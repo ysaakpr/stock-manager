@@ -42,7 +42,7 @@ tasks:
     Makefile targets: check (ruff format --check, ruff check, mypy, pytest), fmt, test, up, down, migrate,
     backup, restore. .gitignore covering data/, .env, __pycache__, .venv, *.parquet, .duckdb.
     ruff + mypy config in pyproject (line-length 100, strict-ish mypy, per-package overrides allowed).
-  deliverables: [pyproject.toml, uv.lock, Makefile, .gitignore, "platform/**/__init__.py", "analyst/**/__init__.py", tests/conftest.py]
+  deliverables: [pyproject.toml, uv.lock, Makefile, .gitignore, "dataplatform/**/__init__.py", "analyst/**/__init__.py", tests/conftest.py]
   acceptance:
     - "uv sync creates a 3.12 venv and resolves the lock"
     - "make check passes on the empty skeleton (zero lint errors, mypy clean, pytest collects 0-or-more with no errors)"
@@ -56,20 +56,20 @@ tasks:
   autonomy: AUTO
   deps: [M0.1]
   spec: |
-    platform/config.py: pydantic-settings Settings reading .env — DB url, DATA_ROOT, timezone
+    dataplatform/config.py: pydantic-settings Settings reading .env — DB url, DATA_ROOT, timezone
     (Asia/Kolkata), rate limits, LLM/broker provider selectors ("stub" default per B4), log level.
-    platform/logging.py: structlog setup, JSON in prod / console in dev, bound context helper.
-    platform/clock.py: Clock protocol + SystemClock + FrozenClock (B10). NOTHING in the codebase may call
+    dataplatform/logging.py: structlog setup, JSON in prod / console in dev, bound context helper.
+    dataplatform/clock.py: Clock protocol + SystemClock + FrozenClock (B10). NOTHING in the codebase may call
     datetime.now() after this exists — add a ruff/grep-based guard in tests asserting no direct
-    datetime.now()/date.today() outside platform/clock.py.
-    platform/store/paths.py: L0/L1/L2 path builders — L0 as
+    datetime.now()/date.today() outside dataplatform/clock.py.
+    dataplatform/store/paths.py: L0/L1/L2 path builders — L0 as
     data/L0/{source}/{yyyy}/{mm}/{filename}, L1 as data/L1/{dataset}/date={yyyy-mm-dd}/part.parquet, L2 mirror.
     .env.example with every key documented and no real values.
-  deliverables: [platform/config.py, platform/logging.py, platform/clock.py, platform/store/paths.py, .env.example, tests/unit/test_clock_guard.py]
+  deliverables: [dataplatform/config.py, dataplatform/logging.py, dataplatform/clock.py, dataplatform/store/paths.py, .env.example, tests/unit/test_clock_guard.py]
   acceptance:
     - "Settings loads from .env.example values with no network or DB access"
     - "FrozenClock makes a time-dependent function deterministic in a test"
-    - "the clock guard test fails if a datetime.now() call is introduced anywhere outside platform/clock.py (prove by temporarily adding one in the test)"
+    - "the clock guard test fails if a datetime.now() call is introduced anywhere outside dataplatform/clock.py (prove by temporarily adding one in the test)"
   verify: "uv run pytest tests/unit/test_clock_guard.py -q && make check"
 
 - id: M0.3
@@ -97,8 +97,8 @@ tasks:
   autonomy: AUTO
   deps: [M0.2, M0.3]
   spec: |
-    Plain SQL migrations (B6) in platform/store/migrations/0001_init.sql + a ~50-line runner
-    (platform/store/migrate.py) tracking applied files in schema_migrations.
+    Plain SQL migrations (B6) in dataplatform/store/migrations/0001_init.sql + a ~50-line runner
+    (dataplatform/store/migrate.py) tracking applied files in schema_migrations.
     Tables per §4.2 sketch, ISIN-keyed, with the append-only ones enforced by triggers or revoked
     UPDATE/DELETE grants where practical:
       security_master, symbol_history, exchange_listing, corporate_actions, adjustment_factors,
@@ -106,7 +106,7 @@ tasks:
       case_(config), policy_set(versioned, ratified_by, ratified_at), thesis(versioned),
       decision_journal(append-only), order_(staged/executed), token_usage.
     Comment every table with the plan module that owns it. Money columns NUMERIC, never float/double.
-  deliverables: [platform/store/migrations/0001_init.sql, platform/store/migrate.py, platform/store/db.py, tests/integration/test_migrations.py]
+  deliverables: [dataplatform/store/migrations/0001_init.sql, dataplatform/store/migrate.py, dataplatform/store/db.py, tests/integration/test_migrations.py]
   acceptance:
     - "make migrate applies cleanly to an empty DB and is idempotent on a second run"
     - "decision_journal and policy_set reject UPDATE and DELETE (test asserts the failure)"
@@ -120,12 +120,12 @@ tasks:
   autonomy: AUTO
   deps: [M0.4]
   spec: |
-    FastAPI app in platform/status/api.py exposing the §4.4 surface, returning real state from the DB
+    FastAPI app in dataplatform/status/api.py exposing the §4.4 surface, returning real state from the DB
     (empty is fine, fabricated is not): /health (liveness + scheduler heartbeat age), /status/sync?date=,
     /status/sources, /status/gaps?from=&to=, /status/quality, /archives?date=.
     Pydantic response models — these are contracts other modules and the future product UI consume.
     /health returns 503 when the scheduler heartbeat is stale beyond a configured threshold.
-  deliverables: [platform/status/api.py, platform/status/models.py, tests/integration/test_status_api.py]
+  deliverables: [dataplatform/status/api.py, dataplatform/status/models.py, tests/integration/test_status_api.py]
   acceptance:
     - "all six endpoints return 200 with schema-valid empty payloads against a migrated empty DB"
     - "/health reports scheduler heartbeat age and flips to 503 when the heartbeat is stale"
@@ -139,12 +139,12 @@ tasks:
   autonomy: AUTO
   deps: [M0.4]
   spec: |
-    APScheduler in-process (§8.1). platform/scheduler/runner.py with a job registry (name, cron, fn,
+    APScheduler in-process (§8.1). dataplatform/scheduler/runner.py with a job registry (name, cron, fn,
     timeout, singleton lock via a DB advisory lock so two processes can't double-run an EOD job),
     heartbeat row written every tick, structured logging of job start/end/failure, and a
-    `uv run python -m platform.scheduler run-once <job>` entrypoint for manual/agent invocation.
+    `uv run python -m dataplatform.scheduler run-once <job>` entrypoint for manual/agent invocation.
     Register one placeholder job: eod_pipeline (no-op for now, real wiring in M1.11).
-  deliverables: [platform/scheduler/runner.py, platform/scheduler/registry.py, tests/integration/test_scheduler.py]
+  deliverables: [dataplatform/scheduler/runner.py, dataplatform/scheduler/registry.py, tests/integration/test_scheduler.py]
   acceptance:
     - "run-once executes a registered job and writes a heartbeat visible via /health"
     - "the singleton lock prevents a second concurrent run of the same job (test proves it)"
@@ -199,7 +199,7 @@ tasks:
   autonomy: AUTO
   deps: [M0.1]
   spec: |
-    platform/ingest/source_register.yaml — machine-readable mirror of §4.1: one entry per dataset with
+    dataplatform/ingest/source_register.yaml — machine-readable mirror of §4.1: one entry per dataset with
     id, url_template, cadence, era ranges, fallback, robots notes, pit notes, status, verified_at,
     last_http_status, sample_bytes, content_type, parser id, required headers.
     Then VERIFY EACH ROW FOR REAL with a single polite request per pattern (2-3s spacing, browser UA,
@@ -209,7 +209,7 @@ tasks:
     GDELT. Flip status to VERIFIED with evidence, or record the exact failure and a candidate alternative.
     Total requests must stay well under the B1 bulk threshold (~one per pattern, ~20 requests).
     AGENTIC_CONTEXT.md §8 records the three NSE patterns already confirmed — re-confirm, don't assume.
-  deliverables: [platform/ingest/source_register.yaml, ops/gates/source-verification.md]
+  deliverables: [dataplatform/ingest/source_register.yaml, ops/gates/source-verification.md]
   acceptance:
     - "every §4.1 row has an entry; each carries verified_at, last_http_status and sample_bytes or an explicit failure note"
     - "no row is marked VERIFIED without a real successful fetch recorded"
@@ -223,13 +223,13 @@ tasks:
   autonomy: AUTO
   deps: [M0.2]
   spec: |
-    platform/ingest/calendar.py: expected trading sessions for a date range = weekdays minus exchange
-    holidays. Holidays from a checked-in YAML (platform/ingest/data/nse_holidays.yaml) covering the last
+    dataplatform/ingest/calendar.py: expected trading sessions for a date range = weekdays minus exchange
+    holidays. Holidays from a checked-in YAML (dataplatform/ingest/data/nse_holidays.yaml) covering the last
     10 years + current year, sourced from the NSE holiday master if fetchable, else curated and then
     validated against actual bhavcopy availability during backfill.
     This is what makes the M1 gate's "gap report explains 100% of missing days" claim checkable — a
     missing day is either GAP(expected) or a real failure, never a shrug.
-  deliverables: [platform/ingest/calendar.py, platform/ingest/data/nse_holidays.yaml, tests/unit/test_calendar.py]
+  deliverables: [dataplatform/ingest/calendar.py, dataplatform/ingest/data/nse_holidays.yaml, tests/unit/test_calendar.py]
   acceptance:
     - "expected_sessions(2016-01-01..2026-08-07) excludes weekends and every listed holiday"
     - "known spot checks pass: Republic Day, Diwali/Muhurat handling, Good Friday, a mid-week holiday"
@@ -243,11 +243,11 @@ tasks:
   autonomy: AUTO
   deps: [M0.2]
   spec: |
-    platform/alerts.py: Alerter protocol (send(severity, title, body, dedup_key)) with LogAlerter (default,
+    dataplatform/alerts.py: Alerter protocol (send(severity, title, body, dedup_key)) with LogAlerter (default,
     no credentials — B4), plus EmailAlerter and TelegramAlerter implementations behind config that raise a
     clear "credential not configured" error rather than failing silently.
     Dedup so a 5-day failure streak doesn't send 500 alerts. §8.1 observability requirement.
-  deliverables: [platform/alerts.py, tests/unit/test_alerts.py]
+  deliverables: [dataplatform/alerts.py, tests/unit/test_alerts.py]
   acceptance:
     - "LogAlerter is the default and requires no credentials"
     - "dedup_key suppresses repeats within a configurable window"
@@ -265,12 +265,12 @@ tasks:
   autonomy: AUTO
   deps: [M0.2]
   spec: |
-    platform/store/l0.py: put(source, logical_date, filename, bytes) -> L0Ref with sha256, size,
+    dataplatform/store/l0.py: put(source, logical_date, filename, bytes) -> L0Ref with sha256, size,
     fetched_at, content_type, and a sidecar .meta.json. Write-once: a second put of identical content is a
     no-op; a put of DIFFERENT content for an existing key raises L0ImmutabilityError (never overwrite).
     get/open by ref, iterate by (source, date range), verify_checksums() sweep.
     Invariant #1 lives here — this module is the reason every L1/L2 value is re-derivable.
-  deliverables: [platform/store/l0.py, tests/unit/test_l0.py]
+  deliverables: [dataplatform/store/l0.py, tests/unit/test_l0.py]
   acceptance:
     - "put is idempotent for identical content and raises on conflicting content for the same key"
     - "no code path in l0.py can modify or delete an existing payload"
@@ -284,13 +284,13 @@ tasks:
   autonomy: AUTO
   deps: [M1.1, C.1, C.3]
   spec: |
-    platform/ingest/fetcher.py: per-source policy from source_register.yaml — browser UA, Referer, warm
+    dataplatform/ingest/fetcher.py: per-source policy from source_register.yaml — browser UA, Referer, warm
     session cookie for NSE (visit www.nseindia.com first, reuse cookies), 2-3s minimum spacing per host,
     tenacity exponential backoff on 5xx/timeouts, HARD STOP + alert on a 403 spike (configurable
     threshold, e.g. 3 in a window) rather than any evasion, respect robots per §4.1/AGENTIC_CONTEXT §8.
     Every response body lands in L0 before any parsing. Returns L0Ref, never parsed data.
     Offline test mode: a recorded-response transport so tests never hit the network (B8).
-  deliverables: [platform/ingest/fetcher.py, platform/ingest/policy.py, tests/unit/test_fetcher.py]
+  deliverables: [dataplatform/ingest/fetcher.py, dataplatform/ingest/policy.py, tests/unit/test_fetcher.py]
   acceptance:
     - "rate limiter enforces the per-host minimum spacing (test with a fake clock)"
     - "403 spike trips a hard stop and emits an alert; no retry-with-different-UA behaviour exists"
@@ -305,12 +305,12 @@ tasks:
   autonomy: AUTO
   deps: [M0.4, C.2]
   spec: |
-    platform/status/sync_state.py implementing §4.4 exactly: PENDING → FETCHED → VALIDATED → NORMALIZED →
+    dataplatform/status/sync_state.py implementing §4.4 exactly: PENDING → FETCHED → VALIDATED → NORMALIZED →
     PUBLISHED, with FAILED(retryable, attempts, last_error) and GAP(expected) branches.
     Illegal transitions raise. Per-(source, date) row in sync_state; attempts and last_error preserved.
     Expose is_green(date, datasets) — the single function the agent's daily loop and the trading interlock
     (§4.4, invariant #10) call. Wire the real values into /status/sync and /status/sources.
-  deliverables: [platform/status/sync_state.py, tests/unit/test_sync_state.py, tests/integration/test_status_sync.py]
+  deliverables: [dataplatform/status/sync_state.py, tests/unit/test_sync_state.py, tests/integration/test_status_sync.py]
   acceptance:
     - "every legal transition works; every illegal transition raises with both states named"
     - "GAP(expected) is set for holidays/weekends from the C.2 calendar, never for a real miss"
@@ -330,7 +330,7 @@ tasks:
     fetched via M1.2 so they are real files. Decimal for prices. Keep SERIES (EQ/BE/BZ/SM/ST...) — do not
     filter to EQ here; filtering is a query concern.
     Emit a typed row model shared with M1.5 so both eras converge on one schema.
-  deliverables: ["platform/ingest/nse/bhavcopy_legacy.py", platform/ingest/models.py, "tests/fixtures/nse_bhavcopy/legacy/", tests/unit/test_bhavcopy_legacy.py]
+  deliverables: ["dataplatform/ingest/nse/bhavcopy_legacy.py", dataplatform/ingest/models.py, "tests/fixtures/nse_bhavcopy/legacy/", tests/unit/test_bhavcopy_legacy.py]
   acceptance:
     - "3+ real fixture files across the era parse to identical row schema with Decimal prices"
     - "row counts and a hand-checked sample row match the raw CSV exactly"
@@ -347,10 +347,10 @@ tasks:
     Parse BhavCopy_NSE_CM_0_0_0_{YYYYMMDD}_F_0000.csv.zip (UDiFF/ISO-20022-flavoured columns:
     TradDt, BizDt, Sgmt, Src, FinInstrmTp, FinInstrmId, ISIN, TckrSymb, SctySrs, OpnPric, HghPric, LwPric,
     ClsPric, LastPric, PrvsClsgPric, TtlTradgVol, TtlTrfVal, TtlNbOfTxsExctd, ...) into the SAME row model
-    as M1.4. Dual-parser dispatch by date/era in platform/ingest/nse/bhavcopy.py.
+    as M1.4. Dual-parser dispatch by date/era in dataplatform/ingest/nse/bhavcopy.py.
     Freeze 2+ real fixtures. Prove era continuity: for a symbol present on both sides of the cutover, the
     parsed schema and semantics are identical (§4.1 "dual parser required").
-  deliverables: ["platform/ingest/nse/bhavcopy_udiff.py", platform/ingest/nse/bhavcopy.py, "tests/fixtures/nse_bhavcopy/udiff/", tests/unit/test_bhavcopy_udiff.py]
+  deliverables: ["dataplatform/ingest/nse/bhavcopy_udiff.py", dataplatform/ingest/nse/bhavcopy.py, "tests/fixtures/nse_bhavcopy/udiff/", tests/unit/test_bhavcopy_udiff.py]
   acceptance:
     - "UDiFF fixtures parse into the M1.4 row model with no era-specific fields leaking out"
     - "the dispatcher picks the right parser by date, including at the exact cutover boundary"
@@ -368,7 +368,7 @@ tasks:
     Note the file's leading-space column names and that delivery fields are '-' for some series — model
     that as None, never 0 (a zero would silently corrupt delivery-spike detection in T0 monitoring).
     Freeze 2+ real fixtures including one with '-' values.
-  deliverables: ["platform/ingest/nse/delivery.py", "tests/fixtures/nse_delivery/", tests/unit/test_delivery.py]
+  deliverables: ["dataplatform/ingest/nse/delivery.py", "tests/fixtures/nse_delivery/", tests/unit/test_delivery.py]
   acceptance:
     - "delivery qty/pct parse correctly; '-' becomes None and is distinguishable from 0"
     - "column-name whitespace handled without brittle positional indexing"
@@ -382,13 +382,13 @@ tasks:
   autonomy: AUTO
   deps: [M0.4, M1.2]
   spec: |
-    platform/identity/: ingest NSE EQUITY_L.csv + symbol change history, build ISIN-keyed security_master
+    dataplatform/identity/: ingest NSE EQUITY_L.csv + symbol change history, build ISIN-keyed security_master
     with symbol_history (symbol, from_date, to_date), exchange_listing rows, series, status
     (ACTIVE/SUSPENDED/DELISTED). resolve(symbol, on_date) -> ISIN and resolve(isin) -> symbol as-of.
     Never overwrite history — a symbol change appends (§4.1). A symbol resolving to two ISINs on one date is
     a hard error surfaced to a reconciliation queue, not a silent pick.
     Invariant #2 is enforced here: this is the only legitimate symbol→ISIN path in the codebase.
-  deliverables: [platform/identity/master.py, platform/identity/ingest.py, tests/unit/test_identity.py, tests/integration/test_identity_ingest.py]
+  deliverables: [dataplatform/identity/master.py, dataplatform/identity/ingest.py, tests/unit/test_identity.py, tests/integration/test_identity_ingest.py]
   acceptance:
     - "resolve(symbol, date) returns the correct ISIN across a real symbol-change case"
     - "re-ingesting the master is idempotent and never loses prior symbol history"
@@ -402,12 +402,12 @@ tasks:
   autonomy: AUTO
   deps: [M1.5, M1.6, M1.7]
   spec: |
-    platform/store/l1.py: write parsed rows to Parquet partitioned by dataset/date (§4.2), ISIN-keyed,
+    dataplatform/store/l1.py: write parsed rows to Parquet partitioned by dataset/date (§4.2), ISIN-keyed,
     both exchanges, raw traded prices ONLY — no adjusted columns (invariant #3). Idempotent per
     (dataset, date): rewriting a partition from L0 produces byte-comparable output. Schema declared once
     and enforced on write; a schema drift fails loud.
     Join delivery data onto prices by (symbol, series, date)→ISIN via M1.7 at write time.
-  deliverables: [platform/store/l1.py, platform/store/schemas.py, tests/integration/test_l1_writer.py]
+  deliverables: [dataplatform/store/l1.py, dataplatform/store/schemas.py, tests/integration/test_l1_writer.py]
   acceptance:
     - "a date's partition is rebuilt from L0 idempotently (same content on re-run)"
     - "prices_raw has no adjusted-price column and a test asserts that"
@@ -421,12 +421,12 @@ tasks:
   autonomy: AUTO
   deps: [M1.3, M1.8, C.2]
   spec: |
-    platform/ingest/backfill.py + CLI: backfill a date range for a source set, driving
+    dataplatform/ingest/backfill.py + CLI: backfill a date range for a source set, driving
     fetch→L0→parse→L1→sync_state. Resumable from sync_state (never re-fetch a PUBLISHED date), checkpointed,
     --dry-run that prints the exact request plan and count without fetching, --limit for sampling,
     graceful SIGINT, progress logging, per-source rate limits honoured, hard stop on 403 spike.
     Under B1 the agent may run --limit sampling (~60 sessions across eras) but NOT the full 10-year run.
-  deliverables: [platform/ingest/backfill.py, ops/runbooks/backfill.md]
+  deliverables: [dataplatform/ingest/backfill.py, ops/runbooks/backfill.md]
   acceptance:
     - "--dry-run over 10 years prints an accurate request count and never opens a socket"
     - "a sampled run of ~60 sessions spanning both bhavcopy eras completes and lands in L1 with sync_state PUBLISHED"
@@ -446,7 +446,7 @@ tasks:
     on FAILED. Self-heal: on startup, re-attempt any date in FAILED(retryable) within a lookback window
     before doing today's work — this is what makes the M1 gate's "self-heal on one induced failure" true.
     Idempotent: running twice for the same session changes nothing.
-  deliverables: [platform/ingest/eod.py, tests/integration/test_eod_pipeline.py, ops/runbooks/daily-eod.md]
+  deliverables: [dataplatform/ingest/eod.py, tests/integration/test_eod_pipeline.py, ops/runbooks/daily-eod.md]
   acceptance:
     - "one invocation takes a session from PENDING to PUBLISHED for all daily NSE sources"
     - "an induced failure (simulated 500) is retried on the next run and self-heals to PUBLISHED"
@@ -460,11 +460,11 @@ tasks:
   autonomy: AUTO
   deps: [M1.3, C.2]
   spec: |
-    platform/quality/gaps.py: for a (source, date range), classify every expected-but-absent date as
+    dataplatform/quality/gaps.py: for a (source, date range), classify every expected-but-absent date as
     GAP(expected: holiday/weekend) or UNEXPLAINED. Wire /status/gaps?from=&to=.
     The M1 gate demands 100% of missing days explained, so the report must enumerate, not summarize:
     every unexplained pair is listed with its sync_state history.
-  deliverables: [platform/quality/gaps.py, tests/unit/test_gaps.py]
+  deliverables: [dataplatform/quality/gaps.py, tests/unit/test_gaps.py]
   acceptance:
     - "over the sampled backfill range, every missing date is classified with a reason"
     - "/status/gaps returns the unexplained set and is empty when the range is complete"
@@ -478,12 +478,12 @@ tasks:
   autonomy: AUTO
   deps: [M1.8]
   spec: |
-    platform/archives/: build a daily bundle (normalized Parquet + CSV) with a manifest carrying per-file
+    dataplatform/archives/: build a daily bundle (normalized Parquet + CSV) with a manifest carrying per-file
     sha256, row counts, source lineage (which L0 refs produced it), and the schema version. Served via
     /archives?date= (manifest + download links) per §4.5.
     Note in the code and runbook that public redistribution of exchange data is a HUMAN_GATE legal question
     (§10, AGENTIC_CONTEXT §3.8) — local/personal download only for now.
-  deliverables: [platform/archives/publisher.py, platform/archives/manifest.py, tests/integration/test_archives.py]
+  deliverables: [dataplatform/archives/publisher.py, dataplatform/archives/manifest.py, tests/integration/test_archives.py]
   acceptance:
     - "a bundle is produced for a real backfilled date with a checksum-complete manifest"
     - "/archives?date= returns the manifest and the files download and verify"
@@ -539,14 +539,14 @@ tasks:
   autonomy: AUTO
   deps: [M0.4]
   spec: |
-    platform/corpactions/taxonomy.py: normalized CA types — SPLIT, BONUS, DIVIDEND, RIGHTS, MERGER,
+    dataplatform/corpactions/taxonomy.py: normalized CA types — SPLIT, BONUS, DIVIDEND, RIGHTS, MERGER,
     DEMERGER, SCHEME_OF_ARRANGEMENT, DVR_CONVERSION, NAME_CHANGE, FACE_VALUE_CHANGE, BUYBACK, DELISTING.
     Parse the free-text purpose strings both exchanges publish ("FV SPLIT FROM RS.10 TO RS.2",
     "BONUS 1:1", "SCHEME OF ARRANGEMENT") into a structured ratio_terms model with explicit
     from/to values. Unparseable strings go to a manual-entry queue with the raw text preserved — never
     guessed at.
     This is the highest-leverage correctness surface in the platform (risk register row 1).
-  deliverables: [platform/corpactions/taxonomy.py, platform/corpactions/parse_terms.py, tests/unit/test_ca_taxonomy.py]
+  deliverables: [dataplatform/corpactions/taxonomy.py, dataplatform/corpactions/parse_terms.py, tests/unit/test_ca_taxonomy.py]
   acceptance:
     - "a table of 40+ real purpose strings (both exchanges, all types) parses to correct structured terms"
     - "ambiguous or novel strings land in the manual queue with raw text intact, never a silent default"
@@ -564,7 +564,7 @@ tasks:
     keyed by ISIN with ex_date, record_date, type, ratio_terms, source, raw_text, and L0 lineage.
     Both daily-forward and historical backfill where the sources expose it. If a source's historical depth
     is short, record that limitation in the source register — it constrains what M2's golden suite can prove.
-  deliverables: ["platform/ingest/nse/corp_actions.py", "platform/ingest/bse/corp_actions.py", "tests/fixtures/corp_actions/", tests/integration/test_ca_ingest.py]
+  deliverables: ["dataplatform/ingest/nse/corp_actions.py", "dataplatform/ingest/bse/corp_actions.py", "tests/fixtures/corp_actions/", tests/integration/test_ca_ingest.py]
   acceptance:
     - "both exchange feeds parse into the same normalized model with real frozen fixtures"
     - "every row carries ISIN (via D2), ex_date, source and L0 lineage"
@@ -583,7 +583,7 @@ tasks:
     only) go to a reconciliation queue exposed via /status/quality with the two raw records side by side.
     §4.1: "the two exchanges describe the same action differently — reconciliation needed."
     Reconciled=false CAs must NOT feed the factor chain — an unreconciled action is a known-unknown.
-  deliverables: [platform/corpactions/reconcile.py, tests/unit/test_ca_reconcile.py]
+  deliverables: [dataplatform/corpactions/reconcile.py, tests/unit/test_ca_reconcile.py]
   acceptance:
     - "matching actions across exchanges reconcile into one row with both sources recorded"
     - "a ratio disagreement lands in the queue and is visible via /status/quality"
@@ -597,14 +597,14 @@ tasks:
   autonomy: AUTO
   deps: [M2.3]
   spec: |
-    platform/corpactions/factors.py per §4.3: cumulative price and quantity factors per ISIN at each
+    dataplatform/corpactions/factors.py per §4.3: cumulative price and quantity factors per ISIN at each
     ex_date. Adjusted series derived on read/materialization, NEVER stored in L1 (invariant #3).
     A newly inserted CA triggers recompute of that ISIN's full factor chain and invalidation of dependent
     L2 partitions. Mergers/demergers modeled explicitly — ex-date price gaps are structural events, not
     returns; the return series must bridge them (§4.3.3).
     Document the exact factor convention (which direction factors apply, what a 1:5 split does to a
     2019 close) in a module docstring — every downstream consumer depends on it.
-  deliverables: [platform/corpactions/factors.py, platform/corpactions/recompute.py, tests/unit/test_factors.py]
+  deliverables: [dataplatform/corpactions/factors.py, dataplatform/corpactions/recompute.py, tests/unit/test_factors.py]
   acceptance:
     - "split/bonus factors compose correctly across multiple stacked actions on one ISIN"
     - "inserting a new CA rewrites the ISIN's full adjusted history and invalidates L2"
@@ -619,11 +619,11 @@ tasks:
   autonomy: AUTO
   deps: [M2.4, M1.8]
   spec: |
-    platform/store/l2.py: materialize adjusted OHLCV per ISIN = raw × cumulative factor, as DuckDB
+    dataplatform/store/l2.py: materialize adjusted OHLCV per ISIN = raw × cumulative factor, as DuckDB
     views over L1 Parquet plus materialized L2 Parquet for hot paths. Fully recomputable; rebuilt
     retroactively on CA arrival. Expose both price-adjusted and total-return series.
     L2 must be deletable at any time and rebuild identically from L1 + factors — test that.
-  deliverables: [platform/store/l2.py, tests/integration/test_l2_views.py]
+  deliverables: [dataplatform/store/l2.py, tests/integration/test_l2_views.py]
   acceptance:
     - "adjusted series for a stock with a known split matches hand-computed values"
     - "wiping L2 entirely and rebuilding produces identical output"
@@ -677,11 +677,11 @@ tasks:
   autonomy: AUTO
   deps: [M2.4, M1.11]
   spec: |
-    platform/quality/sentinel.py: flag any close-to-close move >20% lacking a CA or circuit-limit
+    dataplatform/quality/sentinel.py: flag any close-to-close move >20% lacking a CA or circuit-limit
     explanation (M2 gate box 3). Rule registry so new rules are one-file additions (continuous track:
     "sentinel rules grow every time something surprises"). Flags land in quality_flag and surface at
     /status/quality; a red flag on a core dataset blocks agent trading via M1.3's is_green.
-  deliverables: [platform/quality/sentinel.py, platform/quality/rules/, tests/unit/test_sentinel.py]
+  deliverables: [dataplatform/quality/sentinel.py, dataplatform/quality/rules/, tests/unit/test_sentinel.py]
   acceptance:
     - "a synthetic 30% move with no CA raises a flag; the same move with a matching CA does not"
     - "flags are queryable via /status/quality and gate is_green"
@@ -719,7 +719,7 @@ tasks:
     Verify the BSE UDiFF bhavcopy endpoint (VERIFY-AT-BUILD row), parse to the shared price row model,
     freeze fixtures, wire into backfill + daily EOD. BSE scrip master into the identity master with
     exchange_listing rows. Sampled backfill only under B1; the full BSE history run joins M1.13's go.
-  deliverables: ["platform/ingest/bse/bhavcopy.py", "platform/ingest/bse/scrip_master.py", "tests/fixtures/bse_bhavcopy/", tests/unit/test_bse_bhavcopy.py]
+  deliverables: ["dataplatform/ingest/bse/bhavcopy.py", "dataplatform/ingest/bse/scrip_master.py", "tests/fixtures/bse_bhavcopy/", tests/unit/test_bse_bhavcopy.py]
   acceptance:
     - "BSE source register row flips to VERIFIED with real evidence"
     - "BSE rows land in L1 under the same schema as NSE, ISIN-keyed"
@@ -736,7 +736,7 @@ tasks:
     Rules for choosing a primary exchange per ISIN (liquidity-based with a documented tie-break and a
     stability rule so primary doesn't flip-flop day to day), and a canonical per-ISIN daily series that
     dedups NSE/BSE. Keep both exchanges' raw rows in L1 — dedup is a read-layer concern.
-  deliverables: [platform/identity/primary.py, tests/unit/test_primary_listing.py]
+  deliverables: [dataplatform/identity/primary.py, tests/unit/test_primary_listing.py]
   acceptance:
     - "a dual-listed ISIN resolves to one primary with the rule and inputs recorded"
     - "primary selection is stable over time (no daily churn on near-ties)"
@@ -753,7 +753,7 @@ tasks:
     Sentinel rule comparing NSE vs BSE closes for dual-listed ISINs; flag divergence beyond a threshold
     (accounting for genuinely thin BSE volume — a low-liquidity BSE print is not a data error, and the rule
     must not cry wolf). M3 gate box 1.
-  deliverables: [platform/quality/rules/cross_exchange.py, tests/unit/test_cross_exchange.py]
+  deliverables: [dataplatform/quality/rules/cross_exchange.py, tests/unit/test_cross_exchange.py]
   acceptance:
     - "a synthetic divergence flags; matched prices do not"
     - "thin-volume BSE prints are excluded or down-weighted with the rationale documented"
@@ -769,7 +769,7 @@ tasks:
     Verify and ingest NSE FII/DII trading-activity reports (daily), with the NSDL/CDSL monthly fallback
     noted. L0 → L1 flows table, queryable 10 years back where the source permits (M3 gate box 2 — if depth
     is shorter, record the real depth in the source register rather than claiming 10y).
-  deliverables: ["platform/ingest/nse/fii_dii.py", tests/unit/test_fii_dii.py]
+  deliverables: ["dataplatform/ingest/nse/fii_dii.py", tests/unit/test_fii_dii.py]
   acceptance:
     - "daily flows parse and land in L1 with sync_state tracking"
     - "actual historical depth available is measured and recorded in source_register.yaml"
@@ -785,7 +785,7 @@ tasks:
     Ingest NSE bulk and block deal CSVs (BSE equivalent as fallback), ISIN-resolved, into L1.
     T0 monitoring consumes these as a flow anomaly signal for holdings (§5.4), so client-name normalization
     matters enough to keep the raw string alongside any normalized form.
-  deliverables: ["platform/ingest/nse/deals.py", tests/unit/test_deals.py]
+  deliverables: ["dataplatform/ingest/nse/deals.py", tests/unit/test_deals.py]
   acceptance:
     - "bulk and block deals parse with ISIN resolution and raw client names preserved"
     - "a deal in a held ISIN is queryable by (isin, date) for T0"
@@ -801,7 +801,7 @@ tasks:
     Ingest exchange shareholding-pattern filings. Store BOTH period_end and filing_date (§4.1: "filing date
     != quarter end"). Promoter holding, pledge %, FII/DII/public splits. Promoter pledge >50% is a BC3-class
     integrity break condition in §5.3, so pledge must be a first-class field.
-  deliverables: ["platform/ingest/shareholding.py", tests/unit/test_shareholding.py]
+  deliverables: ["dataplatform/ingest/shareholding.py", tests/unit/test_shareholding.py]
   acceptance:
     - "every row carries (period_end, filing_date) and neither is inferred from the other"
     - "promoter pledge % is extracted as a queryable field"
@@ -818,7 +818,7 @@ tasks:
     Ingest BhavCopy_NSE_FO_*.csv.zip; compute per-underlying EOD aggregates: total OI and change, put/call
     ratio, futures basis vs spot, rollover proxies. Sentiment context only — no derivatives trading (§4.1).
     Keep the raw contract-level rows in L1; aggregates are L2.
-  deliverables: ["platform/ingest/nse/fo_bhavcopy.py", platform/store/fo_aggregates.py, tests/unit/test_fo.py]
+  deliverables: ["dataplatform/ingest/nse/fo_bhavcopy.py", dataplatform/store/fo_aggregates.py, tests/unit/test_fo.py]
   acceptance:
     - "contract rows parse; PCR/OI/basis aggregates computed per underlying and reconciled to a hand check"
     - "aggregates live in L2 and rebuild from L1"
@@ -836,7 +836,7 @@ tasks:
     timestamps (natural PIT), normalize to (isin, ts, category, subject, body/attachment ref), and build a
     searchable keyword index. T0 matches announcement keywords against break conditions (§5.4), so the
     index must support the phrase/keyword sets a thesis defines.
-  deliverables: [platform/ingest/announcements.py, platform/query/announcement_search.py, tests/unit/test_announcements.py]
+  deliverables: [dataplatform/ingest/announcements.py, dataplatform/query/announcement_search.py, tests/unit/test_announcements.py]
   acceptance:
     - "announcements searchable by ISIN, date range and keyword within 1 hour of the EOD poll (M3 box 3)"
     - "source timestamps preserved exactly — no re-stamping with ingest time"
@@ -854,7 +854,7 @@ tasks:
     history accumulates from day one (§4.1) and is what kills survivorship bias in M4's PIT universe.
     Ingest benchmark TRI series (with the computed price-index + dividend-estimate fallback noted).
     Snapshot semantics: never overwrite a prior month's membership.
-  deliverables: [platform/ingest/indices.py, tests/unit/test_indices.py]
+  deliverables: [dataplatform/ingest/indices.py, tests/unit/test_indices.py]
   acceptance:
     - "a monthly snapshot is stored immutably with its as-of date"
     - "membership as-of a historical date is queryable and returns the snapshot in force then"
@@ -887,11 +887,11 @@ tasks:
   autonomy: AUTO
   deps: [M2.5]
   spec: |
-    platform/query/: shape (a) adjusted OHLCV series per ISIN across years; shape (b) full-market
+    dataplatform/query/: shape (a) adjusted OHLCV series per ISIN across years; shape (b) full-market
     cross-section for a date (§4.5). DuckDB over Parquet, typed request/response models, and a benchmark
     test asserting both shapes return in a sane time on the full 10-year store.
     One query entrypoint module — every consumer (A3, A5, A6, X2, D6) goes through it.
-  deliverables: [platform/query/service.py, platform/query/shapes.py, tests/integration/test_query_shapes.py]
+  deliverables: [dataplatform/query/service.py, dataplatform/query/shapes.py, tests/integration/test_query_shapes.py]
   acceptance:
     - "shape (a) returns a correct multi-year adjusted series for a CA-heavy ISIN"
     - "shape (b) returns a complete cross-section for a date, both exchanges deduped to primary"
@@ -910,7 +910,7 @@ tasks:
     including delisted names (§4.5 — "kills survivorship bias").
     Fundamentals joins must respect the M7 quarantine boundary even before M7 exists: the join surface
     accepts only PIT-tagged sources.
-  deliverables: [platform/query/screen.py, platform/query/universe.py, tests/integration/test_pit_universe.py]
+  deliverables: [dataplatform/query/screen.py, dataplatform/query/universe.py, tests/integration/test_pit_universe.py]
   acceptance:
     - "universe as of a past date includes names later delisted and excludes names not yet listed"
     - "screen filters compose and return correct sets against a hand-verified small case"
@@ -928,7 +928,7 @@ tasks:
     A PIT-mode query context carries as_of; the query layer filters knowable_date <= as_of and raises if a
     dataset has no knowable_date declared. Invariant #7 / §8.3.6.
     Implement as a guard the backtest cannot bypass — not a convention consumers must remember.
-  deliverables: [platform/query/pit.py, tests/unit/test_pit_guard.py]
+  deliverables: [dataplatform/query/pit.py, tests/unit/test_pit_guard.py]
   acceptance:
     - "a dataset without a declared knowable_date is unusable in PIT mode (raises)"
     - "an attempt to read future data in PIT mode raises rather than returning filtered-but-silent results where that hides a bug"
@@ -1350,12 +1350,39 @@ tasks:
     - "a SIP instalment is parked in the liquid ETF then deployed on a valid trigger"
   verify: "uv run pytest tests/integration/test_paper_run_10_sessions.py -q"
 
+- id: M5.15
+  title: Broker session re-auth interlock (AUTH_REQUIRED)
+  milestone: M5
+  module: X1
+  autonomy: AUTO
+  deps: [M5.11, M5.12]
+  spec: |
+    Regulation forces a daily broker API logout with OAuth + 2FA (see ops/compliance/sebi-algo-memo.md,
+    NSE consolidated NNF circular INVG/73992 §8.3.2.1.8), so the daily loop can hold a dead session at
+    market open. §4.4's interlock covers red data; this covers dead auth — the same failure class of
+    acting on an invalid precondition, and until now uncovered.
+    Add to the Broker protocol: session_valid() and a SessionExpired error concrete brokers raise. The
+    daily loop checks it alongside is_green(): an invalid session journals AUTH_REQUIRED in the same shape
+    as SKIPPED_DATA_RED, places zero orders, and alerts once per streak (deduped) with the re-auth
+    instruction. SimBroker's session is always valid so paper mode is unaffected — which is exactly why
+    this is cheap to build here and expensive to retrofit at M8.
+    An AUTH_REQUIRED day must DEFER the day's staged decisions, not silently drop them, with the deferral
+    journaled. A decision that evaporates because of an auth failure is a journal lie.
+  deliverables: [execution/session.py, analyst/monitor/interlock.py, ops/runbooks/broker-reauth.md, tests/unit/test_auth_interlock.py]
+  acceptance:
+    - "an invalid broker session produces a journaled AUTH_REQUIRED entry and zero orders (test proves no order path runs)"
+    - "paper mode via SimBroker is never blocked by the interlock"
+    - "a day's staged decisions are deferred rather than dropped, and the deferral is journaled"
+    - "the alert fires once per streak, not once per check"
+    - "the runbook tells the owner exactly how to re-authenticate and what the loop does until they do"
+  verify: "uv run pytest tests/unit/test_auth_interlock.py -q"
+
 - id: M5.14
   title: "GATE M5 — Analyst agent paper-mode audit"
   milestone: M5
   module: "—"
   autonomy: GATE_AUDIT
-  deps: [M5.13]
+  deps: [M5.13, M5.15]
   spec: |
     Verify M5's five boxes with captured evidence. §9 calls this "the gate of maximum interest".
     State plainly which boxes were satisfied with StubLLM rather than a real model (B4) — that is an honest
@@ -1380,7 +1407,7 @@ tasks:
     only per §4.1 license note). Timestamped at source (natural PIT). Store raw in L0, normalize to
     (ts, source, title, url, entities, tone) in L1.
     Do not store full article bodies from RSS sources — headlines and links only, per the register.
-  deliverables: [platform/ingest/gdelt.py, platform/ingest/rss.py, platform/ingest/data/rss_feeds.yaml, tests/unit/test_news_ingest.py]
+  deliverables: [dataplatform/ingest/gdelt.py, dataplatform/ingest/rss.py, dataplatform/ingest/data/rss_feeds.yaml, tests/unit/test_news_ingest.py]
   acceptance:
     - "GDELT and RSS rows land with source timestamps preserved and L0 lineage"
     - "no full article bodies are stored for RSS sources"
@@ -1398,7 +1425,7 @@ tasks:
     a curated alias table for the hard cases) and match against each thesis's break-condition keyword sets.
     Precision matters more than recall for T0 escalation cost — a noisy matcher makes T1 expensive. Measure
     both on a labelled sample and record the numbers.
-  deliverables: [analyst/monitor/linkage.py, analyst/monitor/matcher.py, platform/identity/aliases.yaml, tests/unit/test_linkage.py]
+  deliverables: [analyst/monitor/linkage.py, analyst/monitor/matcher.py, dataplatform/identity/aliases.yaml, tests/unit/test_linkage.py]
   acceptance:
     - "a labelled sample of 50+ items gives measured precision/recall, recorded in the module docs"
     - "an integrity-class keyword hit (auditor resignation, fraud, pledge) escalates immediately per §5.3 BC3"
@@ -1552,7 +1579,7 @@ tasks:
     Lands in a physically separate RESTATED store — a different Parquet root and a different query surface
     from the PIT store. Tag every datum with source=screener_restated.
     Total request volume must respect B1's bulk threshold; a full-universe pull is a NEEDS_GO campaign.
-  deliverables: [platform/ingest/screener.py, platform/store/restated.py, tests/unit/test_screener.py]
+  deliverables: [dataplatform/ingest/screener.py, dataplatform/store/restated.py, tests/unit/test_screener.py]
   acceptance:
     - "the crawler provably never requests a robots-disallowed path (test asserts the URL policy)"
     - "restated data lands in its own store root, never in the PIT store"
@@ -1570,7 +1597,7 @@ tasks:
     reachable path to the restated store — separate connection/catalog, and an explicit test proving a
     backtest cannot read restated fundamentals even deliberately.
     §8.3's PIT leak test extends to cover this.
-  deliverables: [platform/query/quarantine.py, tests/integration/test_quarantine.py]
+  deliverables: [dataplatform/query/quarantine.py, tests/integration/test_quarantine.py]
   acceptance:
     - "a deliberate attempt to read restated data from a PIT/backtest context raises"
     - "monitoring (T1/T2) can read it, and the journal records which store each datum came from"
@@ -1589,7 +1616,7 @@ tasks:
     disclosures (needed by §5.3's segment-revenue break conditions).
     History only accumulates forward from now — say so plainly; do not backfill PIT fundamentals from a
     restated source.
-  deliverables: ["platform/ingest/xbrl/", platform/store/pit_fundamentals.py, "tests/fixtures/xbrl/", tests/unit/test_xbrl.py]
+  deliverables: ["dataplatform/ingest/xbrl/", dataplatform/store/pit_fundamentals.py, "tests/fixtures/xbrl/", tests/unit/test_xbrl.py]
   acceptance:
     - "real XBRL fixtures parse with (period_end, filing_date) on every datum"
     - "standalone and consolidated are distinguished; segment disclosures extracted where present"
@@ -1638,7 +1665,7 @@ tasks:
   milestone: M8
   module: X1
   autonomy: AUTO
-  deps: [M5.12]
+  deps: [M5.12, M5.15]
   spec: |
     execution/kite_broker.py implementing the same Broker protocol as SimBroker (invariant #5): place /
     modify / cancel / positions / holdings / ledger / margins via Kite Connect REST.

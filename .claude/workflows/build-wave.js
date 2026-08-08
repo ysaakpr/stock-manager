@@ -65,12 +65,13 @@ Do not build anything. Do not interpret or filter the list — return it verbati
   const outcomes = await parallel(
     plan.tasks.map((task) => () =>
       agent(
-        `Run \`./orch prompt ${task.id}\` in the repo root and follow the brief it prints, exactly.
+        `First claim the task so no other wave picks it up: \`./orch set ${task.id} IN_PROGRESS\`.
+Then run \`./orch prompt ${task.id}\` in the repo root and follow the brief it prints, exactly.
 That brief is your complete instruction set — it names the files to read, the acceptance criteria,
 and the three legal ways to finish. Record your outcome with ./orch before you stop.
 
 Then return {id:"${task.id}", state:<the state you recorded>, summary:<one line>}.`,
-        { label: task.id, phase: 'Build', agentType: 'builder', schema: OUTCOME }
+        { label: task.id, phase: 'Build', schema: OUTCOME }
       )
     )
   )

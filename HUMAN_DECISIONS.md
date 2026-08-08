@@ -27,6 +27,15 @@ these as settled and will not re-ask.
 | B3 | `uv` with a pinned Python 3.12; Postgres in docker-compose |
 | B4 | No Anthropic key and no Kite credentials yet — both sit behind interfaces with stubs |
 
+Second round, after M0.1 and M8.2 reported:
+
+| # | Decision |
+|---|---|
+| D1 | **M1.13 pre-authorized.** The full 10-year NSE backfill runs unattended as soon as M1.9–M1.12 are DONE and the dry-run plan verifies. A 403 hard stop parks rather than retries. |
+| D2 | **`platform/` → `dataplatform/` ratified** (EXECUTION_PLAN §12). All 71 path strings in TASK_GRAPH.yaml swept, so no agent resolves the old name from a footnote. |
+| D3 | **Broker re-auth interlock built now, in M5** — new task M5.15, `AUTH_REQUIRED` alongside `SKIPPED_DATA_RED`, rather than retrofitting the daily loop at M8. |
+| D4 | **Detached unattended runs authorized** — `./orch run --permission-mode bypassPermissions`. Standing guards are the `.claude/settings.json` deny list and the §6 invariants. |
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
@@ -34,9 +43,8 @@ the actual blocker. Listed here so nothing is a surprise.
 
 | Task | Decision you'll be asked for | Blocks |
 |---|---|---|
-| M1.13 | Go for the full 10-year NSE backfill (~4–6 hrs of rate-limited fetching) | M1 gate, and everything that needs real history: M2 golden suite, M4 reference case + momentum run |
 | M6.8 | An Anthropic API key, to exercise T1/T2 against a real model and measure real cost | live-model quality evidence for the M6 gate |
-| M8.3 | Whether to run the tiny-capital live-order sessions yourself (Kite credentials + real money) | M8 gate |
+| M8.3 | Whether to run the tiny-capital live-order sessions yourself (Kite credentials + real money). **Read `ops/compliance/sebi-algo-memo.md` Q1 first** — Kite's terms 2(e) say the APIs are not intended for fully automated trading without manual intervention, which is a question about the product's shape, not just this gate. | M8 gate |
 | M8.4 | Graduation: fund a case with real money, or not (decision #8 — discretionary, always yours) | — |
 
 ---
