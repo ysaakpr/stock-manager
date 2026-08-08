@@ -1,0 +1,85 @@
+# The whole deployable: two services, and it stays two (decision #13 — no redis, no nginx, no
+# extras). `postgres` holds masters, sync state, cases, policies and the append-only journal;
+# `app` runs the D5 status API. L0/L1/L2 do NOT live in a container: they are bind-mounted from
+# the host so the immutable lake (invariant #1) outlives every rebuild of this stack.
+#
+# Variables and their defaults — `docker compose up -d` works with none of them set. Compose
+# reads them from the environment or from ops/.env (the project directory is this file's
+# directory), never from the repo-root .env:
+#   POSTGRES_USER/PASSWORD/DB   trading/trading/trading
+#   POSTGRES_HOST_PORT          5433 — host-side publish only; see the note on the mapping
+#   APP_HOST_PORT               8000
+#   DATA_ROOT                   ../data — host path of the lake; inside the app it is /data
+
+name: trading-platform
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-trading}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trading}
+      POSTGRES_DB: ${POSTGRES_DB:-trading}
+    ports:
+      # In-network the port is 5432 and every service reaches it there. The host-side publish
+      # defaults to 5433 because this deploy host already runs its own Postgres bound to
+      # 127.0.0.1:5432: docker happily publishes over it on 0.0.0.0, but a host-side client
+      # connecting to localhost:5432 then reaches the *other* server (it fails with
+      # `role "trading" does not exist`). Host tooling — make migrate, integration tests —
+      # must use 5433. See ops/README.md.
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      # Named volume, not a bind mount: Postgres is rebuildable from L0 + migrations, and its
+      # data directory is the one thing that must never be edited by hand from the host.
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # -U/-d explicitly: pg_isready otherwise probes the OS user and a database named after
+      # it, which reports "accepting connections" before our database exists.
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -q"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  app:
+    build:
+      # Repo root, so the build can copy the §8.2 packages; see the root .dockerignore.
+      context: ..
+      dockerfile: ops/Dockerfile
+    depends_on:
+      postgres:
+        # Not just "started": the API opens a pool on first request and a half-initialised
+        # Postgres is the classic source of a flaky first boot.
+        condition: service_healthy
+    environment:
+      # Reached by service name over the compose network — never localhost, which inside the
+      # container is the container itself.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-trading}:${POSTGRES_PASSWORD:-trading}@postgres:5432/${POSTGRES_DB:-trading}
+      DATA_ROOT: /data
+      TZ: Asia/Kolkata
+    env_file:
+      # Optional so a fresh clone starts with no secrets on disk. Anything the owner puts in
+      # the repo-root .env reaches the app; the two settings above still win, because their
+      # host-side values would be wrong inside the container.
+      - path: ../.env
+        required: false
+    ports:
+      - "${APP_HOST_PORT:-8000}:8000"
+    volumes:
+      - ${DATA_ROOT:-../data}:/data
+    healthcheck:
+      # stdlib urllib, because slim has no curl and this stack adds no packages for a probe.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
+volumes:
+  pgdata:

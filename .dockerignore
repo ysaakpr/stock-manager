@@ -1,0 +1,21 @@
+# Build context for ops/Dockerfile. The Dockerfile copies only the §8.2 packages, so this is
+# mostly about not shipping the host venv and the data lake into the daemon.
+.git/
+.venv/
+data/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+ops/build-logs/
+ops/backups/
+BUILD_STATE.json
+.build_state.lock
+*.parquet
+*.duckdb
+.DS_Store
