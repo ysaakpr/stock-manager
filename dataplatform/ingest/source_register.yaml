@@ -1,0 +1,1035 @@
+# Source Register v1 — machine-readable mirror of EXECUTION_PLAN.md §4.1.
+#
+# Every field the engine consumes maps to a row in §4.1 and to at least one entry here.
+# `status` in this file is a *fact about a real fetch*, not a plan aspiration: it is set by the
+# C.1 verification sweep (2026-08-08) and every VERIFIED entry carries the status, size,
+# content-type, checksum and structural parse of the response that earned it.
+#
+# Consumers: M1.2 (crawl policy engine) reads `host`, `required_headers`, `needs_session_cookie`
+# and the `hosts:` block; the parser tasks named in `parser.task` read `url_template` and `era`.
+# Nothing in this file is fetched by the test suite — tests assert its shape, never its hosts.
+#
+# Schema is enforced by dataplatform/ingest/source_register.py:
+#   uv run python -m dataplatform.ingest.source_register validate
+
+version: 1
+
+sweep:
+  task: C.1
+  swept_at: 2026-08-08T18:16:38+05:30
+  host_timezone: Asia/Kolkata
+  reference_trading_date: 2026-08-07  # last completed session before the sweep
+  total_requests: 47  # includes robots.txt probes and three failed GDELT TLS attempts
+  requests_per_host:
+    nsearchives.nseindia.com: 11
+    www.nseindia.com: 7
+    www.bseindia.com: 4
+    api.bseindia.com: 6
+    niftyindices.com: 7
+    www.niftyindices.com: 1
+    www.screener.in: 3
+    data.gdeltproject.org: 5
+    api.gdeltproject.org: 3
+  bulk_threshold_note: >-
+    AGENTIC_CONTEXT §3.3 reserves any campaign over ~200 requests to one source to the human.
+    The largest single-host total above is 11. This sweep is nowhere near that line.
+  user_agent: >-
+    Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko)
+    Chrome/127.0.0.0 Safari/537.36
+  method_note: >-
+    One request per URL pattern, >=2.5 s spacing per host, browser UA, Referer
+    https://www.nseindia.com/ for NSE hosts. Hard stop on a 403 spike was armed and never
+    tripped. No retry with a different UA, no attempt to evade any block, no login anywhere.
+  evidence_log: ops/gates/source-verification.md
+
+# ── robots.txt, one record per host actually contacted ───────────────────────────────────────
+# `robots_served: false` means the host does not publish crawl directives at /robots.txt — for
+# www.bseindia.com the path returns HTTP 200 carrying the site's Angular shell (a soft 404),
+# which is NOT a policy document and must not be parsed as one.
+hosts:
+  - host: www.nseindia.com
+    robots_url: https://www.nseindia.com/robots.txt
+    checked_at: 2026-08-08T18:08:05+05:30
+    robots_http_status: 200
+    robots_served: true
+    permits: "User-agent: * / Allow: / — everything except the one path below."
+    disallow: ["/market-data-test"]
+    min_spacing_seconds: 2.5
+
+  - host: nsearchives.nseindia.com
+    robots_url: https://nsearchives.nseindia.com/robots.txt
+    checked_at: 2026-08-08T18:08:08+05:30
+    robots_http_status: 404
+    robots_served: false
+    permits: >-
+      No robots.txt on the archive host (404, 3,425 B error page). No directives exist, so
+      nothing is disallowed; the sibling www.nseindia.com allows / for all agents. Crawled
+      under the §4.1 policy anyway: browser UA, 2-3 s spacing, hard stop on 403.
+    disallow: []
+    min_spacing_seconds: 2.5
+
+  - host: www.bseindia.com
+    robots_url: https://www.bseindia.com/robots.txt
+    checked_at: 2026-08-08T18:08:10+05:30
+    robots_http_status: 200
+    robots_served: false
+    permits: >-
+      BSE does not serve crawl directives: /robots.txt returns HTTP 200 with 13,850 B of the
+      site's Angular index.html (soft 404). Treated as "no directives published"; crawled
+      conservatively at 2.5 s spacing. Re-check before any campaign — a real robots.txt
+      appearing later must win.
+    disallow: []
+    min_spacing_seconds: 2.5
+
+  - host: api.bseindia.com
+    robots_url: https://api.bseindia.com/robots.txt
+    checked_at: 2026-08-08T18:09:02+05:30
+    robots_http_status: 301
+    robots_served: false
+    permits: >-
+      301 to https://www.bseindia.com/members/showinterest, i.e. the same soft-404 shell as the
+      web host. No directives published. Same conservative policy as www.bseindia.com.
+    disallow: []
+    min_spacing_seconds: 2.5
+
+  - host: niftyindices.com
+    robots_url: https://niftyindices.com/robots.txt
+    checked_at: 2026-08-08T18:08:19+05:30
+    robots_http_status: 200
+    robots_served: true
+    permits: "User-agent: * / Allow: / — the two report paths below are excluded."
+    disallow:
+      - "/indices/equity/broad-based-indices/NIFTY-Next-50/NIFTY-50"
+      - "/reports/nifty-passive-insights"
+    min_spacing_seconds: 2.5
+
+  - host: www.niftyindices.com
+    robots_url: https://www.niftyindices.com/robots.txt
+    checked_at: 2026-08-08T18:08:16+05:30
+    robots_http_status: 200
+    robots_served: true
+    permits: "Byte-identical (136 B) to the apex host's robots.txt; same two disallows."
+    disallow:
+      - "/indices/equity/broad-based-indices/NIFTY-Next-50/NIFTY-50"
+      - "/reports/nifty-passive-insights"
+    min_spacing_seconds: 2.5
+
+  - host: www.screener.in
+    robots_url: https://www.screener.in/robots.txt
+    checked_at: 2026-08-08T18:08:22+05:30
+    robots_http_status: 200
+    robots_served: true
+    permits: >-
+      Per-company pages (/company/<SYMBOL>/) are permitted. The disallows below are exactly the
+      limits AGENTIC_CONTEXT §8 requires us to respect — no listing pagination, no search, no
+      sorting, no user pages, no per-quarter source pages.
+    disallow:
+      - "/user/*"
+      - "/*?q="
+      - "/*?sort="
+      - "/*?limit="
+      - "/*?page="
+      - "/company/source/quarter/*"
+    min_spacing_seconds: 5.0
+
+  - host: api.gdeltproject.org
+    robots_url: https://api.gdeltproject.org/robots.txt
+    checked_at: 2026-08-08T18:08:38+05:30
+    robots_http_status: 404
+    robots_served: false
+    permits: >-
+      No robots.txt (404). The API's own 429 body states the policy in words instead —
+      "limit requests to one every 5 seconds" — which is the binding limit for this host.
+    disallow: []
+    min_spacing_seconds: 5.0
+
+  - host: data.gdeltproject.org
+    robots_url: http://data.gdeltproject.org/robots.txt
+    checked_at: 2026-08-08T18:16:38+05:30
+    robots_http_status: 404
+    robots_served: false
+    permits: >-
+      No robots.txt (404, empty body). The host is a CNAME to c.storage.googleapis.com, so
+      HTTPS fails certificate validation and the feed is only reachable over plain HTTP —
+      recorded on the source entry, not worked around.
+    disallow: []
+    min_spacing_seconds: 2.5
+
+# ── one entry per §4.1 dataset surface ───────────────────────────────────────────────────────
+sources:
+  # §4.1 row 1 — NSE equity OHLCV, pre-UDiFF era
+  - id: nse_bhavcopy_legacy
+    plan_row: "NSE equity OHLCV (≤ ~08-Jul-2024)"
+    description: Legacy daily NSE cash-market bhavcopy, one zipped CSV per session.
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/content/historical/EQUITIES/{YYYY}/{MON}/cm{DD}{MON}{YYYY}bhav.csv.zip"
+    verified_url: "https://nsearchives.nseindia.com/content/historical/EQUITIES/2024/JAN/cm02JAN2024bhav.csv.zip"
+    cadence: backfill_only
+    era: {start: null, end: 2024-07-08}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.nse.bhavcopy_legacy, task: M1.4}
+    robots_notes: No directives on the archive host; www.nseindia.com allows /.
+    pit_notes: Immutable once published. Carries ISIN directly, so it joins without a master.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:29+05:30
+    last_http_status: 200
+    sample_bytes: 100665
+    content_type: application/zip
+    sample_sha256: bc3f9ff6586c56248f2cfc678d7f873ac9c4a86f8a83395ebca2d91990157356
+    parse_check: >-
+      zip with one member cm02JAN2024bhav.csv; 14 columns; header
+      SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,
+      TOTALTRADES,ISIN, (trailing comma is part of the format).
+    fixture: {frozen: false, task: M1.4, path: "tests/fixtures/nse_bhavcopy/legacy/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M1.4
+
+  # §4.1 row 2 — NSE equity OHLCV, UDiFF era
+  - id: nse_bhavcopy_udiff
+    plan_row: "NSE equity OHLCV (UDiFF, ≥ Jul-2024)"
+    description: UDiFF-format NSE cash-market bhavcopy — different schema, dual parser required.
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{YYYYMMDD}_F_0000.csv.zip"
+    verified_url: "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260807_F_0000.csv.zip"
+    cadence: daily
+    era: {start: 2024-07-08, end: null}
+    fallback: ["samco.in mirror", "GetBhavcopy"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.nse.bhavcopy_udiff, task: M1.5}
+    robots_notes: No directives on the archive host; www.nseindia.com allows /.
+    pit_notes: Immutable once published. ISIN present.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:32+05:30
+    last_http_status: 200
+    sample_bytes: 194665
+    content_type: application/zip
+    sample_sha256: 33817d3100c82c3c90bc5349447cf04c749b07bf01b5a66260213ede0f7fab8b
+    parse_check: >-
+      zip with one member BhavCopy_NSE_CM_0_0_0_20260807_F_0000.csv; 34 columns; header starts
+      TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,... — confirms the
+      schema break against the 14-column legacy era above.
+    fixture: {frozen: false, task: M1.5, path: "tests/fixtures/nse_bhavcopy/udiff/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M1.5
+
+  # §4.1 row 3 — NSE delivery %
+  - id: nse_sec_bhavdata_full
+    plan_row: "NSE delivery % (sec_bhavdata_full)"
+    description: Per-security delivery quantity and delivery percentage for one session.
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{DDMMYYYY}.csv"
+    verified_url: "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_07082026.csv"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.nse.delivery, task: M1.6}
+    robots_notes: No directives on the archive host.
+    pit_notes: Immutable.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:34+05:30
+    last_http_status: 200
+    sample_bytes: 374452
+    content_type: text/csv
+    sample_sha256: 8b937105b230a12d50395b0c9e1f02fc1c39d611914988985c4a34bc5e7af06e
+    parse_check: >-
+      plain CSV, 15 columns, header
+      "SYMBOL, SERIES, DATE1, PREV_CLOSE, OPEN_PRICE, HIGH_PRICE, LOW_PRICE, LAST_PRICE,
+      CLOSE_PRICE, AVG_PRICE, TTL_TRD_QNTY, TURNOVER_LACS, NO_OF_TRADES, DELIV_QTY, DELIV_PER".
+      Note the leading space in every field name after the first — the parser must strip.
+      No ISIN column: this file joins on SYMBOL+SERIES and therefore MUST be resolved through
+      the D2 identity master before it touches anything (invariant #2).
+    fixture: {frozen: false, task: M1.6, path: "tests/fixtures/nse_delivery/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M1.6
+
+  # §4.1 row 4 — BSE equity OHLCV (two eras)
+  - id: bse_bhavcopy_udiff
+    plan_row: "BSE equity OHLCV"
+    description: BSE UDiFF cash-market bhavcopy, current era — same column schema as NSE UDiFF.
+    host: www.bseindia.com
+    method: GET
+    url_template: "https://www.bseindia.com/download/BhavCopy/Equity/BhavCopy_BSE_CM_0_0_0_{YYYYMMDD}_F_0000.CSV"
+    verified_url: "https://www.bseindia.com/download/BhavCopy/Equity/BhavCopy_BSE_CM_0_0_0_20260807_F_0000.CSV"
+    cadence: daily
+    era: {start: 2024-07-08, end: null}
+    fallback: ["GetBhavcopy"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.bseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.bse.bhavcopy, task: M3.1}
+    robots_notes: BSE publishes no robots.txt (soft 404); crawled conservatively at 2.5 s.
+    pit_notes: Immutable. ISIN present, so it joins directly.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:57+05:30
+    last_http_status: 200
+    sample_bytes: 845830
+    content_type: application/octet-stream
+    sample_sha256: 15a3b8847a32a92415702d0704f4718820827926b254d0d388122b375845f0eb
+    parse_check: >-
+      uncompressed CSV (not a zip despite the sibling NSE pattern); 34 columns; identical UDiFF
+      header to NSE — TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,...
+    fixture: {frozen: false, task: M3.1, path: "tests/fixtures/bse_bhavcopy/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.1
+
+  - id: bse_bhavcopy_legacy
+    plan_row: "BSE equity OHLCV"
+    description: BSE legacy zipped bhavcopy — the backfill half of the §4.1 row.
+    host: www.bseindia.com
+    method: GET
+    url_template: "https://www.bseindia.com/download/BhavCopy/Equity/EQ{DDMMYY}_CSV.ZIP"
+    verified_url: "https://www.bseindia.com/download/BhavCopy/Equity/EQ020124_CSV.ZIP"
+    cadence: backfill_only
+    era: {start: null, end: 2024-07-08}
+    fallback: ["GetBhavcopy"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.bseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.bse.bhavcopy, task: M3.1}
+    robots_notes: BSE publishes no robots.txt (soft 404); crawled conservatively at 2.5 s.
+    pit_notes: >-
+      Immutable, but there is NO ISIN column in this era — only SC_CODE. Backfilled BSE rows
+      must be resolved to ISIN through the BSE scrip master (D2) before use; joining on
+      SC_CODE or SC_NAME anywhere downstream breaks invariant #2.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:13:00+05:30
+    last_http_status: 200
+    sample_bytes: 138176
+    content_type: application/x-zip-compressed
+    sample_sha256: c823f5109cfea4296d572566e2850e087a3086c17993cd01c9455b50980c9ef9
+    parse_check: >-
+      zip with one member EQ020124.CSV; 14 columns; header
+      SC_CODE,SC_NAME,SC_GROUP,SC_TYPE,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,NO_TRADES,
+      NO_OF_SHRS,NET_TURNOV,TDCLOINDI.
+    fixture: {frozen: false, task: M3.1, path: "tests/fixtures/bse_bhavcopy/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.1
+
+  # §4.1 row 5 — corporate actions, both exchanges
+  - id: nse_corp_actions
+    plan_row: "Corporate actions"
+    description: NSE equity corporate actions — ex-date, record date, purpose text, ISIN.
+    host: www.nseindia.com
+    method: GET
+    url_template: "https://www.nseindia.com/api/corporates-corporateActions?index=equities&from_date={DD-MM-YYYY}&to_date={DD-MM-YYYY}"
+    verified_url: "https://www.nseindia.com/api/corporates-corporateActions?index=equities"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback: ["Screener per-company page", "manual entry queue"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+      Accept: "application/json, text/plain, */*"
+      X-Requested-With: XMLHttpRequest
+    needs_session_cookie: true
+    parser: {id: dataplatform.ingest.nse.corp_actions, task: M2.2}
+    robots_notes: www.nseindia.com allows / except /market-data-test.
+    pit_notes: >-
+      Actions apply retroactively by design. caBroadcastDate is the first-knowable timestamp
+      and must be stored alongside exDate — a factor may not be visible to a decision before
+      its broadcast (invariant #7).
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:45+05:30
+    last_http_status: 200
+    sample_bytes: 6053
+    content_type: application/json; charset=utf-8
+    sample_sha256: c01faf279bd1f54737687326ae0857c2bab2856a2be40cab5d7f575bde29947d
+    parse_check: >-
+      JSON array, 20 records; keys include isin, symbol, series, exDate, recDate,
+      caBroadcastDate, bcStartDate, bcEndDate, ndStartDate, ndEndDate, subject, faceVal.
+      ISIN is native, so this joins without the identity master.
+    fixture: {frozen: false, task: M2.2, path: "tests/fixtures/corp_actions/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M2.2
+
+  - id: bse_corp_actions
+    plan_row: "Corporate actions"
+    description: BSE corporate actions — the reconciliation counterpart to the NSE feed.
+    host: api.bseindia.com
+    method: GET
+    url_template: "https://api.bseindia.com/BseIndiaAPI/api/DefaultData/w?ddlcategorys=E&ddlindustrys=&scripcode={SCRIP_CD}&segment=0&strSearch=S"
+    verified_url: "https://api.bseindia.com/BseIndiaAPI/api/DefaultData/w?ddlcategorys=E&ddlindustrys=&scripcode=&segment=0&strSearch=S"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback: ["Screener per-company page", "manual entry queue"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.bseindia.com/"
+      Origin: "https://www.bseindia.com"
+      Accept: "application/json, text/plain, */*"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.bse.corp_actions, task: M2.2}
+    robots_notes: No robots.txt published by BSE; 2.5 s spacing, Referer/Origin required.
+    pit_notes: >-
+      Same retroactive semantics as NSE. BSE keys on scrip_code, not ISIN — reconciliation
+      against the NSE feed must go through the scrip master.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:11:07+05:30
+    last_http_status: 200
+    sample_bytes: 56128
+    content_type: application/json; charset=utf-8
+    sample_sha256: 0b9dfd9183d48cb6df23dc31e8f15519a6572fbfb557efe4f3afd482c89010ad
+    parse_check: >-
+      JSON array, 197 records; keys scrip_code, short_name, long_name, Ex_date, exdate,
+      Purpose, RD_Date, BCRD_FROM, BCRD_TO, ND_START_DATE, ND_END_DATE, payment_date.
+      Note two different ex-date spellings in the same record — both must be read.
+    fixture: {frozen: false, task: M2.2, path: "tests/fixtures/corp_actions/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M2.2
+
+  # §4.1 row 6 — symbol / ISIN master
+  - id: nse_equity_list
+    plan_row: "Symbol / ISIN master"
+    description: NSE's full equity list — the symbol→ISIN spine of the identity master.
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+    verified_url: "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+    cadence: weekly
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.identity.ingest, task: M1.7}
+    robots_notes: No directives on the archive host.
+    pit_notes: >-
+      A snapshot, not a history — the file only shows today's listings. Keep every weekly
+      snapshot forever and never overwrite; symbol changes and delistings are only
+      reconstructible from the accumulated series.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:37+05:30
+    last_http_status: 200
+    sample_bytes: 169183
+    content_type: text/csv
+    sample_sha256: 153db8e940a615513151a7e2aed74eb9551f9529755861959a8c1f7f80ce914b
+    parse_check: >-
+      CSV, 8 columns, header "SYMBOL,NAME OF COMPANY, SERIES, DATE OF LISTING, PAID UP VALUE,
+      MARKET LOT, ISIN NUMBER, FACE VALUE" (leading spaces again).
+    fixture: {frozen: false, task: M1.7, path: "tests/fixtures/nse_equity_list/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M1.7
+
+  - id: bse_scrip_master
+    plan_row: "Symbol / ISIN master"
+    description: BSE list-of-scrips — scrip_code→ISIN, without which no BSE row can be joined.
+    host: api.bseindia.com
+    method: GET
+    url_template: "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group=&Scripcode=&industry=&segment=Equity&status={Active|Suspended|Delisted}"
+    verified_url: "https://api.bseindia.com/BseIndiaAPI/api/ListofScripData/w?Group=&Scripcode=&industry=&segment=Equity&status=Active"
+    cadence: weekly
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.bseindia.com/"
+      Origin: "https://www.bseindia.com"
+      Accept: "application/json, text/plain, */*"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.bse.scrip_master, task: M3.1}
+    robots_notes: No robots.txt published by BSE; Referer/Origin required.
+    pit_notes: >-
+      status=Active returns live scrips only. Delisted and suspended scrips must be pulled with
+      the other status values or the backfill silently acquires survivorship bias.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:57+05:30
+    last_http_status: 200
+    sample_bytes: 1736833
+    content_type: application/json; charset=utf-8
+    sample_sha256: 221e2ac9345918778637cba703ce590f8ca3dcbea4ce12f30cefb4b2f9d20897
+    parse_check: >-
+      JSON array, 4,949 active equity scrips; keys SCRIP_CD, Scrip_Name, scrip_id, Status,
+      GROUP, FACE_VALUE, ISIN_NUMBER, INDUSTRY, Segment, NSURL, Issuer_Name, Mktcap.
+    fixture: {frozen: false, task: M3.1, path: "tests/fixtures/bse_scrip_master/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.1
+
+  # §4.1 row 7 — index constituents
+  - id: nifty_index_constituents
+    plan_row: "Index constituents"
+    description: Constituent list CSVs per index — monthly snapshots build the PIT universe.
+    host: niftyindices.com
+    method: GET
+    url_template: "https://niftyindices.com/IndexConstituent/ind_{index_slug}list.csv"
+    verified_url: "https://niftyindices.com/IndexConstituent/ind_nifty50list.csv"
+    cadence: monthly
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://niftyindices.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.indices, task: M3.9}
+    robots_notes: >-
+      Allow: / with two disallowed report paths, neither of which is /IndexConstituent/.
+    pit_notes: >-
+      The file is always "as of today" — there is no historical constituents download. Snapshot
+      every month from day one; membership history accumulates and is what kills survivorship
+      bias in M4's PIT universe.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:11:10+05:30
+    last_http_status: 200
+    sample_bytes: 3352
+    content_type: application/octet-stream
+    sample_sha256: 9fb8832853c279448d2bc05f0e7dd5f460ed2ff35332fea8c40fc1250362ad28
+    parse_check: >-
+      CSV, 5 columns, header "Company Name,Industry,Symbol,Series,ISIN Code". ISIN is native.
+    fixture: {frozen: false, task: M3.9, path: "tests/fixtures/nifty_indices/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.9
+
+  # §4.1 row 8 — benchmark TRI (primary FAILED, fallback input VERIFIED)
+  - id: nifty_tri_history
+    plan_row: "Benchmark TRI series"
+    description: Historical total-return index values for a named index over a date range.
+    host: niftyindices.com
+    method: POST
+    url_template: "https://niftyindices.com/Backpage.aspx/getTotalReturnIndexString"
+    verified_url: "https://niftyindices.com/Backpage.aspx/getTotalReturnIndexString"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback:
+      - "Computed price-index proxy + dividend estimate (§4.1's own fallback)"
+      - nifty_index_close_snapshot
+    required_headers:
+      User-Agent: browser
+      Referer: "https://niftyindices.com/reports/historical-data"
+      Content-Type: "application/json; charset=UTF-8"
+      X-Requested-With: XMLHttpRequest
+    needs_session_cookie: true
+    parser: {id: dataplatform.ingest.indices, task: M3.9}
+    robots_notes: Path is not disallowed by robots; the block is an application-level gate.
+    pit_notes: TRI is restated only on index reconstitution; treat published values as final.
+    status: FAILED
+    verified_at: 2026-08-08T18:14:21+05:30
+    last_http_status: 200
+    sample_bytes: 92911
+    content_type: text/html; charset=utf-8
+    sample_sha256: eb0b7852f57fad28115f86e526d600139238327d324b18e9d842f61cb3a08925
+    parse_check: null
+    fixture: {frozen: false, task: M3.9, path: null}
+    failure_note: >-
+      Tried twice, both POST with a JSON body {name, indexName, startDate, endDate}: bare, and
+      again after warming https://niftyindices.com/reports/historical-data in the same cookie
+      jar. Both returned HTTP 200 carrying the site's HTML home page, redirected to
+      /?ReturnUrl=%2fBackpage.aspx%2fgetTotalReturnIndexString — an application-level session
+      gate, not a robots or rate-limit block, and not something to evade. The warm GET set zero
+      cookies, which is why the gate never opens. A 200 with text/html is the failure signal
+      here: any fetcher that trusts the status code alone will happily store 92 KB of markup as
+      a TRI series.
+    candidate_alternatives:
+      - "Compute TRI from the price index plus the Div Yield column already present in
+         nifty_index_close_snapshot — this is §4.1's stated fallback and needs no new source."
+      - "Drive the historical-data page as a browser (it works interactively) to learn the real
+         session/token handshake, then replay it from the fetcher."
+      - "NSE indices archive on nsearchives.nseindia.com, which mirrors the daily index file
+         and may also carry a TRI variant under a name this sweep did not guess."
+    owner_task: M3.9
+
+  - id: nifty_index_close_snapshot
+    plan_row: "Benchmark TRI series"
+    description: >-
+      Daily closing values for all NIFTY indices, including Div Yield — the input to §4.1's
+      computed-TRI fallback. Verified on both the niftyindices and NSE archive hosts.
+    host: niftyindices.com
+    method: GET
+    url_template: "https://niftyindices.com/Daily_Snapshot/ind_close_all_{DDMMYYYY}.csv"
+    verified_url: "https://niftyindices.com/Daily_Snapshot/ind_close_all_07082026.csv"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback:
+      - "https://nsearchives.nseindia.com/content/indices/ind_close_all_{DDMMYYYY}.csv
+         (verified 2026-08-08T18:15:03+05:30, 200, 17,122 B, text/csv — byte-identical payload)"
+    required_headers:
+      User-Agent: browser
+      Referer: "https://niftyindices.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.indices, task: M3.9}
+    robots_notes: /Daily_Snapshot/ is not disallowed.
+    pit_notes: Immutable once published.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:11:13+05:30
+    last_http_status: 200
+    sample_bytes: 17122
+    content_type: application/octet-stream
+    sample_sha256: 2338d57ae47cd5a1848f6d6432ee18b467636540764c62d25581be1d4f0e1985
+    parse_check: >-
+      CSV, 13 columns, 163 index rows; header "Index Name,Index Date,Open Index Value,High
+      Index Value,Low Index Value,Closing Index Value,Points Change,Change(%),Volume,Turnover
+      (Rs. Cr.),P/E,P/B,Div Yield". Grep for "TRI"/"total return" returns nothing — this file
+      is price-index only, which is exactly why nifty_tri_history is still open.
+    fixture: {frozen: false, task: M3.9, path: "tests/fixtures/nifty_indices/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.9
+
+  # §4.1 row 9 — FII/DII flows
+  - id: nse_fii_dii_flows
+    plan_row: "FII/DII daily flows"
+    description: FII and DII buy/sell/net values for one session.
+    host: www.nseindia.com
+    method: GET
+    url_template: "https://www.nseindia.com/api/fiidiiTradeReact"
+    verified_url: "https://www.nseindia.com/api/fiidiiTradeReact"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback: ["NSDL/CDSL monthly"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+      Accept: "application/json, text/plain, */*"
+      X-Requested-With: XMLHttpRequest
+    needs_session_cookie: true
+    parser: {id: dataplatform.ingest.nse.fii_dii, task: M3.4}
+    robots_notes: www.nseindia.com allows / except /market-data-test.
+    pit_notes: >-
+      Immutable, but the endpoint serves only the latest session — there is no date parameter.
+      It must be captured daily; a missed day is not recoverable from this URL.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:51+05:30
+    last_http_status: 200
+    sample_bytes: 215
+    content_type: application/json; charset=utf-8
+    sample_sha256: 1d16ad6b79af9d612f5c80e68fb06d74f95febca474a8d7c86c4285f52664ce0
+    parse_check: >-
+      JSON array, 2 records (one FII, one DII); keys category, date, buyValue, sellValue,
+      netValue. Values arrive as strings — Decimal on parse, never float.
+    fixture: {frozen: false, task: M3.4, path: "tests/fixtures/nse_flows/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.4
+
+  # §4.1 row 10 — bulk & block deals
+  - id: nse_bulk_deals
+    plan_row: "Bulk & block deals"
+    description: Bulk deals reported for the current session.
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/content/equities/bulk.csv"
+    verified_url: "https://nsearchives.nseindia.com/content/equities/bulk.csv"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback: ["BSE equivalent"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.nse.deals, task: M3.5}
+    robots_notes: No directives on the archive host.
+    pit_notes: >-
+      Immutable, but the URL is not date-parameterised — it is a rolling current file. Capture
+      daily and key on the Date column.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:43+05:30
+    last_http_status: 200
+    sample_bytes: 10687
+    content_type: text/csv
+    sample_sha256: a777e1184667deefc1fee68527839ab8f155df5056d27b552c801fd1515b5611
+    parse_check: >-
+      CSV, 8 columns, header "Date,Symbol,Security Name,Client Name,Buy/Sell,Quantity Traded,
+      Trade Price / Wght. Avg. Price,Remarks". No ISIN — resolve via D2.
+    fixture: {frozen: false, task: M3.5, path: "tests/fixtures/nse_deals/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.5
+
+  - id: nse_block_deals
+    plan_row: "Bulk & block deals"
+    description: Block deals reported for the current session.
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/content/equities/block.csv"
+    verified_url: "https://nsearchives.nseindia.com/content/equities/block.csv"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback: ["BSE equivalent"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.nse.deals, task: M3.5}
+    robots_notes: No directives on the archive host.
+    pit_notes: Same rolling-file semantics as bulk deals.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:45+05:30
+    last_http_status: 200
+    sample_bytes: 250
+    content_type: text/csv
+    sample_sha256: 27f54f83a5791b75588d2946d27613a7f55922ff8ca8be5a7e88550baf54d22f
+    parse_check: >-
+      CSV, 7 columns (no Remarks), header "Date,Symbol,Security Name,Client Name,Buy/Sell,
+      Quantity Traded,Trade Price / Wght. Avg. Price". 250 B is a genuinely quiet day, not a
+      truncated response — one deal row. The quality layer must not treat a small block.csv as
+      a failure.
+    fixture: {frozen: false, task: M3.5, path: "tests/fixtures/nse_deals/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.5
+
+  # §4.1 row 11 — shareholding pattern
+  - id: nse_shareholding_pattern
+    plan_row: "Shareholding pattern"
+    description: Quarterly shareholding-pattern filings index, with promoter/public splits.
+    host: www.nseindia.com
+    method: GET
+    url_template: "https://www.nseindia.com/api/corporate-share-holdings-master?index=equities"
+    verified_url: "https://www.nseindia.com/api/corporate-share-holdings-master?index=equities"
+    cadence: quarterly
+    era: {start: null, end: null}
+    fallback: ["Screener company pages (robots-permitted)"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+      Accept: "application/json, text/plain, */*"
+      X-Requested-With: XMLHttpRequest
+    needs_session_cookie: true
+    parser: {id: dataplatform.ingest.shareholding, task: M3.6}
+    robots_notes: www.nseindia.com allows / except /market-data-test.
+    pit_notes: >-
+      Filing date is not quarter end. The payload carries both `date` (quarter end) and
+      `broadcastDate`/`cgTimeStamp` (first knowable) — store both, and gate decisions on the
+      broadcast timestamp (invariant #7).
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:56+05:30
+    last_http_status: 200
+    sample_bytes: 2407298
+    content_type: application/json; charset=utf-8
+    sample_sha256: 54c2384cfecb39ee4c5a3c236f8bf1e45d93d12ef17103ad210c27108652ffa5
+    parse_check: >-
+      JSON array, 2,284 records; keys include isin, name, date, broadcastDate, cgTimeStamp,
+      pr_and_prgrp, employeeTrusts, publicShareholdingNotes, promoterDematNotes, industry.
+    fixture: {frozen: false, task: M3.6, path: "tests/fixtures/nse_shareholding/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.6
+
+  # §4.1 row 12 — F&O EOD
+  - id: nse_fo_bhavcopy
+    plan_row: "F&O EOD (OI, PCR, basis)"
+    description: NSE derivatives bhavcopy — sentiment context only, never traded (decision set).
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{YYYYMMDD}_F_0000.csv.zip"
+    verified_url: "https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_20260807_F_0000.csv.zip"
+    cadence: daily
+    era: {start: 2024-07-08, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.nse.fo_bhavcopy, task: M3.7}
+    robots_notes: No directives on the archive host.
+    pit_notes: Immutable.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:40+05:30
+    last_http_status: 200
+    sample_bytes: 1057426
+    content_type: application/zip
+    sample_sha256: a5ca8f06fd69554ea123134fc823a8a868ccca454d286727c22290dc37daac82
+    parse_check: >-
+      zip with one member BhavCopy_NSE_FO_0_0_0_20260807_F_0000.csv; 34 columns; same UDiFF
+      header as the cash file, with XpryDt, StrkPric, OptnTp, OpnIntrst, ChngInOpnIntrst
+      populated — the columns PCR and basis are computed from.
+    fixture: {frozen: false, task: M3.7, path: "tests/fixtures/nse_fo/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.7
+
+  # §4.1 row 13 — corporate announcements
+  - id: nse_announcements
+    plan_row: "Corporate announcements"
+    description: NSE corporate announcements feed with attachment links and XBRL flags.
+    host: www.nseindia.com
+    method: GET
+    url_template: "https://www.nseindia.com/api/corporate-announcements?index=equities&from_date={DD-MM-YYYY}&to_date={DD-MM-YYYY}"
+    verified_url: "https://www.nseindia.com/api/corporate-announcements?index=equities"
+    cadence: intraday_poll_at_eod
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+      Accept: "application/json, text/plain, */*"
+      X-Requested-With: XMLHttpRequest
+    needs_session_cookie: true
+    parser: {id: dataplatform.ingest.announcements, task: M3.8}
+    robots_notes: www.nseindia.com allows / except /market-data-test.
+    pit_notes: >-
+      Natural PIT — an_dt/exchdisstime are source timestamps to the second. Store exchdisstime
+      as the knowable_date; it is the exchange dissemination time, not the company's claim.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:48+05:30
+    last_http_status: 200
+    sample_bytes: 13687
+    content_type: application/json; charset=utf-8
+    sample_sha256: b2df1df49599fb99093f4fbb7bff34708b4142997b69d386ad99e67633998164
+    parse_check: >-
+      JSON array, 20 records; keys sm_isin, symbol, sm_name, desc, attchmntText, attchmntFile,
+      an_dt, exchdisstime, sort_date, hasXbrl, seq_id. ISIN is native.
+    fixture: {frozen: false, task: M3.8, path: "tests/fixtures/announcements/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.8
+
+  - id: bse_announcements
+    plan_row: "Corporate announcements"
+    description: BSE announcements feed, paged by date.
+    host: api.bseindia.com
+    method: GET
+    url_template: "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno={N}&strCat=-1&strPrevDate={YYYYMMDD}&strScrip=&strSearch=P&strToDate={YYYYMMDD}&strType=C&subcategory=-1"
+    verified_url: "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pageno=1&strCat=-1&strPrevDate=20260807&strScrip=&strSearch=P&strToDate=20260807&strType=C&subcategory=-1"
+    cadence: intraday_poll_at_eod
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.bseindia.com/"
+      Origin: "https://www.bseindia.com"
+      Accept: "application/json, text/plain, */*"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.announcements, task: M3.8}
+    robots_notes: No robots.txt published by BSE; Referer/Origin required.
+    pit_notes: DT_TM / NEWS_DT are source timestamps. Keyed on SCRIP_CD — resolve via D2.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:12:56+05:30
+    last_http_status: 200
+    sample_bytes: 60280
+    content_type: application/json; charset=utf-8
+    sample_sha256: 5e4d42a26d9bea745c484a5aa6808265475b4e0bc164ff61370906557b927c65
+    parse_check: >-
+      JSON object with keys Table (50 announcement records) and Table1 (paging); record keys
+      NEWSID, SCRIP_CD, NEWSSUB, HEADLINE, DT_TM, NEWS_DT, ANNOUNCEMENT_TYPE, CATEGORYNAME,
+      ATTACHMENTNAME, CRITICALNEWS, FILESTATUS, QUARTER_ID.
+      Gotcha found while verifying: strPrevDate must equal strToDate (a single date). A range
+      of strPrevDate=20260807/strToDate=20260808 returns HTTP 200 with a 2-byte body `{}` —
+      an empty success, not an error. The ingester must assert Table is present and non-empty
+      on a trading day rather than trusting the status code.
+    fixture: {frozen: false, task: M3.8, path: "tests/fixtures/announcements/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.8
+
+  # §4.1 row 14 — news / geopolitical
+  - id: gdelt_v2_event_files
+    plan_row: "News / geopolitical"
+    description: GDELT 2.0 raw 15-minute export/mention/GKG files, discovered via lastupdate.txt.
+    host: data.gdeltproject.org
+    method: GET
+    url_template: "http://data.gdeltproject.org/gdeltv2/lastupdate.txt"
+    verified_url: "http://data.gdeltproject.org/gdeltv2/lastupdate.txt"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback: ["curated RSS (PIB, business press headlines)"]
+    required_headers:
+      User-Agent: browser
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.gdelt, task: M6.1}
+    robots_notes: No robots.txt on the host (404, empty body).
+    pit_notes: Every file is timestamped in its own name (YYYYMMDDHHMMSS) — natural PIT.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:11:13+05:30
+    last_http_status: 200
+    sample_bytes: 319
+    content_type: text/plain
+    sample_sha256: 38545c8332a9b600a4a1a19af6e181d9697959d04d012b804259d01e558ff7d3
+    parse_check: >-
+      3 lines of "size md5 url", e.g.
+      "35289 b7bc099f6c8e5d9051b3c667c94b8277
+      http://data.gdeltproject.org/gdeltv2/20260808124500.export.CSV.zip" — the manifest
+      carries its own MD5, which L0 should cross-check on ingest.
+      HTTPS is not usable: the host is a CNAME to c.storage.googleapis.com and presents a
+      certificate for that name, so https:// fails validation. Plain HTTP is the published
+      access path for this feed; the payload's own MD5 is the integrity control.
+    fixture: {frozen: false, task: M6.1, path: "tests/fixtures/gdelt/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M6.1
+
+  - id: gdelt_doc_api
+    plan_row: "News / geopolitical"
+    description: GDELT DOC 2.0 article-search API — the convenient query surface over the feed.
+    host: api.gdeltproject.org
+    method: GET
+    url_template: "https://api.gdeltproject.org/api/v2/doc/doc?query={q}&mode=artlist&format=json&maxrecords={n}"
+    verified_url: "https://api.gdeltproject.org/api/v2/doc/doc?query=nifty&mode=artlist&format=json&maxrecords=5"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback: [gdelt_v2_event_files]
+    required_headers:
+      User-Agent: browser
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.gdelt, task: M6.1}
+    robots_notes: No robots.txt (404). The rate limit is stated in the 429 body instead.
+    pit_notes: Results are timestamped; the API itself has no PIT guarantee on backfill depth.
+    status: FAILED
+    verified_at: 2026-08-08T18:13:22+05:30
+    last_http_status: 429
+    sample_bytes: 444
+    content_type: null
+    sample_sha256: 44c03f8dd984184218c90dc7e64aed9e6e2d8b17426feb5aa7933b3c44df64c6
+    parse_check: null
+    fixture: {frozen: false, task: M6.1, path: null}
+    failure_note: >-
+      HTTP 429 on both attempts, the second after a 15 s idle gap — so this is an IP-level or
+      global throttle, not our spacing. Body: "Please limit requests to one every 5 seconds or
+      contact ... All high-traffic users should switch to our ngrams dataset". Not retried
+      further; hammering a source that says it is rate-limited is exactly the behaviour §8
+      forbids.
+    candidate_alternatives:
+      - "gdelt_v2_event_files (VERIFIED above) is the primary path and needs no API at all —
+         pull the 15-minute files and filter locally."
+      - "GDELT Web News NGrams dataset, which the 429 body itself recommends for volume users."
+      - "Re-probe the DOC API from the production host at >=5 s spacing before M6.1 depends on
+         it; a single 429 pair is not proof the endpoint is permanently unavailable."
+    owner_task: M6.1
+
+  # §4.1 row 15 — fundamentals (restated)
+  - id: screener_company_fundamentals
+    plan_row: "Fundamentals (restated)"
+    description: >-
+      Screener per-company data. Restated, therefore monitoring-only and physically quarantined
+      from backtests (decision #7, invariant #8).
+    host: www.screener.in
+    method: GET
+    url_template: "https://www.screener.in/company/{SYMBOL}/"
+    verified_url: "https://www.screener.in/company/RELIANCE/"
+    cadence: quarterly_refresh
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.screener, task: M7.1}
+    robots_notes: >-
+      Per-company pages are permitted. The Excel export path /company/{SYMBOL}/export/ is not
+      robots-disallowed but is not anonymously reachable (see failure_note). Never touch
+      /user/*, ?q=, ?sort=, ?limit=, ?page= or /company/source/quarter/* — per-company cadence
+      only, 5 s spacing.
+    pit_notes: >-
+      NOT point-in-time. Screener shows restated figures with no as-of date, so this feed may
+      never reach a backtest or a decision — monitoring surface only.
+    status: BLOCKED_CREDENTIAL
+    verified_at: 2026-08-08T18:13:07+05:30
+    last_http_status: 404
+    sample_bytes: 11441
+    content_type: text/html; charset=utf-8
+    sample_sha256: 9bca56f8cf869784cb1f8c1fa698822d5bd4c4d619f8b4c44670481361736a3f
+    parse_check: null
+    fixture: {frozen: false, task: M7.1, path: null}
+    failure_note: >-
+      The §4.1 primary — the Excel export — is not available to an anonymous client:
+      GET https://www.screener.in/company/RELIANCE/export/ returns HTTP 404 with an 11,441 B
+      HTML page. Screener gates the export behind a logged-in account, and creating an account
+      or accepting third-party terms is reserved to the human (AGENTIC_CONTEXT §3.7); no
+      credential exists (B4). Not escalated as a blocker because a working substitute was
+      verified in the same sweep: the robots-permitted company page fetched 200 /
+      227,493 B / text/html at 2026-08-08T18:11:25+05:30 and carries the same statements.
+    candidate_alternatives:
+      - "Parse the robots-permitted HTML company page (verified 200, 227,493 B) — no account,
+         no terms acceptance, same restated data. Recommended default for M7.1."
+      - "If the export is genuinely needed, the owner supplies a Screener session cookie; that
+         is a §3.7 human decision and M7.1 should park on it rather than self-serve."
+    owner_task: M7.1
+
+  # §4.1 row 16 — fundamentals (point-in-time)
+  - id: nse_financial_results_index
+    plan_row: "Fundamentals (point-in-time)"
+    description: >-
+      Index of results filings with filing timestamps and a direct XBRL URL per filing — the
+      discovery half of the true-PIT fundamentals path.
+    host: www.nseindia.com
+    method: GET
+    url_template: "https://www.nseindia.com/api/corporates-financial-results?index=equities&period={Quarterly|Annual}&from_date={DD-MM-YYYY}&to_date={DD-MM-YYYY}"
+    verified_url: "https://www.nseindia.com/api/corporates-financial-results?index=equities&period=Quarterly"
+    cadence: per_filing
+    era: {start: null, end: null}
+    fallback: ["Announcement PDFs"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+      Accept: "application/json, text/plain, */*"
+      X-Requested-With: XMLHttpRequest
+    needs_session_cookie: true
+    parser: {id: dataplatform.ingest.xbrl, task: M7.3}
+    robots_notes: www.nseindia.com allows / except /market-data-test.
+    pit_notes: >-
+      True PIT. `filingDate` / `broadCastDate` / `exchdisstime` are the first-knowable
+      timestamps; `fromDate`/`toDate` are the reporting period and must never be used as the
+      knowable date (invariant #7).
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:53+05:30
+    last_http_status: 200
+    sample_bytes: 2910921
+    content_type: application/json; charset=utf-8
+    sample_sha256: 914f4b9ee846c538e77d626b2be42b525c4ab8855042e92b5c3de8227b4f04e6
+    parse_check: >-
+      JSON array, 3,816 records; keys isin, symbol, companyName, filingDate, broadCastDate,
+      exchdisstime, fromDate, toDate, period, relatingTo, audited, consolidated, indAs, format,
+      seqNumber and `xbrl` — an absolute URL to the filing's XBRL document, which is how the
+      next entry is reached.
+    fixture: {frozen: false, task: M7.3, path: "tests/fixtures/xbrl/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M7.3
+
+  - id: nse_xbrl_filing
+    plan_row: "Fundamentals (point-in-time)"
+    description: The XBRL document for a single results filing, linked from the index above.
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/corporate/xbrl/{filename}.xml"
+    verified_url: "https://nsearchives.nseindia.com/corporate/xbrl/INDAS_121277_1705282_30072026051753.xml"
+    cadence: per_filing
+    era: {start: null, end: null}
+    fallback: ["Announcement PDFs"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.xbrl, task: M7.3}
+    robots_notes: No directives on the archive host.
+    pit_notes: >-
+      The filename embeds the filing timestamp (…_30072026051753). Never construct these URLs
+      by guessing — take them from the `xbrl` field of the filings index, which is what makes
+      the filing date authoritative.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:12:52+05:30
+    last_http_status: 200
+    sample_bytes: 19935
+    content_type: application/xml
+    sample_sha256: 89651604c15397b2901204e86ac91d3a21feab6281f9ebe6d670288f5b85b84e
+    parse_check: >-
+      well-formed XBRL XML; root xbrli:xbrl with the in-bse-fin 2020-03-31 taxonomy namespaces
+      (NSE serves filings against the BSE-published taxonomy — expected, not an error).
+    fixture: {frozen: false, task: M7.3, path: "tests/fixtures/xbrl/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M7.3
