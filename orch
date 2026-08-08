@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# orch — build orchestrator entrypoint.
+#
+# Runs on an ephemeral uv environment (stdlib + PyYAML) so it works before the product's
+# own dependencies exist, and keeps working afterwards regardless of the project venv.
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+exec uv run --quiet --python 3.12 --with pyyaml python -m orchestrator "$@"

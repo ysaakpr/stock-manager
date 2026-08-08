@@ -1,0 +1,23 @@
+# data lake — never committed (L0 is immutable on disk, not in git)
+data/
+# secrets
+.env
+.env.*
+!.env.example
+# build machinery state
+BUILD_STATE.json
+.build_state.lock
+ops/build-logs/
+ops/backups/
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+# artifacts
+*.parquet
+*.duckdb
+.DS_Store

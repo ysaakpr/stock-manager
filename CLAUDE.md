@@ -1,0 +1,75 @@
+# trading-platform — repo conventions
+
+EOD market-data platform (System 1) + analyst agent (System 2). Solo-maintained monolith.
+
+**Read before working:** [EXECUTION_PLAN.md](EXECUTION_PLAN.md) (what to build — the constitution) and
+[AGENTIC_CONTEXT.md](AGENTIC_CONTEXT.md) (how agents build it, autonomy limits, hard invariants).
+Your task's spec is its entry in [TASK_GRAPH.yaml](TASK_GRAPH.yaml).
+
+## Toolchain
+
+Python 3.12 via `uv` (never the host's 3.9). Postgres via docker-compose.
+
+```bash
+uv sync                     # install/refresh env from uv.lock
+uv run pytest               # tests
+uv run pytest tests/unit    # fast subset
+make check                  # format + lint + types + tests — the gate for every task
+make up                     # docker compose up -d (postgres + app)
+make migrate                # apply platform/store/migrations/*.sql
+```
+
+Never `pip install` into the host. Never run `python3` directly — always `uv run python`.
+
+## Layout
+
+```
+platform/    ingest/ identity/ corpactions/ store/ quality/ query/ archives/ status/   # D1-D7
+analyst/     cases/ interview/ mapper/ thesis/ monitor/ rotation/ cash/ rails/ journal/ # A1-A9
+execution/   broker.py sim_broker.py kite_broker.py costs/ recon.py kill_switch.py      # X1
+backtest/    replay engine                                                             # X2
+accounting/  token/cost metering                                                        # X3
+orchestrator/ the autonomous build system itself (not product code)
+ops/         compose, backups, deploy, runbooks
+tests/       unit/ integration/ golden/ fixtures/
+data/        L0/ L1/ L2  — gitignored, never committed
+```
+
+Module boundaries are packages. A module's public surface is what its `__init__.py` exports; reach into a
+sibling's internals and you have created the coupling this layout exists to prevent.
+
+## Code conventions
+
+- Type hints everywhere; `mypy --strict` on new packages. Dataclasses or pydantic models for anything crossing
+  a module boundary — no bare dicts as interfaces.
+- **Money:** `Decimal`, never `float`. Prices, quantities, costs, P&L. A float in the cost model is a bug.
+- **Dates:** `datetime.date` for trading dates, tz-aware `datetime` for timestamps (Asia/Kolkata).
+  Never `datetime.now()` — inject a `Clock` (AGENTIC_CONTEXT §6.11).
+- **Identity:** ISIN is the only join key. A function taking a `symbol` and querying prices is a bug.
+- **Errors:** fail loud and specific. Bare `except:` and silent `pass` on an ingestion failure are defects —
+  a source that broke must reach the status API, not a log line nobody reads.
+- **Logging:** `structlog`, key-value, one event per meaningful step. Log the source, date, and state on every
+  ingestion transition.
+- Docstrings on public functions: what it does, what it assumes, what it never does.
+- Comment density matches surrounding code. Comment *why*, not *what*.
+
+## Testing
+
+`tests/unit` (offline, fast), `tests/integration` (needs docker postgres), `tests/golden` (the CA suite).
+
+- Ingestion parsers: frozen fixture per format era in `tests/fixtures/<source>/<era>/`. **Tests never hit the
+  network.**
+- Anything touching adjustment factors, costs, rails, or PIT boundaries needs a test that fails if the logic
+  is inverted. Property tests for rails (no generated order stream may breach a cap).
+- Replay determinism: same inputs → byte-identical journal and book.
+
+## Data invariants (full list in AGENTIC_CONTEXT.md §6)
+
+L0 immutable · ISIN-only joins · no adjusted prices in L1 · one shared cost model · one decision path for
+paper and real · rails unbypassable · no future data in a decision · restated fundamentals quarantined from
+backtests · every decision journaled including no-ops · red data means no trading.
+
+## Git
+
+One commit per completed task: `[<task-id>] <title>`, with `Task:` and `Acceptance:` trailers. Never commit
+`data/`, `.env`, or credentials. Never force-push or rewrite history.
