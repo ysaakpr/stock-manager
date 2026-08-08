@@ -20,7 +20,9 @@ That last rule is the one to read twice. A 403 spike is answered by stopping and
 (AGENTIC_CONTEXT §8) — never by a different user agent, a different header set, a proxy, or a
 faster retry. There is one user agent, it comes from `Settings`, and 403 is not in the retryable
 set. `tests/unit/test_fetcher.py` asserts all of that, including that no second agent exists in
-this file to rotate to.
+this file to rotate to. The one exception is narrow and documented at `_warm_session`: NSE answers
+its own homepage with 403 and hands over the usable cookie anyway, so the *handshake's* 403 is
+kept rather than counted. The data request that follows is classified exactly as before.
 
 Offline by construction (B8): the network lives behind `Transport`. `HttpxTransport` is the real
 one, `RecordedTransport` replays scripted responses, and the test suite only ever wires the
