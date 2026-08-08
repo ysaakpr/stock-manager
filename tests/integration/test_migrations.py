@@ -12,6 +12,7 @@ so a missing database still fails the gate rather than passing silently.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterator
 from datetime import datetime
@@ -27,8 +28,11 @@ from dataplatform.store.migrate import MigrationError, discover, migrate
 
 pytestmark = pytest.mark.integration
 
-#: Dropped and recreated at the start of every session, so it is empty by construction.
-SCRATCH_DB = "trading_m0_4_migrations"
+#: Created at the start of every session and dropped afterwards, so it is empty by construction.
+#: Suffixed with the pid because two pytest sessions do run at once here — an autonomous build
+#: wave has several agents in the suite simultaneously — and a fixed name means one session's
+#: `DROP DATABASE ... WITH (FORCE)` deletes the database another is mid-test against (M0.6).
+SCRATCH_DB = f"trading_m0_4_migrations_{os.getpid()}"
 
 #: The tables M0.4 owes its dependants, from the task spec and EXECUTION_PLAN.md §4.2.
 EXPECTED_TABLES = frozenset(
