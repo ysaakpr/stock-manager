@@ -345,9 +345,7 @@ def test_a_403_is_never_retried(build: Any, settings: Settings) -> None:
     assert not issubclass(ForbiddenSpikeError, RetryableFetchError)
 
 
-def test_every_attempt_presents_the_same_identity(
-    build: Any, settings: Settings, register: SourceRegister
-) -> None:
+def test_every_attempt_presents_the_same_identity(build: Any, settings: Settings) -> None:
     """The anti-evasion property: refusals change nothing about how the next request looks."""
     fetcher, transport = build({UDIFF: RecordedResponse(status_code=403)})
     for _ in range(settings.http_forbidden_streak_limit - 1):
