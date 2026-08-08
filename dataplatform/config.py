@@ -26,6 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 __all__ = [
     "REPO_ROOT",
+    "AlertProvider",
     "AppEnv",
     "BrokerProvider",
     "LlmProvider",
@@ -79,6 +80,18 @@ class BrokerProvider(StrEnum):
 
     STUB = "stub"
     KITE = "kite"
+
+
+class AlertProvider(StrEnum):
+    """Which channel `dataplatform.alerts.build_alerter` wires.
+
+    `LOG` writes the alert as a structured log event and needs no credential, which is why it is
+    the default (B4) — an alerting channel that cannot be configured is one that never fires.
+    """
+
+    LOG = "log"
+    EMAIL = "email"
+    TELEGRAM = "telegram"
 
 
 class Settings(BaseSettings):
@@ -154,6 +167,39 @@ class Settings(BaseSettings):
     llm_provider: LlmProvider = Field(default=LlmProvider.STUB, description="stub | anthropic")
     broker_provider: BrokerProvider = Field(default=BrokerProvider.STUB, description="stub | kite")
 
+    # ── alerting (§8.1: FAILED streaks, red quality, reconciliation breaks) ───────────────────
+    alert_provider: AlertProvider = Field(
+        default=AlertProvider.LOG, description="log | email | telegram; log needs no credential"
+    )
+    alert_dedup_window_minutes: Annotated[int, Field(ge=0)] = Field(
+        default=360,
+        description="repeat alerts on one dedup_key are suppressed for this long; 0 disables",
+    )
+    alert_smtp_host: str | None = Field(
+        default=None, description="required only when ALERT_PROVIDER=email"
+    )
+    alert_smtp_port: Annotated[int, Field(ge=1, le=65535)] = Field(
+        default=587, description="587 uses STARTTLS; 465 uses implicit TLS"
+    )
+    alert_smtp_username: str | None = Field(
+        default=None, description="omit for a relay that does not authenticate"
+    )
+    alert_smtp_password: SecretStr | None = Field(
+        default=None, description="omit for a relay that does not authenticate"
+    )
+    alert_email_from: str | None = Field(
+        default=None, description="envelope sender; required only when ALERT_PROVIDER=email"
+    )
+    alert_email_to: str = Field(
+        default="", description="comma-separated recipients; see alert_email_recipients"
+    )
+    alert_telegram_bot_token: SecretStr | None = Field(
+        default=None, description="required only when ALERT_PROVIDER=telegram"
+    )
+    alert_telegram_chat_id: str | None = Field(
+        default=None, description="required only when ALERT_PROVIDER=telegram"
+    )
+
     # ── credentials (absent by default; never logged — SecretStr masks its repr) ──────────────
     anthropic_api_key: SecretStr | None = Field(
         default=None, description="required only when LLM_PROVIDER=anthropic"
@@ -170,9 +216,20 @@ class Settings(BaseSettings):
     def _upper_level(cls, value: object) -> object:
         return value.upper() if isinstance(value, str) else value
 
-    @field_validator("anthropic_api_key", "kite_api_key", "kite_api_secret", mode="before")
+    @field_validator(
+        "anthropic_api_key",
+        "kite_api_key",
+        "kite_api_secret",
+        "alert_smtp_host",
+        "alert_smtp_username",
+        "alert_smtp_password",
+        "alert_email_from",
+        "alert_telegram_bot_token",
+        "alert_telegram_chat_id",
+        mode="before",
+    )
     @classmethod
-    def _blank_secret_is_absent(cls, value: object) -> object:
+    def _blank_is_absent(cls, value: object) -> object:
         """`KEY=` in a .env means "not configured", not a credential that is the empty string."""
         return None if isinstance(value, str) and not value.strip() else value
 
@@ -202,6 +259,11 @@ class Settings(BaseSettings):
     def tzinfo(self) -> ZoneInfo:
         """`timezone` as a tzinfo, for wiring a `Clock`."""
         return ZoneInfo(self.timezone)
+
+    @property
+    def alert_email_recipients(self) -> tuple[str, ...]:
+        """`alert_email_to` as addresses. Empty when nothing is configured, never `('',)`."""
+        return tuple(part.strip() for part in self.alert_email_to.split(",") if part.strip())
 
     def effective_log_format(self) -> LogFormat:
         """Resolve `AUTO`: JSON in prod so the log is queryable, console elsewhere so it reads."""
