@@ -32,7 +32,19 @@ complete graph. Answer what it asks and run again:
 
 ## Unattended overnight runs
 
-Agents need Bash without a prompt for each command:
+**Prerequisite:** `./orch run` spawns `claude -p` once per task, so the Claude Code **CLI** must be on
+PATH. It is not installed on this machine as of 2026-08-08 — this repo has been driven from the Claude
+desktop app, which does not expose the binary. `orch run` fails loudly rather than silently doing nothing.
+To enable detached runs:
+
+```bash
+npm install -g @anthropic-ai/claude-code
+```
+
+Then authenticate the CLI once interactively (`claude` in a terminal) before the first detached run —
+a headless `claude -p` cannot complete a login flow. Until then, use the in-session runner below.
+
+Once the CLI is available, agents need Bash without a prompt for each command:
 
 ```bash
 ./orch run --max-waves 40 --concurrency 3 --permission-mode bypassPermissions
@@ -63,10 +75,18 @@ cause and clear it:
 `orch` refuses to move a task out of DONE, because downstream tasks have already trusted it. If you
 genuinely need to, edit `BUILD_STATE.json` by hand — the friction is deliberate.
 
-## In-session alternative
+## In-session runner (works today, no CLI needed)
 
-Inside Claude Code, `.claude/workflows/build-wave.js` runs the same waves through the Workflow tool with
-live progress instead of a detached process. Same graph, same state, same `orch`.
+`.claude/workflows/build-wave.js` runs the same waves through the Workflow tool, with live progress in
+`/workflows` instead of a detached process. Same graph, same state, same `orch`, same commits — the only
+difference is that it advances while the session is open.
+
+```
+/build-wave            # or: ask for the build-wave workflow with {"maxWaves": N}
+```
+
+Each wave claims its tasks with `orch set <id> IN_PROGRESS` before working, so the in-session and detached
+runners cannot hand the same task to two agents. Do not run both at once anyway.
 
 ## What it will never do on its own
 
