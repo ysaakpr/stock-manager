@@ -15,6 +15,7 @@ Needs the docker postgres (`make up`); if it is unreachable the module skips wit
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from datetime import date, datetime, timedelta
 
@@ -39,8 +40,11 @@ from dataplatform.store.migrate import migrate
 
 pytestmark = pytest.mark.integration
 
-#: Dropped and recreated at the start of every session, so it is empty by construction.
-SCRATCH_DB = "trading_m1_3_sync_state"
+#: Dropped and recreated at the start of every session, so it is empty by construction. Keyed by
+#: pid because the build runs several agents against one Postgres: a fixed name means one session's
+#: `DROP DATABASE ... WITH (FORCE)` kills another session mid-test, which reads as a flaky suite —
+#: observed as `relation "sync_state" does not exist` across this module during M1.11.
+SCRATCH_DB = f"trading_m1_3_sync_state_{os.getpid()}"
 
 BHAVCOPY = "nse_bhavcopy_udiff"
 DELIVERY = "nse_sec_bhavdata_full"
