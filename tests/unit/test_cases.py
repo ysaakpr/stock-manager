@@ -58,6 +58,7 @@ from analyst.cases import (
     LifecycleError,
     MonitoringCadence,
     NoPolicyError,
+    PolicyError,
     PolicySet,
     PolicyStatus,
     PolicyVersionError,
@@ -428,6 +429,37 @@ def test_journal_payloads_are_strings_only(service: CaseService, db: FakeDatabas
     for entry in db.journal:
         for key, value in entry["payload"].items():
             assert isinstance(value, str), f"payload[{key!r}] is {type(value).__name__}"
+
+
+def test_a_proposal_under_review_may_be_reworked(service: CaseService, db: FakeDatabase) -> None:
+    """Nothing has been approved yet, so replacing the pending document is not a lifecycle move."""
+    service.create(CASE_ID, "AI & Robotics")
+    service.begin_interview(CASE_ID)
+    service.propose(CASE_ID, proposal())
+
+    reworked = proposal(rotation_dial=RotationDial(tactical_pct=Decimal("20")))
+    service.propose(CASE_ID, reworked)
+
+    pending = service.pending_proposal(CASE_ID)
+    assert pending is not None and pending.content_hash == reworked.content_hash
+    assert db.transitions() == [("DRAFT", "INTERVIEW"), ("INTERVIEW", "PROPOSAL")]
+    assert len(db.events("POLICY_PROPOSED")) == 1
+
+
+def test_a_funded_case_changes_policy_only_by_versioning_it(service: CaseService) -> None:
+    """propose() is for a case's first policy set; after that the change carries a version."""
+    ratified_case(service)
+    service.fund(CASE_ID, FundingMode.PAPER, by="vysh")
+    with pytest.raises(IllegalTransitionError, match="revise_policy"):
+        service.propose(CASE_ID, proposal())
+
+
+def test_a_proposal_for_another_case_is_refused(service: CaseService) -> None:
+    """A policy set names the case it governs; proposing it elsewhere would misfile a rail."""
+    service.create(CASE_ID, "AI & Robotics")
+    service.begin_interview(CASE_ID)
+    with pytest.raises(PolicyError, match="names case"):
+        service.propose(CASE_ID, proposal(case_id="SOMEONE_ELSE"))
 
 
 def test_an_illegal_transition_changes_nothing(service: CaseService, db: FakeDatabase) -> None:
