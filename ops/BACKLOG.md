@@ -12,3 +12,5 @@ Agents: add a line here rather than expanding your task's scope (AGENTIC_CONTEXT
 | setup | Golden CA suite starts at 7 named cases; §4.3 expects ~13 more ugly cases collected during backfill. |
 | M0.1 | `orchestrator/` is excluded from the gate (6 files unformatted, 7 mypy-strict errors). Bringing the build machinery under `make check` is a small, separate task. |
 | M0.1 | The `platform/` → `dataplatform/` rename is documented in CLAUDE.md but ~30 `platform/…` path strings in TASK_GRAPH.yaml specs/deliverables still read the old name; a mechanical sweep would remove the indirection. |
+| M8.2 | Regulation forces a daily broker API logout (NSE/INVG/73992 §8.3.2.1.8) — the daily loop needs a journaled `AUTH_REQUIRED` no-trade state alongside `SKIPPED_DATA_RED`; no task owns it. |
+| M8.2 | Broker API terms are undated and change silently (kite.trade/terms preamble); a quarterly dated capture into `ops/compliance/` would make a term change detectable — C-track candidate. |
