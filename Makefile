@@ -51,9 +51,11 @@ psql:
 migrate:
 	uv run python -m dataplatform.store.migrate
 
-## backup / restore: pg_dump + L0 manifest, and the restore drill (ops/*.sh, M1.12).
+## backup / restore: pg_dump + L0 manifest, and the restore drill. `restore` verifies the newest
+## backup by rebuilding it into a scratch database — it never writes to the live one. The real
+## recovery procedure is deliberately not a make target: ops/runbooks/backup-restore.md.
 backup:
 	bash ops/backup.sh
 
 restore:
-	bash ops/restore.sh
+	bash ops/restore.sh --scratch

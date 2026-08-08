@@ -16,7 +16,13 @@ make up      # creates data/L0 data/L1 data/L2, then docker compose up -d
 make logs    # follow both services
 make psql    # interactive shell on the container DB
 make down    # stop; the pgdata volume and the lake survive
+make backup  # pg_dump + a checksummed L0 manifest into ops/backups/<ts>
+make restore # rebuild the newest backup into a scratch DB and verify every row count
 ```
+
+`make restore` is a *drill*: it never writes to the live database, and it refuses a target named
+after it. Real recovery, the object-storage gap, and the executed drill transcripts are in
+[runbooks/backup-restore.md](runbooks/backup-restore.md).
 
 `docker compose -f ops/docker-compose.yml up -d` works identically with no environment set —
 every variable has a default. `make up` additionally creates the lake directories, which
