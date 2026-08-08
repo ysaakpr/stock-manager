@@ -13,11 +13,29 @@ from dataplatform.ingest.nse.bhavcopy_legacy import (
 )
 from dataplatform.ingest.nse.bhavcopy_legacy import parse as parse_legacy_bhavcopy
 from dataplatform.ingest.nse.bhavcopy_legacy import parse_l0 as parse_legacy_bhavcopy_l0
+from dataplatform.ingest.nse.fii_dii import (
+    FLOWS_DATASET,
+    FlowCategory,
+    FlowDay,
+    FlowRow,
+    StaleSessionError,
+)
+from dataplatform.ingest.nse.fii_dii import ingest_day as ingest_flows_day
+from dataplatform.ingest.nse.fii_dii import parse as parse_fii_dii
+from dataplatform.ingest.nse.fii_dii import parse_l0 as parse_fii_dii_l0
 
 __all__ = [
+    "FLOWS_DATASET",
     "LEGACY_COLUMNS",
     "LEGACY_ERA_END",
     "LEGACY_SOURCE_ID",
+    "FlowCategory",
+    "FlowDay",
+    "FlowRow",
+    "StaleSessionError",
+    "ingest_flows_day",
+    "parse_fii_dii",
+    "parse_fii_dii_l0",
     "parse_legacy_bhavcopy",
     "parse_legacy_bhavcopy_l0",
 ]

@@ -428,6 +428,14 @@ class Fetcher:
         deliberately *not* stored — it is a handshake, not data, and writing a homepage that
         changes hourly under one L0 key would conflict with itself on the second day
         (invariant #1). Once per host per process; the transport keeps the jar.
+
+        The warm-up is a *handshake*, so its status is not a verdict on our access: NSE answers
+        `https://www.nseindia.com/` with a 403 **and sets the usable cookie anyway**
+        (`ops/gates/source-verification.md` §5.7, re-observed live on 2026-08-08 — the 403 warm-up
+        is followed by a 200 on `/api/fiidiiTradeReact`). Counting that toward the 403 spike, or
+        aborting on it, would stop every cookie source in the register from ever fetching. The
+        hard stop is unweakened for the request that matters: if the source is genuinely refusing
+        us, the *data* request 403s too and trips it there.
         """
         warm_url = policy.warm_url
         if warm_url is None:
@@ -437,7 +445,7 @@ class Fetcher:
             return
         robots_for(host, self._register).check(warm_url)
         self._guard(host)
-        response = self._request(policy, "GET", warm_url, None)
+        response = self._request(policy, "GET", warm_url, None, handshake=True)
         self._warmed.add(host)
         _LOG.info(
             "fetch.session_warmed",
@@ -449,7 +457,13 @@ class Fetcher:
         )
 
     def _request(
-        self, policy: CrawlPolicy, method: str, url: str, payload: bytes | None
+        self,
+        policy: CrawlPolicy,
+        method: str,
+        url: str,
+        payload: bytes | None,
+        *,
+        handshake: bool = False,
     ) -> FetchResponse:
         """One logical request: rate-limited, retried on the failures that mean "later"."""
         retrying = Retrying(
@@ -464,10 +478,15 @@ class Fetcher:
             before_sleep=_log_retry,
             reraise=True,
         )
-        return retrying(self._attempt, policy, method, url, payload)
+        return retrying(self._attempt, policy, method, url, payload, handshake)
 
     def _attempt(
-        self, policy: CrawlPolicy, method: str, url: str, payload: bytes | None
+        self,
+        policy: CrawlPolicy,
+        method: str,
+        url: str,
+        payload: bytes | None,
+        handshake: bool,
     ) -> FetchResponse:
         """One attempt, with the same headers as every other attempt for this source."""
         host = urlsplit(url).hostname or policy.host
@@ -480,15 +499,38 @@ class Fetcher:
             timeout=policy.timeout_seconds,
             payload=payload,
         )
-        return self._classify(policy, host, url, response)
+        return self._classify(policy, host, url, response, handshake=handshake)
 
     def _classify(
-        self, policy: CrawlPolicy, host: str, url: str, response: FetchResponse
+        self,
+        policy: CrawlPolicy,
+        host: str,
+        url: str,
+        response: FetchResponse,
+        *,
+        handshake: bool = False,
     ) -> FetchResponse:
-        """Turn a status code into "keep it", "wait and repeat", "stop", or "give up"."""
+        """Turn a status code into "keep it", "wait and repeat", "stop", or "give up".
+
+        `handshake` marks the session warm-up, whose 403 is a documented NSE behaviour that still
+        yields the cookie (see `_warm_session`). It changes exactly one thing: a 403 on the
+        handshake is kept instead of counted. Every other status, and every status on a data
+        request, is classified identically — the spike detector is not reachable from here by any
+        other route, and there is still no code path that varies a header or retries a refusal.
+        """
         status = response.status_code
         if 200 <= status < 300:
             self._watch.record_success(host)
+            return response
+        if status == _FORBIDDEN and handshake:
+            _LOG.info(
+                "fetch.handshake_forbidden",
+                source=policy.source_id,
+                host=host,
+                url=url,
+                status=status,
+                state="WARMED",
+            )
             return response
         if status == _FORBIDDEN:
             self._on_forbidden(policy, host, url)

@@ -93,6 +93,31 @@ class Fixture(BaseModel):
     path: str | None = None
 
 
+class HistoricalDepth(BaseModel):
+    """How far back a source actually reaches, measured rather than assumed.
+
+    §4.1 and the M3 gate both talk about "10 years where the source permits", and the permitting
+    is the part nobody can know from documentation: an endpoint that serves only its latest
+    session looks identical to a deep archive until someone asks it for an old date. A parser task
+    that measures its source's depth records the result here — including when the answer is "one
+    session" — so the gate reads a measurement instead of an aspiration.
+
+    `sessions_available` counts what *one* request yields, which is 1 for a rolling "latest" feed
+    and unbounded (`None`) for a dated archive where depth is expressed by the date range instead.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    measured_at: datetime
+    measured_by: str
+    method: str
+    sessions_available: int | None = None
+    earliest_available: date | None = None
+    latest_available: date | None = None
+    accrues_forward: bool = False
+    note: str = ""
+
+
 class HostPolicy(BaseModel):
     """What one host's robots.txt says, and how fast we are allowed to talk to it.
 
@@ -141,6 +166,7 @@ class Source(BaseModel):
     sample_sha256: str | None = None
     parse_check: str | None = None
     fixture: Fixture
+    history: HistoricalDepth | None = None
     failure_note: str | None = None
     candidate_alternatives: list[str] = Field(default_factory=list)
     owner_task: str | None = None

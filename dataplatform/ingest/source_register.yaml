@@ -627,7 +627,41 @@ sources:
     parse_check: >-
       JSON array, 2 records (one FII, one DII); keys category, date, buyValue, sellValue,
       netValue. Values arrive as strings — Decimal on parse, never float.
-    fixture: {frozen: false, task: M3.4, path: "tests/fixtures/nse_flows/"}
+    fixture:
+      frozen: true
+      task: M3.4
+      path: "tests/fixtures/nse_flows/json_v1/fiidiiTradeReact_20260807.json"
+    history:
+      measured_at: 2026-08-08T19:32:00+05:30
+      measured_by: M3.4
+      sessions_available: 1
+      earliest_available: 2026-08-07
+      latest_available: 2026-08-07
+      accrues_forward: true
+      method: >-
+        Three live requests on 2026-08-08, ≥3 s apart, browser UA + Referer, after the usual NSE
+        session warm-up. (1) The bare endpoint returned 200 / 215 B whose sha256 is
+        1d16ad6b…64ce0 — byte-identical to C.1's sample the previous evening, so the payload is
+        stable and immutable once published. (2) The same endpoint with `?date=05-08-2026`
+        returned the *same* 215 B and the same sha256, still dated 07-Aug-2026: the feed has no
+        date parameter and silently ignores one, so a caller cannot tell a rejected date from a
+        served one by status code alone. (3) A dated cash-segment equivalent on the archive host
+        (`/content/equities/fii_dii_07082026.csv`) returned 404 + HTML. Depth is therefore one
+        session, and it is measured, not inferred from documentation.
+      note: >-
+        The M3 gate's "flows queryable 10 years back" is NOT achievable from this source and this
+        row does not claim it. History accrues forward from the first daily capture, and a missed
+        session is a permanent hole — nothing can re-fetch it, which is why the parser refuses to
+        file one session's numbers under another session's date. For the past, the noted fallback
+        is the NSDL FPI portal (www.fpi.nsdl.co.in, "Daily Trends in FPI Investments"; reachable
+        on 2026-08-08, 200 / 59,035 B, and it serves no robots.txt — /robots.txt 302s to
+        contactus.html) plus CDSL's fortnightly/monthly series. Both are FPI-only, carry no DII
+        side, and are compiled on a custodian-confirmed basis rather than the exchange's
+        provisional one, so they are a fallback for the FII leg and never a substitute for this
+        row. Ingesting them is not M3.4's scope; it needs its own register entries with their own
+        robots evidence. Separately, `nsearchives.nseindia.com/content/fo/fii_stats_{DD-Mon-YYYY}
+        .xls` IS dated and deep (200 / 9,216 B for 07-Aug-2026) but reports the F&O segment — a
+        different dataset (M3.7/M3.8), not this one.
     failure_note: null
     candidate_alternatives: []
     owner_task: M3.4

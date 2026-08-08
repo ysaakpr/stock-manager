@@ -6,6 +6,7 @@ readme = "CLAUDE.md"
 # Pinned to 3.12: the host's 3.9 is never used, and 3.13+ is unverified for this dep set (B3).
 requires-python = "==3.12.*"
 dependencies = [
+    "anthropic>=0.121.0",
     "apscheduler>=3.10",
     "duckdb>=1.1",
     "fastapi>=0.115",
@@ -74,7 +75,7 @@ files = ["dataplatform", "analyst", "execution", "backtest", "accounting", "test
 
 # Per-package overrides are allowed (M0.1 spec). Third-party packages without stubs:
 [[tool.mypy.overrides]]
-module = ["apscheduler.*", "yfinance.*"]
+module = ["apscheduler.*", "pyarrow.*", "yfinance.*"]
 ignore_missing_imports = true
 
 # ── tests ────────────────────────────────────────────────────────────────────

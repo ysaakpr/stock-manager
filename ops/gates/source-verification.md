@@ -178,3 +178,30 @@ C.1 verifies that each URL pattern is reachable and that its payload parses stru
 register entry names the parser task that owes one (`fixture.frozen: false`, `fixture.task`).
 Re-verification is not reimplemented here either: rate limiting, backoff and the 403 hard stop
 belong to M1.2's fetcher, which reads this register for its per-source policy.
+
+---
+
+## 7. Later measurements by parser tasks
+
+Appended by the task that owns each row, in the same terms as the sweep above. The register is
+still the machine-readable record; this is the prose an operator reads.
+
+### M3.4 — FII/DII flows depth (2026-08-08, ~19:30 IST, 6 requests over 2 hosts)
+
+| # | Request | Result | What it establishes |
+|---|---|---|---|
+| 1 | `GET www.nseindia.com/` (warm-up) | 403, 370 B, `text/html` — **cookie still set** | §5.7 reproduced, four hours after the sweep. It is the normal behaviour of this handshake, not an incident. |
+| 2 | `GET www.nseindia.com/api/fiidiiTradeReact` | 200, 215 B, `application/json`, sha256 `1d16ad6b…64ce0` | Byte-identical to C.1's sample from the previous evening. Once published, a session's payload does not change. |
+| 3 | same + `?date=05-08-2026` | 200, 215 B, **same sha256**, still dated 07-Aug-2026 | The feed has no date parameter and ignores one silently. A caller cannot tell a rejected date from a served one by status code. |
+| 4 | `GET nsearchives…/content/equities/fii_dii_07082026.csv` | 404, 3,537 B, `text/html` | No dated cash-segment equivalent on the archive host. |
+| 5 | `GET nsearchives…/content/fo/fii_stats_07-Aug-2026.xls` | 200, 9,216 B, `application/vnd.ms-excel` | A dated FII surface *does* exist — but it is the **F&O segment** (M3.7/M3.8), a different dataset. It must not be presented as this row's history. |
+| 6 | `GET www.fpi.nsdl.co.in/robots.txt`, then `/web/Reports/Latest.aspx?RptType=6` | 302 → `contactus.html` (no robots file); 200, 59,035 B | The noted fallback is real and reachable, and publishes "Daily Trends in FPI Investments". FPI-only, no DII, custodian-confirmed basis — a fallback for one leg, not a substitute. Not ingested; it would need its own register entry and robots record. |
+
+**Conclusion, recorded in `source_register.yaml` as `nse_fii_dii_flows.history`: depth is one
+session.** The M3 gate's "flows queryable 10 years back" is not achievable from this source, and
+the register now says so instead of implying otherwise. History accrues forward from the first
+daily capture, and a missed session is unrecoverable.
+
+Nothing was acted on: no account, no login, no terms accepted, no payment. Requests were ≥3 s
+apart with the platform's one user agent and the register's Referer, and the 403 in row 1 was not
+answered with a different agent, a proxy, or a retry.
