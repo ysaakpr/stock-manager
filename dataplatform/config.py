@@ -163,6 +163,16 @@ class Settings(BaseSettings):
         default=3, description="consecutive 403s from one source before ingestion hard-stops"
     )
 
+    # ── status API (§4.4) ─────────────────────────────────────────────────────────────────────
+    scheduler_heartbeat_stale_after_seconds: Annotated[int, Field(ge=1)] = Field(
+        default=300,
+        description="/health turns 503 once the newest scheduler heartbeat is older than this",
+    )
+    status_quality_flag_limit: Annotated[int, Field(ge=1)] = Field(
+        default=200,
+        description="most open quality flags GET /status/quality returns in one response",
+    )
+
     # ── provider selectors (B4: no credential exists, so both default to a stub) ──────────────
     llm_provider: LlmProvider = Field(default=LlmProvider.STUB, description="stub | anthropic")
     broker_provider: BrokerProvider = Field(default=BrokerProvider.STUB, description="stub | kite")
