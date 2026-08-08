@@ -570,11 +570,6 @@ class PolicySet(BaseModel):
         """`sha256:<hex>` over the seven policies. What a ratification pins."""
         return policy_digest(self.policies)
 
-    @property
-    def is_ratified(self) -> bool:
-        """Whether decisions may be made under this version."""
-        return self.status is PolicyStatus.RATIFIED
-
     def revise(self, **changes: Any) -> PolicySet:
         """Return the next version, in `PROPOSAL`, with `changes` applied.
 
