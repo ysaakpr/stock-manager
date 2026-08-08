@@ -174,7 +174,13 @@ sources:
     needs_session_cookie: false
     parser: {id: dataplatform.ingest.nse.bhavcopy_legacy, task: M1.4}
     robots_notes: No directives on the archive host; www.nseindia.com allows /.
-    pit_notes: Immutable once published. Carries ISIN directly, so it joins without a master.
+    pit_notes: >-
+      Immutable once published. Carries ISIN directly, so it joins without a master — but only
+      back to some point in the early 2010s. M1.4 fetched cm04JAN2010bhav.csv.zip from this same
+      pattern and found an older sub-era: eleven columns, no TOTALTRADES and no ISIN. The M1.4
+      parser refuses that header rather than emitting rows with no identity (invariant #2), so
+      `era.start: null` above means "as far back as the 14-column format goes", not "all of it".
+      Nothing needs the deeper history today: the C.2 calendar starts at 2016-01-01.
     status: VERIFIED
     verified_at: 2026-08-08T18:10:29+05:30
     last_http_status: 200
@@ -185,7 +191,7 @@ sources:
       zip with one member cm02JAN2024bhav.csv; 14 columns; header
       SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,
       TOTALTRADES,ISIN, (trailing comma is part of the format).
-    fixture: {frozen: false, task: M1.4, path: "tests/fixtures/nse_bhavcopy/legacy/"}
+    fixture: {frozen: true, task: M1.4, path: "tests/fixtures/nse_bhavcopy/legacy/"}
     failure_note: null
     candidate_alternatives: []
     owner_task: M1.4
