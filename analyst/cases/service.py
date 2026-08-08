@@ -470,6 +470,7 @@ class CaseService:
         is the entire reason a policy change is a version rather than an edit.
         """
         record = self.require(case_id)
+        _refuse_if_closed(record, "revise the policy set of")
         current = self.current_policy(case_id)
         if current is None:
             raise NoPolicyError(
@@ -516,6 +517,7 @@ class CaseService:
         current one, `policy_set` is append-only, and `policy_set_version_unique` is the backstop.
         """
         record = self.require(case_id)
+        _refuse_if_closed(record, "ratify a policy set for")
         proposal = self.pending_proposal(case_id)
         if proposal is None:
             raise NoPolicyError(
@@ -915,6 +917,21 @@ class CaseService:
 
 
 # ── row ↔ value mapping ──────────────────────────────────────────────────────────────────────
+
+
+def _refuse_if_closed(record: CaseRecord, action: str) -> None:
+    """Refuse a policy operation on a closed case.
+
+    A `CLOSED` case makes no more decisions, so a policy version ratified for it governs nothing
+    — and a pending proposal left on one would sit in the multi-case view as "waiting on me"
+    forever. The transition table already refuses to move a closed case; this refuses to keep
+    governing it.
+    """
+    if record.state is CaseState.CLOSED:
+        raise LifecycleError(
+            f"cannot {action} case {record.case_id}: it is CLOSED and makes no further "
+            "decisions, so there is nothing for a policy version to govern"
+        )
 
 
 def _replace(record: CaseRecord, **changes: Any) -> CaseRecord:

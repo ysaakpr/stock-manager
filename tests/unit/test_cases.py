@@ -674,6 +674,22 @@ def test_require_policy_is_the_guard_a_decision_path_calls(service: CaseService)
     assert service.policy_history(CASE_ID) == ()
 
 
+def test_a_closed_case_is_not_governed_any_further(service: CaseService) -> None:
+    """A proposal pending when a case closed must not be ratifiable afterwards."""
+    ratified_case(service)
+    service.fund(CASE_ID, FundingMode.PAPER, by="vysh")
+    service.activate(CASE_ID)
+    service.revise_policy(CASE_ID, rotation_dial=RotationDial(tactical_pct=Decimal("45")))
+    service.close(CASE_ID, reason="horizon reached with a revision still pending")
+
+    assert service.pending_proposal(CASE_ID) is not None
+    with pytest.raises(LifecycleError, match="CLOSED"):
+        service.ratify(CASE_ID, by="vysh")
+    with pytest.raises(LifecycleError, match="CLOSED"):
+        service.revise_policy(CASE_ID, rotation_dial=RotationDial(tactical_pct=Decimal("50")))
+    assert len(service.policy_history(CASE_ID)) == 1
+
+
 def test_a_version_number_is_never_reused(service: CaseService, db: FakeDatabase) -> None:
     """`policy_set` is append-only; the service refuses before the constraint has to.
 
