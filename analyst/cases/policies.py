@@ -644,14 +644,6 @@ class PolicySet(BaseModel):
             }
         )
 
-    def superseded(self) -> Self:
-        """Return this ratified version marked `SUPERSEDED`, for the history view."""
-        if self.status is not PolicyStatus.RATIFIED:
-            raise PolicyVersionError(
-                f"only a RATIFIED version can be superseded, not {self.status.value}"
-            )
-        return self.model_validate({**self.model_dump(), "status": PolicyStatus.SUPERSEDED})
-
 
 def _first_of_next_month(day: date) -> date:
     """The first day of the month after `day`. Avoids any month-length arithmetic."""

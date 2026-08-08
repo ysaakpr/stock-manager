@@ -37,9 +37,12 @@ from psycopg.types.json import Json
 from pydantic import ValidationError
 
 from analyst.cases import (
+    CLOSED_STATES,
     LEGAL_TRANSITIONS,
     PENDING_POLICY_KEY,
     POLICY_FIELDS,
+    PRE_FUNDING_STATES,
+    TRADING_STATES,
     CapitalPlan,
     CaseNotFoundError,
     CaseService,
@@ -65,6 +68,7 @@ from analyst.cases import (
     RotationDial,
     T2Cadence,
     TriggerSensitivity,
+    UnknownPolicyVersionError,
     check_funding,
     check_transition,
 )
@@ -368,6 +372,15 @@ def test_closed_is_terminal_and_says_so() -> None:
         check_transition(CASE_ID, CaseState.CLOSED, CaseState.ACTIVE)
 
 
+def test_the_state_sets_downstream_reads_partition_the_lifecycle() -> None:
+    """A6, A7 and the daily loop filter cases by these; a state in none of them is invisible."""
+    assert frozenset({CaseState.CLOSED}) == CLOSED_STATES
+    assert frozenset({CaseState.ACTIVE}) == TRADING_STATES, "a SUSPENDED case places no orders"
+    covered = PRE_FUNDING_STATES | TRADING_STATES | CLOSED_STATES
+    assert set(CaseState) - covered == {CaseState.FUNDED, CaseState.SUSPENDED}
+    assert not PRE_FUNDING_STATES & TRADING_STATES
+
+
 def test_the_happy_path_journals_one_entry_per_transition(
     service: CaseService, db: FakeDatabase
 ) -> None:
@@ -649,6 +662,16 @@ def test_a_stored_policy_version_round_trips_through_the_row(service: CaseServic
     assert isinstance(read_back.rails.max_position_pct, Decimal)
     assert read_back.ratification is not None
     assert read_back.ratification.content_hash == stored.content_hash
+
+
+def test_require_policy_is_the_guard_a_decision_path_calls(service: CaseService) -> None:
+    """Downstream (A4, A6, A7) must not have to remember to check for None."""
+    service.create(CASE_ID, "AI & Robotics")
+    with pytest.raises(NoPolicyError, match="no decision may be made"):
+        service.require_policy(CASE_ID)
+    with pytest.raises(UnknownPolicyVersionError):
+        service.policy_version(CASE_ID, 1)
+    assert service.policy_history(CASE_ID) == ()
 
 
 def test_a_version_number_is_never_reused(service: CaseService, db: FakeDatabase) -> None:

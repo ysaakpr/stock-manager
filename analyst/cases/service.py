@@ -211,11 +211,6 @@ class CaseRecord:
     created_at: datetime
     updated_at: datetime
 
-    @property
-    def is_funded(self) -> bool:
-        """Whether capital has been committed to this case in either mode."""
-        return self.state not in PRE_FUNDING_STATES and self.state is not CaseState.CLOSED
-
 
 @dataclass(frozen=True, slots=True)
 class SipInstalment:
