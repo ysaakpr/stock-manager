@@ -24,7 +24,7 @@ Never `pip install` into the host. Never run `python3` directly — always `uv r
 ## Layout
 
 ```
-platform/    ingest/ identity/ corpactions/ store/ quality/ query/ archives/ status/   # D1-D7
+dataplatform/ ingest/ identity/ corpactions/ store/ quality/ query/ archives/ status/  # D1-D7
 analyst/     cases/ interview/ mapper/ thesis/ monitor/ rotation/ cash/ rails/ journal/ # A1-A9
 execution/   broker.py sim_broker.py kite_broker.py costs/ recon.py kill_switch.py      # X1
 backtest/    replay engine                                                             # X2
@@ -37,6 +37,14 @@ data/        L0/ L1/ L2  — gitignored, never committed
 
 Module boundaries are packages. A module's public surface is what its `__init__.py` exports; reach into a
 sibling's internals and you have created the coupling this layout exists to prevent.
+
+**`dataplatform/` is the plan's `platform/`.** EXECUTION_PLAN §8.2 names System 1 `platform/`, which Python
+cannot have as a top-level package: it shadows the stdlib `platform` module. Both directions break — once
+anything has imported the stdlib module (pytest does, at startup) `platform.config` fails with *'platform' is
+not a package*, and when the local package wins the path race instead, `import pandas` dies on
+`platform.python_implementation()`. Renamed at M0.1 and guarded by `tests/unit/test_layout.py`. **A spec,
+deliverable path or task entry that says `platform/x.py` means `dataplatform/x.py`** — that substitution is
+the whole change; nothing else about §8.2 moved. Proposed as an amendment in EXECUTION_PLAN §12.
 
 ## Code conventions
 

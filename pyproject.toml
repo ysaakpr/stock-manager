@@ -1,0 +1,87 @@
+[project]
+name = "trading-platform"
+version = "0.1.0"
+description = "EOD market-data platform (System 1) + analyst agent (System 2)"
+readme = "CLAUDE.md"
+# Pinned to 3.12: the host's 3.9 is never used, and 3.13+ is unverified for this dep set (B3).
+requires-python = "==3.12.*"
+dependencies = [
+    "apscheduler>=3.10",
+    "duckdb>=1.1",
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "pandas>=2.2",
+    "psycopg[binary]>=3.2",
+    "pyarrow>=17",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "pyyaml>=6.0",
+    "structlog>=24.4",
+    "tenacity>=9.0",
+    "typer>=0.12",
+    "uvicorn>=0.30",
+]
+
+[dependency-groups]
+dev = [
+    "freezegun>=1.5",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "pytest-cov>=5.0",
+    "ruff>=0.7",
+    "types-pyyaml>=6.0",
+    # Test-only: reference A for the M2 golden CA suite (B2). Never imported by product code.
+    "yfinance>=0.2.40",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+# The monolith's top-level packages. orchestrator/ is build machinery, not product code.
+packages = ["dataplatform", "analyst", "execution", "backtest", "accounting"]
+
+# ── lint / format ────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# orchestrator/ predates the gate and is not product code (CLAUDE.md); see ops/BACKLOG.md.
+extend-exclude = ["orchestrator"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "W",
+    "F",    # pyflakes
+    "I",    # import order
+    "N",    # naming
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+    "PTH",  # use pathlib
+    "RUF",
+]
+
+# ── types ────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+# `uv run mypy` with no arguments checks exactly this set.
+files = ["dataplatform", "analyst", "execution", "backtest", "accounting", "tests"]
+
+# Per-package overrides are allowed (M0.1 spec). Third-party packages without stubs:
+[[tool.mypy.overrides]]
+module = ["apscheduler.*", "yfinance.*"]
+ignore_missing_imports = true
+
+# ── tests ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "integration: needs the docker postgres (make up)",
+    "golden: corporate-action golden suite (EXECUTION_PLAN.md 4.3)",
+]

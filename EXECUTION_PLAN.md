@@ -403,6 +403,7 @@ SEBI RA/RIA registration path · multi-tenant activation (model is ready, deploy
 | Date | Decision # | Change | Reason |
 |---|---|---|---|
 | 2026-08-08 | — | v1.0 ratified | Initial constitution (15 decisions) |
+| 2026-08-08 | — | **PROPOSED** (M0.1): §8.2 System 1 package `platform/` → `dataplatform/` | `platform` is a stdlib module name, so it cannot be a top-level package: after anything imports the stdlib module (pytest does) `platform.config` raises *'platform' is not a package*, and when the local package wins the path race `import pandas` fails on `platform.python_implementation()`. Both reproduced at M0.1. Only the directory name changes — module boundaries, IDs and ownership per §8.2 are untouched, and no §1 decision is affected. Two `verify` commands in TASK_GRAPH.yaml (C.1, M1.9) were updated to `python -m dataplatform.ingest.…`; other `platform/…` strings in the plan and graph read as `dataplatform/…` per CLAUDE.md. |
 
 *Amendments to §1 require an entry here. Everything else evolves freely.*
 

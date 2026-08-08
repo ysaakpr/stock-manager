@@ -214,7 +214,7 @@ tasks:
     - "every §4.1 row has an entry; each carries verified_at, last_http_status and sample_bytes or an explicit failure note"
     - "no row is marked VERIFIED without a real successful fetch recorded"
     - "robots.txt was checked per host and the register records what it permits"
-  verify: "uv run python -m platform.ingest.source_register validate"
+  verify: "uv run python -m dataplatform.ingest.source_register validate"
 
 - id: C.2
   title: NSE trading calendar (expected sessions)
@@ -432,7 +432,7 @@ tasks:
     - "a sampled run of ~60 sessions spanning both bhavcopy eras completes and lands in L1 with sync_state PUBLISHED"
     - "killing mid-run and restarting resumes without re-fetching completed dates and without gaps"
     - "the runbook documents resume, sampling, and what to do on a 403 hard stop"
-  verify: "uv run python -m platform.ingest.backfill --source nse_bhavcopy --from 2016-01-01 --to 2026-08-07 --dry-run && uv run pytest tests/integration/test_backfill.py -q"
+  verify: "uv run python -m dataplatform.ingest.backfill --source nse_bhavcopy --from 2016-01-01 --to 2026-08-07 --dry-run && uv run pytest tests/integration/test_backfill.py -q"
 
 - id: M1.10
   title: Daily EOD pipeline job
