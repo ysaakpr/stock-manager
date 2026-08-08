@@ -436,7 +436,7 @@ sources:
     parse_check: >-
       CSV, 8 columns, header "SYMBOL,NAME OF COMPANY, SERIES, DATE OF LISTING, PAID UP VALUE,
       MARKET LOT, ISIN NUMBER, FACE VALUE" (leading spaces again).
-    fixture: {frozen: false, task: M1.7, path: "tests/fixtures/nse_equity_list/"}
+    fixture: {frozen: true, task: M1.7, path: "tests/fixtures/nse_equity_list/2026-08-08/"}
     failure_note: null
     candidate_alternatives: []
     owner_task: M1.7
