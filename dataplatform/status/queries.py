@@ -1,10 +1,11 @@
 """D5: the status-API reads that no other module already owns.
 
-Two of the six §4.4 endpoints read through somebody else's module on purpose, because a second
+Three of the six §4.4 endpoints read through somebody else's module on purpose, because a second
 implementation would be a second answer to the same question: `sync_state` is read through
-`SyncStateStore` (M1.3), which the trading interlock also uses, and the scheduler heartbeat
-through `dataplatform.scheduler.read_heartbeat` (M0.6), which is written by the same module that
-beats. This file is the remainder of the surface: the stuck-pairs read behind `/status/gaps`, the
+`SyncStateStore` (M1.3), which the trading interlock also uses, the scheduler heartbeat through
+`dataplatform.scheduler.read_heartbeat` (M0.6), which is written by the same module that beats,
+and `/status/gaps` through `dataplatform.quality.gaps.GapScanner` (M1.11), which owns the one
+definition of what an unexplained missing day is. This file is the remainder of the surface: the
 open D7 flags behind `/status/quality`, and the published bundle behind `/archives`.
 
 Split from `api.py` so the HTTP layer is only routing and status codes, and so "where does this
@@ -27,30 +28,18 @@ from dataplatform.status.models import (
     ArchiveBundleOut,
     ArchiveFileOut,
     ArchivesOut,
-    GapEntryOut,
-    GapsOut,
     QualityFlagOut,
     QualityOut,
     SeverityCountOut,
 )
 from dataplatform.store.db import Connection
 
-__all__ = ["StatusQueryError", "read_archives", "read_gaps", "read_quality"]
+__all__ = ["StatusQueryError", "read_archives", "read_quality"]
 
 
 class StatusQueryError(RuntimeError):
     """State in the database the status contract cannot describe — a defect, not a bad request."""
 
-
-# PUBLISHED is complete and GAP is an explained absence (weekend, holiday). Everything else in the
-# range is stuck mid-pipeline or failed, and both owe someone an explanation.
-_GAPS_SQL = """
-SELECT source, logical_date, state, attempts, retryable, last_error, updated_at
-FROM sync_state
-WHERE logical_date BETWEEN %s AND %s
-  AND state NOT IN ('PUBLISHED', 'GAP')
-ORDER BY logical_date, source
-"""
 
 _QUALITY_FLAGS_SQL = """
 SELECT id, logical_date, check_name, severity, isin, source, observed_value, threshold,
@@ -75,35 +64,6 @@ SELECT logical_date, schema_version, bundle_path, manifest_sha256, file_count, t
 FROM archive_bundle
 WHERE logical_date = %s
 """
-
-
-def read_gaps(conn: Connection, from_date: date, to_date: date) -> GapsOut:
-    """Tracked `(source, date)` pairs in an inclusive range that are neither PUBLISHED nor GAP.
-
-    Never invents a pair: a date no source ever attempted has no row and cannot appear here,
-    because classifying an absence needs the trading calendar and the per-source cadence (M1.11).
-    Reading an empty answer as "every missing day is explained" would be wrong until that lands,
-    which is why `GapsOut.unexplained` documents exactly what populates it.
-    """
-    if from_date > to_date:
-        raise StatusQueryError(f"from={from_date.isoformat()} is after to={to_date.isoformat()}")
-    rows = conn.execute(_GAPS_SQL, (from_date, to_date)).fetchall()
-    return GapsOut(
-        from_date=from_date,
-        to_date=to_date,
-        unexplained=[
-            GapEntryOut(
-                source=str(row[0]),
-                date=row[1],
-                state=row[2],
-                attempts=int(row[3]),
-                retryable=bool(row[4]),
-                last_error=row[5],
-                updated_at=row[6],
-            )
-            for row in rows
-        ],
-    )
 
 
 def read_quality(conn: Connection, as_of: datetime, limit: int) -> QualityOut:

@@ -34,6 +34,7 @@ from psycopg.types.json import Json
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
+from dataplatform.quality.gaps import GapReason
 from dataplatform.status.api import app, clock_source, db_connection, settings_source
 from dataplatform.status.models import (
     ArchivesOut,
@@ -45,6 +46,7 @@ from dataplatform.status.models import (
     SourcesOut,
     SyncStatusOut,
 )
+from dataplatform.status.sync_state import SyncState
 from dataplatform.store.db import Connection, connect, connection, with_dbname
 from dataplatform.store.migrate import migrate
 
@@ -572,16 +574,68 @@ def test_status_gaps_lists_only_the_incomplete_pairs_in_the_range(
         client.get("/status/gaps", params={"from": SESSION.isoformat(), "to": "2026-08-11"}).json()
     )
 
-    assert [(entry.date, entry.state.value) for entry in body.unexplained] == [
-        (date(2026, 8, 10), "FAILED"),
-        (date(2026, 8, 11), "FETCHED"),
+    assert [(entry.date, entry.state) for entry in body.unexplained] == [
+        (date(2026, 8, 10), SyncState.FAILED),
+        (date(2026, 8, 11), SyncState.FETCHED),
     ]
     assert body.unexplained[0].last_error == "HTTP 500"
+    # 2026-08-09 is a Sunday with no row: the calendar explains it, so it is not owed.
+    assert body.fully_explained is False
+
+
+def test_status_gaps_reports_a_session_nobody_ever_attempted(
+    client: TestClient, conn: Connection
+) -> None:
+    """M1.11's whole point: an absent row is invisible to a query over `sync_state` alone.
+
+    The source is tracked (it has a row for one session) and the range holds another session it
+    never reached — which must surface as `NEVER_ATTEMPTED`, with no history to show for it.
+    """
+    seed_sync(conn, day=date(2026, 8, 10), state="PUBLISHED", checksum="deadbeef")
+
+    body = GapsOut.model_validate(
+        client.get("/status/gaps", params={"from": SESSION.isoformat(), "to": "2026-08-10"}).json()
+    )
+
+    assert body.sources == [SOURCE]
+    assert [(entry.date, entry.reason) for entry in body.unexplained] == [
+        (SESSION, GapReason.NEVER_ATTEMPTED)
+    ]
+    assert body.unexplained[0].state is None
+    assert body.fully_explained is False
+    # Friday, Saturday, Sunday, Monday — one pair each, and the weekend is explained.
+    assert (body.pairs_examined, body.complete, body.explained_total) == (4, 1, 2)
+
+
+def test_status_gaps_is_empty_when_the_range_is_complete(
+    client: TestClient, conn: Connection
+) -> None:
+    """The M1 gate's pass condition, over the wire: every day accounted for, nothing owed."""
+    seed_sync(conn, day=SESSION, state="PUBLISHED", checksum="deadbeef")
+    seed_sync(conn, day=date(2026, 8, 8), state="GAP")
+    seed_sync(conn, day=date(2026, 8, 9), state="GAP")
+
+    body = GapsOut.model_validate(
+        client.get("/status/gaps", params={"from": SESSION.isoformat(), "to": "2026-08-09"}).json()
+    )
+
+    assert body.unexplained == []
+    assert body.unexplained_total == 0
+    assert body.fully_explained is True
 
 
 def test_status_gaps_refuses_an_inverted_range(client: TestClient) -> None:
     response = client.get("/status/gaps", params={"from": "2026-08-11", "to": "2026-08-07"})
     assert response.status_code == 400
+
+
+def test_status_gaps_refuses_a_range_the_trading_calendar_does_not_cover(
+    client: TestClient,
+) -> None:
+    """ "No holidays that year" would invent ~250 sessions and report every one as missing."""
+    response = client.get("/status/gaps", params={"from": "2011-06-01", "to": "2011-06-30"})
+    assert response.status_code == 400
+    assert "coverage" in response.json()["detail"]
 
 
 def test_status_quality_reports_open_flags_with_their_measured_values(

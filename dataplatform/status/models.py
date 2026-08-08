@@ -25,6 +25,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from dataplatform.quality.gaps import GapEntry, GapReason, GapReport
 from dataplatform.status.sync_state import GreenStatus, SourceStatus, SyncRecord, SyncState
 
 #: `datetime.date` under a second name. Several models here carry a field called `date` — the
@@ -38,6 +39,7 @@ __all__ = [
     "ArchivesOut",
     "DatabaseHealthOut",
     "GapEntryOut",
+    "GapReasonCountOut",
     "GapsOut",
     "HealthOut",
     "QualityFlagOut",
@@ -272,32 +274,121 @@ class HealthOut(BaseModel):
 
 
 class GapEntryOut(BaseModel):
-    """One `(source, date)` pair in the range that is neither PUBLISHED nor an explained GAP."""
+    """One `(source, date)` pair with no usable data, with the evidence for its reason.
+
+    Every history field is nullable because the most important entry of all — `NEVER_ATTEMPTED` —
+    has no `sync_state` row behind it. That is the point of D7's gap report: an absence a query
+    over the table alone can never see.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     source: str
     date: date
-    state: SyncState
+    reason: GapReason
+    explained: bool = Field(description="False means somebody owes an answer for this day")
+    day_kind: str = Field(description="SESSION | MUHURAT | WEEKEND | HOLIDAY from the C.2 calendar")
+    detail: str = Field(description="One line naming the reason concretely, for an operator")
+    state: SyncState | None = Field(description="Null when the pair has no sync_state row at all")
     attempts: int
-    retryable: bool
+    retryable: bool | None
     last_error: str | None
-    updated_at: datetime
+    first_attempt_at: datetime | None
+    updated_at: datetime | None
+    l1_partition: str | None = Field(
+        description="The L1 partition that was checked; null when the lake was not the problem"
+    )
+
+    @classmethod
+    def of(cls, entry: GapEntry) -> GapEntryOut:
+        """Project a classified entry onto the wire contract."""
+        return cls(
+            source=entry.source,
+            date=entry.logical_date,
+            reason=entry.reason,
+            explained=entry.explained,
+            day_kind=entry.day_kind.value,
+            detail=entry.detail,
+            state=entry.state,
+            attempts=entry.attempts,
+            retryable=entry.retryable,
+            last_error=entry.last_error,
+            first_attempt_at=entry.first_attempt_at,
+            updated_at=entry.updated_at,
+            l1_partition=entry.l1_partition,
+        )
+
+
+class GapReasonCountOut(BaseModel):
+    """How many entries in a report carry one reason."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: GapReason
+    count: int
 
 
 class GapsOut(BaseModel):
-    """`GET /status/gaps?from=&to=` — the unexplained set over an inclusive date range."""
+    """`GET /status/gaps?from=&to=` — the unexplained set over an inclusive date range (M1.11).
+
+    `unexplained` is the answer, and the M1 gate's criterion is that it is empty. Everything
+    beside it exists so that an empty list cannot be misread: `sources` says what was examined,
+    `pairs_examined` how much, and `l1_unchecked` how many `PUBLISHED` pairs could not be checked
+    against the lake. A status API that reported "nothing wrong" without saying what it looked at
+    would be the fabricated green §4.4 exists to prevent.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     from_date: date
     to_date: date
-    unexplained: list[GapEntryOut] = Field(
-        description="Pairs the platform has a row for and has not completed. A date no source ever "
-        "attempted cannot appear yet: turning an absence into GAP-or-UNEXPLAINED needs the "
-        "calendar and the per-source cadence, which is M1.11's gap report. Empty therefore means "
-        "'nothing tracked is stuck', not yet 'every missing day is explained'"
+    sources: list[str] = Field(
+        description="The sources examined. Empty means the platform tracks none — which is not "
+        "the same claim as 'nothing is missing'"
     )
+    unexplained: list[GapEntryOut] = Field(
+        description="Pairs that owed data and do not have it: never attempted, failed, stuck "
+        "mid-pipeline, filed as a GAP on a trading day, or PUBLISHED with the L1 partition gone. "
+        "Truncated to `limit`; `unexplained_total` is always the real count"
+    )
+    unexplained_total: int = Field(
+        description="Every unexplained pair in the range, counted before the limit truncated"
+    )
+    explained_total: int = Field(
+        description="Absences the calendar or the source register accounts for (weekend, holiday, "
+        "outside this source's era)"
+    )
+    complete: int = Field(description="Pairs that are PUBLISHED with their data present")
+    pairs_examined: int = Field(description="sources x dates in the range")
+    l1_unchecked: int = Field(
+        description="PUBLISHED pairs whose L1 partition could not be verified because the "
+        "dataset has never been written. Reported rather than assumed present"
+    )
+    counts: list[GapReasonCountOut] = Field(description="Entry counts per reason, explained first")
+    fully_explained: bool = Field(description="The M1 gate criterion: no unexplained pair at all")
+    limit: int = Field(description="How many unexplained entries this response was allowed to hold")
+
+    @classmethod
+    def of(cls, report: GapReport, *, limit: int) -> GapsOut:
+        """Project a gap report onto the wire, truncating only the enumeration."""
+        unexplained = report.unexplained
+        return cls(
+            from_date=report.from_date,
+            to_date=report.to_date,
+            sources=list(report.sources),
+            unexplained=[GapEntryOut.of(entry) for entry in unexplained[:limit]],
+            unexplained_total=len(unexplained),
+            explained_total=len(report.explained),
+            complete=report.complete,
+            pairs_examined=report.pairs_examined,
+            l1_unchecked=report.l1_unchecked,
+            counts=[
+                GapReasonCountOut(reason=reason, count=count)
+                for reason, count in report.counts_by_reason().items()
+            ],
+            fully_explained=report.fully_explained,
+            limit=limit,
+        )
 
 
 # ── /status/quality ─────────────────────────────────────────────────────────────────────────

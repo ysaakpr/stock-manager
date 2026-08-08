@@ -589,6 +589,43 @@ class SyncStateStore:
         ).fetchall()
         return tuple(_record(row) for row in rows)
 
+    def rows_in_range(
+        self, from_date: date, to_date: date, *, sources: Sequence[str] | None = None
+    ) -> tuple[SyncRecord, ...]:
+        """Every row in an inclusive date range, optionally narrowed to some sources.
+
+        The range read behind D7's gap report (M1.11), which needs the whole range in one query
+        rather than a round trip per date. Ordered `(logical_date, source)` so a caller streaming
+        it reads a timeline. An empty `sources` tuple means "no sources", not "all of them" — a
+        caller that resolved its source list to nothing gets nothing back, which is the answer
+        that cannot be mistaken for a clean bill of health.
+        """
+        if sources is not None and not sources:
+            return ()
+        clause = "" if sources is None else " AND source = ANY(%s)"
+        params: tuple[object, ...] = (
+            (from_date, to_date) if sources is None else (from_date, to_date, list(sources))
+        )
+        rows = self._conn.execute(
+            f"SELECT {_COLUMNS} FROM sync_state WHERE logical_date BETWEEN %s AND %s{clause} "
+            f"ORDER BY logical_date, source",
+            params,
+        ).fetchall()
+        return tuple(_record(row) for row in rows)
+
+    def tracked_sources(self) -> tuple[str, ...]:
+        """Every source the table has ever held a row for, sorted.
+
+        The platform's own claim about what it ingests, and the default denominator of the gap
+        report. A source that has never been attempted is not in here — which is why a report
+        over this default carries the list it used, so an empty answer cannot be read as
+        "nothing is missing" when it means "nothing is tracked".
+        """
+        rows = self._conn.execute(
+            "SELECT DISTINCT source FROM sync_state ORDER BY source"
+        ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
     def day_kind(self, logical_date: date) -> DayKind | None:
         """What the calendar calls this date, or None when it is outside coverage.
 

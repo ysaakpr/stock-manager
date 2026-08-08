@@ -5,7 +5,7 @@ Six endpoints, and every field on every one of them comes out of a query:
     GET /health                 liveness + scheduler heartbeat age   (scheduler_heartbeat)
     GET /status/sync?date=      all sources for a date, with states  (sync_state, C.2 calendar)
     GET /status/sources         last success, lag, failure streak    (sync_state)
-    GET /status/gaps?from=&to=  tracked pairs that are not complete  (sync_state)
+    GET /status/gaps?from=&to=  every missing day, with its reason   (sync_state, calendar, L1)
     GET /status/quality         open D7 sentinel flags               (quality_flag)
     GET /archives?date=         the published bundle's manifest      (archive_bundle)
 
@@ -41,7 +41,9 @@ from starlette.requests import Request
 
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
+from dataplatform.ingest.calendar import CalendarError
 from dataplatform.logging import get_logger
+from dataplatform.quality.gaps import GapReportError, GapScanner, LakeL1Presence
 from dataplatform.scheduler import Heartbeat, read_heartbeat
 from dataplatform.status.models import (
     ArchivesOut,
@@ -56,11 +58,18 @@ from dataplatform.status.models import (
     SourceStatusOut,
     SyncStatusOut,
 )
-from dataplatform.status.queries import read_archives, read_gaps, read_quality
+from dataplatform.status.queries import read_archives, read_quality
 from dataplatform.status.sync_state import SyncStateStore
 from dataplatform.store.db import Connection, connection
 
-__all__ = ["app", "clock_source", "db_connection", "settings_source", "sync_store"]
+__all__ = [
+    "app",
+    "clock_source",
+    "db_connection",
+    "gap_scanner",
+    "settings_source",
+    "sync_store",
+]
 
 app = FastAPI(
     title="trading-platform status API",
@@ -113,6 +122,18 @@ def sync_store(conn: ConnDep, clock: ClockDep) -> SyncStateStore:
 
 
 SyncStoreDep = Annotated[SyncStateStore, Depends(sync_store)]
+
+
+def gap_scanner(conn: ConnDep, settings: SettingsDep) -> GapScanner:
+    """D7's gap report (M1.11), wired to this request's connection and the configured lake.
+
+    The lake root comes from settings rather than from the process default so a test — and the
+    container, whose `/data` is a bind mount — checks the L1 partitions it actually wrote.
+    """
+    return GapScanner(conn, l1_presence=LakeL1Presence(settings.data_root))
+
+
+GapScannerDep = Annotated[GapScanner, Depends(gap_scanner)]
 
 
 async def _unreachable_database(request: Request, exc: Exception) -> Response:
@@ -280,9 +301,9 @@ def status_sources(store: SyncStoreDep, clock: ClockDep) -> SourcesOut:
     )
 
 
-@app.get("/status/gaps", summary="Tracked (source, date) pairs that are not complete")
+@app.get("/status/gaps", summary="Every missing (source, date) pair in a range, with its reason")
 def status_gaps(
-    conn: ConnDep,
+    scanner: GapScannerDep,
     clock: ClockDep,
     from_date: Annotated[
         date | None, Query(alias="from", description="Inclusive. Defaults to today.")
@@ -290,15 +311,28 @@ def status_gaps(
     to_date: Annotated[
         date | None, Query(alias="to", description="Inclusive. Defaults to today.")
     ] = None,
+    source: Annotated[
+        list[str] | None,
+        Query(
+            description="Sources to report on; repeat for several. Defaults to every source "
+            "sync_state has ever held a row for."
+        ),
+    ] = None,
+    limit: Annotated[
+        int, Query(ge=1, le=20000, description="Cap on the enumerated unexplained list.")
+    ] = 500,
 ) -> GapsOut:
-    """Pairs in the range that reached neither PUBLISHED nor an explained GAP.
+    """The unexplained set for a range, and the accounting behind it (§4.4, M1.11).
 
+    What it does: asks D7's gap report to classify every `(source, date)` pair in the range —
+    against the C.2 calendar, the D1 source register's eras, `sync_state` and the L1 lake — and
+    serves the pairs nothing explains, each with its full sync_state history. `fully_explained`
+    is the M1 gate's criterion in one field.
     What it assumes: an unbounded range is not what anyone meant, so each end defaults to today
     rather than to all of history. Both ends are inclusive.
-    What it never does: enumerate dates with no row at all. Whether an absent date was a holiday or
-    a real miss is the calendar's question, and answering it is M1.11's gap report; until that
-    lands this endpoint reports what is tracked and stuck — a subset of the eventual answer, never
-    a superset dressed up as complete.
+    What it never does: answer for a range the trading calendar does not cover. That is a 400
+    naming the missing years, because "no holidays that year" would silently invent ~250 sessions
+    and report every one of them as a missing day.
     """
     today = clock.today()
     start = today if from_date is None else from_date
@@ -307,7 +341,11 @@ def status_gaps(
         raise HTTPException(
             status_code=400, detail=f"from={start.isoformat()} is after to={end.isoformat()}"
         )
-    return read_gaps(conn, start, end)
+    try:
+        report = scanner.report(start, end, sources=source)
+    except (CalendarError, GapReportError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return GapsOut.of(report, limit=limit)
 
 
 @app.get("/status/quality", summary="Open D7 sentinel flags")
