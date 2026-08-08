@@ -1,5 +1,6 @@
-# data lake — never committed (L0 is immutable on disk, not in git)
-data/
+# data lake — never committed (L0 is immutable on disk, not in git). Anchored: unanchored `data/`
+# also matches package data directories such as dataplatform/ingest/data/, which are checked in.
+/data/
 # secrets
 .env
 .env.*

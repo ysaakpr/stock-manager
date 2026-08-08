@@ -1,0 +1,271 @@
+# NSE capital-market trading holidays and special sessions — the input to
+# `dataplatform.ingest.calendar` (task C.2).
+#
+# What this file is for: an expected trading session is a weekday that is not in `holidays`. That
+# turns "no bhavcopy for 2024-01-26" into GAP(expected) instead of a shrug, which is what makes the
+# M1 gate's "gap report explains 100% of missing days" claim checkable.
+#
+# `special_session: MUHURAT` is the subtle case and the reason this file is not just a list of
+# dates. On Diwali Laxmi Pujan the exchange is closed to normal trading — the NSE holiday master
+# lists it as a holiday — but it holds a ~1 hour ceremonial session and **publishes a bhavcopy for
+# that date, weekend or not**. All eleven Muhurat dates below were confirmed to return a bhavcopy
+# (2016-10-30 Sun, 2019-10-27 Sun, 2020-11-14 Sat and 2023-11-12 Sun among them). So a Muhurat date
+# is not an expected *session*, but it is an expected *file*; treating it as a plain holiday would
+# silently skip a real trading day's data.
+#
+# Coverage is a hard boundary, not a default. `expected_sessions` refuses a range that leaves the
+# span below rather than assuming an uncovered year has no holidays — an assumption that would
+# quietly manufacture ~15 phantom sessions a year.
+#
+# Maintenance: NSE publishes the next year's list in ~December. Append a `years:` block and move
+# `coverage.end`; both are checked at load, and a year with no holidays is rejected.
+
+version: 1
+
+coverage:
+  start: 2016-01-01
+  end: 2026-12-31
+
+provenance:
+  curated_by: "C.2"
+  curated_on: "2026-08-08"
+  method: |
+    2026 is the exchange's own list, taken from the NSE holiday master
+    (https://www.nseindia.com/api/holiday-master?type=trading, CM segment) on
+    2026-08-08; it is complete, weekends included.
+    2016-2025 could not be fetched — the master serves only the current year, and
+    the per-symbol historical API is behind anti-bot (503), which AGENTIC_CONTEXT
+    §8 forbids evading. Those years were instead *derived*: every weekday with no
+    NIFTY 50 session is a closure candidate, and each candidate that disagreed
+    with the curated expectation was resolved by fetching the date's bhavcopy from
+    nsearchives directly (a 200 means the exchange traded, a 404 means it did
+    not). Six such disagreements were checked and all six proved to be index-feed
+    gaps on real trading days: 2016-01-01, 2016-08-12, 2018-01-01, 2019-01-01,
+    2019-02-13, 2019-03-29. They are therefore absent below.
+    Holiday *names* for 2016-2025 are curated, not sourced; a wrong name mislabels
+    a gap-report line but cannot change which days are sessions.
+  bhavcopy_probes: 21   # nsearchives, 3s spacing, well under the §3.3 bulk threshold
+  known_limitation: |
+    For source `derived_verified` years the weekday closures are complete (that is
+    what the derivation sees) but holidays that fell on a weekend are not
+    enumerated, because a non-session weekend is indistinguishable from a
+    non-session weekend holiday. This costs nothing: both are already non-sessions,
+    and Muhurat weekend dates — the only weekend entries that carry data — are
+    listed explicitly. `source: nse_holiday_master` years are complete.
+    The full cross-check against real bhavcopy availability for all ~2,700 weekdays
+    is M1's backfill job: `TradingCalendar.reconcile` is the function it calls.
+
+years:
+  - year: 2016
+    source: derived_verified
+    holidays:
+      - { date: 2016-01-26, name: "Republic Day" }
+      - { date: 2016-03-07, name: "Mahashivratri" }
+      - { date: 2016-03-24, name: "Holi" }
+      - { date: 2016-03-25, name: "Good Friday" }
+      - { date: 2016-04-14, name: "Dr. Baba Saheb Ambedkar Jayanti" }
+      - { date: 2016-04-15, name: "Shri Ram Navami" }
+      - { date: 2016-04-19, name: "Shri Mahavir Jayanti" }
+      - { date: 2016-07-06, name: "Id-Ul-Fitr (Ramzan Id)" }
+      - { date: 2016-08-15, name: "Independence Day" }
+      - { date: 2016-09-05, name: "Ganesh Chaturthi" }
+      - { date: 2016-09-13, name: "Bakri Id" }
+      - { date: 2016-10-11, name: "Dussehra" }
+      - { date: 2016-10-12, name: "Muharram" }
+      - { date: 2016-10-30, name: "Diwali Laxmi Pujan", special_session: MUHURAT }
+      - { date: 2016-10-31, name: "Diwali-Balipratipada" }
+      - { date: 2016-11-14, name: "Guru Nanak Jayanti" }
+
+  - year: 2017
+    source: derived_verified
+    holidays:
+      - { date: 2017-01-26, name: "Republic Day" }
+      - { date: 2017-02-24, name: "Mahashivratri" }
+      - { date: 2017-03-13, name: "Holi" }
+      - { date: 2017-04-04, name: "Shri Ram Navami" }
+      - { date: 2017-04-14, name: "Dr. Baba Saheb Ambedkar Jayanti / Good Friday" }
+      - { date: 2017-05-01, name: "Maharashtra Day" }
+      - { date: 2017-06-26, name: "Id-Ul-Fitr (Ramzan Id)" }
+      - { date: 2017-08-15, name: "Independence Day" }
+      - { date: 2017-08-25, name: "Ganesh Chaturthi" }
+      - { date: 2017-10-02, name: "Mahatma Gandhi Jayanti" }
+      - { date: 2017-10-19, name: "Diwali Laxmi Pujan", special_session: MUHURAT }
+      - { date: 2017-10-20, name: "Diwali-Balipratipada" }
+      - { date: 2017-12-25, name: "Christmas" }
+
+  - year: 2018
+    source: derived_verified
+    holidays:
+      - { date: 2018-01-26, name: "Republic Day" }
+      - { date: 2018-02-13, name: "Mahashivratri" }
+      - { date: 2018-03-02, name: "Holi" }
+      - { date: 2018-03-29, name: "Shri Mahavir Jayanti" }
+      - { date: 2018-03-30, name: "Good Friday" }
+      - { date: 2018-05-01, name: "Maharashtra Day" }
+      - { date: 2018-08-15, name: "Independence Day" }
+      - { date: 2018-08-22, name: "Bakri Id" }
+      - { date: 2018-09-13, name: "Ganesh Chaturthi" }
+      - { date: 2018-09-20, name: "Muharram" }
+      - { date: 2018-10-02, name: "Mahatma Gandhi Jayanti" }
+      - { date: 2018-10-18, name: "Dussehra" }
+      - { date: 2018-11-07, name: "Diwali Laxmi Pujan", special_session: MUHURAT }
+      - { date: 2018-11-08, name: "Diwali-Balipratipada" }
+      - { date: 2018-11-23, name: "Guru Nanak Jayanti" }
+      - { date: 2018-12-25, name: "Christmas" }
+
+  - year: 2019
+    source: derived_verified
+    holidays:
+      - { date: 2019-03-04, name: "Mahashivratri" }
+      - { date: 2019-03-21, name: "Holi" }
+      - { date: 2019-04-17, name: "Shri Mahavir Jayanti" }
+      - { date: 2019-04-19, name: "Good Friday" }
+      - { date: 2019-04-29, name: "Parliamentary Elections (Mumbai)" }
+      - { date: 2019-05-01, name: "Maharashtra Day" }
+      - { date: 2019-06-05, name: "Id-Ul-Fitr (Ramzan Id)" }
+      - { date: 2019-08-12, name: "Bakri Id" }
+      - { date: 2019-08-15, name: "Independence Day" }
+      - { date: 2019-09-02, name: "Ganesh Chaturthi" }
+      - { date: 2019-09-10, name: "Muharram" }
+      - { date: 2019-10-02, name: "Mahatma Gandhi Jayanti" }
+      - { date: 2019-10-08, name: "Dussehra" }
+      - { date: 2019-10-21, name: "Maharashtra Assembly Elections" }
+      - { date: 2019-10-27, name: "Diwali Laxmi Pujan", special_session: MUHURAT }
+      - { date: 2019-10-28, name: "Diwali-Balipratipada" }
+      - { date: 2019-11-12, name: "Guru Nanak Jayanti" }
+      - { date: 2019-12-25, name: "Christmas" }
+
+  - year: 2020
+    source: derived_verified
+    holidays:
+      - { date: 2020-02-21, name: "Mahashivratri" }
+      - { date: 2020-03-10, name: "Holi" }
+      - { date: 2020-04-02, name: "Shri Ram Navami" }
+      - { date: 2020-04-06, name: "Shri Mahavir Jayanti" }
+      - { date: 2020-04-10, name: "Good Friday" }
+      - { date: 2020-04-14, name: "Dr. Baba Saheb Ambedkar Jayanti" }
+      - { date: 2020-05-01, name: "Maharashtra Day" }
+      - { date: 2020-05-25, name: "Id-Ul-Fitr (Ramzan Id)" }
+      - { date: 2020-10-02, name: "Mahatma Gandhi Jayanti" }
+      - { date: 2020-11-14, name: "Diwali Laxmi Pujan", special_session: MUHURAT }
+      - { date: 2020-11-16, name: "Diwali-Balipratipada" }
+      - { date: 2020-11-30, name: "Guru Nanak Jayanti" }
+      - { date: 2020-12-25, name: "Christmas" }
+
+  - year: 2021
+    source: derived_verified
+    holidays:
+      - { date: 2021-01-26, name: "Republic Day" }
+      - { date: 2021-03-11, name: "Mahashivratri" }
+      - { date: 2021-03-29, name: "Holi" }
+      - { date: 2021-04-02, name: "Good Friday" }
+      - { date: 2021-04-14, name: "Dr. Baba Saheb Ambedkar Jayanti" }
+      - { date: 2021-04-21, name: "Shri Ram Navami" }
+      - { date: 2021-05-13, name: "Id-Ul-Fitr (Ramzan Id)" }
+      - { date: 2021-07-21, name: "Bakri Id" }
+      - { date: 2021-08-19, name: "Muharram" }
+      - { date: 2021-09-10, name: "Ganesh Chaturthi" }
+      - { date: 2021-10-15, name: "Dussehra" }
+      - { date: 2021-11-04, name: "Diwali Laxmi Pujan", special_session: MUHURAT }
+      - { date: 2021-11-05, name: "Diwali-Balipratipada" }
+      - { date: 2021-11-19, name: "Guru Nanak Jayanti" }
+
+  - year: 2022
+    source: derived_verified
+    holidays:
+      - { date: 2022-01-26, name: "Republic Day" }
+      - { date: 2022-03-01, name: "Mahashivratri" }
+      - { date: 2022-03-18, name: "Holi" }
+      - { date: 2022-04-14, name: "Dr. Baba Saheb Ambedkar Jayanti / Shri Mahavir Jayanti" }
+      - { date: 2022-04-15, name: "Good Friday" }
+      - { date: 2022-05-03, name: "Id-Ul-Fitr (Ramzan Id)" }
+      - { date: 2022-08-09, name: "Muharram" }
+      - { date: 2022-08-15, name: "Independence Day" }
+      - { date: 2022-08-31, name: "Ganesh Chaturthi" }
+      - { date: 2022-10-05, name: "Dussehra" }
+      - { date: 2022-10-24, name: "Diwali Laxmi Pujan", special_session: MUHURAT }
+      - { date: 2022-10-26, name: "Diwali-Balipratipada" }
+      - { date: 2022-11-08, name: "Guru Nanak Jayanti" }
+
+  - year: 2023
+    source: derived_verified
+    holidays:
+      - { date: 2023-01-26, name: "Republic Day" }
+      - { date: 2023-03-07, name: "Holi" }
+      - { date: 2023-03-30, name: "Shri Ram Navami" }
+      - { date: 2023-04-04, name: "Shri Mahavir Jayanti" }
+      - { date: 2023-04-07, name: "Good Friday" }
+      - { date: 2023-04-14, name: "Dr. Baba Saheb Ambedkar Jayanti" }
+      - { date: 2023-05-01, name: "Maharashtra Day" }
+      - { date: 2023-06-29, name: "Bakri Id" }
+      - { date: 2023-08-15, name: "Independence Day" }
+      - { date: 2023-09-19, name: "Ganesh Chaturthi" }
+      - { date: 2023-10-02, name: "Mahatma Gandhi Jayanti" }
+      - { date: 2023-10-24, name: "Dussehra" }
+      - { date: 2023-11-12, name: "Diwali Laxmi Pujan", special_session: MUHURAT }
+      - { date: 2023-11-14, name: "Diwali-Balipratipada" }
+      - { date: 2023-11-27, name: "Guru Nanak Jayanti" }
+      - { date: 2023-12-25, name: "Christmas" }
+
+  - year: 2024
+    source: derived_verified
+    holidays:
+      - { date: 2024-01-22, name: "Special Holiday (Shri Ram Temple Pran Pratishtha)" }
+      - { date: 2024-01-26, name: "Republic Day" }
+      - { date: 2024-03-08, name: "Mahashivratri" }
+      - { date: 2024-03-25, name: "Holi" }
+      - { date: 2024-03-29, name: "Good Friday" }
+      - { date: 2024-04-11, name: "Id-Ul-Fitr (Ramzan Id)" }
+      - { date: 2024-04-17, name: "Shri Ram Navami" }
+      - { date: 2024-05-01, name: "Maharashtra Day" }
+      - { date: 2024-05-20, name: "General Parliamentary Elections (Mumbai)" }
+      - { date: 2024-06-17, name: "Bakri Id" }
+      - { date: 2024-07-17, name: "Muharram" }
+      - { date: 2024-08-15, name: "Independence Day" }
+      - { date: 2024-10-02, name: "Mahatma Gandhi Jayanti" }
+      - { date: 2024-11-01, name: "Diwali Laxmi Pujan", special_session: MUHURAT }
+      - { date: 2024-11-15, name: "Guru Nanak Jayanti" }
+      - { date: 2024-11-20, name: "Maharashtra Assembly Elections" }
+      - { date: 2024-12-25, name: "Christmas" }
+
+  - year: 2025
+    source: derived_verified
+    holidays:
+      - { date: 2025-02-26, name: "Mahashivratri" }
+      - { date: 2025-03-14, name: "Holi" }
+      - { date: 2025-03-31, name: "Id-Ul-Fitr (Ramzan Id)" }
+      - { date: 2025-04-10, name: "Shri Mahavir Jayanti" }
+      - { date: 2025-04-14, name: "Dr. Baba Saheb Ambedkar Jayanti" }
+      - { date: 2025-04-18, name: "Good Friday" }
+      - { date: 2025-05-01, name: "Maharashtra Day" }
+      - { date: 2025-08-15, name: "Independence Day" }
+      - { date: 2025-08-27, name: "Ganesh Chaturthi" }
+      - { date: 2025-10-02, name: "Mahatma Gandhi Jayanti / Dussehra" }
+      - { date: 2025-10-21, name: "Diwali Laxmi Pujan", special_session: MUHURAT }
+      - { date: 2025-10-22, name: "Diwali-Balipratipada" }
+      - { date: 2025-11-05, name: "Prakash Gurpurb Sri Guru Nanak Dev" }
+      - { date: 2025-12-25, name: "Christmas" }
+
+  - year: 2026
+    source: nse_holiday_master
+    holidays:
+      - { date: 2026-01-15, name: "Municipal Corporation Election - Maharashtra" }
+      - { date: 2026-01-26, name: "Republic Day" }
+      - { date: 2026-02-15, name: "Mahashivratri" }
+      - { date: 2026-03-03, name: "Holi" }
+      - { date: 2026-03-21, name: "Id-Ul-Fitr (Ramadan Eid)" }
+      - { date: 2026-03-26, name: "Shri Ram Navami" }
+      - { date: 2026-03-31, name: "Shri Mahavir Jayanti" }
+      - { date: 2026-04-03, name: "Good Friday" }
+      - { date: 2026-04-14, name: "Dr. Baba Saheb Ambedkar Jayanti" }
+      - { date: 2026-05-01, name: "Maharashtra Day" }
+      - { date: 2026-05-28, name: "Bakri Id" }
+      - { date: 2026-06-26, name: "Muharram" }
+      - { date: 2026-08-15, name: "Independence Day" }
+      - { date: 2026-09-14, name: "Ganesh Chaturthi" }
+      - { date: 2026-10-02, name: "Mahatma Gandhi Jayanti" }
+      - { date: 2026-10-20, name: "Dussehra" }
+      - { date: 2026-11-08, name: "Diwali Laxmi Pujan", special_session: MUHURAT }
+      - { date: 2026-11-10, name: "Diwali-Balipratipada" }
+      - { date: 2026-11-24, name: "Prakash Gurpurb Sri Guru Nanak Dev" }
+      - { date: 2026-12-25, name: "Christmas" }
