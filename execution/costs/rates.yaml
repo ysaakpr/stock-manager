@@ -1,0 +1,188 @@
+# Indian delivery-equity transaction costs, as a dated rate card (M4.4).
+#
+# One schedule per rate regime, in ascending `effective_from` order. A trade is charged with the
+# last schedule whose `effective_from` is on or before its trade date, so a 2018 backtest pays 2018
+# rates and today's SimBroker pays today's. A trade before the first schedule raises rather than
+# borrowing a later rate card — a backtest silently priced with rates that did not exist yet is the
+# failure this file exists to prevent.
+#
+# Every rate is a QUOTED STRING. YAML would parse a bare 0.0000307 as a float, and a float in the
+# cost model is a bug (CLAUDE.md); `execution/costs/model.py` rejects one, and
+# `tests/unit/test_costs.py` asserts no unquoted number survives in this file.
+#
+# Rates are fractions of turnover unless the key says otherwise. ₹15 per crore is "0.0000015".
+#
+# `provenance` on each schedule:
+#   verified     — every number read off the cited primary source on `sources_read_on`.
+#   reconstructed — the regime is real and the rates are the published figures of the period as
+#                  reported by the cited sources, but no primary rate card of that date was read.
+#                  Materiality of any error is noted per schedule.
+
+version: 1
+
+card:
+  broker: zerodha
+  segment: equity_delivery
+  currency: INR
+  scope: >-
+    Delivery equity on NSE and BSE only. Intraday, F&O, currency and commodity have a different
+    rate card and are deliberately absent: add them here, never in a second module (invariant #4).
+
+schedules:
+  # ── 2017-07-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: gst-era-state-stamp
+    effective_from: "2017-07-01"
+    label: GST at 18% replaces service tax; stamp duty still state-wise and charged on both sides
+    provenance: reconstructed
+    sources_read_on: "2026-08-08"
+    sources:
+      - "https://zerodha.com/z-connect/general/uniform-stamp-duty — before 2020-07-01 stamp duty
+         was set by each state and collected on buy AND sell; most states charged about
+         ₹1000/crore (0.01%) on delivery."
+      - "Karnataka Stamp Act 1957, contract-note article — ₹1 for every ₹10,000 of the value of
+         the securities, i.e. 0.01%."
+      - "Zerodha's published DP charge of the period: ₹13.5 + GST per scrip on the sell side
+         (₹5.5 depository + ₹8 broker)."
+    notes: >-
+      The exchange transaction and SEBI turnover rates here are the figures Zerodha published in
+      this period (NSE 0.00325%, BSE 0.00275%, SEBI ₹15/crore); no primary rate card of a 2018
+      date was read, and no capped state (Telangana, Haryana) is encoded — an unlisted state
+      raises. On a ₹50,000 trade the whole exchange+SEBI block is under ₹2, so a residual error
+      here is paise, while getting the stamp-duty side wrong (both sides, not buy-only) would be
+      rupees — that part is sourced.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.001"
+      sell_rate: "0.001"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000275"
+    sebi_turnover_rate: "0.0000015"
+    gst:
+      rate: "0.18"
+      # The published formula of this era was "18% on (brokerage + transaction charges)"; the SEBI
+      # turnover fee entered the GST base later (see the 2025-04-01 schedule).
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: state
+      sides: [BUY, SELL]
+      state_rates:
+        KA: "0.0001"
+        MH: "0.0001"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2020-07-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: uniform-stamp-duty
+    effective_from: "2020-07-01"
+    label: Uniform central stamp duty, buy side only (Finance Act 2019, notified 2020-07-01)
+    provenance: reconstructed
+    sources_read_on: "2026-08-08"
+    sources:
+      - "https://zerodha.com/z-connect/general/uniform-stamp-duty — from 2020-07-01, 0.015%
+         (₹1500/crore) on delivery, charged on the buy side only, uniform across states."
+      - "https://www.sebi.gov.in/media/press-releases/apr-2020/sebi-reduces-broker-turnover-fees-and-filing-fees-for-issuers_46571.html
+         — SEBI cut broker turnover fees; the current ₹10/crore is the post-cut level."
+    notes: >-
+      Stamp duty is the sourced change here. The SEBI turnover fee is moved to ₹10/crore at this
+      boundary because ₹10/crore is the verified current figure and the cut is of this period; the
+      exact effective date was not established, and the COVID-window 50% relaxation
+      (Jun-2020..Mar-2021) is not modelled. Both are ≤ 5 paise on a ₹50,000 trade.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.001"
+      sell_rate: "0.001"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000275"
+    sebi_turnover_rate: "0.000001"
+    gst:
+      rate: "0.18"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: uniform
+      sides: [BUY]
+      uniform_rate: "0.00015"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2024-10-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: true-to-label
+    effective_from: "2024-10-01"
+    label: SEBI true-to-label — flat, slab-free exchange transaction charges
+    provenance: reconstructed
+    sources_read_on: "2026-08-08"
+    sources:
+      - "https://www.business-standard.com/markets/news/higher-stt-and-transaction-charges-on-nse-bse-mcx-effective-today-124100100146_1.html
+         — from 2024-10-01 NSE cash charges became a flat ₹2.97 per lakh (0.00297%), replacing the
+         ₹2.97–₹3.22 slabs; BSE revised the same day."
+      - "https://zerodha.com/z-connect/business-updates/sebis-true-to-label-circular"
+    notes: >-
+      NSE 0.00297% is sourced to the day. BSE 0.00375% is the currently published figure carried
+      back to this boundary, since BSE revised on the same circular; the intermediate BSE rate was
+      not established (sub-paisa on a ₹50,000 trade).
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.001"
+      sell_rate: "0.001"
+    exchange_transaction:
+      NSE: "0.0000297"
+      BSE: "0.0000375"
+    sebi_turnover_rate: "0.000001"
+    gst:
+      rate: "0.18"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: uniform
+      sides: [BUY]
+      uniform_rate: "0.00015"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2025-04-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: current
+    effective_from: "2025-04-01"
+    label: Current published rate card — GST also applies to the SEBI turnover fee
+    provenance: verified
+    sources_read_on: "2026-08-08"
+    sources:
+      - "https://zerodha.com/charges (read 2026-08-08): equity delivery — zero brokerage;
+         STT 0.1% on buy & sell; transaction charges NSE 0.00307%, BSE 0.00375%;
+         SEBI charges ₹10/crore; GST 18% on (brokerage + SEBI charges + transaction charges);
+         stamp charges 0.015% (₹1500/crore) on buy side; DP charge ₹15.34 per scrip on sell
+         (₹3.5 CDSL + ₹9.5 Zerodha + ₹2.34 GST)."
+      - "https://support.zerodha.com/category/account-opening/resident-individual/ri-charges/articles/how-is-the-securities-transaction-tax-stt-calculated
+         (read 2026-08-08): STT 0.1% both sides on delivery, rounded to the nearest rupee — buy
+         500 @ ₹100 → ₹50; sell 500 @ ₹105 → ₹52.50 → ₹53."
+    notes: >-
+      Every rate is verified against the published card. The boundary date is the one change whose
+      timing is reconstructed: SEBI turnover fees became subject to GST around April 2025, and the
+      NSE rate of 0.00307% and the DP split of ₹3.5 + ₹9.5 are current but their effective dates
+      were not established, so they are attached to this boundary. A trade dated between
+      2024-10-01 and this date therefore pays at most ~1 paisa less GST than it should on a
+      ₹50,000 order.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.001"
+      sell_rate: "0.001"
+    exchange_transaction:
+      NSE: "0.0000307"
+      BSE: "0.0000375"
+    sebi_turnover_rate: "0.000001"
+    gst:
+      rate: "0.18"
+      applies_to: [brokerage, exchange_transaction, sebi_turnover]
+    stamp_duty:
+      regime: uniform
+      sides: [BUY]
+      uniform_rate: "0.00015"
+    dp_charge:
+      depository_fee: "3.50"
+      broker_fee: "9.50"
+      gst_applies: true
