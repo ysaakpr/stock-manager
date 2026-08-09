@@ -123,7 +123,11 @@ A task is `DONE` only when **all** hold:
 
 1. Every acceptance criterion in the task entry demonstrably passes.
 2. The task's `verify` command exits 0, and its output is captured into the state record.
-3. `make check` passes repo-wide (ruff format, ruff lint, mypy on changed packages, pytest).
+3. Format, lint and types are clean **on the task's own deliverable paths**. `orch` runs these
+   scoped, not repo-wide: several builder agents share one working tree, so a repo-wide check
+   fails a finished task because a *different* agent has a half-written file on disk. You are
+   accountable for your files. Repo-wide green is the gate auditor's job, run when the tree is
+   quiet — and a gate auditor must not fail a task for another agent's in-flight edit.
 4. New behaviour has tests. Ingestion parsers have era fixtures (B8); anything touching money, adjustment
    factors, rails, or PIT boundaries has tests that fail if the logic is reversed.
 5. No secrets, no `data/`, no large binaries in the commit.

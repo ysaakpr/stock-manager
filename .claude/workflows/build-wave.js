@@ -46,7 +46,8 @@ let waves = 0
 for (let wave = 1; wave <= MAX_WAVES; wave++) {
   phase('Plan')
   const plan = await agent(
-    `Run \`./orch ready --json\` in the repo root and \`./orch status\`.
+    `Run \`./orch release\` first (clears claims abandoned by a killed run), then
+\`./orch ready --json\` in the repo root and \`./orch status\`.
 Return exactly the ready tasks as {tasks:[{id,title}]} plus {parked:[task ids currently PARKED]}.
 Do not build anything. Do not interpret or filter the list — return it verbatim.`,
     { label: `plan:wave-${wave}`, phase: 'Plan', schema: READY }

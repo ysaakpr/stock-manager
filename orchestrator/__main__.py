@@ -62,6 +62,32 @@ def _run(cmd: str, timeout: int = VERIFY_TIMEOUT) -> tuple[int, str]:
     return proc.returncode, (proc.stdout + proc.stderr)[-20000:]
 
 
+def _scoped_paths(task: object) -> list[str]:
+    """The task's own files, for a DoD check that does not depend on the rest of the tree.
+
+    Several builder agents share one working tree, so a repo-wide `make check` fails a
+    finished task because a *different* agent has a half-written file on disk. A task is
+    accountable for its own deliverables; repo-wide green is the gate auditor's job, run
+    when the tree is quiet.
+    """
+    out: set[str] = set()
+    for raw in getattr(task, "deliverables", ()):  # type: ignore[arg-type]
+        spec = str(raw).rstrip("/")
+        matches = (
+            list(REPO.glob(spec)) if any(c in spec for c in "*?[") else [REPO / spec]
+        )
+        for match in matches:
+            if not match.exists():
+                continue
+            # A fixture directory holds CSVs, not modules, and mypy errors out on a
+            # directory with no .py in it -- which would fail the task for nothing.
+            if match.is_dir() and not any(match.rglob("*.py")):
+                continue
+            if match.is_dir() or match.suffix == ".py":
+                out.add(str(match.relative_to(REPO)))
+    return sorted(out)
+
+
 def _cleared(st: BuildState) -> set[str]:
     doc = st.load()
     return {tid for tid, rec in doc["tasks"].items() if rec.get("human_cleared")}
@@ -173,13 +199,12 @@ def cmd_set(args: argparse.Namespace) -> int:
     checks: list[tuple[str, str]] = []
     if task.verify:
         checks.append(("verify", task.verify))
-    if (
-        task.autonomy == "AUTO"
-        and (REPO / "Makefile").exists()
-        and "make check" not in task.verify
-        and not args.skip_check
-    ):
-        checks.append(("make check", "make check"))
+    scoped = _scoped_paths(task)
+    if task.autonomy == "AUTO" and scoped and not args.skip_check:
+        joined = " ".join(scoped)
+        checks.append(("format", f"uv run ruff format --check {joined}"))
+        checks.append(("lint", f"uv run ruff check {joined}"))
+        checks.append(("types", f"uv run mypy {joined}"))
 
     transcript: list[str] = []
     for label, cmd in checks:
@@ -220,6 +245,20 @@ def cmd_set(args: argparse.Namespace) -> int:
     ]
     if unblocked:
         print(f"unblocked: {', '.join(unblocked)}")
+    return 0
+
+
+def cmd_release(_args: argparse.Namespace) -> int:
+    """Clear IN_PROGRESS rows abandoned by a killed runner (session limit, crash, Ctrl-C).
+
+    An abandoned claim is invisible to `ready` forever, which looks exactly like a deadlock.
+    """
+    graph, st = Graph(), BuildState()
+    released = st.release_stale(list(graph.tasks))
+    if released:
+        print(f"released {len(released)}: {', '.join(released)}")
+    else:
+        print("nothing stale")
     return 0
 
 
@@ -360,6 +399,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--reason")
     p.add_argument("--skip-check", action="store_true", help="skip `make check` (needs a reason)")
     p.set_defaults(fn=cmd_set)
+
+    sub.add_parser("release").set_defaults(fn=cmd_release)
 
     p = sub.add_parser("escalate")
     p.add_argument("task_id")
