@@ -203,10 +203,15 @@ def cmd_set(args: argparse.Namespace) -> int:
     # no such excuse — it is a defect regardless of which task's diff it rode in on, `orch set
     # <id> DONE` is the path every agent actually commits through, and invariant #13
     # (AGENTIC_CONTEXT.md §6) does not carve out an exception for --skip-check.
+    # --disable-filter .../is_line_allowlisted: a `# pragma: allowlist secret` comment is not a
+    # review — it has no baseline entry and no diff anyone looks at. Every accepted false positive
+    # goes through .secrets.baseline instead (Makefile's `check` target carries the full reason).
     checks: list[tuple[str, str]] = [
         (
             "secret scan",
-            "uv run detect-secrets-hook -n --baseline .secrets.baseline $(git ls-files)",
+            "uv run detect-secrets-hook -n "
+            "--disable-filter detect_secrets.filters.allowlist.is_line_allowlisted "
+            "--baseline .secrets.baseline $(git ls-files)",
         ),
     ]
     if task.verify:

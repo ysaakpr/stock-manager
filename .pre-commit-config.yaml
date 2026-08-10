@@ -19,6 +19,9 @@ repos:
     hooks:
       - id: detect-secrets
         name: detect-secrets (no live verification — see Makefile's `check` target for why)
-        entry: uv run detect-secrets-hook -n --baseline .secrets.baseline
+        entry: >-
+          uv run detect-secrets-hook -n
+          --disable-filter detect_secrets.filters.allowlist.is_line_allowlisted
+          --baseline .secrets.baseline
         language: system
         pass_filenames: true

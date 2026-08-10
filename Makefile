@@ -23,7 +23,14 @@ check:
 # call to the provider inside `make check`, and a secret that fails that call — a fake one planted
 # in a test, or a real one already revoked — reads as "verified false" and is silently hidden.
 # That is precisely backwards for a leak scanner: offline and always-flag is the correct default.
-	uv run detect-secrets-hook -n --baseline .secrets.baseline $$(git ls-files)
+#
+# --disable-filter .../is_line_allowlisted: detect-secrets treats a `# pragma: allowlist secret`
+# comment as a review by itself, with no entry in .secrets.baseline and no diff anyone has to look
+# at — anyone (or anything with commit access) can silence the gate next to a real secret with one
+# comment. Every accepted false positive in this repo goes through the audited baseline instead.
+	uv run detect-secrets-hook -n \
+		--disable-filter detect_secrets.filters.allowlist.is_line_allowlisted \
+		--baseline .secrets.baseline $$(git ls-files)
 	uv run ruff format --check .
 	uv run ruff check .
 	uv run mypy
