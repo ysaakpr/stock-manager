@@ -180,9 +180,32 @@ normally within free tier, but the account itself is the gate); NewsAPI.org retu
 neither. Logged only so nobody later reaches for them silently — revisit if a task genuinely needs
 article-level global news volume that RSS + GDELT masterfiles cannot provide.
 
-### D8 — M3.9 was never blocked. Confirm the acceptance rewrite, and whether to split the task.
+### D8 — M3.9 was never blocked. Confirm the acceptance rewrite, and whether to split the task. → **ANSWERED: yes to both.**
 
-**Raised:** 2026-08-10. **Blocks ~34 dependents** — the largest single unblock in the graph.
+**Raised:** 2026-08-10. **Answered:** 2026-08-10 by the owner. **Blocks ~34 dependents** — the
+largest single unblock in the graph.
+
+> **DECISION.** Both parts approved as recommended.
+>
+> 1. **Acceptance rewrite: option 2.** `TASK_GRAPH.yaml:858-862`'s third bullet is replaced with
+>    the offline fixture assertion specified below — three indices, literal `Decimal` levels on a
+>    known date, `None`-not-zero for `'-'`. **No acceptance criterion in this repo may require a
+>    network fetch at verify time**; that is what made this one unsatisfiable, and rule B8 already
+>    said so.
+> 2. **Split approved.** M3.9 becomes a constituents task and a TRI task, so that no single task
+>    owns one VERIFIED and one FAILED source row. A task that can be neither honestly done nor
+>    honestly blocked is a bookkeeping defect, and this repo has already paid for one of those.
+>
+> **Consequences, binding on whoever builds it:**
+> - The register row is corrected to the real path `POST /BackPage/getTotalReturnIndexString`
+>   (no `.aspx`) with the `cinfo` string envelope. That correction is what actually unblocks the
+>   graph; it must not wait on the parser being finished.
+> - Ingest **daily** TRI even though nothing downstream needs daily levels — 25 years is one
+>   request, and re-fetching later is the expensive path.
+> - The three observed parser traps below (newest-first rows, CAPS index names, regenerating
+>   `RequestNumber`) are part of the build contract, not folklore.
+> - `TASK_GRAPH.yaml` and `source_register.yaml` are task-owned config: they are edited by the
+>   build sub-agent under the split tasks, not by hand in this file's commit.
 
 `nifty_tri_history` is marked `FAILED` because the register recorded a **stale URL path**, not
 because the source is gated. Corrected path, probed live 2026-08-10 (4 POSTs, ≥2.5s apart, no 403
