@@ -180,10 +180,21 @@ some Hindi-language items, so normalization must handle or filter non-English.
 **Recommendation: option 2.** It closes both real gaps on sources confirmed live today, with no
 schema change and no invariant exposure.
 
-### D7 — Drop Business Standard from M6.1's curated RSS set
+### D7 — Drop Business Standard from M6.1's curated RSS set → **ANSWERED: drop it.**
 
-**Raised:** 2026-08-10. `business-standard.com/rss/markets-106.rss` returns **403 (WAF block)**
+**Raised:** 2026-08-10. **Answered:** 2026-08-10 by the owner.
+`business-standard.com/rss/markets-106.rss` returns **403 (WAF block)**
 against the same user agent that gets 200 from Moneycontrol, ET Markets, Livemint and PIB.
+
+> **DECISION.** Business Standard is **removed** from M6.1's curated feed set — not parked as a
+> non-VERIFIED row, not substituted. Moneycontrol, ET Markets, Livemint and PIB are the set.
+>
+> - **A 403 from a WAF is a refusal, and §8 forbids working around it.** Rotating user agents or
+>   otherwise evading anti-bot measures to acquire a fourth feed is prohibited, and risks an IP ban
+>   mid-build for marginal signal. If this feed is ever wanted it comes back through a licence or a
+>   partner arrangement, as a new decision — never through evasion.
+> - PIB serves **Hindi-language items**; M6.1's normalisation must handle or explicitly filter
+>   non-English rather than assume English.
 
 **The call:** confirm dropping it, versus spending effort on UA/header tuning to get past the WAF.
 
