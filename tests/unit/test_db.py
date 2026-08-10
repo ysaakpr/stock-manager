@@ -8,13 +8,17 @@ regress even when nobody has `make up` running.
 
 from __future__ import annotations
 
+import io
+from datetime import datetime
 from typing import Any
 
 import pytest
 from pydantic import SecretStr
 
-from dataplatform.config import Settings
-from dataplatform.store.db import connect, with_dbname
+from dataplatform.clock import IST, FrozenClock
+from dataplatform.config import AppEnv, Settings
+from dataplatform.logging import configure_logging, get_logger
+from dataplatform.store.db import MalformedDatabaseUrlError, connect, with_dbname
 
 
 class ConnectSpy:
@@ -109,6 +113,43 @@ def test_an_explicit_database_url_override_takes_the_dsn_string_path(
 
     assert connect_spy.calls[0][0] == ("postgresql://trading:trading@override-host:5432/trading",)
     assert connect_spy.kwargs == {"autocommit": False}
+
+
+def test_a_malformed_database_url_raises_without_the_password_fragment() -> None:
+    """psycopg's own parser quotes the offending fragment back — `unexpected spaces found in
+    "pa ss"` — and for a URI DSN that fragment can be (part of) the password. `connect()` must
+    intercept this before psycopg's own error, carrying the fragment, ever escapes."""
+    settings = Settings(database_url=SecretStr("postgresql://trading:pa ss@localhost:5433/trading"))
+
+    with pytest.raises(MalformedDatabaseUrlError) as caught:
+        connect(settings)
+
+    assert "pa ss" not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True  # raised `from None`: no chained context
+
+
+@pytest.mark.parametrize("app_env", ["prod", "dev"])
+def test_a_malformed_database_url_never_leaks_into_either_log_renderer(app_env: str) -> None:
+    """The concrete case behind invariant #13's audit: a caller that logs this failure with
+    `exc_info=True` (mirroring scheduler/runner.py) must not put the password fragment on the
+    wire in JSON mode OR in Rich's console rendering — reordering the redaction processor cannot
+    fix the console case (Rich injects ANSI mid-token), so the fix has to be that no exception on
+    this path ever carries the fragment in the first place.
+    """
+    settings = Settings(
+        app_env=AppEnv(app_env),
+        database_url=SecretStr("postgresql://trading:pa ss@localhost:5433/trading"),
+    )
+    stream = io.StringIO()
+    configure_logging(settings, clock=FrozenClock(datetime(2026, 8, 10, tzinfo=IST)), stream=stream)
+
+    try:
+        connect(settings)
+    except MalformedDatabaseUrlError:
+        get_logger().exception("db_connect_failed")
+
+    assert "pa ss" not in stream.getvalue()
 
 
 def test_with_dbname_replaces_only_the_path_component() -> None:

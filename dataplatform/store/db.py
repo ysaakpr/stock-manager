@@ -20,11 +20,31 @@ import psycopg
 
 from dataplatform.config import Settings, get_settings
 
-__all__ = ["Connection", "connect", "connection", "with_dbname"]
+__all__ = ["Connection", "MalformedDatabaseUrlError", "connect", "connection", "with_dbname"]
 
 #: psycopg's default row factory yields plain tuples. Naming the alias keeps every signature in
 #: the platform identical and spells out the generic parameter `mypy --strict` insists on.
 Connection = psycopg.Connection[tuple[Any, ...]]
+
+
+class MalformedDatabaseUrlError(ValueError):
+    """`DATABASE_URL` does not parse as a Postgres connection string.
+
+    Raised instead of letting psycopg's own `ProgrammingError` propagate: that error's message
+    quotes the exact offending fragment back — `unexpected spaces found in "pa ss"` — and for a
+    URI-style DSN, the offending fragment can be (part of) the password itself. Raised with
+    `from None` so the fragment-carrying original is dropped from `__cause__` too (invariant #13).
+    The advice always points at the discrete `POSTGRES_*` fields precisely because they need no
+    escaping at all — there is no URI grammar for a password to collide with.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "DATABASE_URL failed to parse as a Postgres connection string — a metacharacter in "
+            "the password (space, @, /, %, #, ?, :) needs percent-encoding to survive a URI. "
+            "Prefer unsetting DATABASE_URL and setting POSTGRES_HOST/PORT/USER/PASSWORD/DB "
+            "instead, which never need escaping."
+        )
 
 
 def connect(settings: Settings | None = None, *, autocommit: bool = False) -> Connection:
@@ -44,11 +64,17 @@ def connect(settings: Settings | None = None, *, autocommit: bool = False) -> Co
     that wants a closed connection afterwards should use `connection()`.
     What it never does: swallow a connection error, or let one carry a credential. An unreachable
     database is an operational fact that has to reach the status API (§4.4), not a `None` that
-    surfaces three frames later — and psycopg's own error messages never echo a password back.
+    surfaces three frames later — and a malformed `DATABASE_URL` raises `MalformedDatabaseUrlError`
+    rather than psycopg's own parse error, which would otherwise quote a password fragment back.
     """
     settings = get_settings() if settings is None else settings
     if settings.database_url is not None:
-        return psycopg.connect(settings.database_url.get_secret_value(), autocommit=autocommit)
+        dsn = settings.database_url.get_secret_value()
+        try:
+            psycopg.conninfo.conninfo_to_dict(dsn)
+        except psycopg.ProgrammingError:
+            raise MalformedDatabaseUrlError() from None
+        return psycopg.connect(dsn, autocommit=autocommit)
     return psycopg.connect(
         host=settings.postgres_host,
         port=settings.postgres_port,
