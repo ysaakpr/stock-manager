@@ -146,3 +146,84 @@ def test_an_exception_is_rendered_as_structured_data_in_prod(configured: Configu
     (event,) = emitted(stream)
     assert event["level"] == "error"
     assert event["exception"][0]["exc_type"] == "ValueError"
+
+
+def test_show_locals_in_tracebacks_is_disabled() -> None:
+    """The one flag standing between a frame's plaintext secret and a log line (invariant #13).
+
+    `structlog.processors.dict_tracebacks` and `structlog.dev.ConsoleRenderer`'s default exception
+    formatter both hardcode `show_locals=True` — this pins the module-level override so a future
+    edit that goes back to the convenience default is caught here, not in production.
+    """
+    from dataplatform import logging as logging_module
+
+    assert logging_module.SHOW_LOCALS_IN_TRACEBACKS is False
+    assert logging_module._JSON_EXCEPTION_RENDERER.format_exception.show_locals is False
+    assert logging_module._CONSOLE_EXCEPTION_FORMATTER.show_locals is False
+
+
+def _raise_with_a_secret_in_frame_locals(secret_value: str) -> None:
+    """A stand-in for `get_secret_value()` called just above a failure — a live plaintext
+    credential sitting in exactly the frame a traceback renderer would show.
+
+    Takes the secret as an argument rather than assigning a literal: a real credential is never a
+    string literal in source, so a test that hardcodes one there would also (harmlessly) show up
+    in Rich's source-context panel and prove nothing about `show_locals` specifically.
+    """
+    alert_smtp_password = secret_value  # noqa: F841 - the point is that it exists, unused
+    raise ValueError("checksum mismatch")
+
+
+def test_a_secret_in_exception_frame_locals_never_reaches_the_prod_log(
+    configured: Configure,
+) -> None:
+    stream = configured()
+    secret = "".join(["s3cret-local-", "9f2c"])
+
+    try:
+        _raise_with_a_secret_in_frame_locals(secret)
+    except ValueError:
+        get_logger().exception("l0_verify_failed")
+
+    assert secret not in stream.getvalue()
+
+
+def test_a_secret_in_exception_frame_locals_never_reaches_the_dev_log(
+    configured: Configure,
+) -> None:
+    stream = configured(app_env="dev")
+    secret = "".join(["s3cret-local-", "9f2c"])
+
+    try:
+        _raise_with_a_secret_in_frame_locals(secret)
+    except ValueError:
+        get_logger().exception("l0_verify_failed")
+
+    assert secret not in stream.getvalue()
+
+
+def test_a_dsn_password_reaching_a_log_field_is_redacted(configured: Configure) -> None:
+    """Defense in depth: even if a caller logs a DSN outright, the password never lands."""
+    stream = configured()
+
+    get_logger().error(
+        "db_connect_failed", dsn="postgresql://trading:s3cret-db-9f2c@localhost:5433/trading"
+    )
+
+    (event,) = emitted(stream)
+    assert "s3cret-db-9f2c" not in stream.getvalue()
+    assert event["dsn"] == "postgresql://trading:***REDACTED***@localhost:5433/trading"
+
+
+def test_a_telegram_token_reaching_a_log_field_is_redacted(configured: Configure) -> None:
+    """Defense in depth for the exact shape `TelegramConfig.send_message_url` produces."""
+    stream = configured()
+    token = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawZ"  # 35 chars, matches the Bot API's token shape
+
+    get_logger().error(
+        "telegram_delivery_failed", url=f"https://api.telegram.org/bot12345678:{token}/sendMessage"
+    )
+
+    (event,) = emitted(stream)
+    assert token not in stream.getvalue()
+    assert event["url"] == "https://api.telegram.org/bot***REDACTED***/sendMessage"

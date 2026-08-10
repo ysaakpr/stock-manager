@@ -13,6 +13,7 @@ absolute, so `import logging` anywhere still resolves to the standard library.
 
 from __future__ import annotations
 
+import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -26,6 +27,59 @@ from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import LogFormat, Settings, get_settings
 
 __all__ = ["bind_context", "clear_context", "configure_logging", "get_logger", "log_context"]
+
+#: A traceback frame's locals are live, unwrapped values — `SecretStr.get_secret_value()` called
+#: two lines above a failure puts a plaintext credential right back into the very frame that
+#: shows up in the traceback. `show_locals=True` is the default on both formatters below; setting
+#: it False here is the one thing standing between that credential and a production log line
+#: (invariant #13). `dataplatform.logging.SHOW_LOCALS_IN_TRACEBACKS` names the guard in one place
+#: so a test can pin it and a future edit cannot silently flip it back.
+SHOW_LOCALS_IN_TRACEBACKS = False
+
+#: The JSON-mode exception renderer, built explicitly rather than using `structlog.processors.
+#: dict_tracebacks` — that convenience object hardcodes `show_locals=True`.
+_JSON_EXCEPTION_RENDERER: Processor = structlog.processors.ExceptionRenderer(
+    structlog.tracebacks.ExceptionDictTransformer(show_locals=SHOW_LOCALS_IN_TRACEBACKS)
+)
+
+#: The console-mode exception formatter. `structlog.dev.ConsoleRenderer`'s own default
+#: (`RichTracebackFormatter`) also hardcodes `show_locals=True` — dev logging is not exempt from
+#: invariant #13 just because it is not JSON.
+_CONSOLE_EXCEPTION_FORMATTER = structlog.dev.RichTracebackFormatter(
+    show_locals=SHOW_LOCALS_IN_TRACEBACKS
+)
+
+#: Matches the password segment of a DSN (`scheme://user:PASSWORD@host`) so it can be blanked out
+#: wherever a connection string reaches a log field despite never being logged deliberately.
+_DSN_PASSWORD_RE = re.compile(r"(://[^\s:/@]+:)([^\s@]+)(@)")
+
+#: Matches a Telegram Bot API token sitting in a URL path (`/bot<token>/...`), per
+#: `TelegramConfig.send_message_url` — the shape invariant #13 calls out by name.
+_TELEGRAM_TOKEN_IN_URL_RE = re.compile(r"(/bot)\d{8,10}:[A-Za-z0-9_-]{35}(/)")
+
+
+def _redact_known_secret_shapes(value: Any) -> Any:
+    """Blank out a DSN password or a Telegram bot token wherever one appears in a string value.
+
+    A last line of defence, not the fix: the real fix is that no caller ever puts a secret in a
+    log field or an exception string in the first place. This exists for the case a future caller
+    gets that wrong anyway — recursing into dicts and lists so it also catches a rendered
+    traceback's `exc_value` / `exc_notes` strings, not just top-level event fields.
+    """
+    if isinstance(value, str):
+        value = _DSN_PASSWORD_RE.sub(r"\1***REDACTED***\3", value)
+        value = _TELEGRAM_TOKEN_IN_URL_RE.sub(r"\1***REDACTED***\2", value)
+        return value
+    if isinstance(value, dict):
+        return {key: _redact_known_secret_shapes(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_redact_known_secret_shapes(item) for item in value]
+    return value
+
+
+def _redaction_processor(logger: WrappedLogger, name: str, event_dict: EventDict) -> EventDict:
+    """The redaction pass, wired in after tracebacks are rendered so it also covers them."""
+    return {key: _redact_known_secret_shapes(val) for key, val in event_dict.items()}
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,11 +121,17 @@ def configure_logging(
     ]
     if settings.effective_log_format() is LogFormat.JSON:
         processors += [
-            structlog.processors.dict_tracebacks,
+            _JSON_EXCEPTION_RENDERER,
+            _redaction_processor,
             structlog.processors.JSONRenderer(sort_keys=True),
         ]
     else:
-        processors.append(structlog.dev.ConsoleRenderer(colors=_is_a_terminal(target)))
+        processors += [
+            _redaction_processor,
+            structlog.dev.ConsoleRenderer(
+                colors=_is_a_terminal(target), exception_formatter=_CONSOLE_EXCEPTION_FORMATTER
+            ),
+        ]
 
     structlog.configure(
         processors=processors,
