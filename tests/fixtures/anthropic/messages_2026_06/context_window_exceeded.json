@@ -1,0 +1,21 @@
+{
+  "id": "msg_01ContextExceededFixture",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-5",
+  "content": [
+    {
+      "type": "text",
+      "text": "Reviewing the filing history for the driver"
+    }
+  ],
+  "stop_reason": "model_context_window_exceeded",
+  "stop_sequence": null,
+  "stop_details": null,
+  "usage": {
+    "input_tokens": 999999,
+    "output_tokens": 41,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}

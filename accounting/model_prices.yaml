@@ -26,7 +26,7 @@
 #                   credential exists to bill against (B4), so nothing here has been checked
 #                   against an invoice.
 
-version: 1
+version: "1"
 
 card:
   provider: anthropic
