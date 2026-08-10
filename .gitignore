@@ -5,8 +5,6 @@
 .env
 .env.*
 !.env.example
-# build machinery state
-BUILD_STATE.json
 .build_state.lock
 ops/build-logs/
 ops/backups/
