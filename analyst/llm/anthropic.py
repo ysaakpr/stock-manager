@@ -78,10 +78,17 @@ _TIMEOUT_SECONDS: Final[float] = 600.0
 #: daily loop can afford to wait and cannot afford to skip a review because of one 529.
 _MAX_RETRIES: Final[int] = 2
 
-#: Models that accept `thinking={"type": "adaptive"}`. Adaptive thinking arrived with the 4.6
-#: generation; asking an older model for it is a 400, so `TRIAGE_MODEL` (Haiku 4.5) must not be
-#: sent one. For a model that is not on this list the parameter is omitted entirely, which is the
-#: no-thinking default everywhere it matters and is never rejected.
+#: Models documented as accepting `thinking={"type": "adaptive"}` — a 4.6-generation capability.
+#: Older models, `TRIAGE_MODEL` (Haiku 4.5) among them, are documented to take a `budget_tokens`
+#: thinking config instead and to reject `adaptive`; that rejection is read off the provider's
+#: documentation and has *not* been observed here, because no credential exists (B4) and the
+#: suite never calls out (B8). The SDK cannot settle it either: `anthropic` 0.121.0 types
+#: `thinking` identically for every model, so a wrong value here type-checks and fails, if it
+#: fails, only against the live API.
+#:
+#: The list is therefore conservative in the safe direction. A model missing from it has the
+#: parameter omitted entirely rather than guessed at — which costs thinking on a model that
+#: would have accepted it, and is never itself rejected.
 _ADAPTIVE_THINKING_MODELS: Final[frozenset[str]] = frozenset(
     {"claude-opus-5", "claude-opus-4-8", "claude-sonnet-5"}
 )
@@ -265,10 +272,17 @@ def _thinking_param(model: str, *, adaptive: bool) -> ThinkingConfigParam | None
     it when the caller said not to think.
     What it assumes: `_ADAPTIVE_THINKING_MODELS` is the accurate list — a model missing from it
     loses thinking rather than erroring, which is the safe direction.
-    What it never does: send `adaptive` to a model that predates it. Two failures hide here and
-    both are silent until a credential exists: Haiku 4.5 rejects `adaptive` outright with a 400,
-    and on the current Opus and Sonnet models *omitting* `thinking` means adaptive is on, so
-    `adaptive_thinking=False` would have been a no-op rather than the off switch it reads as.
+    What it never does: send `adaptive` to a model documented not to take it, or reach for
+    omission as the off switch. The second is the subtle one. On Claude Opus 5 and Sonnet 5,
+    omitting `thinking` runs adaptive anyway, so `adaptive_thinking=False` implemented by leaving
+    the parameter out would be a no-op that reads like a setting; `disabled` has to be said out
+    loud. It is not uniform across this list — on Opus 4.8 omitting the parameter does mean no
+    thinking — which is exactly why the off switch is explicit rather than inferred per model.
+
+    Both behaviours are documented rather than observed: no credential exists here (B4), and
+    nothing in `anthropic` 0.121.0's types distinguishes the models, so neither can be checked
+    offline. What *is* checked offline is the request this builds, in
+    `tests/unit/test_llm_accounting.py`.
     """
     if model not in _ADAPTIVE_THINKING_MODELS:
         return None

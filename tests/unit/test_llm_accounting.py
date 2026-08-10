@@ -33,6 +33,14 @@ after the FX conversion instead of before, and `schedule_for` returning the olde
 force instead of the newest. Every one of those is a plausible edit and every one of them is
 caught here.
 
+The same standard applies to the fields that are not arithmetic. `recorded_at` is written from
+the ledger's clock and `ts` from the caller, so the fixtures put those two instants two seconds
+apart — set to the same value they would be equal by construction, and a `recorded_at` that had
+started echoing the caller's `ts` would pass unnoticed, taking the replay audit trail with it.
+For the same reason the end-to-end stub reply pins an explicit `Usage` with all four buckets
+distinct: the stub's own estimate leaves both cache buckets at zero, which would make
+`prompt_tokens` and `input_tokens` accidentally equal.
+
 Nothing here touches the network — `no_sockets` is autouse for the whole module, so a call that
 tried would fail rather than hang. `AnthropicLLM` is exercised against frozen response fixtures
 (`tests/fixtures/anthropic/messages_2026_06/`) served through an `httpx.MockTransport`, which is
@@ -331,7 +339,7 @@ def test_the_guard_would_catch_an_unquoted_number(tmp_path: Path) -> None:
     assert "tag:yaml.org,2002:float" in tags
 
 
-def test_a_float_rate_is_refused_at_load(card: PriceCard) -> None:
+def test_a_float_rate_is_refused_at_load() -> None:
     """The loader rejects a float even if one reached it another way — belt as well as braces."""
     with pytest.raises(ValidationError, match="quoted strings"):
         ModelPrice.model_validate(
@@ -763,10 +771,13 @@ def test_a_completed_call_maps_every_token_bucket(stub_transport: _Transport) ->
 
 
 def test_adaptive_thinking_is_sent_only_to_a_model_that_has_it(stub_transport: _Transport) -> None:
-    """Haiku 4.5 — `TRIAGE_MODEL` — rejects `thinking={"type": "adaptive"}` with a 400.
+    """Adaptive thinking is documented as a 4.6-generation capability, so it is chosen per model.
 
-    The parameter is therefore chosen from the model rather than sent unconditionally, and this
-    is the only place that choice can be checked while no credential exists.
+    Haiku 4.5 — `TRIAGE_MODEL` — is documented to reject it. That rejection cannot be observed
+    here: no credential exists (B4), the suite never calls out (B8), and `anthropic` 0.121.0
+    types `thinking` identically for every model, so a wrong value type-checks. What this asserts
+    is the thing that *is* checkable offline — which parameter the request carries — leaving the
+    provider's response to the day a key lands.
     """
     turns = [Message(role=Role.USER, content="Classify this filing.")]
 

@@ -22,3 +22,4 @@ Nothing in this directory contains a credential, and nothing may. The `id` field
 | `max_tokens.json` | A truncated answer — billed, and `truncated` must be visible to the caller. |
 | `refusal.json` | A refusal: HTTP 200, empty content, `stop_details.category`. |
 | `context_window_exceeded.json` | A stop reason this client does not map, which must fail loud. |
+| `resolved_model_id.json` | An alias resolved to a dated snapshot id — what gets priced. |
