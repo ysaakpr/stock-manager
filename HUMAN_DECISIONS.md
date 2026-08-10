@@ -294,9 +294,36 @@ which invariant "same inputs → byte-identical journal" would catch only after 
 
 ---
 
-### D9 — A 200 with the wrong body is written straight into L0. Fix in the shared layer?
+### D9 — A 200 with the wrong body is written straight into L0. Fix in the shared layer? → **ANSWERED: yes to both.**
 
-**Raised:** 2026-08-10. This is the **generalizable** half of D8 and it outlives M3.9.
+**Raised:** 2026-08-10. **Answered:** 2026-08-10 by the owner. This is the **generalizable** half of
+D8 and it outlives M3.9.
+
+> **DECISION.** Both parts approved.
+>
+> 1. **An executable `expect` hook is added to `CrawlPolicy`**, asserted before the L0 write, as
+>    **its own M1-series task** — not bolted onto M3.9. It reopens M1.2's module and changes the
+>    shared path every ingestion source runs through, so it earns its own contract, tests and
+>    review rather than being reviewed as an afterthought inside a parser task.
+> 2. **A read-only re-probe sweep of the whole source register is commissioned** — every `FAILED`
+>    and `BLOCKED_CREDENTIAL` row. It is an `explore` dispatch: no code, no PR, findings only.
+>
+> **Why the sweep, stated plainly:** *two of two* investigated FAILED rows were bookkeeping, not
+> dead sources (M6.1's contract, M3.9's stale URL). Until re-probed, **no FAILED row in this
+> register may be cited as a reason a task cannot proceed** — including by the planner. A stale
+> register row silently stalled ~34 tasks once already.
+>
+> **The trap the `expect` hook must avoid, recorded so it is not rediscovered:** a content-type
+> check does **not** work. The *working* niftyindices TRI response and the 92 KB block page are
+> both `text/html; charset=utf-8`. Only a parse/shape assertion discriminates.
+> `ops/gates/source-verification.md` §5 previously taught the content-type fix and has been
+> corrected.
+>
+> **Known rows sharing the hole:** `bse_announcements` (returns `{}` at HTTP 200),
+> `screener_company_fundamentals`, both BSE bhavcopies, both niftyindices CSVs.
+>
+> **Why this is urgent rather than tidy:** L0 is immutable under invariant #1. A bad payload
+> written there can never be cleaned up, only quarantined.
 
 `Fetcher.fetch` writes to L0 on **any 2xx with zero payload inspection**:
 `dataplatform/ingest/fetcher.py:402` calls `_request(...)`, `:403` calls `_l0.put(...)`, and there
