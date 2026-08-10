@@ -56,16 +56,16 @@
     },
     "M0.3": {
       "attempts": 1,
-      "commit": "f0b0b8a",
-      "finished": "2026-08-08T14:14:20+00:00",
+      "commit": "8cfc4bb",
+      "finished": "2026-08-10T08:53:24+00:00",
       "first_started": "2026-08-08T12:35:55+00:00",
       "last_started": "2026-08-08T12:35:55+00:00",
-      "note": "Two-service compose stack: postgres:16 (named pgdata volume, pg_isready healthcheck with -U/-d, in-network 5432) + app built from ops/Dockerfile (python:3.12-slim, deps from uv.lock via uv, non-root uid 1000, venv on PATH so no uv run at runtime) serving uvicorn dataplatform.status.api:app; app waits on service_healthy. DATA_ROOT bind-mounts the host lake at /data (make up creates L0/L1/L2 first so docker cannot create the mount source as root); Makefile gains logs + psql (psql reads credentials from the container's own env). Verified on a clean boot after down -v: both containers healthy, curl /health returns {\"status\":\"ok\"}, make psql runs a real session, and the app connects to postgres:5432 (server addr 172.18.0.2). Two assumptions, both in the commit body: (1) dataplatform/status/api.py is a /health-only skeleton because the CMD needs an importable ASGI app to be running at all \u2014 M0.5 replaces it with the section 4.4 surface, no stack change; (2) postgres publishes on host port 5433, not 5432, because this host already runs its own postgres bound to 127.0.0.1:5432 and the specific bind wins, so a host client on localhost:5432 reaches the wrong server (reproduced: role trading does not exist) \u2014 publishing on 5432 would leave no working host-side path at all. ops/README.md documents the host DSN as localhost:5433; .env.example/config.py still default to 5432, logged in ops/BACKLOG.md for M0.4.",
-      "previous_state": "DONE",
+      "note": "Rework: entrypoint applies dataplatform.store.migrate before uvicorn starts (fixes the M0 gate root cause -- app healthcheck no longer consumes an unmigrated /health 503); postgres bound to 127.0.0.1 and POSTGRES_PASSWORD has no committed default (invariant #13); fixed a YAML-comment bug in inherited WIP where an unquoted # broke docker compose config entirely. Verified clean-slate (down -v, no cached image): both containers healthy; migrations log at container start; idempotent on warm restart; stopping postgres flips app unhealthy within ~30s and it self-heals -- the healthcheck can genuinely fail. tests/integration: 138 passed, 0 skipped (was 136 skipped repo-wide). Full suite: 1286 passed, 0 skipped, 0 failed. Commit 8cfc4bb.",
+      "previous_state": "FAILED",
       "reason": "gate M0 (M0.8): cold `docker compose up` never reaches healthy. Nothing applies migrations at container start, so /health answers 503 (relation \"scheduler_heartbeat\" does not exist), the app healthcheck fails 6/6 and the container sits `unhealthy` indefinitely \u2014 `restart: unless-stopped` does not retry a failed healthcheck. Verified 2026-08-08 from `docker compose down -v` + `docker image rm trading-platform-app:latest`: 2 min unhealthy after `make up`, healthy within 10s of `make migrate`. Fix on the entrypoint or compose (a one-shot migrate service, or an entrypoint step), and add `make migrate` to ops/README.md's 'Running it' list \u2014 it is absent today. Second defect on the same surface: `make up` has no --build and there is no `make build` target, so the stack was found serving a pre-M0.5 image whose /status/sync 404'd. Full evidence: ops/gates/M0.md",
       "regressed_by": "M0.3 was DONE; regressed by the M0 gate audit (M0.8) per its brief",
-      "state": "FAILED",
-      "verify_output": "$ docker compose -f ops/docker-compose.yml up -d && sleep 8 && docker compose -f ops/docker-compose.yml ps --format json | uv run python -c 'import sys,json; rows=[json.loads(l) for l in sys.stdin if l.strip()]; assert any(r[\"Service\"]==\"postgres\" for r in rows), rows'\n(exit 0)\nContainer trading-platform-app-1 Running \n Container trading-platform-postgres-1 Running \n Container trading-platform-postgres-1 Waiting \n Container trading-platform-postgres-1 Healthy\n\n$ make check\n(exit 0)\nuv run ruff format --check .\n54 files already formatted\nuv run ruff check .\nAll checks passed!\nuv run mypy\nSuccess: no issues found in 42 source files\nuv run pytest\n........................................................................ [ 47%]\n........................................................................ [ 94%]\n.........                                                                [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/fastapi/testclient.py:1\n  /Users/vysh/Documents/work/stocks/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n153 passed, 1 warning in 1.81s"
+      "state": "DONE",
+      "verify_output": "$ docker compose -f ops/docker-compose.yml up -d && sleep 8 && docker compose -f ops/docker-compose.yml ps --format json | uv run python -c 'import sys,json; rows=[json.loads(l) for l in sys.stdin if l.strip()]; assert any(r[\"Service\"]==\"postgres\" for r in rows), rows'\n(exit 0)\nContainer trading-platform-postgres-1  Running\n Container trading-platform-app-1  Running\n Container trading-platform-postgres-1  Waiting\n Container trading-platform-postgres-1  Healthy"
     },
     "M0.4": {
       "attempts": 1,
@@ -276,7 +276,7 @@
       "verify_output": "$ test -s ops/compliance/sebi-algo-memo.md\n(exit 0)\n\n\n$ make check\n(exit 0)\nuv run ruff format --check .\n39 files already formatted\nuv run ruff check .\nAll checks passed!\nuv run mypy\nSuccess: no issues found in 29 source files\nuv run pytest\n.............................                                            [100%]\n29 passed in 0.17s"
     }
   },
-  "updated_at": "2026-08-09T03:47:22+00:00",
+  "updated_at": "2026-08-10T08:53:24+00:00",
   "version": 1,
   "wave": 1
 }
