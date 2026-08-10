@@ -51,9 +51,18 @@ Derived engineering decisions made under §1's authority (recorded here so they 
   `backtest/`, `accounting/`, `ops/`) live at the root per §8.2; no redundant nesting level.
 - **B6 — Migrations.** Plain numbered SQL files in `platform/store/migrations/NNNN_name.sql` plus a ~50-line
   runner, not Alembic. Boring tech (#13); the schema is small and append-only-ish.
-- **B7 — Git discipline.** Local repo, no remote. One commit per completed task, message
-  `[<task-id>] <title>` with a `Task:`/`Acceptance:` trailer. Commits are the rollback unit for a bad
-  autonomous wave. Never `--force`, never rewrite history, never commit `data/` or `.env`.
+- **B7 — Git discipline. THE REPO IS PUBLIC.** `origin` is `git@github.com:ysaakpr/stock-manager.git`
+  and its visibility is **public**. Every commit you make is world-readable the moment it is pushed, and
+  the full history — all of it, not a squashed snapshot — is already published. An earlier revision of
+  this line said "local repo, no remote"; that was **false**, and every agent that trusted it was
+  building under the wrong threat model. Write every file, commit message, fixture, log line and
+  docstring as if a stranger is reading it, because one can. Deleting a secret in a later commit does
+  **not** unpublish it: anything committed and pushed is compromised and must be rotated at the
+  provider (invariant #13, `ops/runbooks/secret-leak.md`).
+  One commit per completed task, message `[<task-id>] <title>` with a `Task:`/`Acceptance:` trailer.
+  Commits are the rollback unit for a bad autonomous wave. Never `--force`, never rewrite history,
+  never commit `data/` or `.env`. History rewriting to expunge a leak is a §3 human-only decision —
+  park it, never attempt it.
 - **B8 — Test fixtures are checked in.** Every source parser has frozen sample files per format era under
   `tests/fixtures/<source>/<era>/`. Live network is *never* touched by the test suite; ingestion tests run
   offline and deterministically in CI.
@@ -130,7 +139,9 @@ A task is `DONE` only when **all** hold:
    quiet — and a gate auditor must not fail a task for another agent's in-flight edit.
 4. New behaviour has tests. Ingestion parsers have era fixtures (B8); anything touching money, adjustment
    factors, rails, or PIT boundaries has tests that fail if the logic is reversed.
-5. No secrets, no `data/`, no large binaries in the commit.
+5. The secret scan passes and the diff introduces no credential-shaped literal — no API key, token,
+   password, DSN with an embedded password, or private key, in code, fixture, config or commit message
+   (invariant #13). No `data/`, no large binaries in the commit.
 6. Docstring or `ops/runbooks/` entry for anything an operator must run or recover.
 7. One commit, message per B7.
 
@@ -166,6 +177,25 @@ the verifier must fail the task.
     `SKIPPED_DATA_RED` in the journal and no trading (§4.4).
 11. **The clock is injected** (B10). Replay is byte-for-byte reproducible.
 12. **Append-only means append-only.** Journal and amendment log are never updated or deleted in place.
+13. **A secret never enters the repo, a log, or an artifact.** The repo is public (B7), so this is the one
+    invariant whose breach cannot be undone by a later commit.
+    - **Where a secret may live:** process environment and the untracked `.env` / `ops/.env`. Nowhere else
+      — not source, YAML, JSON, SQL migration, test fixture, runbook, commit message, or `data/`.
+    - **Every credential-bearing setting is a `SecretStr`**, including connection strings that embed a
+      password (a Postgres DSN *is* a credential). If it can authenticate, it is a secret.
+    - **No secret reaches a log, the status API, or the journal.** The journal is append-only (#12), so a
+      secret written there can never be redacted — it is permanent. Never log a whole `Settings` object,
+      never print the environment, never enable frame-locals in a traceback renderer, and scrub
+      credential-bearing URLs before any error string is logged.
+    - **Never interpolate a secret into a URL, a subprocess argv, or an exception message.** A token in a
+      URL path leaks through every library that quotes the URL back at you when a request fails.
+    - **Checked-in fixtures (B8) must be credential-free.** A recorder that captures request headers must
+      strip authentication before anything is written under `tests/fixtures/`.
+    - **`BUILD_STATE.json` is tracked and therefore published** (D5, commit `64651a4`). It is written by
+      machines, not reviewed by eyes, and every push publishes it. A task's recorded `reason` or `note` is
+      often a raw error string — scrub it. Never let a DSN, token, argv, or captured response body reach
+      build state, and never widen it to hold configuration that could carry a credential.
+    - **A leaked key is rotated first and argued about second.** See `ops/runbooks/secret-leak.md`.
 
 ---
 

@@ -81,3 +81,13 @@ backtests · every decision journaled including no-ops · red data means no trad
 
 One commit per completed task: `[<task-id>] <title>`, with `Task:` and `Acceptance:` trailers. Never commit
 `data/`, `.env`, or credentials. Never force-push or rewrite history.
+
+**This repo is public** (`github.com/ysaakpr/stock-manager`). Every commit is world-readable once pushed,
+and a secret cannot be un-published by deleting it in a later commit — it can only be rotated.
+
+**Secrets:** environment and the untracked `.env` are the only places a credential may live — never source,
+YAML, fixture, migration, runbook, or commit message. Anything that can authenticate is a secret, including
+a Postgres DSN with an embedded password, and every such setting is a `SecretStr`. A secret in a log line,
+the status API, or the journal is a bug — and the journal is append-only, so that one is permanent. Never
+log a whole `Settings` object, never put a token in a URL or an argv. A credential in a commit is a defect
+of the same order as a float in the cost model. Full rule: AGENTIC_CONTEXT §6 invariant #13.

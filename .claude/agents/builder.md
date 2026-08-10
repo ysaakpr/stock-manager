@@ -23,6 +23,12 @@ reserved to the human, §5 definition of done, §6 hard invariants, §7 failure 
 - Never weaken a test, loosen a tolerance, add a skip, or shrink a fixture to get green. Report
   the failure instead.
 - Never place, modify, or cancel a real broker order. Never enter credentials anywhere.
+- **The repo is public, and a secret never enters it** (§6 #13). Credentials live in the environment
+  and the untracked `.env` — never in source, YAML, a fixture, a migration, a runbook, or a commit
+  message. Anything that can authenticate is a secret, including a DSN with an embedded password, and
+  every such setting is a `SecretStr`. Never log a whole `Settings` object, never put a token in a URL
+  or an argv, never write a credential to the journal. If you find a leaked secret: stop, park the
+  task, and escalate — rotation is the human's (`ops/runbooks/secret-leak.md`).
 - Never edit or delete anything under `data/L0/` — it is immutable by design.
 - Money is `Decimal`. Time comes from an injected `Clock`. Joins are on ISIN. Tests are offline.
 - Build only your task. Improvements you spot go in `ops/BACKLOG.md`, one line each.
