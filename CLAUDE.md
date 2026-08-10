@@ -79,8 +79,11 @@ backtests · every decision journaled including no-ops · red data means no trad
 
 ## Git
 
-One commit per completed task: `[<task-id>] <title>`, with `Task:` and `Acceptance:` trailers. Never commit
-`data/`, `.env`, or credentials. Never force-push or rewrite history.
+Every commit message is `[<task-id>] <title>`, with `Task:` and `Acceptance:` trailers. Commit each coherent
+green piece as you reach it rather than saving one commit for the end of the task — the runner has died
+mid-task seven times here and taken the uncommitted tree with it every time (AGENTIC_CONTEXT §7). Several
+well-named commits per task is the intended shape; squashing is the merger's option, never a reason to hold
+work in a dirty tree. Never commit `data/`, `.env`, or credentials. Never force-push or rewrite history.
 
 **This repo is public** (`github.com/ysaakpr/stock-manager`). Every commit is world-readable once pushed,
 and a secret cannot be un-published by deleting it in a later commit — it can only be rotated.

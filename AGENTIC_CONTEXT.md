@@ -132,18 +132,36 @@ A task is `DONE` only when **all** hold:
 
 1. Every acceptance criterion in the task entry demonstrably passes.
 2. The task's `verify` command exits 0, and its output is captured into the state record.
-3. Format, lint and types are clean **on the task's own deliverable paths**. `orch` runs these
-   scoped, not repo-wide: several builder agents share one working tree, so a repo-wide check
-   fails a finished task because a *different* agent has a half-written file on disk. You are
-   accountable for your files. Repo-wide green is the gate auditor's job, run when the tree is
-   quiet — and a gate auditor must not fail a task for another agent's in-flight edit.
+3. **The full gate is green, repo-wide** — secret scan, format, lint, types, and the tests. `orch
+   set <id> DONE` runs it and refuses the transition when it fails (D11).
+
+   *Amended 2026-08-10.* This rule previously mandated **scoped** checks, on the premise that
+   "several builder agents share one working tree, so a repo-wide check fails a finished task
+   because a *different* agent has a half-written file on disk." **That premise is obsolete:**
+   builders now run in per-agent git worktrees, so a peer's in-flight edit is not on your disk.
+   The old rule also let "DONE" mean "compiles and is well formatted" — `orch` never ran pytest at
+   all — which is exactly how four tasks (C.3, M0.4, M1.4, M1.11) came to be recorded DONE with
+   `reason: "make check failed with exit 2"`.
+
+   A scoped format/lint/types pass still runs **first**, as a fast fail, so you learn immediately
+   whether the broken file is one of yours. It is a convenience, not the gate.
+
+   The gate is defined exactly once, in `orchestrator/checks.py`. `make check` and `orch` both
+   call it; they cannot drift, because there is nothing left to drift from.
 4. New behaviour has tests. Ingestion parsers have era fixtures (B8); anything touching money, adjustment
    factors, rails, or PIT boundaries has tests that fail if the logic is reversed.
 5. The secret scan passes and the diff introduces no credential-shaped literal — no API key, token,
    password, DSN with an embedded password, or private key, in code, fixture, config or commit message
    (invariant #13). No `data/`, no large binaries in the commit.
 6. Docstring or `ops/runbooks/` entry for anything an operator must run or recover.
-7. One commit, message per B7.
+7. Commits on the task's own branch, every message prefixed `[<task-id>]` per B7.
+
+   *Amended 2026-08-10.* This previously read "one commit". It now reads *commits*, plural, and
+   deliberately: §7 requires committing each coherent green piece as you reach it, because the
+   runner has died mid-task seven times and taken uncommitted trees with it. A task that lands as
+   five well-named commits is not untidy — it is the recoverable outcome, and the one-commit rule
+   was quietly buying crash-fragility in exchange for a tidy log. Squashing is the merger's option
+   at merge time, never a reason to delay committing.
 
 Reporting a task DONE whose verify command did not pass is the single worst failure mode in this system —
 it poisons every downstream task that trusts it. Report the failure instead; `FAILED` costs one retry,
