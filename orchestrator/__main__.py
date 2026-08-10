@@ -197,21 +197,40 @@ def cmd_set(args: argparse.Namespace) -> int:
 
     # DONE is the one state the agent does not get to assert. We verify it ourselves.
     #
-    # The secret scan is unconditional and first: every other check below is scoped to the
-    # task's own deliverables (or skippable with --skip-check) because a *different* agent's
-    # half-written file must not fail *this* task's format/lint/types. A leaked credential has
-    # no such excuse — it is a defect regardless of which task's diff it rode in on, `orch set
-    # <id> DONE` is the path every agent actually commits through, and invariant #13
-    # (AGENTIC_CONTEXT.md §6) does not carve out an exception for --skip-check.
+    # Both scans are unconditional and first: every other check below is scoped to the task's own
+    # deliverables (or skippable with --skip-check) because a *different* agent's half-written
+    # file must not fail *this* task's format/lint/types. A leaked credential has no such excuse —
+    # it is a defect regardless of which task's diff it rode in on, `orch set <id> DONE` is the
+    # path every agent actually commits through (the agent runs `git commit` itself — allow-listed
+    # in .claude/settings.json, and prompts.py:for_task instructs it to — `orch` never commits on
+    # anyone's behalf), and invariant #13 (AGENTIC_CONTEXT.md §6) does not carve out an exception
+    # for --skip-check.
+    #
+    # The commit-message scan runs against the commit that ALREADY EXISTS by the time this
+    # function is reached: the agent commits, then runs `orch set <id> DONE`, in that order (that
+    # ordering is what lets `git rev-parse HEAD` below record the task's own commit at all). A
+    # secret this catches is therefore caught one step later than the pre-commit hook it
+    # complements, in a commit object that already exists locally — not a leak by itself (nothing
+    # here pushes, and `git push` is denied), but AGENTIC_CONTEXT.md §7's "History rewriting to
+    # expunge a leak is a §3 human-only decision — park it, never attempt it" means the recovery
+    # from a hit here is an escalation, not a clean rewrite. Scanning before the commit exists
+    # would need `orch` to own commit creation, which it does not.
+    #
     # --disable-filter .../is_line_allowlisted: a `# pragma: allowlist secret` comment is not a
     # review — it has no baseline entry and no diff anyone looks at. Every accepted false positive
     # goes through .secrets.baseline instead (Makefile's `check` target carries the full reason).
+    scan_flags = (
+        "-n --disable-filter detect_secrets.filters.allowlist.is_line_allowlisted "
+        "--baseline .secrets.baseline"
+    )
     checks: list[tuple[str, str]] = [
+        ("secret scan", f"uv run detect-secrets-hook {scan_flags} $(git ls-files)"),
         (
-            "secret scan",
-            "uv run detect-secrets-hook -n "
-            "--disable-filter detect_secrets.filters.allowlist.is_line_allowlisted "
-            "--baseline .secrets.baseline $(git ls-files)",
+            "commit message scan",
+            # detect-secrets-hook skips /dev/stdin outright (its own is_invalid_file filter), so
+            # the message has to land in a real temp file first.
+            f'f="$(mktemp)"; git log -1 --format=%B > "$f"; '
+            f'uv run detect-secrets-hook {scan_flags} "$f"; rc=$?; rm -f "$f"; exit "$rc"',
         ),
     ]
     if task.verify:
