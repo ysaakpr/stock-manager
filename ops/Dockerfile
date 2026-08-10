@@ -36,12 +36,20 @@ COPY backtest ./backtest
 COPY accounting ./accounting
 RUN uv sync --frozen --no-dev
 
+# M0.3: applies pending migrations before CMD starts serving (see the file for why). Copied and
+# made executable while we are still root, so the non-root user below only ever needs to read+
+# execute it.
+COPY ops/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # Non-root. The only path the process writes is DATA_ROOT, a bind mount from the host; uid
 # 1000 is fixed so a Linux host can chown the lake to a known owner (see ops/README.md).
 RUN useradd --create-home --uid 1000 app && chown -R app:app /app
 USER app
 
 EXPOSE 8000
+
+ENTRYPOINT ["/app/entrypoint.sh"]
 
 # uvicorn from the project venv, which is already first on PATH — no `uv run` at runtime, so
 # the container never tries to re-resolve dependencies while starting.

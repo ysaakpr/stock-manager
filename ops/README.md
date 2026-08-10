@@ -12,9 +12,12 @@ no nginx, no sidecars.
 ## Running it
 
 ```bash
+cp ops/.env.example ops/.env  # once: set POSTGRES_PASSWORD — see "Configuration" below
 make up      # creates data/L0 data/L1 data/L2, then docker compose up -d
 make logs    # follow both services
 make psql    # interactive shell on the container DB
+make migrate # apply dataplatform/store/migrations/*.sql by hand (the app's entrypoint already
+             # does this on every start; the target is for a running container or a bare DB)
 make down    # stop; the pgdata volume and the lake survive
 make backup  # pg_dump + a checksummed L0 manifest into ops/backups/<ts>
 make restore # rebuild the newest backup into a scratch DB and verify every row count
@@ -24,10 +27,14 @@ make restore # rebuild the newest backup into a scratch DB and verify every row 
 after it. Real recovery, the object-storage gap, and the executed drill transcripts are in
 [runbooks/backup-restore.md](runbooks/backup-restore.md).
 
-`docker compose -f ops/docker-compose.yml up -d` works identically with no environment set —
-every variable has a default. `make up` additionally creates the lake directories, which
-matters: if docker creates a bind-mount source itself it creates it owned by root, and the app
-runs as uid 1000.
+The `app` container's entrypoint (`ops/entrypoint.sh`) applies pending migrations before `uvicorn`
+starts serving, in order: postgres healthy → migrations applied → app serves → healthcheck green.
+`dataplatform.store.migrate` is idempotent, so this runs safely on every start, not just a cold
+one; a migration failure exits the entrypoint non-zero, so the container never comes up serving a
+half-migrated schema. `docker compose -f ops/docker-compose.yml up -d` needs `POSTGRES_PASSWORD`
+set (environment or `ops/.env`) and nothing else — every other variable has a default. `make up`
+additionally creates the lake directories, which matters: if docker creates a bind-mount source
+itself it creates it owned by root, and the app runs as uid 1000.
 
 ## Postgres is on host port 5433, not 5432
 
@@ -54,16 +61,24 @@ back once the host Postgres is gone.
 
 ## Configuration
 
-Compose reads variables from the environment or from **`ops/.env`** — its project directory is
-this file's directory, so the repo-root `.env` is *not* auto-loaded for interpolation. All have
-defaults:
+Compose reads variables from the environment or from **`ops/.env`** (`cp ops/.env.example
+ops/.env`) — its project directory is this file's directory, so the repo-root `.env` is *not*
+auto-loaded for interpolation. Every variable has a default **except `POSTGRES_PASSWORD`**:
+invariant #13 (the repo is public) forbids a working credential in a tracked file, so
+`docker-compose.yml` ships none, and `docker compose up` fails immediately, by name, if it is
+unset rather than standing up a database whose password is `git log`-visible forever.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `trading` | container DB credentials |
-| `POSTGRES_HOST_PORT` | `5433` | host-side publish (in-network is always 5432) |
+| `POSTGRES_PASSWORD` | *(none — required)* | container DB password; set it in `ops/.env` |
+| `POSTGRES_USER` / `POSTGRES_DB` | `trading` | container DB identifiers, not secrets |
+| `POSTGRES_HOST_PORT` | `5433` | host-side publish, bound to `127.0.0.1` only (in-network is always 5432) |
 | `APP_HOST_PORT` | `8000` | host-side publish for the status API |
 | `DATA_ROOT` | `../data` | **host** path of the data lake |
+
+If you set a non-default `POSTGRES_PASSWORD`, update `DATABASE_URL` in the repo-root `.env` to
+match — host tooling (`make migrate`, `tests/integration`) connects on `localhost:5433` using
+that value, independently of what compose hands the `app` container over the network.
 
 The repo-root `.env` *is* passed into the app container (`env_file`, `required: false`), so
 runtime settings the owner keeps there reach the process. `DATABASE_URL`, `DATA_ROOT` and `TZ`
@@ -98,18 +113,18 @@ docker compose -f ops/docker-compose.yml build app && make up
 A code change needs the same rebuild — there is no source bind mount, on purpose: what runs in
 the container is what was built, which is what makes a container's behaviour reproducible.
 
-## Status of the app entrypoint
+## Status of the app's HTTP surface
 
-`dataplatform/status/api.py` is a skeleton serving only `/health` (process liveness, no
-database access). **M0.5** replaces it with the §4.4 surface — `/status/sync`,
-`/status/sources`, `/status/gaps`, `/status/quality`, `/archives` — and a DB-backed scheduler
-heartbeat. The compose stack does not change when that lands.
+`dataplatform/status/api.py` serves the full §4.4 surface — `/health`, `/status/sync`,
+`/status/sources`, `/status/gaps`, `/status/quality`, `/archives` — backed by the database and a
+DB-backed scheduler heartbeat (M0.5). `/health` answers `503` until the schema is migrated and
+readable, which is exactly what the container healthcheck relies on (see "The image" above).
 
 ## Verifying the stack by hand
 
 ```bash
 docker compose -f ops/docker-compose.yml ps                      # postgres healthy, app healthy
-curl -s localhost:8000/health                                    # {"status":"ok"}
+curl -s localhost:8000/health                                    # {"status":"OK", ...}
 docker compose -f ops/docker-compose.yml exec -T app \
   python -c "import os,psycopg; print(psycopg.connect(os.environ['DATABASE_URL']).info.dsn)"
 ```
