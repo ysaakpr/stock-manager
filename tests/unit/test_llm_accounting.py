@@ -100,7 +100,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "anthropic" / "messages_2026_06"
 
 TRADING_DATE = date(2026, 8, 7)
+
+#: When the model call happened, and — deliberately two seconds later — when the row recording it
+#: landed. They must differ: `ts` and `recorded_at` are separate columns precisely so a replayed
+#: ledger is distinguishable from the original, and a test that set the ledger's clock to the same
+#: instant it passed as `ts` could not tell the two columns apart. Same shape as
+#: `tests/unit/test_journal.py`, for the same reason.
 CALLED_AT = datetime(2026, 8, 7, 19, 30, tzinfo=IST)
+RECORDED_AT = datetime(2026, 8, 7, 19, 30, 2, tzinfo=IST)
+
 CASE_ID = "AI_ROBOTICS"
 
 #: Not a credential and not shaped like one. A string that looked like a real key would be a
@@ -232,7 +240,8 @@ WRITE_COLUMNS = (
 
 @pytest.fixture
 def clock() -> FrozenClock:
-    return FrozenClock(CALLED_AT)
+    """Stopped at `RECORDED_AT`, which is *not* `CALLED_AT`. See the note on those constants."""
+    return FrozenClock(RECORDED_AT)
 
 
 @pytest.fixture
@@ -907,8 +916,9 @@ def test_the_ledger_writes_one_row_per_call_with_the_priced_figures(
 
     assert usage_id == 1
     written = conn.params_by_column(WRITE_COLUMNS)
-    assert written["ts"] == CALLED_AT
-    assert written["recorded_at"] == CALLED_AT  # from the injected clock, never datetime.now()
+    assert written["ts"] == CALLED_AT  # when the call happened, from the caller
+    assert written["recorded_at"] == RECORDED_AT  # when the row landed, from the injected clock
+    assert written["ts"] != written["recorded_at"]  # two columns, two instants, never one value
     assert written["provider"] == STUB_PROVIDER
     assert written["model"] == DEFAULT_MODEL
     assert written["purpose"] == "t1_review"
@@ -927,7 +937,31 @@ def test_the_ledger_defaults_its_timestamp_to_the_injected_clock(
     """B10: no module reads the wall clock, so an omitted `ts` comes from the clock it was given."""
     priced = pricer.price(response(), on=INTRO_DATE, purpose="t1_review")
     ledger.record(priced)
-    assert conn.params_by_column(WRITE_COLUMNS)["ts"] == CALLED_AT
+    written = conn.params_by_column(WRITE_COLUMNS)
+    assert written["ts"] == RECORDED_AT
+    assert written["recorded_at"] == RECORDED_AT  # a live call: both instants are "now"
+
+
+def test_a_replayed_row_keeps_the_old_call_time_and_takes_a_new_recorded_at(
+    pricer: TokenPricer, ledger: TokenLedger, conn: RecordingConnection
+) -> None:
+    """`recorded_at` is the ledger's clock, never an echo of the caller's `ts`.
+
+    This is the whole reason there are two timestamp columns: a replay re-writes a call that
+    happened days ago, so its `ts` is old while its `recorded_at` is now, and that difference is
+    what distinguishes a replayed ledger from the original run. Reading `recorded_at` off the
+    caller's `ts` instead would make every replayed row claim to have been written when the call
+    was made — indistinguishable from the original, and the audit trail is gone.
+    """
+    priced = pricer.price(response(), on=INTRO_DATE, purpose="t1_review")
+    long_ago = datetime(2026, 7, 1, 9, 15, tzinfo=IST)
+
+    ledger.record(priced, ts=long_ago)
+
+    written = conn.params_by_column(WRITE_COLUMNS)
+    assert written["ts"] == long_ago  # the call's own instant, preserved
+    assert written["recorded_at"] == RECORDED_AT  # the clock's instant, not the caller's
+    assert written["recorded_at"] > written["ts"]
 
 
 def test_a_naive_timestamp_is_refused(pricer: TokenPricer, ledger: TokenLedger) -> None:
