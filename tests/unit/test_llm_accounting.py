@@ -833,11 +833,13 @@ def test_the_model_that_answered_is_reported_not_the_one_that_was_asked_for(
 ) -> None:
     """A provider may resolve an alias to a dated snapshot, and that is what gets priced.
 
-    Two consequences, both asserted here. The response carries the id the provider used, not the
-    alias the caller sent — otherwise a burn report attributes spend to a model that never ran.
-    And because the card lists aliases, a resolved id it does not list raises at pricing time
-    rather than booking ₹0: loud, which is the designed behaviour (`model_prices.yaml`'s `scope`),
-    and the operator's fix is to add the id to the card.
+    The response carries the id the provider used, not the alias the caller sent — otherwise a
+    burn report attributes spend to a model that never ran, and the figure will not reconcile
+    against an invoice that names the snapshot.
+
+    So the card lists both, and the resolved id prices identically to its alias. It has to: this
+    is `TRIAGE_MODEL`, and an alias-only card would raise on the first triage call of the first
+    real run. That is a rename, not an unpriced model, and the two must not fail the same way.
     """
     client = AnthropicLLM(FAKE_KEY, http_client=stub_transport.client("resolved_model_id.json"))
 
@@ -845,8 +847,60 @@ def test_the_model_that_answered_is_reported_not_the_one_that_was_asked_for(
 
     assert reply.model == "claude-haiku-4-5-20251001"
     assert reply.model != TRIAGE_MODEL
-    with pytest.raises(UnknownModelError, match=r"Add the model to accounting/model_prices\.yaml"):
-        pricer.price(reply, on=INTRO_DATE, purpose="theme_mapping")
+
+    resolved = pricer.price(reply, on=INTRO_DATE, purpose="theme_mapping")
+    alias = pricer.price(
+        response(model=TRIAGE_MODEL, usage=reply.usage), on=INTRO_DATE, purpose="theme_mapping"
+    )
+    assert resolved.cost_inr == alias.cost_inr > 0
+    assert resolved.cost_usd == alias.cost_usd
+
+
+def test_every_dated_id_the_card_lists_prices_as_its_alias_does(card: PriceCard) -> None:
+    """A dated entry is a second name for one model, so it may never be a second price.
+
+    Two entries that drifted apart would make the burn report depend on whether the provider
+    happened to resolve the alias that day — the same call priced two ways.
+    """
+    dated = {
+        model: model.rsplit("-", 1)[0]
+        for schedule in card.schedules
+        for model in schedule.models
+        if model.rsplit("-", 1)[-1].isdigit() and len(model.rsplit("-", 1)[-1]) == 8
+    }
+    assert dated, "the card lists no dated ids; this guard has stopped finding them"
+
+    for schedule in card.schedules:
+        for snapshot, alias in dated.items():
+            if snapshot not in schedule.models:
+                continue
+            assert alias in schedule.models, (
+                f"{snapshot} is listed in {schedule.id}, {alias} is not"
+            )
+            assert schedule.price_for(snapshot) == schedule.price_for(alias)
+
+
+def test_the_triage_model_is_priced_under_both_its_names(card: PriceCard) -> None:
+    """`TRIAGE_MODEL` is the model most likely to be resolved, so it is the one to pin.
+
+    Its dated id is the only one published for the models this client names; if that changes, the
+    card gets the new entry, not a fallback.
+    """
+    for schedule in card.schedules:
+        assert schedule.price_for(TRIAGE_MODEL).input > 0
+        assert schedule.price_for(f"{TRIAGE_MODEL}-20251001").input > 0
+
+
+def test_a_model_nobody_priced_still_fails_loud(pricer: TokenPricer) -> None:
+    """Listing dated ids must not have softened the refusal into a guess.
+
+    A plausible-looking id that is not on the card — a future snapshot, a typo, a model someone
+    wired in without pricing it — still raises. There is no prefix match, no nearest neighbour and
+    no ₹0.
+    """
+    for unknown in ("claude-haiku-4-5-20260101", "claude-haiku-4-6", "claude-opus-5-20260624"):
+        with pytest.raises(UnknownModelError, match="has no price for model"):
+            pricer.price(response(model=unknown), on=INTRO_DATE, purpose="theme_mapping")
 
 
 def test_a_truncated_answer_is_visible_and_still_billed(stub_transport: _Transport) -> None:
