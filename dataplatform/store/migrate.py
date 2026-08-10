@@ -20,6 +20,7 @@ Run it with `make migrate`, which is `uv run python -m dataplatform.store.migrat
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import re
 import sys
@@ -32,7 +33,14 @@ from dataplatform.config import Settings, get_settings
 from dataplatform.logging import configure_logging, get_logger
 from dataplatform.store.db import Connection, connection
 
-__all__ = ["MIGRATIONS_DIR", "Migration", "MigrationError", "discover", "migrate"]
+__all__ = [
+    "MIGRATIONS_DIR",
+    "Migration",
+    "MigrationConnectionError",
+    "MigrationError",
+    "discover",
+    "migrate",
+]
 
 #: Where the numbered SQL files live, beside this module.
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
@@ -61,6 +69,17 @@ log = get_logger(__name__)
 
 class MigrationError(RuntimeError):
     """The migrations on disk and the ones recorded in the database disagree."""
+
+
+class MigrationConnectionError(RuntimeError):
+    """The database could not be reached, or the driver rejected the connection string.
+
+    Deliberately never wraps the original exception's message. Some drivers put the offending
+    value verbatim into their own error text — psycopg does this for a malformed password
+    (`unexpected spaces found in "..."`) — which would otherwise put a secret in this process's
+    stdout/stderr on every restart (invariant #13). Only the exception's type name is safe to
+    surface; the message here is written fresh, from what is already known to be non-secret.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,11 +152,29 @@ def migrate(
     migrations = discover(directory)
 
     # Autocommit at the connection level, with an explicit transaction around each migration:
-    # the advisory lock has to outlive those transactions (it guards the whole run, not one file),
-    # and the bootstrap must be visible to a second runner that is waiting on the lock.
-    with connection(settings, autocommit=True) as conn:
-        conn.execute(_BOOTSTRAP)
+    # the advisory lock has to outlive those transactions (it guards the whole run, not one file).
+    # The lock is taken *before* anything else touches the schema: `CREATE TABLE IF NOT EXISTS`
+    # is not safe against a concurrent identical statement (two sessions can both decide the table
+    # is missing and race to create it — observed for real with 6 concurrent runners, one dying on
+    # `pg_type_typname_nsp_index`, the ledger unharmed). The entrypoint makes two runners starting
+    # at once an ordinary occurrence, not a rare accident, so this has to hold under real
+    # concurrency: a restart loop, or a second app container racing the first.
+    with contextlib.ExitStack() as stack:
+        # Opening the connection is the one call in this function that touches the DSN before
+        # anything is known to have gone right — the seam where a rejected password or an
+        # unreachable host surfaces, and therefore the seam whose exception must never be
+        # printed as-is (see MigrationConnectionError). Everything past this point runs plain
+        # SQL against an already-open connection, whose errors are safe to show in full.
+        try:
+            conn = stack.enter_context(connection(settings, autocommit=True))
+        except Exception as error:
+            raise MigrationConnectionError(
+                f"could not open the configured database connection ({type(error).__name__}). "
+                "Check that the host is reachable and that DATABASE_URL's user, password and "
+                "database are correct."
+            ) from None
         conn.execute("SELECT pg_advisory_lock(%s)", (_LOCK_KEY,))
+        conn.execute(_BOOTSTRAP)
         pending = _pending(conn, migrations)
         for migration in pending:
             _apply(conn, migration, applied_at=clock.now())
@@ -187,8 +224,17 @@ def main() -> int:
     configure_logging()
     try:
         applied = migrate()
+    except MigrationConnectionError as error:
+        log.error("migrate.failed", stage="connect", error=str(error))
+        return 1
     except MigrationError as error:
-        log.error("migrate.failed", error=str(error))
+        log.error("migrate.failed", stage="schema", error=str(error))
+        return 1
+    except Exception as error:
+        # Last-resort net, not the expected path: MigrationConnectionError already covers the
+        # one call site known to echo secrets. This exists so a future exception type nobody
+        # anticipated still cannot put its own message — and whatever it embedded — on stdout.
+        log.error("migrate.failed", stage="unexpected", error_type=type(error).__name__)
         return 1
     for migration in applied:
         print(f"applied {migration.path.name}")
