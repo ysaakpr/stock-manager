@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from typing import Any
 
+import httpx
 import pytest
 import structlog
 from pydantic import SecretStr
@@ -37,11 +38,13 @@ from dataplatform.alerts import (
     Severity,
     TelegramAlerter,
     TelegramConfig,
+    TelegramDeliveryError,
+    _telegram_transport,
     build_alerter,
 )
 from dataplatform.clock import IST, FrozenClock
-from dataplatform.config import REPO_ROOT, AlertProvider
-from dataplatform.logging import configure_logging
+from dataplatform.config import REPO_ROOT, AlertProvider, AppEnv, Settings
+from dataplatform.logging import configure_logging, get_logger
 from tests.conftest import SettingsLoader
 
 EXAMPLE_ENV = REPO_ROOT / ".env.example"
@@ -433,6 +436,64 @@ def test_the_telegram_token_lives_in_the_url_and_nowhere_else() -> None:
 
     assert config.send_message_url().endswith("/bot123456:test-token/sendMessage")
     assert "test-token" not in repr(config)
+
+
+def test_a_rejected_telegram_call_raises_without_the_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`httpx.HTTPStatusError.__str__` embeds the full request URL — token in the path, per
+    `TelegramConfig.send_message_url` — so it must never escape `_telegram_transport` (invariant
+    #13): a wrong chat id or a bot token mid-rotation is exactly when this path is exercised.
+
+    `__cause__ is None` alone proves nothing: a bare `raise TelegramDeliveryError(...)` with no
+    `from` clause at all *also* leaves `__cause__` as `None` — Python only routes the original,
+    token-bearing `HTTPStatusError` through the implicit `__context__` chain instead, which every
+    renderer (Python's own, structlog's, Rich's) still prints. `__suppress_context__` is the flag
+    that is only `True` when an explicit `from` clause — including `from None` — was used, so it
+    is the one assertion here that a regression to a bare `raise` actually fails (verified by
+    hand: with the `from None` deleted, `__cause__ is None` still holds and this line does not).
+    """
+    config = TelegramConfig(bot_token=SecretStr("123456:a-real-looking-token"), chat_id="-100999")
+    request = httpx.Request("POST", config.send_message_url())
+    response = httpx.Response(401, request=request, text='{"ok": false}')
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: response)
+
+    with pytest.raises(TelegramDeliveryError) as caught:
+        _telegram_transport(config, {"chat_id": "-100999", "text": "hi"})
+
+    assert "a-real-looking-token" not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True  # the assertion a bare `raise` would fail
+    assert caught.value.status_code == 401
+    assert caught.value.chat_id == "-100999"
+
+
+@pytest.mark.parametrize("app_env", [AppEnv.PROD, AppEnv.DEV])
+def test_a_rejected_telegram_call_does_not_leak_the_token_into_the_log(
+    app_env: AppEnv, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact production path the audit named: a scheduler job catches the delivery failure
+    and logs it with `exc_info=True` (scheduler/runner.py) — asserted against the *rendered log
+    output* in both JSON (prod) and Rich/console (dev) mode, not just the exception's own
+    attributes: a redaction processor cannot reach inside Rich's rendered traceback (it runs
+    before the renderer, and Rich injects ANSI mid-token even if it could), so the only thing
+    standing between the token and a dev log is `__suppress_context__` actually being `True`.
+    Verified by hand that a bare `raise` (no `from` clause) makes the token appear in both modes.
+    """
+    config = TelegramConfig(bot_token=SecretStr("123456:a-real-looking-token"), chat_id="-100999")
+    request = httpx.Request("POST", config.send_message_url())
+    response = httpx.Response(401, request=request)
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: response)
+    alerter = TelegramAlerter(config, clock=FrozenClock(CLOSE))
+    stream = io.StringIO()
+    configure_logging(Settings(app_env=app_env), clock=FrozenClock(CLOSE), stream=stream)
+
+    try:
+        alerter.send(Severity.CRITICAL, "test", "body", "dedup:key")
+    except TelegramDeliveryError:
+        get_logger().exception("job_failed")
+
+    assert "a-real-looking-token" not in stream.getvalue()
 
 
 def test_an_oversized_body_is_truncated_rather_than_rejected_by_the_api() -> None:

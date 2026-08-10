@@ -1,0 +1,43 @@
+# Secret scanning at commit time (AGENTIC_CONTEXT invariant #13) — for whoever has run
+# `make hooks` (or `uv run pre-commit install`) in their own clone. This file does nothing by
+# itself: git does not execute a repo's own `.pre-commit-config.yaml` on clone or on commit —
+# that would mean a fresh checkout could run arbitrary code, which is the opposite of what a
+# security control should do. Nothing in this repo runs `pre-commit install` for you.
+#
+# This is convenience for a human at a keyboard, not a load-bearing control. The autonomous build
+# does not run this hook — the agent commits directly (`git commit` is allow-listed and
+# orchestrator/prompts.py:for_task instructs it to; `orch` itself never commits on anyone's
+# behalf) — but `orch set <id> DONE`'s own checks (orchestrator/__main__.py:cmd_set) now scan both
+# the tree AND the commit message the agent just created, catching on that path what this hook
+# would have caught earlier had it run. `make check` and `orch`'s DONE path are the controls that
+# cannot be skipped; treat this file as one commit earlier than those for a human, never as a
+# replacement for them, and never as coverage of the autonomous path at all.
+#
+# `language: system` + `uv run`, not the upstream detect-secrets pre-commit repo: that would
+# fetch and install its own copy of the tool from GitHub on every fresh clone, version-drifting
+# from the one pinned in uv.lock. Running it through uv means one install, one pinned version,
+# and it works offline once `uv sync` has run once.
+repos:
+  - repo: local
+    hooks:
+      - id: detect-secrets
+        name: detect-secrets (no live verification — see Makefile's `check` target for why)
+        entry: >-
+          uv run detect-secrets-hook -n
+          --disable-filter detect_secrets.filters.allowlist.is_line_allowlisted
+          --baseline .secrets.baseline
+        language: system
+        pass_filenames: true
+      # Invariant #13 names commit messages explicitly ("a secret in ... the journal" is the same
+      # class of never-undoable mistake as one in a commit message — AGENTIC_CONTEXT.md §6). This
+      # stage needs a second, separate `pre-commit install --hook-type commit-msg` (`make hooks`
+      # runs both); the same detect-secrets-hook, pointed at the message file pre-commit hands it
+      # instead of the changed files.
+      - id: detect-secrets-commit-msg
+        name: detect-secrets (commit message)
+        entry: >-
+          uv run detect-secrets-hook -n
+          --disable-filter detect_secrets.filters.allowlist.is_line_allowlisted
+          --baseline .secrets.baseline
+        language: system
+        stages: [commit-msg]

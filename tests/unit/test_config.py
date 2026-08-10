@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import re
 import socket
+import typing
 from pathlib import Path
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from dataplatform.config import (
     REPO_ROOT,
@@ -28,6 +29,8 @@ from dataplatform.config import (
     LogFormat,
     LogLevel,
     Settings,
+    SettingsValidationError,
+    get_settings,
 )
 from tests.conftest import SettingsLoader
 
@@ -58,7 +61,12 @@ def test_settings_load_from_the_example_env_offline(load_settings: SettingsLoade
     assert settings.log_format is LogFormat.AUTO
     assert settings.timezone == "Asia/Kolkata"
     assert settings.tzinfo.key == "Asia/Kolkata"
-    assert settings.database_url.startswith("postgresql://")
+    assert settings.database_url is None  # discrete POSTGRES_* below is the documented default
+    assert settings.postgres_host == "localhost"
+    assert settings.postgres_port == 5433
+    assert settings.postgres_user == "trading"
+    assert settings.postgres_password.get_secret_value() == "trading"
+    assert settings.postgres_db == "trading"
     assert settings.data_root == REPO_ROOT / "data"
     assert settings.http_min_interval_seconds >= 2.0  # §4.1 crawl policy
     assert settings.http_user_agent.startswith("Mozilla/5.0")  # NSE rejects non-browser agents
@@ -147,16 +155,47 @@ def test_a_blank_credential_is_absent_rather_than_an_empty_secret(
     assert settings.anthropic_api_key is None
 
 
+#: Every field on `Settings` whose type is `SecretStr` or `SecretStr | None` — computed from the
+#: model rather than hand-listed, so a credential added later (M6.8's Anthropic key already here,
+#: M8.3's Kite secret already here) is covered by construction instead of by remembering to widen
+#: this test (invariant #13).
+_SECRET_STR_FIELDS = [
+    name
+    for name, field in Settings.model_fields.items()
+    if field.annotation is SecretStr or SecretStr in typing.get_args(field.annotation)
+]
+
+
+def test_every_settings_field_that_can_authenticate_is_a_secret_str() -> None:
+    """A bare `str` credential (a DSN included) is invariant #13's one-line regression."""
+    assert "database_url" in _SECRET_STR_FIELDS
+    assert "postgres_password" in _SECRET_STR_FIELDS
+    assert "anthropic_api_key" in _SECRET_STR_FIELDS
+    assert "kite_api_key" in _SECRET_STR_FIELDS
+    assert "kite_api_secret" in _SECRET_STR_FIELDS
+    assert "alert_smtp_password" in _SECRET_STR_FIELDS
+    assert "alert_telegram_bot_token" in _SECRET_STR_FIELDS
+
+
+@pytest.mark.parametrize("field", _SECRET_STR_FIELDS)
 def test_a_configured_credential_is_masked_in_the_repr(
-    load_settings: SettingsLoader, monkeypatch: pytest.MonkeyPatch
+    field: str, load_settings: SettingsLoader, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Settings get printed into logs and tracebacks; the secret must not come along."""
-    monkeypatch.setenv("KITE_API_SECRET", "s3cret-token")
+    """Settings get printed into logs and tracebacks; no secret-bearing field may leak there."""
+    marker = f"s3cret-{field}-9f2c"
+    value = (
+        f"postgresql://trading:{marker}@localhost:5433/trading"
+        if field == "database_url"
+        else marker
+    )
+    monkeypatch.setenv(field.upper(), value)
     settings = load_settings(None)
 
-    assert settings.kite_api_secret is not None
-    assert settings.kite_api_secret.get_secret_value() == "s3cret-token"
-    assert "s3cret-token" not in repr(settings)
+    secret = getattr(settings, field)
+    assert secret is not None
+    assert marker in secret.get_secret_value()
+    assert marker not in repr(settings)
+    assert marker not in str(settings)
 
 
 @pytest.mark.parametrize(
@@ -179,4 +218,86 @@ def test_a_bad_value_fails_loud_at_construction(
     monkeypatch.setenv(key, value)
 
     with pytest.raises(ValidationError):
+        load_settings(None)
+
+
+@pytest.mark.parametrize(
+    "bad_dsn",
+    [
+        # A colon-free input — a bare password, or the libpq keyword form
+        # (`host=... password=... dbname=...`), which `psycopg.conninfo.conninfo_to_dict`
+        # parses happily and which store/db.py's own docstring points operators toward for a
+        # managed Postgres that hands out one connection string.
+        "host=localhost user=trading password=Sup3rS3cret! dbname=trading",
+        "MyPlainPasswordOnly",
+        "mysql://u:s3cret-mysql-pw@h/d",
+    ],
+)
+def test_an_invalid_database_url_raises_a_validation_error_naming_no_scheme(
+    bad_dsn: str, load_settings: SettingsLoader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`value.split(":")[0]` used to return the *entire* input when it held no colon, putting a
+    plaintext password straight into `_postgres_dsn`'s own hand-written message — fixed by not
+    building one from the value at all.
+
+    This test only proves the *type* of failure and the *validator's own message*; whether the
+    value can still appear is a question about `pydantic.ValidationError` itself, not about this
+    validator, and belongs to `test_get_settings_never_echoes_a_rejected_database_url` below —
+    `pydantic.ValidationError.errors()` attaches the pre-coercion input to any field a validator
+    rejects, and `str(ValidationError)` renders it, regardless of the validator's own message.
+    Asserting non-leakage against the raw `ValidationError` here would be asserting something
+    false: it *does* leak at this level, unavoidably, which is exactly why `get_settings()` exists
+    to catch and re-wrap it before anything in this process ever sees the raw object.
+    """
+    monkeypatch.setenv("DATABASE_URL", bad_dsn)
+
+    with pytest.raises(ValidationError, match="must be a Postgres DSN"):
+        load_settings(None)
+
+
+@pytest.mark.parametrize(
+    "bad_dsn",
+    [
+        "host=localhost user=trading password=Sup3rS3cret! dbname=trading",
+        "MyPlainPasswordOnly",
+        "mysql://u:s3cret-mysql-pw@h/d",
+    ],
+)
+def test_get_settings_never_echoes_a_rejected_database_url(
+    bad_dsn: str, clean_settings_env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real production path: nothing outside config.py and tests constructs `Settings()`
+    directly (`status/api.py`, every other caller, goes through `get_settings()`). Proves the
+    deeper leak `_postgres_dsn`'s own message fix does not touch: `pydantic.ValidationError`
+    attaches the raw, pre-coercion `DATABASE_URL` string to its `errors()` output — and renders it
+    in `str(ValidationError)` — for *any* field a custom validator rejects, independent of what
+    that validator's message says. `SecretStr`'s masking only applies once a `SecretStr` instance
+    exists; the string `BaseSettings` read from the environment is not one yet when this fires.
+    """
+    monkeypatch.setenv("DATABASE_URL", bad_dsn)
+    get_settings.cache_clear()
+
+    try:
+        with pytest.raises(SettingsValidationError) as caught:
+            get_settings()
+        assert bad_dsn not in str(caught.value)
+        assert "database_url" in str(caught.value)
+    finally:
+        get_settings.cache_clear()
+
+
+def test_a_sqlalchemy_style_scheme_is_rejected_at_validation_not_at_connect(
+    load_settings: SettingsLoader, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`postgresql+psycopg://` is SQLAlchemy's driver-suffix convention — this platform has no
+    SQLAlchemy anywhere, and psycopg.conninfo.conninfo_to_dict rejects the `+driver` suffix
+    unconditionally. Accepting it here would only move that same rejection past this message and
+    into connect()'s MalformedDatabaseUrlError, which would then blame "a metacharacter in the
+    password" for a DSN that never had one — the wrong diagnosis for the actual problem.
+    """
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+psycopg://trading:trading@localhost:5433/trading"
+    )
+
+    with pytest.raises(ValidationError, match="must be a Postgres DSN"):
         load_settings(None)

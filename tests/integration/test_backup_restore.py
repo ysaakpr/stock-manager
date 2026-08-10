@@ -28,8 +28,9 @@ import pytest
 
 from dataplatform.clock import IST
 from dataplatform.config import Settings
-from dataplatform.store.db import connect, connection, with_dbname
+from dataplatform.store.db import connect, connection
 from dataplatform.store.migrate import migrate
+from tests.integration.conftest import settings_for, skip_or_fail_on_connect_error
 
 pytestmark = pytest.mark.integration
 
@@ -60,11 +61,6 @@ LAKE_FILES = {
 BACKUP_FILES = ("postgres.dump", "row_counts.tsv", "l0_manifest.sha256", "backup.json")
 
 SEEDED_AT = datetime(2026, 8, 8, 18, 30, tzinfo=IST)
-
-
-def _settings_for(dbname: str) -> Settings:
-    """Settings for the configured server with a different database selected."""
-    return Settings(database_url=with_dbname(Settings().database_url, dbname))
 
 
 def _run(
@@ -112,15 +108,15 @@ def docker_postgres() -> None:
     if shutil.which("docker") is None:  # pragma: no cover - environment, not logic
         pytest.skip("docker is not on PATH")
     try:
-        connect(_settings_for("postgres"), autocommit=True).close()
+        connect(settings_for("postgres"), autocommit=True).close()
     except psycopg.OperationalError as error:  # pragma: no cover - environment, not logic
-        pytest.skip(f"postgres is not reachable — run `make up` first: {error}")
+        skip_or_fail_on_connect_error(error)
 
 
 @pytest.fixture(scope="session")
 def source_db(docker_postgres: None) -> Iterator[str]:
     """A migrated database holding exactly `SEEDED` rows, dropped at the end of the session."""
-    admin = _settings_for("postgres")
+    admin = settings_for("postgres")
     conn = connect(admin, autocommit=True)
     try:
         for dbname in (SOURCE_DB, SCRATCH_DB):
@@ -129,7 +125,7 @@ def source_db(docker_postgres: None) -> Iterator[str]:
     finally:
         conn.close()
 
-    settings = _settings_for(SOURCE_DB)
+    settings = settings_for(SOURCE_DB)
     migrate(settings)
     with connection(settings) as live:
         for index in range(SEEDED["security_master"]):
@@ -280,7 +276,7 @@ def test_restore_leaves_no_scratch_database_behind(
 ) -> None:
     """The drill is a drill: it proves the dump restores and then tidies up after itself."""
     _run("restore.sh", "--scratch", "--backup", str(backup), "--db", SCRATCH_DB, env=script_env)
-    with connection(_settings_for("postgres"), autocommit=True) as conn:
+    with connection(settings_for("postgres"), autocommit=True) as conn:
         row = conn.execute(
             "SELECT count(*) FROM pg_database WHERE datname = %s", (SCRATCH_DB,)
         ).fetchone()
@@ -367,7 +363,7 @@ def test_restore_refuses_to_target_the_live_database(
     backup: Path, script_env: dict[str, str]
 ) -> None:
     """The one thing a drill must never do is overwrite the database it is drilling for."""
-    live = Settings().database_url.rsplit("/", 1)[-1].split("?")[0]
+    live = Settings().postgres_db
     done = _run(
         "restore.sh",
         "--scratch",

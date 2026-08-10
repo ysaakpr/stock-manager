@@ -23,8 +23,9 @@ import pytest
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
-from dataplatform.store.db import Connection, connect, connection, with_dbname
+from dataplatform.store.db import Connection, connect, connection
 from dataplatform.store.migrate import MigrationError, discover, migrate
+from tests.integration.conftest import settings_for, skip_or_fail_on_connect_error
 
 pytestmark = pytest.mark.integration
 
@@ -86,30 +87,21 @@ PLAN_MODULE = re.compile(r"^(D[1-7]|A[1-9]|X[1-3]) ")
 APPLIED_AT = datetime(2026, 8, 8, 9, 15, tzinfo=IST)
 
 
-def _settings_for(dbname: str) -> Settings:
-    """Settings for the configured server with a different database selected.
-
-    An explicit keyword outranks the environment in pydantic-settings, so this picks up the
-    developer's real credentials and host while pointing somewhere harmless.
-    """
-    return Settings(database_url=with_dbname(Settings().database_url, dbname))
-
-
 @pytest.fixture(scope="session")
 def scratch_settings() -> Iterator[Settings]:
     """Create an empty scratch database for the session; drop it again afterwards."""
-    admin = _settings_for("postgres")
+    admin = settings_for("postgres")
     try:
         conn = connect(admin, autocommit=True)
     except psycopg.OperationalError as error:  # pragma: no cover - environment, not logic
-        pytest.skip(f"postgres is not reachable — run `make up` first: {error}")
+        skip_or_fail_on_connect_error(error)
     try:
         conn.execute(f'DROP DATABASE IF EXISTS "{SCRATCH_DB}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{SCRATCH_DB}"')
     finally:
         conn.close()
 
-    yield _settings_for(SCRATCH_DB)
+    yield settings_for(SCRATCH_DB)
 
     conn = connect(admin, autocommit=True)
     try:

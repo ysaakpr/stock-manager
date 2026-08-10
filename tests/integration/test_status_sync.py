@@ -35,8 +35,9 @@ from dataplatform.status.sync_state import (
     UnknownSyncRowError,
     is_green,
 )
-from dataplatform.store.db import Connection, connect, connection, with_dbname
+from dataplatform.store.db import Connection, connect, connection
 from dataplatform.store.migrate import migrate
+from tests.integration.conftest import settings_for, skip_or_fail_on_connect_error
 
 pytestmark = pytest.mark.integration
 
@@ -62,26 +63,21 @@ UNCOVERED = date(2011, 6, 1)  # before the holiday file begins
 NOW = datetime(2026, 8, 10, 9, 15, tzinfo=IST)
 
 
-def _settings_for(dbname: str) -> Settings:
-    """Settings for the configured server with a different database selected."""
-    return Settings(database_url=with_dbname(Settings().database_url, dbname))
-
-
 @pytest.fixture(scope="session")
 def scratch_settings() -> Iterator[Settings]:
     """A migrated scratch database for the session; dropped again afterwards."""
-    admin = _settings_for("postgres")
+    admin = settings_for("postgres")
     try:
         conn = connect(admin, autocommit=True)
     except psycopg.OperationalError as error:  # pragma: no cover - environment, not logic
-        pytest.skip(f"postgres is not reachable — run `make up` first: {error}")
+        skip_or_fail_on_connect_error(error)
     try:
         conn.execute(f'DROP DATABASE IF EXISTS "{SCRATCH_DB}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{SCRATCH_DB}"')
     finally:
         conn.close()
 
-    settings = _settings_for(SCRATCH_DB)
+    settings = settings_for(SCRATCH_DB)
     migrate(settings, clock=FrozenClock(NOW))
     yield settings
 

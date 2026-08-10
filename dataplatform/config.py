@@ -1,7 +1,10 @@
 """Process configuration (§8.1) — one `Settings` object, read from the environment or `.env`.
 
 Every knob the platform has lives here, so "what is this process actually configured to do" is a
-single object an operator can print, and so no module invents its own `os.environ` lookup.
+single object, and so no module invents its own `os.environ` lookup. Every credential-bearing
+field is a `SecretStr` (AGENTIC_CONTEXT invariant #13), so an operator inspecting the object at a
+REPL sees it masked — but that masking is a last line of defence, not a licence to log it: no code
+in this platform may log, print to the status API, or journal a whole `Settings` object.
 `.env.example` documents every key and is the file `tests/unit/test_config.py` loads, which keeps
 the two from drifting apart.
 
@@ -17,7 +20,7 @@ from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Repo root, derived from this file's location so the defaults work from any working directory
@@ -33,8 +36,34 @@ __all__ = [
     "LogFormat",
     "LogLevel",
     "Settings",
+    "SettingsValidationError",
     "get_settings",
 ]
+
+
+class SettingsValidationError(ValueError):
+    """`Settings()` failed validation. Carries field paths and reasons, never a rejected value.
+
+    Raised instead of letting `pydantic.ValidationError` propagate from `get_settings()`:
+    pydantic attaches the *pre-coercion* input to every failing field's error entry — for a
+    setting read from the environment, that is the raw string `BaseSettings` saw, regardless of
+    the field's declared type or what its own validator's message says. A `SecretStr` field is no
+    exception: coercion into `SecretStr` happens *inside* the same validation pass that can reject
+    it, so a `database_url` rejected by `_postgres_dsn` reports `input='<the raw DSN>'` in
+    `ValidationError.errors()`, and `str(ValidationError)` renders that field verbatim — masking
+    only ever applies to a `SecretStr` *instance* that already exists, not to the string pydantic
+    is in the middle of turning into one (invariant #13). Verified: `Settings(database_url=
+    SecretStr(bad))` (a `SecretStr` handed in directly) masks correctly; `Settings(_env_file=None)`
+    with `DATABASE_URL` set to the same value in the environment does not — same validator, same
+    rejection, different echo, because only the second path coerces from a raw string.
+    """
+
+    def __init__(self, error: ValidationError) -> None:
+        reasons = "; ".join(
+            f"{'.'.join(str(part) for part in entry['loc'])}: {entry['msg']}"
+            for entry in error.errors()
+        )
+        super().__init__(f"invalid configuration - {reasons}")
 
 
 class AppEnv(StrEnum):
@@ -126,13 +155,40 @@ class Settings(BaseSettings):
     )
 
     # ── storage ──────────────────────────────────────────────────────────────────────────────
-    database_url: str = Field(
-        # Port 5433, not 5432: that is where ops/docker-compose.yml publishes the container DB on
-        # the host, because this host already runs its own Postgres on 127.0.0.1:5432 and a
-        # default of 5432 silently reaches that other server (ops/README.md). In-container the
-        # app is handed postgres:5432 by compose and never sees this default.
-        default="postgresql://trading:trading@localhost:5433/trading",
-        description="Postgres DSN for masters, sync state and the journal",
+    # Discrete connection parameters, not a pre-built DSN string, are the default path: a
+    # Postgres password can legitimately contain a space, `@`, `/`, `%`, `#`, `?` or `:`, and a
+    # DSN string is a URI — those characters need percent-encoding to survive one, which nothing
+    # upstream of this process can be trusted to have done (ops/docker-compose.yml's own
+    # `${POSTGRES_PASSWORD}` interpolation does not). `dataplatform.store.db.connect` hands these
+    # to psycopg as keyword arguments, never assembling a URL, so no character is ever ambiguous
+    # (invariant #13: a wrong DSN parse silently reaching a different database, or a malformed one
+    # quoting the password fragment back in a `ProgrammingError`, are both a leak/misconnection of
+    # exactly the kind that rule exists to prevent).
+    #
+    # Port 5433, not 5432: that is where ops/docker-compose.yml publishes the container DB on the
+    # host, because this host already runs its own Postgres on 127.0.0.1:5432 and a default of
+    # 5432 silently reaches that other server (ops/README.md). In-container the app is expected to
+    # be given POSTGRES_HOST=postgres and POSTGRES_PORT=5432 explicitly.
+    postgres_host: str = Field(default="localhost", description="Postgres server host")
+    postgres_port: Annotated[int, Field(ge=1, le=65535)] = Field(
+        default=5433, description="Postgres server port"
+    )
+    postgres_user: str = Field(default="trading", description="Postgres role this process uses")
+    postgres_password: SecretStr = Field(
+        default=SecretStr("trading"),
+        description="Postgres role's password — a SecretStr regardless of the default (#13)",
+    )
+    postgres_db: str = Field(
+        default="trading", description="Postgres database for masters, sync state and the journal"
+    )
+    # An explicit escape hatch, not the default: a single DSN string is occasionally the only
+    # option (a managed Postgres that hands out one connection string), and existing tooling
+    # (ops/README.md's demo, a developer's own shell) may still export DATABASE_URL directly. Set,
+    # it overrides every POSTGRES_* field above outright — whoever sets it owns getting any
+    # metacharacter in its password percent-encoded, per `urllib.parse.quote`.
+    database_url: SecretStr | None = Field(
+        default=None,
+        description="explicit full DSN override; unset means build safely from POSTGRES_* above",
     )
     data_root: Path = Field(
         default=Path("data"),
@@ -236,6 +292,7 @@ class Settings(BaseSettings):
         "alert_email_from",
         "alert_telegram_bot_token",
         "alert_telegram_chat_id",
+        "database_url",
         mode="before",
     )
     @classmethod
@@ -254,10 +311,31 @@ class Settings(BaseSettings):
 
     @field_validator("database_url")
     @classmethod
-    def _postgres_dsn(cls, value: str) -> str:
-        """Postgres is the only supported store (§8.1); a DSN for anything else is a typo."""
-        if not value.startswith(("postgres://", "postgresql://", "postgresql+")):
-            raise ValueError(f"database_url must be a Postgres DSN, got {value.split(':')[0]!r}")
+    def _postgres_dsn(cls, value: SecretStr | None) -> SecretStr | None:
+        """Postgres is the only supported store (§8.1); a DSN for anything else is a typo.
+
+        Calls `get_secret_value()` once rather than binding it to a local: a local binding is a
+        second place the unwrapped DSN lives for the rest of this frame's life, and this frame is
+        exactly the one a `ValidationError` traceback would show (invariant #13 — keep `SecretStr`
+        wrapped all the way to the point it is actually used, never one line longer).
+
+        Never includes the value in the raised message, not even a prefix of it: a colon-free
+        input (a bare password, or a libpq keyword-form DSN like `host=... password=...`, which
+        `psycopg.conninfo.conninfo_to_dict` parses happily and an operator following
+        `store/db.py`'s own advice to prefer `DATABASE_URL` for a managed provider might plausibly
+        paste) makes `value.split(":")[0]` return the *entire* string — pydantic's field name in
+        the error envelope is enough to act on; the value never needs to ride along.
+
+        `postgresql+` (the SQLAlchemy driver-suffix convention) is deliberately not an accepted
+        scheme: this platform has no SQLAlchemy anywhere, and `conninfo_to_dict` rejects that form
+        unconditionally, so accepting it here would only move the same rejection one hop later —
+        past this message, into `connect()`'s `MalformedDatabaseUrlError`, which then names the
+        wrong cause ("a metacharacter in the password") for a DSN that never had one.
+        """
+        if value is None:
+            return None
+        if not value.get_secret_value().startswith(("postgres://", "postgresql://")):
+            raise ValueError("database_url must be a Postgres DSN")
         return value
 
     @field_validator("data_root")
@@ -290,7 +368,15 @@ def get_settings() -> Settings:
     module sees the same configuration for the life of the process.
     What it assumes: configuration does not change under a running process.
     What it never does: hide a construction error — a bad value raises here, at startup, rather
-    than at the first ingestion. Tests that need a different configuration construct `Settings`
-    directly and inject it, instead of mutating this cache.
+    than at the first ingestion — or let one carry the rejected value. A `ValidationError` from a
+    bad env-sourced `database_url` is re-raised as `SettingsValidationError`, which is why that
+    type exists: pydantic's own error object is not safe to let reach stderr or a log field
+    unrewritten (invariant #13; see `SettingsValidationError`'s docstring for the exact mechanism).
+    Tests that need a different configuration construct `Settings` directly and inject it, instead
+    of mutating this cache — and get the raw `ValidationError`, since nothing they do with it logs
+    or prints it.
     """
-    return Settings()
+    try:
+        return Settings()
+    except ValidationError as error:
+        raise SettingsValidationError(error) from None
