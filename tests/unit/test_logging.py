@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 from collections.abc import Callable, Iterator
 from datetime import datetime
 from typing import Any
 
+import httpx
 import pytest
 import structlog
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.logging import (
+    _HttpxUrlRedactor,
     bind_context,
     clear_context,
     configure_logging,
@@ -227,3 +230,89 @@ def test_a_telegram_token_reaching_a_log_field_is_redacted(configured: Configure
     (event,) = emitted(stream)
     assert token not in stream.getvalue()
     assert event["url"] == "https://api.telegram.org/bot***REDACTED***/sendMessage"
+
+
+#: httpx's own "HTTP Request: %s %s ..." call site, verified by reading httpx._client's source —
+#: the second positional arg is the request's `httpx.URL` object, not a `str`.
+def _httpx_request_log_record(url: httpx.URL) -> logging.LogRecord:
+    return logging.LogRecord(
+        "httpx",
+        logging.INFO,
+        __file__,
+        1,
+        'HTTP Request: %s %s "%s %d %s"',
+        ("POST", url, "HTTP/1.1", 401, "Unauthorized"),
+        None,
+    )
+
+
+def test_the_httpx_filter_redacts_a_telegram_token_carried_by_a_url_object() -> None:
+    """httpx passes the request URL as its own `httpx.URL` object, not a `str` — only converted
+    to text when the record is finally formatted, well after any filter has run. A naive
+    `isinstance(arg, str)` check misses this entirely and the token reaches the formatted line
+    unredacted; this is exactly the case that broke on the first attempt at this filter."""
+    token = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawZ"
+    url = httpx.URL(f"https://api.telegram.org/bot12345678:{token}/sendMessage")
+    record = _httpx_request_log_record(url)
+
+    assert _HttpxUrlRedactor().filter(record) is True
+
+    assert token not in record.getMessage()
+    assert "***REDACTED***" in record.getMessage()
+
+
+def test_the_httpx_filter_leaves_non_matching_arguments_untouched() -> None:
+    """A numeric `%d` argument (the status code) must stay numeric, or formatting breaks; a
+    method string with nothing to redact must come through byte-for-byte."""
+    record = _httpx_request_log_record(httpx.URL("https://nsearchives.nseindia.com/bhavcopy.zip"))
+
+    _HttpxUrlRedactor().filter(record)
+
+    method, url, _http_version, status_code, reason = record.args  # type: ignore[misc]
+    assert method == "POST"
+    assert str(url) == "https://nsearchives.nseindia.com/bhavcopy.zip"
+    assert status_code == 401  # still an int, or "%d" % "401" raises TypeError
+    assert reason == "Unauthorized"
+
+
+def test_the_httpx_logger_is_filtered_end_to_end_after_configure_logging(
+    configured: Configure,
+) -> None:
+    """The concrete production path: something later sets the httpx logger's level to INFO and
+    attaches a handler (a future entrypoint, a test, a REPL) — configure_logging must have
+    already made that safe by the time it happens, regardless of when."""
+    configured()
+    httpx_stream = io.StringIO()
+    httpx_logger = logging.getLogger("httpx")
+    handler = logging.StreamHandler(httpx_stream)
+    httpx_logger.addHandler(handler)
+    previous_level = httpx_logger.level
+    httpx_logger.setLevel(logging.INFO)
+    token = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsawZ"
+
+    try:
+        httpx_logger.info(
+            'HTTP Request: %s %s "%s %d %s"',
+            "POST",
+            httpx.URL(f"https://api.telegram.org/bot12345678:{token}/sendMessage"),
+            "HTTP/1.1",
+            401,
+            "Unauthorized",
+        )
+    finally:
+        httpx_logger.removeHandler(handler)
+        httpx_logger.setLevel(previous_level)
+
+    assert token not in httpx_stream.getvalue()
+
+
+def test_configure_logging_does_not_attach_the_httpx_filter_twice(configured: Configure) -> None:
+    """`configure_logging` is called once per test in this module (and per real entrypoint call
+    too); the filter must not accumulate one copy of itself per call."""
+    configured()
+    configured()
+
+    httpx_filters = [
+        f for f in logging.getLogger("httpx").filters if isinstance(f, _HttpxUrlRedactor)
+    ]
+    assert len(httpx_filters) == 1

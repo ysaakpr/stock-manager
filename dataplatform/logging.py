@@ -13,6 +13,7 @@ absolute, so `import logging` anywhere still resolves to the standard library.
 
 from __future__ import annotations
 
+import logging
 import re
 import sys
 from collections.abc import Iterator
@@ -87,6 +88,64 @@ def _redaction_processor(logger: WrappedLogger, name: str, event_dict: EventDict
     return {key: _redact_known_secret_shapes(val) for key, val in event_dict.items()}
 
 
+class _HttpxUrlRedactor(logging.Filter):
+    """httpx logs every request's URL at INFO — `HTTP Request: POST <url> "HTTP/1.1 ..."` — on
+    its own stdlib `logging.getLogger("httpx")`, entirely outside structlog. `TelegramConfig.
+    send_message_url` puts the bot token in that URL's path, and nothing about the redaction
+    processors above reaches this: they run inside structlog's own pipeline, which this record
+    never enters unless something later routes stdlib logging through it.
+
+    Today that "something" does not exist (`configure_logging` never touches the stdlib root
+    logger — ops/BACKLOG.md's M0.2 entry names the gap and routes the real fix to M0.5's
+    entrypoint work), which is exactly why this cannot wait for M0.5: the httpx logger already
+    has its own default level (`WARNING`) and no handler, so the token is silent only by
+    accident — the first `logging.basicConfig(level=logging.INFO)` anywhere in the process (a
+    test, a REPL, a future entrypoint) arms it. Verified with a real `httpx.post` against a
+    fake-token URL: unfiltered, the token appears in the stdlib log line; filtered, it does not.
+
+    A filter on the named logger, not a raised level: raising `httpx`'s level to hide this one
+    URL shape would also hide its INFO line for every *other* source this platform fetches from,
+    which is a real observability cost this rule does not need to pay.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = (
+            _redact_known_secret_shapes(record.msg) if isinstance(record.msg, str) else record.msg
+        )
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._redact_arg(arg) for arg in record.args)
+        elif record.args:
+            record.args = self._redact_arg(record.args)
+        return True
+
+    @staticmethod
+    def _redact_arg(arg: Any) -> Any:
+        """Redact whatever `arg` stringifies to — httpx passes the request URL as its own
+        `httpx.URL` object, not a `str`, and it is only converted to text when the record is
+        finally formatted (by `%s % args`, well after any filter has run). Checking `isinstance
+        (arg, str)` alone misses it entirely: the object survives the filter unredacted, and
+        formatting stringifies the *original* URL. Only replaces `arg` when redaction actually
+        changed something — a numeric arg (`%d` status code) must stay numeric, or formatting a
+        record whose format string expects a number breaks.
+        """
+        original = str(arg)
+        redacted = _redact_known_secret_shapes(original)
+        return redacted if redacted != original else arg
+
+
+def _install_httpx_url_redaction() -> None:
+    """Attach `_HttpxUrlRedactor` to the `httpx` logger exactly once per process.
+
+    Idempotent by class-identity check rather than a module-level flag: `configure_logging` is
+    documented to be callable more than once (tests do it per case), and `Logger.addFilter`
+    itself is not idempotent — calling it twice would redact twice, which is harmless for the
+    regex but pointless and would multiply across every test in a suite.
+    """
+    httpx_logger = logging.getLogger("httpx")
+    if not any(isinstance(f, _HttpxUrlRedactor) for f in httpx_logger.filters):
+        httpx_logger.addFilter(_HttpxUrlRedactor())
+
+
 @dataclass(frozen=True, slots=True)
 class _ClockTimeStamper:
     """Stamp every event from the injected clock rather than from the host wall clock."""
@@ -111,12 +170,16 @@ def configure_logging(
     `settings.log_level`, and writes one line per event to `stream` (stderr by default).
     What it assumes: it is called once, early, by whatever owns the process — an entrypoint, a
     CLI, or a test. Calling it again reconfigures cleanly.
-    What it never does: touch the stdlib root logger. Library logs (httpx, uvicorn) still go
-    wherever their own configuration sends them until an entrypoint routes them here.
+    What it never does: touch the stdlib root logger, or route library logs (httpx, uvicorn)
+    through structlog — they still go wherever their own configuration sends them until an
+    entrypoint does that (M0.5; ops/BACKLOG.md). The one exception is `_install_httpx_url_
+    redaction`, a narrow filter on the named `httpx` logger that redacts a Telegram bot token
+    from its own INFO line regardless of level or handler — a security containment, not routing.
     """
     settings = get_settings() if settings is None else settings
     clock = SystemClock(settings.tzinfo) if clock is None else clock
     target = sys.stderr if stream is None else stream
+    _install_httpx_url_redaction()
 
     processors: list[Processor] = [
         structlog.contextvars.merge_contextvars,
