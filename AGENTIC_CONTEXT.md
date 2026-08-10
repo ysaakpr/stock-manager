@@ -135,10 +135,23 @@ A task is `DONE` only when **all** hold:
 3. **The full gate is green, repo-wide** — secret scan, format, lint, types, and the tests. `orch
    set <id> DONE` runs it and refuses the transition when it fails (D11).
 
-   *Amended 2026-08-10.* This rule previously mandated **scoped** checks, on the premise that
-   "several builder agents share one working tree, so a repo-wide check fails a finished task
-   because a *different* agent has a half-written file on disk." **That premise is obsolete:**
-   builders now run in per-agent git worktrees, so a peer's in-flight edit is not on your disk.
+   *Amended 2026-08-10; corrected the same day.* This rule previously mandated **scoped** checks,
+   on the premise that "several builder agents share one working tree, so a repo-wide check fails a
+   finished task because a *different* agent has a half-written file on disk."
+
+   **The correction:** the first version of this amendment asserted that builders "now run in
+   per-agent git worktrees". That was **false for `orch run`** and I should not have written it.
+   There is no worktree support anywhere in `orchestrator/`; `_spawn` passes `cwd=REPO` and
+   concurrency defaults to 3. It was true only of the separately-driven sub-agents that repaired
+   Wave A. A review demonstrated the consequence: a peer's untracked half-written file failed an
+   innocent task's gate three times at the `format` step, auto-parking it and emptying the ready
+   queue — a livelock.
+
+   **So the repo-wide gate REQUIRES worktree isolation per builder, and that isolation is a
+   prerequisite, not an assumption.** Until `orch` spawns each builder in its own worktree, a
+   repo-wide gate under concurrency > 1 can park a task for someone else's mess. The old scoped
+   rule was not wrong about the hazard — it was wrong about the remedy, because it bought
+   isolation by giving up the tests.
    The old rule also let "DONE" mean "compiles and is well formatted" — `orch` never ran pytest at
    all — which is exactly how four tasks (C.3, M0.4, M1.4, M1.11) came to be recorded DONE with
    `reason: "make check failed with exit 2"`.
