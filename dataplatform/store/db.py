@@ -39,7 +39,7 @@ def connect(settings: Settings | None = None, *, autocommit: bool = False) -> Co
     fact that has to reach the status API (§4.4), not a `None` that surfaces three frames later.
     """
     settings = get_settings() if settings is None else settings
-    return psycopg.connect(settings.database_url, autocommit=autocommit)
+    return psycopg.connect(settings.database_url.get_secret_value(), autocommit=autocommit)
 
 
 @contextmanager

@@ -67,7 +67,7 @@ MASTER_TABLES = {
 
 
 def _settings_for(dbname: str) -> Settings:
-    return Settings(database_url=with_dbname(Settings().database_url, dbname))
+    return Settings(database_url=with_dbname(Settings().database_url.get_secret_value(), dbname))
 
 
 @pytest.fixture(scope="session")

@@ -78,6 +78,7 @@ __all__ = [
     "Severity",
     "TelegramAlerter",
     "TelegramConfig",
+    "TelegramDeliveryError",
     "build_alerter",
 ]
 
@@ -95,6 +96,23 @@ class AlertOutcome(StrEnum):
 
     SENT = "sent"
     SUPPRESSED = "suppressed"
+
+
+class TelegramDeliveryError(RuntimeError):
+    """The Bot API rejected a `sendMessage` call — a wrong chat id, a revoked or mid-rotation
+    bot token, or a transient failure.
+
+    Raised instead of letting `httpx.HTTPStatusError` propagate: that exception's message embeds
+    the full request URL, and `TelegramConfig.send_message_url` puts the bot token in that URL's
+    path (invariant #13). Raised with `from None` so the original, token-bearing exception is
+    dropped from `__cause__` too — a chained exception still renders in a traceback, which is
+    exactly what a frame-locals-off fix does not by itself prevent.
+    """
+
+    def __init__(self, status_code: int, chat_id: str) -> None:
+        self.status_code = status_code
+        self.chat_id = chat_id
+        super().__init__(f"telegram sendMessage rejected: status={status_code} chat_id={chat_id}")
 
 
 class AlertConfigurationError(RuntimeError):
@@ -471,11 +489,17 @@ def _telegram_transport(config: TelegramConfig, payload: Mapping[str, str]) -> N
 
     A non-2xx response raises: the Bot API answers a wrong chat id or a revoked token with a
     perfectly well-formed error body, and treating that as delivery is how alerting dies quietly.
+    `httpx.HTTPStatusError.__str__` includes the request URL — token in the path, per
+    `send_message_url` — so it is never allowed past this function; `TelegramDeliveryError`
+    carries only the status and chat id a caller needs to log or alert on.
     """
     response = httpx.post(
         config.send_message_url(), json=dict(payload), timeout=_TELEGRAM_TIMEOUT_SECONDS
     )
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError:
+        raise TelegramDeliveryError(response.status_code, config.chat_id) from None
 
 
 def _dedup_window(settings: Settings) -> timedelta:

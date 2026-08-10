@@ -74,7 +74,7 @@ SOURCE = "nse_bhavcopy_udiff"
 
 def _settings_for(dbname: str) -> Settings:
     """Settings for the configured server with a different database selected."""
-    return Settings(database_url=with_dbname(Settings().database_url, dbname))
+    return Settings(database_url=with_dbname(Settings().database_url.get_secret_value(), dbname))
 
 
 def _with_threshold(settings: Settings, seconds: int) -> Settings:

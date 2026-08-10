@@ -63,7 +63,7 @@ NEVER_SOON = "0 4 1 1 *"
 
 def _settings_for(dbname: str) -> Settings:
     """Settings for the configured server with a different database selected."""
-    return Settings(database_url=with_dbname(Settings().database_url, dbname))
+    return Settings(database_url=with_dbname(Settings().database_url.get_secret_value(), dbname))
 
 
 @pytest.fixture(scope="session")
@@ -191,7 +191,10 @@ def test_the_run_once_cli_runs_the_placeholder_eod_job(scratch_settings: Setting
         [sys.executable, "-m", "dataplatform.scheduler", "run-once", "eod_pipeline"],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin", "DATABASE_URL": scratch_settings.database_url},
+        env={
+            "PATH": "/usr/bin:/bin",
+            "DATABASE_URL": scratch_settings.database_url.get_secret_value(),
+        },
         check=False,
     )
 

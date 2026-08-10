@@ -60,7 +60,7 @@ RECORDED_AT = datetime(2026, 8, 7, 19, 30, 2, tzinfo=IST)
 
 
 def _settings_for(dbname: str) -> Settings:
-    return Settings(database_url=with_dbname(Settings().database_url, dbname))
+    return Settings(database_url=with_dbname(Settings().database_url.get_secret_value(), dbname))
 
 
 @pytest.fixture(scope="session")

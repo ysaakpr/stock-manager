@@ -64,7 +64,7 @@ SEEDED_AT = datetime(2026, 8, 8, 18, 30, tzinfo=IST)
 
 def _settings_for(dbname: str) -> Settings:
     """Settings for the configured server with a different database selected."""
-    return Settings(database_url=with_dbname(Settings().database_url, dbname))
+    return Settings(database_url=with_dbname(Settings().database_url.get_secret_value(), dbname))
 
 
 def _run(
@@ -367,7 +367,7 @@ def test_restore_refuses_to_target_the_live_database(
     backup: Path, script_env: dict[str, str]
 ) -> None:
     """The one thing a drill must never do is overwrite the database it is drilling for."""
-    live = Settings().database_url.rsplit("/", 1)[-1].split("?")[0]
+    live = Settings().database_url.get_secret_value().rsplit("/", 1)[-1].split("?")[0]
     done = _run(
         "restore.sh",
         "--scratch",

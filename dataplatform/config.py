@@ -1,7 +1,10 @@
 """Process configuration (§8.1) — one `Settings` object, read from the environment or `.env`.
 
 Every knob the platform has lives here, so "what is this process actually configured to do" is a
-single object an operator can print, and so no module invents its own `os.environ` lookup.
+single object, and so no module invents its own `os.environ` lookup. Every credential-bearing
+field is a `SecretStr` (AGENTIC_CONTEXT invariant #13), so an operator inspecting the object at a
+REPL sees it masked — but that masking is a last line of defence, not a licence to log it: no code
+in this platform may log, print to the status API, or journal a whole `Settings` object.
 `.env.example` documents every key and is the file `tests/unit/test_config.py` loads, which keeps
 the two from drifting apart.
 
@@ -126,12 +129,16 @@ class Settings(BaseSettings):
     )
 
     # ── storage ──────────────────────────────────────────────────────────────────────────────
-    database_url: str = Field(
+    database_url: SecretStr = Field(
         # Port 5433, not 5432: that is where ops/docker-compose.yml publishes the container DB on
         # the host, because this host already runs its own Postgres on 127.0.0.1:5432 and a
         # default of 5432 silently reaches that other server (ops/README.md). In-container the
         # app is handed postgres:5432 by compose and never sees this default.
-        default="postgresql://trading:trading@localhost:5433/trading",
+        #
+        # A `SecretStr`, not `str`: the DSN embeds a password, and a DSN with an embedded
+        # password is a credential (invariant #13) whether or not the default value happens to
+        # be a placeholder.
+        default=SecretStr("postgresql://trading:trading@localhost:5433/trading"),
         description="Postgres DSN for masters, sync state and the journal",
     )
     data_root: Path = Field(
@@ -254,10 +261,11 @@ class Settings(BaseSettings):
 
     @field_validator("database_url")
     @classmethod
-    def _postgres_dsn(cls, value: str) -> str:
+    def _postgres_dsn(cls, value: SecretStr) -> SecretStr:
         """Postgres is the only supported store (§8.1); a DSN for anything else is a typo."""
-        if not value.startswith(("postgres://", "postgresql://", "postgresql+")):
-            raise ValueError(f"database_url must be a Postgres DSN, got {value.split(':')[0]!r}")
+        dsn = value.get_secret_value()
+        if not dsn.startswith(("postgres://", "postgresql://", "postgresql+")):
+            raise ValueError(f"database_url must be a Postgres DSN, got {dsn.split(':')[0]!r}")
         return value
 
     @field_validator("data_root")
