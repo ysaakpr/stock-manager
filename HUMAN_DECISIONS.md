@@ -180,6 +180,101 @@ normally within free tier, but the account itself is the gate); NewsAPI.org retu
 neither. Logged only so nobody later reaches for them silently — revisit if a task genuinely needs
 article-level global news volume that RSS + GDELT masterfiles cannot provide.
 
+### D8 — M3.9 was never blocked. Confirm the acceptance rewrite, and whether to split the task.
+
+**Raised:** 2026-08-10. **Blocks ~34 dependents** — the largest single unblock in the graph.
+
+`nifty_tri_history` is marked `FAILED` because the register recorded a **stale URL path**, not
+because the source is gated. Corrected path, probed live 2026-08-10 (4 POSTs, ≥2.5s apart, no 403
+and no 429):
+
+| index | HTTP | bytes | rows | earliest | latest |
+|---|---|---|---|---|---|
+| NIFTY 50 | 200 | 177,036 | 1,239 | 01 Apr 2021 | 30 Mar 2026 |
+| NIFTY IT | 200 | 168,505 | 1,239 | 01 Apr 2021 | 30 Mar 2026 |
+| NIFTY CPSE | 200 | 170,170 | 1,239 | 01 Apr 2021 | 30 Mar 2026 |
+| NIFTY 50, max depth | 200 | 880,867 | 6,213 | **02 Apr 2001** | 30 Mar 2026 |
+
+`POST https://niftyindices.com/BackPage/getTotalReturnIndexString` — no `.aspx` — body
+`{"cinfo": "{'name':'NIFTY 50','startDate':'...','endDate':'...','indexName':'NIFTY 50'}"}`,
+**no session cookie, no Referer**. 25 years of all three indices is available in one request each.
+
+**Three defects in the current acceptance text (lines 858–862), not one:**
+
+1. *"spot-checked against a published value"* requires a **live fetch at verify time**, which
+   collides with ratified rule B8 (fixtures are checked in, `AGENTIC_CONTEXT.md:66`) and with the
+   no-network guard at `dataplatform/ingest/fetcher.py:27-29`. As written it cannot pass offline.
+2. It says **"NIFTY-TRI" singular**, but the ratified reference-case fixture
+   (`AGENTIC_CONTEXT.md:70`) needs **NIFTY 50 + NIFTY IT + NIFTY CPSE**.
+3. It is silent on depth. The binding constraint is **10 years**, set by M4.10's verify line
+   (`TASK_GRAPH.yaml:1063`) — not the case fixture's 5-year horizon.
+
+**Data-requirement verdict: nothing needs daily TRI *levels*.** M4.6's acceptance (`:988-990`)
+never mentions TRI; M4.10 wants a period return (`:1060`); M6.6's drawdown profile is
+portfolio-side and must trace to journal entries (`:1508`); the only TRI-aware code in the tree
+stores benchmark *names* as strings (`analyst/cases/policies.py:176-181`). Periodic return / XIRR
+plus a drawdown profile is sufficient. **Ingest daily anyway** — 25 years costs one request.
+
+**The call, part 1 — which acceptance rewrite.** Recommended (difficulty b, no data migration, no
+new invariant risk), replacing lines 858–862's third bullet with an assertion that is fully
+verifiable **offline against a frozen fixture**: TRI parses from
+`tests/fixtures/nifty_indices/2026/` for all three indices over 2021-04-01..2026-03-31, asserting
+(i) 1,239 rows per index with identical date sets; (ii) strictly increasing dates after
+normalisation, no duplicate, no gap against the M1.7 trading calendar; (iii) the literal `Decimal`
+levels **33655.43 / 41606.83 / 11793.29** on 2026-03-30; (iv) every level is `Decimal` and
+positive, and `NTR_Value` is `None` — never `Decimal 0` — where the source publishes `'-'`.
+Full option set (1: mechanical single-index; 2: recommended; 3: adds a TRI ≥ price-index
+cross-check but depends on an unverified historical-snapshot fetch; 4: split-aware) is in the
+options memo.
+
+**The call, part 2 — split M3.9 into a constituents task and a TRI task?** **Recommended: yes.**
+Not for parallelism — 16 of the dependents reconverge at M4.8 — but because **one task currently
+owns one VERIFIED row and one FAILED row, so it can be neither done nor blocked honestly.** The 34
+dependents divide 5 constituents-only, 9 TRI-only, 16 both, and M7.1/M7.3 need neither (they reach
+M3.9 only through the M3.10 gate edge). Cost of the split: 2 dependency lines and 1 task block.
+
+**Three parser traps worth knowing before anyone builds this** (all observed, not inferred): rows
+arrive **newest-first**; index names must be sent in **CAPS** and echo back title-cased; and a 5th
+key `RequestNumber` **regenerates on every request** — hash the payload as-is and determinism dies,
+which invariant "same inputs → byte-identical journal" would catch only after it hurt.
+
+---
+
+### D9 — A 200 with the wrong body is written straight into L0. Fix in the shared layer?
+
+**Raised:** 2026-08-10. This is the **generalizable** half of D8 and it outlives M3.9.
+
+`Fetcher.fetch` writes to L0 on **any 2xx with zero payload inspection**:
+`dataplatform/ingest/fetcher.py:402` calls `_request(...)`, `:403` calls `_l0.put(...)`, and there
+is **nothing between them**. The register's `parse_check` field is **prose, not executable**;
+`fetch_succeeded` only checks that the body string is non-empty
+(`dataplatform/ingest/source_register.py:175-182`), and the register validator runs against the
+YAML, never against a live payload. And because L0 is immutable by invariant #1, **a bad write
+cannot be cleaned up** — only quarantined.
+
+**Do not reach for a content-type check.** The working niftyindices response is
+`text/html; charset=utf-8`, identical to the block page — so a content-type guard rejects every
+good response. `ops/gates/source-verification.md` §5 item 1 taught exactly that wrong fix and has
+been corrected in place today.
+
+**Same hole, other rows:** `bse_announcements` (returns `{}` at 200),
+`screener_company_fundamentals`, both BSE bhavcopy rows, and both niftyindices CSV rows.
+
+**The call:** add a `validator`/`expect` hook to `CrawlPolicy`
+(`dataplatform/ingest/policy.py:168-191`), invoked between `fetcher.py:402` and `:403`, raising a
+fetch-level `PayloadShapeError` before anything reaches L0 — **as its own M1-series task**
+(recommended) rather than smuggled into M3.9. It reopens M1.2's module, which is why it wants its
+own task entry and its own gate rather than riding along on an M3 task.
+
+Two sub-questions bundled here: **(a)** when a row flips `FAILED → VERIFIED`, must a real fetcher
+run re-derive `sample_bytes` / `sample_sha256` / `parse_check` (recommended — otherwise VERIFIED
+just means "an agent edited a YAML file"), and **(b)** given two of two investigated `FAILED` rows
+turned out to be **bookkeeping errors rather than dead sources** (M6.1's contract, M3.9's stale
+URL), should the remaining `FAILED` / `BLOCKED_CREDENTIAL` rows be **re-probed before anyone treats
+them as real constraints**? Recommended: yes, as one scoped sweep task.
+
+---
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
