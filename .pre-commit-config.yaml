@@ -1,5 +1,14 @@
-# Secret scanning at commit time (AGENTIC_CONTEXT invariant #13). `orch`/CI enforce the same
-# check as `make check`'s detect-secrets-hook step; this catches it one step earlier.
+# Secret scanning at commit time (AGENTIC_CONTEXT invariant #13) — for whoever has run
+# `make hooks` (or `uv run pre-commit install`) in their own clone. This file does nothing by
+# itself: git does not execute a repo's own `.pre-commit-config.yaml` on clone or on commit —
+# that would mean a fresh checkout could run arbitrary code, which is the opposite of what a
+# security control should do. Nothing in this repo runs `pre-commit install` for you.
+#
+# This is convenience for a human at a keyboard, not a load-bearing control — it catches nothing
+# for the autonomous build (`orch set <id> DONE` calls the scan directly; see
+# orchestrator/__main__.py:cmd_set) or for a push that never went through a local commit hook.
+# `make check` and `orch`'s DONE path are the controls that cannot be skipped; treat this as one
+# commit earlier than those, not as a replacement for them.
 #
 # `language: system` + `uv run`, not the upstream detect-secrets pre-commit repo: that would
 # fetch and install its own copy of the tool from GitHub on every fresh clone, version-drifting

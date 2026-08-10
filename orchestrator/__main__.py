@@ -196,7 +196,19 @@ def cmd_set(args: argparse.Namespace) -> int:
         return 0
 
     # DONE is the one state the agent does not get to assert. We verify it ourselves.
-    checks: list[tuple[str, str]] = []
+    #
+    # The secret scan is unconditional and first: every other check below is scoped to the
+    # task's own deliverables (or skippable with --skip-check) because a *different* agent's
+    # half-written file must not fail *this* task's format/lint/types. A leaked credential has
+    # no such excuse — it is a defect regardless of which task's diff it rode in on, `orch set
+    # <id> DONE` is the path every agent actually commits through, and invariant #13
+    # (AGENTIC_CONTEXT.md §6) does not carve out an exception for --skip-check.
+    checks: list[tuple[str, str]] = [
+        (
+            "secret scan",
+            "uv run detect-secrets-hook -n --baseline .secrets.baseline $(git ls-files)",
+        ),
+    ]
     if task.verify:
         checks.append(("verify", task.verify))
     scoped = _scoped_paths(task)

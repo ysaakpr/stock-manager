@@ -11,24 +11,34 @@ DATA_ROOT ?= $(CURDIR)/data
 export DATA_ROOT
 
 .DEFAULT_GOAL := check
-.PHONY: check fmt test up down logs psql migrate backup restore
+.PHONY: check fmt test hooks up down logs psql migrate backup restore
 
-## check: format check + lint + types + secret scan + tests. Must pass before any task is DONE.
+## check: secret scan + format check + lint + types + tests. Must pass before any task is DONE.
+##
+## The scan runs FIRST, before anything that can fail on an unrelated formatting or type issue: a
+## leaked credential must be caught even on a tree that is red for every other reason, not only on
+## a tree clean enough to reach the last line (invariant #13 — AGENTIC_CONTEXT.md §6).
 check:
-	uv run ruff format --check .
-	uv run ruff check .
-	uv run mypy
 # -n/--no-verify: several plugins (Telegram, Stripe, GitHub...) otherwise place a live network
 # call to the provider inside `make check`, and a secret that fails that call — a fake one planted
 # in a test, or a real one already revoked — reads as "verified false" and is silently hidden.
 # That is precisely backwards for a leak scanner: offline and always-flag is the correct default.
 	uv run detect-secrets-hook -n --baseline .secrets.baseline $$(git ls-files)
+	uv run ruff format --check .
+	uv run ruff check .
+	uv run mypy
 	uv run pytest
 
 ## fmt: rewrite files to the canonical format and apply safe lint fixes.
 fmt:
 	uv run ruff format .
 	uv run ruff check --fix .
+
+## hooks: install the pre-commit git hook — a local convenience, not a load-bearing control.
+## `make check` (above) and `orch`'s DONE path run the same scan unconditionally; nothing in this
+## repo runs this target for you, so a fresh clone is exactly as protected without it as with it.
+hooks:
+	uv run pre-commit install
 
 ## test: the full suite. `uv run pytest tests/unit` for the fast offline subset.
 test:
