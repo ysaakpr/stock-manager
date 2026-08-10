@@ -121,8 +121,18 @@ main() {
 
     command -v docker >/dev/null 2>&1 || die "docker is not on PATH"
     [ -f "$COMPOSE_FILE" ] || die "no compose file at $COMPOSE_FILE"
-    pg 'true' >/dev/null 2>&1 \
-        || die "the '$PG_SERVICE' service is not running — start it with 'make up' first"
+    # A failed probe has two different causes that look identical from the exit code alone: the
+    # service really is down, or this user cannot reach the docker daemon at all (e.g. missing
+    # from the `docker` group) and every docker command fails the same way regardless of what is
+    # running. Capturing docker's own message and keying off it tells the two apart instead of
+    # asserting the more common one.
+    local probe
+    if ! probe="$(pg 'true' 2>&1)"; then
+        if printf '%s' "$probe" | grep -qi 'docker.sock\|cannot connect to the docker daemon'; then
+            die "cannot reach the docker daemon — this is a docker/permissions problem, not '$PG_SERVICE' being down: $probe"
+        fi
+        die "the '$PG_SERVICE' service is not running or not reachable — start it with 'make up' first: $probe"
+    fi
 
     # The container is the authority on which database it serves. Asking it beats re-deriving the
     # DSN from .env, which is exactly the drift that ends with a backup of the wrong database.
