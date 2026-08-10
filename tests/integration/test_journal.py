@@ -25,6 +25,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from pydantic import SecretStr
 
 from analyst.journal import (
     Actor,
@@ -60,7 +61,8 @@ RECORDED_AT = datetime(2026, 8, 7, 19, 30, 2, tzinfo=IST)
 
 
 def _settings_for(dbname: str) -> Settings:
-    return Settings(database_url=with_dbname(Settings().database_url.get_secret_value(), dbname))
+    dsn = with_dbname(Settings().database_url.get_secret_value(), dbname)
+    return Settings(database_url=SecretStr(dsn))
 
 
 @pytest.fixture(scope="session")

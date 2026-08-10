@@ -20,6 +20,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from pydantic import SecretStr
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
@@ -92,7 +93,8 @@ def _settings_for(dbname: str) -> Settings:
     An explicit keyword outranks the environment in pydantic-settings, so this picks up the
     developer's real credentials and host while pointing somewhere harmless.
     """
-    return Settings(database_url=with_dbname(Settings().database_url.get_secret_value(), dbname))
+    dsn = with_dbname(Settings().database_url.get_secret_value(), dbname)
+    return Settings(database_url=SecretStr(dsn))
 
 
 @pytest.fixture(scope="session")

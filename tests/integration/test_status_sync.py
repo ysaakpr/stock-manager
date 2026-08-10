@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
@@ -64,7 +65,8 @@ NOW = datetime(2026, 8, 10, 9, 15, tzinfo=IST)
 
 def _settings_for(dbname: str) -> Settings:
     """Settings for the configured server with a different database selected."""
-    return Settings(database_url=with_dbname(Settings().database_url.get_secret_value(), dbname))
+    dsn = with_dbname(Settings().database_url.get_secret_value(), dbname)
+    return Settings(database_url=SecretStr(dsn))
 
 
 @pytest.fixture(scope="session")

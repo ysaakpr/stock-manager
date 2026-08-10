@@ -21,6 +21,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from pydantic import SecretStr
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
@@ -67,7 +68,8 @@ MASTER_TABLES = {
 
 
 def _settings_for(dbname: str) -> Settings:
-    return Settings(database_url=with_dbname(Settings().database_url.get_secret_value(), dbname))
+    dsn = with_dbname(Settings().database_url.get_secret_value(), dbname)
+    return Settings(database_url=SecretStr(dsn))
 
 
 @pytest.fixture(scope="session")

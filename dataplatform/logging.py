@@ -36,11 +36,16 @@ __all__ = ["bind_context", "clear_context", "configure_logging", "get_logger", "
 #: so a test can pin it and a future edit cannot silently flip it back.
 SHOW_LOCALS_IN_TRACEBACKS = False
 
+#: The transformer `_JSON_EXCEPTION_RENDERER` wraps, kept as its own name (rather than inlined)
+#: so a test can assert `.show_locals` on a concretely-typed object — `ExceptionRenderer` declares
+#: its wrapped callable as the abstract `ExceptionTransformer`, which does not expose it.
+_JSON_EXCEPTION_TRANSFORMER = structlog.tracebacks.ExceptionDictTransformer(
+    show_locals=SHOW_LOCALS_IN_TRACEBACKS
+)
+
 #: The JSON-mode exception renderer, built explicitly rather than using `structlog.processors.
 #: dict_tracebacks` — that convenience object hardcodes `show_locals=True`.
-_JSON_EXCEPTION_RENDERER: Processor = structlog.processors.ExceptionRenderer(
-    structlog.tracebacks.ExceptionDictTransformer(show_locals=SHOW_LOCALS_IN_TRACEBACKS)
-)
+_JSON_EXCEPTION_RENDERER = structlog.processors.ExceptionRenderer(_JSON_EXCEPTION_TRANSFORMER)
 
 #: The console-mode exception formatter. `structlog.dev.ConsoleRenderer`'s own default
 #: (`RichTracebackFormatter`) also hardcodes `show_locals=True` — dev logging is not exempt from

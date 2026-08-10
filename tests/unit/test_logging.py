@@ -158,7 +158,7 @@ def test_show_locals_in_tracebacks_is_disabled() -> None:
     from dataplatform import logging as logging_module
 
     assert logging_module.SHOW_LOCALS_IN_TRACEBACKS is False
-    assert logging_module._JSON_EXCEPTION_RENDERER.format_exception.show_locals is False
+    assert logging_module._JSON_EXCEPTION_TRANSFORMER.show_locals is False
     assert logging_module._CONSOLE_EXCEPTION_FORMATTER.show_locals is False
 
 

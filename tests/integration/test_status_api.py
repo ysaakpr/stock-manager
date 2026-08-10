@@ -31,6 +31,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Json
+from pydantic import SecretStr
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
@@ -74,7 +75,8 @@ SOURCE = "nse_bhavcopy_udiff"
 
 def _settings_for(dbname: str) -> Settings:
     """Settings for the configured server with a different database selected."""
-    return Settings(database_url=with_dbname(Settings().database_url.get_secret_value(), dbname))
+    dsn = with_dbname(Settings().database_url.get_secret_value(), dbname)
+    return Settings(database_url=SecretStr(dsn))
 
 
 def _with_threshold(settings: Settings, seconds: int) -> Settings:
@@ -484,7 +486,7 @@ def test_health_answers_503_and_says_so_when_the_database_is_unreachable(
     `UNKNOWN`, never `NEVER_RAN`: a heartbeat that could not be read is not evidence that no
     scheduler ever ran, and /health may not invent the fact it failed to check.
     """
-    dead = Settings(database_url="postgresql://trading:trading@127.0.0.1:1/trading")
+    dead = Settings(database_url=SecretStr("postgresql://trading:trading@127.0.0.1:1/trading"))
     with make_client(dead) as client:
         response = client.get("/health")
 
@@ -721,7 +723,7 @@ def test_a_status_endpoint_answers_503_when_the_database_is_gone(
     make_client: ClientFactory,
 ) -> None:
     """An unreachable Postgres is infrastructure, and says so — it is not an anonymous 500."""
-    dead = Settings(database_url="postgresql://trading:trading@127.0.0.1:1/trading")
+    dead = Settings(database_url=SecretStr("postgresql://trading:trading@127.0.0.1:1/trading"))
     with make_client(dead, use_test_connection=False) as client:
         response = client.get("/status/sources")
 
