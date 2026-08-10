@@ -13,11 +13,16 @@ export DATA_ROOT
 .DEFAULT_GOAL := check
 .PHONY: check fmt test up down logs psql migrate backup restore
 
-## check: format check + lint + types + tests. Must pass before any task is DONE.
+## check: format check + lint + types + secret scan + tests. Must pass before any task is DONE.
 check:
 	uv run ruff format --check .
 	uv run ruff check .
 	uv run mypy
+# -n/--no-verify: several plugins (Telegram, Stripe, GitHub...) otherwise place a live network
+# call to the provider inside `make check`, and a secret that fails that call — a fake one planted
+# in a test, or a real one already revoked — reads as "verified false" and is silently hidden.
+# That is precisely backwards for a leak scanner: offline and always-flag is the correct default.
+	uv run detect-secrets-hook -n --baseline .secrets.baseline $$(git ls-files)
 	uv run pytest
 
 ## fmt: rewrite files to the canonical format and apply safe lint fixes.

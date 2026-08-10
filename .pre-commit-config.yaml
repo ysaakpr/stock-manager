@@ -1,0 +1,15 @@
+# Secret scanning at commit time (AGENTIC_CONTEXT invariant #13). `orch`/CI enforce the same
+# check as `make check`'s detect-secrets-hook step; this catches it one step earlier.
+#
+# `language: system` + `uv run`, not the upstream detect-secrets pre-commit repo: that would
+# fetch and install its own copy of the tool from GitHub on every fresh clone, version-drifting
+# from the one pinned in uv.lock. Running it through uv means one install, one pinned version,
+# and it works offline once `uv sync` has run once.
+repos:
+  - repo: local
+    hooks:
+      - id: detect-secrets
+        name: detect-secrets (no live verification — see Makefile's `check` target for why)
+        entry: uv run detect-secrets-hook -n --baseline .secrets.baseline
+        language: system
+        pass_filenames: true
