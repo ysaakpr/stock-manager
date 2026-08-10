@@ -1,0 +1,116 @@
+# What a model call costs, as a dated card (M5.4, decision #12).
+#
+# One schedule per price regime, in ascending `effective_from` order. A call is priced with the
+# last schedule whose `effective_from` is on or before its trading date, so a decision made during
+# an introductory-pricing window keeps that price forever and a replay of it reproduces the same
+# rupee figure. A call dated before the first schedule raises rather than borrowing a later card.
+#
+# A model that is not listed in the schedule in force raises `UnknownModelError`. That is the
+# point: the alternative is a call that costs ₹0 in the burn report, which reads as "cheap" rather
+# than "unpriced" and is exactly the blindness X3 exists to remove.
+#
+# Every number is a QUOTED STRING. YAML would parse a bare 0.10 as a float, and a float in the
+# cost model is a bug (CLAUDE.md); `accounting/tokens.py` rejects one, and
+# `tests/unit/test_llm_accounting.py` asserts no unquoted number survives in this file.
+#
+# Rates are US dollars per MILLION tokens, matching how the provider publishes them. The four
+# buckets are disjoint: `input` is uncached prompt tokens, `cache_write` is tokens written to the
+# provider's prompt cache (5-minute TTL — the 1-hour TTL is a different, higher rate and is not
+# modelled because nothing here uses it), `cache_read` is tokens served from it, and `output` is
+# generation. `usd_inr` converts the total to the settled rupee figure.
+#
+# `provenance` on each schedule:
+#   verified      — every number read off the provider's published pricing page on the cited date.
+#   reconstructed — the figures are the published rates as known at authoring, but no page was
+#                   fetched while writing this file. Tests never touch the network (B8), and no
+#                   credential exists to bill against (B4), so nothing here has been checked
+#                   against an invoice.
+
+version: 1
+
+card:
+  provider: anthropic
+  currency: INR
+  basis: usd_per_million_tokens
+  scope: >-
+    The models this system may call. Adding a model means adding it here first; an unlisted model
+    is a loud failure at pricing time, never a free call.
+
+schedules:
+  # ── 2026-06-24 ─────────────────────────────────────────────────────────────────────────────
+  - id: sonnet-5-introductory
+    effective_from: "2026-06-24"
+    label: Current list prices, with Claude Sonnet 5 still on its introductory rate
+    provenance: reconstructed
+    figures_current_as_of: "2026-06-24"
+    sources:
+      - "Anthropic published model pricing (https://platform.claude.com/docs/en/pricing), as
+         known on 2026-06-24: Opus-tier $5/$25 per MTok input/output, Sonnet 5 $3/$15 with an
+         introductory $2/$10 through 2026-08-31, Haiku 4.5 $1/$5."
+      - "Prompt-cache multipliers, same source: a 5-minute cache write costs 1.25x the input rate
+         and a cache read costs 0.1x."
+    notes: >-
+      Reconstructed, not verified: the figures are the published rates as known at authoring and
+      no pricing page was fetched while writing this file. The USD/INR rate is the weaker number —
+      88.00 is a plausible 2026 level, not a quoted rate on any date, and it is carried here so
+      that `cost_inr` is a single auditable multiplication rather than a hidden constant. Every
+      row in `token_usage` also stores `cost_usd`, so the rate actually applied to any historical
+      call is recoverable by division even after this card is corrected.
+    usd_inr: "88.00"
+    models:
+      claude-opus-5:
+        input: "5.00"
+        output: "25.00"
+        cache_write: "6.25"
+        cache_read: "0.50"
+      claude-opus-4-8:
+        input: "5.00"
+        output: "25.00"
+        cache_write: "6.25"
+        cache_read: "0.50"
+      claude-sonnet-5:
+        input: "2.00"
+        output: "10.00"
+        cache_write: "2.50"
+        cache_read: "0.20"
+      claude-haiku-4-5:
+        input: "1.00"
+        output: "5.00"
+        cache_write: "1.25"
+        cache_read: "0.10"
+
+  # ── 2026-09-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: sonnet-5-list
+    effective_from: "2026-09-01"
+    label: Claude Sonnet 5 introductory pricing ends; everything else unchanged
+    provenance: reconstructed
+    figures_current_as_of: "2026-06-24"
+    sources:
+      - "Anthropic published model pricing, as known on 2026-06-24: Claude Sonnet 5 is $3/$15 per
+         MTok, with the $2/$10 introductory rate applying only through 2026-08-31."
+    notes: >-
+      A dated boundary rather than a rate correction: the same model costs more from this date, so
+      a decision made on 2026-08-31 and a decision made on 2026-09-01 must not price identically.
+      Carried forward unchanged otherwise, including the USD/INR placeholder above.
+    usd_inr: "88.00"
+    models:
+      claude-opus-5:
+        input: "5.00"
+        output: "25.00"
+        cache_write: "6.25"
+        cache_read: "0.50"
+      claude-opus-4-8:
+        input: "5.00"
+        output: "25.00"
+        cache_write: "6.25"
+        cache_read: "0.50"
+      claude-sonnet-5:
+        input: "3.00"
+        output: "15.00"
+        cache_write: "3.75"
+        cache_read: "0.30"
+      claude-haiku-4-5:
+        input: "1.00"
+        output: "5.00"
+        cache_write: "1.25"
+        cache_read: "0.10"
