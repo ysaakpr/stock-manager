@@ -9,6 +9,16 @@
 # point: the alternative is a call that costs ₹0 in the burn report, which reads as "cheap" rather
 # than "unpriced" and is exactly the blindness X3 exists to remove.
 #
+# Both the alias and the dated id are listed where a dated id is published, at the same rates. A
+# call is priced on the model the *response* names, not the one the request asked for, because
+# that is the model that actually ran and the one the invoice will show. The provider may resolve
+# an alias to a dated snapshot, so an alias-only card would raise on a perfectly ordinary call —
+# and `claude-haiku-4-5` is `TRIAGE_MODEL`, so that would land on the first triage call of the
+# first real run. Listing both keeps the refusal for a model nobody has priced, which is the case
+# it is for, without it firing on a rename. Of the models here only Haiku 4.5 publishes a dated
+# id (`-20251001`); the rest are documented as bare aliases and get no second entry until one
+# appears.
+#
 # Every number is a QUOTED STRING. YAML would parse a bare 0.10 as a float, and a float in the
 # cost model is a bug (CLAUDE.md); `accounting/tokens.py` rejects one, and
 # `tests/unit/test_llm_accounting.py` asserts no unquoted number survives in this file.
@@ -26,7 +36,7 @@
 #                   credential exists to bill against (B4), so nothing here has been checked
 #                   against an invoice.
 
-version: 1
+version: "1"
 
 card:
   provider: anthropic
@@ -78,6 +88,11 @@ schedules:
         output: "5.00"
         cache_write: "1.25"
         cache_read: "0.10"
+      claude-haiku-4-5-20251001:
+        input: "1.00"
+        output: "5.00"
+        cache_write: "1.25"
+        cache_read: "0.10"
 
   # ── 2026-09-01 ─────────────────────────────────────────────────────────────────────────────
   - id: sonnet-5-list
@@ -110,6 +125,11 @@ schedules:
         cache_write: "3.75"
         cache_read: "0.30"
       claude-haiku-4-5:
+        input: "1.00"
+        output: "5.00"
+        cache_write: "1.25"
+        cache_read: "0.10"
+      claude-haiku-4-5-20251001:
         input: "1.00"
         output: "5.00"
         cache_write: "1.25"

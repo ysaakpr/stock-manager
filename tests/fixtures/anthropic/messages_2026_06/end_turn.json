@@ -1,0 +1,21 @@
+{
+  "id": "msg_01EndTurnFixture000000000",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-5",
+  "content": [
+    {
+      "type": "text",
+      "text": "The thesis driver is intact: order inflow grew for the fourth straight quarter."
+    }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "stop_details": null,
+  "usage": {
+    "input_tokens": 1201,
+    "output_tokens": 317,
+    "cache_creation_input_tokens": 4096,
+    "cache_read_input_tokens": 8192
+  }
+}
