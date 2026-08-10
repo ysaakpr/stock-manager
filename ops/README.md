@@ -11,8 +11,17 @@ no nginx, no sidecars.
 
 ## Running it
 
+Two separate `.env` files are involved, both gitignored, both **required** — `POSTGRES_PASSWORD`
+has no default (invariant #13), so skipping either produces a failure, not a fallback:
+
 ```bash
-cp ops/.env.example ops/.env  # once: set POSTGRES_PASSWORD — see "Configuration" below
+cp ops/.env.example ops/.env         # 1. compose reads this — sets POSTGRES_PASSWORD
+                                      #    for the containers themselves
+cp .env.example .env                 # 2. the app's own Settings AND every piece of host
+                                      #    tooling (make migrate, tests/integration, a bare
+                                      #    psql) read this — set the *same* password into
+                                      #    DATABASE_URL here (see "Postgres is on host port
+                                      #    5433" below for the exact host/port to use)
 make up      # creates data/L0 data/L1 data/L2, then docker compose up -d
 make logs    # follow both services
 make psql    # interactive shell on the container DB
@@ -22,6 +31,12 @@ make down    # stop; the pgdata volume and the lake survive
 make backup  # pg_dump + a checksummed L0 manifest into ops/backups/<ts>
 make restore # rebuild the newest backup into a scratch DB and verify every row count
 ```
+
+Skipping file 2 is the one that bites silently: `make up` still succeeds (only file 1 gates the
+containers), but every host-side check of the result — `tests/integration`, `make migrate` run
+by hand, a manual `psql` — fails to connect and, in test suites that treat an unreachable database
+as "nothing to test here" rather than a hard failure, quietly skips instead of erroring. That
+exact failure mode cost the whole integration suite before M0.3 was reworked (`ops/gates/M0.md`).
 
 `make restore` is a *drill*: it never writes to the live database, and it refuses a target named
 after it. Real recovery, the object-storage gap, and the executed drill transcripts are in
@@ -39,8 +54,8 @@ itself it creates it owned by root, and the app runs as uid 1000.
 ## Postgres is on host port 5433, not 5432
 
 Inside the compose network the database is `postgres:5432` and that is what the app uses
-(`DATABASE_URL=postgresql://trading:trading@postgres:5432/trading`). The **host-side** publish
-is 5433, deliberately:
+(`DATABASE_URL=postgresql://trading:<POSTGRES_PASSWORD>@postgres:5432/trading`, assembled by
+compose from `ops/.env`). The **host-side** publish is 5433, deliberately:
 
 > This host already runs its own Postgres bound to `127.0.0.1:5432`. Docker will publish over
 > it on `0.0.0.0:5432` without complaint, but the kernel prefers the more specific bind, so a
@@ -51,7 +66,7 @@ So, for anything running on the host — `make migrate`, `tests/integration`, `p
 terminal — put this in your repo-root `.env`:
 
 ```
-DATABASE_URL=postgresql://trading:trading@localhost:5433/trading
+DATABASE_URL=postgresql://trading:<same password as ops/.env's POSTGRES_PASSWORD>@localhost:5433/trading
 ```
 
 `.env.example` ships the conventional `localhost:5432`, which is right on a host without its
@@ -76,9 +91,11 @@ unset rather than standing up a database whose password is `git log`-visible for
 | `APP_HOST_PORT` | `8000` | host-side publish for the status API |
 | `DATA_ROOT` | `../data` | **host** path of the data lake |
 
-If you set a non-default `POSTGRES_PASSWORD`, update `DATABASE_URL` in the repo-root `.env` to
-match — host tooling (`make migrate`, `tests/integration`) connects on `localhost:5433` using
-that value, independently of what compose hands the `app` container over the network.
+Whatever `POSTGRES_PASSWORD` you set, `DATABASE_URL` in the repo-root `.env` must embed the same
+value — host tooling (`make migrate`, `tests/integration`, a bare `psql`) connects on
+`localhost:5433` using that value, independently of what compose hands the `app` container over
+the network. There is no default for either file to fall back on, so the two are the same
+password written twice, not one password with an optional override; see "Running it" above.
 
 The repo-root `.env` *is* passed into the app container (`env_file`, `required: false`), so
 runtime settings the owner keeps there reach the process. `DATABASE_URL`, `DATA_ROOT` and `TZ`
