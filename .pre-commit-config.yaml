@@ -25,3 +25,16 @@ repos:
           --baseline .secrets.baseline
         language: system
         pass_filenames: true
+      # Invariant #13 names commit messages explicitly ("a secret in ... the journal" is the same
+      # class of never-undoable mistake as one in a commit message — AGENTIC_CONTEXT.md §6). This
+      # stage needs a second, separate `pre-commit install --hook-type commit-msg` (`make hooks`
+      # runs both); the same detect-secrets-hook, pointed at the message file pre-commit hands it
+      # instead of the changed files.
+      - id: detect-secrets-commit-msg
+        name: detect-secrets (commit message)
+        entry: >-
+          uv run detect-secrets-hook -n
+          --disable-filter detect_secrets.filters.allowlist.is_line_allowlisted
+          --baseline .secrets.baseline
+        language: system
+        stages: [commit-msg]

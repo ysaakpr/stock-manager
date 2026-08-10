@@ -41,11 +41,14 @@ fmt:
 	uv run ruff format .
 	uv run ruff check --fix .
 
-## hooks: install the pre-commit git hook — a local convenience, not a load-bearing control.
+## hooks: install the pre-commit git hooks — a local convenience, not a load-bearing control.
 ## `make check` (above) and `orch`'s DONE path run the same scan unconditionally; nothing in this
 ## repo runs this target for you, so a fresh clone is exactly as protected without it as with it.
+## Two hook types: the changed-files scan (pre-commit stage) and the commit-message scan
+## (commit-msg stage) both need installing — `pre-commit install` alone only wires the first.
 hooks:
 	uv run pre-commit install
+	uv run pre-commit install --hook-type commit-msg
 
 ## test: the full suite. `uv run pytest tests/unit` for the fast offline subset.
 test:
