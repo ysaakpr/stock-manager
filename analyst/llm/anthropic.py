@@ -221,18 +221,22 @@ class AnthropicLLM:
             thinking=anthropic.omit if thinking is None else thinking,
         )
 
+        # Usage is read first and travels on every failure below. The provider billed this call
+        # whatever it decided about the answer, so an error that dropped the token counts would
+        # book a real charge at ₹0 — X3's own blindness, on the path nobody inspects.
         usage = Usage(
             input_tokens=raw.usage.input_tokens,
             output_tokens=raw.usage.output_tokens,
             cache_write_tokens=raw.usage.cache_creation_input_tokens or 0,
             cache_read_tokens=raw.usage.cache_read_input_tokens or 0,
         )
-        stop_reason = _stop_reason(raw.stop_reason)
+        stop_reason = _stop_reason(raw.stop_reason, usage=usage)
         if stop_reason is StopReason.REFUSAL:
             category = None if raw.stop_details is None else raw.stop_details.category
             raise LLMRefusalError(
                 f"{model} declined the request (category {category!r}); there is no answer to act "
-                "on. Do not retry the same prompt — journal the refusal and escalate."
+                "on. Do not retry the same prompt — journal the refusal and escalate.",
+                usage=usage,
             )
 
         text: list[str] = []
@@ -296,12 +300,19 @@ def _tool_param(tool: ToolSpec) -> ToolParam:
     )
 
 
-def _stop_reason(value: str | None) -> StopReason:
-    """Map a provider stop reason, refusing to guess at one this module has never seen."""
+def _stop_reason(value: str | None, *, usage: Usage) -> StopReason:
+    """Map a provider stop reason, refusing to guess at one this module has never seen.
+
+    `usage` is carried onto the error rather than merely reported in it. A stop reason this module
+    does not map still describes a call the provider ran and billed — `model_context_window_
+    exceeded` is the live example, and it arrives precisely on the calls with the largest prompts —
+    so the counts have to survive the raise or that spend is booked at ₹0.
+    """
     if value is None:
         raise LLMError(
             "the response carried no stop_reason; a completion whose termination is unknown "
-            "cannot be trusted to be complete"
+            "cannot be trusted to be complete",
+            usage=usage,
         )
     try:
         return _STOP_REASONS[value]
@@ -309,7 +320,8 @@ def _stop_reason(value: str | None) -> StopReason:
         raise LLMError(
             f"unknown stop_reason {value!r} from the provider; treating it as a normal end of "
             "turn could silently accept a partial answer. Add it to _STOP_REASONS once its "
-            "meaning is established."
+            "meaning is established.",
+            usage=usage,
         ) from None
 
 

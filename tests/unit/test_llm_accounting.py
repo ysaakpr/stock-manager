@@ -936,6 +936,57 @@ def test_an_unmapped_stop_reason_fails_loud(stub_transport: _Transport) -> None:
 
 
 @pytest.mark.parametrize(
+    ("fixture", "error", "billed_prompt_tokens"),
+    [
+        ("refusal.json", LLMRefusalError, 274),
+        ("context_window_exceeded.json", LLMError, 999_999),
+    ],
+)
+def test_a_failed_call_still_carries_the_tokens_it_was_billed_for(
+    stub_transport: _Transport,
+    pricer: TokenPricer,
+    fixture: str,
+    error: type[LLMError],
+    billed_prompt_tokens: int,
+) -> None:
+    """A call this client refuses to return an answer for was still run, and still billed.
+
+    Both of these arrive as HTTP 200 with a full `usage` block, and the context-window case is the
+    one that hurts: it fires on the largest prompts there are. Raising without the token counts
+    would book that at ₹0 — the exact blindness X3 exists to remove, reopened on the error path.
+    The counts ride out on the exception so the spend stays bookable; nothing here books it, and
+    a caller must never substitute a zero for an absent `usage`.
+    """
+    client = AnthropicLLM(FAKE_KEY, http_client=stub_transport.client(fixture))
+
+    with pytest.raises(error) as raised:
+        client.complete([Message(role=Role.USER, content="hello")], model=DEFAULT_MODEL)
+
+    spent = raised.value.usage
+    assert spent is not None, "the provider billed this call and the counts were dropped"
+    assert spent.prompt_tokens == billed_prompt_tokens
+
+    # Bookable, not merely reported: the carried usage prices like any other call.
+    priced = pricer.price(
+        LLMResponse(provider=ANTHROPIC_PROVIDER, model=DEFAULT_MODEL, text="", usage=spent),
+        on=INTRO_DATE,
+        purpose="t1_review",
+    )
+    assert priced.cost_inr > 0
+
+
+def test_a_failure_with_nothing_to_book_carries_no_usage() -> None:
+    """A missing credential bills nobody, so `usage` is None rather than a zero.
+
+    Zero and unknown must stay distinguishable: a zero would read as a call that was free, which
+    is the same misreading as an unpriced call booking ₹0.
+    """
+    with pytest.raises(LLMCredentialError) as raised:
+        AnthropicLLM(None)
+    assert raised.value.usage is None
+
+
+@pytest.mark.parametrize(
     ("kwargs", "match"),
     [
         ({"messages": [], "model": DEFAULT_MODEL}, "at least one message"),
