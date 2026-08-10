@@ -16,6 +16,9 @@ asks — is this thesis broken, what does this filing imply for the driver — a
 multi-step kind it exists for, and the model decides per call how much of it to do. The reasoning
 itself is not requested back (`display` is left at its default): the journal records the decision
 and the evidence it was made on, and a summary of the model's private reasoning is neither.
+Adaptive thinking is a per-model capability, not a universal one, so the parameter is chosen from
+the model being called rather than sent unconditionally — see `_thinking_param`, which is where
+the two ways of getting that wrong are written down.
 
 Not implemented here, deliberately: server-side refusal fallbacks (`fallbacks`), prompt-cache
 breakpoints, and streaming. All three are beta or shape-changing surfaces that cannot be exercised
@@ -29,7 +32,14 @@ from collections.abc import Sequence
 from typing import Final, Literal, cast
 
 import anthropic
-from anthropic.types import MessageParam, ThinkingConfigAdaptiveParam, ToolParam
+import httpx
+from anthropic.types import (
+    MessageParam,
+    ThinkingConfigAdaptiveParam,
+    ThinkingConfigDisabledParam,
+    ThinkingConfigParam,
+    ToolParam,
+)
 from pydantic import SecretStr
 
 from analyst.llm.client import (
@@ -68,6 +78,14 @@ _TIMEOUT_SECONDS: Final[float] = 600.0
 #: daily loop can afford to wait and cannot afford to skip a review because of one 529.
 _MAX_RETRIES: Final[int] = 2
 
+#: Models that accept `thinking={"type": "adaptive"}`. Adaptive thinking arrived with the 4.6
+#: generation; asking an older model for it is a 400, so `TRIAGE_MODEL` (Haiku 4.5) must not be
+#: sent one. For a model that is not on this list the parameter is omitted entirely, which is the
+#: no-thinking default everywhere it matters and is never rejected.
+_ADAPTIVE_THINKING_MODELS: Final[frozenset[str]] = frozenset(
+    {"claude-opus-5", "claude-opus-4-8", "claude-sonnet-5"}
+)
+
 #: Provider stop reasons this module understands, mapped to the vocabulary `analyst/` uses.
 _STOP_REASONS: Final[dict[str, StopReason]] = {
     "end_turn": StopReason.END_TURN,
@@ -90,7 +108,14 @@ class AnthropicLLM:
     an empty completion as if it were an answer.
     """
 
-    __slots__ = ("_api_key", "_client", "_max_retries", "_thinking", "_timeout_seconds")
+    __slots__ = (
+        "_api_key",
+        "_client",
+        "_http_client",
+        "_max_retries",
+        "_thinking",
+        "_timeout_seconds",
+    )
 
     def __init__(
         self,
@@ -99,6 +124,7 @@ class AnthropicLLM:
         timeout_seconds: float = _TIMEOUT_SECONDS,
         max_retries: int = _MAX_RETRIES,
         adaptive_thinking: bool = True,
+        http_client: httpx.Client | None = None,
     ) -> None:
         secret = SecretStr(api_key) if isinstance(api_key, str) else api_key
         if secret is None or not secret.get_secret_value().strip():
@@ -116,6 +142,7 @@ class AnthropicLLM:
         self._timeout_seconds = timeout_seconds
         self._max_retries = max_retries
         self._thinking = adaptive_thinking
+        self._http_client = http_client
         self._client: anthropic.Anthropic | None = None
 
     def __repr__(self) -> str:
@@ -130,6 +157,7 @@ class AnthropicLLM:
         timeout_seconds: float = _TIMEOUT_SECONDS,
         max_retries: int = _MAX_RETRIES,
         adaptive_thinking: bool = True,
+        http_client: httpx.Client | None = None,
     ) -> AnthropicLLM:
         """Build from configuration, raising `LLMCredentialError` when the key is absent (B4)."""
         resolved = get_settings() if settings is None else settings
@@ -138,6 +166,7 @@ class AnthropicLLM:
             timeout_seconds=timeout_seconds,
             max_retries=max_retries,
             adaptive_thinking=adaptive_thinking,
+            http_client=http_client,
         )
 
     @property
@@ -146,13 +175,16 @@ class AnthropicLLM:
 
         Lazy so that constructing this object — which is what startup wiring does, and what the
         credential check exists for — opens no connection pool and touches no environment beyond
-        the key it was handed.
+        the key it was handed. Passing `api_key` explicitly is what stops the SDK consulting the
+        environment for a credential of its own; `http_client` is the seam a test drives, and it
+        carries no credential.
         """
         if self._client is None:
             self._client = anthropic.Anthropic(
                 api_key=self._api_key.get_secret_value(),
                 timeout=self._timeout_seconds,
                 max_retries=self._max_retries,
+                http_client=self._http_client,
             )
         return self._client
 
@@ -179,17 +211,14 @@ class AnthropicLLM:
         if max_tokens <= 0:
             raise ValueError(f"max_tokens must be positive, got {max_tokens}")
 
+        thinking = _thinking_param(model, adaptive=self._thinking)
         raw = self._sdk.messages.create(
             model=model,
             max_tokens=max_tokens,
             messages=[_message_param(message) for message in messages],
-            system=anthropic.NOT_GIVEN if system is None else system,
-            tools=[_tool_param(tool) for tool in tools] if tools else anthropic.NOT_GIVEN,
-            thinking=(
-                ThinkingConfigAdaptiveParam(type="adaptive")
-                if self._thinking
-                else anthropic.NOT_GIVEN
-            ),
+            system=anthropic.omit if system is None else system,
+            tools=[_tool_param(tool) for tool in tools] if tools else anthropic.omit,
+            thinking=anthropic.omit if thinking is None else thinking,
         )
 
         usage = Usage(
@@ -200,7 +229,7 @@ class AnthropicLLM:
         )
         stop_reason = _stop_reason(raw.stop_reason)
         if stop_reason is StopReason.REFUSAL:
-            category = None if raw.stop_details is None else getattr(raw.stop_details, "category")
+            category = None if raw.stop_details is None else raw.stop_details.category
             raise LLMRefusalError(
                 f"{model} declined the request (category {category!r}); there is no answer to act "
                 "on. Do not retry the same prompt — journal the refusal and escalate."
@@ -223,6 +252,25 @@ class AnthropicLLM:
             stop_reason=stop_reason,
             tool_calls=tuple(tool_calls),
         )
+
+
+def _thinking_param(model: str, *, adaptive: bool) -> ThinkingConfigParam | None:
+    """The `thinking` value for one call, or None to omit the parameter.
+
+    What it does: asks for adaptive thinking on the models that have it, and explicitly disables
+    it when the caller said not to think.
+    What it assumes: `_ADAPTIVE_THINKING_MODELS` is the accurate list — a model missing from it
+    loses thinking rather than erroring, which is the safe direction.
+    What it never does: send `adaptive` to a model that predates it. Two failures hide here and
+    both are silent until a credential exists: Haiku 4.5 rejects `adaptive` outright with a 400,
+    and on the current Opus and Sonnet models *omitting* `thinking` means adaptive is on, so
+    `adaptive_thinking=False` would have been a no-op rather than the off switch it reads as.
+    """
+    if model not in _ADAPTIVE_THINKING_MODELS:
+        return None
+    if adaptive:
+        return ThinkingConfigAdaptiveParam(type="adaptive")
+    return ThinkingConfigDisabledParam(type="disabled")
 
 
 def _message_param(message: Message) -> MessageParam:

@@ -454,9 +454,7 @@ class TokenLedger:
                 f"no unattached token_usage row with id {usage_id}: it does not exist, or it is "
                 f"already attached to a decision"
             )
-        _LOG.info(
-            "token_usage.attach", usage_id=usage_id, decision_journal_id=decision_journal_id
-        )
+        _LOG.info("token_usage.attach", usage_id=usage_id, decision_journal_id=decision_journal_id)
 
 
 # ── the metered client ───────────────────────────────────────────────────────────────────────
