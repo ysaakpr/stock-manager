@@ -463,6 +463,43 @@ manually scanned and are clean.
 
 ---
 
+### D12 — The source register cannot say "we are declining this source on policy grounds"
+
+**Raised:** 2026-08-10, from the D9(b) register sweep. **Status: OPEN.** Cited by
+`source_register.yaml` (`screener_company_fundamentals`) and by `M3.9.b`.
+
+**The finding.** `screener_company_fundamentals` is recorded `BLOCKED_CREDENTIAL`. The sweep found
+the register's export URL was itself a guess; the real form action is
+`POST /user/company/export/{id}/`, and **`/user/*` is robots-disallowed** — recorded in the
+register's own robots evidence for screener.in (fetched 200 at 2026-08-08T18:08:22). So the row is
+blocked by **policy**, not by a missing credential.
+
+**Why the label matters.** The status enum is `VERIFIED | FAILED | BLOCKED_CREDENTIAL`
+(`source_register.py:54-64`). None of those says "we are choosing not to take this data." A row
+labelled BLOCKED_CREDENTIAL invites a future reader — human or agent — to supply a credential and
+proceed, which §8 forbids. The label actively points at the prohibited action.
+
+This is the same shape as D6: **a vocabulary too narrow to express the truth forces dishonest
+bookkeeping.** D6 was resolved by discovering the register already permitted what was needed. Here
+it does not.
+
+**Options.**
+1. **Add a status** (`BLOCKED_POLICY` or `DECLINED`). Says the true thing; costs a schema change to
+   the enum, the validator, and every reader/report that switches on status.
+2. **Keep `BLOCKED_CREDENTIAL` + mandatory prose.** Zero code cost; keeps a label that points at the
+   forbidden action, and prose is not machine-readable — nothing can gate on it.
+3. **Use `FAILED`.** Wrong: nothing failed. It would also put a policy decision in the same bucket
+   the re-probe sweep exists to re-examine, guaranteeing someone re-probes a source we declined.
+4. **Delete the row.** Loses the evidence and the reasoning; the next sweep rediscovers screener.in
+   and re-reaches the same wall.
+
+**Recommendation: option 1.** The register's whole purpose is machine-readable source truth, and
+"declined on policy grounds" is a permanent state that must survive re-probe sweeps untouched —
+which requires it to be a status, not a sentence. Note this row is `M7.1`'s input, so the decision
+should land before M7.1 is built.
+
+---
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
