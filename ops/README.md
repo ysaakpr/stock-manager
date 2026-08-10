@@ -90,6 +90,13 @@ unset rather than standing up a database whose password is `git log`-visible for
 | `POSTGRES_HOST_PORT` | `5433` | host-side publish, bound to `127.0.0.1` only (in-network is always 5432) |
 | `APP_HOST_PORT` | `8000` | host-side publish for the status API |
 | `DATA_ROOT` | `../data` | **host** path of the data lake |
+| `COMPOSE_PROJECT_NAME` | `trading-platform` | isolates a second concurrent stack — see below |
+
+**Running a second stack at the same time** (a second worktree, CI) needs
+`COMPOSE_PROJECT_NAME` set to something else, exported before every command — `up`, `down`,
+`logs`, and `make backup`/`make restore` (which shell out to `ops/backup.sh`/`ops/restore.sh`)
+all read it and resolve to that project, never silently to the default one. Leaving it unset is
+exactly today's single-stack behaviour; nothing changes for anyone who does not need isolation.
 
 Whatever `POSTGRES_PASSWORD` you set, `DATABASE_URL` in the repo-root `.env` must embed the same
 value — host tooling (`make migrate`, `tests/integration`, a bare `psql`) connects on

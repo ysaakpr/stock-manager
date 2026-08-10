@@ -24,7 +24,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly REPO_ROOT
 
+# COMPOSE_PROJECT mirrors ops/docker-compose.yml's own `name: ${COMPOSE_PROJECT_NAME:-trading-platform}`
+# exactly, so this script always resolves the same stack `make up` (or a second, isolated
+# `COMPOSE_PROJECT_NAME=... docker compose up`) started — never the default project by accident
+# just because this shell's environment does not happen to have the override set.
 COMPOSE_FILE="${COMPOSE_FILE:-$REPO_ROOT/ops/docker-compose.yml}"
+COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-trading-platform}"
 PG_SERVICE="${PG_SERVICE:-postgres}"
 DATA_ROOT="${DATA_ROOT:-$REPO_ROOT/data}"
 BACKUP_ROOT="${BACKUP_ROOT:-$REPO_ROOT/ops/backups}"
@@ -76,7 +81,19 @@ else
     die "neither sha256sum nor shasum is on PATH; the backup cannot be verified"
 fi
 
-pg() { docker compose -f "$COMPOSE_FILE" exec -T "$PG_SERVICE" sh -c "$1"; }
+pg() { docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" exec -T "$PG_SERVICE" sh -c "$1"; }
+
+# Is $PG_SERVICE running, just under a different compose project than $COMPOSE_PROJECT? Answers
+# the exact confusion a mismatched COMPOSE_PROJECT_NAME produces: the service probe below fails
+# either way, and "not running" is the wrong diagnosis when it is running, elsewhere.
+other_project_running() {
+    # `|| true`: grep exits 1 when nothing else is running (the common case, and not an error),
+    # and under `set -eo pipefail` that alone would abort the whole script before the caller
+    # ever gets to look at an empty result — silently, with no die() message at all.
+    docker ps --filter "label=com.docker.compose.service=$PG_SERVICE" \
+              --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null \
+        | grep -svx "$COMPOSE_PROJECT" | head -n1 || true
+}
 
 require_plain_dbname() {
     printf '%s' "$1" | grep -Eq '^[a-z][a-z0-9_]{0,62}$' \
@@ -135,7 +152,12 @@ main() {
         if printf '%s' "$probe" | grep -qi 'docker.sock\|cannot connect to the docker daemon'; then
             die "cannot reach the docker daemon — this is a docker/permissions problem, not '$PG_SERVICE' being down: $probe"
         fi
-        die "the '$PG_SERVICE' service is not running or not reachable — start it with 'make up' first: $probe"
+        local elsewhere
+        elsewhere="$(other_project_running)"
+        if [ -n "$elsewhere" ]; then
+            die "'$PG_SERVICE' is not running under project '$COMPOSE_PROJECT', but it IS running under project '$elsewhere' — set COMPOSE_PROJECT_NAME=$elsewhere to reach that stack, or 'make up' to start '$COMPOSE_PROJECT'"
+        fi
+        die "the '$PG_SERVICE' service is not running under project '$COMPOSE_PROJECT' — start it with 'make up' first: $probe"
     fi
 
     local started

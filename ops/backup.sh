@@ -25,7 +25,12 @@ readonly REPO_ROOT
 
 # Overridable so the drill, the integration test and a second stack can all run this unedited.
 # DATA_ROOT matches the Makefile's default, which is compose's `../data` made absolute.
+# COMPOSE_PROJECT mirrors ops/docker-compose.yml's own `name: ${COMPOSE_PROJECT_NAME:-trading-platform}`
+# exactly, so this script always resolves the same stack that `make up` (or a second, isolated
+# `COMPOSE_PROJECT_NAME=... docker compose up`) started — never the default project by accident
+# just because this shell's environment does not happen to have the override set.
 COMPOSE_FILE="${COMPOSE_FILE:-$REPO_ROOT/ops/docker-compose.yml}"
+COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-trading-platform}"
 PG_SERVICE="${PG_SERVICE:-postgres}"
 DATA_ROOT="${DATA_ROOT:-$REPO_ROOT/data}"
 # Where `<ts>` directories accumulate. ops/restore.sh reads the same variable, so pointing one
@@ -85,8 +90,23 @@ else
 fi
 
 # Run a shell snippet inside the postgres container with stdin and stdout wired straight through,
-# so a custom-format archive streams into a host file without a tty mangling it.
-pg() { docker compose -f "$COMPOSE_FILE" exec -T "$PG_SERVICE" sh -c "$1"; }
+# so a custom-format archive streams into a host file without a tty mangling it. `-p` is explicit
+# rather than left to compose's own COMPOSE_PROJECT_NAME/`.env` resolution: this function must
+# resolve the *same* stack `make up` started even if this script's own environment does not
+# happen to carry the override that command line used.
+pg() { docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_FILE" exec -T "$PG_SERVICE" sh -c "$1"; }
+
+# Is $PG_SERVICE running, just under a different compose project than $COMPOSE_PROJECT? Answers
+# the exact confusion a mismatched COMPOSE_PROJECT_NAME produces: the service probe below fails
+# either way, and "not running" is the wrong diagnosis when it is running, elsewhere.
+other_project_running() {
+    # `|| true`: grep exits 1 when nothing else is running (the common case, and not an error),
+    # and under `set -eo pipefail` that alone would abort the whole script before the caller
+    # ever gets to look at an empty result — silently, with no die() message at all.
+    docker ps --filter "label=com.docker.compose.service=$PG_SERVICE" \
+              --format '{{.Label "com.docker.compose.project"}}' 2>/dev/null \
+        | grep -svx "$COMPOSE_PROJECT" | head -n1 || true
+}
 
 # A database name is interpolated into that snippet, so it must not be able to close the quoting.
 # Postgres allows far more than this in a quoted identifier; this platform's databases are
@@ -131,7 +151,12 @@ main() {
         if printf '%s' "$probe" | grep -qi 'docker.sock\|cannot connect to the docker daemon'; then
             die "cannot reach the docker daemon — this is a docker/permissions problem, not '$PG_SERVICE' being down: $probe"
         fi
-        die "the '$PG_SERVICE' service is not running or not reachable — start it with 'make up' first: $probe"
+        local elsewhere
+        elsewhere="$(other_project_running)"
+        if [ -n "$elsewhere" ]; then
+            die "'$PG_SERVICE' is not running under project '$COMPOSE_PROJECT', but it IS running under project '$elsewhere' — set COMPOSE_PROJECT_NAME=$elsewhere to reach that stack, or 'make up' to start '$COMPOSE_PROJECT'"
+        fi
+        die "the '$PG_SERVICE' service is not running under project '$COMPOSE_PROJECT' — start it with 'make up' first: $probe"
     fi
 
     # The container is the authority on which database it serves. Asking it beats re-deriving the

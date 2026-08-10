@@ -14,8 +14,12 @@
 #   POSTGRES_HOST_PORT   5433 — host-side publish only; see the note on the mapping
 #   APP_HOST_PORT        8000
 #   DATA_ROOT            ../data — host path of the lake; inside the app it is /data
+#   COMPOSE_PROJECT_NAME trading-platform — unset, this is the only stack; set it to run a
+#                        second, isolated stack (a second worktree, CI) alongside this one
+#                        without the two silently sharing containers, network and volume. Every
+#                        ops/*.sh script honours it too — see their headers.
 
-name: trading-platform
+name: ${COMPOSE_PROJECT_NAME:-trading-platform}
 
 services:
   postgres:
