@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Annotated
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Repo root, derived from this file's location so the defaults work from any working directory
@@ -36,8 +36,34 @@ __all__ = [
     "LogFormat",
     "LogLevel",
     "Settings",
+    "SettingsValidationError",
     "get_settings",
 ]
+
+
+class SettingsValidationError(ValueError):
+    """`Settings()` failed validation. Carries field paths and reasons, never a rejected value.
+
+    Raised instead of letting `pydantic.ValidationError` propagate from `get_settings()`:
+    pydantic attaches the *pre-coercion* input to every failing field's error entry — for a
+    setting read from the environment, that is the raw string `BaseSettings` saw, regardless of
+    the field's declared type or what its own validator's message says. A `SecretStr` field is no
+    exception: coercion into `SecretStr` happens *inside* the same validation pass that can reject
+    it, so a `database_url` rejected by `_postgres_dsn` reports `input='<the raw DSN>'` in
+    `ValidationError.errors()`, and `str(ValidationError)` renders that field verbatim — masking
+    only ever applies to a `SecretStr` *instance* that already exists, not to the string pydantic
+    is in the middle of turning into one (invariant #13). Verified: `Settings(database_url=
+    SecretStr(bad))` (a `SecretStr` handed in directly) masks correctly; `Settings(_env_file=None)`
+    with `DATABASE_URL` set to the same value in the environment does not — same validator, same
+    rejection, different echo, because only the second path coerces from a raw string.
+    """
+
+    def __init__(self, error: ValidationError) -> None:
+        reasons = "; ".join(
+            f"{'.'.join(str(part) for part in entry['loc'])}: {entry['msg']}"
+            for entry in error.errors()
+        )
+        super().__init__(f"invalid configuration - {reasons}")
 
 
 class AppEnv(StrEnum):
@@ -288,16 +314,28 @@ class Settings(BaseSettings):
     def _postgres_dsn(cls, value: SecretStr | None) -> SecretStr | None:
         """Postgres is the only supported store (§8.1); a DSN for anything else is a typo.
 
-        Calls `get_secret_value()` twice rather than once into a local: a local binding is a
+        Calls `get_secret_value()` once rather than binding it to a local: a local binding is a
         second place the unwrapped DSN lives for the rest of this frame's life, and this frame is
         exactly the one a `ValidationError` traceback would show (invariant #13 — keep `SecretStr`
         wrapped all the way to the point it is actually used, never one line longer).
+
+        Never includes the value in the raised message, not even a prefix of it: a colon-free
+        input (a bare password, or a libpq keyword-form DSN like `host=... password=...`, which
+        `psycopg.conninfo.conninfo_to_dict` parses happily and an operator following
+        `store/db.py`'s own advice to prefer `DATABASE_URL` for a managed provider might plausibly
+        paste) makes `value.split(":")[0]` return the *entire* string — pydantic's field name in
+        the error envelope is enough to act on; the value never needs to ride along.
+
+        `postgresql+` (the SQLAlchemy driver-suffix convention) is deliberately not an accepted
+        scheme: this platform has no SQLAlchemy anywhere, and `conninfo_to_dict` rejects that form
+        unconditionally, so accepting it here would only move the same rejection one hop later —
+        past this message, into `connect()`'s `MalformedDatabaseUrlError`, which then names the
+        wrong cause ("a metacharacter in the password") for a DSN that never had one.
         """
         if value is None:
             return None
-        if not value.get_secret_value().startswith(("postgres://", "postgresql://", "postgresql+")):
-            scheme = value.get_secret_value().split(":")[0]
-            raise ValueError(f"database_url must be a Postgres DSN, got {scheme!r}")
+        if not value.get_secret_value().startswith(("postgres://", "postgresql://")):
+            raise ValueError("database_url must be a Postgres DSN")
         return value
 
     @field_validator("data_root")
@@ -330,7 +368,15 @@ def get_settings() -> Settings:
     module sees the same configuration for the life of the process.
     What it assumes: configuration does not change under a running process.
     What it never does: hide a construction error — a bad value raises here, at startup, rather
-    than at the first ingestion. Tests that need a different configuration construct `Settings`
-    directly and inject it, instead of mutating this cache.
+    than at the first ingestion — or let one carry the rejected value. A `ValidationError` from a
+    bad env-sourced `database_url` is re-raised as `SettingsValidationError`, which is why that
+    type exists: pydantic's own error object is not safe to let reach stderr or a log field
+    unrewritten (invariant #13; see `SettingsValidationError`'s docstring for the exact mechanism).
+    Tests that need a different configuration construct `Settings` directly and inject it, instead
+    of mutating this cache — and get the raw `ValidationError`, since nothing they do with it logs
+    or prints it.
     """
-    return Settings()
+    try:
+        return Settings()
+    except ValidationError as error:
+        raise SettingsValidationError(error) from None
