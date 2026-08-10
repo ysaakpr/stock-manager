@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from email.message import EmailMessage
 from typing import Any
 
+import httpx
 import pytest
 import structlog
 from pydantic import SecretStr
@@ -37,11 +38,13 @@ from dataplatform.alerts import (
     Severity,
     TelegramAlerter,
     TelegramConfig,
+    TelegramDeliveryError,
+    _telegram_transport,
     build_alerter,
 )
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import REPO_ROOT, AlertProvider
-from dataplatform.logging import configure_logging
+from dataplatform.logging import configure_logging, get_logger
 from tests.conftest import SettingsLoader
 
 EXAMPLE_ENV = REPO_ROOT / ".env.example"
@@ -433,6 +436,45 @@ def test_the_telegram_token_lives_in_the_url_and_nowhere_else() -> None:
 
     assert config.send_message_url().endswith("/bot123456:test-token/sendMessage")
     assert "test-token" not in repr(config)
+
+
+def test_a_rejected_telegram_call_raises_without_the_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`httpx.HTTPStatusError.__str__` embeds the full request URL — token in the path, per
+    `TelegramConfig.send_message_url` — so it must never escape `_telegram_transport` (invariant
+    #13): a wrong chat id or a bot token mid-rotation is exactly when this path is exercised."""
+    config = TelegramConfig(bot_token=SecretStr("123456:a-real-looking-token"), chat_id="-100999")
+    request = httpx.Request("POST", config.send_message_url())
+    response = httpx.Response(401, request=request, text='{"ok": false}')
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: response)
+
+    with pytest.raises(TelegramDeliveryError) as caught:
+        _telegram_transport(config, {"chat_id": "-100999", "text": "hi"})
+
+    assert "a-real-looking-token" not in str(caught.value)
+    assert caught.value.__cause__ is None  # raised `from None`: no chained, token-bearing cause
+    assert caught.value.status_code == 401
+    assert caught.value.chat_id == "-100999"
+
+
+def test_a_rejected_telegram_call_does_not_leak_the_token_into_the_log(
+    monkeypatch: pytest.MonkeyPatch, log_stream: io.StringIO
+) -> None:
+    """The exact production path the audit named: a scheduler job catches the delivery failure
+    and logs it with `exc_info=True` (scheduler/runner.py)."""
+    config = TelegramConfig(bot_token=SecretStr("123456:a-real-looking-token"), chat_id="-100999")
+    request = httpx.Request("POST", config.send_message_url())
+    response = httpx.Response(401, request=request)
+    monkeypatch.setattr(httpx, "post", lambda *args, **kwargs: response)
+    alerter = TelegramAlerter(config, clock=FrozenClock(CLOSE))
+
+    try:
+        alerter.send(Severity.CRITICAL, "test", "body", "dedup:key")
+    except TelegramDeliveryError:
+        get_logger().exception("job_failed")
+
+    assert "a-real-looking-token" not in log_stream.getvalue()
 
 
 def test_an_oversized_body_is_truncated_rather_than_rejected_by_the_api() -> None:
