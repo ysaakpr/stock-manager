@@ -275,6 +275,50 @@ them as real constraints**? Recommended: yes, as one scoped sweep task.
 
 ---
 
+### D10 — Wave A merge order is not optional, and one fix only lands when two branches meet
+
+**Raised:** 2026-08-10. Three repair branches exist locally, none pushed. Read this before merging any
+of them.
+
+**Merge order:**
+
+1. **`polly/m5.4-finish` first** (7 commits). It is the branch that makes `make check` green — it
+   fixes the 6 static-analysis failures that commit `60874b6` introduced. This matters beyond its own
+   task: `make check` currently dies at `ruff format` *before* reaching the secret scan, so until
+   M5.4 lands, the scan does not run inside `make check` at all.
+2. **`polly/secrets-hardening` and `polly/m0.3-rework` together.** Neither is independently complete:
+
+| Merged alone | What you get |
+|---|---|
+| M0.3 only | A container stack that works, and a test suite that **still silently skips 136 tests** and exits 0 — the M0 gate's exact signature. The skip-guard fix lives in `dataplatform/config.py` + `tests/integration/**`, which the secrets branch owns. |
+| secrets only | A suite that fails loudly on a misconfigured DSN, against a stack whose migration-at-start and loopback-bind fixes are on the other branch. |
+
+**Known merge conflict:** both branches modify `Makefile` (secrets adds the scan step; M0.3's earlier
+work touched targets) and `ops/BACKLOG.md`. Small and textual, but expect to resolve them by hand.
+
+**Post-merge integration task — do NOT skip it.** The secrets branch replaced the single interpolated
+DSN with discrete `postgres_host/port/user/password/db` settings passed as psycopg keyword arguments,
+so no character is ever URI grammar. That closes a **silent misparse** on the host path: a password
+containing `/` made the old DSN parse as `host='trading', user=None, password=None`, and `%41`
+silently became `A` — connecting as the wrong user rather than failing. But
+`ops/docker-compose.yml` still hands the container **one interpolated `DATABASE_URL`**, so the
+in-container path keeps exactly the weakness the host path just shed. The fix is for compose to pass
+the discrete `POSTGRES_*` variables instead.
+
+It could not be done inside either branch: `ops/**` belongs to M0.3, whose `config.py` has no
+discrete fields, so making the change there would have broken that branch's own 138-test
+verification. It is a genuine two-branch dependency, deferred deliberately rather than forgotten.
+Until it lands, **a container password containing `/`, `%`, `@` or a space is still unsafe** even
+though the host-side path is fixed.
+
+**Also unenforced until the secrets branch's B1 fix lands:** nothing scans for secrets on the path
+agents actually commit through. `orch set-state DONE` runs format/lint/types only and never calls
+`make check`; `.pre-commit-config.yaml` is not installed (no `.git/hooks/pre-commit` exists anywhere);
+and `make check` reaches the scan only on a tree that already passes formatting. The one control that
+works today fires **after** push — which on a deliberately-public repo (D5) is after the harm.
+
+---
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
