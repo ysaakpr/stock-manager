@@ -12,16 +12,21 @@ import io
 import json
 import logging
 from collections.abc import Callable, Iterator
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 import httpx
 import pytest
 import structlog
+from pydantic import BaseModel
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.logging import (
     _HttpxUrlRedactor,
+    _redact_known_secret_shapes,
     bind_context,
     clear_context,
     configure_logging,
@@ -316,3 +321,106 @@ def test_configure_logging_does_not_attach_the_httpx_filter_twice(configured: Co
         f for f in logging.getLogger("httpx").filters if isinstance(f, _HttpxUrlRedactor)
     ]
     assert len(httpx_filters) == 1
+
+
+# ── denylist widening: shapes an earlier review found had zero coverage ────────────────────────
+
+
+def test_a_telegram_token_with_a_body_longer_than_35_chars_is_redacted() -> None:
+    """The original regex hard-coded an exact 35-char body; a real token 36+ chars long (bot ids
+    already reach 10 digits) passed through untouched."""
+    token = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDMARKR1"  # 36 chars
+    url = f"https://api.telegram.org/bot12345678:{token}/sendMessage"
+
+    assert token not in _redact_known_secret_shapes(url)
+
+
+def test_a_telegram_token_as_the_final_url_segment_is_redacted() -> None:
+    """The original regex required a trailing `/`, so a token with no method segment after it —
+    or an 11-digit bot id — passed through untouched."""
+    token = "AAHdqTcvCH1vGWJxfSeofSAs0K5PALDMARKR1"
+    url = f"https://api.telegram.org/bot12345678901:{token}"  # 11-digit id, no trailing "/"
+
+    assert token not in _redact_known_secret_shapes(url)
+
+
+def test_an_anthropic_api_key_is_redacted() -> None:
+    """M6.8 does not exist yet — nothing calls get_secret_value() on anthropic_api_key today —
+    but the pattern is in place before that call site is, not discovered as a gap after it."""
+    key = "sk-ant-api03-MARKERabcdefghijklmnopqrstuvwxyz1234567890"
+
+    redacted = _redact_known_secret_shapes(f"request failed: key={key}")
+
+    assert key not in redacted
+    assert "sk-ant-***REDACTED***" in redacted
+
+
+def test_an_aws_access_key_id_is_redacted() -> None:
+    key = "AKIAABCDEFGHIJKLMNOP"
+
+    redacted = _redact_known_secret_shapes(f"using access key {key}")
+
+    assert key not in redacted
+
+
+@pytest.mark.parametrize("field", ["alert_smtp_password", "kite_api_key", "kite_api_secret"])
+def test_a_shapeless_credential_is_redacted_by_field_name(field: str) -> None:
+    """SMTP and Kite credentials have no fixed shape at all — nothing about the VALUE can be
+    pattern-matched, unlike Anthropic's `sk-ant-` prefix or a Telegram token's `\\d+:` shape — so
+    the only signal available is the name a value is logged under."""
+    marker = "anyRandomShapeAtAll-9f2c"
+
+    redacted = _redact_known_secret_shapes({field: marker})
+
+    assert marker not in str(redacted)
+    assert redacted[field] == "***REDACTED***"
+
+
+def test_a_secret_inside_a_tuple_or_a_set_is_redacted() -> None:
+    """The recursive descent originally covered dict and list only; a caller collecting several
+    DSNs into a tuple or a set fell through untouched."""
+    dsn = "postgresql://trading:s3cret-tuple-9f2c@localhost:5433/trading"
+
+    assert "s3cret-tuple-9f2c" not in str(_redact_known_secret_shapes((dsn,)))
+    assert "s3cret-tuple-9f2c" not in str(_redact_known_secret_shapes({dsn}))
+
+
+def test_a_dataclass_carrying_a_bare_secret_field_is_redacted_via_its_repr() -> None:
+    """`SecretStr` masks its own repr already; a *bare* str field on a plain config-carrying
+    object does not, and JSONRenderer would otherwise repr() it after this processor has run."""
+
+    @dataclass
+    class SmtpCfgRepr:
+        host: str
+        password: str
+
+    redacted = _redact_known_secret_shapes(SmtpCfgRepr(host="mail", password="MARKER-smtp-pw"))
+
+    assert "MARKER-smtp-pw" not in redacted
+    assert isinstance(redacted, str)
+
+
+def test_a_pydantic_model_carrying_a_bare_secret_field_is_redacted_via_its_repr() -> None:
+    class SmtpCfgModel(BaseModel):
+        host: str
+        password: str
+
+    redacted = _redact_known_secret_shapes(SmtpCfgModel(host="mail", password="MARKER-smtp-pw"))
+
+    assert "MARKER-smtp-pw" not in redacted
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        Decimal("1234.56"),
+        date(2026, 8, 10),
+        UUID("12345678-1234-5678-1234-567812345678"),
+    ],
+)
+def test_ordinary_value_types_pass_through_unchanged(value: object) -> None:
+    """The dataclass/BaseModel repr fix must not widen into "repr() anything unrecognised" — a
+    Decimal, a date or a UUID is exactly the value shape this platform's own logging convention
+    relies on structlog/JSONRenderer to serialise cleanly, and none of them can carry a credential
+    field the way a config-carrying object can."""
+    assert _redact_known_secret_shapes(value) is value

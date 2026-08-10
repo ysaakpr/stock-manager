@@ -18,10 +18,11 @@ import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import Any, TextIO
 
 import structlog
+from pydantic import BaseModel
 from structlog.typing import EventDict, FilteringBoundLogger, Processor, WrappedLogger
 
 from dataplatform.clock import Clock, SystemClock
@@ -60,32 +61,98 @@ _CONSOLE_EXCEPTION_FORMATTER = structlog.dev.RichTracebackFormatter(
 _DSN_PASSWORD_RE = re.compile(r"(://[^\s:/@]+:)([^\s@]+)(@)")
 
 #: Matches a Telegram Bot API token sitting in a URL path (`/bot<token>/...`), per
-#: `TelegramConfig.send_message_url` — the shape invariant #13 calls out by name.
-_TELEGRAM_TOKEN_IN_URL_RE = re.compile(r"(/bot)\d{8,10}:[A-Za-z0-9_-]{35}(/)")
+#: `TelegramConfig.send_message_url` — the shape invariant #13 calls out by name. Bot ids already
+#: reach 10 digits and a token body of 36+ chars is observed in the wild, so both ends are open
+#: rather than the exact `{8,10}`/`{35}` this repo shipped with first, which a longer real token
+#: or bot id would silently pass through.
+_TELEGRAM_TOKEN_IN_URL_RE = re.compile(r"(/bot)\d{5,}:[\w-]{20,}")
+
+#: Anthropic API keys (`sk-ant-api03-...`, `console.anthropic.com` → Settings → API Keys) — M6.8
+#: has not landed yet, so nothing calls `get_secret_value()` on `anthropic_api_key` today, but the
+#: day it does, this pattern is already in place rather than a gap discovered after the fact.
+_ANTHROPIC_KEY_RE = re.compile(r"sk-ant-[A-Za-z0-9_-]{20,}")
+
+#: An AWS access key ID (never the secret access key, which has no fixed shape at all — see
+#: `_SENSITIVE_KEY_NAME_MARKERS` below for how that half is covered). Not used anywhere in this
+#: platform's own credentials; kept because a future dependency (an S3-backed L0 target is an open
+#: item in ops/BACKLOG.md) would otherwise add this exact shape with zero coverage.
+_AWS_ACCESS_KEY_ID_RE = re.compile(r"AKIA[0-9A-Z]{16}")
+
+#: Field-name substrings that make a value's entire content suspect regardless of its shape.
+#: Exists because SMTP and Kite credentials — the two credential types this repo's own audit named
+#: as having zero shape-based coverage — have no recognizable format at all: an SMTP password is
+#: an arbitrary string, and a Kite api_key/api_secret is a plain alphanumeric string with no fixed
+#: prefix (unlike Anthropic's `sk-ant-` or a Telegram token's `\d+:` shape). Nothing about the
+#: VALUE can be pattern-matched for those two; only the NAME a value is logged under can be, which
+#: is why this list exists as a second, complementary mechanism rather than more regexes.
+_SENSITIVE_KEY_NAME_MARKERS = ("password", "secret", "token", "api_key", "apikey")
+
+
+def _is_sensitive_key_name(key: object) -> bool:
+    lowered = str(key).lower()
+    return any(marker in lowered for marker in _SENSITIVE_KEY_NAME_MARKERS)
 
 
 def _redact_known_secret_shapes(value: Any) -> Any:
-    """Blank out a DSN password or a Telegram bot token wherever one appears in a string value.
+    """Blank out a value whose shape or field name is a known credential, wherever it appears.
 
     A last line of defence, not the fix: the real fix is that no caller ever puts a secret in a
     log field or an exception string in the first place. This exists for the case a future caller
-    gets that wrong anyway — recursing into dicts and lists so it also catches a rendered
-    traceback's `exc_value` / `exc_notes` strings, not just top-level event fields.
+    gets that wrong anyway — recursing into dicts, lists, tuples and sets so it also catches a
+    rendered traceback's `exc_value` / `exc_notes` strings and any of the container shapes a
+    caller might collect several DSNs or tokens into, not just a single top-level string field.
+
+    A dict's *values* are redacted by name where the key is sensitive (whole-value blanking,
+    since a shapeless credential has nothing else to match on) and by shape everywhere else.
+
+    A dataclass or a pydantic `BaseModel` is redacted by field name via its own fields, not its
+    `repr()` text directly: `repr()` renders as `ClassName(field='value', ...)`, which the shape
+    regexes above cannot parse as key-value pairs, so a bare `str` field with no recognisable
+    shape (a plain settings-carrying object's password field — `SecretStr` masks its own `repr()`
+    already, but a *bare* `str`/`int` field on the same object would not) would survive a naive
+    `repr()`-then-regex pass untouched. Converting to a dict first (`dataclasses.asdict` /
+    `model_dump(mode="json")`) reuses the dict branch's key-name check, then folds back into a
+    single string — the one non-primitive shape worth the small behaviour change of turning the
+    field into text. Every other object type (`Decimal`, `date`, `UUID`, an `Enum`...) is returned
+    unchanged: those are exactly the value types this platform's own logging convention relies on
+    structlog/`JSONRenderer` to serialise cleanly, and coercing all of them through `repr()` on the
+    chance one might carry a credential would degrade every ordinary log line's field shapes to
+    catch a case that, for this platform's own types, does not occur.
     """
     if isinstance(value, str):
         value = _DSN_PASSWORD_RE.sub(r"\1***REDACTED***\3", value)
-        value = _TELEGRAM_TOKEN_IN_URL_RE.sub(r"\1***REDACTED***\2", value)
+        value = _TELEGRAM_TOKEN_IN_URL_RE.sub(r"\1***REDACTED***", value)
+        value = _ANTHROPIC_KEY_RE.sub("sk-ant-***REDACTED***", value)
+        value = _AWS_ACCESS_KEY_ID_RE.sub("AKIA***REDACTED***", value)
         return value
     if isinstance(value, dict):
-        return {key: _redact_known_secret_shapes(val) for key, val in value.items()}
+        return {
+            key: (
+                "***REDACTED***"
+                if _is_sensitive_key_name(key)
+                else _redact_known_secret_shapes(val)
+            )
+            for key, val in value.items()
+        }
     if isinstance(value, list):
         return [_redact_known_secret_shapes(item) for item in value]
+    if isinstance(value, (tuple, set, frozenset)):
+        return type(value)(_redact_known_secret_shapes(item) for item in value)
+    if isinstance(value, BaseModel):
+        fields = _redact_known_secret_shapes(value.model_dump(mode="json"))
+        return f"{type(value).__name__}({fields})"
+    if is_dataclass(value) and not isinstance(value, type):
+        fields = _redact_known_secret_shapes(asdict(value))
+        return f"{type(value).__name__}({fields})"
     return value
 
 
 def _redaction_processor(logger: WrappedLogger, name: str, event_dict: EventDict) -> EventDict:
     """The redaction pass, wired in after tracebacks are rendered so it also covers them."""
-    return {key: _redact_known_secret_shapes(val) for key, val in event_dict.items()}
+    return {
+        key: ("***REDACTED***" if _is_sensitive_key_name(key) else _redact_known_secret_shapes(val))
+        for key, val in event_dict.items()
+    }
 
 
 class _HttpxUrlRedactor(logging.Filter):
