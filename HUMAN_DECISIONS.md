@@ -88,9 +88,29 @@ What this settles for every agent, permanently:
 
 ## Open
 
-### D6 — M6.1: narrow the acceptance criteria to drop the dead GDELT DOC API
+### D6 — M6.1: narrow the acceptance criteria to drop the dead GDELT DOC API → **ANSWERED: option 2.**
 
 **Raised:** 2026-08-10, by read-only investigation into M6.1's unsatisfiable acceptance bullet.
+**Answered:** 2026-08-10 by the owner.
+
+> **DECISION — option 2.** The `gdelt_doc_api` row is declared **out of scope** for M6.1 and stays
+> non-VERIFIED carrying its `candidate_alternatives`; the register already permits exactly that
+> (`source_register.py:54-64`, `:245-246`), so no new status is invented and nothing is deleted to
+> make a bullet pass. In exchange M6.1 owes the evidence its own spec promised: **every curated RSS
+> feed gets its own register row, VERIFIED, before M6.1 can be DONE.** There is no RSS row today.
+>
+> **Binding on the build:**
+> - M6.1 emits **unresolved** organisation text. It must NOT resolve entities to ISIN — **M6.2 owns
+>   resolution** under a tighter contract (alias table, labelled-sample precision/recall). A
+>   half-resolved entity field next to the ISIN-only-joins invariant is worse than an unresolved one.
+> - Dropping the DOC API is not a weakening: EXECUTION_PLAN names no vendor and no article-level
+>   granularity (§134 "News / geopolitical", §277 *"where available"*). GDELT was an implementation
+>   choice by the task author, not a ratified requirement.
+> - **Acknowledged one-way door:** RSS bodies are never fetched by design (headlines + links only,
+>   per licence), so article text cannot be backfilled later. If M6.3's evidence bundle needs more
+>   than a headline, that is a new decision and a new source, not a re-run of this one.
+> - M6.1 is **not** on the T0 mechanical decision path — BC3 triggers from M3.8 via M5.11 — so
+>   invariant #7 does not depend on this task.
 
 **The finding — the source is not the problem, the contract is.** M6.1 owns *two* source-register
 rows, not one:
