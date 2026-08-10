@@ -22,4 +22,11 @@ Nothing in this directory contains a credential, and nothing may. The `id` field
 | `max_tokens.json` | A truncated answer — billed, and `truncated` must be visible to the caller. |
 | `refusal.json` | A refusal: HTTP 200, empty content, `stop_details.category`. |
 | `context_window_exceeded.json` | A stop reason this client does not map, which must fail loud. |
+| `no_stop_reason.json` | A completion whose termination is absent, so it cannot be trusted. |
+| `tool_use_array_input.json` | A tool call whose `input` is an array, not the object we published. |
 | `resolved_model_id.json` | An alias resolved to a dated snapshot id — what gets priced. |
+
+Four of these are billed failures: `refusal`, `context_window_exceeded`, `no_stop_reason` and
+`tool_use_array_input` all carry a full `usage` block, because the provider ran and billed the
+call whatever this client decides about the answer. Their token counts are load-bearing, not
+scenery — the tests assert the counts survive the raise and still price to a non-zero `cost_inr`.

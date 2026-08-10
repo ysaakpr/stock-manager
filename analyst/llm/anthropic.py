@@ -22,8 +22,8 @@ the two ways of getting that wrong are written down.
 
 Not implemented here, deliberately: server-side refusal fallbacks (`fallbacks`), prompt-cache
 breakpoints, and streaming. All three are beta or shape-changing surfaces that cannot be exercised
-without a key, and untestable code on the money path is worse than absent code. `ops/BACKLOG.md`
-carries them; the day a credential lands they are the first thing to add.
+without a key, and untestable code on the money path is worse than absent code. This paragraph is
+the record of that decision; the day a credential lands they are the first thing to add.
 """
 
 from __future__ import annotations
@@ -253,7 +253,11 @@ class AnthropicLLM:
                 text.append(block.text)
             elif block.type == "tool_use":
                 tool_calls.append(
-                    ToolCall(id=block.id, name=block.name, arguments=_arguments(block.input))
+                    ToolCall(
+                        id=block.id,
+                        name=block.name,
+                        arguments=_arguments(block.input, usage=usage),
+                    )
                 )
         return LLMResponse(
             provider=ANTHROPIC_PROVIDER,
@@ -339,13 +343,21 @@ def _stop_reason(value: str | None, *, usage: Usage) -> StopReason:
         ) from None
 
 
-def _arguments(value: object) -> dict[str, object]:
+def _arguments(value: object, *, usage: Usage) -> dict[str, object]:
     """A tool call's arguments as a mapping, or a loud failure.
 
     The SDK types `input` as `object` because a tool schema can in principle be any JSON. Every
     tool this system offers takes an object, so anything else means the model answered a tool
     contract that is not the one we published.
+
+    `usage` is carried for the same reason it is on every other raise reachable from a completed
+    response: the model generated this tool call and the provider billed the whole exchange, so
+    dropping the counts here would book real spend at ₹0. It is the last raise site in this
+    module's happy path, and the easiest one to miss — the failure is in a content block, long
+    after the call itself has plainly succeeded.
     """
     if not isinstance(value, dict):
-        raise LLMError(f"tool call arguments must be an object, got {type(value).__name__}")
+        raise LLMError(
+            f"tool call arguments must be an object, got {type(value).__name__}", usage=usage
+        )
     return {str(key): item for key, item in value.items()}

@@ -1,0 +1,21 @@
+{
+  "id": "msg_01NoStopReasonFixture000",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-opus-5",
+  "content": [
+    {
+      "type": "text",
+      "text": "Order inflow grew for the fourth straight quarter"
+    }
+  ],
+  "stop_reason": null,
+  "stop_sequence": null,
+  "stop_details": null,
+  "usage": {
+    "input_tokens": 640,
+    "output_tokens": 55,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}

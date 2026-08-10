@@ -951,6 +951,8 @@ def test_an_unmapped_stop_reason_fails_loud(stub_transport: _Transport) -> None:
     [
         ("refusal.json", LLMRefusalError, 274),
         ("context_window_exceeded.json", LLMError, 999_999),
+        ("no_stop_reason.json", LLMError, 640),
+        ("tool_use_array_input.json", LLMError, 903),
     ],
 )
 def test_a_failed_call_still_carries_the_tokens_it_was_billed_for(
@@ -962,11 +964,15 @@ def test_a_failed_call_still_carries_the_tokens_it_was_billed_for(
 ) -> None:
     """A call this client refuses to return an answer for was still run, and still billed.
 
-    Both of these arrive as HTTP 200 with a full `usage` block, and the context-window case is the
-    one that hurts: it fires on the largest prompts there are. Raising without the token counts
-    would book that at ₹0 — the exact blindness X3 exists to remove, reopened on the error path.
-    The counts ride out on the exception so the spend stays bookable; nothing here books it, and
-    a caller must never substitute a zero for an absent `usage`.
+    Every one of these arrives as HTTP 200 with a full `usage` block — this is the complete set of
+    raise sites reachable once the provider has answered. Two hurt more than the others: the
+    context-window case fires on the largest prompts there are, and the malformed tool call fires
+    in a content block, long after the call has plainly succeeded, which is what makes it the easy
+    one to miss. Raising without the token counts would book any of them at ₹0 — the exact
+    blindness X3 exists to remove, reopened on the error path.
+
+    The counts ride out on the exception so the spend stays bookable; nothing here books it, and a
+    caller must never substitute a zero for an absent `usage`.
     """
     client = AnthropicLLM(FAKE_KEY, http_client=stub_transport.client(fixture))
 
@@ -984,6 +990,31 @@ def test_a_failed_call_still_carries_the_tokens_it_was_billed_for(
         purpose="t1_review",
     )
     assert priced.cost_inr > 0
+
+
+def test_a_tool_call_answering_the_wrong_contract_fails_loud(stub_transport: _Transport) -> None:
+    """Every tool this system offers takes an object; an array means a contract nobody published.
+
+    Coercing it would hand a rail or a mapper arguments it cannot read, one layer further from the
+    thing that went wrong.
+    """
+    client = AnthropicLLM(FAKE_KEY, http_client=stub_transport.client("tool_use_array_input.json"))
+    with pytest.raises(LLMError, match="tool call arguments must be an object, got list"):
+        client.complete([Message(role=Role.USER, content="Is it broken?")], model=DEFAULT_MODEL)
+
+
+def test_a_response_with_no_stop_reason_is_not_trusted_to_be_complete(
+    stub_transport: _Transport,
+) -> None:
+    """A completion whose termination is unknown cannot be read as a finished answer.
+
+    Near-unreachable on a non-streaming call — the SDK types `stop_reason` as optional and the API
+    populates it — but the guard exists precisely because "near" is not "never", and an untested
+    guard is a guard nobody knows the shape of.
+    """
+    client = AnthropicLLM(FAKE_KEY, http_client=stub_transport.client("no_stop_reason.json"))
+    with pytest.raises(LLMError, match="carried no stop_reason"):
+        client.complete([Message(role=Role.USER, content="hello")], model=DEFAULT_MODEL)
 
 
 def test_a_failure_with_nothing_to_book_carries_no_usage() -> None:

@@ -57,16 +57,24 @@ DEFAULT_MAX_TOKENS: Final[int] = 16_000
 class LLMError(Exception):
     """Base for every failure of this package, so callers can catch the module.
 
-    Carries the `Usage` of the call that failed, when the failure happened late enough for the
-    provider to have reported one. That is not decoration: a refusal and an unrecognized
-    termination both arrive as billed HTTP 200 responses, so an error that dropped its token
-    counts would book a real charge at ₹0 — the same metering blindness X3 exists to remove
-    (decision #12), reappearing on the error path where nobody looks for it.
+    Carries the `Usage` of the call that failed, whenever the provider reported one. That is not
+    decoration: a refusal, an unrecognized termination and a malformed tool call all arrive inside
+    billed HTTP 200 responses, so an error that dropped its token counts would book a real charge
+    at ₹0 — the same metering blindness X3 exists to remove (decision #12), reappearing on the
+    error path where nobody looks for it. Every raise in this package that is reachable after a
+    successful response populates it.
 
-    `usage` is None when there is genuinely nothing to book: a missing credential, an argument
-    rejected before a request went out, a transport failure with no response. A caller that meters
-    failed calls prices `usage` when it is present and records nothing when it is not; it must
-    never substitute a zero, which would be indistinguishable from a call that cost nothing.
+    `usage` is None when there is genuinely nothing to book: a missing credential, or an argument
+    rejected before a request went out. A caller that meters failed calls prices `usage` when it
+    is present and records nothing when it is not; it must never substitute a zero, which would be
+    indistinguishable from a call that cost nothing.
+
+    A transport failure is not one of these cases, because it never becomes an `LLMError` at all —
+    a connection reset or a timeout surfaces as the SDK's own `anthropic.APIConnectionError` or
+    `anthropic.APITimeoutError`, uncaught and unwrapped. That is deliberate rather than an
+    oversight: translating them would hide the SDK's retry accounting behind a vaguer type, and
+    failing loud and specific is the rule (CLAUDE.md). A caller that wants to catch this package
+    and the transport in one place catches `anthropic.APIError` alongside `LLMError`.
     """
 
     def __init__(self, message: str, *, usage: Usage | None = None) -> None:
