@@ -223,6 +223,21 @@ Children inherit the parent's deps and milestone; the parent becomes a no-op con
 its children do. Splitting early is cheap and correct. Degrading quality to squeeze a too-large task into one
 context is the failure this rule exists to prevent.
 
+**Commit early, commit often — the runner will die under you.** This is not style advice. The runner has
+exited mid-task at least seven times (M5.3, M5.4 and M6.1 on 2026-08-08; four more sessions on 2026-08-10),
+and every time it took the *uncommitted* working tree with it. That is the whole story behind
+`60874b6 "first commit"`: an abandoned tree, hand-committed later under a message that breaks the
+`[<task-id>]` convention, carrying 1,316 lines whose declared tests had never been written.
+
+So: **commit each coherent green piece as you reach it, on your own branch, before moving to the next.**
+Do not save a single commit for the end of the task. A crash must cost you the last few minutes, not the
+whole task. Intermediate commits use the same `[<task-id>] <title>` convention; a task that ends up with
+five commits instead of one is not untidy, it is recoverable.
+
+Corollary for whoever inherits a crashed task: **the working tree left behind is untrusted WIP.** It was
+never run to green and no one reviewed it. Read it, judge it against the acceptance criteria, and keep or
+discard it on the merits. Never assume it was nearly done.
+
 **A dependency turns out to be wrong or missing.** Do not work around it silently. If the fix is small and
 inside your task's blast radius, fix it and note it. If it is not, park with `--why-blocked` naming the
 upstream task; the orchestrator will surface it as a graph defect rather than a human decision.

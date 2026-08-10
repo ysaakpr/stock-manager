@@ -423,6 +423,46 @@ manually scanned and are clean.
 
 ---
 
+### D11 — The build system can record DONE over a red gate → **ANSWERED: fix all four parts, before Wave B.**
+
+**Raised:** 2026-08-10, from `BUILD_STATE.json` (tracked as of `64651a4`) and `ops/gates/M0.md`.
+**Answered:** 2026-08-10 by the owner.
+
+**The evidence, four observations that are one problem:**
+
+1. **Four tasks are recorded DONE over a failing gate.** C.3, M0.4, M1.4 and M1.11 carry
+   `state: DONE` with `reason: "make check failed with exit 2"`.
+2. **`orch`'s DONE path never runs the tests.** It runs format, lint, types, and (since the secrets
+   work) an unconditional secret scan. **No pytest.** "DONE" currently means "compiles and is
+   well-formatted".
+3. **R2 — the gate auditor cannot record a failure.** `./orch set <id> FAILED` is refused by design
+   by `orchestrator/state.py` (`ops/gates/M0.md:456`). The audit role has no write path for the one
+   artifact it exists to produce, so a failed gate lands in Markdown that no dependency walk reads.
+4. **Together these let the build stack on rubble, and it already did.** M0.3 had a commit and a
+   FAILED gate; every dep-walk read the commit and treated it as satisfied. **M0.4-M0.7 were built
+   on top of it.** That is why Wave A existed.
+
+> **DECISION — all four parts, sequenced BEFORE Wave B.**
+>
+> **(a) DONE must mean green.** `orch`'s DONE verification runs the full `make check` including
+> pytest and **refuses the transition** on failure. Accepted cost: every state transition gets
+> slower, and this will likely **turn several currently-DONE tasks red**. That is the point, not a
+> regression.
+>
+> **(b) Fix R2.** The gate auditor gets a legitimate write path for `FAILED`, so a failed gate is
+> recorded in machine-readable state rather than prose.
+>
+> **(c) Reconcile the four mis-recorded tasks** — as a read-only `explore` **first**. Re-run their
+> gates at their commits and find out what is actually true before writing any state.
+>
+> **(d) Ratify the commit-early mandate** into `AGENTIC_CONTEXT.md` §7 so it binds every builder,
+> not only the ones briefed ad hoc. **Done in this commit.**
+>
+> **Scope note:** (a), (b) and (c) touch `orchestrator/` — the build system, not product code — but
+> they are still code, so they are built by sub-agents under normal task discipline, not hand-edited.
+
+---
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
