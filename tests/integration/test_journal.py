@@ -25,7 +25,6 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from pydantic import SecretStr
 
 from analyst.journal import (
     Actor,
@@ -44,8 +43,9 @@ from analyst.journal import (
 )
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
-from dataplatform.store.db import Connection, connect, connection, with_dbname
+from dataplatform.store.db import Connection, connect, connection
 from dataplatform.store.migrate import migrate
+from tests.integration.conftest import settings_for, skip_or_fail_on_connect_error
 
 pytestmark = pytest.mark.integration
 
@@ -60,26 +60,21 @@ DECIDED_AT = datetime(2026, 8, 7, 19, 30, tzinfo=IST)
 RECORDED_AT = datetime(2026, 8, 7, 19, 30, 2, tzinfo=IST)
 
 
-def _settings_for(dbname: str) -> Settings:
-    dsn = with_dbname(Settings().database_url.get_secret_value(), dbname)
-    return Settings(database_url=SecretStr(dsn))
-
-
 @pytest.fixture(scope="session")
 def journal_settings() -> Iterator[Settings]:
     """An empty scratch database with the schema applied, dropped at the end of the session."""
-    admin = _settings_for("postgres")
+    admin = settings_for("postgres")
     try:
         conn = connect(admin, autocommit=True)
     except psycopg.OperationalError as error:  # pragma: no cover - environment, not logic
-        pytest.skip(f"postgres is not reachable — run `make up` first: {error}")
+        skip_or_fail_on_connect_error(error)
     try:
         conn.execute(f'DROP DATABASE IF EXISTS "{SCRATCH_DB}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{SCRATCH_DB}"')
     finally:
         conn.close()
 
-    scratch = _settings_for(SCRATCH_DB)
+    scratch = settings_for(SCRATCH_DB)
     migrate(scratch, clock=FrozenClock(RECORDED_AT))
     yield scratch
 

@@ -129,17 +129,40 @@ class Settings(BaseSettings):
     )
 
     # ── storage ──────────────────────────────────────────────────────────────────────────────
-    database_url: SecretStr = Field(
-        # Port 5433, not 5432: that is where ops/docker-compose.yml publishes the container DB on
-        # the host, because this host already runs its own Postgres on 127.0.0.1:5432 and a
-        # default of 5432 silently reaches that other server (ops/README.md). In-container the
-        # app is handed postgres:5432 by compose and never sees this default.
-        #
-        # A `SecretStr`, not `str`: the DSN embeds a password, and a DSN with an embedded
-        # password is a credential (invariant #13) whether or not the default value happens to
-        # be a placeholder.
-        default=SecretStr("postgresql://trading:trading@localhost:5433/trading"),
-        description="Postgres DSN for masters, sync state and the journal",
+    # Discrete connection parameters, not a pre-built DSN string, are the default path: a
+    # Postgres password can legitimately contain a space, `@`, `/`, `%`, `#`, `?` or `:`, and a
+    # DSN string is a URI — those characters need percent-encoding to survive one, which nothing
+    # upstream of this process can be trusted to have done (ops/docker-compose.yml's own
+    # `${POSTGRES_PASSWORD}` interpolation does not). `dataplatform.store.db.connect` hands these
+    # to psycopg as keyword arguments, never assembling a URL, so no character is ever ambiguous
+    # (invariant #13: a wrong DSN parse silently reaching a different database, or a malformed one
+    # quoting the password fragment back in a `ProgrammingError`, are both a leak/misconnection of
+    # exactly the kind that rule exists to prevent).
+    #
+    # Port 5433, not 5432: that is where ops/docker-compose.yml publishes the container DB on the
+    # host, because this host already runs its own Postgres on 127.0.0.1:5432 and a default of
+    # 5432 silently reaches that other server (ops/README.md). In-container the app is expected to
+    # be given POSTGRES_HOST=postgres and POSTGRES_PORT=5432 explicitly.
+    postgres_host: str = Field(default="localhost", description="Postgres server host")
+    postgres_port: Annotated[int, Field(ge=1, le=65535)] = Field(
+        default=5433, description="Postgres server port"
+    )
+    postgres_user: str = Field(default="trading", description="Postgres role this process uses")
+    postgres_password: SecretStr = Field(
+        default=SecretStr("trading"),
+        description="Postgres role's password — a SecretStr regardless of the default (#13)",
+    )
+    postgres_db: str = Field(
+        default="trading", description="Postgres database for masters, sync state and the journal"
+    )
+    # An explicit escape hatch, not the default: a single DSN string is occasionally the only
+    # option (a managed Postgres that hands out one connection string), and existing tooling
+    # (ops/README.md's demo, a developer's own shell) may still export DATABASE_URL directly. Set,
+    # it overrides every POSTGRES_* field above outright — whoever sets it owns getting any
+    # metacharacter in its password percent-encoded, per `urllib.parse.quote`.
+    database_url: SecretStr | None = Field(
+        default=None,
+        description="explicit full DSN override; unset means build safely from POSTGRES_* above",
     )
     data_root: Path = Field(
         default=Path("data"),
@@ -243,6 +266,7 @@ class Settings(BaseSettings):
         "alert_email_from",
         "alert_telegram_bot_token",
         "alert_telegram_chat_id",
+        "database_url",
         mode="before",
     )
     @classmethod
@@ -261,8 +285,10 @@ class Settings(BaseSettings):
 
     @field_validator("database_url")
     @classmethod
-    def _postgres_dsn(cls, value: SecretStr) -> SecretStr:
+    def _postgres_dsn(cls, value: SecretStr | None) -> SecretStr | None:
         """Postgres is the only supported store (§8.1); a DSN for anything else is a typo."""
+        if value is None:
+            return None
         dsn = value.get_secret_value()
         if not dsn.startswith(("postgres://", "postgresql://", "postgresql+")):
             raise ValueError(f"database_url must be a Postgres DSN, got {dsn.split(':')[0]!r}")

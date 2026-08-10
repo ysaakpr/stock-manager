@@ -24,7 +24,6 @@ from uuid import UUID
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
@@ -43,8 +42,9 @@ from dataplatform.scheduler import (
     read_heartbeat,
 )
 from dataplatform.status.api import app, clock_source, settings_source
-from dataplatform.store.db import Connection, connect, connection, with_dbname
+from dataplatform.store.db import Connection, connect, connection
 from dataplatform.store.migrate import migrate
+from tests.integration.conftest import settings_for, skip_or_fail_on_connect_error
 
 pytestmark = pytest.mark.integration
 
@@ -62,27 +62,21 @@ NOW = datetime(2026, 8, 8, 18, 30, tzinfo=IST)
 NEVER_SOON = "0 4 1 1 *"
 
 
-def _settings_for(dbname: str) -> Settings:
-    """Settings for the configured server with a different database selected."""
-    dsn = with_dbname(Settings().database_url.get_secret_value(), dbname)
-    return Settings(database_url=SecretStr(dsn))
-
-
 @pytest.fixture(scope="session")
 def scratch_settings() -> Iterator[Settings]:
     """An empty, migrated scratch database for the session; dropped afterwards."""
-    admin = _settings_for("postgres")
+    admin = settings_for("postgres")
     try:
         conn = connect(admin, autocommit=True)
     except psycopg.OperationalError as error:  # pragma: no cover - environment, not logic
-        pytest.skip(f"postgres is not reachable — run `make up` first: {error}")
+        skip_or_fail_on_connect_error(error)
     try:
         conn.execute(f'DROP DATABASE IF EXISTS "{SCRATCH_DB}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{SCRATCH_DB}"')
     finally:
         conn.close()
 
-    settings = _settings_for(SCRATCH_DB)
+    settings = settings_for(SCRATCH_DB)
     migrate(settings, clock=FrozenClock(NOW))
     yield settings
 
@@ -189,14 +183,21 @@ def test_the_run_once_cli_runs_the_placeholder_eod_job(scratch_settings: Setting
     """The §8.1 invocation verbatim, as a real process — argv parsing, wiring and exit code."""
     assert "eod_pipeline" in default_registry(), "M0.6 must register the placeholder EOD job"
 
+    if scratch_settings.database_url is not None:
+        db_env = {"DATABASE_URL": scratch_settings.database_url.get_secret_value()}
+    else:
+        db_env = {
+            "POSTGRES_HOST": scratch_settings.postgres_host,
+            "POSTGRES_PORT": str(scratch_settings.postgres_port),
+            "POSTGRES_USER": scratch_settings.postgres_user,
+            "POSTGRES_PASSWORD": scratch_settings.postgres_password.get_secret_value(),
+            "POSTGRES_DB": scratch_settings.postgres_db,
+        }
     completed = subprocess.run(
         [sys.executable, "-m", "dataplatform.scheduler", "run-once", "eod_pipeline"],
         capture_output=True,
         text=True,
-        env={
-            "PATH": "/usr/bin:/bin",
-            "DATABASE_URL": scratch_settings.database_url.get_secret_value(),
-        },
+        env={"PATH": "/usr/bin:/bin", **db_env},
         check=False,
     )
 

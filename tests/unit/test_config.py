@@ -59,7 +59,12 @@ def test_settings_load_from_the_example_env_offline(load_settings: SettingsLoade
     assert settings.log_format is LogFormat.AUTO
     assert settings.timezone == "Asia/Kolkata"
     assert settings.tzinfo.key == "Asia/Kolkata"
-    assert settings.database_url.get_secret_value().startswith("postgresql://")
+    assert settings.database_url is None  # discrete POSTGRES_* below is the documented default
+    assert settings.postgres_host == "localhost"
+    assert settings.postgres_port == 5433
+    assert settings.postgres_user == "trading"
+    assert settings.postgres_password.get_secret_value() == "trading"
+    assert settings.postgres_db == "trading"
     assert settings.data_root == REPO_ROOT / "data"
     assert settings.http_min_interval_seconds >= 2.0  # §4.1 crawl policy
     assert settings.http_user_agent.startswith("Mozilla/5.0")  # NSE rejects non-browser agents
@@ -162,6 +167,7 @@ _SECRET_STR_FIELDS = [
 def test_every_settings_field_that_can_authenticate_is_a_secret_str() -> None:
     """A bare `str` credential (a DSN included) is invariant #13's one-line regression."""
     assert "database_url" in _SECRET_STR_FIELDS
+    assert "postgres_password" in _SECRET_STR_FIELDS
     assert "anthropic_api_key" in _SECRET_STR_FIELDS
     assert "kite_api_key" in _SECRET_STR_FIELDS
     assert "kite_api_secret" in _SECRET_STR_FIELDS

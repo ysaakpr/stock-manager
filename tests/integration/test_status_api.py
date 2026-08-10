@@ -48,8 +48,9 @@ from dataplatform.status.models import (
     SyncStatusOut,
 )
 from dataplatform.status.sync_state import SyncState
-from dataplatform.store.db import Connection, connect, connection, with_dbname
+from dataplatform.store.db import Connection, connect, connection
 from dataplatform.store.migrate import migrate
+from tests.integration.conftest import settings_for, skip_or_fail_on_connect_error
 
 pytestmark = pytest.mark.integration
 
@@ -73,40 +74,37 @@ STALE_AFTER = 120
 SOURCE = "nse_bhavcopy_udiff"
 
 
-def _settings_for(dbname: str) -> Settings:
-    """Settings for the configured server with a different database selected."""
-    dsn = with_dbname(Settings().database_url.get_secret_value(), dbname)
-    return Settings(database_url=SecretStr(dsn))
-
-
 def _with_threshold(settings: Settings, seconds: int) -> Settings:
-    """The same settings with a different staleness threshold, and nothing else changed."""
-    return Settings(
-        database_url=settings.database_url,
-        scheduler_heartbeat_stale_after_seconds=seconds,
-    )
+    """The same settings with a different staleness threshold, and nothing else changed.
+
+    `model_copy(update=...)`, not `Settings(database_url=settings.database_url, ...)`: the latter
+    rebuilds every other field from the environment/defaults, silently dropping whichever
+    `postgres_*` fields (or `database_url` override) `settings` actually carried — including,
+    critically, the scratch database name.
+    """
+    return settings.model_copy(update={"scheduler_heartbeat_stale_after_seconds": seconds})
 
 
 def _with_flag_limit(settings: Settings, limit: int) -> Settings:
     """The same settings with a different `/status/quality` page size."""
-    return Settings(database_url=settings.database_url, status_quality_flag_limit=limit)
+    return settings.model_copy(update={"status_quality_flag_limit": limit})
 
 
 @pytest.fixture(scope="session")
 def scratch_settings() -> Iterator[Settings]:
     """A migrated scratch database for the session; dropped again afterwards."""
-    admin = _settings_for("postgres")
+    admin = settings_for("postgres")
     try:
         conn = connect(admin, autocommit=True)
     except psycopg.OperationalError as error:  # pragma: no cover - environment, not logic
-        pytest.skip(f"postgres is not reachable — run `make up` first: {error}")
+        skip_or_fail_on_connect_error(error)
     try:
         conn.execute(f'DROP DATABASE IF EXISTS "{SCRATCH_DB}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{SCRATCH_DB}"')
     finally:
         conn.close()
 
-    settings = _with_threshold(_settings_for(SCRATCH_DB), STALE_AFTER)
+    settings = _with_threshold(settings_for(SCRATCH_DB), STALE_AFTER)
     migrate(settings, clock=FrozenClock(NOW))
     yield settings
 
