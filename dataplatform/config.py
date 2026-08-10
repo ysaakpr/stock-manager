@@ -286,12 +286,18 @@ class Settings(BaseSettings):
     @field_validator("database_url")
     @classmethod
     def _postgres_dsn(cls, value: SecretStr | None) -> SecretStr | None:
-        """Postgres is the only supported store (§8.1); a DSN for anything else is a typo."""
+        """Postgres is the only supported store (§8.1); a DSN for anything else is a typo.
+
+        Calls `get_secret_value()` twice rather than once into a local: a local binding is a
+        second place the unwrapped DSN lives for the rest of this frame's life, and this frame is
+        exactly the one a `ValidationError` traceback would show (invariant #13 — keep `SecretStr`
+        wrapped all the way to the point it is actually used, never one line longer).
+        """
         if value is None:
             return None
-        dsn = value.get_secret_value()
-        if not dsn.startswith(("postgres://", "postgresql://", "postgresql+")):
-            raise ValueError(f"database_url must be a Postgres DSN, got {dsn.split(':')[0]!r}")
+        if not value.get_secret_value().startswith(("postgres://", "postgresql://", "postgresql+")):
+            scheme = value.get_secret_value().split(":")[0]
+            raise ValueError(f"database_url must be a Postgres DSN, got {scheme!r}")
         return value
 
     @field_validator("data_root")

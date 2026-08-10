@@ -69,12 +69,15 @@ def connect(settings: Settings | None = None, *, autocommit: bool = False) -> Co
     """
     settings = get_settings() if settings is None else settings
     if settings.database_url is not None:
-        dsn = settings.database_url.get_secret_value()
+        # No local binds the unwrapped DSN: get_secret_value() is called once for the pre-flight
+        # parse check and once for the real connect, rather than once into a `dsn` variable that
+        # would then sit in this frame — exactly the frame a traceback would show — for no reason
+        # (invariant #13). Two calls cost nothing; a lingering plaintext local costs a leak.
         try:
-            psycopg.conninfo.conninfo_to_dict(dsn)
+            psycopg.conninfo.conninfo_to_dict(settings.database_url.get_secret_value())
         except psycopg.ProgrammingError:
             raise MalformedDatabaseUrlError() from None
-        return psycopg.connect(dsn, autocommit=autocommit)
+        return psycopg.connect(settings.database_url.get_secret_value(), autocommit=autocommit)
     return psycopg.connect(
         host=settings.postgres_host,
         port=settings.postgres_port,
