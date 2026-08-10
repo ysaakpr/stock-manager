@@ -141,7 +141,8 @@ printf '{"source": "nse_bhavcopy"}\n' \
 
 docker compose -f ops/docker-compose.yml exec -T postgres \
   sh -c 'createdb -U "$POSTGRES_USER" trading_drill'
-DATABASE_URL=postgresql://trading:trading@localhost:5433/trading_drill \
+POSTGRES_HOST=localhost POSTGRES_PORT=5433 POSTGRES_USER=trading \
+POSTGRES_PASSWORD="$POSTGRES_PASSWORD" POSTGRES_DB=trading_drill \
   uv run python -m dataplatform.store.migrate
 # then 3 security_master, 2 case_ and 5 decision_journal rows via psql
 ```

