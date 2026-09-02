@@ -46,6 +46,7 @@ from typing import Final
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.identity.master import Exchange
+from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
 from dataplatform.ingest.calendar import (
     CalendarCoverageError,
     TradingCalendar,
@@ -183,12 +184,62 @@ def _write_bhavcopy(rows: Sequence[PriceRow], data_root: Path | None) -> object:
     return write_prices_raw(list(rows), exchange=Exchange.NSE, data_root=data_root)
 
 
+# ── bse_bhavcopy source set ──────────────────────────────────────────────────────────────────
+
+
+#: The `sync_state` source name for the BSE cash price core, era-independent like NSE's.
+BSE_BHAVCOPY: Final = "bse_bhavcopy"
+
+
+def _bse_bhavcopy_request(trade_date: date, register: SourceRegister) -> FetchRequest:
+    """Build the BSE cash-bhavcopy fetch for one UDiFF-era session.
+
+    Only the UDiFF era (>= 2024-07-08) is wired end-to-end here: it carries ISIN natively, so a
+    fetched file parses straight to `prices_raw`. The legacy era has no ISIN column and must be
+    resolved through the BSE scrip master (`bse.scrip_master`) — a different write path whose full
+    run is gated behind B1/M1.13. A pre-cutover date is refused loudly rather than fetched into a
+    session that could never land in L1, so an operator sees the boundary instead of a wall of
+    `FAILED` rows.
+    """
+    if bse_bhavcopy.era_of(trade_date) == "legacy":
+        raise ValueError(
+            f"{trade_date.isoformat()} is before the BSE UDiFF cutover "
+            f"({bse_bhavcopy.CUTOVER.isoformat()}); the legacy era carries no ISIN and its L1 "
+            "backfill goes through the scrip master on the M1.13-gated run, not this source set"
+        )
+    fetch_source = bse_bhavcopy.UDIFF_SOURCE_ID
+    url = _template_for(register, fetch_source).replace("{YYYYMMDD}", f"{trade_date:%Y%m%d}")
+    return FetchRequest(
+        trade_date=trade_date,
+        state_source=BSE_BHAVCOPY,
+        fetch_source=fetch_source,
+        url=url,
+        filename=url.rsplit("/", 1)[-1],
+    )
+
+
+def _write_bse_bhavcopy(rows: Sequence[PriceRow], data_root: Path | None) -> object:
+    """Write one parsed BSE session to its `prices_raw` L1 partition, tagged `exchange=BSE` (M1.8).
+
+    The BSE UDiFF bhavcopy carries ISIN natively, so the raw price partition stands on its own with
+    no delivery join — the identical shape the NSE writer produces, differing only in the exchange
+    tag, so both exchanges' raw rows live in `prices_raw` for M3.2's read-layer dedup.
+    """
+    return write_prices_raw(list(rows), exchange=Exchange.BSE, data_root=data_root)
+
+
 SOURCE_SETS: Final[dict[str, SourceSet]] = {
     NSE_BHAVCOPY: SourceSet(
         name=NSE_BHAVCOPY,
         build_request=_bhavcopy_request,
         parse=lambda store, ref: bhavcopy.parse_l0(store, ref),
         write=_write_bhavcopy,
+    ),
+    BSE_BHAVCOPY: SourceSet(
+        name=BSE_BHAVCOPY,
+        build_request=_bse_bhavcopy_request,
+        parse=lambda store, ref: bse_bhavcopy.parse_l0(store, ref),
+        write=_write_bse_bhavcopy,
     ),
 }
 

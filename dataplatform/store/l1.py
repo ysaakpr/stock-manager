@@ -46,6 +46,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from dataplatform.identity.master import Exchange, IdentityMaster
+from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
 from dataplatform.ingest.models import PriceRow
 from dataplatform.ingest.nse import bhavcopy, delivery
 from dataplatform.ingest.nse.delivery import DeliveryRow, ResolvedDeliveryRow
@@ -227,11 +228,17 @@ def rebuild_prices_raw_from_l0(
 
     The pipeline entry point and the idempotency guarantee made executable: `L0Store.get` re-hashes
     each payload on the way out, so the rows are derived from bytes that have not changed, and
-    running this twice produces a byte-identical partition (acceptance 1). `bhavcopy.parse_l0`
-    dispatches to the era's parser from `bhavcopy_ref.logical_date`; the delivery file, when given,
-    is parsed and joined. `master` is required whenever `delivery_ref` is given.
+    running this twice produces a byte-identical partition (acceptance 1). The bhavcopy parser is
+    chosen by `exchange` — NSE and BSE publish different files, but both parse to the identical
+    `PriceRow` and both dispatch to their era's parser from `bhavcopy_ref.logical_date`, so a BSE
+    session lands in L1 under the same schema, ISIN-keyed, as an NSE one (M3.1). The delivery file,
+    when given, is parsed and joined; `master` is required whenever `delivery_ref` is given.
+
+    BSE's daily and recent-history sessions are the UDiFF era, which carries ISIN natively; the
+    pre-08-Jul-2024 BSE legacy era has no ISIN column and is resolved through the scrip master by
+    `bse.bhavcopy.resolve_legacy` on the B1/M1.13-gated backfill path, not here.
     """
-    price_rows = bhavcopy.parse_l0(store, bhavcopy_ref)
+    price_rows = _parse_bhavcopy_l0(store, bhavcopy_ref, exchange=exchange)
     delivery_batch: tuple[DeliveryRow, ...] = ()
     if delivery_ref is not None:
         delivery_batch = delivery.parse_l0(store, delivery_ref)
@@ -263,6 +270,18 @@ def read_prices_raw(
 
 
 # ── internals ────────────────────────────────────────────────────────────────────────────────
+
+
+def _parse_bhavcopy_l0(store: L0Store, ref: L0Ref, *, exchange: Exchange) -> tuple[PriceRow, ...]:
+    """Parse a bhavcopy L0 payload with the parser its exchange requires.
+
+    NSE and BSE ship different files (different columns, and BSE serves the UDiFF era uncompressed),
+    but both `parse_l0` functions share the signature and both emit the identical `PriceRow`, so the
+    exchange is the only branch — no caller downstream sees which exchange's file it was.
+    """
+    if exchange is Exchange.BSE:
+        return bse_bhavcopy.parse_l0(store, ref)
+    return bhavcopy.parse_l0(store, ref)
 
 
 def _single_session(price_rows: Sequence[PriceRow]) -> date:

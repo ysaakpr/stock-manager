@@ -1,0 +1,72 @@
+[
+  {
+    "SCRIP_CD": "500325",
+    "Scrip_Name": "RELIANCE",
+    "scrip_id": "RELIANCE",
+    "Status": "Active",
+    "GROUP": "A",
+    "FACE_VALUE": "10",
+    "ISIN_NUMBER": "INE002A01018",
+    "INDUSTRY": "Refineries",
+    "Segment": "Equity",
+    "NSURL": "",
+    "Issuer_Name": "Reliance Industries Ltd",
+    "Mktcap": "0"
+  },
+  {
+    "SCRIP_CD": "532540",
+    "Scrip_Name": "TCS",
+    "scrip_id": "TCS",
+    "Status": "Active",
+    "GROUP": "A",
+    "FACE_VALUE": "1",
+    "ISIN_NUMBER": "INE467B01029",
+    "INDUSTRY": "IT",
+    "Segment": "Equity",
+    "NSURL": "",
+    "Issuer_Name": "Tata Consultancy Services Ltd",
+    "Mktcap": "0"
+  },
+  {
+    "SCRIP_CD": "500209",
+    "Scrip_Name": "INFY",
+    "scrip_id": "INFY",
+    "Status": "Active",
+    "GROUP": "A",
+    "FACE_VALUE": "5",
+    "ISIN_NUMBER": "INE009A01021",
+    "INDUSTRY": "IT",
+    "Segment": "Equity",
+    "NSURL": "",
+    "Issuer_Name": "Infosys Ltd",
+    "Mktcap": "0"
+  },
+  {
+    "SCRIP_CD": "543066",
+    "Scrip_Name": "BSEONLY",
+    "scrip_id": "BSEONLY",
+    "Status": "Active",
+    "GROUP": "B",
+    "FACE_VALUE": "10",
+    "ISIN_NUMBER": "INE0J1Y01017",
+    "INDUSTRY": "Misc",
+    "Segment": "Equity",
+    "NSURL": "",
+    "Issuer_Name": "A BSE-only Listed Co Ltd",
+    "Mktcap": "0"
+  },
+  {
+    "SCRIP_CD": "590999",
+    "Scrip_Name": "NOISIN",
+    "scrip_id": "NOISIN",
+    "Status": "Suspended",
+    "GROUP": "T",
+    "FACE_VALUE": "10",
+    "ISIN_NUMBER": "",
+    "INDUSTRY": "",
+    "Segment": "Equity",
+    "NSURL": "",
+    "Issuer_Name": "No ISIN Co Ltd",
+    "Mktcap": "0"
+  }
+]
