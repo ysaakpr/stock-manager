@@ -36,7 +36,7 @@ from typing import Annotated
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.requests import Request
 
 from dataplatform.clock import Clock, SystemClock
@@ -386,8 +386,55 @@ def archives(
     What it assumes: the publisher (D6/M1.12) records one row per bundle it publishes, carrying
     the manifest it wrote. This endpoint reports that record; it does not walk the lake, because a
     directory that happens to contain files is not the same claim as a manifest with checksums.
-    What it never does: serve the files themselves. The download route is M1.12's, and public
-    redistribution of exchange data is a legal question reserved to the human (§10,
+    What it never does: serve the files themselves. The download route is `/archives/download`, and
+    public redistribution of exchange data is a legal question reserved to the human (§10,
     AGENTIC_CONTEXT §3.8) — local and personal use only until that is answered.
     """
     return read_archives(conn, clock.today() if date is None else date)
+
+
+@app.get(
+    "/archives/download",
+    summary="Download one file from a published bundle (local/personal use only)",
+    responses={404: {"description": "No bundle for the date, or no such file in its manifest"}},
+)
+def archives_download(
+    conn: ConnDep,
+    settings: SettingsDep,
+    name: Annotated[str, Query(description="A file name from the date's manifest.")],
+    date: Annotated[date, Query(description="The bundle's trading date (YYYY-MM-DD).")],
+) -> FileResponse:
+    """Stream one file of a published bundle, checked against the manifest before it is served.
+
+    What it does: reads the `archive_bundle` row for `date`, confirms `name` is a file the manifest
+    lists (which is also what forecloses path traversal — only a manifested name is served, never an
+    arbitrary path), resolves it under `<data_root>/<bundle_path>/<name>` and returns it. A caller
+    verifies the bytes against the manifest's sha256; this route does not re-hash on the way out.
+    What it never does: redistribute publicly. Public redistribution of exchange data is a legal
+    question reserved to the human (§10, AGENTIC_CONTEXT §3.8); this endpoint is the operator's own
+    host serving the operator's own lake — local and personal download only until that is answered.
+    """
+    result = read_archives(conn, date)
+    if result.bundle is None:
+        raise HTTPException(
+            status_code=404, detail=f"no archive bundle published for {date.isoformat()}"
+        )
+    entry = next((file for file in result.bundle.files if file.name == name), None)
+    if entry is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"bundle for {date.isoformat()} has no file named {name!r}",
+        )
+    path = settings.data_root / result.bundle.bundle_path / entry.path
+    if not path.is_file():
+        log.error(
+            "archives.download_missing_file",
+            date=date.isoformat(),
+            name=name,
+            path=str(path),
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=f"file {name!r} is in the manifest for {date.isoformat()} but not on disk",
+        )
+    return FileResponse(path, filename=entry.name, media_type="application/octet-stream")
