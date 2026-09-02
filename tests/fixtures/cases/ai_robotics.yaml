@@ -1,0 +1,112 @@
+# The §5.2 AI/Robotics reference case — B9's ratified fixture.
+#
+# AGENTIC_CONTEXT.md B9: "The reference case is a fixture. `tests/fixtures/cases/ai_robotics.yaml`
+# encodes the §5.2 example case (₹10k/mo on the 1st, 5 yr, NIFTY-TRI + IT/CPSE blend, dial 30%,
+# rails 15%/35%/8/−25%, staged exit, LIQUIDCASE parking, T2 monthly) pre-marked RATIFIED_FIXTURE.
+# It exists so M5 can be built and self-tested without blocking on a live ratification. A fixture
+# ratification is **never** valid for real money — the real-money path requires a genuine human
+# ratification record."
+#
+# The fixture is deliberately the *interview inputs*, not a hand-built policy set: the test runs the
+# real §5.1 interview flow (`analyst.interview.conduct_interview` → `build_proposal`) over the
+# transcript below and derives the seven §5.2 policies from it, so "the case was created through the
+# interview flow, not hand-constructed" (M5.13 acceptance 1) is a property of how the fixture is
+# consumed, not a claim the fixture asserts about itself. The `expected_policies` block records what
+# that derivation must produce, so a drift in the recommendation tables fails the paper run loudly.
+
+case_id: AI_ROBOTICS
+theme: AI/Robotics
+as_of: 2026-08-03
+
+# Pre-marked B9 ratification. FIXTURE, never HUMAN: paper and tests only, never real money.
+ratification:
+  kind: RATIFIED_FIXTURE
+  by: b9-reference-fixture
+
+# The §5.1 interview transcript — the small set of facts only the human supplies. Everything else
+# (the dial, the rails, the exit menu, the cash and monitoring policy) is *derived* from these.
+interview:
+  sip_amount: "10000"          # ₹10k per instalment
+  sip_day: "1"                 # on the 1st of the month
+  horizon: "5"                 # 5-year horizon → T2 monthly (< 10 years)
+  theme: AI/Robotics
+  risk_appetite: aggressive    # → rotation dial 30%
+  concentration: medium        # → rails 15% / 35% / 8
+  benchmark_secondary: NIFTY IT/CPSE blend
+
+# The liquid ETF idle cash and SIP instalments park in (§5.6, decision #10). LIQUIDCASE, overriding
+# the interview default LIQUIDBEES, per B9. Identified by ISIN — the cash leg joins on ISIN like any
+# other order (invariant #2); the symbol is display text for the proposal.
+parking:
+  isin: INF740KA1QQ4
+  symbol: LIQUIDCASE
+
+# The A3 theme map's purity-scored universe (M4.2), as-of `as_of`. Three proxies across three
+# value-chain stages, each with a disclosed segment split the purity score is computed from.
+universe:
+  - isin: INE100A01010
+    name: Compute Silicon Ltd
+    stage: compute & silicon
+    sector: compute & silicon
+    theme_revenue_fraction: "0.6"
+    other_revenue_fraction: "0.4"
+  - isin: INE200B01020
+    name: Sensor Actuator Corp
+    stage: sensors & actuators
+    sector: sensors & actuators
+    theme_revenue_fraction: "0.25"
+    other_revenue_fraction: "0.75"
+  - isin: INE300C01030
+    name: Integration Systems Ltd
+    stage: systems integration
+    sector: systems integration
+    theme_revenue_fraction: "0.1"
+    other_revenue_fraction: "0.9"
+
+# One §5.3 thesis per holding, drafted in PROPOSAL/CORE, ratified with the proposal in one act.
+theses:
+  - isin: INE100A01010
+    driver: Indian EMS capex cycle x AI-accelerator localization
+    theme_purity: "0.6"
+    expected_evidence:
+      - order-book growth >20% YoY
+    break_conditions:
+      - id: BC1
+        type: fundamental
+        condition: segment revenue falls two consecutive quarters
+        evaluation_tier: T1
+        evaluation: T1 on results filing
+  - isin: INE200B01020
+    driver: robotics sensing content per unit rising with automation adoption
+    theme_purity: "0.25"
+    expected_evidence:
+      - design wins with two OEMs
+    break_conditions:
+      - id: BC1
+        type: structural
+        condition: sensor content per unit falls two consecutive quarters
+        evaluation_tier: T1
+        evaluation: T1 on competitive teardown
+  - isin: INE300C01030
+    driver: systems-integration margin expansion on autonomous deployments
+    theme_purity: "0.1"
+    expected_evidence:
+      - integration backlog converts above 80%
+    break_conditions:
+      - id: BC1
+        type: fundamental
+        condition: gross margin contracts for three consecutive quarters
+        evaluation_tier: T1
+        evaluation: T1 on results filing
+
+# What the §5.1 recommendation must derive from the transcript above (§5.2, B9). The paper run
+# asserts the ratified policy set matches these, so a change to a recommendation table cannot pass
+# unnoticed as the reference case silently drifting.
+expected_policies:
+  rotation_dial_tactical_pct: "30"      # aggressive appetite
+  max_position_pct: "15"                # medium concentration
+  max_sector_pct: "35"
+  min_holdings: 8
+  drawdown_review_pct: "25"             # aggressive → −25% peak-to-trough
+  max_order_value_inr: "120000"        # 12 × the SIP instalment (fat-finger cap)
+  t2_cadence: MONTHLY                   # 5-year horizon
