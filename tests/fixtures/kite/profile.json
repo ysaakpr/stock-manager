@@ -1,0 +1,13 @@
+{
+  "status": "success",
+  "data": {
+    "user_id": "AB1234",
+    "user_type": "individual",
+    "email": "trader@example.com",
+    "user_name": "Test Account",
+    "broker": "ZERODHA",
+    "exchanges": ["NSE", "BSE"],
+    "products": ["CNC", "MIS", "NRML"],
+    "order_types": ["MARKET", "LIMIT", "SL", "SL-M"]
+  }
+}

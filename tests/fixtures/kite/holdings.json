@@ -1,0 +1,44 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "tradingsymbol": "INFY",
+      "exchange": "NSE",
+      "instrument_token": 408065,
+      "isin": "INE009A01021",
+      "product": "CNC",
+      "quantity": 40,
+      "t1_quantity": 0,
+      "average_price": 1500.50,
+      "last_price": 1543.20,
+      "close_price": 1531.00,
+      "pnl": 1708.00
+    },
+    {
+      "tradingsymbol": "TCS",
+      "exchange": "NSE",
+      "instrument_token": 2953217,
+      "isin": "INE467B01029",
+      "product": "CNC",
+      "quantity": 10,
+      "t1_quantity": 0,
+      "average_price": 3200.25,
+      "last_price": 3288.10,
+      "close_price": 3270.00,
+      "pnl": 878.50
+    },
+    {
+      "tradingsymbol": "WIPRO",
+      "exchange": "NSE",
+      "instrument_token": 969473,
+      "isin": "INE075A01022",
+      "product": "CNC",
+      "quantity": 0,
+      "t1_quantity": 0,
+      "average_price": 0.0,
+      "last_price": 452.10,
+      "close_price": 450.00,
+      "pnl": 0.0
+    }
+  ]
+}

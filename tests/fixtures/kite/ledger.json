@@ -1,0 +1,31 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "posting_date": "2024-01-02",
+      "particulars": "Funds transfer via UPI",
+      "voucher_type": "Bank Receipts",
+      "debit": 0.0,
+      "credit": 200000.00,
+      "balance": 200000.00
+    },
+    {
+      "posting_date": "2024-01-03",
+      "particulars": "Net obligation for Buy INFY-EQ",
+      "voucher_type": "Book Voucher",
+      "isin": "INE009A01021",
+      "debit": 60020.30,
+      "credit": 0.0,
+      "balance": 139979.70
+    },
+    {
+      "posting_date": "2024-01-03",
+      "particulars": "Sell TCS-EQ",
+      "voucher_type": "Book Voucher",
+      "isin": "INE467B01029",
+      "debit": 0.0,
+      "credit": 14980.45,
+      "balance": 154960.15
+    }
+  ]
+}

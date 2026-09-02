@@ -1,0 +1,41 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "order_id": "240102000000001",
+      "exchange_order_id": "1300000012345678",
+      "status": "OPEN",
+      "status_message": null,
+      "tradingsymbol": "INFY",
+      "exchange": "NSE",
+      "transaction_type": "BUY",
+      "order_type": "MARKET",
+      "product": "CNC",
+      "validity": "DAY",
+      "quantity": 10,
+      "price": 0.0,
+      "filled_quantity": 0,
+      "pending_quantity": 10,
+      "average_price": 0.0,
+      "tag": "reb-2024-01-02"
+    },
+    {
+      "order_id": "240102000000001",
+      "exchange_order_id": "1300000012345678",
+      "status": "COMPLETE",
+      "status_message": null,
+      "tradingsymbol": "INFY",
+      "exchange": "NSE",
+      "transaction_type": "BUY",
+      "order_type": "MARKET",
+      "product": "CNC",
+      "validity": "DAY",
+      "quantity": 10,
+      "price": 0.0,
+      "filled_quantity": 10,
+      "pending_quantity": 0,
+      "average_price": 1543.20,
+      "tag": "reb-2024-01-02"
+    }
+  ]
+}

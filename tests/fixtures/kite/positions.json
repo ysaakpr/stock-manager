@@ -1,0 +1,45 @@
+{
+  "status": "success",
+  "data": {
+    "net": [
+      {
+        "tradingsymbol": "INFY",
+        "exchange": "NSE",
+        "instrument_token": 408065,
+        "product": "CNC",
+        "quantity": 5,
+        "average_price": 1490.00,
+        "last_price": 1543.20,
+        "pnl": 266.00,
+        "buy_quantity": 5,
+        "sell_quantity": 0
+      },
+      {
+        "tradingsymbol": "TCS",
+        "exchange": "NSE",
+        "instrument_token": 2953217,
+        "product": "CNC",
+        "quantity": 0,
+        "average_price": 0.0,
+        "last_price": 3288.10,
+        "pnl": 0.0,
+        "buy_quantity": 3,
+        "sell_quantity": 3
+      }
+    ],
+    "day": [
+      {
+        "tradingsymbol": "INFY",
+        "exchange": "NSE",
+        "instrument_token": 408065,
+        "product": "CNC",
+        "quantity": 5,
+        "average_price": 1490.00,
+        "last_price": 1543.20,
+        "pnl": 266.00,
+        "buy_quantity": 5,
+        "sell_quantity": 0
+      }
+    ]
+  }
+}
