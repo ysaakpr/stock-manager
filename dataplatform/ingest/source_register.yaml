@@ -224,7 +224,7 @@ sources:
       zip with one member BhavCopy_NSE_CM_0_0_0_20260807_F_0000.csv; 34 columns; header starts
       TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,... — confirms the
       schema break against the 14-column legacy era above.
-    fixture: {frozen: false, task: M1.5, path: "tests/fixtures/nse_bhavcopy/udiff/"}
+    fixture: {frozen: true, task: M1.5, path: "tests/fixtures/nse_bhavcopy/udiff/"}
     failure_note: null
     candidate_alternatives: []
     owner_task: M1.5
@@ -260,7 +260,7 @@ sources:
       Note the leading space in every field name after the first — the parser must strip.
       No ISIN column: this file joins on SYMBOL+SERIES and therefore MUST be resolved through
       the D2 identity master before it touches anything (invariant #2).
-    fixture: {frozen: false, task: M1.6, path: "tests/fixtures/nse_delivery/"}
+    fixture: {frozen: true, task: M1.6, path: "tests/fixtures/nse_delivery/"}
     failure_note: null
     candidate_alternatives: []
     owner_task: M1.6
