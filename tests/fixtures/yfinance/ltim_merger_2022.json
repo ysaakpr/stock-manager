@@ -1,0 +1,11 @@
+{
+  "case_id": "ltim_merger_2022",
+  "ticker": "LTIM.NS",
+  "source": "yfinance / Yahoo Finance (reference A, EXECUTION_PLAN \u00a74.3, B2)",
+  "fetched_at": "2026-09-02T18:27:55+05:30",
+  "available": false,
+  "unavailable_reason": "Yahoo Finance serves no data for LTIM.NS (LTIMindtree) \u2014 history() returns zero rows for every range, recent and full, and the symbol search returns nothing, while peer NSE large caps (RELIANCE.NS, TCS.NS, INFY.NS, HDFCBANK.NS) return in the same call. LTIMindtree was formed by the 2022-11-24 merger under test (L&T Infotech absorbing Mindtree), and Yahoo's coverage of the renamed line is absent here. Verdict: reference B authoritative; reference A is unavailable for this case. A surviving-entity merger carries a unit price factor, so the checked-in reference-B literals (adjusted == raw, bridged return) remain the golden truth and are not weakened by the missing cross-check.",
+  "rows": [],
+  "splits": {},
+  "dividends": {}
+}
