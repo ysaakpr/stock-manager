@@ -1,0 +1,67 @@
+[
+  {
+    "isin": "INE002A01018",
+    "name": "Reliance Industries Limited",
+    "date": "31-Mar-2026",
+    "broadcastDate": "07-May-2026 18:30:00",
+    "cgTimeStamp": "07-May-2026 18:30:00",
+    "pr_and_prgrp": "50.30",
+    "pledgeShares_prcnt": "0.00",
+    "public_prcnt": "49.70",
+    "fii_prcnt": "22.10",
+    "dii_prcnt": "15.40",
+    "industry": "Refineries"
+  },
+  {
+    "isin": "INE467B01029",
+    "name": "Tata Consultancy Services Limited",
+    "date": "31-Mar-2026",
+    "broadcastDate": "18-Apr-2026 17:05:00",
+    "cgTimeStamp": "18-Apr-2026 17:05:00",
+    "pr_and_prgrp": "72.30",
+    "pledgeShares_prcnt": "0.00",
+    "public_prcnt": "27.70",
+    "fii_prcnt": "12.05",
+    "dii_prcnt": "8.20",
+    "industry": "Computers - Software"
+  },
+  {
+    "isin": "INE134E01011",
+    "name": "Distressed Promoter Holdings Limited",
+    "date": "31-Mar-2026",
+    "broadcastDate": "12-May-2026 10:00:00",
+    "cgTimeStamp": "12-May-2026 10:00:00",
+    "pr_and_prgrp": "60.00",
+    "pledgeShares_prcnt": "62.50",
+    "public_prcnt": "40.00",
+    "fii_prcnt": "5.00",
+    "dii_prcnt": "3.00",
+    "industry": "Miscellaneous"
+  },
+  {
+    "isin": "INE040A01034",
+    "name": "HDFC Bank Limited",
+    "date": "31-Mar-2026",
+    "broadcastDate": "12-May-2026 11:30:00",
+    "cgTimeStamp": "12-May-2026 11:30:00",
+    "pr_and_prgrp": "0.00",
+    "pledgeShares_prcnt": "0.00",
+    "public_prcnt": "100.00",
+    "fii_prcnt": "47.80",
+    "dii_prcnt": "30.10",
+    "industry": "Banks"
+  },
+  {
+    "isin": "INE009A01021",
+    "name": "Infosys Limited",
+    "date": "31-Mar-2026",
+    "broadcastDate": "21-Apr-2026 16:45:00",
+    "cgTimeStamp": "21-Apr-2026 16:45:00",
+    "pr_and_prgrp": "14.60",
+    "pledgeShares_prcnt": "0.00",
+    "public_prcnt": "85.40",
+    "fii_prcnt": "33.20",
+    "dii_prcnt": "21.90",
+    "industry": "Computers - Software"
+  }
+]
