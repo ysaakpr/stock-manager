@@ -183,12 +183,10 @@ class AnthropicLLM:
             model=model,
             max_tokens=max_tokens,
             messages=[_message_param(message) for message in messages],
-            system=anthropic.NOT_GIVEN if system is None else system,
-            tools=[_tool_param(tool) for tool in tools] if tools else anthropic.NOT_GIVEN,
+            system=anthropic.omit if system is None else system,
+            tools=[_tool_param(tool) for tool in tools] if tools else anthropic.omit,
             thinking=(
-                ThinkingConfigAdaptiveParam(type="adaptive")
-                if self._thinking
-                else anthropic.NOT_GIVEN
+                ThinkingConfigAdaptiveParam(type="adaptive") if self._thinking else anthropic.omit
             ),
         )
 
@@ -200,7 +198,7 @@ class AnthropicLLM:
         )
         stop_reason = _stop_reason(raw.stop_reason)
         if stop_reason is StopReason.REFUSAL:
-            category = None if raw.stop_details is None else getattr(raw.stop_details, "category")
+            category = None if raw.stop_details is None else raw.stop_details.category
             raise LLMRefusalError(
                 f"{model} declined the request (category {category!r}); there is no answer to act "
                 "on. Do not retry the same prompt — journal the refusal and escalate."
