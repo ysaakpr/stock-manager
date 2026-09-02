@@ -32,7 +32,7 @@ from backtest.policies.naive_momentum import (
 from backtest.replay import SessionContext
 from dataplatform.clock import FrozenClock
 from dataplatform.query.pit import Dataset, PitContext, PitError
-from execution.broker import Exchange, Holding, Side
+from execution.broker import Exchange, Holding, Margins, Side
 
 SESSION = date(2020, 1, 1)
 
@@ -92,9 +92,7 @@ class _FakeBroker:
     def holdings(self) -> tuple[Holding, ...]:
         return self._holdings
 
-    def margins(self):
-        from execution.broker import Margins
-
+    def margins(self) -> Margins:
         return Margins(available=self._cash, utilised=Decimal("0"))
 
 
@@ -102,7 +100,7 @@ def _ctx(data_session: date, broker: _FakeBroker) -> SessionContext:
     return SessionContext(
         session=data_session,
         pit=PitContext(as_of=data_session),
-        broker=broker,  # type: ignore[arg-type] — the fake satisfies the read surface the policy uses
+        broker=broker,  # type: ignore[arg-type]  # the fake satisfies the read surface the policy uses
         clock=FrozenClock(data_session),
     )
 

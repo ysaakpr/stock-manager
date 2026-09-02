@@ -49,12 +49,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+from dataplatform.clock import SystemClock
 from dataplatform.corpactions import ActionType, FactorChain, return_series
 from tests.golden.casebook import GoldenCase, build_case_chain, load_cases
 
@@ -470,7 +471,7 @@ def _write_fixture(series: YahooSeries) -> None:
         "case_id": series.case_id,
         "ticker": series.ticker,
         "source": "yfinance / Yahoo Finance (reference A, EXECUTION_PLAN §4.3, B2)",
-        "fetched_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "fetched_at": SystemClock().now().isoformat(timespec="seconds"),
         "available": series.available,
         "unavailable_reason": series.unavailable_reason,
         "rows": [
