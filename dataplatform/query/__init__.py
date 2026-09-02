@@ -17,6 +17,7 @@ from dataplatform.query.announcement_search import (
     normalize,
 )
 from dataplatform.query.errors import QueryError
+from dataplatform.query.pit import Dataset, PitContext, PitError
 from dataplatform.query.screen import (
     Compare,
     Filter,
@@ -65,6 +66,7 @@ __all__ = [
     "CompiledQuery",
     "CrossSection",
     "CrossSectionRequest",
+    "Dataset",
     "Filter",
     "FundamentalDatum",
     "FundamentalsSource",
@@ -72,6 +74,8 @@ __all__ = [
     "KeywordQuery",
     "ListingCalendar",
     "ListingWindow",
+    "PitContext",
+    "PitError",
     "PitFundamentals",
     "PitUniverse",
     "QuarantineError",
