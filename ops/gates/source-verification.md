@@ -205,3 +205,27 @@ daily capture, and a missed session is unrecoverable.
 Nothing was acted on: no account, no login, no terms accepted, no payment. Requests were ≥3 s
 apart with the platform's one user agent and the register's Referer, and the 403 in row 1 was not
 answered with a different agent, a proxy, or a retry.
+
+### M6.1 — GDELT export + curated RSS (2026-09-02, ~13:20 IST, 5 requests over 3 hosts)
+
+Two source families for the News/geopolitical row (§4.1 row 14): GDELT 2.0 (free/open) and a
+curated RSS set. Requests were browser-UA, ≥3 s apart per host, robots respected. Nothing was
+acted on: no account, no login, no terms, no payment.
+
+| # | Request | Result | What it establishes |
+|---|---|---|---|
+| 1 | `GET data.gdeltproject.org/gdeltv2/lastupdate.txt` | 200, 319 B, `text/plain`, sha256 `d4234101…76dd0c` | The discovery manifest: 3 lines `size md5 url` for the export/mentions/GKG of the latest 15-min slot. Frozen at `tests/fixtures/gdelt/v2/lastupdate.txt`. |
+| 2 | `GET …/gdeltv2/20260902074500.export.CSV.zip` | 200, 75,093 B, `application/zip`, sha256 `228a1e3f…9dcf3e` | The export file the manifest named. **MD5 `99034aac…4b6` matches the manifest line** — the feed's own integrity control, cross-checked on ingest. 61-column TSV, 1210 events. Frozen. |
+| 3 | `GET www.rbi.org.in/pressreleases_rss.xml` | 200, 120,049 B, `text/xml`, sha256 `4c183fb7…2cc2f118` | Active curated feed. RSS 2.0, 10 items, each `<title>`/`<link>`/`<pubDate>` (zone-less RFC 822 → Asia/Kolkata). `<description>` carries the full release and is **not** read. Frozen at `tests/fixtures/rss/rbi/2026-09-02/`. |
+| 4 | `GET www.rbi.org.in/robots.txt` | 418, anti-bot HTML page | No robots policy served (a 418 block page is not a policy document). The RSS path is a syndication surface returning 200 to a reader; we fetch that one path at EOD cadence, spaced, no crawl (AGENTIC_CONTEXT §8). Recorded on the `www.rbi.org.in` host row. |
+| 5 | `GET pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=3` | 200, ~8 KB, `text/xml` | PIB is curated but its items carry `<title>`/`<link>` only — **no `<pubDate>`, no channel date**. An item that cannot be dated from the source is not PIT-usable, so PIB is listed `active: false` in `rss_feeds.yaml` with that reason, not backfilled from the wall clock. Frozen at `tests/fixtures/rss/pib/2026-09-02/`. |
+
+**Register outcome:** `gdelt_v2_event_files` and `curated_rss` are both VERIFIED with the evidence
+above; `gdelt_doc_api` stays FAILED (429-throttled at C.1) — the event-files path is the primary
+and needs no API. GDELT is reachable only over plain HTTP (the host is a GCS CNAME; HTTPS fails
+cert validation), and the payload MD5 is the integrity control, as the register records.
+
+Business-press headline feeds (Business Standard, Economic Times markets) carry per-item
+`<pubDate>` and are license-clean at the headline+link level, but each host needs its own verified
+register row (host + robots) and a §10 redistribution review before activation. Listed in
+`rss_feeds.yaml` as `active: false`; tracked in `ops/BACKLOG.md`.

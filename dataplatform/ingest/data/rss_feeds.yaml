@@ -1,0 +1,64 @@
+# Curated RSS feed set for the News/geopolitical dataset (§4.1 row 14).
+#
+# Headlines and links only, per the §4.1 license note — the parser (dataplatform.ingest.rss)
+# reads <title>, <link> and the item timestamp and nothing else, and NewsRow has no body field.
+#
+# `source` is the Source Register id whose crawl policy governs the fetch; a feed's `host` must
+# match that register row's host (the fetcher enforces it). An `active: false` feed is curated but
+# not ingested; its `reason` says why, so the gap is documented rather than lost.
+#
+# Verified live on 2026-09-02 from this host; evidence recorded in ops/gates/source-verification.md
+# and, for the active feed, in source_register.yaml under `curated_rss`.
+version: 1
+feeds:
+  - id: rbi_press_releases
+    name: RBI Press Releases
+    publisher: Reserve Bank of India
+    url: https://www.rbi.org.in/pressreleases_rss.xml
+    host: www.rbi.org.in
+    source: curated_rss
+    active: true
+    reason: null
+
+  # PIB is named in the plan's curated set, but its RssMain.aspx feed carries no per-item and no
+  # channel timestamp (verified 2026-09-02: <item> holds <title> and <link> only). A news row that
+  # cannot be dated from the source is not point-in-time usable, and this pipeline never dates an
+  # item from the wall clock, so PIB stays listed but inactive until a timestamped PIB endpoint is
+  # sourced. See ops/BACKLOG.md.
+  - id: pib_press_releases
+    name: PIB Press Releases
+    publisher: Press Information Bureau
+    url: https://pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=3
+    host: pib.gov.in
+    source: curated_rss_pib
+    active: false
+    reason: >-
+      RssMain.aspx items carry no <pubDate>/<dc:date> and the channel carries no date; items
+      cannot be point-in-time dated. Awaiting a timestamped PIB feed before activation.
+
+  # Business-press headlines carry per-item <pubDate> and are license-clean at the headline+link
+  # level (§4.1 note), but each host needs its own verified Source Register row (host + robots
+  # evidence) before it can be fetched, and the redistribution question for storing any archive of
+  # them externally is a §10/HUMAN_GATE matter (AGENTIC_CONTEXT §3.8). Listed as the next feeds to
+  # activate; kept inactive here so this task ships only what it verified. See ops/BACKLOG.md.
+  - id: business_standard_markets
+    name: Business Standard — Markets
+    publisher: Business Standard
+    url: https://www.business-standard.com/rss/markets-106.rss
+    host: www.business-standard.com
+    source: curated_rss_business_standard
+    active: false
+    reason: >-
+      Needs its own verified Source Register row (host + robots.txt evidence) and a §10 redistribution
+      review before activation. Feed carries per-item <pubDate> (verified 2026-09-02).
+
+  - id: economic_times_markets
+    name: Economic Times — Markets
+    publisher: The Economic Times
+    url: https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms
+    host: economictimes.indiatimes.com
+    source: curated_rss_economic_times
+    active: false
+    reason: >-
+      Needs its own verified Source Register row (host + robots.txt evidence) and a §10 redistribution
+      review before activation. Feed carries per-item <pubDate> (verified 2026-09-02).

@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 import yaml
 
+from dataplatform.clock import IST
 from dataplatform.ingest.source_register import (
     PLAN_ROWS,
     REGISTER_PATH,
@@ -27,6 +28,15 @@ from dataplatform.ingest.source_register import (
     load,
     problems,
 )
+
+#: The build horizon: the latest date any verification in the register may legitimately carry.
+#: C.1 verified its rows in a single sweep (`register.sweep`), but a source added by a later task
+#: is flipped to VERIFIED by that task's own real fetch (AGENTIC_CONTEXT §8), whose date
+#: legitimately postdates the sweep. The honest anti-fabrication invariant is therefore not
+#: "before the C.1 sweep" but "not after the build actually ran" — a fixed, checked-in ceiling so
+#: the suite stays offline and deterministic (B10). Bump this when a task records a verification on
+#: a newer date (M6.1 did, on 2026-09-02: curated_rss).
+LATEST_VERIFICATION: datetime = datetime(2026, 9, 2, 23, 59, 59, tzinfo=IST)
 
 
 @pytest.fixture(scope="module")
@@ -74,9 +84,12 @@ def test_every_entry_carries_evidence_or_a_failure_note(
     source = next(s for s in register.sources if s.id == source_id)
     assert isinstance(source.verified_at, datetime)
     assert source.verified_at.tzinfo is not None, "timestamps must be tz-aware (Asia/Kolkata)"
-    # Compared against the sweep's own end time, not the host clock: this suite is offline and
-    # deterministic, and evidence dated after the sweep that produced it is fabricated.
-    assert source.verified_at <= register.sweep.swept_at
+    # Not after the build horizon (offline, deterministic): evidence dated in the future is
+    # fabricated. C.1's rows were gathered at/before its sweep; a source added by a later task
+    # (AGENTIC_CONTEXT §8) carries that task's own verification date, which postdates the sweep but
+    # not the build. Both are non-fabricated; only a future date is.
+    assert register.sweep.swept_at <= LATEST_VERIFICATION, "bump LATEST_VERIFICATION for new sweeps"
+    assert source.verified_at <= LATEST_VERIFICATION, source.id
     assert source.last_http_status is not None
     assert source.sample_bytes or source.failure_note
 
