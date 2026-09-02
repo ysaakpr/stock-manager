@@ -51,12 +51,20 @@ from dataplatform.identity.primary import (
     select_primary_map,
 )
 from dataplatform.logging import get_logger
+from dataplatform.query.errors import QueryError
+from dataplatform.query.screen import Filter, PitFundamentals, run_screen
 from dataplatform.query.shapes import (
     AdjustedPoint,
     AdjustedSeries,
     AdjustedSeriesRequest,
     CrossSection,
     CrossSectionRequest,
+)
+from dataplatform.query.universe import (
+    ListingCalendar,
+    PitUniverse,
+    index_membership_asof,
+    pit_universe,
 )
 from dataplatform.store.l2 import (
     AdjustedBar,
@@ -66,7 +74,7 @@ from dataplatform.store.l2 import (
     register_raw_view,
 )
 
-__all__ = ["QueryError", "QueryService"]
+__all__ = ["QueryError", "QueryService"]  # QueryError re-exported from errors (see that module)
 
 _LOG = get_logger(__name__)
 
@@ -74,14 +82,6 @@ _LOG = get_logger(__name__)
 #: consumer reads through the typed methods, never the raw relations.
 _ADJUSTED_VIEW = "l2_prices_adjusted"
 _RAW_VIEW = "l1_prices_raw"
-
-
-class QueryError(Exception):
-    """A query could not be answered from the lake — a missing primary, an incomplete L1, etc.
-
-    Distinct from the identity layer's `IdentityError`: this is the query service telling its caller
-    the *request* cannot be served against the data on disk, not that an identity rule was violated.
-    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +215,59 @@ class QueryService:
             fell_back=sum(1 for r in rows if r.fell_back),
         )
         return CrossSection(trade_date=request.trade_date, rows=rows)
+
+    # ── shape (c): screen-style filters over a joined cross-section ─────────────────────────────
+
+    def screen(
+        self,
+        trade_date: date,
+        screen: Filter,
+        *,
+        primary_by_isin: Mapping[str, Exchange] | None = None,
+        flows: Mapping[str, Mapping[str, Decimal]] | None = None,
+        fundamentals: PitFundamentals | None = None,
+        universe: frozenset[str] | None = None,
+    ) -> frozenset[str]:
+        """Screen the `trade_date` cross-section, joined to flows/fundamentals — shape (c) (§4.5).
+
+        Fetches the day's cross-section (shape (b)) through this same service, joins the per-ISIN
+        flow metrics (`flows`) and PIT fundamentals (`fundamentals`) onto it, optionally narrows to
+        a `universe` (e.g. a shape-(d) PIT universe), and returns the ISINs the composed `screen`
+        filter passes. `fundamentals` is a `PitFundamentals` — the join surface structurally cannot
+        take a restated source (invariant #8; see `screen.PitFundamentals`).
+        """
+        cross = self.cross_section(
+            CrossSectionRequest(
+                trade_date=trade_date,
+                primary_by_isin=dict(primary_by_isin) if primary_by_isin is not None else None,
+            )
+        )
+        return run_screen(cross, screen, flows=flows, fundamentals=fundamentals, universe=universe)
+
+    # ── shape (d): point-in-time universe as of a historical date ──────────────────────────────
+
+    def pit_universe(
+        self,
+        as_of: date,
+        calendar: ListingCalendar,
+        *,
+        index_slugs: Sequence[str] = (),
+    ) -> PitUniverse:
+        """The point-in-time universe as of `as_of` — shape (d) (§4.5); kills survivorship bias.
+
+        Keeps every ISIN the injected `calendar` says was listed and not yet delisted on `as_of`
+        (so later-delisted names stay in and not-yet-listed names stay out), intersected — when
+        `index_slugs` is given — with the index membership in force then (read from M3.9's
+        constituent history through this service's `data_root`, never today's list). The listing
+        calendar is injected because listing status lives in the identity master, not the Parquet
+        lake `QueryService` reads; `universe.store_listing_calendar` adapts the production store.
+        """
+        membership = (
+            index_membership_asof(index_slugs, as_of, data_root=self._data_root)
+            if index_slugs
+            else None
+        )
+        return pit_universe(as_of, calendar, index_membership=membership, index_slugs=index_slugs)
 
     # ── internals: reads ───────────────────────────────────────────────────────────────────────
 
