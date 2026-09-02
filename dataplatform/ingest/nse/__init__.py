@@ -64,6 +64,16 @@ from dataplatform.ingest.nse.fii_dii import (
 from dataplatform.ingest.nse.fii_dii import ingest_day as ingest_flows_day
 from dataplatform.ingest.nse.fii_dii import parse as parse_fii_dii
 from dataplatform.ingest.nse.fii_dii import parse_l0 as parse_fii_dii_l0
+from dataplatform.ingest.nse.fo_bhavcopy import (
+    FO_COLUMNS,
+    FO_ERA_START,
+    FO_SOURCE_ID,
+    FoContractRow,
+    FoInstrumentType,
+    OptionType,
+)
+from dataplatform.ingest.nse.fo_bhavcopy import parse as parse_fo_bhavcopy
+from dataplatform.ingest.nse.fo_bhavcopy import parse_l0 as parse_fo_bhavcopy_l0
 
 __all__ = [
     "BHAVCOPY_CUTOVER",
@@ -74,6 +84,9 @@ __all__ = [
     "DELIVERY_COLUMNS",
     "DELIVERY_SOURCE_ID",
     "FLOWS_DATASET",
+    "FO_COLUMNS",
+    "FO_ERA_START",
+    "FO_SOURCE_ID",
     "LEGACY_COLUMNS",
     "LEGACY_ERA_END",
     "LEGACY_SOURCE_ID",
@@ -91,6 +104,9 @@ __all__ = [
     "FlowCategory",
     "FlowDay",
     "FlowRow",
+    "FoContractRow",
+    "FoInstrumentType",
+    "OptionType",
     "ResolvedDealRow",
     "ResolvedDeliveryRow",
     "StaleSessionError",
@@ -107,6 +123,8 @@ __all__ = [
     "parse_delivery_l0",
     "parse_fii_dii",
     "parse_fii_dii_l0",
+    "parse_fo_bhavcopy",
+    "parse_fo_bhavcopy_l0",
     "parse_legacy_bhavcopy",
     "parse_legacy_bhavcopy_l0",
     "parse_udiff_bhavcopy",
