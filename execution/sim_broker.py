@@ -283,6 +283,18 @@ class SimBroker:
         self._next_order_seq: int = 0
         self._next_ledger_seq: int = 0
 
+    # ── Broker: session ──────────────────────────────────────────────────────────────────────
+
+    def session_valid(self) -> bool:
+        """Always `True`: a paper session cannot expire, so the auth interlock never blocks it.
+
+        The daily OAuth+2FA logout that dead-ends a real broker session (INVG/73992 §8.3.2.1.8) has
+        no analogue here — `SimBroker` holds no API token to lose. Returning `True` unconditionally
+        is what makes the AUTH_REQUIRED interlock a no-op in paper mode (acceptance 2) while it
+        still guards the same seam that `KiteBroker` will fail at M8 (invariant #5).
+        """
+        return True
+
     # ── Broker: order lifecycle ──────────────────────────────────────────────────────────────
 
     def place(self, request: OrderRequest) -> Order:

@@ -138,6 +138,17 @@ class Decision(StrEnum):
     SKIPPED_DATA_RED = "SKIPPED_DATA_RED"
     """`/status/sync` was not green, so no decision was made and no order placed (invariant #10)."""
 
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    """The broker API session had lapsed (daily OAuth+2FA logout), so no order was placed. The
+    same failure class as `SKIPPED_DATA_RED` — an invalid precondition — for dead auth rather than
+    bad data (M5.15, §4.4). The re-auth instruction is on the entry; the day's staged decisions are
+    `DEFERRED`, never dropped."""
+
+    DEFERRED = "DEFERRED"
+    """A staged decision that could not be placed today (an `AUTH_REQUIRED` day) and was carried to
+    the next valid session rather than dropped. A decision that evaporates is a journal lie, so the
+    deferral is itself a journalled decision naming the instrument it concerns."""
+
     RAIL_BLOCK = "RAIL_BLOCK"
     """A8 refused an order. The breached rail is named in the rationale; there is no override."""
 
@@ -181,6 +192,8 @@ REQUIRES_RATIONALE: Final[frozenset[Decision]] = frozenset(
         Decision.SELL,
         Decision.ESCALATE,
         Decision.SKIPPED_DATA_RED,
+        Decision.AUTH_REQUIRED,
+        Decision.DEFERRED,
         Decision.RAIL_BLOCK,
         Decision.POLICY_PROPOSAL,
     }
@@ -188,8 +201,12 @@ REQUIRES_RATIONALE: Final[frozenset[Decision]] = frozenset(
 
 #: Decisions that are meaningless without an instrument. A `BUY` with no ISIN cannot be
 #: reconciled against the order it produced, and joining it back by symbol is invariant #2's
-#: forbidden shortcut.
-REQUIRES_INSTRUMENT: Final[frozenset[Decision]] = frozenset({Decision.BUY, Decision.SELL})
+#: forbidden shortcut. `DEFERRED` is here too: a deferred trade that does not name the instrument
+#: it postponed is exactly the "journal lie" M5.15 exists to prevent — the deferral must be
+#: reconcilable against the decision it carried forward.
+REQUIRES_INSTRUMENT: Final[frozenset[Decision]] = frozenset(
+    {Decision.BUY, Decision.SELL, Decision.DEFERRED}
+)
 
 #: Decisions that must name the evidence bundle they were made on. Invariant #9 for `HEARTBEAT`:
 #: "a day with nothing to do still writes a heartbeat *with the evidence considered*" — without

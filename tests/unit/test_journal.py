@@ -63,7 +63,8 @@ from dataplatform.store.db import Connection
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 JOURNAL_PACKAGE = REPO_ROOT / "analyst" / "journal"
-INIT_MIGRATION = REPO_ROOT / "dataplatform" / "store" / "migrations" / "0001_init.sql"
+MIGRATIONS_DIR = REPO_ROOT / "dataplatform" / "store" / "migrations"
+INIT_MIGRATION = MIGRATIONS_DIR / "0001_init.sql"
 
 TRADING_DATE = date(2026, 8, 7)
 DECIDED_AT = datetime(2026, 8, 7, 19, 30, tzinfo=IST)
@@ -683,9 +684,39 @@ def _check_values(block: str, column: str) -> set[str]:
     return set(re.findall(r"'([A-Z_0-9]+)'", match.group(1)))
 
 
+def _effective_check_values(migrations: Sequence[str], table: str, column: str) -> set[str]:
+    """The allowed values of `table.column` after applying every migration in order.
+
+    An enum can be widened by a later migration — M5.15 adds `AUTH_REQUIRED`/`DEFERRED` to
+    `decision_journal.decision` in 0007 by dropping and re-adding the CHECK — so the *effective*
+    constraint the model will actually meet in the database is 0001's inline CHECK as overridden by
+    the last `ADD CONSTRAINT ... CHECK (column IN (...))` for that column. Reading only 0001 would
+    miss a legitimately migrated value and, worse, would not catch drift introduced by a migration
+    other than the first.
+    """
+    values: set[str] | None = None
+    for sql in migrations:
+        create = re.search(rf"CREATE TABLE {table} \((.*?)\n\);", sql, re.DOTALL)
+        if create:
+            inline = re.search(rf"CHECK \({column} IN \((.*?)\)\)", create.group(1), re.DOTALL)
+            if inline:
+                values = set(re.findall(r"'([A-Z_0-9]+)'", inline.group(1)))
+        for added in re.finditer(
+            rf"ADD CONSTRAINT \w+ CHECK \({column} IN \((.*?)\)\)", sql, re.DOTALL
+        ):
+            values = set(re.findall(r"'([A-Z_0-9]+)'", added.group(1)))
+    assert values is not None, f"no CHECK on {table}.{column} in any migration"
+    return values
+
+
 @pytest.fixture(scope="module")
 def init_migration() -> str:
     return INIT_MIGRATION.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def all_migrations() -> list[str]:
+    return [path.read_text(encoding="utf-8") for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
 
 
 def test_the_schema_rejects_mutation_of_the_journal_at_the_database_level(
@@ -714,12 +745,17 @@ def test_the_schema_rejects_mutation_of_the_journal_at_the_database_level(
     [("actor", Actor), ("decision", Decision), ("sleeve", Sleeve)],
 )
 def test_the_models_enums_match_the_schemas_check_constraints(
-    init_migration: str, column: str, enum: type[Actor] | type[Decision] | type[Sleeve]
+    all_migrations: list[str], column: str, enum: type[Actor] | type[Decision] | type[Sleeve]
 ) -> None:
-    """A value this model accepts and the database rejects fails mid-decision, in production."""
-    block = _table_block(init_migration, "decision_journal")
+    """A value this model accepts and the database rejects fails mid-decision, in production.
 
-    assert _check_values(block, column) == {member.value for member in enum}
+    Checked against the *effective* constraint after every migration, not 0001 alone: a widening
+    like 0007's `AUTH_REQUIRED`/`DEFERRED` must keep enum and schema in step, and drift in any
+    migration must fail here.
+    """
+    assert _effective_check_values(all_migrations, "decision_journal", column) == {
+        member.value for member in enum
+    }
 
 
 def _string_constants(source: str) -> Iterator[str]:

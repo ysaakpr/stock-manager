@@ -13,9 +13,32 @@ daily loop may compose them directly.
 
 from analyst.monitor.interlock import (
     CORE_DATASETS,
+    AuthGate,
+    AuthInterlock,
+    AuthInterlockResult,
     GreenGate,
     GreenLike,
+    PendingDecision,
     StatusApiGate,
+)
+from analyst.monitor.linkage import (
+    ALIASES_PATH,
+    AliasEntry,
+    AliasTable,
+    MatchKind,
+    NameResolver,
+    NewsLink,
+    SurfaceForm,
+    load_aliases,
+)
+from analyst.monitor.matcher import (
+    INTEGRITY_QUERY,
+    BreakConditionWatch,
+    NewsMatch,
+    Urgency,
+    default_integrity_watch,
+    match_link,
+    match_links,
 )
 from analyst.monitor.t0 import (
     CHECKS_PERFORMED,
@@ -44,8 +67,16 @@ from analyst.monitor.t0 import (
 )
 
 __all__ = [
+    "ALIASES_PATH",
     "CHECKS_PERFORMED",
     "CORE_DATASETS",
+    "INTEGRITY_QUERY",
+    "AliasEntry",
+    "AliasTable",
+    "AuthGate",
+    "AuthInterlock",
+    "AuthInterlockResult",
+    "BreakConditionWatch",
     "CorporateActionEvent",
     "Deal",
     "DeliverySignal",
@@ -55,7 +86,13 @@ __all__ = [
     "GreenLike",
     "InMemoryEscalationQueue",
     "KeywordWatch",
+    "MatchKind",
+    "NameResolver",
+    "NewsLink",
+    "NewsMatch",
+    "PendingDecision",
     "StatusApiGate",
+    "SurfaceForm",
     "T0Check",
     "T0Config",
     "T0Escalation",
@@ -65,10 +102,15 @@ __all__ = [
     "T0Monitor",
     "T0Outcome",
     "T0Result",
+    "Urgency",
     "check_announcements",
     "check_corporate_actions",
     "check_data_quality",
     "check_drawdown",
     "check_flow",
     "check_rails",
+    "default_integrity_watch",
+    "load_aliases",
+    "match_link",
+    "match_links",
 ]

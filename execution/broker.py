@@ -50,6 +50,7 @@ __all__ = [
     "OrderStatus",
     "OrderType",
     "Position",
+    "SessionExpired",
     "Side",
     "UnknownOrderError",
 ]
@@ -77,6 +78,20 @@ class UnknownOrderError(BrokerError, KeyError):
 
 class OrderNotModifiableError(BrokerError):
     """`modify`/`cancel` reached an order that is no longer staged (filled, rejected, cancelled)."""
+
+
+class SessionExpired(BrokerError):  # noqa: N818 - spec-named (M5.15); the class *is* the event
+    """The broker's API session is no longer authenticated — the day's OAuth+2FA login has lapsed.
+
+    Indian brokers force a daily API logout that only an interactive OAuth + 2FA login re-opens
+    (NSE consolidated NNF circular INVG/73992 §8.3.2.1.8), so a session that was valid yesterday
+    is dead at the next market open until a human re-authenticates. A concrete broker raises this
+    from `session_valid()` (or from any order-path method) when it can positively determine the
+    session is gone, rather than letting a request fail obscurely deep in the transport. The daily
+    loop's auth interlock treats it exactly like a `False` from `session_valid()`: journal
+    `AUTH_REQUIRED`, place no orders, defer the day's decisions. `SimBroker` never raises it — a
+    paper session cannot expire (invariant #5: paper and real share the seam, not the failure).
+    """
 
 
 # ── vocabulary ───────────────────────────────────────────────────────────────────────────────
@@ -288,6 +303,18 @@ class Broker(Protocol):
     What it never does: decide *whether* to trade. Rails (A8) and the policy layer decide that
     upstream; the broker only carries out — or refuses — the order it is handed.
     """
+
+    def session_valid(self) -> bool:
+        """Whether the broker API session is authenticated and usable for this trading day.
+
+        The auth precondition every order path depends on — the counterpart, for dead auth, of the
+        data-red interlock's `is_green` for bad data (EXECUTION_PLAN §4.4). The daily loop calls it
+        before staging: a `False` means the day's OAuth+2FA login has lapsed and no order may be
+        placed. An implementation that can positively detect an expired session may instead raise
+        `SessionExpired`, which the interlock treats identically; returning `True` asserts the
+        session is live. `SimBroker` always returns `True` (a paper session cannot expire), so
+        paper mode is never blocked; `KiteBroker` (M8) checks the real token.
+        """
 
     def place(self, request: OrderRequest) -> Order:
         """Place an order. Returns the resulting `Order` (staged for its target session)."""
