@@ -28,12 +28,14 @@ from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Store
 
 clock = SystemClock()
-store = L0Store(clock=clock)                       # default lake from settings
-with connection() as conn:                         # commit is the caller's
+store = L0Store(clock=clock)  # default lake from settings
+with connection() as conn:  # commit is the caller's
     report = publish_bundle(
-        conn, store, logical_date,
+        conn,
+        store,
+        logical_date,
         clock=clock,
-        archive_root=settings.data_root,           # bundles live under <archive_root>/archives/
+        archive_root=settings.data_root,  # bundles live under <archive_root>/archives/
     )
     conn.commit()
 print(report.file_count, report.total_bytes, report.manifest_sha256)

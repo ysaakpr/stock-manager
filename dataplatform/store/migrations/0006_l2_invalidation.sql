@@ -29,7 +29,7 @@ CREATE TABLE l2_invalidation (
     resolved_at  timestamptz
 );
 COMMENT ON TABLE l2_invalidation IS
-    'D3/D4 · The stale-L2 queue (§4.3 rule 2). One open row per ISIN whose adjustment_factors were '
+    'D4 · The D3/D4 stale-L2 queue (§4.3 rule 2). One open row per ISIN whose adjustment_factors were '
     'recomputed since its L2 was last built; M2.5''s materializer drains it, rebuilds that ISIN''s '
     'adjusted partitions, and sets resolved. Bad/stale L2 must never silently become decisions '
     '(invariant #10), so an unresolved row is a visible instruction to rebuild, not a log line.';
