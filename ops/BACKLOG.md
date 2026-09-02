@@ -8,6 +8,7 @@ Agents: add a line here rather than expanding your task's scope (AGENTIC_CONTEXT
 
 | Spotted by | Item |
 |---|---|
+| M6.6 | A6's rotation SELL journal entries (`analyst.rotation.engine.RotationEngine._decide`) carry rationale, sleeve and break-condition verdicts but **not** the trade's gross rupee value, realized gain, sell-side charges, or holding-period class — those live on the referenced `order_`/`Fill`, not the `decision_journal` row. The evidence pack's turnover/tax section (§5.7) is meant to be reconstructable from the journal alone, so it reads a SELL's value/gain from the payload (`value_inr`/`realized_gain_inr`/`charges_inr`/`holding_period`); a SELL without them is counted as an untraceable trade and surfaced as a defect. Have A6/A7's SELL path (and the deploy path's `deployed_inr`, for consistency, adopt the canonical `value_inr`) write these keys when it journals the trade, so real rotation exits populate the pack without the pack reaching into the order table. `_deploy_payload`/`RotationEngine._decide` are the seams. |
 | setup | Object-storage target for L0 + Postgres backups is undecided; `ops/backup.sh` is local-only until one exists. |
 | setup | Golden CA suite starts at 7 named cases; §4.3 expects ~13 more ugly cases collected during backfill. |
 | M0.1 | `orchestrator/` is excluded from the gate (6 files unformatted, 7 mypy-strict errors). Bringing the build machinery under `make check` is a small, separate task. |
