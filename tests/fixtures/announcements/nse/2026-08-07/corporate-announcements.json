@@ -1,0 +1,80 @@
+[
+  {
+    "symbol": "ACMEROBO",
+    "sm_name": "Acme Robotics Limited",
+    "sm_isin": "INE001A01018",
+    "desc": "Divestment of Robotics Business Line",
+    "attchmntText": "The Board of Directors at its meeting held today approved the divestment and complete exit of the Company's robotics business line through a slump sale to a strategic buyer, subject to shareholder approval.",
+    "attchmntFile": "https://nsearchives.nseindia.com/corporate/ACMEROBO_07082026153522.pdf",
+    "an_dt": "2026-08-07 15:35:22",
+    "exchdisstime": "07-Aug-2026 15:35:22",
+    "sort_date": "2026-08-07 15:35:22",
+    "hasXbrl": "false",
+    "seq_id": "8100001"
+  },
+  {
+    "symbol": "ACMEROBO",
+    "sm_name": "Acme Robotics Limited",
+    "sm_isin": "INE001A01018",
+    "desc": "Award of Order / Receipt of Order",
+    "attchmntText": "The Company's robotics division has won a new order worth Rs 500 crore from a leading automotive manufacturer, to be executed over eighteen months.",
+    "attchmntFile": "https://nsearchives.nseindia.com/corporate/ACMEROBO_07082026121005.pdf",
+    "an_dt": "2026-08-07 12:10:05",
+    "exchdisstime": "07-Aug-2026 12:10:05",
+    "sort_date": "2026-08-07 12:10:05",
+    "hasXbrl": "false",
+    "seq_id": "8100002"
+  },
+  {
+    "symbol": "ACMEROBO",
+    "sm_name": "Acme Robotics Limited",
+    "sm_isin": "INE001A01018",
+    "desc": "Resignation of Statutory Auditor",
+    "attchmntText": "The Company informs that its Statutory Auditor has tendered resignation with immediate effect. The Audit Committee is initiating the process to appoint a new auditor.",
+    "attchmntFile": "https://nsearchives.nseindia.com/corporate/ACMEROBO_06082026180244.pdf",
+    "an_dt": "2026-08-06 18:02:44",
+    "exchdisstime": "06-Aug-2026 18:02:44",
+    "sort_date": "2026-08-06 18:02:44",
+    "hasXbrl": "false",
+    "seq_id": "8100003"
+  },
+  {
+    "symbol": "ACMEROBO",
+    "sm_name": "Acme Robotics Limited",
+    "sm_isin": "INE001A01018",
+    "desc": "Board Meeting Intimation",
+    "attchmntText": "Intimation of Board Meeting to be held on 14 August 2026 to consider and approve the unaudited financial results for the quarter ended 30 June 2026.",
+    "attchmntFile": "https://nsearchives.nseindia.com/corporate/ACMEROBO_07082026091500.pdf",
+    "an_dt": "2026-08-07 09:15:00",
+    "exchdisstime": "07-Aug-2026 09:15:00",
+    "sort_date": "2026-08-07 09:15:00",
+    "hasXbrl": "false",
+    "seq_id": "8100004"
+  },
+  {
+    "symbol": "NORTHCHEM",
+    "sm_name": "Northern Chemicals Limited",
+    "sm_isin": "INE002A01018",
+    "desc": "Divestment of Specialty Chemicals Undertaking",
+    "attchmntText": "The Board approved the divestment and exit of the specialty chemicals undertaking by way of a business transfer agreement.",
+    "attchmntFile": "https://nsearchives.nseindia.com/corporate/NORTHCHEM_07082026110000.pdf",
+    "an_dt": "2026-08-07 11:00:00",
+    "exchdisstime": "07-Aug-2026 11:00:00",
+    "sort_date": "2026-08-07 11:00:00",
+    "hasXbrl": "false",
+    "seq_id": "8100005"
+  },
+  {
+    "symbol": "GHOSTCO",
+    "sm_name": "Ghost Company (identity gap)",
+    "sm_isin": "",
+    "desc": "Updates",
+    "attchmntText": "A disclosure whose native ISIN field is blank in the feed, exercised so the parser surfaces it as unresolved rather than dropping or guessing.",
+    "attchmntFile": "",
+    "an_dt": "2026-08-07 10:00:00",
+    "exchdisstime": "07-Aug-2026 10:00:00",
+    "sort_date": "2026-08-07 10:00:00",
+    "hasXbrl": "false",
+    "seq_id": "8100006"
+  }
+]

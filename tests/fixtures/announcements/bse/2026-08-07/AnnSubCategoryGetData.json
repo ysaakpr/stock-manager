@@ -1,0 +1,51 @@
+{
+  "Table": [
+    {
+      "NEWSID": "20260807-1",
+      "SCRIP_CD": "543210",
+      "NEWSSUB": "Divestment of Robotics Business Line",
+      "HEADLINE": "The Board of Directors approved the sale and complete exit of the Company's robotics business line to a strategic buyer.",
+      "DT_TM": "2026-08-07T14:20:33",
+      "NEWS_DT": "2026-08-07T00:00:00",
+      "ANNOUNCEMENT_TYPE": "C",
+      "CATEGORYNAME": "Company Update",
+      "ATTACHMENTNAME": "543210_20260807142033.pdf",
+      "CRITICALNEWS": "0",
+      "FILESTATUS": "A",
+      "QUARTER_ID": "0"
+    },
+    {
+      "NEWSID": "20260807-2",
+      "SCRIP_CD": "999999",
+      "NEWSSUB": "Trading Window Closure",
+      "HEADLINE": "Intimation of closure of trading window for the quarter ended 30 June 2026.",
+      "DT_TM": "2026-08-07T09:00:00",
+      "NEWS_DT": "2026-08-07T00:00:00",
+      "ANNOUNCEMENT_TYPE": "C",
+      "CATEGORYNAME": "Company Update",
+      "ATTACHMENTNAME": "",
+      "CRITICALNEWS": "0",
+      "FILESTATUS": "A",
+      "QUARTER_ID": "0"
+    },
+    {
+      "NEWSID": "20260807-3",
+      "SCRIP_CD": "500325",
+      "NEWSSUB": "Board Meeting Intimation",
+      "HEADLINE": "Board meeting to be held on 14 August 2026 to consider the unaudited results for the quarter ended 30 June 2026.",
+      "DT_TM": "2026-08-07T10:30:00",
+      "NEWS_DT": "2026-08-07T00:00:00",
+      "ANNOUNCEMENT_TYPE": "C",
+      "CATEGORYNAME": "Board Meeting",
+      "ATTACHMENTNAME": "500325_20260807103000.pdf",
+      "CRITICALNEWS": "0",
+      "FILESTATUS": "A",
+      "QUARTER_ID": "0"
+    }
+  ],
+  "Table1": [
+    {
+      "ROWCNT": 3
+    }
+  ]
+}
