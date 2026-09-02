@@ -29,6 +29,7 @@ from dataplatform.quality.gaps import (
 )
 from dataplatform.quality.sentinel import (
     CloseToCloseMove,
+    ExchangeClose,
     PersistFindingCounts,
     QualityFinding,
     SentinelInput,
@@ -46,6 +47,7 @@ from dataplatform.quality.sentinel import (
 __all__ = [
     "PER_SESSION_CADENCES",
     "CloseToCloseMove",
+    "ExchangeClose",
     "GapEntry",
     "GapReason",
     "GapReport",

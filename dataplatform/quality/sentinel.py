@@ -47,6 +47,7 @@ from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field
 
 from dataplatform.clock import Clock
+from dataplatform.identity.master import Exchange
 from dataplatform.ingest.models import ISIN_PATTERN, PriceRow
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection
@@ -61,6 +62,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CloseToCloseMove",
+    "ExchangeClose",
     "PersistFindingCounts",
     "QualityFinding",
     "SentinelInput",
@@ -110,21 +112,58 @@ class CloseToCloseMove(BaseModel):
         return (self.close - self.prev_close) / self.prev_close
 
 
+class ExchangeClose(BaseModel):
+    """One security's raw close on one exchange for one session — the cross-exchange rule's input.
+
+    A dual-listed ISIN prints on both NSE and BSE, and the two closes should agree: it is the same
+    company, and cross-listing arbitrage keeps them within a fraction of a percent. When they do
+    not, one side's close is wrong (a missed corporate-action adjustment, a decimal shift, a stale
+    print), which is exactly the kind of value a sentinel exists to catch. So the cross-exchange
+    rule needs each exchange's close *tagged with its exchange*, which `CloseToCloseMove` (a
+    single-series, single-exchange move) deliberately is not — hence this second, exchange-keyed
+    close type.
+
+    `turnover` (rupee value traded) is carried because the whole difficulty of this check is thin
+    liquidity: a BSE close backed by a handful of shares is a stale sliver, not a second opinion on
+    price, and a divergence there is noise, not a data error (D2's `LiquidityMetric` already fixes
+    turnover as the platform's liquidity yardstick). `volume` is kept alongside for diagnostics.
+    `close` is the raw, unadjusted close from L1 (invariant #3): comparing adjusted prices would
+    paper over the very cross-exchange adjustment gap the rule is trying to notice.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    isin: str = Field(pattern=ISIN_PATTERN)
+    date: date
+    exchange: Exchange
+    close: Decimal = Field(gt=0, description="This session's raw close on this exchange, INR.")
+    turnover: Decimal = Field(
+        ge=0, description="Rupee value traded in the session (the liquidity yardstick)."
+    )
+    volume: int = Field(
+        default=0, ge=0, description="Shares traded; diagnostic, turnover is the measure."
+    )
+    source: str = Field(min_length=1, description="Originating dataset id, for flag scoping.")
+
+
 @dataclass(frozen=True)
 class SentinelInput:
     """Everything the sentinel's rules read, gathered once and passed to each rule unchanged.
 
     A deliberately open container: the move rule reads `moves`, `corporate_actions` and
-    `circuit_bands`; a future volume rule would read a field this dataclass grows. Growing the
-    *input* is not changing the *engine* — `run_sentinel` never inspects these fields, it only hands
-    the whole object to each rule. `corporate_actions` should be the reconciled set (the only kind
-    M2.4 trusts); `circuit_bands` maps ISIN → the fractional daily price band (e.g. `0.05` for a 5%
-    band), used to recognise a move that merely rode the exchange's own limit.
+    `circuit_bands`; the cross-exchange rule (M3.3) reads `exchange_closes`; a future volume rule
+    would read a field this dataclass grows. Growing the *input* is not changing the *engine* —
+    `run_sentinel` never inspects these fields, it only hands the whole object to each rule.
+    `corporate_actions` should be the reconciled set (the only kind M2.4 trusts); `circuit_bands`
+    maps ISIN → the fractional daily price band (e.g. `0.05` for a 5% band), used to recognise a
+    move that merely rode the exchange's own limit. `exchange_closes` carries each exchange's raw
+    close for an ISIN/session so the cross-exchange rule can compare NSE against BSE.
     """
 
     moves: tuple[CloseToCloseMove, ...] = ()
     corporate_actions: tuple[CorporateAction, ...] = ()
     circuit_bands: Mapping[str, Decimal] = field(default_factory=dict)
+    exchange_closes: tuple[ExchangeClose, ...] = ()
 
 
 def finding_fingerprint(check_name: str, isin: str | None, logical_date: date) -> str:
