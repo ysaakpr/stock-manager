@@ -494,6 +494,39 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/integration/test_query_shapes.py -q\n(exit 0)\n......\nquery.benchmark corpus=200 isins x 2520 sessions x 2 venues = 1,008,000 rows | method=median-of-5 perf_counter (1 warm-up discarded) | series(a)=55.1ms cross_section(b)=68.3ms | budget=5.0s\n.                                                                  [100%]\n\n$ uv run ruff format --check dataplatform/query/service.py dataplatform/query/shapes.py tests/integration/test_query_shapes.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check dataplatform/query/service.py dataplatform/query/shapes.py tests/integration/test_query_shapes.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/query/service.py dataplatform/query/shapes.py tests/integration/test_query_shapes.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
+    "M4.10": {
+      "attempts": 1,
+      "commit": "374dd53",
+      "finished": "2026-09-02T17:01:11+00:00",
+      "first_started": "2026-09-02T16:31:21+00:00",
+      "last_started": "2026-09-02T16:31:21+00:00",
+      "note": "Naive top-20 12m-momentum policy, monthly rebalance, run 2016-2026 through the real replay engine (PIT universe, shared cost model, M4.7 allocator, M4.6 accounting, full journaling). A-priori params, no tuning. Benchmark is a broad-market TRI proxy computed from L1 (licensed NIFTY-TRI not in store); real data reads L1 raw closes (adjusted==raw, no CAs in lake). ~41s, portfolio XIRR 10.69% vs proxy 7.86%, costs incl.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run python -m backtest.run --policy naive_momentum --from 2016-04-01 --to 2026-03-31 --report\n(exit 0)\n ] sim_broker.rejected            isin=INE474C01015 order_id=SIM-002992 reason='no reference bar for 2026-03-04: no reference bar for INE474C01015 on 2026-03-04'\n2026-09-02 22:30:59 [warning  ] sim_broker.rejected            isin=INE486J01014 order_id=SIM-002993 reason='no reference bar for 2026-03-04: no reference bar for INE486J01014 on 2026-03-04'\n2026-09-02 22:30:59 [info     ] sim_broker.filled              cost=96.25 fill_price=459.9486135975513920188267009 isin=INE506W01012 order_id=SIM-002994 quantity=169 reference_price=460.0500 side=SELL slippage_bps=2.203812682286881451435694068\n2026-09-02 22:30:59 [warning  ] sim_broker.rejected            isin=INE509F01011 order_id=SIM-002995 reason='no reference bar for 2026-03-04: no reference bar for INE509F01011 on 2026-03-04'\n2026-09-02 22:30:59 [warning  ] sim_broker.rejected            isin=INE558B01017 order_id=SIM-002996 reason='no reference bar for 2026-03-04: no reference bar for INE558B01017 on 2026-03-04'\n2026-09-02 22:30:59 [warning  ] sim_broker.rejected            isin=INE593W01010 order_id=SIM-002997 reason='no reference bar for 2026-03-04: no reference bar for INE593W01010 on 2026-03-04'\n2026-09-02 22:30:59 [warning  ] sim_broker.rejected            isin=INE602A01015 order_id=SIM-002998 reason='no reference bar for 2026-03-04: no reference bar for INE602A01015 on 2026-03-04'\n2026-09-02 22:30:59 [warning  ] sim_broker.rejected            isin=INE713T01010 order_id=SIM-002999 reason='no reference bar for 2026-03-04: no reference bar for INE713T01010 on 2026-03-04'\n2026-09-02 22:30:59 [warning  ] sim_broker.rejected            isin=INE863B01011 order_id=SIM-003000 reason='no reference bar for 2026-03-04: no reference bar for INE863B01011 on 2026-03-04'\n2026-09-02 22:30:59 [warning  ] sim_broker.rejected            isin=INE935N01012 order_id=SIM-003001 reason='no reference bar for 2026-03-04: no reference bar for INE935N01012 on 2026-03-04'\n2026-09-02 22:30:59 [warning  ] sim_broker.rejected            isin=INE947Q01010 order_id=SIM-003002 reason='no reference bar for 2026-03-04: no reference bar for INE947Q01010 on 2026-03-04'\n2026-09-02 22:30:59 [warning  ] sim_broker.rejected            isin=INF174KA1KU9 order_id=SIM-003003 reason='no reference bar for 2026-03-04: no reference bar for INF174KA1KU9 on 2026-03-04'\n2026-09-02 22:30:59 [info     ] sim_broker.filled              cost=104.28 fill_price=3650.730474339529684115087965 isin=INE200A01026 order_id=SIM-003004 quantity=24 reference_price=3650.0000 side=BUY slippage_bps=2.001299560355298945446479475\n2026-09-02 22:30:59 [info     ] sim_broker.filled              cost=105.32 fill_price=870.1744169729952204731693267 isin=INE419M01027 order_id=SIM-003005 quantity=102 reference_price=870.0000 side=BUY slippage_bps=2.004792793048511185854328035\n2026-09-02 22:30:59 [info     ] sim_broker.filled              cost=14.45 fill_price=570.6641135039828048352478439 isin=INE531E01026 order_id=SIM-003006 quantity=21 reference_price=570.5500 side=BUY slippage_bps=2.000061414123299189340881734\n2026-09-02 22:30:59 [info     ] sim_broker.filled              cost=106.35 fill_price=3731.146741576777490987165260 isin=INE864I01014 order_id=SIM-003007 quantity=24 reference_price=3730.4000 side=BUY slippage_bps=2.001773474097927801751175195\n2026-09-02 22:30:59 [info     ] sim_broker.filled              cost=0.00 fill_price=26.89537800127527695332065124 isin=INF277KA1984 order_id=SIM-003008 quantity=2 reference_price=26.8900 side=BUY slippage_bps=2.000000474256955492990415909\n2026-09-02 22:30:59 [info     ] replay.complete                digest=097e8e57da88efd0cd8d50247bafb36781806c1addbdca59e66062092a569475 entries=5271 first=2016-09-02 last=2026-03-30 sessions=2364\nnaive_momentum 2016-09-02\u21922026-03-30: 2364 sessions, 115 rebalances, 41.0s\n  final NAV \u20b92,646,258.25 from \u20b91,000,000.00\n  XIRR portfolio 10.69% vs NIFTY-TRI proxy 7.86%\n\u2026[truncated]"
+    },
+    "M4.11": {
+      "attempts": 1,
+      "commit": "eef60a2",
+      "finished": "2026-09-02T17:12:34+00:00",
+      "first_started": "2026-09-02T17:01:56+00:00",
+      "last_started": "2026-09-02T17:01:56+00:00",
+      "note": "Automated PIT-leak audit harness instruments PitContext.admit during a full replay; two test-double leaks (honest guard-caught + mis-declared audit-caught) prove it catches future data; offline CI runs determinism+PIT-leak+golden+make check. Assumption: CI has no Postgres, so DB-backed integration tests skip there.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_pit_leak.py -q\n(exit 0)\n......                                                                   [100%]\n\n$ uv run ruff format --check tests/integration/test_pit_leak.py\n(exit 0)\n1 file already formatted\n\n$ uv run ruff check tests/integration/test_pit_leak.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy tests/integration/test_pit_leak.py\n(exit 0)\nSuccess: no issues found in 1 source file"
+    },
+    "M4.12": {
+      "attempts": 1,
+      "commit": "6ec4e26",
+      "finished": "2026-09-02T17:26:58+00:00",
+      "first_started": "2026-09-02T17:19:33+00:00",
+      "last_started": "2026-09-02T17:19:33+00:00",
+      "note": "GATE M4 PASSED: all 4 boxes evidenced. (1) reference case reproduced to the paisa via real accounting engine, spans 1:5 split/42:25 merger/1:1 demerger over 60-instalment SIP; (2) naive momentum ran end-to-end over full L1 history (2364 sessions,115 rebalances,43.5s,5271 journal entries,no PIT violations); (3) PIT leak harness provably catches a deliberate mis-declared future read; (4) determinism test byte-identical and wired into .github/workflows/ci.yml. Caveats recorded in ops/gates/M4.md: reference uses representative prices+no-slippage fills, momentum window ~9.6y with L1 proxy benchmark and no-CA lake, CI config present+passing locally but remote execution unverifiable from host.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run python -m orchestrator gate M4\n(exit 0)\n\u001b[1mgate M4\u001b[0m: re-verifying 11 task(s)\n\n  \u001b[32m\u2713\u001b[0m M4.1     Query service \u2014 series and cross-section shapes\n  \u001b[32m\u2713\u001b[0m M4.2     Query service \u2014 screen filters and PIT universe\n  \u001b[32m\u2713\u001b[0m M4.3     PIT access rules + leak guard\n  \u001b[32m\u2713\u001b[0m M4.4     Indian transaction cost model (shared)\n  \u001b[32m\u2713\u001b[0m M4.5     Broker interface + SimBroker fill model\n  \u001b[32m\u2713\u001b[0m M4.6     Portfolio accounting + XIRR + benchmarks\n  \u001b[32m\u2713\u001b[0m M4.7     SIP simulation with lot/whole-share constraints\n  \u001b[32m\u2713\u001b[0m M4.8     Replay engine (X2) + determinism harness\n  \u001b[32m\u2713\u001b[0m M4.9     Hand-computed reference backtest case\n  \u001b[32m\u2713\u001b[0m M4.10    Naive momentum backtest, 10 years\n  \u001b[32m\u2713\u001b[0m M4.11    PIT leak test + determinism in CI\n\n\u001b[32mgate M4: all verifications pass\u001b[0m"
+    },
     "M4.2": {
       "attempts": 1,
       "commit": "ac6eba9",
@@ -560,6 +593,28 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_sip.py -q\n(exit 0)\n.............                                                            [100%]\n\n$ uv run ruff format --check backtest/sip.py tests/unit/test_sip.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/sip.py tests/unit/test_sip.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/sip.py tests/unit/test_sip.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     },
+    "M4.8": {
+      "attempts": 1,
+      "commit": "c975d7b",
+      "finished": "2026-09-02T16:05:30+00:00",
+      "first_started": "2026-09-02T15:44:27+00:00",
+      "last_started": "2026-09-02T15:44:27+00:00",
+      "note": "backtest/replay.py: ReplayEngine drives an injected Policy over sessions through a ReplayBroker (SimBroker), FrozenClock re-frozen per session, a fresh PitContext(as_of=session) as the policy's only data surface, and full journaling (heartbeat on no-op, invariant #9); ReplayResult serialises journal+book to canonical bytes for byte-identical determinism. Journal injection is optional so the determinism harness runs offline in CI; a skippable pg test proves entries also land in decision_journal. Assumption: the market calendar outruns the replay window so the last session can stage.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_replay_determinism.py -q\n(exit 0)\n...........                                                              [100%]\n\n$ uv run ruff format --check backtest/replay.py tests/integration/test_replay_determinism.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/replay.py tests/integration/test_replay_determinism.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/replay.py tests/integration/test_replay_determinism.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M4.9": {
+      "attempts": 1,
+      "commit": "374b999",
+      "finished": "2026-09-02T16:30:34+00:00",
+      "first_started": "2026-09-02T16:06:37+00:00",
+      "last_started": "2026-09-02T16:06:37+00:00",
+      "note": "5yr/60-instalment monthly SIP over 3 golden-suite names (IRCTC 1:5 split, HDFC Ltd->HDFC Bank 42:25 merger, RIL->JFS 1:1 demerger) through the real PortfolioBook + shared cost model + xirr; every cashflow/qty/cost/XIRR hand-computed as literals, engine matches to the paisa. Added PortfolioBook.apply_merger (book had splits/bonus/demerger but no acquired->survivor conversion).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/golden/test_reference_case.py -q\n(exit 0)\n............                                                             [100%]\n\n$ uv run ruff format --check tests/golden/reference_case tests/golden/test_reference_case.py\n(exit 0)\n4 files already formatted\n\n$ uv run ruff check tests/golden/reference_case tests/golden/test_reference_case.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy tests/golden/reference_case tests/golden/test_reference_case.py\n(exit 0)\nSuccess: no issues found in 4 source files"
+    },
     "M5.1": {
       "attempts": 1,
       "commit": "7727e03",
@@ -571,12 +626,71 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_journal.py -q\n(exit 0)\n..........................................................               [100%]\n\n$ make check\n(exit 0)\nuv run ruff format --check .\n90 files already formatted\nuv run ruff check .\nAll checks passed!\nuv run mypy\nSuccess: no issues found in 77 source files\nuv run pytest\n........................................................................ [  7%]\n........................................................................ [ 14%]\n........................................................................ [ 22%]\n........................................................................ [ 29%]\n........................................................................ [ 36%]\n........................................................................ [ 44%]\n........................................................................ [ 51%]\n........................................................................ [ 59%]\n........................................................................ [ 66%]\n........................................................................ [ 73%]\n........................................................................ [ 81%]\n........................................................................ [ 88%]\n........................................................................ [ 96%]\n.....................................                                    [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/fastapi/testclient.py:1\n  /Users/vysh/Documents/work/stocks/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n973 passed, 1 warning in 24.58s"
     },
+    "M5.10": {
+      "attempts": 1,
+      "commit": "70e3223",
+      "finished": "2026-09-02T15:57:13+00:00",
+      "first_started": "2026-09-02T15:44:27+00:00",
+      "last_started": "2026-09-02T15:44:27+00:00",
+      "note": "A7 cash manager: park() sizes idle exit-proceeds+SIP cash into whole-share liquid-ETF buys same session (routed through A8, journaled CASH-sleeve); deploy() requires a BuyAuthorization (ratified-thesis CORE or TACTICAL rationale) from A4, refuses CASH/mismatched/sell/sub-min, journals the sleeve; DeploymentQueue is an immutable FIFO earmark. Assumption: CashManager runs on a RATIFIED PolicySet (\u00a73 item 2); deploy_within_sessions deadline + explicit un-park sell deferred to the M5.11 daily loop (BACKLOG).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_cash.py -q\n(exit 0)\n.......................                                                  [100%]\n\n$ uv run ruff format --check analyst/cash/manager.py analyst/cash/queue.py tests/unit/test_cash.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check analyst/cash/manager.py analyst/cash/queue.py tests/unit/test_cash.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/cash/manager.py analyst/cash/queue.py tests/unit/test_cash.py\n(exit 0)\nSuccess: no issues found in 3 source files"
+    },
+    "M5.11": {
+      "attempts": 1,
+      "commit": "62b7fe5",
+      "finished": "2026-09-02T16:23:09+00:00",
+      "first_started": "2026-09-02T16:06:37+00:00",
+      "last_started": "2026-09-02T16:06:37+00:00",
+      "note": "T0 mechanical monitor + data-red interlock (GreenGate/StatusApiGate); interlock short-circuits to SKIPPED_DATA_RED before gather(); T0 holds no LLM/broker. Note: repo-wide make check is pre-existing RED from M2.7 (tests/golden/test_yfinance_reference.py:473 uses datetime.now(), violating the clock guard) \u2014 unrelated to M5.11.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_t0.py -q\n(exit 0)\n................                                                         [100%]\n\n$ uv run ruff format --check analyst/monitor/interlock.py analyst/monitor/t0.py tests/unit/test_t0.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check analyst/monitor/interlock.py analyst/monitor/t0.py tests/unit/test_t0.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/monitor/interlock.py analyst/monitor/t0.py tests/unit/test_t0.py\n(exit 0)\nSuccess: no issues found in 3 source files"
+    },
     "M5.12": {
       "attempts": 1,
+      "commit": "5fad8ef",
+      "finished": "2026-09-02T15:41:06+00:00",
       "first_started": "2026-09-02T15:22:34+00:00",
       "last_started": "2026-09-02T15:22:34+00:00",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "Order staging (StagingCoordinator + order_ journal seam) -> next-session execution -> Reconciler comparing InternalBook vs broker positions/ledger; any mismatch trips a file-backed KillSwitch (survives restart) and alerts. Assumption: execute() drives fills via SimBroker.execute_session (paper); the M8 KiteBroker execution-driver seam and REJECTED-order journaling noted in BACKLOG.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_recon_drill.py -q\n(exit 0)\n......                                                                   [100%]\n\n$ uv run ruff format --check execution/kill_switch.py execution/recon.py execution/staging.py tests/integration/test_recon_drill.py\n(exit 0)\n4 files already formatted\n\n$ uv run ruff check execution/kill_switch.py execution/recon.py execution/staging.py tests/integration/test_recon_drill.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy execution/kill_switch.py execution/recon.py execution/staging.py tests/integration/test_recon_drill.py\n(exit 0)\nSuccess: no issues found in 4 source files"
+    },
+    "M5.13": {
+      "attempts": 1,
+      "commit": "3b7c2bd",
+      "finished": "2026-09-02T16:51:17+00:00",
+      "first_started": "2026-09-02T16:31:21+00:00",
+      "last_started": "2026-09-02T16:31:21+00:00",
+      "note": "Reference case built via real interview flow (fixture transcript \u2192 conduct_interview \u2192 build_proposal), ratified FIXTURE, funded PAPER; 10 sessions via SchedulerRunner.run_once with FrozenClock advancing daily \u2014 10 heartbeats, RAIL_BLOCK on an injected oversized order, SIP parked then deployed. Daily-loop composition lives in the test (no production entrypoint in M5 scope; backlogged).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_paper_run_10_sessions.py -q\n(exit 0)\n....                                                                     [100%]\n\n$ uv run ruff format --check tests/integration/test_paper_run_10_sessions.py\n(exit 0)\n1 file already formatted\n\n$ uv run ruff check tests/integration/test_paper_run_10_sessions.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy tests/integration/test_paper_run_10_sessions.py\n(exit 0)\nSuccess: no issues found in 1 source file"
+    },
+    "M5.14": {
+      "attempts": 1,
+      "commit": "374dd53",
+      "finished": "2026-09-02T17:07:48+00:00",
+      "first_started": "2026-09-02T17:01:55+00:00",
+      "last_started": "2026-09-02T17:01:55+00:00",
+      "note": "Gate M5 PASS: all 5 \u00a79 boxes evidenced in ops/gates/M5.md; ./orch gate M5 = 14/14 verify green; paper run 4 passed (real Postgres, not skipped). StubLLM/fixture-satisfied boxes labelled (B4: no LLM ran; theme map+theses are stub/fixture; box2 is FIXTURE ratification only, never real money).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run python -m orchestrator gate M5\n(exit 0)\n\u001b[1mgate M5\u001b[0m: re-verifying 14 task(s)\n\n  \u001b[32m\u2713\u001b[0m M5.1     Decision journal (A9) \u2014 append-only core\n  \u001b[32m\u2713\u001b[0m M5.2     Risk rails (A8) + property tests\n  \u001b[32m\u2713\u001b[0m M5.3     Case service (A1) + policy sets\n  \u001b[32m\u2713\u001b[0m M5.4     LLM client abstraction + token accounting (X3)\n  \u001b[32m\u2713\u001b[0m M5.5     Theme mapper (A3) with purity scores\n  \u001b[32m\u2713\u001b[0m M5.6     Thesis engine (A4) + versioned ratification\n  \u001b[32m\u2713\u001b[0m M5.7     Interview / case builder (A2)\n  \u001b[32m\u2713\u001b[0m M5.8     Ratification UX (FastAPI + HTMX)\n  \u001b[32m\u2713\u001b[0m M5.9     Rotation engine (A6) \u2014 dial and sleeves\n  \u001b[32m\u2713\u001b[0m M5.10    Cash manager (A7)\n  \u001b[32m\u2713\u001b[0m M5.11    T0 mechanical monitor (A5) + data-red interlock\n  \u001b[32m\u2713\u001b[0m M5.12    Order staging + daily reconciliation + kill switch\n  \u001b[32m\u2713\u001b[0m M5.13    AI/Robotics reference case + 10-session paper run\n  \u001b[32m\u2713\u001b[0m M5.15    Broker session re-auth interlock (AUTH_REQUIRED)\n\n\u001b[32mgate M5: all verifications pass\u001b[0m"
+    },
+    "M5.15": {
+      "attempts": 1,
+      "commit": "0b60d02",
+      "finished": "2026-09-02T16:50:35+00:00",
+      "first_started": "2026-09-02T16:31:21+00:00",
+      "last_started": "2026-09-02T16:31:21+00:00",
+      "note": "Auth interlock: session_valid()/SessionExpired on Broker; AuthInterlock journals AUTH_REQUIRED+DEFERRED, defers decisions, alerts once/streak; SimBroker always valid. Assumption: daily-loop wiring lands at M5.13/M5.14 (BACKLOG).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_auth_interlock.py -q\n(exit 0)\n...............                                                          [100%]\n\n$ uv run ruff format --check analyst/monitor/interlock.py execution/session.py tests/unit/test_auth_interlock.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check analyst/monitor/interlock.py execution/session.py tests/unit/test_auth_interlock.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/monitor/interlock.py execution/session.py tests/unit/test_auth_interlock.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
     "M5.2": {
       "attempts": 1,
@@ -638,10 +752,26 @@
     },
     "M5.7": {
       "attempts": 1,
+      "commit": "f236706",
+      "finished": "2026-09-02T15:38:15+00:00",
       "first_started": "2026-09-02T15:22:34+00:00",
       "last_started": "2026-09-02T15:22:34+00:00",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "Interview flow (conduct_interview) + recommend_policies (dial from risk appetite, rails from concentration tolerance, all 7 \u00a75.2 policies with recorded reasoning) + build_proposal producing one ratifiable Proposal with a single content hash. Assumed concentration tolerance is a distinct input defaulting from risk appetite.",
+      "previous_state": "FAILED",
+      "reason": "types failed with exit 1",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_interview.py -q\n(exit 0)\n.................                                                        [100%]\n\n$ uv run ruff format --check analyst/interview/flow.py analyst/interview/proposal.py tests/unit/test_interview.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check analyst/interview/flow.py analyst/interview/proposal.py tests/unit/test_interview.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/interview/flow.py analyst/interview/proposal.py tests/unit/test_interview.py\n(exit 0)\nSuccess: no issues found in 3 source files"
+    },
+    "M5.8": {
+      "attempts": 1,
+      "commit": "c975d7b",
+      "finished": "2026-09-02T15:58:59+00:00",
+      "first_started": "2026-09-02T15:44:27+00:00",
+      "last_started": "2026-09-02T15:44:27+00:00",
+      "note": "FastAPI+HTMX review/edit/approve over an in-memory ProposalStore + typer CLI sharing one ratify_proposal core; approval pins Proposal.content_hash, stale-hash approvals refused (409/exit 1). Offline test (no Postgres). Exclusion editing + durable case-backed store deferred to M5.13 (BACKLOG).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_ratify_ux.py -q\n(exit 0)\n.......                                                                  [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/fastapi/testclient.py:1\n  /Users/vysh/Documents/work/stocks/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n\n$ uv run ruff format --check analyst/cases/cli.py analyst/cases/web.py tests/integration/test_ratify_ux.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check analyst/cases/cli.py analyst/cases/web.py tests/integration/test_ratify_ux.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/cases/cli.py analyst/cases/web.py tests/integration/test_ratify_ux.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
     "M5.9": {
       "attempts": 1,
@@ -667,19 +797,137 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_news_ingest.py -q\n(exit 0)\n...........                                                              [100%]\n\n$ uv run ruff format --check dataplatform/ingest/gdelt.py dataplatform/ingest/rss.py tests/unit/test_news_ingest.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check dataplatform/ingest/gdelt.py dataplatform/ingest/rss.py tests/unit/test_news_ingest.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/gdelt.py dataplatform/ingest/rss.py tests/unit/test_news_ingest.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
+    "M6.2": {
+      "attempts": 1,
+      "commit": "053578a",
+      "finished": "2026-09-02T16:52:04+00:00",
+      "first_started": "2026-09-02T16:31:21+00:00",
+      "last_started": "2026-09-02T16:31:21+00:00",
+      "note": "News\u2192ISIN linkage (identity master + curated aliases.yaml) and break-condition matcher; integrity BC3 hits escalate IMMEDIATE; 60-item labelled sample precision 1.00 / recall 0.91. Matcher not yet wired into the T0 daily sweep (noted in BACKLOG for M6.3).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_linkage.py -q\n(exit 0)\n..............                                                           [100%]\n\n$ uv run ruff format --check analyst/monitor/linkage.py analyst/monitor/matcher.py tests/unit/test_linkage.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check analyst/monitor/linkage.py analyst/monitor/matcher.py tests/unit/test_linkage.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/monitor/linkage.py analyst/monitor/matcher.py tests/unit/test_linkage.py\n(exit 0)\nSuccess: no issues found in 3 source files"
+    },
+    "M6.3": {
+      "attempts": 1,
+      "commit": "eef60a2",
+      "finished": "2026-09-02T17:13:22+00:00",
+      "first_started": "2026-09-02T17:01:55+00:00",
+      "last_started": "2026-09-02T17:01:55+00:00",
+      "note": "Evidence bundle builder (analyst/monitor/bundle.py): assembles the T1/T2 input (flag, thesis+break conditions, price/flow, recent filings/news) into a content-addressed journal EvidenceBundle; measures a deterministic pre-flight token estimate and bounds it under a configured BundleBudget (essentials always kept, filings/news trimmed most-recent-first with the overflow reported, essentials-overflow refused loudly); enforces PIT by refusing any input knowable after the trading date (IST). Assumption: the T1/T2 caller sends exactly BuiltBundle.rendered_prompt, so the stored snapshot is what the model saw.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_bundle.py -q\n(exit 0)\n........................                                                 [100%]\n\n$ uv run ruff format --check analyst/monitor/bundle.py tests/unit/test_bundle.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check analyst/monitor/bundle.py tests/unit/test_bundle.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/monitor/bundle.py tests/unit/test_bundle.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M6.4": {
+      "attempts": 1,
+      "commit": "6c172ae",
+      "finished": "2026-09-02T17:33:03+00:00",
+      "first_started": "2026-09-02T17:19:33+00:00",
+      "last_started": "2026-09-02T17:19:33+00:00",
+      "note": "T1Reviewer + verdicts: strong-model review returns schema-validated per-condition verdicts (INTACT/WEAKENED/BROKEN) + a proposed action validated in code against the ratified exit menu before rails; BROKEN triggers the A7 exit path via exit_triggered; malformed answers retried then escalated; every verdict journalled with token/cost via MeteredLLM; deterministic under StubLLM. Assumption: T1 journals ESCALATE and surfaces exit_triggered rather than calling A7/human-inbox directly (A7 not yet built) \u2014 noted in BACKLOG.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_t1.py -q\n(exit 0)\n................                                                         [100%]\n\n$ uv run ruff format --check analyst/monitor/t1.py analyst/monitor/verdicts.py tests/unit/test_t1.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check analyst/monitor/t1.py analyst/monitor/verdicts.py tests/unit/test_t1.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/monitor/t1.py analyst/monitor/verdicts.py tests/unit/test_t1.py\n(exit 0)\nSuccess: no issues found in 3 source files"
+    },
+    "M6.5": {
+      "attempts": 1,
+      "commit": "6291684",
+      "finished": "2026-09-02T17:51:04+00:00",
+      "first_started": "2026-09-02T17:33:35+00:00",
+      "last_started": "2026-09-02T17:33:35+00:00",
+      "note": "T2 scheduled deep review (analyst/monitor/t2.py): one metered strong-model call assesses every ratified thesis (schema-validated to cover exactly the case's theses, retried then escalated on malformed); bench derived deterministically from A3's ThemeMap (held names filtered, ranked by purity); rotation steering computed off the RATIFIED dial (dial_tactical_pct is always the ratified one); any recommended dial change routes through resize_dial as a PROPOSAL + POLICY_PROPOSAL journal line, never applied. Assumption: T2 consumes A3's ThemeMap as an input rather than re-running map_theme, and the caller/daily loop owns scheduling (next_due helper) and the green-gate; a core tilt toward a non-held name is treated as malformed (membership change is A4's path).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_t2.py -q\n(exit 0)\n.................                                                        [100%]\n\n$ uv run ruff format --check analyst/monitor/t2.py tests/unit/test_t2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check analyst/monitor/t2.py tests/unit/test_t2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/monitor/t2.py tests/unit/test_t2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M6.6": {
+      "attempts": 1,
+      "commit": "a04e390",
+      "finished": "2026-09-02T18:11:51+00:00",
+      "first_started": "2026-09-02T17:51:44+00:00",
+      "last_started": "2026-09-02T17:51:44+00:00",
+      "note": "\u00a75.7 evidence pack generated from the decision journal (analyst/journal/evidence_pack.py + templates/pack.md.tmpl); returns/drawdown take NAV+TRI marks via PackValuation, all other sections journal-derived; rail-breach count framed as a bug (CLEAN/BUGS_PRESENT). Assumption: SELL entries carry value/gain in payload \u2014 A6 rotation SELLs do not yet (backlog).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_evidence_pack.py -q\n(exit 0)\n......                                                                   [100%]\n\n$ uv run ruff format --check analyst/journal/evidence_pack.py tests/integration/test_evidence_pack.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check analyst/journal/evidence_pack.py tests/integration/test_evidence_pack.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/journal/evidence_pack.py tests/integration/test_evidence_pack.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M6.7": {
+      "attempts": 1,
+      "commit": "004737e",
+      "finished": "2026-09-02T18:33:45+00:00",
+      "first_started": "2026-09-02T18:22:04+00:00",
+      "last_started": "2026-09-02T18:22:04+00:00",
+      "note": "Automated stub-mode fire drill: injected auditor-resignation disclosure runs the real interlock\u2192T0 sweep\u2192ESCALATE+queue\u2192bundle\u2192T1 StubLLM review, asserting T0\u2192T1 escalation, a schema-valid verdict, an in-policy IMMEDIATE exit journaled (with an off-policy inversion), non-zero per-decision token cost on the journal line, byte-identical repeatability across two case journals, and evidence-pack reflection. Assumed the 'news item' is an exchange disclosure fed to T0's announcement keyword check (the only T0\u2192T1 mechanism wired into T0Monitor); the news-matcher path (M6.2) is not yet wired into T0Monitor.run.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_fire_drill.py -q\n(exit 0)\n.....                                                                    [100%]\n\n$ uv run ruff format --check tests/integration/test_fire_drill.py\n(exit 0)\n1 file already formatted\n\n$ uv run ruff check tests/integration/test_fire_drill.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy tests/integration/test_fire_drill.py\n(exit 0)\nSuccess: no issues found in 1 source file"
+    },
     "M7.1": {
       "attempts": 1,
+      "commit": "f236706",
+      "finished": "2026-09-02T15:39:35+00:00",
       "first_started": "2026-09-02T15:22:39+00:00",
       "last_started": "2026-09-02T15:22:39+00:00",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "Screener per-company ingestion, monitoring-only. Crawler builds only the robots-permitted /company/<slug>/ shape and enforces the shared CrawlPolicy robots check (test proves every disallowed shape\u2014?page=/?q=/?sort=/?limit=//user/*//company/source/quarter/*\u2014is refused). Parser reads the robots-permitted HTML company page (C.1's recommended default, since the Excel export is login-gated=NEEDS_SECRET); a full-universe live pull remains a NEEDS_GO campaign. Restated data lands in a physically separate RESTATED/ root (never L0/L1/L2), partitioned by ISIN, every row tagged source=screener_restated with L0 lineage (sha256/source/date) stamped from the L0Ref. HTML fixture under tests/fixtures/screener/2026-08/.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_screener.py -q\n(exit 0)\n.............................                                            [100%]\n\n$ uv run ruff format --check dataplatform/ingest/screener.py dataplatform/store/restated.py tests/unit/test_screener.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check dataplatform/ingest/screener.py dataplatform/store/restated.py tests/unit/test_screener.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/screener.py dataplatform/store/restated.py tests/unit/test_screener.py\n(exit 0)\nSuccess: no issues found in 3 source files"
+    },
+    "M7.2": {
+      "attempts": 1,
+      "commit": "70e3223",
+      "finished": "2026-09-02T15:56:33+00:00",
+      "first_started": "2026-09-02T15:44:27+00:00",
+      "last_started": "2026-09-02T15:44:27+00:00",
+      "note": "Structural quarantine: backtest_catalog() vs monitoring_catalog(); only monitoring builds the RestatedReader and registers the restated DuckDB view, so a backtest has no path to restated data (raises QuarantineError). Monitoring reads carry per-datum store provenance for the journal. Assumed the analyst-side journal consumes provenance (dataplatform never imports analyst).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_quarantine.py -q\n(exit 0)\n...........                                                              [100%]\n\n$ uv run ruff format --check dataplatform/query/quarantine.py tests/integration/test_quarantine.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/query/quarantine.py tests/integration/test_quarantine.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/query/quarantine.py tests/integration/test_quarantine.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     },
     "M7.3": {
       "attempts": 1,
+      "commit": "5fad8ef",
+      "finished": "2026-09-02T15:43:01+00:00",
       "first_started": "2026-09-02T15:22:34+00:00",
       "last_started": "2026-09-02T15:22:34+00:00",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "XBRL results-filings parser (discovery index + in-bse-fin document parser) \u2192 new PIT fundamentals store partitioned by filing_date. Every fact tagged (period_end from doc, filing_date from index \u2014 independent); standalone/consolidated kept as distinct records via nature; segment revenues extracted from typed dimension members; restatements stored as new records (later filing_date/filing_id), never overwriting \u2014 read_pit returns all knowable versions, read_latest supersedes. Assumption: fixtures are representative in-bse-fin documents built offline (no network in tests); no full fetch runner yet \u2014 both noted in BACKLOG.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_xbrl.py -q\n(exit 0)\n.........................................                                [100%]\n\n$ uv run ruff format --check dataplatform/ingest/xbrl dataplatform/store/pit_fundamentals.py tests/unit/test_xbrl.py\n(exit 0)\n6 files already formatted\n\n$ uv run ruff check dataplatform/ingest/xbrl dataplatform/store/pit_fundamentals.py tests/unit/test_xbrl.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/xbrl dataplatform/store/pit_fundamentals.py tests/unit/test_xbrl.py\n(exit 0)\nSuccess: no issues found in 6 source files"
+    },
+    "M7.4": {
+      "attempts": 1,
+      "commit": "6291684",
+      "finished": "2026-09-02T17:45:49+00:00",
+      "first_started": "2026-09-02T17:33:36+00:00",
+      "last_started": "2026-09-02T17:33:36+00:00",
+      "note": "Mechanical \u00a75.3 BC1 segment-decline evaluator over the PIT store (read_latest, as-of + restatement-safe, consecutiveness-gated); store+date-labelled evidence items for T1/T2 (PIT and restated); break-condition path reads PIT only, restated unreachable. Assumes segment revenue is quarterly (annual periods excluded by length).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_fundamental_bc.py -q\n(exit 0)\n....................                                                     [100%]\n\n$ uv run ruff format --check analyst/monitor/fundamentals.py tests/unit/test_fundamental_bc.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check analyst/monitor/fundamentals.py tests/unit/test_fundamental_bc.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/monitor/fundamentals.py tests/unit/test_fundamental_bc.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M7.5": {
+      "attempts": 1,
+      "commit": "6291684",
+      "finished": "2026-09-02T17:55:52+00:00",
+      "first_started": "2026-09-02T17:51:44+00:00",
+      "last_started": "2026-09-02T17:51:44+00:00",
+      "note": "Gate M7 PASS 3/3: PIT fundamentals register rows VERIFIED (real fetch, sha256); (period_end,filing_date) non-null in L1 schema + proven in test_xbrl; structural unreachability proven in test_quarantine (no restated view/reader on backtest_catalog, SQL raises, control data on disk). Caveats: restated Screener export row BLOCKED_CREDENTIAL by design (B4/\u00a73.7, robots-permitted substitute verified); XBRL test fixtures taxonomy-accurate but hand-authored, real-fetch bytes in Source Register. ops/gates/M7.md written.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run python -m orchestrator gate M7\n(exit 0)\n\u001b[1mgate M7\u001b[0m: re-verifying 4 task(s)\n\n  \u001b[32m\u2713\u001b[0m M7.1     Screener ingestion (restated store, monitoring-only)\n  \u001b[32m\u2713\u001b[0m M7.2     Restated-data quarantine enforcement\n  \u001b[32m\u2713\u001b[0m M7.3     XBRL filings parser \u2192 PIT fundamentals store\n  \u001b[32m\u2713\u001b[0m M7.4     Fundamentals into T1/T2 evidence + break conditions\n\n\u001b[32mgate M7: all verifications pass\u001b[0m"
+    },
+    "M8.1": {
+      "attempts": 1,
+      "commit": "7ffaff7",
+      "finished": "2026-09-02T17:18:19+00:00",
+      "first_started": "2026-09-02T17:01:55+00:00",
+      "last_started": "2026-09-02T17:01:55+00:00",
+      "note": "KiteBroker: Broker-protocol adapter over Kite Connect REST, tested against recorded fixtures via an injected transport. Dry-run by default (constructs+logs the exact request, sends nothing); real place/modify/cancel refuse without live_confirm=True (HARD RULE \u00a73.5). ISIN-only above the seam via an InstrumentResolver; money parsed Decimal. Shared Broker-contract suite runs over both SimBroker and KiteBroker. Assumption: /ledger endpoint is a placeholder pending the real Console reports URL at M8.3 (backlogged).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_kite_broker.py -q\n(exit 0)\n.....................................                                    [100%]\n\n$ uv run ruff format --check execution/kite_broker.py tests/unit/test_kite_broker.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check execution/kite_broker.py tests/unit/test_kite_broker.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy execution/kite_broker.py tests/unit/test_kite_broker.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     },
     "M8.2": {
       "attempts": 0,
@@ -691,7 +939,7 @@
       "verify_output": "$ test -s ops/compliance/sebi-algo-memo.md\n(exit 0)\n\n\n$ make check\n(exit 0)\nuv run ruff format --check .\n39 files already formatted\nuv run ruff check .\nAll checks passed!\nuv run mypy\nSuccess: no issues found in 29 source files\nuv run pytest\n.............................                                            [100%]\n29 passed in 0.17s"
     }
   },
-  "updated_at": "2026-09-02T15:34:05+00:00",
+  "updated_at": "2026-09-02T18:33:45+00:00",
   "version": 1,
   "wave": 1
 }
