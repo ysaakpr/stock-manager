@@ -155,6 +155,20 @@ hosts:
     disallow: []
     min_spacing_seconds: 2.5
 
+  - host: www.rbi.org.in
+    robots_url: https://www.rbi.org.in/robots.txt
+    checked_at: 2026-09-02T13:20:00+05:30
+    robots_http_status: 418
+    robots_served: false
+    permits: >-
+      No robots.txt policy is served — /robots.txt answers HTTP 418 with an anti-bot HTML page,
+      which is not a policy document (M6.1, 2026-09-02). The published RSS feed
+      (/pressreleases_rss.xml) is a syndication surface intended for readers and returns 200 to a
+      browser UA; we fetch that one path at EOD cadence, spaced, and do not crawl the site. If the
+      feed itself begins refusing us, the 403 hard stop applies — no evasion (AGENTIC_CONTEXT §8).
+    disallow: []
+    min_spacing_seconds: 3.0
+
 # ── one entry per §4.1 dataset surface ───────────────────────────────────────────────────────
 sources:
   # §4.1 row 1 — NSE equity OHLCV, pre-UDiFF era
@@ -365,7 +379,29 @@ sources:
       JSON array, 20 records; keys include isin, symbol, series, exDate, recDate,
       caBroadcastDate, bcStartDate, bcEndDate, ndStartDate, ndEndDate, subject, faceVal.
       ISIN is native, so this joins without the identity master.
-    fixture: {frozen: false, task: M2.2, path: "tests/fixtures/corp_actions/"}
+    fixture:
+      frozen: true
+      task: M2.2
+      path: "tests/fixtures/corp_actions/nse/2026-08-08/corporateActions.json"
+    history:
+      measured_at: 2026-08-08T18:10:45+05:30
+      measured_by: M2.2
+      method: >-
+        Structural depth from the C.1 verification fetch (2026-08-08) plus the documented API
+        contract: the endpoint takes from_date/to_date and serves a dated archive, not a rolling
+        latest, so history is addressable by date range rather than one session deep. Backfill is
+        the windowed from_date/to_date runner. The precise earliest addressable date is NOT yet
+        confirmed by a live probe — that probe is part of the B1 verify-and-sample step
+        (AGENTIC_CONTEXT §2 B1 / §3.3), which is gated and was not run here.
+      sessions_available: null
+      earliest_available: null
+      latest_available: null
+      accrues_forward: false
+      note: >-
+        Depth is limited by two things, both to be pinned down by the B1 sample fetch before the
+        10-year backfill: NSE caps the from_date..to_date span per request (a multi-year backfill
+        must window it), and the archive's true earliest date is unconfirmed. Until then the M2
+        golden suite may only assert over the range a frozen fixture covers, not "10 years back".
     failure_note: null
     candidate_alternatives: []
     owner_task: M2.2
@@ -401,7 +437,31 @@ sources:
       JSON array, 197 records; keys scrip_code, short_name, long_name, Ex_date, exdate,
       Purpose, RD_Date, BCRD_FROM, BCRD_TO, ND_START_DATE, ND_END_DATE, payment_date.
       Note two different ex-date spellings in the same record — both must be read.
-    fixture: {frozen: false, task: M2.2, path: "tests/fixtures/corp_actions/"}
+    fixture:
+      frozen: true
+      task: M2.2
+      path: "tests/fixtures/corp_actions/bse/2026-08-08/defaultdata.json"
+    history:
+      measured_at: 2026-08-08T18:11:07+05:30
+      measured_by: M2.2
+      method: >-
+        Structural depth from the C.1 verification fetch (2026-08-08) plus the documented API
+        contract: DefaultData/w takes a scripcode and no date parameter, and the verification
+        response carried this scrip's full published corporate-action history in one call (197
+        records), so one request yields the whole per-scrip archive rather than one session. The
+        earliest year BSE retains per scrip is NOT yet confirmed across scrips — that survey is
+        part of the B1 verify-and-sample step (AGENTIC_CONTEXT §2 B1 / §3.3), gated and not run
+        here.
+      sessions_available: null
+      earliest_available: null
+      latest_available: null
+      accrues_forward: false
+      note: >-
+        No date parameter means backfill is per-scrip, not per-session: the runner iterates scrip
+        codes and takes each one's full history in a single response. BSE keys on scrip_code, so
+        every row is resolved scrip→ISIN through the D2 identity master (invariant #2); a scrip the
+        master does not know lands in the unresolved list rather than under a guessed ISIN. Depth
+        beyond "the scrips we have listings for" awaits the B1 scrip-master survey.
     failure_note: null
     candidate_alternatives: []
     owner_task: M2.2
@@ -695,7 +755,7 @@ sources:
     parse_check: >-
       CSV, 8 columns, header "Date,Symbol,Security Name,Client Name,Buy/Sell,Quantity Traded,
       Trade Price / Wght. Avg. Price,Remarks". No ISIN — resolve via D2.
-    fixture: {frozen: false, task: M3.5, path: "tests/fixtures/nse_deals/"}
+    fixture: {frozen: true, task: M3.5, path: "tests/fixtures/nse_deals/"}
     failure_note: null
     candidate_alternatives: []
     owner_task: M3.5
@@ -728,7 +788,7 @@ sources:
       Quantity Traded,Trade Price / Wght. Avg. Price". 250 B is a genuinely quiet day, not a
       truncated response — one deal row. The quality layer must not treat a small block.csv as
       a failure.
-    fixture: {frozen: false, task: M3.5, path: "tests/fixtures/nse_deals/"}
+    fixture: {frozen: true, task: M3.5, path: "tests/fixtures/nse_deals/"}
     failure_note: null
     candidate_alternatives: []
     owner_task: M3.5
@@ -908,7 +968,12 @@ sources:
       HTTPS is not usable: the host is a CNAME to c.storage.googleapis.com and presents a
       certificate for that name, so https:// fails validation. Plain HTTP is the published
       access path for this feed; the payload's own MD5 is the integrity control.
-    fixture: {frozen: false, task: M6.1, path: "tests/fixtures/gdelt/"}
+      M6.1 (2026-09-02) followed the manifest to the export file and froze both: the manifest
+      (tests/fixtures/gdelt/v2/lastupdate.txt) and the 20260902074500 export
+      (tests/fixtures/gdelt/v2/20260902074500.export.CSV.zip, 75093 B, 61-column TSV, 1210 events,
+      manifest MD5 99034aac15390b75b102dd54d797bea6 cross-checked against the stored bytes).
+      Parser: dataplatform.ingest.gdelt (export file → NewsRow with DATEADDED/AvgTone/actors/URL).
+    fixture: {frozen: true, task: M6.1, path: "tests/fixtures/gdelt/"}
     failure_note: null
     candidate_alternatives: []
     owner_task: M6.1
@@ -949,6 +1014,47 @@ sources:
       - "GDELT Web News NGrams dataset, which the 429 body itself recommends for volume users."
       - "Re-probe the DOC API from the production host at >=5 s spacing before M6.1 depends on
          it; a single 429 pair is not proof the endpoint is permanently unavailable."
+    owner_task: M6.1
+
+  - id: curated_rss
+    plan_row: "News / geopolitical"
+    description: >-
+      Curated RSS headlines (the register's named fallback for the news row: "curated RSS — PIB,
+      business press headlines"). Headlines and links only per the §4.1 license note. The active
+      feed is RBI press releases; the full curated set (PIB, business press) lives in
+      dataplatform/ingest/data/rss_feeds.yaml, each feed with its own host and activation note.
+    host: www.rbi.org.in
+    method: GET
+    url_template: "https://www.rbi.org.in/pressreleases_rss.xml"
+    verified_url: "https://www.rbi.org.in/pressreleases_rss.xml"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback: ["gdelt_v2_event_files"]
+    required_headers:
+      User-Agent: browser
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.rss, task: M6.1}
+    robots_notes: >-
+      www.rbi.org.in serves no robots.txt policy (HTTP 418 anti-bot page). The RSS feed is a
+      syndication surface; we fetch only /pressreleases_rss.xml at EOD cadence, spaced 3s, no crawl.
+    pit_notes: >-
+      Natural PIT — each <item> carries <pubDate> (RFC 822). RBI omits the zone, so it is read as
+      Asia/Kolkata (the exchange zone). Only title, link and pubDate are stored; the <description>
+      (which holds the full release) is never read into L1 — headlines and links only.
+    status: VERIFIED
+    verified_at: 2026-09-02T13:22:00+05:30
+    last_http_status: 200
+    sample_bytes: 120049
+    content_type: text/xml
+    sample_sha256: 4c183fb7471d4ab99a3231530f6f00b39c3417cdbd0f1c4c789b72682cc2f118
+    parse_check: >-
+      RSS 2.0, 10 <item>s, each with <title> (CDATA), <link> and <pubDate>
+      (e.g. "Wed, 02 Sep 2026 11:30:00", zone-less → Asia/Kolkata). <description> carries the full
+      press release and is deliberately not read. Frozen at
+      tests/fixtures/rss/rbi/2026-09-02/pressreleases_rss.xml.
+    fixture: {frozen: true, task: M6.1, path: "tests/fixtures/rss/"}
+    failure_note: null
+    candidate_alternatives: []
     owner_task: M6.1
 
   # §4.1 row 15 — fundamentals (restated)
