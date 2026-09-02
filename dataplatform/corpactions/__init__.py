@@ -2,10 +2,24 @@
 
 Public surface so far: the normalized action taxonomy, its structured terms models, the free-text
 purpose-string normalizer and the manual-entry queue an unparseable string lands in (M2.1); the
-cross-exchange reconciliation engine and its `/status/quality` queue (M2.3). The factor chain and
-the retroactive recompute path arrive with M2.4.
+cross-exchange reconciliation engine and its `/status/quality` queue (M2.3); the adjustment factor
+chain, the price-adjusted / return / total-return series derived from it, and the retroactive
+recompute-and-invalidate seam (M2.4).
 """
 
+from dataplatform.corpactions.factors import (
+    AdjustedPoint,
+    FactorChain,
+    FactorError,
+    FactorRow,
+    PricePoint,
+    ReturnPoint,
+    build_chain_for_isin,
+    build_factor_chain,
+    price_adjusted_series,
+    return_series,
+    total_return_series,
+)
 from dataplatform.corpactions.parse_terms import (
     CorporateActionNormalizer,
     ManualEntryQueue,
@@ -14,6 +28,12 @@ from dataplatform.corpactions.parse_terms import (
     ParseOutcome,
     classify,
     parse_purpose,
+)
+from dataplatform.corpactions.recompute import (
+    RecomputeResult,
+    recompute_for_actions,
+    recompute_isin,
+    recompute_isins,
 )
 
 # Imported after taxonomy/parse_terms so those submodules are fully loaded first: reconcile pulls
@@ -57,11 +77,15 @@ __all__ = [
     "TERMS_ADAPTER",
     "TERMS_BY_ACTION",
     "ActionType",
+    "AdjustedPoint",
     "CorporateActionNormalizer",
     "DividendKind",
     "DividendTerms",
     "ExchangeRatioTerms",
     "FaceValueTerms",
+    "FactorChain",
+    "FactorError",
+    "FactorRow",
     "ManualEntryQueue",
     "ManualQueueEntry",
     "ManualQueueReason",
@@ -69,22 +93,33 @@ __all__ = [
     "ParseOutcome",
     "ParsedAction",
     "PersistCounts",
+    "PricePoint",
     "PriceTerms",
     "QualityFlagRecord",
     "RatioTerms",
+    "RecomputeResult",
     "ReconcileError",
     "ReconciledAction",
     "ReconciliationConflict",
     "ReconciliationReason",
     "ReconciliationResult",
+    "ReturnPoint",
     "RightsTerms",
     "Terms",
     "UnquantifiedTerms",
+    "build_chain_for_isin",
+    "build_factor_chain",
     "classify",
     "describe",
     "eligible_for_factor_chain",
     "load_reconciled_actions",
     "parse_purpose",
     "persist_reconciliation",
+    "price_adjusted_series",
+    "recompute_for_actions",
+    "recompute_isin",
+    "recompute_isins",
     "reconcile",
+    "return_series",
+    "total_return_series",
 ]
