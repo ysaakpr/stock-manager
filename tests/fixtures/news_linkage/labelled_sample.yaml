@@ -1,0 +1,285 @@
+# Labelled sample for the M6.2 news→holding linkage precision/recall measurement.
+#
+# 60 hand-labelled news items over a fixed held universe of six securities (defined in
+# tests/unit/test_linkage.py). Each item carries the ISINs it is genuinely *about* in `gold`; an
+# empty `gold` is a distractor that must NOT link (it exists to measure precision). The universe:
+#
+#   INE009A01021  Infosys Limited                     NSE:INFY   BSE:INFY
+#   INE066A01021  Eicher Motors Limited               NSE:EICHERMOT  BSE:EICHER   (Royal Enfield)
+#   INE214T01019  LTIMindtree Limited                 NSE:LTIM   BSE:540005  (ex L&T Infotech, Mindtree)
+#   INE002A01018  Reliance Industries Limited         NSE:RELIANCE  BSE:500325  (RIL)
+#   INE467B01029  Tata Consultancy Services Limited   NSE:TCS    BSE:532540
+#   INE423A01024  Adani Enterprises Limited           NSE:ADANIENT  BSE:512599
+#
+# The distractors are chosen to probe each precision guard: an ordinary word that is a company's
+# first name ("Reliance on imported coal"), a shared industry word ("Motors and pumps"), a sibling
+# entity that is not the holding ("Adani Ports", "Reliance General Insurance", "Larsen & Toubro"
+# the parent vs "Larsen & Toubro Infotech" the former name), and a near-miss token
+# ("Infosystems Global", "Mind the gap ... tree"). The misses (gold set, but no surface form present)
+# are headlines that name a company only by description or by an un-curated short form — the deliberate
+# recall cost of a precision-first matcher.
+
+items:
+  # ── Infosys ────────────────────────────────────────────────────────────────────────────────────
+  - id: n01
+    source: rss_bs
+    title: "Infosys Q2 net profit rises 11%, raises FY guidance"
+    gold: [INE009A01021]
+  - id: n02
+    source: rss_bs
+    title: "Infy shares jump 4% after a brokerage upgrade"
+    gold: [INE009A01021]
+  - id: n03
+    source: rss_bs
+    title: "Infosys Technologies veteran returns as strategic advisor"
+    gold: [INE009A01021]
+  - id: n04
+    source: gdelt
+    title: null
+    entities: ["INFOSYS LIMITED", "SALIL PAREKH"]
+    gold: [INE009A01021]
+  - id: n05
+    source: rss_bs
+    title: "Auditor resigns at Infosys citing governance concerns"
+    gold: [INE009A01021]
+  - id: n06
+    source: rss_bs
+    title: "SFIO opens a probe into an Infosys whistleblower complaint"
+    gold: [INE009A01021]
+  - id: n07
+    source: rss_bs
+    title: "Infosys board approves a 12,000 crore share buyback"
+    gold: [INE009A01021]
+  - id: n40
+    source: rss_bs
+    title: "Infosys announces a special interim dividend"
+    gold: [INE009A01021]
+
+  # ── Eicher Motors / Royal Enfield ────────────────────────────────────────────────────────────
+  - id: n08
+    source: rss_bs
+    title: "Eicher Motors reports record Royal Enfield monthly sales"
+    gold: [INE066A01021]
+  - id: n09
+    source: rss_bs
+    title: "Royal Enfield unveils a new 650cc roadster"
+    gold: [INE066A01021]
+  - id: n10
+    source: rss_bs
+    title: "EICHERMOT hits a fresh 52-week high"
+    gold: [INE066A01021]
+  - id: n11
+    source: gdelt
+    title: null
+    entities: ["EICHER MOTORS", "SIDDHARTHA LAL"]
+    gold: [INE066A01021]
+  - id: n12
+    source: rss_bs
+    title: "On the BSE, EICHER climbs 3% intraday"
+    gold: [INE066A01021]
+  - id: n13
+    source: rss_bs
+    title: "Promoter pledge raised at Eicher Motors, an exchange filing shows"
+    gold: [INE066A01021]
+  - id: n36
+    source: rss_bs
+    title: "Royal Enfield recalls 3,000 units for a brake inspection"
+    gold: [INE066A01021]
+
+  # ── LTIMindtree (renamed / merged) ─────────────────────────────────────────────────────────────
+  - id: n14
+    source: rss_bs
+    title: "LTIMindtree beats estimates on strong deal bookings"
+    gold: [INE214T01019]
+  - id: n15
+    source: rss_bs
+    title: "Larsen & Toubro Infotech legacy contracts fold into LTIMindtree"
+    gold: [INE214T01019]
+  - id: n16
+    source: rss_bs
+    title: "Mindtree co-founder's non-compete period ends"
+    gold: [INE214T01019]
+  - id: n17
+    source: rss_bs
+    title: "LTIM surges after a record order-book update"
+    gold: [INE214T01019]
+  - id: n18
+    source: rss_bs
+    title: "LTI completes its rebranding to LTIMindtree"
+    gold: [INE214T01019]
+  - id: n19
+    source: gdelt
+    title: null
+    entities: ["LTIMINDTREE LIMITED"]
+    gold: [INE214T01019]
+  - id: n37
+    source: rss_bs
+    title: "Mindtree alumni network crosses 50,000 members"
+    gold: [INE214T01019]
+
+  # ── Reliance Industries ─────────────────────────────────────────────────────────────────────────
+  - id: n20
+    source: rss_bs
+    title: "Reliance Industries to demerge its financial services arm"
+    gold: [INE002A01018]
+  - id: n21
+    source: rss_bs
+    title: "RIL Q1 profit tops street estimates"
+    gold: [INE002A01018]
+  - id: n22
+    source: gdelt
+    title: null
+    entities: ["RELIANCE INDUSTRIES", "MUKESH AMBANI"]
+    gold: [INE002A01018]
+  - id: n23
+    source: rss_bs
+    title: "Reliance Industries commissions a new petrochemical unit"
+    gold: [INE002A01018]
+  - id: n35
+    source: rss_bs
+    title: "Reliance Industries auditor flags a going-concern note"
+    gold: [INE002A01018]
+
+  # ── Tata Consultancy Services ──────────────────────────────────────────────────────────────────
+  - id: n24
+    source: rss_bs
+    title: "TCS bags a multi-year deal with a UK retailer"
+    gold: [INE467B01029]
+  - id: n25
+    source: rss_bs
+    title: "Tata Consultancy Services raises its interim dividend"
+    gold: [INE467B01029]
+  - id: n26
+    source: gdelt
+    title: null
+    entities: ["TATA CONSULTANCY SERVICES"]
+    gold: [INE467B01029]
+  - id: n27
+    source: rss_bs
+    title: "TCS opens a new delivery centre in Pune"
+    gold: [INE467B01029]
+  - id: n38
+    source: rss_bs
+    title: "TCS wins a large order from a Nordic bank"
+    gold: [INE467B01029]
+
+  # ── Adani Enterprises ──────────────────────────────────────────────────────────────────────────
+  - id: n28
+    source: rss_bs
+    title: "Adani Enterprises to raise $2.5 billion via a QIP"
+    gold: [INE423A01024]
+  - id: n29
+    source: rss_bs
+    title: "ADANIENT added to the Nifty Next 50 index"
+    gold: [INE423A01024]
+  - id: n30
+    source: rss_bs
+    title: "Fraud allegations resurface against Adani Enterprises"
+    gold: [INE423A01024]
+  - id: n31
+    source: gdelt
+    title: null
+    entities: ["ADANI ENTERPRISES LIMITED"]
+    gold: [INE423A01024]
+  - id: n39
+    source: rss_bs
+    title: "Adani Enterprises' airports unit reports double-digit growth"
+    gold: [INE423A01024]
+
+  # ── Multi-holding items (one headline, two holdings) ───────────────────────────────────────────
+  - id: n32
+    source: rss_bs
+    title: "TCS and Infosys lead a broad IT rally"
+    gold: [INE467B01029, INE009A01021]
+  - id: n33
+    source: rss_bs
+    title: "Eicher Motors and Adani Enterprises among the top gainers"
+    gold: [INE066A01021, INE423A01024]
+  - id: n34
+    source: rss_bs
+    title: "Infy and LTIM outperform in midcap IT"
+    gold: [INE009A01021, INE214T01019]
+
+  # ── Misses: real references the precision-first matcher does not resolve (recall cost) ──────────
+  - id: m01
+    source: rss_bs
+    title: "Bengaluru-headquartered IT bellwether tops estimates"
+    gold: [INE009A01021]
+  - id: m02
+    source: rss_bs
+    title: "Maker of the Classic 350 sees strong export demand"
+    gold: [INE066A01021]
+  - id: m03
+    source: rss_bs
+    title: "Ambani's flagship posts record refining margins"
+    gold: [INE002A01018]
+  - id: m04
+    source: rss_bs
+    title: "India's largest software exporter lifts its annual pay"
+    gold: [INE467B01029]
+
+  # ── Distractors: must not link (precision) ─────────────────────────────────────────────────────
+  - id: d01
+    source: rss_bs
+    title: "Reliance on imported coal falls to a decade low"
+    gold: []
+  - id: d02
+    source: rss_pib
+    title: "Government pledges to double farmer income by 2030"
+    gold: []
+  - id: d03
+    source: rss_bs
+    title: "Motors and pumps segment sees a demand revival"
+    gold: []
+  - id: d04
+    source: rss_bs
+    title: "Services exports from India hit a record high"
+    gold: []
+  - id: d05
+    source: rss_bs
+    title: "Enterprises across the country trim their capex plans"
+    gold: []
+  - id: d06
+    source: rss_bs
+    title: "India Inc sees auditor resignations rise this quarter"
+    gold: []
+  - id: d07
+    source: rss_bs
+    title: "A new enterprise-software startup raises seed funding"
+    gold: []
+  - id: d08
+    source: rss_bs
+    title: "Larsen & Toubro wins a large infrastructure order"
+    gold: []
+  - id: d09
+    source: rss_bs
+    title: "Tata group reshuffles its senior leadership"
+    gold: []
+  - id: d10
+    source: rss_bs
+    title: "Adani Ports posts higher quarterly cargo volumes"
+    gold: []
+  - id: d11
+    source: rss_bs
+    title: "Global fraud losses climb, an industry survey finds"
+    gold: []
+  - id: d12
+    source: rss_bs
+    title: "Infosystems Global unveils a refreshed logo"
+    gold: []
+  - id: d13
+    source: rss_bs
+    title: "Reliance General Insurance launches a new policy"
+    gold: []
+  - id: d14
+    source: rss_bs
+    title: "Mind the gap: tree cover shrinks across metros"
+    gold: []
+  - id: d15
+    source: rss_bs
+    title: "Century Textiles gains on a realty push"
+    gold: []
+  - id: d16
+    source: rss_bs
+    title: "Enterprise India summit opens in New Delhi"
+    gold: []

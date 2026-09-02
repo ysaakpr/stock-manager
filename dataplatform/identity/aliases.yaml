@@ -1,0 +1,65 @@
+# Curated alias table for news → ISIN linkage (M6.2, A5).
+#
+# The identity master (D2) knows a security's *current* legal name and its exchange symbols. News
+# and press headlines do not: they use brand names ("Royal Enfield"), the name a company had before
+# it was renamed or merged ("Larsen & Toubro Infotech"), or a short form the market uses ("Infy",
+# "RIL", "TCS") that is nothing the master would ever hold. Those are the hard cases this file
+# exists for — and only those. A form the master already gives (the legal name, an exchange ticker
+# of length >= 4) does NOT belong here; adding it is duplication, not curation.
+#
+# Precision is the whole point (§5.4: a noisy matcher makes T1 expensive). Every entry here is a
+# hand-vetted, high-confidence equivalence a human is willing to escalate a holding on. That is why
+# short forms the derived rules would (rightly) refuse as too collision-prone — "TCS", "RIL" — are
+# allowed here: a curator has judged them distinctive enough. Do not add a form that is an ordinary
+# English word ("reliance"), a country ("india"), or an industry ("motors"): it will link half the
+# feed to one holding.
+#
+# Fields per entry:
+#   isin           the identity this resolves to (the only join key — invariant #2).
+#   canonical      the current legal name, for the reader; matching also uses it via the master.
+#   former_names   names the company traded/was known under before a rename or merger. Covers the
+#                  "renamed company" acceptance: a headline using the old name still links.
+#   also_known_as  brands and market short forms not derivable from the legal name.
+#   note           why this entry is needed — the audit trail for a curated equivalence.
+#
+# Dual-listing (one ISIN, NSE + BSE) needs no entry here: the master already carries both exchange
+# symbol windows, and the resolver draws surface forms from every exchange. An entry appears here
+# only when a *name* differs from what the master states, never merely because a name is listed twice.
+
+version: 1
+
+aliases:
+  - isin: INE009A01021
+    canonical: Infosys Limited
+    former_names:
+      - Infosys Technologies
+    also_known_as:
+      - Infy
+    note: "Renamed from Infosys Technologies Ltd to Infosys Ltd (2011); 'Infy' is the market short form."
+
+  - isin: INE066A01021
+    canonical: Eicher Motors Limited
+    also_known_as:
+      - Royal Enfield
+    note: "Royal Enfield is Eicher's motorcycle brand; headlines name the brand, not the listed parent."
+
+  - isin: INE214T01019
+    canonical: LTIMindtree Limited
+    former_names:
+      - Larsen & Toubro Infotech
+      - Mindtree
+    also_known_as:
+      - LTI
+    note: "L&T Infotech and Mindtree merged into LTIMindtree (2022); both predecessor names still appear."
+
+  - isin: INE002A01018
+    canonical: Reliance Industries Limited
+    also_known_as:
+      - RIL
+    note: "'Reliance' alone is an ordinary word and is deliberately NOT an alias; 'RIL' is the safe short form."
+
+  - isin: INE467B01029
+    canonical: Tata Consultancy Services Limited
+    also_known_as:
+      - TCS
+    note: "'TCS' (length 3) is below the derived-ticker floor but is a hand-vetted, distinctive short form."
