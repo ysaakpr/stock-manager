@@ -1,0 +1,62 @@
+[
+  {
+    "symbol": "TCS",
+    "companyName": "Tata Consultancy Services Limited",
+    "isin": "INE467B01029",
+    "fromDate": "01-Apr-2026",
+    "toDate": "30-Jun-2026",
+    "relatingTo": "Quarterly",
+    "period": "Quarterly",
+    "consolidated": "Standalone",
+    "audited": "Unaudited",
+    "broadCastDate": "10-Jul-2026 18:02:11",
+    "exchdisstime": "10-Jul-2026 18:02:11",
+    "seqNumber": "TCS-Q1FY27-SA-4411271",
+    "xbrl": "https://nsearchives.nseindia.com/corporate/xbrl/INDAS_TCS_STANDALONE_10072026.xml"
+  },
+  {
+    "symbol": "TCS",
+    "companyName": "Tata Consultancy Services Limited",
+    "isin": "INE467B01029",
+    "fromDate": "01-Apr-2026",
+    "toDate": "30-Jun-2026",
+    "relatingTo": "Quarterly",
+    "period": "Quarterly",
+    "consolidated": "Consolidated",
+    "audited": "Unaudited",
+    "broadCastDate": "10-Jul-2026 18:02:14",
+    "exchdisstime": "10-Jul-2026 18:02:14",
+    "seqNumber": "TCS-Q1FY27-CO-4411272",
+    "xbrl": "https://nsearchives.nseindia.com/corporate/xbrl/INDAS_TCS_CONSOLIDATED_10072026.xml"
+  },
+  {
+    "symbol": "KAYNES",
+    "companyName": "Kaynes Technology India Limited",
+    "isin": "INE918Z01012",
+    "fromDate": "01-Jan-2026",
+    "toDate": "31-Mar-2026",
+    "relatingTo": "Quarterly",
+    "period": "Quarterly",
+    "consolidated": "Standalone",
+    "audited": "Audited",
+    "broadCastDate": "15-May-2026 19:41:03",
+    "exchdisstime": "15-May-2026 19:41:03",
+    "seqNumber": "KAYNES-Q4FY26-SA-3980551",
+    "xbrl": "https://nsearchives.nseindia.com/corporate/xbrl/INDAS_KAYNES_STANDALONE_15052026.xml"
+  },
+  {
+    "symbol": "KAYNES",
+    "companyName": "Kaynes Technology India Limited",
+    "isin": "INE918Z01012",
+    "fromDate": "01-Jan-2026",
+    "toDate": "31-Mar-2026",
+    "relatingTo": "Quarterly",
+    "period": "Quarterly",
+    "consolidated": "Standalone",
+    "audited": "Audited",
+    "broadCastDate": "20-Aug-2026 16:12:55",
+    "exchdisstime": "20-Aug-2026 16:12:55",
+    "seqNumber": "KAYNES-Q4FY26-SA-4290887",
+    "xbrl": "https://nsearchives.nseindia.com/corporate/xbrl/INDAS_KAYNES_STANDALONE_20082026.xml"
+  }
+]

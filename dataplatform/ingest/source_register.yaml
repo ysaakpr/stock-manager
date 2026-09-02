@@ -1141,7 +1141,7 @@ sources:
       exchdisstime, fromDate, toDate, period, relatingTo, audited, consolidated, indAs, format,
       seqNumber and `xbrl` — an absolute URL to the filing's XBRL document, which is how the
       next entry is reached.
-    fixture: {frozen: false, task: M7.3, path: "tests/fixtures/xbrl/"}
+    fixture: {frozen: true, task: M7.3, path: "tests/fixtures/xbrl/"}
     failure_note: null
     candidate_alternatives: []
     owner_task: M7.3
@@ -1175,7 +1175,7 @@ sources:
     parse_check: >-
       well-formed XBRL XML; root xbrli:xbrl with the in-bse-fin 2020-03-31 taxonomy namespaces
       (NSE serves filings against the BSE-published taxonomy — expected, not an error).
-    fixture: {frozen: false, task: M7.3, path: "tests/fixtures/xbrl/"}
+    fixture: {frozen: true, task: M7.3, path: "tests/fixtures/xbrl/"}
     failure_note: null
     candidate_alternatives: []
     owner_task: M7.3

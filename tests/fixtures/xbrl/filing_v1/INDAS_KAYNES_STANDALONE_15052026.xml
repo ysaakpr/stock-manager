@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Frozen fixture (M7.3). Representative NSE results filing in the in-bse-fin 2020-03-31 taxonomy
+  shape. Values are illustrative, not a real filing.
+  Kaynes Q4 FY26 STANDALONE, period 2026-01-01..2026-03-31, as originally filed 15-May-2026.
+  Carries a robotics segment (§5.3's example). A later filing restates this same period; both must
+  be kept — see INDAS_KAYNES_STANDALONE_20082026.xml.
+-->
+<xbrli:xbrl
+    xmlns:xbrli="http://www.xbrl.org/2003/instance"
+    xmlns:xbrldi="http://xbrl.org/2006/xbrldi"
+    xmlns:iso4217="http://www.xbrl.org/2003/iso4217"
+    xmlns:in-bse-fin="http://www.bseindia.com/xbrl/fin/2020-03-31/in-bse-fin">
+
+  <xbrli:context id="CQ">
+    <xbrli:entity>
+      <xbrli:identifier scheme="http://www.nseindia.com/">INE918Z01012</xbrli:identifier>
+    </xbrli:entity>
+    <xbrli:period>
+      <xbrli:startDate>2026-01-01</xbrli:startDate>
+      <xbrli:endDate>2026-03-31</xbrli:endDate>
+    </xbrli:period>
+  </xbrli:context>
+
+  <xbrli:context id="CQ_Seg_Robotics">
+    <xbrli:entity>
+      <xbrli:identifier scheme="http://www.nseindia.com/">INE918Z01012</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:typedMember dimension="in-bse-fin:BusinessSegmentAxis">
+          <in-bse-fin:SegmentName>Automation and Robotics</in-bse-fin:SegmentName>
+        </xbrldi:typedMember>
+      </xbrli:segment>
+    </xbrli:entity>
+    <xbrli:period>
+      <xbrli:startDate>2026-01-01</xbrli:startDate>
+      <xbrli:endDate>2026-03-31</xbrli:endDate>
+    </xbrli:period>
+  </xbrli:context>
+
+  <xbrli:context id="CQ_Seg_EMS">
+    <xbrli:entity>
+      <xbrli:identifier scheme="http://www.nseindia.com/">INE918Z01012</xbrli:identifier>
+      <xbrli:segment>
+        <xbrldi:typedMember dimension="in-bse-fin:BusinessSegmentAxis">
+          <in-bse-fin:SegmentName>EMS</in-bse-fin:SegmentName>
+        </xbrldi:typedMember>
+      </xbrli:segment>
+    </xbrli:entity>
+    <xbrli:period>
+      <xbrli:startDate>2026-01-01</xbrli:startDate>
+      <xbrli:endDate>2026-03-31</xbrli:endDate>
+    </xbrli:period>
+  </xbrli:context>
+
+  <xbrli:unit id="INR">
+    <xbrli:measure>iso4217:INR</xbrli:measure>
+  </xbrli:unit>
+  <xbrli:unit id="INRPerShare">
+    <xbrli:divide>
+      <xbrli:unitNumerator><xbrli:measure>iso4217:INR</xbrli:measure></xbrli:unitNumerator>
+      <xbrli:unitDenominator><xbrli:measure>xbrli:shares</xbrli:measure></xbrli:unitDenominator>
+    </xbrli:divide>
+  </xbrli:unit>
+
+  <in-bse-fin:NameOfTheCompany contextRef="CQ">Kaynes Technology India Limited</in-bse-fin:NameOfTheCompany>
+  <in-bse-fin:NatureOfReportStandaloneConsolidated contextRef="CQ">Standalone</in-bse-fin:NatureOfReportStandaloneConsolidated>
+  <in-bse-fin:WhetherResultsAreAuditedOrUnaudited contextRef="CQ">Audited</in-bse-fin:WhetherResultsAreAuditedOrUnaudited>
+  <in-bse-fin:DateOfStartOfReportingPeriod contextRef="CQ">2026-01-01</in-bse-fin:DateOfStartOfReportingPeriod>
+  <in-bse-fin:DateOfEndOfReportingPeriod contextRef="CQ">2026-03-31</in-bse-fin:DateOfEndOfReportingPeriod>
+
+  <in-bse-fin:RevenueFromOperations contextRef="CQ" unitRef="INR" decimals="-5">8000000000</in-bse-fin:RevenueFromOperations>
+  <in-bse-fin:OtherIncome contextRef="CQ" unitRef="INR" decimals="-5">200000000</in-bse-fin:OtherIncome>
+  <in-bse-fin:TotalIncome contextRef="CQ" unitRef="INR" decimals="-5">8200000000</in-bse-fin:TotalIncome>
+  <in-bse-fin:TotalExpenses contextRef="CQ" unitRef="INR" decimals="-5">7050000000</in-bse-fin:TotalExpenses>
+  <in-bse-fin:ProfitBeforeTax contextRef="CQ" unitRef="INR" decimals="-5">1150000000</in-bse-fin:ProfitBeforeTax>
+  <in-bse-fin:ProfitLossForPeriod contextRef="CQ" unitRef="INR" decimals="-5">900000000</in-bse-fin:ProfitLossForPeriod>
+  <in-bse-fin:BasicEarningsPerShare contextRef="CQ" unitRef="INRPerShare" decimals="2">14.05</in-bse-fin:BasicEarningsPerShare>
+  <in-bse-fin:DilutedEarningsPerShare contextRef="CQ" unitRef="INRPerShare" decimals="2">14.00</in-bse-fin:DilutedEarningsPerShare>
+
+  <in-bse-fin:SegmentRevenue contextRef="CQ_Seg_Robotics" unitRef="INR" decimals="-5">3000000000</in-bse-fin:SegmentRevenue>
+  <in-bse-fin:SegmentRevenue contextRef="CQ_Seg_EMS" unitRef="INR" decimals="-5">5000000000</in-bse-fin:SegmentRevenue>
+</xbrli:xbrl>

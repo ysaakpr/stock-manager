@@ -1,0 +1,278 @@
+"""The true point-in-time fundamentals store (M7.3, §4.2 L1) — filings, tagged and never restated.
+
+This is the legitimate, backtest-safe half of the fundamentals waterfall: values parsed from the
+exchange's own results filings, each tagged with the `filing_date` on which it first became knowable
+(§4.1, invariant #7). It is physically and by name separate from the Screener *restated* store
+(M7.1), which is monitoring-only and quarantined from backtests (invariant #8) — the two never share
+a dataset root, so a query pointed at this dataset cannot reach restated numbers by accident.
+
+Two design decisions carry the point-in-time and restatement guarantees:
+
+* **Partitioned by `filing_date`, not by period end.** A partition holds exactly the facts that
+  became knowable on one date, so `read_pit(on_date)` answers "what did we know then" by *choosing
+  partitions* — a quarter filed after the as-of date is physically absent from the result, rather
+  than filtered out by a `WHERE` clause a caller might forget. That is invariant #7 made structural.
+* **A restatement is a new record, never an overwrite (acceptance 3).** A later filing that restates
+  an earlier period carries a later `filing_date` and a distinct `filing_id`, so it lands in a
+  different partition (or, if filed the same day, a distinct row keyed by `filing_id`) and both
+  versions coexist forever. `read_pit` returns every version knowable as of a date; `read_latest`
+  collapses to the most-recently-filed value per `(isin, period_end, nature, concept, segment)` for
+  a consumer that wants the current best knowledge — without the store having discarded history.
+
+History only accumulates forward from now. This store is *never* backfilled from a restated source:
+a value that was restated has lost the number the market originally saw, and writing that into the
+PIT store would fabricate a knowable-date the fact never had. Backfilling here is a defect, not a
+feature. The genuine backfill of PIT fundamentals is simply "run the filing ingester every day from
+today onward," and the depth of this store is therefore "since M7.3 went live," stated plainly.
+
+Money is `Decimal`: the parquet schema stores values as `decimal128`, and a float never touches the
+value on the way in or out.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from datetime import date
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Final
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from dataplatform.ingest.xbrl.models import Filing, FundamentalFact, Nature
+from dataplatform.logging import get_logger
+from dataplatform.store.paths import Layer, l1_partition_path, layer_root, partition_date_of
+
+__all__ = [
+    "PIT_FUNDAMENTALS_DATASET",
+    "read_l1",
+    "read_latest",
+    "read_pit",
+    "write_pit",
+]
+
+_LOG = get_logger(__name__)
+
+#: The L1 dataset name. Partitioned by `filing_date` (the knowable date):
+#: `data/L1/pit_fundamentals/date=YYYY-MM-DD/part.parquet`. The name is distinct from the restated
+#: store's root (M7.1) precisely so the two cannot be confused for one another.
+PIT_FUNDAMENTALS_DATASET: Final = "pit_fundamentals"
+
+#: Values are stored to two decimal places in a wide precision: revenues run to lakhs/crores of
+#: rupees while EPS is a few rupees, and 38 digits comfortably holds both. A source that started
+#: stating a third decimal would fail the write loudly rather than have a value silently rounded.
+_VALUE_TYPE: Final = pa.decimal128(38, 2)
+
+#: The L1 schema, declared once and enforced on write and on read (§4.2, M1.8's rule).
+_L1_SCHEMA: Final = pa.schema(
+    [
+        pa.field("isin", pa.string(), nullable=False),
+        pa.field("period_start", pa.date32(), nullable=True),
+        pa.field("period_end", pa.date32(), nullable=False),
+        pa.field("filing_date", pa.date32(), nullable=False),
+        pa.field("nature", pa.string(), nullable=False),
+        pa.field("filing_id", pa.string(), nullable=False),
+        pa.field("concept", pa.string(), nullable=False),
+        pa.field("segment", pa.string(), nullable=True),
+        pa.field("value", _VALUE_TYPE, nullable=False),
+        pa.field("source", pa.string(), nullable=False),
+        pa.field("l0_key", pa.string(), nullable=True),
+    ]
+)
+
+#: What makes one fact distinct from another *within a filing partition*: the same period reported
+#: for two different filings (a restatement) is kept apart by `filing_id`, and the same concept for
+#: the parent and the group is kept apart by `nature`.
+_FACT_KEY = ("isin", "period_end", "nature", "filing_id", "concept", "segment")
+
+
+def write_pit(filing: Filing, *, data_root: Path | None = None) -> Path:
+    """Write one filing's facts to L1, into its `filing_date` partition, and return the path.
+
+    Restatement-safe by construction: a later filing restating the same period has a later
+    `filing_date` (a different partition) or, if filed the same day, a distinct `filing_id` (a
+    distinct row), so this never overwrites an earlier filing's facts. When a partition already
+    holds facts for *other* filings dated that day, they are merged and rewritten together;
+    re-writing the *same* filing is idempotent. Refuses to merge two different values for the
+    identical fact key — that is a corrupt input, not a restatement.
+
+    Rows within a partition are sorted by the fact key so a re-derivation is byte-identical (the
+    M1.5 determinism rule), and the file is written whole to a temporary name then renamed over the
+    target so a crash mid-write cannot leave a half file readable.
+    """
+    path = l1_partition_path(PIT_FUNDAMENTALS_DATASET, filing.filing_date, data_root=data_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    merged: dict[tuple[Any, ...], FundamentalFact] = {}
+    if path.exists():
+        for existing in _rows_of(path):
+            merged[_key_of(existing)] = existing
+    for fact in filing.facts:
+        key = _key_of(fact)
+        prior = merged.get(key)
+        if prior is not None and prior.filing_id != fact.filing_id:
+            # Two filings claiming the identical fact key on one day is impossible — filing_id is
+            # in the key — so this is a same-filing re-derivation; a value change is corruption.
+            raise ValueError(
+                f"conflicting value for {key} in partition {path}: {prior.value} vs {fact.value}"
+            )
+        if prior is not None and prior.value != fact.value:
+            raise ValueError(
+                f"re-deriving {key} produced a different value ({prior.value} → {fact.value}); L0 "
+                "is immutable, so a stable parse must be stable"
+            )
+        merged[key] = fact
+
+    rows = sorted(merged.values(), key=_key_of)
+    table = pa.Table.from_pylist([_to_record(row) for row in rows], schema=_L1_SCHEMA)
+    staging = path.with_name(f".{path.name}.partial")
+    pq.write_table(table, staging, compression="snappy", version="2.6")
+    staging.replace(path)
+
+    _LOG.info(
+        "pit_fundamentals.written",
+        source=filing.source,
+        isin=filing.isin,
+        period_end=filing.period_end.isoformat(),
+        filing_date=filing.filing_date.isoformat(),
+        nature=filing.nature.value,
+        filing_id=filing.filing_id,
+        dataset=PIT_FUNDAMENTALS_DATASET,
+        path=str(path),
+        rows=len(rows),
+        state="NORMALIZED",
+    )
+    return path
+
+
+def read_l1(filing_date: date, *, data_root: Path | None = None) -> tuple[FundamentalFact, ...]:
+    """Read one filing-date partition back out of L1.
+
+    Raises `FileNotFoundError` when the partition was never written — an absent partition is a gap
+    for D7 to explain, not an empty filing date.
+    """
+    path = l1_partition_path(PIT_FUNDAMENTALS_DATASET, filing_date, data_root=data_root)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"no {PIT_FUNDAMENTALS_DATASET} partition for {filing_date.isoformat()}: {path}"
+        )
+    return _rows_of(path)
+
+
+def read_pit(on_date: date, *, data_root: Path | None = None) -> tuple[FundamentalFact, ...]:
+    """Every fundamental fact knowable on `on_date` — the point-in-time query (invariant #7).
+
+    What it does: reads only the partitions whose `filing_date` is on or before `on_date`, so a
+    filing disseminated *after* that date is physically absent from the result. A period restated by
+    a later filing appears once per filing made on or before `on_date` — both the original and any
+    restatement the market had seen by then, because that is exactly what was knowable.
+    What it assumes: `on_date` is the decision date in Asia/Kolkata.
+    What it never does: return a fact filed after `on_date`, or invent a partition — an as-of date
+    before the earliest filing yields an empty result, not an error.
+
+    Rows are returned sorted by the fact key then `filing_date`.
+    """
+    rows: list[FundamentalFact] = []
+    for path in _partitions_through(on_date, data_root=data_root):
+        rows.extend(_rows_of(path))
+    rows.sort(key=lambda fact: (*_key_of(fact), fact.filing_date))
+    return tuple(rows)
+
+
+def read_latest(on_date: date, *, data_root: Path | None = None) -> tuple[FundamentalFact, ...]:
+    """The most-recently-filed value per fact, among filings knowable on `on_date`.
+
+    Collapses restatements to the best knowledge as of the as-of date — for each
+    `(isin, period_end, nature, concept, segment)`, the fact from the latest `filing_date` on or
+    before `on_date` — without the store having discarded the earlier version (which `read_pit`
+    still returns). This is the read a break-condition evaluator uses; it never reaches back past
+    `on_date`, so a restatement the market had not yet seen cannot change a historical decision.
+    """
+    latest: dict[tuple[Any, ...], FundamentalFact] = {}
+    for fact in read_pit(on_date, data_root=data_root):
+        key = _key_without_filing(fact)
+        current = latest.get(key)
+        if current is None or fact.filing_date > current.filing_date:
+            latest[key] = fact
+    return tuple(sorted(latest.values(), key=_key_without_filing))
+
+
+def _partitions_through(on_date: date, *, data_root: Path | None) -> Iterator[Path]:
+    """The `part.parquet` files whose `filing_date` partition is on or before `on_date`."""
+    dataset_dir = layer_root(Layer.L1, data_root=data_root) / PIT_FUNDAMENTALS_DATASET
+    if not dataset_dir.is_dir():
+        return
+    for partition_dir in sorted(dataset_dir.iterdir()):
+        if not partition_dir.is_dir():
+            continue
+        try:
+            filing_date = partition_date_of(partition_dir)
+        except ValueError:
+            continue
+        if filing_date <= on_date:
+            path = partition_dir / "part.parquet"
+            if path.exists():
+                yield path
+
+
+def _rows_of(path: Path) -> tuple[FundamentalFact, ...]:
+    """Parse one L1 partition file into facts, enforcing the declared schema on read."""
+    records = pq.read_table(path, schema=_L1_SCHEMA).to_pylist()
+    return tuple(
+        FundamentalFact(
+            isin=str(record["isin"]),
+            period_start=record["period_start"],
+            period_end=record["period_end"],
+            filing_date=record["filing_date"],
+            nature=Nature(record["nature"]),
+            filing_id=str(record["filing_id"]),
+            concept=str(record["concept"]),
+            segment=None if record["segment"] is None else str(record["segment"]),
+            value=_as_decimal(record["value"]),
+            source=str(record["source"]),
+            l0_key=None if record["l0_key"] is None else str(record["l0_key"]),
+        )
+        for record in records
+    )
+
+
+def _as_decimal(value: Any) -> Decimal:
+    """A parquet decimal comes back as `Decimal` already; guard the money invariant explicitly."""
+    if not isinstance(value, Decimal):  # pragma: no cover - schema guarantees Decimal
+        raise TypeError(f"value read from L1 is {type(value).__name__}, not Decimal")
+    return value
+
+
+def _to_record(fact: FundamentalFact) -> dict[str, Any]:
+    """One fact as the dict `pa.Table.from_pylist` writes against `_L1_SCHEMA`."""
+    return {
+        "isin": fact.isin,
+        "period_start": fact.period_start,
+        "period_end": fact.period_end,
+        "filing_date": fact.filing_date,
+        "nature": fact.nature.value,
+        "filing_id": fact.filing_id,
+        "concept": fact.concept,
+        "segment": fact.segment,
+        "value": fact.value,
+        "source": fact.source,
+        "l0_key": fact.l0_key,
+    }
+
+
+def _key_of(fact: FundamentalFact) -> tuple[Any, ...]:
+    """The within-partition identity of a fact (`_FACT_KEY`)."""
+    return (
+        fact.isin,
+        fact.period_end,
+        fact.nature.value,
+        fact.filing_id,
+        fact.concept,
+        fact.segment or "",
+    )
+
+
+def _key_without_filing(fact: FundamentalFact) -> tuple[Any, ...]:
+    """The identity of a fact *across* filings — the key a restatement supersedes."""
+    return (fact.isin, fact.period_end, fact.nature.value, fact.concept, fact.segment or "")
