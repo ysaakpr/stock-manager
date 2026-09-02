@@ -46,7 +46,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from datetime import date, timedelta
 from enum import StrEnum
-from typing import Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -57,10 +57,12 @@ from dataplatform.corpactions.taxonomy import (
     Terms,
     describe,
 )
-from dataplatform.ingest.corp_actions import CorporateAction
 from dataplatform.ingest.models import ISIN_PATTERN, IngestError
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection
+
+if TYPE_CHECKING:
+    from dataplatform.ingest.corp_actions import CorporateAction
 
 __all__ = [
     "CA_RECONCILIATION_CHECK",
@@ -615,6 +617,8 @@ def load_reconciled_actions(
         params = (isin,)
     sql += " ORDER BY isin, ex_date, action_type, source"
 
+    from dataplatform.ingest.corp_actions import CorporateAction
+
     rows = conn.execute(sql, params).fetchall()
     return tuple(
         CorporateAction(
@@ -632,3 +636,36 @@ def load_reconciled_actions(
         )
         for row in rows
     )
+
+
+def _bind_corporate_action() -> bool:
+    """Resolve the `CorporateAction` forward reference the models above carry.
+
+    `CorporateAction` lives in `dataplatform.ingest.corp_actions`, which imports this package's
+    taxonomy/parse_terms back — importing it at module top makes the two a runtime cycle whenever
+    `dataplatform.ingest.corp_actions` is imported *first* (M3.8's announcement tests do exactly
+    that). So it is kept off the runtime import graph (annotation-only, above) and bound here once,
+    into this module's globals, so the pydantic models resolve their forward reference.
+
+    Returns True once the binding succeeds. When this package was pulled in *by* corp_actions and
+    that module is still mid-initialization, the import raises `ImportError`; corp_actions calls
+    `bind_corporate_action()` from the tail of its own module to complete the binding once it has
+    finished defining the class. The models are only ever validated after corp_actions is loaded,
+    so no validation can observe the unbound state.
+    """
+    if "CorporateAction" in globals():
+        return True
+    try:
+        from dataplatform.ingest.corp_actions import CorporateAction
+    except ImportError:
+        return False
+    globals()["CorporateAction"] = CorporateAction
+    for _model in (ReconciledAction, ReconciliationConflict, ReconciliationResult):
+        _model.model_rebuild(force=True)
+    return True
+
+
+#: Public re-entry point for corp_actions to finish the binding (see `_bind_corporate_action`).
+bind_corporate_action = _bind_corporate_action
+
+_bind_corporate_action()

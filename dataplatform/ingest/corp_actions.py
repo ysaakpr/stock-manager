@@ -405,3 +405,20 @@ def load_corporate_actions(
         )
         for row in rows
     )
+
+
+# `dataplatform.corpactions.reconcile` embeds this module's `CorporateAction` in its pydantic
+# models but cannot import it at module top without a runtime import cycle (this module imports that
+# package's taxonomy/parse_terms). When that package is pulled in *by* this module's own imports
+# above — i.e. this module is imported first — reconcile loads while `CorporateAction` is still
+# undefined and defers binding. Now that the class exists, complete that binding. No-op when
+# reconcile has not been imported, or bound itself already (the import-order where it loads last).
+def _bind_reconcile_models() -> None:
+    import sys
+
+    reconcile = sys.modules.get("dataplatform.corpactions.reconcile")
+    if reconcile is not None:
+        reconcile.bind_corporate_action()
+
+
+_bind_reconcile_models()
