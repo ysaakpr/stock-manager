@@ -1,0 +1,72 @@
+<div id="proposal">
+  <h1>Proposal — {{case_id}}</h1>
+  <p class="muted">Theme <b>{{theme}}</b> · universe as of {{as_of}}</p>
+  <p class="muted">Content hash: <span class="hash">{{content_hash}}</span></p>
+
+  <div class="message">{{message}}</div>
+
+  <h2>Universe</h2>
+  <table>
+    <thead><tr><th>ISIN</th><th>Name</th><th>Value-chain stage</th><th>Purity</th></tr></thead>
+    <tbody>
+      {{universe_rows}}
+    </tbody>
+  </table>
+
+  <h2>Theses</h2>
+  {{thesis_blocks}}
+
+  <h2>Policies (§5.2)</h2>
+  <table>
+    <thead><tr><th>Policy</th><th>Content</th></tr></thead>
+    <tbody>
+      {{policy_rows}}
+    </tbody>
+  </table>
+
+  <h2>Why these policies</h2>
+  <table>
+    <thead><tr><th>Policy</th><th>Traced from</th><th>Stated</th><th>Reasoning</th></tr></thead>
+    <tbody>
+      {{recommendation_rows}}
+    </tbody>
+  </table>
+
+  <h2>Edit</h2>
+  <p class="muted">Changing an answer re-derives the policies it drives and produces a new content
+    hash — re-review before approving.</p>
+  <form hx-post="/cases/{{case_id}}/edit" hx-target="#proposal" hx-swap="outerHTML"
+        method="post" action="/cases/{{case_id}}/edit">
+    <fieldset>
+      <div><label for="sip_amount_inr">SIP amount (₹)</label>
+        <input id="sip_amount_inr" name="sip_amount_inr" value="{{sip_amount_inr}}" /></div>
+      <div><label for="sip_day_of_month">SIP day of month</label>
+        <input id="sip_day_of_month" name="sip_day_of_month" value="{{sip_day_of_month}}" /></div>
+      <div><label for="horizon_years">Horizon (years)</label>
+        <input id="horizon_years" name="horizon_years" value="{{horizon_years}}" /></div>
+      <div><label for="risk_appetite">Risk appetite</label>
+        <select id="risk_appetite" name="risk_appetite">{{risk_options}}</select></div>
+      <div><label for="concentration_tolerance">Concentration</label>
+        <select id="concentration_tolerance" name="concentration_tolerance">{{concentration_options}}</select></div>
+      <div><label for="benchmark_secondary">Theme benchmark</label>
+        <input id="benchmark_secondary" name="benchmark_secondary" value="{{benchmark_secondary}}" /></div>
+      <div><label for="top_up_rule">Top-up rule</label>
+        <input id="top_up_rule" name="top_up_rule" value="{{top_up_rule}}" /></div>
+    </fieldset>
+    <button type="submit">Apply edit</button>
+  </form>
+
+  <h2>Approve</h2>
+  <p class="muted">Approval is one act over the whole document, pinned to the hash shown above.</p>
+  <form method="post" action="/cases/{{case_id}}/approve">
+    <input type="hidden" name="content_hash" value="{{content_hash}}" />
+    <div><label for="by">Approver</label>
+      <input id="by" name="by" placeholder="your name" required /></div>
+    <div><label for="kind">Kind</label>
+      <select id="kind" name="kind">
+        <option value="HUMAN">HUMAN</option>
+        <option value="FIXTURE">FIXTURE (paper/test only)</option>
+      </select></div>
+    <button type="submit">Ratify</button>
+  </form>
+</div>
