@@ -175,22 +175,23 @@ class JobRegistry:
 
 
 def eod_pipeline(context: JobContext) -> None:
-    """The daily end-of-day pipeline. A no-op placeholder until M1.11 wires the real one.
+    """The daily end-of-day pipeline (M1.10): the latest session, fetched to PUBLISHED, archived.
 
-    What it does today: emits one structured event naming the trading date it would have
-    processed, which is enough for the run to be observable end to end — the run is recorded, the
-    heartbeat moves, and `/health` goes fresh.
-    What it assumes: the trading date is the injected clock's today. M1.11 replaces that with the
-    calendar's most recent expected session (C.2), because a Monday run processes Friday.
-    What it never does: fetch, write L0, or touch a decision. Wiring D1 into this function is
-    M1.11's task and nothing before it should depend on this body.
+    What it does: drives every daily NSE source for the latest trading session down
+    `fetch → L0 → parse → L1 → sync_state`, self-heals any FAILED(retryable) date in the lookback
+    window first, runs the D7 gap check, publishes the day's archive bundle, and alerts on any
+    source left FAILED. It raises `EodPipelineError` when the target session did not publish, so the
+    run is recorded FAILED and the next run self-heals it.
+    What it assumes: the injected clock and settings are the run's (B10), the database is migrated,
+    and the network is reachable — the real wiring is built inside `run_eod_pipeline`.
+    What it never does: decide the time for itself, or report a green run on a day its session never
+    landed. The import is deferred so this module (loaded by the scheduler) does not pull in the
+    whole ingest stack at import time, and so `dataplatform.ingest.eod` can name `JobContext`
+    without an import cycle.
     """
-    log.info(
-        "job.eod_pipeline.placeholder",
-        trading_date=context.clock.today().isoformat(),
-        run_id=str(context.run_id),
-        note="no-op until M1.11 wires the ingestion pipeline",
-    )
+    from dataplatform.ingest.eod import run_eod_pipeline
+
+    run_eod_pipeline(context)
 
 
 #: The one job M0.6 registers (§8.1: one daily EOD pipeline). 18:30 IST on weekdays — after the
@@ -201,7 +202,7 @@ EOD_PIPELINE = Job(
     cron="30 18 * * mon-fri",
     fn=eod_pipeline,
     timeout=timedelta(minutes=45),
-    description="Daily EOD ingest → validate → normalize → publish (placeholder until M1.11)",
+    description="Daily EOD ingest → validate → normalize → publish → archive (M1.10)",
 )
 
 

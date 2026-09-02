@@ -183,12 +183,21 @@ def test_the_idle_tick_beats_without_a_job(scratch_settings: Settings) -> None:
     assert (beat.job, beat.run_id) == (None, None), "the process tick is not a job run"
 
 
-def test_the_run_once_cli_runs_the_placeholder_eod_job(scratch_settings: Settings) -> None:
-    """The §8.1 invocation verbatim, as a real process — argv parsing, wiring and exit code."""
-    assert "eod_pipeline" in default_registry(), "M0.6 must register the placeholder EOD job"
+def test_the_cli_lists_the_registered_eod_job(scratch_settings: Settings) -> None:
+    """The §8.1 CLI boots as a real process and reports the registered EOD job — argv, wiring.
+
+    M1.10 replaced M0.6's no-op placeholder with the real networked pipeline, so `run-once
+    eod_pipeline` now fetches from NSE and cannot run offline in the test suite (B8). The CLI
+    mechanics that this smoke test guards — a real subprocess parses argv, builds the runner from
+    the environment, and exits 0 — are exercised here via `list`, which touches neither the network
+    nor the database; run-once's execute-record-heartbeat path stays covered in-process by
+    `test_run_once_executes_the_job_and_records_it` and
+    `test_run_once_writes_a_heartbeat_that_health_reports`.
+    """
+    assert "eod_pipeline" in default_registry(), "the daily EOD job must stay registered"
 
     completed = subprocess.run(
-        [sys.executable, "-m", "dataplatform.scheduler", "run-once", "eod_pipeline"],
+        [sys.executable, "-m", "dataplatform.scheduler", "list"],
         capture_output=True,
         text=True,
         env={"PATH": "/usr/bin:/bin", "DATABASE_URL": scratch_settings.database_url},
@@ -196,11 +205,7 @@ def test_the_run_once_cli_runs_the_placeholder_eod_job(scratch_settings: Setting
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "eod_pipeline SUCCEEDED" in completed.stdout
-
-    beat = read_heartbeat(scratch_settings, name=DEFAULT_SCHEDULER_ID)
-    assert beat is not None and (beat.state, beat.job) == ("SUCCEEDED", "eod_pipeline")
-    assert beat.instance != "test:1", "the CLI ran in its own process, with its own instance id"
+    assert "eod_pipeline\t30 18 * * mon-fri" in completed.stdout
 
 
 def test_an_unknown_job_is_refused_by_name(scratch_settings: Settings) -> None:
