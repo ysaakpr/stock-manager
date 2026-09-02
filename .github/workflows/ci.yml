@@ -1,0 +1,69 @@
+# CI — the offline gate for the trading platform (M4.11, EXECUTION_PLAN §8.3.3, §8.3.6).
+#
+# This workflow runs the SAME gate every task must pass locally — `make check` — plus the two
+# properties M4's gate stands on, called out as their own fast steps so a break in either is
+# obvious in the checks list: replay determinism (§8.3.3) and the PIT-leak audit (§8.3.6). It
+# also runs the golden corporate-action suite (§4.3) explicitly.
+#
+# It is deliberately OFFLINE (AGENTIC_CONTEXT B8): no Postgres service, no network. Tests that
+# need the docker database skip themselves when it is unreachable (the `integration` marker and
+# the per-fixture `pytest.skip`), and the one live-network golden cross-check (`network`) is
+# opt-in only, so a bare run never touches Yahoo. CI proves the fixtures-only path is green;
+# database-backed integration tests run behind `make up` locally, not here.
+#
+# Runbook: ops/runbooks/ci.md.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# One in-flight run per ref; a newer push cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: offline gate (make check + determinism + PIT leak + golden)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv (pinned Python 3.12)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync the locked environment
+        # --frozen: fail if uv.lock is out of date rather than silently resolving new versions —
+        # CI must build the exact environment the lock pins (reproducibility, invariant of §8.3.3).
+        run: uv sync --frozen
+
+      # ── the two properties M4's gate stands on, as their own fast, offline steps ──────────────
+
+      - name: Replay determinism (§8.3.3)
+        run: uv run pytest tests/integration/test_replay_determinism.py -q -m "not network"
+
+      - name: PIT-leak audit (§8.3.6)
+        run: uv run pytest tests/integration/test_pit_leak.py -q -m "not network"
+
+      # ── the golden corporate-action suite (§4.3), offline (the network cross-check is opt-in) ──
+
+      - name: Golden corporate-action suite (§4.3)
+        run: uv run pytest tests/golden -q -m "not network"
+
+      # ── the full gate: format + lint + types + the whole offline test suite ───────────────────
+
+      - name: make check
+        # The same command CLAUDE.md / AGENTIC_CONTEXT §5 name as the gate for every task. Its
+        # pytest run is offline: database-backed tests skip without `make up`, network tests are
+        # opt-in. This re-covers the suites above; running them first is fail-fast, not duplication.
+        run: make check
