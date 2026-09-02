@@ -30,11 +30,14 @@ __all__ = [
     "l0_path",
     "l1_partition_dir",
     "l1_partition_path",
+    "l2_isin_partition_dir",
+    "l2_isin_partition_path",
     "l2_partition_dir",
     "l2_partition_path",
     "layer_root",
     "partition_date_of",
     "partition_dir",
+    "partition_isin_of",
     "partition_path",
 ]
 
@@ -45,6 +48,15 @@ _IDENTIFIER = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 #: The partition directory name L1/L2 use, e.g. `date=2026-08-07`.
 _PARTITION = re.compile(r"^date=(\d{4}-\d{2}-\d{2})$")
+
+#: The ISIN-partition directory name the L2 adjusted dataset uses, e.g. `isin=INE002A01018`.
+#: L2's adjusted series is partitioned by ISIN, not date (§4.5(a) reads "per ISIN across years",
+#: and M2.5's incremental rebuild is per ISIN): a single CA that lands for one ISIN must rewrite
+#: exactly one file, never every date partition of the whole market. The value is a full ISIN,
+#: which is upper-case — so it is validated against the ISIN pattern, not the lower-case lake
+#: identifier rule that governs dataset directory names.
+_ISIN_PARTITION = re.compile(r"^isin=([A-Z]{2}[A-Z0-9]{9}[0-9])$")
+_ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
 
 #: The single file written per (dataset, date) partition. One file keeps a partition rewrite
 #: atomic-ish and byte-comparable (M1.5's determinism check).
@@ -161,6 +173,32 @@ def l2_partition_path(
     return partition_path(Layer.L2, dataset, trading_date, filename=filename, data_root=data_root)
 
 
+def l2_isin_partition_dir(dataset: str, isin: str, *, data_root: Path | None = None) -> Path:
+    """L2 ISIN-partition directory, e.g. `L2/prices_adjusted/isin=INE002A01018`.
+
+    The L2 adjusted dataset is partitioned by ISIN rather than by date: the adjusted series a
+    consumer reads is "one ISIN across years" (§4.5(a)) and a corporate action invalidates exactly
+    one ISIN's history (§4.3 rule 2), so the unit that is rebuilt — and the file that is rewritten —
+    is one ISIN, not one market-wide date. Raises `PathLayoutError` if `isin` is not a valid ISIN.
+    """
+    return (
+        layer_root(Layer.L2, data_root=data_root)
+        / _identifier(dataset, "dataset")
+        / f"isin={_isin(isin)}"
+    )
+
+
+def l2_isin_partition_path(
+    dataset: str,
+    isin: str,
+    *,
+    filename: str = DEFAULT_PART_FILENAME,
+    data_root: Path | None = None,
+) -> Path:
+    """The parquet file inside an L2 ISIN partition."""
+    return l2_isin_partition_dir(dataset, isin, data_root=data_root) / _filename(filename)
+
+
 def partition_date_of(path: Path) -> date:
     """Read the trading date back out of an L1/L2 path — the inverse of `partition_dir`.
 
@@ -175,12 +213,35 @@ def partition_date_of(path: Path) -> date:
     raise PathLayoutError(f"no date=YYYY-MM-DD partition component in {str(path)!r}")
 
 
+def partition_isin_of(path: Path) -> str:
+    """Read the ISIN back out of an L2 ISIN-partition path — the inverse of `l2_isin_partition_dir`.
+
+    Scans the path's parts so it works on either the partition directory or a file inside it.
+    Raises rather than guessing: a path with no `isin=` component is not an L2 adjusted partition.
+    """
+    for part in reversed(path.parts):
+        match = _ISIN_PARTITION.match(part)
+        if match:
+            return match.group(1)
+    raise PathLayoutError(f"no isin=<ISIN> partition component in {str(path)!r}")
+
+
 def _identifier(value: str, kind: str) -> str:
     """Validate a source or dataset name before it becomes a directory."""
     if not _IDENTIFIER.match(value):
         raise PathLayoutError(
             f"{kind} {value!r} is not a valid lake identifier: lower-case letters, digits, "
             "'.', '_' and '-' only, starting with a letter or digit"
+        )
+    return value
+
+
+def _isin(value: str) -> str:
+    """Validate an ISIN before it becomes a partition directory value."""
+    if not _ISIN.match(value):
+        raise PathLayoutError(
+            f"{value!r} is not a valid ISIN (ISO 6166: two letters, nine alphanumerics, a check "
+            "digit); an L2 partition is keyed on the ISIN join key, never a symbol"
         )
     return value
 
