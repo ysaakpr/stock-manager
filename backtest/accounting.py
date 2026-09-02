@@ -150,8 +150,8 @@ class PortfolioBook:
 
     What it does: post fills (from the shared ``Broker``/``SimBroker`` fill model, so costs come
     from the one cost model — invariant #4), record the investor's deposits and withdrawals, apply
-    splits/bonuses/demergers to the holdings, mark to market, and report XIRR against a benchmark
-    pair.
+    splits/bonuses/mergers/demergers to the holdings, mark to market, and report XIRR against a
+    benchmark pair.
 
     What it assumes: fills, deposits and corporate actions arrive in chronological order — the book
     is a forward walk, and it does not re-sort history. Dates come from the events (a ``Fill`` knows
@@ -368,6 +368,63 @@ class PortfolioBook:
             resulting=resulting_isin,
             resulting_quantity=new_quantity,
             cost_moved=str(resulting_basis),
+        )
+
+    def apply_merger(
+        self,
+        acquired_isin: str,
+        *,
+        surviving_isin: str,
+        shares_received: Decimal,
+        shares_held: Decimal,
+    ) -> None:
+        """A merger: the acquired entity's shares convert to the surviving entity's, basis carried.
+
+        The holder of the *acquired* (amalgamating) company receives ``shares_received`` of the
+        surviving entity for every ``shares_held`` held (``ExchangeRatioTerms``' replacement ratio —
+        HDFC Ltd into HDFC Bank was 42:25). The acquired position ceases to exist and its **whole**
+        cost basis moves to the surviving entity: a merger redistributes nothing, it re-labels a
+        holding, so the sum of value across the two ISINs before and after is identical. If the book
+        already holds the surviving entity, the converted shares and basis are added to it.
+
+        This is the mirror of the surviving-entity view the golden CA suite verifies (unit price
+        factor, bridged return): on the *survivor's* own price series a merger is a structural
+        break, not a scaling, so nothing here touches a price — it moves a share count and its basis
+        from the dead ISIN to the live one. Leaving the acquired holding parked on a dead line is
+        how a naive book silently loses a position, which is exactly the failure this refuses.
+        Refuses a ratio that would leave a fractional holding.
+        """
+        if acquired_isin == surviving_isin:
+            raise CorporateActionError("a merger's surviving ISIN must differ from the acquired")
+        self._require_decimal("shares_received", shares_received)
+        self._require_decimal("shares_held", shares_held)
+        if shares_received <= _ZERO or shares_held <= _ZERO:
+            raise CorporateActionError("merger exchange ratio terms must be positive")
+        acquired = self._positions.get(acquired_isin)
+        if acquired is None or acquired.quantity == 0:
+            raise InsufficientSharesError(
+                f"cannot apply merger: no position in acquired {acquired_isin}"
+            )
+
+        converted_quantity = self._whole_shares(
+            acquired.quantity * shares_received / shares_held, "merger"
+        )
+        moved_basis = acquired.cost_basis
+        surviving = self._positions.get(surviving_isin)
+        if surviving is None or surviving.quantity == 0:
+            new_quantity = converted_quantity
+            new_basis = moved_basis
+        else:
+            new_quantity = surviving.quantity + converted_quantity
+            new_basis = surviving.cost_basis + moved_basis
+        self._positions[acquired_isin] = BookPosition(acquired_isin, 0, _ZERO)
+        self._positions[surviving_isin] = BookPosition(surviving_isin, new_quantity, new_basis)
+        _log.info(
+            "book.merger",
+            acquired=acquired_isin,
+            surviving=surviving_isin,
+            converted_quantity=converted_quantity,
+            basis_moved=str(moved_basis),
         )
 
     def _rescale_quantity(self, isin: str, multiple: Decimal, event: str) -> None:
