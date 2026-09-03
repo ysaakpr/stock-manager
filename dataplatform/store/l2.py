@@ -223,9 +223,14 @@ def read_raw_bars_from_l1(
     owns = con is None
     con = open_connection() if con is None else con
     try:
+        # Scope to the EQ (regular-market) series: a name also carries block (BL), trade-to-trade
+        # (BE/BZ) and special-settlement (T0) rows for the same (exchange, trade_date), and pulling
+        # them all in would give the adjusted builder two closes for one date — a spurious
+        # "duplicate price". The EQ series is the one price history L2 adjusts, matching the query
+        # layer and the backtest reader (both filter series='EQ').
         rows = con.execute(
             "SELECT isin, exchange, trade_date, open, high, low, close, total_traded_qty "
-            "FROM read_parquet($files) WHERE isin = $isin "
+            "FROM read_parquet($files) WHERE isin = $isin AND series = 'EQ' "
             "ORDER BY exchange, trade_date",
             {"files": [str(f) for f in files], "isin": isin},
         ).fetchall()

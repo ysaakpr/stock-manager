@@ -385,10 +385,15 @@ class _AdjustedCloseSource:
 
     The primary map is supplied, not derived: this lake is single-exchange (NSE), so every ISIN's
     primary is NSE and the liquidity scan `cross_section` would otherwise run is skipped. The ISIN
-    set for the map comes from L1's raw closes on the session — the same names L2 was materialized
-    from — so a name present in L1 but not yet materialized in L2 simply has no adjusted close and
-    drops out of the candidate set, exactly as the query layer reports it. Closes are cached per
-    session, so the walk pays for each cross-section once.
+    set for the map comes from L1's raw closes on the session.
+
+    Raw is the base; L2 adjusted is overlaid where it exists. L2 is materialized only for names with
+    a non-identity factor chain (a split/bonus/rights) — for every other name the adjusted close
+    equals the raw close *exactly*, so the raw close IS its adjusted close, not an approximation.
+    A factored name whose L2 failed to materialize (e.g. an unresolved percent-of-face-value
+    dividend, see ops/BACKLOG.md) also falls back to raw and is therefore under-adjusted — a
+    bounded, documented gap, not silent corruption. Closes are cached per session, so the walk
+    pays once.
     """
 
     def __init__(self, service: QueryService, reader: _L1Reader) -> None:
@@ -402,11 +407,14 @@ class _AdjustedCloseSource:
             return cached
         # Single-exchange lake: pin every name's primary to NSE so cross_section skips the L1
         # liquidity scan. The ISIN universe is L1's own priced names for the session.
-        primary = dict.fromkeys(self._reader.closes_on(session), IdentityExchange.NSE)
+        raw = self._reader.closes_on(session)
+        primary = dict.fromkeys(raw, IdentityExchange.NSE)
         cross = self._service.cross_section(
             CrossSectionRequest(trade_date=session, primary_by_isin=primary)
         )
-        closes = {row.isin: row.adj_close for row in cross.rows}
+        # Start from raw (exact for no-CA names); overlay the L2 adjusted close where it exists.
+        closes = dict(raw)
+        closes.update({row.isin: row.adj_close for row in cross.rows})
         self._closes[session] = closes
         return closes
 
