@@ -10,13 +10,29 @@ portfolio accounting and XIRR (M4.6) mirrored off the fills, and full per-sessio
 survives a ten-year run, report the result against a broad-market total-return benchmark with costs
 included, and state the runtime — not to make money (see :mod:`backtest.policies.naive_momentum`).
 
-Data reality this build runs against: the lake here holds L1 raw NSE prices only — L2 has not been
-materialized and no corporate-action factors, identity master or licensed index series are loaded.
-So the harness reads **raw** closes as the adjusted series (identical with no CA present, which
-this store has none of), derives the tradeable universe and its listing windows from L1's own
-observed trading (survivorship-safe: a name is in the universe on a date iff it traded on or
-around it, and later-delisted names stay in for earlier dates), and stands a **broad-market TRI
-proxy computed from L1** in for the licensed NSE NIFTY-TRI series, which is not in the store. The
+M9.2 change — the momentum **signal** now reads L2 back-adjusted closes through the query layer.
+The trailing-return signal that ranks the universe is the one figure splits and bonuses corrupt: a
+name that split 2:1 shows a fake ~-50% twelve-month return on raw closes and the policy wrongly
+drops it. So ``_L1MomentumData`` now sources its momentum *ratio* from
+:meth:`QueryService.cross_section` (L2 ``prices_adjusted``, materialized by M2.5 from the M9.1
+factors), which back-adjusts both endpoints into one share basis. The ratio is point-in-time safe:
+a corporate action *after* the rebalance date scales numerator and denominator identically and
+cancels, so no future split leaks into a past decision (invariant #7). **Execution stays raw** — the
+sizing price, the fill reference bars and the terminal marks are the prices that actually traded
+(``ReferenceBar`` is raw by invariant #3; the book holds real raw shares), so only *analysis* moves
+to L2. Pass ``adjusted=False`` to source the signal from raw L1 too — the pre-M9.2 baseline the
+adjusted-vs-raw delta report is struck against.
+
+Data reality this build runs against: the lake here holds L1 raw NSE prices only, and
+``corporate_actions`` / ``adjustment_factors`` are empty — M9.1's live ten-year CA backfill is a
+bulk-fetch campaign gated on a human go (AGENTIC_CONTEXT B1). With no CA rows every factor chain is
+the identity, so a materialized L2 equals L1 bar-for-bar and the adjusted signal equals the raw one
+over *this* store: the adjusted-vs-raw run is byte-identical here and the delta is zero. The
+de-corruption itself is proven on a controlled known-split fixture in
+``tests/integration/test_backtest_adjusted.py``. The universe and listing windows are still derived
+from L1's own observed trading (survivorship-safe: a name is in the universe on a date iff it traded
+on or around it, and later-delisted names stay in for earlier dates), and a **broad-market TRI proxy
+computed from L1** stands in for the licensed NSE NIFTY-TRI series, which is not in the store. The
 proxy flows through the *same* :class:`~dataplatform.ingest.indices.TriSeries` and
 :meth:`~backtest.accounting.PortfolioBook.compare_to_benchmarks` code the published series will,
 so the comparison plumbing is what is proven; the published TRI slots in unchanged once ingested.
@@ -31,7 +47,7 @@ import argparse
 import sys
 import time
 from bisect import bisect_right
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -46,10 +62,13 @@ from backtest.policies.naive_momentum import (
 )
 from backtest.replay import BookSnapshot, ReplayEngine, ReplayResult
 from dataplatform.clock import FrozenClock
+from dataplatform.identity.master import Exchange as IdentityExchange
 from dataplatform.identity.master import ListingStatus
 from dataplatform.ingest.indices import TriPoint, TriSeries
 from dataplatform.logging import get_logger
 from dataplatform.query.pit import Dataset
+from dataplatform.query.service import QueryService
+from dataplatform.query.shapes import CrossSectionRequest
 from dataplatform.query.universe import InMemoryListingCalendar, ListingWindow, pit_universe
 from dataplatform.store.l2 import open_connection, register_raw_view
 from dataplatform.store.paths import l1_partition_path
@@ -78,6 +97,7 @@ _BENCHMARK_BASKET = 50  # broad-market TRI proxy basket size (most-liquid names 
 _TRI_SEED = Decimal("1000")  # the proxy index is seeded to 1000 on the first session
 _ACCOUNT_STATE = "MH"  # Maharashtra — the account's state for state-wise stamp duty (a priori)
 _REPORT_PATH = Path("ops/gates/M4-momentum-report.md")
+_DELTA_REPORT_PATH = Path("ops/gates/M9-adjusted-backtest-report.md")
 
 
 # ── L1 lake reader ────────────────────────────────────────────────────────────────────────────────
@@ -256,11 +276,56 @@ class _L1Market:
         return bar
 
 
+# ── signal closes: raw L1, or L2 back-adjusted through the query layer ────────────────────────────
+
+
+#: A per-session close source for the momentum *ratio*: session date -> {ISIN: close}. The raw
+#: variant is ``_L1Reader.closes_on``; the adjusted variant is ``_AdjustedCloseSource`` below.
+SignalCloses = Callable[[date], Mapping[str, Decimal]]
+
+
+class _AdjustedCloseSource:
+    """L2 back-adjusted closes for one session, read through :class:`QueryService` (M9.2).
+
+    The seam the M4.10 backlog names ("read `QueryService.adjusted_series` / `cross_section`"): each
+    call answers a session's closes with the L2 ``prices_adjusted`` bars (``raw x cumulative
+    factor``), so a split or bonus inside the look-back window is expressed in one share basis and
+    the momentum ratio it feeds is no longer corrupted. Only the *close* is taken — execution still
+    fills on the raw reference bar (invariant #3: adjusted series are for analysis, never a fill).
+
+    The primary map is supplied, not derived: this lake is single-exchange (NSE), so every ISIN's
+    primary is NSE and the liquidity scan `cross_section` would otherwise run is skipped. The ISIN
+    set for the map comes from L1's raw closes on the session — the same names L2 was materialized
+    from — so a name present in L1 but not yet materialized in L2 simply has no adjusted close and
+    drops out of the candidate set, exactly as the query layer reports it. Closes are cached per
+    session, so the walk pays for each cross-section once.
+    """
+
+    def __init__(self, service: QueryService, reader: _L1Reader) -> None:
+        self._service = service
+        self._reader = reader
+        self._closes: dict[date, dict[str, Decimal]] = {}
+
+    def __call__(self, session: date) -> Mapping[str, Decimal]:
+        cached = self._closes.get(session)
+        if cached is not None:
+            return cached
+        # Single-exchange lake: pin every name's primary to NSE so cross_section skips the L1
+        # liquidity scan. The ISIN universe is L1's own priced names for the session.
+        primary = dict.fromkeys(self._reader.closes_on(session), IdentityExchange.NSE)
+        cross = self._service.cross_section(
+            CrossSectionRequest(trade_date=session, primary_by_isin=primary)
+        )
+        closes = {row.isin: row.adj_close for row in cross.rows}
+        self._closes[session] = closes
+        return closes
+
+
 # ── data source: the PIT momentum signal the policy reads ─────────────────────────────────────────
 
 
 class _L1MomentumData:
-    """The policy's :class:`~backtest.policies.naive_momentum.MomentumData`, computed from L1.
+    """The policy's :class:`~backtest.policies.naive_momentum.MomentumData` (M4.10 + M9.2).
 
     Rebalances on the first trading session of each month. For each rebalance date it builds the
     candidate set: the PIT universe as of that date (from L1 listing windows), cut to names with
@@ -268,10 +333,28 @@ class _L1MomentumData:
     before the date minus twelve months), and tags each with its trailing return. Every figure is
     knowable on the rebalance date, so the dataset admits cleanly through the point-in-time guard.
     The whole schedule is precomputed once, so the replay walk is dict lookups.
+
+    M9.2 splits the two close reads the record needs. The **momentum ratio** is computed from
+    ``signal_closes`` — L2 back-adjusted closes through the query layer
+    (:class:`_AdjustedCloseSource`) — so a split in the look-back window no longer reads as a fake
+    collapse. The **sizing price**
+    is the raw close from L1, because the allocation buys whole shares that fill on the raw
+    reference bar; mixing an adjusted price into a raw fill would mis-size the order. With
+    ``signal_closes = reader.closes_on`` (the raw source) the two coincide and the result is the
+    pre-M9.2 raw baseline.
     """
 
-    def __init__(self, reader: _L1Reader, sessions: Sequence[date]) -> None:
+    def __init__(
+        self,
+        reader: _L1Reader,
+        sessions: Sequence[date],
+        *,
+        signal_closes: SignalCloses | None = None,
+    ) -> None:
         self._reader = reader
+        self._signal_closes: SignalCloses = (
+            signal_closes if signal_closes is not None else reader.closes_on
+        )
         self._sessions = list(sessions)
         self._rebalance = set(_first_session_of_each_month(sessions))
         self._windows = reader.listing_windows()
@@ -298,19 +381,23 @@ class _L1MomentumData:
         if reference is None:
             return ()  # no twelve-month history yet — nothing to rank
         universe = pit_universe(as_of, InMemoryListingCalendar(self._windows)).isins
-        now_closes = self._reader.closes_on(as_of)
-        then_closes = self._reader.closes_on(reference)
+        # Momentum ratio from the signal source (L2 adjusted, or raw for the baseline); the sizing
+        # price from raw L1, because the order fills on the raw reference bar (invariant #3).
+        signal_now = self._signal_closes(as_of)
+        signal_then = self._signal_closes(reference)
+        raw_now = self._reader.closes_on(as_of)
         records: list[MomentumRecord] = []
         for isin in universe:
-            now = now_closes.get(isin)
-            then = then_closes.get(isin)
-            if now is None or then is None or then <= _ZERO:
+            now = signal_now.get(isin)
+            then = signal_then.get(isin)
+            price = raw_now.get(isin)
+            if now is None or then is None or then <= _ZERO or price is None:
                 continue
             records.append(
                 MomentumRecord(
                     isin=isin,
                     momentum=now / then - _ONE,
-                    price=now,
+                    price=price,
                     knowable_date=as_of,
                 )
             )
@@ -483,6 +570,7 @@ class BacktestResult:
     """Everything the report needs from one run — engine output plus the derived metrics."""
 
     policy: str
+    adjusted: bool
     start: date
     terminal: date
     sessions: int
@@ -511,6 +599,7 @@ def run_naive_momentum(
     opening_cash: Decimal = _DEFAULT_OPENING_CASH,
     parameters: MomentumParameters | None = None,
     data_root: Path | None = None,
+    adjusted: bool = True,
 ) -> BacktestResult:
     """Run the naive momentum policy over ``[start, end]`` and return the result + report metrics.
 
@@ -519,9 +608,17 @@ def run_naive_momentum(
     replay engine — advances a ``FrozenClock`` session by session, and derives the terminal
     valuation, cost total and benchmark comparison. Raises ``BacktestError`` if the window holds no
     tradeable sessions.
+
+    ``adjusted`` (M9.2) selects the momentum signal's close source: ``True`` reads L2 back-adjusted
+    closes through :class:`QueryService` (so splits/bonuses stop corrupting the ranking), ``False``
+    reads raw L1 closes — the pre-M9.2 baseline the delta report is struck against. Execution,
+    marks and the benchmark are raw in both cases (invariant #3). An adjusted run assumes L2 has
+    been materialized (M2.5) for the names in the window; a name with no L2 bar has no adjusted
+    close and drops out of the candidate set, as the query layer reports it.
     """
     params = parameters if parameters is not None else MomentumParameters()
     reader = _L1Reader(data_root=data_root)
+    service = QueryService(data_root=data_root) if adjusted else None
     try:
         sessions = reader.trading_sessions(start, end)
         if not sessions:
@@ -533,7 +630,8 @@ def run_naive_momentum(
         sessions = _reserve_fill_headroom(sessions, calendar)
         first_session, terminal = sessions[0], sessions[-1]
 
-        data = _L1MomentumData(reader, sessions)
+        signal_closes = _AdjustedCloseSource(service, reader) if service is not None else None
+        data = _L1MomentumData(reader, sessions, signal_closes=signal_closes)
         clock = FrozenClock(first_session)
         sim = SimBroker(
             clock=clock,
@@ -560,6 +658,7 @@ def run_naive_momentum(
         )
         return BacktestResult(
             policy="naive_momentum",
+            adjusted=adjusted,
             start=first_session,
             terminal=terminal,
             sessions=len(sessions),
@@ -577,6 +676,8 @@ def run_naive_momentum(
             decision_counts=_decision_counts(result.journal),
         )
     finally:
+        if service is not None:
+            service.close()
         reader.close()
 
 
@@ -660,8 +761,15 @@ def render_report(run: BacktestResult) -> str:
         f"- **Window:** {run.start.isoformat()} → {run.terminal.isoformat()} "
         f"({run.sessions} trading sessions, {run.rebalances} monthly rebalances)",
         f"- **Runtime:** {run.runtime_seconds:.1f} s (engine replay, wall clock)",
-        "- **Data:** L1 raw NSE equity closes (adjusted == raw: this lake has no corporate "
-        "actions); universe and listing windows derived from L1 observed trading.",
+        (
+            "- **Signal source:** L2 back-adjusted closes read through the query layer "
+            "(`QueryService.cross_section`); over this CA-free lake L2 equals L1 raw. Execution, "
+            "marks and benchmark are raw (invariant #3). Universe and listing windows derived from "
+            "L1 observed trading."
+            if run.adjusted
+            else "- **Signal source:** raw L1 NSE closes (pre-M9.2 baseline; `--raw`). Universe "
+            "and listing windows derived from L1 observed trading."
+        ),
         "",
         "## Parameters (chosen a priori — no tuning was performed)",
         "",
@@ -712,6 +820,119 @@ def render_report(run: BacktestResult) -> str:
     return "\n".join(lines)
 
 
+def _trades(run: BacktestResult) -> int:
+    """Total fills over the run (BUY + SELL) — the turnover proxy the delta report reads."""
+    return run.decision_counts[Decision.BUY.value] + run.decision_counts[Decision.SELL.value]
+
+
+def render_delta_report(
+    raw: BacktestResult, adjusted: BacktestResult, *, flipped: Sequence[str] = ()
+) -> str:
+    """The M9.2 report: the adjusted 10-year run against the raw baseline, delta by delta.
+
+    States XIRR, turnover (fills) and cost for the raw run and the adjusted run and the delta
+    between them, plus the run digests (equal here, because this store has no corporate actions so
+    L2 adjusted equals L1 raw — see the run banner). ``flipped`` lists names whose twelve-month
+    signal flipped across a known split between the two runs; it is empty over a CA-free store and
+    the flip is instead demonstrated on the fixture in ``tests/integration/test_backtest_adjusted``.
+    """
+    raw_x, adj_x = raw.comparison.portfolio_xirr, adjusted.comparison.portfolio_xirr
+    raw_t, adj_t = _trades(raw), _trades(adjusted)
+    raw_c, adj_c = raw.total_charges, adjusted.total_charges
+    identical = raw.result.digest() == adjusted.result.digest()
+    lines = [
+        "# M9.2 — Momentum backtest on L2 adjusted prices (10 years)",
+        "",
+        "*Generated by `python -m backtest.run --policy naive_momentum --delta-report`. The "
+        "momentum signal now reads L2 back-adjusted closes through the query layer "
+        "(`QueryService.cross_section`), so splits and bonuses stop corrupting the twelve-month "
+        "ranking. This report strikes the adjusted run against the pre-M9.2 raw-signal baseline.*",
+        "",
+        "## Data reality",
+        "",
+        "This lake holds L1 raw NSE closes only; `corporate_actions` and `adjustment_factors` are "
+        "empty because M9.1's live ten-year CA backfill is a bulk-fetch campaign gated on a human "
+        "go (AGENTIC_CONTEXT B1). With no CA rows every factor chain is the identity, so the "
+        "materialized L2 equals L1 bar-for-bar and the adjusted signal equals the raw one **over "
+        "this store**. The delta below is therefore zero by construction, and the two run digests "
+        "match — the plumbing (materialize L2 -> read adjusted through the query layer -> replay) "
+        "is what this run proves end-to-end. The de-corruption itself — an adjusted signal that "
+        "removes a split's fake ~-50% momentum — is asserted on a controlled known-split "
+        "fixture in `tests/integration/test_backtest_adjusted.py`.",
+        "",
+        "## Window",
+        "",
+        f"- {adjusted.start.isoformat()} -> {adjusted.terminal.isoformat()} "
+        f"({adjusted.sessions} sessions, {adjusted.rebalances} monthly rebalances)",
+        f"- Adjusted run replay time: {adjusted.runtime_seconds:.1f} s; "
+        f"raw run replay time: {raw.runtime_seconds:.1f} s",
+        "",
+        "## Adjusted vs raw",
+        "",
+        "| Metric | Raw signal | Adjusted signal | Delta |",
+        "| --- | --- | --- | --- |",
+        f"| Portfolio XIRR | {_pct(raw_x)} | {_pct(adj_x)} | {_pct(adj_x - raw_x)} |",
+        f"| Turnover (BUY+SELL fills) | {raw_t} | {adj_t} | {adj_t - raw_t:+d} |",
+        f"| Total costs | {_rupees(raw_c)} | {_rupees(adj_c)} | {_rupees(adj_c - raw_c)} |",
+        f"| Final NAV | {_rupees(raw.final_nav)} | {_rupees(adjusted.final_nav)} | "
+        f"{_rupees(adjusted.final_nav - raw.final_nav)} |",
+        "",
+        f"- **Run digest (raw):** `{raw.result.digest()}`",
+        f"- **Run digest (adjusted):** `{adjusted.result.digest()}`",
+        f"- **Digests identical:** {identical} "
+        "(expected here — adjusted equals raw with no CAs in the store).",
+        "",
+        "## Signal flips across a known split",
+        "",
+        (
+            "- None over this store: it holds no corporate actions, so no name's twelve-month "
+            "signal moves between the raw and adjusted runs. The flip is demonstrated on the "
+            "fixture split in `tests/integration/test_backtest_adjusted.py`, where the raw signal "
+            "shows a fake ~-50% twelve-month momentum across the ex-date and the adjusted signal "
+            "does not."
+            if not flipped
+            else "- " + ", ".join(flipped)
+        ),
+        "",
+        "## PIT",
+        "",
+        "- Both runs completed with every session's queries scoped to that session; no `PitError` "
+        "was raised. The adjusted momentum *ratio* is PIT-safe by construction: a corporate action "
+        "after the rebalance date scales both endpoints of the trailing return identically and "
+        "cancels, so no future split leaks into a past decision (invariant #7).",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def run_delta_report(
+    *,
+    start: date,
+    end: date,
+    opening_cash: Decimal = _DEFAULT_OPENING_CASH,
+    parameters: MomentumParameters | None = None,
+    data_root: Path | None = None,
+) -> str:
+    """Run the raw and adjusted backtests over the same window and render the M9.2 delta report."""
+    raw = run_naive_momentum(
+        start=start,
+        end=end,
+        opening_cash=opening_cash,
+        parameters=parameters,
+        data_root=data_root,
+        adjusted=False,
+    )
+    adjusted = run_naive_momentum(
+        start=start,
+        end=end,
+        opening_cash=opening_cash,
+        parameters=parameters,
+        data_root=data_root,
+        adjusted=True,
+    )
+    return render_delta_report(raw, adjusted)
+
+
 def _print_summary(run: BacktestResult) -> None:
     """A terse stdout summary; the full report is the markdown file when `--report` is passed."""
     c = run.comparison
@@ -744,6 +965,20 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--report", action="store_true", help=f"write the markdown report to {_REPORT_PATH}"
     )
     parser.add_argument(
+        "--raw",
+        dest="adjusted",
+        action="store_false",
+        help="source the momentum signal from raw L1 closes (pre-M9.2 baseline); default is the "
+        "L2 back-adjusted signal read through the query layer",
+    )
+    parser.add_argument(
+        "--delta-report",
+        action="store_true",
+        help=f"run the raw and adjusted backtests and write the M9.2 delta report to "
+        f"{_DELTA_REPORT_PATH}",
+    )
+    parser.set_defaults(adjusted=True)
+    parser.add_argument(
         "--opening-cash",
         type=Decimal,
         default=_DEFAULT_OPENING_CASH,
@@ -774,6 +1009,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     params = (
         MomentumParameters(top_n=args.top_n) if args.top_n is not None else MomentumParameters()
     )
+
+    if args.delta_report:
+        try:
+            report = run_delta_report(
+                start=start,
+                end=end,
+                opening_cash=args.opening_cash,
+                parameters=params,
+                data_root=args.data_root,
+            )
+        except BacktestError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        _DELTA_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _DELTA_REPORT_PATH.write_text(report, encoding="utf-8")
+        print(f"  delta report written to {_DELTA_REPORT_PATH}")
+        return 0
+
     try:
         run = run_naive_momentum(
             start=start,
@@ -781,6 +1034,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             opening_cash=args.opening_cash,
             parameters=params,
             data_root=args.data_root,
+            adjusted=args.adjusted,
         )
     except BacktestError as error:
         print(f"error: {error}", file=sys.stderr)
