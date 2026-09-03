@@ -158,10 +158,40 @@ reads +₹21,092 cr while the same document's EPS reads −69.45. The parser sto
 published. L0 is immutable and the store's contract is fidelity to it; silently "correcting" a
 filer would make the store disagree with its own lineage.
 
+## 7. Expected data size
+
+Measured, not estimated: the document-size mean is weighted by the real population of each
+(era x taxonomy) cell from every index chunk in the decade, and the L1 figure comes from writing
+real facts into partitions at the sizes the actual broadcast-date distribution produces (1,775
+partitions, median 16 filings, max 744).
+
+| Layer | What | Size |
+|---|---|---|
+| L0 | 80,583 XBRL documents @ 37.3 KB weighted mean | **3.01 GB** |
+| L0 | 80,583 `.meta.json` sidecars @ 316 B | 25 MB |
+| L0 | 88 index payloads (3-month chunks; 104 MB measured across the decade) | 104 MB |
+| L1 | `pit_fundamentals`: ~1.06 M fact rows in 1,775 date partitions | **12 MB** |
+| | **Total** | **~3.15 GB** (2.93 GiB) |
+
+Add up to ~0.7 GB of filesystem slack in the worst case — 161,342 small files on 4 KiB blocks —
+so budget **~3.2-3.9 GB** on disk.
+
+Two things this settles:
+
+* **The backlog's estimate of "fundamentals XBRL ~5-10 GB" was 2-3x high.** The measured 3.1 GB
+  keeps the parked S3-backed-L0 decision comfortably intact rather than pushing against it.
+* **L1 is negligible** — 12 MB for a decade, because the store keeps eight whitelisted concepts
+  plus segment revenue (10.5 facts per filing) and parquet dictionary-encodes the repetitive
+  columns (`isin`, `concept`, `source`, `l0_key`) down to ~11 bytes a row.
+
+The document mean rests on 107 measured documents (0.13% of the population) with real spread
+(11 KB-101 KB), so treat the 3.01 GB as ±5%: **2.8-3.2 GB** for the raw documents.
+
 ## 7. What is still reserved to the owner
 
-The full campaign — ~101,446 per-filing fetches — is the bulk execution B1 reserves for a human go
-(`NEEDS_GO`), unchanged. Everything above cost **33 index requests and 113 document requests**
+The full campaign — 101,446 per-filing fetches, resolving to 80,583 distinct documents (one
+document serves 1.26 entries; see the backlog on skipping the redundant ~21%) — is the bulk
+execution B1 reserves for a human go (`NEEDS_GO`), unchanged. Everything above cost **33 index requests and 113 document requests**
 (22 + 3 + 8 index; 22 fixture captures, 57 era samples, 34 through the live runner), which is the
 verify-and-sample scope B1 authorises explicitly — two orders of magnitude below the campaign.
 
