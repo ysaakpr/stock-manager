@@ -94,6 +94,7 @@ __all__ = [
     "TriSeries",
     "close_snapshot_url",
     "compute_tri",
+    "constituents_state_source",
     "constituents_url",
     "extend_tri",
     "ingest_constituents",
@@ -1150,6 +1151,22 @@ def l0_close_filename(snapshot_date: date) -> str:
     return f"ind_close_all_{snapshot_date:%d%m%Y}.csv"
 
 
+def constituents_state_source(index_slug: str) -> str:
+    """The sync-state source id for one index list — `nifty_index_constituents:<slug>`.
+
+    The constituents *register* entry is one row (`nifty_index_constituents`, the endpoint the URL
+    and crawl policy come from), but every index list publishes "as of today" through it, so a whole
+    sweep files many slugs under one logical date. A sync row is keyed `(source, logical_date)`, so
+    if every slug used the bare register id they would all collide on the one `(source, as_of)` row
+    — the first to `PUBLISHED` would make the next slug's `begin` an illegal transition out of a
+    terminal state. Qualifying the sync source with the slug gives each list its own row, so
+    `/status/sync` shows per-slug progress and one slug's failure is a `FAILED` row of its own
+    (what M10.2's per-slug journaling builds on). The *fetch* still uses the bare register id: the
+    URL, headers and 403 watch are all per-endpoint, not per-slug.
+    """
+    return f"{CONSTITUENTS_SOURCE_ID}:{index_slug}"
+
+
 def ingest_constituents(
     *,
     fetcher: Fetcher,
@@ -1160,6 +1177,7 @@ def ingest_constituents(
     as_of: date,
     data_root: Path | None = None,
     register: SourceRegister | None = None,
+    state_source: str | None = None,
 ) -> ConstituentSnapshot:
     """Take one index snapshot from nothing to `PUBLISHED`: fetch → L0 → parse → L1 → sync.
 
@@ -1168,35 +1186,41 @@ def ingest_constituents(
     snapshot date — both the logical date the L0 payload files under and the date the membership is
     recorded against.
 
+    `state_source` is the id the *sync row* is keyed under; it defaults to the per-slug
+    `constituents_state_source(index_slug)` so a sweep of many lists on one date does not collide on
+    one shared sync row (see that helper). The *fetch* always uses the bare register id
+    `CONSTITUENTS_SOURCE_ID`, because the URL and crawl policy are per-endpoint.
+
     A re-run of the same month is safe: `write_constituents_l1` is a no-op when the membership is
     unchanged and raises `ImmutableSnapshotError` if it would differ. Any failure is recorded on the
     sync row — with `retryable` set from what actually went wrong — then re-raised, so the caller
     sees the exception and `/status/sync` sees the state.
     """
+    sync_source = state_source or constituents_state_source(index_slug)
     url = constituents_url(index_slug, register)
-    tracker.begin(CONSTITUENTS_SOURCE_ID, as_of)
+    tracker.begin(sync_source, as_of)
     try:
         ref = fetcher.fetch(
             CONSTITUENTS_SOURCE_ID, url, as_of, filename=l0_constituents_filename(index_slug, as_of)
         )
-        tracker.mark_fetched(CONSTITUENTS_SOURCE_ID, as_of, checksum=ref.sha256, l0_path=ref.key)
+        tracker.mark_fetched(sync_source, as_of, checksum=ref.sha256, l0_path=ref.key)
 
         snapshot = parse_constituents_l0(
             l0, ref, index_slug=index_slug, index_name=index_name, as_of=as_of
         )
-        tracker.mark_validated(CONSTITUENTS_SOURCE_ID, as_of)
+        tracker.mark_validated(sync_source, as_of)
 
         write_constituents_l1(snapshot, data_root=data_root)
-        tracker.mark_normalized(CONSTITUENTS_SOURCE_ID, as_of)
+        tracker.mark_normalized(sync_source, as_of)
 
-        tracker.mark_published(CONSTITUENTS_SOURCE_ID, as_of)
+        tracker.mark_published(sync_source, as_of)
     except Exception as exc:
         tracker.mark_failed(
-            CONSTITUENTS_SOURCE_ID, as_of, f"{type(exc).__name__}: {exc}", retryable=_retryable(exc)
+            sync_source, as_of, f"{type(exc).__name__}: {exc}", retryable=_retryable(exc)
         )
         _LOG.error(
             "indices.constituents_ingest_failed",
-            source=CONSTITUENTS_SOURCE_ID,
+            source=sync_source,
             index=index_slug,
             as_of=as_of.isoformat(),
             error=f"{type(exc).__name__}: {exc}",

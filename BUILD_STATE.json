@@ -285,6 +285,23 @@
       "state": "DONE",
       "verify_output": "$ uv run python -m dataplatform.ingest.backfill --source nse_bhavcopy --from 2016-01-01 --to 2026-08-07 --dry-run && uv run pytest tests/integration/test_backfill.py -q\n(exit 0)\n0260623_F_0000.csv.zip\n2026-06-24\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260624_F_0000.csv.zip\n2026-06-25\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260625_F_0000.csv.zip\n2026-06-29\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260629_F_0000.csv.zip\n2026-06-30\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260630_F_0000.csv.zip\n2026-07-01\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260701_F_0000.csv.zip\n2026-07-02\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260702_F_0000.csv.zip\n2026-07-03\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260703_F_0000.csv.zip\n2026-07-06\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260706_F_0000.csv.zip\n2026-07-07\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260707_F_0000.csv.zip\n2026-07-08\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260708_F_0000.csv.zip\n2026-07-09\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260709_F_0000.csv.zip\n2026-07-10\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260710_F_0000.csv.zip\n2026-07-13\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260713_F_0000.csv.zip\n2026-07-14\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260714_F_0000.csv.zip\n2026-07-15\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260715_F_0000.csv.zip\n2026-07-16\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260716_F_0000.csv.zip\n2026-07-17\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260717_F_0000.csv.zip\n2026-07-20\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260720_F_0000.csv.zip\n2026-07-21\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260721_F_0000.csv.zip\n2026-07-22\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260722_F_0000.csv.zip\n2026-07-23\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260723_F_0000.csv.zip\n2026-07-24\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260724_F_0000.csv.zip\n2026-07-27\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260727_F_0000.csv.zip\n2026-07-28\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260728_F_0000.csv.zip\n2026-07-29\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260729_F_0000.csv.zip\n2026-07-30\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260730_F_0000.csv.zip\n2026-07-31\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260731_F_0000.csv.zip\n2026-08-03\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260803_F_0000.csv.zip\n2026-08-04\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260804_F_0000.csv.zip\n2026-08-05\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260805_F_0000.csv.zip\n2026-08-06\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_20260806_F_0000.csv.zip\n2026-08-07\tnse_bhavcopy_udiff\thttps://nsearchives.nseindia.com/content/cm/BhavC\n\u2026[truncated]"
     },
+    "M10.1": {
+      "attempts": 1,
+      "commit": "dc0b873",
+      "finished": "2026-09-03T14:21:04+00:00",
+      "first_started": "2026-09-03T14:07:32+00:00",
+      "last_started": "2026-09-03T14:07:32+00:00",
+      "note": "Built run_constituents_ingest sweep over the M3.9 single-index driver (broad + sectoral/thematic lists) returning a CoverageReport (published/skipped/parked with an enumerated ParkCause); resume keyed on the L1 artefact; fixed M3.9's shared-sync-row collision by per-slug state source (nifty_index_constituents:<slug>). Assumption: current 'as-of-today' snapshot only (historical membership is M10.2).",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_constituents_ingest.py -q\n(exit 0)\n..........                                                               [100%]\n\n$ uv run ruff format --check dataplatform/ingest/constituents_ingest.py tests/unit/test_constituents_ingest.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/constituents_ingest.py tests/unit/test_constituents_ingest.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/constituents_ingest.py tests/unit/test_constituents_ingest.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M10.4": {
+      "attempts": 0,
+      "human_cleared": true,
+      "previous_state": "PENDING",
+      "state": "PENDING"
+    },
     "M2.1": {
       "attempts": 1,
       "commit": "1941253",
@@ -977,9 +994,55 @@
       "previous_state": "IN_PROGRESS",
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_ca_backfill.py -q\n(exit 0)\n......                                                                   [100%]\n\n$ uv run ruff format --check dataplatform/ingest/corp_actions_backfill.py tests/unit/test_ca_backfill.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/corp_actions_backfill.py tests/unit/test_ca_backfill.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/corp_actions_backfill.py tests/unit/test_ca_backfill.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M9.2": {
+      "attempts": 2,
+      "commit": "3808744",
+      "finished": "2026-09-03T08:22:05+00:00",
+      "first_started": "2026-09-03T07:55:41+00:00",
+      "last_started": "2026-09-03T08:16:33+00:00",
+      "note": "Re-pointed naive-momentum signal onto L2 back-adjusted closes via QueryService.cross_section (_AdjustedCloseSource), raw fills/marks kept (inv #3); delta report added. Real lake is CA-free (M9.1 backfill B1-gated) so L2==L1 and delta is zero over the store; de-corruption + wipe/rebuild determinism asserted on a known-split fixture.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_backtest_adjusted.py -q\n(exit 0)\n....                                                                     [100%]\n\n$ uv run ruff format --check backtest/run.py tests/integration/test_backtest_adjusted.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/run.py tests/integration/test_backtest_adjusted.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/run.py tests/integration/test_backtest_adjusted.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M9.3": {
+      "attempts": 1,
+      "commit": "6e4d54a",
+      "finished": "2026-09-03T08:47:01+00:00",
+      "first_started": "2026-09-03T08:23:03+00:00",
+      "last_started": "2026-09-03T08:23:03+00:00",
+      "note": "Investable universe = M3.9 as-of index membership \u2229 a stated median-turnover floor (nifty500, >=Rs1cr/365d), PIT-safe; new --universe-report; 10y run: universe 1483->894, XIRR 11.70%->12.05%. Membership screen inert on the real store (no constituents snapshots), so intersection asserted on fixture.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_backtest_universe.py -q\n(exit 0)\n......                                                                   [100%]\n\n$ uv run ruff format --check backtest/run.py tests/integration/test_backtest_universe.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/run.py tests/integration/test_backtest_universe.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/run.py tests/integration/test_backtest_universe.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M9.4": {
+      "attempts": 1,
+      "commit": "d39c9c4",
+      "finished": "2026-09-03T09:02:10+00:00",
+      "first_started": "2026-09-03T08:48:15+00:00",
+      "last_started": "2026-09-03T08:48:15+00:00",
+      "note": "Benchmark now reads M3.9's computed TRI (read_tri_series) through the unchanged compare_to_benchmarks path; L1 proxy is a stated fallback when no TRI in store. Report states computed-not-licensed provenance and excess.",
+      "previous_state": "FAILED",
+      "reason": "types failed with exit 1",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_backtest_benchmark.py -q\n(exit 0)\n.......                                                                  [100%]\n\n$ uv run ruff format --check backtest/run.py tests/integration/test_backtest_benchmark.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/run.py tests/integration/test_backtest_benchmark.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/run.py tests/integration/test_backtest_benchmark.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M9.5": {
+      "attempts": 3,
+      "commit": "3b0d313",
+      "finished": "2026-09-03T09:44:25+00:00",
+      "first_started": "2026-09-03T09:03:16+00:00",
+      "last_started": "2026-09-03T09:10:25+00:00",
+      "note": "Momentum v2: 4 independently-toggleable a-priori changes (12-1, turnover banding, 200d-MA regime filter, inverse-vol weights) behind MomentumV2Parameters; all-off == naive. 18 unit tests incl. an inversion test per toggle + PIT-leak guards on signal and regime. 10y increment report (naive vs each vs all-on: XIRR/maxDD/turnover/cost) at ops/gates/M9-momentum-v2-report.md. Assumed adjusted=False + L1/proxy benchmark+regime index over this CA-free/ungated store, as M9.2-M9.4 established.",
+      "previous_state": "IN_PROGRESS",
+      "reason": "runner exited while task was in progress",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-09-03T07:53:58+00:00",
+  "updated_at": "2026-09-03T14:21:04+00:00",
   "version": 1,
   "wave": 1
 }
