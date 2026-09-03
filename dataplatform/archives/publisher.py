@@ -22,7 +22,10 @@ Offline by construction: reads L1 parquet and L0 refs, writes files and one DB r
 
 from __future__ import annotations
 
+import argparse
 import hashlib
+import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -39,9 +42,10 @@ from dataplatform.archives.manifest import (
     ManifestFile,
     manifest_sha256,
 )
-from dataplatform.clock import Clock
-from dataplatform.logging import get_logger
-from dataplatform.store.db import Connection
+from dataplatform.clock import Clock, SystemClock
+from dataplatform.config import Settings, get_settings
+from dataplatform.logging import configure_logging, get_logger
+from dataplatform.store.db import Connection, connection
 from dataplatform.store.l0 import L0Ref, L0Store
 from dataplatform.store.paths import l1_partition_path
 from dataplatform.store.schemas import PRICES_RAW_DATASET, PRICES_RAW_SCHEMA
@@ -52,6 +56,7 @@ __all__ = [
     "ArchivePublishError",
     "PublishReport",
     "bundle_dir",
+    "main",
     "publish_bundle",
 ]
 
@@ -323,3 +328,58 @@ def _record_bundle(
             published_at,
         ),
     )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """CLI entry point — publish one backfilled date's bundle into the operator's own lake.
+
+    What it does: builds the real wiring from settings (the configured `data_root` lake and
+    Postgres, B10 `SystemClock`), publishes the date's bundle with `publish_bundle`, commits the
+    `archive_bundle` row, and prints the manifest sha256, file count and byte total. The bundle is
+    then immediately downloadable at `GET /archives?date=` on the same host (§10 legal gate — local
+    and personal download only). This is how an operator publishes an archive for a date the daily
+    EOD job never covered (e.g. a range backfilled by M1.13, whose runner does not itself archive).
+    What it assumes: the date is backfilled — its L1 `prices_raw` partition and the L0 payloads it
+    derived from both exist under `data_root`. It refuses loud (`ArchivePublishError`, exit 1)
+    rather than emit an empty or unprovable bundle. Never opens a socket.
+    """
+    parser = argparse.ArgumentParser(prog="archive-publisher", description=__doc__)
+    parser.add_argument(
+        "--date",
+        dest="logical_date",
+        required=True,
+        type=date.fromisoformat,
+        help="the backfilled trading date to publish (YYYY-MM-DD)",
+    )
+    args = parser.parse_args(argv)
+
+    configure_logging()
+    settings: Settings = get_settings()
+    clock = SystemClock()
+    store = L0Store(clock=clock, data_root=settings.data_root)
+
+    try:
+        with connection(settings) as conn:
+            report = publish_bundle(
+                conn,
+                store,
+                args.logical_date,
+                clock=clock,
+                archive_root=settings.data_root,
+                data_root=settings.data_root,
+            )
+            conn.commit()
+    except ArchivePublishError as error:
+        print(f"cannot publish {args.logical_date.isoformat()}: {error}", file=sys.stderr)
+        return 1
+
+    print(
+        f"{report.logical_date.isoformat()}: {report.file_count} files, "
+        f"{report.total_bytes} bytes at {report.bundle_path} "
+        f"(manifest {report.manifest_sha256})"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

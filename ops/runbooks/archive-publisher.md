@@ -21,6 +21,21 @@ An agent must not act on the redistribution question; it may only research and w
 
 Reads L1 off disk and writes files + one `archive_bundle` row. Never opens a socket.
 
+**CLI (the operator path).** Publishes one already-backfilled date into the configured lake and
+Postgres, then the bundle is immediately downloadable at `GET /archives?date=` on the same host:
+
+```bash
+uv run python -m dataplatform.archives --date 2024-01-02
+# 2024-01-02: 2 files, 539382 bytes at archives/2024-01-02 (manifest 27b42ba9…)
+```
+
+Use this to publish an archive for a date the daily EOD job never covered — e.g. any date in the
+10-year range backfilled by M1.13, whose backfill runner lands data in L1 but does **not** itself
+publish archives. The daily EOD job (M1.10) publishes the current session's bundle automatically;
+this CLI is for historical/back-publishing. It refuses loud (exit 1) if the date is not backfilled.
+
+**Programmatic.** The same call the EOD job and the CLI make:
+
 ```python
 from dataplatform.archives import publish_bundle
 from dataplatform.clock import SystemClock
