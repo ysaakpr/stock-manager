@@ -384,15 +384,20 @@ def _rights_terms(text: str) -> _Extraction:
     if len(money) > 1:
         return _conflicting(f"{len(money)} different rupee amounts in one rights string")
     new, held = ratios[0]
-    if not money:
-        # A ratio alone cannot price the entitlement, so the factor is still undefined.
-        terms = RightsTerms(new_shares=new, held_shares=held)
-        return terms, ManualQueueReason.TERMS_NOT_STATED, "rights subscription price not stated"
-    if "premium" in text:
-        terms = RightsTerms(new_shares=new, held_shares=held, premium_inr=money[0])
-    else:
-        terms = RightsTerms(new_shares=new, held_shares=held, issue_price_inr=money[0])
-    return terms, None, ""
+    try:
+        if not money:
+            # A ratio alone cannot price the entitlement, so the factor is still undefined.
+            terms = RightsTerms(new_shares=new, held_shares=held)
+            return terms, ManualQueueReason.TERMS_NOT_STATED, "rights subscription price not stated"
+        if "premium" in text:
+            terms = RightsTerms(new_shares=new, held_shares=held, premium_inr=money[0])
+        else:
+            terms = RightsTerms(new_shares=new, held_shares=held, issue_price_inr=money[0])
+        return terms, None, ""
+    except ValidationError as exc:
+        # A term that parses to numbers but fails model validation (e.g. a zero issue price) is a
+        # single bad row — queue it like any other unusable one, never let it fail the whole fetch.
+        return _conflicting(f"rights terms not usable: {exc.error_count()} error")
 
 
 def _dividend_kind(text: str) -> DividendKind:
@@ -407,19 +412,28 @@ def _dividend_kind(text: str) -> DividendKind:
 
 def _dividend_terms(text: str) -> _Extraction:
     kind = _dividend_kind(text)
-    bare = DividendTerms(dividend_kind=kind)
     money, percents = _money_values(text), _percents(text)
-    if len(money) > 1:
-        return bare, ManualQueueReason.TERMS_CONFLICTING, f"{len(money)} dividend amounts in one"
-    if len(percents) > 1:
-        return bare, ManualQueueReason.TERMS_CONFLICTING, f"{len(percents)} percentages in one"
-    if money and percents:
-        return bare, ManualQueueReason.TERMS_CONFLICTING, "both a rupee amount and a percentage"
-    if money:
-        return DividendTerms(dividend_kind=kind, amount_inr=money[0]), None, ""
-    if percents:
-        return DividendTerms(dividend_kind=kind, percent_of_face_value=percents[0]), None, ""
-    return bare, ManualQueueReason.TERMS_NOT_STATED, "dividend amount not stated"
+    try:
+        bare = DividendTerms(dividend_kind=kind)
+        if len(money) > 1:
+            return (
+                bare,
+                ManualQueueReason.TERMS_CONFLICTING,
+                f"{len(money)} dividend amounts in one",
+            )
+        if len(percents) > 1:
+            return bare, ManualQueueReason.TERMS_CONFLICTING, f"{len(percents)} percentages in one"
+        if money and percents:
+            return bare, ManualQueueReason.TERMS_CONFLICTING, "both a rupee amount and a percentage"
+        if money:
+            return DividendTerms(dividend_kind=kind, amount_inr=money[0]), None, ""
+        if percents:
+            return DividendTerms(dividend_kind=kind, percent_of_face_value=percents[0]), None, ""
+        return bare, ManualQueueReason.TERMS_NOT_STATED, "dividend amount not stated"
+    except ValidationError as exc:
+        # A non-positive rupee amount (e.g. a "Rs 0" parse artifact) is a single bad row — queue it
+        # rather than raise and fail the whole date-chunk fetch (mirrors _face_value_terms).
+        return _conflicting(f"dividend terms not usable: {exc.error_count()} error")
 
 
 def _exchange_ratio_terms(text: str) -> _Extraction:

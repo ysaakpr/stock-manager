@@ -200,7 +200,9 @@ class RightsTerms(_TermsBase):
         default=None, gt=0, description="Full subscription price per new share, INR."
     )
     premium_inr: Decimal | None = Field(
-        default=None, gt=0, description="Premium over face value per new share, INR."
+        default=None,
+        ge=0,
+        description="Premium over face value per new share, INR. Zero for a rights issue at par.",
     )
 
     @model_validator(mode="after")
