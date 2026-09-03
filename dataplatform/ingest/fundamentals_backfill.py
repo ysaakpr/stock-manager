@@ -85,7 +85,7 @@ from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
 from dataplatform.logging import get_logger
 from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store.db import connection
-from dataplatform.store.l0 import L0Error, L0Store
+from dataplatform.store.l0 import L0Error, L0Ref, L0Store
 from dataplatform.store.l1 import read_prices_raw
 from dataplatform.store.pit_fundamentals import write_pit
 
@@ -244,6 +244,7 @@ class FundamentalsBackfillReport:
     filings_in_universe: int = 0
     filings_published: int = 0
     filings_skipped_published: int = 0
+    filings_l0_reused: int = 0
     filings_failed: int = 0
     facts_written: int = 0
     skipped_out_of_universe: int = 0
@@ -646,9 +647,7 @@ class FundamentalsBackfillRunner:
         _LOG.info("fundamentals_backfill.filing_start", unit=unit.label, url=unit.url)
         try:
             self._sync.begin(unit.state_source, unit.logical_date)
-            ref = self._fetcher.fetch(
-                parser.SOURCE_ID, unit.url, unit.logical_date, filename=unit.filename
-            )
+            ref = self._ref_for(unit, report=report)
             self._sync.mark_fetched(
                 unit.state_source, unit.logical_date, checksum=ref.sha256, l0_path=ref.key
             )
@@ -696,6 +695,40 @@ class FundamentalsBackfillRunner:
                 index=False,
             )
         return True
+
+    def _ref_for(self, unit: FilingUnit, *, report: FundamentalsBackfillReport) -> L0Ref:
+        """This filing's L0 payload — reused if it is already in the lake, fetched if not.
+
+        One document is named by more than one index entry: a December-year-end company's is linked
+        by both its Quarterly and its Annual record, and refilings share a URL. Over the whole
+        ten-year index, 101,446 actionable entries resolve to 80,597 distinct
+        `(filing_date, filename)` payloads — so fetching per entry re-requests bytes L0 already
+        holds 20,849 times, a fifth of the campaign and about seventeen hours of its wall-clock.
+        `L0Store.put` did notice (it logs `state=DUPLICATE`), but only after the request had been
+        made.
+
+        The parse still runs per entry — the entry is what selects the results column, so two
+        entries over one document legitimately yield two different filings. This skips the
+        *download*, not the work. L0 is immutable and checksummed, and `L0Store.get` re-verifies
+        the digest on the way out, so a reused payload is the same bytes a fetch would have
+        returned; anything unreadable raises and the unit fails loudly rather than parsing stale
+        data.
+        """
+        try:
+            ref = self._l0.ref_for(parser.SOURCE_ID, unit.logical_date, unit.filename)
+        except (L0Error, FileNotFoundError):
+            return self._fetcher.fetch(
+                parser.SOURCE_ID, unit.url, unit.logical_date, filename=unit.filename
+            )
+        report.filings_l0_reused += 1
+        _LOG.info(
+            "fundamentals_backfill.filing_l0_reused",
+            unit=unit.label,
+            l0_key=ref.key,
+            sha256=ref.sha256,
+            state="FETCHED",
+        )
+        return ref
 
     def _park_on_spike(
         self, label: str, state_source: str, logical_date: date, spike: ForbiddenSpikeError
@@ -811,6 +844,7 @@ def render_report(
         f"- Filings in universe (fetched): {report.filings_in_universe}",
         f"- Filings published: {report.filings_published}",
         f"- Filings resumed (already published): {report.filings_skipped_published}",
+        f"- Filings whose L0 payload was reused (no re-fetch): {report.filings_l0_reused}",
         f"- Filings failed: {report.filings_failed}",
         f"- Facts written: {report.facts_written}",
         f"- ISINs covered: {len(report.covered_isins)}",

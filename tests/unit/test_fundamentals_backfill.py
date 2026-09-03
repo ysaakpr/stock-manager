@@ -746,6 +746,62 @@ def test_a_failed_filing_is_retried_by_the_next_run(tmp_path: Path) -> None:
     assert healed.filings_skipped_published == 0  # nothing had been published to skip
 
 
+def test_a_document_named_by_two_entries_is_fetched_once(tmp_path: Path) -> None:
+    """Two entries over one document cost one download and still produce two filings.
+
+    Schaeffler's document is named by both a Quarterly and an Annual entry on the same broadcast
+    date, so the second entry's payload is already in L0. Across the ten-year index this is a fifth
+    of the campaign's requests. The *parse* still runs per entry — the entry selects the results
+    column, so the two yield different periods — which is why this skips the download and not the
+    work.
+    """
+    settings = _settings(tmp_path)
+    plan = _quarterly_plan()
+    transport = _ok_transport(plan)
+    report = _runner(transport, settings=settings, sync=_FakeSync(), universe={SCHAEFFLER}).run(
+        plan
+    )
+
+    assert report.filings_published == 4  # two natures x (quarterly, annual)
+    assert report.filings_l0_reused == 2  # one per nature: the second entry over each document
+    archive = [r.url for r in transport.requests if "nsearchives" in r.url]
+    assert len(archive) == 2  # two documents, two downloads — not four
+    assert len(set(archive)) == 2
+
+    rendered = fb.render_report(from_date=FROM, to_date=TO, universe_size=1, report=report)
+    assert "Filings whose L0 payload was reused (no re-fetch): 2" in rendered
+
+
+def test_a_reused_payload_yields_the_same_facts_as_a_fetch(tmp_path: Path) -> None:
+    """Reuse must be indistinguishable from a fetch, or it is a correctness hole not a saving."""
+    from decimal import Decimal
+
+    settings = _settings(tmp_path)
+    plan = _quarterly_plan()
+    _runner(_ok_transport(plan), settings=settings, sync=_FakeSync(), universe={SCHAEFFLER}).run(
+        plan
+    )
+
+    stored = read_latest(date(2026, 9, 1), data_root=settings.data_root)
+    # The annual entry's filing is the one whose payload was reused (it sorts after the quarterly).
+    assert _one(
+        stored,
+        SCHAEFFLER,
+        "revenue_from_operations",
+        date(2024, 12, 31),
+        nature="Consolidated",
+        period_start=date(2024, 1, 1),
+    ) == Decimal("82323800000.00")
+    assert _one(
+        stored,
+        SCHAEFFLER,
+        "revenue_from_operations",
+        date(2024, 12, 31),
+        nature="Consolidated",
+        period_start=date(2024, 10, 1),
+    ) == Decimal("21360600000.00")
+
+
 def test_index_plan_is_pure_and_offline() -> None:
     register = load_register()
     # Both periods across 3-month chunks over a full year: 4 quarters x 2 periods = 8 chunks.
