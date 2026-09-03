@@ -43,9 +43,16 @@ from dataplatform.quality.gaps import (
 )
 from dataplatform.status.sync_state import SyncRecord, SyncState
 from dataplatform.store.paths import l1_partition_dir
+from dataplatform.store.schemas import PRICES_RAW_DATASET
 
 SOURCE = "nse_bhavcopy_udiff"
 LEGACY = "nse_bhavcopy_legacy"
+
+# A price source's sync-record id (SOURCE) and the L1 dataset its partitions actually land in are
+# NOT the same name: the writer lands every exchange/era in the one canonical `prices_raw` dataset.
+# Keeping these distinct here is deliberate — conflating them is exactly what hid the pre-M1.14
+# presence-probe bug, where the report probed `data/L1/nse_bhavcopy_udiff/` (which never exists).
+L1_DATASET = PRICES_RAW_DATASET
 
 AT = datetime(2026, 8, 7, 18, 30, tzinfo=IST)
 
@@ -405,14 +412,14 @@ def test_duplicate_sources_are_examined_once() -> None:
 @pytest.fixture
 def lake(tmp_path: Path) -> Path:
     """A scratch data root with an L1 dataset that already holds one partition."""
-    partition = l1_partition_dir(SOURCE, MONDAY, data_root=tmp_path)
+    partition = l1_partition_dir(L1_DATASET, MONDAY, data_root=tmp_path)
     partition.mkdir(parents=True)
     (partition / "part.parquet").write_bytes(b"PAR1rows")
     return tmp_path
 
 
 def test_a_present_l1_partition_is_present(lake: Path) -> None:
-    assert LakeL1Presence(lake).check(SOURCE, MONDAY).check is L1Check.PRESENT
+    assert LakeL1Presence(lake).check(L1_DATASET, MONDAY).check is L1Check.PRESENT
 
 
 def test_a_deleted_l1_partition_shows_up_as_unexplained(lake: Path) -> None:
@@ -423,7 +430,7 @@ def test_a_deleted_l1_partition_shows_up_as_unexplained(lake: Path) -> None:
     lost L1 partition would be invisible to the one report that is supposed to find it.
     """
     published = rows(record(SyncState.PUBLISHED, logical_date=MONDAY))
-    expectations = {SOURCE: expectation(l1_dataset=SOURCE)}
+    expectations = {SOURCE: expectation(l1_dataset=L1_DATASET)}
     presence = LakeL1Presence(lake)
 
     before = report_over(
@@ -433,7 +440,7 @@ def test_a_deleted_l1_partition_shows_up_as_unexplained(lake: Path) -> None:
     assert before.complete == 1
     assert before.l1_unchecked == 0
 
-    partition = l1_partition_dir(SOURCE, MONDAY, data_root=lake)
+    partition = l1_partition_dir(L1_DATASET, MONDAY, data_root=lake)
     (partition / "part.parquet").unlink()
     partition.rmdir()
 
@@ -451,10 +458,10 @@ def test_a_deleted_l1_partition_shows_up_as_unexplained(lake: Path) -> None:
 
 def test_an_empty_partition_file_is_not_a_partition(lake: Path) -> None:
     """A zero-byte part file is a failed write. Counting it as data would hide the failure."""
-    partition = l1_partition_dir(SOURCE, MONDAY, data_root=lake)
+    partition = l1_partition_dir(L1_DATASET, MONDAY, data_root=lake)
     (partition / "part.parquet").write_bytes(b"")
 
-    assert LakeL1Presence(lake).check(SOURCE, MONDAY).check is L1Check.ABSENT
+    assert LakeL1Presence(lake).check(L1_DATASET, MONDAY).check is L1Check.ABSENT
 
 
 def test_a_dataset_that_was_never_normalised_is_counted_not_flagged(tmp_path: Path) -> None:
@@ -467,7 +474,7 @@ def test_a_dataset_that_was_never_normalised_is_counted_not_flagged(tmp_path: Pa
         MONDAY,
         MONDAY,
         records=rows(record(SyncState.PUBLISHED, logical_date=MONDAY)),
-        expectations={SOURCE: expectation(l1_dataset=SOURCE)},
+        expectations={SOURCE: expectation(l1_dataset=L1_DATASET)},
         l1_presence=LakeL1Presence(tmp_path),
     )
 
@@ -481,11 +488,11 @@ def test_the_l1_partition_is_only_looked_up_for_a_row_that_claims_the_data_is_th
 ) -> None:
     """A FAILED pair is already unexplained for a better reason; the lake has nothing to add."""
     entry = classify_pair(
-        expectation(l1_dataset=SOURCE),
+        expectation(l1_dataset=L1_DATASET),
         MONDAY,
         DayKind.SESSION,
         record(SyncState.FAILED, logical_date=MONDAY, last_error="HTTP 500"),
-        l1=L1Result(L1Check.ABSENT, l1_partition_dir(SOURCE, MONDAY, data_root=lake)),
+        l1=L1Result(L1Check.ABSENT, l1_partition_dir(L1_DATASET, MONDAY, data_root=lake)),
     )
 
     assert entry is not None
@@ -506,6 +513,20 @@ def test_expectations_come_from_the_checked_in_source_register() -> None:
     assert udiff.era_start == date(2024, 7, 8)
     assert not udiff.in_era(date(2024, 7, 7))
     assert legacy.in_era(date(2024, 7, 7))
+
+
+def test_price_sources_resolve_their_l1_dataset_to_prices_raw() -> None:
+    """Regression (M1.14): a price source's L1 partitions land in the canonical `prices_raw`
+    dataset, not under its own id. Probing `data/L1/<source_id>/` never finds them, so every
+    published day silently reports NO_DATASET and a deleted partition can never surface as
+    unexplained. Pin the mapping here so production and the deletion test can never drift apart
+    again — both NSE eras and BSE must resolve to `prices_raw`.
+    """
+    expectations = expectations_from_register()
+    for price_source in ("nse_bhavcopy_udiff", "nse_bhavcopy_legacy", "bse_bhavcopy_udiff"):
+        assert expectations[price_source].l1_dataset == PRICES_RAW_DATASET, price_source
+    # A non-price per-session source keeps its own id as its L1 dataset name.
+    assert expectations["nse_fii_dii_flows"].l1_dataset == "nse_fii_dii_flows"
 
 
 def test_a_non_per_session_cadence_is_not_measured_against_the_trading_calendar() -> None:

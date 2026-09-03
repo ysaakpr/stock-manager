@@ -51,6 +51,7 @@ from dataplatform.logging import get_logger
 from dataplatform.status.sync_state import SyncRecord, SyncState, SyncStateStore
 from dataplatform.store.db import Connection
 from dataplatform.store.paths import l1_partition_dir
+from dataplatform.store.schemas import PRICES_RAW_DATASET
 
 __all__ = [
     "PER_SESSION_CADENCES",
@@ -255,6 +256,20 @@ class SourceExpectation:
         return f"{start}..{end}"
 
 
+#: The §4.1 rows whose parsed sessions all land in the single canonical L1 `prices_raw` dataset —
+#: both exchanges and both eras, tagged by `exchange` (see `ingest.backfill.write_prices_raw`). The
+#: L1 writer does *not* shard price data per source id, so a price source's presence must be probed
+#: under `prices_raw`, not under its own id. Every other per-session source keeps its id as its
+#: dataset name (the `/status/sync?dataset=` convention); an unknown directory reports `NO_DATASET`.
+_PRICES_RAW_ROWS: Final[frozenset[str]] = frozenset(
+    {
+        "NSE equity OHLCV (≤ ~08-Jul-2024)",
+        "NSE equity OHLCV (UDiFF, ≥ Jul-2024)",
+        "BSE equity OHLCV",
+    }
+)
+
+
 def expectations_from_register(
     register: source_register.SourceRegister | None = None,
 ) -> dict[str, SourceExpectation]:
@@ -262,9 +277,11 @@ def expectations_from_register(
 
     What it does: reads each entry's `cadence` and `era` — the register is already the single
     place those facts live, so the gap report reads them rather than restating them.
-    What it assumes: the L1 dataset for a per-session source carries the source's own id, which is
-    the convention `/status/sync?dataset=` already uses. A wrong guess costs nothing: an unknown
-    dataset directory reports `NO_DATASET` and is counted, never flagged as a missing partition.
+    What it assumes: a price-OHLCV source's rows land in the canonical `prices_raw` L1 dataset
+    (`_PRICES_RAW_ROWS`); every other per-session source's L1 dataset carries the source's own id,
+    the convention `/status/sync?dataset=` uses. Probing the wrong directory reports `NO_DATASET`
+    and is *counted as unchecked* — it never flags a missing partition — so a price source pointed
+    at its own id (the pre-M1.14 bug) silently left every published day unverified.
     """
     loaded = source_register.load() if register is None else register
     return {
@@ -273,10 +290,23 @@ def expectations_from_register(
             per_session=entry.cadence in PER_SESSION_CADENCES,
             era_start=entry.era.start,
             era_end=entry.era.end,
-            l1_dataset=entry.id if entry.cadence in PER_SESSION_CADENCES else None,
+            l1_dataset=_l1_dataset_for(entry.plan_row, entry.id, entry.cadence),
         )
         for entry in loaded.sources
     }
+
+
+def _l1_dataset_for(plan_row: str, source_id: str, cadence: str) -> str | None:
+    """The L1 dataset a source's partitions actually land in, or None if it owes no per-session L1.
+
+    Price-OHLCV rows resolve to `prices_raw` (the writer's one dataset for both exchanges); other
+    per-session sources keep their own id; non-per-session sources have no per-day L1 partition.
+    """
+    if cadence not in PER_SESSION_CADENCES:
+        return None
+    if plan_row in _PRICES_RAW_ROWS:
+        return PRICES_RAW_DATASET
+    return source_id
 
 
 @lru_cache(maxsize=1)
