@@ -12,6 +12,7 @@ from datetime import timedelta
 import pytest
 
 from dataplatform.scheduler import (
+    JOB_NAME,
     Job,
     JobContext,
     JobNotRegisteredError,
@@ -74,10 +75,43 @@ def test_the_registry_keeps_registration_order() -> None:
     assert len(registry) == 2 and "alpha" in registry and "nope" not in registry
 
 
-def test_the_default_registry_holds_the_placeholder_eod_job() -> None:
+def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
+    """The exact set, in registration order — a job may be neither dropped nor added by accident.
+
+    Pinned exactly rather than by `in` on purpose, and it is the *only* assertion here that has to
+    change when a job is added: a registry that silently lost the daily EOD job looks identical to
+    a healthy one at runtime until 18:30 comes and goes, and a job registered by an unreviewed
+    import is exactly what §8.1's explicit registry exists to prevent. Each job's own cadence is
+    proved by its own task's tests (`tests/integration/test_scheduler.py` for the EOD pipeline,
+    `tests/integration/test_constituents_snapshot_job.py` for the weekly snapshot); what is proved
+    here is the membership.
+    """
     registry = default_registry()
-    assert registry.names() == ("eod_pipeline",)
+    assert registry.names() == ("eod_pipeline", "constituents_snapshot")
     assert registry.get("eod_pipeline").cron == "30 18 * * mon-fri"
+    assert registry.get("constituents_snapshot").cron == "0 20 * * sat"
+
+
+def test_every_default_job_is_valid_and_describes_itself() -> None:
+    """The construction-time guarantees, asserted over whatever the registry holds.
+
+    This is the half of the module docstring's promise that survives a new job being added: a bad
+    cron or a non-positive timeout in job number three must fail in `make check`, not at the hour
+    it was supposed to fire. `Job.__post_init__` already enforces both, so the assertions below can
+    only fail if that validation is weakened or bypassed — which is the point of having them.
+    """
+    from zoneinfo import ZoneInfo
+
+    exchange = ZoneInfo("Asia/Kolkata")
+    jobs = [default_registry().get(name) for name in default_registry().names()]
+    assert jobs, "a scheduler with no jobs is a misconfiguration, not a valid default"
+    for job in jobs:
+        assert JOB_NAME.match(job.name), job.name
+        assert job.timeout > timedelta(0), job.name
+        # Builds in the exchange timezone the scheduler supplies from Settings, never the host's.
+        assert str(job.trigger(exchange).timezone) == "Asia/Kolkata", job.name
+        # A registered job nobody can identify from `scheduler list` is an operational trap.
+        assert job.description.strip(), job.name
 
 
 def test_the_default_registry_is_a_fresh_object_each_call() -> None:
