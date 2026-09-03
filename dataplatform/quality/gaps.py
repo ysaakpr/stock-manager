@@ -269,22 +269,41 @@ _PRICES_RAW_ROWS: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: The cash price core is *ingested* under an era-independent source-set name, not under the
+#: register's per-era ids: `sync_state` rows and the trading interlock are keyed on
+#: `backfill.NSE_BHAVCOPY` / `BSE_BHAVCOPY` (see `backfill.FetchRequest.state_source`), and every
+#: session — both eras, both exchanges — lands in the single `prices_raw` L1 dataset. The register,
+#: meanwhile, splits each exchange into per-era entries. So the source the gap report actually scans
+#: (`GapScanner` defaults to the sources `sync_state` holds rows for) is a name the register does
+#: not contain, and without this it falls through to the loud default and probes
+#: `data/L1/nse_bhavcopy/`, which never exists — the M1.14 defect. This maps each state-source name
+#: to the register ids it aggregates; the union of their eras is the state-source's era, so a
+#: pre-cutover BSE session (legacy era not yet wired) is not reported as owed. `test_gaps` pins
+#: these names and constituents to `backfill.SOURCE_SETS` so they cannot drift.
+_PRICE_STATE_SOURCES: Final[dict[str, tuple[str, ...]]] = {
+    "nse_bhavcopy": ("nse_bhavcopy_legacy", "nse_bhavcopy_udiff"),
+    "bse_bhavcopy": ("bse_bhavcopy_udiff",),
+}
+
 
 def expectations_from_register(
     register: source_register.SourceRegister | None = None,
 ) -> dict[str, SourceExpectation]:
-    """Build one expectation per registered source from the D1 Source Register (C.1).
+    """Build the gap report's expectations from the D1 Source Register (C.1).
 
     What it does: reads each entry's `cadence` and `era` — the register is already the single
-    place those facts live, so the gap report reads them rather than restating them.
-    What it assumes: a price-OHLCV source's rows land in the canonical `prices_raw` L1 dataset
-    (`_PRICES_RAW_ROWS`); every other per-session source's L1 dataset carries the source's own id,
-    the convention `/status/sync?dataset=` uses. Probing the wrong directory reports `NO_DATASET`
-    and is *counted as unchecked* — it never flags a missing partition — so a price source pointed
-    at its own id (the pre-M1.14 bug) silently left every published day unverified.
+    place those facts live — and *additionally* emits an expectation under each era-independent
+    price source-set name (`_PRICE_STATE_SOURCES`), because that is the name ingest tracks the
+    price core under in `sync_state` and the name `GapScanner` therefore scans.
+    What it assumes: a price source's rows land in the canonical `prices_raw` L1 dataset — both the
+    per-era register ids (`_PRICES_RAW_ROWS`) and the aggregate state-source names resolve there.
+    Every other per-session source's L1 dataset carries the source's own id, the convention
+    `/status/sync?dataset=` uses. Probing the wrong directory reports `NO_DATASET` and is *counted
+    as unchecked* — it never flags a missing partition — so a price source pointed at its own id
+    (the pre-M1.14 bug) silently left every published day unverified.
     """
     loaded = source_register.load() if register is None else register
-    return {
+    expectations = {
         entry.id: SourceExpectation(
             source=entry.id,
             per_session=entry.cadence in PER_SESSION_CADENCES,
@@ -294,6 +313,8 @@ def expectations_from_register(
         )
         for entry in loaded.sources
     }
+    expectations.update(_price_state_expectations(loaded))
+    return expectations
 
 
 def _l1_dataset_for(plan_row: str, source_id: str, cadence: str) -> str | None:
@@ -307,6 +328,38 @@ def _l1_dataset_for(plan_row: str, source_id: str, cadence: str) -> str | None:
     if plan_row in _PRICES_RAW_ROWS:
         return PRICES_RAW_DATASET
     return source_id
+
+
+def _price_state_expectations(
+    register: source_register.SourceRegister,
+) -> dict[str, SourceExpectation]:
+    """One expectation per era-independent price source-set name, resolving to `prices_raw`.
+
+    The era is the union of the state-source's constituent register eras — contiguous by
+    construction (legacy meets UDiFF at the cutover) — so the aggregate owes a file exactly on the
+    sessions its wired eras covered and no earlier. A constituent the register does not carry is
+    skipped, so a not-yet-wired era (BSE legacy) neither errors here nor manufactures owed days.
+    """
+    by_id = {entry.id: entry for entry in register.sources}
+    out: dict[str, SourceExpectation] = {}
+    for state_source, constituent_ids in _PRICE_STATE_SOURCES.items():
+        eras = [by_id[cid].era for cid in constituent_ids if cid in by_id]
+        if not eras:
+            continue
+        starts = [era.start for era in eras]
+        ends = [era.end for era in eras]
+        # A None bound on either side means "unbounded" and swallows the others: a source with an
+        # open-ended era owes files to the range's edge. Otherwise the union is the widest span.
+        era_start = None if any(s is None for s in starts) else min(s for s in starts if s)
+        era_end = None if any(e is None for e in ends) else max(e for e in ends if e)
+        out[state_source] = SourceExpectation(
+            source=state_source,
+            per_session=True,
+            era_start=era_start,
+            era_end=era_end,
+            l1_dataset=PRICES_RAW_DATASET,
+        )
+    return out
 
 
 @lru_cache(maxsize=1)

@@ -529,6 +529,77 @@ def test_price_sources_resolve_their_l1_dataset_to_prices_raw() -> None:
     assert expectations["nse_fii_dii_flows"].l1_dataset == "nse_fii_dii_flows"
 
 
+def test_the_price_state_source_names_match_the_ingest_source_sets() -> None:
+    """The gap report scans the source names `sync_state` holds, and ingest tracks the price core
+    under the era-independent source-set names (`backfill.SOURCE_SETS`), not the register's per-era
+    ids. If `_PRICE_STATE_SOURCES` drifted from those names the report would probe a name production
+    never writes — exactly the M1.14 defect, where the live `nse_bhavcopy` source fell through to
+    the default and every published day went physically unchecked. Pin the two together.
+    """
+    from dataplatform.ingest.backfill import BSE_BHAVCOPY, NSE_BHAVCOPY, SOURCE_SETS
+    from dataplatform.quality.gaps import _PRICE_STATE_SOURCES
+
+    assert set(_PRICE_STATE_SOURCES) == {NSE_BHAVCOPY, BSE_BHAVCOPY}
+    assert {NSE_BHAVCOPY, BSE_BHAVCOPY} <= set(SOURCE_SETS)
+    for state_source in _PRICE_STATE_SOURCES:
+        assert expectations_from_register()[state_source].l1_dataset == PRICES_RAW_DATASET
+
+
+def test_l1_presence_is_verified_over_the_state_source_ingest_actually_writes(
+    tmp_path: Path,
+) -> None:
+    """Regression (M1.14, take 2): acceptance #3 must hold on the path production runs.
+
+    Ingest writes `sync_state` under the era-independent set name `nse_bhavcopy` and lands every
+    session in `prices_raw` — not under the register's per-era ids. An earlier fix reconciled only
+    the register-id path (which the live pipeline never exercises), so its tests passed while the
+    live `GapScanner` still checked 0/2469 partitions. This test drives `build_report` over the real
+    state-source name with the real `expectations_from_register()` mapping and a real lake, so it
+    fails if the report ever again probes a dataset the writer does not use.
+    """
+    from dataplatform.ingest.backfill import NSE_BHAVCOPY
+
+    start, end = date(2026, 8, 3), date(2026, 8, 7)  # a full UDiFF-era trading week
+    published = published_every_session(start, end, source=NSE_BHAVCOPY)
+    sessions = [d for (_src, d), r in published.items() if r.state is SyncState.PUBLISHED]
+    assert sessions, "the sampled week must contain trading sessions"
+    for day in sessions:
+        part = l1_partition_dir(PRICES_RAW_DATASET, day, data_root=tmp_path)
+        part.mkdir(parents=True)
+        (part / "part.parquet").write_bytes(b"PAR1rows")
+
+    presence = LakeL1Presence(tmp_path)
+    real = expectations_from_register()  # the production mapping, not a hand-built one
+
+    before = report_over(
+        start,
+        end,
+        sources=(NSE_BHAVCOPY,),
+        records=published,
+        expectations=real,
+        l1_presence=presence,
+    )
+    assert before.l1_unchecked == 0, (
+        "every published prices_raw partition must be physically checked"
+    )
+    assert before.complete == len(sessions)
+
+    # Acceptance #3: a deleted prices_raw partition surfaces the day as unexplained, not swallowed.
+    victim = l1_partition_dir(PRICES_RAW_DATASET, sessions[0], data_root=tmp_path)
+    (victim / "part.parquet").unlink()
+    victim.rmdir()
+    after = report_over(
+        start,
+        end,
+        sources=(NSE_BHAVCOPY,),
+        records=published,
+        expectations=real,
+        l1_presence=presence,
+    )
+    assert after.l1_unchecked == 0
+    assert GapReason.L1_PARTITION_MISSING in [entry.reason for entry in after.unexplained]
+
+
 def test_a_non_per_session_cadence_is_not_measured_against_the_trading_calendar() -> None:
     quarterly = [
         entry
