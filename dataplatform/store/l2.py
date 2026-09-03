@@ -57,7 +57,12 @@ import pyarrow.parquet as pq
 from pydantic import BaseModel, ConfigDict, Field
 
 from dataplatform.clock import Clock
-from dataplatform.corpactions.factors import FactorChain, FactorRow, total_return_series
+from dataplatform.corpactions.factors import (
+    FactorChain,
+    FactorError,
+    FactorRow,
+    total_return_series,
+)
 from dataplatform.corpactions.reconcile import load_reconciled_actions
 from dataplatform.ingest.models import ISIN_PATTERN
 from dataplatform.logging import get_logger
@@ -282,10 +287,27 @@ def build_adjusted_bars(
     ):
         bars = list(group)
         prices: list[PricePoint] = [_price_point(b) for b in bars]
-        tr_by_date = {p.date: p.adj_close for p in total_return_series(actions, prices)}
+        # The price-adjusted series (splits/bonuses) uses only chain.*_factor_asof and never a
+        # dividend, so it must be produced unconditionally. The total-return leg needs cash-dividend
+        # amounts and can legitimately fail — a dividend stated as a percent of face value (no rupee
+        # amount to reinvest) or one with no prior close. When it does, fall back tr_close to the
+        # price-adjusted close (dividends simply not reinvested) and log it, rather than let a
+        # dividend gap block a name's split adjustment. Decouples price-adjust from total-return.
+        try:
+            tr_by_date = {p.date: p.adj_close for p in total_return_series(actions, prices)}
+        except FactorError as exc:
+            _LOG.warning(
+                "l2.total_return_unavailable",
+                isin=isin,
+                exchange=exchange,
+                reason=str(exc)[:140],
+                fallback="tr_close = adj_close (dividends not reinvested)",
+            )
+            tr_by_date = {}
         for bar in bars:
             cum_price = chain.price_factor_asof(bar.trade_date)
             cum_qty = chain.qty_factor_asof(bar.trade_date)
+            adj_close = bar.close * cum_price
             out.append(
                 AdjustedBar(
                     isin=isin,
@@ -294,9 +316,9 @@ def build_adjusted_bars(
                     adj_open=bar.open * cum_price,
                     adj_high=bar.high * cum_price,
                     adj_low=bar.low * cum_price,
-                    adj_close=bar.close * cum_price,
+                    adj_close=adj_close,
                     adj_volume=Decimal(bar.volume) * cum_qty,
-                    tr_close=tr_by_date[bar.trade_date],
+                    tr_close=tr_by_date.get(bar.trade_date, adj_close),
                     cum_price_factor=cum_price,
                     cum_qty_factor=cum_qty,
                 )
