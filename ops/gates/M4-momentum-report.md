@@ -5,8 +5,8 @@
 ## Run
 
 - **Policy:** `naive_momentum`
-- **Window:** 2016-09-02 → 2026-03-30 (2364 trading sessions, 115 monthly rebalances)
-- **Runtime:** 41.0 s (engine replay, wall clock)
+- **Window:** 2016-09-02 → 2026-08-31 (2468 trading sessions, 120 monthly rebalances)
+- **Runtime:** 43.6 s (engine replay, wall clock)
 - **Data:** L1 raw NSE equity closes (adjusted == raw: this lake has no corporate actions); universe and listing windows derived from L1 observed trading.
 
 ## Parameters (chosen a priori — no tuning was performed)
@@ -20,25 +20,25 @@
 
 ## Result
 
-- **Final NAV:** ₹2,646,258.25 (from ₹1,000,000.00 deposited)
-- **Held names at end:** 39
-- **Realized P&L:** ₹1,771,118.59
-- **Unrealized P&L:** ₹-124,860.34
-- **Total costs (STT, charges, GST, stamp, DP):** ₹86,580.55 — costs are included in every fill, not deducted after the fact
+- **Final NAV:** ₹3,023,380.77 (from ₹1,000,000.00 deposited)
+- **Held names at end:** 44
+- **Realized P&L:** ₹1,741,298.93
+- **Unrealized P&L:** ₹282,081.84
+- **Total costs (STT, charges, GST, stamp, DP):** ₹92,577.42 — costs are included in every fill, not deducted after the fact
 
 ## Return vs benchmark (money-weighted XIRR, identical cashflows)
 
 | Series | XIRR |
 | --- | --- |
-| Portfolio (naive momentum, **costs included**) | 10.69% |
-| NIFTY-TRI (broad-market TRI proxy from L1) | 7.86% |
-| **Excess over benchmark** | 2.84% |
+| Portfolio (naive momentum, **costs included**) | 11.70% |
+| NIFTY-TRI (broad-market TRI proxy from L1) | 8.56% |
+| **Excess over benchmark** | 3.14% |
 
 > The benchmark is a broad-market total-return **proxy computed from L1** (equal-weight average of the 50 most-liquid names at the start, seeded to 1000). The licensed NSE NIFTY-TRI series is not loaded here; the proxy flows through the same `TriSeries` / `compare_to_benchmarks` code the published series will, so the comparison machinery is what this validates. Do not read the excess as alpha.
 
 ## Journal (invariant #9 — every session decided, including no-ops)
 
-- **Total entries:** 5271
-- **BUY:** 1079  ·  **SELL:** 1930  ·  **HEARTBEAT:** 2262
-- **Run digest (sha256 of journal + book):** `097e8e57da88efd0cd8d50247bafb36781806c1addbdca59e66062092a569475`
+- **Total entries:** 5573
+- **BUY:** 1133  ·  **SELL:** 2079  ·  **HEARTBEAT:** 2361
+- **Run digest (sha256 of journal + book):** `27f0444b31926e9ba00b09de086aebfa0f6bca711d00ddc2674f94461794ad2e`
 - **PIT:** the run completed with every session's queries scoped to that session; no `PitError` was raised (a look-ahead read would have failed the run). The dedicated leak harness is M4.11.

@@ -444,6 +444,40 @@ class BacktestError(Exception):
     """A backtest could not be set up or run. Fails loud (CLAUDE.md), never a silent skip."""
 
 
+def _reserve_fill_headroom(
+    sessions: tuple[date, ...], calendar: Sequence[date]
+) -> tuple[date, ...]:
+    """Trim the replay window so an order staged on its last session still has a bar to fill on.
+
+    Execution is T+1: an order decided on session D is staged to fill on the *next* session, so the
+    market calendar must extend one session beyond the last *replayed* one (the invariant
+    ``_L1Market`` documents). When the requested window reaches the last session on disk that does
+    not hold, and a rebalance landing on that edge is stranded with no next bar — it raises
+    ``NoReferenceBarError`` from inside ``SimBroker.place`` mid-run. Reserving the final on-disk
+    session as fill headroom keeps the run inside data that exists instead of crashing: the reserved
+    session is only ever a fill target, never itself replayed, so the terminal valuation is struck
+    on the session before it. A window with no session left to replay once the edge is reserved
+    cannot run at all and is refused loudly.
+    """
+    if not sessions or not calendar or sessions[-1] < calendar[-1]:
+        return sessions
+    reserved = sessions[-1]
+    trimmed = sessions[:-1]
+    if not trimmed:
+        raise BacktestError(
+            f"the replay window ends on the last session on disk ({reserved.isoformat()}) with no "
+            "earlier session to replay; T+1 execution needs one session of fill headroom after the "
+            "window, so end the backtest before the last available session"
+        )
+    _LOG.info(
+        "backtest.reserved_fill_headroom",
+        reserved_session=reserved.isoformat(),
+        terminal=trimmed[-1].isoformat(),
+        reason="T+1 execution needs a session after the last replayed one to fill against",
+    )
+    return trimmed
+
+
 @dataclass(frozen=True, slots=True)
 class BacktestResult:
     """Everything the report needs from one run — engine output plus the derived metrics."""
@@ -493,6 +527,10 @@ def run_naive_momentum(
         if not sessions:
             raise BacktestError(f"no trading sessions in [{start.isoformat()}, {end.isoformat()}]")
         calendar = reader.all_sessions()
+        # T+1 execution needs a session after the last replayed one to fill against; reserve it when
+        # the window reaches the last session on disk, rather than crashing mid-run on a final-bar
+        # rebalance (NoReferenceBarError).
+        sessions = _reserve_fill_headroom(sessions, calendar)
         first_session, terminal = sessions[0], sessions[-1]
 
         data = _L1MomentumData(reader, sessions)

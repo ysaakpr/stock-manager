@@ -235,3 +235,27 @@ def test_equal_weight_targets_sum_to_one_and_allocate() -> None:
     buys = [o for o in decision.orders if o.side is Side.BUY]
     assert buys, "even a small budget should buy at least one share of the cheapest name"
     assert all(o.quantity >= 1 for o in buys)
+
+
+def test_fill_headroom_is_reserved_at_the_data_edge() -> None:
+    """T+1 execution needs a bar after the last replayed session (M4.10 boundary).
+
+    A window reaching the last session on disk once crashed mid-run: a rebalance landing on the
+    final bar had no next session to stage its fill against (NoReferenceBarError from SimBroker).
+    The run now reserves that final session as fill headroom instead of stranding the order.
+    """
+    from backtest.run import BacktestError, _reserve_fill_headroom
+
+    calendar = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+
+    # Window reaching the edge: the last on-disk session is reserved as a fill target, not replayed.
+    reached = tuple(calendar)
+    assert _reserve_fill_headroom(reached, calendar) == (date(2026, 8, 3), date(2026, 8, 4))
+
+    # Window that stops before the edge already has headroom and is left untouched.
+    inside = (date(2026, 8, 3), date(2026, 8, 4))
+    assert _reserve_fill_headroom(inside, calendar) == inside
+
+    # A single-session window sitting on the edge cannot reserve headroom and is refused loudly.
+    with pytest.raises(BacktestError, match="fill headroom"):
+        _reserve_fill_headroom((date(2026, 8, 5),), calendar)
