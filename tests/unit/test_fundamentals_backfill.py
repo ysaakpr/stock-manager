@@ -644,6 +644,108 @@ def test_a_published_chunk_whose_l0_payload_is_gone_is_reported_not_a_crash(
     assert "index reparse failed" in rendered
 
 
+def test_a_bounded_re_run_spends_its_cap_on_work_not_on_resume_skips(tmp_path: Path) -> None:
+    """`--max-filings` counts attempts, so a bounded resume makes progress instead of marking time.
+
+    Charging a resume-skip to the cap is the difference between a bounded re-run doing something
+    and doing nothing: after a first pass published four filings, a second `--max-filings 4` run
+    would spend its whole budget re-confirming those four and never reach the rest — which is
+    exactly the case an operator hits when restarting a large run.
+    """
+    settings = _settings(tmp_path)
+    plan = _quarterly_plan()
+    sync = _FakeSync()
+    universe = {VSTTILLERS, SCHAEFFLER}  # eight entries between them
+
+    first = _runner(_ok_transport(plan), settings=settings, sync=sync, universe=universe).run(plan)
+    assert first.filings_published == 8
+
+    # Everything is published; a capped re-run attempts nothing and reports every unit resumed.
+    second = fb.FundamentalsBackfillRunner(
+        fetcher=_fetcher(_ok_transport(plan), settings),
+        l0=L0Store(clock=CLOCK, data_root=settings.data_root),
+        sync=cast("Any", sync),
+        universe=universe,
+        commit=lambda: None,
+        data_root=settings.data_root,
+        max_filings=4,
+    ).run(plan)
+    assert second.filings_published == 0
+    assert second.filings_skipped_published == 8  # all eight, not the first four
+
+
+def test_a_bounded_run_resumes_where_it_left_off(tmp_path: Path) -> None:
+    """Two capped runs cover what one uncapped run would, rather than redoing the first batch."""
+    settings = _settings(tmp_path)
+    plan = _quarterly_plan()
+    sync = _FakeSync()
+    universe = {VSTTILLERS, SCHAEFFLER}
+
+    first = fb.FundamentalsBackfillRunner(
+        fetcher=_fetcher(_ok_transport(plan), settings),
+        l0=L0Store(clock=CLOCK, data_root=settings.data_root),
+        sync=cast("Any", sync),
+        universe=universe,
+        commit=lambda: None,
+        data_root=settings.data_root,
+        max_filings=3,
+    ).run(plan)
+    assert first.filings_published == 3
+
+    second = fb.FundamentalsBackfillRunner(
+        fetcher=_fetcher(_ok_transport(plan), settings),
+        l0=L0Store(clock=CLOCK, data_root=settings.data_root),
+        sync=cast("Any", sync),
+        universe=universe,
+        commit=lambda: None,
+        data_root=settings.data_root,
+        max_filings=3,
+    ).run(plan)
+    assert second.filings_skipped_published == 3  # the first batch, confirmed and not re-fetched
+    assert second.filings_published == 3  # and three *new* ones, not a repeat of the first three
+
+
+def test_a_failed_filing_is_retried_by_the_next_run(tmp_path: Path) -> None:
+    """Only `PUBLISHED` is skipped, so a failure heals on the next run without editing state.
+
+    That is the point of recording `retryable` as a report label rather than a resume gate (the
+    price and corporate-action backfills do the same): a parser that has since been fixed, or a
+    host that has stopped refusing, should be picked up by simply running the command again.
+    """
+    settings = _settings(tmp_path)
+    plan = _quarterly_plan()
+    sync = _FakeSync()
+
+    # First pass: every XBRL fetch 404s, so every filing lands FAILED (and no 403 spike trips).
+    script: dict[str, RecordedResponse | list[RecordedResponse]] = {
+        WARM_URL: RecordedResponse(status_code=200, body=b"", headers={"content-type": "text/html"})
+    }
+    for unit in plan:
+        script[unit.url] = RecordedResponse(
+            status_code=200,
+            body=INDEX_FIXTURE.read_bytes(),
+            headers={"content-type": "application/json"},
+        )
+    for xml in FILINGS_DIR.glob("*.xml"):
+        script[f"https://nsearchives.nseindia.com/corporate/xbrl/{xml.name}"] = RecordedResponse(
+            status_code=404, body=b"not found"
+        )
+    broken = _runner(
+        RecordedTransport(cast("Any", script)), settings=settings, sync=sync, universe={VSTTILLERS}
+    ).run(plan)
+    assert broken.filings_published == 0
+    assert broken.filings_failed == 4
+    assert not broken.parked
+
+    # Second pass over the same checkpoint, with the host healthy: the failures are re-attempted.
+    healed = _runner(_ok_transport(plan), settings=settings, sync=sync, universe={VSTTILLERS}).run(
+        plan
+    )
+    assert healed.filings_published == 4
+    assert healed.filings_failed == 0
+    assert healed.filings_skipped_published == 0  # nothing had been published to skip
+
+
 def test_index_plan_is_pure_and_offline() -> None:
     register = load_register()
     # Both periods across 3-month chunks over a full year: 4 quarters x 2 periods = 8 chunks.

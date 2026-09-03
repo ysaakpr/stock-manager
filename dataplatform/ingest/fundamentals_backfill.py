@@ -598,12 +598,16 @@ class FundamentalsBackfillRunner:
                 # Bounded sample reached: stop *attempting* fetches, but keep counting the universe
                 # so the coverage report still names how much the full run has left to do.
                 continue
-            self._filings_attempted += 1
             url = entry.xbrl_url
             if url is None:  # pragma: no cover - `entry.is_actionable` already guaranteed this
                 continue
             unit = FilingUnit(entry=entry, url=url, filename=url.rsplit("/", 1)[-1])
-            self._process_filing(unit, report=report)
+            # Counted only if the unit got past its resume check and really went to the network. A
+            # resume-skip opens no socket and is not a sample, and charging it to the cap makes a
+            # bounded *re*-run useless: `--max-filings 25` over a window with 22 already published
+            # would spend its whole budget re-confirming those and never reach the work left.
+            if self._process_filing(unit, report=report):
+                self._filings_attempted += 1
 
     def _symbols_for(self, isin: str, index_symbol: str) -> frozenset[str]:
         """Every symbol this ISIN has traded under, plus the one the index reports today.
@@ -618,12 +622,15 @@ class FundamentalsBackfillRunner:
             known |= self._symbol_history(isin)
         return frozenset(known)
 
-    def _process_filing(self, unit: FilingUnit, *, report: FundamentalsBackfillReport) -> None:
+    def _process_filing(self, unit: FilingUnit, *, report: FundamentalsBackfillReport) -> bool:
         """Drive one filing `fetch → L0 → parse → write_pit`, or record why it could not be driven.
 
-        Skip-if-published (resume). On success `write_pit` lands the filing in its `filing_date`
-        partition (restatement-safe — a new record, never an overwrite). A 403 spike raises
-        `_ParkedError`; every other failure is caught, filed `FAILED`, committed and counted.
+        Returns whether the unit was *attempted* — False when it resume-skipped, which is what lets
+        the caller charge only real work to `--max-filings`. On success `write_pit` lands the filing
+        in its `filing_date` partition (restatement-safe — a new record, never an overwrite). A 403
+        spike raises `_ParkedError`; every other failure is caught, filed `FAILED`, committed and
+        counted, and the *next* run retries it: only `PUBLISHED` is skipped, so a unit that failed,
+        or one interrupted mid-flight, is picked up again without anyone editing `sync_state`.
         """
         existing = self._sync.get(unit.state_source, unit.logical_date)
         if existing is not None and existing.state is SyncState.PUBLISHED:
@@ -634,7 +641,7 @@ class FundamentalsBackfillRunner:
                 unit=unit.label,
                 state="PUBLISHED",
             )
-            return
+            return False
 
         _LOG.info("fundamentals_backfill.filing_start", unit=unit.label, url=unit.url)
         try:
@@ -688,6 +695,7 @@ class FundamentalsBackfillRunner:
                 report=report,
                 index=False,
             )
+        return True
 
     def _park_on_spike(
         self, label: str, state_source: str, logical_date: date, spike: ForbiddenSpikeError
