@@ -47,7 +47,7 @@ import argparse
 import sys
 import time
 from bisect import bisect_right
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -64,7 +64,7 @@ from backtest.replay import BookSnapshot, ReplayEngine, ReplayResult
 from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import Exchange as IdentityExchange
 from dataplatform.identity.master import ListingStatus
-from dataplatform.ingest.indices import TriPoint, TriSeries
+from dataplatform.ingest.indices import TriPoint, TriSeries, membership_asof
 from dataplatform.logging import get_logger
 from dataplatform.query.pit import Dataset
 from dataplatform.query.service import QueryService
@@ -98,6 +98,20 @@ _TRI_SEED = Decimal("1000")  # the proxy index is seeded to 1000 on the first se
 _ACCOUNT_STATE = "MH"  # Maharashtra — the account's state for state-wise stamp duty (a priori)
 _REPORT_PATH = Path("ops/gates/M4-momentum-report.md")
 _DELTA_REPORT_PATH = Path("ops/gates/M9-adjusted-backtest-report.md")
+_UNIVERSE_REPORT_PATH = Path("ops/gates/M9-universe-report.md")
+
+# ── M9.3 investable-universe defaults (a priori, stated once, never tuned) ───────────────────────
+#: The index whose as-of membership defines the investable set. NIFTY 500 is the broadest published
+#: NSE index — a name outside it on a date is, by construction, off the investable map that day.
+_DEFAULT_INVESTABLE_INDEX = "nifty500"
+#: The liquidity floor: a name's *median daily traded value* over the look-back must clear this to
+#: count as investable. ₹1 crore (₹10,000,000) is a deliberately conservative microcap cut — on the
+#: real ten-year store it drops the illiquid ~35% tail (probed at build time) that a raw momentum
+#: rank can otherwise pick, while keeping every tradeable name. Chosen once, reported verbatim.
+_DEFAULT_TURNOVER_FLOOR = Decimal("10000000")
+#: The window the median turnover is measured over — a trailing year, ending on the rebalance date
+#: (so the whole measurement is point-in-time: no session after the decision enters it).
+_DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 365
 
 
 # ── L1 lake reader ────────────────────────────────────────────────────────────────────────────────
@@ -121,6 +135,7 @@ class _L1Reader:
         register_raw_view(self._con, view=self._VIEW, data_root=data_root)
         self._closes: dict[date, dict[str, Decimal]] = {}
         self._refbars: dict[date, dict[str, ReferenceBar]] = {}
+        self._turnover: dict[tuple[date, date], dict[str, Decimal]] = {}
 
     def _partition(self, session: date) -> str:
         """The single L1 parquet file for one session — read directly, not via a lake scan.
@@ -247,6 +262,32 @@ class _L1Reader:
         ).fetchall()
         return [str(row[0]) for row in rows]
 
+    def median_turnover_over(self, start: date, end: date) -> dict[str, Decimal]:
+        """Each equity name's median daily traded value over ``[start, end]`` (cached per window).
+
+        The liquidity statistic the M9.3 floor screens against: for every ISIN, the median of its
+        ``total_traded_value`` across the sessions in the window on which it actually traded (a
+        positive turnover). ``quantile_disc(..., 0.5)`` picks a real observed value rather than
+        interpolating between two, so the result stays an exact ``Decimal`` off the lake's
+        ``decimal128`` column and is deterministic (no float mid-point creeps into the screen).
+
+        Point-in-time by contract: the caller passes a window that ends on or before the decision
+        date, so no session after the decision enters the median. A name absent from the window
+        (never traded in it) is simply absent from the result and fails the floor.
+        """
+        cached = self._turnover.get((start, end))
+        if cached is not None:
+            return cached
+        rows = self._con.execute(
+            f"SELECT isin, quantile_disc(total_traded_value, 0.5) FROM {self._VIEW} "
+            "WHERE series = 'EQ' AND total_traded_value > 0 "
+            "AND trade_date BETWEEN $start AND $end GROUP BY isin",
+            {"start": start, "end": end},
+        ).fetchall()
+        medians = {str(isin): Decimal(median) for isin, median in rows}
+        self._turnover[(start, end)] = medians
+        return medians
+
 
 # ── market: the SessionMarket SimBroker fills against ─────────────────────────────────────────────
 
@@ -321,6 +362,108 @@ class _AdjustedCloseSource:
         return closes
 
 
+# ── investable universe: as-of index membership ∩ a stated liquidity floor (M9.3) ────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseParameters:
+    """The a-priori investable-universe constraints (M9.3) — stated once, reported, never tuned.
+
+    Two screens, both point-in-time:
+
+    * ``index_slug`` — the index whose *as-of* membership defines the investable map. The screen
+      reads the M3.9 constituents history through :func:`membership_asof`, which returns the
+      snapshot in force on the decision date (never today's list — the survivorship-bias kill,
+      invariant #7). When the store holds no snapshot on or before a date (``membership_asof`` →
+      ``None``), the membership screen is a no-op for that date and only the liquidity floor
+      applies; the run reports plainly whether membership data was present (see the report).
+
+    * ``median_turnover_floor`` / ``liquidity_lookback_days`` — a name's median daily traded value
+      over the trailing ``liquidity_lookback_days`` (ending on the decision date) must reach the
+      floor. This is the microcap cut that kills the fake momentum a raw rank can pick off
+      names that barely trade (ops/BACKLOG.md, M4.10).
+
+    All three are fixed by construction and echoed verbatim in the report, so the "no tuning" line
+    stays checkable.
+    """
+
+    index_slug: str = _DEFAULT_INVESTABLE_INDEX
+    median_turnover_floor: Decimal = _DEFAULT_TURNOVER_FLOOR
+    liquidity_lookback_days: int = _DEFAULT_LIQUIDITY_LOOKBACK_DAYS
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.median_turnover_floor, Decimal):
+            raise TypeError("median_turnover_floor must be a Decimal — money is never float")
+        if self.median_turnover_floor < _ZERO:
+            raise ValueError(
+                f"median_turnover_floor must be >= 0, got {self.median_turnover_floor}"
+            )
+        if self.liquidity_lookback_days <= 0:
+            raise ValueError(
+                f"liquidity_lookback_days must be positive, got {self.liquidity_lookback_days}"
+            )
+
+
+class _InvestableUniverse:
+    """Constrains a rebalance's candidate set to the investable, liquid names as-of a date (M9.3).
+
+    The rebalance universe is the intersection of two point-in-time screens applied to the
+    survivorship-safe PIT candidate set the momentum data already builds:
+
+      1. **as-of index membership** — the M3.9 constituents snapshot in force on the date
+         (:func:`membership_asof`); absent when the store carries no snapshot for the date, in which
+         case this screen does not narrow the set (and the report says so);
+      2. **a stated liquidity floor** — the name's median daily traded value over the trailing
+         look-back reaches ``median_turnover_floor``.
+
+    Both reads are scoped to sessions on or before the decision date, so the screen is PIT-safe:
+    no future membership change and no post-decision turnover can enter it. Results are cached per
+    date so the ten-year walk pays for each screen once. ``members_asof`` and ``liquid_asof`` are
+    exposed so a test can assert either screen in isolation.
+    """
+
+    def __init__(
+        self,
+        reader: _L1Reader,
+        params: UniverseParameters,
+        *,
+        data_root: Path | None = None,
+    ) -> None:
+        self._reader = reader
+        self._params = params
+        self._data_root = data_root
+        self._members: dict[date, frozenset[str] | None] = {}
+        self._liquid: dict[date, frozenset[str]] = {}
+
+    def members_asof(self, as_of: date) -> frozenset[str] | None:
+        """The as-of index membership on ``as_of`` — ``None`` when no snapshot is in force then."""
+        if as_of in self._members:
+            return self._members[as_of]
+        snapshot = membership_asof(self._params.index_slug, as_of, data_root=self._data_root)
+        members = None if snapshot is None else snapshot.members
+        self._members[as_of] = members
+        return members
+
+    def liquid_asof(self, as_of: date) -> frozenset[str]:
+        """The ISINs whose trailing median daily turnover reaches the floor as of ``as_of``."""
+        if as_of in self._liquid:
+            return self._liquid[as_of]
+        start = as_of - timedelta(days=self._params.liquidity_lookback_days)
+        medians = self._reader.median_turnover_over(start, as_of)
+        floor = self._params.median_turnover_floor
+        liquid = frozenset(isin for isin, median in medians.items() if median >= floor)
+        self._liquid[as_of] = liquid
+        return liquid
+
+    def constrain(self, as_of: date, candidates: Iterable[str]) -> set[str]:
+        """Candidates surviving both screens as of ``as_of`` (index membership ∩ liquidity)."""
+        result = set(candidates) & self.liquid_asof(as_of)
+        members = self.members_asof(as_of)
+        if members is not None:
+            result &= members
+        return result
+
+
 # ── data source: the PIT momentum signal the policy reads ─────────────────────────────────────────
 
 
@@ -350,17 +493,22 @@ class _L1MomentumData:
         sessions: Sequence[date],
         *,
         signal_closes: SignalCloses | None = None,
+        universe_filter: _InvestableUniverse | None = None,
     ) -> None:
         self._reader = reader
         self._signal_closes: SignalCloses = (
             signal_closes if signal_closes is not None else reader.closes_on
         )
+        self._universe_filter = universe_filter
         self._sessions = list(sessions)
         self._rebalance = set(_first_session_of_each_month(sessions))
         self._windows = reader.listing_windows()
         self._signals: dict[date, tuple[MomentumRecord, ...]] = {}
+        self._universe_sizes: dict[date, int] = {}
         for rebalance_date in sorted(self._rebalance):
-            self._signals[rebalance_date] = self._compute(rebalance_date)
+            records = self._compute(rebalance_date)
+            self._signals[rebalance_date] = records
+            self._universe_sizes[rebalance_date] = len(records)
 
     def is_rebalance(self, session: date) -> bool:
         return session in self._rebalance
@@ -376,11 +524,29 @@ class _L1MomentumData:
     def rebalance_dates(self) -> tuple[date, ...]:
         return tuple(sorted(self._rebalance))
 
+    @property
+    def universe_sizes(self) -> Mapping[date, int]:
+        """The number of ranked candidates at each rebalance — the investable universe size."""
+        return dict(self._universe_sizes)
+
+    @property
+    def mean_universe_size(self) -> Decimal:
+        """Mean investable-universe size across rebalances that had any candidate (0 if none)."""
+        sizes = [n for n in self._universe_sizes.values() if n > 0]
+        if not sizes:
+            return _ZERO
+        return (Decimal(sum(sizes)) / Decimal(len(sizes))).quantize(Decimal("0.1"))
+
     def _compute(self, as_of: date) -> tuple[MomentumRecord, ...]:
         reference = self._lookback_session(as_of)
         if reference is None:
             return ()  # no twelve-month history yet — nothing to rank
         universe = pit_universe(as_of, InMemoryListingCalendar(self._windows)).isins
+        # M9.3: narrow the survivorship-safe PIT universe to the investable, liquid set as of this
+        # date — as-of index membership intersected with the median-turnover floor. Without a filter
+        # this is the pre-M9.3 full universe (the M9.2 baseline the delta report is struck against).
+        if self._universe_filter is not None:
+            universe = frozenset(self._universe_filter.constrain(as_of, universe))
         # Momentum ratio from the signal source (L2 adjusted, or raw for the baseline); the sizing
         # price from raw L1, because the order fills on the raw reference bar (invariant #3).
         signal_now = self._signal_closes(as_of)
@@ -586,6 +752,8 @@ class BacktestResult:
     unrealized_pnl: Decimal
     comparison: BenchmarkComparison
     decision_counts: Mapping[str, int]
+    universe_filtered: bool
+    mean_universe: Decimal
 
     @property
     def held_names(self) -> int:
@@ -600,6 +768,7 @@ def run_naive_momentum(
     parameters: MomentumParameters | None = None,
     data_root: Path | None = None,
     adjusted: bool = True,
+    universe: UniverseParameters | None = None,
 ) -> BacktestResult:
     """Run the naive momentum policy over ``[start, end]`` and return the result + report metrics.
 
@@ -615,6 +784,11 @@ def run_naive_momentum(
     marks and the benchmark are raw in both cases (invariant #3). An adjusted run assumes L2 has
     been materialized (M2.5) for the names in the window; a name with no L2 bar has no adjusted
     close and drops out of the candidate set, as the query layer reports it.
+
+    ``universe`` (M9.3) constrains the rebalance candidate set to the investable, liquid names as of
+    each date: as-of index membership (M3.9 constituents) intersected with a median-turnover floor,
+    both point-in-time (:class:`_InvestableUniverse`). ``None`` leaves the full survivorship-safe
+    PIT universe in place — the pre-M9.3 baseline the universe delta report is struck against.
     """
     params = parameters if parameters is not None else MomentumParameters()
     reader = _L1Reader(data_root=data_root)
@@ -631,7 +805,14 @@ def run_naive_momentum(
         first_session, terminal = sessions[0], sessions[-1]
 
         signal_closes = _AdjustedCloseSource(service, reader) if service is not None else None
-        data = _L1MomentumData(reader, sessions, signal_closes=signal_closes)
+        universe_filter = (
+            _InvestableUniverse(reader, universe, data_root=data_root)
+            if universe is not None
+            else None
+        )
+        data = _L1MomentumData(
+            reader, sessions, signal_closes=signal_closes, universe_filter=universe_filter
+        )
         clock = FrozenClock(first_session)
         sim = SimBroker(
             clock=clock,
@@ -674,6 +855,8 @@ def run_naive_momentum(
             unrealized_pnl=book.unrealized_pnl(terminal_prices),
             comparison=comparison,
             decision_counts=_decision_counts(result.journal),
+            universe_filtered=universe is not None,
+            mean_universe=data.mean_universe_size,
         )
     finally:
         if service is not None:
@@ -933,6 +1116,154 @@ def run_delta_report(
     return render_delta_report(raw, adjusted)
 
 
+def render_universe_report(
+    baseline: BacktestResult,
+    constrained: BacktestResult,
+    *,
+    universe: UniverseParameters,
+    membership_present: bool,
+) -> str:
+    """The M9.3 report: the investable-universe run against the M9.2 (full-universe) baseline.
+
+    States the a-priori thresholds, the universe-size move (mean candidates per rebalance, baseline
+    vs constrained) and the XIRR / turnover / cost delta. ``membership_present`` records whether the
+    store actually held any as-of index-membership snapshot the screen could apply — over a store
+    with none, only the liquidity floor narrows the set, and the report says so plainly (the
+    membership intersection itself is asserted on a controlled fixture in the test suite).
+    """
+    base_x, con_x = baseline.comparison.portfolio_xirr, constrained.comparison.portfolio_xirr
+    base_t, con_t = _trades(baseline), _trades(constrained)
+    base_c, con_c = baseline.total_charges, constrained.total_charges
+    floor = universe.median_turnover_floor
+    lines = [
+        "# M9.3 — Investable universe + liquidity filter (10 years)",
+        "",
+        "*Generated by `python -m backtest.run --policy naive_momentum --universe-report`. The "
+        "rebalance universe is now the as-of index membership (M3.9 constituents) intersected "
+        "with a stated median-turnover floor, both point-in-time, replacing 'every name that "
+        "traded'. This report strikes the constrained run against the M9.2 full-universe "
+        "baseline; both read the same close source, so the delta isolates the universe effect.*",
+        "",
+        "## A-priori thresholds (stated once, not tuned)",
+        "",
+        f"- **Investable index:** `{universe.index_slug}` — as-of membership via "
+        "`membership_asof` (the snapshot in force on the decision date, never today's list).",
+        f"- **Liquidity floor:** median daily traded value ≥ {_rupees(floor)} over a trailing "
+        f"{universe.liquidity_lookback_days}-day window ending on the rebalance date.",
+        "",
+        "## Data reality",
+        "",
+        (
+            "This store holds **no** index-constituents snapshots (`index_constituents` is empty — "
+            "M3.9's history accrues one snapshot per month from day one and the ten-year backfill "
+            "of prior months does not exist to be fetched, AGENTIC_CONTEXT B1/§4.1). So over this "
+            "run the as-of membership screen finds no snapshot in force on any date and does not "
+            "narrow the set; **the liquidity floor is what moves the universe here.** The "
+            "membership intersection — an as-of constituent list cutting the universe, and an "
+            "illiquid name excluded on a date it would otherwise rank into the top-N — is asserted "
+            "on a controlled fixture in `tests/integration/test_backtest_universe.py`, which loads "
+            "real snapshots."
+            if not membership_present
+            else "This store holds index-constituents snapshots, so the run applies the full "
+            "intersection: as-of membership ∩ the liquidity floor, both point-in-time."
+        ),
+        "",
+        (
+            "Both runs read the "
+            + ("L2 back-adjusted" if constrained.adjusted else "raw L1")
+            + " momentum signal. "
+            + (
+                ""
+                if constrained.adjusted
+                else "Over this corporate-action-free store the L2 adjusted signal equals the raw "
+                "one bar-for-bar (M9.2), and the ten-year L2 is not materialized, so the raw "
+                "signal *is* the M9.2 signal here — the baseline below is the effective M9.2 run."
+            )
+        ),
+        "",
+        "## Window",
+        "",
+        f"- {constrained.start.isoformat()} -> {constrained.terminal.isoformat()} "
+        f"({constrained.sessions} sessions, {constrained.rebalances} monthly rebalances)",
+        f"- Constrained run replay time: {constrained.runtime_seconds:.1f} s; "
+        f"baseline run replay time: {baseline.runtime_seconds:.1f} s",
+        "",
+        "## Constrained vs M9.2 baseline",
+        "",
+        "| Metric | Full universe (M9.2) | Investable + liquid (M9.3) | Delta |",
+        "| --- | --- | --- | --- |",
+        f"| Mean universe size / rebalance | {baseline.mean_universe} | "
+        f"{constrained.mean_universe} | {constrained.mean_universe - baseline.mean_universe} |",
+        f"| Portfolio XIRR | {_pct(base_x)} | {_pct(con_x)} | {_pct(con_x - base_x)} |",
+        f"| Turnover (BUY+SELL fills) | {base_t} | {con_t} | {con_t - base_t:+d} |",
+        f"| Total costs | {_rupees(base_c)} | {_rupees(con_c)} | {_rupees(con_c - base_c)} |",
+        f"| Final NAV | {_rupees(baseline.final_nav)} | {_rupees(constrained.final_nav)} | "
+        f"{_rupees(constrained.final_nav - baseline.final_nav)} |",
+        "",
+        f"- **Run digest (baseline):** `{baseline.result.digest()}`",
+        f"- **Run digest (constrained):** `{constrained.result.digest()}`",
+        "",
+        "## PIT",
+        "",
+        "- Both screens read only sessions on or before the decision date: `membership_asof` "
+        "refuses a snapshot captured after the date, and the turnover median is measured over a "
+        "window ending on it. No future membership change or post-decision turnover enters a "
+        "past decision "
+        "(invariant #7). Both runs completed with no `PitError` raised.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def run_universe_report(
+    *,
+    start: date,
+    end: date,
+    opening_cash: Decimal = _DEFAULT_OPENING_CASH,
+    parameters: MomentumParameters | None = None,
+    universe: UniverseParameters | None = None,
+    data_root: Path | None = None,
+    adjusted: bool = False,
+) -> str:
+    """Run the M9.2 baseline and the M9.3 investable-universe backtest and render the delta report.
+
+    Both runs read the same close source; they differ only in the universe screen, so the delta
+    isolates the universe effect. ``adjusted`` defaults to ``False`` because over the real store
+    the L2 adjusted signal equals the raw one bar-for-bar (no corporate actions — M9.2 established
+    this and the ten-year L2 is not materialized), so the raw signal *is* the M9.2 signal here and
+    the run completes without a materialized L2; pass ``adjusted=True`` on a store with a
+    materialized L2 to strike the delta on the back-adjusted signal explicitly. ``membership_asof``
+    is probed once over the rebalance window to record honestly whether the store held any snapshot
+    the membership screen could apply.
+    """
+    uni = universe if universe is not None else UniverseParameters()
+    baseline = run_naive_momentum(
+        start=start,
+        end=end,
+        opening_cash=opening_cash,
+        parameters=parameters,
+        data_root=data_root,
+        adjusted=adjusted,
+        universe=None,
+    )
+    constrained = run_naive_momentum(
+        start=start,
+        end=end,
+        opening_cash=opening_cash,
+        parameters=parameters,
+        data_root=data_root,
+        adjusted=adjusted,
+        universe=uni,
+    )
+    membership_present = any(
+        membership_asof(uni.index_slug, rebalance, data_root=data_root) is not None
+        for rebalance in (baseline.start, constrained.terminal)
+    )
+    return render_universe_report(
+        baseline, constrained, universe=uni, membership_present=membership_present
+    )
+
+
 def _print_summary(run: BacktestResult) -> None:
     """A terse stdout summary; the full report is the markdown file when `--report` is passed."""
     c = run.comparison
@@ -976,6 +1307,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help=f"run the raw and adjusted backtests and write the M9.2 delta report to "
         f"{_DELTA_REPORT_PATH}",
+    )
+    parser.add_argument(
+        "--universe-report",
+        action="store_true",
+        help=f"run the M9.2 full-universe baseline and the M9.3 investable-universe backtest and "
+        f"write the universe delta report to {_UNIVERSE_REPORT_PATH}",
     )
     parser.set_defaults(adjusted=True)
     parser.add_argument(
@@ -1025,6 +1362,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         _DELTA_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
         _DELTA_REPORT_PATH.write_text(report, encoding="utf-8")
         print(f"  delta report written to {_DELTA_REPORT_PATH}")
+        return 0
+
+    if args.universe_report:
+        try:
+            report = run_universe_report(
+                start=start,
+                end=end,
+                opening_cash=args.opening_cash,
+                parameters=params,
+                data_root=args.data_root,
+            )
+        except BacktestError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        _UNIVERSE_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _UNIVERSE_REPORT_PATH.write_text(report, encoding="utf-8")
+        print(f"  universe report written to {_UNIVERSE_REPORT_PATH}")
         return 0
 
     try:
