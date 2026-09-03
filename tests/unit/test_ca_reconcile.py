@@ -43,6 +43,7 @@ from dataplatform.corpactions import (
     RatioTerms,
     ReconcileError,
     ReconciliationReason,
+    SingleSourcePolicy,
     UnquantifiedTerms,
     eligible_for_factor_chain,
     load_reconciled_actions,
@@ -206,11 +207,38 @@ def test_an_exdate_disagreement_lands_in_the_queue() -> None:
 
 def test_an_action_only_one_exchange_published_lands_in_the_queue() -> None:
     nse = split(INFY, NSE, date(2024, 1, 25), "10", "2", "FV SPLIT 10 TO 2")
-    (conflict,) = reconcile([nse]).queue
+    result = reconcile([nse])  # QUEUE is the default
+    (conflict,) = result.queue
     assert conflict.reason is ReconciliationReason.SINGLE_SOURCE
     assert len(conflict.records) == 1
     assert conflict.records[0].source == NSE
     assert conflict.severity == "WARN"
+    assert not result.reconciled, "the strict default never lets one feed reach the factor chain"
+
+
+def test_accept_policy_admits_a_single_source_action_marked_not_cross_verified() -> None:
+    """SingleSourcePolicy.ACCEPT trusts one feed but records that it was not cross-verified."""
+    nse = split(INFY, NSE, date(2024, 1, 25), "10", "2", "FV SPLIT 10 TO 2")
+    result = reconcile([nse], single_source_policy=SingleSourcePolicy.ACCEPT)
+
+    assert not result.queue, "an accepted single-source action is not also queued as a conflict"
+    (accepted,) = result.reconciled
+    assert accepted.reconciled is True  # cleared for the factor chain
+    assert accepted.cross_verified is False  # but never mistaken for a two-feed agreement
+    assert accepted.source_ids == (NSE,)
+    assert accepted.isin == INFY
+    assert accepted.reconciliation_note and "single-source" in accepted.reconciliation_note
+
+
+def test_accept_policy_still_queues_a_real_disagreement() -> None:
+    """The policy relaxes only single-source; a two-feed contradiction is never accepted."""
+    nse = split(INFY, NSE, date(2024, 1, 25), "10", "2", "FV SPLIT 10 TO 2")
+    bse = split(INFY, BSE, date(2024, 1, 25), "10", "5", "Split 10 to 5")  # terms disagree
+
+    result = reconcile([nse, bse], single_source_policy=SingleSourcePolicy.ACCEPT)
+    assert not result.reconciled
+    (conflict,) = result.queue
+    assert conflict.reason is ReconciliationReason.RATIO_MISMATCH
 
 
 def test_a_ratio_disagreement_is_visible_via_status_quality() -> None:

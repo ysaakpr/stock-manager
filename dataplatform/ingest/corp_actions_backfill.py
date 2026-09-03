@@ -59,6 +59,7 @@ from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.corpactions.recompute import RecomputeResult, recompute_isins
 from dataplatform.corpactions.reconcile import (
+    SingleSourcePolicy,
     persist_reconciliation,
     reconcile,
 )
@@ -589,6 +590,7 @@ def finalize_reconcile_and_recompute(
     *,
     clock: Clock,
     commit: Callable[[], None] = lambda: None,
+    single_source_policy: SingleSourcePolicy = SingleSourcePolicy.QUEUE,
 ) -> FinalizeCounts:
     """Reconcile every stored CA across the two feeds, then recompute each agreed ISIN's chain.
 
@@ -598,11 +600,16 @@ def finalize_reconcile_and_recompute(
     factor chain from its reconciled actions and flags its L2 stale — so `adjustment_factors` is
     populated exactly for the names with a ratio-bearing, agreed-upon action.
 
+    `single_source_policy` decides what happens to an action only one feed published: `QUEUE`
+    (default, strict two-exchange invariant) leaves it for a human; `ACCEPT` admits it to the factor
+    chain marked `cross_verified=False` — needed when the store carries only one exchange's CA feed,
+    where every action is single-source and `QUEUE` would produce no factors at all.
+
     The caller's `commit` is the durable checkpoint; the reconcile marks and the factor rewrite land
     in one transaction, as every D3 writer intends.
     """
     all_actions = load_corporate_actions(conn)
-    result = reconcile(all_actions)
+    result = reconcile(all_actions, single_source_policy=single_source_policy)
     persist = persist_reconciliation(conn, result, clock=clock)
 
     reconciled_isins = {action.isin for action in result.reconciled}
@@ -737,6 +744,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=Path("ops/gates/M9-ca-backfill-report.md"),
         help="where to write the coverage report",
     )
+    parser.add_argument(
+        "--single-source-policy",
+        choices=[p.value for p in SingleSourcePolicy],
+        default=SingleSourcePolicy.QUEUE.value,
+        help=(
+            "what to do with an action only one feed published: QUEUE (default, strict "
+            "two-exchange invariant — a human confirms it) or ACCEPT (admit it to the factor "
+            "chain marked cross_verified=False; use when the store carries one exchange's feed)"
+        ),
+    )
     args = parser.parse_args(argv)
 
     settings = get_settings()
@@ -751,6 +768,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         chunk_months=args.chunk_months,
         dry_run=args.dry_run,
         report_path=args.report,
+        single_source_policy=SingleSourcePolicy(args.single_source_policy),
         settings=settings,
         clock=clock,
         calendar=calendar,
@@ -766,6 +784,7 @@ def _run_live(
     chunk_months: int,
     dry_run: bool,
     report_path: Path,
+    single_source_policy: SingleSourcePolicy,
     settings: Settings,
     clock: Clock,
     calendar: TradingCalendar,
@@ -815,7 +834,12 @@ def _run_live(
 
         finalize: FinalizeCounts | None = None
         if not report.parked:
-            finalize = finalize_reconcile_and_recompute(conn, clock=clock, commit=conn.commit)
+            finalize = finalize_reconcile_and_recompute(
+                conn,
+                clock=clock,
+                commit=conn.commit,
+                single_source_policy=single_source_policy,
+            )
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(

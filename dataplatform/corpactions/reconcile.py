@@ -48,7 +48,7 @@ from datetime import date, timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dataplatform.clock import Clock
 from dataplatform.corpactions.taxonomy import (
@@ -74,6 +74,7 @@ __all__ = [
     "ReconciliationConflict",
     "ReconciliationReason",
     "ReconciliationResult",
+    "SingleSourcePolicy",
     "eligible_for_factor_chain",
     "load_reconciled_actions",
     "persist_reconciliation",
@@ -123,6 +124,25 @@ class ReconciliationReason(StrEnum):
     SINGLE_SOURCE = "SINGLE_SOURCE"
     """Only one exchange published this action. Often benign (a single-listed security), but never
     silently assumed to be: an unconfirmed action is still a known-unknown to the factor chain."""
+
+
+class SingleSourcePolicy(StrEnum):
+    """What `reconcile()` does with an action only one feed published.
+
+    `QUEUE` (the default, and the two-exchange invariant) never lets a single feed's word reach the
+    factor chain: a single-source action becomes a `SINGLE_SOURCE` conflict a human confirms once.
+
+    `ACCEPT` admits it to the factor chain marked `cross_verified=False` — for a store that carries
+    only one exchange's feed (so *every* action is single-source and `QUEUE` would yield no factors
+    at all), or a genuinely single-listed security. It is never silent: the resulting
+    `ReconciledAction` records the single source, `cross_verified` is `False`, and the note says so,
+    so a factor built on one feed is always distinguishable from one two feeds agreed on. Ratio and
+    ex-date *disagreements* are unaffected by this policy — a contradiction between two feeds is
+    always queued, never accepted, whatever the policy.
+    """
+
+    QUEUE = "QUEUE"
+    ACCEPT = "ACCEPT"
 
 
 #: The severity each reason carries on `/status/quality`. A contradiction between the feeds is an
@@ -180,22 +200,29 @@ class QualityFlagRecord(BaseModel):
 
 
 class ReconciledAction(BaseModel):
-    """One corporate action both exchanges agree on — the only kind the factor chain may consume.
+    """One corporate action cleared for the factor chain — the only kind it may consume.
 
-    What it holds: the canonical identity and terms of the agreed action, plus **both** raw
-    `CorporateAction`s in `sources`, so a reconciled row is never separated from the two feed rows
-    that were found to agree. `reconciled` is `Literal[True]` and this type can only be minted by
-    `reconcile()`, which is what makes "only reconciled actions reach a factor" a type-level fact
-    and not a convention a caller has to remember.
+    Almost always this is an action **both exchanges agree on**: `cross_verified` is `True` and
+    `sources` holds **both** raw `CorporateAction`s, so a reconciled row is never separated from the
+    two feed rows that were found to agree. It can only be minted by `reconcile()`, which is what
+    makes "only reconciled actions reach a factor" a type-level fact and not a convention a caller
+    has to remember.
 
-    What it never does: choose between disagreeing feeds. If the two rows did not agree, there is
-    no `ReconciledAction` — there is a `ReconciliationConflict` in the queue instead.
+    The one exception is a single-source action admitted under `SingleSourcePolicy.ACCEPT`:
+    `cross_verified` is `False`, `sources` holds the **one** feed row, and `reconciliation_note`
+    says the action was not cross-verified. This keeps a factor built on one feed always
+    distinguishable from one two feeds agreed on — the policy relaxes *whether* a single feed is
+    trusted, never *whether the fact that it is single-sourced* is recorded.
 
-    Canonical fields when the two rows differ only within tolerance: `ex_date` is the earlier of
-    the two (deterministic and source-agnostic), and `knowable_date` is the *later* — the action
-    is only known to be reconciled once both feeds have arrived, so a decision may not see the
-    reconciled verdict before then (invariant #7). Any within-tolerance ex-date difference is
-    recorded in `reconciliation_note`; nothing is lost.
+    What it never does: choose between disagreeing feeds. If two feeds contradicted each other there
+    is no `ReconciledAction` — there is a `ReconciliationConflict` in the queue instead, regardless
+    of policy.
+
+    Canonical fields when two rows differ only within tolerance: `ex_date` is the earlier of the two
+    (deterministic and source-agnostic), and `knowable_date` is the *later* — the action is only
+    known to be reconciled once both feeds have arrived, so a decision may not see the reconciled
+    verdict before then (invariant #7). Any within-tolerance ex-date difference is recorded in
+    `reconciliation_note`; nothing is lost.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -207,12 +234,22 @@ class ReconciledAction(BaseModel):
     knowable_date: date
     record_date: date | None = None
     reconciled: Literal[True] = True
+    cross_verified: bool = True
     reconciliation_note: str | None = None
-    sources: tuple[CorporateAction, ...] = Field(min_length=2)
+    sources: tuple[CorporateAction, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _sources_match_verification(self) -> ReconciledAction:
+        """A cross-verified action carries both feeds; a single-source one carries exactly one."""
+        if self.cross_verified and len(self.sources) < 2:
+            raise ValueError("a cross-verified action must carry both feed rows")
+        if not self.cross_verified and len(self.sources) != 1:
+            raise ValueError("a single-source action must carry exactly one feed row")
+        return self
 
     @property
     def source_ids(self) -> tuple[str, ...]:
-        """The feed ids that agreed, sorted — e.g. `('bse_corp_actions', 'nse_corp_actions')`."""
+        """The feed ids behind this action, sorted — one if single-source, two if cross-verified."""
         return tuple(sorted(action.source for action in self.sources))
 
     def describe(self) -> str:
@@ -373,10 +410,34 @@ def _reconcile_pair(left: CorporateAction, right: CorporateAction) -> Reconciled
     )
 
 
+def _accept_single_source(action: CorporateAction) -> ReconciledAction:
+    """Admit a single-feed action to the factor chain under `SingleSourcePolicy.ACCEPT`.
+
+    `cross_verified=False` and the note name the one feed, so the action is trusted for adjustment
+    but never mistaken for one two feeds agreed on. Its `knowable_date` is the feed's own — there is
+    no second feed to wait for, unlike a cross-verified pair.
+    """
+    return ReconciledAction(
+        isin=action.isin,
+        ex_date=action.ex_date,
+        action_type=action.action_type,
+        terms=action.terms,
+        knowable_date=action.knowable_date,
+        record_date=action.record_date,
+        cross_verified=False,
+        reconciliation_note=(
+            f"single-source ({action.source}): accepted under SingleSourcePolicy.ACCEPT, "
+            "not cross-verified against a second feed"
+        ),
+        sources=(action,),
+    )
+
+
 def reconcile(
     actions: Iterable[CorporateAction],
     *,
     ex_date_tolerance_days: int = DEFAULT_EX_DATE_TOLERANCE_DAYS,
+    single_source_policy: SingleSourcePolicy = SingleSourcePolicy.QUEUE,
 ) -> ReconciliationResult:
     """Reconcile a set of corporate actions across exchanges into agreements and a queue.
 
@@ -413,14 +474,19 @@ def reconcile(
 
         if len(by_source) == 1:
             for action in group:
-                queue.append(
-                    ReconciliationConflict(
-                        reason=ReconciliationReason.SINGLE_SOURCE,
-                        isin=isin,
-                        action_type=action_type,
-                        records=(action,),
+                if single_source_policy is SingleSourcePolicy.ACCEPT:
+                    # Owner-ratified: trust the one feed, but stamp cross_verified=False so the
+                    # factor it feeds is never mistaken for a two-feed agreement.
+                    reconciled.append(_accept_single_source(action))
+                else:
+                    queue.append(
+                        ReconciliationConflict(
+                            reason=ReconciliationReason.SINGLE_SOURCE,
+                            isin=isin,
+                            action_type=action_type,
+                            records=(action,),
+                        )
                     )
-                )
             continue
 
         left_source, right_source = sorted(by_source)

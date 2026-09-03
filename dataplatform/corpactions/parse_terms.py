@@ -413,8 +413,11 @@ def _dividend_kind(text: str) -> DividendKind:
 def _dividend_terms(text: str) -> _Extraction:
     kind = _dividend_kind(text)
     money, percents = _money_values(text), _percents(text)
+    # The bare form (kind only, no amount) is always valid and is the queue fallback — DIVIDEND is
+    # the one type TERMS_BY_ACTION does not allow UnquantifiedTerms for, so a bad amount must fall
+    # back to a bare DividendTerms, never to _conflicting()'s UnquantifiedTerms.
+    bare = DividendTerms(dividend_kind=kind)
     try:
-        bare = DividendTerms(dividend_kind=kind)
         if len(money) > 1:
             return (
                 bare,
@@ -432,8 +435,13 @@ def _dividend_terms(text: str) -> _Extraction:
         return bare, ManualQueueReason.TERMS_NOT_STATED, "dividend amount not stated"
     except ValidationError as exc:
         # A non-positive rupee amount (e.g. a "Rs 0" parse artifact) is a single bad row — queue it
-        # rather than raise and fail the whole date-chunk fetch (mirrors _face_value_terms).
-        return _conflicting(f"dividend terms not usable: {exc.error_count()} error")
+        # as a bare DividendTerms (not _conflicting's UnquantifiedTerms, which DIVIDEND rejects)
+        # rather than raise and fail the whole date-chunk fetch.
+        return (
+            bare,
+            ManualQueueReason.TERMS_CONFLICTING,
+            f"dividend amount unusable: {exc.error_count()} error",
+        )
 
 
 def _exchange_ratio_terms(text: str) -> _Extraction:
