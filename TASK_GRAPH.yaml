@@ -18,6 +18,7 @@ milestones:
   M6: {title: Monitoring depth T1/T2 + evidence packs, depends: [M5]}
   M7: {title: Fundamentals waterfall, depends: [M3]}
   M8: {title: Real-money readiness, depends: [M5, M6]}
+  M9: {title: Trustworthy backtest inputs + momentum v2, depends: [M2, M3, M4]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -1738,3 +1739,114 @@ tasks:
     question: "Review the graduation evidence pack and decide whether to fund a case with real money."
     why_blocked: "Decision #8: graduation is discretionary and reserved to the owner."
     unblocks: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M9 — Trustworthy backtest inputs + momentum v2
+# (owner-promoted from ops/BACKLOG.md, 2026-09-03: make the M4.10 backtest
+#  trustworthy before iterating strategy — the 4-point sequence, CA split into
+#  ingest + wire since one agent context cannot hold both.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: M9.1
+  title: Corporate-action backfill over the price window
+  milestone: M9
+  module: D3
+  autonomy: AUTO
+  deps: [M2.4]
+  spec: |
+    Land real corporate-action terms so the adjustment engine has something to work with. M2.2 built
+    the parse->resolve->persist path and M2.4 the factor chain, but no runner writes CA rows
+    (ops/BACKLOG.md, M2.2). Build the fetch->L0->parse->reconcile->persist backfill runner (per-date
+    NSE, per-scrip BSE, mirroring nse/fii_dii.py:ingest_day and backfill.py's SourceSet loop), run it
+    over the L1 price window (2016-09..2026-09) for the names present in prices_raw, then run the M2.4
+    factor recompute so adjustment_factors is populated. Bounded, resumable, checkpointed; a 403
+    hard-stop parks rather than hammers (like M1.13). Do not weaken any validator — unresolved
+    identities and unparseable terms go to the M2.3 reconciliation queue, never silently dropped.
+  deliverables: [dataplatform/ingest/corp_actions_backfill.py, tests/unit/test_ca_backfill.py, ops/gates/M9-ca-backfill-report.md]
+  acceptance:
+    - "corporate_actions holds real split/bonus/dividend rows for the price window, keyed by ISIN"
+    - "adjustment_factors is recomputed and non-empty for names with a ratio-bearing action"
+    - "the runner is resumable and reports coverage; a hard block parks with an enumerated cause, not a silent skip"
+  verify: "uv run pytest tests/unit/test_ca_backfill.py -q"
+
+- id: M9.2
+  title: L2 adjusted prices in the momentum backtest
+  milestone: M9
+  module: X2
+  autonomy: AUTO
+  deps: [M9.1, M2.5]
+  spec: |
+    Re-point the momentum backtest off raw L1 closes onto L2 back-adjusted series through the query
+    layer, so the signal and P&L stop being corrupted by splits/bonuses (ops/BACKLOG.md, M4.10:
+    "adjusted == raw"). Materialize L2 adjusted (M2.5) from the M9.1 factors, then swap
+    _L1MomentumData / _L1Market / _L1Reader in backtest/run.py to read QueryService.adjusted_series /
+    cross_section (the seam the M4.10 backlog names). Re-run the 10y backtest and report the delta vs
+    the raw run: XIRR, turnover, costs, and names whose 12m signal flipped across a known split.
+  deliverables: [backtest/run.py, tests/integration/test_backtest_adjusted.py, ops/gates/M9-adjusted-backtest-report.md]
+  acceptance:
+    - "the backtest reads back-adjusted closes; a name with a known split no longer shows a fake ~-50% 12m momentum across its ex-date (asserted)"
+    - "the 10y run completes with no PIT violations and a report stating the XIRR/turnover/cost delta vs the raw run"
+    - "wiping and rebuilding L2 leaves the backtest run digest byte-identical (determinism preserved)"
+  verify: "uv run pytest tests/integration/test_backtest_adjusted.py -q"
+
+- id: M9.3
+  title: Investable universe + liquidity filter
+  milestone: M9
+  module: X2
+  autonomy: AUTO
+  deps: [M9.2, M3.9]
+  spec: |
+    Constrain the backtest universe from "every name that traded" to an investable, liquid set as-of
+    each rebalance, killing the fake microcap momentum the current run can pick (ops/BACKLOG.md,
+    M4.10). Use the M3.9 index-constituents history for as-of membership, and add an ADV/turnover
+    liquidity filter (drop names below a stated median-turnover floor over the lookback). State the
+    thresholds a priori. Re-run and report how universe size and results move. PIT-safe throughout.
+  deliverables: [backtest/run.py, tests/integration/test_backtest_universe.py, ops/gates/M9-universe-report.md]
+  acceptance:
+    - "the rebalance universe is as-of index membership intersected with a stated liquidity floor, PIT-safe"
+    - "an illiquid name below the floor is excluded on a date it would otherwise rank into the top-N (asserted)"
+    - "the 10y run completes and the report states the universe-size and XIRR/turnover delta vs M9.2"
+  verify: "uv run pytest tests/integration/test_backtest_universe.py -q"
+
+- id: M9.4
+  title: NIFTY-TRI benchmark wired into the backtest
+  milestone: M9
+  module: X2
+  autonomy: AUTO
+  deps: [M9.3, M3.9]
+  spec: |
+    Replace the L1 broad-market proxy benchmark with the real NIFTY total-return series through the
+    M3.9 pipeline. The licensed niftyindices TRI endpoint is session-gated and FAILED at C.1, so use
+    M3.9's computed TRI (seeded to the published close) as the benchmark, flowing it through the same
+    TriSeries / compare_to_benchmarks path. State plainly in the report that it is the computed TRI,
+    not the licensed feed, and what that means for reading excess return.
+  deliverables: [backtest/run.py, tests/integration/test_backtest_benchmark.py, ops/gates/M9-benchmark-report.md]
+  acceptance:
+    - "the backtest benchmark is the M3.9 TriSeries (computed TRI), not the ad-hoc L1 proxy"
+    - "the report states the benchmark provenance (computed, not licensed) and re-states excess return on it"
+    - "the comparison runs through the existing compare_to_benchmarks path unchanged"
+  verify: "uv run pytest tests/integration/test_backtest_benchmark.py -q"
+
+- id: M9.5
+  title: Momentum policy v2 — 12-1, banding, regime filter, vol-scaling
+  milestone: M9
+  module: X2
+  autonomy: AUTO
+  deps: [M9.2, M9.3, M9.4]
+  spec: |
+    With the inputs now trustworthy (adjusted prices, investable universe, real TRI), evolve the
+    naive policy into a documented v2 and measure each change in isolation:
+      * 12-1 momentum: rank on t-12m..t-1m return (skip the most recent month) instead of 0-12m;
+      * turnover banding/hysteresis: only sell a holding once it leaves an outer band (e.g. top-30),
+        to cut the ~2079-sell churn the naive run showed;
+      * regime filter: hold the basket only while the index is above its 200-day MA, else park the
+        cash in the liquid sleeve;
+      * volatility-scaled weights: size ~ 1/vol instead of pure equal weight.
+    Keep each behind a stated parameter so the a-priori-vs-tuned line stays checkable; report XIRR,
+    max drawdown, turnover and cost for naive vs each increment vs all-on, all on the M9.2-M9.4 inputs.
+  deliverables: [backtest/policies/momentum_v2.py, tests/unit/test_momentum_v2.py, ops/gates/M9-momentum-v2-report.md]
+  acceptance:
+    - "each of the four changes is a separately-toggleable, unit-tested parameter with an inversion test"
+    - "the report compares naive vs each increment vs all-on on adjusted prices + investable universe + computed TRI, with drawdown and turnover, costs included"
+    - "no look-ahead: the regime filter and the volatility estimate read only PIT-admitted data"
+  verify: "uv run pytest tests/unit/test_momentum_v2.py -q"
