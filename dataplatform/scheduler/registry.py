@@ -32,6 +32,7 @@ from dataplatform.config import Settings
 from dataplatform.logging import get_logger
 
 __all__ = [
+    "CONSTITUENTS_SNAPSHOT",
     "EOD_PIPELINE",
     "JOB_NAME",
     "Job",
@@ -39,6 +40,7 @@ __all__ = [
     "JobFn",
     "JobNotRegisteredError",
     "JobRegistry",
+    "constituents_snapshot",
     "default_registry",
     "eod_pipeline",
 ]
@@ -206,10 +208,43 @@ EOD_PIPELINE = Job(
 )
 
 
+def constituents_snapshot(context: JobContext) -> None:
+    """The weekly index-constituents snapshot (M10.2): the survivorship-bias killer.
+
+    What it does: snapshots the broad and sectoral niftyindices constituent lists with this week's
+    capture date, appending a dated membership record per slug so real point-in-time sector history
+    accumulates going forward — niftyindices publishes "as of today" only, so a static-today map
+    applied backward is survivorship-biased, and this is the mechanism that builds true history
+    over time. Idempotent per (slug, week): a re-run of the same week is a no-op. One slug's fetch
+    failure is journaled, alerted and skipped; it never aborts the others.
+    What it assumes: the injected clock and settings are the run's (B10), the database is migrated,
+    and the network is reachable — the real wiring is built inside `run_constituents_snapshot`.
+    What it never does: manufacture past history, or silently fill a missed week (a gap stays a
+    gap). The import is deferred so this module (loaded by the scheduler) does not pull in the
+    ingest stack at import time, and so `constituents_ingest` can name `JobContext` without a cycle.
+    """
+    from dataplatform.ingest.constituents_snapshot_job import run_constituents_snapshot
+
+    run_constituents_snapshot(context)
+
+
+#: The weekly constituents snapshot (M10.2). 20:00 IST every Saturday — the market is closed and the
+#: published lists are stable for the week, and the Saturday capture is stamped `as_of` that ISO
+#: week's Sunday (`week_anchor`) so a second run of the same week is a true no-op. The timezone is
+#: supplied by the scheduler from `Settings`, never the host's.
+CONSTITUENTS_SNAPSHOT = Job(
+    name="constituents_snapshot",
+    cron="0 20 * * sat",
+    fn=constituents_snapshot,
+    timeout=timedelta(minutes=30),
+    description="Weekly dated snapshot of index constituents — forward sector history (M10.2)",
+)
+
+
 def default_registry() -> JobRegistry:
     """The registry a production scheduler process runs.
 
     A fresh object each call rather than a module-level singleton: two processes in one test, or a
     test that registers an extra job, must not be able to mutate what the next one sees.
     """
-    return JobRegistry([EOD_PIPELINE])
+    return JobRegistry([EOD_PIPELINE, CONSTITUENTS_SNAPSHOT])

@@ -11,6 +11,7 @@ Other packages use this through `read_heartbeat` (the status API) and `Scheduler
 """
 
 from dataplatform.scheduler.registry import (
+    CONSTITUENTS_SNAPSHOT,
     EOD_PIPELINE,
     JOB_NAME,
     Job,
@@ -18,6 +19,7 @@ from dataplatform.scheduler.registry import (
     JobFn,
     JobNotRegisteredError,
     JobRegistry,
+    constituents_snapshot,
     default_registry,
     eod_pipeline,
 )
@@ -36,6 +38,7 @@ from dataplatform.scheduler.runner import (
 
 __all__ = [
     "ALIVE",
+    "CONSTITUENTS_SNAPSHOT",
     "DEFAULT_HEARTBEAT_INTERVAL",
     "DEFAULT_SCHEDULER_ID",
     "EOD_PIPELINE",
@@ -51,6 +54,7 @@ __all__ = [
     "JobState",
     "SchedulerRunner",
     "build_scheduler",
+    "constituents_snapshot",
     "default_registry",
     "eod_pipeline",
     "read_heartbeat",
