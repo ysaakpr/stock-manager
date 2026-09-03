@@ -64,6 +64,12 @@ from pathlib import Path
 
 from analyst.journal.models import Decision, JournalEntry
 from backtest.accounting import BenchmarkComparison, PortfolioBook
+from backtest.policies.momentum_v2 import (
+    MomentumV2Parameters,
+    MomentumV2Policy,
+    MomentumV2Record,
+    RegimeReading,
+)
 from backtest.policies.naive_momentum import (
     MomentumParameters,
     MomentumRecord,
@@ -114,6 +120,22 @@ _REPORT_PATH = Path("ops/gates/M4-momentum-report.md")
 _DELTA_REPORT_PATH = Path("ops/gates/M9-adjusted-backtest-report.md")
 _UNIVERSE_REPORT_PATH = Path("ops/gates/M9-universe-report.md")
 _BENCHMARK_REPORT_PATH = Path("ops/gates/M9-benchmark-report.md")
+_V2_REPORT_PATH = Path("ops/gates/M9-momentum-v2-report.md")
+
+# ── M9.5 momentum v2 defaults (a priori, stated once, never tuned) ───────────────────────────────
+#: The trailing window over which the regime index's moving average is struck. 200 sessions is the
+#: standard trend filter. The regime index is the same broad-market L1 basket the benchmark proxy
+#: uses (equal-weight price relative of the most-liquid names at the start), so the regime overlay
+#: reads a proxy for the index, stated plainly in the report.
+_REGIME_MA_DAYS = 200
+#: The number of trailing monthly points the volatility estimate is struck over — a year of monthly
+#: returns. Monthly (not daily) keeps the ten-year walk cheap and is ample for risk-parity sizing.
+_VOL_MONTHS = 12
+#: The volatility floor: when a name has too few monthly points for a sample stddev (or a degenerate
+#: zero one), it is sized at this vol rather than dropped, so the candidate universe stays identical
+#: across every v2 config and only the *use* of vol changes. A rare fallback, reported.
+_VOL_FLOOR = Decimal("0.05")
+_MONTH_DAYS = 30  # the calendar step between monthly volatility / skip-month reference points
 
 # ── M9.4 benchmark defaults (a priori, stated once) ──────────────────────────────────────────────
 #: The M3.9 index whose computed total-return series is the broad-market benchmark. NIFTY 50 is the
@@ -605,6 +627,224 @@ class _L1MomentumData:
         return self._sessions[index]
 
 
+# ── M9.5: the regime index (a broad-market proxy) and its trailing moving average ────────────────
+
+
+class _RegimeSource:
+    """The regime overlay's index level and its trailing moving average, both point-in-time (M9.5).
+
+    The regime index is the same broad-market L1 basket the benchmark proxy uses — an equal-weight
+    price relative of the ``size`` most-liquid names on the first session, seeded to
+    :data:`_TRI_SEED`. Its ``ma_days``-session simple moving average, struck over sessions on or
+    before the decision date, is the trend filter: the momentum basket is held only while the level
+    is at or above the average.
+
+    Point-in-time by construction (invariant #7): both the level and the moving average read only
+    closes on sessions ``<= as_of`` — no future close enters the average, so the regime a rebalance
+    sees is exactly what was knowable that day. Levels are cached per session, so the ten-year walk
+    computes each session's level once even though the moving-average windows overlap heavily.
+
+    It is a *proxy* index, stated plainly in the report: the store holds no licensed index level, so
+    the regime is read off the same L1 broad-market basket the benchmark proxy is built from.
+    """
+
+    def __init__(
+        self,
+        reader: _L1Reader,
+        calendar: Sequence[date],
+        *,
+        first_session: date,
+        size: int,
+        ma_days: int,
+    ) -> None:
+        self._reader = reader
+        self._calendar = list(calendar)
+        self._ma_days = ma_days
+        self._basket = reader.most_liquid_on(first_session, size)
+        base = reader.closes_on(first_session)
+        self._base = {isin: base[isin] for isin in self._basket if isin in base}
+        if not self._base:
+            raise BacktestError(
+                f"cannot build a regime index: no basket closes on {first_session.isoformat()}"
+            )
+        self._levels: dict[date, Decimal | None] = {}
+
+    def _level(self, session: date) -> Decimal | None:
+        """The broad-market proxy level on ``session`` — ``None`` if no basket name printed."""
+        if session in self._levels:
+            return self._levels[session]
+        closes = self._reader.closes_on(session)
+        relatives = [closes[isin] / self._base[isin] for isin in self._base if isin in closes]
+        level = _TRI_SEED * (sum(relatives, _ZERO) / Decimal(len(relatives))) if relatives else None
+        self._levels[session] = level
+        return level
+
+    def reading(self, as_of: date) -> RegimeReading:
+        """The regime reading as of ``as_of``: the current level and its trailing moving average."""
+        cutoff = bisect_right(self._calendar, as_of)
+        window = self._calendar[:cutoff][-self._ma_days :]
+        levels = [level for s in window if (level := self._level(s)) is not None]
+        if not levels:
+            raise BacktestError(f"no regime index level on or before {as_of.isoformat()}")
+        current = self._level(as_of)
+        if current is None:
+            current = levels[-1]  # no print on the date itself — carry the last real level
+        moving_average = sum(levels, _ZERO) / Decimal(len(levels))
+        return RegimeReading(
+            index_level=current, moving_average=moving_average, knowable_date=as_of
+        )
+
+
+# ── M9.5: the v2 momentum signal — 0-12 and 12-1 returns, plus a trailing volatility ─────────────
+
+
+def _sample_stdev(values: Sequence[Decimal]) -> Decimal | None:
+    """Sample standard deviation of ``values`` (Decimal), or ``None`` for fewer than two points."""
+    n = len(values)
+    if n < 2:
+        return None
+    mean = sum(values, _ZERO) / Decimal(n)
+    variance = sum(((v - mean) ** 2 for v in values), _ZERO) / Decimal(n - 1)
+    return variance.sqrt()
+
+
+class _L1MomentumV2Data:
+    """The v2 policy's :class:`MomentumV2Data` (M9.5) — same PIT/universe wiring, richer signal.
+
+    Built exactly like :class:`_L1MomentumData` — rebalance on the first session of each month, the
+    survivorship-safe PIT universe narrowed by the same investable/liquidity screen (M9.3), the
+    momentum ratio from the same L2-adjusted-or-raw close source (M9.2), the sizing price from raw
+    L1 (invariant #3) — but every candidate carries what the four v2 toggles need:
+
+    * ``momentum_0_12`` — the naive trailing return (``close_now / close_12m - 1``);
+    * ``momentum_12_1`` — the return from twelve months ago to one month ago
+      (``close_1m / close_12m - 1``), skipping the most recent month;
+    * ``volatility`` — the sample standard deviation of the trailing twelve monthly returns, floored
+      at :data:`_VOL_FLOOR` when too few points exist (so the universe stays identical across every
+      v2 config and only the *use* of vol changes).
+
+    The candidate set is identical to the naive/M9.3 set for the same parameters, so the increment
+    report isolates each toggle rather than confounding it with a universe change. The regime
+    reading is served through the injected :class:`_RegimeSource`.
+    """
+
+    def __init__(
+        self,
+        reader: _L1Reader,
+        sessions: Sequence[date],
+        regime_source: _RegimeSource,
+        *,
+        signal_closes: SignalCloses | None = None,
+        universe_filter: _InvestableUniverse | None = None,
+    ) -> None:
+        self._reader = reader
+        self._signal_closes: SignalCloses = (
+            signal_closes if signal_closes is not None else reader.closes_on
+        )
+        self._universe_filter = universe_filter
+        self._regime_source = regime_source
+        self._sessions = list(sessions)
+        self._rebalance = set(_first_session_of_each_month(sessions))
+        self._windows = reader.listing_windows()
+        self._signals: dict[date, tuple[MomentumV2Record, ...]] = {}
+        self._universe_sizes: dict[date, int] = {}
+        for rebalance_date in sorted(self._rebalance):
+            records = self._compute(rebalance_date)
+            self._signals[rebalance_date] = records
+            self._universe_sizes[rebalance_date] = len(records)
+
+    def is_rebalance(self, session: date) -> bool:
+        return session in self._rebalance
+
+    def signal(self, as_of: date) -> Dataset[MomentumV2Record]:
+        records = self._signals.get(as_of, ())
+        return Dataset.declaring(
+            f"momentum_v2@{as_of.isoformat()}",
+            records,
+            knowable_date=lambda record: record.knowable_date,
+        )
+
+    def regime(self, as_of: date) -> Dataset[RegimeReading]:
+        reading = self._regime_source.reading(as_of)
+        return Dataset.declaring(
+            f"regime@{as_of.isoformat()}",
+            (reading,),
+            knowable_date=lambda r: r.knowable_date,
+        )
+
+    def rebalance_dates(self) -> tuple[date, ...]:
+        return tuple(sorted(self._rebalance))
+
+    @property
+    def mean_universe_size(self) -> Decimal:
+        sizes = [n for n in self._universe_sizes.values() if n > 0]
+        if not sizes:
+            return _ZERO
+        return (Decimal(sum(sizes)) / Decimal(len(sizes))).quantize(Decimal("0.1"))
+
+    def _session_on_or_before(self, target: date) -> date | None:
+        index = bisect_right(self._sessions, target) - 1
+        return self._sessions[index] if index >= 0 else None
+
+    def _monthly_sessions(self, as_of: date) -> list[date]:
+        """The trailing monthly reference sessions (as_of, -1m, ... -12m), deduped, ascending."""
+        points: list[date] = []
+        for k in range(_VOL_MONTHS + 1):
+            session = self._session_on_or_before(as_of - timedelta(days=_MONTH_DAYS * k))
+            if session is not None:
+                points.append(session)
+        return sorted(set(points))
+
+    def _volatility(self, isin: str, monthly_maps: Sequence[Mapping[str, Decimal]]) -> Decimal:
+        """The trailing monthly-return volatility for ``isin``, floored at :data:`_VOL_FLOOR`."""
+        closes = [m[isin] for m in monthly_maps if isin in m and m[isin] > _ZERO]
+        returns = [closes[i] / closes[i - 1] - _ONE for i in range(1, len(closes))]
+        stdev = _sample_stdev(returns)
+        if stdev is None or stdev <= _ZERO:
+            return _VOL_FLOOR
+        return stdev
+
+    def _compute(self, as_of: date) -> tuple[MomentumV2Record, ...]:
+        reference_12m = self._session_on_or_before(as_of - timedelta(days=_LOOKBACK_DAYS))
+        reference_1m = self._session_on_or_before(as_of - timedelta(days=_MONTH_DAYS))
+        if reference_12m is None or reference_1m is None:
+            return ()  # not enough history to form either signal yet
+        universe = pit_universe(as_of, InMemoryListingCalendar(self._windows)).isins
+        if self._universe_filter is not None:
+            universe = frozenset(self._universe_filter.constrain(as_of, universe))
+        signal_now = self._signal_closes(as_of)
+        signal_12m = self._signal_closes(reference_12m)
+        signal_1m = self._signal_closes(reference_1m)
+        raw_now = self._reader.closes_on(as_of)
+        monthly_sessions = self._monthly_sessions(as_of)
+        monthly_maps = [self._signal_closes(session) for session in monthly_sessions]
+        records: list[MomentumV2Record] = []
+        for isin in universe:
+            now = signal_now.get(isin)
+            base_12 = signal_12m.get(isin)
+            base_1 = signal_1m.get(isin)
+            price = raw_now.get(isin)
+            if (
+                now is None
+                or base_12 is None
+                or base_1 is None
+                or base_12 <= _ZERO
+                or price is None
+            ):
+                continue
+            records.append(
+                MomentumV2Record(
+                    isin=isin,
+                    momentum_0_12=now / base_12 - _ONE,
+                    momentum_12_1=base_1 / base_12 - _ONE,
+                    price=price,
+                    volatility=self._volatility(isin, monthly_maps),
+                    knowable_date=as_of,
+                )
+            )
+        return tuple(records)
+
+
 # ── accounting broker: mirror the SimBroker fills into a PortfolioBook for the report ─────────────
 
 
@@ -619,10 +859,20 @@ class _AccountingBroker:
     accumulated here for the cost line of the report.
     """
 
-    def __init__(self, sim: SimBroker, book: PortfolioBook) -> None:
+    def __init__(
+        self,
+        sim: SimBroker,
+        book: PortfolioBook,
+        *,
+        nav_sink: Callable[[date], None] | None = None,
+    ) -> None:
         self._sim = sim
         self._book = book
         self.total_charges: Decimal = _ZERO
+        # Optional per-session NAV sampler (M9.5): called after each session's fills are posted, so
+        # a caller can build the NAV path a max-drawdown needs. ``None`` (the default) is the
+        # pre-M9.5 behaviour exactly — no extra work, no change to the shared M9.2-M9.4 run.
+        self._nav_sink = nav_sink
 
     @property
     def book(self) -> PortfolioBook:
@@ -634,6 +884,8 @@ class _AccountingBroker:
             if order.status is OrderStatus.COMPLETE and order.fill is not None:
                 self._book.record_fill(order.fill)
                 self.total_charges += order.fill.cost.total
+        if self._nav_sink is not None:
+            self._nav_sink(session)
         return filled
 
     # ── Broker surface — delegated verbatim (invariant #5: one broker interface) ──────────────────
@@ -851,6 +1103,9 @@ class BacktestResult:
     benchmark_source: str
     benchmark_index_name: str
     benchmark_method: str
+    #: Peak-to-trough max drawdown of the NAV path over the run, as a positive ratio (0.25 = -25%).
+    #: Zero when no NAV path was sampled (the pre-M9.5 naive/adjusted/universe/benchmark runs).
+    max_drawdown: Decimal = _ZERO
 
     @property
     def held_names(self) -> int:
@@ -988,6 +1243,144 @@ def run_naive_momentum(
         reader.close()
 
 
+def run_momentum_v2(
+    *,
+    start: date,
+    end: date,
+    v2_parameters: MomentumV2Parameters,
+    opening_cash: Decimal = _DEFAULT_OPENING_CASH,
+    data_root: Path | None = None,
+    adjusted: bool = False,
+    universe: UniverseParameters | None = None,
+    benchmark_slug: str = _BENCHMARK_TRI_SLUG,
+) -> BacktestResult:
+    """Run the momentum v2 policy over ``[start, end]`` and return the report metrics (M9.5).
+
+    Mirrors :func:`run_naive_momentum`'s wiring — the same L1 data, the one shared cost model behind
+    ``SimBroker``, the M4.7 allocator inside the policy, M4.6 accounting mirrored off the fills,
+    full journaling through the replay engine — but drives :class:`MomentumV2Policy` with
+    ``v2_parameters`` and additionally samples the NAV path each session so the run reports a
+    peak-to-trough max drawdown. With every toggle in ``v2_parameters`` off the run reproduces the
+    naive result exactly (the increment report's baseline).
+
+    ``adjusted`` defaults to ``False``: over this corporate-action-free store the L2 adjusted signal
+    equals the raw one bar-for-bar (M9.2) and the ten-year L2 is not materialized, so the raw signal
+    *is* the M9.2 signal here — the report says so. ``universe`` constrains the candidate set to the
+    investable, liquid names (M9.3); the benchmark is M3.9's computed TRI when the store holds it,
+    else the L1 proxy (M9.4). The regime overlay reads a broad-market L1 proxy index (stated).
+    """
+    reader = _L1Reader(data_root=data_root)
+    service = QueryService(data_root=data_root) if adjusted else None
+    try:
+        sessions = reader.trading_sessions(start, end)
+        if not sessions:
+            raise BacktestError(f"no trading sessions in [{start.isoformat()}, {end.isoformat()}]")
+        calendar = reader.all_sessions()
+        sessions = _reserve_fill_headroom(sessions, calendar)
+        first_session, terminal = sessions[0], sessions[-1]
+
+        signal_closes = _AdjustedCloseSource(service, reader) if service is not None else None
+        universe_filter = (
+            _InvestableUniverse(reader, universe, data_root=data_root)
+            if universe is not None
+            else None
+        )
+        regime_source = _RegimeSource(
+            reader,
+            calendar,
+            first_session=first_session,
+            size=_BENCHMARK_BASKET,
+            ma_days=v2_parameters.regime_ma_days,
+        )
+        data = _L1MomentumV2Data(
+            reader,
+            sessions,
+            regime_source,
+            signal_closes=signal_closes,
+            universe_filter=universe_filter,
+        )
+        clock = FrozenClock(first_session)
+        sim = SimBroker(
+            clock=clock,
+            cost_model=CostModel(load_rate_card(), account_state=_ACCOUNT_STATE),
+            market=_L1Market(reader, calendar),
+            opening_cash=opening_cash,
+        )
+        book = PortfolioBook()
+        book.deposit(first_session, opening_cash)
+
+        # NAV path for the max-drawdown metric: after each session's fills, mark the whole book at
+        # each held name's last-known close (a name that did not print that day is carried at its
+        # previous close, never guessed or zeroed), so the path is a real point-in-time NAV series.
+        last_close: dict[str, Decimal] = {}
+        nav_path: list[Decimal] = []
+
+        def sample_nav(session: date) -> None:
+            last_close.update(reader.closes_on(session))
+            positions = book.positions()
+            if any(position.isin not in last_close for position in positions):
+                return  # a held name with no close seen yet — skip this sample rather than guess
+            nav_path.append(book.net_asset_value(last_close))
+
+        broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
+        policy = MomentumV2Policy(data, v2_parameters)
+
+        engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
+        started = time.perf_counter()
+        result = engine.run()
+        runtime = time.perf_counter() - started
+
+        terminal_prices = _terminal_prices(reader, book, sessions)
+        resolved = _resolve_benchmark(
+            reader,
+            data.rebalance_dates(),
+            first_session,
+            terminal,
+            slug=benchmark_slug,
+            data_root=data_root,
+        )
+        benchmark = resolved.series
+        comparison = book.compare_to_benchmarks(
+            terminal, terminal_prices, benchmark=benchmark, theme=benchmark
+        )
+        # A momentum parameter object for the shared BacktestResult fields (top_n, sleeve, budget);
+        # the v2-specific toggles are reported separately by the caller from ``v2_parameters``.
+        shared_params = MomentumParameters(
+            top_n=v2_parameters.top_n,
+            buy_budget_fraction=v2_parameters.buy_budget_fraction,
+            sleeve=v2_parameters.sleeve,
+        )
+        return BacktestResult(
+            policy="momentum_v2",
+            adjusted=adjusted,
+            start=first_session,
+            terminal=terminal,
+            sessions=len(sessions),
+            rebalances=len(data.rebalance_dates()),
+            parameters=shared_params,
+            opening_cash=opening_cash,
+            runtime_seconds=runtime,
+            result=result,
+            book=result.book,
+            final_nav=book.net_asset_value(terminal_prices),
+            total_charges=broker.total_charges,
+            realized_pnl=book.realized_pnl,
+            unrealized_pnl=book.unrealized_pnl(terminal_prices),
+            comparison=comparison,
+            decision_counts=_decision_counts(result.journal),
+            universe_filtered=universe is not None,
+            mean_universe=data.mean_universe_size,
+            benchmark_source=resolved.source,
+            benchmark_index_name=benchmark.index_name,
+            benchmark_method=benchmark.method,
+            max_drawdown=_max_drawdown(nav_path),
+        )
+    finally:
+        if service is not None:
+            service.close()
+        reader.close()
+
+
 def _terminal_prices(
     reader: _L1Reader, book: PortfolioBook, sessions: Sequence[date]
 ) -> dict[str, Decimal]:
@@ -1022,6 +1415,25 @@ def _decision_counts(journal: Sequence[JournalEntry]) -> dict[str, int]:
     for entry in journal:
         counts[entry.decision.value] += 1
     return counts
+
+
+def _max_drawdown(nav_path: Sequence[Decimal]) -> Decimal:
+    """The largest peak-to-trough NAV decline over the path, as a positive ratio (0.25 = -25%).
+
+    Walks the NAV series tracking the running peak; the drawdown at each point is
+    ``(peak - nav) / peak`` and the result is the maximum of those. Zero for a non-declining path or
+    an empty one. Deterministic and exact in ``Decimal`` — no float creeps into the risk metric.
+    """
+    peak = _ZERO
+    worst = _ZERO
+    for nav in nav_path:
+        if nav > peak:
+            peak = nav
+        if peak > _ZERO:
+            drawdown = (peak - nav) / peak
+            if drawdown > worst:
+                worst = drawdown
+    return worst
 
 
 def _first_session_of_each_month(sessions: Sequence[date]) -> list[date]:
@@ -1512,6 +1924,200 @@ def run_benchmark_report(
     return render_benchmark_report(run, benchmark_slug=benchmark_slug)
 
 
+# ── M9.5: momentum v2 increment report — naive vs each toggle vs all-on ───────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class _V2Increment:
+    """One row of the increment report: a human label, the toggles it turns on, and its run."""
+
+    label: str
+    parameters: MomentumV2Parameters
+    run: BacktestResult
+
+
+def _v2_configs(top_n: int, sell_band: int) -> list[tuple[str, MomentumV2Parameters]]:
+    """Naive, each single-toggle increment, and all-on — the rows of the M9.5 report.
+
+    Naive is every toggle off (which reproduces the naive policy). Each increment turns on exactly
+    one change relative to naive, so the delta isolates it; all-on turns on all four. The banding
+    increment widens the sell band from ``top_n`` to ``sell_band`` (the outer hysteresis band).
+    """
+    return [
+        ("Naive (all off)", MomentumV2Parameters(top_n=top_n)),
+        ("+ 12-1 momentum", MomentumV2Parameters(top_n=top_n, use_12_1=True)),
+        ("+ Turnover banding", MomentumV2Parameters(top_n=top_n, sell_band=sell_band)),
+        ("+ Regime filter", MomentumV2Parameters(top_n=top_n, regime_filter=True)),
+        ("+ Vol-scaled weights", MomentumV2Parameters(top_n=top_n, vol_scaled=True)),
+        (
+            "All on",
+            MomentumV2Parameters(
+                top_n=top_n,
+                use_12_1=True,
+                sell_band=sell_band,
+                regime_filter=True,
+                vol_scaled=True,
+            ),
+        ),
+    ]
+
+
+def render_v2_report(increments: Sequence[_V2Increment], *, top_n: int, sell_band: int) -> str:
+    """The M9.5 report: naive vs each increment vs all-on, on the M9.2-M9.4 inputs.
+
+    One table with a row per configuration and columns for portfolio XIRR, max drawdown, turnover
+    (BUY+SELL fills) and total cost — every figure struck on the same adjusted-signal, investable-
+    universe, computed-TRI-benchmark stack, so each row differs from naive only by the toggle(s) it
+    turns on. Costs are included in every fill (invariant #4), not deducted after the fact.
+    """
+    baseline = increments[0].run
+    lines = [
+        "# M9.5 — Momentum policy v2 (10 years)",
+        "",
+        "*Generated by `python -m backtest.run --policy naive_momentum --v2-report`. Four a-priori "
+        "improvements to the naive momentum policy — 12-1 ranking, turnover banding, a regime "
+        "filter and volatility-scaled weights — each behind its own toggle, each measured in "
+        "isolation against the naive baseline and then all together.*",
+        "",
+        "## The four changes (each a stated, separately-toggleable parameter — no tuning)",
+        "",
+        "- **12-1 momentum** (`use_12_1`) — rank on the `t-12m .. t-1m` return, skipping the most "
+        "recent month (the short-term-reversal month), instead of the raw `0..12m` return.",
+        f"- **Turnover banding / hysteresis** (`sell_band`) — buy the top-{top_n} but only sell a "
+        f"holding once it leaves the top-{sell_band} outer band, so a name drifting between rank "
+        f"{top_n} and {sell_band} is held rather than churned.",
+        "- **Regime filter** (`regime_filter`) — hold the basket only while the regime index is at "
+        f"or above its {_REGIME_MA_DAYS}-session moving average; below it, sell the basket and "
+        "park in the liquid sleeve (hold cash).",
+        "- **Volatility-scaled weights** (`vol_scaled`) — size each name at `~ 1/vol` (risk "
+        f"parity) over the trailing {_VOL_MONTHS} monthly returns, instead of pure equal weight.",
+        "",
+        "With all four off the policy is the naive top-N policy exactly (the parity is pinned in "
+        "`tests/unit/test_momentum_v2.py`), so the first row below is the naive baseline.",
+        "",
+        "## Data reality (same as M9.2-M9.4)",
+        "",
+        "Every run reads the **raw** L1 momentum signal: this store holds no corporate actions, so "
+        "the L2 back-adjusted signal equals the raw one bar-for-bar (M9.2) and the ten-year L2 is "
+        "not materialized — the raw signal *is* the M9.2 signal here. The universe is the M9.3 "
+        "investable/liquid set (as-of index membership ∩ a median-turnover floor; this store holds "
+        "no membership snapshots, so the liquidity floor is what narrows it). The benchmark is the "
+        + (
+            "M3.9 computed TRI."
+            if baseline.benchmark_is_computed_tri
+            else "pre-M9.4 broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the "
+            "close-all backfill is gated, AGENTIC_CONTEXT B1)."
+        )
+        + " The regime overlay reads a **proxy** index — the same broad-market L1 basket the "
+        "benchmark proxy is built from — because the store holds no licensed index level.",
+        "",
+        "## Window",
+        "",
+        f"- {baseline.start.isoformat()} -> {baseline.terminal.isoformat()} "
+        f"({baseline.sessions} sessions, {baseline.rebalances} monthly rebalances)",
+        f"- Mean investable universe / rebalance: {baseline.mean_universe}",
+        f"- Benchmark XIRR (identical cashflows, all rows): "
+        f"{_pct(baseline.comparison.benchmark_xirr)} "
+        f"({_benchmark_label(baseline)})",
+        "",
+        "## Naive vs each increment vs all-on",
+        "",
+        "| Configuration | Portfolio XIRR | Max drawdown | Turnover (fills) | Total cost | "
+        "Excess vs benchmark |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for increment in increments:
+        run = increment.run
+        lines.append(
+            f"| {increment.label} | {_pct(run.comparison.portfolio_xirr)} | "
+            f"{_pct(run.max_drawdown)} | {_trades(run)} | {_rupees(run.total_charges)} | "
+            f"{_pct(run.comparison.excess_over_benchmark)} |"
+        )
+    naive = increments[0]
+    lines += [
+        "",
+        "### Deltas vs naive (isolating each change)",
+        "",
+        "| Configuration | Δ XIRR | Δ Max drawdown | Δ Turnover | Δ Cost |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for increment in increments[1:]:
+        run = increment.run
+        base = naive.run
+        lines.append(
+            f"| {increment.label} | "
+            f"{_pct(run.comparison.portfolio_xirr - base.comparison.portfolio_xirr)} | "
+            f"{_pct(run.max_drawdown - base.max_drawdown)} | "
+            f"{_trades(run) - _trades(base):+d} | "
+            f"{_rupees(run.total_charges - base.total_charges)} |"
+        )
+    lines += [
+        "",
+        "## Reading it",
+        "",
+        "- **Turnover banding** is the change that most directly targets the naive run's churn — "
+        f"the naive policy fired {_trades(naive.run)} fills over the decade "
+        f"({naive.run.decision_counts[Decision.SELL.value]} of them sells); the banding row shows "
+        "how much of that the hysteresis removes, and its cost delta is the saving.",
+        "- **The regime filter** trades return for drawdown control: it sits in cash through the "
+        "sessions the proxy index is below its moving average, so its max-drawdown column is the "
+        "one to read against naive.",
+        "- **Vol-scaling** and **12-1** reshape the basket rather than its size; read them in the "
+        "XIRR and drawdown columns.",
+        "- **Do not read any excess-vs-benchmark figure as alpha** — the benchmark here is a "
+        "computed/proxy total-return series, not the licensed feed (M9.4). The point of this table "
+        "is the *relative* effect of each toggle, all measured against the identical benchmark.",
+        "",
+        "## PIT (invariant #7, acceptance #3)",
+        "",
+        "- Every run completed with each session's queries scoped to that session; no `PitError` "
+        "was raised. The regime reading and the volatility estimate read only closes on or before "
+        "the decision date — the moving average is struck over a trailing window ending on the "
+        "session, and the monthly volatility points are all on or before it — so no future data "
+        "enters a past decision. The 12-1 and 0-12 ratios are PIT-safe by the same argument as "
+        "M9.2 (a later corporate action scales both endpoints identically and cancels).",
+        "",
+        "## Run digests (determinism)",
+        "",
+    ]
+    for increment in increments:
+        lines.append(f"- **{increment.label}:** `{increment.run.result.digest()}`")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def run_v2_report(
+    *,
+    start: date,
+    end: date,
+    top_n: int = 20,
+    sell_band: int = 30,
+    opening_cash: Decimal = _DEFAULT_OPENING_CASH,
+    data_root: Path | None = None,
+    universe: UniverseParameters | None = None,
+) -> str:
+    """Run naive, each single-toggle increment and all-on, and render the M9.5 increment report.
+
+    Every configuration runs on the same M9.2-M9.4 stack (adjusted-or-raw signal, the M9.3
+    investable universe, the M9.4 benchmark), so each row differs from naive only by the toggle(s)
+    it turns on. Returns the rendered markdown.
+    """
+    uni = universe if universe is not None else UniverseParameters()
+    increments: list[_V2Increment] = []
+    for label, params in _v2_configs(top_n, sell_band):
+        run = run_momentum_v2(
+            start=start,
+            end=end,
+            v2_parameters=params,
+            opening_cash=opening_cash,
+            data_root=data_root,
+            adjusted=False,
+            universe=uni,
+        )
+        increments.append(_V2Increment(label=label, parameters=params, run=run))
+    return render_v2_report(increments, top_n=top_n, sell_band=sell_band)
+
+
 def _print_summary(run: BacktestResult) -> None:
     """A terse stdout summary; the full report is the markdown file when `--report` is passed."""
     c = run.comparison
@@ -1572,6 +2178,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help=f"run the backtest against M3.9's computed TRI and write the M9.4 benchmark report to "
         f"{_BENCHMARK_REPORT_PATH}",
+    )
+    parser.add_argument(
+        "--v2-report",
+        action="store_true",
+        help=f"run naive vs each v2 increment vs all-on (M9.5) and write the momentum-v2 report to "
+        f"{_V2_REPORT_PATH}",
     )
     parser.set_defaults(adjusted=True)
     parser.add_argument(
@@ -1656,6 +2268,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         _BENCHMARK_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
         _BENCHMARK_REPORT_PATH.write_text(report, encoding="utf-8")
         print(f"  benchmark report written to {_BENCHMARK_REPORT_PATH}")
+        return 0
+
+    if args.v2_report:
+        try:
+            report = run_v2_report(
+                start=start,
+                end=end,
+                top_n=args.top_n if args.top_n is not None else 20,
+                opening_cash=args.opening_cash,
+                data_root=args.data_root,
+            )
+        except BacktestError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        _V2_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _V2_REPORT_PATH.write_text(report, encoding="utf-8")
+        print(f"  v2 report written to {_V2_REPORT_PATH}")
         return 0
 
     try:
