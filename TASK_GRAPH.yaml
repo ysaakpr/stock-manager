@@ -19,6 +19,7 @@ milestones:
   M7: {title: Fundamentals waterfall, depends: [M3]}
   M8: {title: Real-money readiness, depends: [M5, M6]}
   M9: {title: Trustworthy backtest inputs + momentum v2, depends: [M2, M3, M4]}
+  M10: {title: Alternative signals — sector rotation + fundamentals, depends: [M3, M4, M7, M9]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -1850,3 +1851,143 @@ tasks:
     - "the report compares naive vs each increment vs all-on on adjusted prices + investable universe + computed TRI, with drawdown and turnover, costs included"
     - "no look-ahead: the regime filter and the volatility estimate read only PIT-admitted data"
   verify: "uv run pytest tests/unit/test_momentum_v2.py -q"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M10 — Alternative signals: sector rotation + fundamentals
+# (owner-promoted 2026-09-03 after the momentum-decay finding: momentum alone
+#  is a decaying, regime-dependent sleeve — diversify the *signal*. Research in
+#  this session: static-map sector rotation is a full-period wash vs momentum
+#  but beat it +11.7% in 2023-26 (survivorship-caveated); the PIT fundamentals
+#  store (M7) is the best-built piece in the platform but holds no data.)
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: M10.1
+  title: Index-constituents ingest — sector classification map
+  milestone: M10
+  module: D1
+  autonomy: AUTO
+  deps: [M3.9]
+  spec: |
+    Land the sector/industry classification the M3.9 constituents ingester already parses but no
+    runner fills. Build a fetch->L0->parse->persist runner over the niftyindices constituent CSVs
+    (`ind_{slug}list.csv`, the five-column Company,Industry,Symbol,Series,ISIN files) for the broad
+    lists (nifty500, nifty50) and the sectoral/thematic lists (niftyit, niftybank, niftyauto,
+    niftypharma, niftyfmcg, niftymetal, niftyenergy, niftyrealty, ...). Persist through the existing
+    `indices` writer so `membership_asof(slug, date)` and the per-name Industry are queryable. This
+    is a small fetch (~15-20 CSVs), not a bulk campaign. The constituents endpoint is VERIFIED at
+    C.1 (unlike the session-gated TRI). Note the hard limit for the caller: each CSV is "as of
+    today" — this ingests the *current* snapshot only; historical membership is M10.2's job.
+  deliverables: [dataplatform/ingest/constituents_ingest.py, tests/unit/test_constituents_ingest.py, ops/gates/M10-constituents-report.md]
+  acceptance:
+    - "every liquid name resolves to an Industry as-of a date via membership_asof over ingested data"
+    - "the broad list plus at least 8 sectoral lists are ingested and queryable"
+    - "the runner is resumable and reports coverage; a gated/failed slug parks with an enumerated cause"
+  verify: "uv run pytest tests/unit/test_constituents_ingest.py -q"
+
+- id: M10.2
+  title: Forward sector-history accumulation (survivorship-bias killer)
+  milestone: M10
+  module: D1
+  autonomy: AUTO
+  deps: [M10.1, M0.6]
+  spec: |
+    niftyindices publishes constituents "as of today" only — there is no history of which names were
+    in a sector index in past years, and a static-today map applied backward is survivorship-biased
+    (the research caveat). Wire a scheduled weekly job (M0.6 scheduler) that snapshots the broad and
+    sectoral constituent lists with the capture date, appending a dated membership record each run so
+    real point-in-time sector history accumulates going forward. Idempotent per (slug, week); a
+    missed week is a visible gap, never silently filled. Usable multi-year history accrues over time
+    — this task builds the mechanism, it does not manufacture past history.
+  deliverables: [dataplatform/ingest/constituents_snapshot_job.py, tests/integration/test_constituents_snapshot_job.py]
+  acceptance:
+    - "a weekly scheduled job appends a dated constituents snapshot for every configured slug"
+    - "membership_asof returns the snapshot in force on a date, and a re-run of the same week is a no-op"
+    - "a fetch failure for one slug is journaled and alerted, and does not abort the other slugs"
+  verify: "uv run pytest tests/integration/test_constituents_snapshot_job.py -q"
+
+- id: M10.3
+  title: Sector-rotation backtest policy
+  milestone: M10
+  module: X2
+  autonomy: AUTO
+  deps: [M10.1, M9.5]
+  spec: |
+    A backtest policy that ranks sectors by their members' aggregate momentum and holds the top
+    momentum names within the top-K sectors, PIT-safe via membership_asof (never today's map for a
+    past date once M10.2 history exists; until then, a static map with the survivorship caveat stated
+    in the report). Reuse the M9 adjusted-price + investable-universe + PIT machinery. Report
+    sector-rotation vs plain momentum on the *same* universe (to isolate the sector effect) and vs
+    the market, per regime window, costs included. State the a-priori parameters (top-K sectors,
+    top-N names); no tuning.
+  deliverables: [backtest/policies/sector_rotation.py, tests/unit/test_sector_rotation.py, ops/gates/M10-sector-rotation-report.md]
+  acceptance:
+    - "sector membership is read point-in-time (membership_asof); no future membership enters a past decision"
+    - "the report compares sector-rotation vs plain momentum (same universe) vs market, per regime, costs in"
+    - "the survivorship/static-map limitation is stated explicitly until M10.2 history matures"
+  verify: "uv run pytest tests/unit/test_sector_rotation.py -q"
+
+- id: M10.4
+  title: Fundamentals backfill runner + PIT ingest (XBRL)
+  milestone: M10
+  module: D1
+  autonomy: NEEDS_GO
+  deps: [M7.3, M1.7]
+  spec: |
+    Fill the true point-in-time fundamentals store (M7.3 `pit_fundamentals`, the best-built piece in
+    the platform: partitioned by filing_date, restatements are new records, quarantined from
+    backtests per invariant #8) that today holds no data. Build the fetch->L0->parse->write_pit
+    runner over the NSE results index + each entry's XBRL filing, resolving each to ISIN through the
+    D2 identity master, tagging each with the filing_date it first became knowable. Resumable,
+    checkpointed; a 403 spike parks. This is a B1 bulk campaign — thousands of per-filing fetches
+    over the price window — so it is NEEDS_GO, exactly like the M1.13 price backfill.
+  deliverables: [dataplatform/ingest/fundamentals_backfill.py, tests/unit/test_fundamentals_backfill.py, ops/gates/M10-fundamentals-backfill-report.md]
+  acceptance:
+    - "pit_fundamentals holds real P&L facts (revenue, PAT, EPS, ...) for the price-window names, keyed by ISIN + filing_date"
+    - "read_pit(on_date) returns only facts knowable then; a restatement is a new record, never an overwrite (invariant #8)"
+    - "the runner is resumable and reports coverage; a hard block parks with an enumerated cause"
+  verify: "uv run pytest tests/unit/test_fundamentals_backfill.py -q"
+  escalation:
+    question: "Run the 10-year NSE XBRL fundamentals backfill? It is a bulk per-filing fetch campaign (thousands of requests), reserved to the owner (B1) like the M1.13 price backfill."
+    why_blocked: "B1: a fetch campaign over ~200 requests to one source is owner-authorized, not agent-initiated."
+    unblocks: [M10.5, M10.6]
+
+- id: M10.5
+  title: Derived fundamental metrics (PIT-safe)
+  milestone: M10
+  module: D6
+  autonomy: AUTO
+  deps: [M10.4]
+  spec: |
+    Compute the signal-ready metrics the raw PIT facts don't give directly, all point-in-time off
+    `read_pit`: YoY revenue and PAT growth, trailing-twelve-month EPS, P/E (trailing EPS against the
+    L1 price), and operating/net margin trend. Every metric as-of a date must read only then-knowable
+    filings (read_pit), so a restated number can never leak into a historical value (invariant #8).
+    Note the known ceiling: only P&L concepts are extracted (M7), so ROE/ROCE/book-value/debt are out
+    of reach until a balance-sheet source is added — do not fabricate them; a balance-sheet extension
+    is a later task (logged to ops/BACKLOG.md).
+  deliverables: [dataplatform/query/fundamentals_metrics.py, tests/unit/test_fundamentals_metrics.py]
+  acceptance:
+    - "each metric as-of a date uses only filings knowable then; an inversion test fails if a later filing leaks"
+    - "P/E joins trailing EPS to the L1 price on ISIN; earnings growth is YoY on the same period nature"
+    - "a metric that needs balance-sheet data raises/omits explicitly rather than inventing a value"
+  verify: "uv run pytest tests/unit/test_fundamentals_metrics.py -q"
+
+- id: M10.6
+  title: Fundamentals-signal backtest policy (value / growth)
+  milestone: M10
+  module: X2
+  autonomy: AUTO
+  deps: [M10.5, M9.5]
+  spec: |
+    A backtest policy on the M10.5 metrics — a value tilt (low trailing P/E) and/or an earnings-growth
+    tilt (high YoY PAT growth) — run through the M9 adjusted-price + PIT + cost machinery, and
+    compared to momentum and the market per regime window, costs included. State the a-priori
+    construction (which metric, quantile/top-N, rebalance); no tuning. The point is to see whether a
+    fundamentals signal diversifies momentum's regime dependence (the M9 decay finding), not to beat
+    it outright.
+  deliverables: [backtest/policies/fundamentals_value.py, tests/unit/test_fundamentals_value.py, ops/gates/M10-fundamentals-signal-report.md]
+  acceptance:
+    - "the signal reads fundamentals point-in-time (read_pit) and prices adjusted; no look-ahead"
+    - "the report compares the fundamentals signal vs momentum vs market per regime, costs included"
+    - "the a-priori parameters are stated and unchanged across the reported runs"
+  verify: "uv run pytest tests/unit/test_fundamentals_value.py -q"
