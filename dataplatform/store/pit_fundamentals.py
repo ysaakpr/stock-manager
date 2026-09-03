@@ -22,11 +22,17 @@ Two design decisions carry the point-in-time and restatement guarantees:
   fourth quarter and its full year end on the same day and are separately announced, so without it
   one would masquerade as a restatement of the other.
 
-History only accumulates forward from now. This store is *never* backfilled from a restated source:
-a value that was restated has lost the number the market originally saw, and writing that into the
-PIT store would fabricate a knowable-date the fact never had. Backfilling here is a defect, not a
-feature. The genuine backfill of PIT fundamentals is simply "run the filing ingester every day from
-today onward," and the depth of this store is therefore "since M7.3 went live," stated plainly.
+This store is *never* backfilled from a **restated** source: a value that was restated has lost the
+number the market originally saw, and writing that into the PIT store would fabricate a
+knowable-date the fact never had. That remains a defect, not a feature — invariant #8.
+
+Backfilling from the *filings* path is a different thing and is legitimate. The announcements index
+filters on **broadcast** date and serves roughly a decade of it, so every historical filing carries
+its own genuine first-knowable timestamp; replaying that history forwards is not fabricating a
+knowable date, it is reading the one the exchange stamped. The depth is therefore not "since M7.3
+went live" but "as far back as the exchange still serves a document" — about FY2018-19, the two
+earlier years being index entries with no XBRL attached — see
+`ops/gates/M10-fundamentals-backfill-live.md`.
 
 Money is `Decimal`: the parquet schema stores values as `decimal128`, and a float never touches the
 value on the way in or out.
