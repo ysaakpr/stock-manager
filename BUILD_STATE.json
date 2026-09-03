@@ -136,49 +136,65 @@
       "verify_output": "$ uv run pytest tests/unit/test_l0.py -q\n(exit 0)\n.................................                                        [100%]\n\n$ make check\n(exit 0)\nuv run ruff format --check .\n65 files already formatted\nuv run ruff check .\nAll checks passed!\nuv run mypy\nSuccess: no issues found in 53 source files\nuv run pytest\n........................................................................ [ 20%]\n........................................................................ [ 41%]\n........................................................................ [ 62%]\n........................................................................ [ 83%]\n..........................................................               [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/fastapi/testclient.py:1\n  /Users/vysh/Documents/work/stocks/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n346 passed, 1 warning in 5.24s"
     },
     "M1.10": {
-      "attempts": 1,
-      "commit": "a4da64a",
-      "finished": "2026-09-02T09:36:11+00:00",
+      "attempts": 3,
+      "commit": "17f7118",
+      "finished": "2026-09-03T01:22:24+00:00",
       "first_started": "2026-09-02T09:19:08+00:00",
-      "last_started": "2026-09-02T09:19:08+00:00",
-      "note": "Wired real eod_pipeline (dataplatform/ingest/eod.py): latest session driven to PUBLISHED via M1.9 BackfillRunner for all daily NSE sources (nse_bhavcopy today), self-heal of FAILED(retryable) dates in a 7-day lookback, D7 gap check, M1.12 archive publish, alert on FAILED; idempotent. Updated M0.6 CLI smoke test to use 'list' since the real job now fetches (B8).",
+      "last_started": "2026-09-03T01:15:11+00:00",
+      "note": "Added the 5-consecutive-session unattended driver test the M1 gate box 3 requires (test_five_consecutive_sessions_run_unattended_with_one_self_heal): one loop drives 5 consecutive UDiFF sessions, the middle 500s and self-heals on the next run, all reach PUBLISHED in L1. Re-dates the real UDiFF fixture (date columns only) to stay offline (B8). eod.py pipeline itself was already built and unchanged. Assumption: healed cross-day stragglers not yet archived \u2014 noted in BACKLOG, out of scope here.",
       "previous_state": "IN_PROGRESS",
+      "reason": "gate M1 box 3: daily EOD 'unattended 5 consecutive sessions' has NO evidence (no 5-session test/run anywhere; test_paper_run_10_sessions drives the M5 analyst scheduler, not the data pipeline). Self-heal proven only by a simulated HTTP 500 + injected fake clock in test_eod_pipeline. Add a 5-consecutive-session driver/test or record a real run. See ops/gates/M1.md.",
       "state": "DONE",
-      "verify_output": "$ uv run pytest tests/integration/test_eod_pipeline.py -q\n(exit 0)\n....                                                                     [100%]\n\n$ uv run ruff format --check dataplatform/ingest/eod.py tests/integration/test_eod_pipeline.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/eod.py tests/integration/test_eod_pipeline.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/eod.py tests/integration/test_eod_pipeline.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+      "verify_output": "$ uv run pytest tests/integration/test_eod_pipeline.py -q\n(exit 0)\n.....                                                                    [100%]\n\n$ uv run ruff format --check dataplatform/ingest/eod.py tests/integration/test_eod_pipeline.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/eod.py tests/integration/test_eod_pipeline.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/eod.py tests/integration/test_eod_pipeline.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     },
     "M1.11": {
-      "attempts": 1,
-      "commit": "be48f4f",
-      "finished": "2026-08-08T14:24:11+00:00",
+      "attempts": 3,
+      "commit": "a5a4153",
+      "finished": "2026-09-03T02:11:29+00:00",
       "first_started": "2026-08-08T13:59:00+00:00",
-      "last_started": "2026-08-08T13:59:00+00:00",
-      "note": "D7 gap report (dataplatform/quality/gaps.py) joins the C.2 calendar, C.1 source-register eras, sync_state and the L1 lake: every (source,date) pair gets exactly one GapReason - explained (WEEKEND/HOLIDAY/OUTSIDE_SOURCE_ERA) or not (NEVER_ATTEMPTED/FAILED/IN_PROGRESS/GAP_ON_A_TRADING_DAY/L1_PARTITION_MISSING) - enumerated with its full sync_state history; GapReport.fully_explained is the M1 gate criterion as one boolean. /status/gaps?from=&to=&source=&limit= serves it, replacing M0.5's placeholder read which could never see an absent row. Assumed the L1 dataset name equals the source id (M1.8 owns the real naming; a wrong guess reports NO_DATASET and is counted as l1_unchecked, never falsely flagged) and that register eras are inclusive at both ends, so 2024-07-08 is owed by both bhavcopy sources. Also pid-keyed test_status_sync.py's scratch database - a fixed name let concurrent agents drop it mid-run and it failed this task's first make check.",
+      "last_started": "2026-09-03T01:15:11+00:00",
+      "note": "L1-presence fix completed (a5a4153): state-source nse_bhavcopy now resolves to prices_raw. Verified on live sync_state + real lake: complete 2469, l1_unchecked 0, unexplained = 2 owner-ratified corrupt days. Two anti-regression tests over the real source name.",
       "previous_state": "FAILED",
-      "reason": "make check failed with exit 2",
+      "reason": "gate M1 box 2 (M1.14 re-audit): the attempt-3 DONE note claims 'live GapScanner l1_unchecked 2469->0' but that is FALSE against the live system. Live GapScanner over 2016-09-02..2026-09-01 still returns l1_unchecked=2469 (0 of 2469 published partitions physically checked). Refined root cause: live sync_state stores every row under source 'nse_bhavcopy', which is NOT a D1 register id (the register has nse_bhavcopy_legacy / nse_bhavcopy_udiff). So _expectation_for('nse_bhavcopy') (gaps.py:322) falls to the default SourceExpectation(l1_dataset='nse_bhavcopy') and LakeL1Presence probes data/L1/nse_bhavcopy/ (NO_DATASET); real data is at data/L1/prices_raw/. The M1.14 fix (_l1_dataset_for + _PRICES_RAW_ROWS) only reconciles register-id-keyed expectations, a path the live pipeline never exercises, and test_price_sources_resolve_their_l1_dataset_to_prices_raw / test_a_deleted_l1_partition_shows_up_as_unexplained both pass only over that unrepresentative path. So a deleted prices_raw partition still never surfaces as unexplained -> M1.11 acceptance #3 does not hold in production. FIX: resolve the live 'nse_bhavcopy' source (any logical dispatch source landing in prices_raw) to the prices_raw L1 dataset, and add a test that runs GapScanner over a sync_state populated under the SAME source name the ingest writer uses, asserting l1_unchecked==0 and that deleting a prices_raw partition yields L1_PARTITION_MISSING. Do NOT weaken any validator; the two owner-ratified corrupt-source FAILED days (2020-07-13, 2021-02-16) must stay rejected. Evidence: ops/gates/M1.md.",
       "state": "DONE",
-      "verify_output": "$ uv run pytest tests/unit/test_gaps.py -q\n(exit 0)\n........................................                                 [100%]\n\n$ make check\n(exit 0)\nuv run ruff format --check .\n112 files already formatted\nuv run ruff check .\nAll checks passed!\nuv run mypy\nSuccess: no issues found in 95 source files\nuv run pytest\n........................................................................ [  5%]\n........................................................................ [ 11%]\n........................................................................ [ 16%]\n........................................................................ [ 22%]\n........................................................................ [ 28%]\n........................................................................ [ 33%]\n........................................................................ [ 39%]\n........................................................................ [ 45%]\n........................................................................ [ 50%]\n........................................................................ [ 56%]\n........................................................................ [ 61%]\n........................................................................ [ 67%]\n........................................................................ [ 73%]\n........................................................................ [ 78%]\n........................................................................ [ 84%]\n........................................................................ [ 90%]\n........................................................................ [ 95%]\n........................................................                 [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/fastapi/testclient.py:1\n  /Users/vysh/Documents/work/stocks/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n1280 passed, 1 warning in 27.89s"
+      "verify_output": "$ uv run pytest tests/unit/test_gaps.py -q\n(exit 0)\n...........................................                              [100%]\n\n$ uv run ruff format --check dataplatform/quality/gaps.py tests/unit/test_gaps.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/quality/gaps.py tests/unit/test_gaps.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/quality/gaps.py tests/unit/test_gaps.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     },
     "M1.12": {
-      "attempts": 1,
-      "commit": "899590a",
-      "finished": "2026-09-02T09:04:29+00:00",
+      "attempts": 3,
+      "commit": "a37470c",
+      "finished": "2026-09-03T01:20:23+00:00",
       "first_started": "2026-09-02T08:50:38+00:00",
-      "last_started": "2026-09-02T08:50:38+00:00",
-      "note": "D6 archive publisher: daily bundle (prices_raw Parquet+CSV) + checksummed manifest with per-file sha256/rows/schema-version and L0 lineage; served via /archives?date= and new /archives/download (local-only, public redistribution is HUMAN_GATE \u00a710); idempotent byte-identical re-publish. Bundle root = data_root/archives/<date>.",
-      "previous_state": "FAILED",
-      "reason": "types failed with exit 1",
+      "last_started": "2026-09-03T01:15:11+00:00",
+      "note": "Added 'python -m dataplatform.archives --date' CLI to back-publish archives for already-backfilled dates (M1.13 backfill lands L1 but never archives; EOD job auto-publishes going forward). Published a real bundle for 2024-01-02 into the live lake+Postgres: /archives?date= and /archives/download now serve it and it verifies (2 files, 2658 rows, lineage->nse_bhavcopy_legacy cm02JAN2024bhav.csv.zip). Fixes M1 gate box 4.",
+      "previous_state": "IN_PROGRESS",
+      "reason": "gate M1 box 4: no real archive is downloadable. archive_bundle table has 0 rows, /archives?date= returns bundle=None, nothing on disk under data/. test_archives passes only because it publishes into a tmp_path root against a scratch DB. The 10y backfill (M1.13) published zero bundles. Publish a bundle for at least one real backfilled date so /archives and /archives/download serve it. See ops/gates/M1.md.",
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/integration/test_archives.py -q\n(exit 0)\n............                                                             [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/fastapi/testclient.py:1\n  /Users/vysh/Documents/work/stocks/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n\n$ uv run ruff format --check dataplatform/archives/manifest.py dataplatform/archives/publisher.py tests/integration/test_archives.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check dataplatform/archives/manifest.py dataplatform/archives/publisher.py tests/integration/test_archives.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/archives/manifest.py dataplatform/archives/publisher.py tests/integration/test_archives.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
     "M1.13": {
       "attempts": 2,
-      "finished": "2026-09-02T14:31:59+00:00",
+      "commit": "432368a",
+      "finished": "2026-09-03T01:01:09+00:00",
       "first_started": "2026-09-02T09:38:48+00:00",
       "human_cleared": true,
       "last_started": "2026-09-02T12:18:38+00:00",
-      "previous_state": "IN_PROGRESS",
+      "note": "Backfill complete: 2469/2471 sessions, 5.68M rows, all 10y in L1; 2 corrupt-at-source days accepted per decision (option B). Report: ops/gates/M1-backfill-report.md",
+      "previous_state": "PENDING",
       "reason": "The 10-year NSE backfill published 2469/2471 sessions; 2 sessions (2020-07-13, 2021-02-16) fail permanently because those NSE bhavcopy files are corrupt at source (a 2-digit-year timestamp and a 'DUMMY' ISIN row) and the parsers correctly reject them \u2014 does criterion 2's '100% of missing days explained' accept these two FAILED days as explained-by-enumerated-cause (gap report at 99.95% fully_explained), or must they be recovered before M1.13 is DONE?",
-      "state": "PARKED"
+      "state": "DONE",
+      "verify_output": "$ uv run python -m orchestrator gate M1 --only backfill\n(exit 0)\n\u001b[1mgate M1\u001b[0m: re-verifying 1 task(s)\n\n  \u001b[32m\u2713\u001b[0m M1.9     Backfill runner (resumable, checkpointed)\n\n\u001b[32mgate M1: all verifications pass\u001b[0m"
+    },
+    "M1.14": {
+      "attempts": 5,
+      "commit": "a5a4153",
+      "finished": "2026-09-03T02:25:23+00:00",
+      "first_started": "2026-09-03T01:04:33+00:00",
+      "last_started": "2026-09-03T02:12:46+00:00",
+      "note": "GATE M1 GREEN: all 5 EXECUTION_PLAN \u00a79 boxes PASS on independent evidence (live Postgres/sync_state, on-disk parquet lake, archive store + checksums, live status API). Box 1: 2469 sessions / 5.68M rows / 2016-09-02..2026-09-01, l1_unchecked=0. Box 2: PASS under owner-ratified option B (2 corrupt-source FAILED days enumerated; validators not weakened); strict fully_explained=False stated. Box 3: PASS by SIMULATION (FrozenClock + re-dated fixtures, no network) \u2014 stated explicitly per spec. Box 4: real bundle, per-file sha256 + L0 lineage verified end-to-end. Box 5: DHFL/RELCAPITAL/JETAIRWAYS present by ISIN. Report: ops/gates/M1.md. Non-blocking findings: stale app container missing /archives/download route; M1.13 report understated JETAIRWAYS history (corrected).",
+      "previous_state": "IN_PROGRESS",
+      "reason": "M1.11 L1-presence defect genuinely fixed and verified on the production path (nse_bhavcopy -> prices_raw, l1_unchecked 0); resetting the auto-parked gate for a fresh independent re-audit",
+      "state": "DONE",
+      "verify_output": "$ uv run python -m orchestrator gate M1\n(exit 0)\n\u001b[1mgate M1\u001b[0m: re-verifying 12 task(s)\n\n  \u001b[32m\u2713\u001b[0m M1.1     L0 raw store (immutable, checksummed)\n  \u001b[32m\u2713\u001b[0m M1.2     Crawl policy engine (D1 core)\n  \u001b[32m\u2713\u001b[0m M1.3     Sync state machine (D5 core)\n  \u001b[32m\u2713\u001b[0m M1.4     NSE legacy bhavcopy parser (pre-Jul-2024)\n  \u001b[32m\u2713\u001b[0m M1.5     NSE UDiFF bhavcopy parser (Jul-2024+)\n  \u001b[32m\u2713\u001b[0m M1.6     sec_bhavdata_full parser (delivery %)\n  \u001b[32m\u2713\u001b[0m M1.7     Identity master v1 (D2)\n  \u001b[32m\u2713\u001b[0m M1.8     L1 canonical writer (prices_raw parquet)\n  \u001b[32m\u2713\u001b[0m M1.9     Backfill runner (resumable, checkpointed)\n  \u001b[32m\u2713\u001b[0m M1.10    Daily EOD pipeline job\n  \u001b[32m\u2713\u001b[0m M1.11    Gap report + /status/gaps\n  \u001b[32m\u2713\u001b[0m M1.12    Archive publisher v1 (D6)\n\n\u001b[32mgate M1: all verifications pass\u001b[0m"
     },
     "M1.2": {
       "attempts": 1,
@@ -863,6 +879,19 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/integration/test_fire_drill.py -q\n(exit 0)\n.....                                                                    [100%]\n\n$ uv run ruff format --check tests/integration/test_fire_drill.py\n(exit 0)\n1 file already formatted\n\n$ uv run ruff check tests/integration/test_fire_drill.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy tests/integration/test_fire_drill.py\n(exit 0)\nSuccess: no issues found in 1 source file"
     },
+    "M6.9": {
+      "attempts": 1,
+      "commit": "432368a",
+      "finished": "2026-09-03T01:02:46+00:00",
+      "first_started": "2026-09-02T18:34:51+00:00",
+      "human_cleared": true,
+      "last_started": "2026-09-02T18:34:51+00:00",
+      "note": "M6 gate passes all autonomous boxes (ops/gates/M6.md); M6.8 live-model drill open as NEEDS_SECRET per gate-semantics fix. Decision: option B.",
+      "previous_state": "PENDING",
+      "reason": "The M6 StubLLM gate audit is complete and PASSES (three boxes evidenced in ops/gates/M6.md); closing the milestone gate mechanically needs the M6.8 Anthropic credential. Provide the key to complete M6.8 (which lets 'orch gate M6' exit 0), or accept the StubLLM gate with the live-model quality as a standing open item?",
+      "state": "DONE",
+      "verify_output": "$ uv run python -m orchestrator gate M6\n(exit 0)\n\u001b[1mgate M6\u001b[0m: re-verifying 8 task(s)\n\n  \u001b[32m\u2713\u001b[0m M6.1     GDELT + curated RSS/PIB ingestion\n  \u001b[32m\u2713\u001b[0m M6.2     News \u2192 holding linkage + break-condition matcher\n  \u001b[32m\u2713\u001b[0m M6.3     Evidence bundle builder\n  \u001b[32m\u2713\u001b[0m M6.4     T1 triggered LLM review\n  \u001b[32m\u2713\u001b[0m M6.5     T2 scheduled deep review\n  \u001b[32m\u2713\u001b[0m M6.6     Evidence pack generator\n  \u001b[32m\u2713\u001b[0m M6.7     Thesis-break fire drill (stub mode)\n  \u001b[33m\u25cb\u001b[0m M6.8     Live-model fire drill and T1/T2 quality review \u2014 open (NEEDS_SECRET, state=PENDING)\n\n\u001b[32mgate M6: all autonomous verifications pass\u001b[0m \u001b[33m(1 human-reserved item(s) open)\u001b[0m\n  \u25cb M6.8 NEEDS_SECRET (state=PENDING)"
+    },
     "M7.1": {
       "attempts": 1,
       "commit": "f236706",
@@ -937,9 +966,20 @@
       "previous_state": "PENDING",
       "state": "DONE",
       "verify_output": "$ test -s ops/compliance/sebi-algo-memo.md\n(exit 0)\n\n\n$ make check\n(exit 0)\nuv run ruff format --check .\n39 files already formatted\nuv run ruff check .\nAll checks passed!\nuv run mypy\nSuccess: no issues found in 29 source files\nuv run pytest\n.............................                                            [100%]\n29 passed in 0.17s"
+    },
+    "M9.1": {
+      "attempts": 1,
+      "commit": "1c3ff49",
+      "finished": "2026-09-03T07:53:58+00:00",
+      "first_started": "2026-09-03T07:34:18+00:00",
+      "last_started": "2026-09-03T07:34:18+00:00",
+      "note": "Built the resumable CA backfill runner (dataplatform/ingest/corp_actions_backfill.py): per-date NSE + per-scrip BSE fetch->L0->parse->persist mirroring fii_dii.ingest_day and backfill.py, then a reconcile+M2.4-recompute finalize so adjustment_factors is populated; resume via sync_state, commit-per-unit checkpoint, 403 spike parks with an enumerated ParkReason (never a silent skip). Verified offline in tests/unit/test_ca_backfill.py. Assumptions: BSE per-scrip units are keyed in sync_state under state_source 'bse_corp_actions/<scrip>' with the window start as the shared logical anchor (sync_state has no per-scrip date), mirroring backfill.py's chosen state_source; the live 10-year run over the full prices_raw universe is a bulk-fetch campaign left B1-gated (like M1.13) so the gate report documents the build+offline evidence rather than live counts.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_ca_backfill.py -q\n(exit 0)\n......                                                                   [100%]\n\n$ uv run ruff format --check dataplatform/ingest/corp_actions_backfill.py tests/unit/test_ca_backfill.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/corp_actions_backfill.py tests/unit/test_ca_backfill.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/corp_actions_backfill.py tests/unit/test_ca_backfill.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-09-02T18:33:45+00:00",
+  "updated_at": "2026-09-03T07:53:58+00:00",
   "version": 1,
   "wave": 1
 }
