@@ -1140,7 +1140,17 @@ sources:
       JSON array, 3,816 records; keys isin, symbol, companyName, filingDate, broadCastDate,
       exchdisstime, fromDate, toDate, period, relatingTo, audited, consolidated, indAs, format,
       seqNumber and `xbrl` — an absolute URL to the filing's XBRL document, which is how the
-      next entry is reached.
+      next entry is reached. Field vocabularies, counted over that whole response (do not guess
+      these — the first M7.3 build did, and rejected every real record): `consolidated` is
+      `Consolidated` (1,630) or `Non-Consolidated` (2,186) and **never `Standalone`**, which is
+      what the XBRL document itself says for the same thing; `audited` is `Audited` (218) or
+      `Un-Audited` (3,598), hyphenated unlike the document's `Unaudited`; `indAs` is `Ind-AS New`
+      (3,535), `NBFC-IND` (212) or `Non-Ind-AS` (69), matching `bank` N/F/B and the served
+      document's taxonomy entry point. 18 records state `xbrl` as the archive path ending in a
+      bare `-`: the announcement exists but has no document, and the URL must not be constructed.
+      One document is linked by more than one entry — a December-year-end company's is named by
+      both a Quarterly and an Annual record — so `(fromDate, toDate)` is not descriptive metadata
+      but the key that selects which period of the document an entry means.
     fixture: {frozen: true, task: M7.3, path: "tests/fixtures/xbrl/"}
     failure_note: null
     candidate_alternatives: []
@@ -1173,8 +1183,30 @@ sources:
     content_type: application/xml
     sample_sha256: 89651604c15397b2901204e86ac91d3a21feab6281f9ebe6d670288f5b85b84e
     parse_check: >-
-      well-formed XBRL XML; root xbrli:xbrl with the in-bse-fin 2020-03-31 taxonomy namespaces
-      (NSE serves filings against the BSE-published taxonomy — expected, not an error).
+      well-formed XBRL XML; root xbrli:xbrl with the in-bse-fin taxonomy namespaces (NSE serves
+      filings against the BSE-published taxonomy — expected, not an error). The instance is a
+      **column-by-column transcription of the published results table**, not one period per
+      document, and four properties of that shape are load-bearing (each confirmed against the
+      captured filings in `tests/fixtures/xbrl/filings/`): (1) the table's columns are the
+      *undimensioned duration* contexts, conventionally `OneD` (the quarter) and `FourD` (the
+      cumulative period), and they usually carry the **same** `xbrli:period` — the authoritative
+      period of a column is the `DateOfStartOfReportingPeriod`/`DateOfEndOfReportingPeriod` facts
+      reported *inside* it, so the index entry's `(fromDate, toDate)` is what picks the column;
+      (2) the entity is identified by NSE **symbol**
+      (`scheme=http://www.nseindia.com/NSESymbol`) — Ind-AS filings carry no ISIN element at all,
+      and the banking taxonomy's can be stale (a captured HDFCBANK filing says INE040A01034 where
+      the index says INE040A01018), so the ISIN comes from the index and only the symbol is
+      cross-checked; (3) segments are `SegmentRevenue` under
+      `in-bse-fin:ReportableSegmentsAxis` inside `xbrli:scenario` (not `xbrli:segment`), named by
+      a sibling `DescriptionOfReportableSegment`, with the column embedded in the member name —
+      and the column's own `SegmentRevenue` is the cross-segment *total*, not a segment;
+      (4) two P&L vocabularies, selected by the `link:schemaRef` entry point —
+      `Ind-AS_entry_point_2020-03-31.xsd` and the NBFC `in-bse-fin-2020-03-31.xsd` share one
+      (`RevenueFromOperations`/`Income`/`Expenses`/`ProfitLossForPeriod`), while
+      `banking_entry_point_2019-09-30.xsd` differs
+      (`InterestEarned`/`ProfitLossForThePeriod`/`BasicEarningsPerShareAfterExtraordinaryItems`).
+      Values are absolute rupees; `LevelOfRoundingUsedInFinancialStatements`
+      (`Lakhs`/`Crores`/`Millions`) describes the printed statement and must not scale them.
     fixture: {frozen: true, task: M7.3, path: "tests/fixtures/xbrl/"}
     failure_note: null
     candidate_alternatives: []

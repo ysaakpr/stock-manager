@@ -16,8 +16,11 @@ Two design decisions carry the point-in-time and restatement guarantees:
   an earlier period carries a later `filing_date` and a distinct `filing_id`, so it lands in a
   different partition (or, if filed the same day, a distinct row keyed by `filing_id`) and both
   versions coexist forever. `read_pit` returns every version knowable as of a date; `read_latest`
-  collapses to the most-recently-filed value per `(isin, period_end, nature, concept, segment)` for
-  a consumer that wants the current best knowledge — without the store having discarded history.
+  collapses to the most-recently-filed value per `(isin, period_start, period_end, nature,
+  concept, segment)` for a consumer that wants the current best knowledge — without the store
+  having discarded history. The period *start* belongs in that key: a December-year-end company's
+  fourth quarter and its full year end on the same day and are separately announced, so without it
+  one would masquerade as a restatement of the other.
 
 History only accumulates forward from now. This store is *never* backfilled from a restated source:
 a value that was restated has lost the number the market originally saw, and writing that into the
@@ -184,10 +187,12 @@ def read_latest(on_date: date, *, data_root: Path | None = None) -> tuple[Fundam
     """The most-recently-filed value per fact, among filings knowable on `on_date`.
 
     Collapses restatements to the best knowledge as of the as-of date — for each
-    `(isin, period_end, nature, concept, segment)`, the fact from the latest `filing_date` on or
-    before `on_date` — without the store having discarded the earlier version (which `read_pit`
-    still returns). This is the read a break-condition evaluator uses; it never reaches back past
-    `on_date`, so a restatement the market had not yet seen cannot change a historical decision.
+    `(isin, period_start, period_end, nature, concept, segment)`, the fact from the latest
+    `filing_date` on or before `on_date` — without the store having discarded the earlier version
+    (which `read_pit` still returns). Two facts differing only in `period_start` are two periods,
+    not two versions of one, and both survive. This is the read a break-condition evaluator uses;
+    it never reaches back past `on_date`, so a restatement the market had not yet seen cannot
+    change a historical decision.
     """
     latest: dict[tuple[Any, ...], FundamentalFact] = {}
     for fact in read_pit(on_date, data_root=data_root):
@@ -274,5 +279,20 @@ def _key_of(fact: FundamentalFact) -> tuple[Any, ...]:
 
 
 def _key_without_filing(fact: FundamentalFact) -> tuple[Any, ...]:
-    """The identity of a fact *across* filings — the key a restatement supersedes."""
-    return (fact.isin, fact.period_end, fact.nature.value, fact.concept, fact.segment or "")
+    """The identity of a fact *across* filings — the key a restatement supersedes.
+
+    `period_start` is part of it, not decoration. A results document reports each concept for
+    several periods that can share an end date — a December-year-end company's fourth quarter and
+    its full year both end 31-Dec — and each is named by its own announcement, so both land in the
+    store legitimately. Keyed on `period_end` alone they look like two versions of one fact, and
+    `read_latest` would drop the annual figure (or the quarterly one, on filing-date order) rather
+    than return both. The period a number describes is part of what the number *is*.
+    """
+    return (
+        fact.isin,
+        fact.period_end,
+        fact.period_start or date.min,
+        fact.nature.value,
+        fact.concept,
+        fact.segment or "",
+    )

@@ -1,31 +1,33 @@
 """M7.3 — XBRL results filings → the true point-in-time fundamentals store.
 
-The file is laid out as the three acceptance criteria, because each is a property a plausible wrong
-implementation would quietly violate:
+Every fixture here is a **captured** NSE response (`tests/fixtures/xbrl/README.md`), and that is the
+point of this rewrite. The first version of this suite was green against hand-built documents
+modelled on the taxonomy, and the parser it certified could not read one real filing: real filings
+put several periods in one document, identify the entity by NSE symbol rather than ISIN, hang
+segments off `xbrli:scenario` rather than `xbrli:segment`, and use element names the taxonomy
+permits but the fabricated fixtures had guessed wrongly. A suite that cannot fail on the real
+format's quirks is not evidence, so these tests are written against the quirks:
 
 1. **Every datum carries `(period_end, filing_date)`, and the two are genuinely independent.** The
-   period end is read from the XBRL document; the filing date is the exchange dissemination date
-   from the announcements index that pointed at it. Proved by parsing two filings that share a
-   period end (Kaynes's original and its restatement, both for 31-Mar-2026) but were disseminated
-   months apart — no arithmetic on the period end could yield both filing dates, so the two fields
-   cannot be one value in two costumes. A filing dated on or before its period is rejected.
-2. **Standalone and consolidated are distinct records; segments are extracted.** Proved by parsing
-   TCS's standalone and consolidated filings for the same quarter and reading back two different
-   revenues keyed by `nature`, and by reading Kaynes's robotics/EMS segment revenues as exact
-   `Decimal`s — the inputs §5.3 BC1 (built in M7.4) compares across quarters.
-3. **A restatement is a new record, not an overwrite.** Proved end to end against the store: after
-   Kaynes files 31-Mar-2026 twice (15-May then 20-Aug), both versions are physically present, a PIT
-   read dated 01-Jun sees only the original, and `read_latest` supersedes to the restated value only
-   once its filing date is knowable — invariant #7 made structural by partitioning on the filing
-   (knowable) date, never overwriting the number the market originally saw.
+   period comes from the document (which column of the results table the index entry names); the
+   filing date is the exchange dissemination date from the index. Proved by V.S.T Tillers, whose
+   31-Dec-2024 quarter was filed on 11-Feb-2025 and re-filed on 30-Jul-2026 — one period end, two
+   filing dates seventeen months apart, so no arithmetic on one could yield the other.
+2. **Standalone and consolidated are distinct; segments are extracted.** Proved on real natures
+   whose bottom lines genuinely differ, and on real multi-segment disclosures (Reliance, ITC,
+   Grasim) whose segment revenues reconcile against the filing's own cross-segment total.
+3. **A restatement is a new record, not an overwrite.** Proved with a real restatement: V.S.T
+   Tillers' original filing overstated the quarter by exactly 10x and the 2026 re-filing corrected
+   it. A PIT read dated 2025 must still return the *wrong* number the market actually saw — that is
+   what invariant #7 protects, and an implementation that "helpfully" corrected history fails here.
 
-The money assertions are written so inverting the logic fails them: a value stays a `Decimal`, never
-a `float`; a value that is not a plain decimal is a parse error; and a restatement never destroys
-the record it revises.
+The column model gets its own section, because selecting the wrong column is the failure mode that
+does not look like a failure: it returns a plausible number for the wrong period.
 """
 
 from __future__ import annotations
 
+import json
 import socket
 from datetime import date
 from decimal import Decimal
@@ -40,6 +42,7 @@ from dataplatform.ingest.xbrl import (
     Filing,
     FilingIndexEntry,
     Nature,
+    Taxonomy,
     parse,
     parse_index,
 )
@@ -53,17 +56,27 @@ from dataplatform.store.pit_fundamentals import (
     write_pit,
 )
 
-INDEX: Final = Path("tests/fixtures/xbrl/index_v1/corporates-financial-results_20260901.json")
-FILINGS_DIR: Final = Path("tests/fixtures/xbrl/filing_v1")
+FIXTURES: Final = Path("tests/fixtures/xbrl")
+INDEX: Final = FIXTURES / "index" / "corporates-financial-results_slice.json"
+WINDOW_INDEX: Final = (
+    FIXTURES / "index" / "corporates-financial-results_Quarterly_20260701_20260903.json"
+)
+FILINGS_DIR: Final = FIXTURES / "filings"
 
-TCS: Final = "INE467B01029"
-KAYNES: Final = "INE918Z01012"
+VSTTILLERS: Final = "INE764D01017"
+RELIANCE: Final = "INE002A01018"
+GRASIM: Final = "INE047A01013"
+HDFCBANK: Final = "INE040A01018"
+SCHAEFFLER: Final = "INE513A01014"
+STANLEY: Final = "INE01A001028"
 
-Q1FY27_END: Final = date(2026, 6, 30)
-Q4FY26_END: Final = date(2026, 3, 31)
-KAYNES_ORIGINAL_FILED: Final = date(2026, 5, 15)
-KAYNES_RESTATED_FILED: Final = date(2026, 8, 20)
-TCS_FILED: Final = date(2026, 7, 10)
+Q3FY25_START: Final = date(2024, 10, 1)
+Q3FY25_END: Final = date(2024, 12, 31)
+#: The cumulative column that shares Q3's end date — what an end-only period match would admit.
+YTD_FY25_START: Final = date(2024, 4, 1)
+
+VST_ORIGINAL_FILED: Final = date(2025, 2, 11)
+VST_RESTATED_FILED: Final = date(2026, 7, 30)
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────────────────────
@@ -90,23 +103,39 @@ def entries(index_bytes: bytes) -> tuple[FilingIndexEntry, ...]:
     return parse_index(index_bytes, filename=INDEX.name)
 
 
-def _entry(entries: tuple[FilingIndexEntry, ...], isin: str, filed: date) -> FilingIndexEntry:
-    return next(e for e in entries if e.isin == isin and e.filing_date == filed)
+def _entry(
+    entries: tuple[FilingIndexEntry, ...],
+    *,
+    isin: str,
+    nature: Nature | None = None,
+    filed: date | None = None,
+    period: str | None = None,
+) -> FilingIndexEntry:
+    """The one entry matching the given coordinates; a non-unique match is a broken fixture."""
+    found = [
+        entry
+        for entry in entries
+        if entry.isin == isin
+        and (nature is None or entry.nature is nature)
+        and (filed is None or entry.filing_date == filed)
+        and (period is None or entry.period == period)
+    ]
+    assert len(found) == 1, f"expected 1 entry for {isin}/{nature}/{filed}/{period}, got {found}"
+    return found[0]
 
 
 def _load(entry: FilingIndexEntry, *, repo_root: Path) -> Filing:
-    """Parse the XBRL fixture an index entry points at, threading the entry's filing date.
+    """Parse the XBRL fixture an index entry points at, exactly as production does.
 
-    Mirrors production: the XBRL URL and the first-knowable filing date both come from the index;
-    the document is never reached by guessing, and the filing date is never read from the document.
+    The entry supplies everything the document cannot: the ISIN, the first-knowable filing date, and
+    the reporting period that selects the column. Nothing is passed that production would not have.
     """
-    name = Path(entry.xbrl_url).name
+    assert entry.xbrl_url is not None
+    name = entry.xbrl_url.rsplit("/", 1)[-1]
     payload = (repo_root / FILINGS_DIR / name).read_bytes()
     return parse(
         payload,
-        filing_date=entry.filing_date,
-        filing_id=entry.filing_id,
-        isin=entry.isin,
+        entry=entry,
         l0_key=f"nse_xbrl_filing/{entry.filing_date.isoformat()}/{name}",
         filename=name,
     )
@@ -114,7 +143,24 @@ def _load(entry: FilingIndexEntry, *, repo_root: Path) -> Filing:
 
 @pytest.fixture
 def all_filings(entries: tuple[FilingIndexEntry, ...], repo_root: Path) -> tuple[Filing, ...]:
-    return tuple(_load(entry, repo_root=repo_root) for entry in entries)
+    """Every actionable entry in the index slice, parsed — 17 real filings."""
+    return tuple(_load(entry, repo_root=repo_root) for entry in entries if entry.is_actionable)
+
+
+@pytest.fixture
+def vst_original(entries: tuple[FilingIndexEntry, ...], repo_root: Path) -> Filing:
+    return _load(
+        _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_ORIGINAL_FILED),
+        repo_root=repo_root,
+    )
+
+
+@pytest.fixture
+def vst_restated(entries: tuple[FilingIndexEntry, ...], repo_root: Path) -> Filing:
+    return _load(
+        _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED),
+        repo_root=repo_root,
+    )
 
 
 def _company_value(filing: Filing, concept: str) -> Decimal:
@@ -129,68 +175,136 @@ def _segment_value(filing: Filing, segment: str) -> Decimal:
     )
 
 
+def _mutate(repo_root: Path, name: str, old: str, new: str, *, count: int = -1) -> bytes:
+    """A captured filing with one substitution — for the failure modes real data does not contain.
+
+    Used only to break a *real* document in one named way. Fixtures are never edited on disk to
+    make a test pass; the mutation lives in the test that needs it, where it is visible.
+    """
+    text = (repo_root / FILINGS_DIR / name).read_text(encoding="utf-8")
+    assert old in text, f"{name} does not contain {old!r}; the fixture changed"
+    return text.replace(old, new, count).encode("utf-8")
+
+
 # ── acceptance 1: every datum carries (period_end, filing_date), independent ───────────────────
 
 
 def test_every_datum_carries_both_dates(all_filings: tuple[Filing, ...]) -> None:
-    """No fact exists without both a period end and a filing date."""
-    assert all_filings  # the fixture set is non-empty
+    """No fact exists without both a period end and a filing date, and never the same value."""
+    assert len(all_filings) == 17
     for filing in all_filings:
         assert filing.facts
         for fact in filing.facts:
             assert isinstance(fact.period_end, date)
             assert isinstance(fact.filing_date, date)
+            assert fact.filing_date > fact.period_end
 
 
-def test_period_end_comes_from_the_document_filing_date_from_the_index(
-    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+def test_the_two_dates_come_from_two_independent_places(
+    vst_original: Filing, vst_restated: Filing
 ) -> None:
-    """The two dates come from two independent places, so neither is derived from the other.
-
-    Kaynes's original and restated filings share a period end (31-Mar-2026, from the XBRL) but were
-    disseminated on different dates (15-May and 20-Aug, from the index). No function of the period
-    end could produce both filing dates.
-    """
-    original = _load(_entry(entries, KAYNES, KAYNES_ORIGINAL_FILED), repo_root=repo_root)
-    restated = _load(_entry(entries, KAYNES, KAYNES_RESTATED_FILED), repo_root=repo_root)
-
-    assert original.period_end == restated.period_end == Q4FY26_END
-    assert original.filing_date == KAYNES_ORIGINAL_FILED
-    assert restated.filing_date == KAYNES_RESTATED_FILED
-    for fact in (*original.facts, *restated.facts):
-        assert fact.filing_date != fact.period_end
+    """One period end, two real filing dates 17 months apart — neither date derives the other."""
+    assert vst_original.period_end == vst_restated.period_end == Q3FY25_END
+    assert vst_original.period_start == vst_restated.period_start == Q3FY25_START
+    assert vst_original.filing_date == VST_ORIGINAL_FILED
+    assert vst_restated.filing_date == VST_RESTATED_FILED
 
 
-def test_discovery_reads_the_broadcast_date_not_the_period(
+def test_the_filing_date_is_the_broadcast_date_not_the_period(
     entries: tuple[FilingIndexEntry, ...],
 ) -> None:
-    """The index's `filing_date` is the dissemination date; `period_end` is the reporting period."""
-    tcs = _entry(entries, TCS, TCS_FILED)
-    assert tcs.filing_date == TCS_FILED
-    assert tcs.period_end == Q1FY27_END
-    assert tcs.period_start == date(2026, 4, 1)
-    assert tcs.filing_date > tcs.period_end
+    """`filing_date` is dissemination (`broadCastDate`); `period_end` is the reporting period."""
+    entry = _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED)
+    assert entry.filing_date == VST_RESTATED_FILED
+    assert entry.period_end == Q3FY25_END
+    assert entry.period_start == Q3FY25_START
+    assert entry.filing_date > entry.period_end
 
 
-def test_a_filing_dated_on_or_before_its_period_is_rejected(repo_root: Path) -> None:
+def test_a_filing_dated_on_or_before_its_period_is_rejected(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
     """Results are disseminated after the period closes; a filing dated on/before it is a leak."""
-    payload = (repo_root / FILINGS_DIR / "INDAS_TCS_STANDALONE_10072026.xml").read_bytes()
-    for bad in (Q1FY27_END, date(2026, 5, 1)):
-        with pytest.raises(ParseError, match="not after the period end"):
-            parse(payload, filing_date=bad, filing_id="x", filename="x.xml")
-
-
-def test_the_reporting_period_is_read_from_the_document(repo_root: Path) -> None:
-    """`period_end` is the document's own reporting-period element, not a context guess."""
-    filing = _load_by_name("INDAS_KAYNES_STANDALONE_15052026.xml", repo_root=repo_root)
-    assert filing.period_start == date(2026, 1, 1)
-    assert filing.period_end == Q4FY26_END
-
-
-def _load_by_name(name: str, *, repo_root: Path) -> Filing:
+    entry = _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED)
+    assert entry.xbrl_url is not None
+    name = entry.xbrl_url.rsplit("/", 1)[-1]
     payload = (repo_root / FILINGS_DIR / name).read_bytes()
-    # A filing date after the period, so the PIT validator is satisfied; the point is the period.
-    return parse(payload, filing_date=date(2026, 12, 31), filing_id=name, filename=name)
+    for bad in (Q3FY25_END, date(2024, 11, 1)):
+        with pytest.raises(ParseError, match="not after the period end"):
+            parse(payload, entry=entry.model_copy(update={"filing_date": bad}), filename=name)
+
+
+# ── the column model: which period of the document this filing is ─────────────────────────────
+
+
+def test_one_document_serves_a_quarterly_and_an_annual_entry(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Schaeffler's December year-end document is linked by two entries, one per column.
+
+    This is the format property the first parser had no model for. The *same bytes* must yield the
+    quarter for the Quarterly entry and the full year for the Annual one — and the difference is
+    not small: the annual revenue is ~4x the quarter's.
+    """
+    quarterly = _entry(entries, isin=SCHAEFFLER, nature=Nature.CONSOLIDATED, period="Quarterly")
+    annual = _entry(entries, isin=SCHAEFFLER, nature=Nature.CONSOLIDATED, period="Annual")
+    assert quarterly.xbrl_url == annual.xbrl_url  # one document, two entries
+
+    quarter = _load(quarterly, repo_root=repo_root)
+    year = _load(annual, repo_root=repo_root)
+
+    assert (quarter.period_start, quarter.period_end) == (Q3FY25_START, Q3FY25_END)
+    assert (year.period_start, year.period_end) == (date(2024, 1, 1), date(2024, 12, 31))
+    assert _company_value(quarter, "revenue_from_operations") == Decimal("21360600000.00")
+    assert _company_value(year, "revenue_from_operations") == Decimal("82323800000.00")
+
+
+def test_the_cumulative_column_is_not_stored_as_the_quarter(
+    vst_restated: Filing, repo_root: Path
+) -> None:
+    """A quarter's figures are the quarter's, not the year-to-date that shares its end date.
+
+    The document holds both columns and gives them the *same* `xbrli:period`, so a parser that
+    filtered on `period_end` alone would store the nine-month revenue as the quarter's. The check
+    is exact: Q3 revenue is 2,191.0 crore against a 6,931.2 crore nine months.
+    """
+    assert _company_value(vst_restated, "revenue_from_operations") == Decimal("2191000000.00")
+    for fact in vst_restated.facts:
+        assert fact.period_start == Q3FY25_START
+        assert fact.period_start != YTD_FY25_START
+
+
+def test_a_period_no_column_reports_is_a_named_error(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Asking a document for a period it does not carry fails loudly, naming what it does carry."""
+    entry = _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED)
+    assert entry.xbrl_url is not None
+    name = entry.xbrl_url.rsplit("/", 1)[-1]
+    payload = (repo_root / FILINGS_DIR / name).read_bytes()
+    wrong_period = entry.model_copy(
+        update={"period_start": date(2023, 10, 1), "period_end": date(2023, 12, 31)}
+    )
+    with pytest.raises(ParseError, match="no results column covers"):
+        parse(payload, entry=wrong_period, filename=name)
+
+
+def test_the_column_period_is_read_from_facts_not_the_context_period(repo_root: Path) -> None:
+    """The proof that `xbrli:period` is *not* what selects a column.
+
+    Both of V.S.T Tillers' columns carry `xbrli:period` 2024-10-01→2024-12-31; only their in-context
+    `DateOf…ReportingPeriod` facts differ. So the cumulative column is reachable — by asking for
+    01-Apr→31-Dec, a period no `xbrli:period` in the document mentions.
+    """
+    name = "INDAS_121276_1705279_30072026051555.xml"
+    payload = (repo_root / FILINGS_DIR / name).read_bytes()
+    entries = parse_index((repo_root / INDEX).read_bytes(), filename=INDEX.name)
+    entry = _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED)
+    cumulative = entry.model_copy(update={"period_start": YTD_FY25_START})
+    filing = parse(payload, entry=cumulative, filename=name)
+    assert filing.period_start == YTD_FY25_START
+    assert filing.period_end == Q3FY25_END
+    assert _company_value(filing, "revenue_from_operations") == Decimal("6931200000.00")
 
 
 # ── acceptance 2: standalone vs consolidated distinguished; segments extracted ─────────────────
@@ -199,25 +313,41 @@ def _load_by_name(name: str, *, repo_root: Path) -> Filing:
 def test_standalone_and_consolidated_are_distinct_records(
     entries: tuple[FilingIndexEntry, ...], repo_root: Path
 ) -> None:
-    """The same company and quarter, filed two ways, are two records with different figures."""
-    standalone = next(
-        _load(e, repo_root=repo_root)
-        for e in entries
-        if e.isin == TCS and e.nature is Nature.STANDALONE
+    """The same company and quarter, filed two ways, are two records with different bottom lines."""
+    standalone = _load(
+        _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED),
+        repo_root=repo_root,
     )
-    consolidated = next(
-        _load(e, repo_root=repo_root)
-        for e in entries
-        if e.isin == TCS and e.nature is Nature.CONSOLIDATED
+    consolidated = _load(
+        _entry(entries, isin=VSTTILLERS, nature=Nature.CONSOLIDATED, filed=VST_RESTATED_FILED),
+        repo_root=repo_root,
     )
     assert standalone.nature is Nature.STANDALONE
     assert consolidated.nature is Nature.CONSOLIDATED
-    assert standalone.period_end == consolidated.period_end == Q1FY27_END
-    assert _company_value(standalone, "revenue_from_operations") == Decimal("630000000000")
-    assert _company_value(consolidated, "revenue_from_operations") == Decimal("645000000000")
-    assert _company_value(standalone, "revenue_from_operations") != _company_value(
-        consolidated, "revenue_from_operations"
-    )
+    assert standalone.period_end == consolidated.period_end == Q3FY25_END
+    # The group and the parent differ on the bottom line, which is why nature is part of identity.
+    assert _company_value(standalone, "profit_after_tax") == Decimal("17000000.00")
+    assert _company_value(consolidated, "profit_after_tax") == Decimal("12800000.00")
+
+
+def test_the_feeds_non_consolidated_is_the_documents_standalone(
+    entries: tuple[FilingIndexEntry, ...],
+) -> None:
+    """The defect that rejected every real entry: the feed never says `Standalone`.
+
+    `consolidated` is `Non-Consolidated`/`Consolidated` in every one of a captured 3,816-record
+    index; matching the enum's own spelling raised on all of them.
+    """
+    raw = json.loads(INDEX.read_text(encoding="utf-8"))
+    assert {record["consolidated"] for record in raw} == {"Non-Consolidated", "Consolidated"}
+    assert {entry.nature for entry in entries} == {Nature.STANDALONE, Nature.CONSOLIDATED}
+
+
+def test_the_feeds_hyphenated_audited_flag_is_read(entries: tuple[FilingIndexEntry, ...]) -> None:
+    """`Un-Audited` is the feed's spelling; matching `unaudited` read every one as "did not say"."""
+    raw = json.loads(INDEX.read_text(encoding="utf-8"))
+    assert "Un-Audited" in {record["audited"] for record in raw}
+    assert {entry.audited for entry in entries} == {True, False}
 
 
 def test_every_fact_carries_its_nature(all_filings: tuple[Filing, ...]) -> None:
@@ -227,69 +357,302 @@ def test_every_fact_carries_its_nature(all_filings: tuple[Filing, ...]) -> None:
             assert fact.nature is filing.nature
 
 
-def test_segment_disclosures_are_extracted(repo_root: Path) -> None:
-    """Kaynes discloses a robotics and an EMS segment — §5.3's example, BC1's inputs."""
-    filing = _load_by_name("INDAS_KAYNES_STANDALONE_15052026.xml", repo_root=repo_root)
-    assert filing.segments() == ("Automation and Robotics", "EMS")
-    assert _segment_value(filing, "Automation and Robotics") == Decimal("3000000000")
-    assert _segment_value(filing, "EMS") == Decimal("5000000000")
+def test_real_segment_disclosures_are_extracted(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Grasim's five reportable segments, named as it names them — §5.3 BC1's inputs."""
+    filing = _load(_entry(entries, isin=GRASIM, nature=Nature.CONSOLIDATED), repo_root=repo_root)
+    assert filing.segments() == (
+        "Building Material",
+        "Cellulosic Fibres",
+        "Chemicals",
+        "Financial Services",
+        "Others",
+    )
+    assert _segment_value(filing, "Building Material") == Decimal("187840000000.00")
+    assert _segment_value(filing, "Cellulosic Fibres") == Decimal("39340900000.00")
 
 
-def test_segment_facts_share_the_filings_period_and_dates(repo_root: Path) -> None:
-    """A segment datum is a first-class PIT fact — same period and filing date as the filing."""
-    filing = _load_by_name("INDAS_TCS_STANDALONE_10072026.xml", repo_root=repo_root)
+def test_the_company_level_segment_total_is_not_taken_as_a_segment(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """The column's own `SegmentRevenue` is the cross-segment total, not a segment's figure.
+
+    Grasim's anchor column reports `SegmentRevenue` 351,546.8 — the gross total, which nets to the
+    347,928.5 `RevenueFromOperations` after 3,618.3 of inter-segment revenue. Reading it as a
+    segment would file the whole company under one segment name, so the segment facts must sum to
+    the gross total and none of them may equal it.
+    """
+    filing = _load(_entry(entries, isin=GRASIM, nature=Nature.CONSOLIDATED), repo_root=repo_root)
+    gross = Decimal("351546800000.00")
+    segments = [f.value for f in filing.segment_facts()]
+    assert sum(segments) == gross
+    assert gross not in segments
+    assert _company_value(filing, "revenue_from_operations") == Decimal("347928500000.00")
+
+
+def test_segment_facts_are_scoped_to_the_selected_column(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Each segment appears once per filing — not twice, once per column of the document."""
+    filing = _load(_entry(entries, isin=RELIANCE, nature=Nature.CONSOLIDATED), repo_root=repo_root)
+    names = [f.segment for f in filing.segment_facts()]
+    assert len(names) == len(set(names)) == 5
     for fact in filing.segment_facts():
         assert fact.concept == SEGMENT_CONCEPT
-        assert fact.segment is not None
+        assert fact.period_start == filing.period_start
         assert fact.period_end == filing.period_end
         assert fact.filing_date == filing.filing_date
+        assert fact.nature is filing.nature
+
+
+def test_a_single_segment_company_reports_no_segments(vst_restated: Filing) -> None:
+    """V.S.T Tillers declares itself single-segment; no segment facts is correct, not a failure."""
+    assert vst_restated.segments() == ()
+    assert vst_restated.segment_facts() == ()
+    assert vst_restated.company_facts()
+
+
+def test_a_filing_that_reports_zero_revenue_is_accepted(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Kanani Industries really filed a zero revenue; a `revenue > 0` guard would reject it."""
+    filing = _load(
+        _entry(entries, isin="INE879E01029", nature=Nature.STANDALONE), repo_root=repo_root
+    )
+    assert _company_value(filing, "revenue_from_operations") == Decimal("0.00")
+    assert _company_value(filing, "profit_after_tax") == Decimal("1757000.00")
+
+
+# ── identity: the ISIN comes from the index, the symbol is cross-checked ──────────────────────
+
+
+def test_the_isin_comes_from_the_index_never_the_document(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """HDFC Bank's document states an ISIN that disagrees with the index; the index wins.
+
+    The document says `INE040A01034`, the index `INE040A01018`. Reading identity from a filer's
+    typing would key a bank's facts under an ISIN the D2 master does not carry (invariant #2), so
+    the document's ISIN element is never read at all.
+    """
+    document = (repo_root / FILINGS_DIR / "BANKING_117524_1359008_23012025122553.xml").read_text(
+        encoding="utf-8"
+    )
+    assert "INE040A01034" in document
+    assert "INE040A01018" not in document
+
+    filing = _load(_entry(entries, isin=HDFCBANK, nature=Nature.STANDALONE), repo_root=repo_root)
+    assert filing.isin == HDFCBANK
+    assert all(fact.isin == HDFCBANK for fact in filing.facts)
+
+
+def test_the_document_is_cross_checked_on_symbol(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """The symbol is the identity every real filing states reliably, so it must agree."""
+    filing = _load(
+        _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED),
+        repo_root=repo_root,
+    )
+    assert filing.symbol == "VSTTILLERS"
+
+
+def test_a_symbol_mismatch_between_index_and_document_is_rejected(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """A document about another company must not be filed under this entry's ISIN."""
+    entry = _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED)
+    assert entry.xbrl_url is not None
+    name = entry.xbrl_url.rsplit("/", 1)[-1]
+    payload = (repo_root / FILINGS_DIR / name).read_bytes()
+    with pytest.raises(ParseError, match="name the same company"):
+        parse(payload, entry=entry.model_copy(update={"symbol": "RELIANCE"}), filename=name)
+
+
+def test_an_entity_identified_by_something_other_than_a_symbol_is_rejected(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """If NSE ever switched the identifier scheme, this must fail rather than compare wrong keys."""
+    entry = _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED)
+    payload = _mutate(
+        repo_root,
+        "INDAS_121276_1705279_30072026051555.xml",
+        'scheme="http://www.nseindia.com/NSESymbol"',
+        'scheme="http://www.nseindia.com/ISIN"',
+    )
+    with pytest.raises(ParseError, match="identifier scheme"):
+        parse(payload, entry=entry, filename="mutated.xml")
+
+
+def test_a_filing_naming_two_entities_is_rejected(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    entry = _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED)
+    payload = _mutate(
+        repo_root,
+        "INDAS_121276_1705279_30072026051555.xml",
+        ">VSTTILLERS</xbrli:identifier>",
+        ">RELIANCE</xbrli:identifier>",
+        count=1,
+    )
+    with pytest.raises(ParseError, match="more than one entity"):
+        parse(payload, entry=entry, filename="mutated.xml")
+
+
+def test_a_nature_disagreement_between_index_and_document_is_rejected(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """The index and the selected column must agree on standalone/consolidated."""
+    entry = _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED)
+    assert entry.xbrl_url is not None
+    name = entry.xbrl_url.rsplit("/", 1)[-1]
+    payload = (repo_root / FILINGS_DIR / name).read_bytes()
+    with pytest.raises(ParseError, match="must describe the same filing"):
+        parse(
+            payload, entry=entry.model_copy(update={"nature": Nature.CONSOLIDATED}), filename=name
+        )
+
+
+# ── taxonomy families: one set of concept keys over two vocabularies ──────────────────────────
+
+
+def test_the_banking_taxonomy_maps_onto_the_same_concept_keys(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """A bank's P&L has different element names; consumers still read one set of keys.
+
+    HDFC Bank Q3 FY25: `InterestEarned` 76,006.88 crore is the operating revenue and `Income`
+    87,460.44 crore the total — the two are distinct, which is what makes the mapping meaningful
+    rather than an alias.
+    """
+    filing = _load(_entry(entries, isin=HDFCBANK, nature=Nature.STANDALONE), repo_root=repo_root)
+    assert filing.taxonomy is Taxonomy.BANKING
+    assert _company_value(filing, "revenue_from_operations") == Decimal("760068800000.00")
+    assert _company_value(filing, "total_income") == Decimal("874604400000.00")
+    assert _company_value(filing, "profit_after_tax") == Decimal("167355000000.00")
+
+
+def test_the_nbfc_entry_point_reads_with_the_ind_as_vocabulary(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Bajaj Finance files against the NBFC entry point but reports the Ind-AS P&L spine."""
+    filing = _load(
+        _entry(entries, isin="INE296A01016", nature=Nature.STANDALONE), repo_root=repo_root
+    )
+    assert filing.taxonomy is Taxonomy.IND_AS
+    assert _company_value(filing, "revenue_from_operations") == Decimal("153710200000.00")
+    assert _company_value(filing, "profit_after_tax") == Decimal("37058100000.00")
+
+
+def test_every_filing_reports_the_full_concept_set(all_filings: tuple[Filing, ...]) -> None:
+    """All eight whitelisted concepts resolve in every captured filing, in both vocabularies.
+
+    The regression this pins: four of the original eight element names (`TotalIncome`,
+    `TotalExpenses`, `BasicEarningsPerShare`, `DilutedEarningsPerShare`) exist in no real filing,
+    so a filing "parsed successfully" with half its concepts silently missing.
+    """
+    expected = {
+        "revenue_from_operations",
+        "other_income",
+        "total_income",
+        "total_expenses",
+        "profit_before_tax",
+        "profit_after_tax",
+        "eps_basic",
+        "eps_diluted",
+    }
+    for filing in all_filings:
+        assert {f.concept for f in filing.company_facts()} == expected, filing.symbol
+
+
+def test_an_unknown_taxonomy_entry_point_is_rejected(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """An unrecognised taxonomy must fail, not read zero concepts and call it a filing."""
+    entry = _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED)
+    payload = _mutate(
+        repo_root,
+        "INDAS_121276_1705279_30072026051555.xml",
+        'xlink:href="Ind-AS_entry_point_2020-03-31.xsd"',
+        'xlink:href="martian_entry_point_2099-01-01.xsd"',
+    )
+    with pytest.raises(ParseError, match="not a results taxonomy"):
+        parse(payload, entry=entry, filename="mutated.xml")
+
+
+def test_eps_is_parsed_as_an_exact_decimal(vst_restated: Filing) -> None:
+    """A fractional value round-trips exactly, not through a float."""
+    assert _company_value(vst_restated, "eps_basic") == Decimal("1.97")
+    assert _company_value(vst_restated, "eps_diluted") == Decimal("1.96")
 
 
 def test_every_value_is_a_decimal_never_a_float(all_filings: tuple[Filing, ...]) -> None:
     for filing in all_filings:
         for fact in filing.facts:
             # `type() is` (not isinstance) so the check is exact and not statically narrowed away:
-            # the value must be precisely a Decimal even after a parquet round trip, never a float.
+            # the value must be precisely a Decimal, never a float.
             value: object = fact.value
             assert type(value) is Decimal
 
 
-def test_eps_is_parsed_as_an_exact_decimal(repo_root: Path) -> None:
-    """A fractional value (EPS) round-trips exactly, not through a float."""
-    filing = _load_by_name("INDAS_TCS_STANDALONE_10072026.xml", repo_root=repo_root)
-    assert _company_value(filing, "eps_basic") == Decimal("33.50")
-    assert _company_value(filing, "eps_diluted") == Decimal("33.45")
+def test_values_are_absolute_rupees_not_the_statements_rounding(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """`LevelOfRoundingUsedInFinancialStatements` describes the statement, not the XBRL.
 
+    Reliance's filing says `Crores` and tags 2,438,650,000,000 for a quarter its statement prints
+    as 243,865 crore — i.e. absolute rupees. A parser that scaled by the rounding label would be
+    wrong by 1e7 here and by 1e5 on a `Lakhs` filing.
+    """
+    document = (repo_root / FILINGS_DIR / "INDAS_117297_1348248_16012025081520.xml").read_text(
+        encoding="utf-8"
+    )
+    assert "<in-bse-fin:LevelOfRoundingUsedInFinancialStatements" in document
+    assert ">Crores<" in document
 
-def test_a_comparative_prior_period_is_not_stored_as_this_filings_datum(repo_root: Path) -> None:
-    """The standalone TCS filing carries a prior-year revenue context; only this period is kept."""
-    filing = _load_by_name("INDAS_TCS_STANDALONE_10072026.xml", repo_root=repo_root)
-    revenues = [f for f in filing.facts if f.concept == "revenue_from_operations"]
-    assert len(revenues) == 1
-    assert revenues[0].period_end == Q1FY27_END
-    assert revenues[0].value == Decimal("630000000000")
+    filing = _load(_entry(entries, isin=RELIANCE, nature=Nature.CONSOLIDATED), repo_root=repo_root)
+    assert _company_value(filing, "revenue_from_operations") == Decimal("2438650000000.00")
+    assert _company_value(filing, "profit_after_tax") == Decimal("219300000000.00")
 
 
 # ── acceptance 3: a restatement is a new record, not an overwrite ──────────────────────────────
 
 
+def test_the_real_restatement_changed_the_numbers(
+    vst_original: Filing, vst_restated: Filing
+) -> None:
+    """V.S.T Tillers' original filing overstated the quarter by exactly 10x.
+
+    Not a contrived pair: the 11-Feb-2025 filing reports 21,910,000,000 of revenue for a quarter
+    the 30-Jul-2026 re-filing puts at 2,191,000,000. The later figure is the right one, and that
+    is precisely why the earlier one must survive in the store — a 2025 backtest could only have
+    seen the wrong number.
+    """
+    assert vst_original.filing_id != vst_restated.filing_id
+    original = _company_value(vst_original, "revenue_from_operations")
+    restated = _company_value(vst_restated, "revenue_from_operations")
+    assert original == Decimal("21910000000.00")
+    assert restated == Decimal("2191000000.00")
+    assert original == restated * 10
+
+
 def test_a_restatement_is_stored_alongside_the_original(
     all_filings: tuple[Filing, ...], tmp_path: Path
 ) -> None:
-    """Both Kaynes filings for 31-Mar-2026 are physically present after both are written."""
+    """Both V.S.T Tillers filings for 31-Dec-2024 are physically present after both are written."""
     for filing in all_filings:
         write_pit(filing, data_root=tmp_path)
 
     revenue = [
         f
         for f in read_pit(date(2026, 9, 1), data_root=tmp_path)
-        if f.isin == KAYNES and f.concept == "revenue_from_operations"
+        if f.isin == VSTTILLERS
+        and f.nature is Nature.STANDALONE
+        and f.concept == "revenue_from_operations"
     ]
-    assert {f.filing_id for f in revenue} == {
-        "KAYNES-Q4FY26-SA-3980551",
-        "KAYNES-Q4FY26-SA-4290887",
-    }
-    assert {f.value for f in revenue} == {Decimal("8000000000"), Decimal("7800000000")}
+    assert len({f.filing_id for f in revenue}) == 2
+    assert {f.value for f in revenue} == {Decimal("21910000000.00"), Decimal("2191000000.00")}
 
 
 def test_the_restatement_does_not_overwrite_the_original_partition(
@@ -299,28 +662,38 @@ def test_the_restatement_does_not_overwrite_the_original_partition(
     for filing in all_filings:
         write_pit(filing, data_root=tmp_path)
 
-    original = read_l1(KAYNES_ORIGINAL_FILED, data_root=tmp_path)
-    restated = read_l1(KAYNES_RESTATED_FILED, data_root=tmp_path)
-    original_rev = next(f for f in original if f.concept == "revenue_from_operations")
-    restated_rev = next(f for f in restated if f.concept == "revenue_from_operations")
-    assert original_rev.value == Decimal("8000000000")
-    assert restated_rev.value == Decimal("7800000000")
+    def standalone_revenue(filed: date) -> Decimal:
+        rows = [
+            f
+            for f in read_l1(filed, data_root=tmp_path)
+            if f.isin == VSTTILLERS
+            and f.nature is Nature.STANDALONE
+            and f.concept == "revenue_from_operations"
+        ]
+        assert len(rows) == 1
+        return rows[0].value
+
+    assert standalone_revenue(VST_ORIGINAL_FILED) == Decimal("21910000000.00")
+    assert standalone_revenue(VST_RESTATED_FILED) == Decimal("2191000000.00")
 
 
 def test_pit_read_before_the_restatement_sees_only_the_original(
     all_filings: tuple[Filing, ...], tmp_path: Path
 ) -> None:
-    """Invariant #7: as of 01-Jun the market had seen only the original filing."""
+    """Invariant #7: in 2025 the market had seen only the (wrong) original figure."""
     for filing in all_filings:
         write_pit(filing, data_root=tmp_path)
 
-    as_of_june = [
+    as_of = [
         f
-        for f in read_pit(date(2026, 6, 1), data_root=tmp_path)
-        if f.isin == KAYNES and f.concept == "revenue_from_operations"
+        for f in read_pit(date(2025, 6, 1), data_root=tmp_path)
+        if f.isin == VSTTILLERS
+        and f.nature is Nature.STANDALONE
+        and f.concept == "revenue_from_operations"
     ]
-    assert [f.filing_id for f in as_of_june] == ["KAYNES-Q4FY26-SA-3980551"]
-    assert as_of_june[0].value == Decimal("8000000000")
+    assert len(as_of) == 1
+    assert as_of[0].value == Decimal("21910000000.00")
+    assert as_of[0].filing_date == VST_ORIGINAL_FILED
 
 
 def test_read_latest_supersedes_only_once_the_restatement_is_knowable(
@@ -330,32 +703,48 @@ def test_read_latest_supersedes_only_once_the_restatement_is_knowable(
     for filing in all_filings:
         write_pit(filing, data_root=tmp_path)
 
-    def kaynes_revenue(on: date) -> Decimal:
+    def revenue(on: date) -> Decimal:
         rows = [
             f
             for f in read_latest(on, data_root=tmp_path)
-            if f.isin == KAYNES and f.concept == "revenue_from_operations"
+            if f.isin == VSTTILLERS
+            and f.nature is Nature.STANDALONE
+            and f.concept == "revenue_from_operations"
         ]
         assert len(rows) == 1
         return rows[0].value
 
-    assert kaynes_revenue(date(2026, 6, 1)) == Decimal("8000000000")  # original only
-    assert kaynes_revenue(date(2026, 9, 1)) == Decimal("7800000000")  # restated now knowable
+    assert revenue(date(2025, 6, 1)) == Decimal("21910000000.00")  # original only
+    assert revenue(date(2026, 9, 1)) == Decimal("2191000000.00")  # correction now knowable
 
 
-def test_the_robotics_segment_restatement_is_kept_distinct(
-    all_filings: tuple[Filing, ...], tmp_path: Path
+def test_a_segment_disclosure_withdrawn_by_a_refiling_keeps_its_history(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path, tmp_path: Path
 ) -> None:
-    """The segment §5.3 turns on is restated too, and both values survive (BC1 needs history)."""
-    for filing in all_filings:
-        write_pit(filing, data_root=tmp_path)
+    """Stanley Lifestyles disclosed a segment, then re-filed without it — BC1 needs both states.
 
-    robotics = [
+    A real case the fabricated fixtures could not have produced: the segment history must not be
+    rewritten by a later filing that simply stopped disclosing it.
+    """
+    original = _load(
+        _entry(entries, isin=STANLEY, nature=Nature.CONSOLIDATED, filed=date(2025, 2, 12)),
+        repo_root=repo_root,
+    )
+    refiled = _load(
+        _entry(entries, isin=STANLEY, nature=Nature.CONSOLIDATED, filed=date(2025, 3, 21)),
+        repo_root=repo_root,
+    )
+    assert "Manufacture of Furniture" in original.segments()
+    assert "Manufacture of Furniture" not in refiled.segments()
+
+    write_pit(original, data_root=tmp_path)
+    write_pit(refiled, data_root=tmp_path)
+    stored = [
         f
-        for f in read_pit(date(2026, 9, 1), data_root=tmp_path)
-        if f.isin == KAYNES and f.segment == "Automation and Robotics"
+        for f in read_pit(date(2025, 6, 1), data_root=tmp_path)
+        if f.isin == STANLEY and f.segment == "Manufacture of Furniture"
     ]
-    assert {f.value for f in robotics} == {Decimal("3000000000"), Decimal("2800000000")}
+    assert [f.value for f in stored] == [Decimal("1154000000.00")]
 
 
 # ── the PIT store: partitioning, round trip, lineage ───────────────────────────────────────────
@@ -364,23 +753,20 @@ def test_the_robotics_segment_restatement_is_kept_distinct(
 def test_two_filings_of_the_same_day_share_a_partition_kept_apart_by_nature(
     all_filings: tuple[Filing, ...], tmp_path: Path
 ) -> None:
-    """TCS standalone and consolidated, both filed 10-Jul, coexist in one partition."""
+    """Standalone and consolidated, both filed 30-Jul-2026, coexist in one partition."""
     for filing in all_filings:
         write_pit(filing, data_root=tmp_path)
 
-    rows = read_l1(TCS_FILED, data_root=tmp_path)
-    natures = {(f.nature, f.concept == "revenue_from_operations") for f in rows}
-    assert (Nature.STANDALONE, True) in natures
-    assert (Nature.CONSOLIDATED, True) in natures
-    standalone_rev = next(
-        f for f in rows if f.nature is Nature.STANDALONE and f.concept == "revenue_from_operations"
-    )
-    consolidated_rev = next(
+    rows = [
         f
-        for f in rows
-        if f.nature is Nature.CONSOLIDATED and f.concept == "revenue_from_operations"
-    )
-    assert standalone_rev.value != consolidated_rev.value
+        for f in read_l1(VST_RESTATED_FILED, data_root=tmp_path)
+        if f.isin == VSTTILLERS and f.concept == "profit_after_tax"
+    ]
+    by_nature = {f.nature: f.value for f in rows}
+    assert by_nature == {
+        Nature.STANDALONE: Decimal("17000000.00"),
+        Nature.CONSOLIDATED: Decimal("12800000.00"),
+    }
 
 
 def test_the_partition_key_is_the_filing_date_not_the_period_end(
@@ -392,32 +778,30 @@ def test_the_partition_key_is_the_filing_date_not_the_period_end(
 
     dataset_dir = tmp_path / "L1" / PIT_FUNDAMENTALS_DATASET
     partitions = {p.name for p in dataset_dir.iterdir() if p.is_dir()}
-    assert partitions == {"date=2026-05-15", "date=2026-07-10", "date=2026-08-20"}
-    # The period end (31-Mar) is data inside the rows, never a partition.
-    assert not (dataset_dir / "date=2026-03-31").exists()
+    assert f"date={VST_ORIGINAL_FILED.isoformat()}" in partitions
+    assert f"date={VST_RESTATED_FILED.isoformat()}" in partitions
+    # Every partition is a filing date; the period end (31-Dec-2024) is data inside the rows.
+    assert not (dataset_dir / "date=2024-12-31").exists()
+    assert partitions == {f"date={f.filing_date.isoformat()}" for f in all_filings}
 
 
-def test_a_partition_reads_back_identically(
-    all_filings: tuple[Filing, ...], tmp_path: Path
-) -> None:
-    original = next(
-        f for f in all_filings if f.isin == KAYNES and f.filing_date == KAYNES_ORIGINAL_FILED
-    )
-    write_pit(original, data_root=tmp_path)
-    back = read_l1(KAYNES_ORIGINAL_FILED, data_root=tmp_path)
+def test_a_partition_reads_back_identically(vst_original: Filing, tmp_path: Path) -> None:
+    write_pit(vst_original, data_root=tmp_path)
+    back = read_l1(VST_ORIGINAL_FILED, data_root=tmp_path)
     assert {(f.concept, f.segment) for f in back} == {
-        (f.concept, f.segment) for f in original.facts
+        (f.concept, f.segment) for f in vst_original.facts
     }
-    assert next(f for f in back if f.concept == "profit_after_tax").value == Decimal("900000000")
+    assert next(f for f in back if f.concept == "profit_after_tax").value == Decimal("170000000.00")
 
 
 def test_rewriting_a_partition_from_the_same_filings_is_byte_identical(
     all_filings: tuple[Filing, ...], tmp_path: Path
 ) -> None:
     """Idempotent per (dataset, filing_date): the M1.5 determinism rule (§4.2)."""
-    tcs = [f for f in all_filings if f.isin == TCS]
-    first = _write_and_read_bytes(tcs, tmp_path, TCS_FILED)
-    second = _write_and_read_bytes(tcs, tmp_path, TCS_FILED)
+    same_day = [f for f in all_filings if f.filing_date == VST_RESTATED_FILED]
+    assert len(same_day) == 2
+    first = _write_and_read_bytes(same_day, tmp_path, VST_RESTATED_FILED)
+    second = _write_and_read_bytes(same_day, tmp_path, VST_RESTATED_FILED)
     assert first == second
 
 
@@ -427,24 +811,20 @@ def _write_and_read_bytes(filings: list[Filing], root: Path, filed: date) -> byt
     return l1_partition_path(PIT_FUNDAMENTALS_DATASET, filed, data_root=root).read_bytes()
 
 
-def test_the_partition_carries_its_l0_lineage(
-    all_filings: tuple[Filing, ...], tmp_path: Path
-) -> None:
-    for filing in all_filings:
-        write_pit(filing, data_root=tmp_path)
+def test_the_partition_carries_its_l0_lineage(vst_original: Filing, tmp_path: Path) -> None:
+    write_pit(vst_original, data_root=tmp_path)
     table = pq.read_table(
-        l1_partition_path(PIT_FUNDAMENTALS_DATASET, KAYNES_ORIGINAL_FILED, data_root=tmp_path)
+        l1_partition_path(PIT_FUNDAMENTALS_DATASET, VST_ORIGINAL_FILED, data_root=tmp_path)
     )
-    keys = set(table.column("l0_key").to_pylist())
-    assert keys == {
-        f"nse_xbrl_filing/{KAYNES_ORIGINAL_FILED.isoformat()}/INDAS_KAYNES_STANDALONE_15052026.xml"
+    assert set(table.column("l0_key").to_pylist()) == {
+        f"nse_xbrl_filing/{VST_ORIGINAL_FILED.isoformat()}/INDAS_119528_1377589_11022025120304.xml"
     }
 
 
-def test_the_l1_value_column_is_decimal(all_filings: tuple[Filing, ...], tmp_path: Path) -> None:
-    write_pit(all_filings[0], data_root=tmp_path)
+def test_the_l1_value_column_is_decimal(vst_original: Filing, tmp_path: Path) -> None:
+    write_pit(vst_original, data_root=tmp_path)
     schema = pq.read_schema(
-        l1_partition_path(PIT_FUNDAMENTALS_DATASET, all_filings[0].filing_date, data_root=tmp_path)
+        l1_partition_path(PIT_FUNDAMENTALS_DATASET, VST_ORIGINAL_FILED, data_root=tmp_path)
     )
     assert str(schema.field("value").type) == "decimal128(38, 2)"
 
@@ -455,38 +835,66 @@ def test_read_pit_on_an_empty_lake_is_empty_not_an_error(tmp_path: Path) -> None
 
 def test_reading_a_partition_that_was_never_written_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
-        read_l1(TCS_FILED, data_root=tmp_path)
+        read_l1(VST_RESTATED_FILED, data_root=tmp_path)
 
 
-def test_writing_the_same_filing_twice_is_idempotent(
-    all_filings: tuple[Filing, ...], tmp_path: Path
-) -> None:
-    filing = all_filings[0]
-    write_pit(filing, data_root=tmp_path)
-    write_pit(filing, data_root=tmp_path)
-    rows = read_l1(filing.filing_date, data_root=tmp_path)
-    assert len(rows) == len(filing.facts)
+def test_writing_the_same_filing_twice_is_idempotent(vst_original: Filing, tmp_path: Path) -> None:
+    write_pit(vst_original, data_root=tmp_path)
+    write_pit(vst_original, data_root=tmp_path)
+    rows = read_l1(VST_ORIGINAL_FILED, data_root=tmp_path)
+    assert len(rows) == len(vst_original.facts)
 
 
 # ── the index parser: shape and failure modes ─────────────────────────────────────────────────
 
 
-def test_the_index_lists_every_filing(entries: tuple[FilingIndexEntry, ...]) -> None:
-    assert len(entries) == 4
-    assert {e.xbrl_url.rsplit("/", 1)[-1] for e in entries} == {
-        "INDAS_TCS_STANDALONE_10072026.xml",
-        "INDAS_TCS_CONSOLIDATED_10072026.xml",
-        "INDAS_KAYNES_STANDALONE_15052026.xml",
-        "INDAS_KAYNES_STANDALONE_20082026.xml",
+def test_the_index_parses_every_real_record(entries: tuple[FilingIndexEntry, ...]) -> None:
+    """Every record in the captured slice parses — the whole point of the rewrite."""
+    raw = json.loads(INDEX.read_text(encoding="utf-8"))
+    assert len(entries) == len(raw) == 18
+
+
+def test_a_whole_live_index_response_parses(repo_root: Path) -> None:
+    """A second captured response, taken verbatim over a date window, parses end to end."""
+    entries = parse_index((repo_root / WINDOW_INDEX).read_bytes(), filename=WINDOW_INDEX.name)
+    assert len(entries) == 6
+    assert all(entry.filing_date > entry.period_end for entry in entries)
+    assert {entry.symbol for entry in entries} == {
+        "AHLWEST",
+        "KANANIIND",
+        "VSTTILLERS",
+        "IL&FSTRANS",
     }
 
 
-def test_the_index_distinguishes_the_two_kaynes_filings_by_seq(
+def test_an_announcement_with_no_xbrl_document_is_not_actionable(
     entries: tuple[FilingIndexEntry, ...],
 ) -> None:
-    kaynes = [e for e in entries if e.isin == KAYNES]
-    assert len({e.seq_number for e in kaynes}) == 2
-    assert {e.filing_date for e in kaynes} == {KAYNES_ORIGINAL_FILED, KAYNES_RESTATED_FILED}
+    """The feed spells "no attachment" as an archive path ending in `-`; that is not a URL.
+
+    It parses (the record is well-formed and its dates are real) but reports itself
+    non-actionable, so an ingest runner counts it rather than the parser dropping it silently.
+    """
+    missing = [entry for entry in entries if not entry.is_actionable]
+    assert len(missing) == 1
+    assert missing[0].xbrl_url is None
+    assert all(entry.xbrl_url is not None for entry in entries if entry.is_actionable)
+
+
+def test_the_index_keys_restatements_apart_by_seq_number(
+    entries: tuple[FilingIndexEntry, ...],
+) -> None:
+    vst = [e for e in entries if e.isin == VSTTILLERS and e.nature is Nature.STANDALONE]
+    assert len({e.seq_number for e in vst}) == len(vst) == 2
+    assert {e.filing_date for e in vst} == {VST_ORIGINAL_FILED, VST_RESTATED_FILED}
+    assert len({e.filing_id for e in vst}) == 2
+
+
+def test_index_entries_are_sorted_deterministically(index_bytes: bytes) -> None:
+    """A re-parse of the same payload yields the same order (replay determinism)."""
+    once = parse_index(index_bytes, filename=INDEX.name)
+    twice = parse_index(index_bytes, filename=INDEX.name)
+    assert once == twice
 
 
 @pytest.mark.parametrize(
@@ -505,63 +913,90 @@ def test_an_index_body_that_is_not_this_format_is_a_named_error(body: bytes, exp
         parse_index(body, filename="index.json")
 
 
+def test_an_unknown_consolidated_value_is_a_named_error() -> None:
+    """A third value in `consolidated` must fail loudly, not be guessed at."""
+    record = json.loads(INDEX.read_text(encoding="utf-8"))[0]
+    record["consolidated"] = "Semi-Consolidated"
+    with pytest.raises(ParseError, match="expected one of"):
+        parse_index(json.dumps([record]).encode("utf-8"), filename="index.json")
+
+
 # ── the XBRL parser: failure modes ────────────────────────────────────────────────────────────
 
 
-def _valid_xbrl(repo_root: Path) -> bytes:
-    return (repo_root / FILINGS_DIR / "INDAS_TCS_STANDALONE_10072026.xml").read_bytes()
+@pytest.fixture
+def any_entry(entries: tuple[FilingIndexEntry, ...]) -> FilingIndexEntry:
+    return _entry(entries, isin=VSTTILLERS, nature=Nature.STANDALONE, filed=VST_RESTATED_FILED)
 
 
-def test_a_body_that_is_not_xml_is_a_named_error() -> None:
+def test_a_body_that_is_not_xml_is_a_named_error(any_entry: FilingIndexEntry) -> None:
     with pytest.raises(ParseError, match="not well-formed XML"):
-        parse(
-            b"<html>Access Denied", filing_date=date(2026, 12, 31), filing_id="x", filename="x.xml"
-        )
+        parse(b"<html>Access Denied", entry=any_entry, filename="x.xml")
 
 
-def test_an_empty_body_is_a_named_error() -> None:
+def test_an_empty_body_is_a_named_error(any_entry: FilingIndexEntry) -> None:
     with pytest.raises(ParseError, match="empty response body"):
-        parse(b"   ", filing_date=date(2026, 12, 31), filing_id="x", filename="x.xml")
+        parse(b"   ", entry=any_entry, filename="x.xml")
 
 
-def test_a_non_xbrl_root_is_rejected() -> None:
+def test_a_non_xbrl_root_is_rejected(any_entry: FilingIndexEntry) -> None:
     with pytest.raises(ParseError, match="not an XBRL"):
-        parse(
-            b"<?xml version='1.0'?><root/>",
-            filing_date=date(2026, 12, 31),
-            filing_id="x",
-            filename="x.xml",
-        )
+        parse(b"<?xml version='1.0'?><root/>", entry=any_entry, filename="x.xml")
 
 
-def test_an_isin_mismatch_between_index_and_document_is_rejected(repo_root: Path) -> None:
-    """The index and the document must name the same company (invariant #2 discipline)."""
-    with pytest.raises(ParseError, match="name the same company"):
-        parse(
-            _valid_xbrl(repo_root),
-            filing_date=TCS_FILED,
-            filing_id="x",
-            isin=KAYNES,
-            filename="x.xml",
-        )
+def test_an_entry_with_no_period_start_cannot_select_a_column(
+    any_entry: FilingIndexEntry, repo_root: Path
+) -> None:
+    """Without a period start there is no way to say which column the entry means."""
+    assert any_entry.xbrl_url is not None
+    name = any_entry.xbrl_url.rsplit("/", 1)[-1]
+    payload = (repo_root / FILINGS_DIR / name).read_bytes()
+    with pytest.raises(ParseError, match="cannot be identified"):
+        parse(payload, entry=any_entry.model_copy(update={"period_start": None}), filename=name)
 
 
-def test_a_missing_nature_element_is_rejected(repo_root: Path) -> None:
-    text = _valid_xbrl(repo_root).decode("utf-8")
-    stripped = "\n".join(
-        line for line in text.splitlines() if "NatureOfReportStandaloneConsolidated" not in line
-    ).encode("utf-8")
-    with pytest.raises(ParseError, match="NatureOfReportStandaloneConsolidated"):
-        parse(stripped, filing_date=TCS_FILED, filing_id="x", filename="x.xml")
+def test_a_missing_nature_element_is_rejected(any_entry: FilingIndexEntry, repo_root: Path) -> None:
+    """No column declares a nature → there is no results column at all."""
+    payload = _mutate(
+        repo_root,
+        "INDAS_121276_1705279_30072026051555.xml",
+        "NatureOfReportStandaloneConsolidated",
+        "NatureOfReportSomethingElse",
+    )
+    with pytest.raises(ParseError, match="no results column"):
+        parse(payload, entry=any_entry, filename="mutated.xml")
 
 
-def test_a_filing_reporting_two_entities_is_rejected(repo_root: Path) -> None:
-    text = _valid_xbrl(repo_root).decode("utf-8").replace("INE467B01029", "INE009A01021", 1)
-    with pytest.raises(ParseError, match="more than one entity"):
-        parse(text.encode("utf-8"), filing_date=TCS_FILED, filing_id="x", filename="x.xml")
-
-
-def test_a_non_decimal_value_is_rejected(repo_root: Path) -> None:
-    text = _valid_xbrl(repo_root).decode("utf-8").replace("630000000000", "NaN")
+def test_a_non_decimal_value_is_rejected(any_entry: FilingIndexEntry, repo_root: Path) -> None:
+    payload = _mutate(
+        repo_root, "INDAS_121276_1705279_30072026051555.xml", ">2191000000.00<", ">NaN<"
+    )
     with pytest.raises(ParseError, match="not a plain decimal"):
-        parse(text.encode("utf-8"), filing_date=TCS_FILED, filing_id="x", filename="x.xml")
+        parse(payload, entry=any_entry, filename="mutated.xml")
+
+
+def test_a_column_reporting_none_of_the_concepts_is_rejected(
+    any_entry: FilingIndexEntry, repo_root: Path
+) -> None:
+    """An empty parse must fail, not record "we looked and found nothing" as a successful ingest."""
+    payload = _mutate(
+        repo_root, "INDAS_121276_1705279_30072026051555.xml", "<in-bse-fin:", "<in-bse-unknown:"
+    )
+    with pytest.raises(ParseError):
+        parse(payload, entry=any_entry, filename="mutated.xml")
+
+
+def test_a_duplicate_concept_in_one_column_is_rejected(
+    any_entry: FilingIndexEntry, repo_root: Path
+) -> None:
+    """One column reports each concept once; two values means neither can be trusted."""
+    original = '<in-bse-fin:ProfitLossForPeriod contextRef="OneD" unitRef="INR" decimals="-5">'
+    payload = _mutate(
+        repo_root,
+        "INDAS_121276_1705279_30072026051555.xml",
+        original,
+        original + "1.00</in-bse-fin:ProfitLossForPeriod>" + original,
+        count=1,
+    )
+    with pytest.raises(ParseError, match="reports ProfitLossForPeriod 2 times"):
+        parse(payload, entry=any_entry, filename="mutated.xml")

@@ -13,9 +13,21 @@ period end. The feed states it as `broadCastDate` (with `exchdisstime` as a fall
 handed that date and never derives one from the document, so `(period_end, filing_date)` come from
 two genuinely independent places (acceptance 1).
 
-`consolidated` is read from the feed too, and threaded to the parser only as a *cross-check*: the
-XBRL's own `NatureOfReportStandaloneConsolidated` is authoritative, and a disagreement is a defect
-worth surfacing rather than silently trusting one side.
+Three fields of an entry are not merely descriptive — the parser cannot read the document without
+them, because one XBRL document holds several periods and several companies' worth of ambiguity:
+
+* **`isin` is the join key.** Real filings identify the entity by NSE *symbol* and carry no usable
+  ISIN of their own, so the ISIN a fact is stored under comes from here (invariant #2, via D2) and
+  `symbol` is what the parser cross-checks against the document.
+* **`(period_start, period_end)` selects the results column.** A document transcribes the published
+  results table column by column — a quarter *and* a cumulative period, both with the same
+  `xbrli:period` — and one document is linked by more than one entry (a December-year-end company's
+  is linked by both its Quarterly and its Annual entry). The entry's `fromDate`/`toDate` is the
+  only thing that says which column it means.
+* **`nature` is cross-checked, not merely carried.** The feed and the document spell the same
+  distinction differently (`Non-Consolidated` here, `Standalone` there — `_nature` maps them), and
+  the selected column's own declaration must agree with this entry or the two are describing
+  different filings.
 
 Offline by construction: this module takes bytes (or an `L0Ref` read back through `L0Store`) and
 never fetches. Money is not in scope here — the index carries dates and URLs, not values.
@@ -66,6 +78,20 @@ _KEY_SEQ: Final = "seqNumber"
 #: than handed to `strptime("%b")`, which reads `LC_TIME`: a non-English host would otherwise fail
 #: to parse a date that is not locale-dependent (the guard the NSE parsers share).
 _FEED_DATE = re.compile(r"^\s*(\d{1,2})-([A-Za-z]{3})-(\d{4})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?\s*$")
+#: How the feed's `consolidated` field spells each `Nature`, compared after `_squash`. The feed's
+#: `Non-Consolidated` is the document's `Standalone`; both spellings map to one stored value.
+_NATURE_SYNONYMS: Final[Mapping[str, Nature]] = {
+    "nonconsolidated": Nature.STANDALONE,
+    "standalone": Nature.STANDALONE,
+    "consolidated": Nature.CONSOLIDATED,
+}
+
+#: A `xbrl` field with no document behind it. The feed states the URL of the filings archive with a
+#: bare `-` where a record has no XBRL attachment, which is a real, common state (18 of a captured
+#: 3,816 records) rather than a malformed record — so the entry parses and reports itself
+#: non-actionable instead of failing the whole index response.
+_MISSING_XBRL_SUFFIX: Final = "/-"
+
 _MONTHS: Final[Mapping[str, int]] = {
     "JAN": 1,
     "FEB": 2,
@@ -105,13 +131,26 @@ class FilingIndexEntry(BaseModel):
     nature: Nature = Field(description="Standalone/Consolidated as the feed declares it")
     audited: bool | None = Field(default=None, description="whether the results are audited")
     period: str | None = Field(default=None, description="Quarterly/Annual, as stated by the feed")
-    xbrl_url: str = Field(min_length=1, description="absolute URL of the filing's XBRL document")
+    xbrl_url: str | None = Field(
+        default=None,
+        description="absolute URL of the filing's XBRL document; None when the feed has none",
+    )
     seq_number: str = Field(min_length=1, description="feed sequence id; keys restatements apart")
 
     @property
     def filing_id(self) -> str:
         """The stable id the parser and store use to keep restatements distinct."""
         return self.seq_number
+
+    @property
+    def is_actionable(self) -> bool:
+        """Whether this entry can actually be ingested — i.e. it names an XBRL document.
+
+        Announcements with no XBRL attachment are real and routine, and the register forbids
+        constructing the URL by guessing. An ingest runner asks this and counts what it skipped,
+        rather than the index parser dropping such records silently (CLAUDE.md: fail loud).
+        """
+        return self.xbrl_url is not None
 
 
 def parse_index(payload: bytes, *, filename: str) -> tuple[FilingIndexEntry, ...]:
@@ -208,7 +247,7 @@ def _entry(record: Mapping[str, Any], *, index: int, filename: str) -> FilingInd
             nature=_nature(record, index=index, filename=filename),
             audited=_optional_audited(record),
             period=_optional_text(record, _KEY_PERIOD),
-            xbrl_url=_text(record, _KEY_XBRL, index=index, filename=filename),
+            xbrl_url=_optional_xbrl_url(record, index=index, filename=filename),
             seq_number=_text(record, _KEY_SEQ, index=index, filename=filename),
         )
     except ValidationError as exc:
@@ -216,13 +255,21 @@ def _entry(record: Mapping[str, Any], *, index: int, filename: str) -> FilingInd
 
 
 def _nature(record: Mapping[str, Any], *, index: int, filename: str) -> Nature:
-    """`Standalone`/`Consolidated` from the feed's `consolidated` field, case-tolerantly."""
+    """`Standalone`/`Consolidated` from the feed's `consolidated` field.
+
+    The feed and the XBRL document spell this distinction differently: the feed says
+    `Non-Consolidated` where the document says `Standalone` (across a captured 3,816-record index
+    the only two values are `Non-Consolidated` and `Consolidated` — `Standalone` never appears). The
+    document's spelling is the stored one (`Nature`), so the feed's synonym is mapped here, and the
+    document's own spelling is accepted too rather than being a surprise if the feed ever adopts it.
+    """
     raw = _text(record, _KEY_CONSOLIDATED, index=index, filename=filename)
-    for nature in Nature:
-        if raw.strip().lower() == nature.value.lower():
-            return nature
+    nature = _NATURE_SYNONYMS.get(_squash(raw))
+    if nature is not None:
+        return nature
     raise ParseError(
-        f"record {index}: {_KEY_CONSOLIDATED!r} is {raw!r}, expected Standalone or Consolidated",
+        f"record {index}: {_KEY_CONSOLIDATED!r} is {raw!r}, expected one of "
+        f"{sorted(_NATURE_SYNONYMS)}",
         filename=filename,
     )
 
@@ -237,6 +284,27 @@ def _filing_field(record: Mapping[str, Any], *, index: int, filename: str) -> st
         f"record {index}: no filing timestamp; expected one of {', '.join(_KEY_FILING)}",
         filename=filename,
     )
+
+
+def _optional_xbrl_url(record: Mapping[str, Any], *, index: int, filename: str) -> str | None:
+    """The filing's XBRL URL, or None when the feed's placeholder says there is no document.
+
+    Taken verbatim from the feed — never constructed (the register forbids guessing these). The
+    field is always present as a string; a record with no attachment spells it as the archive path
+    ending in a bare `-`, which is not a URL that can be fetched and so becomes None.
+    """
+    raw = _text(record, _KEY_XBRL, index=index, filename=filename)
+    return None if raw.endswith(_MISSING_XBRL_SUFFIX) else raw
+
+
+def _squash(value: str) -> str:
+    """Fold a feed label to a comparable key: lowercase, no hyphens, no surrounding blanks.
+
+    The feed and the XBRL document disagree on hyphens and case for the same words (`Un-Audited` vs
+    `Unaudited`, `Non-Consolidated` vs `Standalone`), and comparing raw strings is how the first cut
+    of this parser rejected every real record.
+    """
+    return value.strip().lower().replace("-", "").replace(" ", "")
 
 
 def _text(record: Mapping[str, Any], key: str, *, index: int, filename: str) -> str:
@@ -256,14 +324,19 @@ def _optional_text(record: Mapping[str, Any], key: str) -> str | None:
 
 
 def _optional_audited(record: Mapping[str, Any]) -> bool | None:
-    """True/False from the audited field; None when absent or unrecognized."""
+    """True/False from the audited field; None when absent or unrecognized.
+
+    The feed hyphenates (`Un-Audited`) where the XBRL document does not (`Unaudited`), so the
+    hyphen is squashed before comparing — matching on the un-squashed spelling read every one of a
+    captured index's 3,598 unaudited entries as "did not say".
+    """
     value = record.get(_KEY_AUDITED)
     if not isinstance(value, str):
         return None
-    lowered = value.strip().lower()
-    if lowered == "audited":
+    squashed = _squash(value)
+    if squashed == "audited":
         return True
-    if lowered == "unaudited":
+    if squashed == "unaudited":
         return False
     return None
 

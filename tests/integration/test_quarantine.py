@@ -39,7 +39,7 @@ from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind,
 from analyst.journal.models import Actor
 from dataplatform.clock import IST
 from dataplatform.ingest.screener import SCREENER_SOURCE_ID, SCREENER_SOURCE_TAG
-from dataplatform.ingest.xbrl.models import Filing, FundamentalFact, Nature
+from dataplatform.ingest.xbrl.models import Filing, FundamentalFact, Nature, Taxonomy
 from dataplatform.query.quarantine import (
     PIT_FUNDAMENTALS_VIEW,
     RESTATED_FUNDAMENTALS_VIEW,
@@ -109,6 +109,8 @@ def _pit_filing() -> Filing:
     )
     return Filing(
         isin=RELIANCE_ISIN,
+        symbol="RELIANCE",
+        taxonomy=Taxonomy.IND_AS,
         name="Reliance Industries",
         period_end=period_end,
         filing_date=filing_date,

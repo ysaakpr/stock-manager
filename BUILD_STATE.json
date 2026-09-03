@@ -296,10 +296,37 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_constituents_ingest.py -q\n(exit 0)\n..........                                                               [100%]\n\n$ uv run ruff format --check dataplatform/ingest/constituents_ingest.py tests/unit/test_constituents_ingest.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/constituents_ingest.py tests/unit/test_constituents_ingest.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/constituents_ingest.py tests/unit/test_constituents_ingest.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     },
+    "M10.2": {
+      "attempts": 1,
+      "commit": "a17c1fa",
+      "finished": "2026-09-03T14:35:09+00:00",
+      "first_started": "2026-09-03T14:22:03+00:00",
+      "last_started": "2026-09-03T14:22:03+00:00",
+      "note": "Weekly constituents snapshot job (constituents_snapshot_job.py) built on M10.1's sweep + M0.6 scheduler; week_anchor (ISO-week Sunday) gives per-(slug,week) idempotency, per-slug failures alerted (WARNING, deduped) not just journaled, sweep never aborts on one slug.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/integration/test_constituents_snapshot_job.py -q\n(exit 0)\n.....                                                                    [100%]\n\n$ uv run ruff format --check dataplatform/ingest/constituents_snapshot_job.py tests/integration/test_constituents_snapshot_job.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/constituents_snapshot_job.py tests/integration/test_constituents_snapshot_job.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/constituents_snapshot_job.py tests/integration/test_constituents_snapshot_job.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M10.3": {
+      "attempts": 1,
+      "commit": "b2378a1",
+      "finished": "2026-09-03T14:46:47+00:00",
+      "first_started": "2026-09-03T14:22:03+00:00",
+      "last_started": "2026-09-03T14:22:03+00:00",
+      "note": "Sector-rotation policy: rank sectors by members' mean momentum, hold top-N names within top-K sectors; PIT-safe via knowable_date guard (membership_asof path); report compares rotation vs plain momentum (same universe, sector gate = only diff) vs market per regime with costs. Assumption: no constituent snapshots in L1 store yet, so the report uses a static current-day map from the checked-in fixtures, survivorship-caveated per spec until M10.2 history matures. a-priori params top_k=5, top_n=20.",
+      "previous_state": "IN_PROGRESS",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_sector_rotation.py -q\n(exit 0)\n................                                                         [100%]\n\n$ uv run ruff format --check backtest/policies/sector_rotation.py tests/unit/test_sector_rotation.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/sector_rotation.py tests/unit/test_sector_rotation.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/sector_rotation.py tests/unit/test_sector_rotation.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
     "M10.4": {
-      "attempts": 0,
+      "attempts": 1,
+      "finished": "2026-09-03T14:41:57+00:00",
+      "first_started": "2026-09-03T14:22:04+00:00",
       "human_cleared": true,
-      "previous_state": "PENDING",
+      "last_started": "2026-09-03T14:22:04+00:00",
+      "note": "cleared: Fix M7.3 properly (option A): rebuilt the XBRL path against 15 real captured NSE filings \u2014 parser rewritten around the format's actual column model (the index entry's (fromDate,toDate) selects the results column), ISIN from the index with a symbol cross-check, real segment axis, both taxonomy vocabularies. All four reported defects fixed plus two more found (hyphenated Un-Audited; read_latest collapsing a Q4 into a full year). M10.4's runner needed no logic change beyond skipping announcements with no XBRL document. See ops/gates/M7-xbrl-rebuild.md. The backfill execution itself remains NEEDS_GO under B1.",
+      "previous_state": "PARKED",
+      "reason": "Correct M7.3's XBRL path (built on fabricated fixtures) so real NSE filings ingest, before the M10.4 fundamentals backfill can land real facts?",
       "state": "PENDING"
     },
     "M2.1": {
@@ -1042,7 +1069,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-09-03T14:21:04+00:00",
+  "updated_at": "2026-09-03T17:15:39+00:00",
   "version": 1,
   "wave": 1
 }

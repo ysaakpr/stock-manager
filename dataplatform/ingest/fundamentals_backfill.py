@@ -216,9 +216,10 @@ class FundamentalsBackfillReport:
     `index_requested` is the discovery plan size; the ingest counts partition the per-filing
     outcome. `filings_discovered` is every entry the index returned; `filings_in_universe` the
     subset whose ISIN is a price-window name resolved through the master (the ones actually
-    fetched). `skipped_out_of_universe` and `unresolved_isins` are the two ways an entry is *not*
-    ingested — surfaced on the report, never silently dropped. A `park_reason` set means the run
-    stopped on a reserved-decision block (`park_detail` enumerates it).
+    fetched). `skipped_out_of_universe`, `unresolved_isins` and `skipped_no_document` are the
+    three ways an entry is *not* ingested — surfaced on the report, never silently dropped. A
+    `park_reason` set means the run stopped on a reserved-decision block (`park_detail` enumerates
+    it).
     """
 
     index_requested: int
@@ -232,6 +233,7 @@ class FundamentalsBackfillReport:
     filings_failed: int = 0
     facts_written: int = 0
     skipped_out_of_universe: int = 0
+    skipped_no_document: int = 0
     covered_isins: set[str] = field(default_factory=set)
     unresolved_isins: set[str] = field(default_factory=set)
     park_reason: ParkReason | None = None
@@ -554,17 +556,28 @@ class FundamentalsBackfillRunner:
                 report.skipped_out_of_universe += 1
                 report.unresolved_isins.add(entry.isin)
                 continue
+            if not entry.is_actionable:
+                # The feed lists the announcement but attaches no XBRL document; the register
+                # forbids constructing the URL, so there is nothing to fetch. Counted, not dropped.
+                report.skipped_no_document += 1
+                _LOG.info(
+                    "fundamentals_backfill.filing_no_document",
+                    isin=entry.isin,
+                    filing_id=entry.filing_id,
+                    period_end=entry.period_end.isoformat(),
+                    state="SKIPPED",
+                )
+                continue
             report.filings_in_universe += 1
             if self._max_filings is not None and self._filings_attempted >= self._max_filings:
                 # Bounded sample reached: stop *attempting* fetches, but keep counting the universe
                 # so the coverage report still names how much the full run has left to do.
                 continue
             self._filings_attempted += 1
-            unit = FilingUnit(
-                entry=entry,
-                url=entry.xbrl_url,
-                filename=entry.xbrl_url.rsplit("/", 1)[-1],
-            )
+            url = entry.xbrl_url
+            if url is None:  # pragma: no cover - `entry.is_actionable` already guaranteed this
+                continue
+            unit = FilingUnit(entry=entry, url=url, filename=url.rsplit("/", 1)[-1])
             self._process_filing(unit, report=report)
 
     def _process_filing(self, unit: FilingUnit, *, report: FundamentalsBackfillReport) -> None:
@@ -596,11 +609,9 @@ class FundamentalsBackfillRunner:
             )
             filing = parser.parse(
                 self._l0.get(ref),
-                filing_date=unit.entry.filing_date,
-                filing_id=unit.entry.filing_id,
+                entry=unit.entry,
                 l0_key=ref.key,
                 filename=unit.filename,
-                isin=unit.entry.isin,
             )
             self._sync.mark_validated(unit.state_source, unit.logical_date)
             write_pit(filing, data_root=self._data_root)
@@ -736,8 +747,9 @@ def render_report(
     """The Markdown coverage report an operator reads after a run (`ops/gates/…`).
 
     States what the run covered and — the point of a coverage report — what it did *not*: the units
-    that failed, the entries skipped as out of the price-window universe, the ISINs that did not
-    resolve, and whether the run parked on a reserved-decision block.
+    that failed, the entries skipped as out of the price-window universe, the announcements that
+    carried no XBRL document to fetch, the ISINs that did not resolve, and whether the run parked on
+    a reserved-decision block.
     """
     lines = [
         "# M10.4 — Fundamentals backfill coverage",
@@ -756,6 +768,7 @@ def render_report(
         f"- Facts written: {report.facts_written}",
         f"- ISINs covered: {len(report.covered_isins)}",
         f"- Entries skipped (ISIN not in universe): {report.skipped_out_of_universe}",
+        f"- Entries skipped (no XBRL document in the feed): {report.skipped_no_document}",
         f"- Distinct unresolved/out-of-universe ISINs: {len(report.unresolved_isins)}",
     ]
     if report.parked:

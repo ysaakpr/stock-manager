@@ -38,39 +38,110 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from dataplatform.ingest.models import ISIN_PATTERN
 
 __all__ = [
+    "BANKING_CONCEPTS",
     "CONCEPTS",
+    "CONCEPT_KEYS",
+    "IND_AS_CONCEPTS",
     "Filing",
     "FundamentalFact",
     "Nature",
+    "Taxonomy",
+    "concepts_for",
 ]
 
 
 class Nature(StrEnum):
     """Whether a filing reports the parent alone or the whole group.
 
-    Spelled exactly as the in-bse-fin taxonomy states it (`Standalone` / `Consolidated`) so the
-    value round-trips through XBRL, the store and a log line unchanged.
+    Spelled as the *XBRL document* states it (`NatureOfReportStandaloneConsolidated`), because that
+    is the value stored on every fact and round-tripped through the store and a log line unchanged.
+    The announcements index spells the same distinction differently — `Non-Consolidated` for what
+    the document calls `Standalone` — and `discovery` maps its vocabulary onto this one. Two
+    spellings for one concept is exactly the kind of thing a `StrEnum` exists to collapse once.
     """
 
     STANDALONE = "Standalone"
     CONSOLIDATED = "Consolidated"
 
 
-#: The monetary/EPS concepts this parser lifts out of a results filing, keyed by a stable snake_case
-#: name the rest of the platform uses, mapped from the in-bse-fin element local-name it appears as.
-#: A curated whitelist, not "every tag": these are the line items §5 reasons about, and a concept a
-#: consumer cannot name is a concept it cannot use. Segment revenue is handled separately — it is
-#: one element (`SegmentRevenue`) disaggregated by a context dimension, not a fixed set of names.
-CONCEPTS: Final[dict[str, str]] = {
+class Taxonomy(StrEnum):
+    """Which in-bse-fin results taxonomy a filing was prepared against.
+
+    NSE serves results filings against one of two BSE-published entry points, and they do not share
+    a P&L vocabulary — a bank's operating revenue is `InterestEarned`, a manufacturer's is
+    `RevenueFromOperations`, and neither element exists in the other's taxonomy. Reading a filing
+    with the wrong vocabulary does not fail, it silently finds nothing, so the family is resolved
+    once, explicitly, and the concept map is chosen from it (`concepts_for`).
+
+    `IND_AS` covers both the general Ind-AS entry point (`Ind-AS_entry_point_2020-03-31.xsd`) and
+    the NBFC one (`in-bse-fin-2020-03-31.xsd`): the NBFC filings add finance-specific elements
+    (`InterestEarned`, `FeesAndCommissionIncome`) but still report the whole Ind-AS P&L spine, so
+    one vocabulary reads both. `BANKING` (`banking_entry_point_2019-09-30.xsd`) genuinely differs.
+    """
+
+    IND_AS = "Ind-AS"
+    BANKING = "Banking"
+
+
+#: The monetary/EPS concepts this parser lifts out of an Ind-AS (and NBFC) results filing, keyed by
+#: the stable snake_case name the rest of the platform uses, mapped from the in-bse-fin element
+#: local-name it really appears as. A curated whitelist, not "every tag": these are the line items
+#: §5 reasons about, and a concept a consumer cannot name is a concept it cannot use.
+#:
+#: The element names are taken from captured filings (`tests/fixtures/xbrl/`), not from reading the
+#: taxonomy: the schema admits `TotalIncome`-style names that no real NSE filing uses, and the four
+#: this map used to guess (`TotalIncome`, `TotalExpenses`, `BasicEarningsPerShare`,
+#: `DilutedEarningsPerShare`) matched nothing in any of them.
+IND_AS_CONCEPTS: Final[dict[str, str]] = {
     "RevenueFromOperations": "revenue_from_operations",
     "OtherIncome": "other_income",
-    "TotalIncome": "total_income",
-    "TotalExpenses": "total_expenses",
+    "Income": "total_income",
+    "Expenses": "total_expenses",
     "ProfitBeforeTax": "profit_before_tax",
     "ProfitLossForPeriod": "profit_after_tax",
-    "BasicEarningsPerShare": "eps_basic",
-    "DilutedEarningsPerShare": "eps_diluted",
+    # Continuing *and* discontinued is the headline EPS a bottom-line P/E wants — the same basis as
+    # `ProfitLossForPeriod` above. The continuing-only variants are reported too and deliberately
+    # left out: mixing bases across concepts is how a ratio quietly stops meaning anything.
+    "BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_basic",
+    "DilutedEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_diluted",
 }
+
+#: The same platform concept keys against the banking taxonomy's own element names, so a bank's
+#: facts land under the keys every consumer already reads rather than a parallel set nobody queries.
+#:
+#: Two mappings are judgement, not translation, and are called out because a ratio built on them
+#: inherits the judgement: `revenue_from_operations` is `InterestEarned` — interest and discount on
+#: advances, investments and inter-bank funds, which *is* a bank's operating revenue and excludes
+#: `OtherIncome` exactly as the Ind-AS element does — and `total_expenses` is
+#: `ExpenditureExcludingProvisionsAndContingencies`, which (as its name says) excludes provisions
+#: and contingencies, so it is not comparable line-for-line with an Ind-AS `Expenses`. Bottom-line
+#: concepts (`profit_before_tax`, `profit_after_tax`, EPS) are directly equivalent.
+BANKING_CONCEPTS: Final[dict[str, str]] = {
+    "InterestEarned": "revenue_from_operations",
+    "OtherIncome": "other_income",
+    "Income": "total_income",
+    "ExpenditureExcludingProvisionsAndContingencies": "total_expenses",
+    "ProfitLossFromOrdinaryActivitiesBeforeTax": "profit_before_tax",
+    "ProfitLossForThePeriod": "profit_after_tax",
+    "BasicEarningsPerShareAfterExtraordinaryItems": "eps_basic",
+    "DilutedEarningsPerShareAfterExtraordinaryItems": "eps_diluted",
+}
+
+#: Element local-name → platform concept key, per taxonomy family.
+CONCEPTS: Final[dict[Taxonomy, dict[str, str]]] = {
+    Taxonomy.IND_AS: IND_AS_CONCEPTS,
+    Taxonomy.BANKING: BANKING_CONCEPTS,
+}
+
+#: The platform concept keys this parser can produce, whatever the taxonomy. Every family maps onto
+#: the same keys, which is what lets a consumer read a bank and a manufacturer with one query.
+CONCEPT_KEYS: Final[frozenset[str]] = frozenset(IND_AS_CONCEPTS.values())
+
+
+def concepts_for(taxonomy: Taxonomy) -> dict[str, str]:
+    """The element local-name → concept key map for one taxonomy family."""
+    return CONCEPTS[taxonomy]
+
 
 #: A fundamental value. `strict` keeps floats out by construction; `allow_inf_nan=False` keeps a
 #: mis-parsed field from becoming a plausible-looking number. No `ge=0`: a loss, a negative other
@@ -148,6 +219,13 @@ class Filing(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     isin: str = Field(pattern=ISIN_PATTERN, description="ISO 6166 identifier (invariant #2)")
+    symbol: str = Field(
+        min_length=1,
+        description="NSE symbol the document identifies the entity by; a cross-check, never a key",
+    )
+    taxonomy: Taxonomy = Field(
+        description="which in-bse-fin entry point the filing was prepared against"
+    )
     name: str = Field(min_length=1, description="company name as filed, for display only")
     period_start: date | None = Field(default=None, description="first day of the reporting period")
     period_end: date = Field(description="the period the filing reports (quarter or year end)")

@@ -44,7 +44,13 @@ from analyst.monitor.fundamentals import (
 )
 from dataplatform.clock import IST
 from dataplatform.ingest.screener import SCREENER_SOURCE_ID, SCREENER_SOURCE_TAG
-from dataplatform.ingest.xbrl import SEGMENT_CONCEPT, Filing, FundamentalFact, Nature
+from dataplatform.ingest.xbrl import (
+    SEGMENT_CONCEPT,
+    Filing,
+    FundamentalFact,
+    Nature,
+    Taxonomy,
+)
 from dataplatform.query.quarantine import (
     QuarantineError,
     backtest_catalog,
@@ -97,6 +103,8 @@ def _segment_filing(
     )
     return Filing(
         isin=isin,
+        symbol="SEGCO",
+        taxonomy=Taxonomy.IND_AS,
         name="Segment Co",
         period_start=quarter.period_start,
         period_end=quarter.period_end,
