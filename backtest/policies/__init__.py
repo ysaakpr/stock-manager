@@ -17,10 +17,24 @@ from backtest.policies.naive_momentum import (
     MomentumRecord,
     NaiveMomentumPolicy,
 )
+from backtest.policies.sector_rotation import (
+    SectorRotationData,
+    SectorRotationParameters,
+    SectorRotationPolicy,
+    SectorRotationRecord,
+    SectorScore,
+    rank_sectors,
+)
 
 __all__ = [
     "MomentumData",
     "MomentumParameters",
     "MomentumRecord",
     "NaiveMomentumPolicy",
+    "SectorRotationData",
+    "SectorRotationParameters",
+    "SectorRotationPolicy",
+    "SectorRotationRecord",
+    "SectorScore",
+    "rank_sectors",
 ]

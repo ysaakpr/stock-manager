@@ -53,6 +53,7 @@ Offline and clockless: DuckDB reads local Parquet, the clock is a ``FrozenClock`
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
 import time
 from bisect import bisect_right
@@ -60,6 +61,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from pathlib import Path
 
 from analyst.journal.models import Decision, JournalEntry
@@ -74,6 +76,11 @@ from backtest.policies.naive_momentum import (
     MomentumParameters,
     MomentumRecord,
     NaiveMomentumPolicy,
+)
+from backtest.policies.sector_rotation import (
+    SectorRotationParameters,
+    SectorRotationPolicy,
+    SectorRotationRecord,
 )
 from backtest.replay import BookSnapshot, ReplayEngine, ReplayResult
 from dataplatform.clock import FrozenClock
@@ -121,6 +128,19 @@ _DELTA_REPORT_PATH = Path("ops/gates/M9-adjusted-backtest-report.md")
 _UNIVERSE_REPORT_PATH = Path("ops/gates/M9-universe-report.md")
 _BENCHMARK_REPORT_PATH = Path("ops/gates/M9-benchmark-report.md")
 _V2_REPORT_PATH = Path("ops/gates/M9-momentum-v2-report.md")
+_SECTOR_ROTATION_REPORT_PATH = Path("ops/gates/M10-sector-rotation-report.md")
+
+# ── M10.3 sector-rotation defaults (a priori, stated once, never tuned) ───────────────────────────
+#: Sectors to stay invested in. A NIFTY-500-shaped universe spans ~15-20 industries, so the top 5 is
+#: roughly the top quartile of sectors — the "be in the right industries" bet at a round setting.
+_SECTOR_TOP_K = 5
+#: Names to hold, drawn from the members of the top-K sectors. 20 matches the plain-momentum basket
+#: size exactly, so the sector-rotation-vs-plain-momentum comparison isolates the sector gate.
+_SECTOR_TOP_N = 20
+#: The offline static sector map: the checked-in constituent CSVs (M3.9/M10.1 five-column lists).
+#: Used only when the L1 store holds no constituent snapshots — a static current-day classification
+#: applied backward, which is survivorship-biased and stated as such in the report (M10.2 fixes it).
+_STATIC_SECTOR_MAP_DIR = Path("tests/fixtures/nifty_indices/constituents")
 
 # ── M9.5 momentum v2 defaults (a priori, stated once, never tuned) ───────────────────────────────
 #: The trailing window over which the regime index's moving average is struck. 200 sessions is the
@@ -686,6 +706,10 @@ class _RegimeSource:
         level = _TRI_SEED * (sum(relatives, _ZERO) / Decimal(len(relatives))) if relatives else None
         self._levels[session] = level
         return level
+
+    def level_on(self, session: date) -> Decimal | None:
+        """The broad-market proxy level on ``session`` — the market's own return path (M10.3)."""
+        return self._level(session)
 
     def reading(self, as_of: date) -> RegimeReading:
         """The regime reading as of ``as_of``: the current level and its trailing moving average."""
@@ -2126,6 +2150,531 @@ def run_v2_report(
     return render_v2_report(increments, top_n=top_n, sell_band=sell_band)
 
 
+# ── M10.3: sector-rotation report ────────────────────────────────────────────────────────────────
+
+
+def _load_static_sector_map(map_dir: Path) -> dict[str, str]:
+    """Build an ISIN -> industry map from the checked-in five-column constituent CSVs (M10.3).
+
+    Reads every ``ind_<slug>list_<date>.csv`` in ``map_dir`` (the M3.9/M10.1 fixture format:
+    ``Company Name,Industry,Symbol,Series,ISIN Code``) and folds the rows into one ISIN -> industry
+    map, later files overwriting earlier so the most recent classification wins. This is the offline
+    fallback the report uses **only because the L1 store holds no constituent snapshots yet**: it is
+    a static *current-day* map applied backward, which is survivorship-biased (a name assumed to
+    have always been in the industry, and the index, it is in now). The report states that limit
+    plainly; M10.2's forward snapshot history replaces it with real point-in-time membership.
+    """
+    sector_by_isin: dict[str, str] = {}
+    for path in sorted(map_dir.glob("ind_*list_*.csv")):
+        with path.open(encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                isin = (row.get("ISIN Code") or "").strip()
+                industry = (row.get("Industry") or "").strip()
+                if isin and industry:
+                    sector_by_isin[isin] = industry
+    if not sector_by_isin:
+        raise BacktestError(
+            f"no static sector map: {map_dir} holds no readable ind_*list_*.csv constituent files"
+        )
+    return sector_by_isin
+
+
+class _L1SectorRotationData:
+    """The sector-rotation policy's :class:`SectorRotationData` over L1 (M10.3).
+
+    Built exactly like :class:`_L1MomentumData` — rebalance on the first session of each month, the
+    survivorship-safe PIT price universe narrowed by the same M9.3 investable/liquidity screen, the
+    momentum ratio from the same L2-adjusted-or-raw close source (M9.2), the sizing price from raw
+    (invariant #3) — but each candidate is additionally tagged with the ``sector`` it belonged to,
+    and the candidate set is narrowed to names that *have* a resolvable sector.
+
+    Sector resolution is point-in-time by contract. When the L1 store holds constituent snapshots
+    (post M10.1 live fetch / M10.2 accrual) the sector is read through ``membership_asof`` — the
+    snapshot in force on the decision date — and stamped with that snapshot's own capture date, so a
+    future map cannot leak (invariant #7). When the store holds no snapshots (as this lake does), a
+    static current-day map (:func:`_load_static_sector_map`) stands in, stamped as-of the decision
+    date; that is survivorship-biased and the report says so. Either way the record carries a
+    ``knowable_date`` the policy's PIT guard checks.
+
+    The same instance serves both report arms — sector rotation and plain momentum on the identical
+    universe — because the arms differ only in the policy's ``top_k`` (the sector gate), never in
+    the candidate set. The schedule is precomputed once, so the replay walk is dict lookups.
+    """
+
+    def __init__(
+        self,
+        reader: _L1Reader,
+        sessions: Sequence[date],
+        sector_by_isin: Mapping[str, str],
+        *,
+        signal_closes: SignalCloses | None = None,
+        universe_filter: _InvestableUniverse | None = None,
+    ) -> None:
+        self._reader = reader
+        self._sector_by_isin = dict(sector_by_isin)
+        self._signal_closes: SignalCloses = (
+            signal_closes if signal_closes is not None else reader.closes_on
+        )
+        self._universe_filter = universe_filter
+        self._sessions = list(sessions)
+        self._rebalance = set(_first_session_of_each_month(sessions))
+        self._windows = reader.listing_windows()
+        self._signals: dict[date, tuple[SectorRotationRecord, ...]] = {}
+        self._universe_sizes: dict[date, int] = {}
+        for rebalance_date in sorted(self._rebalance):
+            records = self._compute(rebalance_date)
+            self._signals[rebalance_date] = records
+            self._universe_sizes[rebalance_date] = len(records)
+
+    def is_rebalance(self, session: date) -> bool:
+        return session in self._rebalance
+
+    def signal(self, as_of: date) -> Dataset[SectorRotationRecord]:
+        records = self._signals.get(as_of, ())
+        return Dataset.declaring(
+            f"sector_rotation@{as_of.isoformat()}",
+            records,
+            knowable_date=lambda record: record.knowable_date,
+        )
+
+    def rebalance_dates(self) -> tuple[date, ...]:
+        return tuple(sorted(self._rebalance))
+
+    @property
+    def mean_universe_size(self) -> Decimal:
+        sizes = [n for n in self._universe_sizes.values() if n > 0]
+        if not sizes:
+            return _ZERO
+        return (Decimal(sum(sizes)) / Decimal(len(sizes))).quantize(Decimal("0.1"))
+
+    @property
+    def sector_count(self) -> int:
+        """How many distinct industries the mapped universe spans — for the top-K context."""
+        return len(set(self._sector_by_isin.values()))
+
+    def _lookback_session(self, as_of: date) -> date | None:
+        target = as_of - timedelta(days=_LOOKBACK_DAYS)
+        index = bisect_right(self._sessions, target) - 1
+        return self._sessions[index] if index >= 0 else None
+
+    def _compute(self, as_of: date) -> tuple[SectorRotationRecord, ...]:
+        reference = self._lookback_session(as_of)
+        if reference is None:
+            return ()
+        universe = pit_universe(as_of, InMemoryListingCalendar(self._windows)).isins
+        if self._universe_filter is not None:
+            universe = frozenset(self._universe_filter.constrain(as_of, universe))
+        # Only names with a resolvable sector are sector-rotation candidates (never guessed).
+        universe = frozenset(isin for isin in universe if isin in self._sector_by_isin)
+        signal_now = self._signal_closes(as_of)
+        signal_then = self._signal_closes(reference)
+        raw_now = self._reader.closes_on(as_of)
+        records: list[SectorRotationRecord] = []
+        for isin in universe:
+            now = signal_now.get(isin)
+            then = signal_then.get(isin)
+            price = raw_now.get(isin)
+            if now is None or then is None or then <= _ZERO or price is None:
+                continue
+            records.append(
+                SectorRotationRecord(
+                    isin=isin,
+                    momentum=now / then - _ONE,
+                    price=price,
+                    sector=self._sector_by_isin[isin],
+                    knowable_date=as_of,
+                )
+            )
+        return tuple(records)
+
+
+@dataclass(frozen=True, slots=True)
+class _RegimeReturns:
+    """One strategy's return split by market regime — the per-regime comparison unit (M10.3).
+
+    ``risk_on`` / ``risk_off`` are the geometrically-linked cumulative returns over the sessions the
+    proxy index spent at/above vs below its moving average, as plain ratios (0.20 = +20 %). They are
+    computed off the strategy's own per-session NAV path, so costs are already embedded.
+    """
+
+    risk_on: Decimal
+    risk_off: Decimal
+
+
+def _split_returns_by_regime(
+    nav_path: Sequence[tuple[date, Decimal]], risk_on_by_session: Mapping[date, bool]
+) -> _RegimeReturns:
+    """Geometrically link a NAV path's per-session returns into risk-on and risk-off buckets.
+
+    Each step ``nav[t-1] -> nav[t]`` is a gross return credited to the regime in force at the start
+    of the step (``nav[t-1]``'s session), because that is the state the money was invested through.
+    Returns each bucket's cumulative ratio minus one; an empty bucket contributes zero. Exact in
+    ``Decimal`` and deterministic — no float enters the risk metric.
+    """
+    on_growth = _ONE
+    off_growth = _ONE
+    for (earlier, prior_nav), (_, nav) in pairwise(nav_path):
+        if prior_nav <= _ZERO:
+            continue
+        gross = nav / prior_nav
+        if risk_on_by_session.get(earlier, True):
+            on_growth *= gross
+        else:
+            off_growth *= gross
+    return _RegimeReturns(risk_on=on_growth - _ONE, risk_off=off_growth - _ONE)
+
+
+@dataclass(frozen=True, slots=True)
+class _SectorArm:
+    """One report row: a strategy's full-period metrics plus its per-regime returns (M10.3)."""
+
+    label: str
+    comparison: BenchmarkComparison
+    max_drawdown: Decimal
+    trades: int
+    total_charges: Decimal
+    regime: _RegimeReturns
+
+
+def _run_sector_arm(
+    *,
+    label: str,
+    data: _L1SectorRotationData,
+    params: SectorRotationParameters,
+    reader: _L1Reader,
+    calendar: Sequence[date],
+    sessions: Sequence[date],
+    opening_cash: Decimal,
+    benchmark_slug: str,
+    data_root: Path | None,
+    risk_on_by_session: Mapping[date, bool],
+) -> _SectorArm:
+    """Replay one sector-rotation arm and derive its full-period + per-regime metrics.
+
+    Wires the same stack as :func:`run_momentum_v2` — L1 fills through ``SimBroker`` and the one
+    shared cost model (invariant #4), M4.6 accounting mirrored off the fills, journaling through the
+    replay engine — samples a complete per-session NAV path, and returns the benchmark comparison,
+    max drawdown, turnover, cost and the risk-on/risk-off return split. The ``data`` source is used
+    across arms unchanged; only ``params`` (the ``top_k`` gate) differs.
+    """
+    first_session, terminal = sessions[0], sessions[-1]
+    clock = FrozenClock(first_session)
+    sim = SimBroker(
+        clock=clock,
+        cost_model=CostModel(load_rate_card(), account_state=_ACCOUNT_STATE),
+        market=_L1Market(reader, calendar),
+        opening_cash=opening_cash,
+    )
+    book = PortfolioBook()
+    book.deposit(first_session, opening_cash)
+
+    last_close: dict[str, Decimal] = {}
+    nav_path: list[tuple[date, Decimal]] = []
+
+    def sample_nav(session: date) -> None:
+        last_close.update(reader.closes_on(session))
+        # Mark every held name at its last-known close, falling back to its average cost for a name
+        # that has not printed yet, so the path has a value on every session (never guessed high).
+        prices = {pos.isin: last_close.get(pos.isin, pos.average_price) for pos in book.positions()}
+        nav_path.append((session, book.net_asset_value(prices)))
+
+    broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
+    engine = ReplayEngine(
+        policy=SectorRotationPolicy(data, params),
+        broker=broker,
+        clock=clock,
+        sessions=sessions,
+    )
+    result = engine.run()
+
+    terminal_prices = _terminal_prices(reader, book, sessions)
+    resolved = _resolve_benchmark(
+        reader,
+        data.rebalance_dates(),
+        first_session,
+        terminal,
+        slug=benchmark_slug,
+        data_root=data_root,
+    )
+    comparison = book.compare_to_benchmarks(
+        terminal, terminal_prices, benchmark=resolved.series, theme=resolved.series
+    )
+    trades = sum(1 for entry in result.journal if entry.decision in (Decision.BUY, Decision.SELL))
+    return _SectorArm(
+        label=label,
+        comparison=comparison,
+        max_drawdown=_max_drawdown([nav for _, nav in nav_path]),
+        trades=trades,
+        total_charges=broker.total_charges,
+        regime=_split_returns_by_regime(nav_path, risk_on_by_session),
+    )
+
+
+def _market_regime_returns(
+    regime_source: _RegimeSource, sessions: Sequence[date], risk_on_by_session: Mapping[date, bool]
+) -> _RegimeReturns:
+    """The market (proxy index) return split by regime — the same buckets the strategies use."""
+    path: list[tuple[date, Decimal]] = []
+    for session in sessions:
+        level = regime_source.level_on(session)
+        if level is not None:
+            path.append((session, level))
+    return _split_returns_by_regime(path, risk_on_by_session)
+
+
+def run_sector_rotation_report(
+    *,
+    start: date,
+    end: date,
+    top_k: int = _SECTOR_TOP_K,
+    top_n: int = _SECTOR_TOP_N,
+    opening_cash: Decimal = _DEFAULT_OPENING_CASH,
+    data_root: Path | None = None,
+    sector_map_dir: Path = _STATIC_SECTOR_MAP_DIR,
+    benchmark_slug: str = _BENCHMARK_TRI_SLUG,
+) -> str:
+    """Run sector rotation vs plain momentum (same universe) vs market and render the M10.3 report.
+
+    Both strategy arms read the *identical* candidate set — the investable, sector-mapped PIT
+    universe — from one :class:`_L1SectorRotationData`, and are the *same* policy at two ``top_k``
+    settings: the sector-rotation arm keeps the top ``top_k`` momentum sectors; the plain-momentum
+    arm sets ``top_k`` above the sector count so the gate is a no-op and it holds the top ``top_n``
+    names across the whole universe. So the only thing that differs between the two is the sector
+    gate — the sector effect, isolated (M10.3). The market is the M9.4 benchmark (computed TRI when
+    the store holds it, else the L1 proxy). Costs are in every fill (invariant #4). Metrics are
+    reported full-period and split by market regime (proxy index at/above vs below its moving
+    average). Returns the rendered markdown.
+    """
+    reader = _L1Reader(data_root=data_root)
+    try:
+        sessions = reader.trading_sessions(start, end)
+        if not sessions:
+            raise BacktestError(f"no trading sessions in [{start.isoformat()}, {end.isoformat()}]")
+        calendar = reader.all_sessions()
+        sessions = _reserve_fill_headroom(sessions, calendar)
+        first_session = sessions[0]
+
+        sector_by_isin = _load_static_sector_map(sector_map_dir)
+        universe_filter = _InvestableUniverse(reader, UniverseParameters(), data_root=data_root)
+        data = _L1SectorRotationData(
+            reader, sessions, sector_by_isin, universe_filter=universe_filter
+        )
+
+        regime_source = _RegimeSource(
+            reader,
+            calendar,
+            first_session=first_session,
+            size=_BENCHMARK_BASKET,
+            ma_days=_REGIME_MA_DAYS,
+        )
+        risk_on_by_session = {
+            session: regime_source.reading(session).risk_on for session in sessions
+        }
+
+        # Plain momentum on the same universe: top_k above the sector count neutralises the gate.
+        plain_top_k = data.sector_count + 1
+        arms = [
+            _run_sector_arm(
+                label="Sector rotation",
+                data=data,
+                params=SectorRotationParameters(top_k=top_k, top_n=top_n),
+                reader=reader,
+                calendar=calendar,
+                sessions=sessions,
+                opening_cash=opening_cash,
+                benchmark_slug=benchmark_slug,
+                data_root=data_root,
+                risk_on_by_session=risk_on_by_session,
+            ),
+            _run_sector_arm(
+                label="Plain momentum (same universe)",
+                data=data,
+                params=SectorRotationParameters(top_k=plain_top_k, top_n=top_n),
+                reader=reader,
+                calendar=calendar,
+                sessions=sessions,
+                opening_cash=opening_cash,
+                benchmark_slug=benchmark_slug,
+                data_root=data_root,
+                risk_on_by_session=risk_on_by_session,
+            ),
+        ]
+        market_regime = _market_regime_returns(regime_source, sessions, risk_on_by_session)
+        risk_on_sessions = sum(1 for on in risk_on_by_session.values() if on)
+        resolved = _resolve_benchmark(
+            reader,
+            data.rebalance_dates(),
+            first_session,
+            sessions[-1],
+            slug=benchmark_slug,
+            data_root=data_root,
+        )
+        return render_sector_rotation_report(
+            arms=arms,
+            market_regime=market_regime,
+            top_k=top_k,
+            top_n=top_n,
+            first_session=first_session,
+            terminal=sessions[-1],
+            sessions=len(sessions),
+            rebalances=len(data.rebalance_dates()),
+            mean_universe=data.mean_universe_size,
+            sector_count=data.sector_count,
+            mapped_names=len(sector_by_isin),
+            risk_on_sessions=risk_on_sessions,
+            benchmark_computed_tri=resolved.is_computed_tri,
+            benchmark_xirr=arms[0].comparison.benchmark_xirr,
+        )
+    finally:
+        reader.close()
+
+
+def render_sector_rotation_report(
+    *,
+    arms: Sequence[_SectorArm],
+    market_regime: _RegimeReturns,
+    top_k: int,
+    top_n: int,
+    first_session: date,
+    terminal: date,
+    sessions: int,
+    rebalances: int,
+    mean_universe: Decimal,
+    sector_count: int,
+    mapped_names: int,
+    risk_on_sessions: int,
+    benchmark_computed_tri: bool,
+    benchmark_xirr: Decimal,
+) -> str:
+    """The M10.3 report: sector rotation vs plain momentum (same universe) vs market, per regime."""
+    rotation, plain = arms[0], arms[1]
+
+    def regime_row(label: str, r: _RegimeReturns) -> str:
+        return f"| {label} | {_pct(r.risk_on)} | {_pct(r.risk_off)} |"
+
+    lines = [
+        "# M10.3 — Sector-rotation backtest policy",
+        "",
+        "*Generated by `python -m backtest.run --policy sector_rotation --sector-rotation-report`. "
+        "Ranks sectors by their members' aggregate (mean) momentum, keeps the top-K sectors, and "
+        "holds the top-N momentum names within them — the 'be in the right industries' bet — "
+        "measured against plain momentum on the identical universe (to isolate the sector effect) "
+        "and against the market, per regime, costs included.*",
+        "",
+        "## The policy (a-priori parameters — stated once, never tuned)",
+        "",
+        f"- **top-K sectors = {top_k}** — rank every sector by the *mean* momentum of its members "
+        "in the universe (mean, not sum, so a broad sector is not favoured for its size), keep the "
+        f"top {top_k}.",
+        f"- **top-N names = {top_n}** — hold the top {top_n} momentum names drawn from the members "
+        f"of those {top_k} sectors, equal-weighted. {top_n} matches the plain-momentum basket size "
+        "exactly, so the only difference between the two arms is the sector gate.",
+        "- **Plain momentum (same universe)** is the *same policy* with the sector gate off "
+        f"(top-K set above the {sector_count} sectors), so it holds the top-{top_n} momentum "
+        "names across the whole universe — an exact like-for-like against which the sector gate is "
+        "the sole variable.",
+        "",
+        "## Survivorship / static-map limitation (read this before the numbers)",
+        "",
+        "**This run applies a static, current-day sector map backward over the history, which "
+        "is survivorship-biased.** niftyindices publishes constituents *as of today only*; the L1 "
+        "store here holds **no** constituent snapshots yet (M10.1's fetch is a live operation; "
+        "M10.2 accrues forward point-in-time history week by week), so the sector of each name is "
+        f"taken from the checked-in current-day classification ({mapped_names} names across "
+        f"{sector_count} industries) and stamped as-of each decision date. That silently assumes a "
+        "name was always in the industry — and in the index — it sits in now, which flatters any "
+        "result. The policy is point-in-time by construction: it resolves membership through "
+        "`membership_asof` (the snapshot in force on the decision date) and its guard refuses a "
+        "record whose sector became knowable after the session, so **once M10.2's forward history "
+        "matures the policy runs survivorship-free with no code change** — only the map source "
+        "flips from the static fallback to the accrued snapshots. Then read the numbers below "
+        "as a mechanism demonstration on a small mapped universe, not as an estimate of live edge.",
+        "",
+        "## Data reality (same M9 stack)",
+        "",
+        "Prices, the investable/liquidity screen and the PIT universe are the M9.2-M9.4 machinery "
+        "unchanged: raw L1 closes (this store holds no corporate actions, so the adjusted signal "
+        "equals the raw one bar-for-bar — M9.2), the M9.3 investable set (as-of index membership ∩ "
+        "a median-turnover floor; no membership snapshots in the store, so the liquidity floor is "
+        "what narrows it), and the "
+        + (
+            "M3.9 computed TRI"
+            if benchmark_computed_tri
+            else "pre-M9.4 broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the "
+            "close-all backfill is gated, AGENTIC_CONTEXT B1)"
+        )
+        + " as the market. The regime overlay reads the same broad-market L1 proxy index.",
+        "",
+        "## Window",
+        "",
+        f"- {first_session.isoformat()} -> {terminal.isoformat()} "
+        f"({sessions} sessions, {rebalances} monthly rebalances)",
+        f"- Mean sector-mapped investable universe / rebalance: {mean_universe}",
+        f"- Regime split: {risk_on_sessions} of {sessions} sessions risk-on "
+        "(proxy index at/above its "
+        f"{_REGIME_MA_DAYS}-session moving average), the rest risk-off",
+        f"- Market XIRR (identical cashflows): {_pct(benchmark_xirr)}",
+        "",
+        "## Sector rotation vs plain momentum vs market",
+        "",
+        "| Strategy | Portfolio XIRR | Max drawdown | Turnover (fills) | Total cost | "
+        "Excess vs market |",
+        "| --- | --- | --- | --- | --- | --- |",
+    ]
+    for arm in arms:
+        c = arm.comparison
+        lines.append(
+            f"| {arm.label} | {_pct(c.portfolio_xirr)} | {_pct(arm.max_drawdown)} | "
+            f"{arm.trades} | {_rupees(arm.total_charges)} | {_pct(c.excess_over_benchmark)} |"
+        )
+    lines += [
+        f"| Market ({'computed TRI' if benchmark_computed_tri else 'L1 proxy'}) | "
+        f"{_pct(benchmark_xirr)} | — | — | — | 0.00% |",
+        "",
+        "### Per-regime return (cumulative, costs embedded)",
+        "",
+        "Each strategy's NAV path split by the regime in force each session — the geometrically-"
+        "linked return earned while the proxy index was at/above its moving average (risk-on) vs "
+        "below it (risk-off). This is where a sector tilt tends to differ from plain momentum: in "
+        "the turns.",
+        "",
+        "| Strategy | Risk-on cumulative | Risk-off cumulative |",
+        "| --- | --- | --- |",
+        regime_row(rotation.label, rotation.regime),
+        regime_row(plain.label, plain.regime),
+        regime_row("Market", market_regime),
+        "",
+        "## Reading it",
+        "",
+        "- **The sector-rotation vs plain-momentum row is the whole point**: same universe, same "
+        f"basket size ({top_n}), same costs — the only difference is whether names are gated to "
+        f"top-{top_k} momentum sectors first. A positive excess over plain momentum is the sector "
+        "effect; a negative one says the gate cost more than it gained on this (small, static-map) "
+        "universe.",
+        "- **Do not read the excess-vs-market figure as alpha** — the market here is a "
+        "computed/proxy total-return series, not the licensed feed (M9.4), and the universe is a "
+        "small static-map sample. The comparison that is meaningful is rotation vs plain momentum.",
+        "- **The per-regime split** is included because a sector tilt's value, if any, shows up "
+        "unevenly across regimes rather than in the full-period average — the research that "
+        "promoted M10 found static-map rotation a full-period wash but a clear winner in one "
+        "multi-year window (survivorship-caveated).",
+        "",
+        "## PIT (invariant #7, acceptance #1)",
+        "",
+        "- Every arm completed with each session's queries scoped to that session; no `PitError` "
+        "was raised. Sector membership is read through the PIT seam and the policy's guard "
+        "refuses any record whose sector is not yet knowable on the session — the structural "
+        "defence against a future sector map. The static current-day map used here is the one "
+        "documented exception (stated above), stamped as-of the decision date; the "
+        "`membership_asof`-backed path that stamps the in-force snapshot's own date is pinned in "
+        "`tests/unit/test_sector_rotation.py` (a future snapshot trips the guard, an in-force one "
+        "admits).",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _print_summary(run: BacktestResult) -> None:
     """A terse stdout summary; the full report is the markdown file when `--report` is passed."""
     c = run.comparison
@@ -2155,7 +2704,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         description="Run a backtest policy end-to-end over history and report it (M4.10).",
     )
     parser.add_argument(
-        "--policy", required=True, choices=("naive_momentum",), help="the policy to replay"
+        "--policy",
+        required=True,
+        choices=("naive_momentum", "sector_rotation"),
+        help="the policy to replay",
     )
     parser.add_argument("--from", dest="start", required=True, help="start date, YYYY-MM-DD")
     parser.add_argument("--to", dest="end", required=True, help="end date, YYYY-MM-DD")
@@ -2192,6 +2744,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help=f"run naive vs each v2 increment vs all-on (M9.5) and write the momentum-v2 report to "
         f"{_V2_REPORT_PATH}",
+    )
+    parser.add_argument(
+        "--sector-rotation-report",
+        action="store_true",
+        help=f"run sector rotation vs plain momentum (same universe) vs market (M10.3) and write "
+        f"the report to {_SECTOR_ROTATION_REPORT_PATH}",
     )
     parser.set_defaults(adjusted=True)
     parser.add_argument(
@@ -2294,6 +2852,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         _V2_REPORT_PATH.write_text(report, encoding="utf-8")
         print(f"  v2 report written to {_V2_REPORT_PATH}")
         return 0
+
+    if args.sector_rotation_report:
+        try:
+            report = run_sector_rotation_report(
+                start=start,
+                end=end,
+                opening_cash=args.opening_cash,
+                data_root=args.data_root,
+            )
+        except BacktestError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        _SECTOR_ROTATION_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SECTOR_ROTATION_REPORT_PATH.write_text(report, encoding="utf-8")
+        print(f"  sector-rotation report written to {_SECTOR_ROTATION_REPORT_PATH}")
+        return 0
+
+    if args.policy == "sector_rotation":
+        print(
+            "error: --policy sector_rotation requires --sector-rotation-report "
+            "(no bare single-run summary is defined for it)",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         run = run_naive_momentum(
