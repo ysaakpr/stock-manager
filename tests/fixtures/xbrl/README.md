@@ -16,7 +16,7 @@ these are the format it will actually meet, warts included.
 | File | What it is |
 |---|---|
 | `corporates-financial-results_Quarterly_20260701_20260903.json` | One whole live response for a date window, verbatim (6 records). |
-| `corporates-financial-results_slice.json` | A 14-record slice of the full 3,816-record undated response, keeping every record that links a document frozen under `filings/` plus one real no-XBRL-document record. Records are verbatim; only the selection is ours. |
+| `corporates-financial-results_slice.json` | A 27-record slice drawn from the captured index responses, keeping every record that links a document frozen under `filings/` plus one real no-XBRL-document record. Records are verbatim; only the selection is ours. |
 
 Real-world properties these carry, each of which broke the first parser:
 
@@ -32,8 +32,12 @@ Real-world properties these carry, each of which broke the first parser:
 
 ## `filings/` — the XBRL documents
 
-Eleven documents, chosen to span both taxonomy vocabularies, both natures, quarterly and annual
-entries, single- and multi-segment disclosure, and a company reporting zero revenue.
+Twenty-one documents, chosen to span all three taxonomy vocabularies, both natures, quarterly and
+annual entries, single- and multi-segment disclosure, a company reporting zero revenue, a real
+restatement, and every **format era** the feed serves. The era spread came from probing the whole
+10-year index and sampling one filing per (financial year x `indAs` label x `bank` flag) cell: 57
+real filings across 8 distinct taxonomy entry points, whose failures are what the second half of
+this table exists to prevent recurring.
 
 | File | Company | Taxonomy | Notes |
 |---|---|---|---|
@@ -48,10 +52,39 @@ entries, single- and multi-segment disclosure, and a company reporting zero reve
 | `NBFC_INDAS_118070_…29012025074729.xml` | BAJFINANCE | Ind-AS (NBFC entry point) | Finance vocabulary layered on the Ind-AS P&L spine. |
 | `BANKING_117524_…23012025122553.xml` | HDFCBANK | Banking | Different P&L vocabulary; its `ISIN` element (`INE040A01034`) **disagrees** with the index (`INE040A01018`). |
 | `BANKING_118874_…06022025045242.xml` | SBIN | Banking | Ditto (`INE062A01020` vs index `INE062A01012`). |
+| `INDAS_119528_…11022025120304.xml` | VSTTILLERS | Ind-AS | The **original** Q3 FY25 filing, overstating revenue 10x; standalone. |
+| `INDAS_119531_…11022025120916.xml` | VSTTILLERS | Ind-AS | Consolidated pair of the above. |
+| `INDAS_120087_…12022025094622.xml` | STANLEY | Ind-AS | Discloses a segment its own re-filing later withdraws. |
+| `INDAS_121074_…21032025010118.xml` | STANLEY | Ind-AS | The re-filing, with no segment disclosure. |
+
+### The older format eras
+
+Everything above was broadcast in 2025-2026. These are the generations before it, and each breaks
+an assumption the modern documents let you get away with.
+
+| File | Company | Era | What it proves |
+|---|---|---|---|
+| `BANKING_48497_…14092019023146_WEB.xml` | ALBK | `banking_entry_point_2018-03-31` | The 2018-2022 `…_WEB` generation **never declares its column contexts** — facts reference `OneD`/`FourD`, which no `<context>` defines. Also: the header block (financial year, `ReportingQuarter`) is pinned to `OneD` but describes the *document*; `OneD` itself is zero-filled and the year's numbers are in `FourD`. Reading the header as `OneD`'s period stores a bank's revenue as zero. |
+| `NONINDAS_63114_…05112020010920_WEB.xml` | MCL | `other_than_banks_entry_point_2018-03-31` | Declares **no `<context>` at all**, so it carries no `<xbrli:entity>` either. Its `Symbol` fact is the only identity it states. |
+| `NONINDAS_108914_…02072024094147.xml` | TARACHAND | `other_than_banks_entry_point_2019-09-30` | The third vocabulary: total income is `Revenue`, not `Income`; the bottom line is `ProfitLossForThePeriod`. Multi-segment. |
+| `NONINDAS_48504_…14092019033403_WEB.xml` | EMKAY | `other_than_banks_entry_point_2018-03-31` | Holds **only** the cumulative column, yet the index lists it under both an Annual and a Quarterly entry. The quarterly entry must be *refused* — a quarter's start is stated nowhere in it. Also the only captured filing with no `ProfitBeforeTax` element (the old form reports `ProfitBeforeExtraordinaryItemsAndTax`, a different basis, left deliberately unmapped). |
+| `BANKING_601183_…25072022110219_WEB.xml` | J&KBANK | `banking_entry_point_2019-09-30` | Identifies its entity by **BSE scrip code** (`532209`), not NSE symbol, so the cross-check falls to the `Symbol` fact. Declares its columns' periods, which is what independently confirms `Four` = cumulative and `One` = the quarter. |
+| `NBFC_INDAS_94201_…15072023024353.xml` | HEALTHX | `Ind-AS_entry_point_2020-03-31` | A **renamed** company: files as `SASTASUNDR` under an index entry that now says `HEALTHX`. The ISIN is unchanged, so the symbol cross-check needs the D2 symbol history. |
 
 The two banking disagreements are the evidence for a rule, not a curiosity: the ISIN a fact is
 stored under comes from the index (D2's key, invariant #2), and the document's own ISIN element is
-never read. The document is cross-checked on **symbol**, which every filing states reliably.
+never read. The document is cross-checked on **symbol** — which is itself only reliable given the
+ISIN's symbol *history*, per the rename case above.
+
+## Availability, and the real depth of this dataset
+
+Probing the whole window (index requests only) found 135,197 announcements over ten financial
+years — the feed is not "recent quarters only". But **XBRL documents exist only from about FY2018-19
+onward**: every one of the 28,247 announcements in FY2016-17 and FY2017-18 has the `-` placeholder
+in place of a document, FY2018-19 is 78% covered and FY2019-20 85%, and from FY2020-21 coverage is
+effectively complete. About 101,446 filings are therefore ingestible. That is the honest depth of
+the PIT fundamentals store from this source, and it is a fact about the source rather than a policy
+choice.
 
 ## Re-capturing
 

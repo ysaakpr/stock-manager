@@ -85,7 +85,7 @@ from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
 from dataplatform.logging import get_logger
 from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store.db import connection
-from dataplatform.store.l0 import L0Store
+from dataplatform.store.l0 import L0Error, L0Store
 from dataplatform.store.l1 import read_prices_raw
 from dataplatform.store.pit_fundamentals import write_pit
 
@@ -108,8 +108,11 @@ __all__ = [
 
 _LOG = get_logger(__name__)
 
-#: The `sync_state` source the discovery index chunks are checkpointed under — the register id
-#: itself, so a chunk's checkpoint reads the same way the daily-forward filings ingest's would.
+#: The `sync_state` source *prefix* the discovery index chunks are checkpointed under — the
+#: register id, so a chunk's checkpoint reads the same way the daily-forward filings ingest's
+#: would. A chunk's full key appends its period and range end (`IndexUnit.state_source`), because
+#: the prefix alone does not identify one payload: two periods share every chunk start date.
+#: L0 payloads are still written under the bare register id — this prefixes only the state key.
 INDEX_STATE_SOURCE: Final = discovery.SOURCE_ID
 
 #: Per-filing ingest units are keyed on the filing date, but many filings share one date, so each
@@ -168,7 +171,18 @@ class IndexUnit:
 
     @property
     def state_source(self) -> str:
-        return INDEX_STATE_SOURCE
+        """`nse_financial_results_index/<period>/<chunk end>` — 1:1 with the L0 payload.
+
+        The period and the chunk end are both in the key because both are in the *filename*, and
+        the filename is what the resume path reads the payload back by. Keyed on the chunk start
+        alone (which is `logical_date`), a chunk's checkpoint would claim payloads it never
+        fetched: the Quarterly and Annual chunks of one date range would share a row, so
+        publishing one would make the other resume-skip and then fail to find its own payload —
+        silently losing every Annual filing of a backfill. Likewise a re-run with a different
+        `--chunk-months` or `--to` covers different ranges, and a range that changed is a chunk
+        that has *not* been fetched, however much its start date overlaps.
+        """
+        return f"{INDEX_STATE_SOURCE}/{self.period.value}/{self.to_date.isoformat()}"
 
     @property
     def logical_date(self) -> date:
@@ -404,12 +418,18 @@ class FundamentalsBackfillRunner:
         should_stop: Callable[[], bool] = lambda: False,
         data_root: Path | None = None,
         max_filings: int | None = None,
+        symbol_history: Callable[[str], frozenset[str]] | None = None,
     ) -> None:
         self._fetcher = fetcher
         self._l0 = l0
         self._sync = sync
         self._universe = universe
         self._commit = commit
+        #: ISIN → every symbol it has ever traded under, for the parser's identity cross-check.
+        #: Injected rather than reached for, so a test needs no master and `main` supplies the real
+        #: D2 one. Companies get renamed, and a filing states the symbol it had when filed: without
+        #: the history, every filing by a since-renamed company fails its cross-check.
+        self._symbol_history = symbol_history
         self._should_stop = should_stop
         self._data_root = data_root
         #: A bounded-sample cap on how many in-universe filings the ingest phase *attempts* (B1's
@@ -482,9 +502,14 @@ class FundamentalsBackfillRunner:
             try:
                 ref = self._l0.ref_for(INDEX_STATE_SOURCE, unit.logical_date, unit.filename)
                 return discovery.parse_index_l0(self._l0, ref)
-            except (FileNotFoundError, ParseError) as exc:
-                # The checkpoint says published but the payload is gone/unreadable; surface it and
-                # move on rather than crash a resume of a decade-long run.
+            except (L0Error, FileNotFoundError, ParseError) as exc:
+                # The checkpoint says published but the payload is gone, unreadable, or fails its
+                # checksum; surface it and move on rather than crash a resume of a decade-long run.
+                # `L0Error` is listed because that is what the store actually raises — a missing
+                # payload is `L0NotFoundError`, which is *not* a `FileNotFoundError`, so catching
+                # only the builtin let a resume die on the one case this handler exists for.
+                report.index_failed += 1
+                report.failures.append((unit.label, f"index reparse failed: {exc}"))
                 _LOG.warning(
                     "fundamentals_backfill.index_reparse_failed",
                     unit=unit.label,
@@ -580,6 +605,19 @@ class FundamentalsBackfillRunner:
             unit = FilingUnit(entry=entry, url=url, filename=url.rsplit("/", 1)[-1])
             self._process_filing(unit, report=report)
 
+    def _symbols_for(self, isin: str, index_symbol: str) -> frozenset[str]:
+        """Every symbol this ISIN has traded under, plus the one the index reports today.
+
+        The index symbol is always included: it is what the entry asserts, and a security the
+        master has no window for (a very recent listing) must still be checkable against it. An
+        `AmbiguousSymbolError`-style problem in the master is not this runner's to resolve — the
+        fallback is the index symbol, and the parser then fails loudly if the document disagrees.
+        """
+        known = {index_symbol}
+        if self._symbol_history is not None:
+            known |= self._symbol_history(isin)
+        return frozenset(known)
+
     def _process_filing(self, unit: FilingUnit, *, report: FundamentalsBackfillReport) -> None:
         """Drive one filing `fetch → L0 → parse → write_pit`, or record why it could not be driven.
 
@@ -610,6 +648,7 @@ class FundamentalsBackfillRunner:
             filing = parser.parse(
                 self._l0.get(ref),
                 entry=unit.entry,
+                known_symbols=self._symbols_for(unit.entry.isin, unit.entry.symbol),
                 l0_key=ref.key,
                 filename=unit.filename,
             )
@@ -917,6 +956,9 @@ def _run_live(
             should_stop=lambda: stop_state["stop"],
             data_root=settings.data_root,
             max_filings=max_filings,
+            symbol_history=lambda isin: frozenset(
+                window.symbol for window in master.windows_for(isin)
+            ),
         )
         report = runner.run(plan)
 

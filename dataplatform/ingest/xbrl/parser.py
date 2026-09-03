@@ -88,16 +88,35 @@ SOURCE_ID: Final = "nse_xbrl_filing"
 #: context dimension, so it is not in the per-taxonomy concept maps (which are name → key).
 SEGMENT_CONCEPT: Final = "segment_revenue"
 
-#: The entity-identifier scheme every real NSE filing uses. The identifier is an NSE *symbol*, not
-#: an ISIN, and asserting the scheme is how a future switch to an ISIN scheme fails loudly here
-#: instead of silently comparing a symbol against an ISIN.
+#: The entity-identifier scheme most real NSE filings use: the identifier is an NSE *symbol*, not
+#: an ISIN. Asserting the scheme is how a future switch to an ISIN scheme fails loudly here instead
+#: of silently comparing a symbol against an ISIN.
 _NSE_SYMBOL_SCHEME: Final = "http://www.nseindia.com/NSESymbol"
+
+#: The other scheme in the wild: a BSE scrip code (e.g. `532209` for J&K Bank). Its identifier is
+#: *not* a symbol and must never be compared to one, so a filing using it is cross-checked on its
+#: `Symbol` fact instead. Recognised explicitly rather than by "anything that is not NSESymbol", so
+#: a third scheme is still a loud failure.
+_BSE_SCRIP_SCHEME: Final = "http://www.bseindia.com/bse-fin/ScripCode"
 
 #: Elements that populate filing-level fields rather than becoming facts.
 _NATURE_ELEMENT: Final = "NatureOfReportStandaloneConsolidated"
 _AUDITED_ELEMENT: Final = "WhetherResultsAreAuditedOrUnaudited"
 _PERIOD_START_ELEMENT: Final = "DateOfStartOfReportingPeriod"
 _PERIOD_END_ELEMENT: Final = "DateOfEndOfReportingPeriod"
+#: The document's financial year. Part of the header block, which the 2018-2022 `…_WEB.xml`
+#: generation attaches to the `OneD` context by convention — it describes the *document*, not that
+#: context, so it is read document-wide and never as a column's own period.
+_FY_START_ELEMENT: Final = "DateOfStartOfFinancialYear"
+_FY_END_ELEMENT: Final = "DateOfEndOfFinancialYear"
+
+#: The column token of the *cumulative* column — the year-to-date, and on an annual filing the year.
+#: Every filing in the captured corpus that declares its columns' periods agrees on this (`FourD`
+#: carries the financial-year range and `OneD` the discrete quarter), which is what licenses using
+#: it for the filings that declare no per-column period at all: those state the financial year
+#: once, in the header, and it is `Four`'s period. `One`'s is not derivable — a quarter's start
+#: appears nowhere in such a document — so an undeclared `One` is skipped rather than guessed.
+_CUMULATIVE_TOKEN: Final = "Four"
 #: `NameOfTheCompany` in the Ind-AS taxonomy; the banking one calls the same thing `NameOfBank`.
 _NAME_ELEMENTS: Final = ("NameOfTheCompany", "NameOfBank")
 #: The document's own copy of the NSE symbol, cross-checked alongside the entity identifier.
@@ -109,10 +128,14 @@ _SEGMENT_AXIS: Final = "ReportableSegmentsAxis"
 _SEGMENT_NAME_ELEMENT: Final = "DescriptionOfReportableSegment"
 _SEGMENT_REVENUE_ELEMENT: Final = "SegmentRevenue"
 
-#: How each taxonomy family announces itself, in the `link:schemaRef` entry point. `banking_` is the
-#: only genuinely distinct vocabulary; the Ind-AS and NBFC entry points share one (`Taxonomy`).
+#: How each taxonomy family announces itself in the `link:schemaRef` entry point, matched on the
+#: stem so the version date in the filename is not part of the identity (`Taxonomy`). Order matters
+#: only in that `other_than_banks_` and `banking_` must be distinguished before the Ind-AS stems;
+#: they share no substring, so the tuple is simply the observed set. Every entry point met across a
+#: decade of the real index is here — an unrecognised one is a hard failure by design.
 _ENTRY_POINTS: Final[tuple[tuple[str, Taxonomy], ...]] = (
     ("banking_entry_point", Taxonomy.BANKING),
+    ("other_than_banks_entry_point", Taxonomy.NON_IND_AS),
     ("ind-as_entry_point", Taxonomy.IND_AS),
     ("in-bse-fin-", Taxonomy.IND_AS),
 )
@@ -174,6 +197,7 @@ def parse(
     payload: bytes,
     *,
     entry: FilingIndexEntry,
+    known_symbols: frozenset[str] | None = None,
     source: str = SOURCE_ID,
     l0_key: str | None = None,
     filename: str,
@@ -187,10 +211,16 @@ def parse(
     table to read. One document commonly holds two columns — a quarter and a cumulative period —
     and only the entry says which one this filing is.
 
-    Cross-checks rather than trusts: the document's NSE symbol must equal `entry.symbol`, and the
-    selected column's `NatureOfReportStandaloneConsolidated` must equal `entry.nature`. A
-    disagreement is a `ParseError`, because it means the index and the document are describing
-    different filings and neither side is safe to prefer.
+    Cross-checks rather than trusts: the document's own symbol must name the same company as the
+    entry, and the selected column's `NatureOfReportStandaloneConsolidated` must equal
+    `entry.nature`. A disagreement is a `ParseError`, because it means the index and the document
+    are describing different filings and neither side is safe to prefer.
+
+    `known_symbols` is every symbol the entry's ISIN has ever traded under, from the D2 master.
+    Pass it whenever the master is at hand — companies get renamed, and a filing states the symbol
+    it had *when filed*, not the one the index reports today. Omitted, the check falls back to
+    `entry.symbol` alone, which is right for a fresh filing and wrong for a renamed company; the
+    parser stays offline either way, so resolving the history is the caller's job.
 
     Raises `ParseError`, naming the file, for anything that is not this format: a body that is not
     well-formed XML, a root that is not `xbrl`, an unrecognised taxonomy entry point, an entity
@@ -210,7 +240,14 @@ def parse(
     shapes = _shapes(root, filename=filename)
     facts_by_context = _facts_by_context(root)
 
-    _check_symbol(root, entry=entry, facts_by_context=facts_by_context, filename=filename)
+    accepted = frozenset({entry.symbol}) if known_symbols is None else known_symbols
+    symbol = _check_symbol(
+        root,
+        entry=entry,
+        facts_by_context=facts_by_context,
+        accepted=accepted,
+        filename=filename,
+    )
 
     column = _select_column(
         _columns(shapes, facts_by_context=facts_by_context, filename=filename),
@@ -239,7 +276,7 @@ def parse(
     try:
         filing = Filing(
             isin=entry.isin,
-            symbol=entry.symbol,
+            symbol=symbol,
             taxonomy=taxonomy,
             name=_company_name(facts_by_context, entry=entry),
             period_start=column.period_start,
@@ -375,14 +412,25 @@ def _check_symbol(
     *,
     entry: FilingIndexEntry,
     facts_by_context: dict[str, dict[str, list[str]]],
+    accepted: frozenset[str],
     filename: str,
-) -> None:
-    """Assert the document is about the company the index entry names, by NSE symbol.
+) -> str:
+    """Assert the document is about the company the index entry names, and return its symbol.
 
-    The symbol is the only identity the document states reliably (the entity identifier's scheme is
-    `NSESymbol`; Ind-AS filings carry no ISIN, and the banking taxonomy's can be stale). So this
-    cross-checks the symbol and leaves the ISIN to the index — which is what keeps invariant #2's
-    join key coming from D2 rather than from a filer's typing.
+    The symbol is the only identity a filing states usefully, so it is what gets cross-checked and
+    the ISIN is left to the index — which is what keeps invariant #2's join key coming from D2
+    rather than from a filer's typing. Two real-world facts shape how the check is done:
+
+    * **The identifier is not always a symbol.** Most filings use `scheme=…/NSESymbol`, but some
+      (notably bank returns) identify the entity by BSE scrip code, which cannot be compared to a
+      symbol at all. Those are checked on the document's own `Symbol` fact. A scheme that is
+      neither is a hard failure: guessing what an unknown identifier means is how a filing gets
+      stored under the wrong company.
+    * **Companies are renamed.** A filing from 2023 states the symbol it had in 2023, while the
+      index states today's. `accepted` is therefore the set of symbols the ISIN has *ever* traded
+      under (from the D2 master, via the caller); the document must match one of them. Comparing
+      against today's symbol alone rejects every renamed company — Sastasundar Ventures files as
+      `SASTASUNDR` under an index entry that now says `HEALTHX`.
     """
     identifiers: set[str] = set()
     schemes: set[str] = set()
@@ -391,39 +439,57 @@ def _check_symbol(
             continue
         identifiers.add((element.text or "").strip())
         schemes.add((element.get("scheme") or "").strip())
-    if not identifiers:
-        raise ParseError("no entity <identifier>; not a results filing", filename=filename)
-    if len(identifiers) != 1:
+    if len(identifiers) > 1:
         raise ParseError(
             f"filing names more than one entity ({', '.join(sorted(identifiers))}); one results "
             "filing is about one company",
             filename=filename,
         )
-    if schemes != {_NSE_SYMBOL_SCHEME}:
+    unknown = schemes - {_NSE_SYMBOL_SCHEME, _BSE_SCRIP_SCHEME}
+    if unknown:
         raise ParseError(
-            f"entity identifier scheme is {', '.join(sorted(schemes))!r}, expected "
-            f"{_NSE_SYMBOL_SCHEME!r}; this parser reads the identifier as an NSE symbol and takes "
-            "the ISIN from the announcements index (invariant #2)",
+            f"entity identifier scheme is {', '.join(sorted(schemes))!r}, expected one of "
+            f"{[_NSE_SYMBOL_SCHEME, _BSE_SCRIP_SCHEME]}; this parser reads the identifier as an "
+            "NSE symbol or a BSE scrip code and takes the ISIN from the announcements index "
+            "(invariant #2)",
             filename=filename,
         )
 
-    document_symbol = next(iter(identifiers))
-    if not _same_symbol(document_symbol, entry.symbol):
+    # Whatever the document states about its own symbol, from either place it can state it. Some
+    # `…_WEB.xml` filings declare no `<context>` at all (see `_shapes`) and so carry no
+    # `<xbrli:entity>` either; their `Symbol` fact is then the only identity they state, and it is
+    # enough. Only a filing that states *neither* is unidentifiable.
+    stated: set[str] = set()
+    if schemes == {_NSE_SYMBOL_SCHEME}:
+        stated |= identifiers
+    for facts in facts_by_context.values():
+        stated |= {value for value in facts.get(_SYMBOL_ELEMENT, ()) if value}
+    if not stated:
+        described = (
+            f"only as {next(iter(identifiers))!r} under scheme {next(iter(schemes))!r}"
+            if identifiers
+            else "by no <xbrli:identifier> at all"
+        )
         raise ParseError(
-            f"index says this filing is {entry.symbol!r} but the document's entity identifier is "
-            f"{document_symbol!r}; the announcements index and the XBRL must name the same company",
+            f"filing identifies its entity {described} and states no <{_SYMBOL_ELEMENT}>, so it "
+            f"cannot be checked against the index entry for {entry.symbol!r}",
             filename=filename,
         )
-    # The document usually repeats the symbol as a `Symbol` fact. Where it does, it must agree too;
-    # where it does not, the entity identifier above already settled identity.
-    for facts in facts_by_context.values():
-        for stated in facts.get(_SYMBOL_ELEMENT, ()):
-            if stated and not _same_symbol(stated, entry.symbol):
-                raise ParseError(
-                    f"document's {_SYMBOL_ELEMENT} fact is {stated!r} but the index says "
-                    f"{entry.symbol!r}",
-                    filename=filename,
-                )
+
+    matched = {
+        symbol
+        for symbol in stated
+        if any(_same_symbol(symbol, candidate) for candidate in accepted)
+    }
+    if not matched:
+        raise ParseError(
+            f"index says this filing is {entry.symbol!r} (ISIN {entry.isin}, symbols ever used: "
+            f"{', '.join(sorted(accepted))}) but the document says "
+            f"{', '.join(sorted(stated))}; the announcements index and the XBRL must name the "
+            "same company",
+            filename=filename,
+        )
+    return sorted(matched)[0]
 
 
 def _same_symbol(left: str, right: str) -> bool:
@@ -457,6 +523,15 @@ def _shapes(root: ET.Element, *, filename: str) -> dict[str, _ContextShape]:
     (not `xbrli:segment`, which is what the fabricated fixtures used and what generic XBRL examples
     show), so both containers are read and the axis is taken from the member's `dimension`
     attribute — which is the durable part either way.
+
+    A document may declare *no* context for a ref its facts use: the 2018-2022 `…_WEB.xml`
+    generation routinely declares only the dimensioned contexts and leaves `OneD`/`FourD` — the
+    table's own columns — undeclared, and some declare no context at all. That is malformed XBRL,
+    but it is what NSE served for four years, and it costs nothing to read: a column's period,
+    nature and audited flag are all facts *inside* the column, never attributes of the `<context>`
+    element. So a missing declaration is not an error here; it simply means "no dimension", which
+    `_column_shape` supplies. What a `<context>` is needed for is the opposite question — proving a
+    ref *is* dimensioned — and a ref nobody declared cannot be a segment (`_segment_facts`).
     """
     shapes: dict[str, _ContextShape] = {}
     for element in root.iter():
@@ -480,9 +555,22 @@ def _shapes(root: ET.Element, *, filename: str) -> dict[str, _ContextShape]:
             is_duration=is_duration,
             axes=frozenset(axes),
         )
-    if not shapes:
-        raise ParseError("no <context> elements; not a results filing", filename=filename)
     return shapes
+
+
+def _column_shape(context_id: str) -> _ContextShape:
+    """The shape of a context no `<context>` element declared: undimensioned, by construction.
+
+    Its token still comes from the id (`OneD` → `One`), which is what links the column to the
+    dimensioned contexts hanging off it.
+    """
+    token = _COLUMN_TOKEN.match(context_id)
+    return _ContextShape(
+        context_id=context_id,
+        token=token.group(1) if token else context_id,
+        is_duration=True,
+        axes=frozenset(),
+    )
 
 
 def _columns(
@@ -493,24 +581,39 @@ def _columns(
 ) -> tuple[_Column, ...]:
     """Every column of the results table this document transcribes.
 
-    A column is an *undimensioned duration* context: it has a `startDate`/`endDate` period and no
-    dimension member, which is what distinguishes the table's columns (`OneD`, `FourD`) from the
-    per-segment and per-expense-line breakdowns hanging off them. Its period is read from the
-    `DateOf…ReportingPeriod` facts *inside* it, not from its `xbrli:period` — real filings put the
-    quarter's dates on the cumulative column's `xbrli:period` too, so the two are indistinguishable
-    there. A context that declares neither is not a column and is skipped.
+    A column is identified by **what it reports, not by what declared it**: a context carrying its
+    own `DateOfStartOfReportingPeriod`/`DateOfEndOfReportingPeriod` and
+    `NatureOfReportStandaloneConsolidated`, with no dimension member. Iterating the *facts* rather
+    than the `<context>` elements is what lets the 2018-2022 `…_WEB.xml` generation parse at all —
+    those documents leave the column contexts undeclared (see `_shapes`), so a walk over declared
+    contexts finds every expense-line breakdown and not one column.
+
+    The period comes from those in-context facts and never from `xbrli:period`: real filings put
+    the quarter's dates on the cumulative column's `xbrli:period` too, so the attribute cannot tell
+    the two apart. A context that reports no period or no nature is a breakdown or a spare, not a
+    column, and is skipped.
     """
+    financial_year = _document_financial_year(facts_by_context, filename=filename)
     columns: list[_Column] = []
-    for context_id, shape in shapes.items():
-        if not shape.is_column:
+    for context_id in facts_by_context:
+        shape = shapes.get(context_id) or _column_shape(context_id)
+        if shape.axes:
             continue
         facts = facts_by_context.get(context_id, {})
-        start = _one(facts, _PERIOD_START_ELEMENT, context_id=context_id, filename=filename)
-        end = _one(facts, _PERIOD_END_ELEMENT, context_id=context_id, filename=filename)
-        if start is None or end is None:
-            # An undimensioned duration context that declares no reporting period is not one of the
-            # table's columns (a filer's spare context); it carries no column-level numbers.
+        period = _declared_period(
+            facts,
+            context_id=context_id,
+            token=shape.token,
+            financial_year=financial_year,
+            filename=filename,
+        )
+        if period is None:
+            # A context that says nothing about the period it covers is not one of the table's
+            # columns — it is a spare, or the old format's unlabelled second column. Either way
+            # there is no honest way to say which period its numbers belong to, so it is skipped
+            # rather than guessed at from its position or from how many facts it happens to carry.
             continue
+        start, end = period
         nature = _nature(facts, context_id=context_id, filename=filename)
         if nature is None:
             continue
@@ -530,11 +633,69 @@ def _columns(
         )
     if not columns:
         raise ParseError(
-            "no results column: no undimensioned duration context declares "
-            f"{_PERIOD_START_ELEMENT}/{_PERIOD_END_ELEMENT} and {_NATURE_ELEMENT}",
+            "no results column: no undimensioned context declares both a period "
+            f"({_PERIOD_START_ELEMENT}/{_PERIOD_END_ELEMENT}, or the document's "
+            f"{_FY_START_ELEMENT}/{_FY_END_ELEMENT} for the {_CUMULATIVE_TOKEN} column) and "
+            f"{_NATURE_ELEMENT}",
             filename=filename,
         )
     return tuple(columns)
+
+
+def _document_financial_year(
+    facts_by_context: dict[str, dict[str, list[str]]], *, filename: str
+) -> tuple[str, str] | None:
+    """The financial year the document declares, from wherever in it that is declared.
+
+    Read document-wide on purpose. These elements are part of the header block, which filers pin
+    to the `OneD` context — but they describe the filing, not that column, and reading them as
+    `OneD`'s own period puts the year's dates on the quarter's numbers. On the captured old-era
+    annual filings that mistake is not subtle: `OneD` is zero-filled and `FourD` holds the year, so
+    it stores a company's revenue as zero.
+    """
+    starts = {
+        v for facts in facts_by_context.values() for v in facts.get(_FY_START_ELEMENT, ()) if v
+    }
+    ends = {v for facts in facts_by_context.values() for v in facts.get(_FY_END_ELEMENT, ()) if v}
+    if len(starts) != 1 or len(ends) != 1:
+        # None stated, or two filings' worth of header in one document — neither is a year we can
+        # attribute a column to.
+        return None
+    return next(iter(starts)), next(iter(ends))
+
+
+def _declared_period(
+    facts: dict[str, list[str]],
+    *,
+    context_id: str,
+    token: str,
+    financial_year: tuple[str, str] | None,
+    filename: str,
+) -> tuple[str, str] | None:
+    """The period a column covers, as `(start, end)` strings — or None if nothing states one.
+
+    Two sources, in order:
+
+    * `DateOfStartOfReportingPeriod` / `DateOfEndOfReportingPeriod` *inside the column*. The
+      authoritative answer, and the only one every filing since roughly 2022 needs.
+    * For the cumulative column alone, the document's financial year. The 2018-2022 `…_WEB.xml`
+      generation declares no per-column periods; it states the financial year once in its header,
+      and that is the cumulative column's period. Restricted to `Four` because that is the only
+      column whose period the financial year *is* — a discrete quarter's start is stated nowhere in
+      those documents, and a prior-year cumulative column would need a year this fact does not
+      describe.
+
+    A column matching neither is skipped, which is what keeps the choice honest: these documents
+    routinely carry two undimensioned columns with the full concept set, and the one that reports
+    nothing about its period gets no period invented for it.
+    """
+    start = _one(facts, _PERIOD_START_ELEMENT, context_id=context_id, filename=filename)
+    end = _one(facts, _PERIOD_END_ELEMENT, context_id=context_id, filename=filename)
+    if start is not None and end is not None:
+        return start, end
+    if token == _CUMULATIVE_TOKEN and financial_year is not None:
+        return financial_year
+    return None
 
 
 def _select_column(

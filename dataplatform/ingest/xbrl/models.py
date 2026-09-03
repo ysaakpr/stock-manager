@@ -42,6 +42,7 @@ __all__ = [
     "CONCEPTS",
     "CONCEPT_KEYS",
     "IND_AS_CONCEPTS",
+    "NON_IND_AS_CONCEPTS",
     "Filing",
     "FundamentalFact",
     "Nature",
@@ -73,14 +74,29 @@ class Taxonomy(StrEnum):
     with the wrong vocabulary does not fail, it silently finds nothing, so the family is resolved
     once, explicitly, and the concept map is chosen from it (`concepts_for`).
 
-    `IND_AS` covers both the general Ind-AS entry point (`Ind-AS_entry_point_2020-03-31.xsd`) and
-    the NBFC one (`in-bse-fin-2020-03-31.xsd`): the NBFC filings add finance-specific elements
-    (`InterestEarned`, `FeesAndCommissionIncome`) but still report the whole Ind-AS P&L spine, so
-    one vocabulary reads both. `BANKING` (`banking_entry_point_2019-09-30.xsd`) genuinely differs.
+    Three families, one per entry point NSE actually serves (counted over a decade of the index:
+    `Ind-AS New` ~92%, `NBFC-IND` ~6%, `Non-Ind-AS` ~2%, the last split between banks and everyone
+    else):
+
+    * `IND_AS` covers the general Ind-AS entry point (`Ind-AS_entry_point_*.xsd`) and the NBFC one
+      (`in-bse-fin-*.xsd`): NBFC filings add finance-specific elements (`InterestEarned`,
+      `FeesAndCommissionIncome`) but still report the whole Ind-AS P&L spine, so one vocabulary
+      reads both.
+    * `BANKING` (`banking_entry_point_*.xsd`) is the RBI-format bank return.
+    * `NON_IND_AS` (`other_than_banks_entry_point_*.xsd`) is the pre-Ind-AS Indian-GAAP form still
+      filed by companies outside the Ind-AS net. Closest to `IND_AS`, but not the same: total
+      income is `Revenue`, not `Income`, and the bottom line is `ProfitLossForThePeriod`, not
+      `ProfitLossForPeriod`.
+
+    The version in an entry point's filename is deliberately not part of the identity — matching is
+    on the stem, so `Ind-AS_entry_point_2017-03-31` and `…_2020-03-31` read with one vocabulary. A
+    taxonomy revision that renamed elements would surface as a column reporting no concepts, which
+    is a hard failure, not silence.
     """
 
     IND_AS = "Ind-AS"
     BANKING = "Banking"
+    NON_IND_AS = "Non-Ind-AS"
 
 
 #: The monetary/EPS concepts this parser lifts out of an Ind-AS (and NBFC) results filing, keyed by
@@ -127,10 +143,28 @@ BANKING_CONCEPTS: Final[dict[str, str]] = {
     "DilutedEarningsPerShareAfterExtraordinaryItems": "eps_diluted",
 }
 
+#: The pre-Ind-AS Indian-GAAP form (`other_than_banks_entry_point_*`). Ind-AS-shaped apart from two
+#: elements, and both differences are naming rather than meaning: `Revenue` is the total-income line
+#: (verified on captured filings — `RevenueFromOperations + OtherIncome == Revenue` exactly), and
+#: `ProfitLossForThePeriod` is the same bottom line the Ind-AS form calls `ProfitLossForPeriod`.
+#: Spelled out as its own map rather than folded into `IND_AS` with fallbacks: a document that turns
+#: out to speak neither dialect must fail loudly, not quietly match a second choice.
+NON_IND_AS_CONCEPTS: Final[dict[str, str]] = {
+    "RevenueFromOperations": "revenue_from_operations",
+    "OtherIncome": "other_income",
+    "Revenue": "total_income",
+    "Expenses": "total_expenses",
+    "ProfitBeforeTax": "profit_before_tax",
+    "ProfitLossForThePeriod": "profit_after_tax",
+    "BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_basic",
+    "DilutedEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_diluted",
+}
+
 #: Element local-name → platform concept key, per taxonomy family.
 CONCEPTS: Final[dict[Taxonomy, dict[str, str]]] = {
     Taxonomy.IND_AS: IND_AS_CONCEPTS,
     Taxonomy.BANKING: BANKING_CONCEPTS,
+    Taxonomy.NON_IND_AS: NON_IND_AS_CONCEPTS,
 }
 
 #: The platform concept keys this parser can produce, whatever the taxonomy. Every family maps onto
@@ -221,7 +255,7 @@ class Filing(BaseModel):
     isin: str = Field(pattern=ISIN_PATTERN, description="ISO 6166 identifier (invariant #2)")
     symbol: str = Field(
         min_length=1,
-        description="NSE symbol the document identifies the entity by; a cross-check, never a key",
+        description="the symbol the document filed under (as-of, not today's); never a join key",
     )
     taxonomy: Taxonomy = Field(
         description="which in-bse-fin entry point the filing was prepared against"

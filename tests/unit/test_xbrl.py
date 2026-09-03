@@ -39,6 +39,7 @@ import pytest
 
 from dataplatform.ingest.models import ParseError
 from dataplatform.ingest.xbrl import (
+    CONCEPT_KEYS,
     Filing,
     FilingIndexEntry,
     Nature,
@@ -69,6 +70,13 @@ GRASIM: Final = "INE047A01013"
 HDFCBANK: Final = "INE040A01018"
 SCHAEFFLER: Final = "INE513A01014"
 STANLEY: Final = "INE01A001028"
+#: The older format eras, one company each (`tests/fixtures/xbrl/README.md`).
+ALBK: Final = "INE428A01015"  # old banking `_WEB`: column contexts never declared
+MCL: Final = "INE813V01014"  # `_WEB` with *no* declared context at all
+TARACHAND: Final = "INE555Z01012"  # the Non-Ind-AS non-bank taxonomy
+JKBANK: Final = "INE168A01017"  # identifies its entity by BSE scrip code
+HEALTHX: Final = "INE019J01013"  # renamed: files as SASTASUNDR, indexed as HEALTHX
+EMKAY: Final = "INE296H01011"  # an annual-only document listed under a quarterly entry
 
 Q3FY25_START: Final = date(2024, 10, 1)
 Q3FY25_END: Final = date(2024, 12, 31)
@@ -124,11 +132,32 @@ def _entry(
     return found[0]
 
 
+#: Stands in for the D2 identity master, which the runner queries for an ISIN's symbol history and
+#: which a unit test has no business opening a database for. Only one captured company has been
+#: renamed; the rest resolve to the symbol their entry already carries.
+KNOWN_SYMBOLS: Final[dict[str, frozenset[str]]] = {
+    HEALTHX: frozenset({"HEALTHX", "SASTASUNDR"}),
+}
+
+#: Entries the parser must *refuse*, and why. Kept as data so a fixture that silently starts
+#: parsing (or stops) shows up as a failure rather than as a quietly smaller corpus.
+MUST_NOT_PARSE: Final[dict[str, str]] = {
+    # Emkay's document holds only the cumulative column; its quarter's start is stated nowhere,
+    # so answering the quarterly entry would mean storing a year's numbers under three months.
+    "1068472": "no results column covers",
+}
+
+
+def _known_symbols(entry: FilingIndexEntry) -> frozenset[str]:
+    return KNOWN_SYMBOLS.get(entry.isin, frozenset({entry.symbol}))
+
+
 def _load(entry: FilingIndexEntry, *, repo_root: Path) -> Filing:
     """Parse the XBRL fixture an index entry points at, exactly as production does.
 
     The entry supplies everything the document cannot: the ISIN, the first-knowable filing date, and
-    the reporting period that selects the column. Nothing is passed that production would not have.
+    the reporting period that selects the column. `known_symbols` mirrors what the runner passes
+    from the D2 master. Nothing is passed that production would not have.
     """
     assert entry.xbrl_url is not None
     name = entry.xbrl_url.rsplit("/", 1)[-1]
@@ -136,6 +165,7 @@ def _load(entry: FilingIndexEntry, *, repo_root: Path) -> Filing:
     return parse(
         payload,
         entry=entry,
+        known_symbols=_known_symbols(entry),
         l0_key=f"nse_xbrl_filing/{entry.filing_date.isoformat()}/{name}",
         filename=name,
     )
@@ -143,8 +173,22 @@ def _load(entry: FilingIndexEntry, *, repo_root: Path) -> Filing:
 
 @pytest.fixture
 def all_filings(entries: tuple[FilingIndexEntry, ...], repo_root: Path) -> tuple[Filing, ...]:
-    """Every actionable entry in the index slice, parsed — 17 real filings."""
-    return tuple(_load(entry, repo_root=repo_root) for entry in entries if entry.is_actionable)
+    """Every actionable entry the parser is meant to read, parsed.
+
+    Excludes the entries in `MUST_NOT_PARSE` — and asserts each of them really does refuse, with
+    the expected reason, so "the corpus got smaller" can never pass for "the corpus is clean".
+    """
+    filings: list[Filing] = []
+    for entry in entries:
+        if not entry.is_actionable:
+            continue
+        expected = MUST_NOT_PARSE.get(entry.seq_number)
+        if expected is not None:
+            with pytest.raises(ParseError, match=expected):
+                _load(entry, repo_root=repo_root)
+            continue
+        filings.append(_load(entry, repo_root=repo_root))
+    return tuple(filings)
 
 
 @pytest.fixture
@@ -191,7 +235,7 @@ def _mutate(repo_root: Path, name: str, old: str, new: str, *, count: int = -1) 
 
 def test_every_datum_carries_both_dates(all_filings: tuple[Filing, ...]) -> None:
     """No fact exists without both a period end and a filing date, and never the same value."""
-    assert len(all_filings) == 17
+    assert len(all_filings) == 25
     for filing in all_filings:
         assert filing.facts
         for fact in filing.facts:
@@ -545,25 +589,45 @@ def test_the_nbfc_entry_point_reads_with_the_ind_as_vocabulary(
     assert _company_value(filing, "profit_after_tax") == Decimal("37058100000.00")
 
 
-def test_every_filing_reports_the_full_concept_set(all_filings: tuple[Filing, ...]) -> None:
-    """All eight whitelisted concepts resolve in every captured filing, in both vocabularies.
+def test_every_filing_reports_the_core_concepts(all_filings: tuple[Filing, ...]) -> None:
+    """Revenue, other income, total income, PAT and EPS resolve in every captured filing.
 
     The regression this pins: four of the original eight element names (`TotalIncome`,
     `TotalExpenses`, `BasicEarningsPerShare`, `DilutedEarningsPerShare`) exist in no real filing,
     so a filing "parsed successfully" with half its concepts silently missing.
+
+    `profit_before_tax` is not core, and deliberately so. The oldest Non-Ind-AS form has no
+    `ProfitBeforeTax` element at all — it reports `ProfitBeforeExtraordinaryItemsAndTax`, which is
+    a *different* basis. Mapping that onto the same key would make one filing's PBT quietly
+    incomparable with another's, so the fact is simply absent and a consumer gets nothing rather
+    than a wrong number. `_concept_gaps` names exactly which filings that is true of, so a new gap
+    appearing anywhere else fails.
     """
-    expected = {
+    core = {
         "revenue_from_operations",
         "other_income",
         "total_income",
         "total_expenses",
-        "profit_before_tax",
         "profit_after_tax",
         "eps_basic",
         "eps_diluted",
     }
+    assert core < CONCEPT_KEYS
     for filing in all_filings:
-        assert {f.concept for f in filing.company_facts()} == expected, filing.symbol
+        got = {f.concept for f in filing.company_facts()}
+        assert core <= got, f"{filing.symbol} {filing.taxonomy.value} missing {core - got}"
+
+
+def test_the_only_concept_any_captured_filing_lacks_is_the_documented_one(
+    all_filings: tuple[Filing, ...],
+) -> None:
+    """The corpus's concept coverage is pinned, so a silent regression cannot hide as a gap."""
+    gaps = {
+        (filing.symbol, concept)
+        for filing in all_filings
+        for concept in CONCEPT_KEYS - {f.concept for f in filing.company_facts()}
+    }
+    assert gaps == {("EMKAY", "profit_before_tax")}
 
 
 def test_an_unknown_taxonomy_entry_point_is_rejected(
@@ -614,6 +678,206 @@ def test_values_are_absolute_rupees_not_the_statements_rounding(
     filing = _load(_entry(entries, isin=RELIANCE, nature=Nature.CONSOLIDATED), repo_root=repo_root)
     assert _company_value(filing, "revenue_from_operations") == Decimal("2438650000000.00")
     assert _company_value(filing, "profit_after_tax") == Decimal("219300000000.00")
+
+
+# ── format eras: the same parser over a decade of the real feed ───────────────────────────────
+
+
+def test_a_filing_whose_column_contexts_are_never_declared_parses(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """The 2018-2022 `…_WEB.xml` generation declares only its *dimensioned* contexts.
+
+    Its facts reference `OneD`/`FourD`, which no `<context>` element defines. That is malformed
+    XBRL and it is what NSE served for four years, covering tens of thousands of filings. Nothing
+    is lost by reading it: a column's period, nature and audited flag are facts *inside* the
+    column, never attributes of the `<context>`.
+    """
+    filing = _load(_entry(entries, isin=ALBK, nature=Nature.CONSOLIDATED), repo_root=repo_root)
+    document = (repo_root / FILINGS_DIR / "BANKING_48497_136132_14092019023146_WEB.xml").read_text(
+        encoding="utf-8"
+    )
+    assert 'contextRef="FourD"' in document
+    assert '<xbrli:context id="FourD"' not in document  # the column is used but never declared
+
+    assert filing.taxonomy is Taxonomy.BANKING
+    assert (filing.period_start, filing.period_end) == (date(2018, 4, 1), date(2019, 3, 31))
+    assert _company_value(filing, "profit_after_tax") == Decimal("-84573800000.00")
+
+
+def test_a_filing_with_no_declared_contexts_at_all_parses(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Some `…_WEB.xml` filings declare no `<context>` whatever — and so carry no entity element.
+
+    Their `Symbol` fact is then the only identity they state, and it is enough to cross-check.
+    """
+    document = (repo_root / FILINGS_DIR / "NONINDAS_63114_354860_05112020010920_WEB.xml").read_text(
+        encoding="utf-8"
+    )
+    assert "<xbrli:context" not in document
+    assert "<xbrli:identifier" not in document
+
+    filing = _load(_entry(entries, isin=MCL, nature=Nature.STANDALONE), repo_root=repo_root)
+    assert filing.symbol == "MCL"
+    assert (filing.period_start, filing.period_end) == (date(2019, 4, 1), date(2020, 3, 31))
+    assert _company_value(filing, "revenue_from_operations") == Decimal("2022783000.00")
+
+
+def test_the_header_block_is_not_read_as_the_quarter_columns_period(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """`DateOfStartOfFinancialYear` describes the *document*; filers pin it to the `OneD` context.
+
+    Reading it as `OneD`'s own period is the subtle way this era goes wrong, and it is not a near
+    miss: on an annual-only filing `OneD` is zero-filled and the cumulative `FourD` holds the year,
+    so the mistake stores a bank's revenue as zero. Both columns carry the full concept set, so
+    nothing about their contents distinguishes them either — only the period does.
+    """
+    document = (repo_root / FILINGS_DIR / "BANKING_48497_136132_14092019023146_WEB.xml").read_text(
+        encoding="utf-8"
+    )
+    assert '<in-bse-fin:DateOfStartOfFinancialYear contextRef="OneD">2018-04-01' in document
+    assert '<in-bse-fin:InterestEarned contextRef="OneD" unitRef="INR" decimals="-5">0.00' in (
+        document
+    )
+
+    filing = _load(_entry(entries, isin=ALBK, nature=Nature.CONSOLIDATED), repo_root=repo_root)
+    assert _company_value(filing, "revenue_from_operations") == Decimal("169157700000.00")
+    assert _company_value(filing, "revenue_from_operations") != Decimal(0)
+
+
+def test_an_annual_only_document_refuses_to_answer_for_a_quarter(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """A quarterly entry pointing at a document that holds only the year must fail, not guess.
+
+    Emkay's document is named by both an Annual entry and a Quarterly one, but carries a single
+    cumulative column. Its quarter's start appears nowhere in the document, so there is no honest
+    period to store — and storing twelve months of numbers under three would be a silent error no
+    downstream check could catch.
+    """
+    annual_entry = _entry(entries, isin=EMKAY, nature=Nature.CONSOLIDATED, period="Annual")
+    quarterly_entry = _entry(entries, isin=EMKAY, nature=Nature.CONSOLIDATED, period="Quarterly")
+    assert annual_entry.xbrl_url == quarterly_entry.xbrl_url  # one document, two entries
+
+    annual = _load(annual_entry, repo_root=repo_root)
+    assert (annual.period_start, annual.period_end) == (date(2018, 4, 1), date(2019, 3, 31))
+    assert _company_value(annual, "revenue_from_operations") == Decimal("1479248000.00")
+
+    with pytest.raises(ParseError, match="no results column covers"):
+        _load(quarterly_entry, repo_root=repo_root)
+
+
+def test_the_non_ind_as_taxonomy_maps_onto_the_same_concept_keys(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """The pre-Ind-AS form calls total income `Revenue`; consumers still read one set of keys."""
+    filing = _load(_entry(entries, isin=TARACHAND, nature=Nature.STANDALONE), repo_root=repo_root)
+    assert filing.taxonomy is Taxonomy.NON_IND_AS
+    assert _company_value(filing, "revenue_from_operations") == Decimal("1410594000.00")
+    assert _company_value(filing, "other_income") == Decimal("35014000.00")
+    assert _company_value(filing, "total_income") == Decimal("1445608000.00")
+    assert _company_value(filing, "profit_after_tax") == Decimal("93530000.00")
+    # `Revenue` is the total-income line, not another name for operating revenue.
+    assert _company_value(filing, "revenue_from_operations") + _company_value(
+        filing, "other_income"
+    ) == _company_value(filing, "total_income")
+    assert filing.segments()
+
+
+def test_an_entity_identified_by_bse_scrip_code_is_checked_on_its_symbol_fact(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Some filings identify the entity by scrip code, which cannot be compared to a symbol.
+
+    J&K Bank's document says `532209`. The `Symbol` fact says `J&KBANK`, which is what the
+    cross-check uses — and the ISIN still comes from the index, never from either.
+    """
+    document = (repo_root / FILINGS_DIR / "BANKING_601183_475_25072022110219_WEB.xml").read_text(
+        encoding="utf-8"
+    )
+    assert 'scheme="http://www.bseindia.com/bse-fin/ScripCode">532209' in document
+
+    filing = _load(
+        _entry(entries, isin=JKBANK, nature=Nature.CONSOLIDATED, period="Annual"),
+        repo_root=repo_root,
+    )
+    assert filing.isin == JKBANK
+    assert filing.symbol == "J&KBANK"
+    assert _company_value(filing, "profit_after_tax") == Decimal("5044400000")
+
+
+def test_a_renamed_company_is_accepted_against_its_symbol_history(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """A filing states the symbol it had when filed, not the one the index reports today.
+
+    Sastasundar Ventures files as `SASTASUNDR` under an index entry that now says `HEALTHX`. The
+    ISIN is unchanged — a rename does not touch it — so the D2 symbol history the caller passes is
+    what lets the cross-check stay strict without rejecting every renamed company.
+    """
+    entry = _entry(entries, isin=HEALTHX, nature=Nature.CONSOLIDATED, period="Annual")
+    assert entry.xbrl_url is not None
+    name = entry.xbrl_url.rsplit("/", 1)[-1]
+    payload = (repo_root / FILINGS_DIR / name).read_bytes()
+
+    # Without the history, today's symbol is all there is to compare against, and it disagrees.
+    with pytest.raises(ParseError, match="must name the same company"):
+        parse(payload, entry=entry, filename=name)
+
+    filing = parse(
+        payload,
+        entry=entry,
+        known_symbols=frozenset({"HEALTHX", "SASTASUNDR"}),
+        filename=name,
+    )
+    assert filing.isin == HEALTHX  # the join key is the index's, unaffected by the rename
+    assert filing.symbol == "SASTASUNDR"  # what the filing itself said
+    assert _company_value(filing, "profit_after_tax") == Decimal("-994692000.00")
+
+
+def test_every_captured_filing_satisfies_its_own_income_identity(
+    all_filings: tuple[Filing, ...],
+) -> None:
+    """`revenue + other income == total income`, exactly, in all three taxonomies.
+
+    The strongest check available without outside knowledge of any company, and the one that
+    catches a mis-mapped concept immediately: reading a bank's `Income` as its operating revenue,
+    or the Non-Ind-AS `Revenue` as anything but the total, breaks it. So does selecting the wrong
+    column, since a quarter's revenue against a year's other income does not add up.
+    """
+    checked = 0
+    for filing in all_filings:
+        v = {f.concept: f.value for f in filing.company_facts()}
+        if not {"revenue_from_operations", "other_income", "total_income"} <= v.keys():
+            continue
+        checked += 1
+        assert v["revenue_from_operations"] + v["other_income"] == v["total_income"], (
+            f"{filing.symbol} {filing.taxonomy.value} {filing.period_end}"
+        )
+    assert checked == len(all_filings)
+
+
+def test_a_banks_total_expenses_excludes_provisions_by_construction(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Pins the one mapping caveat a ratio built on `total_expenses` inherits.
+
+    For a bank the element is `ExpenditureExcludingProvisionsAndContingencies`, so
+    `total_income - total_expenses` is *operating* profit and the gap to PBT is the provisions
+    line. That is documented at `BANKING_CONCEPTS`; this makes it testable, so nobody later
+    "fixes" the mapping to make the two agree.
+    """
+    filing = _load(
+        _entry(entries, isin=JKBANK, nature=Nature.CONSOLIDATED, period="Annual"),
+        repo_root=repo_root,
+    )
+    operating = _company_value(filing, "total_income") - _company_value(filing, "total_expenses")
+    assert operating == Decimal("13734000000")
+    # PBT is lower by the provisions the expense line leaves out — the two must not be equal.
+    assert _company_value(filing, "profit_before_tax") == Decimal("7467200000")
+    assert operating > _company_value(filing, "profit_before_tax")
 
 
 # ── acceptance 3: a restatement is a new record, not an overwrite ──────────────────────────────
@@ -851,7 +1115,7 @@ def test_writing_the_same_filing_twice_is_idempotent(vst_original: Filing, tmp_p
 def test_the_index_parses_every_real_record(entries: tuple[FilingIndexEntry, ...]) -> None:
     """Every record in the captured slice parses — the whole point of the rewrite."""
     raw = json.loads(INDEX.read_text(encoding="utf-8"))
-    assert len(entries) == len(raw) == 18
+    assert len(entries) == len(raw) == 27
 
 
 def test_a_whole_live_index_response_parses(repo_root: Path) -> None:

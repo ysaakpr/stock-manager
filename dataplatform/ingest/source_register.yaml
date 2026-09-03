@@ -1150,7 +1150,13 @@ sources:
       bare `-`: the announcement exists but has no document, and the URL must not be constructed.
       One document is linked by more than one entry — a December-year-end company's is named by
       both a Quarterly and an Annual record — so `(fromDate, toDate)` is not descriptive metadata
-      but the key that selects which period of the document an entry means.
+      but the key that selects which period of the document an entry means. The date filter is on
+      the **broadcast** date, not the period, and it returns every reporting period disseminated in
+      the window — which is what makes a forward-walking PIT backfill possible. Probing the whole
+      window found 135,197 announcements over ten financial years, but a document exists only from
+      about FY2018-19 on: FY2016-17 and FY2017-18 are 100% placeholder (24,247 entries, no
+      documents), FY2018-19 is 81% covered, FY2019-20 86%, and FY2020-21 onward effectively
+      complete. ~101,446 filings are ingestible, and that is the honest depth of this dataset.
     fixture: {frozen: true, task: M7.3, path: "tests/fixtures/xbrl/"}
     failure_note: null
     candidate_alternatives: []
@@ -1200,13 +1206,32 @@ sources:
       `in-bse-fin:ReportableSegmentsAxis` inside `xbrli:scenario` (not `xbrli:segment`), named by
       a sibling `DescriptionOfReportableSegment`, with the column embedded in the member name —
       and the column's own `SegmentRevenue` is the cross-segment *total*, not a segment;
-      (4) two P&L vocabularies, selected by the `link:schemaRef` entry point —
-      `Ind-AS_entry_point_2020-03-31.xsd` and the NBFC `in-bse-fin-2020-03-31.xsd` share one
-      (`RevenueFromOperations`/`Income`/`Expenses`/`ProfitLossForPeriod`), while
-      `banking_entry_point_2019-09-30.xsd` differs
-      (`InterestEarned`/`ProfitLossForThePeriod`/`BasicEarningsPerShareAfterExtraordinaryItems`).
-      Values are absolute rupees; `LevelOfRoundingUsedInFinancialStatements`
-      (`Lakhs`/`Crores`/`Millions`) describes the printed statement and must not scale them.
+      (4) three P&L vocabularies, selected by the `link:schemaRef` entry point (matched on the stem,
+      so the version date is not part of the identity) — `Ind-AS_entry_point_*` and the NBFC
+      `in-bse-fin-*` share one (`RevenueFromOperations`/`Income`/`Expenses`/`ProfitLossForPeriod`),
+      `banking_entry_point_*` differs
+      (`InterestEarned`/`ProfitLossForThePeriod`/`BasicEarningsPerShareAfterExtraordinaryItems`),
+      and `other_than_banks_entry_point_*` — the pre-Ind-AS Indian-GAAP form — differs again
+      (total income is `Revenue`, the bottom line `ProfitLossForThePeriod`). Values are absolute
+      rupees; `LevelOfRoundingUsedInFinancialStatements` (`Lakhs`/`Crores`/`Millions`) describes the
+      printed statement and must not scale them.
+      Three further properties belong to the **older document generations** and were each found by
+      sampling a filing per (financial year x taxonomy x bank flag) across the decade: (5) the
+      2018-2022 `…_WEB.xml` files declare only their *dimensioned* contexts, leaving the table's
+      own columns (`OneD`/`FourD`) undeclared — some declare no `<context>` at all, and so carry no
+      `<xbrli:entity>` either, leaving the `Symbol` fact as their only stated identity; (6) those
+      files also state no per-column reporting period, only a document-level
+      `DateOfStartOfFinancialYear`/`DateOfEndOfFinancialYear` header pinned to `OneD` — it
+      describes the *document*, and on an annual filing `OneD` is zero-filled while the year's
+      numbers sit in the cumulative `FourD`, so reading the header as `OneD`'s period stores a
+      company's revenue as zero; (7) some filings identify the entity by BSE scrip code
+      (`scheme=…/bse-fin/ScripCode`) rather than NSE symbol, and a filing states the symbol it had
+      *when filed*, so a since-renamed company only cross-checks against the D2 symbol history
+      (Sastasundar Ventures files as `SASTASUNDR` under an entry that now reads `HEALTHX`).
+      Known source gaps, both handled rather than fixed: a small number of index entries name a
+      document the archive answers 404 for, and an annual-only document is sometimes listed under a
+      fourth-quarter entry as well — the quarter is refused, because its start is stated nowhere in
+      the document and storing twelve months under three would be silent.
     fixture: {frozen: true, task: M7.3, path: "tests/fixtures/xbrl/"}
     failure_note: null
     candidate_alternatives: []

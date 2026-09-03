@@ -59,13 +59,20 @@ WARM_URL: Final = "https://www.nseindia.com/"
 NOW: Final = datetime(2026, 9, 3, 18, 30, tzinfo=IST)
 CLOCK: Final = FrozenClock(NOW)
 
-#: The captured index slice holds 18 real announcements — 17 with an XBRL document and one with
+#: The captured index slice holds 27 real announcements — 26 with an XBRL document and one with
 #: none. `VSTTILLERS` accounts for four (two natures x an original filing and its correction) and
-#: `SCHAEFFLER` for four (two natures x a quarterly and an annual entry over the same documents).
+#: `SCHAEFFLER` for four (two natures x a quarterly and an annual entry over the same documents);
+#: the rest span the older format eras (`tests/fixtures/xbrl/README.md`).
 VSTTILLERS: Final = "INE764D01017"
 SCHAEFFLER: Final = "INE513A01014"
 VIDEOIND: Final = "INE703A01011"  # the announcement with no XBRL document
-ENTRIES_IN_SLICE: Final = 18
+#: The older format eras (`tests/fixtures/xbrl/README.md`).
+ALBK: Final = "INE428A01015"
+MCL: Final = "INE813V01014"
+TARACHAND: Final = "INE555Z01012"
+JKBANK: Final = "INE168A01017"
+HEALTHX: Final = "INE019J01013"
+ENTRIES_IN_SLICE: Final = 27
 Q3FY25_END: Final = date(2024, 12, 31)
 VST_ORIGINAL_FILED: Final = date(2025, 2, 11)
 VST_RESTATED_FILED: Final = date(2026, 7, 30)
@@ -382,7 +389,7 @@ def test_coverage_report_enumerates_what_ran_and_what_did_not(tmp_path: Path) ->
     assert "Window: 2026-01-01 .. 2026-12-31" in rendered
     # Both non-ingest outcomes are named, so a reader is never left guessing at the difference
     # between the discovered count and the published one.
-    assert "Entries skipped (ISIN not in universe): 10" in rendered
+    assert "Entries skipped (ISIN not in universe): 19" in rendered
     assert "Entries skipped (no XBRL document in the feed): 0" in rendered
 
 
@@ -446,6 +453,195 @@ def test_max_filings_caps_the_ingest_but_not_the_reported_universe(tmp_path: Pat
     assert report.filings_published == 2  # only two attempted
     assert report.filings_in_universe == 8  # but the full universe is still counted
     assert len(report.covered_isins) <= 2
+
+
+def test_the_older_format_eras_ingest_end_to_end(tmp_path: Path) -> None:
+    """The runner drives the pre-2023 documents through fetch -> L0 -> parse -> write_pit too.
+
+    The unit tests above all use filings broadcast in 2025-2026. These are the generations before
+    them — undeclared column contexts, no contexts at all, the Non-Ind-AS vocabulary, a BSE scrip
+    code for an identifier — and they are the bulk of a ten-year backfill, so the runner must be
+    exercised on them and not only the parser.
+    """
+    from decimal import Decimal
+
+    settings = _settings(tmp_path)
+    plan = _quarterly_plan()
+    era = {ALBK, MCL, TARACHAND, JKBANK}
+    report = _runner(_ok_transport(plan), settings=settings, sync=_FakeSync(), universe=era).run(
+        plan
+    )
+
+    assert report.filings_published == len(era) + 1  # J&K Bank is named by two entries
+    assert report.filings_failed == 0
+    assert not report.parked
+    assert report.covered_isins == era
+
+    stored = read_latest(date(2026, 9, 1), data_root=settings.data_root)
+    # An old banking `_WEB` filing whose column contexts are never declared, and whose header block
+    # sits on the zero-filled `OneD`: the real loss must land, not a zero.
+    assert _one(stored, ALBK, "profit_after_tax", date(2019, 3, 31), nature="Consolidated") == (
+        Decimal("-84573800000.00")
+    )
+    # A document with no `<context>` whatever, identified only by its `Symbol` fact.
+    assert _one(stored, MCL, "revenue_from_operations", date(2020, 3, 31)) == (
+        Decimal("2022783000.00")
+    )
+    # The Non-Ind-AS vocabulary, where total income is `Revenue`.
+    assert _one(stored, TARACHAND, "total_income", date(2023, 3, 31)) == Decimal("1445608000.00")
+    # A BSE scrip code for an identifier, and one document answering both its entries.
+    jk_periods = {
+        (f.period_start, f.period_end)
+        for f in stored
+        if f.isin == JKBANK and f.concept == "eps_basic"
+    }
+    assert jk_periods == {
+        (date(2021, 4, 1), date(2022, 3, 31)),
+        (date(2022, 1, 1), date(2022, 3, 31)),
+    }
+
+
+def test_a_renamed_company_ingests_via_the_injected_symbol_history(tmp_path: Path) -> None:
+    """The runner passes D2's symbol history, which is what lets a renamed company's filing land.
+
+    Sastasundar Ventures files as `SASTASUNDR` under an index entry that now says `HEALTHX`.
+    Without the history the parser cannot tell that from a document about the wrong company, so it
+    refuses — correctly. With it, the filing lands under the index's ISIN, which the rename never
+    touched.
+    """
+    from decimal import Decimal
+
+    settings = _settings(tmp_path)
+    plan = _quarterly_plan()
+
+    without = _runner(
+        _ok_transport(plan), settings=settings, sync=_FakeSync(), universe={HEALTHX}
+    ).run(plan)
+    assert without.filings_published == 0
+    assert without.filings_failed == 2  # both of its entries, refused on identity
+    assert any("name the same company" in message for _label, message in without.failures)
+
+    with_history = fb.FundamentalsBackfillRunner(
+        fetcher=_fetcher(_ok_transport(plan), settings),
+        l0=L0Store(clock=CLOCK, data_root=settings.data_root),
+        sync=cast("Any", _FakeSync()),
+        universe={HEALTHX},
+        commit=lambda: None,
+        data_root=settings.data_root,
+        symbol_history=lambda isin: frozenset({"SASTASUNDR"}) if isin == HEALTHX else frozenset(),
+    ).run(plan)
+
+    assert with_history.filings_published == 2
+    assert with_history.filings_failed == 0
+    stored = read_latest(date(2026, 9, 1), data_root=settings.data_root)
+    # Its annual and its fourth-quarter entries share an end date and a nature, so both records
+    # survive `read_latest` only because `period_start` is part of its collapse key.
+    assert _one(
+        stored,
+        HEALTHX,
+        "profit_after_tax",
+        date(2023, 3, 31),
+        nature="Consolidated",
+        period_start=date(2022, 4, 1),
+    ) == Decimal("-994692000.00")
+    assert _one(
+        stored,
+        HEALTHX,
+        "profit_after_tax",
+        date(2023, 3, 31),
+        nature="Consolidated",
+        period_start=date(2023, 1, 1),
+    ) == Decimal("-480010000.00")
+    # The join key is the index's ISIN throughout; the document's own symbol is only a cross-check.
+    assert all(f.isin == HEALTHX for f in stored)
+
+
+def test_the_two_periods_of_one_chunk_do_not_share_a_checkpoint() -> None:
+    """The Quarterly and Annual chunks of one date range are two units, keyed apart.
+
+    They share a start date (the `logical_date`) and differ only in period, so a checkpoint keyed
+    on the register id plus the start date collapses them into one row. The consequence is not a
+    lost checkpoint but lost *data*: publishing the Quarterly chunk makes the Annual chunk
+    resume-skip, and the resume path then reads back the Quarterly filename's payload or none at
+    all — every Annual filing of the backfill silently gone.
+    """
+    plan = fb.build_index_units(FROM, TO, register=load_register(), chunk_months=12)
+    quarterly = next(u for u in plan if u.period is fb.Period.QUARTERLY)
+    annual = next(u for u in plan if u.period is fb.Period.ANNUAL)
+
+    assert (quarterly.logical_date, quarterly.from_date, quarterly.to_date) == (
+        annual.logical_date,
+        annual.from_date,
+        annual.to_date,
+    )
+    assert quarterly.state_source != annual.state_source
+    assert (quarterly.state_source, quarterly.logical_date) != (
+        annual.state_source,
+        annual.logical_date,
+    )
+    # Every unit in a full plan is distinctly keyed, whatever the chunking.
+    for months in (1, 3, 12):
+        units = fb.build_index_units(FROM, TO, register=load_register(), chunk_months=months)
+        keys = [(u.state_source, u.logical_date) for u in units]
+        assert len(set(keys)) == len(units), months
+
+
+def test_a_chunk_whose_range_changed_is_not_considered_fetched() -> None:
+    """Re-chunking changes which payload a unit needs, so its checkpoint must not carry over.
+
+    Two runs can produce a chunk with the same period and start date but a different end — a
+    different `--to`, or a different `--chunk-months`. The second covers filings the first never
+    fetched, so treating it as published would skip a range and then look for a payload under a
+    filename nothing ever wrote.
+    """
+    register = load_register()
+    short = fb.build_index_units(FROM, date(2026, 6, 30), register=register, chunk_months=12)
+    long = fb.build_index_units(FROM, TO, register=register, chunk_months=12)
+    first_short = next(u for u in short if u.period is fb.Period.QUARTERLY)
+    first_long = next(u for u in long if u.period is fb.Period.QUARTERLY)
+
+    assert first_short.logical_date == first_long.logical_date
+    assert first_short.filename != first_long.filename
+    assert first_short.state_source != first_long.state_source
+
+
+def test_the_checkpoint_key_tracks_the_payload_filename() -> None:
+    """One state key ↔ one L0 filename. The resume path reads the payload by filename, so any
+    two units that differ in filename must differ in key, or a resume reads the wrong bytes."""
+    units = fb.build_index_units(FROM, TO, register=load_register(), chunk_months=3)
+    by_key: dict[tuple[str, date], str] = {}
+    for unit in units:
+        key = (unit.state_source, unit.logical_date)
+        assert by_key.setdefault(key, unit.filename) == unit.filename, key
+
+
+def test_a_published_chunk_whose_l0_payload_is_gone_is_reported_not_a_crash(
+    tmp_path: Path,
+) -> None:
+    """A resume whose payload vanished must surface the chunk and continue.
+
+    `L0Store.ref_for` raises `L0NotFoundError`, which is **not** a `FileNotFoundError` — catching
+    only the builtin let a decade-long resume die on the single case this handler exists for. The
+    chunk is counted as failed and named in the report, never swallowed.
+    """
+    settings = _settings(tmp_path)
+    plan = _quarterly_plan()
+    sync = _FakeSync()
+    # Mark every chunk published without ever writing its L0 payload.
+    for unit in plan:
+        sync.begin(unit.state_source, unit.logical_date)
+        sync.mark_published(unit.state_source, unit.logical_date)
+
+    transport = _ok_transport(plan)
+    report = _runner(transport, settings=settings, sync=sync, universe={VSTTILLERS}).run(plan)
+
+    assert not report.parked
+    assert report.index_skipped_published == len(plan)
+    assert report.index_failed == len(plan)
+    assert report.filings_discovered == 0
+    assert transport.requests == []  # a resume opens no socket, even a broken one
+    rendered = fb.render_report(from_date=FROM, to_date=TO, universe_size=1, report=report)
+    assert "index reparse failed" in rendered
 
 
 def test_index_plan_is_pure_and_offline() -> None:
