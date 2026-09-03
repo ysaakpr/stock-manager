@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 from . import escalate as esc
-from .graph import MAX_ATTEMPTS, Graph, GraphError, parse_child_spec, runnable
+from .graph import HUMAN, MAX_ATTEMPTS, Graph, GraphError, parse_child_spec, runnable
 from .prompts import for_task
 from .state import BuildState
 
@@ -332,11 +332,24 @@ def cmd_gate(args: argparse.Namespace) -> int:
 
     print(f"{BOLD}gate {args.milestone}{OFF}: re-verifying {len(tasks)} task(s)\n")
     failures: list[str] = []
+    open_items: list[str] = []
     for t in tasks:
         state = states.get(t.id, "PENDING")
         if state != "DONE":
-            print(f"  {RED}✗{OFF} {t.id:8} state={state} (never completed)")
-            failures.append(f"{t.id} state={state}")
+            # A task the plan reserves for a human — a go-ahead (NEEDS_GO), a
+            # secret we do not hold (NEEDS_SECRET), or a human-only gate
+            # (HUMAN_GATE) — cannot be closed autonomously, so its being
+            # unfinished is an open item the gate reports honestly, not a gate
+            # failure. Only an *autonomous* task that never completed is a real
+            # failure. (Without this, a milestone whose sole remainder is, say,
+            # a live-model drill blocked on an absent API key could never pass,
+            # even with every autonomous box independently evidenced.)
+            if t.autonomy in HUMAN:
+                print(f"  {YELLOW}○{OFF} {t.id:8} {t.title} — open ({t.autonomy}, state={state})")
+                open_items.append(f"{t.id} {t.autonomy} (state={state})")
+            else:
+                print(f"  {RED}✗{OFF} {t.id:8} state={state} (never completed)")
+                failures.append(f"{t.id} state={state}")
             continue
         if not t.verify:
             print(f"  {YELLOW}·{OFF} {t.id:8} no verify command")
@@ -354,6 +367,14 @@ def cmd_gate(args: argparse.Namespace) -> int:
         for f in failures:
             print(f"  - {f}")
         return 1
+    if open_items:
+        print(
+            f"\n{GREEN}gate {args.milestone}: all autonomous verifications pass{OFF} "
+            f"{YELLOW}({len(open_items)} human-reserved item(s) open){OFF}"
+        )
+        for item in open_items:
+            print(f"  ○ {item}")
+        return 0
     print(f"\n{GREEN}gate {args.milestone}: all verifications pass{OFF}")
     return 0
 
