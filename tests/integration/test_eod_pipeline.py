@@ -15,11 +15,21 @@ test and dropped afterwards. No socket is opened to any exchange.
 
 The two fixture sessions used straddle the 2024-07-08 UDiFF cutover — 2024-07-05 is legacy and
 2024-07-08 is UDiFF — so the runs exercise both bhavcopy parsers exactly as the daily job would.
+
+Beyond the three task criteria, `test_five_consecutive_sessions_run_unattended_with_one_self_heal`
+is the driver the M1 gate's box 3 demands — "daily EOD job runs unattended 5 consecutive sessions
+incl. self-heal on one induced failure" (EXECUTION_PLAN §9). One loop advances the clock through
+five consecutive sessions with no human step; the middle session 500s and the next day's run
+self-heals it. Five consecutive sessions need five days of bytes and the suite ships two, so
+`_udiff_bytes_for` re-dates the real checked-in UDiFF fixture (only its two ISO date columns) rather
+than fabricating a bhavcopy — the run stays offline and every row is the exchange's real shape.
 """
 
 from __future__ import annotations
 
+import io
 import os
+import zipfile
 from collections.abc import Iterator
 from datetime import date, timedelta
 from pathlib import Path
@@ -202,6 +212,76 @@ def _store(conn: Connection, clock: FrozenClock) -> SyncStateStore:
 
 def _urls_fetched(transport: RecordedTransport) -> list[str]:
     return [r.url for r in transport.requests]
+
+
+# ── five-consecutive-session driver helpers (M1 gate box 3) ────────────────────────────────────
+
+#: Five consecutive UDiFF-era sessions (Mon-Fri, 2024-07-08 .. 2024-07-12), all present in the C.2
+#: calendar with no holiday between them — the run the M1 gate's "5 consecutive sessions" box needs.
+CONSECUTIVE_SESSIONS: Final[tuple[date, ...]] = (
+    date(2024, 7, 8),
+    date(2024, 7, 9),
+    date(2024, 7, 10),
+    date(2024, 7, 11),
+    date(2024, 7, 12),
+)
+#: The middle session, made to 500 on its own run so a later run must self-heal it unattended.
+INDUCED_FAILURE_SESSION: Final = date(2024, 7, 10)
+
+
+def _udiff_bytes_for(day: date) -> bytes:
+    """Real UDiFF fixture bytes re-dated to `day` — bytes for an arbitrary consecutive session.
+
+    A five-session run needs five days of bhavcopy and the suite ships two real dates. Rather than
+    fabricate a bhavcopy from nothing, this re-dates the checked-in UDiFF fixture: it rewrites only
+    the two ISO date columns (`TradDt`, `BizDt`) — the ones the parser reads as the session date and
+    the L1 writer partitions by — and keeps every other column, every one of the real 2,815 symbol
+    rows, and the exchange's exact shape. The parser reads the single zip member by position, so the
+    member name is left descriptive and never load-bearing.
+    """
+    with zipfile.ZipFile(FIXTURE_FILES[UDIFF_SESSION]) as archive:
+        member = archive.namelist()[0]
+        lines = archive.read(member).decode("utf-8").splitlines()
+    header = lines[0].split(",")
+    trad_dt, biz_dt = header.index("TradDt"), header.index("BizDt")
+    iso = day.isoformat()
+    out = [lines[0]]
+    for line in lines[1:]:
+        if not line.strip():
+            continue
+        fields = line.split(",")
+        fields[trad_dt] = iso
+        fields[biz_dt] = iso
+        out.append(",".join(fields))
+    body = ("\n".join(out) + "\n").encode("utf-8")
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zipped:
+        zipped.writestr(f"BhavCopy_NSE_CM_0_0_0_{day:%Y%m%d}_F_0000.csv", body)
+    return buffer.getvalue()
+
+
+def _consecutive_transport(
+    register: SourceRegister, *, fail_500: tuple[date, ...] = ()
+) -> RecordedTransport:
+    """Serve each consecutive session's re-dated UDiFF bytes as 200, except `fail_500` dates as 500.
+
+    Scripting all five URLs every run is harmless — the runner only fetches the dates its plan names
+    — and it models a real upstream honestly: the failing day returns 500 on its own run and 200
+    afterwards, which is exactly what lets the next run's self-heal step land it.
+    """
+    script: dict[str, RecordedResponse] = {}
+    for day in CONSECUTIVE_SESSIONS:
+        url = _url_for(day, register)
+        if day in fail_500:
+            script[url] = RecordedResponse(status_code=500, body=b"upstream error")
+        else:
+            script[url] = RecordedResponse(
+                status_code=200,
+                body=_udiff_bytes_for(day),
+                headers={"content-type": "application/zip"},
+            )
+    return RecordedTransport(script)
 
 
 # ── acceptance 1: one invocation, PENDING → PUBLISHED for every daily NSE source ──────────────
@@ -404,3 +484,69 @@ def test_second_run_for_the_same_session_is_a_no_op(
         before.attempts,
         before.updated_at,
     )
+
+
+# ── M1 gate box 3: 5 consecutive sessions unattended, incl. self-heal on one induced failure ────
+
+
+def test_five_consecutive_sessions_run_unattended_with_one_self_heal(
+    settings: Settings, conn: Connection, register: SourceRegister
+) -> None:
+    """One loop drives five consecutive sessions unattended; a mid-run failure self-heals next day.
+
+    This is the driver the M1 gate's box 3 demands (EXECUTION_PLAN §9): the daily EOD job as an
+    operable unattended loop, not a one-shot script. The clock advances one session at a time and
+    the *same* pipeline runs each day with no human step in between. The middle session (2024-07-10)
+    500s on its own run and is left FAILED(retryable) and alerted; the very next day's run
+    re-attempts it within the lookback window while also publishing its own session — the self-heal
+    happens with no human in the loop. At the end all five consecutive sessions are PUBLISHED in L1.
+    """
+    # Consecutive sessions are one day apart, so a two-day lookback reaches yesterday's straggler
+    # and keeps the gap window to weekends — no un-run pre-fixture history to noise the run (matches
+    # the tuned windows the other acceptance tests use).
+    lookback = timedelta(days=2)
+    healed_across_runs: set[date] = set()
+    saw_induced_failure = False
+
+    for session in CONSECUTIVE_SESSIONS:
+        clock = FrozenClock(session)
+        alerter = RecordingAlerter()
+        fail_500 = (INDUCED_FAILURE_SESSION,) if session == INDUCED_FAILURE_SESSION else ()
+        report = _pipeline(
+            _consecutive_transport(register, fail_500=fail_500),
+            settings=settings,
+            conn=conn,
+            clock=clock,
+            register=register,
+            alerter=alerter,
+            lookback=lookback,
+        ).run()
+
+        healed_across_runs.update(report.healed)
+        critical = [key for sev, _title, key in alerter.sent if sev is Severity.CRITICAL]
+
+        if session == INDUCED_FAILURE_SESSION:
+            saw_induced_failure = True
+            assert not report.session_published, "the 500 must leave this session unpublished"
+            assert report.archive is None, "a session that never published is not archived"
+            assert f"eod:{NSE_BHAVCOPY}:{session.isoformat()}:FAILED" in critical, (
+                "the induced failure must be alerted CRITICAL"
+            )
+        else:
+            assert report.session_published, f"{session} should publish on its own run"
+            assert critical == [], f"a healthy run for {session} raises no source-failed alert"
+
+    # The failure really self-healed on a later run, with no human intervention.
+    assert saw_induced_failure
+    assert INDUCED_FAILURE_SESSION in healed_across_runs, (
+        "the induced failure must be re-attempted by a later run's self-heal step, not by a human"
+    )
+
+    # Every one of the five consecutive sessions is now PUBLISHED and its data is in L1.
+    store = _store(conn, FrozenClock(CONSECUTIVE_SESSIONS[-1]))
+    for session in CONSECUTIVE_SESSIONS:
+        record = store.get(NSE_BHAVCOPY, session)
+        assert record is not None and record.state is SyncState.PUBLISHED, (
+            f"{session} did not reach PUBLISHED after the unattended run"
+        )
+        assert len(read_prices_raw(session, data_root=settings.data_root)) > 0
