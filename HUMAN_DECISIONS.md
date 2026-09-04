@@ -36,6 +36,470 @@ Second round, after M0.1 and M8.2 reported:
 | D3 | **Broker re-auth interlock built now, in M5** — new task M5.15, `AUTH_REQUIRED` alongside `SKIPPED_DATA_RED`, rather than retrofitting the daily loop at M8. |
 | D4 | **Detached unattended runs authorized** — `./orch run --permission-mode bypassPermissions`. Standing guards are the `.claude/settings.json` deny list and the §6 invariants. |
 
+## Answered
+
+### D5 — The repo is public. Confirm that is intentional. → **ANSWERED: yes, intentionally public.**
+
+**Raised:** 2026-08-10, by a read-only security audit of the working tree and full git history.
+**Answered:** 2026-08-10 — *"D5 is intentional."* Option 1 below. No action on visibility; the
+secret-scanning gate is now **mandatory**, not advisory.
+
+**The finding.** `origin` is `git@github.com:ysaakpr/stock-manager.git` and GitHub reports
+`"private": false`. Local `main` is fully pushed, so all 36 commits are world-readable now. The
+`60874b6 "first commit"` message is misleading — it is an ordinary commit on top of the full chain,
+not a squash, so the entire development history is published, not a flattened snapshot.
+
+**Why it needed a human.** [AGENTIC_CONTEXT.md](AGENTIC_CONTEXT.md) §2 B7 stated *"Local repo, no
+remote"*, and `.claude/settings.json` denies `git push` and `git remote add`. Every autonomous agent
+has therefore been building under a ratified threat model of "nothing leaves this machine" that did
+not match reality. The remote was added outside the agent sandbox. B7 has been corrected to state the
+truth; this entry records the decision behind it.
+
+**Good news:** the audit found **no secret** anywhere — not in the working tree, not in any of the 228
+blobs in history, not in dangling objects. `.env` was never tracked and `.env.example` holds no real
+values. Nothing needs rotating today. This is a decision about posture, not an incident.
+
+**The call you're being asked to make:**
+
+1. **Public, intentionally** — fine, and the hardening tasks proceed on that assumption: the repo stays
+   readable by anyone, so the secret-scanning gate becomes mandatory before any real credential (M6.8's
+   Anthropic key, M8.3's Kite credentials) ever exists on this machine.
+2. **Should be private** — make it private, then decide separately whether the published history matters
+   enough to do anything about. It contains no secrets, so most likely it does not.
+
+**Decision (2026-08-10): option 1 — public, intentionally.**
+
+What this settles for every agent, permanently:
+
+- **The threat model is "everything committed is published."** Not "published if someone looks" —
+  published, immediately, irrevocably. `git push` is the publication event.
+- **Rotation, never redaction.** A credential that reaches a commit is compromised the moment it is
+  pushed and can only be rotated at the provider. Deleting it in a later commit changes nothing.
+  See [ops/runbooks/secret-leak.md](ops/runbooks/secret-leak.md).
+- **The scanning gate is mandatory and must exist before the first real credential does.** Both
+  M6.8 (Anthropic key) and M8.3 (Kite credentials) introduce live secrets onto this machine; neither
+  may start until a pre-commit hook, a `make check` scan, and a CI scan are all in place and
+  demonstrated to fail on a planted fake. Self-attested "I reviewed my own diff" is not a control.
+- **Kite is the highest-severity credential in the system** — it can move real money. Treat any
+  suspected exposure of it as an incident, not a cleanup.
+- **This applies to `BUILD_STATE.json` too**, now that it is tracked (commit `64651a4`). It is
+  machine-written build state that is published on every push: no agent may write a credential,
+  token, DSN, or raw error payload that could embed one into it.
+
+## Open
+
+### D6 — M6.1: narrow the acceptance criteria to drop the dead GDELT DOC API → **ANSWERED: option 2.**
+
+**Raised:** 2026-08-10, by read-only investigation into M6.1's unsatisfiable acceptance bullet.
+**Answered:** 2026-08-10 by the owner.
+
+> **DECISION — option 2.** The `gdelt_doc_api` row is declared **out of scope** for M6.1 and stays
+> non-VERIFIED carrying its `candidate_alternatives`; the register already permits exactly that
+> (`source_register.py:54-64`, `:245-246`), so no new status is invented and nothing is deleted to
+> make a bullet pass. In exchange M6.1 owes the evidence its own spec promised: **every curated RSS
+> feed gets its own register row, VERIFIED, before M6.1 can be DONE.** There is no RSS row today.
+>
+> **Binding on the build:**
+> - M6.1 emits **unresolved** organisation text. It must NOT resolve entities to ISIN — **M6.2 owns
+>   resolution** under a tighter contract (alias table, labelled-sample precision/recall). A
+>   half-resolved entity field next to the ISIN-only-joins invariant is worse than an unresolved one.
+> - Dropping the DOC API is not a weakening: EXECUTION_PLAN names no vendor and no article-level
+>   granularity (§134 "News / geopolitical", §277 *"where available"*). GDELT was an implementation
+>   choice by the task author, not a ratified requirement.
+> - **Acknowledged one-way door:** RSS bodies are never fetched by design (headlines + links only,
+>   per licence), so article text cannot be backfilled later. If M6.3's evidence bundle needs more
+>   than a headline, that is a new decision and a new source, not a re-run of this one.
+> - M6.1 is **not** on the T0 mechanical decision path — BC3 triggers from M3.8 via M5.11 — so
+>   invariant #7 does not depend on this task.
+
+**The finding — the source is not the problem, the contract is.** M6.1 owns *two* source-register
+rows, not one:
+
+| Row | Status | Live re-probe, 2026-08-10 |
+|---|---|---|
+| `gdelt_v2_event_files` (`source_register.yaml:881–914`) | **VERIFIED** | 200 OK; a 15-min GKG file downloaded and parsed, 2.99 MB, 27 columns |
+| `gdelt_doc_api` (`:916–952`) | **FAILED** | 429, reconfirmed at the API's own stated 5 s spacing. Body: *"All high-traffic users should switch to our ngrams dataset"* |
+
+The 429 is a permanent global throttle, not a blip — and it is the row the register itself calls
+skippable (`candidate_alternatives`, `:946–951`: the event-files path *"needs no API at all"*).
+Nobody hammered the throttle to find out, per the §8 rule against evading rate limits.
+
+What is actually unsatisfiable is the acceptance bullet **"both source register rows flip to
+VERIFIED"** — it demands VERIFIED on a row whose own schema and validator never required it.
+`source_register.py:54–64` defines exactly three states (`VERIFIED`, `FAILED`,
+`BLOCKED_CREDENTIAL`) and the validator at `:245–246` already permits a non-VERIFIED row that
+carries `candidate_alternatives`. **No schema change is needed. The fix belongs in TASK_GRAPH.yaml.**
+
+**Two further gaps found in the same contract:**
+
+1. **There is no RSS row in the register at all**, though `rss.py` and `rss_feeds.yaml` are M6.1
+   deliverables. The "both rows" bullet was written when only the two GDELT rows existed; RSS
+   verification was never specified. Pre-existing gap, independent of the GDELT failure.
+2. M6.1's spec (`:1408`, the `entities` column) implies ISIN resolution happens during ingestion.
+   It must not — that is M6.2's job, which already has a tighter contract for it
+   (`analyst/monitor/linkage.py`, alias table, labelled-sample precision/recall). M6.1 should emit
+   **unresolved, source-native** org text.
+
+**Why this is safe to narrow rather than a weakening.** Neither EXECUTION_PLAN's §1 decisions nor
+the §6 invariants name GDELT, require article-level granularity, or name any vendor. The
+requirement is *"News / geopolitical"* — vendor-agnostic (§134), and §277 hedges *"news replay from
+timestamped stores **where available**"*, unlike the unconditional language used for prices.
+GDELT was the task author's implementation choice, not a plan requirement.
+
+**Criticality — high graph position, low data criticality.** 11 tasks sit behind M6.1, including
+the M6 **and** M8 gates. But M6.1 is **not on the T0 mechanical decision path**: the ISIN-native,
+PIT-clean trigger for break condition BC3 is M3.8 (NSE/BSE official announcements + keyword index)
+wired into T0 by M5.11 — both predate M6.1 and do not depend on it. M6.4 triggers T1 *"on a T0 flag
+or filing event"*, never on a GDELT signal. News enters only as evidence-bundle content shown to
+the LLM, downstream of ratified break conditions and deterministic rails (#6). **Invariant #7 ("no
+future data in a decision") is already satisfied without M6.1.** So parking buys safety we already
+have, while stalling two milestone gates.
+
+**Also relevant: RSS carries the India signal, GDELT largely does not.** GDELT's GKG is a global
+firehose — sampled rows were Australian and US local crime, zero India-finance content, and the
+schema has **no ticker or ISIN field**, only fuzzy free-text org names. Moneycontrol, ET Markets and
+Livemint all return 200 with India-listed company names dense in plain text. PIB works but serves
+some Hindi-language items, so normalization must handle or filter non-English.
+
+**The call — pick one:**
+
+1. **Minimal unblock** — drop the DOC API bullet only; RSS register rows deferred to a fast-follow
+   task. *Trivial. Leaves gap 1 open past M6.1's DONE.*
+2. **Full honest fix (recommended).** DOC API explicitly out of scope with its FAILED status
+   standing; each RSS feed gets its own VERIFIED register row **before** M6.1 is DONE; `entities`
+   stored unresolved with ISIN resolution named as M6.2's. *Small — four feeds to verify, same
+   shape as the 15+ existing register entries. No schema change, no invariant exposure, supersedable
+   without migration.*
+3. **RSS-primary reframing** — as 2, but RSS becomes the declared primary source and GDELT is
+   opportunistic (a GDELT failure logs and skips, never fails the pipeline). Better matches where
+   the signal actually is, but rewrites the task's title/spirit, which is more surface than the
+   failure requires.
+4. **Defer/park M6.1** — not recommended. Stalls 11 tasks and both gates for no compensating
+   safety, since the decision-critical path never needed it.
+
+**Recommendation: option 2.** It closes both real gaps on sources confirmed live today, with no
+schema change and no invariant exposure.
+
+### D7 — Drop Business Standard from M6.1's curated RSS set → **ANSWERED: drop it.**
+
+**Raised:** 2026-08-10. **Answered:** 2026-08-10 by the owner.
+`business-standard.com/rss/markets-106.rss` returns **403 (WAF block)**
+against the same user agent that gets 200 from Moneycontrol, ET Markets, Livemint and PIB.
+
+> **DECISION.** Business Standard is **removed** from M6.1's curated feed set — not parked as a
+> non-VERIFIED row, not substituted. Moneycontrol, ET Markets, Livemint and PIB are the set.
+>
+> - **A 403 from a WAF is a refusal, and §8 forbids working around it.** Rotating user agents or
+>   otherwise evading anti-bot measures to acquire a fourth feed is prohibited, and risks an IP ban
+>   mid-build for marginal signal. If this feed is ever wanted it comes back through a licence or a
+>   partner arrangement, as a new decision — never through evasion.
+> - PIB serves **Hindi-language items**; M6.1's normalisation must handle or explicitly filter
+>   non-English rather than assume English.
+
+**The call:** confirm dropping it, versus spending effort on UA/header tuning to get past the WAF.
+
+**Recommendation: drop it.** Three working India-finance feeds already cover the need, and evading
+an anti-bot measure for a fourth is precisely what AGENTIC_CONTEXT §8 forbids. This is a config
+change to the curated set, not a blocker.
+
+### For the record — GDELT BigQuery and NewsAPI: probed, not pursued
+
+**No decision needed now.** Both were probed live and both are human-gated under §3 (items 4 and 9):
+GDELT via BigQuery returns 401 and needs a GCP project **plus a billing account** (query cost is
+normally within free tier, but the account itself is the gate); NewsAPI.org returns 401
+`apiKeyMissing` and needs a paid key for anything beyond non-commercial dev use. Option 2 requires
+neither. Logged only so nobody later reaches for them silently — revisit if a task genuinely needs
+article-level global news volume that RSS + GDELT masterfiles cannot provide.
+
+### D8 — M3.9 was never blocked. Confirm the acceptance rewrite, and whether to split the task. → **ANSWERED: yes to both.**
+
+**Raised:** 2026-08-10. **Answered:** 2026-08-10 by the owner. **Blocks ~34 dependents** — the
+largest single unblock in the graph.
+
+> **DECISION.** Both parts approved as recommended.
+>
+> 1. **Acceptance rewrite: option 2.** `TASK_GRAPH.yaml:858-862`'s third bullet is replaced with
+>    the offline fixture assertion specified below — three indices, literal `Decimal` levels on a
+>    known date, `None`-not-zero for `'-'`. **No acceptance criterion in this repo may require a
+>    network fetch at verify time**; that is what made this one unsatisfiable, and rule B8 already
+>    said so.
+> 2. **Split approved.** M3.9 becomes a constituents task and a TRI task, so that no single task
+>    owns one VERIFIED and one FAILED source row. A task that can be neither honestly done nor
+>    honestly blocked is a bookkeeping defect, and this repo has already paid for one of those.
+>
+> **Consequences, binding on whoever builds it:**
+> - The register row is corrected to the real path `POST /BackPage/getTotalReturnIndexString`
+>   (no `.aspx`) with the `cinfo` string envelope. That correction is what actually unblocks the
+>   graph; it must not wait on the parser being finished.
+> - Ingest **daily** TRI even though nothing downstream needs daily levels — 25 years is one
+>   request, and re-fetching later is the expensive path.
+> - The three observed parser traps below (newest-first rows, CAPS index names, regenerating
+>   `RequestNumber`) are part of the build contract, not folklore.
+> - `TASK_GRAPH.yaml` and `source_register.yaml` are task-owned config: they are edited by the
+>   build sub-agent under the split tasks, not by hand in this file's commit.
+
+`nifty_tri_history` is marked `FAILED` because the register recorded a **stale URL path**, not
+because the source is gated. Corrected path, probed live 2026-08-10 (4 POSTs, ≥2.5s apart, no 403
+and no 429):
+
+| index | HTTP | bytes | rows | earliest | latest |
+|---|---|---|---|---|---|
+| NIFTY 50 | 200 | 177,036 | 1,239 | 01 Apr 2021 | 30 Mar 2026 |
+| NIFTY IT | 200 | 168,505 | 1,239 | 01 Apr 2021 | 30 Mar 2026 |
+| NIFTY CPSE | 200 | 170,170 | 1,239 | 01 Apr 2021 | 30 Mar 2026 |
+| NIFTY 50, max depth | 200 | 880,867 | 6,213 | **02 Apr 2001** | 30 Mar 2026 |
+
+`POST https://niftyindices.com/BackPage/getTotalReturnIndexString` — no `.aspx` — body
+`{"cinfo": "{'name':'NIFTY 50','startDate':'...','endDate':'...','indexName':'NIFTY 50'}"}`,
+**no session cookie, no Referer**. 25 years of all three indices is available in one request each.
+
+**Three defects in the current acceptance text (lines 858–862), not one:**
+
+1. *"spot-checked against a published value"* requires a **live fetch at verify time**, which
+   collides with ratified rule B8 (fixtures are checked in, `AGENTIC_CONTEXT.md:66`) and with the
+   no-network guard at `dataplatform/ingest/fetcher.py:27-29`. As written it cannot pass offline.
+2. It says **"NIFTY-TRI" singular**, but the ratified reference-case fixture
+   (`AGENTIC_CONTEXT.md:70`) needs **NIFTY 50 + NIFTY IT + NIFTY CPSE**.
+3. It is silent on depth. The binding constraint is **10 years**, set by M4.10's verify line
+   (`TASK_GRAPH.yaml:1063`) — not the case fixture's 5-year horizon.
+
+**Data-requirement verdict: nothing needs daily TRI *levels*.** M4.6's acceptance (`:988-990`)
+never mentions TRI; M4.10 wants a period return (`:1060`); M6.6's drawdown profile is
+portfolio-side and must trace to journal entries (`:1508`); the only TRI-aware code in the tree
+stores benchmark *names* as strings (`analyst/cases/policies.py:176-181`). Periodic return / XIRR
+plus a drawdown profile is sufficient. **Ingest daily anyway** — 25 years costs one request.
+
+**The call, part 1 — which acceptance rewrite.** Recommended (difficulty b, no data migration, no
+new invariant risk), replacing lines 858–862's third bullet with an assertion that is fully
+verifiable **offline against a frozen fixture**: TRI parses from
+`tests/fixtures/nifty_indices/2026/` for all three indices over 2021-04-01..2026-03-31, asserting
+(i) 1,239 rows per index with identical date sets; (ii) strictly increasing dates after
+normalisation, no duplicate, no gap against the M1.7 trading calendar; (iii) the literal `Decimal`
+levels **33655.43 / 41606.83 / 11793.29** on 2026-03-30; (iv) every level is `Decimal` and
+positive, and `NTR_Value` is `None` — never `Decimal 0` — where the source publishes `'-'`.
+Full option set (1: mechanical single-index; 2: recommended; 3: adds a TRI ≥ price-index
+cross-check but depends on an unverified historical-snapshot fetch; 4: split-aware) is in the
+options memo.
+
+**The call, part 2 — split M3.9 into a constituents task and a TRI task?** **Recommended: yes.**
+Not for parallelism — 16 of the dependents reconverge at M4.8 — but because **one task currently
+owns one VERIFIED row and one FAILED row, so it can be neither done nor blocked honestly.** The 34
+dependents divide 5 constituents-only, 9 TRI-only, 16 both, and M7.1/M7.3 need neither (they reach
+M3.9 only through the M3.10 gate edge). Cost of the split: 2 dependency lines and 1 task block.
+
+**Three parser traps worth knowing before anyone builds this** (all observed, not inferred): rows
+arrive **newest-first**; index names must be sent in **CAPS** and echo back title-cased; and a 5th
+key `RequestNumber` **regenerates on every request** — hash the payload as-is and determinism dies,
+which invariant "same inputs → byte-identical journal" would catch only after it hurt.
+
+---
+
+### D9 — A 200 with the wrong body is written straight into L0. Fix in the shared layer? → **ANSWERED: yes to both.**
+
+**Raised:** 2026-08-10. **Answered:** 2026-08-10 by the owner. This is the **generalizable** half of
+D8 and it outlives M3.9.
+
+> **DECISION.** Both parts approved.
+>
+> 1. **An executable `expect` hook is added to `CrawlPolicy`**, asserted before the L0 write, as
+>    **its own M1-series task** — not bolted onto M3.9. It reopens M1.2's module and changes the
+>    shared path every ingestion source runs through, so it earns its own contract, tests and
+>    review rather than being reviewed as an afterthought inside a parser task.
+> 2. **A read-only re-probe sweep of the whole source register is commissioned** — every `FAILED`
+>    and `BLOCKED_CREDENTIAL` row. It is an `explore` dispatch: no code, no PR, findings only.
+>
+> **Why the sweep, stated plainly:** *two of two* investigated FAILED rows were bookkeeping, not
+> dead sources (M6.1's contract, M3.9's stale URL). Until re-probed, **no FAILED row in this
+> register may be cited as a reason a task cannot proceed** — including by the planner. A stale
+> register row silently stalled ~34 tasks once already.
+>
+> **The trap the `expect` hook must avoid, recorded so it is not rediscovered:** a content-type
+> check does **not** work. The *working* niftyindices TRI response and the 92 KB block page are
+> both `text/html; charset=utf-8`. Only a parse/shape assertion discriminates.
+> `ops/gates/source-verification.md` §5 previously taught the content-type fix and has been
+> corrected.
+>
+> **Known rows sharing the hole:** `bse_announcements` (returns `{}` at HTTP 200),
+> `screener_company_fundamentals`, both BSE bhavcopies, both niftyindices CSVs.
+>
+> **Why this is urgent rather than tidy:** L0 is immutable under invariant #1. A bad payload
+> written there can never be cleaned up, only quarantined.
+
+`Fetcher.fetch` writes to L0 on **any 2xx with zero payload inspection**:
+`dataplatform/ingest/fetcher.py:402` calls `_request(...)`, `:403` calls `_l0.put(...)`, and there
+is **nothing between them**. The register's `parse_check` field is **prose, not executable**;
+`fetch_succeeded` only checks that the body string is non-empty
+(`dataplatform/ingest/source_register.py:175-182`), and the register validator runs against the
+YAML, never against a live payload. And because L0 is immutable by invariant #1, **a bad write
+cannot be cleaned up** — only quarantined.
+
+**Do not reach for a content-type check.** The working niftyindices response is
+`text/html; charset=utf-8`, identical to the block page — so a content-type guard rejects every
+good response. `ops/gates/source-verification.md` §5 item 1 taught exactly that wrong fix and has
+been corrected in place today.
+
+**Same hole, other rows:** `bse_announcements` (returns `{}` at 200),
+`screener_company_fundamentals`, both BSE bhavcopy rows, and both niftyindices CSV rows.
+
+**The call:** add a `validator`/`expect` hook to `CrawlPolicy`
+(`dataplatform/ingest/policy.py:168-191`), invoked between `fetcher.py:402` and `:403`, raising a
+fetch-level `PayloadShapeError` before anything reaches L0 — **as its own M1-series task**
+(recommended) rather than smuggled into M3.9. It reopens M1.2's module, which is why it wants its
+own task entry and its own gate rather than riding along on an M3 task.
+
+Two sub-questions bundled here: **(a)** when a row flips `FAILED → VERIFIED`, must a real fetcher
+run re-derive `sample_bytes` / `sample_sha256` / `parse_check` (recommended — otherwise VERIFIED
+just means "an agent edited a YAML file"), and **(b)** given two of two investigated `FAILED` rows
+turned out to be **bookkeeping errors rather than dead sources** (M6.1's contract, M3.9's stale
+URL), should the remaining `FAILED` / `BLOCKED_CREDENTIAL` rows be **re-probed before anyone treats
+them as real constraints**? Recommended: yes, as one scoped sweep task.
+
+---
+
+### D10 — Wave A merge order is not optional, and one fix only lands when two branches meet
+
+**Raised:** 2026-08-10. Three repair branches exist locally, none pushed. Read this before merging any
+of them.
+
+**Merge order:**
+
+1. **`polly/m5.4-finish` first** (7 commits). It is the branch that makes `make check` green — it
+   fixes the 6 static-analysis failures that commit `60874b6` introduced. This matters beyond its own
+   task: `make check` currently dies at `ruff format` *before* reaching the secret scan, so until
+   M5.4 lands, the scan does not run inside `make check` at all.
+2. **`polly/secrets-hardening` and `polly/m0.3-rework` together.** Neither is independently complete:
+
+| Merged alone | What you get |
+|---|---|
+| M0.3 only | A container stack that works, and a test suite that **still silently skips 136 tests** and exits 0 — the M0 gate's exact signature. The skip-guard fix lives in `dataplatform/config.py` + `tests/integration/**`, which the secrets branch owns. |
+| secrets only | A suite that fails loudly on a misconfigured DSN, against a stack whose migration-at-start and loopback-bind fixes are on the other branch. |
+
+**Known merge conflict:** both branches modify `Makefile` (secrets adds the scan step; M0.3's earlier
+work touched targets) and `ops/BACKLOG.md`. Small and textual, but expect to resolve them by hand.
+
+> **CORRECTION, 2026-08-10, later the same day.** The compose item below was first recorded here as a
+> *deferrable* post-merge task. That was wrong, and the correction matters more than the original
+> entry. An independent review demonstrated it against the real template: with
+> `POSTGRES_PASSWORD=pw@evil.example.com:5432/otherdb`, the interpolated DSN parses to
+> `host='evil.example.com'` — **the container sends its username and a prefix of its password to an
+> off-box host of the password's choosing.** `pw/slash` yields `host='trading'`; `pw%40enc`
+> authenticates with a silently different password. That is not a misparse to tidy up later, it is a
+> credential-exfiltration path that arms itself the moment a real password is set. It is now a
+> **BLOCKING, must-fix-before-merge** item, tracked as a Wave-A integration task rather than a
+> follow-up, and no branch should be merged until it is closed and verified.
+
+**Post-merge integration task — do NOT skip it.** The secrets branch replaced the single interpolated
+DSN with discrete `postgres_host/port/user/password/db` settings passed as psycopg keyword arguments,
+so no character is ever URI grammar. That closes a **silent misparse** on the host path: a password
+containing `/` made the old DSN parse as `host='trading', user=None, password=None`, and `%41`
+silently became `A` — connecting as the wrong user rather than failing. But
+`ops/docker-compose.yml` still hands the container **one interpolated `DATABASE_URL`**, so the
+in-container path keeps exactly the weakness the host path just shed. The fix is for compose to pass
+the discrete `POSTGRES_*` variables instead.
+
+It could not be done inside either branch: `ops/**` belongs to M0.3, whose `config.py` has no
+discrete fields, so making the change there would have broken that branch's own 138-test
+verification. It is a genuine two-branch dependency, deferred deliberately rather than forgotten.
+Until it lands, **a container password containing `/`, `%`, `@` or a space is still unsafe** even
+though the host-side path is fixed.
+
+**Enforcement, now closed on the secrets branch — but with one gap that remains open.** The B1 finding
+was that all three pre-publication controls were inert: `orch set-state DONE` ran format/lint/types and
+never called `make check`; `.pre-commit-config.yaml` was never installed (no `.git/hooks/pre-commit`
+existed anywhere); and `make check` reached the scan only on a tree that already passed formatting. The
+secrets branch fixes all three — the scan is now the **first** step of `make check` and the first,
+unconditional entry in `orch`'s check list, and the `# pragma: allowlist secret` bypass is disabled in
+every invocation. Verified by planting a pragma-carrying token inside a deliberately malformatted file:
+it still died at the scan, never reaching `ruff format`.
+
+**Still open, and stated accurately here because an earlier report of it was wrong:** nothing scans
+**commit messages**, anywhere. `orch` itself does not create commits — but **the agent does**
+(`git commit` is allow-listed and `orchestrator/prompts.py:100` instructs it), and `orch`'s scan runs
+*after* that commit already exists. Since repo policy forbids rewriting history, a secret in a commit
+message is caught only once it is permanently unrewritable. A `commit-msg` hook now exists but is
+local and opt-in (`make hooks`), so it does nothing for the autonomous path. Invariant #13 names commit
+messages explicitly, so this gap is real. All 6 of the secrets branch's own commit messages were
+manually scanned and are clean.
+
+---
+
+### D11 — The build system can record DONE over a red gate → **ANSWERED: fix all four parts, before Wave B.**
+
+**Raised:** 2026-08-10, from `BUILD_STATE.json` (tracked as of `64651a4`) and `ops/gates/M0.md`.
+**Answered:** 2026-08-10 by the owner.
+
+**The evidence, four observations that are one problem:**
+
+1. **Four tasks are recorded DONE over a failing gate.** C.3, M0.4, M1.4 and M1.11 carry
+   `state: DONE` with `reason: "make check failed with exit 2"`.
+2. **`orch`'s DONE path never runs the tests.** It runs format, lint, types, and (since the secrets
+   work) an unconditional secret scan. **No pytest.** "DONE" currently means "compiles and is
+   well-formatted".
+3. **R2 — the gate auditor cannot record a failure.** `./orch set <id> FAILED` is refused by design
+   by `orchestrator/state.py` (`ops/gates/M0.md:456`). The audit role has no write path for the one
+   artifact it exists to produce, so a failed gate lands in Markdown that no dependency walk reads.
+4. **Together these let the build stack on rubble, and it already did.** M0.3 had a commit and a
+   FAILED gate; every dep-walk read the commit and treated it as satisfied. **M0.4-M0.7 were built
+   on top of it.** That is why Wave A existed.
+
+> **DECISION — all four parts, sequenced BEFORE Wave B.**
+>
+> **(a) DONE must mean green.** `orch`'s DONE verification runs the full `make check` including
+> pytest and **refuses the transition** on failure. Accepted cost: every state transition gets
+> slower, and this will likely **turn several currently-DONE tasks red**. That is the point, not a
+> regression.
+>
+> **(b) Fix R2.** The gate auditor gets a legitimate write path for `FAILED`, so a failed gate is
+> recorded in machine-readable state rather than prose.
+>
+> **(c) Reconcile the four mis-recorded tasks** — as a read-only `explore` **first**. Re-run their
+> gates at their commits and find out what is actually true before writing any state.
+>
+> **(d) Ratify the commit-early mandate** into `AGENTIC_CONTEXT.md` §7 so it binds every builder,
+> not only the ones briefed ad hoc. **Done in this commit.**
+>
+> **Scope note:** (a), (b) and (c) touch `orchestrator/` — the build system, not product code — but
+> they are still code, so they are built by sub-agents under normal task discipline, not hand-edited.
+
+---
+
+### D12 — The source register cannot say "we are declining this source on policy grounds"
+
+**Raised:** 2026-08-10, from the D9(b) register sweep. **Status: OPEN.** Cited by
+`source_register.yaml` (`screener_company_fundamentals`) and by `M3.9.b`.
+
+**The finding.** `screener_company_fundamentals` is recorded `BLOCKED_CREDENTIAL`. The sweep found
+the register's export URL was itself a guess; the real form action is
+`POST /user/company/export/{id}/`, and **`/user/*` is robots-disallowed** — recorded in the
+register's own robots evidence for screener.in (fetched 200 at 2026-08-08T18:08:22). So the row is
+blocked by **policy**, not by a missing credential.
+
+**Why the label matters.** The status enum is `VERIFIED | FAILED | BLOCKED_CREDENTIAL`
+(`source_register.py:54-64`). None of those says "we are choosing not to take this data." A row
+labelled BLOCKED_CREDENTIAL invites a future reader — human or agent — to supply a credential and
+proceed, which §8 forbids. The label actively points at the prohibited action.
+
+This is the same shape as D6: **a vocabulary too narrow to express the truth forces dishonest
+bookkeeping.** D6 was resolved by discovering the register already permitted what was needed. Here
+it does not.
+
+**Options.**
+1. **Add a status** (`BLOCKED_POLICY` or `DECLINED`). Says the true thing; costs a schema change to
+   the enum, the validator, and every reader/report that switches on status.
+2. **Keep `BLOCKED_CREDENTIAL` + mandatory prose.** Zero code cost; keeps a label that points at the
+   forbidden action, and prose is not machine-readable — nothing can gate on it.
+3. **Use `FAILED`.** Wrong: nothing failed. It would also put a policy decision in the same bucket
+   the re-probe sweep exists to re-examine, guaranteeing someone re-probes a source we declined.
+4. **Delete the row.** Loses the evidence and the reasoning; the next sweep rediscovers screener.in
+   and re-reaches the same wall.
+
+**Recommendation: option 1.** The register's whole purpose is machine-readable source truth, and
+"declined on policy grounds" is a permanent state that must survive re-probe sweeps untouched —
+which requires it to be a status, not a sentence. Note this row is `M7.1`'s input, so the decision
+should land before M7.1 is built.
+
+---
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes

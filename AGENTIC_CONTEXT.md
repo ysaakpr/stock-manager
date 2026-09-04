@@ -51,9 +51,18 @@ Derived engineering decisions made under §1's authority (recorded here so they 
   `backtest/`, `accounting/`, `ops/`) live at the root per §8.2; no redundant nesting level.
 - **B6 — Migrations.** Plain numbered SQL files in `platform/store/migrations/NNNN_name.sql` plus a ~50-line
   runner, not Alembic. Boring tech (#13); the schema is small and append-only-ish.
-- **B7 — Git discipline.** Local repo, no remote. One commit per completed task, message
-  `[<task-id>] <title>` with a `Task:`/`Acceptance:` trailer. Commits are the rollback unit for a bad
-  autonomous wave. Never `--force`, never rewrite history, never commit `data/` or `.env`.
+- **B7 — Git discipline. THE REPO IS PUBLIC.** `origin` is `git@github.com:ysaakpr/stock-manager.git`
+  and its visibility is **public**. Every commit you make is world-readable the moment it is pushed, and
+  the full history — all of it, not a squashed snapshot — is already published. An earlier revision of
+  this line said "local repo, no remote"; that was **false**, and every agent that trusted it was
+  building under the wrong threat model. Write every file, commit message, fixture, log line and
+  docstring as if a stranger is reading it, because one can. Deleting a secret in a later commit does
+  **not** unpublish it: anything committed and pushed is compromised and must be rotated at the
+  provider (invariant #13, `ops/runbooks/secret-leak.md`).
+  One commit per completed task, message `[<task-id>] <title>` with a `Task:`/`Acceptance:` trailer.
+  Commits are the rollback unit for a bad autonomous wave. Never `--force`, never rewrite history,
+  never commit `data/` or `.env`. History rewriting to expunge a leak is a §3 human-only decision —
+  park it, never attempt it.
 - **B8 — Test fixtures are checked in.** Every source parser has frozen sample files per format era under
   `tests/fixtures/<source>/<era>/`. Live network is *never* touched by the test suite; ingestion tests run
   offline and deterministically in CI.
@@ -123,16 +132,49 @@ A task is `DONE` only when **all** hold:
 
 1. Every acceptance criterion in the task entry demonstrably passes.
 2. The task's `verify` command exits 0, and its output is captured into the state record.
-3. Format, lint and types are clean **on the task's own deliverable paths**. `orch` runs these
-   scoped, not repo-wide: several builder agents share one working tree, so a repo-wide check
-   fails a finished task because a *different* agent has a half-written file on disk. You are
-   accountable for your files. Repo-wide green is the gate auditor's job, run when the tree is
-   quiet — and a gate auditor must not fail a task for another agent's in-flight edit.
+3. **The full gate is green, repo-wide** — secret scan, format, lint, types, and the tests. `orch
+   set <id> DONE` runs it and refuses the transition when it fails (D11).
+
+   *Amended 2026-08-10; corrected the same day.* This rule previously mandated **scoped** checks,
+   on the premise that "several builder agents share one working tree, so a repo-wide check fails a
+   finished task because a *different* agent has a half-written file on disk."
+
+   **The correction:** the first version of this amendment asserted that builders "now run in
+   per-agent git worktrees". That was **false for `orch run`** and I should not have written it.
+   There is no worktree support anywhere in `orchestrator/`; `_spawn` passes `cwd=REPO` and
+   concurrency defaults to 3. It was true only of the separately-driven sub-agents that repaired
+   Wave A. A review demonstrated the consequence: a peer's untracked half-written file failed an
+   innocent task's gate three times at the `format` step, auto-parking it and emptying the ready
+   queue — a livelock.
+
+   **So the repo-wide gate REQUIRES worktree isolation per builder, and that isolation is a
+   prerequisite, not an assumption.** Until `orch` spawns each builder in its own worktree, a
+   repo-wide gate under concurrency > 1 can park a task for someone else's mess. The old scoped
+   rule was not wrong about the hazard — it was wrong about the remedy, because it bought
+   isolation by giving up the tests.
+   The old rule also let "DONE" mean "compiles and is well formatted" — `orch` never ran pytest at
+   all — which is exactly how four tasks (C.3, M0.4, M1.4, M1.11) came to be recorded DONE with
+   `reason: "make check failed with exit 2"`.
+
+   A scoped format/lint/types pass still runs **first**, as a fast fail, so you learn immediately
+   whether the broken file is one of yours. It is a convenience, not the gate.
+
+   The gate is defined exactly once, in `orchestrator/checks.py`. `make check` and `orch` both
+   call it; they cannot drift, because there is nothing left to drift from.
 4. New behaviour has tests. Ingestion parsers have era fixtures (B8); anything touching money, adjustment
    factors, rails, or PIT boundaries has tests that fail if the logic is reversed.
-5. No secrets, no `data/`, no large binaries in the commit.
+5. The secret scan passes and the diff introduces no credential-shaped literal — no API key, token,
+   password, DSN with an embedded password, or private key, in code, fixture, config or commit message
+   (invariant #13). No `data/`, no large binaries in the commit.
 6. Docstring or `ops/runbooks/` entry for anything an operator must run or recover.
-7. One commit, message per B7.
+7. Commits on the task's own branch, every message prefixed `[<task-id>]` per B7.
+
+   *Amended 2026-08-10.* This previously read "one commit". It now reads *commits*, plural, and
+   deliberately: §7 requires committing each coherent green piece as you reach it, because the
+   runner has died mid-task seven times and taken uncommitted trees with it. A task that lands as
+   five well-named commits is not untidy — it is the recoverable outcome, and the one-commit rule
+   was quietly buying crash-fragility in exchange for a tidy log. Squashing is the merger's option
+   at merge time, never a reason to delay committing.
 
 Reporting a task DONE whose verify command did not pass is the single worst failure mode in this system —
 it poisons every downstream task that trusts it. Report the failure instead; `FAILED` costs one retry,
@@ -166,6 +208,25 @@ the verifier must fail the task.
     `SKIPPED_DATA_RED` in the journal and no trading (§4.4).
 11. **The clock is injected** (B10). Replay is byte-for-byte reproducible.
 12. **Append-only means append-only.** Journal and amendment log are never updated or deleted in place.
+13. **A secret never enters the repo, a log, or an artifact.** The repo is public (B7), so this is the one
+    invariant whose breach cannot be undone by a later commit.
+    - **Where a secret may live:** process environment and the untracked `.env` / `ops/.env`. Nowhere else
+      — not source, YAML, JSON, SQL migration, test fixture, runbook, commit message, or `data/`.
+    - **Every credential-bearing setting is a `SecretStr`**, including connection strings that embed a
+      password (a Postgres DSN *is* a credential). If it can authenticate, it is a secret.
+    - **No secret reaches a log, the status API, or the journal.** The journal is append-only (#12), so a
+      secret written there can never be redacted — it is permanent. Never log a whole `Settings` object,
+      never print the environment, never enable frame-locals in a traceback renderer, and scrub
+      credential-bearing URLs before any error string is logged.
+    - **Never interpolate a secret into a URL, a subprocess argv, or an exception message.** A token in a
+      URL path leaks through every library that quotes the URL back at you when a request fails.
+    - **Checked-in fixtures (B8) must be credential-free.** A recorder that captures request headers must
+      strip authentication before anything is written under `tests/fixtures/`.
+    - **`BUILD_STATE.json` is tracked and therefore published** (D5, commit `64651a4`). It is written by
+      machines, not reviewed by eyes, and every push publishes it. A task's recorded `reason` or `note` is
+      often a raw error string — scrub it. Never let a DSN, token, argv, or captured response body reach
+      build state, and never widen it to hold configuration that could carry a credential.
+    - **A leaked key is rotated first and argued about second.** See `ops/runbooks/secret-leak.md`.
 
 ---
 
@@ -192,6 +253,21 @@ be 3× the estimate — do not thrash. Stop, and split:
 Children inherit the parent's deps and milestone; the parent becomes a no-op container that completes when
 its children do. Splitting early is cheap and correct. Degrading quality to squeeze a too-large task into one
 context is the failure this rule exists to prevent.
+
+**Commit early, commit often — the runner will die under you.** This is not style advice. The runner has
+exited mid-task at least seven times (M5.3, M5.4 and M6.1 on 2026-08-08; four more sessions on 2026-08-10),
+and every time it took the *uncommitted* working tree with it. That is the whole story behind
+`60874b6 "first commit"`: an abandoned tree, hand-committed later under a message that breaks the
+`[<task-id>]` convention, carrying 1,316 lines whose declared tests had never been written.
+
+So: **commit each coherent green piece as you reach it, on your own branch, before moving to the next.**
+Do not save a single commit for the end of the task. A crash must cost you the last few minutes, not the
+whole task. Intermediate commits use the same `[<task-id>] <title>` convention; a task that ends up with
+five commits instead of one is not untidy, it is recoverable.
+
+Corollary for whoever inherits a crashed task: **the working tree left behind is untrusted WIP.** It was
+never run to green and no one reviewed it. Read it, judge it against the acceptance criteria, and keep or
+discard it on the merits. Never assume it was nearly done.
 
 **A dependency turns out to be wrong or missing.** Do not work around it silently. If the fix is small and
 inside your task's blast radius, fix it and note it. If it is not, park with `--why-blocked` naming the

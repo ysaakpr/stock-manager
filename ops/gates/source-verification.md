@@ -150,7 +150,24 @@ These came out of the sweep and are cheap now, expensive later.
 1. **HTTP 200 is not success on three of these hosts.** `www.bseindia.com`, `niftyindices.com`
    and `www.screener.in` all answer unknown paths with 200 + HTML. A fetcher that trusts the
    status code will checksum 92 KB of markup into L0 and call it a TRI series. Validate
-   content-type and payload shape before the write, on every source.
+   **payload shape** before the write, on every source.
+
+   > **Correction, 2026-08-10 — do not use content-type as the discriminator.** This item
+   > originally said "validate content-type and payload shape". The content-type half is **false
+   > and actively harmful**: `niftyindices.com` serves its *successful* TRI response as
+   > `text/html; charset=utf-8` — byte-for-byte the same content-type as the block page. A
+   > content-type check rejects every good response. Only a **parse/shape assertion** separates
+   > success from failure here: parse the body and assert the expected structure (for TRI, a JSON
+   > array whose rows carry `Date` and `TotalReturnsIndex`), then store. Same conclusion for the
+   > BSE `{}`-at-200 case in item 2 — that is also a shape assertion, not a header check.
+   >
+   > Root cause of the original error: the sweep probed a **stale URL path**
+   > (`/Backpage.aspx/getTotalReturnIndexString`). The live path is
+   > `/BackPage/getTotalReturnIndexString` — no `.aspx` — with the body wrapped in a `cinfo`
+   > string envelope, and it needs **no session cookie and no Referer**. The HTML that came back
+   > was this host's answer to a path that does not exist, not an application-level session gate.
+   > `nifty_tri_history`'s `failure_note` in `dataplatform/ingest/source_register.yaml` still
+   > records the old conclusion and is corrected as part of M3.9.
 2. **BSE's announcements API returns `{}` with a 200** when `strPrevDate != strToDate`. An empty
    success. Ingest must assert the `Table` key is present and non-empty on a trading day.
 3. **Two datasets have no ISIN and must not be joined without D2**: `sec_bhavdata_full` (SYMBOL +
