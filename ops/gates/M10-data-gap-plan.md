@@ -42,6 +42,69 @@ free cash flow and accruals remain impossible; no gross-block or working-capital
 can only be approximated (equity + debt, where the debt/equity ratio is stated) rather than
 computed; and quarterly equity is unavailable, so ROE is an annual measure here, not a rolling one.
 
+## Validation: the derivations checked, before building anything
+
+Both derivations were tested before committing to a schema migration, which turned up one design
+change that would otherwise have shipped as a silent defect.
+
+### Shares outstanding — 95.0% correct, and the failures detect themselves
+
+`profit_after_tax / eps_basic` is an implied share count using only whitelisted concepts, so it is
+a free, offline check on `paid_up / face_value`. Over the **10,547 filings** where both are
+computable:
+
+| Agreement | Filings | |
+|---|---|---|
+| within ±50% | **10,016 (95.0%)** | the derivation is right |
+| ×1e5 or worse | 97 (0.9%) | filer scale error |
+| ×10–1e3 | 233 (2.2%) | filer scale error |
+| < 0.5× | 201 (1.9%) | filer scale error |
+
+The failures are not noise — they are **clean powers of ten**. KIOCL states
+`PaidUpValueOfEquityShareCapital = 62,192,556,500,000` with `unitRef="INR"`, which would be ₹62
+lakh crore for a company whose paid-up capital is around ₹600 crore; BASF, SPAL and VIKASMCORP are
+off by almost exactly 1e6. The absolute-rupee scale verified earlier was verified on *P&L*
+concepts (a captured Reliance filing's revenue matches its published crore figure exactly); it does
+**not** hold for the capital elements, and assuming it did would have put a 1e6 error into a market
+cap.
+
+**So Action 1 must ship with a guard, not just a mapping:** derive the share count, compare it to
+`profit_after_tax / eps_basic`, and refuse the fact when they disagree beyond a tolerance rather
+than storing a number that is wrong by six orders of magnitude. The filing's own EPS is the
+detector, so this costs nothing and needs no third party.
+
+### Equity — validated against Screener, with one definitional difference
+
+Equity has no equivalent internal identity, so this one needed an outside source. Screener's Excel
+export is `BLOCKED_CREDENTIAL`, but the register records a verified working substitute — the
+robots-permitted company page — and the M7.1 parser already reads its tables. **Invariant #8
+permits this**: it quarantines restated fundamentals from *backtests and decisions*, and comparing
+our arithmetic against an independent statement of the same accounting fact is neither. The check
+keeps that structural rather than promised — the pages land in a scratch L0 the real lake never
+sees, and nothing writes to `pit_fundamentals`. Verified after the run: the PIT store's only source
+is `nse_xbrl_filing`.
+
+Thirteen companies, largest first, standalone or consolidated matched to Screener's own basis:
+
+| Component | Result |
+|---|---|
+| Paid-up capital | **12 of 13 exact** (only IOC differs, 2.5% — a bonus/buyback timing difference) |
+| Reserves | **10 of 13 exact to 0.0%**; TCS −0.2%, LT +1.4% |
+| Reserves, two outliers | VEDL −20.0%, GAIL −11.8% |
+
+Reliance, NTPC, POWERGRID, ITC, HINDALCO, WIPRO and SAIL agree to the rupee on both components.
+
+The two outliers are **not errors, and their direction gives them away**: ours is lower in both
+cases, and our element is `ReserveExcludingRevaluationReserves` while Screener reports total
+reserves. The gap is the revaluation surplus, which asset-heavy companies (a miner and a pipeline
+utility) carry and which the element excludes *by name*. Two valid definitions, not a discrepancy —
+and for a P/B or ROE factor the exclusion is the better choice, since a revaluation surplus inflates
+book value with no cash movement and at management's discretion.
+
+**So the concept must be named for what it is** — `shareholders_equity_excl_revaluation`, not
+`shareholders_equity`. Calling it the latter would invite a reader to reconcile it against a vendor
+figure and conclude the data is wrong.
+
 ## Action 1 — Extract the balance-sheet concepts. No fetching at all.
 
 This is a parser change. Every document needed is already in L0, and `_ref_for` reuses stored
@@ -49,13 +112,18 @@ payloads, so re-deriving the whole store costs **zero requests**.
 
 1. Extend `CONCEPTS` in `dataplatform/ingest/xbrl/models.py` with the elements above, per taxonomy
    family (the banking form names its own asset-quality items).
-2. Add the two derived facts — `shares_outstanding`, `shareholders_equity` — computed in the
-   parser from stated elements, never inferred when an input is missing. A filing lacking either
-   input yields no derived fact rather than a guess, matching how the existing whitelist behaves.
-3. Add `taxonomy` to `FundamentalFact` and the L1 schema in the same change (already filed
+2. Add the two derived facts, named for exactly what they are: `shares_outstanding` and
+   `shareholders_equity_excl_revaluation`. Computed in the parser from stated elements, never
+   inferred when an input is missing — a filing lacking either input yields no derived fact rather
+   than a guess, matching how the existing whitelist behaves.
+3. **Guard `shares_outstanding` with `profit_after_tax / eps_basic`** and refuse the fact when the
+   two disagree beyond a tolerance. 5% of filings state a paid-up capital that is wrong by a clean
+   power of ten (see the validation above), and without the guard those become market caps wrong by
+   the same factor. Surface the refusals as a count rather than dropping them silently.
+4. Add `taxonomy` to `FundamentalFact` and the L1 schema in the same change (already filed
    separately in `ops/BACKLOG.md`). It is the same schema migration and the same re-derivation, so
    doing them together halves the work and avoids a second rewrite of every partition.
-4. Re-derive `pit_fundamentals` from L0.
+5. Re-derive `pit_fundamentals` from L0.
 
 **Sequencing is not optional.** `_rows_of` enforces `_L1_SCHEMA` on read and `write_pit` merges
 existing partitions, so adding a column while the campaign is writing makes already-written

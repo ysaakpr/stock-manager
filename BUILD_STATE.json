@@ -329,6 +329,15 @@
       "reason": "Correct M7.3's XBRL path (built on fabricated fixtures) so real NSE filings ingest, before the M10.4 fundamentals backfill can land real facts?",
       "state": "PENDING"
     },
+    "M11.1": {
+      "attempts": 0,
+      "commit": "af5da21",
+      "finished": "2026-09-04T07:12:26+00:00",
+      "note": "Probed 6 macro surfaces (34 requests, 7 hosts); built the PIT macro store + index valuation parser + evidence-backed index name history. Register: 27 entries, 17 rows, validates. make check green (2510 passed).",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run python -m dataplatform.ingest.source_register validate && uv run pytest tests/unit/test_macro_series.py -q\n(exit 0)\nsource register OK \u2014 27 entries over 17 \u00a74.1 rows (23 VERIFIED, 3 FAILED, 1 BLOCKED_CREDENTIAL); 14 hosts with a robots record; swept 2026-08-08 in 47 requests\n  open: nifty_tri_history [FAILED] -> M3.9\n  open: gdelt_doc_api [FAILED] -> M6.1\n  open: screener_company_fundamentals [BLOCKED_CREDENTIAL] -> M7.1\n  open: alfred_series_vintage [FAILED] -> M11.1\n.........................                                                [100%]\n\n$ uv run ruff format --check dataplatform/ingest/macro/index_valuation.py dataplatform/ingest/macro/models.py dataplatform/store/macro_series.py tests/unit/test_macro_series.py\n(exit 0)\n4 files already formatted\n\n$ uv run ruff check dataplatform/ingest/macro/index_valuation.py dataplatform/ingest/macro/models.py dataplatform/store/macro_series.py tests/unit/test_macro_series.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/macro/index_valuation.py dataplatform/ingest/macro/models.py dataplatform/store/macro_series.py tests/unit/test_macro_series.py\n(exit 0)\nSuccess: no issues found in 4 source files"
+    },
     "M2.1": {
       "attempts": 1,
       "commit": "1941253",
@@ -1069,7 +1078,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-09-03T17:15:39+00:00",
+  "updated_at": "2026-09-04T07:12:26+00:00",
   "version": 1,
   "wave": 1
 }
