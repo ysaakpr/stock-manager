@@ -41,6 +41,23 @@ filing-date window (default 3 — one quarter); `--report` sets the coverage-rep
    `nse_xbrl_filing/<filing_id>`. `write_pit` lands each filing in its `filing_date` partition; a
    restatement is a new record, never an overwrite (invariant #8).
 
+## Watching a run
+
+```bash
+ops/fundamentals_progress.sh        # one snapshot
+ops/fundamentals_progress.sh -w     # refresh every 30s
+```
+
+Reports index chunks, filings published/failed against the in-universe total, the publish rate over
+the last ten minutes with an ETA, the L1 partition span, L0 size, and **failures grouped by cause**
+— anything it cannot classify is printed as `UNKNOWN — needs a look`, which is the line to watch:
+every other class is a known and understood outcome.
+
+Progress comes from `sync_state`, not from tailing a log, because the checkpoint is the authority on
+what is done. The denominator is the *in-universe* count, not the raw announcement count — the
+runner only attempts entries whose ISIN is in the price-window universe (about 63% of documents),
+and using the announcement total instead nearly doubles the quoted ETA.
+
 ## Restarting after a failure
 
 **Rerun the same command.** Nothing is redone: the checkpoint is committed per unit, and the only
