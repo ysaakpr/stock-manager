@@ -57,7 +57,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Final
 from xml.etree import ElementTree as ET
@@ -109,6 +109,22 @@ _PERIOD_END_ELEMENT: Final = "DateOfEndOfReportingPeriod"
 #: context, so it is read document-wide and never as a column's own period.
 _FY_START_ELEMENT: Final = "DateOfStartOfFinancialYear"
 _FY_END_ELEMENT: Final = "DateOfEndOfFinancialYear"
+
+#: What `ReportingQuarter` says, mapped to (months after the financial-year start, months long).
+#: The 2018-2022 `…_WEB.xml` generation states no per-column reporting period; for a *sub-annual*
+#: filing it names the period here instead, and with the financial year that is a complete
+#: statement of what the column covers. `Yearly` is deliberately absent: on those documents the
+#: quarter column carries a `Yearly` label from the header block while being zero-filled, and the
+#: year's numbers sit in the cumulative column — so `Yearly` on a quarter column says nothing about
+#: that column and must not be read as if it did (see `_declared_period`).
+_REPORTING_QUARTER_ELEMENT: Final = "ReportingQuarter"
+_SUB_ANNUAL_PERIODS: Final[dict[str, tuple[int, int]]] = {
+    "first quarter": (0, 3),
+    "second quarter": (3, 3),
+    "third quarter": (6, 3),
+    "fourth quarter": (9, 3),
+    "half yearly": (0, 6),
+}
 
 #: The column token of the *cumulative* column — the year-to-date, and on an annual filing the year.
 #: Every filing in the captured corpus that declares its columns' periods agrees on this (`FourD`
@@ -693,9 +709,53 @@ def _declared_period(
     end = _one(facts, _PERIOD_END_ELEMENT, context_id=context_id, filename=filename)
     if start is not None and end is not None:
         return start, end
-    if token == _CUMULATIVE_TOKEN and financial_year is not None:
+    if financial_year is None:
+        return None
+    if token == _CUMULATIVE_TOKEN:
         return financial_year
-    return None
+
+    # Not the cumulative column, so the financial year is not its period — but `ReportingQuarter`
+    # may name which part of that year it is, and on the older documents that is the only statement
+    # of the column's period there is. `Yearly` is excluded on purpose (see `_SUB_ANNUAL_PERIODS`).
+    quarter = _one(facts, _REPORTING_QUARTER_ELEMENT, context_id=context_id, filename=filename)
+    if quarter is None:
+        return None
+    span = _SUB_ANNUAL_PERIODS.get(quarter.strip().lower())
+    if span is None:
+        return None
+    return _period_within(financial_year, span, context_id=context_id, filename=filename)
+
+
+def _period_within(
+    financial_year: tuple[str, str],
+    span: tuple[int, int],
+    *,
+    context_id: str,
+    filename: str,
+) -> tuple[str, str] | None:
+    """The `(start, end)` of a sub-annual span measured from the financial year's start.
+
+    Derived arithmetic, so it is worth being clear about why it cannot mislabel a period: whatever
+    this returns still has to *equal the index entry's own period exactly* for the column to be
+    selected (`_select_column`). A wrong derivation therefore matches nothing and the filing fails
+    loudly, exactly as it did before — it can never be stored under a period nobody asked for.
+    """
+    fy_start = _iso_date(
+        financial_year[0], what=f"context {context_id!r} financial-year start", filename=filename
+    )
+    offset, length = span
+    start = _add_months(fy_start, offset)
+    end = _add_months(fy_start, offset + length) - timedelta(days=1)
+    return start.isoformat(), end.isoformat()
+
+
+def _add_months(day: date, months: int) -> date:
+    """`day` shifted by whole months, keeping the day-of-month.
+
+    Financial years start on the 1st, so no clamping is needed for the spans this is used with.
+    """
+    total = day.month - 1 + months
+    return day.replace(year=day.year + total // 12, month=total % 12 + 1)
 
 
 def _select_column(

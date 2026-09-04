@@ -77,6 +77,8 @@ TARACHAND: Final = "INE555Z01012"  # the Non-Ind-AS non-bank taxonomy
 JKBANK: Final = "INE168A01017"  # identifies its entity by BSE scrip code
 HEALTHX: Final = "INE019J01013"  # renamed: files as SASTASUNDR, indexed as HEALTHX
 EMKAY: Final = "INE296H01011"  # an annual-only document listed under a quarterly entry
+#: A sub-annual column whose period is stated only by `ReportingQuarter` + the financial year.
+CAPTRUST: Final = "INE707C01018"
 
 Q3FY25_START: Final = date(2024, 10, 1)
 Q3FY25_END: Final = date(2024, 12, 31)
@@ -235,7 +237,7 @@ def _mutate(repo_root: Path, name: str, old: str, new: str, *, count: int = -1) 
 
 def test_every_datum_carries_both_dates(all_filings: tuple[Filing, ...]) -> None:
     """No fact exists without both a period end and a filing date, and never the same value."""
-    assert len(all_filings) == 25
+    assert len(all_filings) == 26
     for filing in all_filings:
         assert filing.facts
         for fact in filing.facts:
@@ -769,6 +771,55 @@ def test_an_annual_only_document_refuses_to_answer_for_a_quarter(
         _load(quarterly_entry, repo_root=repo_root)
 
 
+def test_a_sub_annual_columns_period_comes_from_its_reporting_quarter(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """A quarter column that states no period still says *which* quarter it is.
+
+    The 2018-2022 generation writes no `DateOf…ReportingPeriod` on a sub-annual filing. It writes
+    `ReportingQuarter` — `First quarter` here — and the financial year, which together state the
+    period completely. Reading them recovers filings that would otherwise be refused outright: 98
+    of them in the FY2018-19 segment alone.
+
+    The derivation cannot mislabel a period, and that is what makes it safe rather than a guess:
+    whatever it produces must still equal the index entry's own period *exactly* before the column
+    is selected, so a wrong derivation matches nothing and fails loudly.
+    """
+    document = (
+        repo_root / FILINGS_DIR / "NONINDAS_38571_34193_11082018045941_WEB_2.xml"
+    ).read_text(encoding="utf-8")
+    assert "DateOfStartOfReportingPeriod" not in document  # no per-column period at all
+    assert '<in-bse-fin:ReportingQuarter contextRef="OneD">First quarter' in document
+    assert '<in-bse-fin:DateOfStartOfFinancialYear contextRef="OneD">2018-04-01' in document
+
+    filing = _load(_entry(entries, isin=CAPTRUST, nature=Nature.CONSOLIDATED), repo_root=repo_root)
+    # Q1 of a financial year starting 01-Apr — derived, then confirmed against the entry.
+    assert (filing.period_start, filing.period_end) == (date(2018, 4, 1), date(2018, 6, 30))
+    assert _company_value(filing, "revenue_from_operations") == Decimal("506491000.00")
+
+
+def test_a_yearly_label_on_a_quarter_column_is_not_read_as_a_period(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """`ReportingQuarter = Yearly` on the quarter column says nothing about that column.
+
+    This is the asymmetry that makes the rule above safe. On an annual-only filing the header
+    block — financial year and `Yearly` — is pinned to `OneD`, but `OneD` is zero-filled and the
+    year's numbers sit in the cumulative column. Treating `Yearly` as `OneD`'s own period would
+    make two columns claim the same period, and the parser would either report a company's revenue
+    as zero or refuse an annual filing that currently works. So `Yearly` is excluded from the
+    sub-annual map, and Allahabad Bank's annual filing still resolves through the cumulative column.
+    """
+    document = (repo_root / FILINGS_DIR / "BANKING_48497_136132_14092019023146_WEB.xml").read_text(
+        encoding="utf-8"
+    )
+    assert '<in-bse-fin:ReportingQuarter contextRef="OneD">Yearly' in document
+
+    filing = _load(_entry(entries, isin=ALBK, nature=Nature.CONSOLIDATED), repo_root=repo_root)
+    assert (filing.period_start, filing.period_end) == (date(2018, 4, 1), date(2019, 3, 31))
+    assert _company_value(filing, "profit_after_tax") == Decimal("-84573800000.00")
+
+
 def test_the_non_ind_as_taxonomy_maps_onto_the_same_concept_keys(
     entries: tuple[FilingIndexEntry, ...], repo_root: Path
 ) -> None:
@@ -1115,7 +1166,7 @@ def test_writing_the_same_filing_twice_is_idempotent(vst_original: Filing, tmp_p
 def test_the_index_parses_every_real_record(entries: tuple[FilingIndexEntry, ...]) -> None:
     """Every record in the captured slice parses — the whole point of the rewrite."""
     raw = json.loads(INDEX.read_text(encoding="utf-8"))
-    assert len(entries) == len(raw) == 27
+    assert len(entries) == len(raw) == 28
 
 
 def test_a_whole_live_index_response_parses(repo_root: Path) -> None:

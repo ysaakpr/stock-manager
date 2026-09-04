@@ -59,7 +59,7 @@ WARM_URL: Final = "https://www.nseindia.com/"
 NOW: Final = datetime(2026, 9, 3, 18, 30, tzinfo=IST)
 CLOCK: Final = FrozenClock(NOW)
 
-#: The captured index slice holds 27 real announcements — 26 with an XBRL document and one with
+#: The captured index slice holds 28 real announcements — 27 with an XBRL document and one with
 #: none. `VSTTILLERS` accounts for four (two natures x an original filing and its correction) and
 #: `SCHAEFFLER` for four (two natures x a quarterly and an annual entry over the same documents);
 #: the rest span the older format eras (`tests/fixtures/xbrl/README.md`).
@@ -72,7 +72,7 @@ MCL: Final = "INE813V01014"
 TARACHAND: Final = "INE555Z01012"
 JKBANK: Final = "INE168A01017"
 HEALTHX: Final = "INE019J01013"
-ENTRIES_IN_SLICE: Final = 27
+ENTRIES_IN_SLICE: Final = 28
 Q3FY25_END: Final = date(2024, 12, 31)
 VST_ORIGINAL_FILED: Final = date(2025, 2, 11)
 VST_RESTATED_FILED: Final = date(2026, 7, 30)
@@ -389,7 +389,7 @@ def test_coverage_report_enumerates_what_ran_and_what_did_not(tmp_path: Path) ->
     assert "Window: 2026-01-01 .. 2026-12-31" in rendered
     # Both non-ingest outcomes are named, so a reader is never left guessing at the difference
     # between the discovered count and the published one.
-    assert "Entries skipped (ISIN not in universe): 19" in rendered
+    assert "Entries skipped (ISIN not in universe): 20" in rendered
     assert "Entries skipped (no XBRL document in the feed): 0" in rendered
 
 
