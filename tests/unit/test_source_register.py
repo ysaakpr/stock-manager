@@ -35,8 +35,8 @@ from dataplatform.ingest.source_register import (
 #: legitimately postdates the sweep. The honest anti-fabrication invariant is therefore not
 #: "before the C.1 sweep" but "not after the build actually ran" — a fixed, checked-in ceiling so
 #: the suite stays offline and deterministic (B10). Bump this when a task records a verification on
-#: a newer date (M6.1 did, on 2026-09-02: curated_rss).
-LATEST_VERIFICATION: datetime = datetime(2026, 9, 2, 23, 59, 59, tzinfo=IST)
+#: a newer date (M6.1 did, on 2026-09-02: curated_rss; M11.1 on 2026-09-04: the macro probe).
+LATEST_VERIFICATION: datetime = datetime(2026, 9, 4, 23, 59, 59, tzinfo=IST)
 
 
 @pytest.fixture(scope="module")

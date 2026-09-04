@@ -48,6 +48,9 @@ PLAN_ROWS: Final[tuple[str, ...]] = (
     "News / geopolitical",
     "Fundamentals (restated)",
     "Fundamentals (point-in-time)",
+    # Proposed amendment (M11.1, EXECUTION_PLAN §12) — awaiting owner ratification. The daily
+    # market-state and economic backdrop the analyst reasons against; §4.1 v1.0 has no such row.
+    "Macro / economic backdrop",
 )
 
 
@@ -160,6 +163,10 @@ class Source(BaseModel):
 
     status: Status
     verified_at: datetime
+    #: The HTTP status the pattern last answered with. `0` is meaningful and distinct from
+    #: `None`: it means the request *was* made and no HTTP response arrived at all (TLS
+    #: established, then a timeout or a stream reset), which is a transport failure rather than
+    #: an application one. `None` means the pattern was never requested, which no entry may be.
     last_http_status: int | None = None
     sample_bytes: int | None = None
     content_type: str | None = None
@@ -239,7 +246,10 @@ def _acceptance_problems(reg: SourceRegister) -> Iterator[str]:
         if source.plan_row not in PLAN_ROWS:
             yield f"{source.id}: plan_row {source.plan_row!r} is not a §4.1 row"
         if source.last_http_status is None:
-            yield f"{source.id}: no last_http_status — the pattern was never actually requested"
+            yield (
+                f"{source.id}: no last_http_status — the pattern was never actually "
+                "requested (use 0 for a request that got no HTTP response at all)"
+            )
         if not source.fetch_succeeded and not source.failure_note:
             yield f"{source.id}: unsuccessful fetch with no explicit failure note"
         if source.status is not Status.VERIFIED and not source.candidate_alternatives:

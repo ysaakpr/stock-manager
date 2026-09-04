@@ -20,6 +20,7 @@ milestones:
   M8: {title: Real-money readiness, depends: [M5, M6]}
   M9: {title: Trustworthy backtest inputs + momentum v2, depends: [M2, M3, M4]}
   M10: {title: Alternative signals — sector rotation + fundamentals, depends: [M3, M4, M7, M9]}
+  M11: {title: Macro backdrop — PIT economic + market-state series, depends: [M4]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -1991,3 +1992,74 @@ tasks:
     - "the report compares the fundamentals signal vs momentum vs market per regime, costs included"
     - "the a-priori parameters are stated and unchanged across the reported runs"
   verify: "uv run pytest tests/unit/test_fundamentals_value.py -q"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M11 — Macro backdrop (PIT economic + market-state series)
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: M11.1
+  title: Macro source probe, PIT macro store, index valuation parser
+  milestone: M11
+  module: D1/D4
+  autonomy: AUTO
+  deps: [M4.3]
+  spec: |
+    Probe the candidate macro sources under C.1's sweep method and record the result as register
+    evidence, then build the point-in-time macro store and its first producer.
+    The store mirrors `pit_fundamentals` exactly — partitioned by `release_date` (the knowable
+    date, not the period the figure describes), a revision is a new record and never an overwrite,
+    `read_pit`/`read_latest` carry the same semantics. It holds only published primitives; a
+    regime or a tag is derived (L2) and rebuildable, never stored as the source of truth.
+    The first producer is NSE's daily close-all snapshot, whose P/E, P/B and Div Yield columns the
+    existing TRI parser leaves on the floor. Resolve every index name through an evidence-backed
+    name history: NSE renamed 48 of 53 indices between 2015-11-06 and 2015-11-10, and a consumer
+    keyed on today's names reads zero rows from any earlier file.
+  deliverables:
+    - dataplatform/ingest/macro/models.py
+    - dataplatform/ingest/macro/index_valuation.py
+    - dataplatform/ingest/macro/index_aliases.yaml
+    - dataplatform/store/macro_series.py
+    - tests/unit/test_macro_series.py
+    - tests/fixtures/nifty_index_close/
+    - ops/gates/M11-macro-source-probe.md
+  acceptance:
+    - "every probed surface has a register row carrying its real status, size, checksum and robots record"
+    - "a fact released after the as-of date is physically absent from read_pit, not filtered out"
+    - "a revision is a new record; both versions survive and read_latest respects the as-of date"
+    - "one series_id spans the 2015 index rename; an unmapped name becomes its own series, never a guess"
+  verify: "uv run python -m dataplatform.ingest.source_register validate && uv run pytest tests/unit/test_macro_series.py -q"
+
+- id: M11.2
+  title: Backfill the daily index valuation series (B1 campaign)
+  milestone: M11
+  module: D1
+  autonomy: NEEDS_GO
+  deps: [M11.1]
+  spec: |
+    Fetch `ind_close_all_<DDMMYYYY>.csv` for every session from the measured archive epoch
+    (2012-10-01) to now and derive `macro_series`. ~2,470 requests to one host, so it is a B1 bulk
+    campaign and needs the owner's go — the same shape as the M1.13 price backfill.
+    Build the runner the way `fundamentals_backfill.py` is built: `sync_state` checkpoint per
+    session, commit-per-unit, `--dry-run`, `--max-sessions`, resumable, and a 403 spike that parks
+    with an enumerated cause. Do not run it concurrently with another campaign on an NSE host.
+    Report coverage per session and, separately, every published index name the alias table does
+    not know — that list is the input to widening the name history.
+  deliverables:
+    - dataplatform/ingest/macro/backfill.py
+    - tests/unit/test_macro_backfill.py
+    - ops/gates/M11-index-valuation-backfill.md
+  acceptance:
+    - "resumable and checkpointed; a re-run redoes no published session"
+    - "coverage reported per session, with unmapped index names listed separately"
+    - "a 403 spike parks with an enumerated cause and a non-zero exit"
+  escalation:
+    question: >-
+      Backfill the daily index valuation series (P/E, P/B, dividend yield per NIFTY index) from the
+      measured archive epoch 2012-10-01 to now? ~2,470 requests to nsearchives.nseindia.com — a B1
+      bulk campaign reserved to the owner, like the M1.13 price backfill. Do not run it alongside
+      the M10.4 fundamentals campaign: both target NSE hosts, and two concurrent runners halve the
+      effective per-host spacing through a side channel.
+    why_blocked: "B1: a fetch campaign over ~200 requests to one source is owner-authorized, not agent-initiated."
+    unblocks: [M11.3]
+  verify: "uv run pytest tests/unit/test_macro_backfill.py -q"
+

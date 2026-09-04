@@ -1,0 +1,94 @@
+# Index name history for the NSE daily close-all snapshot (`ind_close_all_<DDMMYYYY>.csv`).
+#
+# The file names each index in the form published *that day*, and NSE/IISL renamed essentially
+# every index in a single event between 2015-11-06 and 2015-11-10 (48 names out of 53 changed in
+# one step, verified by fetching both sides). A consumer that keys on today's name therefore loses
+# every observation before that date — the same survivorship trap D2's `symbol_history` exists to
+# close for equities, in the index dimension. This table is that history.
+#
+# Evidence discipline, deliberately conservative: a row exists only where the *name stem* matches
+# and the closing level across the switch corroborates it, or where multi-year level continuity
+# pins it by hand. Twenty-six pre-2015 names have neither and are **absent on purpose** — an
+# unmapped name keeps its own published name as its canonical subject, so it forms a visibly
+# separate series rather than being silently merged into the wrong index. Adding one is a research
+# task with the evidence recorded here, never a guess.
+#
+# Provenance: dataplatform/ingest/macro (M11.1), probed 2026-09-04. Detail and the unmapped list:
+# ops/gates/M11-macro-source-probe.md
+
+version: 1
+switch_event:
+  observed_between: [2015-11-06, 2015-11-10]
+  names_changed: 48
+  names_unchanged: 5
+
+aliases:
+  - published: "S&P CNX Nifty"
+    canonical: "Nifty 50"
+    evidence: "flagship; level continuity 2012-10-01 5718.8 -> 2015-04-01 8586.25 -> 2017-01-02 8179.5"
+  - published: "CNX Nifty"
+    canonical: "Nifty 50"
+    evidence: "flagship; same series as S&P CNX Nifty, renamed 2015-11 (level delta 2.15% across the switch)"
+  - published: "CNX Nifty Junior"
+    canonical: "Nifty Next 50"
+    evidence: "level continuity 2015-04-01 19634.3 -> 2017-01-02 21580.25 (delta 1.28% across the switch)"
+  - published: "CNX 100"
+    canonical: "Nifty 100"
+    evidence: "name stem match; close delta 2.01% across the 2015-11 switch"
+  - published: "CNX 100 Equal Weight"
+    canonical: "Nifty100 Equal Weight"
+    evidence: "name stem match; close delta 1.79% across the 2015-11 switch"
+  - published: "CNX 200"
+    canonical: "Nifty 200"
+    evidence: "name stem match; close delta 1.86% across the 2015-11 switch"
+  - published: "CNX 500"
+    canonical: "Nifty 500"
+    evidence: "name stem match; close delta 1.71% across the 2015-11 switch"
+  - published: "CNX 500 Shariah"
+    canonical: "Nifty500 Shariah"
+    evidence: "name stem match; close delta 1.64% across the 2015-11 switch"
+  - published: "CNX Auto"
+    canonical: "Nifty Auto"
+    evidence: "name stem match; close delta 1.39% across the 2015-11 switch"
+  - published: "CNX Bank"
+    canonical: "Nifty Bank"
+    evidence: "name stem match; close delta 1.47% across the 2015-11 switch"
+  - published: "CNX Commodities"
+    canonical: "Nifty Commodities"
+    evidence: "name stem match; close delta 3.18% across the 2015-11 switch"
+  - published: "CNX Energy"
+    canonical: "Nifty Energy"
+    evidence: "name stem match; close delta 3.46% across the 2015-11 switch"
+  - published: "CNX FMCG"
+    canonical: "Nifty FMCG"
+    evidence: "name stem match; close delta 0.17% across the 2015-11 switch"
+  - published: "CNX IT"
+    canonical: "Nifty IT"
+    evidence: "name stem match; close delta 2.36% across the 2015-11 switch"
+  - published: "CNX Infrastructure"
+    canonical: "Nifty Infrastructure"
+    evidence: "name stem match; close delta 3.09% across the 2015-11 switch"
+  - published: "CNX MNC"
+    canonical: "Nifty MNC"
+    evidence: "name stem match; close delta 0.08% across the 2015-11 switch"
+  - published: "CNX Media"
+    canonical: "Nifty Media"
+    evidence: "name stem match; close delta 1.76% across the 2015-11 switch"
+  - published: "CNX Metal"
+    canonical: "Nifty Metal"
+    evidence: "name stem match; close delta 2.26% across the 2015-11 switch"
+  - published: "CNX PSE"
+    canonical: "Nifty PSE"
+    evidence: "name stem match; close delta 3.58% across the 2015-11 switch"
+  - published: "CNX PSU Bank"
+    canonical: "Nifty PSU Bank"
+    evidence: "name stem match; close delta 0.11% across the 2015-11 switch"
+  - published: "CNX Pharma"
+    canonical: "Nifty Pharma"
+    evidence: "name stem match; close delta 4.98% across the 2015-11 switch"
+  - published: "CNX Realty"
+    canonical: "Nifty Realty"
+    evidence: "name stem match; close delta 4.72% across the 2015-11 switch"
+  - published: "CNX Shariah25"
+    canonical: "Nifty Shariah 25"
+    evidence: "name stem match; close delta 1.68% across the 2015-11 switch"

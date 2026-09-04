@@ -170,6 +170,56 @@ hosts:
     min_spacing_seconds: 3.0
 
 # ── one entry per §4.1 dataset surface ───────────────────────────────────────────────────────
+  - host: api.worldbank.org
+    robots_url: https://api.worldbank.org/robots.txt
+    checked_at: 2026-09-04T12:18:00+05:30
+    robots_http_status: 404
+    robots_served: false
+    permits: >-
+      No robots.txt: the API answers /robots.txt with its own JSON 404 envelope
+      ({"statusCode": 404, "message": "Resource not found"}, 54 B), which is an API response and
+      not a policy document. No directives exist. Crawled under the §4.1 policy anyway.
+    disallow: []
+    min_spacing_seconds: 2.5
+
+  - host: www.mospi.gov.in
+    robots_url: https://www.mospi.gov.in/robots.txt
+    checked_at: 2026-09-04T12:17:00+05:30
+    robots_http_status: 200
+    robots_served: false
+    permits: >-
+      MoSPI does not serve crawl directives: /robots.txt returns HTTP 200 with 2,657 B of the
+      site's HTML shell, byte-identical (sha256 3f07fe05...) to the response for /. That is a soft
+      404 in the same family as www.bseindia.com's, and must not be parsed as a policy. Treated as
+      "no directives published"; re-check before any campaign — a real robots.txt appearing later
+      must win.
+    disallow: []
+    min_spacing_seconds: 3.0
+
+  - host: fred.stlouisfed.org
+    robots_url: https://fred.stlouisfed.org/robots.txt
+    checked_at: 2026-09-04T12:16:00+05:30
+    robots_http_status: 0
+    robots_served: false
+    permits: >-
+      Unknown — the host is unreachable from this machine (TLS connects, then zero bytes and a
+      read timeout; see the alfred_series_vintage failure_note). Robots was never obtained, so no
+      crawl of this host is authorised by this record. Re-probe before any use.
+    disallow: []
+    min_spacing_seconds: 5.0
+
+  - host: alfred.stlouisfed.org
+    robots_url: https://alfred.stlouisfed.org/robots.txt
+    checked_at: 2026-09-04T12:16:00+05:30
+    robots_http_status: 0
+    robots_served: false
+    permits: >-
+      Unknown — same unreachability as its sibling fred.stlouisfed.org (TLS connects, zero bytes,
+      read timeout; `robots_http_status: 0` means the request was made and no HTTP response
+      arrived). Robots was never obtained, so no crawl of this host is authorised by this record.
+    disallow: []
+    min_spacing_seconds: 5.0
+
 sources:
   # §4.1 row 1 — NSE equity OHLCV, pre-UDiFF era
   - id: nse_bhavcopy_legacy
@@ -651,7 +701,31 @@ sources:
       Index Value,Low Index Value,Closing Index Value,Points Change,Change(%),Volume,Turnover
       (Rs. Cr.),P/E,P/B,Div Yield". Grep for "TRI"/"total return" returns nothing — this file
       is price-index only, which is exactly why nifty_tri_history is still open.
-    fixture: {frozen: false, task: M3.9, path: "tests/fixtures/nifty_indices/"}
+      M11.1 (2026-09-04) additionally reads the P/E, P/B and Div Yield columns this file has
+      carried in every era measured — the platform's daily market-valuation spine
+      (dataplatform.ingest.macro.index_valuation).
+    fixture: {frozen: true, task: M11.1, path: "tests/fixtures/nifty_index_close/"}
+    history:
+      measured_at: 2026-09-04T12:29:00+05:30
+      measured_by: M11.1
+      method: >-
+        Dated-URL probe at >=2.6 s spacing, bisecting the archive epoch and sampling one session
+        per era. 2012-07-01 and 2011-04-01 answer 404 (3,532 B HTML error page); 2012-10-01
+        answers 200 with 30 index rows, so the archive begins in that quarter.
+      earliest_available: 2012-10-01
+      latest_available: 2026-09-01
+      accrues_forward: true
+      note: >-
+        **No format eras** — the 13-column header is byte-identical from 2012-10-01 to 2026-09-01,
+        which is unusual for this platform and worth not forgetting. Index *count* grows with the
+        family (30 -> 48 -> 69 -> 78 -> 94 -> 165), so a PIT read must not assume an index existed.
+        **Naming eras do exist and matter more:** NSE/IISL renamed 48 of 53 index names in a single
+        event between 2015-11-06 and 2015-11-10 (S&P CNX Nifty / CNX Nifty -> Nifty 50, CNX Nifty
+        Junior -> Nifty Next 50, CNX Bank -> Nifty Bank, ...). A consumer keyed on today's names
+        reads *zero* rows from any pre-2015-11 file, silently losing three years of history. The
+        evidence-backed name history is dataplatform/ingest/macro/index_aliases.yaml; 26 pre-2015
+        names remain deliberately unmapped rather than guessed
+        (ops/gates/M11-macro-source-probe.md).
     failure_note: null
     candidate_alternatives: []
     owner_task: M3.9
@@ -1236,3 +1310,108 @@ sources:
     failure_note: null
     candidate_alternatives: []
     owner_task: M7.3
+
+  # §4.1 row 17 (new) — macro / economic backdrop
+  - id: worldbank_indicator_api
+    plan_row: "Macro / economic backdrop"
+    description: >-
+      World Bank Indicators API — annual macro series for India (CPI inflation, GDP growth and the
+      rest of the WDI catalogue), keyless JSON. Annual only, so it is a cross-check and a long-run
+      backdrop, never the daily state; the daily spine is nifty_index_close_snapshot.
+    host: api.worldbank.org
+    method: GET
+    url_template: "https://api.worldbank.org/v2/country/{iso3}/indicator/{indicator}?format=json&per_page={n}"
+    verified_url: "https://api.worldbank.org/v2/country/IND/indicator/FP.CPI.TOTL.ZG?format=json&per_page=100"
+    cadence: annual
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.macro, task: M11.1}
+    robots_notes: No robots.txt — the API answers it with its own JSON 404 envelope (54 B).
+    pit_notes: >-
+      **Not point-in-time.** The envelope carries one `lastupdated` for the whole response
+      (2026-07-13 on the verified fetch) and the API serves only the *current* vintage of each
+      year — a revised figure silently replaces the original with no way to ask for what was
+      published at the time. So a fact from here may be stored only with `release_date` set to the
+      envelope's `lastupdated`, which makes it knowable *now*, not in the year it describes. It is
+      therefore usable for a present-day backdrop and unusable for a historical backtest, and the
+      M11.1 store's release-date partitioning is what keeps that distinction enforceable rather
+      than a comment.
+    status: VERIFIED
+    verified_at: 2026-09-04T12:18:00+05:30
+    last_http_status: 200
+    sample_bytes: 14939
+    content_type: application/json;charset=utf-8
+    sample_sha256: 32b62553bfce28d40767b2b05f7d9a8aac1307656b05659dbc5b768c23c7e6cf
+    parse_check: >-
+      JSON array of two elements: a paging envelope
+      {"page":1,"pages":1,"per_page":100,"total":66,"sourceid":"2","lastupdated":"2026-07-13"} and
+      an array of 66 observations, each {"indicator":{"id","value"},"country":{"id","value"},
+      "countryiso3code","date","value","unit","obs_status","decimal"}. 66 annual points for India
+      CPI inflation. No API key required.
+    fixture: {frozen: false, task: M11.1, path: null}
+    history:
+      measured_at: 2026-09-04T12:18:00+05:30
+      measured_by: M11.1
+      method: One request for FP.CPI.TOTL.ZG, per_page=100, counting returned observations.
+      sessions_available: 66
+      accrues_forward: true
+      note: >-
+        66 annual observations in one response, no paging needed at per_page=100. Depth is in
+        years, not sessions; there is no dated-archive form of this endpoint and no vintage
+        parameter, which is the pit_notes limitation above.
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M11.1
+
+  - id: alfred_series_vintage
+    plan_row: "Macro / economic backdrop"
+    description: >-
+      ALFRED (ArchivaL FRED, St. Louis Fed) — the same series *as it was published on* a past date.
+      The one surface probed that would solve the macro vintage problem outright: it carries each
+      revision with the date it was released, which is exactly the release_date the M11.1 store
+      partitions by.
+    host: alfred.stlouisfed.org
+    method: GET
+    url_template: "https://alfred.stlouisfed.org/graph/alfredgraph.csv?id={series}&vintage_date={YYYY-MM-DD}"
+    verified_url: "https://alfred.stlouisfed.org/graph/alfredgraph.csv?id=INDCPIALLMINMEI&vintage_date=2020-01-15"
+    cadence: monthly
+    era: {start: null, end: null}
+    fallback: ["worldbank_indicator_api (annual, current-vintage only — not a substitute for vintages)"]
+    required_headers:
+      User-Agent: browser
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.macro, task: M11.1}
+    robots_notes: Never obtained — the host did not answer /robots.txt. No crawl is authorised.
+    pit_notes: >-
+      Would be natively point-in-time: `vintage_date` asks for the series as it stood on that date,
+      so a backfill could reconstruct genuine release dates rather than fabricate them. Untested
+      against a real response.
+    status: FAILED
+    verified_at: 2026-09-04T12:16:00+05:30
+    last_http_status: 0  # requested five times; no HTTP response ever arrived
+    sample_bytes: null
+    content_type: null
+    sample_sha256: null
+    parse_check: null
+    fixture: {frozen: false, task: M11.1, path: null}
+    failure_note: >-
+      **Unreachable from this host, cause undetermined — not proven to be a source-side refusal.**
+      Five attempts across fred.stlouisfed.org and alfred.stlouisfed.org: httpx (HTTP/2) read
+      timeout; curl HTTP/2 returned "stream was not closed cleanly: INTERNAL_ERROR" after 0.09 s;
+      curl --http1.1 timed out at 45 s with zero bytes, including on the bare host root; and the
+      same three failed identically outside the build sandbox. A control request to
+      api.worldbank.org on the same network in the same sweep returned 200, so this is specific to
+      this host and not general egress. TLS establishes and then no bytes arrive, which is the
+      signature of a network-path block rather than an application refusal — there was no status
+      code, no body, and nothing to evade. **Do not mark this VERIFIED or permanently FAILED on
+      this evidence**; it needs one re-probe from a different network before either.
+    candidate_alternatives:
+      - "Re-probe from the Ubuntu campaign server — a different network path settles it in one request."
+      - "FRED's keyless CSV surface (fred.stlouisfed.org/graph/fredgraph.csv?id=...) shares the
+         host and failed identically; it is the same probe, not a second option."
+      - "MoSPI's own release archive carries genuine Indian release dates, but www.mospi.gov.in
+         serves no robots policy (soft-404) and cpi.mospi.gov.in did not answer at all."
+    owner_task: M11.1
