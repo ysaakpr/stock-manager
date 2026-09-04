@@ -28,12 +28,24 @@ correctness — only for not repeating work.
 ```bash
 cd ~/Documents/work/stocks
 ops/backup.sh                      # pg_dump + an L0 manifest, into ops/backups/<ts>/
-tar -czf /tmp/campaign-out.tgz \
+COPYFILE_DISABLE=1 tar -czf /tmp/campaign-out.tgz \
     data/L1/prices_raw \
     data/L0/nse_financial_results_index \
     data/L0/nse_xbrl_filing \
     ops/backups/$(ls -t ops/backups | head -1)
 ```
+
+**`COPYFILE_DISABLE=1` is not optional on macOS.** Without it `tar` writes an AppleDouble `._name`
+companion for every file, which Linux extracts as a real file — 25,080 of them on a first attempt
+here, doubling the apparent document count and putting junk inside an immutable lake. If you
+already extracted without it, clean up before doing anything else:
+
+```bash
+find data ops/backups -name '._*' -delete
+```
+
+Then confirm the counts match the source: `find data/L0/nse_xbrl_filing -name '*.xml' | wc -l`
+should equal the number of `*.meta.json` sidecars, and both should equal what the laptop reports.
 
 `ops/backup.sh` dumps the database and *fingerprints* L0 rather than copying it — it is
 deliberately not a transfer tool, so the `tar` above carries the lake itself. Keep the manifest: it
@@ -57,15 +69,37 @@ deliberately, which is the shape `ops/runbooks/backup-restore.md` documents:
 ```bash
 ops/restore.sh ops/backups/<ts> --no-l0     # verify the dump (scratch DB, then dropped)
 
+# `make migrate` built the schema and stamped schema_migrations; the dump carries the same stamps,
+# so clear that one table rather than excluding it and leaving the two records to disagree.
 docker compose -f ops/docker-compose.yml exec -T postgres \
-  sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-         --no-owner --no-privileges --data-only --exit-on-error' \
+  sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -q -c "TRUNCATE schema_migrations"'
+
+docker compose -f ops/docker-compose.yml exec -T postgres \
+  sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --no-owner --no-privileges \
+         --data-only --disable-triggers --single-transaction --exit-on-error' \
   < ops/backups/<ts>/postgres.dump
 ```
 
-`--no-l0` skips the manifest re-check, which is what you want on a host whose lake is only the
-slice you shipped. `--data-only` loads rows into the schema `make migrate` just created rather than
-trying to recreate it.
+Three flags each earn their place, and each was learned by the restore failing without it:
+
+* `--no-l0` skips the manifest re-check, which is what you want on a host whose lake is only the
+  slice you shipped.
+* `--disable-triggers` is required because `--data-only` restores tables **alphabetically**, so
+  `adjustment_factors` lands before `security_master` and every foreign key fails. Postgres
+  implements FK checks as triggers, so this is the documented way through.
+* `--single-transaction` makes a partial restore impossible. Without it the first failure leaves
+  FK-broken rows behind and the only clean recovery is dropping the database and starting over.
+
+Verify against the source before starting anything — row counts should match exactly:
+
+```bash
+uv run python -c "
+from dataplatform.config import get_settings
+from dataplatform.store.db import connection
+with connection(get_settings()) as c:
+    for t in ('security_master','symbol_history','exchange_listing','corporate_actions','sync_state'):
+        print(t, c.execute(f'SELECT count(*) FROM {t}').fetchone()[0])"
+```
 
 Then run it exactly as here — the campaign driver and `ops/fundamentals_progress.sh` both work
 unchanged:
@@ -80,6 +114,13 @@ campaign on the server while it is still running here means two independent rate
 `nsearchives.nseindia.com` — the effective spacing halves and the recorded 2.5 s is breached through
 a side channel. **Stop the laptop's driver before starting the server's**, and do not split years
 across the two machines to "go faster".
+
+### Things the server may lack
+
+`uv` is often absent on a fresh box (`curl -LsSf https://astral.sh/uv/install.sh | sh`, then
+`export PATH="$HOME/.local/bin:$PATH"`), and Ubuntu images generally have no `zsh` — so
+`ops/fundamentals_progress.sh`, which is zsh, will not run there. Drive the campaign with a bash
+script on the server and keep the zsh progress view for the laptop.
 
 ## 3. Bring the archive home
 
