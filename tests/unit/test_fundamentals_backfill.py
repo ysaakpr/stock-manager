@@ -28,6 +28,7 @@ document is skipped and counted rather than fetched
 
 from __future__ import annotations
 
+import shutil
 import socket
 from collections.abc import Sequence
 from datetime import date, datetime
@@ -46,6 +47,7 @@ from dataplatform.ingest.fetcher import (
     RecordedTransport,
 )
 from dataplatform.ingest.source_register import load as load_register
+from dataplatform.ingest.xbrl import FundamentalFact
 from dataplatform.status.sync_state import SyncState
 from dataplatform.store.l0 import L0Store
 from dataplatform.store.pit_fundamentals import read_l1, read_latest, read_pit
@@ -800,6 +802,95 @@ def test_a_reused_payload_yields_the_same_facts_as_a_fetch(tmp_path: Path) -> No
         nature="Consolidated",
         period_start=date(2024, 10, 1),
     ) == Decimal("21360600000.00")
+
+
+class _RefusingTransport:
+    """A transport that turns any request into a failure, so "offline" is enforced not assumed."""
+
+    def __init__(self, on_request: object) -> None:
+        self._on_request = on_request
+
+    def request(self, *args: object, **kwargs: object) -> object:
+        return self._on_request(*args, **kwargs)  # type: ignore[operator]
+
+
+def test_a_rebuild_from_l0_opens_no_socket_and_reproduces_the_store(tmp_path: Path) -> None:
+    """The whole point of a portable campaign: fetch anywhere, rebuild at home with no network.
+
+    A first run populates L0 and L1. A second run over a *fresh* lake root — sharing only the L0
+    tree — must reproduce exactly the same facts while making zero requests, index chunks included.
+    That is what lets the fetching happen on one machine and the store be rebuilt on another from
+    nothing but the archive.
+    """
+    settings = _settings(tmp_path)
+    plan = _quarterly_plan()
+    universe = {VSTTILLERS, SCHAEFFLER}
+
+    online = _runner(
+        _ok_transport(plan), settings=settings, sync=_FakeSync(), universe=universe
+    ).run(plan)
+    assert online.filings_published == 8
+    before = read_latest(date(2026, 9, 1), data_root=settings.data_root)
+    assert before
+
+    # A second lake that shares L0 and has no L1 and no checkpoints — a transferred archive.
+    fresh = tmp_path / "rebuilt"
+    (fresh / "L0").parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(settings.data_root / "L0", fresh / "L0")
+    rebuilt_settings = settings.model_copy(update={"data_root": fresh})
+
+    # A transport that fails on any request at all, so "no socket" is enforced, not assumed.
+    def forbidden(*_a: object, **_k: object) -> object:
+        raise AssertionError("a rebuild-from-l0 run attempted a network request")
+
+    offline = fb.FundamentalsBackfillRunner(
+        fetcher=_fetcher(cast("Any", _RefusingTransport(forbidden)), rebuilt_settings),
+        l0=L0Store(clock=CLOCK, data_root=fresh),
+        sync=cast("Any", _FakeSync()),
+        universe=universe,
+        commit=lambda: None,
+        data_root=fresh,
+        rebuild_from_l0=True,
+    ).run(plan)
+
+    assert offline.filings_published == 8
+    assert offline.filings_failed == 0
+    assert not offline.parked
+    after = read_latest(date(2026, 9, 1), data_root=fresh)
+
+    def key(f: FundamentalFact) -> tuple[object, ...]:
+        return (f.isin, f.period_start, f.period_end, f.nature, f.concept, f.segment)
+
+    assert {key(f): f.value for f in after} == {key(f): f.value for f in before}
+
+
+def test_a_rebuild_fails_loudly_on_an_incomplete_lake(tmp_path: Path) -> None:
+    """A rebuild must never quietly reach for the network to paper over a missing payload.
+
+    Otherwise a store rebuilt from a partial archive looks identical to one rebuilt from a whole
+    archive, and nobody can reproduce it from what they were handed.
+    """
+    settings = _settings(tmp_path)
+    plan = _quarterly_plan()
+
+    def forbidden(*_a: object, **_k: object) -> object:
+        raise AssertionError("a rebuild-from-l0 run attempted a network request")
+
+    report = fb.FundamentalsBackfillRunner(
+        fetcher=_fetcher(cast("Any", _RefusingTransport(forbidden)), settings),
+        l0=L0Store(clock=CLOCK, data_root=settings.data_root),
+        sync=cast("Any", _FakeSync()),
+        universe={VSTTILLERS},
+        commit=lambda: None,
+        data_root=settings.data_root,
+        rebuild_from_l0=True,
+    ).run(plan)
+
+    # Nothing in L0 at all, so every index chunk is unrebuildable — recorded, not fetched.
+    assert report.index_published == 0
+    assert report.index_failed == len(plan)
+    assert report.filings_published == 0
+    assert any("rebuild-from-l0 forbids fetching" in message for _l, message in report.failures)
 
 
 def test_index_plan_is_pure_and_offline() -> None:

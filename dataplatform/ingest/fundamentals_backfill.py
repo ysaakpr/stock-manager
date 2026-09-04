@@ -97,6 +97,7 @@ __all__ = [
     "FundamentalsBackfillReport",
     "FundamentalsBackfillRunner",
     "IndexUnit",
+    "MissingPayloadError",
     "ParkReason",
     "Period",
     "build_index_units",
@@ -420,12 +421,21 @@ class FundamentalsBackfillRunner:
         data_root: Path | None = None,
         max_filings: int | None = None,
         symbol_history: Callable[[str], frozenset[str]] | None = None,
+        rebuild_from_l0: bool = False,
     ) -> None:
         self._fetcher = fetcher
         self._l0 = l0
         self._sync = sync
         self._universe = universe
         self._commit = commit
+        #: Derive everything from payloads already in L0 and never open a socket. This is what
+        #: makes a campaign portable: run the fetching wherever it is convenient, bring the L0 tree
+        #: home, and rebuild L1 and the checkpoints locally with no network at all. It is opt-in
+        #: rather than automatic because the announcements index is a *live* feed — silently reusing
+        #: a stored index chunk would make a forward sync unable to see filings broadcast since it
+        #: was fetched, which is precisely the trap the runbook warns about. Asking for it by name
+        #: keeps "rebuild what I already have" and "go and look for more" distinguishable.
+        self._rebuild_from_l0 = rebuild_from_l0
         #: ISIN → every symbol it has ever traded under, for the parser's identity cross-check.
         #: Injected rather than reached for, so a test needs no master and `main` supplies the real
         #: D2 one. Companies get renamed, and a filing states the symbol it had when filed: without
@@ -526,9 +536,7 @@ class FundamentalsBackfillRunner:
         )
         try:
             self._sync.begin(unit.state_source, unit.logical_date)
-            ref = self._fetcher.fetch(
-                discovery.SOURCE_ID, unit.url, unit.logical_date, filename=unit.filename
-            )
+            ref = self._index_ref(unit)
             self._sync.mark_fetched(
                 unit.state_source, unit.logical_date, checksum=ref.sha256, l0_path=ref.key
             )
@@ -696,6 +704,27 @@ class FundamentalsBackfillRunner:
             )
         return True
 
+    def _index_ref(self, unit: IndexUnit) -> L0Ref:
+        """This index chunk's L0 payload — fetched normally, or read back in rebuild mode.
+
+        Unlike a filing, an index chunk is *not* reused opportunistically. The feed is live, and a
+        chunk's stored payload is a snapshot of what had been broadcast when it was fetched; reusing
+        it by default would make a forward sync structurally blind to anything filed since. So the
+        reuse happens only when the caller asked for a rebuild, where "do not go to the network" is
+        the whole point.
+        """
+        if not self._rebuild_from_l0:
+            return self._fetcher.fetch(
+                discovery.SOURCE_ID, unit.url, unit.logical_date, filename=unit.filename
+            )
+        try:
+            return self._l0.ref_for(discovery.SOURCE_ID, unit.logical_date, unit.filename)
+        except (L0Error, FileNotFoundError):
+            raise MissingPayloadError(
+                f"{unit.label}: no L0 payload for {unit.filename} and --rebuild-from-l0 forbids "
+                "fetching; the lake this was rebuilt from is incomplete"
+            ) from None
+
     def _ref_for(self, unit: FilingUnit, *, report: FundamentalsBackfillReport) -> L0Ref:
         """This filing's L0 payload — reused if it is already in the lake, fetched if not.
 
@@ -717,6 +746,11 @@ class FundamentalsBackfillRunner:
         try:
             ref = self._l0.ref_for(parser.SOURCE_ID, unit.logical_date, unit.filename)
         except (L0Error, FileNotFoundError):
+            if self._rebuild_from_l0:
+                raise MissingPayloadError(
+                    f"{unit.label}: no L0 payload for {unit.filename} and --rebuild-from-l0 "
+                    "forbids fetching; the lake this was rebuilt from is incomplete"
+                ) from None
             return self._fetcher.fetch(
                 parser.SOURCE_ID, unit.url, unit.logical_date, filename=unit.filename
             )
@@ -803,6 +837,14 @@ class FundamentalsBackfillRunner:
         rollback = getattr(conn, "rollback", None)
         if callable(rollback):
             rollback()
+
+
+class MissingPayloadError(Exception):
+    """A rebuild-from-L0 run needed a payload the lake does not hold.
+
+    Raised rather than fetched, because a rebuild that quietly reached for the network would
+    produce a store nobody could reproduce from the archive they were handed.
+    """
 
 
 class _ParkedError(Exception):
@@ -917,6 +959,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help="cap the per-filing ingest at this many attempts (B1 verify+sample of the bulk half)",
     )
+    ap.add_argument(
+        "--rebuild-from-l0",
+        action="store_true",
+        help=(
+            "derive L1 and the checkpoints from payloads already in L0 and never fetch; "
+            "use after moving an L0 tree between machines"
+        ),
+    )
     ap.add_argument("--chunk-months", type=int, default=DEFAULT_CHUNK_MONTHS)
     ap.add_argument(
         "--report",
@@ -939,6 +989,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         chunk_months=args.chunk_months,
         dry_run=args.dry_run,
         report_path=args.report,
+        rebuild_from_l0=args.rebuild_from_l0,
         settings=settings,
         clock=clock,
         calendar=calendar,
@@ -955,6 +1006,7 @@ def _run_live(
     chunk_months: int,
     dry_run: bool,
     report_path: Path,
+    rebuild_from_l0: bool,
     settings: Settings,
     clock: Clock,
     calendar: TradingCalendar,
@@ -1001,6 +1053,7 @@ def _run_live(
             symbol_history=lambda isin: frozenset(
                 window.symbol for window in master.windows_for(isin)
             ),
+            rebuild_from_l0=rebuild_from_l0,
         )
         report = runner.run(plan)
 
