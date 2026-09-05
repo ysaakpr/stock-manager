@@ -28,10 +28,12 @@ document is skipped and counted rather than fetched
 
 from __future__ import annotations
 
+import re
 import shutil
 import socket
 from collections.abc import Sequence
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final, cast
 
@@ -127,8 +129,15 @@ def _quarterly_plan() -> list[fb.IndexUnit]:
     )
 
 
-def _ok_transport(plan: Sequence[fb.IndexUnit]) -> RecordedTransport:
-    """Serve the warm-up, each index chunk's fixture, and each filing's XBRL fixture, all 200."""
+def _ok_transport(
+    plan: Sequence[fb.IndexUnit], *, break_paid_up: bool = False
+) -> RecordedTransport:
+    """Serve the warm-up, each index chunk's fixture, and each filing's XBRL fixture, all 200.
+
+    `break_paid_up` multiplies every stated paid-up equity capital by a million, reproducing the
+    filer error that ~5% of real filings contain (KIOCL states ₹62 lakh crore where it means ₹600
+    crore). Used to prove the parser's corroboration guard fires and that the runner counts it.
+    """
     script: dict[str, RecordedResponse | list[RecordedResponse]] = {
         WARM_URL: RecordedResponse(status_code=200, body=b"", headers={"content-type": "text/html"})
     }
@@ -140,8 +149,17 @@ def _ok_transport(plan: Sequence[fb.IndexUnit]) -> RecordedTransport:
         )
     for xml in FILINGS_DIR.glob("*.xml"):
         url = f"https://nsearchives.nseindia.com/corporate/xbrl/{xml.name}"
+        body = xml.read_bytes()
+        if break_paid_up:
+            body = re.sub(
+                rb"(<in-bse-fin:PaidUpValueOfEquityShareCapital[^>]*>)([0-9.]+)(<)",
+                lambda m: (
+                    m.group(1) + str(Decimal(m.group(2).decode()) * 1_000_000).encode() + m.group(3)
+                ),
+                body,
+            )
         script[url] = RecordedResponse(
-            status_code=200, body=xml.read_bytes(), headers={"content-type": "application/xml"}
+            status_code=200, body=body, headers={"content-type": "application/xml"}
         )
     return RecordedTransport(cast("Any", script))
 
@@ -966,3 +984,31 @@ class _FakeSync:
         row.state = SyncState.FAILED
         row.retryable = retryable
         return row
+
+
+def test_the_report_counts_share_counts_the_parser_refused(tmp_path: Path) -> None:
+    """A withheld derivation is a data-quality signal, so it has to reach the operator's report.
+
+    The filing still publishes — only the share count is withheld, because the filing's own EPS
+    contradicts its paid-up capital. That is invisible in the published/failed counts by design,
+    which is exactly why it needs its own line: a *rise* in this rate is how a change at the source
+    would first announce itself, and nothing else in the report would move.
+    """
+    settings = _settings(tmp_path)
+    plan = _quarterly_plan()
+    baseline = _runner(
+        _ok_transport(plan), settings=settings, sync=_FakeSync(), universe={VSTTILLERS, SCHAEFFLER}
+    ).run(plan)
+    assert baseline.filings_published == 8
+    assert baseline.derivations_refused == 0
+
+    # Break one company's paid-up capital by a clean power of ten, the way a real filer does.
+    scaled = _settings(tmp_path / "scaled")
+    report = _runner(
+        _ok_transport(plan, break_paid_up=True),
+        settings=scaled,
+        sync=_FakeSync(),
+        universe={VSTTILLERS, SCHAEFFLER},
+    ).run(plan)
+    assert report.filings_published == 8, "the filing still publishes; only the derivation is held"
+    assert report.derivations_refused > 0

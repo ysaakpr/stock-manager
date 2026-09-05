@@ -82,6 +82,7 @@ from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.ingest.xbrl import discovery, parser
 from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
+from dataplatform.ingest.xbrl.models import SHARES_OUTSTANDING
 from dataplatform.logging import get_logger
 from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store.db import connection
@@ -235,6 +236,13 @@ class FundamentalsBackfillReport:
     three ways an entry is *not* ingested — surfaced on the report, never silently dropped. A
     `park_reason` set means the run stopped on a reserved-decision block (`park_detail` enumerates
     it).
+
+    `derivations_refused` counts filings that stated the capital elements but whose share count the
+    parser withheld because the filing's own EPS contradicted it (roughly 5% — filers who state a
+    paid-up capital out by a clean power of ten). It is a data-quality signal, not an error: the
+    filing is published, only the derivation is withheld. It belongs on the report because a *rise*
+    in the rate is how a change at the source would first show itself, and a rate nobody reports is
+    a rate nobody notices.
     """
 
     index_requested: int
@@ -248,6 +256,7 @@ class FundamentalsBackfillReport:
     filings_l0_reused: int = 0
     filings_failed: int = 0
     facts_written: int = 0
+    derivations_refused: int = 0
     skipped_out_of_universe: int = 0
     skipped_no_document: int = 0
     covered_isins: set[str] = field(default_factory=set)
@@ -674,6 +683,9 @@ class FundamentalsBackfillRunner:
             report.filings_published += 1
             report.facts_written += len(filing.facts)
             report.covered_isins.add(filing.isin)
+            concepts = {fact.concept for fact in filing.company_facts()}
+            if "paid_up_equity_capital" in concepts and SHARES_OUTSTANDING not in concepts:
+                report.derivations_refused += 1
             _LOG.info(
                 "fundamentals_backfill.filing_published",
                 unit=unit.label,
@@ -889,6 +901,8 @@ def render_report(
         f"- Filings whose L0 payload was reused (no re-fetch): {report.filings_l0_reused}",
         f"- Filings failed: {report.filings_failed}",
         f"- Facts written: {report.facts_written}",
+        f"- Share counts refused (filing's own EPS contradicts its paid-up capital): "
+        f"{report.derivations_refused}",
         f"- ISINs covered: {len(report.covered_isins)}",
         f"- Entries skipped (ISIN not in universe): {report.skipped_out_of_universe}",
         f"- Entries skipped (no XBRL document in the feed): {report.skipped_no_document}",
