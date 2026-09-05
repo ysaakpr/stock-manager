@@ -1156,7 +1156,7 @@ def test_a_three_decimal_eps_survives_the_write(vst_original: Filing, tmp_path: 
     eps = next(f for f in vst_original.facts if f.concept == "eps_basic")
     three_dp = eps.model_copy(update={"value": Decimal("1.234")})
     filing = vst_original.model_copy(
-        update={"facts": tuple(f for f in vst_original.facts if f is not eps) + (three_dp,)}
+        update={"facts": (*(f for f in vst_original.facts if f is not eps), three_dp)}
     )
     write_pit(filing, data_root=tmp_path)
 
