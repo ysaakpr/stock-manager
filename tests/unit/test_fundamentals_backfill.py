@@ -49,10 +49,15 @@ from dataplatform.ingest.fetcher import (
     RecordedTransport,
 )
 from dataplatform.ingest.source_register import load as load_register
-from dataplatform.ingest.xbrl import FundamentalFact
-from dataplatform.status.sync_state import SyncState
+from dataplatform.ingest.xbrl import FundamentalFact, discovery, parser
+from dataplatform.status.sync_state import IllegalTransitionError, SyncState
 from dataplatform.store.l0 import L0Store
-from dataplatform.store.pit_fundamentals import read_l1, read_latest, read_pit
+from dataplatform.store.pit_fundamentals import (
+    PIT_FUNDAMENTALS_DATASET,
+    read_l1,
+    read_latest,
+    read_pit,
+)
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 FIXTURES: Final = REPO_ROOT / "tests" / "fixtures" / "xbrl"
@@ -938,6 +943,17 @@ class _SyncRow:
         self.state = state
         self.retryable = retryable
 
+    def check_transition(self, to_state: SyncState) -> None:
+        """The real record's pre-flight check, modelled for the one edge the runner asks about.
+
+        `_buffer_filing` asks whether this row will accept a fresh `begin` before it buffers a
+        filing, because at the flush a refusal would abort a whole batch instead of one filing.
+        """
+        if to_state is SyncState.PENDING and self.state is SyncState.FAILED and not self.retryable:
+            raise IllegalTransitionError(
+                "nse_xbrl_filing", date(2026, 1, 1), self.state, to_state, "non-retryable"
+            )
+
 
 class _FakeSync:
     """In-memory `SyncStateStore` stand-in keyed by `(source, logical_date)`, as the real store is.
@@ -1012,3 +1028,216 @@ def test_the_report_counts_share_counts_the_parser_refused(tmp_path: Path) -> No
     ).run(plan)
     assert report.filings_published == 8, "the filing still publishes; only the derivation is held"
     assert report.derivations_refused > 0
+
+
+# ── the batched rebuild: the same store, and no checkpoint ahead of the facts ───────────────────
+
+
+def _seeded_lake(tmp_path: Path, plan: Sequence[fb.IndexUnit]) -> Path:
+    """An L0 tree holding every payload the plan names, and no L1 and no checkpoints.
+
+    One online run populates L0; the L0 subtree alone is what a rebuild is handed. Returned as a
+    fresh data root so each rebuild below writes its L1 from nothing.
+    """
+    seed = _settings(tmp_path / "seed")
+    _runner(
+        _ok_transport(plan), settings=seed, sync=_FakeSync(), universe={VSTTILLERS, SCHAEFFLER}
+    ).run(plan)
+    return seed.data_root / "L0"
+
+
+def _rebuild(
+    l0_tree: Path,
+    root: Path,
+    *,
+    batched: bool,
+    sync: _FakeSync | None = None,
+    commit: Any = None,
+) -> fb.FundamentalsBackfillReport:
+    """Re-derive the store into `root` from a copy of `l0_tree`, batched or one filing at a time."""
+    root.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(l0_tree, root / "L0")
+
+    def forbidden(*_a: object, **_k: object) -> object:
+        raise AssertionError("a rebuild-from-l0 run attempted a network request")
+
+    settings = _settings(root)
+    return fb.FundamentalsBackfillRunner(
+        fetcher=_fetcher(cast("Any", _RefusingTransport(forbidden)), settings),
+        l0=L0Store(clock=CLOCK, data_root=root),
+        sync=cast("Any", sync if sync is not None else _FakeSync()),
+        universe={VSTTILLERS, SCHAEFFLER},
+        commit=commit if commit is not None else (lambda: None),
+        data_root=root,
+        rebuild_from_l0=True,
+        batched_writes=batched,
+    ).run(_quarterly_plan())
+
+
+def _l1_bytes(root: Path) -> dict[str, bytes]:
+    base = root / "L1" / PIT_FUNDAMENTALS_DATASET
+    return {str(p.relative_to(base)): p.read_bytes() for p in sorted(base.rglob("part.parquet"))}
+
+
+def test_a_batched_rebuild_writes_the_same_store_as_one_filing_at_a_time(tmp_path: Path) -> None:
+    """The acceptance for the whole optimisation: identical parquet, not merely equivalent facts.
+
+    Batching exists because rewriting a partition per filing costs O(n²) row-writes — a real
+    results-season filing date holds up to 762 filings — and the re-derivation it speeds up is one
+    the store's determinism invariant says must reproduce byte for byte. So the two paths are run
+    over the same L0 tree and the files are compared as bytes.
+    """
+    plan = _quarterly_plan()
+    l0_tree = _seeded_lake(tmp_path, plan)
+
+    one_at_a_time = _rebuild(l0_tree, tmp_path / "seq", batched=False)
+    batched = _rebuild(l0_tree, tmp_path / "bat", batched=True)
+
+    assert one_at_a_time.filings_published == batched.filings_published == 8
+    assert one_at_a_time.facts_written == batched.facts_written
+    assert one_at_a_time.filings_failed == batched.filings_failed == 0
+    assert one_at_a_time.covered_isins == batched.covered_isins
+    assert _l1_bytes(tmp_path / "seq") == _l1_bytes(tmp_path / "bat")
+    assert len(_l1_bytes(tmp_path / "bat")) > 1, "the fixtures must span more than one partition"
+
+
+def test_no_filing_is_checkpointed_published_before_its_facts_are_on_disk(tmp_path: Path) -> None:
+    """The invariant buffering must not break, asserted at the moment the checkpoint is written.
+
+    The unbatched runner commits per filing, so a kill loses one filing. Buffering can only be
+    allowed to widen that window, never to invert it: a committed `PUBLISHED` row for a filing
+    whose facts are still in memory would make the next run resume-skip data that was never
+    written, and no re-run would ever notice. So every `mark_published` is intercepted and the
+    filing's own partition is read back from disk before the call is allowed to proceed.
+    """
+    plan = _quarterly_plan()
+    l0_tree = _seeded_lake(tmp_path, plan)
+    root = tmp_path / "bat"
+
+    class _AssertingSync(_FakeSync):
+        def mark_published(self, source: str, logical_date: date, **kw: object) -> Any:
+            if source.startswith(fb.FILING_STATE_PREFIX):  # the index chunk has no partition
+                filing_id = source.removeprefix(fb.FILING_STATE_PREFIX)
+                stored = read_l1(logical_date, data_root=root)  # raises if never written
+                assert any(f.filing_id == filing_id for f in stored), (
+                    f"{source} was checkpointed PUBLISHED before its facts reached "
+                    f"{logical_date.isoformat()}"
+                )
+            return super().mark_published(source, logical_date)
+
+    commits: list[int] = []
+    report = _rebuild(
+        l0_tree,
+        root,
+        batched=True,
+        sync=_AssertingSync(),
+        commit=lambda: commits.append(1),
+    )
+
+    assert report.filings_published == 8
+    # And the batching really happened: one commit for the whole chunk's filings, not eight.
+    assert len(commits) < report.filings_published
+
+
+def test_a_run_that_stops_mid_chunk_publishes_only_what_it_flushed(tmp_path: Path) -> None:
+    """A SIGINT part-way through a chunk publishes the buffer and checkpoints exactly that.
+
+    Two halves of one property. Work already parsed is flushed rather than thrown away, so the
+    stop is not a silent loss; and every filing the stop cut off has no `PUBLISHED` row at all, so
+    the next run re-derives it. What must never exist is the third case — a row published for a
+    filing whose facts never reached a partition.
+    """
+    plan = _quarterly_plan()
+    l0_tree = _seeded_lake(tmp_path, plan)
+    root = tmp_path / "bat"
+    root.mkdir(parents=True)
+    shutil.copytree(l0_tree, root / "L0")
+
+    def forbidden(*_a: object, **_k: object) -> object:
+        raise AssertionError("a rebuild-from-l0 run attempted a network request")
+
+    settings = _settings(root)
+    sync = _FakeSync()
+    seen = {"filings": 0}
+
+    def stop_after_three() -> bool:
+        return seen["filings"] >= 3
+
+    class _CountingL0(L0Store):
+        def get(self, ref: Any) -> bytes:
+            payload = super().get(ref)
+            if ref.source == parser.SOURCE_ID:
+                seen["filings"] += 1
+            return payload
+
+    report = fb.FundamentalsBackfillRunner(
+        fetcher=_fetcher(cast("Any", _RefusingTransport(forbidden)), settings),
+        l0=_CountingL0(clock=CLOCK, data_root=root),
+        sync=cast("Any", sync),
+        universe={VSTTILLERS, SCHAEFFLER},
+        commit=lambda: None,
+        should_stop=stop_after_three,
+        data_root=root,
+        rebuild_from_l0=True,
+        batched_writes=True,
+    ).run(plan)
+
+    assert 0 < report.filings_published < 8, "the stop must cut the chunk short, not skip it"
+    published = [
+        source.removeprefix(fb.FILING_STATE_PREFIX)
+        for (source, _d), row in sync._rows.items()
+        if source.startswith(fb.FILING_STATE_PREFIX) and row.state is SyncState.PUBLISHED
+    ]
+    assert len(published) == report.filings_published
+    # Every checkpointed filing is readable out of L1, and nothing else is checkpointed at all.
+    stored = {f.filing_id for f in read_pit(date(2026, 9, 1), data_root=root)}
+    assert set(published) <= stored
+
+
+def test_batching_is_refused_on_a_run_that_could_fetch(tmp_path: Path) -> None:
+    """The coarser checkpoint is only affordable when re-doing the work is free.
+
+    Under `--rebuild-from-l0` a lost buffer costs local reads and parses. On a fetching run it
+    would cost another chunk of NSE requests, and request budget is the binding constraint on this
+    whole campaign — so the combination is refused rather than left available to be chosen.
+    """
+    settings = _settings(tmp_path)
+    with pytest.raises(ValueError, match="batched_writes requires rebuild_from_l0"):
+        fb.FundamentalsBackfillRunner(
+            fetcher=_fetcher(_ok_transport(_quarterly_plan()), settings),
+            l0=L0Store(clock=CLOCK, data_root=tmp_path),
+            sync=cast("Any", _FakeSync()),
+            universe={VSTTILLERS},
+            commit=lambda: None,
+            data_root=tmp_path,
+            batched_writes=True,
+        )
+
+
+def test_an_announcement_the_feed_repeats_is_skipped_by_the_buffer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The feed really does list one announcement twice, and unflushed the buffer must say so.
+
+    Measured over the L0 index payloads, 15 `(filing_id, filing_date)` keys repeat inside a single
+    chunk — the same record verbatim. Unbatched the second copy resume-skips on the first's
+    committed `PUBLISHED` row. Buffered there is no row yet, so without the buffer's own answer
+    both copies reach the flush and the second `begin` lands on a row the first just published,
+    which the state machine refuses.
+    """
+    plan = _quarterly_plan()
+    l0_tree = _seeded_lake(tmp_path, plan)
+
+    real_parse_index = discovery.parse_index
+
+    def doubled(payload: bytes, *, filename: str) -> tuple[Any, ...]:
+        entries = real_parse_index(payload, filename=filename)
+        return tuple(e for entry in entries for e in (entry, entry))
+
+    monkeypatch.setattr(discovery, "parse_index", doubled)
+
+    report = _rebuild(l0_tree, tmp_path / "bat", batched=True)
+
+    assert report.filings_published == 8, "each filing publishes once, however often it is listed"
+    assert report.filings_skipped_published == 8, "and the repeat is counted, not silently dropped"
+    assert report.filings_failed == 0

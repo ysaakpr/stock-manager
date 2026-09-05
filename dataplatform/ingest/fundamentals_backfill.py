@@ -31,7 +31,20 @@ Four properties, each mapped to an acceptance criterion, mirror `backfill.py` an
 * **The store keys every fact by ISIN + filing_date.** `write_pit` lands a filing in its
   `filing_date` partition; a restatement is a later filing with a later date (or a distinct
   `filing_id`), so it is a new record and never an overwrite (invariant #8). The runner adds no
-  overwrite path — it only ever calls `write_pit`.
+  overwrite path — it only ever calls the PIT store's own writers.
+
+`--rebuild-from-l0` moves the second bullet's writes into a buffer, and the first bullet's
+checkpoint with them. Writing one filing at a time means rewriting its whole `filing_date`
+partition per filing, and a results-season partition holds up to 762 of them (measured), so the
+re-derivation pays O(n²) row-writes per partition — about ninety minutes over the 68,839-filing
+corpus, essentially all of it in the write path. A batched run buffers each partition's facts and
+writes it once per index chunk. The checkpoint moves with the facts, not ahead of them: nothing
+touches `sync_state` while a filing is buffered, and the transitions for a whole batch are written
+and committed only after `PitFundamentalsBatch.flush` has every partition on disk. So a kill still
+never leaves a `PUBLISHED` row for a filing whose facts are in memory — it loses at most one
+chunk's worth of *re-derivation*, which under `--rebuild-from-l0` is local reads and parses and no
+network at all. That trade is refused on a fetching run: the constructor will not batch without
+`rebuild_from_l0`.
 * **Identity resolves through the D2 master (invariant #2).** The universe of names to backfill is
   the ISINs actually present in `prices_raw` over the window, intersected with the master's known
   securities; a filing whose ISIN is not in that universe is skipped and surfaced on the coverage
@@ -82,18 +95,19 @@ from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.ingest.xbrl import discovery, parser
 from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
-from dataplatform.ingest.xbrl.models import SHARES_OUTSTANDING
+from dataplatform.ingest.xbrl.models import SHARES_OUTSTANDING, Filing
 from dataplatform.logging import get_logger
 from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Error, L0Ref, L0Store
 from dataplatform.store.l1 import read_prices_raw
-from dataplatform.store.pit_fundamentals import write_pit
+from dataplatform.store.pit_fundamentals import PitFundamentalsBatch, write_pit
 
 __all__ = [
     "DEFAULT_CHUNK_MONTHS",
     "FILING_STATE_PREFIX",
     "INDEX_STATE_SOURCE",
+    "MAX_BUFFERED_FILINGS",
     "FilingUnit",
     "FundamentalsBackfillReport",
     "FundamentalsBackfillRunner",
@@ -127,6 +141,14 @@ FILING_STATE_PREFIX: Final = f"{parser.SOURCE_ID}/"
 #: matches the filing cadence and keeps a single index response well inside a sane size; the feed
 #: has no documented page size, so a quarter at a time is the conservative bound.
 DEFAULT_CHUNK_MONTHS: Final = 3
+
+#: How many filings a batched run buffers before it flushes and checkpoints, regardless of where
+#: the chunk boundary falls. A safety valve on memory, not the normal flush trigger: measured over
+#: the L0 index payloads, the busiest three-month chunk carries 3,865 actionable entries, so on the
+#: default plan the chunk boundary always comes first and this never fires. It exists because
+#: `--chunk-months` is an operator's choice — a twelve-month chunk in the lake already carries
+#: 9,287 — and an unbounded buffer would make that choice a memory failure rather than a slow run.
+MAX_BUFFERED_FILINGS: Final = 5_000
 
 
 class Period(StrEnum):
@@ -223,6 +245,21 @@ class FilingUnit:
             f"filing {self.entry.isin} {self.entry.period_end.isoformat()} "
             f"{self.entry.nature.value} ({self.entry.filing_id})"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _BufferedFiling:
+    """One parsed filing waiting in the write buffer, with what its checkpoint will need.
+
+    Held only between `_buffer_filing` and the flush that writes its partition. The `ref` is
+    carried because `mark_fetched` records the payload's checksum and L0 key, and that transition
+    is deferred with the rest: a `sync_state` row must not describe a fetch whose facts are still
+    only in memory.
+    """
+
+    unit: FilingUnit
+    ref: L0Ref
+    filing: Filing
 
 
 @dataclass(slots=True)
@@ -431,7 +468,15 @@ class FundamentalsBackfillRunner:
         max_filings: int | None = None,
         symbol_history: Callable[[str], frozenset[str]] | None = None,
         rebuild_from_l0: bool = False,
+        batched_writes: bool = False,
     ) -> None:
+        if batched_writes and not rebuild_from_l0:
+            raise ValueError(
+                "batched_writes requires rebuild_from_l0: buffering trades per-filing checkpoint "
+                "granularity for speed, and that trade is only sound when re-deriving a killed "
+                "run's filings costs a local read and a parse. On a fetching run it would cost "
+                "another chunk of NSE requests, which is the campaign's binding constraint"
+            )
         self._fetcher = fetcher
         self._l0 = l0
         self._sync = sync
@@ -457,6 +502,15 @@ class FundamentalsBackfillRunner:
         #: not the discovery phase, so the coverage report still reflects the true universe size.
         self._max_filings = max_filings
         self._filings_attempted = 0
+        #: The write buffer, or `None` for the one-filing-at-a-time path. When it is set, a
+        #: filing's facts and its whole `sync_state` transition are both deferred to `_flush`, so
+        #: the checkpoint and the parquet file move together (see `_flush`).
+        self._batch = PitFundamentalsBatch(data_root=data_root) if batched_writes else None
+        self._buffered: list[_BufferedFiling] = []
+        #: The `sync_state` keys currently in `_buffered`: the buffer's own answer to the
+        #: resume question, which `sync_state` cannot give for an unflushed filing. See
+        #: `_already_done`.
+        self._buffered_keys: set[tuple[str, date]] = set()
 
     def run(self, index_units: Sequence[IndexUnit]) -> FundamentalsBackfillReport:
         """Process the discovery plan, then ingest each chunk's in-universe filings, resumably.
@@ -479,9 +533,14 @@ class FundamentalsBackfillRunner:
                     unit, index=index, total=len(index_units), report=report
                 )
                 self._ingest_entries(entries, report=report)
+                self._flush(report=report)
         except _ParkedError as parked:
             report.park_reason = parked.reason
             report.park_detail = parked.detail
+        # Whatever is still buffered when the loop ends early — a SIGINT mid-chunk, or a park — is
+        # work already fetched and parsed. Publish it rather than make the next run redo it. A
+        # no-op unless this run is batching and has something pending.
+        self._flush(report=report)
         _LOG.info(
             "fundamentals_backfill.done",
             index_requested=report.index_requested,
@@ -641,57 +700,36 @@ class FundamentalsBackfillRunner:
         return frozenset(known)
 
     def _process_filing(self, unit: FilingUnit, *, report: FundamentalsBackfillReport) -> bool:
-        """Drive one filing `fetch → L0 → parse → write_pit`, or record why it could not be driven.
+        """Drive one filing `fetch → L0 → parse → write`, or record why it could not be driven.
 
         Returns whether the unit was *attempted* — False when it resume-skipped, which is what lets
-        the caller charge only real work to `--max-filings`. On success `write_pit` lands the filing
-        in its `filing_date` partition (restatement-safe — a new record, never an overwrite). A 403
-        spike raises `_ParkedError`; every other failure is caught, filed `FAILED`, committed and
-        counted, and the *next* run retries it: only `PUBLISHED` is skipped, so a unit that failed,
-        or one interrupted mid-flight, is picked up again without anyone editing `sync_state`.
+        the caller charge only real work to `--max-filings`. The filing lands in its `filing_date`
+        partition (restatement-safe — a new record, never an overwrite), either published outright
+        or buffered for the batch flush; `_publish_filing` and `_buffer_filing` are the two shapes,
+        and they differ only in when the write and the checkpoint happen, never in what is written.
+        A 403 spike raises `_ParkedError`; every other failure is caught, filed `FAILED`, committed
+        and counted, and the *next* run retries it: only `PUBLISHED` is skipped, so a unit that
+        failed, or one interrupted mid-flight, is picked up again without anyone editing
+        `sync_state`.
         """
-        existing = self._sync.get(unit.state_source, unit.logical_date)
-        if existing is not None and existing.state is SyncState.PUBLISHED:
+        done = self._already_done(unit)
+        if done is not None:
             report.filings_skipped_published += 1
             report.covered_isins.add(unit.entry.isin)
             _LOG.info(
                 "fundamentals_backfill.filing_skip_published",
                 unit=unit.label,
-                state="PUBLISHED",
+                state=done,
             )
             return False
 
         _LOG.info("fundamentals_backfill.filing_start", unit=unit.label, url=unit.url)
         try:
-            self._sync.begin(unit.state_source, unit.logical_date)
-            ref = self._ref_for(unit, report=report)
-            self._sync.mark_fetched(
-                unit.state_source, unit.logical_date, checksum=ref.sha256, l0_path=ref.key
-            )
-            filing = parser.parse(
-                self._l0.get(ref),
-                entry=unit.entry,
-                known_symbols=self._symbols_for(unit.entry.isin, unit.entry.symbol),
-                l0_key=ref.key,
-                filename=unit.filename,
-            )
-            self._sync.mark_validated(unit.state_source, unit.logical_date)
-            write_pit(filing, data_root=self._data_root)
-            self._sync.mark_normalized(unit.state_source, unit.logical_date)
-            self._sync.mark_published(unit.state_source, unit.logical_date)
-            self._commit()
-            report.filings_published += 1
-            report.facts_written += len(filing.facts)
-            report.covered_isins.add(filing.isin)
-            concepts = {fact.concept for fact in filing.company_facts()}
-            if "paid_up_equity_capital" in concepts and SHARES_OUTSTANDING not in concepts:
-                report.derivations_refused += 1
-            _LOG.info(
-                "fundamentals_backfill.filing_published",
-                unit=unit.label,
-                facts=len(filing.facts),
-                state="PUBLISHED",
-            )
+            batch = self._batch
+            if batch is None:
+                self._publish_filing(unit, report=report)
+            else:
+                self._buffer_filing(unit, batch=batch, report=report)
         except ForbiddenSpikeError as spike:
             self._park_on_spike(unit.label, unit.state_source, unit.logical_date, spike)
         except ParseError as exc:
@@ -715,6 +753,159 @@ class FundamentalsBackfillRunner:
                 index=False,
             )
         return True
+
+    def _already_done(self, unit: FilingUnit) -> str | None:
+        """Why this filing needs no work — `"PUBLISHED"`, `"BUFFERED"`, or `None` to go and do it.
+
+        The `sync_state` half is the resume check: a committed `PUBLISHED` row is never re-fetched.
+        The buffer half exists because one index chunk really can name the same filing twice — the
+        feed repeats an announcement verbatim, and measured over the L0 index payloads 15
+        `(filing_id, filing_date)` keys repeat inside a single chunk. Unbatched, the second copy
+        resume-skips because the first already committed `PUBLISHED`. Buffered, the first has no
+        row yet, so the buffer itself has to answer; otherwise both copies reach the flush and the
+        second `begin` lands on the row the first has just published — an illegal transition, not
+        a no-op. Counted as a resume-skip either way, because that is what it is.
+        """
+        existing = self._sync.get(unit.state_source, unit.logical_date)
+        if existing is not None and existing.state is SyncState.PUBLISHED:
+            return "PUBLISHED"
+        if (unit.state_source, unit.logical_date) in self._buffered_keys:
+            return "BUFFERED"
+        return None
+
+    def _publish_filing(self, unit: FilingUnit, *, report: FundamentalsBackfillReport) -> None:
+        """Fetch, parse, write and checkpoint one filing — the one-at-a-time path.
+
+        Every `sync_state` transition is written as it happens and the commit after
+        `mark_published` is the checkpoint, so a kill loses at most this filing. That granularity
+        is what the daily-forward path is for and it is not traded away here.
+        """
+        self._sync.begin(unit.state_source, unit.logical_date)
+        ref = self._ref_for(unit, report=report)
+        self._sync.mark_fetched(
+            unit.state_source, unit.logical_date, checksum=ref.sha256, l0_path=ref.key
+        )
+        filing = self._parse(unit, ref)
+        self._sync.mark_validated(unit.state_source, unit.logical_date)
+        write_pit(filing, data_root=self._data_root)
+        self._sync.mark_normalized(unit.state_source, unit.logical_date)
+        self._sync.mark_published(unit.state_source, unit.logical_date)
+        self._commit()
+        self._count_published(unit, filing, report=report)
+
+    def _buffer_filing(
+        self,
+        unit: FilingUnit,
+        *,
+        batch: PitFundamentalsBatch,
+        report: FundamentalsBackfillReport,
+    ) -> None:
+        """Fetch and parse one filing into the write buffer, touching `sync_state` not at all.
+
+        Nothing is checkpointed here, deliberately. Any row written now would be committed by the
+        *next* unit that commits — a failure two filings later runs `_fail`, which commits — and
+        would then describe work no flush had done. Leaving the row absent until the flush keeps
+        the rule the buffer has to keep: a row exists only once its facts are on disk, and a killed
+        run simply re-derives this filing, which under `--rebuild-from-l0` costs a local read and a
+        parse and no network at all.
+
+        The conflict checks still run per filing, inside `batch.add` — a filing whose re-derivation
+        contradicts a stored or already-buffered fact raises here and fails alone, exactly as it
+        would have against `write_pit`.
+        """
+        # Whether this row will accept the sequence the flush is going to drive, asked here, where
+        # a refusal fails one filing. Asked at the flush it would abort a whole batch instead. The
+        # case that reaches this is a row an earlier park left non-retryable `FAILED`, and the
+        # unbatched path meets it at its own `begin`, one filing wide, which is what this matches.
+        existing = self._sync.get(unit.state_source, unit.logical_date)
+        if existing is not None:
+            existing.check_transition(SyncState.PENDING)
+        ref = self._ref_for(unit, report=report)
+        filing = self._parse(unit, ref)
+        batch.add(filing)
+        self._buffered.append(_BufferedFiling(unit=unit, ref=ref, filing=filing))
+        self._buffered_keys.add((unit.state_source, unit.logical_date))
+        _LOG.info(
+            "fundamentals_backfill.filing_buffered",
+            unit=unit.label,
+            facts=len(filing.facts),
+            pending=len(self._buffered),
+            state="VALIDATED",
+        )
+        if len(self._buffered) >= MAX_BUFFERED_FILINGS:
+            self._flush(report=report)
+
+    def _flush(self, *, report: FundamentalsBackfillReport) -> None:
+        """Write every buffered partition, then checkpoint the filings that went into them.
+
+        The order is the whole point, and it is what makes buffering safe to trade against the
+        per-unit checkpoint. `batch.flush()` returns only once every touched partition is on disk;
+        only then does any row reach `PUBLISHED`, and the single commit that follows is this
+        batch's checkpoint. So there is no moment at which a committed row claims `PUBLISHED` for a
+        filing whose facts are still in memory — the failure this replaces the per-filing commit
+        with is the one `write_pit`-then-commit has always had, only wider: a kill between the
+        parquet write and the commit leaves L1 ahead of the checkpoint, and the next run re-derives
+        those filings into a merge that is idempotent because L0 is immutable.
+
+        A flush that raises is not caught. Its only remaining causes are I/O — the values were
+        already checked filing by filing on the way into the buffer — and an L1 store that cannot
+        be written is not a condition to carry on through.
+        """
+        batch = self._batch
+        if batch is None or not self._buffered:
+            return
+        partitions = batch.flush()
+        for pending in self._buffered:
+            state_source, logical_date = pending.unit.state_source, pending.unit.logical_date
+            self._sync.begin(state_source, logical_date)
+            self._sync.mark_fetched(
+                state_source, logical_date, checksum=pending.ref.sha256, l0_path=pending.ref.key
+            )
+            self._sync.mark_validated(state_source, logical_date)
+            self._sync.mark_normalized(state_source, logical_date)
+            self._sync.mark_published(state_source, logical_date)
+        self._commit()
+        for pending in self._buffered:
+            self._count_published(pending.unit, pending.filing, report=report)
+        _LOG.info(
+            "fundamentals_backfill.batch_flushed",
+            partitions=len(partitions),
+            filings=len(self._buffered),
+            state="PUBLISHED",
+        )
+        self._buffered.clear()
+        self._buffered_keys.clear()
+
+    def _parse(self, unit: FilingUnit, ref: L0Ref) -> Filing:
+        """One L0 payload into a `Filing`, cross-checked against the ISIN's symbol history."""
+        return parser.parse(
+            self._l0.get(ref),
+            entry=unit.entry,
+            known_symbols=self._symbols_for(unit.entry.isin, unit.entry.symbol),
+            l0_key=ref.key,
+            filename=unit.filename,
+        )
+
+    def _count_published(
+        self, unit: FilingUnit, filing: Filing, *, report: FundamentalsBackfillReport
+    ) -> None:
+        """Charge one filing to the report — only ever once its facts are durably on disk.
+
+        Called from the commit side of both paths rather than from the parse, so
+        `filings_published` counts filings that really are published. A buffered filing is not one.
+        """
+        report.filings_published += 1
+        report.facts_written += len(filing.facts)
+        report.covered_isins.add(filing.isin)
+        concepts = {fact.concept for fact in filing.company_facts()}
+        if "paid_up_equity_capital" in concepts and SHARES_OUTSTANDING not in concepts:
+            report.derivations_refused += 1
+        _LOG.info(
+            "fundamentals_backfill.filing_published",
+            unit=unit.label,
+            facts=len(filing.facts),
+            state="PUBLISHED",
+        )
 
     def _index_ref(self, unit: IndexUnit) -> L0Ref:
         """This index chunk's L0 payload — fetched normally, or read back in rebuild mode.
@@ -977,7 +1168,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--rebuild-from-l0",
         action="store_true",
         help=(
-            "derive L1 and the checkpoints from payloads already in L0 and never fetch; "
+            "derive L1 and the checkpoints from payloads already in L0 and never fetch, "
+            "buffering the L1 writes per partition rather than rewriting one per filing; "
             "use after moving an L0 tree between machines"
         ),
     )
@@ -1068,6 +1260,10 @@ def _run_live(
                 window.symbol for window in master.windows_for(isin)
             ),
             rebuild_from_l0=rebuild_from_l0,
+            # A rebuild is the only run that batches its writes. It is the run whose whole shape is
+            # "throw the store away and redo it from L0", so the coarser checkpoint costs a local
+            # re-parse and nothing else; the daily-forward path keeps its per-filing commit.
+            batched_writes=rebuild_from_l0,
         )
         report = runner.run(plan)
 

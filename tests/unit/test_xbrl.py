@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import socket
+from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -43,6 +44,7 @@ from dataplatform.ingest.xbrl import (
     CONDITIONAL_CONCEPT_KEYS,
     Filing,
     FilingIndexEntry,
+    FundamentalFact,
     Nature,
     Taxonomy,
     concepts_for,
@@ -54,6 +56,7 @@ from dataplatform.ingest.xbrl.parser import SEGMENT_CONCEPT
 from dataplatform.store.paths import l1_partition_path
 from dataplatform.store.pit_fundamentals import (
     PIT_FUNDAMENTALS_DATASET,
+    PitFundamentalsBatch,
     read_l1,
     read_latest,
     read_pit,
@@ -1558,7 +1561,7 @@ def test_taxonomy_rides_on_every_fact_not_just_the_filing(
 def test_a_share_count_is_a_whole_number_of_shares(
     entries: tuple[FilingIndexEntry, ...], repo_root: Path
 ) -> None:
-    """Paid-up over face value rarely divides exactly, and the remainder is not a fraction of a share.
+    """Paid-up over face value rarely divides exactly, and the remainder is not part of a share.
 
     Paid-up capital is stated to the nearest thousand rupees, so a ₹3 face value leaves a repeating
     decimal — SPICEMOBI's real filing gives 201,749,666.666… — and a repeating decimal has no
@@ -1578,3 +1581,214 @@ def test_a_share_count_is_a_whole_number_of_shares(
     # the guard passes it and the rounding is what has to hold.
     assert shares == Decimal("15035555556")
     assert shares == shares.to_integral_value()
+
+
+# ── the batched write path: same bytes, same refusals, nothing on disk until flush ─────────────
+
+
+def _batched(filings: Sequence[Filing], root: Path) -> None:
+    """Write every filing through one batch, as a re-derivation's chunk does."""
+    batch = PitFundamentalsBatch(data_root=root)
+    for filing in filings:
+        batch.add(filing)
+    batch.flush()
+
+
+def _partition_bytes(root: Path) -> dict[str, bytes]:
+    base = root / "L1" / PIT_FUNDAMENTALS_DATASET
+    return {str(p.relative_to(base)): p.read_bytes() for p in sorted(base.rglob("part.parquet"))}
+
+
+def test_a_batched_write_is_byte_identical_to_a_filing_at_a_time(
+    all_filings: tuple[Filing, ...], tmp_path: Path
+) -> None:
+    """The batch is an optimisation, not a second format — its output must be indistinguishable.
+
+    Re-deriving the store from L0 rewrites every partition it touches, and replay determinism is a
+    stated invariant, so "the fast path produces the same store" has to be checked on the bytes and
+    not on a read-back comparison that a schema or ordering difference could survive.
+    """
+    one_at_a_time, batched = tmp_path / "seq", tmp_path / "bat"
+    for filing in all_filings:
+        write_pit(filing, data_root=one_at_a_time)
+    _batched(all_filings, batched)
+
+    assert _partition_bytes(one_at_a_time) == _partition_bytes(batched)
+    assert len(_partition_bytes(batched)) > 1, "the fixtures must span more than one partition"
+
+
+def test_a_later_batch_merges_into_a_partition_an_earlier_one_wrote(
+    all_filings: tuple[Filing, ...], tmp_path: Path
+) -> None:
+    """Two flushes into one partition: the second must not erase what the first stored.
+
+    This is the ordinary case, not an edge one. A run flushes per index chunk, and the quarterly
+    and annual passes cover the same dates, so a partition written by one flush is routinely
+    reopened by a later one — as is any partition a resumed or repeated run touches again. The
+    buffer therefore reads a partition's stored rows on first touch, which is both what preserves
+    them and what lets a conflict be refused against them.
+    """
+    same_day = [f for f in all_filings if f.filing_date == VST_RESTATED_FILED]
+    assert len(same_day) == 2, "the fixtures must have two filings sharing one partition"
+    first, second = same_day
+    batched, incremental = tmp_path / "bat", tmp_path / "seq"
+
+    for filing in (first, second):  # one filing per flush, as two chunks would
+        batch = PitFundamentalsBatch(data_root=batched)
+        batch.add(filing)
+        batch.flush()
+    for filing in (first, second):
+        write_pit(filing, data_root=incremental)
+
+    stored = read_l1(VST_RESTATED_FILED, data_root=batched)
+    assert {f.filing_id for f in stored} == {first.filing_id, second.filing_id}
+    assert _partition_bytes(batched) == _partition_bytes(incremental)
+
+
+def test_nothing_reaches_the_disk_before_the_flush(
+    all_filings: tuple[Filing, ...], tmp_path: Path
+) -> None:
+    """The property the deferred checkpoint rests on: a buffered fact is not a stored fact.
+
+    If `add` wrote anything, a caller could reasonably checkpoint on it — and the whole reason the
+    runner defers its `sync_state` transitions to the flush is that it cannot.
+    """
+    batch = PitFundamentalsBatch(data_root=tmp_path)
+    for filing in all_filings:
+        batch.add(filing)
+
+    assert batch.pending_filings == len(all_filings)
+    assert not list((tmp_path / "L1").rglob("*.parquet"))
+    assert read_pit(date(2026, 9, 1), data_root=tmp_path) == ()
+
+    written = batch.flush()
+    assert len(written) == len({f.filing_date for f in all_filings})
+    assert batch.pending_filings == 0
+    assert read_pit(date(2026, 9, 1), data_root=tmp_path)
+
+
+def test_a_batch_refuses_a_re_derived_value_that_changed(
+    vst_original: Filing, tmp_path: Path
+) -> None:
+    """The restatement guard survives buffering: two values for one fact key is corrupt input.
+
+    `_FACT_KEY` carries `filing_id`, so this is never a restatement — a restatement has its own
+    id. It is the same filing parsed twice into different numbers, which L0's immutability says
+    cannot happen, so it is refused rather than merged.
+    """
+    revenue = next(f for f in vst_original.facts if f.concept == "revenue_from_operations")
+    changed = vst_original.model_copy(
+        update={
+            "facts": (
+                *(f for f in vst_original.facts if f is not revenue),
+                revenue.model_copy(update={"value": revenue.value + 1}),
+            )
+        }
+    )
+
+    batch = PitFundamentalsBatch(data_root=tmp_path)
+    batch.add(vst_original)
+    with pytest.raises(ValueError, match="produced a different value"):
+        batch.add(changed)
+
+
+def test_a_refused_filing_leaves_nothing_of_itself_in_the_buffer(
+    vst_original: Filing, tmp_path: Path
+) -> None:
+    """A filing that raises must not have half of its facts flushed later.
+
+    `write_pit` gets this free — it builds a local map and drops it on the way out. A buffer does
+    not, and a partially merged filing would be published by the next flush as though it had been
+    accepted, which is worse than the failure it came from.
+    """
+    good = vst_original.facts[0]
+    poisoned = vst_original.model_copy(
+        update={
+            "facts": (
+                good.model_copy(update={"concept": "a_fact_only_this_filing_has"}),
+                *vst_original.facts,
+            )
+        }
+    )
+
+    batch = PitFundamentalsBatch(data_root=tmp_path)
+    batch.add(vst_original)
+    baseline = batch.pending_facts
+    with pytest.raises(ValueError, match="produced a different value"):
+        batch.add(poisoned.model_copy(update={"facts": _with_changed_value(poisoned)}))
+    assert batch.pending_facts == baseline
+
+    batch.flush()
+    stored = {f.concept for f in read_l1(VST_ORIGINAL_FILED, data_root=tmp_path)}
+    assert "a_fact_only_this_filing_has" not in stored
+
+
+def _with_changed_value(filing: Filing) -> tuple[FundamentalFact, ...]:
+    """The filing's facts with its revenue altered — the second fact of the tuple raises."""
+    return tuple(
+        f.model_copy(update={"value": f.value + 1}) if f.concept == "revenue_from_operations" else f
+        for f in filing.facts
+    )
+
+
+def test_a_restatement_batched_beside_its_original_still_keeps_both(
+    all_filings: tuple[Filing, ...], tmp_path: Path
+) -> None:
+    """Both V.S.T Tillers filings through one batch: a restatement is still a new record.
+
+    Buffering merges by fact key before anything is written, so this is where an over-eager merge
+    would collapse the two versions — and losing the number a 2025 backtest could actually see is
+    exactly the failure invariant #8 exists to prevent.
+    """
+    _batched(list(all_filings), tmp_path)
+
+    revenue = [
+        f
+        for f in read_pit(date(2026, 9, 1), data_root=tmp_path)
+        if f.isin == VSTTILLERS
+        and f.nature is Nature.STANDALONE
+        and f.concept == "revenue_from_operations"
+    ]
+    assert {f.value for f in revenue} == {Decimal("21910000000.00"), Decimal("2191000000.00")}
+    early = read_pit(date(2025, 6, 1), data_root=tmp_path)
+    assert _revenue_of(early) == {Decimal("21910000000.00")}
+
+
+def _revenue_of(facts: tuple[FundamentalFact, ...]) -> set[Decimal]:
+    return {
+        f.value
+        for f in facts
+        if f.isin == VSTTILLERS
+        and f.nature is Nature.STANDALONE
+        and f.concept == "revenue_from_operations"
+    }
+
+
+def test_a_batch_refuses_a_value_the_l1_column_cannot_hold(
+    vst_original: Filing, tmp_path: Path
+) -> None:
+    """An out-of-scale value fails one filing, not the whole partition it was buffered with.
+
+    A filing at a time, `pa.Table.from_pylist` catches this and the runner files that one filing
+    `FAILED`. Buffered, the conversion happens at the flush, where it would take every filing in
+    the batch with it — so the same check runs on the way in.
+    """
+    eps = next(f for f in vst_original.facts if f.concept == "eps_basic")
+    five_dp = vst_original.model_copy(
+        update={
+            "facts": (
+                *(f for f in vst_original.facts if f is not eps),
+                eps.model_copy(update={"value": Decimal("1.23456")}),
+            )
+        }
+    )
+
+    batch = PitFundamentalsBatch(data_root=tmp_path)
+    with pytest.raises(ValueError, match="does not fit the L1"):
+        batch.add(five_dp)
+    assert batch.pending_filings == 0
+
+    # The batch is still usable and the good filing still writes.
+    batch.add(vst_original)
+    batch.flush()
+    assert read_l1(VST_ORIGINAL_FILED, data_root=tmp_path)
