@@ -94,6 +94,7 @@ def _segment_filing(
         period_end=quarter.period_end,
         filing_date=quarter.filing_date,
         nature=nature,
+        taxonomy=Taxonomy.IND_AS,
         filing_id=filing_id,
         concept=SEGMENT_CONCEPT,
         segment=segment,

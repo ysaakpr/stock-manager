@@ -49,7 +49,7 @@ from typing import Any, Final
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from dataplatform.ingest.xbrl.models import Filing, FundamentalFact, Nature
+from dataplatform.ingest.xbrl.models import Filing, FundamentalFact, Nature, Taxonomy
 from dataplatform.logging import get_logger
 from dataplatform.store.paths import Layer, l1_partition_path, layer_root, partition_date_of
 
@@ -90,10 +90,21 @@ _L1_SCHEMA: Final = pa.schema(
         pa.field("period_end", pa.date32(), nullable=False),
         pa.field("filing_date", pa.date32(), nullable=False),
         pa.field("nature", pa.string(), nullable=False),
+        # Which taxonomy family the filing was prepared against. Not decoration: a bank's
+        # `revenue_from_operations` is `InterestEarned` and its `total_expenses` excludes provisions
+        # and contingencies, so a screen that ranks banks beside manufacturers on one concept key is
+        # comparing two different measurements. Carried on the row so that is visible where the
+        # number is read, instead of requiring a join back to the filing to find out.
+        pa.field("taxonomy", pa.string(), nullable=False),
         pa.field("filing_id", pa.string(), nullable=False),
         pa.field("concept", pa.string(), nullable=False),
         pa.field("segment", pa.string(), nullable=True),
         pa.field("value", _VALUE_TYPE, nullable=False),
+        # Whether the parser computed this value or read it from an element. A derived number can be
+        # wrong while both its inputs were read correctly, so an audit has to be able to separate
+        # the two populations — and `shares_outstanding` in particular is only published when the
+        # filing's own EPS corroborates it, which is a fact about the row worth keeping.
+        pa.field("derived", pa.bool_(), nullable=False),
         pa.field("source", pa.string(), nullable=False),
         pa.field("l0_key", pa.string(), nullable=True),
     ]
@@ -246,10 +257,12 @@ def _rows_of(path: Path) -> tuple[FundamentalFact, ...]:
             period_end=record["period_end"],
             filing_date=record["filing_date"],
             nature=Nature(record["nature"]),
+            taxonomy=Taxonomy(record["taxonomy"]),
             filing_id=str(record["filing_id"]),
             concept=str(record["concept"]),
             segment=None if record["segment"] is None else str(record["segment"]),
             value=_as_decimal(record["value"]),
+            derived=bool(record["derived"]),
             source=str(record["source"]),
             l0_key=None if record["l0_key"] is None else str(record["l0_key"]),
         )
@@ -272,10 +285,12 @@ def _to_record(fact: FundamentalFact) -> dict[str, Any]:
         "period_end": fact.period_end,
         "filing_date": fact.filing_date,
         "nature": fact.nature.value,
+        "taxonomy": fact.taxonomy.value,
         "filing_id": fact.filing_id,
         "concept": fact.concept,
         "segment": fact.segment,
         "value": fact.value,
+        "derived": fact.derived,
         "source": fact.source,
         "l0_key": fact.l0_key,
     }

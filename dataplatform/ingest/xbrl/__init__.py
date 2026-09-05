@@ -27,10 +27,15 @@ from dataplatform.ingest.xbrl.discovery import (
 )
 from dataplatform.ingest.xbrl.models import (
     BANKING_CONCEPTS,
+    COMMON_CONCEPT_KEYS,
     CONCEPT_KEYS,
     CONCEPTS,
+    CONDITIONAL_CONCEPT_KEYS,
+    DERIVED_CONCEPTS,
     IND_AS_CONCEPTS,
     NON_IND_AS_CONCEPTS,
+    SHAREHOLDERS_EQUITY,
+    SHARES_OUTSTANDING,
     Filing,
     FundamentalFact,
     Nature,
@@ -45,11 +50,16 @@ from dataplatform.ingest.xbrl.parser import (
 
 __all__ = [
     "BANKING_CONCEPTS",
+    "COMMON_CONCEPT_KEYS",
     "CONCEPTS",
     "CONCEPT_KEYS",
+    "CONDITIONAL_CONCEPT_KEYS",
+    "DERIVED_CONCEPTS",
     "IND_AS_CONCEPTS",
     "NON_IND_AS_CONCEPTS",
     "SEGMENT_CONCEPT",
+    "SHAREHOLDERS_EQUITY",
+    "SHARES_OUTSTANDING",
     "SOURCE_ID",
     "Filing",
     "FilingIndexEntry",

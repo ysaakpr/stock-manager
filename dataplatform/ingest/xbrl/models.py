@@ -39,10 +39,15 @@ from dataplatform.ingest.models import ISIN_PATTERN
 
 __all__ = [
     "BANKING_CONCEPTS",
+    "COMMON_CONCEPT_KEYS",
     "CONCEPTS",
     "CONCEPT_KEYS",
+    "CONDITIONAL_CONCEPT_KEYS",
+    "DERIVED_CONCEPTS",
     "IND_AS_CONCEPTS",
     "NON_IND_AS_CONCEPTS",
+    "SHAREHOLDERS_EQUITY",
+    "SHARES_OUTSTANDING",
     "Filing",
     "FundamentalFact",
     "Nature",
@@ -99,6 +104,80 @@ class Taxonomy(StrEnum):
     NON_IND_AS = "Non-Ind-AS"
 
 
+#: Balance-sheet elements the results filing does carry, and which the whitelist used to stop short
+#: of. A quarterly filing is profit-and-loss only, but SEBI LODR requires a balance sheet alongside
+#: *annual* results and the XBRL states it — measured over 2,500 captured documents, the two capital
+#: elements appear in **100%** of filings of every family and the reserves line in 25-48% (which is
+#: essentially "the annual ones"). Element names are identical across the three taxonomies here, so
+#: this block is shared rather than repeated three times with the same strings.
+#:
+#: `reserves_excl_revaluation` is named for what it excludes, deliberately. A vendor reporting
+#: "reserves" reports the total *including* any revaluation surplus, so the two legitimately differ
+#: for an asset-heavy company — cross-checked against Screener, ours matched to the rupee on 8 of 13
+#: companies and the two large gaps were exactly that surplus. Excluding it is the better basis for
+#: a book-value ratio (a revaluation writeup moves no cash and is management's discretion), but a
+#: reader must be able to see which basis they hold from the name alone.
+_CAPITAL_CONCEPTS: Final[dict[str, str]] = {
+    "PaidUpValueOfEquityShareCapital": "paid_up_equity_capital",
+    "FaceValueOfEquityShareCapital": "face_value_per_share",
+    "ReserveExcludingRevaluationReserves": "reserves_excl_revaluation",
+}
+
+#: The parent's own share of a consolidated profit — the figure the reported EPS is actually struck
+#: on, and therefore the right numerator for any per-share ratio on a group filing.
+#:
+#: Not a refinement: for a holding company it is a different number entirely. GRASIM's consolidated
+#: `ProfitLossForPeriod` for Q3 FY25 is ₹1,844 crore, but it consolidates UltraTech and Aditya Birla
+#: Capital and most of that profit belongs to their minority holders — the parent's share is ₹901
+#: crore, almost exactly half. A P/E built on the consolidated bottom line and a market cap built on
+#: the parent's shares is comparing a group's earnings to a parent's equity, which understates the
+#: multiple by 2x for exactly the companies where it matters most.
+#:
+#: Element per family, and the third one is a deliberate omission rather than an oversight: Ind-AS
+#: states the parent's share directly (80% of consolidated filings, 11% of standalone ones where it
+#: equals the bottom line anyway); banking states it as "after minority interest", the same quantity
+#: named differently, in 100% of filings; and the pre-Ind-AS form states only
+#: `ProfitLossForPeriodBeforeMinorityInterest`, which is the wrong side of the deduction. Mapping
+#: that one would put the group's profit under a key promising the parent's, so it is left out and
+#: those filings fall back to the bottom line — 3 consolidated filings in a 4,000-document sample.
+_IND_AS_OWNERS_CONCEPTS: Final[dict[str, str]] = {
+    "ProfitOrLossAttributableToOwnersOfParent": "profit_attributable_to_owners",
+}
+_BANKING_OWNERS_CONCEPTS: Final[dict[str, str]] = {
+    "ProfitLossAfterTaxesMinorityInterestAndShareOfProfitLossOfAssociates": (
+        "profit_attributable_to_owners"
+    ),
+}
+
+#: Leverage, as the filer computed it. Ind-AS and the pre-Ind-AS form state it in ~27-43% of
+#: filings; **no** bank filing does, which is correct rather than missing — a debt-to-equity ratio
+#: is not a meaningful figure for a deposit-taking institution. Included despite being a ratio
+#: someone else computed (normally a reason to refuse a number we cannot reconstruct) because
+#: leverage has no other route out of this dataset: borrowings are not stated anywhere in it.
+_LEVERAGE_CONCEPTS: Final[dict[str, str]] = {
+    "DebtEquityRatio": "debt_equity_ratio",
+}
+
+#: Asset quality, in **100%** of bank filings and in no other family. This is the one place the
+#: banking taxonomy is richer than the Ind-AS one rather than merely different, and it is what makes
+#: a genuine quality factor possible for banks — where `reserves_excl_revaluation` gives book value
+#: but says nothing about whether the loan book is sound.
+_BANK_QUALITY_CONCEPTS: Final[dict[str, str]] = {
+    "GrossNonPerformingAssets": "gross_npa",
+    "NonPerformingAssets": "net_npa",
+    "PercentageOfGrossNpa": "gross_npa_pct",
+    "PercentageOfNpa": "net_npa_pct",
+    "ReturnOnAssets": "return_on_assets",
+    "CET1Ratio": "cet1_ratio",
+}
+
+#: Concepts the parser *computes* rather than reads, from elements above. Kept separate because a
+#: derived fact has a provenance a mapped one does not: it can be wrong even when both its inputs
+#: were read correctly, so each carries its own guard in the parser.
+SHARES_OUTSTANDING: Final = "shares_outstanding"
+SHAREHOLDERS_EQUITY: Final = "shareholders_equity_excl_revaluation"
+DERIVED_CONCEPTS: Final[frozenset[str]] = frozenset({SHARES_OUTSTANDING, SHAREHOLDERS_EQUITY})
+
 #: The monetary/EPS concepts this parser lifts out of an Ind-AS (and NBFC) results filing, keyed by
 #: the stable snake_case name the rest of the platform uses, mapped from the in-bse-fin element
 #: local-name it really appears as. A curated whitelist, not "every tag": these are the line items
@@ -120,6 +199,9 @@ IND_AS_CONCEPTS: Final[dict[str, str]] = {
     # left out: mixing bases across concepts is how a ratio quietly stops meaning anything.
     "BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_basic",
     "DilutedEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_diluted",
+    **_CAPITAL_CONCEPTS,
+    **_LEVERAGE_CONCEPTS,
+    **_IND_AS_OWNERS_CONCEPTS,
 }
 
 #: The same platform concept keys against the banking taxonomy's own element names, so a bank's
@@ -141,6 +223,9 @@ BANKING_CONCEPTS: Final[dict[str, str]] = {
     "ProfitLossForThePeriod": "profit_after_tax",
     "BasicEarningsPerShareAfterExtraordinaryItems": "eps_basic",
     "DilutedEarningsPerShareAfterExtraordinaryItems": "eps_diluted",
+    **_CAPITAL_CONCEPTS,
+    **_BANK_QUALITY_CONCEPTS,
+    **_BANKING_OWNERS_CONCEPTS,
 }
 
 #: The pre-Ind-AS Indian-GAAP form (`other_than_banks_entry_point_*`). Ind-AS-shaped apart from two
@@ -158,6 +243,8 @@ NON_IND_AS_CONCEPTS: Final[dict[str, str]] = {
     "ProfitLossForThePeriod": "profit_after_tax",
     "BasicEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_basic",
     "DilutedEarningsLossPerShareFromContinuingAndDiscontinuedOperations": "eps_diluted",
+    **_CAPITAL_CONCEPTS,
+    **_LEVERAGE_CONCEPTS,
 }
 
 #: Element local-name → platform concept key, per taxonomy family.
@@ -167,9 +254,49 @@ CONCEPTS: Final[dict[Taxonomy, dict[str, str]]] = {
     Taxonomy.NON_IND_AS: NON_IND_AS_CONCEPTS,
 }
 
-#: The platform concept keys this parser can produce, whatever the taxonomy. Every family maps onto
-#: the same keys, which is what lets a consumer read a bank and a manufacturer with one query.
-CONCEPT_KEYS: Final[frozenset[str]] = frozenset(IND_AS_CONCEPTS.values())
+#: Every platform concept key this parser can produce, across all taxonomies plus the derived ones.
+#: A union rather than one family's values: the P&L spine is shared, but a bank reports asset
+#: quality no other filer does and reports no debt-to-equity ratio, so no single family enumerates
+#: the whole vocabulary any more.
+CONCEPT_KEYS: Final[frozenset[str]] = (
+    frozenset(
+        key
+        for family in (IND_AS_CONCEPTS, BANKING_CONCEPTS, NON_IND_AS_CONCEPTS)
+        for key in family.values()
+    )
+    | DERIVED_CONCEPTS
+)
+
+#: Concepts a filing may legitimately omit, so their absence is data rather than a defect. Two
+#: reasons, both measured over 3,000 captured documents:
+#:
+#: * **Period.** A results filing states a balance sheet only alongside *annual* results, so the
+#:   reserves line appears in 24% of Ind-AS filings, 16% of banking and 41% of the pre-Ind-AS form —
+#:   which is roughly "the annual ones" in each. `shareholders_equity_excl_revaluation` inherits
+#:   that, being derived from it.
+#: * **Filer discretion.** `DebtEquityRatio` is stated by 26% of Ind-AS filers and 47% of pre-Ind-AS
+#:   ones, and by no bank at all.
+#: * **Nature.** `profit_attributable_to_owners` is stated by 80% of consolidated Ind-AS filings and
+#:   11% of standalone ones — a standalone filing has no minority to attribute away, so there the
+#:   bottom line already *is* the owners' share and the separate element is redundant.
+#:
+#: `shares_outstanding` is here for a third reason: its inputs are universal but it is withheld when
+#: the filing's own EPS does not corroborate it (~5% of filings), which is a refusal, not a gap.
+#:
+#: Everything in `CONCEPT_KEYS` outside this set is stated by every filing of the families that map
+#: it, which is what makes a missing one a parse regression worth failing on.
+CONDITIONAL_CONCEPT_KEYS: Final[frozenset[str]] = frozenset(
+    {"reserves_excl_revaluation", "debt_equity_ratio", "profit_attributable_to_owners"}
+    | DERIVED_CONCEPTS
+)
+
+#: The concepts every family states, and therefore the only ones a consumer may assume are present
+#: for any filing. Everything else in `CONCEPT_KEYS` is family- or period-conditional.
+COMMON_CONCEPT_KEYS: Final[frozenset[str]] = frozenset(
+    set(IND_AS_CONCEPTS.values())
+    & set(BANKING_CONCEPTS.values())
+    & set(NON_IND_AS_CONCEPTS.values())
+)
 
 
 def concepts_for(taxonomy: Taxonomy) -> dict[str, str]:
@@ -193,6 +320,16 @@ class FundamentalFact(BaseModel):
     one the filing really reported, filed strictly after the period it reports.
     What it never does: infer `filing_date` from `period_end`, hold a `float`, or merge standalone
     and consolidated — `nature` is part of its identity.
+
+    Two fields exist to keep a consumer from having to guess where a number came from:
+
+    * **`taxonomy`** — a bank's `revenue_from_operations` is `InterestEarned` and its
+      `total_expenses` excludes provisions, so the same concept key does not mean the same thing
+      across families. A cross-sectional screen that ranks banks and manufacturers on one key needs
+      to *see* that in the row rather than re-derive it by joining back to the filing.
+    * **`derived`** — whether the parser computed this number or read it. A derived value can be
+      wrong even when both its inputs were read correctly, so it carries a different burden of proof
+      than a stated one, and anything auditing the store must be able to separate the two.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -208,6 +345,9 @@ class FundamentalFact(BaseModel):
         description="first date the number was knowable (exchange dissemination); after period_end"
     )
     nature: Nature = Field(description="Standalone or Consolidated — part of the fact's identity")
+    taxonomy: Taxonomy = Field(
+        description="entry point the filing was prepared against; concept keys are not cross-family"
+    )
     filing_id: str = Field(
         min_length=1, description="stable id of the filing this came from; keys restatements apart"
     )
@@ -216,6 +356,9 @@ class FundamentalFact(BaseModel):
         default=None, description="business-segment name for a segment datum; None at company level"
     )
     value: Value = Field(description="the reported value, exact and finite (CLAUDE.md: Decimal)")
+    derived: bool = Field(
+        default=False, description="computed by the parser from stated elements, not read from one"
+    )
     source: str = Field(min_length=1, description="Source Register id the filing came from")
     l0_key: str | None = Field(
         default=None, description="`source/date/filename` of the L0 payload this was derived from"

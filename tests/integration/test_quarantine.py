@@ -100,6 +100,7 @@ def _pit_filing() -> Filing:
         period_end=period_end,
         filing_date=filing_date,
         nature=Nature.STANDALONE,
+        taxonomy=Taxonomy.IND_AS,
         filing_id="RELIANCE-2024Q4-STD",
         concept="revenue_from_operations",
         segment=None,

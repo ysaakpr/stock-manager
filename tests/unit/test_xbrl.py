@@ -40,13 +40,16 @@ import pytest
 from dataplatform.ingest.models import ParseError
 from dataplatform.ingest.xbrl import (
     CONCEPT_KEYS,
+    CONDITIONAL_CONCEPT_KEYS,
     Filing,
     FilingIndexEntry,
     Nature,
     Taxonomy,
+    concepts_for,
     parse,
     parse_index,
 )
+from dataplatform.ingest.xbrl.models import SHAREHOLDERS_EQUITY, SHARES_OUTSTANDING
 from dataplatform.ingest.xbrl.parser import SEGMENT_CONCEPT
 from dataplatform.store.paths import l1_partition_path
 from dataplatform.store.pit_fundamentals import (
@@ -623,11 +626,19 @@ def test_every_filing_reports_the_core_concepts(all_filings: tuple[Filing, ...])
 def test_the_only_concept_any_captured_filing_lacks_is_the_documented_one(
     all_filings: tuple[Filing, ...],
 ) -> None:
-    """The corpus's concept coverage is pinned, so a silent regression cannot hide as a gap."""
+    """The corpus's concept coverage is pinned, so a silent regression cannot hide as a gap.
+
+    Compared against each filing's *own family*, not against `CONCEPT_KEYS`. The union is no longer
+    a meaningful expectation for a single filing: only a bank states a CET1 ratio, and only a
+    non-bank states a debt-to-equity one, so measuring every filing against every key would call
+    correct behaviour a gap and bury the one real omission in eighty false ones.
+    """
     gaps = {
         (filing.symbol, concept)
         for filing in all_filings
-        for concept in CONCEPT_KEYS - {f.concept for f in filing.company_facts()}
+        for concept in set(concepts_for(filing.taxonomy).values())
+        - CONDITIONAL_CONCEPT_KEYS
+        - {f.concept for f in filing.company_facts()}
     }
     assert gaps == {("EMKAY", "profit_before_tax")}
 
@@ -1336,3 +1347,209 @@ def test_a_duplicate_concept_in_one_column_is_rejected(
     )
     with pytest.raises(ParseError, match="reports ProfitLossForPeriod 2 times"):
         parse(payload, entry=any_entry, filename="mutated.xml")
+
+
+# ── the derived balance-sheet facts, and the two guards that gate them ─────────────────────────
+
+
+def test_shares_outstanding_is_paid_up_over_face_value(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """The share count the XBRL never states, from the two elements it always does."""
+    filing = _load(_entry(entries, isin=RELIANCE), repo_root=repo_root)
+    # Reliance: ₹13,532 crore of ₹10 paid-up equity, so 13.532 billion shares — the published count.
+    assert _company_value(filing, "paid_up_equity_capital") == Decimal("135320000000.00")
+    assert _company_value(filing, "face_value_per_share") == Decimal("10")
+    assert _company_value(filing, SHARES_OUTSTANDING) == Decimal("13532000000")
+
+
+def test_a_derived_fact_says_it_was_derived(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """`derived` separates what the parser computed from what the filer stated."""
+    filing = _load(_entry(entries, isin=RELIANCE), repo_root=repo_root)
+    by_concept = {f.concept: f.derived for f in filing.company_facts()}
+    assert by_concept[SHARES_OUTSTANDING] is True
+    assert by_concept["paid_up_equity_capital"] is False
+    assert by_concept["profit_after_tax"] is False
+
+
+def test_equity_is_paid_up_plus_reserves_excluding_revaluation(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Book value, on an annual filing that states the reserves line."""
+    filing = _load(_entry(entries, isin=EMKAY, period="Annual"), repo_root=repo_root)
+    paid_up = _company_value(filing, "paid_up_equity_capital")
+    reserves = _company_value(filing, "reserves_excl_revaluation")
+    assert paid_up == Decimal("246190000.00")
+    assert reserves == Decimal("1456728000.00")
+    assert _company_value(filing, SHAREHOLDERS_EQUITY) == paid_up + reserves
+
+
+def test_a_quarterly_filing_has_a_share_count_but_no_equity(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """The capital elements are universal; the reserves line is annual, so equity is too.
+
+    Not a defect to be papered over — carrying a share count without a book value is exactly what
+    the data supports, and inferring the missing half from an earlier filing would invent a number
+    the market never saw.
+    """
+    filing = _load(_entry(entries, isin=RELIANCE), repo_root=repo_root)
+    concepts = {f.concept for f in filing.company_facts()}
+    assert SHARES_OUTSTANDING in concepts
+    assert "reserves_excl_revaluation" not in concepts
+    assert SHAREHOLDERS_EQUITY not in concepts
+
+
+def test_a_reserves_figure_of_exactly_zero_yields_no_equity(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """29% of filings that state the reserves element state 0.00, and none of them means it.
+
+    Schaeffler India states `ReserveExcludingRevaluationReserves` as 0.00 against ₹31.26 crore of
+    paid-up capital. Taken literally that is the whole book value of a company whose reserves run to
+    thousands of crores, and it would hand a P/B screen a ~100x error pointing the wrong way. The
+    tag is mandatory and the filer left it unfilled; absent is the honest reading.
+    """
+    filing = _load(
+        _entry(entries, isin=SCHAEFFLER, nature=Nature.STANDALONE, period="Annual"),
+        repo_root=repo_root,
+    )
+    assert _company_value(filing, "reserves_excl_revaluation") == Decimal("0")
+    assert SHAREHOLDERS_EQUITY not in {f.concept for f in filing.company_facts()}
+
+
+def test_a_negative_reserve_is_kept_because_accumulated_losses_are_real(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Zero means unfilled, but negative means what it says — and can mean negative equity."""
+    entry = _entry(entries, isin=EMKAY, period="Annual")
+    payload = _mutate(
+        repo_root,
+        entry.xbrl_url.rsplit("/", 1)[-1] if entry.xbrl_url else "",
+        ">1456728000.00</in-bse-fin:ReserveExcludingRevaluationReserves>",
+        ">-1456728000.00</in-bse-fin:ReserveExcludingRevaluationReserves>",
+    )
+    filing = parse(payload, entry=entry, known_symbols=KNOWN_SYMBOLS.get(entry.isin), filename="m")
+    assert _company_value(filing, SHAREHOLDERS_EQUITY) == Decimal("-1210538000.00")
+
+
+def test_the_parent_share_is_preferred_over_the_group_bottom_line(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """A holding company's EPS is struck on the parent's profit, not the group's.
+
+    GRASIM consolidates UltraTech and Aditya Birla Capital, so ₹1,844 crore of consolidated profit
+    is ₹899 crore once the minorities' share is removed. Against the parent's figure the two share
+    counts agree to 0.3%; against the group's they are out by more than a factor of two — on a
+    filing where nothing is wrong. That gap is what forces the guard's tolerance wide enough to
+    admit a real error, which is the reason to prefer this element rather than a matter of taste.
+
+    It matters twice over: `profit_attributable_to_owners` is also the earnings a P/E on this
+    company should use, since the market cap it divides is the parent's shares at the parent's
+    price.
+    """
+    filing = _load(_entry(entries, isin=GRASIM), repo_root=repo_root)
+    group = _company_value(filing, "profit_after_tax")
+    owners = _company_value(filing, "profit_attributable_to_owners")
+    eps = _company_value(filing, "eps_basic")
+    shares = _company_value(filing, SHARES_OUTSTANDING)
+    assert (group, owners, eps) == (
+        Decimal("18442900000.00"),
+        Decimal("8989700000.00"),
+        Decimal("13.47"),
+    )
+    assert shares == Decimal("669550000")
+    assert abs(shares / (owners / eps) - 1) < Decimal("0.005")
+    assert shares / (group / eps) < Decimal("0.5")
+
+
+def test_a_share_count_the_filings_own_eps_contradicts_is_refused(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """The power-of-ten paid-up error, which ~4% of real filings contain, must not reach the store.
+
+    A market cap wrong by 1e6 is not a noisy number, it is a different company. The filing's own EPS
+    is a free second opinion, so there is no reason to publish a count that fails it.
+    """
+    entry = _entry(entries, isin=RELIANCE)
+    payload = _mutate(
+        repo_root,
+        entry.xbrl_url.rsplit("/", 1)[-1] if entry.xbrl_url else "",
+        ">135320000000.00</in-bse-fin:PaidUpValueOfEquityShareCapital>",
+        ">135320000000000000.00</in-bse-fin:PaidUpValueOfEquityShareCapital>",
+    )
+    filing = parse(payload, entry=entry, filename="mutated.xml")
+    concepts = {f.concept for f in filing.company_facts()}
+    assert SHARES_OUTSTANDING not in concepts
+    # The stated element is still published — it is what the filing says. Only the derivation,
+    # which would silently become a market cap, is withheld.
+    assert "paid_up_equity_capital" in concepts
+
+
+def test_a_refused_share_count_refuses_the_equity_too(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Both derivations share the suspect input, so a failed guard withdraws both.
+
+    Nothing inside the document distinguishes a wrong paid-up capital from a wrong face value, and
+    the paid-up figure is also a term of the equity sum. Publishing the book value anyway would keep
+    the error and merely hide which number carries it.
+    """
+    entry = _entry(entries, isin=EMKAY, period="Annual")
+    payload = _mutate(
+        repo_root,
+        entry.xbrl_url.rsplit("/", 1)[-1] if entry.xbrl_url else "",
+        ">246190000.00</in-bse-fin:PaidUpValueOfEquityShareCapital>",
+        ">246190000000000.00</in-bse-fin:PaidUpValueOfEquityShareCapital>",
+    )
+    filing = parse(payload, entry=entry, filename="mutated.xml")
+    concepts = {f.concept for f in filing.company_facts()}
+    assert SHARES_OUTSTANDING not in concepts
+    assert SHAREHOLDERS_EQUITY not in concepts
+
+
+def test_a_filing_whose_eps_is_zero_cannot_corroborate_and_is_refused(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """1.9% of filings state EPS as 0.00; an unverifiable count is withheld, not assumed good.
+
+    Allahabad Bank's FY19 filing reports a ₹8,457 crore loss and an EPS of 0.00, which cannot both
+    be true — so the one cross-check the document offers is unusable, and with it the derivations.
+    """
+    filing = _load(_entry(entries, isin=ALBK), repo_root=repo_root)
+    assert _company_value(filing, "eps_basic") == Decimal("0")
+    assert _company_value(filing, "paid_up_equity_capital") == Decimal("20968400000.00")
+    concepts = {f.concept for f in filing.company_facts()}
+    assert SHARES_OUTSTANDING not in concepts
+    assert SHAREHOLDERS_EQUITY not in concepts
+
+
+def test_a_bank_carries_asset_quality_no_other_filer_reports(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """The banking taxonomy is richer here, not merely different — and it is 100% populated."""
+    filing = _load(_entry(entries, isin=ALBK), repo_root=repo_root)
+    concepts = {f.concept for f in filing.company_facts()}
+    assert {"gross_npa", "net_npa", "gross_npa_pct", "net_npa_pct", "return_on_assets"} <= concepts
+    # And the reverse: leverage is not a meaningful figure for a deposit-taker, and no bank
+    # states it, so the concept must be absent rather than defaulted to something.
+    assert "debt_equity_ratio" not in concepts
+    ind_as = _load(_entry(entries, isin=RELIANCE), repo_root=repo_root)
+    assert "gross_npa" not in {f.concept for f in ind_as.company_facts()}
+
+
+def test_taxonomy_rides_on_every_fact_not_just_the_filing(
+    all_filings: tuple[Filing, ...],
+) -> None:
+    """A bank's `revenue_from_operations` is `InterestEarned`; a row must say so on its own.
+
+    Without this a cross-sectional screen ranking banks beside manufacturers on one concept key
+    silently compares interest earned against revenue from operations, and total expenses that
+    exclude provisions against total expenses that include them.
+    """
+    for filing in all_filings:
+        assert filing.facts, filing.symbol
+        for fact in filing.facts:
+            assert fact.taxonomy is filing.taxonomy

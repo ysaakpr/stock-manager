@@ -65,6 +65,8 @@ from xml.etree import ElementTree as ET
 from dataplatform.ingest.models import ParseError
 from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
 from dataplatform.ingest.xbrl.models import (
+    SHAREHOLDERS_EQUITY,
+    SHARES_OUTSTANDING,
     Filing,
     FundamentalFact,
     Nature,
@@ -878,6 +880,7 @@ def _facts(
                 concept=concept,
                 segment=None,
                 raw=raw,
+                taxonomy=taxonomy,
                 column=column,
                 entry=entry,
                 source=source,
@@ -895,9 +898,21 @@ def _facts(
 
     facts.extend(
         _segment_facts(
+            taxonomy=taxonomy,
             column=column,
             shapes=shapes,
             facts_by_context=facts_by_context,
+            entry=entry,
+            source=source,
+            l0_key=l0_key,
+            filename=filename,
+        )
+    )
+    facts.extend(
+        _derived_facts(
+            facts,
+            taxonomy=taxonomy,
+            column=column,
             entry=entry,
             source=source,
             l0_key=l0_key,
@@ -910,6 +925,7 @@ def _facts(
 
 def _segment_facts(
     *,
+    taxonomy: Taxonomy,
     column: _Column,
     shapes: dict[str, _ContextShape],
     facts_by_context: dict[str, dict[str, list[str]]],
@@ -976,6 +992,7 @@ def _segment_facts(
                 concept=SEGMENT_CONCEPT,
                 segment=name,
                 raw=raw,
+                taxonomy=taxonomy,
                 column=column,
                 entry=entry,
                 source=source,
@@ -987,16 +1004,148 @@ def _segment_facts(
     return [f for f in facts if f.segment not in ambiguous]
 
 
-def _fact(
+#: The widest the two independent share counts may differ before neither is trusted. Three, chosen
+#: from the measured distribution rather than picked: over 10,468 (document, column) pairs stating
+#: both capital elements, 86.6% agree within 5%, 95.6% fall inside this band, and **every** case
+#: outside it is out by a clean power of ten — the smallest real error is 10x, so the band has a
+#: 3.3x margin below the nearest thing it must catch.
+#:
+#: It has to be this loose because the two counts are honestly different measurements. EPS is struck
+#: over *weighted-average* shares where paid-up capital is the period-end count, so any mid-period
+#: issue, bonus or buyback separates them; an EPS rounded to two decimals is worth ±10% to a company
+#: earning ₹0.05 a share; and a consolidated group's bottom line belongs partly to minority holders
+#: (see `profit_attributable_to_owners`, which is why that element is preferred below).
+_SHARE_COUNT_TOLERANCE: Final = Decimal("3")
+
+
+def _derived_facts(
+    stated: list[FundamentalFact],
     *,
-    concept: str,
-    segment: str | None,
-    raw: str,
+    taxonomy: Taxonomy,
     column: _Column,
     entry: FilingIndexEntry,
     source: str,
     l0_key: str | None,
     filename: str,
+) -> list[FundamentalFact]:
+    """Share count and shareholders' equity, computed from the stated capital elements.
+
+    These two are the reason a results filing can support a market cap, a P/B and an ROE at all: the
+    XBRL states no share count and no equity line, but it states the elements they follow from.
+
+    * `shares_outstanding` = paid-up equity capital / face value per share.
+    * `shareholders_equity_excl_revaluation` = paid-up equity capital + reserves excluding
+      revaluation. Named for the exclusion because a vendor's "reserves" figure includes any
+      revaluation surplus and the two therefore legitimately differ for an asset-heavy company; a
+      reader must be able to tell which basis they hold without going back to the filing.
+
+    What it assumes: nothing it does not check. Every input must be stated and usable, and a filing
+    missing one yields no derived fact rather than a guess — the same way the whitelist behaves.
+
+    Two checks, both of which fire on real filings in this corpus:
+
+    * **A share count must be corroborated by the filing's own EPS.** `profit / eps_basic` is a
+      second, independent count built from concepts already whitelisted, so the filing audits itself
+      at no cost — and **~4% of filings fail that audit by a clean power of ten** (KIOCL states a
+      paid-up capital 1e6 too large, which would read a ₹600 crore company as ₹62 lakh crore).
+      `profit_attributable_to_owners` is preferred as the numerator wherever stated, since that is
+      the figure EPS is struck on; using the group bottom line instead falsely refuses every holding
+      company, GRASIM among them, whose minorities own half the consolidated profit.
+
+      A filing that fails yields *neither* derived fact, not merely no share count: the suspect
+      input is the paid-up capital, which is also a term of the equity sum, and nothing inside the
+      document says whether the fault lies there or in the face value. Refusing a possibly-good book
+      value is the recoverable error; publishing one wrong by six orders of magnitude is not.
+
+    * **A reserves figure of exactly zero is an unfilled field, not a zero.** 29% of the filings
+      that state the element state it as 0.00 — including ones from companies with thousands of
+      crores of reserves — because the taxonomy requires the tag and a filer who has not computed it
+      enters nothing. Taken at face value it makes equity equal paid-up capital alone, which for
+      Schaeffler India would put book value ~100x too low and hand a screen a spectacular fake P/B.
+      A *negative* reserve is kept: accumulated losses are real, and so is the negative equity they
+      can produce.
+
+    Every refusal is logged with both counts, so the rate is measurable rather than invisible.
+    """
+    by_concept = {fact.concept: fact.value for fact in stated if fact.segment is None}
+    paid_up = by_concept.get("paid_up_equity_capital")
+    face_value = by_concept.get("face_value_per_share")
+    if paid_up is None or face_value is None or paid_up <= 0 or face_value <= 0:
+        return []
+    shares = paid_up / face_value
+
+    # The parent's share where the filing states it, the bottom line otherwise. A zero is treated as
+    # unstated on both: a standalone filing sometimes tags the attributable element with 0.
+    profit = by_concept.get("profit_attributable_to_owners") or by_concept.get("profit_after_tax")
+    eps = by_concept.get("eps_basic")
+    # A negative implied count means profit and EPS disagree in sign, which is not a share count at
+    # all — no corroboration rather than a magnitude to compare against.
+    implied = profit / eps if profit and eps else None
+    if implied is None or implied <= 0:
+        reason = "no usable profit / eps_basic to corroborate against"
+    elif not 1 / _SHARE_COUNT_TOLERANCE <= shares / implied <= _SHARE_COUNT_TOLERANCE:
+        reason = f"paid_up/face_value is {shares / implied:.3g}x profit/eps_basic"
+    else:
+        reason = ""
+    if reason:
+        _LOG.warning(
+            "xbrl.derivation_refused",
+            filename=filename,
+            isin=entry.isin,
+            column=column.context_id,
+            period_end=column.period_end.isoformat(),
+            shares_from_capital=str(shares),
+            shares_from_eps=str(implied) if implied is not None else None,
+            reason=reason,
+            state="REFUSED",
+        )
+        return []
+
+    facts = [
+        _fact(
+            concept=SHARES_OUTSTANDING,
+            segment=None,
+            raw=str(shares),
+            taxonomy=taxonomy,
+            column=column,
+            entry=entry,
+            source=source,
+            l0_key=l0_key,
+            filename=filename,
+            derived=True,
+        )
+    ]
+    reserves = by_concept.get("reserves_excl_revaluation")
+    if reserves:
+        facts.append(
+            _fact(
+                concept=SHAREHOLDERS_EQUITY,
+                segment=None,
+                raw=str(paid_up + reserves),
+                taxonomy=taxonomy,
+                column=column,
+                entry=entry,
+                source=source,
+                l0_key=l0_key,
+                filename=filename,
+                derived=True,
+            )
+        )
+    return facts
+
+
+def _fact(
+    *,
+    concept: str,
+    segment: str | None,
+    raw: str,
+    taxonomy: Taxonomy,
+    column: _Column,
+    entry: FilingIndexEntry,
+    source: str,
+    l0_key: str | None,
+    filename: str,
+    derived: bool = False,
 ) -> FundamentalFact:
     """One validated `FundamentalFact`, tagged with the column's period and the entry's identity."""
     value = _value(raw, concept=concept, segment=segment, filename=filename)
@@ -1007,10 +1156,12 @@ def _fact(
             period_end=column.period_end,
             filing_date=entry.filing_date,
             nature=column.nature,
+            taxonomy=taxonomy,
             filing_id=entry.filing_id,
             concept=concept,
             segment=segment,
             value=value,
+            derived=derived,
             source=source,
             l0_key=l0_key,
         )
