@@ -302,7 +302,12 @@ sources:
     url_template: "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{DDMMYYYY}.csv"
     verified_url: "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_07082026.csv"
     cadence: daily
-    era: {start: null, end: null}
+    # Measured, not assumed. This read `{start: null}` — open-ended — until a backfill probed it:
+    # the archive serves 2019-09-30 and 404s every session before it (binary search over 2019-2021,
+    # 9 requests; 2019-09-27 is the last 404, and 09-28/29 are a weekend). Prices in this lake go
+    # back to 2016-09-02, so 755 of 2,461 price sessions can never carry delivery figures — a
+    # ceiling on any delivery-based signal, and not a gap a retry would close.
+    era: {start: 2019-09-30, end: null}
     fallback: []
     required_headers:
       User-Agent: browser

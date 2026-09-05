@@ -41,11 +41,11 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from types import FrameType
-from typing import Final
+from typing import Any, Final
 
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
-from dataplatform.identity.master import Exchange
+from dataplatform.identity.master import Exchange, IdentityMaster, IdentityStore
 from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
 from dataplatform.ingest.calendar import (
     CalendarCoverageError,
@@ -58,9 +58,10 @@ from dataplatform.ingest.fetcher import (
     build_fetcher,
 )
 from dataplatform.ingest.models import ParseError, PriceRow
-from dataplatform.ingest.nse import bhavcopy
+from dataplatform.ingest.nse import bhavcopy, delivery
 from dataplatform.ingest.nse.bhavcopy_legacy import LEGACY_SOURCE_ID
 from dataplatform.ingest.nse.bhavcopy_udiff import UDIFF_SOURCE_ID
+from dataplatform.ingest.nse.delivery import DeliveryRow
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.logging import get_logger
@@ -109,7 +110,29 @@ class FetchRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class SourceSet:
+class WriteContext:
+    """What a source set's write step may reach for, beyond the rows it was handed.
+
+    A price bhavcopy needs none of it: it carries ISIN natively and its rows are the whole
+    partition. The delivery set needs all three — the lake, to read the session's *bhavcopy* back
+    out of L0 and rebuild the partition around the new delivery figures, and the identity master,
+    because a delivery row has no ISIN and the only legal symbol→ISIN path is D2 (invariant #2).
+
+    The register comes along because naming the stored bhavcopy means asking the same question the
+    fetch asked — which era's URL template, and therefore which L0 directory and filename.
+
+    Passed rather than captured in a closure so that what a write step depends on is visible in its
+    signature, and so `SOURCE_SETS` can stay a module-level constant built without a database.
+    """
+
+    l0: L0Store
+    data_root: Path | None
+    master: IdentityMaster | None
+    register: SourceRegister
+
+
+@dataclass(frozen=True, slots=True)
+class SourceSet[RowT]:
     """A named backfill target: how to turn a date into a fetch, and how to land what came back.
 
     A source set is the unit `--source` selects. It knows three things and nothing else: the
@@ -117,12 +140,18 @@ class SourceSet:
     session (era dispatch lives here), and how to parse then write the fetched L0 payload. Keeping
     parse and write as two steps lets the runner move the row `FETCHED → VALIDATED → NORMALIZED`
     honestly and attribute a failure to the step that actually broke.
+
+    Generic in the row type because not every backfill target yields prices: the delivery file
+    yields `DeliveryRow`, which has no ISIN and is not a price at all. `needs_master` is declared
+    rather than discovered, so a run that cannot build the master fails at wiring time with the
+    reason named, instead of at the first write with a `ValueError` from three layers down.
     """
 
     name: str
     build_request: Callable[[date, SourceRegister], FetchRequest]
-    parse: Callable[[L0Store, L0Ref], Sequence[PriceRow]]
-    write: Callable[[Sequence[PriceRow], Path | None], object]
+    parse: Callable[[L0Store, L0Ref], Sequence[RowT]]
+    write: Callable[[Sequence[RowT], WriteContext], object]
+    needs_master: bool = False
 
 
 # ── nse_bhavcopy source set ────────────────────────────────────────────────────────────────────
@@ -173,15 +202,15 @@ def _bhavcopy_request(trade_date: date, register: SourceRegister) -> FetchReques
 NSE_BHAVCOPY: Final = "nse_bhavcopy"
 
 
-def _write_bhavcopy(rows: Sequence[PriceRow], data_root: Path | None) -> object:
+def _write_bhavcopy(rows: Sequence[PriceRow], ctx: WriteContext) -> object:
     """Write one parsed NSE session to its `prices_raw` L1 partition (M1.8).
 
     No delivery join and no identity master: the bhavcopy carries ISIN natively, so the raw price
     partition stands on its own. The delivery `%` join (M1.6/M1.7) is the daily pipeline's (M1.10)
     concern and a later source set; a backfill of a decade of prices does not block on it.
-    `data_root` is the runner's lake root, so L1 lands beside the L0 the payload came from.
+    `ctx.data_root` is the runner's lake root, so L1 lands beside the L0 the payload came from.
     """
-    return write_prices_raw(list(rows), exchange=Exchange.NSE, data_root=data_root)
+    return write_prices_raw(list(rows), exchange=Exchange.NSE, data_root=ctx.data_root)
 
 
 # ── bse_bhavcopy source set ──────────────────────────────────────────────────────────────────
@@ -218,17 +247,75 @@ def _bse_bhavcopy_request(trade_date: date, register: SourceRegister) -> FetchRe
     )
 
 
-def _write_bse_bhavcopy(rows: Sequence[PriceRow], data_root: Path | None) -> object:
+def _write_bse_bhavcopy(rows: Sequence[PriceRow], ctx: WriteContext) -> object:
     """Write one parsed BSE session to its `prices_raw` L1 partition, tagged `exchange=BSE` (M1.8).
 
     The BSE UDiFF bhavcopy carries ISIN natively, so the raw price partition stands on its own with
     no delivery join — the identical shape the NSE writer produces, differing only in the exchange
     tag, so both exchanges' raw rows live in `prices_raw` for M3.2's read-layer dedup.
     """
-    return write_prices_raw(list(rows), exchange=Exchange.BSE, data_root=data_root)
+    return write_prices_raw(list(rows), exchange=Exchange.BSE, data_root=ctx.data_root)
 
 
-SOURCE_SETS: Final[dict[str, SourceSet]] = {
+# ── nse_delivery source set ──────────────────────────────────────────────────────────────────
+
+
+#: The `sync_state` source name for the delivery backfill. Distinct from `nse_bhavcopy` because it
+#: is a distinct dataset with its own coverage: a session can have prices and no delivery figures,
+#: and the trading interlock should be able to ask about each separately rather than have one
+#: source's gap silently redden the other.
+NSE_DELIVERY: Final = "nse_delivery"
+
+
+def _delivery_request(trade_date: date, register: SourceRegister) -> FetchRequest:
+    """Build the delivery fetch for one session. One era, so no dispatch — just the dated URL."""
+    url = _template_for(register, delivery.DELIVERY_SOURCE_ID).replace(
+        "{DDMMYYYY}", f"{trade_date:%d%m%Y}"
+    )
+    return FetchRequest(
+        trade_date=trade_date,
+        state_source=NSE_DELIVERY,
+        fetch_source=delivery.DELIVERY_SOURCE_ID,
+        url=url,
+        filename=url.rsplit("/", 1)[-1],
+    )
+
+
+def _write_delivery(rows: Sequence[DeliveryRow], ctx: WriteContext) -> object:
+    """Re-derive one session's `prices_raw` partition from its stored bhavcopy plus this delivery.
+
+    The join happens at L1 *write* time, not as a later patch to an existing partition, so landing
+    delivery for a session means rebuilding that session's partition from both inputs. The price
+    side costs no request: the bhavcopy payload is already in L0 and immutable, which is the whole
+    point of keeping it. `write_prices_raw` re-sorts on a total key, so a partition rebuilt this
+    way is byte-identical to the original except for the two delivery columns.
+
+    Raises rather than writing a partition with delivery silently missing: a `prices_raw` session
+    that quietly lost its prices because its bhavcopy could not be read would be far worse than a
+    failed session, which the runner records and a later run retries.
+    """
+    if not rows:
+        raise ValueError("delivery file parsed to zero rows; refusing to rewrite the partition")
+    trade_date = rows[0].trade_date
+    # L0 keys by the *fetching* source, so a legacy session and a UDiFF one live under different
+    # directories. Both the source id and the filename are taken from the same request builder the
+    # price backfill used, never re-spelled here — a filename guessed independently would silently
+    # miss the 2024-07-08 UDiFF cutover.
+    stored = _bhavcopy_request(trade_date, ctx.register)
+    price_ref = ctx.l0.ref_for(stored.fetch_source, trade_date, stored.filename)
+    price_rows = bhavcopy.parse_l0(ctx.l0, price_ref)
+    if not price_rows:
+        raise ValueError(f"{trade_date}: stored bhavcopy parsed to zero price rows")
+    return write_prices_raw(
+        list(price_rows),
+        exchange=Exchange.NSE,
+        delivery_rows=rows,
+        master=ctx.master,
+        data_root=ctx.data_root,
+    )
+
+
+SOURCE_SETS: Final[dict[str, SourceSet[Any]]] = {
     NSE_BHAVCOPY: SourceSet(
         name=NSE_BHAVCOPY,
         build_request=_bhavcopy_request,
@@ -240,6 +327,13 @@ SOURCE_SETS: Final[dict[str, SourceSet]] = {
         build_request=_bse_bhavcopy_request,
         parse=lambda store, ref: bse_bhavcopy.parse_l0(store, ref),
         write=_write_bse_bhavcopy,
+    ),
+    NSE_DELIVERY: SourceSet(
+        name=NSE_DELIVERY,
+        build_request=_delivery_request,
+        parse=lambda store, ref: delivery.parse_l0(store, ref),
+        write=_write_delivery,
+        needs_master=True,
     ),
 }
 
@@ -270,7 +364,7 @@ def sample_dates(dates: Sequence[date], limit: int | None) -> list[date]:
 
 
 def build_plan(
-    source_set: SourceSet,
+    source_set: SourceSet[Any],
     from_date: date,
     to_date: date,
     *,
@@ -333,20 +427,29 @@ class BackfillRunner:
 
     def __init__(
         self,
-        source_set: SourceSet,
+        source_set: SourceSet[Any],
         *,
         fetcher: Fetcher,
         l0: L0Store,
         sync: SyncStateStore,
         commit: Callable[[], None],
+        register: SourceRegister,
+        master: IdentityMaster | None = None,
         should_stop: Callable[[], bool] = lambda: False,
     ) -> None:
+        if source_set.needs_master and master is None:
+            raise ValueError(
+                f"source set {source_set.name!r} joins through the identity master and none was "
+                "given; a delivery row has no ISIN and the only legal symbol→ISIN path is D2 "
+                "(invariant #2)"
+            )
         self._set = source_set
         self._fetcher = fetcher
         self._l0 = l0
         self._sync = sync
         self._commit = commit
         self._should_stop = should_stop
+        self._ctx = WriteContext(l0=l0, data_root=l0.data_root, master=master, register=register)
 
     def run(self, requests: Sequence[FetchRequest]) -> BackfillReport:
         """Process every request in order, resuming, checkpointing and stopping per the class doc.
@@ -438,7 +541,7 @@ class BackfillRunner:
             rows = self._set.parse(self._l0, ref)
             self._sync.mark_validated(source, day)
 
-            self._set.write(rows, self._l0.data_root)
+            self._set.write(rows, self._ctx)
             self._sync.mark_normalized(source, day)
 
             self._sync.mark_published(source, day)
@@ -590,7 +693,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _run_live(
-    source_set: SourceSet,
+    source_set: SourceSet[Any],
     plan: Sequence[FetchRequest],
     *,
     calendar: TradingCalendar,
@@ -613,12 +716,18 @@ def _run_live(
     l0 = L0Store(clock=clock, data_root=settings.data_root)
     with connection(settings) as conn:
         sync = SyncStateStore(conn, clock=clock, calendar=calendar)
+        # Loaded only when the source set declares it needs it, so a price backfill neither pays
+        # for the master nor fails when D2 is empty. A set that does need it fails here, at wiring
+        # time with the reason named, rather than at the first write from three layers down.
+        master = IdentityStore(conn, clock=clock).load_master() if source_set.needs_master else None
         runner = BackfillRunner(
             source_set,
             fetcher=fetcher,
             l0=l0,
             sync=sync,
             commit=conn.commit,
+            register=register,
+            master=master,
             should_stop=lambda: stop_state["stop"],
         )
         report = runner.run(plan)
