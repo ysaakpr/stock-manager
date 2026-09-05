@@ -130,14 +130,23 @@ def real_file(request: pytest.FixtureRequest) -> Fixture:
 # ── the fixture set itself ───────────────────────────────────────────────────────────────────
 
 
+#: The counter-example fixture: a real payload the archive served for the *wrong* session. Held
+#: apart from the frozen session set because it is not a well-formed example of the source — it is
+#: the evidence for a guard, and folding it into the happy-path set would have it asserted against
+#: as though its contents described the day its name claims.
+MISDATED: Final = "sec_bhavdata_full_30092019_MISDATED.csv"
+
+
 def test_the_frozen_set_is_two_real_files_one_with_dashes() -> None:
     """2+ real fixtures including one with `-` values — the premise the rest of the file rests on.
 
     Asserted rather than assumed so that shrinking the fixture set to dodge a failure shows up as
-    a failing test (AGENTIC_CONTEXT §7).
+    a failing test (AGENTIC_CONTEXT §7). The misdated counter-example is excluded by name and
+    asserted separately, so neither set can be quietly emptied.
     """
-    on_disk = sorted(path.name for path in FIXTURES.glob("*.csv"))
+    on_disk = sorted(p.name for p in FIXTURES.glob("*.csv") if p.name != MISDATED)
     assert on_disk == sorted(fixture.filename for fixture in FIXTURE_FILES)
+    assert (FIXTURES / MISDATED).is_file(), "the misdated payload is a guard's only evidence"
     assert len(FIXTURE_FILES) >= 2
 
     for fixture in FIXTURE_FILES:
@@ -602,3 +611,24 @@ def test_a_corrupted_l0_payload_never_becomes_rows(tmp_path: Path) -> None:
 
     with pytest.raises(Exception, match="hashes to"):
         parse_l0(store, ref)
+
+
+def test_a_file_whose_body_is_another_session_is_refused() -> None:
+    """The archive answers some dated URLs with a different session's file — loudly, now.
+
+    `sec_bhavdata_full_30092019.csv` returns HTTP 200 and 210KB of **27-Jun-2019** rows. This is
+    the captured payload, byte for byte. Before this check a backfill took it at face value: it
+    joined June's delivery onto June's prices, rewrote a partition for a session nobody asked for,
+    and marked 2019-09-30 PUBLISHED — so that session silently never got its delivery figures while
+    its checkpoint claimed it had. Caught only because a spot check showed 0% delivery on a
+    "published" session, which is not a way to find defects.
+    """
+    name = "sec_bhavdata_full_30092019_MISDATED.csv"
+    payload = (FIXTURES / name).read_bytes()
+
+    # It parses perfectly well — the file is valid, it is simply not the session it was named for.
+    rows = parse(payload, filename=name)
+    assert rows[0].trade_date == date(2019, 6, 27)
+
+    with pytest.raises(ParseError, match="was fetched as"):
+        parse(payload, filename=name, trade_date=date(2019, 9, 30))

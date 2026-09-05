@@ -69,11 +69,16 @@ _LOG = get_logger(__name__)
 #: The register id this parser serves (`source_register.yaml`, `parser.task: M1.6`).
 DELIVERY_SOURCE_ID: Final = "nse_sec_bhavdata_full"
 
-#: The first session this file's archive serves. Measured by probing, not documented anywhere:
-#: every session before it 404s. Delivery for earlier sessions comes from the older MTO report
-#: (`dataplatform.ingest.nse.mto`), which carries the same facts and agrees with this file exactly
-#: where both exist — so this is a boundary in *sourcing*, not a boundary in the data.
-SEC_BHAVDATA_ERA_START: Final = date(2019, 9, 30)
+#: The first session this file's archive serves *correctly*. Measured by probing, and the word
+#: "correctly" is load-bearing: a status-only probe puts this at 2019-09-30, because the archive
+#: answers `sec_bhavdata_full_30092019.csv` with HTTP 200 and a body of 27-Jun-2019 rows. Every
+#: session before this one either 404s or answers with another session's file, so `parse` checks
+#: the body's own date against the one asked for rather than trusting the URL.
+#:
+#: Delivery for earlier sessions comes from the older MTO report (`dataplatform.ingest.nse.mto`),
+#: which carries the same facts and agrees with this file exactly where both exist — so this is a
+#: boundary in *sourcing*, not a boundary in the data.
+SEC_BHAVDATA_ERA_START: Final = date(2019, 10, 1)
 
 #: The file's header, exactly, with the leading spaces already stripped. The parser compares the
 #: file's stripped names against this rather than trusting field order, so a reordered or renamed
@@ -193,7 +198,9 @@ class DeliveryResolution:
     unresolved: tuple[DeliveryRow, ...]
 
 
-def parse(payload: bytes, *, filename: str) -> tuple[DeliveryRow, ...]:
+def parse(
+    payload: bytes, *, filename: str, trade_date: date | None = None
+) -> tuple[DeliveryRow, ...]:
     """Parse one `sec_bhavdata_full` CSV into delivery rows, in the file's own order.
 
     Assumes `payload` is one complete file — an EOD artefact of a few hundred kilobytes — so a
@@ -201,12 +208,29 @@ def parse(payload: bytes, *, filename: str) -> tuple[DeliveryRow, ...]:
     errors and logs and is not parsed for the date: the rows carry `DATE1` and disagreeing with it
     silently would be worse.
 
+    `trade_date`, when given, is the session the *caller asked for*, and the file's own `DATE1`
+    must equal it. This is not a formality. The archive is addressed by date in the URL and it does
+    not always serve the date it was asked for: `sec_bhavdata_full_30092019.csv` returns HTTP 200
+    with a body full of 27-Jun-2019 rows. Without this check a backfill takes that at face value,
+    joins June's delivery onto June's prices, writes a partition for a session nobody requested and
+    marks the requested one PUBLISHED — so the session silently never gets its delivery figures and
+    the checkpoint says otherwise. Callers that know the session (`parse_l0`) must pass it.
+
     Raises `ParseError` — naming the file, and the line when the fault is one record's — for a
     non-UTF-8 body, an unrecognised header, a short or wide row, a field that is not the number or
-    date it must be, a duplicate `(symbol, series)` key, or rows spanning more than one session.
+    date it must be, a duplicate `(symbol, series)` key, rows spanning more than one session, or a
+    body whose session is not the one asked for.
     """
     text = _text_of(payload, filename=filename)
     rows = parse_text(text, filename=filename)
+    if trade_date is not None and rows[0].trade_date != trade_date:
+        raise ParseError(
+            f"file states session {rows[0].trade_date.isoformat()} but was fetched as "
+            f"{trade_date.isoformat()}; the archive answers some dated URLs with another "
+            "session's file, and delivery figures landing on the wrong session is a data defect, "
+            "not a naming quirk",
+            filename=filename,
+        )
     _LOG.info(
         "delivery.parsed",
         source=DELIVERY_SOURCE_ID,
@@ -223,9 +247,11 @@ def parse_l0(store: L0Store, ref: L0Ref) -> tuple[DeliveryRow, ...]:
     """Parse the L0 payload a fetch produced, re-verifying its checksum on the way in.
 
     The pipeline entry point: `L0Store.get` re-hashes the payload, so "every L1 value derives from
-    bytes that have not changed" holds at the point of derivation, not only at fetch.
+    bytes that have not changed" holds at the point of derivation, not only at fetch. The ref's
+    `logical_date` is the session the fetch asked for, so it is passed as the date the file must
+    agree with — the archive does not always serve the date it is asked for.
     """
-    return parse(store.get(ref), filename=ref.filename)
+    return parse(store.get(ref), filename=ref.filename, trade_date=ref.logical_date)
 
 
 def parse_text(text: str, *, filename: str) -> tuple[DeliveryRow, ...]:
