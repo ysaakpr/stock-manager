@@ -2091,20 +2091,6 @@ def render_v2_report(increments: Sequence[_V2Increment], *, top_n: int, sell_ban
         "signal — earlier editions of this report held cash for the window's first year for want "
         "of one.",
         "",
-        "Every run reads the **raw** L1 momentum signal: this store holds no corporate actions, so "
-        "the L2 back-adjusted signal equals the raw one bar-for-bar (M9.2) and the ten-year L2 is "
-        "not materialized — the raw signal *is* the M9.2 signal here. The universe is the M9.3 "
-        "investable/liquid set (as-of index membership ∩ a median-turnover floor; this store holds "
-        "no membership snapshots, so the liquidity floor is what narrows it). The benchmark is the "
-        + (
-            "M3.9 computed TRI."
-            if baseline.benchmark_is_computed_tri
-            else "pre-M9.4 broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the "
-            "close-all backfill is gated, AGENTIC_CONTEXT B1)."
-        )
-        + " The regime overlay reads a **proxy** index — the same broad-market L1 basket the "
-        "benchmark proxy is built from — because the store holds no licensed index level.",
-        "",
         "## Window",
         "",
         f"- {baseline.start.isoformat()} -> {baseline.terminal.isoformat()} "
