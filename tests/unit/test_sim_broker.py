@@ -20,7 +20,7 @@ the clock is frozen (B10), so the whole file is offline and deterministic.
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 from typing import Final
 
@@ -147,8 +147,11 @@ def test_eod_buy_fills_at_next_session_open_with_costs_and_slippage() -> None:
     expected_bps = Decimal("2") + Decimal("50") * participation
     assert fill.slippage_bps == expected_bps
 
-    # Fill is the reference nudged *up* by that slippage — a buy never fills below its reference.
-    expected_fill = Decimal("100") * (Decimal("1") + expected_bps / Decimal("10000"))
+    # Fill is the reference nudged *up* by that slippage, then rounded *up* to the paisa tick — a
+    # buy never fills below its reference and never at a price no exchange could print.
+    unquantised = Decimal("100") * (Decimal("1") + expected_bps / Decimal("10000"))
+    expected_fill = unquantised.quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+    assert unquantised < expected_fill <= unquantised + Decimal("0.01")
     assert fill.fill_price == expected_fill
     assert fill.fill_price > fill.reference_price
 
@@ -209,8 +212,10 @@ def test_slippage_grows_with_participation() -> None:
     deep = InMemoryMarket(
         [S1], {(INFY, S1): _bar(INFY, S1, open_="100", vwap="100", traded_value="100000000")}
     )
+    # Thin enough that the extra slippage is worth more than one paisa tick on a ₹100 name: at
+    # ₹20,000 of session turnover a ₹1,000 order is 5% participation, i.e. +2.5 bps on the base.
     thin = InMemoryMarket(
-        [S1], {(INFY, S1): _bar(INFY, S1, open_="100", vwap="100", traded_value="200000")}
+        [S1], {(INFY, S1): _bar(INFY, S1, open_="100", vwap="100", traded_value="20000")}
     )
     deep_broker = _broker(deep)
     thin_broker = _broker(thin)

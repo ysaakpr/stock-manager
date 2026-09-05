@@ -12,7 +12,9 @@ decision code cannot tell it from `KiteBroker`. It simulates how an EOD decision
   the close, which no EOD order can actually get.
 * **Slippage in bps, scaled by liquidity.** On top of the reference, an adverse slippage whose size
   grows with the order's participation in the session's traded value: a large order in a thin name
-  moves the price against itself more than a small order in a liquid one (`SlippageModel`).
+  moves the price against itself more than a small order in a liquid one (`SlippageModel`). The
+  resulting price is quantised to the paisa tick, adversely, so a fill is always a price an exchange
+  could have printed.
 * **The one shared cost model.** Every fill is priced by `execution.costs` — the *same* module the
   backtest uses (invariant #4). Two cost implementations would make paper and replay disagree about
   a strategy neither ever ran.
@@ -33,7 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import StrEnum
 from typing import Protocol
 
@@ -60,6 +62,10 @@ from execution.costs import CostModel, Trade
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
 _BPS = Decimal("10000")
+#: Fill prices are quoted to the paisa, as every exchange print is. Without this the slippage ratio
+#: (order turnover / session turnover) puts a 28-digit repeating decimal on the fill, the ledger
+#: tracks cash to 1e-25 of a rupee, and two sums of the same fills disagree in the last digit.
+_TICK = Decimal("0.01")
 
 _log = structlog.get_logger(__name__)
 
@@ -218,6 +224,18 @@ def _adverse(price: Decimal, side: Side, bps: Decimal) -> Decimal:
     """Move `price` `bps` basis points in the direction that hurts `side` (up buy, down sell)."""
     factor = _ONE + bps / _BPS if side is Side.BUY else _ONE - bps / _BPS
     return price * factor
+
+
+def _quantise_adverse(price: Decimal, side: Side) -> Decimal:
+    """Round `price` to the paisa tick in the direction that hurts `side`.
+
+    A buy rounds up to the next paisa, a sell down to the previous one, so quantisation can never
+    flatter a fill. The exchange prints to a tick; a paper fill with 25 decimals is not a price any
+    contract note could show, and it is also the source of last-digit disagreement between a ledger
+    and an independent re-summing of its fills (`tests/property/test_sim_broker_property.py`).
+    """
+    rounding = ROUND_CEILING if side is Side.BUY else ROUND_FLOOR
+    return price.quantize(_TICK, rounding=rounding)
 
 
 # ── internal book ────────────────────────────────────────────────────────────────────────────
@@ -405,7 +423,9 @@ class SimBroker:
         slippage_bps = self._policy.slippage.bps_for(
             order_turnover=turnover_at_reference, traded_value=bar.traded_value
         )
-        fill_price = _adverse(reference, request.side, slippage_bps)
+        fill_price = _quantise_adverse(
+            _adverse(reference, request.side, slippage_bps), request.side
+        )
 
         # Delivery reality: you cannot sell what has not settled, or buy without the cash.
         if request.side is Side.SELL:

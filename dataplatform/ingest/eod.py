@@ -38,12 +38,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 from dataplatform.alerts import Alerter, Severity, build_alerter
 from dataplatform.archives.publisher import PublishReport, publish_bundle
 from dataplatform.clock import Clock
 from dataplatform.config import Settings
+from dataplatform.identity.master import IdentityStore
 from dataplatform.ingest.backfill import (
     NSE_BHAVCOPY,
     SOURCE_SETS,
@@ -267,7 +268,7 @@ class EodPipeline:
     # ── per source ───────────────────────────────────────────────────────────────────────────
 
     def _run_source(
-        self, source_set: SourceSet, *, target: date, lookback_from: date
+        self, source_set: SourceSet[Any], *, target: date, lookback_from: date
     ) -> SourceOutcome:
         """Self-heal the source's retryable stragglers, then drive the target, then report on it."""
         source = source_set.name
@@ -275,12 +276,21 @@ class EodPipeline:
         dates = sorted(set(healed) | {target})
         plan = [source_set.build_request(day, self._register) for day in dates]
 
+        # A source that joins through the identity master (delivery has no ISIN) gets the master
+        # loaded here, as the standalone backfill does; the daily NSE sources do not need it.
+        master = (
+            IdentityStore(self._conn, clock=self._clock).load_master()
+            if source_set.needs_master
+            else None
+        )
         runner = BackfillRunner(
             source_set,
             fetcher=self._fetcher,
             l0=self._l0,
             sync=self._sync,
             commit=self._conn.commit,
+            register=self._register,
+            master=master,
         )
         backfill_report = runner.run(plan)
 

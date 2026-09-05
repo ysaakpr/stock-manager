@@ -296,7 +296,9 @@ class PortfolioBook:
         self._require_decimal("to_face_value", to_face_value)
         if from_face_value <= _ZERO or to_face_value <= _ZERO:
             raise CorporateActionError("split face values must be positive")
-        self._rescale_quantity(isin, from_face_value / to_face_value, "split")
+        self._rescale_quantity(
+            isin, numerator=from_face_value, denominator=to_face_value, event="split"
+        )
 
     def apply_bonus(self, isin: str, *, new_shares: Decimal, held_shares: Decimal) -> None:
         """A bonus issue ``new:held``: adds free shares, basis unchanged, value preserved.
@@ -310,7 +312,9 @@ class PortfolioBook:
         self._require_decimal("held_shares", held_shares)
         if new_shares <= _ZERO or held_shares <= _ZERO:
             raise CorporateActionError("bonus ratio terms must be positive")
-        self._rescale_quantity(isin, (new_shares + held_shares) / held_shares, "bonus")
+        self._rescale_quantity(
+            isin, numerator=new_shares + held_shares, denominator=held_shares, event="bonus"
+        )
 
     def apply_demerger(
         self,
@@ -427,12 +431,22 @@ class PortfolioBook:
             basis_moved=str(moved_basis),
         )
 
-    def _rescale_quantity(self, isin: str, multiple: Decimal, event: str) -> None:
-        """Multiply a position's share count by ``multiple``, holding its cost basis fixed."""
+    def _rescale_quantity(
+        self, isin: str, *, numerator: Decimal, denominator: Decimal, event: str
+    ) -> None:
+        """Scale a position's share count by ``numerator / denominator``, cost basis fixed.
+
+        The ratio is applied as ``quantity * numerator / denominator`` — multiply first, divide
+        last — so the arithmetic stays exact whenever the true result is a whole number. Dividing
+        first would turn a 1:3 bonus into the repeating ``1.333…`` and 300 shares into
+        ``399.999…``, which ``_whole_shares`` then rightly refuses: a valid corporate action
+        rejected by a rounding artefact. The property suite (``tests/property/test_book_property``)
+        is what caught that.
+        """
         held = self._positions.get(isin)
         if held is None or held.quantity == 0:
             raise InsufficientSharesError(f"cannot apply {event}: no position in {isin}")
-        new_quantity = self._whole_shares(held.quantity * multiple, event)
+        new_quantity = self._whole_shares(held.quantity * numerator / denominator, event)
         self._positions[isin] = BookPosition(isin, new_quantity, held.cost_basis)
         _log.info(
             "book.corporate_action",
