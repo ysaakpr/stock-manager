@@ -98,6 +98,7 @@ for rpt in reports:
 
 rate = observed_univ / observed_disc if observed_disc else 0.63  # 0.63 measured on FY2018
 total = round(observed_univ + sum(n for y, n in WITH_DOC.items() if y not in done_years) * rate)
+estimated = True
 
 settings = get_settings()
 with connection(settings) as conn:
@@ -120,11 +121,17 @@ with connection(settings) as conn:
     ).fetchall()
 
 done = published + failed
+# Once more has been attempted than the estimate predicted, the estimate has been overtaken by
+# fact: the campaign is further along than the projection, so report the real denominator rather
+# than a bar past 100%. The projection is only useful while there is still work it cannot see.
+if done > total:
+    total, estimated = done, False
 pct = 100 * done / total if total else 0.0
 filled = int(pct / 2.5)
 bar = "#" * filled + "." * (40 - filled)
 print(f"  index    {chunks} chunks published")
-print(f"  filings  {bar} {pct:5.1f}%   (of ~{total:,} in-universe, {rate:.0%} of documents)")
+label = f"of ~{total:,} in-universe, {rate:.0%} of documents" if estimated else f"of {total:,} attempted — complete"
+print(f"  filings  {bar} {pct:5.1f}%   ({label})")
 print(f"           {published:,} published · {failed:,} failed · {done:,}/{total:,} attempted")
 if recent:
     per_min = recent / 10
@@ -146,6 +153,10 @@ KNOWN = (
     ("returned 404", "archive 404 (source gap)"),
     ("must name the same company", "symbol not in D2 history"),
     ("no results column:", "no column declares a period"),
+    # A rebuild never fetches, so the archive's 404s surface as a payload the lake does not hold
+    # rather than as an HTTP status. Same filings, same cause — classified so a rebuild does not
+    # report the whole class as unknown and cry wolf on the one line that should mean something.
+    ("MissingPayloadError", "not in L0 (archive 404 during the fetch)"),
     ("ConnectError", "transient network"),
     ("TransportError", "transient network"),
 )

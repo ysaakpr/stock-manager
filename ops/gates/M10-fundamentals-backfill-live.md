@@ -158,6 +158,67 @@ reads +₹21,092 cr while the same document's EPS reads −69.45. The parser sto
 published. L0 is immutable and the store's contract is fidelity to it; silently "correcting" a
 filer would make the store disagree with its own lineage.
 
+## 6b. The campaign, completed
+
+Executed on a separate host over about a day and a half at the archive's own recorded 2.5 s spacing
+(`ops/runbooks/move-campaign-to-a-server.md`), then the archive was brought home and the store
+rebuilt locally from it with `--rebuild-from-l0` — **zero network requests for the rebuild**.
+
+| | |
+|---|---|
+| Filings attempted | **70,734** |
+| Published | **68,839** (97.3%) |
+| Failed | **1,895** (2.7%) |
+| Facts stored | **636,661** |
+| ISINs covered | **1,598** |
+| Distinct reporting periods | 59, 2017-03-31 → 2024-12-31 |
+| L0 | 56,134 documents, 2.5 GB |
+| L1 | 1,592 filing-date partitions, 16 MB |
+
+The rebuild is what proved the archive is the source of truth rather than a claim about it. Three
+defects were found *after* the fetching finished, by tallying the failures by cause, and fixing them
+cost minutes of CPU instead of another day and a half of requests:
+
+* **250 filings were being lost in the *write* path**, not the parse. `pyarrow` refuses to rescale a
+  `Decimal` that would lose data, so a filing reporting EPS to three places parsed perfectly and
+  then died on `ArrowInvalid`. The value column is now `decimal128(38, 4)`; 528 EPS facts in the
+  final store carry more than two decimal places and would previously have been unstorable.
+  Rounding was the wrong fix — 1.234 truncated to 1.23 is a 0.3% error in the denominator of every
+  P/E built on it.
+* **362 were refused over a URL prefix**: a third identifier scheme,
+  `http://www.bseindia.com/bse-fin/NSESymbol`, which is the same NSE symbol under BSE's namespace
+  root.
+* **2 were lost to a filer repeating a segment name.** That segment is now dropped with a warning
+  and the company-level P&L still lands.
+
+The accounting is exact: the server finished at 68,225 published / 2,509 failed, the rebuilt store
+holds 68,839 / 1,895 — **+614 and −614**, precisely the class the progress tool had flagged as
+unclassified. That line is the reason the defects were found at all.
+
+### Verification of the completed store
+
+* **Sampled L0-vs-store: 2,000 of 68,839 published filings re-derived from the archive, 2,000
+  matched exactly** — no mismatches, no filings in the checkpoint but absent from L1, no missing
+  documents. Sampled rather than exhaustive because a full re-parse costs as much as the rebuild,
+  and a wrong fact would have to come from a *rule*, which shows up in a sample.
+* **Invariants over all 636,661 facts:** `filing_date > period_end` everywhere, every value a
+  `Decimal`, every row carrying its `l0_key`, and the store's only source still `nse_xbrl_filing`
+  — invariant #8 intact.
+* **Income identity across all 68,839 filings: 68,368 hold it exactly (99.323%).** All 466
+  exceptions have a gap of ≤ ₹1,000 — filer rounding. **Zero structural violations**, which is the
+  claim worth making: no mis-mapped concept and no wrongly-selected column anywhere in the corpus.
+
+### The remaining 1,895, every one classified
+
+| Count | Cause | Disposition |
+|---|---|---|
+| 1,434 | The entry's period is not a column in the document | **Correct refusal.** Mostly `Yearly`-only documents listed under a fourth-quarter entry; storing twelve months under three would be silent. The annual entry for each lands normally. |
+| 372 | Not in L0 — the archive 404'd during the fetch | Source gap. NSE lists the document and does not serve it; no parser change reaches these. |
+| 89 | The document's symbol is not in D2's history | A D2 coverage gap, not a parser one — see `ops/BACKLOG.md`. Recoverable from L0 at zero fetch cost once the identity master carries historical symbols. |
+
+Nothing is unexplained, and nothing needs re-fetching: 1,523 of the 1,895 are decisions the parser
+should be making, and the other 372 are documents that do not exist.
+
 ## 7. Expected data size
 
 Measured, not estimated: the document-size mean is weighted by the real population of each
