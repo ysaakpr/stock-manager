@@ -190,3 +190,27 @@ def test_the_join_is_refused_without_the_identity_master(lake: L0Store) -> None:
     rows = delivery.parse(DELIVERY_FIXTURE.read_bytes(), filename=DELIVERY_FIXTURE.name)
     with pytest.raises(ValueError, match="IdentityMaster"):
         SOURCE_SETS[NSE_DELIVERY].write(rows, _ctx(lake, None))
+
+
+def test_the_era_boundary_picks_the_right_file() -> None:
+    """Before 2019-09-30 the modern file 404s; the older MTO report covers those sessions.
+
+    The boundary is in our sourcing, not in the market, so both eras publish under one
+    `sync_state` source — the interlock asks one question about delivery coverage across the
+    decade rather than two that meet at a seam.
+    """
+    register = load_register()
+    old = SOURCE_SETS[NSE_DELIVERY].build_request(date(2016, 9, 2), register)
+    new = SOURCE_SETS[NSE_DELIVERY].build_request(date(2026, 8, 7), register)
+
+    assert old.url.endswith("/archives/equities/mto/MTO_02092016.DAT")
+    assert old.fetch_source == "nse_mto"
+    assert new.url.endswith("/products/content/sec_bhavdata_full_07082026.csv")
+    assert new.fetch_source == delivery.DELIVERY_SOURCE_ID
+    assert old.state_source == new.state_source == NSE_DELIVERY
+
+    # The boundary itself belongs to the modern file — it is the first session that archive serves.
+    edge = SOURCE_SETS[NSE_DELIVERY].build_request(delivery.SEC_BHAVDATA_ERA_START, register)
+    assert edge.fetch_source == delivery.DELIVERY_SOURCE_ID
+    before = SOURCE_SETS[NSE_DELIVERY].build_request(date(2019, 9, 27), register)
+    assert before.fetch_source == "nse_mto"

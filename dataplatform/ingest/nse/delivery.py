@@ -69,6 +69,12 @@ _LOG = get_logger(__name__)
 #: The register id this parser serves (`source_register.yaml`, `parser.task: M1.6`).
 DELIVERY_SOURCE_ID: Final = "nse_sec_bhavdata_full"
 
+#: The first session this file's archive serves. Measured by probing, not documented anywhere:
+#: every session before it 404s. Delivery for earlier sessions comes from the older MTO report
+#: (`dataplatform.ingest.nse.mto`), which carries the same facts and agrees with this file exactly
+#: where both exist — so this is a boundary in *sourcing*, not a boundary in the data.
+SEC_BHAVDATA_ERA_START: Final = date(2019, 9, 30)
+
 #: The file's header, exactly, with the leading spaces already stripped. The parser compares the
 #: file's stripped names against this rather than trusting field order, so a reordered or renamed
 #: column is a `ParseError` naming the file, not a value read out of the wrong position.

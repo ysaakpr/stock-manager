@@ -294,6 +294,46 @@ sources:
     owner_task: M1.5
 
   # §4.1 row 3 — NSE delivery %
+  - id: nse_mto
+    plan_row: "NSE delivery % (sec_bhavdata_full)"
+    description: >-
+      Security-wise delivery position (MTO). The older delivery report, and the only route to
+      delivery figures before 2019-09-30, which is where sec_bhavdata_full's archive begins.
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/archives/equities/mto/MTO_{DDMMYYYY}.DAT"
+    verified_url: "https://nsearchives.nseindia.com/archives/equities/mto/MTO_07082026.DAT"
+    cadence: daily
+    # Serves at least 2016-01-04 (probed), which is before this platform's first price session
+    # (2016-09-02), so the delivery history has no hole once both eras are used.
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.nse.mto, task: M1.6}
+    robots_notes: No directives on the archive host.
+    pit_notes: Immutable.
+    status: VERIFIED
+    verified_at: 2026-09-05T23:55:00+05:30
+    last_http_status: 200
+    sample_bytes: 118158
+    content_type: text/plain
+    sample_sha256: b8fe04bbb0d725abc0e11c2706e93600f959fcb44aa6e33291bc474a97c868e1
+    parse_check: >-
+      Fixed-shape comma-delimited text, not a CSV with a header row. Record type 10 is the header
+      ("10,MTO,DDMMYYYY,<total>,<count>"), type 20 a security
+      ("20,<sr>,<symbol>,<series>,<traded>,<delivered>,<pct>"). The column header names six fields
+      and a data row carries seven — "Name of Security" is symbol AND series — so splitting on the
+      header count shears the series off every row. No ISIN: joins on SYMBOL+SERIES and MUST be
+      resolved through the D2 master before it touches anything (invariant #2).
+      Cross-checked against nse_sec_bhavdata_full on 2026-08-07, a session both serve: every
+      (symbol, series) key present in both reports an identical delivery quantity, and MTO values
+      keys the modern file leaves blank while leaving none blank that it fills.
+    fixture: {frozen: true, task: M1.6, path: "tests/fixtures/nse_mto/"}
+    failure_note: null
+
   - id: nse_sec_bhavdata_full
     plan_row: "NSE delivery % (sec_bhavdata_full)"
     description: Per-security delivery quantity and delivery percentage for one session.
@@ -303,10 +343,13 @@ sources:
     verified_url: "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_07082026.csv"
     cadence: daily
     # Measured, not assumed. This read `{start: null}` — open-ended — until a backfill probed it:
-    # the archive serves 2019-09-30 and 404s every session before it (binary search over 2019-2021,
-    # 9 requests; 2019-09-27 is the last 404, and 09-28/29 are a weekend). Prices in this lake go
-    # back to 2016-09-02, so 755 of 2,461 price sessions can never carry delivery figures — a
-    # ceiling on any delivery-based signal, and not a gap a retry would close.
+    # this archive serves 2019-09-30 and 404s every session before it (binary search over
+    # 2019-2021, 9 requests; 2019-09-27 is the last 404, and 09-28/29 are a weekend).
+    #
+    # That boundary is this *file's*, not delivery data's. An earlier version of this comment said
+    # the 755 price sessions before it "can never carry delivery figures", which was wrong: it
+    # generalised from one URL pattern to every route. `nse_mto` above serves the same facts for
+    # those sessions and agrees with this file exactly where both exist.
     era: {start: 2019-09-30, end: null}
     fallback: []
     required_headers:

@@ -58,7 +58,7 @@ from dataplatform.ingest.fetcher import (
     build_fetcher,
 )
 from dataplatform.ingest.models import ParseError, PriceRow
-from dataplatform.ingest.nse import bhavcopy, delivery
+from dataplatform.ingest.nse import bhavcopy, delivery, mto
 from dataplatform.ingest.nse.bhavcopy_legacy import LEGACY_SOURCE_ID
 from dataplatform.ingest.nse.bhavcopy_udiff import UDIFF_SOURCE_ID
 from dataplatform.ingest.nse.delivery import DeliveryRow
@@ -268,17 +268,42 @@ NSE_DELIVERY: Final = "nse_delivery"
 
 
 def _delivery_request(trade_date: date, register: SourceRegister) -> FetchRequest:
-    """Build the delivery fetch for one session. One era, so no dispatch — just the dated URL."""
-    url = _template_for(register, delivery.DELIVERY_SOURCE_ID).replace(
-        "{DDMMYYYY}", f"{trade_date:%d%m%Y}"
-    )
+    """Build the delivery fetch for one session, choosing the era's file.
+
+    Two eras, and the boundary is in our *sourcing* rather than in the market: `sec_bhavdata_full`
+    is served from 2019-09-30 and 404s before it, while the older MTO report covers everything back
+    past this platform's first price session. Both state the same facts and agree exactly where
+    they overlap (`nse_mto`'s register row records the comparison), so splicing them leaves no seam
+    a delivery factor could mistake for a change in behaviour.
+
+    `state_source` stays `nse_delivery` across both, deliberately — the same reason the bhavcopy's
+    does: the interlock should ask one question about delivery coverage over the whole decade, not
+    two that meet at a boundary.
+    """
+    if trade_date < delivery.SEC_BHAVDATA_ERA_START:
+        fetch_source = mto.MTO_SOURCE_ID
+        url = _template_for(register, fetch_source).replace("{DDMMYYYY}", f"{trade_date:%d%m%Y}")
+    else:
+        fetch_source = delivery.DELIVERY_SOURCE_ID
+        url = _template_for(register, fetch_source).replace("{DDMMYYYY}", f"{trade_date:%d%m%Y}")
     return FetchRequest(
         trade_date=trade_date,
         state_source=NSE_DELIVERY,
-        fetch_source=delivery.DELIVERY_SOURCE_ID,
+        fetch_source=fetch_source,
         url=url,
         filename=url.rsplit("/", 1)[-1],
     )
+
+
+def _parse_delivery(store: L0Store, ref: L0Ref) -> Sequence[DeliveryRow]:
+    """Parse a stored delivery payload with the parser its era wrote it in.
+
+    Dispatch is on the session, the same question `_delivery_request` asked when fetching it, so a
+    payload is never read with the other era's parser — which would not fail, it would find nothing.
+    """
+    if ref.logical_date < delivery.SEC_BHAVDATA_ERA_START:
+        return mto.parse_l0(store, ref)
+    return delivery.parse_l0(store, ref)
 
 
 def _write_delivery(rows: Sequence[DeliveryRow], ctx: WriteContext) -> object:
@@ -331,7 +356,7 @@ SOURCE_SETS: Final[dict[str, SourceSet[Any]]] = {
     NSE_DELIVERY: SourceSet(
         name=NSE_DELIVERY,
         build_request=_delivery_request,
-        parse=lambda store, ref: delivery.parse_l0(store, ref),
+        parse=_parse_delivery,
         write=_write_delivery,
         needs_master=True,
     ),
