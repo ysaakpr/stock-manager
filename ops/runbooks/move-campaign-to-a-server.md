@@ -153,6 +153,20 @@ archive. Two unit tests hold this: one asserts a rebuild over a transferred L0 r
 facts while a refusing transport is wired in, the other asserts an incomplete lake fails with the
 reason named.
 
+It is also the only mode that **batches its L1 writes**, and that changes what a kill costs. The
+per-filing path rewrites a whole `filing_date` partition per filing, which a results-season
+partition of 762 filings pays 762 times over; a rebuild instead buffers each partition's facts and
+writes it once per index chunk. Measured over 10,132 real filings, the write path drops from 410s
+to 3.4s, and every partition it produces is byte-identical to the one the per-filing path writes.
+
+The checkpoint moves with the facts. Nothing reaches `sync_state` while a filing is buffered, and
+the whole batch's rows are written and committed only after every partition is on disk — so a
+killed run never leaves a `PUBLISHED` row for a filing whose facts were still in memory. What it
+loses is up to one chunk's worth of *re-derivation*, which here is local reads and parses and no
+requests. That is why the runner refuses to batch on a fetching run: there the same kill would cost
+another chunk of NSE requests. A `Ctrl-C` is handled rather than merely survived — the buffer is
+flushed and checkpointed before the run ends.
+
 Verify the round trip:
 
 ```bash
@@ -176,7 +190,7 @@ what I have" and "go and look for more" from being the same command.
 |---|---|
 | Out | ~1 GB (prices + current L0 + a dump) |
 | Back | ~3.1 GB (L0 only, compresses well — XBRL is verbose XML) |
-| Local rebuild | **0 requests**, minutes of CPU |
+| Local rebuild | **0 requests**; minutes of CPU, dominated by parsing rather than writing |
 | Re-fetch if you skip L0 on the way out | ~9,700 filings ≈ 6.7 h at 2.5 s |
 
 The last row is the only real decision. Sending L0 out costs ~600 MB of upload and saves about
