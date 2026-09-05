@@ -20,3 +20,6 @@ __pycache__/
 *.parquet
 *.duckdb
 .DS_Store
+
+# Generated run reports — a coverage dump is output, not a record.
+/ops/reports/

@@ -194,6 +194,59 @@ nearest thousand rupees, so it is rounded to a whole share. Audited the other di
 stated value of any newly-mapped concept exceeds four decimal places across 8,000 documents, so
 nothing else will fail that write later in a run.
 
+### The re-derived store, verified
+
+Re-derived from L0 in one pass, **zero network requests**, on the batched write path (a separate
+task, merged first: `write_pit` was 96.9% of rebuild time because it rewrote each partition once per
+filing — 90 minutes became about 12).
+
+| | before | after |
+|---|---|---|
+| Filings published | 68,839 | **68,839** — identical set |
+| Facts | 636,661 | **911,954** (+43%) |
+| Distinct concepts | 9 | **22** |
+| Partitions / size | 1,592 / 16 MB | 1,592 / 20 MB |
+| ISINs | 1,598 | 1,598 |
+
+Coverage of the new concepts, over all 68,839 filings:
+
+| concept | filings | |
+|---|---|---|
+| `paid_up_equity_capital`, `face_value_per_share` | 68,837 | **100.0%** |
+| `shares_outstanding` | 65,319 | **94.9%** — 3,518 (5.11%) refused by the guard |
+| `profit_attributable_to_owners` | 27,829 | 40.4% |
+| `debt_equity_ratio` | 18,250 | 26.5% |
+| `reserves_excl_revaluation` | 13,129 | 19.1% |
+| `shareholders_equity_excl_revaluation` | 9,171 | 13.3% |
+| bank asset quality (NPA ×4, ROA, CET1) | 654 | 100% *of bank filings* |
+
+The 5.11% refusal rate lands on the 5% this plan predicted from the paid-up scale errors, and
+13.3/19.1 = 69.6% of the filings stating reserves yield a book value — the complement is the 30.4%
+that state 0.00, matching the 29.5% measured independently. Both guards are doing what they were
+sized to do, at the rate they were sized for.
+
+Verification, all passing:
+
+* every L1 filing is `PUBLISHED` and every published filing is in L1 — no orphans, none missing;
+* `filing_date > period_end` on all 911,954 facts (invariant #7); every value a `Decimal`; every row
+  carrying its `l0_key`; one source only (invariant #8); `taxonomy` populated on every row;
+* all 65,319 share counts recompute exactly from their own paid-up and face value, and all 9,171
+  equity facts from paid-up plus reserves, with none resting on a zero reserves figure;
+* all 65,319 published share counts sit inside the 3x band against their own filing's EPS — the
+  guard held on the real corpus, not just on fixtures;
+* **1,500 filings re-parsed from L0 and compared fact by fact: 0 differ.**
+
+All 2,297 failures classify into the three known classes, none new: 1,434 correct refusals (the
+entry's period is not a column in that document), 774 documents NSE lists but never served into L0,
+89 symbols missing from D2's history.
+
+One difference worth naming rather than rounding away: the rebuild attempted 71,136 units against
+the campaign's 70,734. The 402 extra are all entries whose document is absent from L0 — the campaign
+ran as eleven yearly segments plus sweeps, this ran as one uniform plan in a single pass, so it
+reached entries the segments did not. They contribute no facts either way, which is why the
+published set is the same 68,839. Whether those 402 documents are fetchable at all is an
+archive-gap question, not a parser one.
+
 ### Also shipped, per the plan
 
 `taxonomy` and `derived` on `FundamentalFact` and the L1 schema, in the same migration and the same

@@ -1177,8 +1177,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument(
         "--report",
         type=Path,
-        default=Path("ops/gates/M10-fundamentals-backfill-report.md"),
-        help="where to write the coverage report",
+        # Deliberately *not* a path under `ops/gates/`. This used to default to the M10.4 gate
+        # document, which is hand-written and committed — so any run that did not pass `--report`
+        # silently replaced a build record with a coverage dump, and the campaign only escaped it
+        # because its driver always passed the flag. A generated file defaults somewhere generated
+        # files live; `ops/reports/` is gitignored for exactly this reason.
+        default=Path("ops/reports/fundamentals-backfill-latest.md"),
+        help="where to write the coverage report (overwritten on every run)",
     )
     args = ap.parse_args(argv)
 
