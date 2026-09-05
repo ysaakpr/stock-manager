@@ -332,6 +332,7 @@ sources:
       (symbol, series) key present in both reports an identical delivery quantity, and MTO values
       keys the modern file leaves blank while leaving none blank that it fills.
     fixture: {frozen: true, task: M1.6, path: "tests/fixtures/nse_mto/"}
+    owner_task: M1.6
     failure_note: null
 
   - id: nse_sec_bhavdata_full
