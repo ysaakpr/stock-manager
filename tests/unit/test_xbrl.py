@@ -1553,3 +1553,28 @@ def test_taxonomy_rides_on_every_fact_not_just_the_filing(
         assert filing.facts, filing.symbol
         for fact in filing.facts:
             assert fact.taxonomy is filing.taxonomy
+
+
+def test_a_share_count_is_a_whole_number_of_shares(
+    entries: tuple[FilingIndexEntry, ...], repo_root: Path
+) -> None:
+    """Paid-up over face value rarely divides exactly, and the remainder is not a fraction of a share.
+
+    Paid-up capital is stated to the nearest thousand rupees, so a ₹3 face value leaves a repeating
+    decimal — SPICEMOBI's real filing gives 201,749,666.666… — and a repeating decimal has no
+    natural precision to store. Rounding to a whole share is both the meaningful reading and the
+    only one the L1 decimal scale can hold; keeping it unrounded failed the write outright.
+    """
+    entry = _entry(entries, isin=RELIANCE)
+    payload = _mutate(
+        repo_root,
+        entry.xbrl_url.rsplit("/", 1)[-1] if entry.xbrl_url else "",
+        ">10</in-bse-fin:FaceValueOfEquityShareCapital>",
+        ">9</in-bse-fin:FaceValueOfEquityShareCapital>",
+    )
+    filing = parse(payload, entry=entry, filename="mutated.xml")
+    shares = _company_value(filing, SHARES_OUTSTANDING)
+    # 135,320,000,000 / 9 = 15,035,555,555.5555… — repeating, and 1.11x the EPS-implied count, so
+    # the guard passes it and the rounding is what has to hold.
+    assert shares == Decimal("15035555556")
+    assert shares == shares.to_integral_value()

@@ -58,7 +58,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Final
 from xml.etree import ElementTree as ET
 
@@ -1072,7 +1072,12 @@ def _derived_facts(
     face_value = by_concept.get("face_value_per_share")
     if paid_up is None or face_value is None or paid_up <= 0 or face_value <= 0:
         return []
-    shares = paid_up / face_value
+    # Rounded to a whole share, because a share count is a count. The division is rarely exact —
+    # SPICEMOBI's ₹60.52 crore of ₹3 paid-up equity gives 201,749,666.67 — but the residual is the
+    # filing's own rounding (paid-up capital is stated to the nearest thousand rupees), not a
+    # fraction of a share that exists. Keeping it would also make the value's scale unbounded, since
+    # a repeating decimal has no natural precision to store.
+    shares = (paid_up / face_value).quantize(Decimal(1), rounding=ROUND_HALF_UP)
 
     # The parent's share where the filing states it, the bottom line otherwise. A zero is treated as
     # unstated on both: a standalone filing sometimes tags the attributable element with 0.
