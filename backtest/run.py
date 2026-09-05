@@ -2667,10 +2667,10 @@ def render_sector_rotation_report(
         "## Data reality (same M9 stack)",
         "",
         "Prices, the investable/liquidity screen and the PIT universe are the M9.2-M9.4 machinery "
-        "unchanged: raw L1 closes (this store holds no corporate actions, so the adjusted signal "
-        "equals the raw one bar-for-bar — M9.2), the M9.3 investable set (as-of index membership ∩ "
-        "a median-turnover floor; no membership snapshots in the store, so the liquidity floor is "
-        "what narrows it), and the "
+        "unchanged: raw L1 closes for the signal (`adjusted=False`, the M9.2 baseline), the M9.3 "
+        "investable set (as-of index membership ∩ a median-turnover floor; no historical "
+        "membership snapshots in the store, so the liquidity floor is what narrows it), look-backs "
+        "walking the full L1 calendar so the first rebalance already has a signal, and the "
         + (
             "M3.9 computed TRI"
             if benchmark_computed_tri
