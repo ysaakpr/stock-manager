@@ -3125,6 +3125,16 @@ class _L1FundamentalsData:
         """How many (ISIN, rebalance) metric computations dropped a mis-scaled filing."""
         return self._excluded_scale
 
+    @property
+    def universe_sizes(self) -> Mapping[date, int]:
+        """Rankable names per rebalance date — the store's staleness curve, read off the run."""
+        return dict(self._universe_sizes)
+
+    @property
+    def latest_filing_date(self) -> date:
+        """The newest filing date in the store — where the fundamentals stop being current."""
+        return self._filing_dates[-1] if self._filing_dates else date.min
+
     def _compute(self, as_of: date) -> tuple[FundamentalsRecord, ...]:
         cutoff = bisect_right(self._filing_dates, as_of)
         knowable = self._facts[:cutoff]
@@ -3344,6 +3354,8 @@ def run_fundamentals_report(
         market = _market_regime_returns(regime_source, sessions, risk_on_by_session)
         market_xirr = arms[0].comparison.benchmark_xirr
         risk_on_sessions = sum(1 for on in risk_on_by_session.values() if on)
+        sizes = fundamentals.universe_sizes
+        ordered = sorted(sizes)
         return render_fundamentals_report(
             arms,
             market=market,
@@ -3355,6 +3367,9 @@ def run_fundamentals_report(
             risk_on_sessions=risk_on_sessions,
             excluded_scale=fundamentals.filings_excluded_scale,
             top_n=top_n,
+            universe_first=(ordered[0], sizes[ordered[0]]) if ordered else None,
+            universe_last=(ordered[-1], sizes[ordered[-1]]) if ordered else None,
+            latest_filing=fundamentals.latest_filing_date,
         )
     finally:
         reader.close()
@@ -3372,6 +3387,9 @@ def render_fundamentals_report(
     risk_on_sessions: int,
     excluded_scale: int,
     top_n: int,
+    universe_first: tuple[date, int] | None = None,
+    universe_last: tuple[date, int] | None = None,
+    latest_filing: date | None = None,
 ) -> str:
     """The M10.6 report: fundamentals arms vs momentum vs market, full period and per regime."""
     lines = [
@@ -3415,6 +3433,20 @@ def render_fundamentals_report(
         f"- Regime split: {risk_on_sessions} of {sessions} sessions risk-on (proxy index at/above "
         f"its {_REGIME_MA_DAYS}-session moving average)",
         f"- Market XIRR (identical cashflows): {_pct(market_xirr)}",
+    ]
+    if latest_filing is not None:
+        lines.append(
+            f"- Newest filing in the PIT store: {latest_filing.isoformat()}. A name is rankable "
+            "only while its newest filing is under 200 days old, so past that date plus 200 days "
+            "the fundamentals arms hold no names — end the window there or read the tail as cash."
+        )
+    if universe_first is not None and universe_last is not None:
+        lines.append(
+            f"- Rankable fundamentals universe: {universe_first[1]} names on the first rebalance "
+            f"({universe_first[0].isoformat()}), {universe_last[1]} on the last "
+            f"({universe_last[0].isoformat()})."
+        )
+    lines += [
         "",
         "## Full period",
         "",
