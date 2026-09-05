@@ -22,7 +22,16 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
   rather than pure equal weight, so a jumpy name does not dominate the book's risk. Weights are
   computed over the same top ``top_n`` and normalised to sum to one.
 
-With **all four toggles off** the policy reproduces the naive top-N decision exactly — that is the
+* **Redeploy proceeds next session** (``redeploy_next_session``) — a mechanical fix to a gap the
+  first four leave open. A rebalance sells on session R (filling R+1) and sizes its buys from the
+  cash that is *already* free on R, so the sale proceeds land on R+1 and then sit idle until the
+  next monthly rebalance: with banding, two to five names a month are sold and 10-25 % of the book
+  waits in cash for a month, every month. With the toggle on, the policy remembers the basket it
+  chose on R and, on R+1, deploys the freed cash toward the same target weights at R+1's prices —
+  one more allocator pass, no new signal, no second look at the ranking. It is an execution
+  improvement, not a return knob: the basket is the one already decided.
+
+With **all five toggles off** the policy reproduces the naive top-N decision exactly — that is the
 "naive" baseline the increment report is struck against, and a unit test pins the parity. Every knob
 is a stated parameter, echoed verbatim into the report, so nothing here is silently tuned.
 
@@ -154,13 +163,16 @@ class MomentumV2Parameters:
     * ``regime_filter`` — hold the basket only while the index is above its ``regime_ma_days``-day
       moving average; below it, sell the basket and park in the liquid (CASH) sleeve.
     * ``vol_scaled`` — size names at ``~ 1/vol`` instead of equal weight.
+    * ``redeploy_next_session`` — on the session after a rebalance, deploy the cash the rebalance's
+      sells released into the basket chosen at that rebalance (same weights, that day's prices).
     * ``regime_ma_days`` — the moving-average window for the regime filter (200, the standard).
     * ``buy_budget_fraction`` — the share of free cash a rebalance deploys (a mechanical execution
       margin, not a return knob — carried over from the naive policy).
     * ``sleeve`` / ``parking_sleeve`` — journal sleeves for basket trades and for regime parking.
 
-    With ``use_12_1``, ``sell_band``, ``regime_filter`` and ``vol_scaled`` all off/``None`` the
-    policy is the naive top-N policy exactly. Every field is fixed by construction and reported
+    With ``use_12_1``, ``sell_band``, ``regime_filter``, ``vol_scaled`` and
+    ``redeploy_next_session`` all off/``None`` the policy is the naive top-N policy exactly. Every
+    field is fixed by construction and reported
     verbatim, so the "no tuning" claim stays checkable.
     """
 
@@ -169,6 +181,7 @@ class MomentumV2Parameters:
     sell_band: int | None = None
     regime_filter: bool = False
     vol_scaled: bool = False
+    redeploy_next_session: bool = False
     regime_ma_days: int = 200
     buy_budget_fraction: Decimal = Decimal("0.98")
     sleeve: Sleeve = Sleeve.TACTICAL
@@ -199,7 +212,9 @@ class MomentumV2Data(Protocol):
     * ``is_rebalance(session)`` — is today a rebalance session (first trading session of the month)?
     * ``signal(as_of)`` — the candidate set as a guardable :class:`Dataset` of
       :class:`MomentumV2Record`, already narrowed to the investable PIT universe and to names with
-      both momentum definitions, a price and a volatility.
+      both momentum definitions, a price and a volatility. With ``redeploy_next_session`` on, the
+      policy also reads it on the session *after* each rebalance, for that day's prices of the
+      basket already chosen — a source must serve those sessions too (the L1 one does).
     * ``regime(as_of)`` — the :class:`RegimeReading` for the session, as a one-element guardable
       dataset. Only read when ``regime_filter`` is on; a source that does not model regime need not
       implement anything more than a stub when the filter is off.
@@ -232,17 +247,28 @@ class MomentumV2Policy:
     the decision exactly.
     """
 
-    __slots__ = ("_data", "_params")
+    __slots__ = ("_data", "_params", "_pending")
 
     def __init__(self, data: MomentumV2Data, params: MomentumV2Parameters | None = None) -> None:
         self._data = data
         self._params = params if params is not None else MomentumV2Parameters()
+        #: The basket weights decided at the last rebalance, awaiting the proceeds of its sells
+        #: (``redeploy_next_session``). ``None`` when nothing is pending. Deterministic state: it is
+        #: a pure function of the previous session's decision, so a replay reproduces it.
+        self._pending: dict[str, Decimal] | None = None
 
     def decide(self, ctx: SessionContext) -> SessionDecision:
-        """Decide this session: a heartbeat off a rebalance, a full rebalance on one."""
-        if not self._data.is_rebalance(ctx.session):
-            return self._heartbeat(ctx)
-        return self._rebalance(ctx)
+        """Decide this session: a heartbeat off a rebalance, a full rebalance on one.
+
+        With ``redeploy_next_session`` on, the session right after a rebalance is a *deployment*
+        session: the cash that rebalance's sells released is put into the basket it chose.
+        """
+        if self._data.is_rebalance(ctx.session):
+            return self._rebalance(ctx)
+        if self._pending is not None:
+            pending, self._pending = self._pending, None
+            return self._redeploy(ctx, pending)
+        return self._heartbeat(ctx)
 
     # ── branches ──────────────────────────────────────────────────────────────────────────────────
 
@@ -269,6 +295,7 @@ class MomentumV2Policy:
         # Regime filter: read the regime through the PIT guard *first*. When it is risk-off, the
         # basket is not held at all — sell everything and park in the liquid sleeve (invariant #7:
         # the reading is admitted, so a future-dated regime trips the guard rather than leaking).
+        self._pending = None
         if self._params.regime_filter:
             (reading,) = ctx.pit.admit(self._data.regime(ctx.session))
             if not reading.risk_on:
@@ -290,6 +317,9 @@ class MomentumV2Policy:
         held = {holding.isin: holding for holding in ctx.broker.holdings()}
         sells = self._sells(held, keep)
         buys, drifts_note = self._buys(ctx, held, target, prices, use_12_1=use_12_1)
+        if self._params.redeploy_next_session and target and sells:
+            # Only a rebalance that sold something leaves proceeds to deploy tomorrow.
+            self._pending = self._weights_for(target)
 
         orders = tuple(order for order, _ in (*sells, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
@@ -373,10 +403,7 @@ class MomentumV2Policy:
         if not target:
             return [], _ZERO
         budget = ctx.broker.margins().available * self._params.buy_budget_fraction
-        if self._params.vol_scaled:
-            weights = inverse_vol_weights({isin: target[isin].volatility for isin in target})
-        else:
-            weights = _equal_weights(sorted(target))
+        weights = self._weights_for(target)
         existing_value = {
             isin: Decimal(held[isin].quantity) * prices[isin] for isin in target if isin in held
         }
@@ -396,6 +423,92 @@ class MomentumV2Policy:
             for order in allocation.orders
         ]
         return buys, allocation.tracking_drift
+
+    def _weights_for(self, target: Mapping[str, MomentumV2Record]) -> dict[str, Decimal]:
+        """The basket's model weights: inverse-vol when ``vol_scaled``, else equal."""
+        if self._params.vol_scaled:
+            return inverse_vol_weights({isin: target[isin].volatility for isin in target})
+        return _equal_weights(sorted(target))
+
+    # ── redeploy: the session after a rebalance ───────────────────────────────────────────────────
+
+    def _redeploy(self, ctx: SessionContext, weights: Mapping[str, Decimal]) -> SessionDecision:
+        """Put the cash yesterday's sells released into yesterday's basket at today's prices.
+
+        Reads today's admitted candidate set only for the *prices* of the names already chosen;
+        the ranking is not revisited. A basket name with no price today is left out of this pass
+        (its weight is renormalised away), never guessed. If nothing is affordable the session is
+        journalled as a heartbeat that says so.
+        """
+        records = {record.isin: record for record in ctx.pit.admit(self._data.signal(ctx.session))}
+        priced = {isin: w for isin, w in weights.items() if isin in records}
+        held = {holding.isin: holding for holding in ctx.broker.holdings()}
+        budget = ctx.broker.margins().available * self._params.buy_budget_fraction
+        if not priced or budget <= _ZERO:
+            return self._redeploy_heartbeat(ctx, budget, reason="no priced basket name or no cash")
+        total = sum(priced.values(), _ZERO)
+        weights_norm = {isin: (w / total).quantize(_WEIGHT_QUANTUM) for isin, w in priced.items()}
+        last = sorted(weights_norm)[-1]
+        weights_norm[last] = _ONE - sum(
+            (w for isin, w in weights_norm.items() if isin != last), _ZERO
+        )
+        prices = {isin: records[isin].price for isin in priced}
+        existing_value = {
+            isin: Decimal(held[isin].quantity) * prices[isin] for isin in priced if isin in held
+        }
+        allocation = simulate_sip_instalment(
+            instalment=budget, targets=weights_norm, prices=prices, existing_value=existing_value
+        )
+        if not allocation.orders:
+            return self._redeploy_heartbeat(ctx, budget, reason="no affordable share reduces drift")
+        buys = [
+            (
+                order.to_order_request(exchange=Exchange.NSE, tag="MOMENTUM"),
+                f"redeploy: proceeds of yesterday's rebalance sells into the chosen basket; "
+                f"buy {order.quantity} @ {order.price}",
+            )
+            for order in allocation.orders
+        ]
+        orders = tuple(order for order, _ in buys)
+        entries = tuple(self._entry(ctx, order, note) for order, note in buys)
+        evidence = EvidenceBundle(
+            trading_date=ctx.session,
+            actor=Actor.T0,
+            items=(
+                EvidenceItem(
+                    kind=EvidenceKind.POSITION,
+                    source="book",
+                    label="redeploy_budget",
+                    as_of=ctx.session,
+                    value=budget,
+                    detail={
+                        "names_bought": str(len(buys)),
+                        "tracking_drift": str(allocation.tracking_drift),
+                    },
+                    text="cash freed by yesterday's rebalance sells, deployed into its basket",
+                ),
+            ),
+        )
+        return SessionDecision(evidence=evidence, orders=orders, entries=entries)
+
+    def _redeploy_heartbeat(
+        self, ctx: SessionContext, budget: Decimal, *, reason: str
+    ) -> SessionDecision:
+        evidence = EvidenceBundle(
+            trading_date=ctx.session,
+            actor=Actor.T0,
+            items=(
+                EvidenceItem(
+                    kind=EvidenceKind.POSITION,
+                    source="book",
+                    label="redeploy_budget",
+                    as_of=ctx.session,
+                    value=budget,
+                    text=f"redeploy session, nothing bought: {reason}",
+                ),
+            ),
+        )
+        return SessionDecision(evidence=evidence)
 
     # ── journal + evidence ──────────────────────────────────────────────────────────────────────
 

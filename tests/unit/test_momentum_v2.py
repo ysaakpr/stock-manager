@@ -466,3 +466,101 @@ def test_all_toggles_on_still_buys_a_basket_when_risk_on() -> None:
         _ctx(SESSION, _FakeBroker(cash=Decimal("1000000")))
     )
     assert _bought(decision), "all-on, risk-on: a basket should be bought"
+
+
+# ── the fifth toggle: redeploy yesterday's sale proceeds into yesterday's basket ─────────────────
+
+NEXT = date(2020, 1, 2)
+
+
+class _TwoDayData:
+    """Rebalance on SESSION only; the same candidate set is served on SESSION and NEXT."""
+
+    def __init__(self, records: tuple[MomentumV2Record, ...] = _RECORDS, *, risk_on: bool = True):
+        self._records = records
+        self._risk_on = risk_on
+
+    def is_rebalance(self, session: date) -> bool:
+        return session == SESSION
+
+    def signal(self, as_of: date) -> Dataset[MomentumV2Record]:
+        return Dataset.declaring(f"m@{as_of}", self._records, knowable_date=lambda _r: SESSION)
+
+    def regime(self, as_of: date) -> Dataset[RegimeReading]:
+        level = Decimal("110") if self._risk_on else Decimal("90")
+        reading = RegimeReading(
+            index_level=level, moving_average=Decimal("100"), knowable_date=SESSION
+        )
+        return Dataset.declaring(f"r@{as_of}", (reading,), knowable_date=lambda r: r.knowable_date)
+
+
+def _two_days(
+    params: MomentumV2Parameters, *, data: _TwoDayData | None = None
+) -> tuple[SessionDecision, SessionDecision]:
+    """Day 1: hold E (a dropout) with little free cash. Day 2: E's proceeds have landed."""
+    policy = MomentumV2Policy(data or _TwoDayData(), params)
+    dropout = (_holding(E, 100),)
+    day1 = policy.decide(_ctx(SESSION, _FakeBroker(cash=Decimal("50"), holdings=dropout)))
+    # E sold overnight: ~10,000 of cash is now free and the dropout is gone.
+    day2 = policy.decide(_ctx(NEXT, _FakeBroker(cash=Decimal("10000"))))
+    return day1, day2
+
+
+def test_without_redeploy_the_proceeds_wait_until_the_next_rebalance_inversion() -> None:
+    day1, day2 = _two_days(MomentumV2Parameters(top_n=2))
+    assert [o.isin for o in day1.orders if o.side is Side.SELL] == [E]
+    assert day2.orders == ()  # cash sits idle: the gap the fifth toggle closes
+
+
+def test_with_redeploy_the_next_session_buys_the_chosen_basket_from_the_freed_cash() -> None:
+    day1, day2 = _two_days(MomentumV2Parameters(top_n=2, redeploy_next_session=True))
+    assert [o.isin for o in day1.orders if o.side is Side.SELL] == [E]
+    buys = [o for o in day2.orders if o.side is Side.BUY]
+    assert buys, "the freed cash should have been deployed"
+    assert {o.isin for o in buys} <= {A, B}  # yesterday's top-2, never a re-ranked name
+    assert all(o.tag == "MOMENTUM" and isinstance(o.quantity, int) for o in buys)
+    assert all(e.decision is Decision.BUY for e in day2.entries)
+    # Sized from the freed cash: 98% of 10,000 at ₹100 a share buys ~98 shares across the basket.
+    assert sum(o.quantity for o in buys) == 98
+
+
+def test_redeploy_is_consumed_once_and_needs_a_sell_to_arm() -> None:
+    params = MomentumV2Parameters(top_n=2, redeploy_next_session=True)
+    policy = MomentumV2Policy(_TwoDayData(), params)
+    policy.decide(_ctx(SESSION, _FakeBroker(cash=Decimal("50"), holdings=(_holding(E, 100),))))
+    rich = _FakeBroker(cash=Decimal("10000"))
+    assert policy.decide(_ctx(NEXT, rich)).orders
+    assert policy.decide(_ctx(date(2020, 1, 3), rich)).orders == ()  # consumed
+
+    # A rebalance that sold nothing (nothing held) leaves no proceeds and arms nothing.
+    fresh = MomentumV2Policy(_TwoDayData(), params)
+    fresh.decide(_ctx(SESSION, _FakeBroker(cash=Decimal("50"))))
+    assert fresh.decide(_ctx(NEXT, rich)).orders == ()
+
+
+def test_a_regime_park_leaves_nothing_to_redeploy() -> None:
+    params = MomentumV2Parameters(top_n=2, redeploy_next_session=True, regime_filter=True)
+    policy = MomentumV2Policy(_TwoDayData(risk_on=False), params)
+    parked = policy.decide(
+        _ctx(SESSION, _FakeBroker(cash=Decimal("50"), holdings=(_holding(A, 10),)))
+    )
+    assert [o.side for o in parked.orders] == [Side.SELL]
+    assert policy.decide(_ctx(NEXT, _FakeBroker(cash=Decimal("10000")))).orders == ()
+
+
+def test_redeploy_with_nothing_affordable_is_a_journalled_heartbeat() -> None:
+    params = MomentumV2Parameters(top_n=2, redeploy_next_session=True)
+    policy = MomentumV2Policy(_TwoDayData(), params)
+    policy.decide(_ctx(SESSION, _FakeBroker(cash=Decimal("50"), holdings=(_holding(E, 100),))))
+    day2 = policy.decide(_ctx(NEXT, _FakeBroker(cash=Decimal("5"))))  # ₹5 buys no ₹100 share
+    assert day2.orders == ()
+    assert day2.entries == ()
+    assert any(item.label == "redeploy_budget" for item in day2.evidence.items)
+
+
+def test_redeploy_is_deterministic() -> None:
+    params = MomentumV2Parameters(top_n=2, redeploy_next_session=True, vol_scaled=True)
+    a = _two_days(params)[1]
+    b = _two_days(params)[1]
+    assert a.orders == b.orders
+    assert a.evidence.ref() == b.evidence.ref()
