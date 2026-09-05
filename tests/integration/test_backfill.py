@@ -248,6 +248,7 @@ def _runner(
         l0=L0Store(clock=clock, data_root=settings.data_root),
         sync=store,
         commit=conn.commit,
+        register=register,
         **kwargs,  # type: ignore[arg-type]
     )
 
