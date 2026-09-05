@@ -1141,7 +1141,28 @@ def test_the_l1_value_column_is_decimal(vst_original: Filing, tmp_path: Path) ->
     schema = pq.read_schema(
         l1_partition_path(PIT_FUNDAMENTALS_DATASET, VST_ORIGINAL_FILED, data_root=tmp_path)
     )
-    assert str(schema.field("value").type) == "decimal128(38, 2)"
+    assert str(schema.field("value").type) == "decimal128(38, 4)"
+
+
+def test_a_three_decimal_eps_survives_the_write(vst_original: Filing, tmp_path: Path) -> None:
+    """Scale 4, not 2 — and the shortfall was silent in the worst way.
+
+    `pyarrow` refuses to rescale a `Decimal` that would lose data, so a filing reporting EPS to
+    three places parsed perfectly and then failed its *write* with `ArrowInvalid`. It cost 250
+    filings of a decade-long campaign and was invisible until the failure classes were tallied.
+    Rounding would have been the wrong fix: 1.234 truncated to 1.23 is a 0.3% error in the
+    denominator of every P/E built on it.
+    """
+    eps = next(f for f in vst_original.facts if f.concept == "eps_basic")
+    three_dp = eps.model_copy(update={"value": Decimal("1.234")})
+    filing = vst_original.model_copy(
+        update={"facts": tuple(f for f in vst_original.facts if f is not eps) + (three_dp,)}
+    )
+    write_pit(filing, data_root=tmp_path)
+
+    back = read_l1(VST_ORIGINAL_FILED, data_root=tmp_path)
+    stored = next(f for f in back if f.concept == "eps_basic")
+    assert stored.value == Decimal("1.234")  # exact, not 1.23
 
 
 def test_read_pit_on_an_empty_lake_is_empty_not_an_error(tmp_path: Path) -> None:

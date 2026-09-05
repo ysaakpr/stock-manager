@@ -71,7 +71,16 @@ PIT_FUNDAMENTALS_DATASET: Final = "pit_fundamentals"
 #: Values are stored to two decimal places in a wide precision: revenues run to lakhs/crores of
 #: rupees while EPS is a few rupees, and 38 digits comfortably holds both. A source that started
 #: stating a third decimal would fail the write loudly rather than have a value silently rounded.
-_VALUE_TYPE: Final = pa.decimal128(38, 2)
+#: Two decimal places is not enough, and the shortfall was silent: `pyarrow` refuses to rescale a
+#: `Decimal` that would lose data, so a filing reporting EPS to three places failed its *write* with
+#: `ArrowInvalid` after parsing perfectly — 250 filings of a decade-long campaign, invisible until
+#: the failure classes were tallied. Measured over 3,000 captured documents, the only concepts ever
+#: carrying more than two places are `eps_basic`/`eps_diluted`, always at exactly three (0.9% of
+#: documents). Scale 4 holds those exactly with headroom, and 34 integer digits is far more than the
+#: largest value in the corpus needs. Rounding instead was the wrong fix: an EPS of 1.234 truncated
+#: to 1.23 is a 0.3% error in the denominator of every P/E built on it, and CLAUDE.md keeps money
+#: exact precisely so a number is never quietly degraded on the way into storage.
+_VALUE_TYPE: Final = pa.decimal128(38, 4)
 
 #: The L1 schema, declared once and enforced on write and on read (§4.2, M1.8's rule).
 _L1_SCHEMA: Final = pa.schema(

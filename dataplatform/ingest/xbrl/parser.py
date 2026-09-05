@@ -93,10 +93,19 @@ SEGMENT_CONCEPT: Final = "segment_revenue"
 #: of silently comparing a symbol against an ISIN.
 _NSE_SYMBOL_SCHEME: Final = "http://www.nseindia.com/NSESymbol"
 
+#: The same identifier under BSE's namespace root. The scheme *name* still ends in `NSESymbol` and
+#: the value still is one — filers using the BSE-published taxonomy sometimes emit this variant.
+#: 362 filings in the captured decade use it, and refusing them was the parser being pedantic about
+#: a URL prefix rather than about identity.
+_BSE_NSE_SYMBOL_SCHEME: Final = "http://www.bseindia.com/bse-fin/NSESymbol"
+
+#: Every scheme whose identifier is an NSE symbol and may therefore be compared to one.
+_SYMBOL_SCHEMES: Final = frozenset({_NSE_SYMBOL_SCHEME, _BSE_NSE_SYMBOL_SCHEME})
+
 #: The other scheme in the wild: a BSE scrip code (e.g. `532209` for J&K Bank). Its identifier is
 #: *not* a symbol and must never be compared to one, so a filing using it is cross-checked on its
-#: `Symbol` fact instead. Recognised explicitly rather than by "anything that is not NSESymbol", so
-#: a third scheme is still a loud failure.
+#: `Symbol` fact instead. Recognised explicitly rather than by "anything that is not a symbol
+#: scheme", so a genuinely unknown scheme is still a loud failure.
 _BSE_SCRIP_SCHEME: Final = "http://www.bseindia.com/bse-fin/ScripCode"
 
 #: Elements that populate filing-level fields rather than becoming facts.
@@ -461,11 +470,12 @@ def _check_symbol(
             "filing is about one company",
             filename=filename,
         )
-    unknown = schemes - {_NSE_SYMBOL_SCHEME, _BSE_SCRIP_SCHEME}
+    unknown = schemes - _SYMBOL_SCHEMES - {_BSE_SCRIP_SCHEME}
     if unknown:
         raise ParseError(
             f"entity identifier scheme is {', '.join(sorted(schemes))!r}, expected one of "
-            f"{[_NSE_SYMBOL_SCHEME, _BSE_SCRIP_SCHEME]}; this parser reads the identifier as an "
+            f"{sorted(_SYMBOL_SCHEMES | {_BSE_SCRIP_SCHEME})}; this parser reads the identifier "
+            "as an "
             "NSE symbol or a BSE scrip code and takes the ISIN from the announcements index "
             "(invariant #2)",
             filename=filename,
@@ -476,7 +486,7 @@ def _check_symbol(
     # `<xbrli:entity>` either; their `Symbol` fact is then the only identity they state, and it is
     # enough. Only a filing that states *neither* is unidentifiable.
     stated: set[str] = set()
-    if schemes == {_NSE_SYMBOL_SCHEME}:
+    if schemes <= _SYMBOL_SCHEMES:
         stated |= identifiers
     for facts in facts_by_context.values():
         stated |= {value for value in facts.get(_SYMBOL_ELEMENT, ()) if value}
@@ -927,6 +937,7 @@ def _segment_facts(
     """
     facts: list[FundamentalFact] = []
     seen: set[str] = set()
+    ambiguous: set[str] = set()
     for context_id, context_facts in facts_by_context.items():
         shape = shapes.get(context_id)
         if shape is None or shape.token != column.token or _SEGMENT_AXIS not in shape.axes:
@@ -945,10 +956,20 @@ def _segment_facts(
                 filename=filename,
             )
         if name in seen:
-            raise ParseError(
-                f"column {column.context_id!r} reports segment {name!r} more than once",
+            # Two contexts in one column carrying the same segment name: the filing states two
+            # different revenues for one segment and nothing distinguishes them, so neither is
+            # usable. Drop that segment rather than failing the filing — its company-level P&L is
+            # unaffected and is most of the value, and losing eight good facts because a filer
+            # typed a segment name twice is the wrong trade. Loud, counted, never silent.
+            _LOG.warning(
+                "xbrl.segment_ambiguous",
                 filename=filename,
+                column=column.context_id,
+                segment=name,
+                state="DROPPED",
             )
+            ambiguous.add(name)
+            continue
         seen.add(name)
         facts.append(
             _fact(
@@ -962,7 +983,8 @@ def _segment_facts(
                 filename=filename,
             )
         )
-    return facts
+    # A name that turned out to be ambiguous invalidates the fact already collected for it too.
+    return [f for f in facts if f.segment not in ambiguous]
 
 
 def _fact(
