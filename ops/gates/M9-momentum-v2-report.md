@@ -11,9 +11,9 @@
 
 With all four off the policy is the naive top-N policy exactly (the parity is pinned in `tests/unit/test_momentum_v2.py`), so the first row below is the naive baseline.
 
-## Data reality (same as M9.2-M9.4)
+## Data reality
 
-Every run reads the **raw** L1 momentum signal: this store holds no corporate actions, so the L2 back-adjusted signal equals the raw one bar-for-bar (M9.2) and the ten-year L2 is not materialized — the raw signal *is* the M9.2 signal here. The universe is the M9.3 investable/liquid set (as-of index membership ∩ a median-turnover floor; this store holds no membership snapshots, so the liquidity floor is what narrows it). The benchmark is the pre-M9.4 broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the close-all backfill is gated, AGENTIC_CONTEXT B1). The regime overlay reads a **proxy** index — the same broad-market L1 basket the benchmark proxy is built from — because the store holds no licensed index level.
+Every run reads the **raw** L1 momentum signal (`adjusted=False`, the M9.2 baseline; the adjusted-vs-raw delta is the M9.2 report's subject, not this one's). The universe is the M9.3 investable/liquid set (as-of index membership ∩ a median-turnover floor; the store holds no historical membership snapshots, so the liquidity floor is what narrows it). The benchmark is the broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the close-all backfill is gated, AGENTIC_CONTEXT B1), and the regime overlay reads the same proxy index. Look-backs (the 12-month and 1-month reference closes, the volatility points) walk the full L1 calendar, so the first rebalance of the window already has a signal — earlier editions of this report held cash for the window's first year for want of one.
 
 ## Window
 
@@ -25,26 +25,34 @@ Every run reads the **raw** L1 momentum signal: this store holds no corporate ac
 
 | Configuration | Portfolio XIRR | Max drawdown | Turnover (fills) | Total cost | Excess vs benchmark |
 | --- | --- | --- | --- | --- | --- |
-| Naive (all off) | 12.23% | 50.20% | 2947 | ₹105,703.19 | 3.67% |
-| + 12-1 momentum | 13.33% | 42.55% | 2745 | ₹120,648.84 | 4.77% |
-| + Turnover banding | 11.11% | 57.27% | 2828 | ₹81,617.62 | 2.56% |
-| + Regime filter | 10.51% | 25.50% | 1899 | ₹79,455.52 | 1.95% |
-| + Vol-scaled weights | 9.47% | 51.76% | 2848 | ₹92,383.06 | 0.92% |
-| All on | 12.03% | 22.51% | 1693 | ₹77,214.51 | 3.48% |
+| Naive (all off) | 12.21% | 50.21% | 2934 | ₹105,658.93 | 3.65% |
+| + 12-1 momentum | 13.32% | 42.54% | 2725 | ₹120,573.79 | 4.77% |
+| + Turnover banding | 11.11% | 57.26% | 2819 | ₹81,611.01 | 2.55% |
+| + Regime filter | 10.49% | 25.51% | 1926 | ₹79,461.91 | 1.94% |
+| + Vol-scaled weights | 9.51% | 51.71% | 2860 | ₹92,649.69 | 0.96% |
+| + Redeploy proceeds next session | 14.23% | 56.13% | 3281 | ₹149,848.01 | 5.68% |
+| All on (four M9.5 toggles) | 12.01% | 22.51% | 1776 | ₹77,175.14 | 3.45% |
+| All on + redeploy | 13.97% | 25.57% | 2107 | ₹107,198.71 | 5.41% |
+| + Vol target 15% | 5.94% | 35.38% | 2960 | ₹57,910.43 | -2.61% |
+| All on + redeploy + vol target 15% | 14.95% | 22.73% | 2766 | ₹136,231.75 | 6.39% |
 
 ### Deltas vs naive (isolating each change)
 
 | Configuration | Δ XIRR | Δ Max drawdown | Δ Turnover | Δ Cost |
 | --- | --- | --- | --- | --- |
-| + 12-1 momentum | 1.10% | -7.64% | -202 | ₹14,945.65 |
-| + Turnover banding | -1.11% | 7.07% | -119 | ₹-24,085.57 |
-| + Regime filter | -1.72% | -24.70% | -1048 | ₹-26,247.67 |
-| + Vol-scaled weights | -2.76% | 1.56% | -99 | ₹-13,320.13 |
-| All on | -0.20% | -27.69% | -1254 | ₹-28,488.68 |
+| + 12-1 momentum | 1.11% | -7.66% | -209 | ₹14,914.86 |
+| + Turnover banding | -1.10% | 7.05% | -115 | ₹-24,047.92 |
+| + Regime filter | -1.72% | -24.70% | -1008 | ₹-26,197.02 |
+| + Vol-scaled weights | -2.70% | 1.51% | -74 | ₹-13,009.24 |
+| + Redeploy proceeds next session | 2.02% | 5.92% | +347 | ₹44,189.08 |
+| All on (four M9.5 toggles) | -0.21% | -27.69% | -1158 | ₹-28,483.79 |
+| All on + redeploy | 1.76% | -24.63% | -827 | ₹1,539.78 |
+| + Vol target 15% | -6.27% | -14.83% | +26 | ₹-47,748.50 |
+| All on + redeploy + vol target 15% | 2.74% | -27.48% | -168 | ₹30,572.82 |
 
 ## Reading it
 
-- **Turnover banding** is the change that most directly targets the naive run's churn — the naive policy fired 2947 fills over the decade (1876 of them sells); the banding row shows how much of that the hysteresis removes, and its cost delta is the saving.
+- **Turnover banding** is the change that most directly targets the naive run's churn — the naive policy fired 2934 fills over the decade (1875 of them sells); the banding row shows how much of that the hysteresis removes, and its cost delta is the saving.
 - **The regime filter** trades return for drawdown control: it sits in cash through the sessions the proxy index is below its moving average, so its max-drawdown column is the one to read against naive.
 - **Vol-scaling** and **12-1** reshape the basket rather than its size; read them in the XIRR and drawdown columns.
 - **Do not read any excess-vs-benchmark figure as alpha** — the benchmark here is a computed/proxy total-return series, not the licensed feed (M9.4). The point of this table is the *relative* effect of each toggle, all measured against the identical benchmark.
@@ -55,9 +63,13 @@ Every run reads the **raw** L1 momentum signal: this store holds no corporate ac
 
 ## Run digests (determinism)
 
-- **Naive (all off):** `8618f3cb36b0d76c24917827c4d9e60aeb75590d249aa97403ab9da324837121`
-- **+ 12-1 momentum:** `f89ad2df184a80ce31293a725543b8cf09d4c6fb498a4d4b380b2b6a1bf234e4`
-- **+ Turnover banding:** `566562c3597be13063f152b907faf4fc8718d7467a0c1febd96e6de07bc03052`
-- **+ Regime filter:** `21b7f7f187067fb80c1215eb9c1e74952a260de849c394dd8fe94f955069e01a`
-- **+ Vol-scaled weights:** `af79abb2f5e2774abf634fc5454e921c4b069d2283d2d1faf34537c77c434c61`
-- **All on:** `e1d0f2e51947c64212eed4baddcf2e6ac3ac2bf943b631c68ab4876f2affd2d7`
+- **Naive (all off):** `0e3b5ef3b8dcf9e310e10be7b57d0802efb5feb554296e679dc9651ed54a1e14`
+- **+ 12-1 momentum:** `fe6b44960c4c002a79cec67b1936bf97e500f4622277227fb4761c074de4e617`
+- **+ Turnover banding:** `1ef852da14e72ec3e756d3d6ba5358d660f374fdff6aff078139daba187c7c4f`
+- **+ Regime filter:** `8a74dd171b261f5e3f01810bda4482eee42c00eb6fd27ae272a7ecd8356feb0c`
+- **+ Vol-scaled weights:** `004a0a0418868500a2d1bd0910378b01c6781e25d03359e614ea84aeb8749c83`
+- **+ Redeploy proceeds next session:** `0675db1aaff6f57b970d5b7567265b75db427b3190057a1257524105c044b85e`
+- **All on (four M9.5 toggles):** `c52f1c6836dce3cde934d61a42cfc793890e5fad836c305d29f3a6c93a0da440`
+- **All on + redeploy:** `50bd64fc7ebf593abcb7e2ab9e3a47b7f699d19b5fc8f31b48814b159b4957f6`
+- **+ Vol target 15%:** `c1118b3012c16a7f85ecc15097ee5523067209b29d952ac293c81c0bcf833162`
+- **All on + redeploy + vol target 15%:** `7f9b2abb9dce792d84ac7e4dcd984bd733b79bff0467ac92a0fbe2393c187fdd`
