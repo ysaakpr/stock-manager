@@ -105,35 +105,116 @@ book value with no cash movement and at management's discretion.
 `shareholders_equity`. Calling it the latter would invite a reader to reconcile it against a vendor
 figure and conclude the data is wrong.
 
-## Action 1 — Extract the balance-sheet concepts. No fetching at all.
+## Action 1 — Extract the balance-sheet concepts. **DONE** (`9f26a83`, `b2e3dbb`).
 
-This is a parser change. Every document needed is already in L0, and `_ref_for` reuses stored
-payloads, so re-deriving the whole store costs **zero requests**.
+A parser change, as planned: every document was already in L0 and `_ref_for` reuses stored payloads,
+so the whole store was re-derived with **zero network requests**.
 
-1. Extend `CONCEPTS` in `dataplatform/ingest/xbrl/models.py` with the elements above, per taxonomy
-   family (the banking form names its own asset-quality items).
-2. Add the two derived facts, named for exactly what they are: `shares_outstanding` and
-   `shareholders_equity_excl_revaluation`. Computed in the parser from stated elements, never
-   inferred when an input is missing — a filing lacking either input yields no derived fact rather
-   than a guess, matching how the existing whitelist behaves.
-3. **Guard `shares_outstanding` with `profit_after_tax / eps_basic`** and refuse the fact when the
-   two disagree beyond a tolerance. 5% of filings state a paid-up capital that is wrong by a clean
-   power of ten (see the validation above), and without the guard those become market caps wrong by
-   the same factor. Surface the refusals as a count rather than dropping them silently.
-4. Add `taxonomy` to `FundamentalFact` and the L1 schema in the same change (already filed
-   separately in `ops/BACKLOG.md`). It is the same schema migration and the same re-derivation, so
-   doing them together halves the work and avoids a second rewrite of every partition.
-5. Re-derive `pit_fundamentals` from L0.
+Four things were built differently from the plan above, each because measuring the real corpus
+contradicted what the plan assumed. All four are recorded here because the plan was wrong, not
+because the implementation drifted.
 
-**Sequencing is not optional.** `_rows_of` enforces `_L1_SCHEMA` on read and `write_pit` merges
-existing partitions, so adding a column while the campaign is writing makes already-written
-partitions unreadable — and the running processes hold the old schema anyway. **Do this after the
-campaign and its sweeps finish.**
+### 1. The concept names were measured per family, not per document sample
 
-Deliberately *not* included: `DebtServiceCoverageRatio` and `InterestServiceCoverageRatio` are
-stated by ~26% of filings but are ratios a filer computed under its own conventions, not primitives.
-Storing a number we cannot reconstruct from its inputs makes it un-auditable. `DebtEquityRatio` is
-included only because leverage has no other route here; it should carry the same caveat.
+The plan said "per taxonomy family (the banking form names its own asset-quality items)". Measured
+over 3,000 captured documents, the split is sharper than that and the other direction too:
+
+| | Ind-AS | Banking | Non-Ind-AS |
+|---|---|---|---|
+| `PaidUpValueOfEquityShareCapital`, `FaceValueOfEquityShareCapital` | 100% | 100% | 100% |
+| `ReserveExcludingRevaluationReserves` | 24% | 16% | 41% |
+| `DebtEquityRatio` | 26% | **0%** | 47% |
+| `GrossNonPerformingAssets`, `NonPerformingAssets`, `PercentageOfGrossNpa`, `PercentageOfNpa`, `ReturnOnAssets`, `CET1Ratio` | 0% | **100%** | 0% |
+
+The capital elements share one name across all three families, so they are one shared block rather
+than three copies. No bank states a debt-to-equity ratio, which is correct rather than missing for a
+deposit-taker. Every mapped element name was then verified to appear in real documents — none was
+read off the schema, which is how the four names this map originally guessed came to match nothing.
+
+### 2. `profit_attributable_to_owners` had to be mapped for the guard to work at all
+
+Not in the plan, and the guard is unsound without it. GRASIM consolidates UltraTech and Aditya Birla
+Capital, so its EPS is struck on ₹899 crore of a ₹1,844 crore consolidated profit. Corroborating a
+share count against the group bottom line puts the two counts **more than 2x apart on a filing where
+nothing is wrong** — which would force the tolerance so wide it could no longer catch a real error.
+Using the parent's share instead lifts exact agreement from 83.3% to 86.6% across 10,468 filings.
+
+Ind-AS and banking state it under different names; the pre-Ind-AS form states only
+`ProfitLossForPeriodBeforeMinorityInterest`, the wrong side of the deduction, so it is deliberately
+left unmapped and those filings fall back to the bottom line (3 consolidated filings in 4,000).
+
+It is also simply the right earnings figure for a P/E whose market cap is the parent's shares.
+
+### 3. A reserves figure of exactly zero is an unfilled tag — a second guard the plan did not foresee
+
+**29.5% of the filings that state `ReserveExcludingRevaluationReserves` state it as 0.00.** The tag
+is mandatory and a filer who has not computed it enters nothing. Taken literally, Schaeffler India's
+book value becomes its ₹31.26 crore of paid-up capital alone — roughly 100x too low — and a P/B
+screen ranks it spectacularly wrong in the direction that most attracts a value strategy. Zero is
+now read as absent. A *negative* reserve is kept: accumulated losses are real, and so is the
+negative equity they produce.
+
+### 4. The tolerance is 3x, taken from the distribution
+
+The plan said "beyond a tolerance" without naming one. Measured over 10,468 (document, column)
+pairs: 86.6% agree within 5%, 95.6% fall inside a 3x band, and **every** case outside it is out by a
+clean power of ten. The band therefore has a 3.3x margin below the smallest error it must catch,
+while admitting the honest reasons the two counts differ — EPS is struck over weighted-average
+shares against a period-end capital figure, and an EPS rounded to two decimals is worth ±10% to a
+company earning ₹0.05 a share.
+
+A filing that fails yields **neither** derived fact. The suspect input is the paid-up capital, which
+is also a term of the equity sum, and nothing inside the document says whether the fault lies there
+or in the face value. Refusing a possibly-good book value is recoverable; publishing one wrong by
+six orders of magnitude is not.
+
+### What the guards actually cost, measured through the production parse path
+
+35,548 filings re-parsed exactly as the runner does:
+
+| | |
+|---|---|
+| state paid-up + face value | **100.0%** |
+| `shares_outstanding` published | **95.0%** — the guard refuses **4.95%** |
+| state the reserves element | 27.0% |
+| `shareholders_equity_excl_revaluation` published | **19.0%** — zero-reserves removes 29.5% |
+| state `profit_attributable_to_owners` | 41.0% |
+| state `debt_equity_ratio` | 27.5% |
+
+The 4.95% refusal rate matches the 5% this plan predicted from the paid-up scale errors, which is
+the check that the guard is catching that population and not something else.
+
+### One defect the rebuild caught that the fixtures could not
+
+`ArrowInvalid: Rescaling Decimal value would cause data loss`, 641 filings into the first rebuild.
+Paid-up over face value rarely divides exactly — SPICEMOBI's ₹60.52 crore of ₹3 paid-up equity gives
+201,749,666.666… to 19 decimal places — and a repeating decimal has no precision the L1 scale can
+hold. A share count is a count of shares and the residual is the filing's own rounding to the
+nearest thousand rupees, so it is rounded to a whole share. Audited the other direction as well: no
+stated value of any newly-mapped concept exceeds four decimal places across 8,000 documents, so
+nothing else will fail that write later in a run.
+
+### Also shipped, per the plan
+
+`taxonomy` and `derived` on `FundamentalFact` and the L1 schema, in the same migration and the same
+re-derivation. A bank's `revenue_from_operations` is `InterestEarned` and its `total_expenses`
+excludes provisions, so a screen ranking banks beside manufacturers on one concept key needs that
+visible on the row rather than reachable by a join. `derived` separates what the parser computed
+from what the filer stated, which is what makes the refusal population auditable.
+
+### Deliberately still not included
+
+`SegmentAssets` and `SegmentLiabilities` (36% of Ind-AS filings, 100% of banking). `SegmentAssets`
+carries name and value in the same dimensioned context, so it would fit the existing
+`_segment_facts` path; `SegmentLiabilities` splits them across a `…01D`/`…01I` context pair, which
+that path cannot express. Adding one without the other gives segment assets with no liabilities to
+set against them — half a balance sheet per segment, which supports no ratio. Left as one piece of
+work rather than shipped half-done.
+
+`DebtServiceCoverageRatio` and `InterestServiceCoverageRatio` remain excluded as before: ratios a
+filer computed under its own conventions, which we cannot reconstruct from inputs and therefore
+cannot audit. `DebtEquityRatio` carries that same caveat and is included only because leverage has
+no other route out of this dataset.
 
 ## Action 2 — Fetch the delivery file. 1.7 hours, and everything else is built.
 
@@ -193,10 +274,14 @@ task; recording here that it gates the other two.
 
 ## Order, and why
 
-1. **Finish the fundamentals campaign and its sweeps.** In flight.
-2. **Action 1 (balance-sheet concepts + taxonomy).** Zero fetching, one schema migration, one
-   re-derivation. Unlocks ROE, P/B, market cap and leverage — the largest capability gain per unit
-   of work available anywhere in this plan, and it needs no owner GO.
+1. **Finish the fundamentals campaign and its sweeps.** ~~In flight.~~ **Done** — 68,839 filings,
+   636,661 facts.
+2. **Action 1 (balance-sheet concepts + taxonomy).** **Done** (`9f26a83`, `b2e3dbb`). Zero fetching,
+   one schema migration, one re-derivation. Market cap now computable for ~95% of filings and book
+   value for ~19% (the annual ones that fill the reserves tag), so P/E on a share count we derive
+   rather than buy, P/B and annual ROE are all reachable. Bank asset quality — gross and net NPA,
+   both as amounts and percentages, plus CET1 and return on assets — arrives at 100% of bank filings
+   as a bonus the plan did not count on.
 3. **Action 2 (delivery).** 1.7 h of fetching behind an owner GO. Cheap, fully built, and the
    signal is genuinely differentiated.
 4. **Action 3 (identity history).** Largest scope, gates the ceiling of everything else, and is the
