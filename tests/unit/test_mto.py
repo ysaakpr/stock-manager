@@ -71,7 +71,9 @@ def test_mto_and_sec_bhavdata_agree_exactly_where_both_exist() -> None:
     """
     mto_rows = mto.parse(_mto("MTO_07082026.DAT"), filename="MTO_07082026.DAT")
     sbd_name = "sec_bhavdata_full_07082026.csv"
-    sbd_rows = delivery.parse((FIXTURES / "nse_delivery" / sbd_name).read_bytes(), filename=sbd_name)
+    sbd_rows = delivery.parse(
+        (FIXTURES / "nse_delivery" / sbd_name).read_bytes(), filename=sbd_name
+    )
 
     by_mto = {(r.symbol, r.series): r.deliv_qty for r in mto_rows}
     by_sbd = {(r.symbol, r.series): r.deliv_qty for r in sbd_rows if r.deliv_qty is not None}
@@ -85,8 +87,9 @@ def test_mto_and_sec_bhavdata_agree_exactly_where_both_exist() -> None:
 
 def test_a_dash_is_absent_not_zero() -> None:
     """A security with no delivery reported is not a security that delivered nothing."""
-    doctored = _mto("MTO_02092016.DAT").replace(b"20MICRONS,EQ,88586,56159,63.39",
-                                                b"20MICRONS,EQ,88586,-,-")
+    doctored = _mto("MTO_02092016.DAT").replace(
+        b"20MICRONS,EQ,88586,56159,63.39", b"20MICRONS,EQ,88586,-,-"
+    )
     rows = mto.parse(doctored, filename="doctored.DAT")
     row = next(r for r in rows if r.symbol == "20MICRONS")
     assert row.deliv_qty is None and row.deliv_pct is None
@@ -95,9 +98,7 @@ def test_a_dash_is_absent_not_zero() -> None:
 def test_a_repeated_security_is_refused() -> None:
     """Two delivery figures for one (symbol, series) cannot both be right."""
     text = _mto("MTO_02092016.DAT").decode()
-    doctored = text.replace(
-        "20,2,3IINFOTECH,EQ", "20,2,20MICRONS,EQ", 1
-    ).encode()
+    doctored = text.replace("20,2,3IINFOTECH,EQ", "20,2,20MICRONS,EQ", 1).encode()
     with pytest.raises(ParseError, match="appears twice"):
         mto.parse(doctored, filename="doctored.DAT")
 
