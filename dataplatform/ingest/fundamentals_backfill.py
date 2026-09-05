@@ -79,7 +79,7 @@ from typing import Final
 
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
-from dataplatform.identity.master import IdentityMaster, IdentityStore
+from dataplatform.identity.master import IdentityMaster, IdentityStore, SymbolWindow
 from dataplatform.ingest.calendar import (
     CalendarCoverageError,
     TradingCalendar,
@@ -424,6 +424,56 @@ def isins_in_price_window(
     return isins
 
 
+#: A filing made shortly after a rename may still carry the retired symbol (Pitti Engineering filed
+#: as PITTILAM 27 days after the change; Bajaj Consumer as BAJAJCORP 17 days after). Four months
+#: covers every such lag observed in the corpus and is still an order of magnitude shorter than the
+#: shortest genuine reuse of a symbol by another company seen there (DTIL: 2,862 days).
+RENAME_GRACE_DAYS: Final = 120
+
+
+def symbols_accepted_on(
+    windows: Iterable[SymbolWindow],
+    on_date: date,
+    *,
+    isin: str,
+    owner_on: Callable[[str], str | None],
+) -> frozenset[str]:
+    """The symbols an ISIN may legitimately state in a filing disseminated on `on_date`.
+
+    What it does: from the ISIN's D2 symbol windows, accept a symbol that was in force on the
+    date, one retired within `RENAME_GRACE_DAYS` before it (a filing prepared under the old name),
+    or one whose window opens *after* it (the results index carries filings from before a company's
+    NSE window opened — Arihant Foundations and Sicagen file for years before their listing dates).
+    Then drop any symbol that `owner_on` says belonged to a *different* ISIN on that date: a symbol
+    another company owns that day is that company's, whatever this ISIN's history says.
+
+    What it never does: accept a symbol this ISIN retired long ago. That is the DTIL case — the
+    document was another company's, and "ever traded under" let it through.
+    """
+    accepted: set[str] = set()
+    for window in windows:
+        if (
+            window.covers(on_date)
+            or window.valid_from > on_date
+            or (
+                window.valid_to is not None
+                and (on_date - window.valid_to).days <= RENAME_GRACE_DAYS
+            )
+        ):
+            accepted.add(window.symbol)
+    for symbol in sorted(accepted):
+        try:
+            owner = owner_on(symbol)
+        except Exception:
+            owner = None
+            ambiguous = True
+        else:
+            ambiguous = False
+        if ambiguous or (owner is not None and owner != isin):
+            accepted.discard(symbol)
+    return frozenset(accepted)
+
+
 def resolve_universe(master: IdentityMaster, price_isins: Iterable[str]) -> set[str]:
     """The price-window ISINs that are known securities in the D2 master (invariant #2).
 
@@ -466,7 +516,7 @@ class FundamentalsBackfillRunner:
         should_stop: Callable[[], bool] = lambda: False,
         data_root: Path | None = None,
         max_filings: int | None = None,
-        symbol_history: Callable[[str], frozenset[str]] | None = None,
+        symbol_history: Callable[[str, date], frozenset[str]] | None = None,
         rebuild_from_l0: bool = False,
         batched_writes: bool = False,
     ) -> None:
@@ -490,10 +540,15 @@ class FundamentalsBackfillRunner:
         #: was fetched, which is precisely the trap the runbook warns about. Asking for it by name
         #: keeps "rebuild what I already have" and "go and look for more" distinguishable.
         self._rebuild_from_l0 = rebuild_from_l0
-        #: ISIN → every symbol it has ever traded under, for the parser's identity cross-check.
-        #: Injected rather than reached for, so a test needs no master and `main` supplies the real
-        #: D2 one. Companies get renamed, and a filing states the symbol it had when filed: without
-        #: the history, every filing by a since-renamed company fails its cross-check.
+        #: (ISIN, filing date) → the symbols that ISIN may file under *on that date*, for the
+        #: parser's identity cross-check. Injected rather than reached for, so a test needs no
+        #: master and `main` supplies the real D2 one through `symbols_accepted_on`. Companies get
+        #: renamed, and a filing states the symbol it had when filed: without the history every
+        #: filing by a since-renamed company fails its cross-check. But the history must be read
+        #: *as of the filing date*: Dhunseri Ventures traded as DTIL until 2010, and a 2024 filing
+        #: that says DTIL is Dhunseri Tea & Industries — a different company — misattributed by
+        #: the index. Accepting "any symbol ever" stored 65 of that company's filings under
+        #: Dhunseri Ventures.
         self._symbol_history = symbol_history
         self._should_stop = should_stop
         self._data_root = data_root
@@ -686,8 +741,8 @@ class FundamentalsBackfillRunner:
             if self._process_filing(unit, report=report):
                 self._filings_attempted += 1
 
-    def _symbols_for(self, isin: str, index_symbol: str) -> frozenset[str]:
-        """Every symbol this ISIN has traded under, plus the one the index reports today.
+    def _symbols_for(self, isin: str, index_symbol: str, filing_date: date) -> frozenset[str]:
+        """The symbols this ISIN may file under on `filing_date`, plus the one the index reports.
 
         The index symbol is always included: it is what the entry asserts, and a security the
         master has no window for (a very recent listing) must still be checkable against it. An
@@ -696,7 +751,7 @@ class FundamentalsBackfillRunner:
         """
         known = {index_symbol}
         if self._symbol_history is not None:
-            known |= self._symbol_history(isin)
+            known |= self._symbol_history(isin, filing_date)
         return frozenset(known)
 
     def _process_filing(self, unit: FilingUnit, *, report: FundamentalsBackfillReport) -> bool:
@@ -881,7 +936,9 @@ class FundamentalsBackfillRunner:
         return parser.parse(
             self._l0.get(ref),
             entry=unit.entry,
-            known_symbols=self._symbols_for(unit.entry.isin, unit.entry.symbol),
+            known_symbols=self._symbols_for(
+                unit.entry.isin, unit.entry.symbol, unit.entry.filing_date
+            ),
             l0_key=ref.key,
             filename=unit.filename,
         )
@@ -1261,8 +1318,11 @@ def _run_live(
             should_stop=lambda: stop_state["stop"],
             data_root=settings.data_root,
             max_filings=max_filings,
-            symbol_history=lambda isin: frozenset(
-                window.symbol for window in master.windows_for(isin)
+            symbol_history=lambda isin, on: symbols_accepted_on(
+                master.windows_for(isin),
+                on,
+                isin=isin,
+                owner_on=lambda symbol: master.try_resolve(symbol, on),
             ),
             rebuild_from_l0=rebuild_from_l0,
             # A rebuild is the only run that batches its writes. It is the run whose whole shape is

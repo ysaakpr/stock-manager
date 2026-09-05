@@ -454,10 +454,13 @@ def _check_symbol(
       neither is a hard failure: guessing what an unknown identifier means is how a filing gets
       stored under the wrong company.
     * **Companies are renamed.** A filing from 2023 states the symbol it had in 2023, while the
-      index states today's. `accepted` is therefore the set of symbols the ISIN has *ever* traded
-      under (from the D2 master, via the caller); the document must match one of them. Comparing
-      against today's symbol alone rejects every renamed company — Sastasundar Ventures files as
-      `SASTASUNDR` under an index entry that now says `HEALTHX`.
+      index states today's. `accepted` is therefore the set of symbols the ISIN could state *on
+      the filing date* (from the D2 master, via the caller — in force, just retired, or not yet
+      opened); the document must match one of them. Comparing against today's symbol alone
+      rejects every renamed company — Sastasundar Ventures files as `SASTASUNDR` under an index
+      entry that now says `HEALTHX`. Comparing against every symbol *ever* held is the opposite
+      error: Dhunseri Ventures was DTIL until 2010, and a 2024 filing saying DTIL is a different
+      company's (Dhunseri Tea & Industries), misattributed by the index.
     """
     identifiers: set[str] = set()
     schemes: set[str] = set()
@@ -511,8 +514,9 @@ def _check_symbol(
     }
     if not matched:
         raise ParseError(
-            f"index says this filing is {entry.symbol!r} (ISIN {entry.isin}, symbols ever used: "
-            f"{', '.join(sorted(accepted))}) but the document says "
+            f"index says this filing is {entry.symbol!r} (ISIN {entry.isin}, symbols accepted on "
+            f"{entry.filing_date.isoformat()}: {', '.join(sorted(accepted))}) but the document "
+            f"says "
             f"{', '.join(sorted(stated))}; the announcements index and the XBRL must name the "
             "same company",
             filename=filename,

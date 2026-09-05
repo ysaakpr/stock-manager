@@ -42,6 +42,8 @@ import pytest
 from dataplatform.alerts import build_alerter
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
+from dataplatform.identity.master import Exchange as IdentityExchange
+from dataplatform.identity.master import SymbolWindow
 from dataplatform.ingest import fundamentals_backfill as fb
 from dataplatform.ingest.fetcher import (
     Fetcher,
@@ -553,7 +555,9 @@ def test_a_renamed_company_ingests_via_the_injected_symbol_history(tmp_path: Pat
         universe={HEALTHX},
         commit=lambda: None,
         data_root=settings.data_root,
-        symbol_history=lambda isin: frozenset({"SASTASUNDR"}) if isin == HEALTHX else frozenset(),
+        symbol_history=lambda isin, _on: (
+            frozenset({"SASTASUNDR"}) if isin == HEALTHX else frozenset()
+        ),
     ).run(plan)
 
     assert with_history.filings_published == 2
@@ -1241,3 +1245,104 @@ def test_an_announcement_the_feed_repeats_is_skipped_by_the_buffer(
     assert report.filings_published == 8, "each filing publishes once, however often it is listed"
     assert report.filings_skipped_published == 8, "and the repeat is counted, not silently dropped"
     assert report.filings_failed == 0
+
+
+# ── the identity cross-check reads the symbol history as of the filing date ───────────────────
+
+
+def _window(symbol: str, valid_from: date, valid_to: date | None, isin: str) -> SymbolWindow:
+    return SymbolWindow(
+        exchange=IdentityExchange.NSE,
+        symbol=symbol,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        isin=isin,
+    )
+
+
+DVL: Final = "INE477B01010"
+DTIL_TODAY: Final = "INE341R01014"  # Dhunseri Tea & Industries, the company that owns DTIL now
+
+_DVL_WINDOWS = (
+    _window("DTIL", date(2008, 1, 11), date(2010, 7, 25), DVL),
+    _window("DPTL", date(2010, 7, 26), date(2014, 11, 11), DVL),
+    _window("DPL", date(2014, 11, 12), date(2019, 1, 1), DVL),
+    _window("DVL", date(2019, 1, 2), None, DVL),
+)
+
+
+def test_a_symbol_the_isin_retired_years_ago_is_not_accepted_inversion() -> None:
+    """The DTIL case: 65 filings by another company landed under Dhunseri Ventures because the
+    check accepted every symbol the ISIN had ever traded under. As of 2024 only DVL is acceptable.
+    """
+    accepted = fb.symbols_accepted_on(
+        _DVL_WINDOWS, date(2024, 2, 9), isin=DVL, owner_on=lambda _s: None
+    )
+    assert accepted == frozenset({"DVL"})
+    assert "DTIL" not in accepted
+
+
+def test_a_symbol_another_isin_owns_on_the_date_is_dropped_even_if_history_allows_it() -> None:
+    """Belt and braces: even inside the grace window, a symbol owned by another ISIN that day is
+    that company's, not this one's."""
+    windows = (
+        _window("OLD", date(2015, 1, 1), date(2024, 1, 20), DVL),
+        _window("NEW", date(2024, 1, 21), None, DVL),
+    )
+    owner = {"OLD": DTIL_TODAY, "NEW": DVL}
+    accepted = fb.symbols_accepted_on(
+        windows, date(2024, 2, 9), isin=DVL, owner_on=lambda s: owner.get(s)
+    )
+    assert accepted == frozenset({"NEW"})
+
+
+def test_a_recently_retired_symbol_is_still_accepted_within_the_grace_window() -> None:
+    """Pitti Engineering filed as PITTILAM 27 days after the rename; that is the same company."""
+    windows = (
+        _window("PITTILAM", date(2010, 1, 1), date(2018, 6, 5), "INE450D01021"),
+        _window("PITTIENG", date(2018, 6, 6), None, "INE450D01021"),
+    )
+    accepted = fb.symbols_accepted_on(
+        windows, date(2018, 7, 2), isin="INE450D01021", owner_on=lambda _s: None
+    )
+    assert accepted == frozenset({"PITTILAM", "PITTIENG"})
+    # ...but not once the grace window has passed.
+    later = fb.symbols_accepted_on(
+        windows, date(2019, 7, 2), isin="INE450D01021", owner_on=lambda _s: None
+    )
+    assert later == frozenset({"PITTIENG"})
+
+
+def test_a_filing_before_the_symbols_window_opened_is_accepted() -> None:
+    """Arihant Foundations files results for years before its NSE window opens (a later listing).
+    The document's symbol is the ISIN's own future symbol, and nobody else owned it that day."""
+    windows = (_window("ARIHANT", date(2022, 12, 1), None, "INE413D01011"),)
+    accepted = fb.symbols_accepted_on(
+        windows, date(2018, 6, 26), isin="INE413D01011", owner_on=lambda _s: None
+    )
+    assert accepted == frozenset({"ARIHANT"})
+
+
+def test_a_renamed_company_is_accepted_under_the_symbol_in_force_on_the_filing_date() -> None:
+    windows = (
+        _window("SASTASUNDR", date(2015, 1, 1), date(2024, 5, 31), HEALTHX),
+        _window("HEALTHX", date(2024, 6, 1), None, HEALTHX),
+    )
+    accepted = fb.symbols_accepted_on(
+        windows, date(2023, 5, 20), isin=HEALTHX, owner_on=lambda s: HEALTHX
+    )
+    # The symbol in force is accepted; so is the ISIN's own *future* symbol (nobody else owned
+    # HEALTHX that day), which is the listing-lag rule — harmless here, essential for Arihant.
+    assert accepted == frozenset({"SASTASUNDR", "HEALTHX"})
+    assert "SASTASUNDR" in accepted
+
+
+def test_an_ambiguous_owner_excludes_the_symbol() -> None:
+    def ambiguous(_symbol: str) -> str | None:
+        raise RuntimeError("two ISINs share this symbol today")
+
+    windows = (_window("X", date(2020, 1, 1), None, DVL),)
+    assert (
+        fb.symbols_accepted_on(windows, date(2024, 1, 1), isin=DVL, owner_on=ambiguous)
+        == frozenset()
+    )
