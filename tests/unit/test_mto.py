@@ -49,7 +49,7 @@ def test_the_series_is_kept_apart_from_the_symbol() -> None:
 
 
 def test_the_session_comes_from_the_file_not_the_filename() -> None:
-    """A file is addressed by date in its URL; the date it is *about* must come from its contents."""
+    """A file is addressed by date in its URL; the date it is *about* comes from its contents."""
     rows = mto.parse(_mto("MTO_07082026.DAT"), filename="anything-at-all.DAT")
     assert {row.trade_date for row in rows} == {OVERLAP}
 
