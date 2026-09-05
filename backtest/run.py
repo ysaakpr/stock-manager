@@ -3135,6 +3135,13 @@ class _L1FundamentalsData:
         """The newest filing date in the store — where the fundamentals stop being current."""
         return self._filing_dates[-1] if self._filing_dates else date.min
 
+    def fresh_isins_on(self, session: date) -> int:
+        """How many ISINs had a filing within the staleness limit on ``session`` — the real
+        currency of the store on that date, which a handful of late filers' newest dates hide."""
+        cutoff = bisect_right(self._filing_dates, session)
+        floor = session - timedelta(days=self._max_staleness_days)
+        return len({f.isin for f in self._facts[:cutoff] if f.filing_date >= floor})
+
     def _compute(self, as_of: date) -> tuple[FundamentalsRecord, ...]:
         cutoff = bisect_right(self._filing_dates, as_of)
         knowable = self._facts[:cutoff]
@@ -3370,6 +3377,7 @@ def run_fundamentals_report(
             universe_first=(ordered[0], sizes[ordered[0]]) if ordered else None,
             universe_last=(ordered[-1], sizes[ordered[-1]]) if ordered else None,
             latest_filing=fundamentals.latest_filing_date,
+            fresh_at_terminal=fundamentals.fresh_isins_on(sessions[-1]),
         )
     finally:
         reader.close()
@@ -3390,6 +3398,7 @@ def render_fundamentals_report(
     universe_first: tuple[date, int] | None = None,
     universe_last: tuple[date, int] | None = None,
     latest_filing: date | None = None,
+    fresh_at_terminal: int | None = None,
 ) -> str:
     """The M10.6 report: fundamentals arms vs momentum vs market, full period and per regime."""
     lines = [
@@ -3435,10 +3444,16 @@ def render_fundamentals_report(
         f"- Market XIRR (identical cashflows): {_pct(market_xirr)}",
     ]
     if latest_filing is not None:
+        fresh = (
+            f" On the terminal session {fresh_at_terminal} ISINs had a filing under 200 days old."
+            if fresh_at_terminal is not None
+            else ""
+        )
         lines.append(
-            f"- Newest filing in the PIT store: {latest_filing.isoformat()}. A name is rankable "
-            "only while its newest filing is under 200 days old, so past that date plus 200 days "
-            "the fundamentals arms hold no names — end the window there or read the tail as cash."
+            f"- Newest filing in the PIT store: {latest_filing.isoformat()}.{fresh} A name is "
+            "rankable only while its newest filing is under 200 days old, so once the store stops "
+            "being current the fundamentals arms hold no names — end the window there or read the "
+            "tail as cash."
         )
     if universe_first is not None and universe_last is not None:
         lines.append(
