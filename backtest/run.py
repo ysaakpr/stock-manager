@@ -63,9 +63,16 @@ from datetime import date, timedelta
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
+from typing import NamedTuple
 
 from analyst.journal.models import Decision, JournalEntry
 from backtest.accounting import BenchmarkComparison, PortfolioBook
+from backtest.policies.fundamentals_value import (
+    FundamentalsRecord,
+    FundamentalsSignal,
+    FundamentalsValueParameters,
+    FundamentalsValuePolicy,
+)
 from backtest.policies.momentum_v2 import (
     MomentumV2Parameters,
     MomentumV2Policy,
@@ -82,7 +89,7 @@ from backtest.policies.sector_rotation import (
     SectorRotationPolicy,
     SectorRotationRecord,
 )
-from backtest.replay import BookSnapshot, ReplayEngine, ReplayResult
+from backtest.replay import BookSnapshot, Policy, ReplayEngine, ReplayResult
 from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import Exchange as IdentityExchange
 from dataplatform.identity.master import ListingStatus
@@ -92,13 +99,16 @@ from dataplatform.ingest.indices import (
     membership_asof,
     read_tri_series,
 )
+from dataplatform.ingest.xbrl import Nature
 from dataplatform.logging import get_logger
+from dataplatform.query.fundamentals_metrics import CONCEPTS_USED, compute_metrics
 from dataplatform.query.pit import Dataset
 from dataplatform.query.service import QueryService
 from dataplatform.query.shapes import CrossSectionRequest
 from dataplatform.query.universe import InMemoryListingCalendar, ListingWindow, pit_universe
 from dataplatform.store.l2 import open_connection, register_raw_view
-from dataplatform.store.paths import l1_partition_path
+from dataplatform.store.paths import Layer, l1_partition_path, layer_root
+from dataplatform.store.pit_fundamentals import PIT_FUNDAMENTALS_DATASET
 from execution.broker import (
     Exchange,
     Holding,
@@ -571,13 +581,18 @@ class _L1MomentumData:
         *,
         signal_closes: SignalCloses | None = None,
         universe_filter: _InvestableUniverse | None = None,
+        lookback_sessions: Sequence[date] | None = None,
     ) -> None:
         self._reader = reader
         self._signal_closes: SignalCloses = (
             signal_closes if signal_closes is not None else reader.closes_on
         )
         self._universe_filter = universe_filter
-        self._sessions = list(sessions)
+        # Look-backs (12m/1m reference closes, volatility points, the follow-up session) walk
+        # the *calendar*, not the replay window: a 12-month return on the first rebalance of a
+        # window needs the year before the window, which is knowable history, not look-ahead.
+        # Defaults to the replay sessions so a caller that passes nothing keeps its old digests.
+        self._sessions = list(lookback_sessions if lookback_sessions is not None else sessions)
         self._rebalance = set(_first_session_of_each_month(sessions))
         self._windows = reader.listing_windows()
         self._signals: dict[date, tuple[MomentumRecord, ...]] = {}
@@ -768,6 +783,7 @@ class _L1MomentumV2Data:
         *,
         signal_closes: SignalCloses | None = None,
         universe_filter: _InvestableUniverse | None = None,
+        lookback_sessions: Sequence[date] | None = None,
     ) -> None:
         self._reader = reader
         self._signal_closes: SignalCloses = (
@@ -775,7 +791,11 @@ class _L1MomentumV2Data:
         )
         self._universe_filter = universe_filter
         self._regime_source = regime_source
-        self._sessions = list(sessions)
+        # Look-backs (12m/1m reference closes, volatility points, the follow-up session) walk
+        # the *calendar*, not the replay window: a 12-month return on the first rebalance of a
+        # window needs the year before the window, which is knowable history, not look-ahead.
+        # Defaults to the replay sessions so a caller that passes nothing keeps its old digests.
+        self._sessions = list(lookback_sessions if lookback_sessions is not None else sessions)
         self._rebalance = set(_first_session_of_each_month(sessions))
         self._windows = reader.listing_windows()
         self._signals: dict[date, tuple[MomentumV2Record, ...]] = {}
@@ -784,11 +804,22 @@ class _L1MomentumV2Data:
             records = self._compute(rebalance_date)
             self._signals[rebalance_date] = records
             self._universe_sizes[rebalance_date] = len(records)
+        # The session after each rebalance is served too: the `redeploy_next_session` toggle
+        # prices yesterday's basket at today's close there. Computed lazily on first read, so runs
+        # without the toggle pay nothing for it and the rebalance-date universe sizes stay the
+        # report's universe figure.
+        self._followups: set[date] = {
+            self._sessions[i + 1]
+            for i, session in enumerate(self._sessions[:-1])
+            if session in self._rebalance
+        }
 
     def is_rebalance(self, session: date) -> bool:
         return session in self._rebalance
 
     def signal(self, as_of: date) -> Dataset[MomentumV2Record]:
+        if as_of not in self._signals and as_of in self._followups:
+            self._signals[as_of] = self._compute(as_of)
         records = self._signals.get(as_of, ())
         return Dataset.declaring(
             f"momentum_v2@{as_of.isoformat()}",
@@ -1207,7 +1238,11 @@ def run_naive_momentum(
             else None
         )
         data = _L1MomentumData(
-            reader, sessions, signal_closes=signal_closes, universe_filter=universe_filter
+            reader,
+            sessions,
+            signal_closes=signal_closes,
+            universe_filter=universe_filter,
+            lookback_sessions=calendar,
         )
         clock = FrozenClock(first_session)
         sim = SimBroker(
@@ -1330,6 +1365,7 @@ def run_momentum_v2(
             regime_source,
             signal_closes=signal_closes,
             universe_filter=universe_filter,
+            lookback_sessions=calendar,
         )
         clock = FrozenClock(first_session)
         sim = SimBroker(
@@ -1982,13 +2018,28 @@ def _v2_configs(top_n: int, sell_band: int) -> list[tuple[str, MomentumV2Paramet
         ("+ Regime filter", MomentumV2Parameters(top_n=top_n, regime_filter=True)),
         ("+ Vol-scaled weights", MomentumV2Parameters(top_n=top_n, vol_scaled=True)),
         (
-            "All on",
+            "+ Redeploy proceeds next session",
+            MomentumV2Parameters(top_n=top_n, redeploy_next_session=True),
+        ),
+        (
+            "All on (four M9.5 toggles)",
             MomentumV2Parameters(
                 top_n=top_n,
                 use_12_1=True,
                 sell_band=sell_band,
                 regime_filter=True,
                 vol_scaled=True,
+            ),
+        ),
+        (
+            "All on + redeploy",
+            MomentumV2Parameters(
+                top_n=top_n,
+                use_12_1=True,
+                sell_band=sell_band,
+                regime_filter=True,
+                vol_scaled=True,
+                redeploy_next_session=True,
             ),
         ),
     ]
@@ -2027,7 +2078,18 @@ def render_v2_report(increments: Sequence[_V2Increment], *, top_n: int, sell_ban
         "With all four off the policy is the naive top-N policy exactly (the parity is pinned in "
         "`tests/unit/test_momentum_v2.py`), so the first row below is the naive baseline.",
         "",
-        "## Data reality (same as M9.2-M9.4)",
+        "## Data reality",
+        "",
+        "Every run reads the **raw** L1 momentum signal (`adjusted=False`, the M9.2 baseline; the "
+        "adjusted-vs-raw delta is the M9.2 report's subject, not this one's). The universe is the "
+        "M9.3 investable/liquid set (as-of index membership ∩ a median-turnover floor; the store "
+        "holds no historical membership snapshots, so the liquidity floor is what narrows it). The "
+        "benchmark is the broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the "
+        "close-all backfill is gated, AGENTIC_CONTEXT B1), and the regime overlay reads the same "
+        "proxy index. Look-backs (the 12-month and 1-month reference closes, the volatility "
+        "points) walk the full L1 calendar, so the first rebalance of the window already has a "
+        "signal — earlier editions of this report held cash for the window's first year for want "
+        "of one.",
         "",
         "Every run reads the **raw** L1 momentum signal: this store holds no corporate actions, so "
         "the L2 back-adjusted signal equals the raw one bar-for-bar (M9.2) and the ten-year L2 is "
@@ -2210,6 +2272,7 @@ class _L1SectorRotationData:
         *,
         signal_closes: SignalCloses | None = None,
         universe_filter: _InvestableUniverse | None = None,
+        lookback_sessions: Sequence[date] | None = None,
     ) -> None:
         self._reader = reader
         self._sector_by_isin = dict(sector_by_isin)
@@ -2217,7 +2280,11 @@ class _L1SectorRotationData:
             signal_closes if signal_closes is not None else reader.closes_on
         )
         self._universe_filter = universe_filter
-        self._sessions = list(sessions)
+        # Look-backs (12m/1m reference closes, volatility points, the follow-up session) walk
+        # the *calendar*, not the replay window: a 12-month return on the first rebalance of a
+        # window needs the year before the window, which is knowable history, not look-ahead.
+        # Defaults to the replay sessions so a caller that passes nothing keeps its old digests.
+        self._sessions = list(lookback_sessions if lookback_sessions is not None else sessions)
         self._rebalance = set(_first_session_of_each_month(sessions))
         self._windows = reader.listing_windows()
         self._signals: dict[date, tuple[SectorRotationRecord, ...]] = {}
@@ -2458,7 +2525,11 @@ def run_sector_rotation_report(
         sector_by_isin = _load_static_sector_map(sector_map_dir)
         universe_filter = _InvestableUniverse(reader, UniverseParameters(), data_root=data_root)
         data = _L1SectorRotationData(
-            reader, sessions, sector_by_isin, universe_filter=universe_filter
+            reader,
+            sessions,
+            sector_by_isin,
+            universe_filter=universe_filter,
+            lookback_sessions=calendar,
         )
 
         regime_source = _RegimeSource(
@@ -2706,7 +2777,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--policy",
         required=True,
-        choices=("naive_momentum", "sector_rotation"),
+        choices=("naive_momentum", "sector_rotation", "fundamentals_value"),
         help="the policy to replay",
     )
     parser.add_argument("--from", dest="start", required=True, help="start date, YYYY-MM-DD")
@@ -2750,6 +2821,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help=f"run sector rotation vs plain momentum (same universe) vs market (M10.3) and write "
         f"the report to {_SECTOR_ROTATION_REPORT_PATH}",
+    )
+    parser.add_argument(
+        "--fundamentals-report",
+        action="store_true",
+        help=f"run the M10.6 fundamentals arms vs momentum vs market per regime and write the "
+        f"report to {_FUNDAMENTALS_REPORT_PATH}",
     )
     parser.set_defaults(adjusted=True)
     parser.add_argument(
@@ -2869,10 +2946,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  sector-rotation report written to {_SECTOR_ROTATION_REPORT_PATH}")
         return 0
 
-    if args.policy == "sector_rotation":
+    if args.fundamentals_report:
+        try:
+            report = run_fundamentals_report(
+                start=start,
+                end=end,
+                top_n=args.top_n if args.top_n is not None else 20,
+                opening_cash=args.opening_cash,
+                data_root=args.data_root,
+            )
+        except BacktestError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        _FUNDAMENTALS_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _FUNDAMENTALS_REPORT_PATH.write_text(report, encoding="utf-8")
+        print(f"  fundamentals report written to {_FUNDAMENTALS_REPORT_PATH}")
+        return 0
+
+    if args.policy in ("sector_rotation", "fundamentals_value"):
         print(
-            "error: --policy sector_rotation requires --sector-rotation-report "
-            "(no bare single-run summary is defined for it)",
+            f"error: --policy {args.policy} requires its report flag "
+            "(--sector-rotation-report / --fundamentals-report); no bare single-run summary is "
+            "defined for it",
             file=sys.stderr,
         )
         return 2
@@ -2897,6 +2992,470 @@ def main(argv: Sequence[str] | None = None) -> int:
         _REPORT_PATH.write_text(report, encoding="utf-8")
         print(f"  report written to {_REPORT_PATH}")
     return 0
+
+
+# ── M10.6: the fundamentals-signal policy on the PIT store ───────────────────────────────────────
+
+_FUNDAMENTALS_REPORT_PATH = Path("ops/gates/M10-fundamentals-signal-report.md")
+#: A name whose newest filing is older than this on the rebalance date is not rankable (M10.6 a
+#: priori: two missed quarterly deadlines).
+_FUNDAMENTALS_MAX_STALENESS_DAYS = 200
+
+
+class _PitFact(NamedTuple):
+    """A `FactRow` read straight off the PIT parquet — the metrics module's input shape."""
+
+    isin: str
+    period_start: date | None
+    period_end: date
+    filing_date: date
+    filing_id: str
+    nature: Nature
+    concept: str
+    segment: str | None
+    value: Decimal
+
+
+class _L1FundamentalsData:
+    """The M10.6 policy's :class:`FundamentalsSignalData` over the PIT store and L1 closes.
+
+    Loads every company-level fact the metrics module reads (`CONCEPTS_USED`) once, sorted by
+    filing date, and for each monthly rebalance hands `compute_metrics` exactly the prefix knowable
+    on that date — so the point-in-time cut is a slice of a sorted list, and `compute_metrics`'s own
+    refusal of a later filing is the backstop. Prices are the session's raw L1 closes (the sizing
+    price, invariant #3); the universe is the survivorship-safe PIT universe narrowed by the same
+    M9.3 investable/liquidity screen the momentum arms use, so the two families rank the same names.
+    """
+
+    def __init__(
+        self,
+        reader: _L1Reader,
+        sessions: Sequence[date],
+        *,
+        data_root: Path | None,
+        universe_filter: _InvestableUniverse | None,
+        max_staleness_days: int = _FUNDAMENTALS_MAX_STALENESS_DAYS,
+        lookback_sessions: Sequence[date] | None = None,
+    ) -> None:
+        self._reader = reader
+        self._universe_filter = universe_filter
+        self._max_staleness_days = max_staleness_days
+        # The calendar the 12-1 momentum look-back walks (the MOMENTUM_VALUE arm's second signal);
+        # the replay sessions alone would leave the first year without one (see _L1MomentumV2Data).
+        self._calendar = list(lookback_sessions if lookback_sessions is not None else sessions)
+        self._sessions = list(sessions)
+        self._rebalance = set(_first_session_of_each_month(sessions))
+        self._windows = reader.listing_windows()
+        self._facts = self._load_facts(data_root)
+        self._filing_dates = [fact.filing_date for fact in self._facts]
+        self._signals: dict[date, tuple[FundamentalsRecord, ...]] = {}
+        self._universe_sizes: dict[date, int] = {}
+        self._excluded_scale = 0
+        for rebalance_date in sorted(self._rebalance):
+            records = self._compute(rebalance_date)
+            self._signals[rebalance_date] = records
+            self._universe_sizes[rebalance_date] = len(records)
+
+    @staticmethod
+    def _load_facts(data_root: Path | None) -> list[_PitFact]:
+        root = layer_root(Layer.L1, data_root=data_root) / PIT_FUNDAMENTALS_DATASET
+        if not root.is_dir():
+            raise BacktestError(
+                f"no PIT fundamentals store at {root}; run the M10.4 backfill first"
+            )
+        con = open_connection()
+        try:
+            rows = con.execute(
+                "SELECT isin, period_start, period_end, filing_date, filing_id, nature, concept, "
+                "value FROM read_parquet($glob) WHERE segment IS NULL AND concept IN $concepts "
+                "ORDER BY filing_date, isin, concept",
+                {"glob": str(root / "*" / "*.parquet"), "concepts": sorted(CONCEPTS_USED)},
+            ).fetchall()
+        finally:
+            con.close()
+        return [
+            _PitFact(
+                isin=str(isin),
+                period_start=period_start,
+                period_end=period_end,
+                filing_date=filing_date,
+                filing_id=str(filing_id),
+                nature=Nature(nature),
+                concept=str(concept),
+                segment=None,
+                value=Decimal(value),
+            )
+            for (
+                isin,
+                period_start,
+                period_end,
+                filing_date,
+                filing_id,
+                nature,
+                concept,
+                value,
+            ) in rows
+        ]
+
+    def is_rebalance(self, session: date) -> bool:
+        return session in self._rebalance
+
+    def signal(self, as_of: date) -> Dataset[FundamentalsRecord]:
+        records = self._signals.get(as_of, ())
+        return Dataset.declaring(
+            f"fundamentals@{as_of.isoformat()}",
+            records,
+            knowable_date=lambda record: record.knowable_date,
+        )
+
+    def rebalance_dates(self) -> tuple[date, ...]:
+        return tuple(sorted(self._rebalance))
+
+    @property
+    def mean_universe_size(self) -> Decimal:
+        sizes = [n for n in self._universe_sizes.values() if n > 0]
+        if not sizes:
+            return _ZERO
+        return (Decimal(sum(sizes)) / Decimal(len(sizes))).quantize(Decimal("0.1"))
+
+    @property
+    def filings_excluded_scale(self) -> int:
+        """How many (ISIN, rebalance) metric computations dropped a mis-scaled filing."""
+        return self._excluded_scale
+
+    def _compute(self, as_of: date) -> tuple[FundamentalsRecord, ...]:
+        cutoff = bisect_right(self._filing_dates, as_of)
+        knowable = self._facts[:cutoff]
+        universe = pit_universe(as_of, InMemoryListingCalendar(self._windows)).isins
+        if self._universe_filter is not None:
+            universe = frozenset(self._universe_filter.constrain(as_of, universe))
+        closes = self._reader.closes_on(as_of)
+        prices = {isin: closes[isin] for isin in universe if isin in closes}
+        metrics = compute_metrics(
+            (fact for fact in knowable if fact.isin in prices), as_of=as_of, prices=prices
+        )
+        momentum = self._momentum_12_1(as_of)
+        records: list[FundamentalsRecord] = []
+        for isin, m in metrics.items():
+            self._excluded_scale += m.filings_excluded_scale
+            if not isinstance(m.earnings_yield, Decimal):
+                continue  # no share count, no price, or no four consecutive quarters: unrankable
+            records.append(
+                FundamentalsRecord(
+                    isin=isin,
+                    earnings_yield=m.earnings_yield,
+                    earnings_growth=(
+                        m.earnings_ttm_yoy if isinstance(m.earnings_ttm_yoy, Decimal) else None
+                    ),
+                    roe=m.roe if isinstance(m.roe, Decimal) else None,
+                    price=prices[isin],
+                    knowable_date=m.knowable_date,
+                    momentum_12_1=momentum.get(isin),
+                )
+            )
+        return tuple(records)
+
+    def _momentum_12_1(self, as_of: date) -> dict[str, Decimal]:
+        """The raw 12-1 return per ISIN as of ``as_of`` — the momentum v2 signal, PIT by reads."""
+        cutoff = bisect_right(self._calendar, as_of - timedelta(days=_LOOKBACK_DAYS)) - 1
+        one_month = bisect_right(self._calendar, as_of - timedelta(days=_MONTH_DAYS)) - 1
+        if cutoff < 0 or one_month < 0:
+            return {}
+        base = self._reader.closes_on(self._calendar[cutoff])
+        recent = self._reader.closes_on(self._calendar[one_month])
+        return {
+            isin: recent[isin] / base[isin] - _ONE
+            for isin in base
+            if isin in recent and base[isin] > _ZERO
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _FundamentalsArm:
+    """One report row: label, full-period metrics, per-regime split, and the a-priori parameters."""
+
+    label: str
+    parameters: str
+    comparison: BenchmarkComparison
+    max_drawdown: Decimal
+    trades: int
+    total_charges: Decimal
+    regime: _RegimeReturns
+    mean_universe: Decimal
+    digest: str
+
+
+def _run_policy_arm(
+    *,
+    label: str,
+    parameters: str,
+    policy: Policy,
+    rebalance_dates: Sequence[date],
+    mean_universe: Decimal,
+    reader: _L1Reader,
+    calendar: Sequence[date],
+    sessions: Sequence[date],
+    opening_cash: Decimal,
+    benchmark_slug: str,
+    data_root: Path | None,
+    risk_on_by_session: Mapping[date, bool],
+) -> _FundamentalsArm:
+    """Replay any policy on the shared stack and derive full-period plus per-regime metrics.
+
+    The same wiring as :func:`_run_sector_arm`, generalised over the policy so the fundamentals arms
+    and the momentum arms in one report differ *only* in the policy object (invariant #4/#5: one
+    broker, one cost model, one accounting book).
+    """
+    first_session, terminal = sessions[0], sessions[-1]
+    clock = FrozenClock(first_session)
+    sim = SimBroker(
+        clock=clock,
+        cost_model=CostModel(load_rate_card(), account_state=_ACCOUNT_STATE),
+        market=_L1Market(reader, calendar),
+        opening_cash=opening_cash,
+    )
+    book = PortfolioBook()
+    book.deposit(first_session, opening_cash)
+    last_close: dict[str, Decimal] = {}
+    nav_path: list[tuple[date, Decimal]] = []
+
+    def sample_nav(session: date) -> None:
+        last_close.update(reader.closes_on(session))
+        prices = {pos.isin: last_close.get(pos.isin, pos.average_price) for pos in book.positions()}
+        nav_path.append((session, book.net_asset_value(prices)))
+
+    broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
+    engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
+    result = engine.run()
+    terminal_prices = _terminal_prices(reader, book, sessions)
+    resolved = _resolve_benchmark(
+        reader, rebalance_dates, first_session, terminal, slug=benchmark_slug, data_root=data_root
+    )
+    comparison = book.compare_to_benchmarks(
+        terminal, terminal_prices, benchmark=resolved.series, theme=resolved.series
+    )
+    trades = sum(1 for entry in result.journal if entry.decision in (Decision.BUY, Decision.SELL))
+    return _FundamentalsArm(
+        label=label,
+        parameters=parameters,
+        comparison=comparison,
+        max_drawdown=_max_drawdown([nav for _, nav in nav_path]),
+        trades=trades,
+        total_charges=broker.total_charges,
+        regime=_split_returns_by_regime(nav_path, risk_on_by_session),
+        mean_universe=mean_universe,
+        digest=result.digest(),
+    )
+
+
+def run_fundamentals_report(
+    *,
+    start: date,
+    end: date,
+    top_n: int = 20,
+    opening_cash: Decimal = _DEFAULT_OPENING_CASH,
+    data_root: Path | None = None,
+    universe: UniverseParameters | None = None,
+    benchmark_slug: str = _BENCHMARK_TRI_SLUG,
+) -> str:
+    """Run the three fundamentals arms beside naive and all-on momentum, per regime (M10.6).
+
+    Every arm replays the same sessions on the same universe through the same broker, book and
+    cost model; the market row is the proxy index's own path split by the same regime buckets.
+    Returns the rendered markdown.
+    """
+    uni = universe if universe is not None else UniverseParameters()
+    reader = _L1Reader(data_root=data_root)
+    try:
+        sessions = reader.trading_sessions(start, end)
+        if not sessions:
+            raise BacktestError(f"no trading sessions in [{start.isoformat()}, {end.isoformat()}]")
+        calendar = reader.all_sessions()
+        sessions = _reserve_fill_headroom(sessions, calendar)
+        first_session = sessions[0]
+        universe_filter = _InvestableUniverse(reader, uni, data_root=data_root)
+        regime_source = _RegimeSource(
+            reader,
+            calendar,
+            first_session=first_session,
+            size=_BENCHMARK_BASKET,
+            ma_days=_REGIME_MA_DAYS,
+        )
+        risk_on_by_session = {s: regime_source.reading(s).risk_on for s in sessions}
+        fundamentals = _L1FundamentalsData(
+            reader,
+            sessions,
+            data_root=data_root,
+            universe_filter=universe_filter,
+            lookback_sessions=calendar,
+        )
+        momentum = _L1MomentumV2Data(
+            reader,
+            sessions,
+            regime_source,
+            universe_filter=universe_filter,
+            lookback_sessions=calendar,
+        )
+        common = {
+            "reader": reader,
+            "calendar": calendar,
+            "sessions": sessions,
+            "opening_cash": opening_cash,
+            "benchmark_slug": benchmark_slug,
+            "data_root": data_root,
+            "risk_on_by_session": risk_on_by_session,
+        }
+        arms: list[_FundamentalsArm] = []
+        for signal in FundamentalsSignal:
+            params = FundamentalsValueParameters(signal=signal, top_n=top_n)
+            arms.append(
+                _run_policy_arm(
+                    label=f"Fundamentals: {signal.value}",
+                    parameters=(
+                        f"signal={signal.value}, top_n={top_n}, sell_band=None, equal weight, "
+                        f"max_staleness_days={params.max_staleness_days}, monthly"
+                    ),
+                    policy=FundamentalsValuePolicy(fundamentals, params),
+                    rebalance_dates=fundamentals.rebalance_dates(),
+                    mean_universe=fundamentals.mean_universe_size,
+                    **common,  # type: ignore[arg-type]
+                )
+            )
+        naive = MomentumV2Parameters(top_n=top_n)
+        all_on = MomentumV2Parameters(
+            top_n=top_n, use_12_1=True, sell_band=30, regime_filter=True, vol_scaled=True
+        )
+        for label, m_params in (
+            ("Momentum: naive (all off)", naive),
+            ("Momentum: v2 all-on", all_on),
+        ):
+            arms.append(
+                _run_policy_arm(
+                    label=label,
+                    parameters=repr(m_params),
+                    policy=MomentumV2Policy(momentum, m_params),
+                    rebalance_dates=momentum.rebalance_dates(),
+                    mean_universe=momentum.mean_universe_size,
+                    **common,  # type: ignore[arg-type]
+                )
+            )
+        market = _market_regime_returns(regime_source, sessions, risk_on_by_session)
+        market_xirr = arms[0].comparison.benchmark_xirr
+        risk_on_sessions = sum(1 for on in risk_on_by_session.values() if on)
+        return render_fundamentals_report(
+            arms,
+            market=market,
+            market_xirr=market_xirr,
+            start=first_session,
+            terminal=sessions[-1],
+            sessions=len(sessions),
+            rebalances=len(fundamentals.rebalance_dates()),
+            risk_on_sessions=risk_on_sessions,
+            excluded_scale=fundamentals.filings_excluded_scale,
+            top_n=top_n,
+        )
+    finally:
+        reader.close()
+
+
+def render_fundamentals_report(
+    arms: Sequence[_FundamentalsArm],
+    *,
+    market: _RegimeReturns,
+    market_xirr: Decimal,
+    start: date,
+    terminal: date,
+    sessions: int,
+    rebalances: int,
+    risk_on_sessions: int,
+    excluded_scale: int,
+    top_n: int,
+) -> str:
+    """The M10.6 report: fundamentals arms vs momentum vs market, full period and per regime."""
+    lines = [
+        "# M10.6 — Fundamentals-signal backtest policy (value / growth) vs momentum vs market",
+        "",
+        "*Generated by `python -m backtest.run --policy fundamentals_value --fundamentals-report`. "
+        "Three a-priori fundamentals signals read point-in-time off the M10.4/M10.5 PIT store, run "
+        "through the identical M9 stack (adjusted-or-raw L1 closes, the M9.3 investable universe, "
+        "SimBroker with the one shared cost model, M4.6 accounting) as the momentum arms they are "
+        "compared with. Costs included everywhere.*",
+        "",
+        "## The a-priori construction (stated once, unchanged across every run below)",
+        "",
+        f"- **Basket:** top-{top_n}, equal weight, whole shares via the M4.7 allocator, sized from "
+        "free cash (98% execution margin), monthly rebalance on the first session; no hysteresis "
+        "band on the fundamentals arms so the signal alone drives turnover.",
+        "- **VALUE:** rank on trailing earnings yield (TTM earnings / market cap, market cap = raw "
+        "close x parser-derived shares outstanding); loss-makers are unrankable.",
+        "- **GROWTH:** rank on TTM-on-TTM earnings growth; needs eight knowable quarters and a "
+        "positive base.",
+        "- **QUALITY_VALUE:** mean of the earnings-yield rank and the ROE rank; ROE needs the "
+        "annual "
+        "equity figure, which only the filings with a filled reserves tag carry, so this arm's "
+        "universe is smaller (stated in the table).",
+        "- **MOMENTUM_VALUE:** mean of the earnings-yield rank and the 12-1 momentum rank (the raw "
+        "signal the momentum v2 arm ranks on), over names with positive trailing earnings.",
+        "- **Staleness:** a name whose newest filing is older than 200 days on the rebalance date "
+        "is "
+        "not rankable.",
+        "- **Point-in-time:** every metric is computed from filings with `filing_date <= session`; "
+        "`compute_metrics` raises on anything later, and the policy admits records through the "
+        "PIT guard. Restatements are invisible until published (invariants #7, #8).",
+        f"- **Scale guard:** {excluded_scale} (ISIN, rebalance) computations dropped a filing "
+        "whose "
+        "paid-up capital sat a clean power of ten off the company's median (M10.5).",
+        "",
+        "## Window",
+        "",
+        f"- {start.isoformat()} -> {terminal.isoformat()} ({sessions} sessions, {rebalances} "
+        "monthly rebalances)",
+        f"- Regime split: {risk_on_sessions} of {sessions} sessions risk-on (proxy index at/above "
+        f"its {_REGIME_MA_DAYS}-session moving average)",
+        f"- Market XIRR (identical cashflows): {_pct(market_xirr)}",
+        "",
+        "## Full period",
+        "",
+        "| Strategy | Mean rankable universe | Portfolio XIRR | Max drawdown | Trades | Total cost "
+        "| Excess vs market |",
+        "| --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for arm in arms:
+        lines.append(
+            f"| {arm.label} | {arm.mean_universe} | {_pct(arm.comparison.portfolio_xirr)} | "
+            f"{_pct(arm.max_drawdown)} | {arm.trades} | {_rupees(arm.total_charges)} | "
+            f"{_pct(arm.comparison.excess_over_benchmark)} |"
+        )
+    lines.append(f"| Market (L1 proxy) | — | {_pct(market_xirr)} | — | — | — | 0.00% |")
+    lines += [
+        "",
+        "## Per-regime return (cumulative, costs embedded)",
+        "",
+        "| Strategy | Risk-on cumulative | Risk-off cumulative |",
+        "| --- | --- | --- |",
+    ]
+    for arm in arms:
+        lines.append(f"| {arm.label} | {_pct(arm.regime.risk_on)} | {_pct(arm.regime.risk_off)} |")
+    lines.append(f"| Market | {_pct(market.risk_on)} | {_pct(market.risk_off)} |")
+    lines += [
+        "",
+        "## Reading it",
+        "",
+        "- The question is diversification, not victory: does a fundamentals arm earn its return "
+        "in "
+        "a different regime bucket from momentum? Read the risk-off column against momentum's.",
+        "- Do not read excess-vs-market as alpha — the market here is the L1 proxy (M9.4), and the "
+        "fundamentals window starts where the PIT store does (2018-05), so it is shorter than "
+        "M9's.",
+        "- The rankable universe differs by arm (a loss-maker has no earnings yield; growth needs "
+        "eight quarters; ROE needs a balance sheet), and it is stated per row for that reason.",
+        "",
+        "## Parameters and digests",
+        "",
+    ]
+    for arm in arms:
+        lines.append(f"- **{arm.label}:** `{arm.parameters}` — digest `{arm.digest}`")
+    return "\n".join(lines) + "\n"
 
 
 if __name__ == "__main__":
