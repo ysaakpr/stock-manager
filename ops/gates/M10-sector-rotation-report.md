@@ -14,7 +14,7 @@
 
 ## Data reality (same M9 stack)
 
-Prices, the investable/liquidity screen and the PIT universe are the M9.2-M9.4 machinery unchanged: raw L1 closes (this store holds no corporate actions, so the adjusted signal equals the raw one bar-for-bar — M9.2), the M9.3 investable set (as-of index membership ∩ a median-turnover floor; no membership snapshots in the store, so the liquidity floor is what narrows it), and the pre-M9.4 broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the close-all backfill is gated, AGENTIC_CONTEXT B1) as the market. The regime overlay reads the same broad-market L1 proxy index.
+Prices, the investable/liquidity screen and the PIT universe are the M9.2-M9.4 machinery unchanged: raw L1 closes for the signal (`adjusted=False`, the M9.2 baseline), the M9.3 investable set (as-of index membership ∩ a median-turnover floor; no historical membership snapshots in the store, so the liquidity floor is what narrows it), look-backs walking the full L1 calendar so the first rebalance already has a signal, and the pre-M9.4 broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the close-all backfill is gated, AGENTIC_CONTEXT B1) as the market. The regime overlay reads the same broad-market L1 proxy index.
 
 ## Window
 
@@ -27,8 +27,8 @@ Prices, the investable/liquidity screen and the PIT universe are the M9.2-M9.4 m
 
 | Strategy | Portfolio XIRR | Max drawdown | Turnover (fills) | Total cost | Excess vs market |
 | --- | --- | --- | --- | --- | --- |
-| Sector rotation | 8.72% | 42.31% | 698 | ₹43,852.07 | 0.17% |
-| Plain momentum (same universe) | 9.36% | 32.75% | 750 | ₹40,234.49 | 0.80% |
+| Sector rotation | 8.72% | 42.31% | 698 | ₹43,818.80 | 0.16% |
+| Plain momentum (same universe) | 9.36% | 32.73% | 746 | ₹40,178.60 | 0.80% |
 | Market (L1 proxy) | 8.56% | — | — | — | 0.00% |
 
 ### Per-regime return (cumulative, costs embedded)
@@ -37,8 +37,8 @@ Each strategy's NAV path split by the regime in force each session — the geome
 
 | Strategy | Risk-on cumulative | Risk-off cumulative |
 | --- | --- | --- |
-| Sector rotation | 130.54% | 0.10% |
-| Plain momentum (same universe) | 108.08% | 17.60% |
+| Sector rotation | 130.34% | 0.12% |
+| Plain momentum (same universe) | 107.98% | 17.66% |
 | Market | 96.16% | 15.87% |
 
 ## Reading it
