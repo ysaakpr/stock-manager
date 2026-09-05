@@ -37,7 +37,7 @@ from dataplatform.ingest.backfill import (
 from dataplatform.ingest.nse import bhavcopy, delivery
 from dataplatform.ingest.nse.delivery import DeliveryRow
 from dataplatform.ingest.source_register import load as load_register
-from dataplatform.store.l0 import L0Store
+from dataplatform.store.l0 import L0Error, L0Store
 from dataplatform.store.l1 import PricesRawWriteReport
 from dataplatform.store.paths import l1_partition_path
 
@@ -172,7 +172,7 @@ def test_a_session_whose_bhavcopy_is_not_in_l0_fails_loudly(
     """
     empty = L0Store(clock=FrozenClock(SESSION), data_root=tmp_path)
     rows = delivery.parse(DELIVERY_FIXTURE.read_bytes(), filename=DELIVERY_FIXTURE.name)
-    with pytest.raises(Exception):
+    with pytest.raises(L0Error):
         SOURCE_SETS[NSE_DELIVERY].write(rows, _ctx(empty, master))
     assert not l1_partition_path("prices_raw", SESSION, data_root=tmp_path).exists()
 
