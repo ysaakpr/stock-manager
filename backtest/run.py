@@ -2042,6 +2042,22 @@ def _v2_configs(top_n: int, sell_band: int) -> list[tuple[str, MomentumV2Paramet
                 redeploy_next_session=True,
             ),
         ),
+        (
+            "+ Vol target 15%",
+            MomentumV2Parameters(top_n=top_n, vol_target_annual=Decimal("0.15")),
+        ),
+        (
+            "All on + redeploy + vol target 15%",
+            MomentumV2Parameters(
+                top_n=top_n,
+                use_12_1=True,
+                sell_band=sell_band,
+                regime_filter=True,
+                vol_scaled=True,
+                redeploy_next_session=True,
+                vol_target_annual=Decimal("0.15"),
+            ),
+        ),
     ]
 
 

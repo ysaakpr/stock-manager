@@ -31,7 +31,15 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
   one more allocator pass, no new signal, no second look at the ranking. It is an execution
   improvement, not a return knob: the basket is the one already decided.
 
-With **all five toggles off** the policy reproduces the naive top-N decision exactly — that is the
+* **Volatility target** (``vol_target_annual``) — a portfolio-level overlay on top of whichever
+  basket the other toggles chose. From each name's trailing monthly-return volatility (already on
+  the record) and one stated average pairwise correlation, the basket's annualised volatility is
+  estimated as ``sqrt((1-rho) * sum(w_i^2 s_i^2) + rho * (sum(w_i s_i))^2)``, and the book is
+  scaled to ``min(1, target / estimate)`` of its capital — the rest parked in cash. A book that is
+  over its exposure sells pro-rata; one under it buys only up to the cap. It is the standard
+  risk-parity-at-the-portfolio-level overlay, chosen once (15 %, rho 0.3) and never fitted.
+
+With **all six toggles off** the policy reproduces the naive top-N decision exactly — that is the
 "naive" baseline the increment report is struck against, and a unit test pins the parity. Every knob
 is a stated parameter, echoed verbatim into the report, so nothing here is silently tuned.
 
@@ -47,10 +55,10 @@ or reach data outside the point-in-time context. Given the same inputs it return
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Protocol, runtime_checkable
 
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
@@ -66,6 +74,7 @@ __all__ = [
     "MomentumV2Policy",
     "MomentumV2Record",
     "RegimeReading",
+    "basket_volatility_annual",
     "inverse_vol_weights",
 ]
 
@@ -165,13 +174,16 @@ class MomentumV2Parameters:
     * ``vol_scaled`` — size names at ``~ 1/vol`` instead of equal weight.
     * ``redeploy_next_session`` — on the session after a rebalance, deploy the cash the rebalance's
       sells released into the basket chosen at that rebalance (same weights, that day's prices).
+    * ``vol_target_annual`` — scale the basket to this annualised volatility (``None`` = fully
+      invested, the pre-overlay behaviour); ``assumed_correlation`` is the one stated average
+      pairwise correlation the estimate uses (0.3, the long-run large-cap figure, chosen once).
     * ``regime_ma_days`` — the moving-average window for the regime filter (200, the standard).
     * ``buy_budget_fraction`` — the share of free cash a rebalance deploys (a mechanical execution
       margin, not a return knob — carried over from the naive policy).
     * ``sleeve`` / ``parking_sleeve`` — journal sleeves for basket trades and for regime parking.
 
-    With ``use_12_1``, ``sell_band``, ``regime_filter``, ``vol_scaled`` and
-    ``redeploy_next_session`` all off/``None`` the policy is the naive top-N policy exactly. Every
+    With ``use_12_1``, ``sell_band``, ``regime_filter``, ``vol_scaled``, ``redeploy_next_session``
+    and ``vol_target_annual`` all off/``None`` the policy is the naive top-N policy exactly. Every
     field is fixed by construction and reported
     verbatim, so the "no tuning" claim stays checkable.
     """
@@ -182,6 +194,8 @@ class MomentumV2Parameters:
     regime_filter: bool = False
     vol_scaled: bool = False
     redeploy_next_session: bool = False
+    vol_target_annual: Decimal | None = None
+    assumed_correlation: Decimal = Decimal("0.3")
     regime_ma_days: int = 200
     buy_budget_fraction: Decimal = Decimal("0.98")
     sleeve: Sleeve = Sleeve.TACTICAL
@@ -197,6 +211,19 @@ class MomentumV2Parameters:
             )
         if self.regime_ma_days <= 0:
             raise ValueError(f"regime_ma_days must be positive, got {self.regime_ma_days}")
+        if self.vol_target_annual is not None:
+            if not isinstance(self.vol_target_annual, Decimal):
+                raise TypeError("vol_target_annual must be a Decimal")
+            if self.vol_target_annual <= _ZERO:
+                raise ValueError(
+                    f"vol_target_annual must be positive, got {self.vol_target_annual}"
+                )
+        if not isinstance(self.assumed_correlation, Decimal):
+            raise TypeError("assumed_correlation must be a Decimal")
+        if not (_ZERO <= self.assumed_correlation <= _ONE):
+            raise ValueError(
+                f"assumed_correlation must be in [0, 1], got {self.assumed_correlation}"
+            )
         if not isinstance(self.buy_budget_fraction, Decimal):
             raise TypeError("buy_budget_fraction must be a Decimal")
         if not (_ZERO < self.buy_budget_fraction <= _ONE):
@@ -316,14 +343,25 @@ class MomentumV2Policy:
 
         held = {holding.isin: holding for holding in ctx.broker.holdings()}
         sells = self._sells(held, keep)
-        buys, drifts_note = self._buys(ctx, held, target, prices, use_12_1=use_12_1)
+        exposure = _ONE
+        trims: list[tuple[OrderRequest, str]] = []
+        if self._params.vol_target_annual is not None and target:
+            exposure = self._exposure(target)
+            trims = self._trims(held, target, prices, exposure, ctx, ranked)
+        buys, drifts_note = self._buys(
+            ctx, held, target, prices, use_12_1=use_12_1, exposure=exposure, ranked=ranked
+        )
+        if trims:
+            buys = []  # a book being cut back to its exposure does not also add to it
         if self._params.redeploy_next_session and target and sells:
             # Only a rebalance that sold something leaves proceeds to deploy tomorrow.
             self._pending = self._weights_for(target)
 
-        orders = tuple(order for order, _ in (*sells, *buys))
-        entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
-        evidence = self._evidence(ctx.session, chosen, drifts_note, use_12_1=use_12_1)
+        orders = tuple(order for order, _ in (*sells, *trims, *buys))
+        entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *trims, *buys))
+        evidence = self._evidence(
+            ctx.session, chosen, drifts_note, use_12_1=use_12_1, exposure=exposure
+        )
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
 
     def _park(self, ctx: SessionContext, reading: RegimeReading) -> SessionDecision:
@@ -392,6 +430,8 @@ class MomentumV2Policy:
         prices: Mapping[str, Decimal],
         *,
         use_12_1: bool,
+        exposure: Decimal = _ONE,
+        ranked: Sequence[MomentumV2Record] = (),
     ) -> tuple[list[tuple[OrderRequest, str]], Decimal]:
         """Whole-share buys toward the model weights, sized from free cash; return them and drift.
 
@@ -399,10 +439,22 @@ class MomentumV2Policy:
         Budget is the cash *currently free* times ``buy_budget_fraction`` — never sale proceeds
         staged this session, which have not settled — and the allocation accounts for existing
         holdings in the surviving names so it tops up toward the model rather than double-buying.
+        Under a volatility target (``exposure < 1``) the budget is further capped so the basket's
+        value does not exceed ``exposure`` of the book's capital.
         """
         if not target:
             return [], _ZERO
         budget = ctx.broker.margins().available * self._params.buy_budget_fraction
+        if exposure < _ONE:
+            capital = self._capital(ctx, held, prices, ranked)
+            in_basket = sum(
+                (Decimal(held[isin].quantity) * prices[isin] for isin in target if isin in held),
+                _ZERO,
+            )
+            headroom = capital * exposure - in_basket
+            budget = min(budget, max(_ZERO, headroom))
+            if budget <= _ZERO:
+                return [], _ZERO
         weights = self._weights_for(target)
         existing_value = {
             isin: Decimal(held[isin].quantity) * prices[isin] for isin in target if isin in held
@@ -423,6 +475,77 @@ class MomentumV2Policy:
             for order in allocation.orders
         ]
         return buys, allocation.tracking_drift
+
+    def _exposure(self, target: Mapping[str, MomentumV2Record]) -> Decimal:
+        """``min(1, vol_target / basket_vol)`` for the basket at its model weights."""
+        assert self._params.vol_target_annual is not None
+        weights = self._weights_for(target)
+        estimate = basket_volatility_annual(
+            {isin: target[isin].volatility for isin in target},
+            weights,
+            correlation=self._params.assumed_correlation,
+        )
+        if estimate <= _ZERO:
+            return _ONE
+        return min(_ONE, (self._params.vol_target_annual / estimate).quantize(_WEIGHT_QUANTUM))
+
+    def _capital(
+        self,
+        ctx: SessionContext,
+        held: Mapping[str, Holding],
+        prices: Mapping[str, Decimal],
+        ranked: Sequence[MomentumV2Record],
+    ) -> Decimal:
+        """Free cash plus every holding marked at its candidate price (average cost if unpriced)."""
+        price_of = {record.isin: record.price for record in ranked}
+        price_of.update(prices)
+        marked = sum(
+            (
+                Decimal(holding.quantity) * price_of.get(isin, holding.average_price)
+                for isin, holding in held.items()
+            ),
+            _ZERO,
+        )
+        return ctx.broker.margins().available + marked
+
+    def _trims(
+        self,
+        held: Mapping[str, Holding],
+        target: Mapping[str, MomentumV2Record],
+        prices: Mapping[str, Decimal],
+        exposure: Decimal,
+        ctx: SessionContext,
+        ranked: Sequence[MomentumV2Record],
+    ) -> list[tuple[OrderRequest, str]]:
+        """Pro-rata partial sells that bring the held basket down to ``exposure`` of capital."""
+        in_basket = {
+            isin: Decimal(held[isin].quantity) * prices[isin] for isin in target if isin in held
+        }
+        current = sum(in_basket.values(), _ZERO)
+        if current <= _ZERO:
+            return []
+        allowed = self._capital(ctx, held, prices, ranked) * exposure
+        if current <= allowed:
+            return []
+        cut = (current - allowed) / current
+        trims: list[tuple[OrderRequest, str]] = []
+        for isin in sorted(in_basket):
+            # Round the trim *up*: a risk overlay that leaves the book a share over its cap has not
+            # enforced the cap. Whole shares, never more than is held.
+            quantity = min(
+                held[isin].quantity,
+                int((Decimal(held[isin].quantity) * cut).to_integral_value(ROUND_CEILING)),
+            )
+            if quantity <= 0:
+                continue
+            trims.append(
+                (
+                    OrderRequest(isin=isin, side=Side.SELL, quantity=quantity, tag="MOMENTUM"),
+                    f"vol target {self._params.vol_target_annual}: basket exposure cut to "
+                    f"{exposure} of capital; trimming {quantity} shares",
+                )
+            )
+        return trims
 
     def _weights_for(self, target: Mapping[str, MomentumV2Record]) -> dict[str, Decimal]:
         """The basket's model weights: inverse-vol when ``vol_scaled``, else equal."""
@@ -544,6 +667,7 @@ class MomentumV2Policy:
         tracking_drift: Decimal,
         *,
         use_12_1: bool,
+        exposure: Decimal = _ONE,
     ) -> EvidenceBundle:
         """The ranked momentum table the decision was made on, as one content-addressed bundle."""
         label = "momentum_12_1" if use_12_1 else "momentum_0_12"
@@ -574,6 +698,21 @@ class MomentumV2Policy:
                 text=f"{weighting} top-{self._params.top_n} rebalance",
             )
         )
+        if self._params.vol_target_annual is not None:
+            items.append(
+                EvidenceItem(
+                    kind=EvidenceKind.POSITION,
+                    source="book",
+                    label="vol_target_exposure",
+                    as_of=session,
+                    value=exposure,
+                    detail={
+                        "vol_target_annual": str(self._params.vol_target_annual),
+                        "assumed_correlation": str(self._params.assumed_correlation),
+                    },
+                    text="share of capital the basket may occupy under the volatility target",
+                )
+            )
         return EvidenceBundle(trading_date=session, actor=Actor.T0, items=tuple(items))
 
 
@@ -594,6 +733,37 @@ def _equal_weights(isins: list[str]) -> dict[str, Decimal]:
     weights = dict.fromkeys(isins[:-1], each)
     weights[isins[-1]] = _ONE - each * (n - 1)
     return weights
+
+
+_MONTHS_PER_YEAR_SQRT = Decimal(12).sqrt()
+
+
+def basket_volatility_annual(
+    volatilities: Mapping[str, Decimal],
+    weights: Mapping[str, Decimal],
+    *,
+    correlation: Decimal,
+) -> Decimal:
+    """Annualised basket volatility from monthly name volatilities and one assumed correlation.
+
+    ``sqrt((1 - rho) * sum(w_i^2 s_i^2) + rho * (sum(w_i s_i))^2)``, then times ``sqrt(12)``. With
+    ``rho = 1`` this is the weighted average volatility (names move together); with ``rho = 0`` the
+    pure diversification case. Every input is a Decimal; the result is exact to Decimal precision.
+    """
+    if not volatilities or not weights:
+        raise ValueError("cannot estimate the volatility of an empty basket")
+    weighted_sq = _ZERO
+    weighted = _ZERO
+    for isin, weight in weights.items():
+        vol = volatilities[isin]
+        if not isinstance(vol, Decimal) or not isinstance(weight, Decimal):
+            raise TypeError("volatilities and weights must be Decimal")
+        if vol <= _ZERO:
+            raise ValueError(f"volatility for {isin} must be positive, got {vol}")
+        weighted_sq += weight * weight * vol * vol
+        weighted += weight * vol
+    variance = (_ONE - correlation) * weighted_sq + correlation * weighted * weighted
+    return variance.sqrt() * _MONTHS_PER_YEAR_SQRT
 
 
 def inverse_vol_weights(volatilities: Mapping[str, Decimal]) -> dict[str, Decimal]:

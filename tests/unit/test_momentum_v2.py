@@ -27,6 +27,7 @@ from backtest.policies.momentum_v2 import (
     MomentumV2Policy,
     MomentumV2Record,
     RegimeReading,
+    basket_volatility_annual,
     inverse_vol_weights,
 )
 from backtest.replay import SessionContext, SessionDecision
@@ -174,6 +175,18 @@ def _bought(decision: SessionDecision) -> set[str]:
 
 def _sold(decision: SessionDecision) -> set[str]:
     return {order.isin for order in decision.orders if order.side is Side.SELL}
+
+
+def _decide(
+    params: MomentumV2Parameters,
+    *,
+    data: _Data | None = None,
+    broker: _FakeBroker | None = None,
+) -> SessionDecision:
+    """One rebalance decision on SESSION over the default records and a cash-only book."""
+    return MomentumV2Policy(data or _Data(_RECORDS), params).decide(
+        _ctx(SESSION, broker or _FakeBroker(cash=Decimal("100000")))
+    )
 
 
 # ── all toggles off reproduces the naive top-N policy ────────────────────────────────────────────
@@ -564,3 +577,98 @@ def test_redeploy_is_deterministic() -> None:
     b = _two_days(params)[1]
     assert a.orders == b.orders
     assert a.evidence.ref() == b.evidence.ref()
+
+
+# ── the sixth toggle: a portfolio-level volatility target ────────────────────────────────────────
+
+_SQRT12 = Decimal(12).sqrt()
+
+
+def test_basket_volatility_estimator_identities() -> None:
+    vols = {A: Decimal("0.10"), B: Decimal("0.20")}
+    weights = {A: Decimal("0.5"), B: Decimal("0.5")}
+    # rho = 1: names move together, so the basket vol is the weighted average vol.
+    together = basket_volatility_annual(vols, weights, correlation=Decimal("1"))
+    assert together == Decimal("0.15") * _SQRT12
+    # rho = 0: pure diversification, sqrt(sum w^2 s^2).
+    independent = basket_volatility_annual(vols, weights, correlation=Decimal("0"))
+    expected = (Decimal("0.25") * Decimal("0.01") + Decimal("0.25") * Decimal("0.04")).sqrt()
+    assert independent == expected * _SQRT12
+    # More correlation, more risk — monotone in rho.
+    middle = basket_volatility_annual(vols, weights, correlation=Decimal("0.3"))
+    assert independent < middle < together
+    with pytest.raises(ValueError):
+        basket_volatility_annual({A: Decimal("0")}, {A: Decimal("1")}, correlation=Decimal("0.3"))
+
+
+def test_vol_target_caps_the_buy_budget_when_the_basket_is_too_volatile_inversion() -> None:
+    """Default records carry 20% *monthly* vol (~69% annualised): a 15% target must cut exposure."""
+    untargeted = _decide(MomentumV2Parameters(top_n=2), broker=_FakeBroker(cash=Decimal("100000")))
+    targeted = _decide(
+        MomentumV2Parameters(top_n=2, vol_target_annual=Decimal("0.15")),
+        broker=_FakeBroker(cash=Decimal("100000")),
+    )
+    bought_untargeted = sum(o.quantity for o in untargeted.orders if o.side is Side.BUY)
+    bought_targeted = sum(o.quantity for o in targeted.orders if o.side is Side.BUY)
+    assert bought_targeted < bought_untargeted
+    # Exposure = 0.15 / (0.20 * sqrt(1-0.3 * 0.5 + 0.3) ... ) — check it against the estimator.
+    weights = {A: Decimal("0.5"), B: Decimal("0.5")}
+    vols = {A: Decimal("0.20"), B: Decimal("0.20")}
+    estimate = basket_volatility_annual(vols, weights, correlation=Decimal("0.3"))
+    exposure = (Decimal("0.15") / estimate).quantize(Decimal("0.00000001"))
+    assert exposure < Decimal("0.5")
+    evidence = {item.label: item for item in targeted.evidence.items}
+    assert evidence["vol_target_exposure"].value == exposure
+    # Roughly exposure x capital worth of shares at ₹100 (whole-share rounding leaves a little).
+    assert bought_targeted <= int(Decimal("100000") * exposure / 100)
+
+
+def test_vol_target_is_a_no_op_for_a_basket_already_below_the_target() -> None:
+    calm = tuple(
+        MomentumV2Record(
+            isin=r.isin,
+            momentum_0_12=r.momentum_0_12,
+            momentum_12_1=r.momentum_12_1,
+            price=r.price,
+            volatility=Decimal("0.01"),  # 1% monthly: ~3.5% annualised, well under 15%
+            knowable_date=r.knowable_date,
+        )
+        for r in _RECORDS
+    )
+    plain = _decide(MomentumV2Parameters(top_n=2), data=_Data(calm))
+    targeted = _decide(
+        MomentumV2Parameters(top_n=2, vol_target_annual=Decimal("0.15")), data=_Data(calm)
+    )
+    assert plain.orders == targeted.orders
+    assert {i.label: i for i in targeted.evidence.items}["vol_target_exposure"].value == Decimal(
+        "1"
+    )
+
+
+def test_an_over_exposed_book_is_trimmed_pro_rata_and_does_not_buy_inversion() -> None:
+    """Holding the whole top-2 with no cash and a 15% target: the basket is cut, not added to."""
+    held = (_holding(A, 500), _holding(B, 500))
+    decision = _decide(
+        MomentumV2Parameters(top_n=2, vol_target_annual=Decimal("0.15")),
+        broker=_FakeBroker(cash=Decimal("0"), holdings=held),
+    )
+    sells = [o for o in decision.orders if o.side is Side.SELL]
+    assert {o.isin for o in sells} == {A, B}
+    assert not [o for o in decision.orders if o.side is Side.BUY]
+    # Pro-rata: the same fraction of each name, and the book ends at or under the exposure.
+    assert sells[0].quantity == sells[1].quantity
+    exposure = {i.label: i for i in decision.evidence.items}["vol_target_exposure"].value
+    assert exposure is not None
+    remaining = sum(500 - o.quantity for o in sells) * Decimal("100")
+    assert remaining <= Decimal("100000") * exposure  # at or under the cap, never over
+    assert remaining > Decimal("100000") * exposure - Decimal("200")  # whole shares only
+    assert all(e.decision is Decision.SELL for e in decision.entries)
+
+
+def test_vol_target_parameters_are_validated() -> None:
+    with pytest.raises(ValueError):
+        MomentumV2Parameters(vol_target_annual=Decimal("0"))
+    with pytest.raises(TypeError):
+        MomentumV2Parameters(vol_target_annual=0.15)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        MomentumV2Parameters(assumed_correlation=Decimal("1.5"))
