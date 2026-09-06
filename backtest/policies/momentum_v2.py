@@ -59,7 +59,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
-from typing import Protocol, runtime_checkable
+from typing import Final, Protocol, runtime_checkable
 
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
@@ -69,6 +69,7 @@ from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, Holding, OrderRequest, Side
 
 __all__ = [
+    "PAPER_RATIFIED_2026_09_06",
     "MomentumV2Data",
     "MomentumV2Parameters",
     "MomentumV2Policy",
@@ -230,6 +231,22 @@ class MomentumV2Parameters:
             raise ValueError(
                 f"buy_budget_fraction must be in (0, 1], got {self.buy_budget_fraction}"
             )
+
+
+#: The momentum-sleeve configuration the owner ratified for **paper mode** on 2026-09-06 — the
+#: four M9.5 toggles plus next-session redeployment of sale proceeds — on the evidence in
+#: `ops/gates/M9-momentum-v2-report.md` (ten-year increment table) and
+#: `ops/gates/M10-fundamentals-signal-report.md` (per-regime comparison). Recorded in
+#: `HUMAN_DECISIONS.md` (D13). A fixture/paper ratification is never valid for real money (B9); the
+#: volatility target stays off pending a read of its cost (BACKLOG).
+PAPER_RATIFIED_2026_09_06: Final = MomentumV2Parameters(
+    top_n=20,
+    use_12_1=True,
+    sell_band=30,
+    regime_filter=True,
+    vol_scaled=True,
+    redeploy_next_session=True,
+)
 
 
 @runtime_checkable

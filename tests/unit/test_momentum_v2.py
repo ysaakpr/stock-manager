@@ -23,6 +23,7 @@ import pytest
 
 from analyst.journal.models import Decision, Sleeve
 from backtest.policies.momentum_v2 import (
+    PAPER_RATIFIED_2026_09_06,
     MomentumV2Parameters,
     MomentumV2Policy,
     MomentumV2Record,
@@ -672,3 +673,21 @@ def test_vol_target_parameters_are_validated() -> None:
         MomentumV2Parameters(vol_target_annual=0.15)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         MomentumV2Parameters(assumed_correlation=Decimal("1.5"))
+
+
+# ── the ratified paper configuration ─────────────────────────────────────────────────────────────
+
+
+def test_the_paper_ratified_configuration_is_all_on_plus_redeploy_and_nothing_else() -> None:
+    """Pins the owner's 2026-09-06 ratification (HUMAN_DECISIONS D13) so it cannot drift."""
+    p = PAPER_RATIFIED_2026_09_06
+    assert (p.top_n, p.use_12_1, p.sell_band, p.regime_filter, p.vol_scaled) == (
+        20,
+        True,
+        30,
+        True,
+        True,
+    )
+    assert p.redeploy_next_session is True
+    assert p.vol_target_annual is None  # pending a read of its cost — not ratified
+    assert p.regime_ma_days == 200 and p.buy_budget_fraction == Decimal("0.98")

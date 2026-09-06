@@ -500,6 +500,19 @@ should land before M7.1 is built.
 
 ---
 
+### D13 — Momentum sleeve policy for paper mode → **ANSWERED (owner, 2026-09-06): "all on + redeploy".**
+
+Evidence: `ops/gates/M9-momentum-v2-report.md` (ten configurations over 2016-09 → 2026-08; redeploying
+sale proceeds the next session adds ~2 pp of XIRR wherever it is on, at a few points more drawdown
+and more turnover) and `ops/gates/M10-fundamentals-signal-report.md` (per-regime comparison, where
+momentum v2 all-on is the best risk-adjusted arm and GROWTH the only fundamentals signal that earns
+in risk-off). The ratified parameters are `backtest.policies.momentum_v2.PAPER_RATIFIED_2026_09_06`
+(12-1 ranking, top-20 with a top-30 sell band, 200-session regime filter, inverse-vol weights,
+redeploy next session; volatility target off pending a read of its cost). Paper only — a real-money
+version is a separate ratification (AGENTIC_CONTEXT §3.2, B9). The paper-trading job that runs this
+configuration daily is not yet built: paper mode today is the M5.13 harness with injected triggers
+and the scheduler registers no analyst session job; building it is the next decision.
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
