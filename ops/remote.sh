@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# The server is the testing engine; the laptop is the coding engine (CLAUDE.md "Development model").
+# The laptop codes and tests; the server fetches and rebuilds, uninterrupted (CLAUDE.md "Development model").
 #
 #   ops/remote.sh status              # server: commit, dirty files, running drivers, disk
 #   ops/remote.sh sync                # push-verified fast-forward of the server checkout to origin
-#   ops/remote.sh check               # sync, then `make check` on the server (format, lint, types, tests)
-#   ops/remote.sh test [pytest args]  # sync, then `uv run pytest <args>` on the server
+#   ops/remote.sh check               # quiet server only: sync, then `make check` there
+#   ops/remote.sh test [pytest args]  # quiet server only: sync, then `uv run pytest <args>` there
 #   ops/remote.sh run <command...>    # sync, then any command in the server's repo directory
 #   ops/remote.sh shell               # interactive shell in the server's repo directory
 #   ops/remote.sh logs [family] [pattern]  # tail the newest ~/campaign log — of one family
@@ -88,8 +88,21 @@ cmd_sync() {
           echo \"server at \$(git log --oneline -1)\$( [ \"\$drivers\" -gt 0 ] && echo \" (\$drivers driver(s) running)\" )\""
 }
 
-cmd_check() { cmd_sync; remote "make check"; }
-cmd_test()  { cmd_sync; remote "uv run pytest $*"; }
+refuse_if_driver_running() {
+  # The server fetches and rebuilds uninterrupted; the gate runs on the laptop. A test run beside a
+  # campaign driver competes with it for the CPU and the Postgres, so check/test are for a quiet
+  # server only. Exit 4 so a caller can tell this from a sync or a test failure.
+  local n
+  n=$(remote 'pgrep -fc "^[^ ]*python[^ ]* -m dataplatform\.ingest" || true')
+  if [ "${n:-0}" -gt 0 ]; then
+    echo "remote: $n driver(s) running on the server — it fetches and rebuilds uninterrupted." >&2
+    echo "        Run the gate here (make check); use check/test only on a quiet server." >&2
+    exit 4
+  fi
+}
+
+cmd_check() { refuse_if_driver_running; cmd_sync; remote "make check"; }
+cmd_test()  { refuse_if_driver_running; cmd_sync; remote "uv run pytest $*"; }
 cmd_run()   { cmd_sync; remote "$*"; }
 cmd_shell() { "${SSH[@]}" -t "cd '$REMOTE_REPO' && export PATH=\"\$HOME/.local/bin:\$PATH\" && exec \$SHELL -l"; }
 cmd_logs()  {

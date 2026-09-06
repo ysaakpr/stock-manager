@@ -77,20 +77,26 @@ L0 immutable · ISIN-only joins · no adjusted prices in L1 · one shared cost m
 paper and real · rails unbypassable · no future data in a decision · restated fundamentals quarantined from
 backtests · every decision journaled including no-ops · red data means no trading.
 
-## Development model: the laptop codes, the server tests
+## Development model: the laptop codes and tests, the server fetches and rebuilds
 
-Two machines, one repo, synchronised only through git. **The laptop is the coding engine**: edit,
-run the fast offline checks (`uv run pytest tests/unit`, `ruff`, `mypy`) and commit here. **The
-server is the testing engine**: the full gate (`make check` with the docker Postgres), backtests
-over the whole lake, and every fetch campaign run there, on the *pushed* HEAD. The server never
-receives uncommitted work; `ops/remote.sh sync` refuses to sync a commit origin does not have.
+Two machines, one repo, synchronised only through git. **The laptop is the coding and testing
+engine**: edit, run the whole gate here (`make check`, against the laptop's docker Postgres — the
+integration suites use their own scratch database) and commit. **The server is the fetch engine**:
+every fetch campaign, every rebuild from L0 and any backtest over the whole lake run there, on the
+*pushed* HEAD, and they run **uninterrupted** — nothing else competes with a running driver for the
+CPU, the Postgres or the request budget. Push to the server only what is ready: code that has passed
+the gate here. `ops/remote.sh check|test` are for a quiet server between campaigns and refuse while
+a driver runs. The server never receives uncommitted work; `ops/remote.sh sync` refuses to sync a
+commit origin does not have. Agents cannot push (`git push` is on the deny list): commit, hand the
+owner the push, and start the server work once origin has the commit.
 
 ```bash
 ops/remote.sh status                 # what the server is at and whether a driver is running
-ops/remote.sh check                  # push-verified sync, then `make check` on the server
-ops/remote.sh test tests/unit -q     # sync, then a pytest selection on the server
+ops/remote.sh run ops/run_bse_campaign.sh          # sync, then start a campaign (nohup, dated log)
 ops/remote.sh run uv run python -m backtest.run --policy naive_momentum --v2-report ...
-ops/remote.sh logs                   # progress of the newest campaign log
+ops/remote.sh logs bse               # progress of the newest log of a family (integrated, bse, …)
+ops/remote.sh check                  # quiet server only: sync, then `make check` there
+ops/remote.sh test tests/unit -q     # quiet server only: sync, then a pytest selection there
 ```
 
 Connection details (host, user, key **path**, repo path) live only in the untracked, gitignored
