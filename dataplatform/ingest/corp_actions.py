@@ -126,6 +126,12 @@ class CorporateAction(BaseModel):
         description="ISO 6166 identifier resolved via D2 — the only legitimate join key",
     )
     ex_date: date = Field(description="the ex-date the action takes effect from (Asia/Kolkata)")
+    filed_against_isin: str | None = Field(
+        default=None,
+        pattern=ISIN_PATTERN,
+        description="the ISIN the exchange named, when it differs from `isin` because that ISIN "
+        "was retired by a reissue and `isin` is the survivor it resolved to through D2 lineage",
+    )
     action_type: ActionType = Field(description="normalized type from the M2.1 taxonomy")
     terms: Terms = Field(
         description="structured terms; `UnquantifiedTerms` when the text stated none"
@@ -172,6 +178,7 @@ class CorporateAction(BaseModel):
         source: str,
         ex_date: date,
         knowable_date: date,
+        filed_against_isin: str | None = None,
         record_date: date | None = None,
         announcement_date: date | None = None,
         source_ref: str | None = None,
@@ -186,6 +193,7 @@ class CorporateAction(BaseModel):
         """
         return cls(
             isin=isin,
+            filed_against_isin=filed_against_isin,
             ex_date=ex_date,
             action_type=parsed.action_type,
             terms=parsed.terms,
@@ -329,12 +337,14 @@ def write_corporate_actions(
     for action in actions:
         row = conn.execute(
             "INSERT INTO corporate_actions "
-            "(isin, ex_date, action_type, ratio_terms, dividend_amount_inr, record_date, "
-            " announcement_date, knowable_date, source, source_ref, raw_text, l0_key, recorded_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "(isin, filed_against_isin, ex_date, action_type, ratio_terms, "
+            " dividend_amount_inr, record_date, announcement_date, knowable_date, source, "
+            " source_ref, raw_text, l0_key, recorded_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (isin, ex_date, action_type, source) DO NOTHING RETURNING id",
             (
                 action.isin,
+                action.filed_against_isin,
                 action.ex_date,
                 action.action_type.value,
                 json.dumps(action.ratio_terms_json()),

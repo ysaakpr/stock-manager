@@ -527,6 +527,7 @@ class _FakeConn:
     def _insert_ca(self, p: tuple[Any, ...]) -> _FakeCursor:
         (
             isin,
+            filed_against_isin,
             ex_date,
             action_type,
             ratio_terms_json,
@@ -545,6 +546,7 @@ class _FakeConn:
             return _FakeCursor([])
         self._ca[key] = {
             "isin": isin,
+            "filed_against_isin": filed_against_isin,
             "ex_date": ex_date,
             "action_type": action_type,
             "ratio_terms": json.loads(ratio_terms_json),

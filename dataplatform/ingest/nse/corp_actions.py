@@ -33,6 +33,7 @@ from typing import Any, Final
 
 from dataplatform.clock import Clock
 from dataplatform.corpactions.parse_terms import ManualEntryQueue, parse_purpose
+from dataplatform.identity.lineage import LineageResolver
 from dataplatform.identity.master import (
     AmbiguousSymbolError,
     Exchange,
@@ -80,6 +81,7 @@ def parse(
     master: IdentityMaster,
     clock: Clock,
     l0_key: str | None = None,
+    lineage: LineageResolver | None = None,
 ) -> CaParseResult:
     """Parse one `corporates-corporateActions` response into normalized corporate actions.
 
@@ -107,6 +109,7 @@ def parse(
             master=master,
             clock=clock,
             l0_key=l0_key,
+            lineage=lineage,
             queue=queue,
             actions=actions,
             unresolved=unresolved,
@@ -151,6 +154,7 @@ def _one(
     master: IdentityMaster,
     clock: Clock,
     l0_key: str | None,
+    lineage: LineageResolver | None,
     queue: ManualEntryQueue,
     actions: list[CorporateAction],
     unresolved: list[UnresolvedIdentity],
@@ -174,13 +178,14 @@ def _one(
     if outcome.action is None:
         return
 
-    isin = _resolve_isin(
+    resolution = _resolve_isin(
         native_isin,
         symbol=symbol,
         ex_date=ex_date,
         master=master,
+        lineage=lineage,
     )
-    if isin is None:
+    if resolution is None:
         unresolved.append(
             UnresolvedIdentity(
                 source=SOURCE_ID,
@@ -202,10 +207,12 @@ def _one(
         )
         return
 
+    isin, filed_against = resolution
     actions.append(
         CorporateAction.from_parsed(
             outcome.action,
             isin=isin,
+            filed_against_isin=filed_against,
             source=SOURCE_ID,
             ex_date=ex_date,
             knowable_date=knowable,
@@ -223,24 +230,38 @@ def _resolve_isin(
     symbol: str,
     ex_date: date,
     master: IdentityMaster,
-) -> str | None:
-    """Validate the feed's native ISIN through D2; return it, or `None` if it does not hold up.
+    lineage: LineageResolver | None = None,
+) -> tuple[str, str | None] | None:
+    """Validate the feed's native ISIN through D2; return `(isin, filed_against)` or `None`.
 
     Native ISIN is the join key here, but "native" is not "trusted": it must be a security the
     master knows, and where the symbol resolves on the ex-date it must resolve to the *same* ISIN.
     A symbol that resolves elsewhere is an identity conflict — the master queues it — and this row
     is held back rather than filed against a contested identity.
+
+    An ISIN the master does not know gets one second chance, through `lineage`. A face-value split
+    retires the ISIN it is filed against, so the row naming a retired ISIN is the *normal* shape
+    of a split, not a broken row: 290 of 445 reissues carry their action this way. When the
+    lineage resolves it to a survivor the master does know, the action is filed against the
+    survivor and `filed_against` carries the retired ISIN for provenance. Without a lineage — or
+    when the survivor is itself unknown — the row is still held back.
     """
+    isin, filed_against = native_isin, None
     if native_isin not in master.securities:
-        return None
+        if lineage is None:
+            return None
+        survivor = lineage.survivor_of(native_isin)
+        if survivor == native_isin or survivor not in master.securities:
+            return None
+        isin, filed_against = survivor, native_isin
     try:
         resolved = master.try_resolve(symbol, ex_date, exchange=Exchange.NSE)
     except AmbiguousSymbolError:
         # The master has already queued the ambiguity; we simply do not file this row against it.
         return None
-    if resolved is not None and resolved != native_isin:
+    if resolved is not None and resolved != isin:
         return None
-    return native_isin
+    return isin, filed_against
 
 
 # ── payload plumbing ───────────────────────────────────────────────────────────────────────────
