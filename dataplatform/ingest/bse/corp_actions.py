@@ -68,6 +68,12 @@ _EMPTY_MARKERS: Final = frozenset({"", "-", "--", "n/a", "na", "null", "none"})
 #: The date shapes BSE has been seen to use: an ISO date or datetime (`2024-10-28T00:00:00`), a
 #: spelled-out `28 Oct 2024`, a hyphenated `28-Oct-2024`, and a numeric `28/10/2024`.
 _ISO_RE: Final[re.Pattern[str]] = re.compile(r"^\s*(\d{4})-(\d{2})-(\d{2})")
+#: `20010426` — the shape the `exdate` key actually carries, separators and all omitted. Its
+#: sibling `Ex_date` spells the same day `26 Apr 2001`, which is why this went unnoticed: the
+#: agreement check between the two could never run while one of them failed to parse at all.
+#: Unambiguous against the others — they require a dash, a slash or a month name — and against a
+#: DDMMYYYY reading, which would put this record in the year 0426.
+_COMPACT_RE: Final[re.Pattern[str]] = re.compile(r"^\s*(\d{4})(\d{2})(\d{2})\s*$")
 _SPELLED_RE: Final[re.Pattern[str]] = re.compile(r"^\s*(\d{1,2})[ -]([A-Za-z]{3})[ -](\d{4})")
 _NUMERIC_RE: Final[re.Pattern[str]] = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})")
 
@@ -331,8 +337,8 @@ def _date(record: Mapping[str, Any], key: str, *, index: int, filename: str) -> 
 
 
 def _parse_date(text: str) -> date | None:
-    """One BSE date string → `date`, across its ISO / spelled / numeric shapes, else `None`."""
-    iso = _ISO_RE.match(text)
+    """One BSE date string → `date`, across its ISO / compact / spelled / numeric shapes."""
+    iso = _ISO_RE.match(text) or _COMPACT_RE.match(text)
     if iso is not None:
         try:
             return date(int(iso.group(1)), int(iso.group(2)), int(iso.group(3)))

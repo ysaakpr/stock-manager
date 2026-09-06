@@ -590,3 +590,45 @@ class _FakeConn:
             )
         rows.sort(key=lambda r: (r[0], r[1], r[2], r[7]))
         return _FakeCursor(rows)
+
+
+# ── the per-scrip endpoint, whose dates are shaped differently ──────────────────────────────────
+
+#: A real per-scrip response, captured 2026-09-06. The frozen 2026-08-08 fixture above came from
+#: the *empty*-scripcode form of the same endpoint, and the two spell `exdate` differently:
+#: `2024-10-28T00:00:00` there, `20010426` here. Only the first had ever been captured, so the
+#: first live per-scrip fetch refused all five scrips it was probed with.
+BSE_PER_SCRIP_FIXTURE: Final = FIXTURES / "bse" / "2026-09-06" / "defaultdata_500325.json"
+
+
+def test_the_per_scrip_endpoint_spells_exdate_without_separators() -> None:
+    """The premise: this fixture must keep the compact shape, or the test below proves nothing."""
+    records = json.loads(BSE_PER_SCRIP_FIXTURE.read_text())
+    assert len(records) == 26
+    assert records[0]["exdate"] == "20010426"
+    assert records[0]["Ex_date"] == "26 Apr 2001"
+
+
+def test_a_per_scrip_response_parses_and_both_ex_date_spellings_agree() -> None:
+    """`Ex_date` and `exdate` must describe one day — the check this module was built around.
+
+    It had never actually run: `exdate` failed to parse in this dialect, so the parser raised
+    before it could compare the two. With the compact shape understood, 26 of RELIANCE's actions
+    back to 2001 land, and the agreement check finally does its job on every one of them.
+    """
+    reliance = UNIVERSE[0][0]
+    result = bse_ca.parse(
+        BSE_PER_SCRIP_FIXTURE.read_bytes(),
+        filename="defaultdata_500325.json",
+        scrip_index=build_scrip_index(_master()),
+        clock=CLOCK,
+    )
+    assert result.unresolved == ()
+    # Every record lands. `queued` overlaps rather than partitions: a dividend whose rupee amount
+    # the purpose string never states is still a real action, and also a question for a human.
+    assert len(result.actions) == 26
+    assert all(action.isin == reliance for action in result.actions)
+    assert min(action.ex_date for action in result.actions) == date(2001, 4, 26)
+
+    bonuses = [a for a in result.actions if a.action_type is ActionType.BONUS]
+    assert len(bonuses) == 3, "RELIANCE's three 1:1 bonus issues"
