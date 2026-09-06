@@ -14,6 +14,7 @@ from dataplatform.scheduler.registry import (
     CONSTITUENTS_SNAPSHOT,
     EOD_PIPELINE,
     JOB_NAME,
+    L0_VERIFY,
     Job,
     JobContext,
     JobFn,
@@ -22,6 +23,8 @@ from dataplatform.scheduler.registry import (
     constituents_snapshot,
     default_registry,
     eod_pipeline,
+    identity_refresh,
+    l0_verify,
 )
 from dataplatform.scheduler.runner import (
     ALIVE,
@@ -43,6 +46,7 @@ __all__ = [
     "DEFAULT_SCHEDULER_ID",
     "EOD_PIPELINE",
     "JOB_NAME",
+    "L0_VERIFY",
     "TICK_JOB_ID",
     "Heartbeat",
     "Job",
@@ -57,5 +61,7 @@ __all__ = [
     "constituents_snapshot",
     "default_registry",
     "eod_pipeline",
+    "identity_refresh",
+    "l0_verify",
     "read_heartbeat",
 ]

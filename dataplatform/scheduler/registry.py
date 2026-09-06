@@ -241,10 +241,81 @@ CONSTITUENTS_SNAPSHOT = Job(
 )
 
 
+def l0_verify(context: JobContext) -> None:
+    """The weekly L0 integrity sweep (2026-09-06 audit, finding N6).
+
+    What it does: re-hashes stored payloads against their sidecars and raises an ERROR
+    `quality_flag` plus a CRITICAL alert for every one that does not match. Rolling over a trailing
+    window most weeks, and over the whole lake in the first week of each month — L0 is write-once,
+    so what changes is what was written since, but bit-rot in the old tail is exactly what nothing
+    else would ever read.
+    What it assumes: the injected clock and settings are the run's (B10) and the database is
+    migrated.
+    What it never does: repair. `L0Store` refuses to modify a stored payload for any reason,
+    including corruption (AGENTIC_CONTEXT §3.10); a defect is a human's call, and re-fetching over
+    it would destroy the evidence. The import is deferred for the same reason the others are.
+    """
+    from dataplatform.store.db import connection
+    from dataplatform.store.l0_verify import run_l0_verify
+
+    with connection(context.settings) as conn:
+        result = run_l0_verify(conn=conn, settings=context.settings, clock=context.clock)
+        conn.commit()
+    if not result.ok:
+        raise RuntimeError(result.summary())
+
+
+#: The weekly L0 sweep. 03:00 IST on Sunday — no market, no campaign window, and the quietest hour
+#: for a pass that reads gigabytes off disk. The timezone comes from `Settings`, never the host's.
+L0_VERIFY = Job(
+    name="l0_verify",
+    cron="0 3 * * sun",
+    fn=l0_verify,
+    timeout=timedelta(hours=2),
+    description="Weekly L0 checksum sweep; full pass in the first week of each month",
+)
+
+
+def identity_refresh(context: JobContext) -> None:
+    """The weekly identity-master refresh (2026-09-06 audit, finding N4).
+
+    What it does: fetches `EQUITY_L.csv` and `symbolchange.csv` into L0 under the host lease, then
+    re-derives `security_master`, `symbol_history` and `exchange_listing` by reading both payloads
+    back out of the lake. `ops/runbooks/identity-master.md` has said "weekly" since M1.7; nothing
+    did it weekly, and until this job the two files had never been fetched at all — the production
+    master was built from `tests/fixtures/`, outside L0's checksums and outside the backup.
+    What it assumes: the injected clock and settings are the run's (B10). A re-run on the same day
+    re-fetches nothing, because L0 already holds that date's payloads.
+    What it never does: overwrite a snapshot. Every week's copy is kept, which is the only way the
+    accumulated series can ever reconstruct the symbol history one snapshot cannot show
+    (`pit_notes` on both register rows).
+    """
+    from dataplatform.ingest.identity_refresh import refresh_identity
+    from dataplatform.store.db import connection
+
+    with connection(context.settings) as conn:
+        report = refresh_identity(conn=conn, clock=context.clock, settings=context.settings)
+        conn.commit()
+    if not report.ingest.is_clean:
+        raise RuntimeError(report.summary())
+
+
+#: The weekly identity refresh. 07:00 IST on Saturday — after the week's last session, before the
+#: constituents snapshot at 20:00, and well clear of any weekday campaign window. The timezone
+#: comes from `Settings`, never the host's.
+IDENTITY_REFRESH = Job(
+    name="identity_refresh",
+    cron="0 7 * * sat",
+    fn=identity_refresh,
+    timeout=timedelta(minutes=15),
+    description="Weekly NSE identity-master refresh: fetch to L0, re-derive from L0 (M1.7)",
+)
+
+
 def default_registry() -> JobRegistry:
     """The registry a production scheduler process runs.
 
     A fresh object each call rather than a module-level singleton: two processes in one test, or a
     test that registers an extra job, must not be able to mutate what the next one sees.
     """
-    return JobRegistry([EOD_PIPELINE, CONSTITUENTS_SNAPSHOT])
+    return JobRegistry([EOD_PIPELINE, CONSTITUENTS_SNAPSHOT, L0_VERIFY, IDENTITY_REFRESH])
