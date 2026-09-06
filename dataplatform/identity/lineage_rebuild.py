@@ -26,7 +26,7 @@ not raised on: one unseen name must not cost the other four hundred edges.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import get_settings
@@ -150,7 +150,7 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         l2_partitions_rebuilt=len(reports),
         l2_partitions_stitched=stitched,
     )
-    _LOG.info("lineage_rebuild.done", **report.__dict__)
+    _LOG.info("lineage_rebuild.done", **asdict(report))
     return report
 
 
@@ -164,7 +164,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     report = rebuild(derive_only=args.derive_only)
-    for field, value in report.__dict__.items():
+    for field, value in asdict(report).items():
         print(f"{field:<36} {value}")
     return 0
 
