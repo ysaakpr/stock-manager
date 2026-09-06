@@ -329,6 +329,24 @@
       "reason": "Correct M7.3's XBRL path (built on fabricated fixtures) so real NSE filings ingest, before the M10.4 fundamentals backfill can land real facts?",
       "state": "PENDING"
     },
+    "M10.5": {
+      "attempts": 0,
+      "commit": "1cda852",
+      "finished": "2026-09-06T03:55:26+00:00",
+      "note": "Built on the 2026-09-06 overnight branch; verify green; merged ff",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_fundamentals_metrics.py -q\n(exit 0)\n.........................                                                [100%]\n\n$ uv run ruff format --check dataplatform/query/fundamentals_metrics.py tests/unit/test_fundamentals_metrics.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/query/fundamentals_metrics.py tests/unit/test_fundamentals_metrics.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/query/fundamentals_metrics.py tests/unit/test_fundamentals_metrics.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M10.6": {
+      "attempts": 0,
+      "commit": "1cda852",
+      "finished": "2026-09-06T03:55:30+00:00",
+      "note": "Built on the 2026-09-06 overnight branch; report over the window the PIT store is current for",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_fundamentals_value.py -q\n(exit 0)\n.............                                                            [100%]\n\n$ uv run ruff format --check backtest/policies/fundamentals_value.py tests/unit/test_fundamentals_value.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/fundamentals_value.py tests/unit/test_fundamentals_value.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/fundamentals_value.py tests/unit/test_fundamentals_value.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
     "M11.1": {
       "attempts": 0,
       "commit": "af5da21",
@@ -1078,7 +1096,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-09-04T07:12:26+00:00",
+  "updated_at": "2026-09-06T03:55:30+00:00",
   "version": 1,
   "wave": 1
 }
