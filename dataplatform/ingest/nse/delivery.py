@@ -38,12 +38,14 @@ from __future__ import annotations
 import csv
 import io
 import re
+import zipfile
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Final
+from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -322,17 +324,93 @@ def resolve(
     return DeliveryResolution(resolved=tuple(resolved), unresolved=tuple(unresolved))
 
 
+#: A zip local-file header. The delivery source ships a bare CSV; exactly one payload in the lake
+#: (2022-08-08) arrived as an xlsx workbook instead, and this is how it is recognised.
+_ZIP_MAGIC: Final = b"PK\x03\x04"
+
+#: Where a single-sheet workbook keeps its grid and its string table.
+_XLSX_SHEET: Final = "xl/worksheets/sheet1.xml"
+_XLSX_SHARED_STRINGS: Final = "xl/sharedStrings.xml"
+
+
 # ── internals ────────────────────────────────────────────────────────────────────────────────
 
 
 def _text_of(payload: bytes, *, filename: str) -> str:
-    """Decode a payload to CSV text. This source ships a bare CSV, not an archive."""
+    """Decode a payload to CSV text — a bare CSV as this source ships, or the one xlsx it once did.
+
+    On 2022-08-08 the archive answered the `.csv` URL with an XLSX workbook, `Content-Type:
+    text/csv` and all. The bytes are not corrupt: the sheet holds the session's 2,255 delivery rows
+    under the same header, with the leading spaces the CSV era writes. Only the container is wrong,
+    and a plain utf-8 decode dies on the zip header at byte 22.
+
+    So a `PK\x03\x04` prefix is converted rather than refused. It is a *one-off*, not an era —
+    every one of the 1,712 payloads in the lake was checked and this is the only archive among them
+    — so this stays a narrow rescue in the decoder and nothing above it learns about xlsx.
+    """
+    if payload.startswith(_ZIP_MAGIC):
+        return _csv_from_xlsx(payload, filename=filename)
     try:
         return payload.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ParseError(
             f"payload is not UTF-8 text at byte {exc.start} ({exc.reason})", filename=filename
         ) from exc
+
+
+def _csv_from_xlsx(payload: bytes, *, filename: str) -> str:
+    """The first worksheet of an xlsx workbook, as the CSV text the rest of the parser reads.
+
+    Reads the sheet XML and the shared-string table straight out of the zip with the standard
+    library — the one workbook this exists for is a flat grid of strings and numbers, and adding a
+    spreadsheet dependency to the whole platform to read it once would be the wrong trade.
+
+    Column position is taken from each cell's `r` reference rather than from its order, so a row
+    that omits an empty trailing cell still lines its values up under the right headers. A value is
+    emitted exactly as the sheet stores it: no rounding, no reformatting, nothing that would make
+    the recovered session differ from a CSV one.
+    """
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+        sheet_xml = archive.read(_XLSX_SHEET)
+        shared = (
+            archive.read(_XLSX_SHARED_STRINGS)
+            if _XLSX_SHARED_STRINGS in archive.namelist()
+            else b"<sst/>"
+        )
+    except (zipfile.BadZipFile, KeyError) as exc:
+        raise ParseError(
+            f"payload begins with a zip header but is not a readable xlsx workbook ({exc})",
+            filename=filename,
+        ) from exc
+
+    namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    strings = [
+        "".join(node.itertext()) for node in ElementTree.fromstring(shared).iter(f"{namespace}si")
+    ]
+
+    lines: list[str] = []
+    for row in ElementTree.fromstring(sheet_xml).iter(f"{namespace}row"):
+        cells: dict[int, str] = {}
+        for cell in row.iter(f"{namespace}c"):
+            reference = cell.get("r", "")
+            column = 0
+            for character in reference:
+                if not character.isalpha():
+                    break
+                column = column * 26 + (ord(character.upper()) - ord("A") + 1)
+            value = cell.find(f"{namespace}v")
+            if value is None or value.text is None:
+                continue
+            if cell.get("t") == "s":
+                index = int(value.text)
+                cells[column] = strings[index] if 0 <= index < len(strings) else ""
+            else:
+                cells[column] = value.text
+        if not cells:
+            continue
+        lines.append(",".join(cells.get(i, "") for i in range(1, max(cells) + 1)))
+    return "\n".join(lines)
 
 
 def _check_header(header: list[str] | None, *, filename: str) -> None:

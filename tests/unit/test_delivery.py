@@ -136,6 +136,12 @@ def real_file(request: pytest.FixtureRequest) -> Fixture:
 #: as though its contents described the day its name claims.
 MISDATED: Final = "sec_bhavdata_full_30092019_MISDATED.csv"
 
+#: The other counter-example: the one payload in 1,712 that arrived as an XLSX workbook under a
+#: `.csv` name with `Content-Type: text/csv`. Held apart for the same reason as the misdated one —
+#: it is not a well-formed example of the source, it is the evidence that the decoder rescues a
+#: container the source is not supposed to ship.
+XLSX_ERA: Final = "sec_bhavdata_full_08082022_XLSX.csv"
+
 
 def test_the_frozen_set_is_two_real_files_one_with_dashes() -> None:
     """2+ real fixtures including one with `-` values — the premise the rest of the file rests on.
@@ -144,9 +150,11 @@ def test_the_frozen_set_is_two_real_files_one_with_dashes() -> None:
     a failing test (AGENTIC_CONTEXT §7). The misdated counter-example is excluded by name and
     asserted separately, so neither set can be quietly emptied.
     """
-    on_disk = sorted(p.name for p in FIXTURES.glob("*.csv") if p.name != MISDATED)
+    counter_examples = {MISDATED, XLSX_ERA}
+    on_disk = sorted(p.name for p in FIXTURES.glob("*.csv") if p.name not in counter_examples)
     assert on_disk == sorted(fixture.filename for fixture in FIXTURE_FILES)
     assert (FIXTURES / MISDATED).is_file(), "the misdated payload is a guard's only evidence"
+    assert (FIXTURES / XLSX_ERA).is_file(), "the xlsx payload is the decoder rescue's only evidence"
     assert len(FIXTURE_FILES) >= 2
 
     for fixture in FIXTURE_FILES:
@@ -632,3 +640,34 @@ def test_a_file_whose_body_is_another_session_is_refused() -> None:
 
     with pytest.raises(ParseError, match="was fetched as"):
         parse(payload, filename=name, trade_date=date(2019, 9, 30))
+
+
+# ── the one payload that came back as a spreadsheet ──────────────────────────────────────────────
+
+
+def test_an_xlsx_workbook_served_as_csv_is_decoded_not_refused() -> None:
+    """2022-08-08: the archive answered the `.csv` URL with a workbook, Content-Type and all.
+
+    Nothing about the data was wrong — same header with its leading spaces, same DATE1, the whole
+    session present. Only the container was, and a plain utf-8 decode died on the zip header at
+    byte 22, costing the lake a day of delivery figures.
+    """
+    payload = (FIXTURES / XLSX_ERA).read_bytes()
+    assert payload.startswith(b"PK\x03\x04"), "the fixture must still be the workbook, not a CSV"
+
+    rows = parse(payload, filename=XLSX_ERA, trade_date=date(2022, 8, 8))
+
+    assert len(rows) == 2255
+    assert rows[0].symbol == "20MICRONS"
+    assert rows[0].trade_date == date(2022, 8, 8)
+    assert rows[0].deliv_qty == 571768
+    assert rows[0].deliv_pct == Decimal("33.89")
+    # The `-` rows this source writes for a series with no delivery figure survive the conversion
+    # rather than becoming empty strings that parse as zero.
+    assert any(row.deliv_qty is None for row in rows)
+
+
+def test_a_zip_that_is_not_a_workbook_is_refused_clearly() -> None:
+    """The rescue is for one malformed container, not a licence to accept any archive."""
+    with pytest.raises(ParseError, match="not a readable xlsx workbook"):
+        parse(b"PK\x03\x04 and then nothing useful", filename="junk.csv", trade_date=None)
