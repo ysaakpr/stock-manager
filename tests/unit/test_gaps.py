@@ -539,7 +539,10 @@ def test_the_price_state_source_names_match_the_ingest_source_sets() -> None:
     from dataplatform.ingest.backfill import BSE_BHAVCOPY, NSE_BHAVCOPY, SOURCE_SETS
     from dataplatform.quality.gaps import _PRICE_STATE_SOURCES
 
-    assert set(_PRICE_STATE_SOURCES) == {NSE_BHAVCOPY, BSE_BHAVCOPY}
+    # Equality, not containment: every set name the backfill writes needs an expectation, and a
+    # new one added to SOURCE_SETS without a row here is the M1.14 defect again. `nse_delivery`
+    # was exactly that — wired in M1.6, missing here until the 2026-09-06 audit.
+    assert set(_PRICE_STATE_SOURCES) == set(SOURCE_SETS)
     assert {NSE_BHAVCOPY, BSE_BHAVCOPY} <= set(SOURCE_SETS)
     for state_source in _PRICE_STATE_SOURCES:
         assert expectations_from_register()[state_source].l1_dataset == PRICES_RAW_DATASET
@@ -731,3 +734,118 @@ def test_a_report_over_a_single_day_is_a_single_pair() -> None:
     assert [entry.reason for entry in report.entries] == [GapReason.WEEKEND]
     assert report.fully_explained
     assert report.to_date - report.from_date == timedelta(0)
+
+
+# ── unit rows: the sub-keyed sources the 2026-09-06 audit found (finding N1) ────────────────────
+
+
+def test_a_failed_unit_row_is_reported_and_names_its_unit() -> None:
+    """A filing that failed is a miss the report must enumerate, with the id to go and look at.
+
+    Before migration 0008 a filing's id lived in the `source` string, so it was neither a source
+    the register knew nor a pair anything looked up — 2,392 stuck filings sat unreported behind a
+    `/status/gaps` that answered 500.
+    """
+    row = record(
+        SyncState.FAILED,
+        source="nse_xbrl_filing/IF87652",
+        logical_date=SESSION,
+        retryable=False,
+        last_error="parse failed: no results column covers 2025-01-01 to 2025-03-31",
+    )
+    report = build_report(
+        SESSION,
+        SESSION,
+        sources=["nse_xbrl_filing"],
+        records={},
+        unit_records=[row],
+        expectations={
+            "nse_xbrl_filing": SourceExpectation(source="nse_xbrl_filing", per_session=False)
+        },
+    )
+
+    (entry,) = report.unexplained
+    assert entry.reason is GapReason.FAILED
+    assert entry.source == "nse_xbrl_filing"
+    assert entry.unit == "IF87652"
+    assert entry.qualified_source == "nse_xbrl_filing/IF87652"
+    assert entry.last_error is not None and "no results column" in entry.last_error
+
+
+def test_a_published_unit_row_is_complete_and_not_enumerated() -> None:
+    """The 69,000 filings that worked must not turn the report into a listing of everything."""
+    published = [
+        record(SyncState.PUBLISHED, source=f"nse_xbrl_filing/IF{n}", logical_date=SESSION)
+        for n in range(50)
+    ]
+    report = build_report(
+        SESSION,
+        SESSION,
+        sources=["nse_xbrl_filing"],
+        records={},
+        unit_records=published,
+        expectations={
+            "nse_xbrl_filing": SourceExpectation(source="nse_xbrl_filing", per_session=False)
+        },
+    )
+
+    assert report.entries == ()
+    assert report.complete == 50
+    # 51: the fifty filings, plus the source's own (source, date) pair from the calendar walk,
+    # which a non-per-session source owes nothing for and which therefore adds no entry.
+    assert report.pairs_examined == 51
+    assert report.fully_explained
+
+
+def test_a_unit_row_for_a_source_outside_the_scan_is_not_examined() -> None:
+    """`sources` still bounds the scan — a unit does not smuggle its source into the report."""
+    row = record(SyncState.FAILED, source="nse_xbrl_filing/IF1", logical_date=SESSION)
+    report = build_report(
+        SESSION,
+        SESSION,
+        sources=[SOURCE],
+        records={},
+        unit_records=[row],
+        expectations={SOURCE: SourceExpectation(source=SOURCE, per_session=False)},
+    )
+
+    assert report.entries == ()
+    assert report.pairs_examined == 1  # the source's own pair, not the filing's
+
+
+def test_a_unit_row_dated_outside_the_calendar_is_reported_rather_than_dropped() -> None:
+    """A filing's date comes from its index entry and can leave C.2's coverage. Say so.
+
+    The per-session walk cannot reach this — it is driven by the calendar — so this is the one
+    path where a real row exists for a day nothing can classify. Silently skipping it would be
+    the drop this module exists to prevent.
+    """
+    outside = date(2011, 3, 4)
+    row = record(SyncState.PUBLISHED, source="nse_xbrl_filing/IFOLD", logical_date=outside)
+    report = build_report(
+        SESSION,
+        SESSION,
+        sources=["nse_xbrl_filing"],
+        records={},
+        unit_records=[row],
+        expectations={
+            "nse_xbrl_filing": SourceExpectation(source="nse_xbrl_filing", per_session=False)
+        },
+    )
+
+    (entry,) = report.unexplained
+    assert entry.reason is GapReason.OUTSIDE_CALENDAR
+    assert entry.unit == "IFOLD"
+    assert not GapReason.OUTSIDE_CALENDAR.explained
+
+
+def test_a_range_fetched_source_owes_nothing_per_session() -> None:
+    """`nse_corp_actions` publishes daily but is *fetched* in yearly ranges. Not 2,461 misses.
+
+    The register's `cadence` describes the feed; `per_session` asks what ingest owes each day. For
+    this source they differ, and taking the register's word for it filed one NEVER_ATTEMPTED per
+    trading day — burying the real misses under an artefact of the reader's own assumption.
+    """
+    expectations = expectations_from_register()
+    assert expectations["nse_corp_actions"].per_session is False
+    assert expectations["nse_bhavcopy"].per_session is True

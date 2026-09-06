@@ -1152,7 +1152,7 @@ def l0_close_filename(snapshot_date: date) -> str:
 
 
 def constituents_state_source(index_slug: str) -> str:
-    """The sync-state source id for one index list — `nifty_index_constituents:<slug>`.
+    """The sync-state source id for one index list — `nifty_index_constituents/<slug>`.
 
     The constituents *register* entry is one row (`nifty_index_constituents`, the endpoint the URL
     and crawl policy come from), but every index list publishes "as of today" through it, so a whole
@@ -1163,8 +1163,13 @@ def constituents_state_source(index_slug: str) -> str:
     `/status/sync` shows per-slug progress and one slug's failure is a `FAILED` row of its own
     (what M10.2's per-slug journaling builds on). The *fetch* still uses the bare register id: the
     URL, headers and 403 watch are all per-endpoint, not per-slug.
+
+    The separator is `/`, which `SyncKey` (D5) splits back out into the `sync_state.unit` column
+    added by migration 0008 — so `source` stays the register id the status API and the gap report
+    read as an enumeration, and the slug lives where a sub-key belongs. It was `:` until then;
+    `SyncKey.parse` still accepts that form so a string persisted before the migration resolves.
     """
-    return f"{CONSTITUENTS_SOURCE_ID}:{index_slug}"
+    return f"{CONSTITUENTS_SOURCE_ID}/{index_slug}"
 
 
 def ingest_constituents(

@@ -65,7 +65,7 @@ from dataplatform.ingest.indices import (
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.scheduler import CONSTITUENTS_SNAPSHOT, default_registry
-from dataplatform.status.sync_state import SyncState, SyncStateStore
+from dataplatform.status.sync_state import SyncKey, SyncState, SyncStateStore
 from dataplatform.store.db import Connection, connect, connection, with_dbname
 from dataplatform.store.l0 import L0Store
 from dataplatform.store.migrate import migrate
@@ -219,9 +219,16 @@ def _store(conn: Connection, clock: FrozenClock, register: SourceRegister) -> Sy
 
 
 def _sync_state(conn: Connection, source: str, logical_date: date) -> str | None:
+    """The stored state for a possibly-qualified source, read the way the store keys it.
+
+    Since migration 0008 a slug lives in `sync_state.unit`, not in the source string, so raw SQL
+    on `source` alone finds nothing for `nifty_index_constituents/niftybank`. `SyncKey` is the one
+    place that split is expressed; a second copy of it here would be a second thing to keep true.
+    """
+    key = SyncKey.parse(source)
     row = conn.execute(
-        "SELECT state FROM sync_state WHERE source = %s AND logical_date = %s",
-        (source, logical_date),
+        "SELECT state FROM sync_state WHERE source = %s AND unit = %s AND logical_date = %s",
+        (key.base, key.unit, logical_date),
     ).fetchone()
     return None if row is None else str(row[0])
 

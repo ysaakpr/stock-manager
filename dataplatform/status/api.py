@@ -59,8 +59,9 @@ from dataplatform.status.models import (
     SyncStatusOut,
 )
 from dataplatform.status.queries import read_archives, read_quality
-from dataplatform.status.sync_state import SyncStateStore
+from dataplatform.status.sync_state import MalformedSyncSourceError, SyncStateStore
 from dataplatform.store.db import Connection, connection
+from dataplatform.store.paths import PathLayoutError
 
 __all__ = [
     "app",
@@ -332,7 +333,10 @@ def status_gaps(
     rather than to all of history. Both ends are inclusive.
     What it never does: answer for a range the trading calendar does not cover. That is a 400
     naming the missing years, because "no holidays that year" would silently invent ~250 sessions
-    and report every one of them as a missing day.
+    and report every one of them as a missing day. Nor does it answer a malformed `source` with a
+    500: a name that is not a lake identifier is the caller's error and says so (audit finding N1,
+    where a poisoned `sync_state` reached `LakeL1Presence` and the stack trace was the whole
+    diagnosis an operator got).
     """
     today = clock.today()
     start = today if from_date is None else from_date
@@ -343,7 +347,12 @@ def status_gaps(
         )
     try:
         report = scanner.report(start, end, sources=source)
-    except (CalendarError, GapReportError) as exc:
+    except (
+        CalendarError,
+        GapReportError,
+        MalformedSyncSourceError,
+        PathLayoutError,
+    ) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return GapsOut.of(report, limit=limit)
 

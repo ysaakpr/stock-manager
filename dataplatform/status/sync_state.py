@@ -26,6 +26,7 @@ quality-green, so both halves are checked here rather than left for the caller t
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
@@ -49,8 +50,10 @@ __all__ = [
     "TERMINAL_STATES",
     "GreenStatus",
     "IllegalTransitionError",
+    "MalformedSyncSourceError",
     "NotAGapError",
     "SourceStatus",
+    "SyncKey",
     "SyncRecord",
     "SyncState",
     "SyncStateError",
@@ -183,6 +186,66 @@ class NotAGapError(SyncStateError):
 
 class UnknownSyncRowError(SyncStateError):
     """A transition was attempted on a `(source, date)` that has no row yet."""
+
+
+# ── the key ──────────────────────────────────────────────────────────────────────────────────
+
+#: A D1 Source Register id, and therefore a lake dataset name: the predicate
+#: `dataplatform.store.paths` applies, repeated here so a bad base is refused before it reaches
+#: Postgres and gives a constraint violation instead of a message naming the writer.
+_BASE_PATTERN: Final = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+#: The two delimiters the qualified writers chose. Neither can occur in a base (see the pattern
+#: above), so splitting on the first of either is unambiguous.
+_UNIT_DELIMITERS: Final = "/:"
+
+
+class MalformedSyncSourceError(SyncStateError):
+    """A source string whose base is not a Source Register id — refused at the write boundary."""
+
+
+@dataclass(frozen=True, slots=True)
+class SyncKey:
+    """A `sync_state` row's identity, split into the register id and the sub-key within it.
+
+    What it does: turns the qualified source string a caller passes — `nse_xbrl_filing/IF87614`,
+    `nifty_index_constituents:niftybank`, or a bare `nse_bhavcopy` — into the two columns the
+    table stores, and back again.
+    What it assumes: the base is a Source Register id and therefore a lake identifier. That is
+    checked, not trusted: `parse` raises rather than letting a second subsystem repeat the defect
+    that took `/status/gaps` down (audit finding N1, migration 0008).
+    What it never does: invent a delimiter. A source with none is a whole key with an empty unit,
+    which is what every per-session source has always been.
+
+    Callers keep passing one string; only the storage boundary knows there are two columns. That
+    is deliberate — the reasoning behind each qualified key lives with its writer, and none of it
+    had to move.
+    """
+
+    base: str
+    unit: str = ""
+
+    @classmethod
+    def parse(cls, source: str) -> SyncKey:
+        """Split a possibly-qualified source string. Raises on a base that is not an identifier."""
+        cut = min(
+            (source.find(delimiter) for delimiter in _UNIT_DELIMITERS if delimiter in source),
+            default=-1,
+        )
+        base, unit = (source, "") if cut < 0 else (source[:cut], source[cut + 1 :])
+        if not _BASE_PATTERN.match(base):
+            raise MalformedSyncSourceError(
+                f"sync_state source {source!r} has base {base!r}, which is not a Source Register "
+                f"id (lower-case letters, digits, '.', '_' and '-', starting with a letter or "
+                f"digit). A sub-key belongs after a '/' or ':', not in the base — see "
+                f"migration 0008 and the SyncKey docstring."
+            )
+        return cls(base=base, unit=unit)
+
+    @property
+    def qualified(self) -> str:
+        """The single string form callers use, and what `SyncRecord.source` carries."""
+        return self.base if not self.unit else f"{self.base}/{self.unit}"
 
 
 # ── the record ───────────────────────────────────────────────────────────────────────────────
@@ -467,14 +530,14 @@ class SourceStatus:
 
 #: Column order shared by every read and the upsert, so the two can never drift apart.
 _COLUMNS: Final[str] = (
-    "source, logical_date, state, attempts, retryable, last_error, checksum, l0_path, "
+    "source, unit, logical_date, state, attempts, retryable, last_error, checksum, l0_path, "
     "first_attempt_at, updated_at"
 )
 
 _UPSERT: Final[str] = f"""
     INSERT INTO sync_state ({_COLUMNS})
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (source, logical_date) DO UPDATE SET
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (source, logical_date, unit) DO UPDATE SET
         state            = EXCLUDED.state,
         attempts         = EXCLUDED.attempts,
         retryable        = EXCLUDED.retryable,
@@ -565,9 +628,11 @@ class SyncStateStore:
 
     def get(self, source: str, logical_date: date) -> SyncRecord | None:
         """The row for one `(source, date)`, or None when the pair was never touched."""
+        key = SyncKey.parse(source)
         row = self._conn.execute(
-            f"SELECT {_COLUMNS} FROM sync_state WHERE source = %s AND logical_date = %s",
-            (source, logical_date),
+            f"SELECT {_COLUMNS} FROM sync_state "
+            f"WHERE source = %s AND unit = %s AND logical_date = %s",
+            (key.base, key.unit, logical_date),
         ).fetchone()
         return None if row is None else _record(row)
 
@@ -584,7 +649,7 @@ class SyncStateStore:
     def rows_for_date(self, logical_date: date) -> tuple[SyncRecord, ...]:
         """Every source's row for one date, source-ordered. Backs `/status/sync?date=`."""
         rows = self._conn.execute(
-            f"SELECT {_COLUMNS} FROM sync_state WHERE logical_date = %s ORDER BY source",
+            f"SELECT {_COLUMNS} FROM sync_state WHERE logical_date = %s ORDER BY source, unit",
             (logical_date,),
         ).fetchall()
         return tuple(_record(row) for row in rows)
@@ -602,14 +667,11 @@ class SyncStateStore:
         """
         if sources is not None and not sources:
             return ()
-        clause = "" if sources is None else " AND source = ANY(%s)"
-        params: tuple[object, ...] = (
-            (from_date, to_date) if sources is None else (from_date, to_date, list(sources))
-        )
+        clause, extra = _source_predicate(sources)
         rows = self._conn.execute(
             f"SELECT {_COLUMNS} FROM sync_state WHERE logical_date BETWEEN %s AND %s{clause} "
-            f"ORDER BY logical_date, source",
-            params,
+            f"ORDER BY logical_date, source, unit",
+            (from_date, to_date, *extra),
         ).fetchall()
         return tuple(_record(row) for row in rows)
 
@@ -625,6 +687,29 @@ class SyncStateStore:
             "SELECT DISTINCT source FROM sync_state ORDER BY source"
         ).fetchall()
         return tuple(str(row[0]) for row in rows)
+
+    def unit_rows(
+        self, from_date: date, to_date: date, *, sources: Sequence[str] | None = None
+    ) -> tuple[SyncRecord, ...]:
+        """Every row in the range that carries a sub-key — one filing, slug, chunk or scrip.
+
+        The rows `rows_in_range` returns too, narrowed to the ones with a sub-key. They are
+        separated because the D7 gap report treats them differently: a per-session source owes
+        one file per trading day and its absence is the question, whereas a unit row exists only
+        because something discovered it, so only its *state* can be wrong. Before migration 0008
+        these rows were indistinguishable from sources, which is how 71,737 filings came to be
+        scanned as lake datasets (audit finding N1).
+        """
+        if sources is not None and not sources:
+            return ()
+        clause, extra = _source_predicate(sources)
+        rows = self._conn.execute(
+            f"SELECT {_COLUMNS} FROM sync_state "
+            f"WHERE logical_date BETWEEN %s AND %s AND unit <> ''{clause} "
+            f"ORDER BY logical_date, source, unit",
+            (from_date, to_date, *extra),
+        ).fetchall()
+        return tuple(_record(row) for row in rows)
 
     def day_kind(self, logical_date: date) -> DayKind | None:
         """What the calendar calls this date, or None when it is outside coverage.
@@ -762,10 +847,12 @@ class SyncStateStore:
 
     def _write(self, record: SyncRecord, *, previous: SyncRecord | None) -> SyncRecord:
         """Persist one record and log the transition. One event per meaningful step (CLAUDE.md)."""
+        key = SyncKey.parse(record.source)
         self._conn.execute(
             _UPSERT,
             (
-                record.source,
+                key.base,
+                key.unit,
                 record.logical_date,
                 record.state.value,
                 record.attempts,
@@ -875,19 +962,43 @@ class SyncStateStore:
             return None
 
 
+def _source_predicate(sources: Sequence[str] | None) -> tuple[str, tuple[object, ...]]:
+    """A WHERE fragment and its parameters for an optional source filter.
+
+    A bare register id matches every unit under it — asking for `nse_xbrl_filing` means the whole
+    source, not the one row that happens to have no sub-key. A qualified name matches exactly the
+    one row. `None` means no filter at all; an empty sequence never reaches here, because "no
+    sources" is answered without a query.
+    """
+    if sources is None:
+        return "", ()
+    keys = [SyncKey.parse(raw) for raw in sources]
+    bases = [key.base for key in keys if not key.unit]
+    qualified = [key.qualified for key in keys if key.unit]
+    clauses: list[str] = []
+    params: list[object] = []
+    if bases:
+        clauses.append("source = ANY(%s)")
+        params.append(bases)
+    if qualified:
+        clauses.append("(source || '/' || unit) = ANY(%s)")
+        params.append(qualified)
+    return f" AND ({' OR '.join(clauses)})", tuple(params)
+
+
 def _record(row: tuple[Any, ...]) -> SyncRecord:
     """Build a `SyncRecord` from a row selected in `_COLUMNS` order."""
     return SyncRecord(
-        source=str(row[0]),
-        logical_date=row[1],
-        state=SyncState(row[2]),
-        attempts=int(row[3]),
-        retryable=bool(row[4]),
-        last_error=None if row[5] is None else str(row[5]),
-        checksum=None if row[6] is None else str(row[6]),
-        l0_path=None if row[7] is None else str(row[7]),
-        first_attempt_at=row[8],
-        updated_at=row[9],
+        source=SyncKey(base=str(row[0]), unit=str(row[1])).qualified,
+        logical_date=row[2],
+        state=SyncState(row[3]),
+        attempts=int(row[4]),
+        retryable=bool(row[5]),
+        last_error=None if row[6] is None else str(row[6]),
+        checksum=None if row[7] is None else str(row[7]),
+        l0_path=None if row[8] is None else str(row[8]),
+        first_attempt_at=row[9],
+        updated_at=row[10],
     )
 
 

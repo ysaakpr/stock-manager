@@ -38,7 +38,7 @@ checked nothing" must never render identically.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from enum import StrEnum
 from functools import lru_cache
@@ -46,9 +46,14 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from dataplatform.ingest import source_register
-from dataplatform.ingest.calendar import DayKind, TradingCalendar, trading_calendar
+from dataplatform.ingest.calendar import (
+    CalendarCoverageError,
+    DayKind,
+    TradingCalendar,
+    trading_calendar,
+)
 from dataplatform.logging import get_logger
-from dataplatform.status.sync_state import SyncRecord, SyncState, SyncStateStore
+from dataplatform.status.sync_state import SyncKey, SyncRecord, SyncState, SyncStateStore
 from dataplatform.store.db import Connection
 from dataplatform.store.paths import l1_partition_dir
 from dataplatform.store.schemas import PRICES_RAW_DATASET
@@ -124,6 +129,14 @@ class GapReason(StrEnum):
 
     L1_PARTITION_MISSING = "L1_PARTITION_MISSING"
     """PUBLISHED, but the L1 partition holds no data. The record outlived the rows."""
+
+    OUTSIDE_CALENDAR = "OUTSIDE_CALENDAR"
+    """A row exists for a date the C.2 holiday file makes no claim about.
+
+    Only reachable for a unit row: the per-session walk is driven *by* the calendar and cannot
+    leave it, but a filing carries whatever date its index entry stated. Unexplained on purpose —
+    the honest answer is to extend the holiday file, not to guess whether the exchange was open.
+    """
 
     @property
     def explained(self) -> bool:
@@ -280,10 +293,30 @@ _PRICES_RAW_ROWS: Final[frozenset[str]] = frozenset(
 #: to the register ids it aggregates; the union of their eras is the state-source's era, so a
 #: pre-cutover BSE session (legacy era not yet wired) is not reported as owed. `test_gaps` pins
 #: these names and constituents to `backfill.SOURCE_SETS` so they cannot drift.
+#:
+#: `nse_delivery` is here for the same reason and with the same resolution: M1.6 ingests the two
+#: delivery eras (MTO before 2019-09-30, `sec_bhavdata_full` after) under one set name, and the
+#: figures land as `deliv_qty`/`deliv_pct` columns *on* `prices_raw` rather than in a dataset of
+#: their own. Without this row it fell through to the loud default and probed
+#: `data/L1/nse_delivery/` — harmless while nothing scanned it, and a `NO_DATASET` on every one
+#: of 2,471 published sessions the moment migration 0008 let the gap report see the source.
 _PRICE_STATE_SOURCES: Final[dict[str, tuple[str, ...]]] = {
     "nse_bhavcopy": ("nse_bhavcopy_legacy", "nse_bhavcopy_udiff"),
     "bse_bhavcopy": ("bse_bhavcopy_udiff",),
+    "nse_delivery": ("nse_mto", "nse_sec_bhavdata_full"),
 }
+
+
+#: Sources the register calls `daily` — truthfully, the endpoint answers for any date — but which
+#: ingest fetches as dated *ranges*, checkpointing one `sync_state` row per range rather than per
+#: session. `cadence` describes how often the source publishes; `per_session` asks whether ingest
+#: owes a row every trading day, and for these two the answers differ.
+#:
+#: Without this, `nse_corp_actions` (11 rows spanning 2015..2026, one per yearly chunk) reports
+#: NEVER_ATTEMPTED on all 2,461 sessions in the lake's range — 2,461 entries that are not misses,
+#: burying the handful that are. Changing the register's `cadence` instead would be the wrong fix:
+#: it would make the register lie about the feed to satisfy one of its readers.
+_RANGE_FETCHED_SOURCES: Final[frozenset[str]] = frozenset({"nse_corp_actions", "bse_corp_actions"})
 
 
 def expectations_from_register(
@@ -306,7 +339,9 @@ def expectations_from_register(
     expectations = {
         entry.id: SourceExpectation(
             source=entry.id,
-            per_session=entry.cadence in PER_SESSION_CADENCES,
+            per_session=(
+                entry.cadence in PER_SESSION_CADENCES and entry.id not in _RANGE_FETCHED_SOURCES
+            ),
             era_start=entry.era.start,
             era_end=entry.era.end,
             l1_dataset=_l1_dataset_for(entry.plan_row, entry.id, entry.cadence),
@@ -397,6 +432,7 @@ class GapEntry:
     reason: GapReason
     detail: str
     day_kind: DayKind
+    unit: str = ""
     state: SyncState | None = None
     attempts: int = 0
     retryable: bool | None = None
@@ -411,9 +447,17 @@ class GapEntry:
         return self.reason.explained
 
     @property
+    def qualified_source(self) -> str:
+        """`source`, or `source/unit` for a row keyed on a filing, slug, chunk or scrip.
+
+        What an operator has to type to find the row again, so it is what the report renders.
+        """
+        return self.source if not self.unit else f"{self.source}/{self.unit}"
+
+    @property
     def key(self) -> tuple[date, str]:
         """Sort key: date first, so a report reads as a timeline."""
-        return (self.logical_date, self.source)
+        return (self.logical_date, self.qualified_source)
 
 
 def _entry(
@@ -424,10 +468,12 @@ def _entry(
     detail: str,
     record: SyncRecord | None = None,
     l1: L1Result | None = None,
+    unit: str = "",
 ) -> GapEntry:
     """Assemble an entry, folding in whatever history the pair has."""
     return GapEntry(
         source=expectation.source,
+        unit=unit,
         logical_date=logical_date,
         reason=reason,
         detail=detail,
@@ -449,6 +495,7 @@ def classify_pair(
     record: SyncRecord | None,
     *,
     l1: L1Result | None = None,
+    unit: str = "",
 ) -> GapEntry | None:
     """Classify one `(source, date)` pair, or return None when there is nothing to explain.
 
@@ -463,7 +510,27 @@ def classify_pair(
     Returns None in exactly two situations: the pair is complete (PUBLISHED with its L1 partition
     present, or with no L1 dataset to check), or the source never owed anything for this date and
     nothing was recorded against it.
+
+    `unit` names the sub-key when the row is one of many under its source — a filing, an index
+    slug, a chunk, a scrip. It changes no rule here: a unit row is classified exactly as the
+    source's own row would be, and the unit only travels onto the entry so the report can name
+    the thing an operator has to go and look at.
     """
+    verdict = _classify(expectation, logical_date, day_kind, record, l1=l1)
+    if verdict is None or not unit:
+        return verdict
+    return replace(verdict, unit=unit)
+
+
+def _classify(
+    expectation: SourceExpectation,
+    logical_date: date,
+    day_kind: DayKind,
+    record: SyncRecord | None,
+    *,
+    l1: L1Result | None = None,
+) -> GapEntry | None:
+    """`classify_pair` without the unit tagging — the rules themselves."""
     if record is None:
         return _absent(expectation, logical_date, day_kind)
 
@@ -636,6 +703,7 @@ def build_report(
     *,
     sources: Sequence[str],
     records: Mapping[tuple[str, date], SyncRecord],
+    unit_records: Sequence[SyncRecord] = (),
     calendar: TradingCalendar | None = None,
     expectations: Mapping[str, SourceExpectation] | None = None,
     l1_presence: L1Presence | None = None,
@@ -650,7 +718,10 @@ def build_report(
     clock — which is what lets the whole classification be tested offline.
     What it assumes: `records` holds every `sync_state` row for the range, keyed
     `(source, logical_date)`; a key that is absent means the pair genuinely has no row, which is
-    what becomes `NEVER_ATTEMPTED`.
+    what becomes `NEVER_ATTEMPTED`. `unit_records` holds the rows that carry a sub-key — one
+    filing, index slug, chunk or scrip — and those are walked separately: a unit exists only
+    because something discovered it, so its absence is not a question the calendar can ask and
+    only its *state* can be wrong. Their sources still need to be in `sources` to be examined.
     What it never does: guess outside the calendar. A range that leaves C.2's coverage raises
     `CalendarCoverageError` from the calendar itself rather than resolving to "no holidays".
 
@@ -690,6 +761,42 @@ def build_report(
                 continue
             entries.append(entry)
             by_reason[entry.reason] = by_reason.get(entry.reason, 0) + 1
+
+    wanted_set = set(wanted)
+    for record in unit_records:
+        key = SyncKey.parse(record.source)
+        if key.base not in wanted_set:
+            continue
+        try:
+            kind = resolved_calendar.classify(record.logical_date)
+        except CalendarCoverageError:
+            # A filing dated outside the holiday file's coverage is a real row we cannot classify
+            # a day for. Counting it as examined and saying nothing would be the silent drop this
+            # module exists to prevent, so it is reported with the reason that names the cause.
+            pairs += 1
+            entries.append(
+                _entry(
+                    per_source[key.base],
+                    record.logical_date,
+                    DayKind.SESSION,
+                    GapReason.OUTSIDE_CALENDAR,
+                    f"{record.logical_date.isoformat()} lies outside the C.2 calendar's coverage, "
+                    f"so this row's day cannot be classified",
+                    record,
+                    unit=key.unit,
+                )
+            )
+            by_reason[GapReason.OUTSIDE_CALENDAR] = by_reason.get(GapReason.OUTSIDE_CALENDAR, 0) + 1
+            continue
+        pairs += 1
+        entry = classify_pair(
+            per_source[key.base], record.logical_date, kind, record, unit=key.unit
+        )
+        if entry is None:
+            complete += int(record.state is SyncState.PUBLISHED)
+            continue
+        entries.append(entry)
+        by_reason[entry.reason] = by_reason.get(entry.reason, 0) + 1
 
     entries.sort(key=lambda entry: entry.key)
     return GapReport(
@@ -762,11 +869,24 @@ class GapScanner:
         """
         wanted = tuple(sources) if sources is not None else self._store.tracked_sources()
         rows = self._store.rows_in_range(from_date, to_date, sources=wanted)
+        # One query, split here rather than in SQL: a row that carries a sub-key is not a
+        # (source, date) pair and must not land in the mapping, where it would either collide
+        # with the source's own row or — since its key is the qualified name — be silently
+        # unreachable. Migration 0008 is what makes the two distinguishable at all.
+        keyed: dict[tuple[str, date], SyncRecord] = {}
+        units: list[SyncRecord] = []
+        for row in rows:
+            key = SyncKey.parse(row.source)
+            if key.unit:
+                units.append(row)
+            else:
+                keyed[(key.base, row.logical_date)] = row
         report = build_report(
             from_date,
             to_date,
             sources=wanted,
-            records={(row.source, row.logical_date): row for row in rows},
+            records=keyed,
+            unit_records=units,
             calendar=self._calendar,
             expectations=self._expectations,
             l1_presence=self._l1_presence,
@@ -777,6 +897,7 @@ class GapScanner:
             to_date=to_date.isoformat(),
             sources=list(report.sources),
             pairs=report.pairs_examined,
+            units=len(units),
             unexplained=len(report.unexplained),
             fully_explained=report.fully_explained,
         )

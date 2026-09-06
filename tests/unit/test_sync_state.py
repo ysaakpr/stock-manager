@@ -25,7 +25,9 @@ from dataplatform.status.sync_state import (
     LEGAL_TRANSITIONS,
     TERMINAL_STATES,
     IllegalTransitionError,
+    MalformedSyncSourceError,
     NotAGapError,
+    SyncKey,
     SyncRecord,
     SyncState,
     evaluate_green,
@@ -346,3 +348,65 @@ def test_duplicate_datasets_are_asked_about_once() -> None:
     )
     assert status.datasets == ("a",)
     assert status.green is True
+
+
+# ── SyncKey: the split migration 0008 made (2026-09-06 audit, finding N1) ───────────────────────
+
+
+@pytest.mark.parametrize(
+    ("raw", "base", "unit"),
+    [
+        ("nse_bhavcopy", "nse_bhavcopy", ""),
+        ("nse_xbrl_filing/IF87614", "nse_xbrl_filing", "IF87614"),
+        ("nse_xbrl_filing/IF87614-FY", "nse_xbrl_filing", "IF87614-FY"),
+        # The old colon form, still parsed so a string persisted before the migration resolves.
+        ("nifty_index_constituents:niftybank", "nifty_index_constituents", "niftybank"),
+        ("nifty_index_constituents/niftybank", "nifty_index_constituents", "niftybank"),
+        # Only the FIRST delimiter splits: an index chunk's own '/' belongs to the unit.
+        (
+            "nse_financial_results_index/Quarterly/2020-12-31",
+            "nse_financial_results_index",
+            "Quarterly/2020-12-31",
+        ),
+        (
+            "nse_integrated_filing_index/2025-03-31/p06",
+            "nse_integrated_filing_index",
+            "2025-03-31/p06",
+        ),
+        ("bse_corp_actions/500325", "bse_corp_actions", "500325"),
+    ],
+)
+def test_sync_key_splits_a_qualified_source_at_its_first_delimiter(
+    raw: str, base: str, unit: str
+) -> None:
+    key = SyncKey.parse(raw)
+    assert (key.base, key.unit) == (base, unit)
+
+
+def test_sync_key_round_trips_through_the_slash_form() -> None:
+    """`qualified` is what `SyncRecord.source` carries, so it must survive a re-parse."""
+    for raw in ("nse_bhavcopy", "nse_xbrl_filing/IF1", "nifty_index_constituents:niftybank"):
+        key = SyncKey.parse(raw)
+        assert SyncKey.parse(key.qualified) == key
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "NSE_BHAVCOPY",  # upper case is not a lake identifier
+        "nse bhavcopy",  # a space
+        "-leading-dash",
+        "",
+        "/IF87614",  # a unit with no source at all
+    ],
+)
+def test_sync_key_refuses_a_base_that_is_not_a_register_id(bad: str) -> None:
+    """The guard that stops the next subsystem repeating finding N1.
+
+    A `source` that is not a lake identifier reached `LakeL1Presence` and took `/status/gaps` down
+    with a `PathLayoutError` eight months after the write that caused it. Refusing at the write
+    boundary turns that into an error at the call site that made the mistake.
+    """
+    with pytest.raises(MalformedSyncSourceError) as caught:
+        SyncKey.parse(bad)
+    assert repr(bad) in str(caught.value)
