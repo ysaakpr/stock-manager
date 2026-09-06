@@ -102,11 +102,14 @@ _NSE_SYMBOL_SCHEME: Final = "http://www.nseindia.com/NSESymbol"
 _BSE_NSE_SYMBOL_SCHEME: Final = "http://www.bseindia.com/bse-fin/NSESymbol"
 
 #: Every scheme whose identifier is an NSE symbol and may therefore be compared to one.
-#: SEBI's own scheme for the same identifier in an Integrated Filing document.
+#: SEBI's own scheme for the same identifier in an Integrated Filing document, and the same
+#: identifier under BSE's namespace root in the NBFC variant (`INTEGRATED_FILING_NBFC_INDAS_*`,
+#: met on the first live sample of the feed).
 _SEBI_SYMBOL_SCHEME: Final = "http://www.sebi.gov.in/in-capmkt/Symbol"
+_CAPMKT_BSE_SYMBOL_SCHEME: Final = "http://www.bseindia.com/in-capmkt/Symbol"
 
 _SYMBOL_SCHEMES: Final = frozenset(
-    {_NSE_SYMBOL_SCHEME, _BSE_NSE_SYMBOL_SCHEME, _SEBI_SYMBOL_SCHEME}
+    {_NSE_SYMBOL_SCHEME, _BSE_NSE_SYMBOL_SCHEME, _SEBI_SYMBOL_SCHEME, _CAPMKT_BSE_SYMBOL_SCHEME}
 )
 
 #: An Integrated Filing document states the company's ISIN as a fact. It is *not* the join key

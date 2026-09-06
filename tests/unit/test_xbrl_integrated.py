@@ -43,10 +43,12 @@ MOLBIO_C = "INTEGRATED_FILING_INDAS_1721824_05092026073816_WEB.xml"
 MOLBIO_S = "INTEGRATED_FILING_INDAS_1721823_05092026073748_WEB.xml"
 GSS_Q4 = "INTEGRATED_FILING_INDAS_1461892_31052025112035_WEB.xml"
 AHLUCONT_NONINDAS = "INTEGRATED_FILING_NONINDAS_1461661_31052025042804_WEB.xml"
+IREDA_NBFC = "INTEGRATED_FILING_NBFC_INDAS_1415182_15042025065703_WEB.xml"
 
 MOLBIO = "INE869T01028"
 GSS = "INE871H01011"
 AHLUCONT = "INE758C01029"
+IREDA = "INE202E01016"
 
 
 def _entry(
@@ -172,6 +174,24 @@ def test_the_non_ind_as_variant_parses_with_the_same_vocabulary() -> None:
     facts = _facts(AHLUCONT_NONINDAS, entry, "AHLUCONT")
     assert facts["revenue_from_operations"] == Decimal("12158363000")
     assert facts["profit_after_tax"] == Decimal("833324000")
+
+
+def test_the_nbfc_variant_parses_under_bses_in_capmkt_symbol_scheme() -> None:
+    """Met on the first live sample: `INTEGRATED_FILING_NBFC_INDAS_*` identifies the entity under
+    `http://www.bseindia.com/in-capmkt/Symbol` and states both `InterestEarned` and
+    `RevenueFromOperations`; the Ind-AS map reads the latter."""
+    entry = _entry(
+        isin=IREDA,
+        symbol="IREDA",
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 3, 31),
+        filing_date=date(2025, 4, 15),
+        nature=Nature.STANDALONE,
+        seq="IF85010",
+    )
+    facts = _facts(IREDA_NBFC, entry, "IREDA")
+    assert facts["revenue_from_operations"] == Decimal("19041700000")
+    assert "profit_after_tax" in facts and "eps_basic" in facts
 
 
 def test_a_document_stating_another_companys_isin_is_refused_inversion() -> None:
