@@ -133,14 +133,28 @@ def parse(
     return result
 
 
-def parse_l0(store: L0Store, ref: L0Ref, *, master: IdentityMaster, clock: Clock) -> CaParseResult:
+def parse_l0(
+    store: L0Store,
+    ref: L0Ref,
+    *,
+    master: IdentityMaster,
+    clock: Clock,
+    lineage: LineageResolver | None = None,
+) -> CaParseResult:
     """Parse the L0 payload a fetch produced, re-verifying its checksum on the way in.
 
     The pipeline's entry point: `Fetcher.fetch` returns an `L0Ref` and never bytes, so this is how
     a fetched response becomes rows, with `L0Store.get` re-hashing the payload so every row derives
     from bytes that have not changed (invariant #1). The ref's key is threaded onto every row.
     """
-    return parse(store.get(ref), filename=ref.filename, master=master, clock=clock, l0_key=ref.key)
+    return parse(
+        store.get(ref),
+        filename=ref.filename,
+        master=master,
+        clock=clock,
+        l0_key=ref.key,
+        lineage=lineage,
+    )
 
 
 # ── one record ───────────────────────────────────────────────────────────────────────────────

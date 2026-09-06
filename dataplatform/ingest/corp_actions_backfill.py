@@ -63,6 +63,7 @@ from dataplatform.corpactions.reconcile import (
     persist_reconciliation,
     reconcile,
 )
+from dataplatform.identity.lineage import LineageResolver, LineageStore
 from dataplatform.identity.master import Exchange, IdentityMaster, IdentityStore
 from dataplatform.ingest.bse import corp_actions as bse_ca
 from dataplatform.ingest.calendar import (
@@ -415,6 +416,7 @@ class CaBackfillRunner:
         scrip_index: dict[str, str],
         clock: Clock,
         should_stop: Callable[[], bool] = lambda: False,
+        lineage: LineageResolver | None = None,
     ) -> None:
         self._fetcher = fetcher
         self._l0 = l0
@@ -425,6 +427,10 @@ class CaBackfillRunner:
         self._scrip_index = scrip_index
         self._clock = clock
         self._should_stop = should_stop
+        # D2 lineage, so an action filed against an ISIN a reissue retired still reaches the
+        # surviving security instead of landing in `unresolved` (0009/0010). None keeps the
+        # pre-lineage behaviour, which is what the offline tests assert.
+        self._lineage = lineage
 
     def run(self, units: Sequence[CaFetchUnit]) -> CaBackfillReport:
         """Process every unit in order — resuming, checkpointing, and parking per the class doc.
@@ -545,7 +551,9 @@ class CaBackfillRunner:
         ref = self._l0.ref_for(unit.fetch_source, unit.logical_date, unit.filename)
         if unit.exchange is Exchange.BSE:
             return bse_ca.parse_l0(self._l0, ref, scrip_index=self._scrip_index, clock=self._clock)
-        return nse_ca.parse_l0(self._l0, ref, master=self._master, clock=self._clock)
+        return nse_ca.parse_l0(
+            self._l0, ref, master=self._master, clock=self._clock, lineage=self._lineage
+        )
 
     def _fail(
         self, unit: CaFetchUnit, message: str, *, retryable: bool, report: CaBackfillReport
@@ -829,6 +837,7 @@ def _run_live(
             scrip_index=build_scrip_index(master),
             clock=clock,
             should_stop=lambda: stop_state["stop"],
+            lineage=LineageStore(conn, clock=clock).load(),
         )
         report = runner.run(plan)
 
