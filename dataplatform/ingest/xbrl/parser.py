@@ -120,6 +120,9 @@ _SYMBOL_SCHEMES: Final = frozenset(
 #: why the ISIN was never read from a document before and still is not from those.
 _ISIN_ELEMENT: Final = "ISIN"
 _INTEGRATED_ENTRY_POINT: Final = "in-capmkt-ent"
+#: `INE` plus the four-character issuer code: the part of an Indian ISIN that names the company and
+#: survives a split or consolidation (which changes the security suffix and the check digit).
+_ISSUER_CODE_LENGTH: Final = 7
 
 #: The other scheme in the wild: a BSE scrip code (e.g. `532209` for J&K Bank). Its identifier is
 #: *not* a symbol and must never be compared to one, so a filing using it is cross-checked on its
@@ -572,10 +575,15 @@ def _check_stated_isin(
 ) -> None:
     """Refuse a document whose own `ISIN` fact names a different company than the entry.
 
-    Called for Integrated Filing documents only. When stated and well-formed the ISIN must match
-    the entry's — the index's ISIN stays the join key, this only catches the index attributing a
-    document to the wrong company. A malformed value is ignored: a filer's typo is not evidence
-    about the company.
+    Called for Integrated Filing documents only. The comparison is on the **issuer code** — the
+    first seven characters of an Indian ISIN (`INE672A` of `INE672A01026`) — not the whole ISIN.
+    A stock split or consolidation gives a company a new ISIN under the same issuer code, and the
+    first live campaign showed filers keep the old one in their XBRL template for a while (Tata
+    Investment, Angel One, E2E within the first hundred filings); refusing those would drop real
+    filings for a difference that identifies the same company. A different issuer code is a
+    different company — the DTIL misattribution, refused. The index's ISIN stays the join key
+    either way; a same-issuer mismatch is logged so the stale-template population stays visible.
+    A malformed value is ignored: a filer's typo is not evidence about the company.
     """
     stated = {
         value.strip().upper()
@@ -583,13 +591,24 @@ def _check_stated_isin(
         for value in facts.get(_ISIN_ELEMENT, ())
         if value and re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", value.strip().upper())
     }
-    if stated and entry.isin not in stated:
+    if not stated or entry.isin in stated:
+        return
+    issuer = entry.isin[:_ISSUER_CODE_LENGTH]
+    foreign = sorted(isin for isin in stated if isin[:_ISSUER_CODE_LENGTH] != issuer)
+    if foreign:
         raise ParseError(
             f"index says this filing is {entry.symbol!r} (ISIN {entry.isin}) but the document "
-            f"states ISIN {', '.join(sorted(stated))}; the announcements index and the XBRL must "
-            "name the same company",
+            f"states ISIN {', '.join(foreign)} — a different issuer; the announcements index and "
+            "the XBRL must name the same company",
             filename=filename,
         )
+    _LOG.info(
+        "xbrl.stated_isin_differs_same_issuer",
+        filename=filename,
+        entry_isin=entry.isin,
+        stated=sorted(stated),
+        note="same issuer code: a split changed the ISIN and the template kept the old one",
+    )
 
 
 def _same_symbol(left: str, right: str) -> bool:

@@ -194,6 +194,22 @@ def test_the_nbfc_variant_parses_under_bses_in_capmkt_symbol_scheme() -> None:
     assert "profit_after_tax" in facts and "eps_basic" in facts
 
 
+def test_the_same_companys_previous_isin_in_the_document_is_accepted() -> None:
+    """A split gives a company a new ISIN under the same issuer code and filers keep the old one in
+    their template for a while (Tata Investment, Angel One, E2E on the first live campaign)."""
+    entry = _entry(
+        isin="INE869T01036",  # a hypothetical post-split ISIN: same issuer 869T, new suffix
+        symbol="MOLBIO",
+        period_start=date(2026, 4, 1),
+        period_end=date(2026, 6, 30),
+        filing_date=date(2026, 9, 5),
+        nature=Nature.CONSOLIDATED,
+        seq="IF192487",
+    )
+    facts = _facts(MOLBIO_C, entry, "MOLBIO")  # the document states INE869T01028
+    assert facts["revenue_from_operations"] == Decimal("4083760000")
+
+
 def test_a_document_stating_another_companys_isin_is_refused_inversion() -> None:
     """The DTIL misattribution, in the form the document itself can refute."""
     entry = _entry(
@@ -205,7 +221,7 @@ def test_a_document_stating_another_companys_isin_is_refused_inversion() -> None
         nature=Nature.CONSOLIDATED,
         seq="IF192487",
     )
-    with pytest.raises(ParseError, match="states ISIN INE869T01028"):
+    with pytest.raises(ParseError, match="states ISIN INE869T01028 — a different issuer"):
         _facts(MOLBIO_C, entry, "MOLBIO")  # ...but the document says it is Molbio's
 
 
