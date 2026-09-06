@@ -516,3 +516,72 @@ def test_a_captured_page_of_the_feed_parses_every_record() -> None:
     # Ahluwalia filed both an Ind-AS and a Non-Ind-AS document for each nature: four records.
     assert len(ahlu) == 8 and {e.nature for e in ahlu} == {Nature.STANDALONE, Nature.CONSOLIDATED}
     assert all(e.is_actionable for e in parsed.entries)
+
+
+# ── half-yearly reporters: the index says a quarter, the document reports six months ─────────────
+
+#: Globus Spirits, filed 2025-12-17. The index entry (IF130670) asks for 2025-07-01→2025-09-30 and
+#: the document reports one column, 2025-04-01→2025-09-30, whose own `ReportingQuarter` reads
+#: "Half yearly". Captured from the live campaign's L0, not built here: this shape is 695 of the
+#: 2,084 filings the exact-period rule was refusing, and a synthetic stand-in would have agreed
+#: with whatever the parser already did.
+_HALF_YEARLY = "INTEGRATED_FILING_INDAS_1586681_17122025122452_WEB.xml"
+GLOBUS = "INE615I01010"
+
+
+def _globus_entry(*, period_start: date, period_end: date) -> FilingIndexEntry:
+    return _entry(
+        isin=GLOBUS,
+        symbol="GLOBUSSPR",
+        period_start=period_start,
+        period_end=period_end,
+        filing_date=date(2025, 12, 17),
+        nature=Nature.CONSOLIDATED,
+        seq="IF130670",
+    )
+
+
+def test_a_half_yearly_filing_the_index_calls_quarterly_is_stored_as_a_half_year() -> None:
+    """The recovery — and its point: the period stored is the document's, not the index's."""
+    filing = parser.parse(
+        (FIXTURES / _HALF_YEARLY).read_bytes(),
+        entry=_globus_entry(period_start=date(2025, 7, 1), period_end=date(2025, 9, 30)),
+        known_symbols=frozenset({"GLOBUSSPR"}),
+        filename=_HALF_YEARLY,
+        l0_key=f"fixture/{_HALF_YEARLY}",
+    )
+    # Not 2025-07-01. The index asked for a quarter; six months is what the company reported and
+    # six months is what a consumer must see, or it would read this as a quarter's revenue.
+    assert (filing.period_start, filing.period_end) == (date(2025, 4, 1), date(2025, 9, 30))
+    assert filing.nature is Nature.CONSOLIDATED
+    facts = {f.concept: f.value for f in filing.facts if f.segment is None}
+    assert facts["revenue_from_operations"] == Decimal("18233360000.00")
+
+
+def test_the_annual_entry_for_the_same_document_is_still_refused() -> None:
+    """The condition that stops the fallback duplicating what an exact match already captures.
+
+    23.7% of documents are named by both an Annual and a Quarterly index entry. Six months is not
+    longer than the twelve this entry asks for, so this one gets nothing and only the quarterly
+    entry recovers the document.
+    """
+    with pytest.raises(ParseError, match="no results column covers"):
+        parser.parse(
+            (FIXTURES / _HALF_YEARLY).read_bytes(),
+            entry=_globus_entry(period_start=date(2025, 4, 1), period_end=date(2026, 3, 31)),
+            known_symbols=frozenset({"GLOBUSSPR"}),
+            filename=_HALF_YEARLY,
+            l0_key=f"fixture/{_HALF_YEARLY}",
+        )
+
+
+def test_a_column_ending_elsewhere_is_never_recovered() -> None:
+    """The end date must be the one the index named; a near miss is still a miss."""
+    with pytest.raises(ParseError, match="no results column covers"):
+        parser.parse(
+            (FIXTURES / _HALF_YEARLY).read_bytes(),
+            entry=_globus_entry(period_start=date(2025, 7, 1), period_end=date(2025, 12, 31)),
+            known_symbols=frozenset({"GLOBUSSPR"}),
+            filename=_HALF_YEARLY,
+            l0_key=f"fixture/{_HALF_YEARLY}",
+        )

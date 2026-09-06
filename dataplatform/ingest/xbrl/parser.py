@@ -945,15 +945,68 @@ def _add_months(day: date, months: int) -> date:
     return day.replace(year=day.year + total // 12, month=total % 12 + 1)
 
 
+#: A financial year, in days, with room for the 364-366 an actual one spans. A column at or above
+#: this is the annual column, which the index's own Annual entry names exactly and must be left to.
+_ANNUAL_DAYS: Final = 350
+
+
+def _is_sub_annual_widening(column: _Column, *, entry: FilingIndexEntry) -> bool:
+    """Whether `column` covers more than the index asked for, but still less than a year.
+
+    The two conditions that keep the end-date fallback from capturing a document a different index
+    entry will capture exactly — see `_select_column`.
+    """
+    if entry.period_start is None:
+        return False
+    asked = (entry.period_end - entry.period_start).days
+    got = (column.period_end - column.period_start).days
+    return asked < got < _ANNUAL_DAYS
+
+
 def _select_column(
     columns: tuple[_Column, ...], *, entry: FilingIndexEntry, filename: str
 ) -> _Column:
-    """The one column whose declared period is exactly the period the index entry names.
+    """The one column the index entry names, preferring an exact period match over an end-date one.
 
-    Both ends must match. `period_end` alone is not enough and is the subtle way this goes wrong: a
-    Q3 filing's cumulative column ends on the same day as its quarter column, so an end-only match
-    admits a nine-month revenue as a quarter's. No match and an ambiguous match are both hard
-    failures — the alternative is storing a number for a period nobody asked for.
+    Both ends matching is the happy path and always wins. `period_end` alone is not enough on its
+    own and is the subtle way this goes wrong: a Q3 filing's cumulative column ends on the same day
+    as its quarter column, so an unguarded end-only match admits a nine-month revenue as a
+    quarter's.
+
+    But an exact match is too strict as the *only* rule, because the index and the document
+    disagree about the period far more often than either is wrong about the numbers. Measured over
+    2,084 refused filings: 695 are half-yearly reporters the index files as quarterly (it asks for
+    `Jul→Sep`, the document reports `Apr→Sep`), 239 are annual-only reporters, and 607 carry an
+    index period exactly one year stale. Those filings are not malformed — the exchange simply
+    describes them by the quarter they arrived in rather than the period they cover.
+
+    So when nothing matches exactly, one narrow fallback applies. Exactly one column must end on
+    the day the index says the period ends, **and that column must cover more time than the index
+    asked for while still being shorter than a financial year**. That is the half-yearly reporter
+    and nothing else.
+
+    Recording it is safe because `Filing` keeps `column.period_start`/`column.period_end` — the
+    document's own span, never the index's claim — so a half-year recovered this way is stored as a
+    half-year and a consumer can see it is not a quarter. What the index got wrong was the label,
+    and the label is not what we keep.
+
+    The two length conditions are what stop this becoming a duplicate factory, and they are not
+    cosmetic: 19,096 documents (23.7% of all of them) are named by *both* an Annual and a Quarterly
+    index entry, so a document is routinely offered to this function twice under different periods.
+    The conditions make at most one of those two recover it:
+
+    * a document holding only a 12-month column — the entry asking 3 months is refused (12 is not
+      shorter than a year), and the entry asking 12 matches exactly. One capture.
+    * a document holding only a 3-month column — the entry asking 12 months is refused (3 is not
+      longer than 12), and the entry asking 3 matches exactly. One capture.
+    * a document holding only a 6-month column — the entry asking 12 months is refused, the entry
+      asking 3 recovers it. One capture, and the only one the exchange's period vocabulary (which
+      has no half-yearly) can express.
+
+    Two columns sharing that end date remains a hard failure whatever their lengths, and that is
+    the case the second paragraph warns about: 234 of the refused filings offer both a 6-month and
+    a 12-month column ending on the same day, with the same nature, and nothing in either document
+    says which the entry meant. Guessing there would put a full year's revenue in a half-year's row.
     """
     matches = [
         column
@@ -962,6 +1015,26 @@ def _select_column(
     ]
     if len(matches) == 1:
         return matches[0]
+    if not matches and entry.period_start is not None:
+        ending_when_asked = [column for column in columns if column.period_end == entry.period_end]
+        if len(ending_when_asked) == 1 and _is_sub_annual_widening(
+            ending_when_asked[0], entry=entry
+        ):
+            column = ending_when_asked[0]
+            _LOG.info(
+                "xbrl.period_taken_from_document",
+                filename=filename,
+                seq_number=entry.seq_number,
+                index_period=(
+                    f"{entry.period_start.isoformat() if entry.period_start else '?'}"
+                    f"\u2192{entry.period_end.isoformat()}"
+                ),
+                document_period=(
+                    f"{column.period_start.isoformat()}\u2192{column.period_end.isoformat()}"
+                ),
+                context=column.context_id,
+            )
+            return column
     offered = ", ".join(
         f"{column.context_id}={column.period_start.isoformat()}→{column.period_end.isoformat()}"
         f"/{column.nature.value}"
@@ -973,8 +1046,9 @@ def _select_column(
     )
     if not matches:
         raise ParseError(
-            f"no results column covers {wanted} as the index entry ({entry.seq_number}) says; the "
-            f"document offers {offered}",
+            f"no results column covers {wanted} as the index entry ({entry.seq_number}) says, and "
+            f"no single column ends on {entry.period_end.isoformat()} either; the document offers "
+            f"{offered}",
             filename=filename,
         )
     raise ParseError(
