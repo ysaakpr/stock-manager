@@ -47,11 +47,13 @@ from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.identity.master import Exchange, IdentityMaster, IdentityStore
 from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
+from dataplatform.ingest.bse.bhavcopy import BseLegacyQuote
 from dataplatform.ingest.calendar import (
     CalendarCoverageError,
     TradingCalendar,
     trading_calendar,
 )
+from dataplatform.ingest.corp_actions import build_scrip_index
 from dataplatform.ingest.fetcher import (
     Fetcher,
     ForbiddenSpikeError,
@@ -267,6 +269,75 @@ def _write_bse_bhavcopy(rows: Sequence[PriceRow], ctx: WriteContext) -> object:
     return write_prices_raw(list(rows), exchange=Exchange.BSE, data_root=ctx.data_root)
 
 
+# ── bse_bhavcopy_legacy source set ───────────────────────────────────────────────────────────
+
+
+#: The `sync_state` source name for the pre-cutover BSE backfill. Distinct from `bse_bhavcopy`
+#: on purpose: the two eras are fetched from different endpoints, parse through different code and
+#: — the part that matters — have different *identity* preconditions. The UDiFF era carries ISIN
+#: natively; this one resolves every row through the BSE scrip master, so its coverage question is
+#: "was the scrip master merged?" and the UDiFF era's is not. One source name over both would make
+#: a gap in either indistinguishable.
+BSE_BHAVCOPY_LEGACY: Final = "bse_bhavcopy_legacy"
+
+
+#: `EQ{DDMMYY}_CSV.ZIP` is numeric — `EQ020124_CSV.ZIP` is 2 January 2024, not `EQ02JAN24`. BSE
+#: answers a wrong stamp with its single-page-app shell under a 200, so the mistake costs a request
+#: and lands an HTML soft-404 in L0 rather than raising.
+def _legacy_stamp(trade_date: date) -> str:
+    return f"{trade_date.day:02d}{trade_date.month:02d}{trade_date.year % 100:02d}"
+
+
+def _bse_legacy_request(trade_date: date, register: SourceRegister) -> FetchRequest:
+    """Build the pre-cutover BSE cash-bhavcopy fetch for one session.
+
+    Refuses a UDiFF-era date for the mirror of the reason `_bse_bhavcopy_request` refuses a legacy
+    one: from the cutover the zipped file stops being served, and a caller who asked the wrong set
+    should see the boundary rather than a run of `FAILED` rows.
+    """
+    if bse_bhavcopy.era_of(trade_date) != "legacy":
+        raise ValueError(
+            f"{trade_date.isoformat()} is on or after the BSE UDiFF cutover "
+            f"({bse_bhavcopy.CUTOVER.isoformat()}); use the {BSE_BHAVCOPY} source set, whose "
+            "rows carry ISIN natively and need no scrip master"
+        )
+    url = _template_for(register, bse_bhavcopy.LEGACY_SOURCE_ID).replace(
+        "{DDMMYY}", _legacy_stamp(trade_date)
+    )
+    return FetchRequest(
+        trade_date=trade_date,
+        state_source=BSE_BHAVCOPY_LEGACY,
+        fetch_source=bse_bhavcopy.LEGACY_SOURCE_ID,
+        url=url,
+        filename=url.rsplit("/", 1)[-1],
+    )
+
+
+def _parse_bse_legacy(store: L0Store, ref: L0Ref) -> tuple[BseLegacyQuote, ...]:
+    """Parse one stored legacy payload. The trade date comes from the ref — the file has none."""
+    return bse_bhavcopy.parse_legacy(
+        store.get(ref), filename=ref.filename, trade_date=ref.logical_date
+    )
+
+
+def _write_bse_legacy(quotes: Sequence[BseLegacyQuote], ctx: WriteContext) -> object:
+    """Resolve a legacy session through the BSE scrip master and write its `prices_raw` partition.
+
+    The whole reason this set declares `needs_master`: a legacy row is keyed on `SC_CODE` and has
+    no ISIN, so D2 is the only path to one (invariant #2). A scrip the master does not know is
+    counted and dropped, never guessed — measured over six probe sessions spanning 2016-2024 that
+    is 5-9% of rows, and every one of them is a non-equity instrument the scrip master excludes by
+    construction: BSE groups F (debt), G (government securities), E (gold ETFs), IF and W. Equity
+    resolves essentially whole.
+    """
+    if ctx.master is None:  # pragma: no cover - the runner refuses to wire this set without one
+        raise ValueError(f"{BSE_BHAVCOPY_LEGACY} needs the identity master to resolve scrip codes")
+    resolution = bse_bhavcopy.resolve_legacy(quotes, build_scrip_index(ctx.master, Exchange.BSE))
+    return write_prices_raw(
+        list(resolution.resolved), exchange=Exchange.BSE, data_root=ctx.data_root
+    )
+
+
 # ── nse_delivery source set ──────────────────────────────────────────────────────────────────
 
 
@@ -363,6 +434,13 @@ SOURCE_SETS: Final[dict[str, SourceSet[Any]]] = {
         build_request=_bse_bhavcopy_request,
         parse=lambda store, ref: bse_bhavcopy.parse_l0(store, ref),
         write=_write_bse_bhavcopy,
+    ),
+    BSE_BHAVCOPY_LEGACY: SourceSet(
+        name=BSE_BHAVCOPY_LEGACY,
+        build_request=_bse_legacy_request,
+        parse=_parse_bse_legacy,
+        write=_write_bse_legacy,
+        needs_master=True,
     ),
     NSE_DELIVERY: SourceSet(
         name=NSE_DELIVERY,

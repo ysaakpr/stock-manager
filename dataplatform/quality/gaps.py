@@ -395,6 +395,10 @@ _PRICES_RAW_ROWS: Final[frozenset[str]] = frozenset(
 _PRICE_STATE_SOURCES: Final[dict[str, tuple[str, ...]]] = {
     "nse_bhavcopy": ("nse_bhavcopy_legacy", "nse_bhavcopy_udiff"),
     "bse_bhavcopy": ("bse_bhavcopy_udiff",),
+    # The pre-cutover BSE era checkpoints under its own name rather than joining `bse_bhavcopy`:
+    # it resolves every row through the scrip master, so "is this session missing?" has a different
+    # precondition either side of 2024-07-08 and one source name would blur the two.
+    "bse_bhavcopy_legacy": ("bse_bhavcopy_legacy",),
     "nse_delivery": ("nse_mto", "nse_sec_bhavdata_full"),
 }
 
