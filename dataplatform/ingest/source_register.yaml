@@ -600,6 +600,42 @@ sources:
     candidate_alternatives: []
     owner_task: M1.7
 
+  - id: nse_symbol_changes
+    plan_row: "Symbol / ISIN master"
+    description: >-
+      NSE's published symbol-change history — every rename, old symbol to new, with its date.
+      The other half of the identity master: EQUITY_L.csv says who is listed today, this says
+      what they used to be called (`dataplatform.identity.ingest._walk_chain`).
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/content/equities/symbolchange.csv"
+    verified_url: "https://nsearchives.nseindia.com/content/equities/symbolchange.csv"
+    cadence: weekly
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.identity.ingest, task: M1.7}
+    robots_notes: No directives on the archive host.
+    pit_notes: >-
+      Cumulative, not a snapshot: the file carries every rename NSE has published, so a later
+      copy is a superset of an earlier one. Keep every copy anyway — a row NSE removes is a
+      claim it has retracted, and only the accumulated series records that it was ever made.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:10:37+05:30
+    last_http_status: 200
+    sample_bytes: 68434
+    content_type: text/csv
+    sample_sha256: eee469d1ec499c66aa21a84c1b874150bfa5e98532fe65bf49ac0c8a7a08004e
+    parse_check: >-
+      CSV, 4 columns, headerless in practice — the first line is a data row. Columns are
+      company name, old symbol, new symbol, effective date (DD-MON-YYYY).
+    fixture: {frozen: true, task: M1.7, path: "tests/fixtures/nse_equity_list/2026-08-08/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M1.7
   - id: bse_scrip_master
     plan_row: "Symbol / ISIN master"
     description: BSE list-of-scrips — scrip_code→ISIN, without which no BSE row can be joined.

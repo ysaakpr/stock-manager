@@ -440,6 +440,45 @@ the lake is the specific hazard `AGENTIC_CONTEXT` §7 warns about.
 
 ---
 
+## 4b. Status — what landed the same day
+
+| | Finding | State | Evidence |
+|---|---|---|---|
+| P0.1 | N1 | **DONE** `9a0a3f9` | Migration 0008 gives `sync_state` a `unit` column; 71,853 distinct sources → **7**, no row lost of 76,803. `/status/sources` 27 MB in 65 s → **3.5 KB in 0.1 s**. `/status/gaps` default view 500 → **200 in 0.1 s**; all ten years in 1.1 s. A CHECK now refuses a non-identifier `source` at write time. |
+| P0.2 | N1 | **DONE** `9a0a3f9` | A malformed `?source=` is a 400 naming it, not a 500. |
+| P0.3 | — | **DONE** `158a66a` | [gap-report-2026-09-06.md](gap-report-2026-09-06.md): 97,445 pairs, 2,409 unexplained, every non-XBRL one listed. |
+| P1.1 | N2 | **DONE** `63c3c98` | Both sessions parse and are in the lake — 2,471 partitions, `expected_sessions` reports nothing absent. Two payloads frozen as fixtures with their provenance. |
+| P1.2 | N2 | **DONE** `5c50055` | `L0_PRESENT_L1_ABSENT` separates "fix the parser" from "fetch it again". Conservative for unit rows on purpose. |
+| P2.1 | N3 | **DONE** `5c50055` | `/status/quarantine` reproduces the 1,799,849 rows and their reason split; a step change becomes a WARN flag; the EOD job runs the check daily. Zero steps over ten years — the level is stable, which is why the rule watches the *change*. |
+| P2.2 | N9 | **DONE** `5c50055` | `/status/quality` groups by check with `raised_today` beside each count. The standing queue is one check: 2,487 `ca_reconciliation` WARNs, none raised today. |
+| P3.1 | N4 | **CODE DONE**, fetch queued | `nse_symbol_changes` has a register row; `identity.ingest --from-l0` reads both files back out of the lake; `ingest.identity_refresh` fetches them under the host lease. **The two requests wait for the host.** |
+| P3.2 | N4 | **DONE** | `identity_refresh` registered, 07:00 IST Saturday. The runbook's "D1 fetches them into L0" is true for the first time, and says so. |
+| P4.1 | N5 | **BLOCKED on the host** | Needs a source probe, and building a parser against a guessed format is the false-DONE this project already paid for once (M7.3). Recorded in the backlog with the candidates and the ordering argument. |
+| P5.1 | N7 | **DONE** `3dfdfca` | `host_lease` refuses a second driver and names the holder; `remote.sh run` now refuses in the other direction too. |
+| P6.1 | N6 | **DONE** `87b7197` | `l0_verify` weekly. First real full sweep: **62,047 payloads re-hashed in 260 s, zero defects.** |
+| P6.2 | N6 | **DONE** `87b7197` | Five `.DS_Store` files removed from inside `data/`. |
+| P7.1 | N8 | **ENUMERATED**, fetch queued | 774 filings → **536 distinct documents**, 153 ISINs, 2018-06 → 2025-02, listed in `missing-xbrl-payloads-2026-09-06.json`. ~22 min of fetching. |
+| P7.2 | — | **DONE** | The two stale backlog rows corrected: delivery *was* fetched, and "21 filings" is 156. |
+
+### Why three items are queued rather than done
+
+`ops/remote.sh status` during this work showed the Integrated Filing campaign still running on the
+server against `nsearchives.nseindia.com` — the same host `EQUITY_L.csv`, `symbolchange.csv` and
+the 536 XBRL documents come from. Fetching from the laptop while it runs is exactly the collision
+N7 is about, so P3.1's two requests, P4.1's probe and P7.1's 536 are queued behind it.
+
+That is worth recording as evidence rather than as an inconvenience: **the only thing that stopped
+the collision was reading a log by hand.** P5.1 now makes it a refusal.
+
+When the campaign finishes, in this order:
+
+```bash
+ops/remote.sh status                                    # drivers: 0
+uv run python -m dataplatform.ingest.identity_refresh   # P3.1 — 2 requests
+uv run python -m dataplatform.ingest.fundamentals_backfill --rebuild-missing \
+    --from-list ops/gates/missing-xbrl-payloads-2026-09-06.json   # P7.1 — 536 requests
+```
+
 ## 5. What this does not cover
 
 The BSE campaign completed on the server (536/536 sessions) and its L0 has not been brought home;

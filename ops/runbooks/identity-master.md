@@ -6,9 +6,26 @@ says. Two operator jobs live here: the weekly refresh, and clearing the reconcil
 
 ## Refresh the NSE master
 
-Weekly. The two files are `EQUITY_L.csv` (today's listings) and `symbolchange.csv` (every rename
-NSE has published). D1 fetches them into L0; this command reads files off disk and never opens a
-socket.
+Weekly, and it is now a scheduled job — `identity_refresh`, 07:00 IST on Saturday. The two files
+are `EQUITY_L.csv` (today's listings) and `symbolchange.csv` (every rename NSE has published). One
+command fetches both into L0 and re-derives the master by reading them back out:
+
+```bash
+uv run python -m dataplatform.ingest.identity_refresh
+```
+
+It takes the `nsearchives.nseindia.com` lease first, so it refuses to run beside a campaign
+(`dataplatform.ingest.lease`), and it re-fetches nothing L0 already holds for the date — a re-run
+on the same day is a no-op.
+
+To re-derive without fetching — after a database restore, or to reproduce a past snapshot — read
+the payloads straight back out of L0:
+
+```bash
+uv run python -m dataplatform.identity.ingest --from-l0 2026-08-08 --dry-run
+```
+
+The path form still exists for a file you have in your hand:
 
 ```bash
 uv run python -m dataplatform.identity.ingest \
@@ -17,6 +34,12 @@ uv run python -m dataplatform.identity.ingest \
   --snapshot-date 2026-08-08 \
   --dry-run                      # drop --dry-run to commit
 ```
+
+> **Until 2026-09-06 the first paragraph was wrong.** It said "D1 fetches them into L0" and D1
+> never had: there was no `data/L0/nse_equity_list/` tree, `symbolchange.csv` had no Source
+> Register row, and the master every ISIN join depends on was built from the frozen copies in
+> `tests/fixtures/` — outside L0's checksums, outside the backup, and outside invariant #1. The
+> `--from-l0` path above is what closes that; the fixtures below are fixtures again.
 
 `--snapshot-date` is the date the snapshot *describes*, not the date you ran it. Omit it and the
 injected clock's today is used, which is right for a same-day refresh and wrong for a re-run of

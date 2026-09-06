@@ -64,21 +64,27 @@ from dataplatform.identity.master import (
 )
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection, connection
+from dataplatform.store.l0 import L0Error, L0Store
 
 __all__ = [
     "EQUITY_LIST_COLUMNS",
+    "EQUITY_LIST_FILENAME",
     "NSE_EQUITY_LIST_SOURCE",
+    "NSE_SYMBOL_CHANGES_SOURCE",
     "NSE_SYMBOL_CHANGE_SOURCE",
+    "SYMBOL_CHANGES_FILENAME",
     "ClampedWindow",
     "DerivedMaster",
     "EquityListRow",
     "IdentityIngestReport",
     "IdentityParseError",
+    "L0PayloadMissingError",
     "SymbolChange",
     "derive_master",
     "ingest_snapshot",
     "parse_equity_list",
     "parse_symbol_changes",
+    "read_snapshot_from_l0",
 ]
 
 _log = get_logger(__name__)
@@ -87,6 +93,55 @@ _log = get_logger(__name__)
 #: written into `symbol_history.source`, so a window can always be traced to the file that
 #: produced it — the current symbol comes from the equity list, older ones from the change file.
 NSE_EQUITY_LIST_SOURCE: Final = "nse_equity_list"
+
+#: The register id for the rename history. Added in the 2026-09-06 audit (P3.1): the file had
+#: always been half of the master's input and had no register row at all, so nothing fetched it and
+#: nothing could re-derive from it.
+NSE_SYMBOL_CHANGES_SOURCE: Final = "nse_symbol_changes"
+
+#: The L0 filenames both sources land under — the last path segment of their register URLs.
+EQUITY_LIST_FILENAME: Final = "EQUITY_L.csv"
+SYMBOL_CHANGES_FILENAME: Final = "symbolchange.csv"
+
+
+class L0PayloadMissingError(IdentityError):
+    """A snapshot was asked for from L0 and the raw lake does not hold it."""
+
+
+def read_snapshot_from_l0(
+    snapshot_date: date, *, store: L0Store | None = None, clock: Clock | None = None
+) -> tuple[str, str]:
+    """Both identity files for one snapshot date, read back out of L0 and re-checksummed.
+
+    What it does: resolves the two `L0Ref`s and reads them through `L0Store.get`, which re-hashes
+    each payload on the way out — so the master is derived from bytes that have not changed since
+    they were fetched, exactly as invariant #1 requires of every other L1 value.
+    What it assumes: D1 has fetched them (`ingest.identity_refresh`). This module still never
+    opens a socket.
+    What it never does: fall back to a file on disk. Until this existed, `security_master` was
+    built from `tests/fixtures/nse_equity_list/`, which is outside L0's provenance chain, outside
+    its checksums and outside the backup — a silent hole under the one table every ISIN join
+    depends on (2026-09-06 audit, finding N4). A quiet fallback would re-open it.
+
+    Raises `L0PayloadMissingError` naming the source and date when the lake does not hold them.
+    """
+    resolved = L0Store(clock=SystemClock() if clock is None else clock) if store is None else store
+    payloads: list[str] = []
+    for source, filename in (
+        (NSE_EQUITY_LIST_SOURCE, EQUITY_LIST_FILENAME),
+        (NSE_SYMBOL_CHANGES_SOURCE, SYMBOL_CHANGES_FILENAME),
+    ):
+        try:
+            ref = resolved.ref_for(source, snapshot_date, filename)
+            payloads.append(resolved.get(ref).decode("utf-8"))
+        except (FileNotFoundError, L0Error) as exc:
+            raise L0PayloadMissingError(
+                f"no L0 payload for {source} on {snapshot_date.isoformat()} ({filename}): {exc}. "
+                f"Fetch it first — `python -m dataplatform.ingest.identity_refresh`"
+            ) from exc
+    return payloads[0], payloads[1]
+
+
 NSE_SYMBOL_CHANGE_SOURCE: Final = "nse_symbol_change"
 
 #: `EQUITY_L.csv`'s header, with the source's own leading spaces stripped. Asserted rather than
@@ -615,8 +670,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     symbol fails visibly instead of leaving a queue row nobody looks at.
     """
     parser = argparse.ArgumentParser(prog="identity.ingest", description="Ingest the NSE master.")
-    parser.add_argument("--equity-list", type=Path, required=True, help="EQUITY_L.csv")
-    parser.add_argument("--symbol-changes", type=Path, help="symbolchange.csv")
+    parser.add_argument("--equity-list", type=Path, help="EQUITY_L.csv on disk")
+    parser.add_argument("--symbol-changes", type=Path, help="symbolchange.csv on disk")
+    parser.add_argument(
+        "--from-l0",
+        type=date.fromisoformat,
+        metavar="SNAPSHOT_DATE",
+        help=(
+            "read both files back out of L0 for this date instead of from disk paths. This is "
+            "the path invariant #1 assumes: the master is re-derivable from the raw lake, which "
+            "it was not while its only copies lived in tests/fixtures (2026-09-06 audit, N4)"
+        ),
+    )
     parser.add_argument(
         "--snapshot-date",
         type=date.fromisoformat,
@@ -626,15 +691,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--dry-run", action="store_true", help="parse, derive and report; roll back at the end"
     )
     args = parser.parse_args(argv)
+    if (args.from_l0 is None) == (args.equity_list is None):
+        parser.error("give either --from-l0 SNAPSHOT_DATE or --equity-list PATH, not both")
 
-    changes = "" if args.symbol_changes is None else args.symbol_changes.read_text(encoding="utf-8")
+    if args.from_l0 is not None:
+        try:
+            equity_list, changes = read_snapshot_from_l0(args.from_l0)
+        except L0PayloadMissingError as error:
+            print(f"identity ingest failed: {error}", file=sys.stderr)
+            return 2
+        snapshot_date = args.snapshot_date or args.from_l0
+    else:
+        equity_list = args.equity_list.read_text(encoding="utf-8")
+        changes = (
+            "" if args.symbol_changes is None else args.symbol_changes.read_text(encoding="utf-8")
+        )
+        snapshot_date = args.snapshot_date
     with connection() as conn:
         try:
             report = ingest_snapshot(
                 conn,
-                equity_list=args.equity_list.read_text(encoding="utf-8"),
+                equity_list=equity_list,
                 symbol_changes=changes,
-                snapshot_date=args.snapshot_date,
+                snapshot_date=snapshot_date,
             )
         except IdentityError as error:
             conn.rollback()

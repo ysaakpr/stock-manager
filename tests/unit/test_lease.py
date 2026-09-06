@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Final
@@ -186,9 +188,11 @@ def _plant(root: Path, *, pid: int, machine: str, at: datetime, overwrite: bool 
 
 
 def _dead_pid() -> int:
-    """A pid that is certainly not running: fork a child and reap it."""
-    pid = os.fork()
-    if pid == 0:  # pragma: no cover - the child never returns
-        os._exit(0)
-    os.waitpid(pid, 0)
-    return pid
+    """A pid that is certainly not running: run a trivial child and let it exit.
+
+    A subprocess rather than `os.fork` — forking a multi-threaded pytest process is exactly the
+    deadlock the runtime warns about, and this needs only the number.
+    """
+    child = subprocess.Popen([sys.executable, "-c", ""])
+    child.wait()
+    return child.pid
