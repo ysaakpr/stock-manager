@@ -13,7 +13,11 @@ Three properties this module exists to guarantee, each mapped to an acceptance c
   byte-identical partition. Determinism comes from three choices: rows are sorted by a total key
   before writing, every money value is quantised to a fixed decimal scale, and the file is written
   whole via a staging rename. So "every L1 value is re-derivable from L0" (invariant #1) is not a
-  claim but a test that rewrites and diffs the bytes.
+  claim but a test that rewrites and diffs the bytes. One partition holds *both* exchanges' rows
+  for the date (§4.1 row 4; M3.1's "BSE lands under the same schema as NSE"), so a write is scoped
+  to the exchange it names: it replaces that exchange's rows and carries the other exchange's
+  through untouched. Whichever exchange is written first, the bytes come out the same, because the
+  sort key leads with `exchange`.
 
 * **The delivery join goes through the identity master, never through symbols.** The delivery file
   has no ISIN and NSE symbols are recycled, so a delivery row is resolved to its ISIN via
@@ -100,6 +104,8 @@ class PricesRawWriteReport:
     delivery_unresolved: int
     delivery_orphaned: int
     quarantine_path: Path | None
+    #: Rows of the *other* exchange already in the partition, read back and written out unchanged.
+    rows_preserved: int = 0
 
     @property
     def quarantined(self) -> int:
@@ -120,11 +126,14 @@ def write_prices_raw(
     What it does: joins the session's delivery figures onto the price rows by `(isin, series,
     trade_date)` after resolving each delivery symbol to an ISIN through `master` (invariant #2),
     builds the `prices_raw` table against the declared schema (invariant #3, drift fails loud), and
-    writes it whole to `L1/prices_raw/date=…/part.parquet`. Delivery rows that cannot be placed are
+    writes it whole to `L1/prices_raw/date=…/part.parquet`. The partition is shared by both
+    exchanges, so rows already there for any *other* exchange are read back and written out again
+    unchanged; only `exchange`'s own rows are replaced. Delivery rows that cannot be placed are
     written to the quarantine dataset and counted, never dropped.
     What it assumes: all `price_rows` are one exchange's single session — it raises `ValueError`
     otherwise, because a partition is exactly one `(dataset, date)`. `exchange` names that exchange;
-    the price rows carry no exchange of their own, so the caller states it.
+    the price rows carry no exchange of their own, so the caller states it. One writer per partition
+    at a time: two exchanges' backfills writing the same date concurrently would race the read-back.
     What it never does: store an adjusted price, resolve a symbol by name alone, or drop a delivery
     row. Passing delivery rows without a `master` is a `ValueError`: there is no legal way to place
     them without the identity path.
@@ -145,8 +154,6 @@ def write_prices_raw(
     by_key = _delivery_index(resolved)
 
     out_rows = [_price_to_raw(row, exchange=exchange, deliv_index=by_key) for row in price_rows]
-    # Total key so the partition is byte-identical across re-derivations regardless of parse order.
-    out_rows.sort(key=lambda r: (r.isin, r.symbol, r.series))
 
     # A resolved delivery key is "joined" iff a price row carried its (isin, series); the rest are
     # orphans (resolved but no matching price) and are quarantined, never dropped.
@@ -155,30 +162,15 @@ def write_prices_raw(
 
     path = l1_partition_path(PRICES_RAW_DATASET, trade_date, data_root=data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_pylist(
-        [
-            {
-                "isin": row.isin,
-                "exchange": row.exchange,
-                "symbol": row.symbol,
-                "series": row.series,
-                "trade_date": row.trade_date,
-                "open": _q(row.open, _PRICE_Q),
-                "high": _q(row.high, _PRICE_Q),
-                "low": _q(row.low, _PRICE_Q),
-                "close": _q(row.close, _PRICE_Q),
-                "last": _q(row.last, _PRICE_Q),
-                "prev_close": _q(row.prev_close, _PRICE_Q),
-                "total_traded_qty": row.total_traded_qty,
-                "total_traded_value": _q(row.total_traded_value, _PRICE_Q),
-                "total_trades": row.total_trades,
-                "deliv_qty": row.deliv_qty,
-                "deliv_pct": _q(row.deliv_pct, _PCT_Q) if row.deliv_pct is not None else None,
-            }
-            for row in out_rows
-        ],
-        schema=PRICES_RAW_SCHEMA,
-    )
+    # The partition is one (dataset, date) for both exchanges: the other exchange's rows already on
+    # disk ride through unchanged and only this exchange's are replaced. Without this, the first BSE
+    # session written would silently overwrite the NSE session for the same date (M3.1).
+    preserved = _other_exchange_records(path, exchange)
+    records = [_record(row) for row in out_rows] + preserved
+    # Total key, leading with exchange, so the partition is byte-identical across re-derivations
+    # regardless of parse order — and regardless of which exchange was written first.
+    records.sort(key=_record_sort_key)
+    table = pa.Table.from_pylist(records, schema=PRICES_RAW_SCHEMA)
     assert_raw_only(table.schema)
     enforce_schema(table, PRICES_RAW_SCHEMA, dataset=PRICES_RAW_DATASET)
     _write_table(table, path)
@@ -198,6 +190,7 @@ def write_prices_raw(
         delivery_unresolved=len(unresolved),
         delivery_orphaned=len(orphaned),
         quarantine_path=quarantine_path,
+        rows_preserved=len(preserved),
     )
     _LOG.info(
         "l1.prices_raw_written",
@@ -206,6 +199,7 @@ def write_prices_raw(
         trade_date=trade_date.isoformat(),
         path=str(path),
         rows=report.rows_written,
+        rows_preserved=report.rows_preserved,
         delivery_rows=report.delivery_rows,
         delivery_joined=report.delivery_joined,
         delivery_unresolved=report.delivery_unresolved,
@@ -438,6 +432,51 @@ def _write_quarantine(
 def _q(value: Decimal, quantum: Decimal) -> Decimal:
     """Quantise to a fixed scale with half-up rounding, so stored money is byte-deterministic."""
     return value.quantize(quantum, rounding=ROUND_HALF_UP)
+
+
+def _record(row: PricesRawRow) -> dict[str, object]:
+    """One validated row as the parquet record the schema expects, money quantised to its scale."""
+    return {
+        "isin": row.isin,
+        "exchange": row.exchange,
+        "symbol": row.symbol,
+        "series": row.series,
+        "trade_date": row.trade_date,
+        "open": _q(row.open, _PRICE_Q),
+        "high": _q(row.high, _PRICE_Q),
+        "low": _q(row.low, _PRICE_Q),
+        "close": _q(row.close, _PRICE_Q),
+        "last": _q(row.last, _PRICE_Q),
+        "prev_close": _q(row.prev_close, _PRICE_Q),
+        "total_traded_qty": row.total_traded_qty,
+        "total_traded_value": _q(row.total_traded_value, _PRICE_Q),
+        "total_trades": row.total_trades,
+        "deliv_qty": row.deliv_qty,
+        "deliv_pct": _q(row.deliv_pct, _PCT_Q) if row.deliv_pct is not None else None,
+    }
+
+
+def _record_sort_key(record: dict[str, object]) -> tuple[str, str, str, str]:
+    """The partition's total order: exchange first, so one exchange's block is unaffected by the
+    other's presence, then the key that was already total within an exchange."""
+    return (
+        str(record["exchange"]),
+        str(record["isin"]),
+        str(record["symbol"]),
+        str(record["series"]),
+    )
+
+
+def _other_exchange_records(path: Path, exchange: Exchange) -> list[dict[str, object]]:
+    """The rows already in the partition that belong to any exchange other than `exchange`.
+
+    Read back through the declared schema so a drifted file fails loud here rather than being
+    re-serialised. An absent partition contributes nothing — the common case for a first write.
+    """
+    if not path.exists():
+        return []
+    stored: list[dict[str, object]] = pq.read_table(path, schema=PRICES_RAW_SCHEMA).to_pylist()
+    return [record for record in stored if record["exchange"] != exchange.value]
 
 
 def _write_table(table: pa.Table, path: Path) -> None:
