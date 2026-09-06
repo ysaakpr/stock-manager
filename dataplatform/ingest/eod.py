@@ -62,6 +62,15 @@ from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.logging import get_logger, log_context
 from dataplatform.quality.gaps import GapReport, GapScanner, LakeL1Presence
+from dataplatform.quality.quarantine import (
+    DEFAULT_WINDOW,
+    QuarantineReport,
+    QuarantineStep,
+    findings_from_steps,
+    read_quarantine,
+    step_changes,
+)
+from dataplatform.quality.sentinel import persist_findings
 from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store.db import Connection, connection
 from dataplatform.store.l0 import L0Store
@@ -158,6 +167,8 @@ class EodReport:
     sources: tuple[str, ...]
     outcomes: dict[str, SourceOutcome] = field(default_factory=dict)
     gap_report: GapReport | None = None
+    quarantine: QuarantineReport | None = None
+    quarantine_steps: tuple[QuarantineStep, ...] = ()
     archive: PublishReport | None = None
     alerts_sent: int = 0
 
@@ -249,6 +260,7 @@ class EodPipeline:
                 )
 
             report.gap_report = self._gap_check(lookback_from, target)
+            report.quarantine, report.quarantine_steps = self._quarantine_check(target)
             report.alerts_sent = self._emit_alerts(report)
 
             if report.session_published:
@@ -350,6 +362,34 @@ class EodPipeline:
             unexplained=len(report.unexplained),
         )
         return report
+
+    def _quarantine_check(
+        self, target: date
+    ) -> tuple[QuarantineReport, tuple[QuarantineStep, ...]]:
+        """Count what L1 refused for the target session, and flag it if it is a step change.
+
+        The count goes in the report unconditionally, which is the point: `prices_raw_quarantine`
+        held 1.8 M rows for months with no reader, and a number nobody sees once a day is a number
+        nobody sees (audit finding N3). The *flag* is raised only on a step, because the level is a
+        known consequence of the identity master being one snapshot and a rule that fired on it
+        would be muted inside a week.
+
+        The window read is `DEFAULT_WINDOW` sessions of history plus the target, because a step is
+        measured against a series' own past and there is nothing to compare a bare session to.
+        """
+        window_start = target - timedelta(days=DEFAULT_WINDOW * 2)
+        report = read_quarantine(window_start, target, data_root=self._data_root)
+        steps = tuple(step for step in step_changes(report.counts) if step.trade_date == target)
+        counts = persist_findings(self._conn, findings_from_steps(steps), clock=self._clock)
+        _LOG.info(
+            "eod.quarantine_check",
+            trade_date=target.isoformat(),
+            rows_in_window=report.rows,
+            totals=report.totals(),
+            steps=len(steps),
+            flags_written=counts.written,
+        )
+        return report, steps
 
     def _emit_alerts(self, report: EodReport) -> int:
         """Alert on every source left FAILED and on an unexplained gap; return how many were sent.

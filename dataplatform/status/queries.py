@@ -20,16 +20,22 @@ ignore the frozen clock a test or a replay set.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
 
 from pydantic import ValidationError
 
+from dataplatform.quality.quarantine import read_quarantine, step_changes
 from dataplatform.status.models import (
     ArchiveBundleOut,
     ArchiveFileOut,
     ArchivesOut,
+    CheckCountOut,
     QualityFlagOut,
     QualityOut,
+    QuarantineCountOut,
+    QuarantineOut,
+    QuarantineStepOut,
     SeverityCountOut,
 )
 from dataplatform.store.db import Connection
@@ -58,6 +64,24 @@ GROUP BY severity
 ORDER BY severity
 """
 
+#: Open flags grouped by what actually raised them. `/status/quality` reported one number and a
+#: truncated page of rows, so a saturated queue ("2,487 open" every day, for two years) rendered
+#: identically to a fresh incident. The two columns that separate them are the last two: how many
+#: of these arrived today, and how many in the last week.
+_QUALITY_BY_CHECK_SQL = """
+SELECT check_name,
+       severity,
+       count(*),
+       min(logical_date),
+       max(logical_date),
+       count(*) FILTER (WHERE raised_at >= %s),
+       count(*) FILTER (WHERE raised_at >= %s)
+FROM quality_flag
+WHERE NOT resolved
+GROUP BY check_name, severity
+ORDER BY count(*) DESC, check_name
+"""
+
 _ARCHIVES_SQL = """
 SELECT logical_date, schema_version, bundle_path, manifest_sha256, file_count, total_bytes,
        manifest, published_at
@@ -67,10 +91,29 @@ WHERE logical_date = %s
 
 
 def read_quality(conn: Connection, as_of: datetime, limit: int) -> QualityOut:
-    """Open D7 sentinel flags, newest first, plus the totals the limit would otherwise hide."""
+    """Open D7 sentinel flags, newest first, plus the totals the limit would otherwise hide.
+
+    Grouped by check as well as by severity, because "how many are open" is not the operational
+    question — "is today worse than yesterday" is, and a permanently saturated queue answers the
+    first one identically every day. `raised_today`/`raised_last_7_days` are that difference.
+    """
+    midnight = datetime.combine(as_of.date(), time.min, tzinfo=as_of.tzinfo)
+    week_ago = midnight - timedelta(days=7)
     counts = [
         SeverityCountOut(severity=row[0], count=int(row[1]))
         for row in conn.execute(_QUALITY_COUNTS_SQL).fetchall()
+    ]
+    by_check = [
+        CheckCountOut(
+            check_name=str(row[0]),
+            severity=row[1],
+            count=int(row[2]),
+            first_date=row[3],
+            last_date=row[4],
+            raised_today=int(row[5]),
+            raised_last_7_days=int(row[6]),
+        )
+        for row in conn.execute(_QUALITY_BY_CHECK_SQL, (midnight, week_ago)).fetchall()
     ]
     flags = [
         QualityFlagOut(
@@ -91,6 +134,7 @@ def read_quality(conn: Connection, as_of: datetime, limit: int) -> QualityOut:
         as_of=as_of,
         open_total=sum(entry.count for entry in counts),
         counts=counts,
+        by_check=by_check,
         flags=flags,
         limit=limit,
     )
@@ -143,3 +187,48 @@ def _manifest_files(manifest: object, logical_date: date) -> list[ArchiveFileOut
             f"archive_bundle.manifest.files for {logical_date.isoformat()} does not match the "
             f"ArchiveFileOut contract: {error}"
         ) from error
+
+
+def read_quarantine_status(
+    from_date: date, to_date: date, *, limit: int, data_root: Path | None = None
+) -> QuarantineOut:
+    """`GET /status/quarantine` — what L1 refused over a range, and which sessions are news.
+
+    The per-session enumeration is capped the way `/status/quality`'s is: `rows`, `totals` and
+    `steps` are computed over the whole range, so the cap changes how much you read and never what
+    is true. `steps` is never capped — there are single digits of them over a decade, and a
+    truncated list of the only actionable field would be worse than useless.
+    """
+    report = read_quarantine(from_date, to_date, data_root=data_root)
+    steps = step_changes(report.counts)
+    return QuarantineOut(
+        from_date=from_date,
+        to_date=to_date,
+        rows=report.rows,
+        partitions_read=report.partitions_read,
+        totals=report.totals(),
+        steps=[
+            QuarantineStepOut(
+                trade_date=step.trade_date,
+                exchange=step.exchange,
+                reason=step.reason,
+                rows=step.rows,
+                baseline=step.baseline,
+                multiple=step.multiple,
+                detail=step.detail(),
+            )
+            for step in steps
+        ],
+        counts=[
+            QuarantineCountOut(
+                trade_date=count.trade_date,
+                exchange=count.exchange,
+                reason=count.reason,
+                rows=count.rows,
+            )
+            # Newest first: an operator opening this wants the recent sessions, and the ten-year
+            # tail is what the cap is there to keep out.
+            for count in sorted(report.counts, key=lambda c: c.trade_date, reverse=True)[:limit]
+        ],
+        limit=limit,
+    )

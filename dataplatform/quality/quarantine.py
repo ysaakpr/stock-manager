@@ -39,6 +39,7 @@ from typing import Final
 import duckdb
 
 from dataplatform.logging import get_logger
+from dataplatform.quality.sentinel import QualityFinding, finding_fingerprint
 from dataplatform.store.paths import Layer, layer_root
 from dataplatform.store.schemas import PRICES_RAW_QUARANTINE_DATASET
 
@@ -46,9 +47,11 @@ __all__ = [
     "DEFAULT_MIN_ROWS",
     "DEFAULT_MULTIPLE",
     "DEFAULT_WINDOW",
+    "STEP_CHECK_NAME",
     "QuarantineCount",
     "QuarantineReport",
     "QuarantineStep",
+    "findings_from_steps",
     "read_quarantine",
     "step_changes",
 ]
@@ -94,14 +97,22 @@ class QuarantineStep:
     reason: str
     rows: int
     baseline: Decimal
-    multiple: Decimal
+    #: `rows / baseline`, or None when the baseline is zero. None is not "unknown" — it is the
+    #: strongest form of the signal, a series that quarantined nothing and now quarantines
+    #: something, and it has no ratio because there is nothing to divide by.
+    multiple: Decimal | None
 
     def detail(self) -> str:
         """The one line an alert or a `quality_flag` carries."""
+        against = (
+            "against a trailing median of zero — this series quarantined nothing until now"
+            if self.multiple is None
+            else f"{self.multiple}x the trailing median of {self.baseline} over the previous "
+            f"sessions"
+        )
         return (
             f"{self.reason} quarantined {self.rows} {self.exchange} row(s) on "
-            f"{self.trade_date.isoformat()}, {self.multiple}x the trailing median of "
-            f"{self.baseline} over the previous sessions — a step change, not the known level"
+            f"{self.trade_date.isoformat()}, {against} — a step change, not the known level"
         )
 
 
@@ -169,14 +180,12 @@ def read_quarantine(
         if from_date <= _partition_date(path) <= to_date
     )
     if not partitions:
-        return QuarantineReport(
-            from_date=from_date, to_date=to_date, counts=(), partitions_read=0
-        )
+        return QuarantineReport(from_date=from_date, to_date=to_date, counts=(), partitions_read=0)
 
     connection = duckdb.connect(":memory:") if con is None else con
     listed = ", ".join(f"'{path}'" for path in partitions)
     rows = connection.execute(
-        f"SELECT trade_date, exchange, reason, count(*) "  # noqa: S608 - paths, not user input
+        f"SELECT trade_date, exchange, reason, count(*) "
         f"FROM read_parquet([{listed}]) GROUP BY 1, 2, 3 ORDER BY 1, 2, 3"
     ).fetchall()
     counts = tuple(
@@ -239,7 +248,10 @@ def step_changes(
                 continue
             history = [previous.rows for previous in series[index - window : index]]
             baseline = Decimal(str(statistics.median(history)))
-            if baseline <= 0 or Decimal(count.rows) < baseline * multiple:
+            # A zero baseline is the strongest signal, not an edge case to skip: a series that
+            # refused nothing for a month and now refuses `min_rows` or more is exactly the new
+            # break this rule exists to find. It has no ratio, so it reports none.
+            if baseline > 0 and Decimal(count.rows) < baseline * multiple:
                 continue
             steps.append(
                 QuarantineStep(
@@ -248,7 +260,11 @@ def step_changes(
                     reason=count.reason,
                     rows=count.rows,
                     baseline=baseline,
-                    multiple=(Decimal(count.rows) / baseline).quantize(Decimal("0.1")),
+                    multiple=(
+                        None
+                        if baseline == 0
+                        else (Decimal(count.rows) / baseline).quantize(Decimal("0.1"))
+                    ),
                 )
             )
     steps.sort(key=lambda step: (step.trade_date, step.exchange, step.reason))
@@ -266,3 +282,41 @@ def totals_by_reason(counts: Sequence[QuarantineCount]) -> Mapping[str, int]:
     for count in counts:
         out[count.reason] = out.get(count.reason, 0) + count.rows
     return out
+
+
+#: The `quality_flag.check_name` a step change is filed under. One name per rule, so
+#: `/status/quality` can filter to it with one predicate.
+STEP_CHECK_NAME: Final = "quarantine_step_change"
+
+
+def findings_from_steps(steps: Iterable[QuarantineStep]) -> tuple[QualityFinding, ...]:
+    """Turn step changes into D7 findings for `persist_findings`.
+
+    WARN, not ERROR, and deliberately: a jump in refusals means a slice of one session did not
+    make it into `prices_raw`, which is worth waking up to, but it is not a reason to stop trading
+    on the rest of the session (invariant #10 counts only ERROR). `source` is the quarantine
+    dataset so the flag scopes there rather than counting market-wide.
+
+    The fingerprint is `(check, exchange/reason, date)`, so re-running the check over a session it
+    already flagged adds nothing — the dedupe the persist path already implements.
+    """
+    return tuple(
+        QualityFinding(
+            logical_date=step.trade_date,
+            check_name=STEP_CHECK_NAME,
+            severity="WARN",
+            source=PRICES_RAW_QUARANTINE_DATASET,
+            observed_value=Decimal(step.rows),
+            threshold=step.baseline,
+            detail={
+                "exchange": step.exchange,
+                "reason": step.reason,
+                "multiple": None if step.multiple is None else str(step.multiple),
+                "message": step.detail(),
+            },
+            fingerprint=finding_fingerprint(
+                f"{STEP_CHECK_NAME}:{step.exchange}:{step.reason}", None, step.trade_date
+            ),
+        )
+        for step in steps
+    )

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Annotated
 
 import psycopg
@@ -51,6 +51,7 @@ from dataplatform.status.models import (
     GapsOut,
     HealthOut,
     QualityOut,
+    QuarantineOut,
     SchedulerHealthOut,
     SchedulerState,
     ServiceStatus,
@@ -58,7 +59,7 @@ from dataplatform.status.models import (
     SourceStatusOut,
     SyncStatusOut,
 )
-from dataplatform.status.queries import read_archives, read_quality
+from dataplatform.status.queries import read_archives, read_quality, read_quarantine_status
 from dataplatform.status.sync_state import MalformedSyncSourceError, SyncStateStore
 from dataplatform.store.db import Connection, connection
 from dataplatform.store.paths import PathLayoutError
@@ -380,6 +381,45 @@ def status_quality(
 
 
 # ── /archives ───────────────────────────────────────────────────────────────────────────────
+
+
+@app.get("/status/quarantine", summary="Rows L1 refused, by session and reason")
+def status_quarantine(
+    clock: ClockDep,
+    settings: SettingsDep,
+    from_date: Annotated[
+        date | None, Query(alias="from", description="Inclusive. Defaults to 90 days back.")
+    ] = None,
+    to_date: Annotated[
+        date | None, Query(alias="to", description="Inclusive. Defaults to today.")
+    ] = None,
+    limit: Annotated[
+        int, Query(ge=1, le=20000, description="Cap on the per-session enumeration.")
+    ] = 500,
+) -> QuarantineOut:
+    """What `prices_raw_quarantine` holds over a range, and which sessions are a step change.
+
+    What it does: counts the dataset by session, exchange and reason, and runs the trailing-median
+    rule over each series. `steps` is the actionable field — the *level* of unresolved delivery
+    symbols is a known, tracked consequence of the identity master being one snapshot, and a rule
+    that fired on it would be muted within a week.
+    What it assumes: nothing about the lake existing. A range with no partitions answers zero rows
+    over zero partitions and says so, because "we found nothing" and "we looked at nothing" must
+    not render identically.
+    What it never does: read from Postgres. The quarantine is an L1 dataset; this endpoint is the
+    only one here that answers from the lake, which is why it takes no connection.
+
+    Written because the dataset had a writer and no reader: 1.8 M rows across 2,467 partitions,
+    one grep away from invisible (2026-09-06 audit, finding N3).
+    """
+    today = clock.today()
+    end = today if to_date is None else to_date
+    start = (end - timedelta(days=90)) if from_date is None else from_date
+    if start > end:
+        raise HTTPException(
+            status_code=400, detail=f"from={start.isoformat()} is after to={end.isoformat()}"
+        )
+    return read_quarantine_status(start, end, limit=limit, data_root=settings.data_root)
 
 
 @app.get("/archives", summary="Manifest of the daily archive bundle for a date")

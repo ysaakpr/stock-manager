@@ -434,6 +434,24 @@ class SeverityCountOut(BaseModel):
     count: int
 
 
+class CheckCountOut(BaseModel):
+    """Open flags from one check, with the two numbers that say whether it is news.
+
+    A queue nobody drains reports the same `count` every day; `raised_today` is what separates
+    "2,487 open, all of them old" from "2,487 open and 40 of them arrived this morning".
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    check_name: str
+    severity: QualitySeverity
+    count: int
+    first_date: date = Field(description="Earliest logical date any open flag of this check names")
+    last_date: date = Field(description="Latest logical date any open flag of this check names")
+    raised_today: int = Field(description="Raised since midnight on the injected clock's today")
+    raised_last_7_days: int
+
+
 class QualityOut(BaseModel):
     """`GET /status/quality` — open D7 flags, newest first, with the true totals beside them."""
 
@@ -445,8 +463,68 @@ class QualityOut(BaseModel):
         "limit truncates. A status endpoint whose total is its own page size cannot report a flood"
     )
     counts: list[SeverityCountOut]
+    by_check: list[CheckCountOut] = Field(
+        default_factory=list,
+        description="Open flags grouped by check, largest first — the view that survives a "
+        "saturated queue, where the capped `flags` page does not",
+    )
     flags: list[QualityFlagOut]
     limit: int = Field(description="How many flags this response was allowed to carry")
+
+
+# ── /status/quarantine ──────────────────────────────────────────────────────────────────────
+
+
+class QuarantineCountOut(BaseModel):
+    """Rows one session refused into `prices_raw_quarantine`, for one reason on one exchange."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    trade_date: date
+    exchange: str
+    reason: str
+    rows: int
+
+
+class QuarantineStepOut(BaseModel):
+    """A session where one reason stepped away from its own trailing median."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    trade_date: date
+    exchange: str
+    reason: str
+    rows: int
+    baseline: Decimal = Field(description="Trailing median of the window before this session")
+    multiple: Decimal | None = Field(
+        description="rows / baseline — exact, never a float. Null when the baseline is zero: "
+        "a series that quarantined nothing and now quarantines something has no ratio, and that "
+        "is the strongest form of the signal rather than a missing value"
+    )
+    detail: str
+
+
+class QuarantineOut(BaseModel):
+    """`GET /status/quarantine` — what L1 refused, and whether any session is news.
+
+    The absolute level is known and tracked elsewhere (the identity master knows 2,397 of the
+    7,536 ISINs that have traded), so `steps` is the field to look at: a jump against a series'
+    own recent history is a new break, where the level is an old one.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    from_date: date
+    to_date: date
+    rows: int = Field(description="Every quarantined row in the range")
+    partitions_read: int = Field(
+        description="Partitions the answer was computed over. Zero rows over zero partitions is "
+        "not a clean bill of health, and this is what tells the two apart"
+    )
+    totals: dict[str, int] = Field(description="Rows per reason, largest first")
+    steps: list[QuarantineStepOut]
+    counts: list[QuarantineCountOut]
+    limit: int = Field(description="How many per-session counts this response was allowed to hold")
 
 
 # ── /archives ───────────────────────────────────────────────────────────────────────────────

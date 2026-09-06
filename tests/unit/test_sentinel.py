@@ -414,6 +414,28 @@ class _FakeConn:
             )
             self._next_id += 1
             return _FakeCursor([])
+        if "GROUP BY check_name, severity" in sql:  # read_quality's by-check grouping
+            since_midnight, since_week = p
+            grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+            for f in self._flags:
+                if not f["resolved"]:
+                    grouped.setdefault((f["check_name"], f["severity"]), []).append(f)
+            return _FakeCursor(
+                [
+                    (
+                        check_name,
+                        severity,
+                        len(flags),
+                        min(f["logical_date"] for f in flags),
+                        max(f["logical_date"] for f in flags),
+                        sum(1 for f in flags if f["raised_at"] >= since_midnight),
+                        sum(1 for f in flags if f["raised_at"] >= since_week),
+                    )
+                    for (check_name, severity), flags in sorted(
+                        grouped.items(), key=lambda item: (-len(item[1]), item[0][0])
+                    )
+                ]
+            )
         if "count(*)" in sql and "severity = 'ERROR'" in sql:  # open_error_flags (the interlock)
             logical_date, sources = p
             n = sum(
