@@ -43,7 +43,7 @@ Offline by construction: DuckDB reads local Parquet, nothing fetches.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
@@ -335,6 +335,7 @@ def materialize_isin(
     actions: Iterable[CorporateAction],
     con: duckdb.DuckDBPyConnection | None = None,
     data_root: Path | None = None,
+    history_isins: Sequence[str] | None = None,
 ) -> L2WriteReport:
     """Materialize one ISIN's L2 adjusted partition from L1 + its factor chain.
 
@@ -345,12 +346,27 @@ def materialize_isin(
 
     An ISIN with no L1 history writes nothing and removes any stale partition, so its rebuilt state
     (absent) is still identical to a fresh build.
+
+    `history_isins` is the ISIN's lineage chain oldest-first (`LineageResolver.chain_to`), for a
+    security whose earlier history sits under ISINs a reissue retired. Omit it and only `isin`'s
+    own bars are read, which is right for the ~90% of names that were never reissued.
     """
     if chain.isin != isin:
         raise ValueError(
             f"factor chain is for {chain.isin!r} but materializing {isin!r}; a chain is per ISIN"
         )
-    raw_bars = read_raw_bars_from_l1(isin, con=con, data_root=data_root)
+    # An ISIN that was reissued holds only the history since the reissue; the rest is under the
+    # ISINs it retired (D2 lineage). Reading the whole chain is what lets a look-back cross the
+    # boundary: IRCTC's L1 under INE335Y01020 starts 2021-10-29, and a twelve-month momentum
+    # signal read from that alone is measuring a three-day-old security. The bars are keyed to
+    # `isin` on the way out, so the partition is the survivor's however many ISINs fed it — and
+    # the spans do not overlap, so the per-(exchange, date) uniqueness the adjuster needs holds.
+    sources = (isin,) if history_isins is None else tuple(history_isins)
+    raw_bars = tuple(
+        bar
+        for source in sources
+        for bar in read_raw_bars_from_l1(source, con=con, data_root=data_root)
+    )
     path = l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=data_root)
     if not raw_bars:
         removed = _remove_partition(path)
@@ -396,6 +412,7 @@ def materialize_isins(
     *,
     con: duckdb.DuckDBPyConnection | None = None,
     data_root: Path | None = None,
+    history_for: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[L2WriteReport, ...]:
     """Materialize several ISINs, each from its own chain and actions, reusing one connection.
 
@@ -407,7 +424,14 @@ def materialize_isins(
     con = open_connection() if con is None else con
     try:
         return tuple(
-            materialize_isin(chain.isin, chain=chain, actions=actions, con=con, data_root=data_root)
+            materialize_isin(
+                chain.isin,
+                chain=chain,
+                actions=actions,
+                con=con,
+                data_root=data_root,
+                history_isins=None if history_for is None else history_for.get(chain.isin),
+            )
             for chain, actions in chains_and_actions
         )
     finally:

@@ -496,3 +496,82 @@ def test_rebuild_invalidated_drains_only_flagged_isins(
 
     # A second drain with nothing open is a no-op.
     assert rebuild_invalidated(db_conn, clock=CLOCK, data_root=lake) == ()  # type: ignore[arg-type]
+
+
+# ── the lineage stitch: a reissued ISIN inherits the history it was split away from ────────────
+
+#: IRCTC's retired ISIN. The real reissue: INE335Y0101(2) traded to 2021-10-28, INE335Y0102(0)
+#: from 2021-10-29. Here it carries the pre-split sessions of the fixture lake.
+RETIRED: Final = "INE335Y01012"
+
+
+@pytest.fixture
+def reissued_lake(tmp_path: Path) -> Path:
+    """A lake where IRCTC's pre-split history sits under the ISIN the split retired.
+
+    This is the shape the real lake has for 445 securities: the survivor's own `prices_raw` rows
+    begin at the reissue, and everything before it is filed under an ISIN that no longer exists.
+    """
+    _write_l1_partition(tmp_path, date(2021, 6, 1), [(RETIRED, "IRCTC", Decimal("1000"), 500)])
+    _write_l1_partition(tmp_path, SPLIT_EX, [(IRCTC, "IRCTC", Decimal("210"), 400)])
+    _write_l1_partition(tmp_path, DIV_EX, [(IRCTC, "IRCTC", Decimal("900"), 300)])
+    return tmp_path
+
+
+def test_without_the_chain_a_reissued_isin_holds_only_its_own_short_history(
+    reissued_lake: Path,
+    irctc_chain: FactorChain,
+    irctc_actions: tuple[CorporateAction, ...],
+) -> None:
+    """The blind spot: the survivor alone starts at the reissue, leaving a look-back nothing
+    to read for a year afterwards."""
+    report = materialize_isin(
+        IRCTC, chain=irctc_chain, actions=irctc_actions, data_root=reissued_lake
+    )
+    assert report.from_date == SPLIT_EX  # the pre-split year is simply absent
+    assert report.rows_written == 2
+
+
+def test_the_lineage_chain_restores_the_pre_reissue_history(
+    reissued_lake: Path,
+    irctc_chain: FactorChain,
+    irctc_actions: tuple[CorporateAction, ...],
+) -> None:
+    report = materialize_isin(
+        IRCTC,
+        chain=irctc_chain,
+        actions=irctc_actions,
+        data_root=reissued_lake,
+        history_isins=(RETIRED, IRCTC),
+    )
+    assert report.from_date == date(2021, 6, 1)
+    assert report.rows_written == 3
+
+    bars = _by_date(read_adjusted(IRCTC, data_root=reissued_lake))
+    # The inherited bar is back-adjusted onto the post-split basis (₹10 → ₹2, so x0.2), which is
+    # what makes it continuous with the survivor's own: 1000 x 0.2 = 200 against a 210 close.
+    assert bars[date(2021, 6, 1)].adj_close == Decimal("200.0000")
+    assert bars[date(2021, 6, 1)].cum_price_factor == Decimal("0.200000000000000000")
+    # Every row is keyed to the survivor however many ISINs fed it — L2 is the survivor's partition.
+    assert {b.isin for b in read_adjusted(IRCTC, data_root=reissued_lake)} == {IRCTC}
+
+
+def test_the_stitch_leaves_the_retired_isin_without_a_partition(
+    reissued_lake: Path,
+    irctc_chain: FactorChain,
+    irctc_actions: tuple[CorporateAction, ...],
+) -> None:
+    """The history moves to the survivor; it is not duplicated under the ISIN that was retired.
+
+    `read_adjusted` raises for an unmaterialized partition on purpose — a gap the query layer
+    explains, not an empty series — so the retired ISIN staying unmaterialized is that raise.
+    """
+    materialize_isin(
+        IRCTC,
+        chain=irctc_chain,
+        actions=irctc_actions,
+        data_root=reissued_lake,
+        history_isins=(RETIRED, IRCTC),
+    )
+    with pytest.raises(FileNotFoundError):
+        read_adjusted(RETIRED, data_root=reissued_lake)
