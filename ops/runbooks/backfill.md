@@ -5,10 +5,12 @@ The backfill runner drives a date range of one source set through the whole inge
 re-fetches a session that is already `PUBLISHED`, so "run it again" is always the right first move
 when you are unsure where a run got to.
 
-The only source set today is `nse_bhavcopy` — the NSE cash-market bhavcopy, both format eras
-(legacy `cm…bhav.csv.zip` before 2024-07-08, UDiFF after), dispatched by date automatically. It
-lands `prices_raw` partitions in L1 and one `sync_state` row per session under the source name
-`nse_bhavcopy`.
+Three source sets exist (`--source`): `nse_bhavcopy` — the NSE cash-market bhavcopy, both format
+eras (legacy `cm…bhav.csv.zip` before 2024-07-08, UDiFF after), dispatched by date automatically;
+`bse_bhavcopy` — the BSE cash bhavcopy, UDiFF era only (see below); and `nse_delivery`. The price
+sets land `prices_raw` partitions in L1 — one partition per date, shared by both exchanges, each
+write replacing only its own exchange's rows — and one `sync_state` row per session under the
+era-independent set name.
 
 ## Before you fetch anything: plan it (`--dry-run`)
 
@@ -82,6 +84,27 @@ session is recorded `FAILED (retryable=False)`; earlier 403s are `FAILED (retrya
 - If the block is not something you can resolve (the source changed its terms, or it needs a
   credential that does not exist), it is a `NEEDS_GO`/`NEEDS_SECRET`-class matter — escalate rather
   than retry.
+
+## BSE (`bse_bhavcopy`)
+
+BSE's cash bhavcopy comes from `www.bseindia.com` — its own host and its own request budget, so it
+may run beside an NSE campaign. Only the UDiFF era (2024-07-08 onward) is wired: it carries ISIN
+natively and parses straight to `prices_raw`, tagged `exchange=BSE`, into the same partition as
+that date's NSE rows. A pre-cutover `--from` is refused at planning time (exit 2): the legacy files
+have no ISIN and their L1 path goes through the scrip master (ops/BACKLOG.md, M3.1). The calendar
+is NSE's, so a BSE-only holiday shows up as one `FAILED (retryable)` 404 for D7 to explain.
+
+```bash
+# Plan it — 536 sessions from the cutover to 2026-09-05; no socket, no database.
+uv run python -m dataplatform.ingest.backfill \
+  --source bse_bhavcopy --from 2024-07-08 --to 2026-09-05 --dry-run
+```
+
+On the server the campaign is driven by `ops/run_bse_campaign.sh` (fixed `--from`, yesterday's
+`--to`, `nohup` with a dated `~/campaign/bse-*.log`; `--dry-run` prints the plan) and followed with
+`ops/remote.sh logs bse`. Progress is also at `GET /status/sources` under `bse_bhavcopy`. The full
+run was authorised by the owner on 2026-09-06 (HUMAN_DECISIONS.md, D14), in parallel with the NSE
+Integrated Filing campaign on the same server.
 
 ## Reproducing offline
 

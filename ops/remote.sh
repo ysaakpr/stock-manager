@@ -7,7 +7,8 @@
 #   ops/remote.sh test [pytest args]  # sync, then `uv run pytest <args>` on the server
 #   ops/remote.sh run <command...>    # sync, then any command in the server's repo directory
 #   ops/remote.sh shell               # interactive shell in the server's repo directory
-#   ops/remote.sh logs [pattern]      # tail the newest ~/campaign log, optionally filtered
+#   ops/remote.sh logs [family] [pattern]  # tail the newest ~/campaign log — of one family
+#                                     # (integrated, bse, rebuild-legacy…) if named — optionally filtered
 #
 # Connection details live ONLY in the untracked, gitignored `.remote.env` at the repo root:
 #
@@ -92,11 +93,24 @@ cmd_test()  { cmd_sync; remote "uv run pytest $*"; }
 cmd_run()   { cmd_sync; remote "$*"; }
 cmd_shell() { "${SSH[@]}" -t "cd '$REMOTE_REPO' && export PATH=\"\$HOME/.local/bin:\$PATH\" && exec \$SHELL -l"; }
 cmd_logs()  {
-  local pattern="${1:-}"
-  remote "L=\$(ls -t ~/campaign/*.log 2>/dev/null | head -1); [ -n \"\$L\" ] || { echo 'no campaign logs'; exit 0; };
+  # `logs [family] [pattern]`: a first argument that is the prefix of some ~/campaign/<family>-*.log
+  # selects the newest log of that family (integrated, bse, rebuild-legacy…); otherwise it is the
+  # grep pattern and the newest log of any family is used. The counters are per runner: the
+  # fundamentals runner logs pages/filings, the price backfill runner logs sessions.
+  local a="${1:-}" b="${2:-}"
+  remote "family=''; pattern='$a';
+          if [ -n '$a' ] && ls ~/campaign/'$a'-*.log >/dev/null 2>&1; then family='$a'; pattern='$b'; fi;
+          if [ -n \"\$family\" ]; then L=\$(ls -t ~/campaign/\"\$family\"-*.log | head -1);
+          else L=\$(ls -t ~/campaign/*.log 2>/dev/null | head -1); fi;
+          [ -n \"\$L\" ] || { echo 'no campaign logs'; exit 0; };
           echo \"log: \$L\";
-          echo \"pages \$(grep -c index_published \$L), published \$(grep -c filing_published \$L), reused \$(grep -c filing_l0_reused \$L), failed \$(grep -c unit_failed \$L)\";
-          if [ -n '$pattern' ]; then grep '$pattern' \$L | tail -20; else grep -v crawl.spacing \$L | tail -5 | cut -c1-200; fi"
+          case \"\$L\" in
+            */bse-*|*/nse-*)
+              echo \"published \$(grep -c backfill.session_published \$L), already \$(grep -c backfill.skip_published \$L), failed \$(grep -c backfill.session_failed \$L), hard_stop \$(grep -c backfill.hard_stop \$L)\";;
+            *)
+              echo \"pages \$(grep -c index_published \$L), published \$(grep -c filing_published \$L), reused \$(grep -c filing_l0_reused \$L), failed \$(grep -c unit_failed \$L)\";;
+          esac;
+          if [ -n \"\$pattern\" ]; then grep \"\$pattern\" \$L | tail -20; else grep -v crawl.spacing \$L | tail -5 | cut -c1-200; fi"
 }
 
 case "${1:-}" in
@@ -107,5 +121,5 @@ case "${1:-}" in
   run)    shift; cmd_run "$@" ;;
   shell)  cmd_shell ;;
   logs)   shift; cmd_logs "$@" ;;
-  *) sed -n '2,12p' "$0"; exit 1 ;;
+  *) sed -n '2,13p' "$0"; exit 1 ;;
 esac

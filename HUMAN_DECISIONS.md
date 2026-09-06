@@ -513,6 +513,22 @@ version is a separate ratification (AGENTIC_CONTEXT §3.2, B9). The paper-tradin
 configuration daily is not yet built: paper mode today is the M5.13 harness with injected triggers
 and the scheduler registers no analyst session job; building it is the next decision.
 
+### D14 — Start the BSE bhavcopy campaign on the server, beside M10.4 → **ANSWERED (owner, 2026-09-06): go.**
+
+The owner asked for the BSE fetch to start on the server in parallel with the Integrated Filing
+campaign. That is the B1 go for M3.1's full BSE history run ("joins M1.13's go"): 536 sessions of
+`bse_bhavcopy` from 2024-07-08 (the UDiFF cutover — the legacy era has no ISIN and is refused) to
+yesterday, at the register's 2.5 s spacing against `www.bseindia.com`. That is a different host from
+the NSE campaigns, so the one-budget-per-host rule holds with both running. Driver:
+`ops/run_bse_campaign.sh`; follow with `ops/remote.sh logs bse`.
+
+Sizing the run found that `write_prices_raw` would have overwritten every NSE `prices_raw`
+partition from the cutover onward with BSE rows — one file per date, no exchange in the path — and
+on the server, where the price L1 has no L0 behind it, unrecoverably. Fixed before the first fetch:
+a partition now holds both exchanges and a write replaces only its own exchange's rows
+(`tests/unit/test_l1_prices_raw_exchanges.py`; ops/BACKLOG.md, M3.1). Not covered by this go: the
+BSE scrip master, BSE corporate actions and the legacy-era bhavcopy — none has a fetch wired yet.
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
