@@ -179,6 +179,10 @@ class CaBackfillReport:
     skipped_published: int = 0
     failed: int = 0
     actions_persisted: int = 0
+    #: Units whose bytes were already in L0, so this run re-parsed instead of re-fetching. A
+    #: re-run after a parser fix should be almost entirely this — it is the measure of how far the
+    #: download and the parse have actually been decoupled.
+    l0_reused: int = 0
     queued: int = 0
     unresolved: int = 0
     touched_isins: set[str] = field(default_factory=set)
@@ -511,9 +515,27 @@ class CaBackfillRunner:
         )
         try:
             self._sync.begin(unit.state_source, unit.logical_date)
-            ref = self._fetcher.fetch(
-                unit.fetch_source, unit.url, unit.logical_date, filename=unit.filename
-            )
+            # L0 first. A unit that FAILED on a *parse* still has its bytes on disk — the fetch
+            # happened, `mark_fetched` recorded it, and only the parse raised. Re-running after a
+            # parser fix is then a pure re-derivation and must not spend a request on bytes the
+            # lake already holds (L0 is immutable, so they are the same bytes). This is what makes
+            # a download campaign independent of the parser fixes that follow it: the expensive,
+            # rate-limited half runs once, and the offline half can be re-run as often as it takes.
+            # A genuinely new fetch still happens whenever the key is new — a later window gives a
+            # different `logical_date`, so refreshing a source is unaffected.
+            if self._l0.exists(unit.fetch_source, unit.logical_date, unit.filename):
+                ref = self._l0.ref_for(unit.fetch_source, unit.logical_date, unit.filename)
+                report.l0_reused += 1
+                _LOG.info(
+                    "ca_backfill.l0_reused",
+                    unit=unit.label,
+                    progress=f"{index}/{total}",
+                    l0_key=ref.key,
+                )
+            else:
+                ref = self._fetcher.fetch(
+                    unit.fetch_source, unit.url, unit.logical_date, filename=unit.filename
+                )
             self._sync.mark_fetched(
                 unit.state_source, unit.logical_date, checksum=ref.sha256, l0_path=ref.key
             )

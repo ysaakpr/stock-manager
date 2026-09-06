@@ -663,3 +663,51 @@ def test_a_record_with_no_purpose_does_not_cost_the_scrip_its_other_actions() ->
     assert len(result.actions) == 26
     assert any(entry.raw_text == "" for entry in result.queued), "the empty row reaches a human"
     assert all(action.isin == "INE117A01022" for action in result.actions)
+
+
+# ── a parse failure must not cost the download twice ────────────────────────────────────────────
+
+
+def test_a_unit_that_failed_on_a_parse_is_re_parsed_from_l0_not_re_fetched(tmp_path: Path) -> None:
+    """The download and the parse are independent: the bytes are fetched once, parsed as often.
+
+    A unit whose *parse* raised still has its payload in L0 — the fetch happened and
+    `mark_fetched` recorded it. So the re-run after a parser fix must be a pure re-derivation.
+    Before this, `_process` called the fetcher unconditionally and a morning of parser fixes cost
+    a second campaign's worth of requests against a rate-limited host.
+    """
+    master = _master()
+    register = load_register()
+    plan = cab.build_plan(FROM, TO, KNOWN_SCRIPS, register=register, chunk_months=24)
+    settings = _settings(tmp_path)
+    conn = _FakeConn()
+    sync = _FakeSync()
+
+    # Serve every unit a well-formed *envelope* the parser cannot use: valid JSON, no records the
+    # scrip index can resolve, and for BSE a record whose scrip code is unknown. The simplest
+    # reliable refusal is a body that is not this format at all.
+    def broken_transport() -> RecordedTransport:
+        script: dict[str, Any] = {
+            WARM_URL: RecordedResponse(
+                status_code=200, body=b"", headers={"content-type": "text/html"}
+            )
+        }
+        for unit in plan:
+            script[unit.url] = RecordedResponse(
+                status_code=200, body=b"{}", headers={"content-type": "application/json"}
+            )
+        return RecordedTransport(cast("Any", script))
+
+    first = _runner(broken_transport(), settings=settings, conn=conn, sync=sync, master=master).run(
+        plan
+    )
+    assert first.failed > 0, "the premise: these units must fail on the parse, not the fetch"
+    assert first.l0_reused == 0
+    fetched = len(plan)
+
+    # The same plan again. Every unit is FAILED, so every one is retried — and every one of them
+    # reads the bytes back off disk.
+    transport2 = broken_transport()
+    second = _runner(transport2, settings=settings, conn=conn, sync=sync, master=master).run(plan)
+    assert second.l0_reused == fetched
+    assert transport2.requests == [], "a re-parse must not touch the network"
