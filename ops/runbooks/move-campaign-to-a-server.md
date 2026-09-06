@@ -195,3 +195,10 @@ what I have" and "go and look for more" from being the same command.
 
 The last row is the only real decision. Sending L0 out costs ~600 MB of upload and saves about
 seven hours of refetching; skipping it costs nothing but time you are already spending elsewhere.
+
+## Day to day: `ops/remote.sh`
+
+Once a server is stood up this way it becomes the standing testing engine (CLAUDE.md "Development
+model"). `ops/remote.sh` wraps the routine — `status`, push-verified `sync`, `check`, `test`, `run`,
+`logs`, `shell` — reading the connection details from the untracked `.remote.env`, so nothing in
+this runbook or any other committed file names the host, the user or the key path.

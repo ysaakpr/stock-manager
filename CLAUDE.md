@@ -77,6 +77,38 @@ L0 immutable · ISIN-only joins · no adjusted prices in L1 · one shared cost m
 paper and real · rails unbypassable · no future data in a decision · restated fundamentals quarantined from
 backtests · every decision journaled including no-ops · red data means no trading.
 
+## Development model: the laptop codes, the server tests
+
+Two machines, one repo, synchronised only through git. **The laptop is the coding engine**: edit,
+run the fast offline checks (`uv run pytest tests/unit`, `ruff`, `mypy`) and commit here. **The
+server is the testing engine**: the full gate (`make check` with the docker Postgres), backtests
+over the whole lake, and every fetch campaign run there, on the *pushed* HEAD. The server never
+receives uncommitted work; `ops/remote.sh sync` refuses to sync a commit origin does not have.
+
+```bash
+ops/remote.sh status                 # what the server is at and whether a driver is running
+ops/remote.sh check                  # push-verified sync, then `make check` on the server
+ops/remote.sh test tests/unit -q     # sync, then a pytest selection on the server
+ops/remote.sh run uv run python -m backtest.run --policy naive_momentum --v2-report ...
+ops/remote.sh logs                   # progress of the newest campaign log
+```
+
+Connection details (host, user, key **path**, repo path) live only in the untracked, gitignored
+`.remote.env` at the repo root (`.remote.env.example` shows the keys). Rules that follow from the
+repo being public:
+
+- **Never read a private key's contents** — not with `cat`, not with Read, not into a log. The
+  wrapper hands ssh the *path* and nothing else; do the same in any ad-hoc command.
+- **Never put the key path, the host or the user in a committed file** — no runbook, no gate
+  report, no commit message, no memory summary that is checked in. `.remote.env` is the one home.
+- **If `.remote.env` is missing or incomplete**, the wrapper exits 2 and names what is missing.
+  Do not guess a host. Warn the user, ask whether to continue with local-only development for now,
+  and if not, ask them to fill in the details. Do not stall the coding work while you wait.
+- One request budget per host: before starting a fetch campaign on the server, make sure no driver
+  runs on the laptop against the same host, and the other way round (`ops/remote.sh status`).
+- The lake is authoritative on whichever machine fetched it; bring `data/L0/` home and rebuild
+  derived stores from it (`ops/runbooks/move-campaign-to-a-server.md`), never copy L1/L2 across.
+
 ## Git
 
 Every commit message is `[<task-id>] <title>`, with `Task:` and `Acceptance:` trailers. Commit each coherent

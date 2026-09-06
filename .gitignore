@@ -23,3 +23,6 @@ __pycache__/
 
 # Generated run reports — a coverage dump is output, not a record.
 /ops/reports/
+
+# Testing-server connection details — local only, never committed (ops/remote.sh)
+.remote.env
