@@ -102,13 +102,31 @@ _NSE_SYMBOL_SCHEME: Final = "http://www.nseindia.com/NSESymbol"
 _BSE_NSE_SYMBOL_SCHEME: Final = "http://www.bseindia.com/bse-fin/NSESymbol"
 
 #: Every scheme whose identifier is an NSE symbol and may therefore be compared to one.
-_SYMBOL_SCHEMES: Final = frozenset({_NSE_SYMBOL_SCHEME, _BSE_NSE_SYMBOL_SCHEME})
+#: SEBI's own scheme for the same identifier in an Integrated Filing document.
+_SEBI_SYMBOL_SCHEME: Final = "http://www.sebi.gov.in/in-capmkt/Symbol"
+
+_SYMBOL_SCHEMES: Final = frozenset(
+    {_NSE_SYMBOL_SCHEME, _BSE_NSE_SYMBOL_SCHEME, _SEBI_SYMBOL_SCHEME}
+)
+
+#: An Integrated Filing document states the company's ISIN as a fact. It is *not* the join key
+#: (that stays the index's, resolved through D2 — invariant #2), but a stated ISIN that names a
+#: different company than the entry is the DTIL misattribution in a form the document itself can
+#: refute, so it is cross-checked when present — **in Integrated Filing documents only**. The older
+#: `in-bse-fin` banking documents carry stale ISINs (J&K Bank's states the pre-2020 one), which is
+#: why the ISIN was never read from a document before and still is not from those.
+_ISIN_ELEMENT: Final = "ISIN"
+_INTEGRATED_ENTRY_POINT: Final = "in-capmkt-ent"
 
 #: The other scheme in the wild: a BSE scrip code (e.g. `532209` for J&K Bank). Its identifier is
 #: *not* a symbol and must never be compared to one, so a filing using it is cross-checked on its
 #: `Symbol` fact instead. Recognised explicitly rather than by "anything that is not a symbol
 #: scheme", so a genuinely unknown scheme is still a loud failure.
 _BSE_SCRIP_SCHEME: Final = "http://www.bseindia.com/bse-fin/ScripCode"
+#: The same scrip-code identifier under SEBI's Integrated Filing namespace root (used by the
+#: `_NONINDAS_` documents and by some `_INDAS_` ones); like the BSE one it is not a symbol.
+_CAPMKT_SCRIP_SCHEME: Final = "http://www.bseindia.com/in-capmkt/ScripCode"
+_SCRIP_SCHEMES: Final = frozenset({_BSE_SCRIP_SCHEME, _CAPMKT_SCRIP_SCHEME})
 
 #: Elements that populate filing-level fields rather than becoming facts.
 _NATURE_ELEMENT: Final = "NatureOfReportStandaloneConsolidated"
@@ -165,6 +183,13 @@ _ENTRY_POINTS: Final[tuple[tuple[str, Taxonomy], ...]] = (
     ("other_than_banks_entry_point", Taxonomy.NON_IND_AS),
     ("ind-as_entry_point", Taxonomy.IND_AS),
     ("in-bse-fin-", Taxonomy.IND_AS),
+    # SEBI's Integrated Filing (Financials) taxonomy, in force from the quarter ended March 2025.
+    # One entry point serves the `INTEGRATED_FILING_INDAS_*` and `_NONINDAS_*` documents alike, and
+    # its vocabulary is the Ind-AS one element-for-element for every concept the store keeps
+    # (verified on captured filings: `tests/fixtures/xbrl/integrated/`). A bank's integrated
+    # filing has not been met yet; if it names its revenue differently it fails the whitelist and
+    # surfaces as a parse failure rather than an empty filing.
+    ("in-capmkt-ent", Taxonomy.IND_AS),
 )
 
 #: The ordinal word a context id leads with — the results table's column, and the only reliable link
@@ -275,6 +300,9 @@ def parse(
         accepted=accepted,
         filename=filename,
     )
+
+    if _is_integrated(root):
+        _check_stated_isin(facts_by_context, entry=entry, filename=filename)
 
     column = _select_column(
         _columns(shapes, facts_by_context=facts_by_context, filename=filename),
@@ -475,11 +503,11 @@ def _check_symbol(
             "filing is about one company",
             filename=filename,
         )
-    unknown = schemes - _SYMBOL_SCHEMES - {_BSE_SCRIP_SCHEME}
+    unknown = schemes - _SYMBOL_SCHEMES - _SCRIP_SCHEMES
     if unknown:
         raise ParseError(
             f"entity identifier scheme is {', '.join(sorted(schemes))!r}, expected one of "
-            f"{sorted(_SYMBOL_SCHEMES | {_BSE_SCRIP_SCHEME})}; this parser reads the identifier "
+            f"{sorted(_SYMBOL_SCHEMES | _SCRIP_SCHEMES)}; this parser reads the identifier "
             "as an "
             "NSE symbol or a BSE scrip code and takes the ISIN from the announcements index "
             "(invariant #2)",
@@ -522,6 +550,43 @@ def _check_symbol(
             filename=filename,
         )
     return sorted(matched)[0]
+
+
+def _is_integrated(root: ET.Element) -> bool:
+    """Whether the document is an Integrated Filing one (its schemaRef names `in-capmkt-ent`)."""
+    for element in root.iter():
+        if _local(element.tag) != "schemaRef":
+            continue
+        href = next(
+            (value for key, value in element.attrib.items() if _local(key) == "href"), ""
+        ).lower()
+        return _INTEGRATED_ENTRY_POINT in href
+    return False
+
+
+def _check_stated_isin(
+    facts_by_context: dict[str, dict[str, list[str]]], *, entry: FilingIndexEntry, filename: str
+) -> None:
+    """Refuse a document whose own `ISIN` fact names a different company than the entry.
+
+    Called for Integrated Filing documents only. When stated and well-formed the ISIN must match
+    the entry's — the index's ISIN stays the join key, this only catches the index attributing a
+    document to the wrong company. A malformed value is ignored: a filer's typo is not evidence
+    about the company.
+    """
+    stated = {
+        value.strip().upper()
+        for facts in facts_by_context.values()
+        for value in facts.get(_ISIN_ELEMENT, ())
+        if value and re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", value.strip().upper())
+    }
+    if stated and entry.isin not in stated:
+        raise ParseError(
+            f"index says this filing is {entry.symbol!r} (ISIN {entry.isin}) but the document "
+            f"states ISIN {', '.join(sorted(stated))}; the announcements index and the XBRL must "
+            "name the same company",
+            filename=filename,
+        )
 
 
 def _same_symbol(left: str, right: str) -> bool:

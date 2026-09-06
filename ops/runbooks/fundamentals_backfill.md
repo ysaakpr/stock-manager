@@ -119,3 +119,34 @@ it re-fetches index chunks you already have (~88 requests for the full window).
 Written to `ops/gates/M10-fundamentals-backfill-report.md`: index chunks published, filings
 discovered vs in-universe vs published/failed, facts written, ISINs covered, entries skipped as out
 of universe, and any park cause. Read it to see what a run covered and what it left.
+
+## The feed moved: Integrated Filing (Financials) from the quarter ended March 2025
+
+`corporates-financial-results` stopped receiving new periods after the quarter ended December 2024
+(it still lists defunct companies filing old quarters — 28 entries for April-June 2025 against
+3,865 for the quarter before). Results from the March-2025 quarter on are published only through
+SEBI's Integrated Filing regime, `api/integrated-filing-results`, which is paged (`page`, `size`
+up to 1000), carries no ISIN and no period start, and points at `INTEGRATED_FILING_INDAS_*` /
+`_NONINDAS_*` documents in SEBI's `in-capmkt` taxonomy. `--feed integrated` reads it:
+
+```bash
+uv run python -m dataplatform.ingest.fundamentals_backfill --feed integrated \
+    --from 2025-03-01 --to $(date +%F) --dry-run          # 6 pages per calendar month
+uv run python -m dataplatform.ingest.fundamentals_backfill --feed integrated \
+    --from 2025-03-01 --to 2025-04-30 --max-filings 20    # B1 verify + sample
+uv run python -m dataplatform.ingest.fundamentals_backfill --feed integrated \
+    --from 2025-03-01 --to $(date +%F) --report ops/reports/fundamentals-integrated-<date>.md
+```
+
+Each page is its own resumable unit (`nse_integrated_filing_index/<month end>/p<NN>`); a page past
+the end of a month is a normal zero-entry unit. The symbol on each record is resolved through D2 as
+of its dissemination date (`creation_Date`), a record that does not resolve is counted and named on
+the report, and the document's own `ISIN` fact is cross-checked against the resolved one. A
+fourth-quarter record yields two entries — the quarter and the financial year — because the
+document carries both columns and the annual one is where the balance-sheet elements are. Ids are
+prefixed `IF` so they never collide with the old feed's. Documents land in the same L0 source and
+the same PIT store as before; the filing-date partition is the first-knowable date either way.
+
+Keep `--from` fixed at `2025-03-01` between runs so the month windows (and their checkpoints) stay
+identical; move `--to` forward to pick up new pages. About 26,600 records existed on 2026-09-06,
+so the first full run is a B1 campaign of roughly a day at the 2.5 s spacing.

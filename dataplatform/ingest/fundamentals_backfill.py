@@ -93,7 +93,7 @@ from dataplatform.ingest.fetcher import (
 from dataplatform.ingest.models import ParseError
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
-from dataplatform.ingest.xbrl import discovery, parser
+from dataplatform.ingest.xbrl import discovery, integrated, parser
 from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
 from dataplatform.ingest.xbrl.models import SHARES_OUTSTANDING, Filing
 from dataplatform.logging import get_logger
@@ -111,11 +111,13 @@ __all__ = [
     "FilingUnit",
     "FundamentalsBackfillReport",
     "FundamentalsBackfillRunner",
+    "IndexFeed",
     "IndexUnit",
     "MissingPayloadError",
     "ParkReason",
     "Period",
     "build_index_units",
+    "build_integrated_units",
     "isins_in_price_window",
     "main",
     "render_report",
@@ -178,9 +180,24 @@ class ParkReason(StrEnum):
     (AGENTIC_CONTEXT §8), not a lower rate or a rotated agent."""
 
 
+class IndexFeed(StrEnum):
+    """Which NSE index a discovery unit reads.
+
+    `RESULTS` is `corporates-financial-results`, the feed the ten-year campaign was built on, which
+    stopped receiving new periods after the quarter ended December 2024. `INTEGRATED` is SEBI's
+    Integrated Filing (Financials) feed that carries every quarter from March 2025 on
+    (`dataplatform.ingest.xbrl.integrated`). Both yield `FilingIndexEntry`s; the documents they
+    point at land in the same L0 source and the same PIT store.
+    """
+
+    RESULTS = "results"
+    INTEGRATED = "integrated"
+
+
 @dataclass(frozen=True, slots=True)
 class IndexUnit:
-    """One discovery fetch: a `(period, date-range)` slice of the results index.
+    """One discovery fetch: a `(period, date-range)` slice of the results index, or one page of
+    the integrated feed.
 
     `state_source`/`logical_date` is its `sync_state` key (a `PUBLISHED` chunk is skipped on the
     next run). Fetching it and parsing the payload yields the `FilingIndexEntry`s whose XBRL the
@@ -192,6 +209,13 @@ class IndexUnit:
     to_date: date
     url: str
     filename: str
+    feed: IndexFeed = IndexFeed.RESULTS
+    page: int | None = None
+
+    @property
+    def source_id(self) -> str:
+        """The Source Register id whose crawl policy fetches this unit."""
+        return integrated.SOURCE_ID if self.feed is IndexFeed.INTEGRATED else discovery.SOURCE_ID
 
     @property
     def state_source(self) -> str:
@@ -206,6 +230,8 @@ class IndexUnit:
         `--chunk-months` or `--to` covers different ranges, and a range that changed is a chunk
         that has *not* been fetched, however much its start date overlaps.
         """
+        if self.feed is IndexFeed.INTEGRATED:
+            return f"{integrated.SOURCE_ID}/{self.to_date.isoformat()}/p{self.page or 1:02d}"
         return f"{INDEX_STATE_SOURCE}/{self.period.value}/{self.to_date.isoformat()}"
 
     @property
@@ -214,6 +240,11 @@ class IndexUnit:
 
     @property
     def label(self) -> str:
+        if self.feed is IndexFeed.INTEGRATED:
+            return (
+                f"integrated index {self.from_date.isoformat()}..{self.to_date.isoformat()} "
+                f"page {self.page or 1}"
+            )
         return f"index {self.period.value} {self.from_date.isoformat()}..{self.to_date.isoformat()}"
 
 
@@ -298,6 +329,10 @@ class FundamentalsBackfillReport:
     skipped_no_document: int = 0
     covered_isins: set[str] = field(default_factory=set)
     unresolved_isins: set[str] = field(default_factory=set)
+    #: Integrated-feed records whose symbol D2 could not resolve on the dissemination date —
+    #: counted per record, and the distinct symbols named, so a rename D2 has not seen shows up.
+    index_unresolved_symbols: int = 0
+    unresolved_symbols: set[str] = field(default_factory=set)
     park_reason: ParkReason | None = None
     park_detail: str | None = None
     failures: list[tuple[str, str]] = field(default_factory=list)
@@ -474,6 +509,42 @@ def symbols_accepted_on(
     return frozenset(accepted)
 
 
+def build_integrated_units(
+    from_date: date,
+    to_date: date,
+    *,
+    register: SourceRegister,
+    page_size: int = integrated.DEFAULT_PAGE_SIZE,
+    pages_per_month: int = integrated.DEFAULT_PAGES_PER_MONTH,
+    limit: int | None = None,
+) -> list[IndexUnit]:
+    """The discovery plan over the integrated feed: every calendar month, `pages_per_month` pages.
+
+    Pure and offline (`--dry-run` prints it). `limit` truncates the plan for a bounded sample run
+    under B1's verify-then-go discipline. Each page is its own resumable unit.
+    """
+    pages = integrated.build_integrated_pages(
+        from_date, to_date, register=register, page_size=page_size, pages_per_month=pages_per_month
+    )
+    units = [
+        IndexUnit(
+            period=Period.QUARTERLY,
+            from_date=page.from_date,
+            to_date=page.to_date,
+            url=page.url,
+            filename=page.filename,
+            feed=IndexFeed.INTEGRATED,
+            page=page.page,
+        )
+        for page in pages
+    ]
+    if limit is not None:
+        if limit <= 0:
+            raise ValueError(f"--limit must be positive, got {limit}")
+        units = units[:limit]
+    return units
+
+
 def resolve_universe(master: IdentityMaster, price_isins: Iterable[str]) -> set[str]:
     """The price-window ISINs that are known securities in the D2 master (invariant #2).
 
@@ -519,6 +590,7 @@ class FundamentalsBackfillRunner:
         symbol_history: Callable[[str, date], frozenset[str]] | None = None,
         rebuild_from_l0: bool = False,
         batched_writes: bool = False,
+        resolve_isin: integrated.ResolveIsin | None = None,
     ) -> None:
         if batched_writes and not rebuild_from_l0:
             raise ValueError(
@@ -550,6 +622,10 @@ class FundamentalsBackfillRunner:
         #: the index. Accepting "any symbol ever" stored 65 of that company's filings under
         #: Dhunseri Ventures.
         self._symbol_history = symbol_history
+        #: `(symbol, dissemination date) -> ISIN` for the integrated feed, whose records carry no
+        #: ISIN. Injected like `symbol_history`; a plan that contains an integrated page without it
+        #: cannot run, and says so rather than guessing an identity (invariant #2).
+        self._resolve_isin = resolve_isin
         self._should_stop = should_stop
         self._data_root = data_root
         #: A bounded-sample cap on how many in-universe filings the ingest phase *attempts* (B1's
@@ -634,8 +710,8 @@ class FundamentalsBackfillRunner:
                 state="PUBLISHED",
             )
             try:
-                ref = self._l0.ref_for(INDEX_STATE_SOURCE, unit.logical_date, unit.filename)
-                return discovery.parse_index_l0(self._l0, ref)
+                ref = self._l0.ref_for(unit.source_id, unit.logical_date, unit.filename)
+                return self._parse_index_payload(unit, ref, report=report)
             except (L0Error, FileNotFoundError, ParseError) as exc:
                 # The checkpoint says published but the payload is gone, unreadable, or fails its
                 # checksum; surface it and move on rather than crash a resume of a decade-long run.
@@ -663,7 +739,7 @@ class FundamentalsBackfillRunner:
             self._sync.mark_fetched(
                 unit.state_source, unit.logical_date, checksum=ref.sha256, l0_path=ref.key
             )
-            entries = discovery.parse_index_l0(self._l0, ref)
+            entries = self._parse_index_payload(unit, ref, report=report)
             self._sync.mark_validated(unit.state_source, unit.logical_date)
             self._sync.mark_normalized(unit.state_source, unit.logical_date)
             self._sync.mark_published(unit.state_source, unit.logical_date)
@@ -701,6 +777,25 @@ class FundamentalsBackfillRunner:
                 index=True,
             )
         return ()
+
+    def _parse_index_payload(
+        self, unit: IndexUnit, ref: L0Ref, *, report: FundamentalsBackfillReport
+    ) -> tuple[FilingIndexEntry, ...]:
+        """One index payload → entries, by feed. Integrated pages resolve symbols through D2."""
+        if unit.feed is IndexFeed.RESULTS:
+            return discovery.parse_index_l0(self._l0, ref)
+        if self._resolve_isin is None:
+            raise ParseError(
+                "an integrated-feed page needs a symbol resolver (the D2 master) and none was "
+                "injected; a record's ISIN is never guessed (invariant #2)",
+                filename=unit.filename,
+            )
+        parsed = integrated.parse_integrated_index(
+            self._l0.get(ref), filename=ref.filename, resolve_isin=self._resolve_isin
+        )
+        report.index_unresolved_symbols += len(parsed.unresolved)
+        report.unresolved_symbols.update(symbol for symbol, _ in parsed.unresolved)
+        return parsed.entries
 
     def _ingest_entries(
         self, entries: Sequence[FilingIndexEntry], *, report: FundamentalsBackfillReport
@@ -975,10 +1070,10 @@ class FundamentalsBackfillRunner:
         """
         if not self._rebuild_from_l0:
             return self._fetcher.fetch(
-                discovery.SOURCE_ID, unit.url, unit.logical_date, filename=unit.filename
+                unit.source_id, unit.url, unit.logical_date, filename=unit.filename
             )
         try:
-            return self._l0.ref_for(discovery.SOURCE_ID, unit.logical_date, unit.filename)
+            return self._l0.ref_for(unit.source_id, unit.logical_date, unit.filename)
         except (L0Error, FileNotFoundError):
             raise MissingPayloadError(
                 f"{unit.label}: no L0 payload for {unit.filename} and --rebuild-from-l0 forbids "
@@ -1155,6 +1250,9 @@ def render_report(
         f"- Entries skipped (ISIN not in universe): {report.skipped_out_of_universe}",
         f"- Entries skipped (no XBRL document in the feed): {report.skipped_no_document}",
         f"- Distinct unresolved/out-of-universe ISINs: {len(report.unresolved_isins)}",
+        f"- Integrated-feed records whose symbol D2 could not resolve: "
+        f"{report.index_unresolved_symbols} ({len(report.unresolved_symbols)} distinct symbols"
+        f"{_named(report.unresolved_symbols)})",
     ]
     if report.parked:
         lines += [
@@ -1191,10 +1289,23 @@ def _install_sigint(state: dict[str, bool]) -> None:
     signal.signal(signal.SIGINT, handle)
 
 
+def _named(symbols: set[str], limit: int = 40) -> str:
+    """`: A, B, C` for a report line, or nothing when there is nothing to name."""
+    return f": {', '.join(sorted(symbols)[:limit])}" if symbols else ""
+
+
+def _try_resolve_quietly(master: IdentityMaster, symbol: str, on: date) -> str | None:
+    """`master.try_resolve` with an ambiguous symbol read as unresolved, not as an identity."""
+    try:
+        return master.try_resolve(symbol, on)
+    except Exception:
+        return None
+
+
 def _print_plan(plan: Sequence[IndexUnit]) -> None:
     """Print the dry-run discovery plan: one line per index chunk, then the count. No socket."""
     for unit in plan:
-        print(f"{unit.label}\t{discovery.SOURCE_ID}\t{unit.url}")
+        print(f"{unit.label}\t{unit.source_id}\t{unit.url}")
     print(
         f"\n{len(plan)} index chunks planned (no fetch performed); "
         "the per-filing ingest count is only known once the index is fetched"
@@ -1232,6 +1343,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     ap.add_argument("--chunk-months", type=int, default=DEFAULT_CHUNK_MONTHS)
     ap.add_argument(
+        "--feed",
+        choices=[feed.value for feed in IndexFeed],
+        default=IndexFeed.RESULTS.value,
+        help=(
+            "which NSE index to discover filings from: `results` (corporates-financial-results, "
+            "periods up to Dec-2024) or `integrated` (Integrated Filing (Financials), periods from "
+            "Mar-2025 on; paged by calendar month)"
+        ),
+    )
+    ap.add_argument(
         "--report",
         type=Path,
         # Deliberately *not* a path under `ops/gates/`. This used to default to the M10.4 gate
@@ -1258,6 +1379,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dry_run=args.dry_run,
         report_path=args.report,
         rebuild_from_l0=args.rebuild_from_l0,
+        feed=IndexFeed(args.feed),
         settings=settings,
         clock=clock,
         calendar=calendar,
@@ -1275,6 +1397,7 @@ def _run_live(
     dry_run: bool,
     report_path: Path,
     rebuild_from_l0: bool,
+    feed: IndexFeed = IndexFeed.RESULTS,
     settings: Settings,
     clock: Clock,
     calendar: TradingCalendar,
@@ -1282,9 +1405,12 @@ def _run_live(
 ) -> int:
     """Build the real wiring and run the plan; split from `main` so `main` is only arg parsing."""
     try:
-        plan = build_index_units(
-            from_date, to_date, register=register, chunk_months=chunk_months, limit=limit
-        )
+        if feed is IndexFeed.INTEGRATED:
+            plan = build_integrated_units(from_date, to_date, register=register, limit=limit)
+        else:
+            plan = build_index_units(
+                from_date, to_date, register=register, chunk_months=chunk_months, limit=limit
+            )
     except ValueError as exc:
         print(f"cannot plan fundamentals backfill: {exc}", file=sys.stderr)
         return 2
@@ -1324,6 +1450,7 @@ def _run_live(
                 isin=isin,
                 owner_on=lambda symbol: master.try_resolve(symbol, on),
             ),
+            resolve_isin=lambda symbol, on: _try_resolve_quietly(master, symbol, on),
             rebuild_from_l0=rebuild_from_l0,
             # A rebuild is the only run that batches its writes. It is the run whose whole shape is
             # "throw the store away and redo it from L0", so the coarser checkpoint costs a local

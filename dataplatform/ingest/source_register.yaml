@@ -1285,6 +1285,61 @@ sources:
     candidate_alternatives: []
     owner_task: M7.3
 
+  - id: nse_integrated_filing_index
+    plan_row: "Fundamentals (point-in-time)"
+    description: >-
+      Index of results filings under SEBI's Integrated Filing (Financials) regime, in force from
+      the quarter ended 31-Mar-2025 — the feed that replaced `nse_financial_results_index` for
+      every new period. Paged; each record links the filing's XBRL document on the archive host.
+    host: www.nseindia.com
+    method: GET
+    url_template: "https://www.nseindia.com/api/integrated-filing-results?type=Integrated%20Filing-%20Financials&index=equities&from_date={DD-MM-YYYY}&to_date={DD-MM-YYYY}&page={N}&size={M}"
+    verified_url: "https://www.nseindia.com/api/integrated-filing-results?type=Integrated%20Filing-%20Financials&index=equities&from_date=01-05-2025&to_date=31-05-2025&page=1&size=20"
+    cadence: per_filing
+    era: {start: 2025-04-01, end: null}
+    fallback: ["Announcement PDFs", "iXBRL HTML rendition (`ixbrl` field)"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+      Accept: "application/json, text/plain, */*"
+      X-Requested-With: XMLHttpRequest
+    needs_session_cookie: true
+    parser: {id: dataplatform.ingest.xbrl.integrated, task: M10.4}
+    robots_notes: www.nseindia.com allows / except /market-data-test.
+    pit_notes: >-
+      True PIT. `creation_Date` (and `broadcast_Date`, null on revisions) is the dissemination
+      timestamp and the first-knowable date; `qe_Date` is the quarter end and must never be used
+      as the knowable date (invariant #7). The record carries no ISIN: the symbol is resolved
+      through D2 as of the dissemination date, and the document's own `ISIN` fact is cross-checked
+      against it.
+    status: VERIFIED
+    verified_at: 2026-09-06T02:05:00+05:30
+    last_http_status: 200
+    sample_bytes: 15202
+    content_type: application/json; charset=utf-8
+    sample_sha256: 93d2b333963383c01c40fb233d8d2ca12beaf2eaf4ad954e5804ca9691beaf2f
+    parse_check: >-
+      Object envelope `{"data": [...], "size": M, "page": N-1, "totalCount": T}`; `page` is
+      1-based in the request and 0-based in the response, `size` up to 1000 verified, and a page
+      past the end returns an empty `data`. Probed 2026-09-06 through the site's own browser
+      session: 26,610 records all-time (equities); 4,180 for a from/to window of Apr-Jun 2025;
+      3,476 for May 2025 alone; the old feed returned 28 for the same quarter. Record keys:
+      symbol, cmName, smName, consolidated (`Consolidated`/`Standalone` — the document's spelling,
+      unlike the old feed), audited (`Audited`/`Un-Audited`), qe_Date (`31-MAR-2025`,
+      upper-case month), creation_Date, broadcast_Date, revised_Date, revision_Remark, type
+      (`Integrated Filing- Financials`), type_Sub (`Original`/`Revision`), seq_Id, xbrl (absolute
+      archive URL, `INTEGRATED_FILING_INDAS_*` or `_NONINDAS_*`, or the bare `-` placeholder),
+      ixbrl, pdf_attach. No fromDate: the period start is the calendar quarter's; a Q4 record's
+      document also carries the financial-year column. The XBRL documents use SEBI's
+      `in-capmkt` taxonomy (entry point `in-capmkt-ent-<date>.xsd`, identifier scheme
+      `http://www.sebi.gov.in/in-capmkt/Symbol`), whose element names match Ind-AS for every
+      stored concept; values are absolute rupees whatever `LevelOfRounding` says (verified on
+      four captured documents, `tests/fixtures/xbrl/integrated/`).
+    fixture: {frozen: true, task: M10.4, path: "tests/fixtures/xbrl/integrated/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M10.4
+
   - id: nse_xbrl_filing
     plan_row: "Fundamentals (point-in-time)"
     description: The XBRL document for a single results filing, linked from the index above.
