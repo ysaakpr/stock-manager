@@ -166,7 +166,13 @@ def _one(
     unresolved: list[UnresolvedIdentity],
 ) -> None:
     """Turn one feed record into an action, a queue entry, or an unresolved-identity note."""
-    purpose = _text(record, _PURPOSE_KEY, index=index, filename=filename, required=True)
+    # Not required. BSE publishes the occasional record with valid dates and an empty `Purpose`
+    # (ABB's 2007-06-28, one of that scrip's 27), and demanding it cost the *whole* response: one
+    # such row refused all 26 of its siblings, which is how 34 of the first 160 scrips failed.
+    # `parse_purpose("")` already yields no action and an UNRECOGNISED_TYPE queue entry, so an
+    # empty purpose lands where every other unclassifiable one does — in front of a human, with
+    # the rest of the scrip's actions intact.
+    purpose = _text(record, _PURPOSE_KEY, index=index, filename=filename)
     scrip_code = _scrip_code(record, index=index, filename=filename)
     ex_date = _ex_date(record, index=index, filename=filename)
     record_date = _date(record, "RD_Date", index=index, filename=filename)

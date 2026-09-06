@@ -632,3 +632,34 @@ def test_a_per_scrip_response_parses_and_both_ex_date_spellings_agree() -> None:
 
     bonuses = [a for a in result.actions if a.action_type is ActionType.BONUS]
     assert len(bonuses) == 3, "RELIANCE's three 1:1 bonus issues"
+
+
+#: ABB's per-scrip response, captured 2026-09-06. Record 2 (ex-date 2007-06-28) carries valid
+#: dates and an empty `Purpose`. BSE publishes these; requiring the field cost the whole response,
+#: which is how 34 of the first 160 scrips of the live campaign failed outright.
+BSE_EMPTY_PURPOSE_FIXTURE: Final = (
+    FIXTURES / "bse" / "2026-09-06" / "defaultdata_500002_EMPTY_PURPOSE.json"
+)
+
+
+def test_a_record_with_no_purpose_does_not_cost_the_scrip_its_other_actions() -> None:
+    """One unusable row is queued for a human; the other 26 still land.
+
+    The same stance the rest of the ingest takes — a record that cannot be *classified* is not an
+    error, it is a question. Before this, an empty `Purpose` raised and the scrip contributed
+    nothing at all.
+    """
+    records = json.loads(BSE_EMPTY_PURPOSE_FIXTURE.read_text())
+    assert len(records) == 27
+    assert records[2]["Purpose"] == "", "the fixture must keep the empty-purpose row"
+    assert records[2]["exdate"] == "20070628"
+
+    result = bse_ca.parse(
+        BSE_EMPTY_PURPOSE_FIXTURE.read_bytes(),
+        filename="defaultdata_500002.json",
+        scrip_index={"500002": "INE117A01022"},
+        clock=CLOCK,
+    )
+    assert len(result.actions) == 26
+    assert any(entry.raw_text == "" for entry in result.queued), "the empty row reaches a human"
+    assert all(action.isin == "INE117A01022" for action in result.actions)
