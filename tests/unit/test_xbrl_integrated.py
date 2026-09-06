@@ -44,6 +44,13 @@ MOLBIO_S = "INTEGRATED_FILING_INDAS_1721823_05092026073748_WEB.xml"
 GSS_Q4 = "INTEGRATED_FILING_INDAS_1461892_31052025112035_WEB.xml"
 AHLUCONT_NONINDAS = "INTEGRATED_FILING_NONINDAS_1461661_31052025042804_WEB.xml"
 IREDA_NBFC = "INTEGRATED_FILING_NBFC_INDAS_1415182_15042025065703_WEB.xml"
+#: The four scheme spellings the first 32 pages of the live campaign refused 87 documents over,
+#: one document each, and one document whose stated ISIN is the company's own mistyped.
+GLOBALE_COLON_SCRIP = "INTEGRATED_FILING_INDAS_1455492_28052025083730_WEB.xml"
+CEREBRAINT_SEBI_HTTPS_SCRIP = "INTEGRATED_FILING_INDAS_1455952_28052025111831_WEB.xml"
+RAJMET_SEBI_HTTPS_SYMBOL = "INTEGRATED_FILING_INDAS_1458322_29052025103356_WEB.xml"
+MTEDUCARE_COLON_SYMBOL = "INTEGRATED_FILING_INDAS_1461551_31052025015633_WEB.xml"
+OBEROI_TYPO_ISIN = "INTEGRATED_FILING_INDAS_1427053_28042025115303_WEB.xml"
 
 MOLBIO = "INE869T01028"
 GSS = "INE871H01011"
@@ -223,6 +230,132 @@ def test_a_document_stating_another_companys_isin_is_refused_inversion() -> None
     )
     with pytest.raises(ParseError, match="states ISIN INE869T01028 — a different issuer"):
         _facts(MOLBIO_C, entry, "MOLBIO")  # ...but the document says it is Molbio's
+
+
+@pytest.mark.parametrize(
+    ("filename", "isin", "symbol", "nature", "filing_date", "revenue"),
+    [
+        # `http://www.bseindia.com/in-capmkt:/ScripCode` — a stray colon (41 documents)
+        (
+            GLOBALE_COLON_SCRIP,
+            "INE0URU01010",
+            "GLOBALE",
+            Nature.STANDALONE,
+            date(2025, 5, 28),
+            "370485000",
+        ),
+        # BSE's ScripCode beside `https://www.sebi.gov.in/in-capmkt/ScripCode` (22 documents)
+        (
+            CEREBRAINT_SEBI_HTTPS_SCRIP,
+            "INE345B01019",
+            "CEREBRAINT",
+            Nature.CONSOLIDATED,
+            date(2025, 5, 28),
+            "25226000",
+        ),
+        # BSE's Symbol beside `https://www.sebi.gov.in/in-capmkt/Symbol` (8 documents)
+        (
+            RAJMET_SEBI_HTTPS_SYMBOL,
+            "INE00KV01022",
+            "RAJMET",
+            Nature.STANDALONE,
+            date(2025, 5, 29),
+            "2085300000",
+        ),
+        # `http://www.bseindia.com/in-capmkt:/Symbol` — the colon again (12 documents)
+        (
+            MTEDUCARE_COLON_SYMBOL,
+            "INE472M01018",
+            "MTEDUCARE",
+            Nature.CONSOLIDATED,
+            date(2025, 5, 31),
+            "128965000",
+        ),
+    ],
+)
+def test_the_spelling_variants_of_an_accepted_scheme_are_folded_onto_it(
+    filename: str, isin: str, symbol: str, nature: Nature, filing_date: date, revenue: str
+) -> None:
+    """87 of the first 412 live refusals were over the *spelling* of a scheme the parser accepts:
+    `in-capmkt:/` with a stray colon, and SEBI's root under `https://`. Identity is unchanged, so
+    the document parses; an unknown scheme is still refused (the NBFC test above covers the
+    canonical form, `test_xbrl` the refusal)."""
+    entry = _entry(
+        isin=isin,
+        symbol=symbol,
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 3, 31),
+        filing_date=filing_date,
+        nature=nature,
+        seq=filename.split("_")[3],
+    )
+    facts = _facts(filename, entry, symbol)
+    assert facts["revenue_from_operations"] == Decimal(revenue)
+
+
+def test_a_stated_isin_that_is_the_entrys_mistyped_is_accepted() -> None:
+    """Oberoi Realty's Q4 FY25 document states `INE903I01010` for `INE093I01010` — two adjacent
+    characters swapped. A different issuer code, so the plain issuer comparison refused it (and
+    12 other companies' typos in the first 32 live pages); the check-digit-and-transposition rule
+    recognises a typo of the entry's own ISIN and accepts the filing under the entry's."""
+    entry = _entry(
+        isin="INE093I01010",
+        symbol="OBEROIRLTY",
+        period_start=date(2025, 1, 1),
+        period_end=date(2025, 3, 31),
+        filing_date=date(2025, 4, 28),
+        nature=Nature.CONSOLIDATED,
+        seq="IF87657",
+    )
+    facts = _facts(OBEROI_TYPO_ISIN, entry, "OBEROIRLTY")
+    assert facts["revenue_from_operations"] == Decimal("11501400000")
+    assert facts["profit_after_tax"] == Decimal("4331700000")
+    assert facts["eps_basic"] == Decimal("11.91")
+
+
+#: Every company the first 32 pages of the live campaign refused over its stated ISIN, with the
+#: verdict the rule must give. Thirteen are typos (a wrong character, `O` for `0`, `1` for `I`, an
+#: adjacent swap); two state a *sister company's real ISIN* — Ashapura Minechem stating Orient
+#: Ceratech's, Gillette stating P&G Hygiene's — and must stay refused.
+LIVE_STATED_ISINS = [
+    ("INE093I01010", "INE903I01010", True),  # OBEROIRLTY: adjacent swap, check digit still valid
+    ("INE024D01016", "INE024E01016", True),  # PRUDMOULI
+    ("INE576I01022", "INE576101022", True),  # JKIL: 1 for I
+    ("INE348A01023", "INE569C01020", False),  # ASHAPURMIN → Orient Ceratech's ISIN
+    ("INE0FS801015", "INEOFS801015", True),  # MSUMI: O for 0
+    ("INE834I01025", "INE834101025", True),  # KHADIM
+    ("INE497S01012", "INE479S01012", True),  # GODAVARIB: adjacent swap
+    ("INE139I01011", "INE139101011", True),  # BVCL
+    ("INE0D6701023", "INE0T6701023", True),  # IPL
+    ("INE03JI01017", "INEO3JI01017", True),  # DGCONTENT
+    ("INE0FHS01024", "INEOFHS01024", True),  # DEEPINDS
+    ("INE0N7W01012", "INEON7W01012", True),  # BLAL
+    ("INE661I01014", "INR661I01014", True),  # BGRENERGY: a wrong country prefix
+    ("INE398A01010", "INE388A01010", True),  # VENKEYS
+    ("INE322A01010", "INE179A01014", False),  # GILLETTE → P&G Hygiene's ISIN
+]
+
+
+@pytest.mark.parametrize(("expected", "stated", "typo"), LIVE_STATED_ISINS)
+def test_the_typo_rule_gives_the_right_verdict_on_every_live_refusal(
+    expected: str, stated: str, typo: bool
+) -> None:
+    assert parser.is_isin_typo_of(stated, expected) is typo
+
+
+def test_the_check_digit_accepts_real_isins_and_refuses_a_single_wrong_character() -> None:
+    """ISO 6166: letters to base-36 values, then Luhn over the digits. Every real ISIN passes; any
+    single wrong character fails (the swap of two adjacent digits is the one error it can miss,
+    which is why `is_isin_typo_of` tests for that separately)."""
+    for real in ("INE002A01018", "INE009A01021", "INE467B01029", "INE093I01010", "US0378331005"):
+        assert parser.is_isin_check_digit_valid(real), real
+    assert not parser.is_isin_check_digit_valid("INE002A01017")
+    assert not parser.is_isin_check_digit_valid("INEOFS801015")  # MSUMI's, O for 0
+    assert not parser.is_isin_check_digit_valid("INE002A0101")  # not twelve characters
+    assert not parser.is_isin_check_digit_valid("ine002a01018")  # not upper-case: not an ISIN
+    # The same ISIN is never a typo of itself, and a real other ISIN is never a typo.
+    assert not parser.is_isin_typo_of("INE002A01018", "INE002A01018")
+    assert not parser.is_isin_typo_of("INE009A01021", "INE002A01018")
 
 
 # ── the feed ────────────────────────────────────────────────────────────────────────────────────

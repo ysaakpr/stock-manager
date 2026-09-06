@@ -150,3 +150,15 @@ the same PIT store as before; the filing-date partition is the first-knowable da
 Keep `--from` fixed at `2025-03-01` between runs so the month windows (and their checkpoints) stay
 identical; move `--to` forward to pick up new pages. About 26,600 records existed on 2026-09-06,
 so the first full run is a B1 campaign of roughly a day at the 2.5 s spacing.
+
+## Retrying refusals after a parser fix
+
+A parse refusal is recorded `FAILED` with its reason, and the document's bytes are already in L0
+(the fetch succeeded; the parse did not). So when a parser change makes a refusal class parse —
+the scheme spellings and the mistyped stated ISINs of the 2026-09-06 campaign, for example — the
+recovery costs **no requests**: rerun the same window with the same feed. `PUBLISHED` units are
+skipped, `FAILED` ones are retried, and `_ref_for` finds each document in L0 instead of fetching.
+Do it on the machine that holds the L0 (the server, under the development model), after the
+running driver has exited — never beside it, because both would write the same `filing_date`
+partitions. Read the new report's failure section afterwards: what is still `FAILED` is a class the
+change did not cover, and it should be named in `ops/BACKLOG.md` before the next season.

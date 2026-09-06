@@ -132,7 +132,23 @@ _BSE_SCRIP_SCHEME: Final = "http://www.bseindia.com/bse-fin/ScripCode"
 #: The same scrip-code identifier under SEBI's Integrated Filing namespace root (used by the
 #: `_NONINDAS_` documents and by some `_INDAS_` ones); like the BSE one it is not a symbol.
 _CAPMKT_SCRIP_SCHEME: Final = "http://www.bseindia.com/in-capmkt/ScripCode"
-_SCRIP_SCHEMES: Final = frozenset({_BSE_SCRIP_SCHEME, _CAPMKT_SCRIP_SCHEME})
+#: And under SEBI's own root, met beside the BSE one in the same document (22 of the first 87
+#: scheme refusals of the Integrated Filing campaign).
+_SEBI_SCRIP_SCHEME: Final = "http://www.sebi.gov.in/in-capmkt/ScripCode"
+_SCRIP_SCHEMES: Final = frozenset({_BSE_SCRIP_SCHEME, _CAPMKT_SCRIP_SCHEME, _SEBI_SCRIP_SCHEME})
+
+
+def _normalise_scheme(scheme: str) -> str:
+    """The scheme URI with the two spelling variants filers produce folded onto the canonical one.
+
+    The first 32 pages of the Integrated Filing campaign refused 87 documents over the *spelling*
+    of a scheme this parser already accepts: `in-capmkt:/ScripCode` with a stray colon (53 of
+    them) and SEBI's root under `https://` instead of `http://` (30). Neither says anything
+    different about identity, so both are folded here; a scheme that is not one of ours after
+    folding is still a loud failure.
+    """
+    return scheme.strip().replace("https://", "http://").replace("in-capmkt:/", "in-capmkt/")
+
 
 #: Elements that populate filing-level fields rather than becoming facts.
 _NATURE_ELEMENT: Final = "NatureOfReportStandaloneConsolidated"
@@ -502,7 +518,7 @@ def _check_symbol(
         if _local(element.tag) != "identifier":
             continue
         identifiers.add((element.text or "").strip())
-        schemes.add((element.get("scheme") or "").strip())
+        schemes.add(_normalise_scheme(element.get("scheme") or ""))
     if len(identifiers) > 1:
         raise ParseError(
             f"filing names more than one entity ({', '.join(sorted(identifiers))}); one results "
@@ -583,7 +599,16 @@ def _check_stated_isin(
     filings for a difference that identifies the same company. A different issuer code is a
     different company — the DTIL misattribution, refused. The index's ISIN stays the join key
     either way; a same-issuer mismatch is logged so the stale-template population stays visible.
-    A malformed value is ignored: a filer's typo is not evidence about the company.
+
+    A malformed value is ignored, and a well-formed one that is a **typo of the entry's ISIN** is
+    accepted and logged rather than refused: one that fails its ISO 6166 check digit cannot be any
+    security's ISIN, and one that transposes two adjacent characters of the entry's is the entry's
+    mistyped (Luhn does not catch a `09`/`90` swap, so the check digit alone would miss it). The
+    first 32 pages of the Integrated Filing campaign refused 15 companies over their stated ISIN;
+    13 were typos of this kind — `INEOFS801015` for `INE0FS801015`, `INE576101022` for
+    `INE576I01022`, `INE903I01010` for `INE093I01010` — and the other two stated a sister
+    company's real ISIN (Gillette stating P&G Hygiene's), which stays refused: the document's
+    Symbol and its ISIN name two different known companies and neither side is safe to prefer.
     """
     stated = {
         value.strip().upper()
@@ -595,19 +620,78 @@ def _check_stated_isin(
         return
     issuer = entry.isin[:_ISSUER_CODE_LENGTH]
     foreign = sorted(isin for isin in stated if isin[:_ISSUER_CODE_LENGTH] != issuer)
-    if foreign:
+    typos = [isin for isin in foreign if is_isin_typo_of(isin, entry.isin)]
+    other = [isin for isin in foreign if isin not in typos]
+    if other:
         raise ParseError(
             f"index says this filing is {entry.symbol!r} (ISIN {entry.isin}) but the document "
-            f"states ISIN {', '.join(foreign)} — a different issuer; the announcements index and "
+            f"states ISIN {', '.join(other)} — a different issuer; the announcements index and "
             "the XBRL must name the same company",
             filename=filename,
         )
-    _LOG.info(
-        "xbrl.stated_isin_differs_same_issuer",
-        filename=filename,
-        entry_isin=entry.isin,
-        stated=sorted(stated),
-        note="same issuer code: a split changed the ISIN and the template kept the old one",
+    if typos:
+        _LOG.info(
+            "xbrl.stated_isin_typo",
+            filename=filename,
+            entry_isin=entry.isin,
+            stated=typos,
+            note="fails its check digit or transposes two adjacent characters of the entry's "
+            "ISIN: a filer's typo, not another company",
+        )
+    same_issuer = sorted(stated - set(foreign))
+    if same_issuer:
+        _LOG.info(
+            "xbrl.stated_isin_differs_same_issuer",
+            filename=filename,
+            entry_isin=entry.isin,
+            stated=same_issuer,
+            note="same issuer code: a split changed the ISIN and the template kept the old one",
+        )
+
+
+def is_isin_check_digit_valid(isin: str) -> bool:
+    """Whether the ISIN's last character is the ISO 6166 check digit of the rest.
+
+    Letters become their base-36 values (`A` = 10 … `Z` = 35), the digits are concatenated, and the
+    Luhn sum over the whole string must be divisible by ten. Assumes a twelve-character
+    upper-case ISIN; anything else is not an ISIN and is False. Never consults a master: this is
+    arithmetic on the string, so it can say "not any security's ISIN" but never "this security's".
+    """
+    if not re.fullmatch(r"[A-Z0-9]{12}", isin):
+        return False
+    digits = "".join(str(int(character, 36)) for character in isin)
+    total = 0
+    for position, character in enumerate(reversed(digits)):
+        value = int(character)
+        if position % 2:
+            value *= 2
+            if value > 9:
+                value -= 9
+        total += value
+    return total % 10 == 0
+
+
+def is_isin_typo_of(stated: str, expected: str) -> bool:
+    """Whether `stated` is `expected` mistyped rather than a different security's ISIN.
+
+    True when `stated` fails its check digit (no security has that ISIN) or is `expected` with two
+    adjacent characters swapped (the one error class the check digit can miss). False for any
+    well-formed ISIN that is not such a transposition — including a real ISIN of another company,
+    which is exactly what the caller must go on refusing. Case-insensitive; never touches a master.
+    """
+    stated, expected = stated.strip().upper(), expected.strip().upper()
+    if stated == expected:
+        return False
+    if not is_isin_check_digit_valid(stated):
+        return True
+    if len(stated) != len(expected):
+        return False
+    differing = [index for index, (a, b) in enumerate(zip(stated, expected, strict=True)) if a != b]
+    return (
+        len(differing) == 2
+        and differing[1] == differing[0] + 1
+        and stated[differing[0]] == expected[differing[1]]
+        and stated[differing[1]] == expected[differing[0]]
     )
 
 
