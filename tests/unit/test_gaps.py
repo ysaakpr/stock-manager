@@ -20,6 +20,7 @@ ten years, so it has to be a property of the classifier. That is what this modul
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -849,3 +850,98 @@ def test_a_range_fetched_source_owes_nothing_per_session() -> None:
     expectations = expectations_from_register()
     assert expectations["nse_corp_actions"].per_session is False
     assert expectations["nse_bhavcopy"].per_session is True
+
+
+# ── L0_PRESENT_L1_ABSENT: is this a parser fix or a re-fetch? (finding N2, P1.2) ─────────────────
+
+
+class _StubL0Presence:
+    """An `L0Presence` that answers from a set of `(source, date)` pairs it was told about."""
+
+    def __init__(self, *present: tuple[str, date], per_session_only: bool = True) -> None:
+        self._present = set(present)
+        self._per_session_only = per_session_only
+
+    def holds(
+        self,
+        sources: Sequence[str],
+        logical_date: date,
+        l0_path: str | None,
+        *,
+        per_session: bool,
+    ) -> bool:
+        if self._per_session_only and not per_session and not l0_path:
+            return False
+        return any((source, logical_date) in self._present for source in sources)
+
+
+def test_a_failed_pair_whose_payload_is_in_l0_says_so() -> None:
+    """The difference between "fix the parser" and "fetch it again", made a reason of its own."""
+    failed = record(SyncState.FAILED, last_error="TIMESTAMP is '13-Jul-20'")
+    report = build_report(
+        SESSION,
+        SESSION,
+        sources=[SOURCE],
+        records=rows(failed),
+        expectations={SOURCE: SourceExpectation(source=SOURCE, l1_dataset=L1_DATASET)},
+        l0_presence=_StubL0Presence((SOURCE, SESSION)),
+    )
+
+    (entry,) = report.unexplained
+    assert entry.reason is GapReason.L0_PRESENT_L1_ABSENT
+    assert "not a re-fetch" in entry.detail
+    assert entry.last_error == "TIMESTAMP is '13-Jul-20'"
+
+
+def test_a_failed_pair_with_no_payload_stays_a_plain_failure() -> None:
+    """Both directions. A FAILED that quietly became L0_PRESENT would send nobody to re-fetch."""
+    report = build_report(
+        SESSION,
+        SESSION,
+        sources=[SOURCE],
+        records=rows(record(SyncState.FAILED, last_error="404")),
+        expectations={SOURCE: SourceExpectation(source=SOURCE, l1_dataset=L1_DATASET)},
+        l0_presence=_StubL0Presence(),
+    )
+
+    (entry,) = report.unexplained
+    assert entry.reason is GapReason.FAILED
+
+
+def test_the_directory_fallback_never_answers_for_a_unit_row(tmp_path: Path) -> None:
+    """A month directory full of other filings is not evidence about the one that failed.
+
+    The 774 filings whose documents were never fetched sit in months packed with documents that
+    were. Answering L0_PRESENT for them would tell an operator not to re-fetch precisely the
+    filings that need re-fetching.
+    """
+    from dataplatform.quality.gaps import LakeL0Presence
+    from dataplatform.store.paths import l0_dir
+
+    directory = l0_dir("nse_xbrl_filing", SESSION, data_root=tmp_path)
+    directory.mkdir(parents=True)
+    (directory / "SOMEONE_ELSES_FILING.xml").write_bytes(b"<xbrl/>")
+    presence = LakeL0Presence(data_root=tmp_path)
+
+    assert presence.holds(["nse_xbrl_filing"], SESSION, None, per_session=False) is False
+    # …and the same directory *is* evidence for a per-session source, where the date is the key.
+    assert presence.holds(["nse_xbrl_filing"], SESSION, None, per_session=True) is True
+
+
+def test_the_recorded_l0_key_is_resolved_through_the_lake_layout(tmp_path: Path) -> None:
+    """`L0Ref.key` is `<source>/<iso-date>/<file>`; the lake shards by year and month.
+
+    Joining the key onto the L0 root would look for a directory that does not exist and report
+    "no bytes" for a payload sitting right there.
+    """
+    from dataplatform.quality.gaps import LakeL0Presence
+    from dataplatform.store.paths import l0_dir
+
+    directory = l0_dir(SOURCE, SESSION, data_root=tmp_path)
+    directory.mkdir(parents=True)
+    (directory / "payload.csv").write_bytes(b"data")
+
+    presence = LakeL0Presence(data_root=tmp_path)
+    key = f"{SOURCE}/{SESSION.isoformat()}/payload.csv"
+    assert presence.holds([SOURCE], SESSION, key, per_session=False) is True
+    assert presence.holds([SOURCE], SESSION, f"{SOURCE}/x/missing.csv", per_session=False) is False

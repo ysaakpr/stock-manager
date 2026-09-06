@@ -34,8 +34,27 @@ enumeration it asks for. 1.1 s over ten years.
 | 2026-09-03 | `nifty_index_constituents/niftyprivatebank` | FAILED | `body is markup, not CSV` — the site answered a bad path with its Angular shell and a 200. Correctly refused. |
 
 The two **bold** rows are audit finding N2: two full trading sessions absent from `prices_raw`
-whose bytes we already hold. They are a parser fix plus a re-derive from L0, no fetching. Closed by
-P1.1.
+whose bytes we already hold.
+
+**Both are closed.** P1.1 froze the two payloads as fixtures, taught the legacy parser the
+two-digit year and the placeholder ISIN, and re-derived both partitions from L0 — no fetching.
+`prices_raw` now holds 2,471 partitions and `expected_sessions` reports nothing absent:
+
+| | rows | with delivery |
+|---|---|---|
+| 2020-07-13 | 2,001 | 1,083 |
+| 2021-02-16 | 2,025 | 1,217 |
+
+`ABFRLPP1` (series `E1`, ISIN `DUMMY`) is in `prices_raw_quarantine` for 2021-02-16 under the new
+`isin_not_published` reason — refused, not dropped, and not a reason to lose the session.
+
+P1.2 also landed, so a re-run of this report now separates the two questions an operator actually
+has. `L0_PRESENT_L1_ABSENT` means the bytes are on disk and the fix is a parser change plus a
+re-derive; plain `FAILED` means a re-fetch. Today that splits as **2 · L0_PRESENT** (the two
+delivery sessions below) against **2,394 · FAILED**, and the split is deliberately conservative
+for unit-keyed sources: a month directory full of *other* filings is not evidence about the one
+that failed, so the 774 filings whose documents were never fetched stay in the re-fetch column
+where they belong.
 
 ## The 2,392 stuck filings
 

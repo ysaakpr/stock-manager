@@ -36,7 +36,7 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Sequence, Sized
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -57,7 +57,7 @@ from dataplatform.ingest.fetcher import (
     ForbiddenSpikeError,
     build_fetcher,
 )
-from dataplatform.ingest.models import ParseError, PriceRow
+from dataplatform.ingest.models import BhavcopyParse, ParseError, PriceRow
 from dataplatform.ingest.nse import bhavcopy, delivery, mto
 from dataplatform.ingest.nse.bhavcopy_legacy import LEGACY_SOURCE_ID
 from dataplatform.ingest.nse.bhavcopy_udiff import UDIFF_SOURCE_ID
@@ -132,7 +132,7 @@ class WriteContext:
 
 
 @dataclass(frozen=True, slots=True)
-class SourceSet[RowT]:
+class SourceSet[ParsedT: Sized]:
     """A named backfill target: how to turn a date into a fetch, and how to land what came back.
 
     A source set is the unit `--source` selects. It knows three things and nothing else: the
@@ -141,16 +141,19 @@ class SourceSet[RowT]:
     parse and write as two steps lets the runner move the row `FETCHED → VALIDATED → NORMALIZED`
     honestly and attribute a failure to the step that actually broke.
 
-    Generic in the row type because not every backfill target yields prices: the delivery file
-    yields `DeliveryRow`, which has no ISIN and is not a price at all. `needs_master` is declared
-    rather than discovered, so a run that cannot build the master fails at wiring time with the
-    reason named, instead of at the first write with a `ValueError` from three layers down.
+    Generic in what the parse *returns*, not in a row type: not every target yields prices (the
+    delivery file yields `DeliveryRow`, which has no ISIN and is not a price at all), and the cash
+    bhavcopy yields a `BhavcopyParse` — rows plus the ones the exchange published without an ISIN,
+    which the writer quarantines. `Sized` is the only thing the runner needs of it, for the count
+    in the published log line. `needs_master` is declared rather than discovered, so a run that
+    cannot build the master fails at wiring time with the reason named, instead of at the first
+    write with a `ValueError` from three layers down.
     """
 
     name: str
     build_request: Callable[[date, SourceRegister], FetchRequest]
-    parse: Callable[[L0Store, L0Ref], Sequence[RowT]]
-    write: Callable[[Sequence[RowT], WriteContext], object]
+    parse: Callable[[L0Store, L0Ref], ParsedT]
+    write: Callable[[ParsedT, WriteContext], object]
     needs_master: bool = False
 
 
@@ -202,15 +205,22 @@ def _bhavcopy_request(trade_date: date, register: SourceRegister) -> FetchReques
 NSE_BHAVCOPY: Final = "nse_bhavcopy"
 
 
-def _write_bhavcopy(rows: Sequence[PriceRow], ctx: WriteContext) -> object:
+def _write_bhavcopy(parsed: BhavcopyParse, ctx: WriteContext) -> object:
     """Write one parsed NSE session to its `prices_raw` L1 partition (M1.8).
 
     No delivery join and no identity master: the bhavcopy carries ISIN natively, so the raw price
     partition stands on its own. The delivery `%` join (M1.6/M1.7) is the daily pipeline's (M1.10)
     concern and a later source set; a backfill of a decade of prices does not block on it.
     `ctx.data_root` is the runner's lake root, so L1 lands beside the L0 the payload came from.
+    A row the exchange published with a placeholder ISIN cannot be keyed and is quarantined rather
+    than dropped or allowed to fail the session (`bhavcopy_legacy.PLACEHOLDER_ISINS`).
     """
-    return write_prices_raw(list(rows), exchange=Exchange.NSE, data_root=ctx.data_root)
+    return write_prices_raw(
+        list(parsed.rows),
+        exchange=Exchange.NSE,
+        unidentified_rows=parsed.refused,
+        data_root=ctx.data_root,
+    )
 
 
 # ── bse_bhavcopy source set ──────────────────────────────────────────────────────────────────
@@ -328,13 +338,14 @@ def _write_delivery(rows: Sequence[DeliveryRow], ctx: WriteContext) -> object:
     # miss the 2024-07-08 UDiFF cutover.
     stored = _bhavcopy_request(trade_date, ctx.register)
     price_ref = ctx.l0.ref_for(stored.fetch_source, trade_date, stored.filename)
-    price_rows = bhavcopy.parse_l0(ctx.l0, price_ref)
-    if not price_rows:
+    parsed = bhavcopy.parse_l0_report(ctx.l0, price_ref)
+    if not parsed.rows:
         raise ValueError(f"{trade_date}: stored bhavcopy parsed to zero price rows")
     return write_prices_raw(
-        list(price_rows),
+        list(parsed.rows),
         exchange=Exchange.NSE,
         delivery_rows=rows,
+        unidentified_rows=parsed.refused,
         master=ctx.master,
         data_root=ctx.data_root,
     )
@@ -344,7 +355,7 @@ SOURCE_SETS: Final[dict[str, SourceSet[Any]]] = {
     NSE_BHAVCOPY: SourceSet(
         name=NSE_BHAVCOPY,
         build_request=_bhavcopy_request,
-        parse=lambda store, ref: bhavcopy.parse_l0(store, ref),
+        parse=lambda store, ref: bhavcopy.parse_l0_report(store, ref),
         write=_write_bhavcopy,
     ),
     BSE_BHAVCOPY: SourceSet(

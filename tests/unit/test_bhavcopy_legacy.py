@@ -36,8 +36,12 @@ from dataplatform.ingest.nse.bhavcopy_legacy import (
     LEGACY_COLUMNS,
     LEGACY_ERA_END,
     LEGACY_SOURCE_ID,
+    _complete_century,
+    _date,
     parse,
     parse_l0,
+    parse_report,
+    parse_text,
 )
 from dataplatform.store import L0Store
 
@@ -62,6 +66,9 @@ class Fixture(NamedTuple):
     trade_date: date
     data_rows: int
     sample: PriceRow
+    #: Symbols the exchange published with a placeholder ISIN. They are data rows of the file and
+    #: are counted in `data_rows`, but they never become `PriceRow`s — see `PLACEHOLDER_ISINS`.
+    refused_symbols: tuple[str, ...] = ()
 
 
 #: RELIANCE on each session, transcribed field by field from the raw CSV line (see the test that
@@ -127,6 +134,47 @@ FIXTURE_FILES: Final = (
             total_trades=261494,
         ),
     ),
+    Fixture(
+        filename="cm13JUL2020bhav.csv.zip",
+        trade_date=date(2020, 7, 13),
+        data_rows=2001,
+        sample=PriceRow(
+            isin="INE002A01018",
+            symbol="RELIANCE",
+            series="EQ",
+            trade_date=date(2020, 7, 13),
+            open=Decimal("1903.35"),
+            high=Decimal("1947.7"),
+            low=Decimal("1900"),
+            close=Decimal("1935"),
+            last=Decimal("1938.7"),
+            prev_close=Decimal("1878.05"),
+            total_traded_qty=32124397,
+            total_traded_value=Decimal("61905840823"),
+            total_trades=615947,
+        ),
+    ),
+    Fixture(
+        filename="cm16FEB2021bhav.csv.zip",
+        trade_date=date(2021, 2, 16),
+        data_rows=2026,
+        sample=PriceRow(
+            isin="INE002A01018",
+            symbol="RELIANCE",
+            series="EQ",
+            trade_date=date(2021, 2, 16),
+            open=Decimal("2039.75"),
+            high=Decimal("2079.4"),
+            low=Decimal("2035"),
+            close=Decimal("2059.5"),
+            last=Decimal("2058.5"),
+            prev_close=Decimal("2032.6"),
+            total_traded_qty=9886093,
+            total_traded_value=Decimal("20377537336.5"),
+            total_trades=274329,
+        ),
+        refused_symbols=("ABFRLPP1",),
+    ),
 )
 
 PRICE_FIELDS: Final = ("open", "high", "low", "close", "last", "prev_close", "total_traded_value")
@@ -150,6 +198,17 @@ def raw_records_of(fixture: Fixture) -> list[list[str]]:
     reader = csv.reader(io.StringIO(raw_csv_of(fixture)))
     next(reader)
     return [record for record in reader if record and any(field.strip() for field in record)]
+
+
+def priced_records_of(fixture: Fixture) -> list[list[str]]:
+    """The raw records that can become `PriceRow`s — everything except the placeholder-ISIN ones.
+
+    The parser refuses a row whose ISIN column holds a placeholder rather than failing the file
+    (`PLACEHOLDER_ISINS`), so a row-for-row comparison against the raw CSV has to exclude the same
+    rows or it is asserting the old, session-losing behaviour.
+    """
+    refused = set(fixture.refused_symbols)
+    return [record for record in raw_records_of(fixture) if record[0] not in refused]
 
 
 @pytest.fixture(params=FIXTURE_FILES, ids=lambda fixture: fixture.filename)
@@ -243,8 +302,12 @@ def test_row_count_matches_the_raw_csv(era_file: Fixture) -> None:
     """Counted twice: once by the parser, once by the stdlib csv reader over the same member."""
     rows = parse(payload_of(era_file), filename=era_file.filename)
 
-    assert len(rows) == len(raw_records_of(era_file))
-    assert len(rows) == era_file.data_rows, "the count transcribed into PROVENANCE.md"
+    assert len(rows) == len(priced_records_of(era_file))
+    # The reconciliation the M1.8 contract asks for: kept + refused is every data row in the file.
+    assert len(rows) + len(era_file.refused_symbols) == len(raw_records_of(era_file))
+    assert len(rows) + len(era_file.refused_symbols) == era_file.data_rows, (
+        "the count transcribed into PROVENANCE.md"
+    )
 
 
 def test_hand_checked_sample_row_matches_the_raw_csv(era_file: Fixture) -> None:
@@ -285,7 +348,7 @@ def test_every_field_of_every_row_matches_the_raw_csv(era_file: Fixture) -> None
     """
     rows = parse(payload_of(era_file), filename=era_file.filename)
 
-    for row, record in zip(rows, raw_records_of(era_file), strict=True):
+    for row, record in zip(rows, priced_records_of(era_file), strict=True):
         assert (row.symbol, row.series, row.isin) == (record[0], record[1], record[12])
         assert row.open == Decimal(record[2])
         assert row.close == Decimal(record[5])
@@ -312,7 +375,7 @@ def test_decimal_conversion_is_exact_not_binary() -> None:
 def test_non_eq_series_survive_the_parser(era_file: Fixture) -> None:
     """Every series the exchange published is present, in the count the raw file has."""
     rows = parse(payload_of(era_file), filename=era_file.filename)
-    records = raw_records_of(era_file)
+    records = priced_records_of(era_file)
 
     assert {row.series for row in rows} == {record[1] for record in records}
     assert {"EQ", "BE"} <= {row.series for row in rows}
@@ -327,7 +390,7 @@ def test_rows_keep_the_exchange_file_order(era_file: Fixture) -> None:
     payload = payload_of(era_file)
     first = parse(payload, filename=era_file.filename)
     assert first == parse(payload, filename=era_file.filename)
-    assert [row.symbol for row in first] == [record[0] for record in raw_records_of(era_file)]
+    assert [row.symbol for row in first] == [record[0] for record in priced_records_of(era_file)]
 
 
 # ── acceptance 3: malformed input raises a specific error naming the file and line ───────────
@@ -483,3 +546,74 @@ def test_a_corrupted_l0_payload_never_becomes_rows(tmp_path: Path) -> None:
 
     with pytest.raises(Exception, match="hashes to"):
         parse_l0(store, ref)
+
+
+# ── the two sessions the parser lost until 2026-09-06 (audit finding N2) ────────────────────────
+
+
+def test_a_two_digit_year_is_read_as_the_session_the_file_is_for() -> None:
+    """`cm13JUL2020bhav.csv` states `13-Jul-20`, and it is the 2020 session, not 1920.
+
+    2,001 rows and a whole trading day were lost to this for months: the parse failed, the failure
+    was correctly non-retryable, and the report that would have named it was answering 500.
+    """
+    fixture = _fixture_named("cm13JUL2020bhav.csv.zip")
+    rows = parse(payload_of(fixture), filename=fixture.filename)
+
+    assert {row.trade_date for row in rows} == {date(2020, 7, 13)}
+    assert len(rows) == 2001
+
+
+def test_the_two_digit_pivot_is_anchored_on_the_exchange_not_a_round_number() -> None:
+    """94-99 is the 1990s, 00-93 is the 2000s — NSE's cash market opened in November 1994."""
+    assert _complete_century(94) == 1994
+    assert _complete_century(99) == 1999
+    assert _complete_century(0) == 2000
+    assert _complete_century(20) == 2020
+    assert _complete_century(93) == 2093
+
+
+def test_the_month_is_read_case_insensitively_and_still_without_the_locale() -> None:
+    """`Jul`, `JUL` and `jul` are one month; `Jui` is not a month in any casing."""
+    for spelling in ("13-Jul-2020", "13-JUL-2020", "13-jul-2020"):
+        assert _date(spelling, column="TIMESTAMP", line=2, filename="x") == date(2020, 7, 13)
+    with pytest.raises(ParseError):
+        _date("13-Jui-2020", column="TIMESTAMP", line=2, filename="x")
+
+
+def test_a_placeholder_isin_refuses_the_row_and_keeps_the_session() -> None:
+    """`ABFRLPP1` carries `DUMMY` on 2021-02-16. One row is not a reason to lose 2,025 prices.
+
+    The row is refused, not dropped: it comes back in `refused` with everything the exchange did
+    state, which is what the L1 writer quarantines. Both halves matter — a parser that kept the
+    row would have had to invent an ISIN (invariant #2), and one that discarded it silently would
+    be the data loss `prices_raw_quarantine` exists to prevent.
+    """
+    fixture = _fixture_named("cm16FEB2021bhav.csv.zip")
+    parsed = parse_report(payload_of(fixture), filename=fixture.filename)
+
+    assert len(parsed.rows) == 2025
+    (refused,) = parsed.refused
+    assert (refused.symbol, refused.series, refused.stated_isin) == ("ABFRLPP1", "E1", "DUMMY")
+    assert refused.trade_date == date(2021, 2, 16)
+    assert refused.line > 1
+    assert "ABFRLPP1" not in {row.symbol for row in parsed.rows}
+    # kept + refused reconciles to the file: nothing was dropped on the way through.
+    assert len(parsed) == len(parsed.rows) + len(parsed.refused) == 2026
+
+
+def test_a_corrupt_isin_is_still_an_error_not_a_refusal() -> None:
+    """The narrowness of the placeholder rule: only the literals the exchange actually publishes.
+
+    `PLACEHOLDER_ISINS` is a closed set for a reason — treating "anything that fails the ISIN
+    pattern" as a stated absence would turn a truncated field into a silently missing row.
+    """
+    body = HEADER + "\nACME,EQ,1,1,1,1,1,1,1,1,16-FEB-2021,1,INE00,\n"
+    with pytest.raises(ParseError) as caught:
+        parse_text(body, filename="corrupt.csv")
+    assert "not a valid price row" in str(caught.value)
+
+
+def _fixture_named(filename: str) -> Fixture:
+    (fixture,) = [f for f in FIXTURE_FILES if f.filename == filename]
+    return fixture

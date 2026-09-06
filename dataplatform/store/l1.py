@@ -51,7 +51,7 @@ import pyarrow.parquet as pq
 
 from dataplatform.identity.master import Exchange, IdentityMaster
 from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
-from dataplatform.ingest.models import PriceRow
+from dataplatform.ingest.models import BhavcopyParse, PriceRow, UnidentifiedRow
 from dataplatform.ingest.nse import bhavcopy, delivery
 from dataplatform.ingest.nse.delivery import DeliveryRow, ResolvedDeliveryRow
 from dataplatform.logging import get_logger
@@ -118,6 +118,7 @@ def write_prices_raw(
     *,
     exchange: Exchange = Exchange.NSE,
     delivery_rows: Iterable[DeliveryRow] = (),
+    unidentified_rows: Iterable[UnidentifiedRow] = (),
     master: IdentityMaster | None = None,
     data_root: Path | None = None,
 ) -> PricesRawWriteReport:
@@ -175,8 +176,14 @@ def write_prices_raw(
     enforce_schema(table, PRICES_RAW_SCHEMA, dataset=PRICES_RAW_DATASET)
     _write_table(table, path)
 
+    unidentified = list(unidentified_rows)
     quarantine_path = _write_quarantine(
-        unresolved, orphaned, exchange=exchange, trade_date=trade_date, data_root=data_root
+        unresolved,
+        orphaned,
+        unidentified,
+        exchange=exchange,
+        trade_date=trade_date,
+        data_root=data_root,
     )
 
     delivery_joined = len(used_keys)
@@ -232,14 +239,15 @@ def rebuild_prices_raw_from_l0(
     pre-08-Jul-2024 BSE legacy era has no ISIN column and is resolved through the scrip master by
     `bse.bhavcopy.resolve_legacy` on the B1/M1.13-gated backfill path, not here.
     """
-    price_rows = _parse_bhavcopy_l0(store, bhavcopy_ref, exchange=exchange)
+    parsed = _parse_bhavcopy_l0(store, bhavcopy_ref, exchange=exchange)
     delivery_batch: tuple[DeliveryRow, ...] = ()
     if delivery_ref is not None:
         delivery_batch = delivery.parse_l0(store, delivery_ref)
     return write_prices_raw(
-        price_rows,
+        parsed.rows,
         exchange=exchange,
         delivery_rows=delivery_batch,
+        unidentified_rows=parsed.refused,
         master=master,
         data_root=data_root,
     )
@@ -266,16 +274,17 @@ def read_prices_raw(
 # ── internals ────────────────────────────────────────────────────────────────────────────────
 
 
-def _parse_bhavcopy_l0(store: L0Store, ref: L0Ref, *, exchange: Exchange) -> tuple[PriceRow, ...]:
+def _parse_bhavcopy_l0(store: L0Store, ref: L0Ref, *, exchange: Exchange) -> BhavcopyParse:
     """Parse a bhavcopy L0 payload with the parser its exchange requires.
 
     NSE and BSE ship different files (different columns, and BSE serves the UDiFF era uncompressed),
-    but both `parse_l0` functions share the signature and both emit the identical `PriceRow`, so the
-    exchange is the only branch — no caller downstream sees which exchange's file it was.
+    but both emit the identical `PriceRow`, so the exchange is the only branch — no caller
+    downstream sees which exchange's file it was. Only the NSE legacy era has ever published a
+    placeholder ISIN, so the BSE branch reports no refusals rather than being unable to.
     """
     if exchange is Exchange.BSE:
-        return bse_bhavcopy.parse_l0(store, ref)
-    return bhavcopy.parse_l0(store, ref)
+        return BhavcopyParse(rows=bse_bhavcopy.parse_l0(store, ref))
+    return bhavcopy.parse_l0_report(store, ref)
 
 
 def _single_session(price_rows: Sequence[PriceRow]) -> date:
@@ -373,6 +382,7 @@ def _price_to_raw(
 def _write_quarantine(
     unresolved: Sequence[DeliveryRow],
     orphaned: Sequence[ResolvedDeliveryRow],
+    unidentified: Sequence[UnidentifiedRow] = (),
     *,
     exchange: Exchange,
     trade_date: date,
@@ -384,33 +394,52 @@ def _write_quarantine(
     dataset (`prices_raw_quarantine`), never a second file in the `prices_raw` partition, so a scan
     of `prices_raw` never reads a quarantined row as canonical.
     """
-    if not unresolved and not orphaned:
+    if not unresolved and not orphaned and not unidentified:
         return None
-    records = [
-        {
-            "symbol": row.symbol,
-            "series": row.series,
-            "trade_date": row.trade_date,
-            "exchange": exchange.value,
-            "isin": None,
-            "deliv_qty": row.deliv_qty,
-            "deliv_pct": _q(row.deliv_pct, _PCT_Q) if row.deliv_pct is not None else None,
-            "reason": PriceQuarantineReason.SYMBOL_UNRESOLVED,
-        }
-        for row in unresolved
-    ] + [
-        {
-            "symbol": row.symbol,
-            "series": row.series,
-            "trade_date": row.trade_date,
-            "exchange": exchange.value,
-            "isin": row.isin,
-            "deliv_qty": row.deliv_qty,
-            "deliv_pct": _q(row.deliv_pct, _PCT_Q) if row.deliv_pct is not None else None,
-            "reason": PriceQuarantineReason.NO_MATCHING_PRICE,
-        }
-        for row in orphaned
-    ]
+    records = (
+        [
+            {
+                "symbol": row.symbol,
+                "series": row.series,
+                "trade_date": row.trade_date,
+                "exchange": exchange.value,
+                "isin": None,
+                "deliv_qty": row.deliv_qty,
+                "deliv_pct": _q(row.deliv_pct, _PCT_Q) if row.deliv_pct is not None else None,
+                "reason": PriceQuarantineReason.SYMBOL_UNRESOLVED,
+            }
+            for row in unresolved
+        ]
+        + [
+            {
+                "symbol": row.symbol,
+                "series": row.series,
+                "trade_date": row.trade_date,
+                "exchange": exchange.value,
+                "isin": row.isin,
+                "deliv_qty": row.deliv_qty,
+                "deliv_pct": _q(row.deliv_pct, _PCT_Q) if row.deliv_pct is not None else None,
+                "reason": PriceQuarantineReason.NO_MATCHING_PRICE,
+            }
+            for row in orphaned
+        ]
+        + [
+            {
+                "symbol": row.symbol,
+                "series": row.series,
+                "trade_date": row.trade_date,
+                "exchange": exchange.value,
+                # The literal the exchange published, kept verbatim: "the source said DUMMY" is a
+                # fact, and blanking it would leave the row indistinguishable from an unresolved
+                # symbol, which is a different failure with a different fix.
+                "isin": row.stated_isin,
+                "deliv_qty": None,
+                "deliv_pct": None,
+                "reason": PriceQuarantineReason.ISIN_NOT_PUBLISHED,
+            }
+            for row in unidentified
+        ]
+    )
     records.sort(key=lambda rec: (rec["reason"], rec["symbol"], rec["series"]))
     path = partition_path(Layer.L1, PRICES_RAW_QUARANTINE_DATASET, trade_date, data_root=data_root)
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -32,6 +32,7 @@ published it (invariant #3); adjustment factors live in D3 and are applied on re
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from typing import Annotated, Final
@@ -40,11 +41,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "ISIN_PATTERN",
+    "BhavcopyParse",
     "IngestError",
     "ParseError",
     "Price",
     "PriceRow",
     "Quantity",
+    "UnidentifiedRow",
 ]
 
 #: An ISIN as ISO 6166 defines it: two-letter country code, nine alphanumerics, one check digit.
@@ -119,3 +122,41 @@ class PriceRow(BaseModel):
     total_traded_qty: Quantity = Field(description="shares traded in the session (TOTTRDQTY)")
     total_traded_value: Price = Field(description="turnover in rupees (TOTTRDVAL)")
     total_trades: Quantity = Field(description="number of trades executed (TOTALTRADES)")
+
+
+class UnidentifiedRow(BaseModel):
+    """A row the exchange published with a placeholder where the ISIN belongs.
+
+    What it does: keeps everything the row *did* state — symbol, series, session and the literal
+    the ISIN column carried — so the refusal can be enumerated rather than counted.
+    What it assumes: the row is otherwise well formed. A corrupt field is a `ParseError`; this
+    type is for the narrower fact that the exchange said this instrument has no ISIN.
+    What it never does: become a `PriceRow`. ISIN is the only join key (invariant #2), so a row
+    without one cannot be keyed, and inventing one from the symbol is the exact defect the
+    identity master exists to prevent.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    symbol: str = Field(min_length=1, description="exchange ticker on `trade_date`, as published")
+    series: str = Field(min_length=1, description="NSE series, verbatim")
+    trade_date: date = Field(description="the exchange session this row is about (Asia/Kolkata)")
+    stated_isin: str = Field(description="the literal the ISIN column held, e.g. 'DUMMY'")
+    line: int = Field(ge=1, description="1-based line in the source file, for the operator")
+
+
+@dataclass(frozen=True, slots=True)
+class BhavcopyParse:
+    """One session's bhavcopy, split into the rows that have an identity and the ones that do not.
+
+    `rows` and `refused` reconcile to the file: every data row in the payload is in exactly one of
+    them, which is what lets a caller assert that nothing was dropped (the M1.8 "never silently"
+    contract, and the same shape as `bse.bhavcopy.LegacyResolution`).
+    """
+
+    rows: tuple[PriceRow, ...]
+    refused: tuple[UnidentifiedRow, ...] = ()
+
+    def __len__(self) -> int:
+        """Every data row the payload held — the honest count for "rows parsed" in a log line."""
+        return len(self.rows) + len(self.refused)

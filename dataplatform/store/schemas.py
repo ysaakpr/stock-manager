@@ -77,7 +77,7 @@ class SchemaError(ValueError):
 
 
 class PriceQuarantineReason:
-    """Why a delivery row was quarantined instead of joined onto a price row.
+    """Why a row was quarantined instead of landing in `prices_raw`.
 
     Not a `StrEnum` because these are stored verbatim in a parquet string column and read back as
     plain strings; the two values are named here so the writer and any consumer agree on them.
@@ -88,6 +88,12 @@ class PriceQuarantineReason:
 
     #: The row resolved to an ISIN, but no price row in the session carried that `(isin, series)`.
     NO_MATCHING_PRICE: Final = "no_matching_price"
+
+    #: A *price* row, not a delivery one: the bhavcopy carried a placeholder where the ISIN
+    #: belongs (`bhavcopy_legacy.PLACEHOLDER_ISINS`). ISIN is the only join key, so the row cannot
+    #: enter `prices_raw` — and the session must not be refused for it either, which is what
+    #: happened to 2021-02-16 until the 2026-09-06 audit.
+    ISIN_NOT_PUBLISHED: Final = "isin_not_published"
 
 
 class PricesRawRow(BaseModel):

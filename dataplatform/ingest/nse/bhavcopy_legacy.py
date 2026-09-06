@@ -42,7 +42,7 @@ from typing import Final
 
 from pydantic import ValidationError
 
-from dataplatform.ingest.models import ParseError, PriceRow
+from dataplatform.ingest.models import BhavcopyParse, ParseError, PriceRow, UnidentifiedRow
 from dataplatform.logging import get_logger
 from dataplatform.store.l0 import L0Ref, L0Store
 
@@ -108,7 +108,25 @@ _MONTHS: Final = {
     "DEC": 12,
 }
 
-_TIMESTAMP: Final = re.compile(r"^(\d{1,2})-([A-Z]{3})-(\d{4})$")
+#: `DD-MON-YY` and `DD-MON-YYYY`, either case. Both widths and both cases occur: 1,939 of the
+#: 1,940 legacy payloads in this lake say `16-FEB-2021`, and `cm13JUL2020bhav.csv` says `13-Jul-20`
+#: in all 2,001 of its rows. That one file also nests its CSV inside a directory of the same name
+#: in the archive — the same session is the archive's only example of both quirks, which is why it
+#: is frozen as its own fixture era rather than patched around.
+_TIMESTAMP: Final = re.compile(r"^(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4})$")
+
+#: NSE's cash market opened in November 1994, so a two-digit year is unambiguous under this pivot
+#: for every date the archive can serve: 94-99 is the 1990s, everything else is 2000 onwards. A
+#: pivot is a guess unless it is anchored on something, and this one is anchored on the exchange's
+#: own start date rather than on a round number.
+_TWO_DIGIT_PIVOT: Final = 94
+
+#: Values NSE publishes in the ISIN column for an instrument that has none. `ABFRLPP1` — Aditya
+#: Birla Fashion's partly-paid rights entitlement, series `E1` — carries `DUMMY` on 2021-02-16, the
+#: only such row in ten years and 1,940 payloads. It is not a malformed row: the exchange stated
+#: that this instrument has no ISIN, which is a different fact from a corrupt field. Refusing the
+#: whole session for it cost 2,000 real prices, so the row is refused and the session is not.
+PLACEHOLDER_ISINS: Final[frozenset[str]] = frozenset({"DUMMY", "NA", "-"})
 
 #: The zip local-file-header magic. Used to tell "a zipped bhavcopy" from "the CSV inside one",
 #: because both are things a caller legitimately has: L0 holds the zip the source served, and a
@@ -132,18 +150,28 @@ def parse(payload: bytes, *, filename: str) -> tuple[PriceRow, ...]:
     for a corrupt archive, an unrecognised header, a short or wide row, a field that is not the
     number or date it must be, and a file whose rows do not all belong to one session.
     """
+    return parse_report(payload, filename=filename).rows
+
+
+def parse_report(payload: bytes, *, filename: str) -> BhavcopyParse:
+    """`parse`, keeping the rows the exchange published with a placeholder ISIN.
+
+    The caller that can quarantine a refusal uses this; `parse` is for the ones that cannot and
+    have nothing useful to do with it. See `PLACEHOLDER_ISINS` for why a refusal is not an error.
+    """
     text = _text_of(payload, filename=filename)
-    rows = parse_text(text, filename=filename)
+    parsed = parse_text_report(text, filename=filename)
     _LOG.info(
         "bhavcopy.parsed",
         source=LEGACY_SOURCE_ID,
         era="legacy",
         filename=filename,
-        trade_date=rows[0].trade_date.isoformat(),
-        rows=len(rows),
+        trade_date=parsed.rows[0].trade_date.isoformat(),
+        rows=len(parsed.rows),
+        refused=len(parsed.refused),
         state="NORMALIZED",
     )
-    return rows
+    return parsed
 
 
 def parse_l0(store: L0Store, ref: L0Ref) -> tuple[PriceRow, ...]:
@@ -158,25 +186,50 @@ def parse_l0(store: L0Store, ref: L0Ref) -> tuple[PriceRow, ...]:
 
 
 def parse_text(text: str, *, filename: str) -> tuple[PriceRow, ...]:
-    """Parse the decoded CSV body. Separated from `parse` so a caller can hand over text it
-    already has (a recovery from a manually unzipped file), and so the archive handling above has
-    exactly one job."""
+    """Parse the decoded CSV body, keeping only the rows that have an identity.
+
+    Separated from `parse` so a caller can hand over text it already has (a recovery from a
+    manually unzipped file), and so the archive handling above has exactly one job. A caller that
+    needs to see what was refused calls `parse_text_report`; this one is the common path and
+    discards it, which is safe because a refusal is never silent — the report's rows are what the
+    L1 writer quarantines.
+    """
+    return parse_text_report(text, filename=filename).rows
+
+
+def parse_text_report(text: str, *, filename: str) -> BhavcopyParse:
+    """Parse the decoded CSV body into the rows that have an ISIN and the ones that do not."""
     reader = csv.reader(io.StringIO(text))
     width = _header_width(next(reader, None), filename=filename)
 
     rows: list[PriceRow] = []
+    refused: list[UnidentifiedRow] = []
     for record in reader:
         if not record or not any(field.strip() for field in record):
             # A trailing newline, not a row. Anything with content in it must be a full record.
             continue
-        rows.append(_row(record, line=reader.line_num, width=width, filename=filename))
+        parsed = _row(record, line=reader.line_num, width=width, filename=filename)
+        if isinstance(parsed, UnidentifiedRow):
+            refused.append(parsed)
+        else:
+            rows.append(parsed)
 
     if not rows:
         raise ParseError(
             "no data rows after the header; a session's bhavcopy always has some", filename=filename
         )
     _one_session(rows, filename=filename)
-    return tuple(rows)
+    if refused:
+        _LOG.warning(
+            "bhavcopy.row_without_isin",
+            source=LEGACY_SOURCE_ID,
+            filename=filename,
+            trade_date=rows[0].trade_date.isoformat(),
+            refused=len(refused),
+            symbols=[row.symbol for row in refused],
+            state="VALIDATED",
+        )
+    return BhavcopyParse(rows=tuple(rows), refused=tuple(refused))
 
 
 # ── internals ────────────────────────────────────────────────────────────────────────────────
@@ -242,8 +295,13 @@ def _header_width(header: list[str] | None, *, filename: str) -> int:
     return len(header)
 
 
-def _row(record: list[str], *, line: int, width: int, filename: str) -> PriceRow:
-    """Turn one CSV record into a `PriceRow`, or say precisely which line and field was wrong."""
+def _row(record: list[str], *, line: int, width: int, filename: str) -> PriceRow | UnidentifiedRow:
+    """Turn one CSV record into a `PriceRow`, or say precisely which line and field was wrong.
+
+    Returns an `UnidentifiedRow` instead when the exchange published a placeholder in the ISIN
+    column: that is a stated absence of identity, not a malformed field, and the two must not be
+    answered the same way (`PLACEHOLDER_ISINS`).
+    """
     if len(record) != width:
         raise ParseError(
             f"row has {len(record)} fields, header has {width}; a short row here is what a "
@@ -261,6 +319,14 @@ def _row(record: list[str], *, line: int, width: int, filename: str) -> PriceRow
             )
 
     field = dict(zip(LEGACY_COLUMNS, (value.strip() for value in record), strict=False))
+    if field["ISIN"].upper() in PLACEHOLDER_ISINS:
+        return UnidentifiedRow(
+            symbol=field["SYMBOL"],
+            series=field["SERIES"],
+            trade_date=_date(field["TIMESTAMP"], column="TIMESTAMP", line=line, filename=filename),
+            stated_isin=field["ISIN"],
+            line=line,
+        )
     try:
         return PriceRow(
             isin=field["ISIN"],
@@ -320,16 +386,23 @@ def _integer(value: str, *, column: str, line: int, filename: str) -> int:
     return int(value)
 
 
+def _complete_century(two_digit: int) -> int:
+    """A two-digit year as the only century the NSE archive could mean. See `_TWO_DIGIT_PIVOT`."""
+    return 1900 + two_digit if two_digit >= _TWO_DIGIT_PIVOT else 2000 + two_digit
+
+
 def _date(value: str, *, column: str, line: int, filename: str) -> date:
-    """Parse `DD-MON-YYYY` into a trading date, locale-independently."""
+    """Parse `DD-MON-YY` or `DD-MON-YYYY` into a trading date, locale-independently."""
     match = _TIMESTAMP.match(value)
-    if match is None or match.group(2) not in _MONTHS:
+    if match is None or match.group(2).upper() not in _MONTHS:
         raise ParseError(
-            f"{column} is {value!r}, which is not a DD-MON-YYYY exchange date",
+            f"{column} is {value!r}, which is not a DD-MON-YY or DD-MON-YYYY exchange date",
             filename=filename,
             line=line,
         )
-    day, month, year = int(match.group(1)), _MONTHS[match.group(2)], int(match.group(3))
+    day, month = int(match.group(1)), _MONTHS[match.group(2).upper()]
+    stated = match.group(3)
+    year = int(stated) if len(stated) == 4 else _complete_century(int(stated))
     try:
         return date(year, month, day)
     except ValueError as exc:

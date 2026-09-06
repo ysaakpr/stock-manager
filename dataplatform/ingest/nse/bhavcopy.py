@@ -25,7 +25,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Final, Literal
 
-from dataplatform.ingest.models import ParseError, PriceRow
+from dataplatform.ingest.models import BhavcopyParse, ParseError, PriceRow
 from dataplatform.ingest.nse import bhavcopy_legacy, bhavcopy_udiff
 from dataplatform.store.l0 import L0Ref, L0Store
 
@@ -70,19 +70,31 @@ def parse(payload: bytes, *, filename: str, trade_date: date) -> tuple[PriceRow,
     Raises `ParseError` (from the chosen parser, or here for the date mismatch) — the two parsers
     never disagree on the row schema, so the caller handles one error type and one row type.
     """
-    if era_of(trade_date) == "legacy":
-        rows = bhavcopy_legacy.parse(payload, filename=filename)
-    else:
-        rows = bhavcopy_udiff.parse(payload, filename=filename)
+    return parse_report(payload, filename=filename, trade_date=trade_date).rows
 
-    if rows[0].trade_date != trade_date:
+
+def parse_report(payload: bytes, *, filename: str, trade_date: date) -> BhavcopyParse:
+    """`parse`, keeping the rows the exchange published without an ISIN rather than discarding them.
+
+    The two eras differ in what they can refuse: only the legacy file has ever carried an ISIN
+    placeholder, so the UDiFF branch always reports an empty `refused` — stated here rather than
+    left to be inferred, because "no refusals" and "this parser cannot report refusals" are
+    different claims. The L1 writer quarantines what comes back (M1.8's "nothing is dropped
+    silently"); `parse` is the caller that has nothing to quarantine into.
+    """
+    if era_of(trade_date) == "legacy":
+        parsed = bhavcopy_legacy.parse_report(payload, filename=filename)
+    else:
+        parsed = BhavcopyParse(rows=bhavcopy_udiff.parse(payload, filename=filename))
+
+    if parsed.rows[0].trade_date != trade_date:
         raise ParseError(
             f"file was dispatched as the {trade_date.isoformat()} session but its rows are dated "
-            f"{rows[0].trade_date.isoformat()}; the payload does not match the date it was filed "
-            "under",
+            f"{parsed.rows[0].trade_date.isoformat()}; the payload does not match the date it was "
+            "filed under",
             filename=filename,
         )
-    return rows
+    return parsed
 
 
 def parse_l0(store: L0Store, ref: L0Ref) -> tuple[PriceRow, ...]:
@@ -93,3 +105,8 @@ def parse_l0(store: L0Store, ref: L0Ref) -> tuple[PriceRow, ...]:
     re-hashes the payload on the way out, so no row is derived from bytes that changed under L0.
     """
     return parse(store.get(ref), filename=ref.filename, trade_date=ref.logical_date)
+
+
+def parse_l0_report(store: L0Store, ref: L0Ref) -> BhavcopyParse:
+    """`parse_l0`, keeping the refused rows for the caller that can quarantine them."""
+    return parse_report(store.get(ref), filename=ref.filename, trade_date=ref.logical_date)

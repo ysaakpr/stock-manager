@@ -55,7 +55,7 @@ from dataplatform.ingest.calendar import (
 from dataplatform.logging import get_logger
 from dataplatform.status.sync_state import SyncKey, SyncRecord, SyncState, SyncStateStore
 from dataplatform.store.db import Connection
-from dataplatform.store.paths import l1_partition_dir
+from dataplatform.store.paths import l0_dir, l1_partition_dir
 from dataplatform.store.schemas import PRICES_RAW_DATASET
 
 __all__ = [
@@ -65,9 +65,11 @@ __all__ = [
     "GapReport",
     "GapReportError",
     "GapScanner",
+    "L0Presence",
     "L1Check",
     "L1Presence",
     "L1Result",
+    "LakeL0Presence",
     "LakeL1Presence",
     "SourceExpectation",
     "build_report",
@@ -130,6 +132,15 @@ class GapReason(StrEnum):
     L1_PARTITION_MISSING = "L1_PARTITION_MISSING"
     """PUBLISHED, but the L1 partition holds no data. The record outlived the rows."""
 
+    L0_PRESENT_L1_ABSENT = "L0_PRESENT_L1_ABSENT"
+    """The attempt failed, but the payload it failed on is in L0 — a parse problem, not a fetch one.
+
+    A narrower `FAILED`, and the distinction is the whole fix: bytes on disk mean the answer is a
+    parser change plus a re-derive, at zero request cost, while no bytes mean a re-fetch behind
+    whatever autonomy limit applies. 2020-07-13 and 2021-02-16 sat in the first class for months
+    and nothing said which class they were in (audit finding N2).
+    """
+
     OUTSIDE_CALENDAR = "OUTSIDE_CALENDAR"
     """A row exists for a date the C.2 holiday file makes no claim about.
 
@@ -190,6 +201,70 @@ class L1Result:
     partition: Path
 
 
+class L0Presence(Protocol):
+    """Whether the payload an attempt failed on is still on disk. Injected, like `L1Presence`."""
+
+    def holds(
+        self,
+        sources: Sequence[str],
+        logical_date: date,
+        l0_path: str | None,
+        *,
+        per_session: bool,
+    ) -> bool:
+        """Whether any payload for this pair is in L0. Never raises for an absent path."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class LakeL0Presence:
+    """`L0Presence` against the real lake (§4.2 layout, via `dataplatform.store.paths`).
+
+    Two questions, in order. The `sync_state` row records the exact `l0_path` the fetch produced
+    whenever the attempt got as far as FETCHED, and that is the authoritative answer. Only 1 of
+    2,397 failed rows in this lake carries one — a parse that fails inside the same step never
+    reaches `mark_fetched` — so there is a fallback, and it is deliberately narrow.
+
+    **The fallback is for per-session sources only.** There, the date identifies the payload: one
+    bhavcopy, one delivery file, and the source's month directory holding data for that date means
+    this pair's bytes are there. For a unit-keyed source it means nothing — `nse_xbrl_filing`'s
+    September-2019 directory holds thousands of documents, and "some document for that month is on
+    disk" is not evidence about the one filing that failed. Answering yes there would tell an
+    operator not to re-fetch the 774 filings whose documents were never fetched at all, which is
+    the opposite of what they need to do.
+    """
+
+    data_root: Path | None = None
+
+    def holds(
+        self,
+        sources: Sequence[str],
+        logical_date: date,
+        l0_path: str | None,
+        *,
+        per_session: bool,
+    ) -> bool:
+        """Whether a payload for this pair is in L0."""
+        if l0_path:
+            # `L0Ref.key` is the logical key `<source>/<iso-date>/<filename>`, not a disk path —
+            # the lake shards by year and month. Rebuild the real path with the same function the
+            # store writes through rather than reimplementing the layout here.
+            filename = l0_path.rsplit("/", 1)[-1]
+            if any(
+                _is_file_with_data(
+                    l0_dir(source, logical_date, data_root=self.data_root) / filename
+                )
+                for source in sources
+            ):
+                return True
+        if not per_session:
+            return False
+        return any(
+            _holds_data(l0_dir(source, logical_date, data_root=self.data_root))
+            for source in sources
+        )
+
+
 class L1Presence(Protocol):
     """Whether a dataset/date partition holds data. Injected so the rules stay testable."""
 
@@ -221,6 +296,11 @@ class LakeL1Presence:
             L1Check.PRESENT if _holds_data(partition) else L1Check.ABSENT,
             partition,
         )
+
+
+def _is_file_with_data(path: Path) -> bool:
+    """Whether `path` is a file with bytes in it. An empty file is a failed write, not a payload."""
+    return path.is_file() and path.stat().st_size > 0
 
 
 def _holds_data(partition: Path) -> bool:
@@ -255,6 +335,18 @@ class SourceExpectation:
     era_start: date | None = None
     era_end: date | None = None
     l1_dataset: str | None = None
+    #: The register ids whose L0 trees hold this source's payloads, when they are not its own id.
+    l0_sources: tuple[str, ...] = ()
+
+    def l0_trees(self) -> tuple[str, ...]:
+        """The L0 source trees a payload for this source could be in.
+
+        A state-source name is not always an L0 tree name: the price core is checkpointed under
+        `nse_bhavcopy` and lands in `nse_bhavcopy_legacy`/`nse_bhavcopy_udiff`, the same split that
+        made `l1_dataset` necessary. Defaults to the source's own id, which is right for every
+        source whose register id *is* its state name.
+        """
+        return self.l0_sources or (self.source,)
 
     def in_era(self, logical_date: date) -> bool:
         """Whether this source's URL pattern covered `logical_date`."""
@@ -393,6 +485,7 @@ def _price_state_expectations(
             era_start=era_start,
             era_end=era_end,
             l1_dataset=PRICES_RAW_DATASET,
+            l0_sources=tuple(cid for cid in constituent_ids if cid in by_id),
         )
     return out
 
@@ -495,6 +588,7 @@ def classify_pair(
     record: SyncRecord | None,
     *,
     l1: L1Result | None = None,
+    l0_present: bool = False,
     unit: str = "",
 ) -> GapEntry | None:
     """Classify one `(source, date)` pair, or return None when there is nothing to explain.
@@ -516,7 +610,7 @@ def classify_pair(
     source's own row would be, and the unit only travels onto the entry so the report can name
     the thing an operator has to go and look at.
     """
-    verdict = _classify(expectation, logical_date, day_kind, record, l1=l1)
+    verdict = _classify(expectation, logical_date, day_kind, record, l1=l1, l0_present=l0_present)
     if verdict is None or not unit:
         return verdict
     return replace(verdict, unit=unit)
@@ -529,6 +623,7 @@ def _classify(
     record: SyncRecord | None,
     *,
     l1: L1Result | None = None,
+    l0_present: bool = False,
 ) -> GapEntry | None:
     """`classify_pair` without the unit tagging — the rules themselves."""
     if record is None:
@@ -573,10 +668,15 @@ def _classify(
             expectation,
             logical_date,
             day_kind,
-            GapReason.FAILED,
+            GapReason.L0_PRESENT_L1_ABSENT if l0_present else GapReason.FAILED,
             f"{record.attempts} attempt(s), "
             f"{'retryable' if record.retryable else 'not retryable'}: "
-            f"{record.last_error or 'no error recorded'}",
+            f"{record.last_error or 'no error recorded'}"
+            + (
+                " — the payload is in L0, so this is a parser fix and a re-derive, not a re-fetch"
+                if l0_present
+                else ""
+            ),
             record,
         )
 
@@ -707,6 +807,7 @@ def build_report(
     calendar: TradingCalendar | None = None,
     expectations: Mapping[str, SourceExpectation] | None = None,
     l1_presence: L1Presence | None = None,
+    l0_presence: L0Presence | None = None,
 ) -> GapReport:
     """Classify every `(source, date)` pair in an inclusive range.
 
@@ -752,10 +853,11 @@ def build_report(
             pairs += 1
             record = records.get((source, day))
             l1 = _l1_lookup(expectation, day, record, l1_presence)
+            l0_present = _l0_lookup(expectation, day, record, l0_presence)
             claims_data = record is not None and record.state is SyncState.PUBLISHED
             if claims_data and (l1 is None or l1.check is L1Check.NO_DATASET):
                 l1_unchecked += 1
-            entry = classify_pair(expectation, day, kind, record, l1=l1)
+            entry = classify_pair(expectation, day, kind, record, l1=l1, l0_present=l0_present)
             if entry is None:
                 complete += int(claims_data)
                 continue
@@ -790,7 +892,12 @@ def build_report(
             continue
         pairs += 1
         entry = classify_pair(
-            per_source[key.base], record.logical_date, kind, record, unit=key.unit
+            per_source[key.base],
+            record.logical_date,
+            kind,
+            record,
+            l0_present=_l0_lookup(per_source[key.base], record.logical_date, record, l0_presence),
+            unit=key.unit,
         )
         if entry is None:
             complete += int(record.state is SyncState.PUBLISHED)
@@ -808,6 +915,28 @@ def build_report(
         complete=complete,
         l1_unchecked=l1_unchecked,
         _by_reason=by_reason,
+    )
+
+
+def _l0_lookup(
+    expectation: SourceExpectation,
+    logical_date: date,
+    record: SyncRecord | None,
+    l0_presence: L0Presence | None,
+) -> bool:
+    """Whether this pair's payload is on disk, asked only when the answer changes the verdict.
+
+    Only a FAILED pair's reason depends on it, so the probe is skipped for every other state —
+    otherwise a decade of weekends would cost ten thousand pointless `stat` calls for an answer
+    nothing reads.
+    """
+    if l0_presence is None or record is None or record.state is not SyncState.FAILED:
+        return False
+    return l0_presence.holds(
+        expectation.l0_trees(),
+        logical_date,
+        record.l0_path,
+        per_session=expectation.per_session,
     )
 
 
@@ -851,11 +980,13 @@ class GapScanner:
         calendar: TradingCalendar | None = None,
         expectations: Mapping[str, SourceExpectation] | None = None,
         l1_presence: L1Presence | None = None,
+        l0_presence: L0Presence | None = None,
     ) -> None:
         self._store = SyncStateStore(conn, calendar=calendar)
         self._calendar = self._store.calendar
         self._expectations = expectations
         self._l1_presence = LakeL1Presence() if l1_presence is None else l1_presence
+        self._l0_presence: L0Presence = LakeL0Presence() if l0_presence is None else l0_presence
 
     def report(
         self, from_date: date, to_date: date, *, sources: Iterable[str] | None = None
@@ -890,6 +1021,7 @@ class GapScanner:
             calendar=self._calendar,
             expectations=self._expectations,
             l1_presence=self._l1_presence,
+            l0_presence=self._l0_presence,
         )
         _log.info(
             "gaps.report",
