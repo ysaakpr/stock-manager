@@ -17,6 +17,16 @@ from dataplatform.identity.ingest import (
     IdentityParseError,
     ingest_snapshot,
 )
+from dataplatform.identity.lineage import (
+    CORROBORATING_TYPES,
+    IsinSpan,
+    LineageEdge,
+    LineageResolver,
+    LineageStore,
+    derive_edges,
+    read_corroboration,
+    read_equity_spans,
+)
 from dataplatform.identity.master import (
     AmbiguousSymbolError,
     ConflictKind,
@@ -55,6 +65,7 @@ from dataplatform.identity.primary import (
 )
 
 __all__ = [
+    "CORROBORATING_TYPES",
     "AmbiguousSymbolError",
     "Canonical",
     "ConflictKind",
@@ -71,6 +82,10 @@ __all__ = [
     "IdentityParseError",
     "IdentityStore",
     "InMemoryReconciliationQueue",
+    "IsinSpan",
+    "LineageEdge",
+    "LineageResolver",
+    "LineageStore",
     "LiquidityMetric",
     "Listing",
     "ListingKeyed",
@@ -85,9 +100,12 @@ __all__ = [
     "UnknownSymbolError",
     "WriteCounts",
     "canonical_daily",
+    "derive_edges",
     "detect_conflicts",
     "ingest_snapshot",
     "plan_history",
+    "read_corroboration",
+    "read_equity_spans",
     "select_primary",
     "select_primary_map",
 ]
