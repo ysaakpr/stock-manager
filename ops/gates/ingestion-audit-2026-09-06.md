@@ -474,10 +474,15 @@ When the campaign finishes, in this order:
 
 ```bash
 ops/remote.sh status                                    # drivers: 0
-uv run python -m dataplatform.ingest.identity_refresh   # P3.1 — 2 requests
-uv run python -m dataplatform.ingest.fundamentals_backfill --rebuild-missing \
-    --from-list ops/gates/missing-xbrl-payloads-2026-09-06.json   # P7.1 — 536 requests
+uv run python -m dataplatform.ingest.identity_refresh   # P3.1 — 2 requests, ~5 s
 ```
+
+P7.1 needs one more thing built first, and it is worth being exact about it: the fundamentals
+runner has `--rebuild-from-l0` (derive from payloads already held) but **no mode that fetches a
+named list of documents**. Its plan is built from the index feed, not from a file. So the 536
+requests need a small addition — read the enumeration, skip anything L0 already holds, fetch the
+rest under the lease — and that is a task, not a command that exists today. The list is its input
+and is committed; the runner is not written.
 
 ## 5. What this does not cover
 
