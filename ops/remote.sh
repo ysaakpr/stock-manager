@@ -6,6 +6,7 @@
 #   ops/remote.sh check               # quiet server only: sync, then `make check` there
 #   ops/remote.sh test [pytest args]  # quiet server only: sync, then `uv run pytest <args>` there
 #   ops/remote.sh run <command...>    # sync, then any command in the server's repo directory
+#   ops/remote.sh exec <command...>   # NO sync: observe the server as it is (read logs, count rows, ps)
 #   ops/remote.sh shell               # interactive shell in the server's repo directory
 #   ops/remote.sh logs [family] [pattern]  # tail the newest ~/campaign log — of one family
 #                                     # (integrated, bse, rebuild-legacy…) if named — optionally filtered
@@ -104,6 +105,9 @@ refuse_if_driver_running() {
 cmd_check() { refuse_if_driver_running; cmd_sync; remote "make check"; }
 cmd_test()  { refuse_if_driver_running; cmd_sync; remote "uv run pytest $*"; }
 cmd_run()   { cmd_sync; remote "$*"; }
+# Observation must never be blocked by an unpushed commit: `exec` skips the sync on purpose. It is
+# for looking, not for running code — anything that should run the *current* tree goes through run.
+cmd_exec()  { remote "$*"; }
 cmd_shell() { "${SSH[@]}" -t "cd '$REMOTE_REPO' && export PATH=\"\$HOME/.local/bin:\$PATH\" && exec \$SHELL -l"; }
 cmd_logs()  {
   # `logs [family] [pattern]`: a first argument that is the prefix of some ~/campaign/<family>-*.log
@@ -132,6 +136,7 @@ case "${1:-}" in
   check)  cmd_check ;;
   test)   shift; cmd_test "$@" ;;
   run)    shift; cmd_run "$@" ;;
+  exec)   shift; cmd_exec "$@" ;;
   shell)  cmd_shell ;;
   logs)   shift; cmd_logs "$@" ;;
   *) sed -n '2,13p' "$0"; exit 1 ;;

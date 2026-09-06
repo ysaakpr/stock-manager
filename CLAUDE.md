@@ -95,6 +95,7 @@ ops/remote.sh status                 # what the server is at and whether a drive
 ops/remote.sh run ops/run_bse_campaign.sh          # sync, then start a campaign (nohup, dated log)
 ops/remote.sh run uv run python -m backtest.run --policy naive_momentum --v2-report ...
 ops/remote.sh logs bse               # progress of the newest log of a family (integrated, bse, …)
+ops/remote.sh exec <command>         # observe without syncing (logs, counts, ps) — never blocked by an unpushed commit
 ops/remote.sh check                  # quiet server only: sync, then `make check` there
 ops/remote.sh test tests/unit -q     # quiet server only: sync, then a pytest selection there
 ```
