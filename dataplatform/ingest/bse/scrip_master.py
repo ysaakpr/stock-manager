@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -282,6 +282,17 @@ def derive_master(
     ingest keeps `NSE` and merely gains a BSE `exchange_listing` row.
     """
     scrip_list = tuple(scrips)
+    # One ISIN can hold several BSE scrip codes at once, and the store's grain is the ISIN:
+    # `security_master` is keyed on it and `exchange_listing` on `(isin, exchange)`. The usual
+    # cause is a buyback — BSE opens a temporary counter for the physical-shares window under the
+    # *same* ISIN and delists it afterwards, so RELIANCE is Active 500325 and Delisted 532611
+    # (`RILBBPH`) at once. 40 of 8,473 ISINs in the 2026-09 snapshot look like this. Emitting a
+    # row per scrip made Postgres refuse the whole write ("ON CONFLICT DO UPDATE command cannot
+    # affect row a second time"), so one scrip is chosen to represent the ISIN here.
+    #
+    # `scrip_to_isin` deliberately keeps *every* code: a bhavcopy row printed under the buyback
+    # counter still has to resolve to the ISIN, and that map is keyed the other way round.
+    canonical = _canonical_by_isin(scrip_list)
     securities = tuple(
         Security(
             isin=scrip.isin,
@@ -292,7 +303,7 @@ def derive_master(
             last_seen_date=snapshot_date,
             face_value_inr=scrip.face_value_inr,
         )
-        for scrip in scrip_list
+        for scrip in canonical
     )
     listings = tuple(
         Listing(
@@ -303,7 +314,7 @@ def derive_master(
             series=scrip.group,
             face_value_inr=scrip.face_value_inr,
         )
-        for scrip in scrip_list
+        for scrip in canonical
     )
     windows = tuple(
         SymbolWindow(
@@ -315,16 +326,43 @@ def derive_master(
             series=scrip.group,
             source=BSE_SCRIP_MASTER_SOURCE,
         )
-        for scrip in scrip_list
+        for scrip in canonical
     )
     _log.info(
         "bse.scrip_master.derived",
         snapshot_date=snapshot_date.isoformat(),
+        scrips=len(scrip_list),
+        isins=len(canonical),
         securities=len(securities),
         listings=len(listings),
         windows=len(windows),
     )
     return BseScripDerivedMaster(securities=securities, listings=listings, windows=windows)
+
+
+#: How live a status is. A security that still trades describes itself better than the delisted
+#: buyback counter sharing its ISIN, so the most-live scrip represents the ISIN.
+_STATUS_RANK: Final[dict[ListingStatus, int]] = {
+    ListingStatus.ACTIVE: 0,
+    ListingStatus.SUSPENDED: 1,
+    ListingStatus.DELISTED: 2,
+}
+
+
+def _canonical_by_isin(scrips: Sequence[BseScrip]) -> tuple[BseScrip, ...]:
+    """One scrip per ISIN — the most-live, then the lowest scrip code — in ISIN order.
+
+    The tie-break matters for the nine ISINs whose codes are all delisted: BSE issues codes
+    roughly in listing order, so the lowest is the original counter rather than the temporary one
+    opened for a corporate event. Deterministic either way, which is what a rebuild needs.
+    """
+    best: dict[str, BseScrip] = {}
+    for scrip in scrips:
+        current = best.get(scrip.isin)
+        key = (_STATUS_RANK[scrip.status], scrip.scrip_code)
+        if current is None or key < (_STATUS_RANK[current.status], current.scrip_code):
+            best[scrip.isin] = scrip
+    return tuple(best[isin] for isin in sorted(best))
 
 
 # ── ingest ───────────────────────────────────────────────────────────────────────────────────
@@ -352,9 +390,16 @@ def ingest_scrip_master(
     `conn` is typed `object` to avoid importing the psycopg connection into an offline-testable
     module; `IdentityStore` gives it its real contract.
     """
-    from dataplatform.store.db import Connection  # local import: keeps the module import-light
+    # Local import: keeps the module import-light. The runtime check uses psycopg's *unsubscripted*
+    # class — `store.db.Connection` is `psycopg.Connection[tuple[Any, ...]]`, and `isinstance`
+    # raises TypeError on a subscripted generic, so the assert as written could never pass for any
+    # real caller. It never had one: this is the first live use of this function.
+    import psycopg
 
-    assert isinstance(conn, Connection)
+    if not isinstance(conn, psycopg.Connection):
+        raise TypeError(
+            f"ingest_scrip_master needs a psycopg connection, got {type(conn).__name__}"
+        )
     clock = SystemClock() if clock is None else clock
     snapshot_date = clock.today() if snapshot_date is None else snapshot_date
 
