@@ -102,9 +102,25 @@ refuse_if_driver_running() {
   fi
 }
 
+refuse_if_local_driver_running() {
+  # The other direction of the same rule, and the one nothing checked until the 2026-09-06 audit:
+  # starting a campaign on the server while one runs *here* puts two drivers on one host and halves
+  # the spacing the crawl policy promises. `dataplatform.ingest.lease` holds the same line inside
+  # the process; this catches it before a five-hour driver is launched over ssh.
+  local held
+  held=$(ls "${DATA_ROOT:-data}/.host-lease/"*.json 2>/dev/null || true)
+  if [ -n "$held" ]; then
+    echo "remote: a local driver holds a host lease — two drivers against one host halve the" >&2
+    echo "        spacing the crawl policy promises. Held here:" >&2
+    for f in $held; do echo "          $(basename "$f" .json): $(cat "$f")" >&2; done
+    echo "        Wait for it, or stop it, before starting a campaign on the server." >&2
+    exit 4
+  fi
+}
+
 cmd_check() { refuse_if_driver_running; cmd_sync; remote "make check"; }
 cmd_test()  { refuse_if_driver_running; cmd_sync; remote "uv run pytest $*"; }
-cmd_run()   { cmd_sync; remote "$*"; }
+cmd_run()   { refuse_if_local_driver_running; cmd_sync; remote "$*"; }
 # Observation must never be blocked by an unpushed commit: `exec` skips the sync on purpose. It is
 # for looking, not for running code — anything that should run the *current* tree goes through run.
 cmd_exec()  { remote "$*"; }

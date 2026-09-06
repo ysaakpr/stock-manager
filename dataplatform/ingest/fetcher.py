@@ -32,10 +32,11 @@ second — no fixture in this repo is produced by a socket opening during a test
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Final, NoReturn, Protocol
+from typing import Any, Final, NoReturn, Protocol
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -50,6 +51,7 @@ from tenacity import (
 from dataplatform.alerts import Alerter, Severity, build_alerter
 from dataplatform.clock import Clock
 from dataplatform.config import Settings, get_settings
+from dataplatform.ingest.lease import host_lease
 from dataplatform.ingest.policy import (
     DEFAULT_FORBIDDEN_WINDOW,
     CrawlPolicy,
@@ -82,6 +84,7 @@ __all__ = [
     "TransportError",
     "UnrecordedRequestError",
     "build_fetcher",
+    "leased_fetcher",
 ]
 
 _LOG = get_logger(__name__)
@@ -640,6 +643,39 @@ def _filename_from_url(url: str) -> str:
     return name
 
 
+@contextmanager
+def leased_fetcher(
+    hosts: Sequence[str],
+    *,
+    clock: Clock,
+    command: str,
+    settings: Settings | None = None,
+    **kwargs: Any,
+) -> Iterator[Fetcher]:
+    """A production fetcher that holds each host's request budget for the driver's lifetime.
+
+    What it does: takes a `host_lease` per host the driver will talk to, then yields the fetcher.
+    A second driver against any of those hosts refuses to start and names the holder, instead of
+    silently halving the spacing `RateLimiter` promises (audit finding N7 — the guard used to be a
+    sentence in CLAUDE.md and nothing else).
+    What it assumes: the caller knows which hosts it will hit. That is a property of the source
+    set, not of the fetcher, so it is named at the call site rather than guessed from the register.
+    What it never does: apply to a test. `Fetcher` and `build_fetcher` are unchanged — a suite
+    wiring a `RecordedTransport` opens no socket and needs no budget, and making every offline test
+    take a file lock would be a cost paid by the wrong callers.
+
+    Hosts are leased in sorted order so two drivers wanting the same pair cannot deadlock by taking
+    them in opposite orders.
+    """
+    resolved = get_settings() if settings is None else settings
+    with ExitStack() as stack:
+        for host in sorted(set(hosts)):
+            stack.enter_context(
+                host_lease(host, clock=clock, command=command, data_root=resolved.data_root)
+            )
+        yield build_fetcher(clock=clock, settings=resolved, **kwargs)
+
+
 def build_fetcher(
     *,
     clock: Clock,
@@ -652,7 +688,9 @@ def build_fetcher(
     """Wire a production fetcher: real HTTP, the configured lake, the configured alert channel.
 
     The clock is required rather than defaulted, because a fetcher that picks its own clock is a
-    fetcher a replay cannot reproduce (B10).
+    fetcher a replay cannot reproduce (B10). It takes no host lease: `leased_fetcher` is the entry
+    point a *driver* uses, and keeping the two separate is what lets the offline suite build a
+    fetcher without a file lock.
     """
     settings = get_settings() if settings is None else settings
     return Fetcher(
