@@ -24,6 +24,7 @@ with no ISIN column ever reach an ISIN-keyed store (invariant #2).
 
 from __future__ import annotations
 
+import json
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -286,6 +287,68 @@ def test_scrip_master_parses_and_skips_the_blank_isin(scrip_json: str) -> None:
     reliance = next(s for s in scrips if s.isin == RELIANCE)
     assert reliance.scrip_code == "500325"
     assert reliance.status is ListingStatus.ACTIVE
+
+
+def test_a_delisted_scrips_na_isin_is_no_isin_not_a_parse_error() -> None:
+    """BSE writes `NA` far more often than a blank, and only in the statuses nobody had fetched.
+
+    The 2026-09 snapshot carries 1,643 of them among 4,614 delisted scrips against 616 empties.
+    Raising on `NA` made the whole delisted list unparseable, which is precisely the half of the
+    master the pre-2024 bhavcopy era needs — Active alone is survivorship bias by construction.
+    """
+    payload = json.dumps(
+        [
+            {
+                "SCRIP_CD": "500325",
+                "scrip_id": "RELIANCE",
+                "Status": "Active",
+                "ISIN_NUMBER": RELIANCE,
+                "FACE_VALUE": "10",
+            },
+            {
+                "SCRIP_CD": "531562",
+                "scrip_id": "GONE",
+                "Status": "Delisted",
+                "ISIN_NUMBER": "NA",
+                "FACE_VALUE": "10",
+            },
+            {
+                "SCRIP_CD": "531563",
+                "scrip_id": "ALSOGONE",
+                "Status": "Delisted",
+                "ISIN_NUMBER": "0",
+                "FACE_VALUE": "10",
+            },
+        ]
+    )
+    scrips, skipped = scrip_master.parse_scrip_master(payload)
+    assert [s.isin for s in scrips] == [RELIANCE]
+    assert skipped == 2
+
+
+def test_a_malformed_isin_is_skipped_not_raised_on() -> None:
+    """One scrip whose ISIN lost a character must not cost the other 8,514 their mapping."""
+    payload = json.dumps(
+        [
+            {
+                "SCRIP_CD": "500325",
+                "scrip_id": "RELIANCE",
+                "Status": "Active",
+                "ISIN_NUMBER": RELIANCE,
+                "FACE_VALUE": "10",
+            },
+            {
+                "SCRIP_CD": "500181",
+                "scrip_id": "BROKEN",
+                "Status": "Delisted",
+                "ISIN_NUMBER": "INE546A1014",
+                "FACE_VALUE": "10",
+            },
+        ]
+    )
+    scrips, skipped = scrip_master.parse_scrip_master(payload)
+    assert [s.isin for s in scrips] == [RELIANCE]
+    assert skipped == 1
 
 
 def test_scrip_to_isin_map(scrip_json: str) -> None:

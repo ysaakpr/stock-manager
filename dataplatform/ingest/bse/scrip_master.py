@@ -90,6 +90,12 @@ BSE_SCRIP_MASTER_SOURCE: Final = "bse_scrip_master"
 #: instead of surfacing as a constraint violation on a several-thousand-row insert.
 _ISIN = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
 
+#: What BSE writes in `ISIN_NUMBER` when a scrip has none. Delisted scrips carry `NA` far more
+#: often than they carry a blank — 1,643 of 4,614 in the 2026-09 snapshot against 616 empties —
+#: because the field predates the ISIN regime for most of them. These are the source saying "no
+#: ISIN", not a corrupted one, so they are skipped and counted exactly as a blank is.
+_NO_ISIN_SENTINELS: frozenset[str] = frozenset({"NA", "N.A.", "N/A", "-", "0", "NIL", "NONE"})
+
 #: BSE's status strings, mapped to the platform's `ListingStatus`. The scrip master is pulled per
 #: status (`Active|Suspended|Delisted`, `source_register.yaml`); every value must map or the row
 #: fails loudly rather than defaulting to ACTIVE and quietly resurrecting a dead scrip.
@@ -188,11 +194,23 @@ def parse_scrip_master(text: str) -> tuple[tuple[BseScrip, ...], int]:
             raise BseScripParseError(f"scrip {index} has no SCRIP_CD: {record!r}")
 
         isin_raw = _text(record, "ISIN_NUMBER").upper()
-        if not isin_raw:
+        if not isin_raw or isin_raw in _NO_ISIN_SENTINELS:
             skipped += 1
             continue
         if not _ISIN.match(isin_raw):
-            raise BseScripParseError(f"scrip {scrip_code} ISIN {isin_raw!r} is not an ISIN")
+            # Neither an ISIN nor the source saying it has none: one malformed value, which in the
+            # 2026-09 snapshot is a single scrip whose ISIN lost a character (`INE546A1014`, eleven
+            # of twelve). Loud — it names the scrip in the log — but skipped rather than raised,
+            # because refusing the file would cost the other 8,514 scrip→ISIN mappings over one bad
+            # row, and without those the whole pre-2024 BSE era stays unjoinable.
+            _log.warning(
+                "bse_scrip.malformed_isin",
+                scrip_code=scrip_code,
+                isin=isin_raw,
+                state="SKIPPED",
+            )
+            skipped += 1
+            continue
 
         status_raw = _text(record, "Status").upper()
         status = _STATUS.get(status_raw)

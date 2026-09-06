@@ -170,6 +170,16 @@ PURPOSE_STRINGS: tuple[Case, ...] = (
     Case("SUB-DIVISION OF EQUITY SHARES FROM RS.10/- TO RS.5/-", NSE, SPLIT, fv("10", "5")),
     Case("STOCK SPLIT FROM RS.5/- TO RE.1/-", NSE, SPLIT, fv("5", "1")),
     Case("FV SPLIT FROM RS 100 TO RS 10", NSE, SPLIT, fv("100", "10")),
+    # The amount flush against the marker, with no space at all. NSE published exactly this for a
+    # 2024 split; `\brs\b` could not match it (there is no word boundary between `s` and `1`), so
+    # the action parsed as SPLIT with UnquantifiedTerms and blew up the factor chain the moment
+    # D2 lineage let it reach one.
+    Case(
+        "Face Value Split (Sub-Division) - From Rs10/- Per Share To Re 1/- Per Share",
+        NSE,
+        SPLIT,
+        fv("10", "1"),
+    ),
     Case("Stock  Split From Rs.10/- to Rs.2/-", BSE, SPLIT, fv("10", "2")),
     Case("Sub-Division of Shares from Rs.2/- to Re.1/-", BSE, SPLIT, fv("2", "1")),
     Case("Consolidation of Shares from Re.1/- to Rs.10/-", BSE, SPLIT, fv("1", "10")),

@@ -579,6 +579,7 @@ def rebuild_invalidated(
     clock: Clock,
     con: duckdb.DuckDBPyConnection | None = None,
     data_root: Path | None = None,
+    history_for: Mapping[str, Sequence[str]] | None = None,
 ) -> tuple[L2WriteReport, ...]:
     """Drain the `l2_invalidation` queue and rebuild exactly the flagged ISINs' L2 partitions.
 
@@ -592,6 +593,10 @@ def rebuild_invalidated(
     What it assumes: the caller owns the transaction and commits it, as M2.4's recompute does — so a
     CA ingest, its recompute, and the L2 rebuild it triggers can share one commit boundary. Returns
     one report per rebuilt ISIN, in ISIN order.
+
+    `history_for` maps an ISIN to its D2 lineage chain, so a security whose earlier history sits
+    under ISINs a reissue retired is rebuilt over the whole chain rather than the stub since the
+    reissue. Omit it and every ISIN is rebuilt from its own bars alone, as before.
     """
     isins = [
         str(r[0])
@@ -610,7 +615,14 @@ def rebuild_invalidated(
             chain = load_factor_chain(conn, isin)
             actions = load_reconciled_actions(conn, isin=isin)
             reports.append(
-                materialize_isin(isin, chain=chain, actions=actions, con=con, data_root=data_root)
+                materialize_isin(
+                    isin,
+                    chain=chain,
+                    actions=actions,
+                    con=con,
+                    data_root=data_root,
+                    history_isins=None if history_for is None else history_for.get(isin),
+                )
             )
             conn.execute(
                 "UPDATE l2_invalidation SET resolved = true, resolved_at = %s "
