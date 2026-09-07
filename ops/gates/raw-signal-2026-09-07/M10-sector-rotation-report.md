@@ -14,12 +14,12 @@
 
 ## Data reality (same M9 stack)
 
-Every arm reads the **L2 back-adjusted** momentum signal (`adjusted=True`, the M9.2 signal: both endpoints of a trailing return expressed in one share basis, so a split or bonus inside the look-back window is no longer read as a price move). Execution stays raw — the sizing price, the fill reference bars and the terminal marks are the prices that actually traded (invariant #3). The investable/liquidity screen and the PIT universe are the M9.2-M9.4 machinery unchanged: the M9.3 investable set (as-of index membership ∩ a median-turnover floor; no historical membership snapshots in the store, so the liquidity floor is what narrows it), look-backs walking the full L1 calendar so the first rebalance already has a signal, and the pre-M9.4 broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the close-all backfill is gated, AGENTIC_CONTEXT B1) as the market. The regime overlay reads the same broad-market L1 proxy index.
+Prices, the investable/liquidity screen and the PIT universe are the M9.2-M9.4 machinery unchanged: raw L1 closes for the signal (`adjusted=False`, the M9.2 baseline), the M9.3 investable set (as-of index membership ∩ a median-turnover floor; no historical membership snapshots in the store, so the liquidity floor is what narrows it), look-backs walking the full L1 calendar so the first rebalance already has a signal, and the pre-M9.4 broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the close-all backfill is gated, AGENTIC_CONTEXT B1) as the market. The regime overlay reads the same broad-market L1 proxy index.
 
 ## Window
 
 - 2016-09-02 -> 2026-08-31 (2470 sessions, 120 monthly rebalances)
-- Mean sector-mapped investable universe / rebalance: 39.2
+- Mean sector-mapped investable universe / rebalance: 38.5
 - Regime split: 1514 of 2470 sessions risk-on (proxy index at/above its 200-session moving average), the rest risk-off
 - Market XIRR (identical cashflows): 8.56%
 
@@ -27,8 +27,8 @@ Every arm reads the **L2 back-adjusted** momentum signal (`adjusted=True`, the M
 
 | Strategy | Portfolio XIRR | Max drawdown | Turnover (fills) | Total cost | Excess vs market |
 | --- | --- | --- | --- | --- | --- |
-| Sector rotation | 9.69% | 45.64% | 800 | ₹54,740.27 | 1.14% |
-| Plain momentum (same universe) | 9.42% | 32.87% | 752 | ₹40,168.95 | 0.87% |
+| Sector rotation | 8.72% | 42.31% | 698 | ₹43,818.80 | 0.16% |
+| Plain momentum (same universe) | 9.36% | 32.73% | 746 | ₹40,178.60 | 0.80% |
 | Market (L1 proxy) | 8.56% | — | — | — | 0.00% |
 
 ### Per-regime return (cumulative, costs embedded)
@@ -37,8 +37,8 @@ Each strategy's NAV path split by the regime in force each session — the geome
 
 | Strategy | Risk-on cumulative | Risk-off cumulative |
 | --- | --- | --- |
-| Sector rotation | 201.42% | -16.32% |
-| Plain momentum (same universe) | 112.45% | 15.83% |
+| Sector rotation | 130.34% | 0.12% |
+| Plain momentum (same universe) | 107.98% | 17.66% |
 | Market | 96.16% | 15.87% |
 
 ## Reading it

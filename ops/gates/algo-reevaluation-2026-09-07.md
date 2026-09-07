@@ -25,6 +25,14 @@ this note is the cross-report reading.
 - Over the **full decade** (2016-09 → 2026-08) the same momentum family earns 12–15 %, not 22 %:
   naive 12.21 %, the best stated configuration 14.95 %, benchmark 8.56 %. A 22 % figure and a 12 %
   figure from "the same policy" differ only in which years they are asked about.
+- Every figure in the two bullets above is on the **raw** signal, because that is what the sweeps
+  ran on until `0e53f4a`. On the corrected **L2 back-adjusted** signal the momentum arms give up
+  ~1.5 pp in the six-year window (**v2 all-on 17.13 %**, naive 16.29 %) and ~0.2–0.7 pp over the
+  decade (**best config 14.74 %**, naive 11.56 %), while the pure-valuation arms do not move at
+  all. Two orderings change as a result: GROWTH overtakes momentum v2 in the six-year window, and
+  **12-1 momentum becomes the best single toggle over the decade at 14.92 %** (+1.60 pp on the
+  adjusted signal, where it was worth +1.11 pp on raw). Read the adjusted numbers as the live
+  estimate and the raw ones as history.
 
 ## Fundamentals arms — identical window, old lake vs rebuilt lake
 
@@ -144,23 +152,104 @@ segment by group code, so no BSE row has ever matched) — the venue predicate a
 `claude/laughing-shirley-90d17c`, unmerged, and are behavior-neutral on this data (0 non-NSE rows
 with `series = 'EQ'`, checked).
 
-## What has not been re-evaluated yet
+## The adjusted-signal sweep (the second run, on `4103f56`)
 
-**The adjusted-signal sweep.** `--v2-report`, `--sector-rotation-report` and
-`--fundamentals-report` hard-coded `adjusted=False` — correct when written (raw *was* the M9.2
-signal over an action-free store), wrong now. So nine of the ten momentum-v2 rows, both
-sector-rotation arms and MOMENTUM_VALUE's second signal above are ranked on closes that read a
-split as a price move. `0e53f4a` makes the source a parameter wired to the existing `--raw` flag,
-with every arm of a sweep on one source and the source named in the report. It needs a push before
-the server can run it:
+Every sweep re-run with the signal on **L2 back-adjusted** closes rather than raw — the source a
+live run should use, and the one nine of the ten momentum-v2 rows above never saw. Same lake, same
+window, same parameters; only the closes the rank is struck on differ. The reports one directory
+level up now carry these runs; the raw editions are kept beside them in `raw-signal-2026-09-07/`.
+
+### Momentum v2 over the decade — raw vs adjusted, toggle by toggle
+
+| Configuration | Raw | **Adjusted** | Δ | Adjusted max DD |
+| --- | --- | --- | --- | --- |
+| Naive (all off) | 12.21% | 11.56% | −0.65 | 48.84% |
+| **+ 12-1 momentum** | 13.32% | **14.92%** | **+1.60** | 39.96% |
+| + Turnover banding | 11.11% | 11.07% | −0.04 | 54.00% |
+| + Regime filter | 10.49% | 9.80% | −0.69 | 24.86% |
+| + Vol-scaled weights | 9.51% | 9.84% | +0.33 | 50.43% |
+| + Redeploy proceeds next session | 14.23% | 13.71% | −0.52 | 53.71% |
+| All on (four M9.5 toggles) | 12.01% | 12.02% | +0.01 | 22.59% |
+| All on + redeploy | 13.97% | 13.04% | −0.93 | 25.87% |
+| + Vol target 15% | 5.94% | 6.39% | +0.45 | 33.25% |
+| **All on + redeploy + vol target 15%** | 14.95% | **14.74%** | −0.21 | **23.04%** |
+
+**12-1 momentum is the change the adjusted signal rewards.** On raw closes it was worth +1.11 pp
+over naive; on adjusted closes it is worth **+3.36 pp** and lands at 14.92 %, level with the
+ten-toggle configuration. That is the one result here with a mechanism behind it rather than an
+accident: 12-1 ranks on `t-12m .. t-1m`, both endpoints in the past, and back-adjusting puts them
+in one share basis — precisely the ratio a split corrupts worst. Everything else moves by less than
+a point, and the two best configurations end up within 0.2 pp of each other with very different
+drawdowns (39.96 % vs **23.04 %**). On a risk-adjusted read, all-on + redeploy + vol target is
+still the one to carry forward.
+
+### Fundamentals arms, 2019-07-01 → 2026-08-31
+
+| Strategy | Raw | **Adjusted** | Δ |
+| --- | --- | --- | --- |
+| Fundamentals: VALUE | 21.53% | 21.53% | — |
+| Fundamentals: GROWTH | 17.55% | **17.55%** | — |
+| Momentum: v2 all-on | 18.52% | **17.13%** | −1.39 |
+| Momentum: naive (all off) | 17.85% | 16.29% | −1.56 |
+| Fundamentals: QUALITY_VALUE | 12.82% | 12.82% | — |
+| Fundamentals: MOMENTUM_VALUE | 12.23% | 12.25% | +0.02 |
+| Market (L1 proxy) | 11.18% | 11.18% | — |
+
+The three pure-valuation arms are unchanged to the digit (no momentum in them), MOMENTUM_VALUE
+barely moves (the earnings-yield half dominates its rank), and the two momentum arms give up
+~1.5 pp. **Correcting the signal reorders the top of the table:** GROWTH (17.55 %) now edges past
+momentum v2 (17.13 %), so on the corrected signal the second-best arm in this window is a pure
+fundamentals one. Momentum v2 keeps the best drawdown in the set by a wide margin (22.06 %).
+
+### Sector rotation over the decade
+
+| Strategy | Raw | **Adjusted** |
+| --- | --- | --- |
+| Sector rotation | 8.72% | **9.69%** |
+| Plain momentum (same universe) | 9.36% | 9.42% |
+| Market (L1 proxy) | 8.56% | 8.56% |
+
+The sector gate's sign flips: it cost 0.64 pp on raw closes and **adds 0.27 pp** on adjusted ones.
+Read it as noise until the universe is bigger — 39.2 sector-mapped names a rebalance under a static
+current-day map is far too small and too survivorship-flattered to carry a 0.27 pp conclusion.
+
+## What the raw-to-adjusted delta is made of
+
+Reading L2 changes two things at once, so none of the deltas above is a single cause. Measured on
+the server, over the 86 rebalances of 2019-07 → 2026-08:
+
+- The adjusted close source answers for **106.3 more ISINs per rebalance** than raw L1 does
+  (1,816.0 raw), and the excess is front-loaded: 140 extra on 2019-07-01, 4 on 2026-08-03.
+- **All 299 distinct extra ISINs are lineage successors** — 299 of the store's 399 reissue edges.
+  L2 is stitched, so a name whose ISIN changed on a face-value split holds its predecessor's bars
+  under the surviving identity, and L2 answers for that identity on sessions where raw L1 has it
+  only under the retired one. The front-loading is that signature: an extra appears on the sessions
+  *before* its reissue, so early dates carry many and recent dates almost none.
+- Only ~21 of those 106 reach the *candidate set* (941.9 → 962.7 names a rebalance in the momentum
+  arms). A candidate needs closes on the session, at the 12-month reference and at the 1-month
+  reference; the successor is in the PIT universe as soon as it trades, but raw L1 has no bar under
+  that identity a year earlier, so the raw run must drop it. The stitched series supplies exactly
+  that reference. Net: **a name inside twelve months of a reissue is rankable in the adjusted run
+  and invisible in the raw one.**
+
+Both effects are real and both are wanted — the price basis is M9.2's correction, the coverage is
+the lineage work making a reissued name visible to a rank at all. They are separated so that a
+change in one is never read as evidence about the other. `--delta-report` now runs the third arm
+that does the split (adjusted closes on L1's ISINs only, so the candidate set is the raw run's
+exactly) and reports `fixed − raw` as the price basis and `adjusted − fixed` as the coverage, the
+two summing to the total by construction. `--signal-l1-isins-only` puts the same restriction on any
+mode. **Those runs are pending** — commit `f90bed8` needs to reach origin before the server can
+sync it:
 
 ```bash
-ops/remote.sh run uv run python -m backtest.run --policy fundamentals_value --fundamentals-report --from 2019-07-01 --to 2026-08-31
-ops/remote.sh run uv run python -m backtest.run --policy naive_momentum --v2-report --from 2016-09-01 --to 2026-08-31
-ops/remote.sh run uv run python -m backtest.run --policy sector_rotation --sector-rotation-report --from 2016-09-01 --to 2026-08-31
+ops/remote.sh run uv run python -m backtest.run --policy naive_momentum --delta-report --from 2016-09-01 --to 2026-08-31
+ops/remote.sh run uv run python -m backtest.run --policy naive_momentum --delta-report --from 2019-07-01 --to 2026-08-31
+ops/remote.sh run uv run python -m backtest.run --policy fundamentals_value --fundamentals-report --from 2019-07-01 --to 2026-08-31 --signal-l1-isins-only
 ```
 
-Also still open, and each of them bounds how much any number above can be trusted:
+## Still open
+
+Each of these bounds how much any number above can be trusted:
 
 - **The benchmark is a price-return L1 proxy**, not a total-return index — no licensed NIFTY-TRI
   (session-gated, FAILED at C.1) and not even M3.9's computed TRI (its close-all snapshot is a gated

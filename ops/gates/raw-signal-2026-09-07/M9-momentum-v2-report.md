@@ -15,46 +15,46 @@ With all six off the policy is the naive top-N policy exactly (the parity is pin
 
 ## Data reality
 
-Every arm reads the **L2 back-adjusted** momentum signal (`adjusted=True`, the M9.2 signal: both endpoints of a trailing return expressed in one share basis, so a split or bonus inside the look-back window is no longer read as a price move). Execution stays raw — the sizing price, the fill reference bars and the terminal marks are the prices that actually traded (invariant #3). The universe is the M9.3 investable/liquid set (as-of index membership ∩ a median-turnover floor; the store holds no historical membership snapshots, so the liquidity floor is what narrows it). The benchmark is the broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the close-all backfill is gated, AGENTIC_CONTEXT B1), and the regime overlay reads the same proxy index. Look-backs (the 12-month and 1-month reference closes, the volatility points) walk the full L1 calendar, so the first rebalance of the window already has a signal — earlier editions of this report held cash for the window's first year for want of one.
+Every arm reads the **raw** L1 momentum signal (`adjusted=False`, the pre-M9.2 baseline; the adjusted-vs-raw delta is the M9.2 report's subject, not this one's). The universe is the M9.3 investable/liquid set (as-of index membership ∩ a median-turnover floor; the store holds no historical membership snapshots, so the liquidity floor is what narrows it). The benchmark is the broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the close-all backfill is gated, AGENTIC_CONTEXT B1), and the regime overlay reads the same proxy index. Look-backs (the 12-month and 1-month reference closes, the volatility points) walk the full L1 calendar, so the first rebalance of the window already has a signal — earlier editions of this report held cash for the window's first year for want of one.
 
 ## Window
 
 - 2016-09-02 -> 2026-08-31 (2470 sessions, 120 monthly rebalances)
-- Mean investable universe / rebalance: 908.1
+- Mean investable universe / rebalance: 888.9
 - Benchmark XIRR (identical cashflows, all rows): 8.56% (NIFTY-TRI (broad-market TRI proxy from L1))
 
 ## Naive vs each increment vs all-on
 
 | Configuration | Portfolio XIRR | Max drawdown | Turnover (fills) | Total cost | Excess vs benchmark |
 | --- | --- | --- | --- | --- | --- |
-| Naive (all off) | 11.56% | 48.84% | 2829 | ₹101,918.68 | 3.00% |
-| + 12-1 momentum | 14.92% | 39.96% | 2743 | ₹129,265.94 | 6.37% |
-| + Turnover banding | 11.07% | 54.00% | 2705 | ₹82,032.90 | 2.51% |
-| + Regime filter | 9.80% | 24.86% | 1918 | ₹75,841.78 | 1.24% |
-| + Vol-scaled weights | 9.84% | 50.43% | 2713 | ₹93,322.49 | 1.29% |
-| + Redeploy proceeds next session | 13.71% | 53.71% | 3152 | ₹142,167.24 | 5.16% |
-| All on (four M9.5 toggles) | 12.02% | 22.59% | 1818 | ₹76,781.31 | 3.46% |
-| All on + redeploy | 13.04% | 25.87% | 2127 | ₹101,578.65 | 4.49% |
-| + Vol target 15% | 6.39% | 33.25% | 2796 | ₹54,816.98 | -2.17% |
-| All on + redeploy + vol target 15% | 14.74% | 23.04% | 2743 | ₹128,926.77 | 6.18% |
+| Naive (all off) | 12.21% | 50.21% | 2934 | ₹105,658.93 | 3.65% |
+| + 12-1 momentum | 13.32% | 42.54% | 2725 | ₹120,573.79 | 4.77% |
+| + Turnover banding | 11.11% | 57.26% | 2819 | ₹81,611.01 | 2.55% |
+| + Regime filter | 10.49% | 25.51% | 1926 | ₹79,461.91 | 1.94% |
+| + Vol-scaled weights | 9.51% | 51.71% | 2860 | ₹92,649.69 | 0.96% |
+| + Redeploy proceeds next session | 14.23% | 56.13% | 3281 | ₹149,848.01 | 5.68% |
+| All on (four M9.5 toggles) | 12.01% | 22.51% | 1776 | ₹77,175.14 | 3.45% |
+| All on + redeploy | 13.97% | 25.57% | 2107 | ₹107,198.71 | 5.41% |
+| + Vol target 15% | 5.94% | 35.38% | 2960 | ₹57,910.43 | -2.61% |
+| All on + redeploy + vol target 15% | 14.95% | 22.73% | 2766 | ₹136,231.75 | 6.39% |
 
 ### Deltas vs naive (isolating each change)
 
 | Configuration | Δ XIRR | Δ Max drawdown | Δ Turnover | Δ Cost |
 | --- | --- | --- | --- | --- |
-| + 12-1 momentum | 3.36% | -8.88% | -86 | ₹27,347.26 |
-| + Turnover banding | -0.49% | 5.15% | -124 | ₹-19,885.78 |
-| + Regime filter | -1.76% | -23.98% | -911 | ₹-26,076.90 |
-| + Vol-scaled weights | -1.72% | 1.59% | -116 | ₹-8,596.19 |
-| + Redeploy proceeds next session | 2.15% | 4.87% | +323 | ₹40,248.56 |
-| All on (four M9.5 toggles) | 0.46% | -26.25% | -1011 | ₹-25,137.37 |
-| All on + redeploy | 1.48% | -22.97% | -702 | ₹-340.03 |
-| + Vol target 15% | -5.17% | -15.59% | -33 | ₹-47,101.70 |
-| All on + redeploy + vol target 15% | 3.18% | -25.80% | -86 | ₹27,008.09 |
+| + 12-1 momentum | 1.11% | -7.66% | -209 | ₹14,914.86 |
+| + Turnover banding | -1.10% | 7.05% | -115 | ₹-24,047.92 |
+| + Regime filter | -1.72% | -24.70% | -1008 | ₹-26,197.02 |
+| + Vol-scaled weights | -2.70% | 1.51% | -74 | ₹-13,009.24 |
+| + Redeploy proceeds next session | 2.02% | 5.92% | +347 | ₹44,189.08 |
+| All on (four M9.5 toggles) | -0.21% | -27.69% | -1158 | ₹-28,483.79 |
+| All on + redeploy | 1.76% | -24.63% | -827 | ₹1,539.78 |
+| + Vol target 15% | -6.27% | -14.83% | +26 | ₹-47,748.50 |
+| All on + redeploy + vol target 15% | 2.74% | -27.48% | -168 | ₹30,572.82 |
 
 ## Reading it
 
-- **Turnover banding** is the change that most directly targets the naive run's churn — the naive policy fired 2829 fills over the decade (1776 of them sells); the banding row shows how much of that the hysteresis removes, and its cost delta is the saving.
+- **Turnover banding** is the change that most directly targets the naive run's churn — the naive policy fired 2934 fills over the decade (1875 of them sells); the banding row shows how much of that the hysteresis removes, and its cost delta is the saving.
 - **The regime filter** trades return for drawdown control: it sits in cash through the sessions the proxy index is below its moving average, so its max-drawdown column is the one to read against naive.
 - **Vol-scaling** and **12-1** reshape the basket rather than its size; read them in the XIRR and drawdown columns.
 - **Do not read any excess-vs-benchmark figure as alpha** — the benchmark here is a computed/proxy total-return series, not the licensed feed (M9.4). The point of this table is the *relative* effect of each toggle, all measured against the identical benchmark.
@@ -65,13 +65,13 @@ Every arm reads the **L2 back-adjusted** momentum signal (`adjusted=True`, the M
 
 ## Run digests (determinism)
 
-- **Naive (all off):** `1010cf2dfbeb2992431583ea38c6a5d450c97a9538da596ef6329380b23fcf96`
-- **+ 12-1 momentum:** `f0abc30ba8126e0dc57e9eba326c2ad62651ce50036af89c0054d9b6d27ae27b`
-- **+ Turnover banding:** `cc57489e83978746f442883358ef1ff396a0b06b79438284aafcc870ed333495`
-- **+ Regime filter:** `9043fa068618c47e159e06cc9c5e6141a205d725c3c4ad00ce2533a04afc2266`
-- **+ Vol-scaled weights:** `061b54f6397bc97576aa05c36d2ca50c6efb972479c1c014df5761455470e6ac`
-- **+ Redeploy proceeds next session:** `d2d3fdb5b2562cd82873b74d84fe26ab3c4ef16622dd656e2fea07f423a519a4`
-- **All on (four M9.5 toggles):** `8be61967092002942e4720a5160b6ca04b02ac5afcb1cdb1f3baf693aea0df9e`
-- **All on + redeploy:** `220e6aed726c3ea3f8c5867af0efc8bbb2580bf801cd121bf978bed8e412c0bf`
-- **+ Vol target 15%:** `416120ebdc448d865ce8b989db0c015f7a74efda7a3c9405b0543ca1536a7c63`
-- **All on + redeploy + vol target 15%:** `2a0b15932cdbbdaa55ab9f9f135bd12373070b3cc6172c9a27d549982275ea22`
+- **Naive (all off):** `923becddfebeb89395e9bdff25fccc5e519d4b950e06aa536436d355a004a28f`
+- **+ 12-1 momentum:** `0da856734d533217a776e9f4bbc1bfe6d64eb6cf800f6fe517b8efaa10ef7e02`
+- **+ Turnover banding:** `68880b21b30449e98b9d5fd9d6cfd410625be5e23a790fd0d5fb45f9b8b2a9a4`
+- **+ Regime filter:** `7ba6dcbe0bae933c0d32d4c79e667925356d7386e3d8d2930d05f9bdd240a02b`
+- **+ Vol-scaled weights:** `94dc0eb1a7034c0a83780285d8e31344d173d66121b17af8c75c56564b689a53`
+- **+ Redeploy proceeds next session:** `1aa4b6f3f10b9ad1ff54861124d63892e48cd3e9bb8c62a2c6c298efce2fe549`
+- **All on (four M9.5 toggles):** `04ca32ac5e80d30a1ca0ed9e5fe71afee562b45b946e26828f0e45ab1da81557`
+- **All on + redeploy:** `9097506c909affd46b5129aef77915114211fad06e61c1dba309b7a70e780598`
+- **+ Vol target 15%:** `86b8d5c2557e1c945f79670b2a621eb670dd25aadb08e088f3bfbd257c981fd9`
+- **All on + redeploy + vol target 15%:** `9863532149ec809de0e54b0407d2b828ffe9d45f276673c09f993d20fef26b47`
