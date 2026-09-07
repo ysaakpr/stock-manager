@@ -372,7 +372,10 @@ def test_the_bar_section_marks_which_windows_were_in_sample() -> None:
     sweep = _split(selection_xirr="0.31", verification_xirr="0.28")
     report = render_duration_report(sweep, floors=[LOW_FLOOR])
     bar = report[report.index("## The bar:") : report.index("## What each arm changed")]
-    assert "out-of-sample" in bar and "in-sample" in bar
+    # "in-sample" is a substring of "out-of-sample", so the presence of both words proves
+    # nothing. Check the two tags where they actually distinguish rows, below.
+    assert "**out-of-sample**" in bar
+    assert re.search(r"\(in-sample,", bar), "no row was tagged in-sample"
     # The overlap claim is counted, not asserted in prose. A selection/verification pair
     # *partitions*, so no pair shares a day and the sentence must say so rather than claim an
     # overlap that is not there.
@@ -420,7 +423,8 @@ def test_the_report_lists_exactly_the_arms_that_ran_and_no_others() -> None:
     for arm in DURATION_ARMS:
         if arm.label != _REFERENCE:
             assert f"| {arm.label} |" not in report, f"{arm.label} never ran but was listed"
-    assert "**1 arms**" in report, "the count came from the module, not from the rows"
+    assert "**1 arm**" in report, "the count came from the module, not from the rows"
+    assert "**1 arms**" not in report, "the singular case is ungrammatical"
     assert "Run digests (determinism)" in report
     assert "d" * 64 in report
 
@@ -428,11 +432,39 @@ def test_the_report_lists_exactly_the_arms_that_ran_and_no_others() -> None:
 def test_a_subset_run_is_banner_marked_as_a_subset() -> None:
     """A filtered report must not read as the campaign, whatever path it was written to."""
     report = render_duration_report(_two_windows(), floors=[LOW_FLOOR])
-    assert "filtered subset, not the duration grid" in report
+    assert "filtered subset, not the campaign" in report
     assert "Do not read this file as the campaign" in report
+    assert "stated arms did not run" in report
+
+
+def _full_campaign() -> MultiWindowSweep:
+    """Every mandated window with every stated arm — what the real campaign produces."""
+    return MultiWindowSweep(
+        windows=[
+            WindowSweep(
+                window=window,
+                result=_result(
+                    [_row(arm.label, xirr="0.20", drawdown="0.25") for arm in DURATION_ARMS],
+                    start=window.start,
+                    terminal=window.end,
+                ),
+            )
+            for window in MANDATED_WINDOWS
+        ],
+        selected=_REFERENCE,
+    )
 
 
 def test_a_full_run_carries_no_subset_banner() -> None:
+    report = render_duration_report(_full_campaign(), floors=[LOW_FLOOR, HIGH_FLOOR])
+    assert "filtered subset" not in report
+    assert f"**{len(DURATION_ARMS)} arms**" in report
+    for arm in DURATION_ARMS:
+        assert f"| {arm.label} |" in report
+
+
+def test_a_narrowed_window_set_is_banner_marked_even_with_every_arm() -> None:
+    """--windows narrows a report exactly as much as --arms does, and must disclose it."""
     sweep = MultiWindowSweep(
         windows=[
             WindowSweep(
@@ -446,10 +478,9 @@ def test_a_full_run_carries_no_subset_banner() -> None:
         ]
     )
     report = render_duration_report(sweep, floors=[LOW_FLOOR])
-    assert "filtered subset" not in report
-    assert f"**{len(DURATION_ARMS)} arms**" in report
-    for arm in DURATION_ARMS:
-        assert f"| {arm.label} |" in report
+    assert "filtered subset, not the campaign" in report
+    assert "not the 4 mandated windows" in report
+    assert "stated arms did not run" not in report, "every arm ran; only the windows narrowed"
 
 
 def test_arms_that_ran_reads_the_rows_in_first_appearance_order() -> None:
@@ -595,3 +626,183 @@ def test_the_inventory_sentence_names_only_the_arms_that_are_there() -> None:
     assert "of the M10.7 composite" in sentence, "'of it' dangles with no reference to refer to"
     assert "1 momentum baseline every" in sentence, "said '1 baselines'"
     assert _inventory([]) == "no arms at all — every one of them failed to produce a row"
+
+
+# ── the guard reaches every site that prints a ratio ─────────────────────────────────────────────
+
+
+def test_the_walk_forward_section_never_prints_an_unsampled_drawdown_as_zero() -> None:
+    """The report's only out-of-sample claim must not read a missing denominator as measured.
+
+    `ranked()` sorts on -return_per_drawdown and an unsampled drawdown yields zero, which outranks
+    every negative-ratio arm — so in an underwater window the arm printed as **Chosen:** is exactly
+    the kind of arm that got there on a missing denominator.
+    """
+    walk = _split(selection_xirr="0.30", verification_xirr="0.05")
+    for entry in walk.windows:
+        entry.result.rows[:] = [
+            _row(_REFERENCE, xirr="0.30", drawdown="0"),  # never caught falling
+            _row(_FAST, xirr="-0.05", drawdown="0.40"),
+        ]
+    report = render_duration_report(walk, floors=[LOW_FLOOR])
+    section = report[report.index("## Walk-forward") : report.index("## The bar:")]
+    assert "0.00% drawdown" not in section
+    assert "(0.00)" not in section
+    assert "no drawdown sampled" in section
+    # The side-by-side table uses the dash rather than a fabricated ratio.
+    chosen_line = next(
+        line for line in section.splitlines() if line.startswith(f"| {_REFERENCE} ←")
+    )
+    # The two ratio cells (selection XIRR/DD, verification XIRR/DD) are dashes, not fabricated
+    # zeros. Checked cell-by-cell: "30.00%" legitimately contains "0.00".
+    cells = [cell.strip() for cell in chosen_line.split("|")]
+    assert cells[4] == "—", f"selection ratio was {cells[4]!r}, expected a dash"
+    assert cells[6] == "—", f"verification ratio was {cells[6]!r}, expected a dash"
+
+
+def test_every_rendered_ratio_site_is_guarded() -> None:
+    """A sweep in which nothing was ever sampled falling must print no `0.00` ratio anywhere."""
+    sweep = _split(selection_xirr="0.30", verification_xirr="0.30")
+    for entry in sweep.windows:
+        entry.result.rows[:] = [
+            _row(_REFERENCE, xirr="0.30", drawdown="0", floor=floor)
+            for floor in (LOW_FLOOR, HIGH_FLOOR)
+        ]
+    report = render_duration_report(sweep, floors=[LOW_FLOOR, HIGH_FLOOR])
+    assert "**0.00**" not in report
+    assert "(0.00)" not in report
+    assert "0.00% max drawdown" not in report
+    assert "0.00% drawdown" not in report
+
+
+# ── multiplicity, derived ────────────────────────────────────────────────────────────────────────
+
+
+def test_the_multiplicity_bullet_counts_what_ran() -> None:
+    """11 swing arms x 4 windows x 2 floors is 88 numbers, and the bullet must say 88."""
+    report = render_duration_report(_full_campaign(), floors=[LOW_FLOOR, HIGH_FLOOR])
+    swing = sum(1 for arm in DURATION_ARMS if arm.swing is not None)
+    expected = swing * len(MANDATED_WINDOWS) * 2
+    assert expected == 88
+    assert f"**{expected} numbers**" in report
+    assert "forty numbers" not in report
+    assert f"{swing} swing arms over 4 windows on 2 liquidity floors" in report
+
+
+def test_the_multiplicity_bullet_follows_a_narrower_run() -> None:
+    report = render_duration_report(_two_windows(), floors=[LOW_FLOOR])
+    # One swing arm, two windows, one floor.
+    assert "**2 numbers**" in report
+    assert "1 swing arm over 2 windows on 1 liquidity floor" in report
+
+
+# ── relational prose is derived, never asserted ──────────────────────────────────────────────────
+
+
+def test_a_walk_forward_only_sweep_does_not_claim_an_overlap_it_counted_as_zero() -> None:
+    """The honest-limits bullet and the bar section's overlap line must agree."""
+    report = render_duration_report(
+        _split(selection_xirr="0.1", verification_xirr="0.1"), floors=[LOW_FLOOR]
+    )
+    assert "do not overlap" in report
+    assert "no two of them share a session" in report
+    assert "decade *contains* the six-year window" not in report
+    assert "partitions* the decade" not in report
+
+
+def test_a_sweep_with_no_verification_window_does_not_claim_a_selection_window() -> None:
+    """The "chosen on, or overlapping it" clause is false when neither window exists."""
+    sweep = MultiWindowSweep(
+        windows=[
+            WindowSweep(
+                window=Window(label="Decade", start=date(2016, 9, 1), end=date(2026, 8, 31)),
+                result=_result(
+                    [_row(_REFERENCE, xirr="0.31", drawdown="0.25")],
+                    start=date(2016, 9, 1),
+                    terminal=date(2026, 8, 31),
+                ),
+            )
+        ]
+    )
+    report = render_duration_report(sweep, floors=[LOW_FLOOR])
+    assert "**Answer: in-sample only.**" in report
+    assert "held out no window at all" in report
+    assert "the window an arm was chosen on" not in report
+    assert "No window here was held out" in report
+
+
+# ── scope, and the divergence section ────────────────────────────────────────────────────────────
+
+
+def test_the_report_says_it_is_not_the_m12_3_gate() -> None:
+    report = render_duration_report(_full_campaign(), floors=[LOW_FLOOR])
+    assert "It is **not** the M12.3 gate" in report
+    assert "M12-strategy-verdict.md" in report
+    assert not report.startswith("# M12.3")
+
+
+def test_arms_that_diverge_by_window_are_named() -> None:
+    """M12.3's criterion, adopted: an arm clearing on one window and not another is named."""
+    windows = []
+    # Six-year clears, decade does not — the divergence the criterion asks about.
+    for label, start, end, xirr in [
+        ("Decade", date(2016, 9, 1), date(2026, 8, 31), "0.14"),
+        ("Six-year", date(2019, 7, 1), date(2026, 8, 31), "0.31"),
+    ]:
+        windows.append(
+            WindowSweep(
+                window=Window(label=label, start=start, end=end),
+                result=_result(
+                    [
+                        _row(_REFERENCE, xirr=xirr, drawdown="0.25"),
+                        _row(_FAST, xirr="0.05", drawdown="0.25"),
+                    ],
+                    start=start,
+                    terminal=end,
+                ),
+            )
+        )
+    report = render_duration_report(MultiWindowSweep(windows=windows), floors=[LOW_FLOOR])
+    section = report[report.index("## Where the verdict changes with the window") :]
+    assert "clears on the six-year window but not the decade" in section
+    assert f"**{_REFERENCE}**" in section
+    # The arm that cleared on neither is not named as diverging.
+    diverging = section[: section.index("## ", 5)] if "## " in section[5:] else section
+    assert _FAST not in diverging
+
+
+def test_divergence_reports_selection_against_verification_too() -> None:
+    walk = _split(selection_xirr="0.31", verification_xirr="0.09")
+    report = render_duration_report(walk, floors=[LOW_FLOOR])
+    section = report[report.index("## Where the verdict changes with the window") :]
+    assert "clears on the selection window but not on verification" in section
+    assert f"**{_REFERENCE}**" in section
+
+
+def test_divergence_says_so_plainly_when_nothing_diverges() -> None:
+    report = render_duration_report(
+        _split(selection_xirr="0.09", verification_xirr="0.09"), floors=[LOW_FLOOR]
+    )
+    section = report[report.index("## Where the verdict changes with the window") :]
+    assert "No arm's answer" in section
+
+
+def test_divergence_needs_a_comparable_pair() -> None:
+    """A decade-only run has no pair to compare, and says that rather than nothing."""
+    sweep = MultiWindowSweep(
+        windows=[
+            WindowSweep(
+                window=Window(label="Decade", start=date(2016, 9, 1), end=date(2026, 8, 31)),
+                result=_result(
+                    [_row(_REFERENCE, xirr="0.31", drawdown="0.25")],
+                    start=date(2016, 9, 1),
+                    terminal=date(2026, 8, 31),
+                ),
+            )
+        ]
+    )
+    report = render_duration_report(sweep, floors=[LOW_FLOOR])
+    assert "## Where the verdict changes" not in report
+    # ...and the scope paragraph does not promise a section that is not there.
+    assert "there is no divergence to name" in report
+    assert "*Where the verdict changes with the window* below" not in report

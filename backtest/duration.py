@@ -1,4 +1,13 @@
-"""M12.3 — the swing composite across multiple durations and multiple windows (X2).
+"""The swing composite across multiple durations and multiple windows (M12.3-adjacent, X2).
+
+**This module does not discharge M12.3.** ``TASK_GRAPH.yaml`` gives M12.3 the deliverable
+``ops/gates/M12-strategy-verdict.md``, written by :mod:`backtest.verdict` over M12.2's
+twenty-three-arm sweep; this is the owner's separate ad-hoc request and writes its own path. It
+shares the walk-forward machinery and adopts one of M12.3's acceptance criteria — naming every arm
+whose verdict changes by window — because that is precisely what "multiple duration and window" was
+asking to see. The rendered report says so in its own first section rather than leaving a reader to
+infer it from a heading.
+
 
 The owner asked to try the M10.7 composite "in multiple duration and window". Neither axis
 existed. :mod:`backtest.sweep` varies the *signal* across twenty-three arms but pins M10.7's own
@@ -282,6 +291,29 @@ def _ratio_cell(row: SweepRow) -> str:
     return f"**{row.return_per_drawdown:.2f}**"
 
 
+def _drawdown_cell(row: SweepRow) -> str:
+    """The max-drawdown cell — ``—`` when the sampler never caught this arm falling."""
+    return _pct(row.max_drawdown) if row.drawdown_sampled else _NO_DRAWDOWN
+
+
+def _ratio_plain(row: SweepRow) -> str:
+    """The ranking key, unbolded, for a cell that sits beside other unbolded figures."""
+    return f"{row.return_per_drawdown:.2f}" if row.drawdown_sampled else "—"
+
+
+def _measured_against(row: SweepRow) -> str:
+    """The "X against a Y drawdown (Z)" clause, or the honest version when there is no Y.
+
+    Prose, not a table cell: the walk-forward paragraph is the report's only out-of-sample claim,
+    and an unmarked ``0.00% drawdown (0.00)`` there reads as a measured zero — the more so because
+    the legend three sections earlier has just taught the reader that a missing denominator is
+    printed as ``— (no drawdown sampled)``.
+    """
+    if not row.drawdown_sampled:
+        return "with no drawdown sampled, so it has no return-per-drawdown figure"
+    return f"against a {_pct(row.max_drawdown)} drawdown ({row.return_per_drawdown:.2f})"
+
+
 def _ranked_table(result: SweepResult, floor: Decimal) -> list[str]:
     """One window, one floor: every arm ranked on XIRR / max drawdown, failures kept."""
     lines = [
@@ -298,7 +330,7 @@ def _ranked_table(result: SweepResult, floor: Decimal) -> list[str]:
             )
             continue
         assert row.run is not None
-        drawdown = _pct(row.max_drawdown) if row.drawdown_sampled else _NO_DRAWDOWN
+        drawdown = _drawdown_cell(row)
         lines.append(
             f"| {position} | {row.arm.label} | {duration} | {_pct(row.xirr)} | "
             f"{drawdown} | {_ratio_cell(row)} | {row.round_trips} | "
@@ -446,16 +478,14 @@ def _walk_forward_section(sweep: MultiWindowSweep, floor: Decimal) -> list[str]:
     verified = row_of(verification.result, chosen, floor)
     if picked is not None and picked.ok:
         lines += [
-            f"On the selection window it earned {_pct(picked.xirr)} against a "
-            f"{_pct(picked.max_drawdown)} drawdown ({picked.return_per_drawdown:.2f}), at "
-            f"{_duration_of(picked.arm)}.",
+            f"On the selection window it earned {_pct(picked.xirr)} "
+            f"{_measured_against(picked)}, at {_duration_of(picked.arm)}.",
             "",
         ]
     if verified is not None and verified.ok:
         lines += [
             f"On the verification window — unseen when it was chosen — it earned "
-            f"**{_pct(verified.xirr)}** against a {_pct(verified.max_drawdown)} drawdown "
-            f"({verified.return_per_drawdown:.2f}), ranking "
+            f"**{_pct(verified.xirr)}** {_measured_against(verified)}, ranking "
             f"**{rank_of(verification.result, chosen, floor)}** of "
             f"{len(verification.result.ranked(floor))}.",
             "",
@@ -477,13 +507,13 @@ def _walk_forward_section(sweep: MultiWindowSweep, floor: Decimal) -> list[str]:
         if other is None or not other.ok:
             lines.append(
                 f"| {label}{marker} | {_duration_of(row.arm)} | {position} | "
-                f"{row.return_per_drawdown:.2f} | — | — | — |"
+                f"{_ratio_plain(row)} | — | — | — |"
             )
             continue
         lines.append(
             f"| {label}{marker} | {_duration_of(row.arm)} | {position} | "
-            f"{row.return_per_drawdown:.2f} | {rank_of(verification.result, label, floor)} | "
-            f"{other.return_per_drawdown:.2f} | {_pct(other.xirr)} |"
+            f"{_ratio_plain(row)} | {rank_of(verification.result, label, floor)} | "
+            f"{_ratio_plain(other)} | {_pct(other.xirr)} |"
         )
     return [*lines, ""]
 
@@ -614,11 +644,28 @@ def _bar_verdict(
     )
     if not out_of_sample:
         where = ", ".join(sorted({hit[0] for hit in cleared}))
+        # Why those windows prove nothing depends on what was actually run: a campaign with a
+        # selection window cleared the bar on the window that selected for it, while a campaign
+        # with none simply never held anything out.
+        if verification is not None:
+            because = (
+                "Every one of those windows was either the window an arm was chosen on or a "
+                "window overlapping it, so what cleared the bar is the selection, not a "
+                "demonstrated edge."
+            )
+        elif sweep.with_role(WindowRole.SELECTION) is not None:
+            because = (
+                "This campaign ran a selection window and no verification window, so nothing "
+                "here was ever held out and the figure has not been tested once."
+            )
+        else:
+            because = (
+                "This campaign held out no window at all, so every figure above was measured on "
+                "data the arms were already chosen against. Nothing here has been tested "
+                "out-of-sample."
+            )
         return (
-            f"**Answer: in-sample only.** The bar was cleared on {where}, and on no "
-            "out-of-sample window. Every one of those windows was either the window an arm was "
-            "chosen on or a window overlapping it, so what cleared the bar is the selection, not "
-            "a demonstrated edge." + floor_caveat
+            f"**Answer: in-sample only.** The bar was cleared on {where}. {because}{floor_caveat}"
         )
 
     reachable = [hit for hit in out_of_sample if hit[1] == max(floors)]
@@ -644,6 +691,95 @@ def _bar_verdict(
     )
 
 
+def _divergence_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> list[str]:
+    """Name every arm whose verdict changes with the window (M12.3's acceptance, adopted).
+
+    This is what running several windows was *for*. An arm that clears the bar on the six-year
+    window and not on the decade has told you when its edge was, and an arm that clears on the
+    selection window and not on the verification window has told you it was selected rather than
+    demonstrated. A report holding all four windows and not naming those arms is burying its own
+    finding, so both comparisons are derived here — nothing about which windows exist is assumed.
+    """
+    labels = [arm.label for arm in arms_that_ran(sweep)]
+    if len(sweep.windows) < 2:
+        return []
+
+    def clears(window_label: str, arm: str, floor: Decimal) -> bool | None:
+        """True/False if the arm ran on that window, ``None`` if it has no row there."""
+        try:
+            result = sweep.result_for(window_label)
+        except KeyError:
+            return None
+        row = row_of(result, arm, floor)
+        return None if row is None or not row.ok else row.xirr > BAR
+
+    lines = [
+        "## Where the verdict changes with the window",
+        "",
+        "*Derived, not curated: every arm whose answer to the "
+        f"{_pct(BAR)} question differs between two windows is named here. This is the whole "
+        "reason for running more than one window — an arm that clears on one and not another has "
+        "told you when its edge was, not that it has one.*",
+        "",
+    ]
+    pairs: list[tuple[str, str, str]] = []
+    present = {entry.window.label for entry in sweep.windows}
+    if {"Six-year", "Decade"} <= present:
+        pairs.append(("Six-year", "Decade", "clears on the six-year window but not the decade"))
+    selection = sweep.with_role(WindowRole.SELECTION)
+    verification = sweep.with_role(WindowRole.VERIFICATION)
+    if selection is not None and verification is not None:
+        pairs.append(
+            (
+                selection.window.label,
+                verification.window.label,
+                "clears on the selection window but not on verification",
+            )
+        )
+    if not pairs:
+        return [
+            *lines,
+            "- No comparable pair of windows ran, so there is no divergence to report. The "
+            "six-year-against-decade and selection-against-verification comparisons both need "
+            "both of their windows.",
+            "",
+        ]
+
+    found = False
+    for left, right, description in pairs:
+        for floor in floors:
+            names = [
+                arm
+                for arm in labels
+                if clears(left, arm, floor) is True and clears(right, arm, floor) is False
+            ]
+            reverse = [
+                arm
+                for arm in labels
+                if clears(left, arm, floor) is False and clears(right, arm, floor) is True
+            ]
+            if names:
+                found = True
+                lines.append(
+                    f"- **{description}**, at {_floor_label(floor)}: "
+                    + ", ".join(f"**{name}**" for name in names)
+                    + "."
+                )
+            if reverse:
+                found = True
+                lines.append(
+                    f"- **The reverse** — clears on {right} but not on {left} — at "
+                    f"{_floor_label(floor)}: " + ", ".join(f"**{name}**" for name in reverse) + "."
+                )
+    if not found:
+        lines.append(
+            f"- No arm's answer to the {_pct(BAR)} question changed between any comparable pair "
+            "of windows at either floor. Either every arm cleared everywhere or none did; the "
+            "ranked tables say which."
+        )
+    return [*lines, ""]
+
+
 def _digest_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> list[str]:
     """Every run's digest, so the whole campaign is reproducible arm by arm (determinism)."""
     lines = [
@@ -667,6 +803,72 @@ def _digest_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> list[
     return lines
 
 
+def _subset_notices(sweep: MultiWindowSweep, arms: Sequence[Arm]) -> list[str]:
+    """Why this report is a subset rather than the campaign — arms, windows, or both.
+
+    Detected from the sweep rather than passed in by the CLI, so any caller that narrows either
+    axis gets the banner. ``--windows`` narrows a report exactly as much as ``--arms`` does, and
+    a run over one window that omits the disclosure reads as the four-window campaign.
+    """
+    notices: list[str] = []
+    ran = {arm.label for arm in arms}
+    missing = [arm.label for arm in DURATION_ARMS if arm.label not in ran]
+    if missing:
+        notices.append(
+            f"{len(missing)} of the {len(DURATION_ARMS)} stated arms did not run: "
+            + ", ".join(f"`{label}`" for label in missing)
+            + "."
+        )
+    stated = {window.label for window in MANDATED_WINDOWS}
+    ran_windows = {entry.window.label for entry in sweep.windows}
+    if ran_windows != stated:
+        absent = sorted(stated - ran_windows)
+        extra = sorted(ran_windows - stated)
+        parts = []
+        if absent:
+            parts.append("did not run " + ", ".join(f"`{label}`" for label in absent))
+        if extra:
+            parts.append("ran unmandated " + ", ".join(f"`{label}`" for label in extra))
+        notices.append(
+            f"The window set is not the {len(MANDATED_WINDOWS)} mandated windows: "
+            + " and ".join(parts)
+            + "."
+        )
+    return notices
+
+
+def _independence_limit(sweep: MultiWindowSweep) -> str:
+    """The honest-limits bullet on window independence, derived from the windows that ran.
+
+    The hardcoded version named the decade and the six-year window whatever had been run, so on a
+    walk-forward-only sweep it asserted an overlap while :func:`_overlapping_pairs` two sections
+    earlier had counted none — the report contradicting itself. Both sentences now come from the
+    same count.
+    """
+    overlaps = _overlapping_pairs(sweep)
+    held_out = sweep.with_role(WindowRole.VERIFICATION)
+    sample = (
+        f"Only **{held_out.window.label}** is out-of-sample; everything else is in-sample by "
+        "construction."
+        if held_out is not None
+        else "**No window here was held out**, so every figure is in-sample by construction."
+    )
+    if not overlaps:
+        return (
+            f"- **{_plural(len(sweep.windows), 'window', 'windows')}, and no two of them share a "
+            f"session.** They are still not independent evidence about the future — they are "
+            f"different stretches of one lake, one universe and one cost model. {sample}"
+        )
+    count = len(sweep.windows)
+    total_pairs = count * (count - 1) // 2
+    return (
+        f"- **These windows are not independent draws, and the count of them means nothing.** "
+        f"{overlaps} of the {_plural(total_pairs, 'window pair', 'window pairs')} below share "
+        "sessions, so the same days are counted more than once across the tables. An arm that "
+        f"clears the bar on several of them has not cleared it several times. {sample}"
+    )
+
+
 def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]) -> str:
     """The M12.3 markdown: every window on its own, then what the whole thing can be asked to prove.
 
@@ -679,7 +881,14 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
     # module constant. A filtered run must not be able to claim the whole grid ran; that would be
     # exactly the survivor bias this module's own text condemns, printed at the top of the file.
     arms = arms_that_ran(sweep)
-    missing = [arm.label for arm in DURATION_ARMS if arm.label not in {a.label for a in arms}]
+    subset = _subset_notices(sweep, arms)
+    # The multiplicity this report is exposed to, derived rather than restated: every arm on
+    # every window on every floor is one number the best of which was selected by being best.
+    swing_arms = [arm for arm in arms if arm.swing is not None]
+    multiplicity = len(swing_arms) * len(sweep.windows) * len(set(floors))
+    _arm_count = _plural(len(swing_arms), "swing arm", "swing arms")
+    _window_count = _plural(len(sweep.windows), "window", "windows")
+    _floor_count = _plural(len(set(floors)), "liquidity floor", "liquidity floors")
     floor_note = (
         f"{_floor_label(min(floors))} (the inherited M9.3 discovery floor) and "
         f"{_floor_label(max(floors))} (what a real book could reach)"
@@ -688,7 +897,7 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
         "figure survives at the other"
     )
     lines = [
-        "# M12.3 — The swing composite in multiple durations and multiple windows",
+        "# The swing composite in multiple durations and multiple windows",
         "",
         "*Generated by `python -m backtest.duration --report`. The M10.7 composite's own three "
         "legs (52-week-high proximity, delivery share, 12-1 momentum) held at a grid of cadences "
@@ -697,20 +906,38 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
         "alone the winner is whichever arm carried the most risk.*",
         "",
     ]
-    if missing:
+    if subset:
         lines += [
-            "> **This is a filtered subset, not the duration grid.** "
-            f"{len(missing)} of the {len(DURATION_ARMS)} stated arms did not run: "
-            + ", ".join(f"`{label}`" for label in missing)
-            + ". Every table below is the subset's ranking, and a ranking of a subset is not the "
-            "grid's ranking. Do not read this file as the campaign.",
+            "> **This is a filtered subset, not the campaign.** " + " ".join(subset) + " Every "
+            "table below is the subset's ranking, and a ranking of a subset is not the grid's "
+            "ranking. Do not read this file as the campaign.",
             "",
         ]
     lines += [
+        "## What this report is, and what it is not",
+        "",
+        "This answers the owner's request to try the M10.7 swing composite *\"in multiple "
+        'duration and window"*. It is **not** the M12.3 gate. `TASK_GRAPH.yaml` gives M12.3 the '
+        "deliverable `ops/gates/M12-strategy-verdict.md`, which `backtest/verdict.py` writes over "
+        "the twenty-three-arm M12.2 sweep, and this file neither replaces it nor discharges its "
+        "acceptance criteria. What the two share is the module and the walk-forward machinery; "
+        "what differs is the arm set — this is M10.7's own three legs at a grid of durations, not "
+        "a comparison of strategy families.",
+        "",
+        (
+            "It does adopt one of M12.3's criteria on purpose, because it is exactly what the "
+            "owner asked for: every arm whose verdict changes between windows is named, under "
+            "*Where the verdict changes with the window* below."
+            if len(sweep.windows) > 1
+            else "M12.3's by-window divergence criterion is adopted where it applies, but this "
+            "run covers a single window, so there is no divergence to name."
+        ),
+        "",
         "## What was run, and what is deliberately absent",
         "",
-        f"- **{len(arms)} arms**, and this count is the arms that actually produced rows, not the "
-        f"arms the module defines: {_inventory(arms)}.",
+        f"- **{_plural(len(arms), 'arm', 'arms')}**, and this count is what actually produced "
+        "rows, not what the module defines: "
+        f"{_inventory(arms)}.",
         "- **Every arm scores on exactly M10.7's three legs.** Every M12.1 leg is at zero, the "
         "trailing stop, the volatility screen and the basket size are at their defaults. A row is "
         "the price of the holding-period machinery and of nothing else.",
@@ -754,6 +981,7 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
 
     lines += _walk_forward_section(sweep, low)
     lines += _bar_section(sweep, floors)
+    lines += _divergence_section(sweep, floors)
 
     lines += [
         "## What each arm changed",
@@ -773,21 +1001,18 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
         "",
         "## Honest limits of this measurement",
         "",
-        "- **These windows are not independent draws, and the count of them means nothing.** The "
-        "decade *contains* the six-year window, and the walk-forward pair *partitions* the "
-        "decade — so the same sessions are counted up to three times across the tables. An arm "
-        "that clears the bar on three windows has not cleared it three times. Only the "
-        "verification window is out-of-sample; everything else is in-sample by construction.",
+        _independence_limit(sweep),
         "- **The walk-forward has one split.** It says whether the selected duration held up "
         "across a single boundary in 2021 — a boundary that happens to sit just after the "
         "sharpest drawdown and just before the sharpest recovery in the lake. It does not say "
         "the duration holds up across boundaries in general.",
         "- **An arm that clears the bar on the six-year window and not the decade has told you "
         "when its edge was**, not that it has one.",
-        "- **The duration axis is still a search.** Ten arms over four windows is forty numbers, "
-        "and the best of forty is flattered by having been the best of forty. The walk-forward "
-        "columns are the only out-of-sample figures in this report; every other cell is in-sample "
-        "by construction.",
+        f"- **The duration axis is still a search.** {_arm_count} over {_window_count} on "
+        f"{_floor_count} is **{multiplicity} numbers**, and the best of {multiplicity} is "
+        f"flattered by having been the best of {multiplicity}. The walk-forward columns are the "
+        "only out-of-sample figures in this report; every other cell is in-sample by "
+        "construction.",
         "- **Two arms re-underwrite at 126 sessions, outside M10.7's stated 7-90 day band.** They "
         "are here because an axis that stops at its own assumption cannot test the assumption. If "
         "one of them wins, the finding is that the band was too narrow, not that the band was "
@@ -833,9 +1058,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--windows",
         default=None,
-        help="comma-separated window labels to run, or `none` for only the --window ones; default "
-        "is all four mandated windows. For smoke-testing the wiring, never for reporting a "
-        "subset as the campaign",
+        help="comma-separated window labels to run, or `none` for only the --window ones; "
+        "default is all four mandated windows. For smoke-testing: a narrowed window set is "
+        "refused the default report path and any report it writes is banner-marked a subset",
     )
     parser.add_argument(
         "--window",
@@ -895,6 +1120,27 @@ def _select_windows(args: argparse.Namespace) -> tuple[Window, ...]:
     return windows + extra
 
 
+def _filter_reasons(
+    args: argparse.Namespace, *, arms: Sequence[Arm], windows: Sequence[Window]
+) -> list[str]:
+    """Why this invocation is a subset rather than the campaign, in words, or an empty list.
+
+    Both ``--arms`` and ``--windows`` narrow what is measured, and either one makes the resulting
+    report a subset's ranking rather than the grid's. They are treated identically: the same path
+    refusal and the same banner in the rendered file.
+    """
+    reasons: list[str] = []
+    if len(arms) != len(DURATION_ARMS):
+        reasons.append(f"--arms ran {len(arms)} of {len(DURATION_ARMS)} arms")
+    stated = {window.label for window in MANDATED_WINDOWS}
+    if {window.label for window in windows} != stated:
+        reasons.append(
+            f"the window set is not the {len(MANDATED_WINDOWS)} mandated windows "
+            f"({len(windows)} ran)"
+        )
+    return reasons
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Entry point for ``python -m backtest.duration``. Returns a process exit code."""
     args = _parse_args(argv)
@@ -918,21 +1164,28 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not arms:
             print(f"error: no arm matches {args.arms}", file=sys.stderr)
             return 2
-        # --arms is a smoke test. Letting it write the deliverable's own path produces a file that
-        # reads as the campaign while holding a subset's ranking, and the path is the only thing a
-        # later reader has to go on.
-        if args.report is not None and Path(args.report) == _REPORT_PATH:
-            print(
-                f"error: --arms filters the grid, so it may not write {_REPORT_PATH} — that path "
-                "is the campaign's. Pass --report <other path> for a smoke test.",
-                file=sys.stderr,
-            )
-            return 2
 
     try:
         windows = _select_windows(args)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    # Either filter makes this a smoke test, and a smoke test may not write the deliverable's own
+    # path: the file would read as the campaign while holding a subset's ranking, and the path is
+    # the only thing a later reader has to go on. Compared by resolution, because an absolute path
+    # or one routed through `..` names the same file without matching it lexically.
+    filtered = _filter_reasons(args, arms=arms, windows=windows)
+    if (
+        filtered
+        and args.report is not None
+        and Path(args.report).resolve() == _REPORT_PATH.resolve()
+    ):
+        print(
+            f"error: {' and '.join(filtered)}, so this run may not write {_REPORT_PATH} — that "
+            "path is the campaign's. Pass --report <other path> for a smoke test.",
+            file=sys.stderr,
+        )
         return 2
 
     _LOG.info(
@@ -974,10 +1227,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not row.ok:
                     print(f"      --  {row.arm.label}: FAILED — {row.error}")
                     continue
+                # The console gets the same guard as the report: an operator watching a long
+                # campaign scroll past must not read a missing denominator as a measured zero.
+                drawdown = f"{_pct(row.max_drawdown):>7}" if row.drawdown_sampled else "  no DD"
+                ratio = f"{row.return_per_drawdown:>5.2f}" if row.drawdown_sampled else "    —"
                 print(
                     f"      {position:>2}. {row.arm.label:<40} XIRR {_pct(row.xirr):>8}  "
-                    f"DD {_pct(row.max_drawdown):>7}  ratio {row.return_per_drawdown:>5.2f}  "
-                    f"trips {row.round_trips:>5}"
+                    f"DD {drawdown}  ratio {ratio}  trips {row.round_trips:>5}"
                 )
     if sweep.selected:
         print(f"\n  selected on the selection window alone: {sweep.selected}")

@@ -83,6 +83,15 @@ def _row(label: str, *, xirr: str, drawdown: str, floor: Decimal = LOW_FLOOR) ->
 # ── the arm list is a comparison, not a grid ─────────────────────────────────────────────────────
 
 
+def test_the_duration_grid_is_the_thirteen_stated_arms() -> None:
+    """A silent addition would enter the tables unpriced and unchecked against its reference."""
+    assert len(DURATION_ARMS) == 13
+    families = [arm.family for arm in DURATION_ARMS]
+    assert families.count("reference") == 1
+    assert families.count("duration") == 10
+    assert families.count("baseline") == 2
+
+
 def test_the_sweep_carries_at_least_twenty_arms() -> None:
     """The acceptance criterion, stated directly."""
     assert len(ARMS) >= 20
@@ -393,6 +402,11 @@ def test_every_duration_arm_is_distinct() -> None:
 def test_every_duration_arm_differs_from_its_reference_by_exactly_the_stated_change() -> None:
     """The convention M12.2 set: a row is readable only as the price of one named change."""
     by_label = {arm.label: arm for arm in DURATION_ARMS}
+    # Every duration arm must be in the table. Without this, an arm added later and left out of
+    # the dict would skip the one-change guard entirely — which is how B2 got in.
+    assert set(_EXPECTED_DURATION_CHANGES) == {
+        arm.label for arm in DURATION_ARMS if arm.family == "duration"
+    }
     for arm in DURATION_ARMS:
         if arm.label not in _EXPECTED_DURATION_CHANGES:
             continue
@@ -651,14 +665,23 @@ def test_no_figure_is_pooled_across_windows(monkeypatch: pytest.MonkeyPatch) -> 
         assert all(entry.result is not other.result for other in others)
         assert len(entry.result.rows) == 1
 
-    # The rule stated positively: no accessor on the sweep returns a value derived from more than
-    # one window. Anything that did — a pooled ranking, a mean XIRR — would have to read rows from
-    # two results, so every public accessor is checked to return only its own window's figures.
-    mean = sum(xirrs.values(), start=Decimal("0")) / Decimal(len(xirrs))
+    # The rule stated so that only an actual mean can break it: every figure the sweep exposes for
+    # a window must be *identical* to a figure that window's own run produced. A pooled or averaged
+    # value could not satisfy that, whatever it happened to equal — where `!= mean` would pass by
+    # arithmetic accident whenever the mean missed the sample (as it does for an even split).
+    per_window_xirrs = {
+        entry.window.label: {row.xirr for row in entry.result.rows} for entry in sweep.windows
+    }
     for entry in sweep.windows:
-        assert entry.result.ranked(LOW_FLOOR)[0].xirr == xirrs[entry.window.label]
-        assert entry.result.ranked(LOW_FLOOR)[0].xirr != mean
-        assert sweep.result_for(entry.window.label) is entry.result
+        label = entry.window.label
+        top = entry.result.ranked(LOW_FLOOR)[0]
+        assert top.xirr in per_window_xirrs[label], "a figure no row on this window produced"
+        assert top.xirr not in {
+            x for other, xs in per_window_xirrs.items() if other != label for x in xs
+        }, "this window's figure also appears on another — the stub made them distinct"
+        assert sweep.result_for(label) is entry.result
+        # Every row carried by this window's result belongs to this window's run, not another's.
+        assert all(row.xirr in per_window_xirrs[label] for row in entry.result.rows)
     # And a label that names no window raises rather than quietly returning something blended.
     with pytest.raises(KeyError, match="no window called"):
         sweep.result_for("every window")
