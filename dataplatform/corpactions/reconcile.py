@@ -51,10 +51,12 @@ from typing import TYPE_CHECKING, Final, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dataplatform.clock import Clock
+from dataplatform.corpactions.factors import PRICE_EVENT_TYPES
 from dataplatform.corpactions.taxonomy import (
     TERMS_ADAPTER,
     ActionType,
     Terms,
+    UnquantifiedTerms,
     describe,
 )
 from dataplatform.ingest.models import ISIN_PATTERN, IngestError
@@ -352,6 +354,27 @@ def _terms_agree(left: Terms, right: Terms) -> bool:
     return type(left) is type(right) and left == right
 
 
+def _quantified_fill(left: Terms, right: Terms) -> Terms | None:
+    """The one side's terms when the *other* stated none, else `None`.
+
+    Not every disagreement is a contradiction. BSE writes 155 splits as bare
+    `Sub Division of Equity shares` and 3 bonuses as prose with no ratio at all — the numbers are
+    simply not in that feed — while NSE states them (`FV SPLIT FROM RS.10/- TO RS.2/-`). Treating
+    that as a `RATIO_MISMATCH` sends a perfectly well-evidenced action to a human whose only
+    possible move is to copy the number across from the other feed already in front of them.
+
+    So silence yields to a statement, and only to a statement: this fires when exactly one side is
+    `UnquantifiedTerms`. Two feeds that both state terms and *disagree* are still a mismatch, and
+    two that both say nothing still have nothing to fill from — a filled action is always backed by
+    one feed's explicit numbers, never by an average or an inference.
+    """
+    left_silent = isinstance(left, UnquantifiedTerms)
+    right_silent = isinstance(right, UnquantifiedTerms)
+    if left_silent == right_silent:
+        return None
+    return right if left_silent else left
+
+
 def _match_by_ex_date(
     left: Sequence[CorporateAction],
     right: Sequence[CorporateAction],
@@ -390,19 +413,38 @@ def _match_by_ex_date(
     return pairs, unmatched_left, unmatched_right
 
 
-def _reconcile_pair(left: CorporateAction, right: CorporateAction) -> ReconciledAction:
-    """Fold two agreeing feed rows into one `ReconciledAction` (see the class docstring)."""
+def _reconcile_pair(
+    left: CorporateAction, right: CorporateAction, *, terms: Terms | None = None
+) -> ReconciledAction:
+    """Fold two agreeing feed rows into one `ReconciledAction` (see the class docstring).
+
+    `terms` overrides `left.terms` when one feed stated the numbers and the other did not — see
+    `_quantified_fill`. The note then records which feed supplied them, so a factor built on a
+    cross-filled action is never indistinguishable from one both feeds spelled out.
+    """
     note: str | None = None
     if left.ex_date != right.ex_date:
         note = (
             f"ex-dates differed within tolerance: {left.source}={left.ex_date.isoformat()}, "
             f"{right.source}={right.ex_date.isoformat()}; earliest used"
         )
+    if terms is not None and not isinstance(terms, UnquantifiedTerms):
+        # Keyed on which feed was *silent*, not on which object won: the pair is ordered by source
+        # name, so the feed that stated the numbers is as often `left` as `right`, and comparing
+        # against `left.terms` silently skipped the note for half of them.
+        silent = next((a for a in (left, right) if isinstance(a.terms, UnquantifiedTerms)), None)
+        if silent is not None:
+            stated = right if silent is left else left
+            filled = (
+                f"terms taken from {stated.source} ({stated.raw_text.strip()!r}); "
+                f"{silent.source} stated none"
+            )
+            note = filled if note is None else f"{note}; {filled}"
     return ReconciledAction(
         isin=left.isin,
         ex_date=min(left.ex_date, right.ex_date),
         action_type=left.action_type,
-        terms=left.terms,
+        terms=left.terms if terms is None else terms,
         knowable_date=max(left.knowable_date, right.knowable_date),
         record_date=left.record_date if left.record_date is not None else right.record_date,
         reconciliation_note=note,
@@ -474,7 +516,19 @@ def reconcile(
 
         if len(by_source) == 1:
             for action in group:
-                if single_source_policy is SingleSourcePolicy.ACCEPT:
+                # A price event whose one feed never stated a ratio cannot become a factor, and
+                # ACCEPT must not pretend otherwise: `_event_factors` raises on it, and because
+                # that raise happens inside the recompute it takes every *other* ISIN's factors
+                # down with it. Queue it instead — a human (or a later feed) supplies the number.
+                # A dividend is different: an unquantified one is a known-unknown the chain
+                # already tolerates, so only the share-basis events are held back here.
+                unquantifiable_price_event = action.action_type in PRICE_EVENT_TYPES and isinstance(
+                    action.terms, UnquantifiedTerms
+                )
+                if (
+                    single_source_policy is SingleSourcePolicy.ACCEPT
+                    and not unquantifiable_price_event
+                ):
                     # Owner-ratified: trust the one feed, but stamp cross_verified=False so the
                     # factor it feeds is never mistaken for a two-feed agreement.
                     reconciled.append(_accept_single_source(action))
@@ -497,6 +551,8 @@ def reconcile(
         for left, right in pairs:
             if _terms_agree(left.terms, right.terms):
                 reconciled.append(_reconcile_pair(left, right))
+            elif (filled := _quantified_fill(left.terms, right.terms)) is not None:
+                reconciled.append(_reconcile_pair(left, right, terms=filled))
             else:
                 queue.append(
                     ReconciliationConflict(

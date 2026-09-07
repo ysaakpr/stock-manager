@@ -39,6 +39,7 @@ from dataplatform.clock import Clock
 from dataplatform.corpactions.factors import (
     PRICE_EVENT_TYPES,
     STRUCTURAL_BREAK_TYPES,
+    FactorError,
     build_chain_for_isin,
 )
 from dataplatform.corpactions.reconcile import load_reconciled_actions
@@ -178,10 +179,31 @@ def recompute_isins(
     clock: Clock,
     reason: str = "corporate action recompute",
 ) -> tuple[RecomputeResult, ...]:
-    """Recompute several ISINs, deduplicating the input, in a stable (sorted) order."""
-    return tuple(
-        recompute_isin(conn, isin, clock=clock, reason=reason) for isin in sorted(set(isins))
-    )
+    """Recompute several ISINs, deduplicating the input, in a stable (sorted) order.
+
+    One ISIN's `FactorError` does not stop the others. It used to: a single unquantifiable split
+    raised out of this generator, and because the whole finalize is one transaction it rolled back
+    every other ISIN's rebuilt chain too — 19,034 reconciled actions and thousands of good factor
+    rows discarded over one bad action. The failure is still loud (a warning naming the ISIN and
+    the reason, and the ISIN is absent from the returned results), but it is now *this* ISIN's
+    failure rather than the batch's.
+
+    Only `FactorError` is caught, and deliberately so: it means "these actions cannot produce a
+    chain", which is a per-ISIN data fact. A database error is not, and must still abort the
+    transaction rather than leave half a recompute committed.
+    """
+    results: list[RecomputeResult] = []
+    for isin in sorted(set(isins)):
+        try:
+            results.append(recompute_isin(conn, isin, clock=clock, reason=reason))
+        except FactorError as exc:
+            _LOG.warning(
+                "ca.factors_unbuildable",
+                isin=isin,
+                reason=str(exc)[:200],
+                state="SKIPPED",
+            )
+    return tuple(results)
 
 
 def recompute_for_actions(

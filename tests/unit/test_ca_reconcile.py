@@ -601,3 +601,98 @@ class _FakeConn:
             ca_rows.sort(key=lambda r: (r[0], r[1], r[2], r[7]))
             return _FakeCursor(ca_rows)
         raise AssertionError(f"_FakeConn does not know this SQL: {sql!r}")
+
+
+# ── one feed states the numbers, the other does not ─────────────────────────────────────────────
+
+
+def _silent_split(isin: str, source: str, ex: date, raw: str) -> CorporateAction:
+    """A split the feed announced without ever saying by how much — BSE's usual shape."""
+    return ca(
+        isin=isin,
+        source=source,
+        ex_date=ex,
+        action_type=ActionType.SPLIT,
+        terms=UnquantifiedTerms(),
+        raw_text=raw,
+    )
+
+
+def test_terms_are_filled_from_the_feed_that_stated_them() -> None:
+    """BSE writes `Sub Division of Equity shares` and stops; NSE says 10 → 2. That is not a clash.
+
+    155 splits and 3 bonuses arrived this way. Queuing them as RATIO_MISMATCH asked a human to
+    copy a number across from the other feed already on the screen.
+    """
+    ex = date(2021, 10, 28)
+    result = reconcile(
+        [
+            split("INE335Y01020", NSE, ex, "10", "2", "FV SPLIT FROM RS.10/- TO RS.2/-"),
+            _silent_split("INE335Y01020", BSE, ex, "Sub Division of Equity shares"),
+        ]
+    )
+    assert result.queue == ()
+    (action,) = result.reconciled
+    assert action.terms == FaceValueTerms(from_value=Decimal("10"), to_value=Decimal("2"))
+    assert action.cross_verified is True
+    assert action.reconciliation_note is not None
+    assert NSE in action.reconciliation_note, "the note must name which feed supplied the numbers"
+
+
+def test_the_fill_works_in_either_direction() -> None:
+    ex = date(2021, 10, 28)
+    result = reconcile(
+        [
+            _silent_split("INE335Y01020", NSE, ex, "Sub-division of equity shares"),
+            split("INE335Y01020", BSE, ex, "10", "2", "Stock Split From Rs.10/- to Rs.2/-"),
+        ]
+    )
+    (action,) = result.reconciled
+    assert action.terms == FaceValueTerms(from_value=Decimal("10"), to_value=Decimal("2"))
+    assert action.reconciliation_note is not None
+    assert BSE in action.reconciliation_note
+
+
+def test_two_feeds_that_both_state_terms_and_disagree_are_still_a_mismatch() -> None:
+    """The fill must never paper over a contradiction — that is the queue's whole job."""
+    ex = date(2021, 10, 28)
+    result = reconcile(
+        [
+            split("INE335Y01020", NSE, ex, "10", "2", "FV SPLIT FROM RS.10/- TO RS.2/-"),
+            split("INE335Y01020", BSE, ex, "10", "5", "Stock Split From Rs.10/- to Rs.5/-"),
+        ]
+    )
+    assert result.reconciled == ()
+    assert [c.reason for c in result.queue] == [ReconciliationReason.RATIO_MISMATCH]
+
+
+def test_two_silent_feeds_have_nothing_to_fill_from() -> None:
+    """Both feeds confirming an event neither quantified still reconciles — the *event* agrees.
+
+    That is `test_both_feeds_agreeing_on_an_unquantified_action_reconciles`'s rule and it stands.
+    The fill adds nothing here because there is nothing to copy, and the factor chain refuses the
+    row later — per-ISIN now, rather than by aborting everyone else's recompute.
+    """
+    ex = date(2021, 10, 28)
+    result = reconcile(
+        [
+            _silent_split("INE335Y01020", NSE, ex, "Sub-division of equity shares"),
+            _silent_split("INE335Y01020", BSE, ex, "Sub Division of Equity shares"),
+        ]
+    )
+    (action,) = result.reconciled
+    assert isinstance(action.terms, UnquantifiedTerms)
+
+
+def test_accept_still_queues_a_single_source_split_that_states_no_ratio() -> None:
+    """ACCEPT cannot admit what can never become a factor.
+
+    `_event_factors` raises on an unquantified split, and that raise happens inside the recompute —
+    so admitting it here is how one bad action took 19,034 reconciled ones down with it.
+    """
+    result = reconcile(
+        [_silent_split("INE335Y01020", BSE, date(2021, 10, 28), "Sub Division of Equity shares")],
+        single_source_policy=SingleSourcePolicy.ACCEPT,
+    )
+    assert result.reconciled == ()
+    assert [c.reason for c in result.queue] == [ReconciliationReason.SINGLE_SOURCE]

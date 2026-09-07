@@ -52,6 +52,7 @@ from dataplatform.corpactions import (
     build_factor_chain,
     price_adjusted_series,
     recompute_isin,
+    recompute_isins,
     return_series,
     total_return_series,
 )
@@ -526,3 +527,30 @@ class _FakeConn:
             )
         rows.sort(key=lambda r: (r[0], r[1], r[2], r[7]))
         return _FakeCursor(rows)
+
+
+def test_one_unbuildable_isin_does_not_abort_the_rest_of_the_batch() -> None:
+    """A split nobody quantified costs its own chain, not everybody's.
+
+    This is the shape that discarded an entire overnight reconcile: `recompute_isins` raised out of
+    its generator on one BSE split written as bare `Sub Division of Equity shares`, and because the
+    finalize runs in a single transaction it rolled back 19,034 reconciled actions and every other
+    ISIN's rebuilt chain along with it.
+    """
+    good = ca(ex_date=date(2021, 6, 1), action_type=ActionType.SPLIT, terms=fv("10", "2"))
+    from dataplatform.corpactions import UnquantifiedTerms
+
+    unbuildable = ca(
+        isin=RIL,
+        ex_date=date(2017, 3, 23),
+        action_type=ActionType.SPLIT,
+        terms=UnquantifiedTerms(),
+    )
+    conn = _FakeConn(reconciled=[good, unbuildable])
+
+    results = recompute_isins(cast("Connection", conn), [INFY, RIL], clock=FrozenClock(NOW))
+
+    # The good ISIN is rebuilt and its rows are on the table; the unbuildable one is simply absent.
+    assert [r.isin for r in results] == [INFY]
+    assert len(conn.factors_for(INFY)) == 1
+    assert conn.factors_for(RIL) == []
