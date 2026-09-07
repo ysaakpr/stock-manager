@@ -293,7 +293,13 @@ def test_the_verdict_names_its_choice_before_any_verification_figure() -> None:
 
 
 def test_the_verdict_says_no_when_no_arm_cleared_the_bar() -> None:
-    """A bar that was not reached is reported as not reached, never as the best number available."""
+    """A bar not reached is reported as not reached — and scoped to the windows actually swept.
+
+    The first edition of this renderer said "no arm cleared 25 % on any window at any liquidity
+    floor" while holding only the two walk-forward windows, which was false the moment a third
+    window existed: the six-year sweep clears it. A verdict may not generalise past its own
+    evidence, so the sentence now names the windows it measured.
+    """
     from backtest.verdict import WalkForward, render_verdict
 
     thin = SweepResult(rows=[_row("modest", xirr="0.14", drawdown="0.20")])
@@ -304,7 +310,9 @@ def test_the_verdict_says_no_when_no_arm_cleared_the_bar() -> None:
         selection_window=(date(2016, 9, 1), date(2021, 8, 31)),
         verification_window=(date(2021, 9, 1), date(2026, 8, 31)),
     )
-    assert "**Answer: no.**" in report
+    assert "**Answer: not on the windows this run measured**" in report
+    # And it must name the windows it actually held, rather than generalising past them.
+    assert "selection" in report and "verification" in report
 
 
 def test_the_verdict_attaches_window_floor_and_drawdown_when_the_bar_is_cleared() -> None:

@@ -243,14 +243,19 @@ def render_verdict(
                 f"{_pct(row.max_drawdown)} max drawdown, "
                 f"{row.return_per_drawdown:.2f} return per drawdown."
             )
+    scope = ", ".join(name for name, _ in windows)
     lines += [
         "",
         (
             "**Answer: the bar was cleared** — but read each line above with its window, its floor "
             "and its drawdown attached; those are conditions, not footnotes."
             if any_cleared
-            else "**Answer: no.** No arm in this sweep cleared a 25 % XIRR on any window at any "
-            "liquidity floor. The honest reading is the ranking, not a number that was not reached."
+            else f"**Answer: not on the windows this run measured** ({scope}). That is a statement "
+            "about these windows only: a window this run did not sweep cannot be reported on here, "
+            "and `ops/gates/M12-strategy-sweep-sixyear.md` is the case in point — the M10.7 "
+            "composite clears 25 % on 2019-07..2026-08 at the ₹1 crore floor. A verdict that "
+            "silently generalised from the windows it happened to hold would be making exactly the "
+            "claim this task exists to prevent."
         ),
         "",
         "## What this verdict cannot be asked to prove",
