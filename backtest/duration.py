@@ -182,14 +182,21 @@ def _top_n(arm: Arm) -> int:
 
 
 def _duration_of(arm: Arm) -> str:
-    """The arm's cadence and re-underwrite in words, or ``—`` for a policy that states neither."""
+    """The arm's whole holding-period machinery in words, or ``—`` for a policy that states none.
+
+    All three knobs, not just the cadence: two arms on the same cadence and re-underwrite but
+    different sell bands hold for different lengths, and a column that showed them as identical
+    would make the band rows unreadable in a table that exists to compare durations.
+    """
     if arm.swing is None:
         return "—"
+    swing = arm.swing
     cadence = {5: "weekly", 10: "fortnightly", 21: "monthly", 63: "quarterly"}.get(
-        arm.swing.rebalance_interval_sessions,
-        f"every {arm.swing.rebalance_interval_sessions} sessions",
+        swing.rebalance_interval_sessions,
+        f"every {swing.rebalance_interval_sessions} sessions",
     )
-    return f"{cadence} / {arm.swing.max_hold_sessions}-session re-underwrite"
+    band = (Decimal(swing.sell_band) / Decimal(swing.top_n)).normalize()
+    return f"{cadence} / {swing.max_hold_sessions}-session re-underwrite / {band}x band"
 
 
 def holding_period_math(row: SweepRow, *, years: Decimal) -> HoldingPeriodMath | None:
@@ -612,16 +619,17 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--windows",
         default=None,
-        help="comma-separated window labels to run; default is all four mandated windows. For "
-        "smoke-testing the wiring, never for reporting a subset as the campaign",
+        help="comma-separated window labels to run, or `none` for only the --window ones; default "
+        "is all four mandated windows. For smoke-testing the wiring, never for reporting a "
+        "subset as the campaign",
     )
     parser.add_argument(
         "--window",
         action="append",
         default=None,
-        metavar="LABEL:START:END",
-        help="an extra ad-hoc standalone window, repeatable. For validating on a short span "
-        "without touching the mandated list",
+        metavar="LABEL:START:END[:ROLE]",
+        help="an extra ad-hoc window, repeatable. For validating on a short span without touching "
+        "the mandated list",
     )
     parser.add_argument(
         "--arms",
@@ -639,23 +647,31 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 def _ad_hoc(spec: str) -> Window:
-    """``LABEL:START:END`` as a standalone window. Raises ``ValueError`` on anything else."""
-    label, _, span = spec.partition(":")
-    start, _, end = span.partition(":")
-    if not label or not start or not end:
-        raise ValueError(f"a window is LABEL:START:END, got {spec!r}")
+    """``LABEL:START:END[:ROLE]`` as a window. Raises ``ValueError`` on anything else.
+
+    The optional role exists so the selection/verification path can be smoke-tested on a short
+    span. It buys nothing for a real campaign — the mandated windows already carry their roles.
+    """
+    parts = spec.split(":")
+    if len(parts) not in (3, 4) or not all(part.strip() for part in parts):
+        raise ValueError(f"a window is LABEL:START:END[:ROLE], got {spec!r}")
+    label, start, end = parts[0], parts[1], parts[2]
+    try:
+        role = WindowRole(parts[3]) if len(parts) == 4 else WindowRole.STANDALONE
+    except ValueError:
+        roles = ", ".join(member.value for member in WindowRole)
+        raise ValueError(f"unknown window role {parts[3]!r}; use one of {roles}") from None
     return Window(
-        label=label,
-        start=date.fromisoformat(start),
-        end=date.fromisoformat(end),
-        role=WindowRole.STANDALONE,
+        label=label, start=date.fromisoformat(start), end=date.fromisoformat(end), role=role
     )
 
 
 def _select_windows(args: argparse.Namespace) -> tuple[Window, ...]:
     """The windows this invocation runs: the mandated list, filtered, plus any ad-hoc ones."""
     windows = MANDATED_WINDOWS
-    if args.windows:
+    if args.windows == "none":
+        windows = ()
+    elif args.windows:
         wanted = [part.strip().lower() for part in args.windows.split(",") if part.strip()]
         windows = tuple(w for w in windows if any(p in w.label.lower() for p in wanted))
         if not windows and not args.window:
