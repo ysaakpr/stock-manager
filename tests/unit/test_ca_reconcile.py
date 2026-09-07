@@ -29,7 +29,7 @@ issue, so "written by reconciliation, read back by the status endpoint" is a rea
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, cast
@@ -443,8 +443,9 @@ def test_reconcile_of_nothing_is_clean_and_empty() -> None:
 class _FakeCursor:
     """A cursor over a fixed result set — only `fetchone`/`fetchall`, which is all callers use."""
 
-    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+    def __init__(self, rows: list[tuple[Any, ...]], rowcount: int | None = None) -> None:
         self._rows = rows
+        self.rowcount = len(rows) if rowcount is None else rowcount
 
     def fetchone(self) -> tuple[Any, ...] | None:
         return self._rows[0] if self._rows else None
@@ -484,7 +485,27 @@ class _FakeConn:
     ) -> None:
         self._ca[(isin, ex_date, action_type.value, source)]["reconciled"] = value
 
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> _FakeCursor:
+    def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> _FakeCursor:
+        if sql.startswith("UPDATE quality_flag SET resolved = true"):
+            # Scoped supersede: close open flags for the examined ISINs whose fingerprint this
+            # pass did not raise. Modelled exactly, because "which flags does a re-run close" is
+            # the whole behaviour under test.
+            assert isinstance(params, Mapping)
+            keep = set(params["fingerprints"])
+            scope = set(params["isins"])
+            closed = 0
+            for flag in self._flags:
+                if (
+                    not flag["resolved"]
+                    and flag["check_name"] == params["check_name"]
+                    and flag["isin"] in scope
+                    and flag["detail"].get("fingerprint") not in keep
+                ):
+                    flag["resolved"] = True
+                    flag["resolved_at"] = params["now"]
+                    flag["resolution"] = params["resolution"]
+                    closed += 1
+            return _FakeCursor([], rowcount=closed)
         p = tuple(params)
         if sql.startswith("UPDATE corporate_actions SET reconciled = true"):
             note, isin, ex_date, action_type, source = p
@@ -696,3 +717,79 @@ def test_accept_still_queues_a_single_source_split_that_states_no_ratio() -> Non
     )
     assert result.reconciled == ()
     assert [c.reason for c in result.queue] == [ReconciliationReason.SINGLE_SOURCE]
+
+
+# ── a queue that cannot go down is not a queue ──────────────────────────────────────────────────
+
+
+def _open_count(conn: _FakeConn, clock: FrozenClock) -> int:
+    return read_quality(cast("Connection", conn), as_of=clock.now(), limit=100).open_total
+
+
+def test_a_disagreement_that_no_longer_exists_is_resolved_by_the_next_pass() -> None:
+    """The fix that made the queue readable again.
+
+    Flags were only ever inserted. A fingerprint that stopped being raised — because a parser was
+    fixed, or a second feed arrived — simply went unmentioned, so `/status/quality` showed 8,495
+    RATIO_MISMATCH flags when 109 were live and the other 8,386 had been answered an hour earlier.
+    """
+    ex = date(2021, 10, 28)
+    nse = split(INFY, NSE, ex, "10", "2", "FV SPLIT FROM RS.10/- TO RS.2/-")
+    bse_wrong = split(INFY, BSE, ex, "10", "5", "Stock Split From Rs.10/- to Rs.5/-")
+    bse_fixed = split(INFY, BSE, ex, "10", "2", "Stock Split From Rs.10/- to Rs.2/-")
+    conn = _FakeConn([nse, bse_wrong, bse_fixed])
+    clock = FrozenClock(NOW)
+
+    first = persist_reconciliation(
+        cast("Connection", conn), reconcile([nse, bse_wrong]), clock=clock
+    )
+    assert first.flags_written == 1
+    assert first.flags_resolved == 0
+    assert _open_count(conn, clock) == 1
+
+    # The same ISIN, now agreeing. The flag must close.
+    second = persist_reconciliation(
+        cast("Connection", conn), reconcile([nse, bse_fixed]), clock=clock
+    )
+    assert second.flags_written == 0
+    assert second.flags_resolved == 1
+    assert _open_count(conn, clock) == 0
+
+
+def test_a_disagreement_that_still_stands_keeps_its_flag() -> None:
+    """Re-running must not churn a live flag: it is skipped, not closed and re-raised."""
+    ex = date(2021, 10, 28)
+    pair = [
+        split(INFY, NSE, ex, "10", "2", "FV SPLIT FROM RS.10/- TO RS.2/-"),
+        split(INFY, BSE, ex, "10", "5", "Stock Split From Rs.10/- to Rs.5/-"),
+    ]
+    conn = _FakeConn(pair)
+    clock = FrozenClock(NOW)
+    persist_reconciliation(cast("Connection", conn), reconcile(pair), clock=clock)
+    again = persist_reconciliation(cast("Connection", conn), reconcile(pair), clock=clock)
+
+    assert again.flags_written == 0
+    assert again.flags_skipped == 1
+    assert again.flags_resolved == 0
+    assert _open_count(conn, clock) == 1
+
+
+def test_another_isins_open_flag_is_not_touched() -> None:
+    """Scope: a pass over one ISIN must never close a disagreement it did not look at."""
+    ex = date(2021, 10, 28)
+    ril = [
+        split(TCS, NSE, ex, "10", "2", "FV SPLIT FROM RS.10/- TO RS.2/-"),
+        split(TCS, BSE, ex, "10", "5", "Stock Split From Rs.10/- to Rs.5/-"),
+    ]
+    infy = [
+        split(INFY, NSE, ex, "10", "2", "FV SPLIT FROM RS.10/- TO RS.2/-"),
+        split(INFY, BSE, ex, "10", "2", "Stock Split From Rs.10/- to Rs.2/-"),
+    ]
+    conn = _FakeConn([*ril, *infy])
+    clock = FrozenClock(NOW)
+
+    persist_reconciliation(cast("Connection", conn), reconcile(ril), clock=clock)
+    assert _open_count(conn, clock) == 1
+
+    persist_reconciliation(cast("Connection", conn), reconcile(infy), clock=clock)
+    assert _open_count(conn, clock) == 1, "TCS's disagreement is still open"

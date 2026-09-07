@@ -20,7 +20,7 @@ that speak exactly the SQL the writers issue. No socket is opened, and no Postgr
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Final, cast
@@ -424,8 +424,9 @@ class _FakeSync:
 class _FakeCursor:
     """A cursor over a fixed result set — only `fetchone`/`fetchall`, which is all callers use."""
 
-    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+    def __init__(self, rows: list[tuple[Any, ...]], rowcount: int | None = None) -> None:
         self._rows = rows
+        self.rowcount = len(rows) if rowcount is None else rowcount
 
     def fetchone(self) -> tuple[Any, ...] | None:
         return self._rows[0] if self._rows else None
@@ -458,7 +459,7 @@ class _FakeConn:
 
     # -- the SQL seam ---------------------------------------------------------------------------
 
-    def execute(self, sql: str, params: Sequence[Any] = ()) -> _FakeCursor:
+    def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> _FakeCursor:
         p = tuple(params)
         if sql.startswith("INSERT INTO corporate_actions"):
             return self._insert_ca(p)
@@ -486,11 +487,28 @@ class _FakeConn:
                 and f["detail"].get("fingerprint") == fingerprint
             ]
             return _FakeCursor([(1,)] if hits else [])
+        if sql.startswith("UPDATE quality_flag SET resolved = true"):
+            # Scoped supersede — see `persist_reconciliation`. Modelled rather than ignored so a
+            # drift in that statement fails here rather than passing silently.
+            assert isinstance(params, Mapping)
+            keep, scope = set(params["fingerprints"]), set(params["isins"])
+            closed = 0
+            for flag in self._flags:
+                if (
+                    not flag["resolved"]
+                    and flag["check_name"] == params["check_name"]
+                    and flag.get("isin") in scope
+                    and flag["detail"].get("fingerprint") not in keep
+                ):
+                    flag["resolved"] = True
+                    closed += 1
+            return _FakeCursor([], rowcount=closed)
         if "INSERT INTO quality_flag" in sql:
             _logical_date, check_name, _severity, _isin, _source, detail_json, _raised_at = p
             self._flags.append(
                 {
                     "check_name": check_name,
+                    "isin": _isin,
                     "detail": json.loads(detail_json),
                     "resolved": False,
                 }

@@ -633,6 +633,17 @@ _INSERT_FLAG_SQL: Final = (
     "VALUES (%s, %s, %s, %s, %s, %s, %s)"
 )
 
+#: Close the flags this pass has superseded. Scoped to the ISINs the pass actually looked at —
+#: a reconciliation over one ISIN must never resolve another's open disagreement — and to the
+#: fingerprints it did *not* raise, so a disagreement that still stands keeps its flag and its
+#: original `raised_at`.
+_RESOLVE_SUPERSEDED_SQL: Final = (
+    "UPDATE quality_flag SET resolved = true, resolved_at = %(now)s, resolution = %(resolution)s "
+    "WHERE check_name = %(check_name)s AND NOT resolved "
+    "  AND isin = ANY(%(isins)s::text[]) "
+    "  AND NOT (detail->>'fingerprint' = ANY(%(fingerprints)s::text[]))"
+)
+
 _LOAD_RECONCILED_SQL: Final = (
     "SELECT isin, ex_date, action_type, ratio_terms, record_date, announcement_date, "
     "knowable_date, source, source_ref, raw_text, l0_key FROM corporate_actions "
@@ -648,6 +659,8 @@ class PersistCounts(BaseModel):
     rows_marked_reconciled: int = 0
     flags_written: int = 0
     flags_skipped: int = 0
+    #: Open flags this pass closed because the disagreement they recorded no longer exists.
+    flags_resolved: int = 0
 
 
 def persist_reconciliation(
@@ -709,14 +722,41 @@ def persist_reconciliation(
         )
         written += 1
 
+    # Anything still open for an ISIN this pass examined, that this pass did not raise, has been
+    # answered — by a parser fix, a second feed arriving, or a correction upstream. Without this
+    # the queue only ever grows: a fingerprint that stops being raised is simply never mentioned
+    # again, so `/status/quality` reported 8,495 RATIO_MISMATCH flags when 109 were live and the
+    # other 8,386 had been fixed an hour earlier. A queue that cannot go down is not a queue.
+    examined = sorted(
+        {action.isin for reconciled in result.reconciled for action in reconciled.sources}
+        | {action.isin for conflict in result.queue for action in conflict.records}
+    )
+    resolved = 0
+    if examined:
+        cursor = conn.execute(
+            _RESOLVE_SUPERSEDED_SQL,
+            {
+                "now": now,
+                "resolution": "superseded: not raised by a later reconciliation of this ISIN",
+                "check_name": CA_RECONCILIATION_CHECK,
+                "isins": examined,
+                "fingerprints": [c.as_quality_flag(clock=clock).fingerprint for c in result.queue],
+            },
+        )
+        resolved = cursor.rowcount
+
     counts = PersistCounts(
-        rows_marked_reconciled=rows_marked, flags_written=written, flags_skipped=skipped
+        rows_marked_reconciled=rows_marked,
+        flags_written=written,
+        flags_skipped=skipped,
+        flags_resolved=resolved,
     )
     _LOG.info(
         "ca.reconcile.persisted",
         rows_marked_reconciled=counts.rows_marked_reconciled,
         flags_written=counts.flags_written,
         flags_skipped=counts.flags_skipped,
+        flags_resolved=counts.flags_resolved,
     )
     return counts
 
