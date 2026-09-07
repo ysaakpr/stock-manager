@@ -444,7 +444,10 @@ class _AdjustedCloseSource:
     every ISIN is pinned to NSE and the liquidity scan `cross_section` would otherwise run to
     choose a venue is skipped. L2 itself is *not* NSE-only (it mirrors whatever venues L1 holds,
     keyed by exchange), so the pin is what selects the NSE series out of it. The ISIN set for the
-    map comes from L1's raw closes on the session.
+    map comes from L1's raw closes on the session, which is also what keeps
+    ``canonical_daily``'s cross-venue fallback (another venue's bar when the primary did not trade)
+    out of the signal: every ISIN asked for printed on NSE that session, so the NSE bar the pin
+    selects is the one that exists.
 
     Raw is the base; L2 adjusted is overlaid where it exists. L2 is materialized only for names with
     a non-identity factor chain (a split/bonus/rights) — for every other name the adjusted close
