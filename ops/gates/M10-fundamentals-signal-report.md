@@ -11,39 +11,39 @@
 - **MOMENTUM_VALUE:** mean of the earnings-yield rank and the 12-1 momentum rank (the raw signal the momentum v2 arm ranks on), over names with positive trailing earnings.
 - **Staleness:** a name whose newest filing is older than 200 days on the rebalance date is not rankable.
 - **Point-in-time:** every metric is computed from filings with `filing_date <= session`; `compute_metrics` raises on anything later, and the policy admits records through the PIT guard. Restatements are invisible until published (invariants #7, #8).
-- **Scale guard:** 8258 (ISIN, rebalance) computations dropped a filing whose paid-up capital sat a clean power of ten off the company's median (M10.5).
+- **Scale guard:** 10881 (ISIN, rebalance) computations dropped a filing whose paid-up capital sat a clean power of ten off the company's median (M10.5).
 
 ## Window
 
-- 2019-07-01 -> 2025-08-29 (1524 sessions, 74 monthly rebalances)
-- Regime split: 961 of 1524 sessions risk-on (proxy index at/above its 200-session moving average)
-- Market XIRR (identical cashflows): 14.21%
-- Newest filing in the PIT store: 2026-08-24. On the terminal session 749 ISINs had a filing under 200 days old. A name is rankable only while its newest filing is under 200 days old, so once the store stops being current the fundamentals arms hold no names — end the window there or read the tail as cash.
-- Rankable fundamentals universe: 217 names on the first rebalance (2019-07-01), 869 on the last (2025-08-01).
+- 2019-07-01 -> 2026-08-31 (1773 sessions, 86 monthly rebalances)
+- Regime split: 1009 of 1773 sessions risk-on (proxy index at/above its 200-session moving average)
+- Market XIRR (identical cashflows): 11.18%
+- Newest filing in the PIT store: 2026-09-05. On the terminal session 2262 ISINs had a filing under 200 days old. A name is rankable only while its newest filing is under 200 days old, so once the store stops being current the fundamentals arms hold no names — end the window there or read the tail as cash.
+- Rankable fundamentals universe: 217 names on the first rebalance (2019-07-01), 1208 on the last (2026-08-03).
 
 ## Full period
 
 | Strategy | Mean rankable universe | Portfolio XIRR | Max drawdown | Trades | Total cost | Excess vs market |
 | --- | --- | --- | --- | --- | --- | --- |
-| Fundamentals: VALUE | 542.4 | 23.13% | 45.27% | 1026 | ₹60,599.72 | 8.92% |
-| Fundamentals: GROWTH | 542.4 | 17.54% | 29.54% | 960 | ₹60,397.85 | 3.33% |
-| Fundamentals: QUALITY_VALUE | 542.4 | 13.85% | 45.63% | 779 | ₹38,286.20 | -0.36% |
-| Fundamentals: MOMENTUM_VALUE | 542.4 | 14.15% | 38.28% | 1338 | ₹72,199.79 | -0.06% |
-| Momentum: naive (all off) | 887.7 | 21.11% | 28.90% | 1939 | ₹85,263.95 | 6.90% |
-| Momentum: v2 all-on | 887.7 | 21.72% | 21.95% | 1260 | ₹57,578.25 | 7.51% |
-| Market (L1 proxy) | — | 14.21% | — | — | — | 0.00% |
+| Fundamentals: VALUE | 613.8 | 21.53% | 45.27% | 1243 | ₹79,196.95 | 10.34% |
+| Fundamentals: GROWTH | 613.8 | 17.55% | 30.45% | 1152 | ₹79,317.14 | 6.37% |
+| Fundamentals: QUALITY_VALUE | 613.8 | 12.82% | 45.63% | 954 | ₹48,903.16 | 1.63% |
+| Fundamentals: MOMENTUM_VALUE | 613.8 | 12.23% | 38.28% | 1587 | ₹88,390.20 | 1.05% |
+| Momentum: naive (all off) | 941.9 | 17.85% | 28.90% | 2359 | ₹99,696.57 | 6.67% |
+| Momentum: v2 all-on | 941.9 | 18.52% | 21.95% | 1453 | ₹66,890.89 | 7.34% |
+| Market (L1 proxy) | — | 11.18% | — | — | — | 0.00% |
 
 ## Per-regime return (cumulative, costs embedded)
 
 | Strategy | Risk-on cumulative | Risk-off cumulative |
 | --- | --- | --- |
-| Fundamentals: VALUE | 312.74% | -12.57% |
-| Fundamentals: GROWTH | 120.97% | 22.61% |
-| Fundamentals: QUALITY_VALUE | 176.38% | -19.49% |
-| Fundamentals: MOMENTUM_VALUE | 154.07% | -10.96% |
-| Momentum: naive (all off) | 234.29% | -2.52% |
-| Momentum: v2 all-on | 190.17% | 15.82% |
-| Market | 107.73% | 9.24% |
+| Fundamentals: VALUE | 279.35% | 6.73% |
+| Fundamentals: GROWTH | 115.27% | 48.17% |
+| Fundamentals: QUALITY_VALUE | 157.31% | -7.70% |
+| Fundamentals: MOMENTUM_VALUE | 145.91% | -6.94% |
+| Momentum: naive (all off) | 241.76% | -4.95% |
+| Momentum: v2 all-on | 202.79% | 11.73% |
+| Market | 76.96% | 20.87% |
 
 ## Reading it
 
@@ -53,9 +53,9 @@
 
 ## Parameters and digests
 
-- **Fundamentals: VALUE:** `signal=VALUE, top_n=20, sell_band=None, equal weight, max_staleness_days=200, monthly` — digest `ef3b9c7e65f4cc079c5b212c8069dcada3b8aa2e593cf8a69c23053f33300f8f`
-- **Fundamentals: GROWTH:** `signal=GROWTH, top_n=20, sell_band=None, equal weight, max_staleness_days=200, monthly` — digest `57b7eb4eb6799137b8f65336ae04b694ffdb02b82d1f7650ab60ff0d916f2fd8`
-- **Fundamentals: QUALITY_VALUE:** `signal=QUALITY_VALUE, top_n=20, sell_band=None, equal weight, max_staleness_days=200, monthly` — digest `68821f6637b3368cc580b4ae3d18f4cdb8538ba70284663d29eece07efbfb23b`
-- **Fundamentals: MOMENTUM_VALUE:** `signal=MOMENTUM_VALUE, top_n=20, sell_band=None, equal weight, max_staleness_days=200, monthly` — digest `6814f654b3ac18e44d684a976c42ac824309ecedf4a3656aff9e47dfb7c5b4a9`
-- **Momentum: naive (all off):** `MomentumV2Parameters(top_n=20, use_12_1=False, sell_band=None, regime_filter=False, vol_scaled=False, redeploy_next_session=False, vol_target_annual=None, assumed_correlation=Decimal('0.3'), regime_ma_days=200, buy_budget_fraction=Decimal('0.98'), sleeve=<Sleeve.TACTICAL: 'TACTICAL'>, parking_sleeve=<Sleeve.CASH: 'CASH'>)` — digest `154eee161bd5ac639e53e8ba2f05947257501d46a5ff1a8098c5d5d05f9ae732`
-- **Momentum: v2 all-on:** `MomentumV2Parameters(top_n=20, use_12_1=True, sell_band=30, regime_filter=True, vol_scaled=True, redeploy_next_session=False, vol_target_annual=None, assumed_correlation=Decimal('0.3'), regime_ma_days=200, buy_budget_fraction=Decimal('0.98'), sleeve=<Sleeve.TACTICAL: 'TACTICAL'>, parking_sleeve=<Sleeve.CASH: 'CASH'>)` — digest `ed476c3db7f9687adf8133ecb2c06c0b6ab3bff8157305aecbc82eefacf3a2b9`
+- **Fundamentals: VALUE:** `signal=VALUE, top_n=20, sell_band=None, equal weight, max_staleness_days=200, monthly` — digest `b61f0bb2277f42fd44ca68c23f0fdd53bcc3a4225db513b4a21f5d19d228e0ba`
+- **Fundamentals: GROWTH:** `signal=GROWTH, top_n=20, sell_band=None, equal weight, max_staleness_days=200, monthly` — digest `9630fdfe21a7a3d7ca231c0bf0bfcb8cfd38d4c5d5fec30b5caca1ba4ba41993`
+- **Fundamentals: QUALITY_VALUE:** `signal=QUALITY_VALUE, top_n=20, sell_band=None, equal weight, max_staleness_days=200, monthly` — digest `39836fb828da5bb9706509e4db9948945805927944d776d008363edd5c79a68d`
+- **Fundamentals: MOMENTUM_VALUE:** `signal=MOMENTUM_VALUE, top_n=20, sell_band=None, equal weight, max_staleness_days=200, monthly` — digest `a6fb2aa4d753c6b0751646062494cf46bdc47f618d12f1a3e02ccd96620ee5e4`
+- **Momentum: naive (all off):** `MomentumV2Parameters(top_n=20, use_12_1=False, sell_band=None, regime_filter=False, vol_scaled=False, redeploy_next_session=False, vol_target_annual=None, assumed_correlation=Decimal('0.3'), regime_ma_days=200, buy_budget_fraction=Decimal('0.98'), sleeve=<Sleeve.TACTICAL: 'TACTICAL'>, parking_sleeve=<Sleeve.CASH: 'CASH'>)` — digest `d8d60de749579ef2088c11fd298f161886d553f5d3b5d1b15b4770f14f33079e`
+- **Momentum: v2 all-on:** `MomentumV2Parameters(top_n=20, use_12_1=True, sell_band=30, regime_filter=True, vol_scaled=True, redeploy_next_session=False, vol_target_annual=None, assumed_correlation=Decimal('0.3'), regime_ma_days=200, buy_budget_fraction=Decimal('0.98'), sleeve=<Sleeve.TACTICAL: 'TACTICAL'>, parking_sleeve=<Sleeve.CASH: 'CASH'>)` — digest `68b0b832ba55facd18c2b987f2f9909f4451937f1aae4bcb7b2bdc49096471ec`

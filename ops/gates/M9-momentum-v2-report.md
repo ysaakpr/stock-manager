@@ -19,8 +19,8 @@ Every run reads the **raw** L1 momentum signal (`adjusted=False`, the M9.2 basel
 
 ## Window
 
-- 2016-09-02 -> 2026-08-31 (2468 sessions, 120 monthly rebalances)
-- Mean investable universe / rebalance: 889.0
+- 2016-09-02 -> 2026-08-31 (2470 sessions, 120 monthly rebalances)
+- Mean investable universe / rebalance: 888.9
 - Benchmark XIRR (identical cashflows, all rows): 8.56% (NIFTY-TRI (broad-market TRI proxy from L1))
 
 ## Naive vs each increment vs all-on
@@ -65,13 +65,13 @@ Every run reads the **raw** L1 momentum signal (`adjusted=False`, the M9.2 basel
 
 ## Run digests (determinism)
 
-- **Naive (all off):** `0e3b5ef3b8dcf9e310e10be7b57d0802efb5feb554296e679dc9651ed54a1e14`
-- **+ 12-1 momentum:** `fe6b44960c4c002a79cec67b1936bf97e500f4622277227fb4761c074de4e617`
-- **+ Turnover banding:** `1ef852da14e72ec3e756d3d6ba5358d660f374fdff6aff078139daba187c7c4f`
-- **+ Regime filter:** `8a74dd171b261f5e3f01810bda4482eee42c00eb6fd27ae272a7ecd8356feb0c`
-- **+ Vol-scaled weights:** `004a0a0418868500a2d1bd0910378b01c6781e25d03359e614ea84aeb8749c83`
-- **+ Redeploy proceeds next session:** `0675db1aaff6f57b970d5b7567265b75db427b3190057a1257524105c044b85e`
-- **All on (four M9.5 toggles):** `c52f1c6836dce3cde934d61a42cfc793890e5fad836c305d29f3a6c93a0da440`
-- **All on + redeploy:** `50bd64fc7ebf593abcb7e2ab9e3a47b7f699d19b5fc8f31b48814b159b4957f6`
-- **+ Vol target 15%:** `c1118b3012c16a7f85ecc15097ee5523067209b29d952ac293c81c0bcf833162`
-- **All on + redeploy + vol target 15%:** `7f9b2abb9dce792d84ac7e4dcd984bd733b79bff0467ac92a0fbe2393c187fdd`
+- **Naive (all off):** `923becddfebeb89395e9bdff25fccc5e519d4b950e06aa536436d355a004a28f`
+- **+ 12-1 momentum:** `0da856734d533217a776e9f4bbc1bfe6d64eb6cf800f6fe517b8efaa10ef7e02`
+- **+ Turnover banding:** `68880b21b30449e98b9d5fd9d6cfd410625be5e23a790fd0d5fb45f9b8b2a9a4`
+- **+ Regime filter:** `7ba6dcbe0bae933c0d32d4c79e667925356d7386e3d8d2930d05f9bdd240a02b`
+- **+ Vol-scaled weights:** `94dc0eb1a7034c0a83780285d8e31344d173d66121b17af8c75c56564b689a53`
+- **+ Redeploy proceeds next session:** `1aa4b6f3f10b9ad1ff54861124d63892e48cd3e9bb8c62a2c6c298efce2fe549`
+- **All on (four M9.5 toggles):** `04ca32ac5e80d30a1ca0ed9e5fe71afee562b45b946e26828f0e45ab1da81557`
+- **All on + redeploy:** `9097506c909affd46b5129aef77915114211fad06e61c1dba309b7a70e780598`
+- **+ Vol target 15%:** `86b8d5c2557e1c945f79670b2a621eb670dd25aadb08e088f3bfbd257c981fd9`
+- **All on + redeploy + vol target 15%:** `9863532149ec809de0e54b0407d2b828ffe9d45f276673c09f993d20fef26b47`

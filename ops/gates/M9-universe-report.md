@@ -15,21 +15,21 @@ Both runs read the raw L1 momentum signal. Over this corporate-action-free store
 
 ## Window
 
-- 2016-09-02 -> 2026-08-31 (2468 sessions, 120 monthly rebalances)
-- Constrained run replay time: 25.2 s; baseline run replay time: 44.0 s
+- 2016-09-02 -> 2026-08-31 (2470 sessions, 120 monthly rebalances)
+- Constrained run replay time: 29.0 s; baseline run replay time: 50.7 s
 
 ## Constrained vs M9.2 baseline
 
 | Metric | Full universe (M9.2) | Investable + liquid (M9.3) | Delta |
 | --- | --- | --- | --- |
 | Mean universe size / rebalance | 1483.3 | 894.4 | -588.9 |
-| Portfolio XIRR | 11.70% | 12.05% | 0.35% |
-| Turnover (BUY+SELL fills) | 3212 | 3049 | -163 |
-| Total costs | ₹92,577.42 | ₹98,687.12 | ₹6,109.70 |
-| Final NAV | ₹3,023,380.77 | ₹3,120,359.48 | ₹96,978.71 |
+| Portfolio XIRR | 11.67% | 12.05% | 0.38% |
+| Turnover (BUY+SELL fills) | 3147 | 3016 | -131 |
+| Total costs | ₹92,377.37 | ₹98,615.08 | ₹6,237.71 |
+| Final NAV | ₹3,016,270.45 | ₹3,119,805.42 | ₹103,534.97 |
 
-- **Run digest (baseline):** `27f0444b31926e9ba00b09de086aebfa0f6bca711d00ddc2674f94461794ad2e`
-- **Run digest (constrained):** `073dff6424afdfc35f2fc95d0da87d63fcd55da056cdab6e3aa6a1fad24db7f7`
+- **Run digest (baseline):** `8deb0088bacf20d72556db49f814b5b482a56ad07c4b8e3833ab5a5f5a559c20`
+- **Run digest (constrained):** `caf1725f7ff2145e9802c38dde2d92d74538d67d7741866fd5b94384b247b15d`
 
 ## PIT
 
