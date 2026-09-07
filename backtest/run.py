@@ -3895,7 +3895,14 @@ class _SwingFeatures:
         return self._imputed
 
     def load(self, dates: Sequence[date]) -> None:
-        """Materialize every feature for the decision dates. Called once, before the replay."""
+        """Materialize every feature for the decision dates. Called once, before the replay.
+
+        Incremental since M12.2: dates already materialized are skipped, so one instance can serve
+        many arms whose cadences overlap — a sweep loads the union of every arm's decision dates
+        once and each arm's own ``load`` is then a no-op. Idempotent, and the union is what makes
+        the sweep report's "one windowed pass over the lake" true rather than aspirational.
+        """
+        dates = [session for session in dates if session not in self._by_date]
         if not dates:
             return
         px = "COALESCE(a.adj_close, r.close)" if self._adjusted else "r.close"
@@ -4106,6 +4113,96 @@ class _L1SwingData:
         return kept
 
 
+@dataclass(frozen=True, slots=True)
+class SwingLake:
+    """Everything a swing arm reads that does not depend on the arm — built once, shared (M12.2).
+
+    Assembling this per arm is what made a fourteen-arm report cost fourteen passes over the lake:
+    the windowed feature query, the trading calendar, the liquidity screen's per-date turnover
+    medians and the regime index's per-session levels are identical for every arm on a window, and
+    all four are the expensive part. A sweep builds one of these, loads the union of every arm's
+    decision dates into ``features``, and hands it to each run.
+
+    ``universe_filters`` is keyed by the liquidity floor in rupees, because that is the one universe
+    knob the sweep varies (M10.7 measured the edge as concentrated in the thinner half of the
+    investable set, so a reachability row means re-running on a higher floor). One filter per floor,
+    shared by every arm on that floor, and its per-date caches warm across arms.
+
+    Owns its DuckDB connection and reader: ``close`` releases both, and no run closes them — a run
+    handed a lake must not shut down state its siblings still need.
+    """
+
+    reader: _L1Reader
+    features: _SwingFeatures
+    sessions: tuple[date, ...]
+    calendar: tuple[date, ...]
+    regime_source: _RegimeSource
+    universe_filters: Mapping[Decimal, _InvestableUniverse]
+    adjusted: bool
+
+    @property
+    def first_session(self) -> date:
+        return self.sessions[0]
+
+    @property
+    def terminal(self) -> date:
+        return self.sessions[-1]
+
+    def close(self) -> None:
+        self.features.close()
+        self.reader.close()
+
+
+def open_swing_lake(
+    *,
+    start: date,
+    end: date,
+    floors: Sequence[Decimal],
+    data_root: Path | None = None,
+    adjusted: bool = True,
+) -> SwingLake:
+    """Build the shared lake state for a swing sweep over ``[start, end]`` (M12.2).
+
+    Assumes ``floors`` lists every median-turnover floor the sweep will run on; a run asking for a
+    floor that is not here is a programming error, not a fallback. Never loads features — the caller
+    knows the union of its arms' decision dates and loads them itself. The caller owns ``close``.
+    """
+    reader = _L1Reader(data_root=data_root)
+    features = _SwingFeatures(data_root=data_root, adjusted=adjusted)
+    try:
+        sessions = reader.trading_sessions(start, end)
+        if not sessions:
+            raise BacktestError(f"no trading sessions in [{start.isoformat()}, {end.isoformat()}]")
+        calendar = reader.all_sessions()
+        sessions = _reserve_fill_headroom(sessions, calendar)
+        return SwingLake(
+            reader=reader,
+            features=features,
+            sessions=tuple(sessions),
+            calendar=tuple(calendar),
+            regime_source=_RegimeSource(
+                reader,
+                calendar,
+                first_session=sessions[0],
+                size=_BENCHMARK_BASKET,
+                ma_days=_REGIME_MA_DAYS,
+            ),
+            universe_filters={
+                floor: _InvestableUniverse(
+                    reader,
+                    UniverseParameters(median_turnover_floor=floor),
+                    data_root=data_root,
+                )
+                for floor in floors
+            },
+            adjusted=adjusted,
+        )
+    except BaseException:
+        features.close()
+        reader.close()
+        raise
+
+
 def run_swing_composite(
     *,
     start: date,
@@ -4116,6 +4213,7 @@ def run_swing_composite(
     adjusted: bool = True,
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
+    lake: SwingLake | None = None,
 ) -> BacktestResult:
     """Replay the swing-composite policy over ``[start, end]``, returning its metrics (M10.7).
 
@@ -4127,34 +4225,45 @@ def run_swing_composite(
     session (it checks its trailing stop against that session's close) and rebalances on every
     ``rebalance_interval_sessions``-th one.
     """
-    reader = _L1Reader(data_root=data_root)
-    features = _SwingFeatures(data_root=data_root, adjusted=adjusted)
-    try:
-        sessions = reader.trading_sessions(start, end)
-        if not sessions:
-            raise BacktestError(f"no trading sessions in [{start.isoformat()}, {end.isoformat()}]")
-        calendar = reader.all_sessions()
-        sessions = _reserve_fill_headroom(sessions, calendar)
-        first_session, terminal = sessions[0], sessions[-1]
-
-        universe_filter = (
-            _InvestableUniverse(reader, universe, data_root=data_root)
-            if universe is not None
-            else None
+    # M12.2: a shared lake, or this run's own. `owned` is what decides whether the connection is
+    # closed at the end — a run handed a lake must not shut down state its siblings still need.
+    owned = lake is None
+    if lake is None:
+        lake = open_swing_lake(
+            start=start,
+            end=end,
+            floors=() if universe is None else (universe.median_turnover_floor,),
+            data_root=data_root,
+            adjusted=adjusted,
         )
+    elif lake.adjusted != adjusted:
+        raise BacktestError(
+            f"the shared lake was built on the {'adjusted' if lake.adjusted else 'raw'} signal but "
+            f"this run asked for the {'adjusted' if adjusted else 'raw'} one — one sweep never "
+            "mixes the two price bases"
+        )
+    reader, features = lake.reader, lake.features
+    try:
+        sessions = list(lake.sessions)
+        calendar = list(lake.calendar)
+        first_session, terminal = lake.first_session, lake.terminal
+
+        universe_filter: _InvestableUniverse | None = None
+        if universe is not None:
+            floor = universe.median_turnover_floor
+            universe_filter = lake.universe_filters.get(floor)
+            if universe_filter is None:
+                raise BacktestError(
+                    f"the shared lake carries no liquidity screen for a floor of {floor} — "
+                    "open_swing_lake must be told every floor the sweep will run on"
+                )
         data = _L1SwingData(
             reader,
             sessions,
             features,
             interval=parameters.rebalance_interval_sessions,
             universe_filter=universe_filter,
-            regime_source=_RegimeSource(
-                reader,
-                calendar,
-                first_session=first_session,
-                size=_BENCHMARK_BASKET,
-                ma_days=_REGIME_MA_DAYS,
-            ),
+            regime_source=lake.regime_source,
         )
         clock = FrozenClock(first_session)
         sim = SimBroker(
@@ -4228,8 +4337,8 @@ def run_swing_composite(
             max_drawdown=_max_drawdown(nav_path),
         )
     finally:
-        features.close()
-        reader.close()
+        if owned:
+            lake.close()
 
 
 @dataclass(frozen=True, slots=True)
