@@ -41,6 +41,8 @@ from backtest.sweep import (
     Arm,
     SweepResult,
     SweepRow,
+    rank_of,
+    row_of,
     run_sweep,
 )
 from dataplatform.logging import get_logger
@@ -74,16 +76,11 @@ class WalkForward:
 
     def rank_of(self, result: SweepResult, label: str, floor: Decimal) -> int | None:
         """Where ``label`` placed in ``result`` on ``floor``, or ``None`` if it has no row."""
-        for position, row in enumerate(result.ranked(floor), start=1):
-            if row.arm.label == label:
-                return position
-        return None
+        return rank_of(result, label, floor)
 
     def row_of(self, result: SweepResult, label: str, floor: Decimal) -> SweepRow | None:
-        for row in result.ranked(floor):
-            if row.arm.label == label:
-                return row
-        return None
+        """``label``'s row in ``result`` on ``floor``, or ``None`` if it has none."""
+        return row_of(result, label, floor)
 
 
 def run_walk_forward(
