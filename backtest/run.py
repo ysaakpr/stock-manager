@@ -23,15 +23,20 @@ sizing price, the fill reference bars and the terminal marks are the prices that
 to L2. Pass ``adjusted=False`` to source the signal from raw L1 too — the pre-M9.2 baseline the
 adjusted-vs-raw delta report is struck against.
 
-Data reality this build runs against: the lake here holds L1 raw NSE prices only, and
-``corporate_actions`` / ``adjustment_factors`` are empty — M9.1's live ten-year CA backfill is a
-bulk-fetch campaign gated on a human go (AGENTIC_CONTEXT B1). With no CA rows every factor chain is
-the identity, so a materialized L2 equals L1 bar-for-bar and the adjusted signal equals the raw one
-over *this* store: the adjusted-vs-raw run is byte-identical here and the delta is zero. The
-de-corruption itself is proven on a controlled known-split fixture in
-``tests/integration/test_backtest_adjusted.py``. The universe and listing windows are still derived
-from L1's own observed trading (survivorship-safe: a name is in the universe on a date iff it traded
-on or around it, and later-delisted names stay in for earlier dates).
+Data reality this build runs against: **the L1 lake is no longer single-exchange.** A per-date
+``prices_raw`` partition carries whichever venues have been backfilled for that date — there is no
+exchange in the partition path — and since the BSE ten-year backfill (2026-09-06) the NSE dates
+carry BSE bars as well. Every L1 read here is therefore pinned to ``exchange = 'NSE'``
+(:data:`_L1Reader._SCOPE`): this run replays an NSE-primary book, and the venue is stated in the
+query rather than left to fall out of the ``series = 'EQ'`` segment filter, which selects only NSE
+rows today purely because BSE labels its cash segment by group code. ``corporate_actions`` and
+``adjustment_factors`` are populated (M9.1's backfill ran) and L2 is materialized for the names
+with a non-identity factor chain, so the adjusted-vs-raw delta is real and measured, not zero —
+``ops/gates/M9-adjusted-backtest-report.md`` reports it. The de-corruption itself is proven on a
+controlled known-split fixture in ``tests/integration/test_backtest_adjusted.py``. The universe and
+listing windows are still derived from L1's own observed trading (survivorship-safe: a name is in
+the universe on a date iff it traded on or around it, and later-delisted names stay in for earlier
+dates).
 
 M9.4 change — the benchmark is now **M3.9's computed TRI**. The broad-market benchmark reads the
 M3.9 pipeline's computed total-return series (:func:`~dataplatform.ingest.indices.read_tri_series` —
@@ -201,12 +206,26 @@ class _L1Reader:
 
     Every method is point-in-time by construction: a caller asks for a specific date's closes or the
     static listing windows, never "latest". Closes are cached per date, so the walk pays for
-    each session's cross-section once. Equity only (``series = 'EQ'``) and priced (``close > 0``);
-    money comes back as ``Decimal`` off the lake's ``decimal128`` columns.
+    each session's cross-section once. NSE equity only (:data:`_SCOPE`) and priced
+    (``close > 0``); money comes back as ``Decimal`` off the lake's ``decimal128`` columns.
     """
 
     _VIEW = "l1_prices_raw"
     _DATASET = "prices_raw"
+    #: The scope every read below is filtered to. Both halves are load-bearing and neither implies
+    #: the other. ``exchange = 'NSE'`` is the *venue* decision: one L1 partition holds both
+    #: exchanges' rows for a date — there is no exchange in the partition path
+    #: (``dataplatform.store.l1``) — and since the BSE backfill the same dates carry BSE bars too.
+    #: ``series = 'EQ'`` is the *segment* decision: NSE's rolling-settlement cash segment, which
+    #: excludes BE/BZ trade-for-trade, SM/ST SME, GB/GS gilts and the N* debt series. The segment
+    #: filter must never be left to do the venue's work. That BSE labels its cash segment by group
+    #: code (A/B/X/XT/T/M/Z/…) and never ``EQ`` is BSE's own convention, not a guarantee: series
+    #: codes are not venue-unique (both venues print ``ZP``), a parser change could map a group to
+    #: ``EQ``, and a third venue could print anything. Drop the venue predicate and BSE bars enter
+    #: the momentum signal, the listing windows, the liquidity screen and the fill reference bars
+    #: silently, because a wrong-venue bar is a *valid* bar. Pinned by
+    #: ``tests/unit/test_backtest_venue.py``.
+    _SCOPE = "exchange = 'NSE' AND series = 'EQ'"
 
     def __init__(self, *, data_root: Path | None = None) -> None:
         self._data_root = data_root
@@ -233,15 +252,20 @@ class _L1Reader:
         """Every distinct NSE-equity trading session in ``[start, end]``, ascending."""
         rows = self._con.execute(
             f"SELECT DISTINCT trade_date FROM {self._VIEW} "
-            f"WHERE series = 'EQ' AND trade_date BETWEEN $start AND $end ORDER BY trade_date",
+            f"WHERE {self._SCOPE} AND trade_date BETWEEN $start AND $end ORDER BY trade_date",
             {"start": start, "end": end},
         ).fetchall()
         return tuple(row[0] for row in rows)
 
     def all_sessions(self) -> tuple[date, ...]:
-        """Every distinct trading session in the store, ascending — the market's own calendar."""
+        """Every distinct NSE trading session in the store, ascending — the NSE calendar.
+
+        The calendar the replay walks and the fill model targets. Scoped to NSE like every other
+        read here: a date on which only another venue printed is not a session of this market and
+        must not enter the walk.
+        """
         rows = self._con.execute(
-            f"SELECT DISTINCT trade_date FROM {self._VIEW} WHERE series = 'EQ' ORDER BY trade_date"
+            f"SELECT DISTINCT trade_date FROM {self._VIEW} WHERE {self._SCOPE} ORDER BY trade_date"
         ).fetchall()
         return tuple(row[0] for row in rows)
 
@@ -257,7 +281,7 @@ class _L1Reader:
         store_end = self.all_sessions()[-1]
         rows = self._con.execute(
             f"SELECT isin, min(trade_date), max(trade_date) FROM {self._VIEW} "
-            f"WHERE series = 'EQ' AND close > 0 GROUP BY isin"
+            f"WHERE {self._SCOPE} AND close > 0 GROUP BY isin"
         ).fetchall()
         windows: list[ListingWindow] = []
         for isin, first_seen, last_seen in rows:
@@ -284,7 +308,7 @@ class _L1Reader:
             self._closes[session] = {}
             return {}
         rows = self._con.execute(
-            "SELECT isin, close FROM read_parquet($path) WHERE series = 'EQ' AND close > 0",
+            f"SELECT isin, close FROM read_parquet($path) WHERE {self._SCOPE} AND close > 0",
             {"path": path},
         ).fetchall()
         closes = {str(isin): Decimal(close) for isin, close in rows}
@@ -298,6 +322,8 @@ class _L1Reader:
         ``traded_value`` is the turnover slippage scales against. Only rows with a positive
         open, a positive quantity and positive turnover qualify: a name the fill model cannot price
         or size against is simply absent, and a staged order for it is rejected by the broker.
+        Every bar is stamped ``Exchange.NSE`` because the read is scoped to NSE — the stamp states
+        the venue the row came from, it does not assume it.
         """
         cached = self._refbars.get(session)
         if cached is not None:
@@ -307,9 +333,9 @@ class _L1Reader:
             self._refbars[session] = {}
             return {}
         rows = self._con.execute(
-            "SELECT isin, open, total_traded_qty, total_traded_value FROM read_parquet($path) "
-            "WHERE series = 'EQ' AND open > 0 AND total_traded_qty > 0 "
-            "AND total_traded_value > 0",
+            f"SELECT isin, open, total_traded_qty, total_traded_value FROM read_parquet($path) "
+            f"WHERE {self._SCOPE} AND open > 0 AND total_traded_qty > 0 "
+            f"AND total_traded_value > 0",
             {"path": path},
         ).fetchall()
         bars: dict[str, ReferenceBar] = {}
@@ -334,9 +360,9 @@ class _L1Reader:
         if not Path(path).exists():
             return []
         rows = self._con.execute(
-            "SELECT isin FROM read_parquet($path) "
-            "WHERE series = 'EQ' AND close > 0 AND total_traded_value > 0 "
-            "ORDER BY total_traded_value DESC, isin LIMIT $n",
+            f"SELECT isin FROM read_parquet($path) "
+            f"WHERE {self._SCOPE} AND close > 0 AND total_traded_value > 0 "
+            f"ORDER BY total_traded_value DESC, isin LIMIT $n",
             {"path": path, "n": size},
         ).fetchall()
         return [str(row[0]) for row in rows]
@@ -359,8 +385,8 @@ class _L1Reader:
             return cached
         rows = self._con.execute(
             f"SELECT isin, quantile_disc(total_traded_value, 0.5) FROM {self._VIEW} "
-            "WHERE series = 'EQ' AND total_traded_value > 0 "
-            "AND trade_date BETWEEN $start AND $end GROUP BY isin",
+            f"WHERE {self._SCOPE} AND total_traded_value > 0 "
+            f"AND trade_date BETWEEN $start AND $end GROUP BY isin",
             {"start": start, "end": end},
         ).fetchall()
         medians = {str(isin): Decimal(median) for isin, median in rows}
@@ -413,9 +439,12 @@ class _AdjustedCloseSource:
     the momentum ratio it feeds is no longer corrupted. Only the *close* is taken — execution still
     fills on the raw reference bar (invariant #3: adjusted series are for analysis, never a fill).
 
-    The primary map is supplied, not derived: this lake is single-exchange (NSE), so every ISIN's
-    primary is NSE and the liquidity scan `cross_section` would otherwise run is skipped. The ISIN
-    set for the map comes from L1's raw closes on the session.
+    The primary map is supplied, not derived: this run is NSE-primary by construction — every bar
+    it executes and marks against comes from :class:`_L1Reader`, which reads NSE rows only — so
+    every ISIN is pinned to NSE and the liquidity scan `cross_section` would otherwise run to
+    choose a venue is skipped. L2 itself is *not* NSE-only (it mirrors whatever venues L1 holds,
+    keyed by exchange), so the pin is what selects the NSE series out of it. The ISIN set for the
+    map comes from L1's raw closes on the session.
 
     Raw is the base; L2 adjusted is overlaid where it exists. L2 is materialized only for names with
     a non-identity factor chain (a split/bonus/rights) — for every other name the adjusted close
@@ -435,8 +464,9 @@ class _AdjustedCloseSource:
         cached = self._closes.get(session)
         if cached is not None:
             return cached
-        # Single-exchange lake: pin every name's primary to NSE so cross_section skips the L1
-        # liquidity scan. The ISIN universe is L1's own priced names for the session.
+        # NSE-primary run: pin every name's primary to the venue the reader serves, so
+        # cross_section returns that venue's L2 series and skips the L1 liquidity scan it would
+        # otherwise run to pick one. The ISIN universe is L1's own priced NSE names for the session.
         raw = self._reader.closes_on(session)
         primary = dict.fromkeys(raw, IdentityExchange.NSE)
         cross = self._service.cross_section(
