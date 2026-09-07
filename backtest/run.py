@@ -225,6 +225,18 @@ _SWING_MOM_SHORT = 21
 #: Minimum prints before a name is scoreable at all — a full year, so every leg has its window.
 _SWING_MIN_HISTORY = 260
 
+# ── M12.1 legs: the windows the new features are struck over. Every one is a round trading period
+# rather than a fitted length, and every one is <= _SWING_MIN_HISTORY, so adding these legs does
+# not narrow the candidate set that M10.7 measured.
+#: The short-horizon return the reversal family reads — one trading week.
+_SWING_RETURN_SHORT = 5
+#: The swing horizon's own trend — one trading month, the month 12-1 deliberately drops.
+_SWING_MOM_1M = 21
+#: Denominator for the delivery and turnover *trend* legs: a trading quarter as the "usual" level.
+_SWING_TREND_SLOW = 63
+#: The moving average `ma_proximity` measures the close against.
+_SWING_MA_WINDOW = 50
+
 
 # ── L1 lake reader ────────────────────────────────────────────────────────────────────────────────
 
@@ -3826,6 +3838,19 @@ def render_fundamentals_report(
 # ── M10.7: the swing signal — 52w-high proximity, delivery share, 12-1, volatility ──────────────
 
 
+def _swing_leg(value: Any, neutral: Decimal) -> Decimal:
+    """One M12.1 leg as a ``Decimal``, or ``neutral`` when the lake has no value for it (M12.1).
+
+    Assumes ``value`` is a DuckDB DOUBLE or ``None``. Never drops the row: a name whose 50-session
+    mean is not yet computable must still be scoreable on the legs that *are*, because the arms
+    differ only in their weights and a candidate set that moved with the weight vector would make
+    every comparison between arms a comparison of two universes.
+    """
+    if value is None:
+        return neutral
+    return Decimal(str(round(value, 8)))
+
+
 class _SwingFeatures:
     """One bulk pass over L1 (+ the L2 overlay) that materializes every swing feature, PIT-safe.
 
@@ -3908,11 +3933,29 @@ class _SwingFeatures:
                 stddev_samp(lr) OVER (PARTITION BY isin ORDER BY trade_date
                     ROWS BETWEEN {_SWING_VOL_WINDOW - 1} PRECEDING AND CURRENT ROW) AS vol,
                 median(ttv) OVER (PARTITION BY isin ORDER BY trade_date
-                    ROWS BETWEEN 251 PRECEDING AND CURRENT ROW) AS ttv_median
+                    ROWS BETWEEN 251 PRECEDING AND CURRENT ROW) AS ttv_median,
+                -- M12.1 legs. Same partition, same backward-only frames, same pass.
+                px / NULLIF(lag(px, {_SWING_RETURN_SHORT}) OVER (PARTITION BY isin
+                    ORDER BY trade_date), 0) - 1 AS return_5,
+                px / NULLIF(lag(px, {_SWING_MOM_1M}) OVER (PARTITION BY isin
+                    ORDER BY trade_date), 0) - 1 AS momentum_1m,
+                avg(dpct) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_RETURN_SHORT - 1} PRECEDING AND CURRENT ROW)
+                    / NULLIF(avg(dpct) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_TREND_SLOW - 1} PRECEDING AND CURRENT ROW), 0)
+                    AS delivery_trend,
+                avg(ttv) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_RETURN_SHORT - 1} PRECEDING AND CURRENT ROW)
+                    / NULLIF(avg(ttv) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_TREND_SLOW - 1} PRECEDING AND CURRENT ROW), 0)
+                    AS turnover_expansion,
+                px / NULLIF(avg(px) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_MA_WINDOW - 1} PRECEDING AND CURRENT ROW), 0)
+                    AS ma_proximity
             FROM ret
         )
         SELECT trade_date, isin, raw_close, high_proximity, delivery, momentum_12_1, vol,
-               ttv_median
+               ttv_median, return_5, momentum_1m, delivery_trend, turnover_expansion, ma_proximity
         FROM feat
         WHERE trade_date IN ({",".join("?" for _ in dates)})
           AND n >= {_SWING_MIN_HISTORY}
@@ -3922,7 +3965,8 @@ class _SwingFeatures:
         """
         rows = self._con.execute(sql, list(dates)).fetchall()
         self._rows = len(rows)
-        # (trade_date, isin, raw_close, high_proximity, delivery, momentum_12_1, vol, ttv_median)
+        # (trade_date, isin, raw_close, high_proximity, delivery, momentum_12_1, vol, ttv_median,
+        #  return_5, momentum_1m, delivery_trend, turnover_expansion, ma_proximity)
         grouped: dict[date, list[tuple[Any, ...]]] = {}
         for row in rows:
             grouped.setdefault(row[0], []).append(row)
@@ -3930,7 +3974,15 @@ class _SwingFeatures:
             deliveries = sorted(r[4] for r in day_rows if r[4] is not None)
             fallback = deliveries[len(deliveries) // 2] if deliveries else 0.0
             records: list[SwingRecord] = []
-            for _, isin, raw_close, high, delivery, momentum, vol, _ttv in day_rows:
+            for row in day_rows:
+                isin, raw_close, high, delivery, momentum, vol = (
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                )
                 if delivery is None:
                     delivery = fallback
                     self._imputed += 1
@@ -3944,6 +3996,14 @@ class _SwingFeatures:
                         volatility=Decimal(str(round(vol, 8))),
                         price=Decimal(str(raw_close)),
                         knowable_date=session,
+                        # M12.1. A NULL leg takes its neutral value rather than dropping the name:
+                        # the candidate set must not move with a leg nobody weighted. Neutral is 0
+                        # for a return (no move) and 1 for a ratio (at its own average).
+                        return_5=_swing_leg(row[8], _ZERO),
+                        momentum_1m=_swing_leg(row[9], _ZERO),
+                        delivery_trend=_swing_leg(row[10], _ONE),
+                        turnover_expansion=_swing_leg(row[11], _ONE),
+                        ma_proximity=_swing_leg(row[12], _ONE),
                     )
                 )
             self._by_date[session] = tuple(records)
@@ -3974,10 +4034,12 @@ class _L1SwingData:
         *,
         interval: int,
         universe_filter: _InvestableUniverse | None = None,
+        regime_source: _RegimeSource,
     ) -> None:
         self._reader = reader
         self._features = features
         self._universe_filter = universe_filter
+        self._regime_source = regime_source
         self._rebalance = set(sessions[::interval])
         self._windows = reader.listing_windows()
         self._universe_sizes: dict[date, int] = {}
@@ -4011,6 +4073,15 @@ class _L1SwingData:
         )
         return Dataset.declaring(
             f"swing_marks@{as_of.isoformat()}", records, knowable_date=lambda r: r.knowable_date
+        )
+
+    def regime(self, as_of: date) -> Dataset[RegimeReading]:
+        """The same broad-market proxy reading momentum v2's gate reads (M12.1)."""
+        reading = self._regime_source.reading(as_of)
+        return Dataset.declaring(
+            f"swing_regime@{as_of.isoformat()}",
+            (reading,),
+            knowable_date=lambda r: r.knowable_date,
         )
 
     def rebalance_dates(self) -> tuple[date, ...]:
@@ -4077,6 +4148,13 @@ def run_swing_composite(
             features,
             interval=parameters.rebalance_interval_sessions,
             universe_filter=universe_filter,
+            regime_source=_RegimeSource(
+                reader,
+                calendar,
+                first_session=first_session,
+                size=_BENCHMARK_BASKET,
+                ma_days=_REGIME_MA_DAYS,
+            ),
         )
         clock = FrozenClock(first_session)
         sim = SimBroker(
