@@ -68,7 +68,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 from analyst.journal.models import Decision, JournalEntry
 from backtest.accounting import BenchmarkComparison, PortfolioBook
@@ -94,6 +94,11 @@ from backtest.policies.sector_rotation import (
     SectorRotationPolicy,
     SectorRotationRecord,
 )
+from backtest.policies.swing_composite import (
+    SwingCompositeParameters,
+    SwingCompositePolicy,
+    SwingRecord,
+)
 from backtest.replay import BookSnapshot, Policy, ReplayEngine, ReplayResult
 from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import Exchange as IdentityExchange
@@ -111,7 +116,11 @@ from dataplatform.query.pit import Dataset
 from dataplatform.query.service import QueryService
 from dataplatform.query.shapes import CrossSectionRequest
 from dataplatform.query.universe import InMemoryListingCalendar, ListingWindow, pit_universe
-from dataplatform.store.l2 import open_connection, register_raw_view
+from dataplatform.store.l2 import (
+    open_connection,
+    register_adjusted_view,
+    register_raw_view,
+)
 from dataplatform.store.paths import Layer, l1_partition_path, layer_root
 from dataplatform.store.pit_fundamentals import PIT_FUNDAMENTALS_DATASET
 from execution.broker import (
@@ -196,6 +205,25 @@ _DEFAULT_TURNOVER_FLOOR = Decimal("10000000")
 #: The window the median turnover is measured over — a trailing year, ending on the rebalance date
 #: (so the whole measurement is point-in-time: no session after the decision enters it).
 _DEFAULT_LIQUIDITY_LOOKBACK_DAYS = 365
+
+# ── M10.7 swing-composite defaults (a priori / measured once, stated, never fitted) ─────────────
+#: Report path for the swing-composite benchmark.
+_SWING_REPORT_PATH = Path("ops/gates/M10-swing-composite-report.md")
+#: Trailing window for the 52-week-high proximity signal — 252 sessions is a trading year.
+_SWING_HIGH_WINDOW = 252
+#: Sessions the delivery share is averaged over. Twenty-one is a trading month. A five-session mean
+#: was measured first and is worse on *both* axes — the 21-session mean earns more (a top-20 basket
+#: beats the universe by 5.03 % over 63 sessions against 4.62 %, t 9.9 against 8.8) and churns far
+#: less (58.7 % of the top-20 survives a fortnight against 46.5 %). There is no trade-off to make
+#: here, so the slower window simply wins; 63 sessions was measured too and gives back return.
+_SWING_DELIVERY_WINDOW = 21
+#: Sessions the volatility screen is struck over — a quarter of daily returns.
+_SWING_VOL_WINDOW = 63
+#: Trading-day lags for the 12-1 momentum leg: a year back to a month back.
+_SWING_MOM_LONG = 252
+_SWING_MOM_SHORT = 21
+#: Minimum prints before a name is scoreable at all — a full year, so every leg has its window.
+_SWING_MIN_HISTORY = 260
 
 
 # ── L1 lake reader ────────────────────────────────────────────────────────────────────────────────
@@ -2984,7 +3012,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--policy",
         required=True,
-        choices=("naive_momentum", "sector_rotation", "fundamentals_value"),
+        choices=("naive_momentum", "sector_rotation", "fundamentals_value", "swing_composite"),
         help="the policy to replay",
     )
     parser.add_argument("--from", dest="start", required=True, help="start date, YYYY-MM-DD")
@@ -3023,6 +3051,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help=f"run naive vs each v2 increment vs all-on (M9.5) and write the momentum-v2 report to "
         f"{_V2_REPORT_PATH}",
+    )
+    parser.add_argument(
+        "--swing-report",
+        action="store_true",
+        help=f"run the M10.7 swing-composite comparison — both momentum policies against every "
+        f"swing arm — and write the report to {_SWING_REPORT_PATH}",
     )
     parser.add_argument(
         "--sector-rotation-report",
@@ -3148,6 +3182,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  v2 report written to {_V2_REPORT_PATH}")
         return 0
 
+    if args.swing_report:
+        try:
+            report = run_swing_report(
+                start=start,
+                end=end,
+                top_n=args.top_n if args.top_n is not None else 20,
+                opening_cash=args.opening_cash,
+                data_root=args.data_root,
+                adjusted=args.adjusted,
+            )
+        except BacktestError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 1
+        _SWING_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _SWING_REPORT_PATH.write_text(report, encoding="utf-8")
+        print(f"  swing report written to {_SWING_REPORT_PATH}")
+        return 0
+
     if args.sector_rotation_report:
         try:
             report = run_sector_rotation_report(
@@ -3185,10 +3237,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  fundamentals report written to {_FUNDAMENTALS_REPORT_PATH}")
         return 0
 
-    if args.policy in ("sector_rotation", "fundamentals_value"):
+    if args.policy in ("sector_rotation", "fundamentals_value", "swing_composite"):
         print(
             f"error: --policy {args.policy} requires its report flag "
-            "(--sector-rotation-report / --fundamentals-report); no bare single-run summary is "
+            "(--sector-rotation-report / --fundamentals-report / --swing-report); no bare "
+            "single-run summary is "
             "defined for it",
             file=sys.stderr,
         )
@@ -3767,6 +3820,612 @@ def render_fundamentals_report(
     ]
     for arm in arms:
         lines.append(f"- **{arm.label}:** `{arm.parameters}` — digest `{arm.digest}`")
+    return "\n".join(lines) + "\n"
+
+
+# ── M10.7: the swing signal — 52w-high proximity, delivery share, 12-1, volatility ──────────────
+
+
+class _SwingFeatures:
+    """One bulk pass over L1 (+ the L2 overlay) that materializes every swing feature, PIT-safe.
+
+    The swing policy decides every ``rebalance_interval_sessions`` and needs, per decision, a
+    252-session trailing high, a 5-session delivery mean, a 12-1 return and a 63-session volatility
+    for ~900 names. Walking that per rebalance in Python would re-read the same partitions hundreds
+    of times; instead this issues **one** windowed query over the whole lake and hands the policy's
+    data source a date-keyed cache.
+
+    **Point-in-time by construction, not by convention.** Every window frame is
+    ``ROWS BETWEEN n PRECEDING AND CURRENT ROW`` over ``PARTITION BY isin ORDER BY trade_date``, so
+    a row dated ``t`` can only see rows dated ``t`` or earlier — there is no frame in this query
+    that reaches forward, and the ``knowable_date`` each record is stamped with is its own session.
+    The guard in ``ctx.pit.admit`` then re-checks that on every read.
+
+    The signal price is the same "raw base, L2 adjusted overlaid where it exists" rule
+    :class:`_AdjustedCloseSource` applies (L2 is materialized only for names with a non-identity
+    factor chain, so for every other name the raw close *is* the adjusted close), expressed as one
+    LEFT JOIN rather than a per-session ``cross_section`` call. ``price`` stays the raw close: the
+    signal is adjusted, the fill and the sizing are not (invariant #3).
+
+    Delivery is the one leg with a coverage caveat and it is reported rather than hidden: NSE's
+    ``deliv_pct`` is populated on 65 % of 2016 prints rising to 86 % by 2026, and a name with no
+    delivery print on a session contributes nothing to its own mean. A name with no delivery data
+    at all in the window scores at the universe's median rather than being dropped, so the
+    candidate set does not silently change with the coverage — ``delivery_imputed`` counts it.
+    """
+
+    def __init__(self, *, data_root: Path | None = None, adjusted: bool = True) -> None:
+        self._con = open_connection()
+        register_raw_view(self._con, view="l1_swing_raw", data_root=data_root)
+        if adjusted:
+            register_adjusted_view(self._con, view="l2_swing_adj", data_root=data_root)
+        self._adjusted = adjusted
+        self._by_date: dict[date, tuple[SwingRecord, ...]] = {}
+        self._imputed = 0
+        self._rows = 0
+
+    @property
+    def delivery_imputed(self) -> int:
+        """How many scored records took the median delivery share for want of any print."""
+        return self._imputed
+
+    def load(self, dates: Sequence[date]) -> None:
+        """Materialize every feature for the decision dates. Called once, before the replay."""
+        if not dates:
+            return
+        px = "COALESCE(a.adj_close, r.close)" if self._adjusted else "r.close"
+        join = (
+            "LEFT JOIN l2_swing_adj a ON a.isin = r.isin AND a.trade_date = r.trade_date "
+            "AND a.exchange = 'NSE'"
+            if self._adjusted
+            else ""
+        )
+        sql = f"""
+        WITH base AS (
+            SELECT r.isin, r.trade_date,
+                   CAST({px} AS DOUBLE) AS px,
+                   CAST(r.close AS DOUBLE) AS raw_close,
+                   CAST(r.deliv_pct AS DOUBLE) AS dpct,
+                   CAST(r.total_traded_value AS DOUBLE) AS ttv
+            FROM l1_swing_raw r {join}
+            WHERE r.exchange = 'NSE' AND r.series = 'EQ' AND r.close > 0
+        ),
+        ret AS (
+            SELECT *, ln(px / NULLIF(lag(px, 1) OVER w, 0)) AS lr, row_number() OVER w AS n
+            FROM base WINDOW w AS (PARTITION BY isin ORDER BY trade_date)
+        ),
+        feat AS (
+            SELECT isin, trade_date, raw_close, n,
+                px / NULLIF(max(px) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_HIGH_WINDOW - 1} PRECEDING AND CURRENT ROW), 0)
+                    AS high_proximity,
+                avg(dpct) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_DELIVERY_WINDOW - 1} PRECEDING AND CURRENT ROW)
+                    AS delivery,
+                lag(px, {_SWING_MOM_SHORT}) OVER (PARTITION BY isin ORDER BY trade_date)
+                    / NULLIF(lag(px, {_SWING_MOM_LONG}) OVER
+                    (PARTITION BY isin ORDER BY trade_date), 0) - 1 AS momentum_12_1,
+                stddev_samp(lr) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_VOL_WINDOW - 1} PRECEDING AND CURRENT ROW) AS vol,
+                median(ttv) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN 251 PRECEDING AND CURRENT ROW) AS ttv_median
+            FROM ret
+        )
+        SELECT trade_date, isin, raw_close, high_proximity, delivery, momentum_12_1, vol,
+               ttv_median
+        FROM feat
+        WHERE trade_date IN ({",".join("?" for _ in dates)})
+          AND n >= {_SWING_MIN_HISTORY}
+          AND high_proximity IS NOT NULL AND momentum_12_1 IS NOT NULL AND vol IS NOT NULL
+          AND raw_close > 0
+        ORDER BY trade_date, isin
+        """
+        rows = self._con.execute(sql, list(dates)).fetchall()
+        self._rows = len(rows)
+        # (trade_date, isin, raw_close, high_proximity, delivery, momentum_12_1, vol, ttv_median)
+        grouped: dict[date, list[tuple[Any, ...]]] = {}
+        for row in rows:
+            grouped.setdefault(row[0], []).append(row)
+        for session, day_rows in grouped.items():
+            deliveries = sorted(r[4] for r in day_rows if r[4] is not None)
+            fallback = deliveries[len(deliveries) // 2] if deliveries else 0.0
+            records: list[SwingRecord] = []
+            for _, isin, raw_close, high, delivery, momentum, vol, _ttv in day_rows:
+                if delivery is None:
+                    delivery = fallback
+                    self._imputed += 1
+                records.append(
+                    SwingRecord(
+                        isin=str(isin),
+                        high_proximity=Decimal(str(round(high, 8))),
+                        # NSE prints delivery as a percentage; carry it as a ratio.
+                        delivery_share=Decimal(str(round(delivery / 100.0, 8))),
+                        momentum_12_1=Decimal(str(round(momentum, 8))),
+                        volatility=Decimal(str(round(vol, 8))),
+                        price=Decimal(str(raw_close)),
+                        knowable_date=session,
+                    )
+                )
+            self._by_date[session] = tuple(records)
+
+    def records(self, session: date) -> tuple[SwingRecord, ...]:
+        return self._by_date.get(session, ())
+
+    def close(self) -> None:
+        self._con.close()
+
+
+class _L1SwingData:
+    """The swing policy's :class:`SwingCompositeData` — decision cadence, candidates, daily marks.
+
+    Decision sessions are every ``interval``-th session of the replay window, counted from the
+    first, so the cadence is in *trading* sessions and does not drift with holidays. Candidates come
+    from :class:`_SwingFeatures`, narrowed by the same M9.3 investable/liquid screen every other
+    policy here uses and by the same survivorship-safe PIT universe, so a swing-vs-momentum
+    comparison isolates the strategy rather than confounding it with a universe change. ``marks``
+    serves the session's raw closes so the policy's trailing stop is checked every session.
+    """
+
+    def __init__(
+        self,
+        reader: _L1Reader,
+        sessions: Sequence[date],
+        features: _SwingFeatures,
+        *,
+        interval: int,
+        universe_filter: _InvestableUniverse | None = None,
+    ) -> None:
+        self._reader = reader
+        self._features = features
+        self._universe_filter = universe_filter
+        self._rebalance = set(sessions[::interval])
+        self._windows = reader.listing_windows()
+        self._universe_sizes: dict[date, int] = {}
+        features.load(sorted(self._rebalance))
+
+    def is_rebalance(self, session: date) -> bool:
+        return session in self._rebalance
+
+    def signal(self, as_of: date) -> Dataset[SwingRecord]:
+        records = self._candidates(as_of)
+        return Dataset.declaring(
+            f"swing_composite@{as_of.isoformat()}",
+            records,
+            knowable_date=lambda record: record.knowable_date,
+        )
+
+    def marks(self, as_of: date) -> Dataset[SwingRecord]:
+        """This session's raw closes as minimal records — what the trailing stop reads."""
+        closes = self._reader.closes_on(as_of)
+        records = tuple(
+            SwingRecord(
+                isin=isin,
+                high_proximity=_ONE,
+                delivery_share=_ZERO,
+                momentum_12_1=_ZERO,
+                volatility=_ZERO,
+                price=close,
+                knowable_date=as_of,
+            )
+            for isin, close in sorted(closes.items())
+        )
+        return Dataset.declaring(
+            f"swing_marks@{as_of.isoformat()}", records, knowable_date=lambda r: r.knowable_date
+        )
+
+    def rebalance_dates(self) -> tuple[date, ...]:
+        return tuple(sorted(self._rebalance))
+
+    @property
+    def mean_universe_size(self) -> Decimal:
+        sizes = [n for n in self._universe_sizes.values() if n > 0]
+        if not sizes:
+            return _ZERO
+        return (Decimal(sum(sizes)) / Decimal(len(sizes))).quantize(Decimal("0.1"))
+
+    def _candidates(self, as_of: date) -> tuple[SwingRecord, ...]:
+        records = self._features.records(as_of)
+        if not records:
+            return ()
+        universe = pit_universe(as_of, InMemoryListingCalendar(self._windows)).isins
+        if self._universe_filter is not None:
+            universe = frozenset(self._universe_filter.constrain(as_of, universe))
+        kept = tuple(record for record in records if record.isin in universe)
+        self._universe_sizes[as_of] = len(kept)
+        return kept
+
+
+def run_swing_composite(
+    *,
+    start: date,
+    end: date,
+    parameters: SwingCompositeParameters,
+    opening_cash: Decimal = _DEFAULT_OPENING_CASH,
+    data_root: Path | None = None,
+    adjusted: bool = True,
+    universe: UniverseParameters | None = None,
+    benchmark_slug: str = _BENCHMARK_TRI_SLUG,
+) -> BacktestResult:
+    """Replay the swing-composite policy over ``[start, end]``, returning its metrics (M10.7).
+
+    Identical wiring to :func:`run_momentum_v2` — the same L1 bars, the one shared cost model behind
+    ``SimBroker`` (invariant #4), the M4.7 whole-share allocator inside the policy, M4.6 accounting
+    mirrored off the fills, full journaling through the replay engine, the same M9.3 universe screen
+    and the same M9.4 benchmark resolution — so a swing-vs-momentum comparison isolates the policy.
+    What differs is the policy driving it and the cadence: the swing policy is consulted on *every*
+    session (it checks its trailing stop against that session's close) and rebalances on every
+    ``rebalance_interval_sessions``-th one.
+    """
+    reader = _L1Reader(data_root=data_root)
+    features = _SwingFeatures(data_root=data_root, adjusted=adjusted)
+    try:
+        sessions = reader.trading_sessions(start, end)
+        if not sessions:
+            raise BacktestError(f"no trading sessions in [{start.isoformat()}, {end.isoformat()}]")
+        calendar = reader.all_sessions()
+        sessions = _reserve_fill_headroom(sessions, calendar)
+        first_session, terminal = sessions[0], sessions[-1]
+
+        universe_filter = (
+            _InvestableUniverse(reader, universe, data_root=data_root)
+            if universe is not None
+            else None
+        )
+        data = _L1SwingData(
+            reader,
+            sessions,
+            features,
+            interval=parameters.rebalance_interval_sessions,
+            universe_filter=universe_filter,
+        )
+        clock = FrozenClock(first_session)
+        sim = SimBroker(
+            clock=clock,
+            cost_model=CostModel(load_rate_card(), account_state=_ACCOUNT_STATE),
+            market=_L1Market(reader, calendar),
+            opening_cash=opening_cash,
+        )
+        book = PortfolioBook()
+        book.deposit(first_session, opening_cash)
+
+        last_close: dict[str, Decimal] = {}
+        nav_path: list[Decimal] = []
+
+        def sample_nav(session: date) -> None:
+            last_close.update(reader.closes_on(session))
+            positions = book.positions()
+            if any(position.isin not in last_close for position in positions):
+                return  # a held name with no close seen yet — skip rather than guess
+            nav_path.append(book.net_asset_value(last_close))
+
+        broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
+        policy = SwingCompositePolicy(data, parameters)
+
+        engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
+        started = time.perf_counter()
+        result = engine.run()
+        runtime = time.perf_counter() - started
+
+        terminal_prices = _terminal_prices(reader, book, sessions)
+        resolved = _resolve_benchmark(
+            reader,
+            data.rebalance_dates(),
+            first_session,
+            terminal,
+            slug=benchmark_slug,
+            data_root=data_root,
+        )
+        benchmark = resolved.series
+        comparison = book.compare_to_benchmarks(
+            terminal, terminal_prices, benchmark=benchmark, theme=benchmark
+        )
+        shared_params = MomentumParameters(
+            top_n=parameters.top_n,
+            buy_budget_fraction=parameters.buy_budget_fraction,
+            sleeve=parameters.sleeve,
+        )
+        return BacktestResult(
+            policy="swing_composite",
+            adjusted=adjusted,
+            start=first_session,
+            terminal=terminal,
+            sessions=len(sessions),
+            rebalances=len(data.rebalance_dates()),
+            parameters=shared_params,
+            opening_cash=opening_cash,
+            runtime_seconds=runtime,
+            result=result,
+            book=result.book,
+            final_nav=book.net_asset_value(terminal_prices),
+            total_charges=broker.total_charges,
+            realized_pnl=book.realized_pnl,
+            unrealized_pnl=book.unrealized_pnl(terminal_prices),
+            comparison=comparison,
+            decision_counts=_decision_counts(result.journal),
+            universe_filtered=universe is not None,
+            mean_universe=data.mean_universe_size,
+            benchmark_source=resolved.source,
+            benchmark_index_name=benchmark.index_name,
+            benchmark_method=benchmark.method,
+            max_drawdown=_max_drawdown(nav_path),
+        )
+    finally:
+        features.close()
+        reader.close()
+
+
+@dataclass(frozen=True, slots=True)
+class _SwingArm:
+    """One configuration in the M10.7 comparison: a label, what it changes, and its measured run."""
+
+    label: str
+    note: str
+    run: BacktestResult
+
+
+def _holding_periods(journal: Sequence[JournalEntry]) -> tuple[int, int, int]:
+    """Realised holding periods in calendar days: ``(mean, median, count)`` of closed round trips.
+
+    Positions here are opened by one or more BUY entries and closed by a single full-quantity SELL,
+    so a name's holding period is the span from the *first* buy of the current open lot to the sell
+    that closes it. A name never sold (still held at the terminal) contributes nothing — an open
+    position has no holding period yet, and counting the run's remaining days as one would bias the
+    mean toward whatever the window happened to end on.
+    """
+    opened: dict[str, date] = {}
+    spans: list[int] = []
+    for entry in journal:
+        if entry.isin is None:
+            continue
+        if entry.decision is Decision.BUY:
+            opened.setdefault(entry.isin, entry.trading_date)
+        elif entry.decision is Decision.SELL:
+            start = opened.pop(entry.isin, None)
+            if start is not None:
+                spans.append((entry.trading_date - start).days)
+    if not spans:
+        return 0, 0, 0
+    spans.sort()
+    return sum(spans) // len(spans), spans[len(spans) // 2], len(spans)
+
+
+def _swing_configs(top_n: int) -> list[tuple[str, str, SwingCompositeParameters]]:
+    """The arms of the M10.7 comparison: a default, then one axis moved at a time.
+
+    Every arm changes exactly one thing against the default, so each row is readable as the price of
+    that one change. The cadence and band rows answer the holding-period question directly; the exit
+    rows are the stop ablation; the signal rows are the leg ablation the composite claim rests on.
+    """
+    return [
+        (
+            "Swing composite (default)",
+            "fortnightly, band 3x, 25% trail",
+            SwingCompositeParameters(top_n=top_n),
+        ),
+        # ── cadence: how often a decision is made ──
+        (
+            "Cadence: weekly",
+            "rebalance every 5 sessions",
+            SwingCompositeParameters(top_n=top_n, rebalance_interval_sessions=5),
+        ),
+        (
+            "Cadence: monthly",
+            "rebalance every 21 sessions",
+            SwingCompositeParameters(top_n=top_n, rebalance_interval_sessions=21),
+        ),
+        # ── band: what actually sets turnover and therefore the holding period ──
+        (
+            "Band: 1.5x top_n",
+            f"sell outside top-{top_n * 3 // 2}",
+            SwingCompositeParameters(top_n=top_n, sell_band=top_n * 3 // 2),
+        ),
+        (
+            "Band: 5x top_n",
+            f"sell outside top-{top_n * 5}",
+            SwingCompositeParameters(top_n=top_n, sell_band=top_n * 5),
+        ),
+        # ── exits ──
+        (
+            "Exit: no trailing stop",
+            "band + max-hold only",
+            SwingCompositeParameters(top_n=top_n, trailing_stop=None),
+        ),
+        (
+            "Exit: 12% trailing stop",
+            "the tight stop, measured",
+            SwingCompositeParameters(top_n=top_n, trailing_stop=Decimal("0.12")),
+        ),
+        (
+            "Exit: max hold 21 sessions",
+            "re-underwrite monthly",
+            SwingCompositeParameters(top_n=top_n, max_hold_sessions=21),
+        ),
+        # ── signal legs ──
+        (
+            "Signal: delivery only",
+            "delivery share alone",
+            SwingCompositeParameters(top_n=top_n, weight_high=_ZERO, weight_momentum=_ZERO),
+        ),
+        (
+            "Signal: no delivery leg",
+            "52w-high + 12-1 only",
+            SwingCompositeParameters(top_n=top_n, weight_delivery=_ZERO),
+        ),
+        (
+            "Signal: 12-1 momentum only",
+            "the v2 signal, swing cadence",
+            SwingCompositeParameters(top_n=top_n, weight_high=_ZERO, weight_delivery=_ZERO),
+        ),
+        # ── risk screen ──
+        (
+            "Screen: no volatility cut",
+            "score the whole set",
+            SwingCompositeParameters(top_n=top_n, exclude_vol_fraction=_ZERO),
+        ),
+    ]
+
+
+def run_swing_report(
+    *,
+    start: date,
+    end: date,
+    top_n: int = 20,
+    opening_cash: Decimal = _DEFAULT_OPENING_CASH,
+    data_root: Path | None = None,
+    adjusted: bool = True,
+) -> str:
+    """Run the M10.7 comparison — the two existing momentum policies against every swing arm — and
+    render it. Every arm reads the identical universe, cost model, benchmark and window, so a row
+    difference is the policy and nothing else."""
+    universe = UniverseParameters()
+    baselines: list[_SwingArm] = [
+        _SwingArm(
+            "Naive momentum (M4.10)",
+            "monthly, top-N by 12m return",
+            run_naive_momentum(
+                start=start,
+                end=end,
+                opening_cash=opening_cash,
+                parameters=MomentumParameters(top_n=top_n),
+                data_root=data_root,
+                adjusted=adjusted,
+                universe=universe,
+            ),
+        ),
+        _SwingArm(
+            "Momentum v2, all on (M9.5)",
+            "monthly, 12-1 + band + regime + vol-scaled + redeploy + 15% vol target",
+            run_momentum_v2(
+                start=start,
+                end=end,
+                v2_parameters=MomentumV2Parameters(
+                    top_n=top_n,
+                    use_12_1=True,
+                    sell_band=top_n + 10,
+                    regime_filter=True,
+                    vol_scaled=True,
+                    redeploy_next_session=True,
+                    vol_target_annual=Decimal("0.15"),
+                ),
+                opening_cash=opening_cash,
+                data_root=data_root,
+                adjusted=adjusted,
+                universe=universe,
+            ),
+        ),
+    ]
+    swing = [
+        _SwingArm(
+            label,
+            note,
+            run_swing_composite(
+                start=start,
+                end=end,
+                parameters=params,
+                opening_cash=opening_cash,
+                data_root=data_root,
+                adjusted=adjusted,
+                universe=universe,
+            ),
+        )
+        for label, note, params in _swing_configs(top_n)
+    ]
+    return render_swing_report(baselines, swing, top_n=top_n)
+
+
+def render_swing_report(
+    baselines: Sequence[_SwingArm], swing: Sequence[_SwingArm], *, top_n: int
+) -> str:
+    """The M10.7 markdown: the comparison table, the holding-period reading, and the caveats."""
+    reference = swing[0].run
+    lines: list[str] = [
+        "# M10.7 — Swing composite: entry and exit criteria for a 7-90 day hold",
+        "",
+        "*Generated by `python -m backtest.run --policy swing_composite --swing-report`. A "
+        "three-signal composite entry (52-week-high proximity, delivery share, 12-1 momentum) with "
+        "three stated exits (a rank band, a re-underwrite at max hold, a wide trailing stop), "
+        "benchmarked against the market and against both existing momentum policies over the same "
+        "window, universe, cost model and benchmark.*",
+        "",
+        "## Window and setup",
+        "",
+        f"- {reference.start.isoformat()} -> {reference.terminal.isoformat()} "
+        f"({reference.sessions} sessions)",
+        f"- Opening capital: {_rupees(reference.opening_cash)}; basket size {top_n}, equal weight",
+        f"- Mean investable universe per decision: {reference.mean_universe}",
+        f"- Benchmark: {_benchmark_label(reference)} — {_pct(reference.comparison.benchmark_xirr)} "
+        "XIRR on identical cashflows",
+        f"- Signal source: {'L2 back-adjusted' if reference.adjusted else 'raw L1'} closes; "
+        "execution, sizing and marks are raw (invariant #3)",
+        "",
+        "## The comparison",
+        "",
+        "| Policy | XIRR | Excess | Max DD | Round trips | Mean hold | Median hold | Costs |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for arm in (*baselines, *swing):
+        run = arm.run
+        mean_hold, median_hold, closed = _holding_periods(run.result.journal)
+        excess = run.comparison.portfolio_xirr - run.comparison.benchmark_xirr
+        lines.append(
+            f"| {arm.label} | {_pct(run.comparison.portfolio_xirr)} | {_pct(excess)} | "
+            f"{_pct(run.max_drawdown)} | {closed} | {mean_hold} | {median_hold} | "
+            f"{_rupees(run.total_charges)} |"
+        )
+    lines += [
+        "",
+        "## What each swing arm changes",
+        "",
+        "| Arm | Change against the default |",
+        "| --- | --- |",
+        *(f"| {arm.label} | {arm.note} |" for arm in swing),
+        "",
+        "## Reading it",
+        "",
+        "- **Round trips** counts *closed* positions (a first buy through the sell that flattens "
+        "it), not journal entries: a name still held at the terminal has no holding period yet and "
+        "is excluded, and an exit that could not fill is not counted twice. It is the honest "
+        "turnover number for a comparison whose whole subject is how often to trade.",
+        "- **Mean hold** is the realised answer to the 7-90 day question. It is set by the *band*, "
+        "not by the calendar: the cadence rows change how often a decision is made, the band rows "
+        "change how far a name may drift before it is sold, and only the second moves the holding "
+        "period much.",
+        "- **The exit rows are the stop ablation.** Measured separately on 33,106 forward paths, a "
+        "tight stop cuts per-trade net return (8% stop: 5.50% against 6.33% for no stop) and turns "
+        "a +3.4% median into -5.5%, because a momentum name's ordinary path passes through an 8% "
+        "drawdown. A wide trailing stop is close to return-neutral and is carried as tail "
+        "insurance, not as a return source.",
+        "- **The signal rows are the composite's justification.** If the three-leg row does not "
+        "beat all three single-leg rows, the composite is not earning its complexity.",
+        "- **Do not read any excess figure as alpha.** The benchmark is a computed/proxy total-"
+        "return series, not the licensed feed (M9.4). The table's value is the *relative* standing "
+        "of policies measured against one identical benchmark.",
+        "",
+        "## Honest limits of this measurement",
+        "",
+        "- **The delivery leg's coverage varies with the era.** NSE's `deliv_pct` is populated on "
+        "about 65% of 2016 prints rising to about 86% by 2026; a candidate with no delivery print "
+        "in its window is scored at the cross-section's median rather than dropped, so the "
+        "candidate set does not silently change with coverage. Early-window delivery results are "
+        "measured on thinner data than late-window ones.",
+        "- **Index membership is not historical.** The store holds one constituents snapshot, so "
+        "the investable screen is the liquidity floor alone (M9.3's stated fallback). The universe "
+        "is survivorship-safe through L1 listing windows, but it is not the index's own as-of "
+        "membership.",
+        "- **Slippage is a model, not a measurement.** Fills price off the next session's open "
+        "with a participation-scaled slippage (`execution.sim_broker`); a real book at this "
+        "cadence would discover its own impact. Higher-turnover arms carry more of this model "
+        "risk than lower-turnover ones — a reason to prefer the slower arms at equal return.",
+        "- **The defaults were not fitted to this table, but the delivery window was chosen "
+        "from measurement** (21 sessions over 5, on both return and stability) and the band "
+        "default is a round 3x multiple whose alternatives this table sweeps. Both are stated "
+        "rather than implied.",
+        "",
+        "## Run digests (determinism)",
+        "",
+        *(f"- **{arm.label}:** `{arm.run.result.digest()}`" for arm in (*baselines, *swing)),
+        "",
+    ]
     return "\n".join(lines) + "\n"
 
 
