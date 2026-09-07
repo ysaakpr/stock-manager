@@ -390,3 +390,70 @@ machine. The 351 trading `INF` ISINs have no scheme master (193 in the master vi
    period-column refusals are a parser change; both offline except the 710 downloads.
 8. **Ops**: rebuild the app image on every sync; schedule the L0 sweep, the sentinel and the daily
    jobs; make an off-host copy of the server-only L0.
+
+---
+
+## Addendum, 2026-09-07 afternoon — the L2 fixes, applied and re-verified on the server
+
+Four commits (`5221551`, `66fbde5`, `b9f31fa`, `61ad8c3`), gate green, pushed; the server synced to
+`61ad8c3` and ran `lineage_rebuild` (2 min 54 s, rollback dump `~/campaign/pre-l2fix-20260907-060325.dump`):
+
+| Stage | Before | After |
+|---|---|---|
+| NSE actions replayed from L0 | 12,477 | 12,505 (compound lines now parse: `Bonus 2:1/Dividend…`) |
+| Reconciliation queue (open flags) | 10,371 | **403** — 9,970 resolved as superseded |
+| `adjustment_factors` rows | 2,681 on 1,820 ISINs | 2,784 on 1,823 ISINs |
+| L2 partitions | 2,237 (only ever-invalidated ISINs) | **3,349** — 3,444 redrained + 1,112 filled |
+| NSE EQ ISINs (not retired) without L2 | 1,100 | **0** |
+| Currently trading NSE EQ names in L2 | 1,923 of 2,716 | **2,714 of 2,716** (the two are reissued this month) |
+| Split/bonus events since 2016-09 with no factor | 71 | 49 (BSE `unquantified` text; no ratio to apply) |
+| Yahoo: names fully consistent / no L2 partition | 71 / 11 | **84 / 0** ([`l2-vs-yahoo-2026-09-07-after.md`](l2-vs-yahoo-2026-09-07-after.md)) |
+| Yahoo: persistent shifts | 26 on 16 names | 23 on 14 — UNOMINDA, HINDPETRO and BEARDSELL's 2017 split are gone |
+
+UNOMINDA now carries 0.2 / **0.333** / 0.5; HINDPETRO 0.333 / **0.667** / 0.667; BEARDSELL 0.1667
+(the 1:5 bonus and the 10→2 split on one line); ADANIGREEN and ETERNAL have partitions with an
+empty chain. Every remaining Yahoo shift is a demerger or rights issue Yahoo adjusts and this
+platform marks structural (RELIANCE, TATACHEM, ADANIENT, CESC, STAR, GFLLIMITED, CHOLAHLDNG,
+BHARTIARTL), Yahoo's own TRENT inconsistency, PATANJALI's insolvency relisting, or an illiquid
+name (GLOBE, HBSL, ORTINGLOBE).
+
+**What the fixes did not close, measured:**
+
+- **Lineage edges with a price break across the stitch: 86 of 399** (35 corroborated, 51 derived;
+  was 73 with 24 successors having no L2 at all). A derived edge's reissue ratio is unknown to
+  the system — the feed row was dated outside the two-session window, or the retired ISIN's
+  action could not be filed (below). The stitched history is continuous in *name* but not in
+  *price* across those 86 boundaries; a consumer should treat them as structural breaks.
+- **Retired ISINs are not in the identity master**, so a corporate action filed against one
+  (ASTRAL's 2019 and 2021 bonuses under its pre-split ISIN, 112 feed events in all) is recorded
+  as an unresolved identity and never becomes a factor. 8 filled partitions show a split-shaped
+  jump for exactly this reason; the rest of the 112 are on names below ₹5 or before the window.
+  Seeding the master with the ISINs L1 has observed trading is the fix (D2, not L2).
+- Of the **382 large day-over-day moves** in L2 now (256 before the fill added 1,112 names),
+  357 coincide with no corporate action and no feed row: genuine moves in illiquid names, and
+  re-entries after a trade-for-trade period the EQ-only stitch drops (§4.2, unchanged).
+- The 403 open flags: 158 dividend `RATIO_MISMATCH`, 156 single-source splits with no stated
+  ratio, 82 single-source dividends, 7 ex-date mismatches.
+
+**The backtest on the rebuilt L2.** The ten-year adjusted run first died a minute in: a stitched
+survivor (GOLDIAM, `INE025B01025`, 2017-10-03) has L2 bars on sessions L1 files under its retired
+ISIN, so neither the liquidity scan nor the backtest's own day map could name its primary exchange
+and `canonical_daily` refused the whole day. Fixed in `8ab8377` + `daad207`: an ISIN only one
+venue printed takes that venue. `python -m backtest.run --policy naive_momentum --from 2016-09-02
+--to 2026-08-31 --delta-report` on the server at `daad207`
+([`M9-adjusted-backtest-report.md`](M9-adjusted-backtest-report.md)):
+
+| | Raw L1 signal | L2 adjusted signal |
+|---|---|---|
+| Sessions / rebalances | 2,470 / 120 | 2,470 / 120 |
+| Portfolio XIRR | 11.67 % | 10.92 % |
+| Turnover (fills) | 3,147 | 3,251 |
+| Total costs | ₹92,377 | ₹89,018 |
+| Replay time | 50.0 s | 52.5 s |
+| Tracebacks / PIT violations | 0 / 0 | 0 / 0 |
+
+The adjusted signal costs 0.75 pp of XIRR against the raw one: the raw run was buying fake
+post-split "momentum" and the adjusted run is not. The report's prose still says the store holds
+no corporate actions — that text is the M9.2 template, written when it was true, not a measurement;
+the digests differ because the factors are real now. **Determinism (M9.2 acceptance 3):** a second, independent run on the same lake produced the same two digests — raw `8deb0088…a559c20`, adjusted `dba85e3b…962d0ea` — so the rebuilt L2 replays byte-identically. The report's template text was corrected in the same session so its prose follows the runs rather than asserting an empty store.
+
