@@ -15,7 +15,7 @@ With all six off the policy is the naive top-N policy exactly (the parity is pin
 
 ## Data reality
 
-Every run reads the **raw** L1 momentum signal (`adjusted=False`, the M9.2 baseline; the adjusted-vs-raw delta is the M9.2 report's subject, not this one's). The universe is the M9.3 investable/liquid set (as-of index membership ∩ a median-turnover floor; the store holds no historical membership snapshots, so the liquidity floor is what narrows it). The benchmark is the broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the close-all backfill is gated, AGENTIC_CONTEXT B1), and the regime overlay reads the same proxy index. Look-backs (the 12-month and 1-month reference closes, the volatility points) walk the full L1 calendar, so the first rebalance of the window already has a signal — earlier editions of this report held cash for the window's first year for want of one.
+Every arm reads the **raw** L1 momentum signal (`adjusted=False`, the pre-M9.2 baseline; the adjusted-vs-raw delta is the M9.2 report's subject, not this one's). The universe is the M9.3 investable/liquid set (as-of index membership ∩ a median-turnover floor; the store holds no historical membership snapshots, so the liquidity floor is what narrows it). The benchmark is the broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the close-all backfill is gated, AGENTIC_CONTEXT B1), and the regime overlay reads the same proxy index. Look-backs (the 12-month and 1-month reference closes, the volatility points) walk the full L1 calendar, so the first rebalance of the window already has a signal — earlier editions of this report held cash for the window's first year for want of one.
 
 ## Window
 
