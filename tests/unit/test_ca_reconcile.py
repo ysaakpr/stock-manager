@@ -328,8 +328,9 @@ def test_a_disagreed_action_never_reaches_the_factor_chain() -> None:
 
     loaded = load_reconciled_actions(cast("Connection", conn))
     assert {a.isin for a in loaded} == {INFY}
-    # both agreeing source rows are marked reconciled; the two disagreeing ones are not
-    assert len(loaded) == 2
+    # both agreeing source rows are marked reconciled and come back as the *one* event they
+    # describe (`collapse_reconciled_rows`); the two disagreeing ones are absent altogether
+    assert len(loaded) == 1
     assert all(a.action_type is ActionType.SPLIT for a in loaded)
 
     loaded_tcs = load_reconciled_actions(cast("Connection", conn), isin=TCS)

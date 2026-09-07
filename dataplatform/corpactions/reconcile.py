@@ -79,6 +79,7 @@ __all__ = [
     "ReconciliationReason",
     "ReconciliationResult",
     "SingleSourcePolicy",
+    "collapse_reconciled_rows",
     "eligible_for_factor_chain",
     "load_reconciled_actions",
     "persist_reconciliation",
@@ -626,6 +627,97 @@ def reconcile(
     return ReconciliationResult(reconciled=tuple(reconciled), queue=tuple(queue))
 
 
+def collapse_reconciled_rows(
+    rows: Iterable[CorporateAction],
+    *,
+    ex_date_tolerance_days: int = DEFAULT_EX_DATE_TOLERANCE_DAYS,
+) -> tuple[CorporateAction, ...]:
+    """One `CorporateAction` per reconciled *event*, however many feeds published it.
+
+    `corporate_actions` keeps one row per `(isin, ex_date, action_type, source)`, so an event both
+    exchanges reported is two rows, both marked reconciled. Every consumer downstream of the
+    reconciled set reasons per event: `build_factor_chain` multiplies the factors of all actions
+    sharing an ex-date, `total_return_series` reinvests every dividend it is handed. Handed both
+    rows, they count the event twice — a 10→2 split the feeds agreed on became `0.2 x 0.2`, and a
+    ₹5 dividend both reported was reinvested as ₹10. The laptop, holding one feed, never showed it;
+    the first store with both (the server, 2026-09-07) squared 548 split/bonus events on 412 ISINs.
+
+    Pairs the rows exactly as `reconcile` paired them — same `(ISIN, type)` grouping, same
+    nearest-ex-date matching within the same tolerance — and folds each pair into one action with
+    the reconciliation's canonical fields: the earlier ex-date, the later knowable date, the first
+    stated record and announcement dates, and the terms the feeds agreed on or the one feed that
+    stated them (`_quantified_fill`). The row carrying those terms carries the event — its source,
+    raw text and L0 key — so a factor built on it still points at real evidence. A row with no
+    counterpart passes through untouched.
+
+    What it never does: pick between two reconciled rows that *contradict*. Two rows marked
+    reconciled whose terms neither agree nor fill can only mean the marks are stale relative to the
+    rules, and that raises `ReconcileError` rather than building a factor on a guess. Three sources
+    for one event is a malformed store, and raises for the same reason `reconcile` does.
+    """
+    tolerance = timedelta(days=ex_date_tolerance_days)
+    grouped: dict[tuple[str, ActionType], list[CorporateAction]] = defaultdict(list)
+    for row in rows:
+        grouped[(row.isin, row.action_type)].append(row)
+
+    folded: list[CorporateAction] = []
+    for (isin, action_type), group in grouped.items():
+        by_source: dict[str, list[CorporateAction]] = defaultdict(list)
+        for row in group:
+            by_source[row.source].append(row)
+        if len(by_source) > 2:
+            raise ReconcileError(
+                f"{isin} {action_type.value}: {len(by_source)} sources "
+                f"({', '.join(sorted(by_source))}); reconciliation is defined for two exchanges"
+            )
+        if len(by_source) == 1:
+            folded.extend(group)
+            continue
+        left_source, right_source = sorted(by_source)
+        pairs, unmatched_left, unmatched_right = _match_by_ex_date(
+            by_source[left_source], by_source[right_source], tolerance
+        )
+        folded.extend(_fold_pair(left, right) for left, right in pairs)
+        folded.extend(unmatched_left)
+        folded.extend(unmatched_right)
+
+    folded.sort(key=lambda a: (a.isin, a.ex_date, a.action_type.value, a.source))
+    return tuple(folded)
+
+
+def _fold_pair(left: CorporateAction, right: CorporateAction) -> CorporateAction:
+    """Two reconciled feed rows of one event, as the one action the chain may count once."""
+    if _terms_agree(left.terms, right.terms):
+        terms, carrier = left.terms, left
+    else:
+        filled = _quantified_fill(left.terms, right.terms)
+        if filled is None:
+            raise ReconcileError(
+                f"{left.isin} {left.action_type.value} on {left.ex_date.isoformat()}: rows from "
+                f"{left.source} ({describe(left.action_type, left.terms)!r}) and {right.source} "
+                f"({describe(right.action_type, right.terms)!r}) are both marked reconciled but "
+                "state different terms; the reconciliation marks are stale — re-run the pass "
+                "rather than build a factor on a guess"
+            )
+        terms = filled
+        # `_quantified_fill` returns one side's own terms object; that side stated the numbers.
+        carrier = left if filled == left.terms else right
+    return carrier.model_copy(
+        update={
+            "ex_date": min(left.ex_date, right.ex_date),
+            "knowable_date": max(left.knowable_date, right.knowable_date),
+            "record_date": left.record_date if left.record_date is not None else right.record_date,
+            "announcement_date": (
+                left.announcement_date
+                if left.announcement_date is not None
+                else right.announcement_date
+            ),
+            "filed_against_isin": left.filed_against_isin or right.filed_against_isin,
+            "terms": terms,
+        }
+    )
+
+
 def eligible_for_factor_chain(result: ReconciliationResult) -> tuple[ReconciledAction, ...]:
     """The only actions M2.4 may build factors from: the reconciled ones, in-memory.
 
@@ -796,13 +888,17 @@ def persist_reconciliation(
 def load_reconciled_actions(
     conn: Connection, *, isin: str | None = None
 ) -> tuple[CorporateAction, ...]:
-    """The factor chain's single door: corporate actions marked `reconciled = true`, only.
+    """The factor chain's single door: corporate actions marked `reconciled = true`, one per event.
 
     This is where invariant "an unreconciled action never feeds a factor" is enforced at the
     database boundary — M2.4 reads its actions through here, never off the raw table, so a row the
     feeds disagreed on (or that only one feed published) is physically absent from the factor
     chain's input until a human resolves it. Terms come back through the same discriminated adapter
     that wrote them, so an illegal `(type, terms)` pair fails here rather than in a factor.
+
+    The rows come back *collapsed* (`collapse_reconciled_rows`): an event both feeds published is
+    two reconciled rows in the table and exactly one action here, because everything behind this
+    door counts per event and would otherwise count it twice.
     """
     sql = _LOAD_RECONCILED_SQL
     params: tuple[object, ...] = ()
@@ -814,7 +910,7 @@ def load_reconciled_actions(
     from dataplatform.ingest.corp_actions import CorporateAction
 
     rows = conn.execute(sql, params).fetchall()
-    return tuple(
+    return collapse_reconciled_rows(
         CorporateAction(
             isin=str(row[0]),
             ex_date=row[1],
