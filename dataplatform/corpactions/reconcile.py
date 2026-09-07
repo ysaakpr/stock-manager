@@ -485,6 +485,20 @@ def _reconcile_pair(
     )
 
 
+def _acceptable_alone(action: CorporateAction) -> bool:
+    """Whether `SingleSourcePolicy.ACCEPT` may admit this one-feed action to the factor chain.
+
+    A price event whose one feed never stated a ratio cannot become a factor, and ACCEPT must not
+    pretend otherwise: `_event_factors` raises on it, and because that raise happens inside the
+    recompute it takes every *other* ISIN's factors down with it. Such an action is queued instead —
+    a human (or a later feed) supplies the number. A dividend is different: an unquantified one is a
+    known-unknown the chain already tolerates, so only the share-basis events are held back.
+    """
+    return not (
+        action.action_type in PRICE_EVENT_TYPES and isinstance(action.terms, UnquantifiedTerms)
+    )
+
+
 def _accept_single_source(action: CorporateAction) -> ReconciledAction:
     """Admit a single-feed action to the factor chain under `SingleSourcePolicy.ACCEPT`.
 
@@ -536,6 +550,22 @@ def reconcile(
     reconciled: list[ReconciledAction] = []
     queue: list[ReconciliationConflict] = []
 
+    def file_single_source(action: CorporateAction, isin: str, action_type: ActionType) -> None:
+        """File one action no second feed published: accept it or queue it, per the policy."""
+        if single_source_policy is SingleSourcePolicy.ACCEPT and _acceptable_alone(action):
+            # Owner-ratified: trust the one feed, but stamp cross_verified=False so the factor it
+            # feeds is never mistaken for a two-feed agreement.
+            reconciled.append(_accept_single_source(action))
+        else:
+            queue.append(
+                ReconciliationConflict(
+                    reason=ReconciliationReason.SINGLE_SOURCE,
+                    isin=isin,
+                    action_type=action_type,
+                    records=(action,),
+                )
+            )
+
     for (isin, action_type), group in grouped.items():
         by_source: dict[str, list[CorporateAction]] = defaultdict(list)
         for action in group:
@@ -549,31 +579,7 @@ def reconcile(
 
         if len(by_source) == 1:
             for action in group:
-                # A price event whose one feed never stated a ratio cannot become a factor, and
-                # ACCEPT must not pretend otherwise: `_event_factors` raises on it, and because
-                # that raise happens inside the recompute it takes every *other* ISIN's factors
-                # down with it. Queue it instead — a human (or a later feed) supplies the number.
-                # A dividend is different: an unquantified one is a known-unknown the chain
-                # already tolerates, so only the share-basis events are held back here.
-                unquantifiable_price_event = action.action_type in PRICE_EVENT_TYPES and isinstance(
-                    action.terms, UnquantifiedTerms
-                )
-                if (
-                    single_source_policy is SingleSourcePolicy.ACCEPT
-                    and not unquantifiable_price_event
-                ):
-                    # Owner-ratified: trust the one feed, but stamp cross_verified=False so the
-                    # factor it feeds is never mistaken for a two-feed agreement.
-                    reconciled.append(_accept_single_source(action))
-                else:
-                    queue.append(
-                        ReconciliationConflict(
-                            reason=ReconciliationReason.SINGLE_SOURCE,
-                            isin=isin,
-                            action_type=action_type,
-                            records=(action,),
-                        )
-                    )
+                file_single_source(action, isin, action_type)
             continue
 
         left_source, right_source = sorted(by_source)
@@ -607,7 +613,9 @@ def reconcile(
                     ),
                 )
             )
-        else:
+        elif unmatched_left and unmatched_right:
+            # Leftovers on both sides: some may be one event the two feeds dated differently, and
+            # which ones is a guess. A disagreement is queued whatever the policy.
             for action in (*unmatched_left, *unmatched_right):
                 queue.append(
                     ReconciliationConflict(
@@ -617,6 +625,15 @@ def reconcile(
                         records=(action,),
                     )
                 )
+        else:
+            # Leftovers on one side only: events the other feed never published at all, single-
+            # source in exactly the sense the policy governs. Until 2026-09-07 this branch queued
+            # them regardless of policy, so ACCEPT applied to a name only when *every* action of
+            # that type was one feed's — UNOMINDA's 2:1 bonus of 2018 (BSE-only, NSE's line was a
+            # compound string the parser refused) stayed unadjusted because NSE had published the
+            # 2016 and 2022 bonuses. Same event, same evidence, different verdict by accident.
+            for action in (*unmatched_left, *unmatched_right):
+                file_single_source(action, isin, action_type)
 
     _LOG.info(
         "ca.reconciled",

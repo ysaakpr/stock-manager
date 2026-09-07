@@ -241,6 +241,69 @@ def test_accept_policy_still_queues_a_real_disagreement() -> None:
     assert conflict.reason is ReconciliationReason.RATIO_MISMATCH
 
 
+def test_accept_admits_the_one_feed_leftover_in_a_two_feed_group() -> None:
+    """The policy is about the action, not the group it sits in.
+
+    NSE and BSE agree on the 2024 split; only BSE published the 2018 one (NSE's line was a compound
+    string the parser refused). Under ACCEPT the 2018 split is single-source in exactly the sense
+    the policy governs — before 2026-09-07 it was queued because the group happened to have two
+    feeds, and UNOMINDA's 2:1 bonus stayed unadjusted in L2 for that reason alone.
+    """
+    nse_2024 = split(INFY, NSE, date(2024, 1, 25), "10", "2", "FV SPLIT 10 TO 2")
+    bse_2024 = split(INFY, BSE, date(2024, 1, 25), "10", "2", "Split 10 to 2")
+    bse_2018 = split(INFY, BSE, date(2018, 7, 11), "100", "10", "Split 100 to 10")
+
+    result = reconcile(
+        [nse_2024, bse_2024, bse_2018], single_source_policy=SingleSourcePolicy.ACCEPT
+    )
+
+    assert not result.queue
+    by_date = {r.ex_date: r for r in result.reconciled}
+    assert by_date[date(2024, 1, 25)].cross_verified is True
+    assert by_date[date(2018, 7, 11)].cross_verified is False
+    assert by_date[date(2018, 7, 11)].source_ids == (BSE,)
+
+
+def test_queue_keeps_the_one_feed_leftover_in_a_two_feed_group() -> None:
+    """Under the strict default the same leftover is a SINGLE_SOURCE conflict, as before."""
+    nse_2024 = split(INFY, NSE, date(2024, 1, 25), "10", "2", "FV SPLIT 10 TO 2")
+    bse_2024 = split(INFY, BSE, date(2024, 1, 25), "10", "2", "Split 10 to 2")
+    bse_2018 = split(INFY, BSE, date(2018, 7, 11), "100", "10", "Split 100 to 10")
+
+    result = reconcile([nse_2024, bse_2024, bse_2018])
+
+    assert [r.ex_date for r in result.reconciled] == [date(2024, 1, 25)]
+    (conflict,) = result.queue
+    assert conflict.reason is ReconciliationReason.SINGLE_SOURCE
+    assert conflict.records[0].ex_date == date(2018, 7, 11)
+
+
+def test_accept_never_touches_leftovers_on_both_sides() -> None:
+    """Two feeds each with an unpaired action may be one event dated differently, or two events;
+    telling which is a guess, so ACCEPT leaves every one of them in the queue."""
+    matched_nse = split(INFY, NSE, date(2024, 1, 25), "10", "2", "FV SPLIT 10 TO 2")
+    matched_bse = split(INFY, BSE, date(2024, 1, 25), "10", "2", "Split 10 to 2")
+    nse_only = split(INFY, NSE, date(2018, 7, 11), "100", "10", "FV SPLIT 100 TO 10")
+    bse_only = split(INFY, BSE, date(2018, 9, 20), "100", "10", "Split 100 to 10")  # 71 days off
+
+    one_each = reconcile(
+        [matched_nse, matched_bse, nse_only, bse_only],
+        single_source_policy=SingleSourcePolicy.ACCEPT,
+    )
+    assert [r.ex_date for r in one_each.reconciled] == [date(2024, 1, 25)]
+    (conflict,) = one_each.queue
+    assert conflict.reason is ReconciliationReason.EX_DATE_MISMATCH
+
+    bse_only_2 = split(INFY, BSE, date(2019, 3, 1), "10", "1", "Split 10 to 1")
+    uneven = reconcile(
+        [matched_nse, matched_bse, nse_only, bse_only, bse_only_2],
+        single_source_policy=SingleSourcePolicy.ACCEPT,
+    )
+    assert [r.ex_date for r in uneven.reconciled] == [date(2024, 1, 25)]
+    assert {c.reason for c in uneven.queue} == {ReconciliationReason.SINGLE_SOURCE}
+    assert len(uneven.queue) == 3
+
+
 def test_a_ratio_disagreement_is_visible_via_status_quality() -> None:
     """The clincher for acceptance 2: persist a mismatch, read it back through /status/quality.
 
