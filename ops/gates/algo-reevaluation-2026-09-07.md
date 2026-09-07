@@ -33,6 +33,11 @@ this note is the cross-report reading.
   **12-1 momentum becomes the best single toggle over the decade at 14.92 %** (+1.60 pp on the
   adjusted signal, where it was worth +1.11 pp on raw). Read the adjusted numbers as the live
   estimate and the raw ones as history.
+- **The momentum arms lose that ~1.5 pp to newly-split names, not to the adjustment.** Decomposed
+  on a fixed candidate set, back-adjusting the closes is worth **+0.75 pp** (full universe, decade)
+  and roughly nothing once the liquidity screen has run; the shortfall is entirely the names within
+  twelve months of a face-value split that only L2's stitched history makes rankable, which cost
+  −1.38 to −2.04 pp on every arm measured. See "The split, measured".
 
 ## Fundamentals arms — identical window, old lake vs rebuilt lake
 
@@ -122,10 +127,9 @@ That last line is the one genuinely new fact the rebuild produced, and it deserv
 corporate-action backfill, adjusted and raw were byte-identical (an action-free store makes every
 factor chain the identity), so no report had ever measured the gap. It is now real: 47,887
 reconciled actions, 1,544 splits and 1,676 bonuses, factors on 1,823 ISINs. **The adjusted signal
-being worse is not evidence that adjusting is wrong** — the raw signal reads a 2:1 split as a fake
-−50 % twelve-month return and drops the name, and over 2016-2026 that accidental "sell what just
-split" filter happened to pay. It is an artefact with no reason to persist; the adjusted number is
-the one to plan against, and the raw one is a coin-flip that landed well.
+being worse is not evidence that adjusting is wrong**, and the decomposition below shows why: on a
+fixed candidate set the adjusted signal *wins* by 0.75 pp. The whole of the shortfall is the extra
+names L2's stitched identities make rankable.
 
 ## Sector rotation
 
@@ -232,20 +236,42 @@ the server, over the 86 rebalances of 2019-07 → 2026-08:
   that reference. Net: **a name inside twelve months of a reissue is rankable in the adjusted run
   and invisible in the raw one.**
 
-Both effects are real and both are wanted — the price basis is M9.2's correction, the coverage is
-the lineage work making a reissued name visible to a rank at all. They are separated so that a
-change in one is never read as evidence about the other. `--delta-report` now runs the third arm
-that does the split (adjusted closes on L1's ISINs only, so the candidate set is the raw run's
-exactly) and reports `fixed − raw` as the price basis and `adjusted − fixed` as the coverage, the
-two summing to the total by construction. `--signal-l1-isins-only` puts the same restriction on any
-mode. **Those runs are pending** — commit `f90bed8` needs to reach origin before the server can
-sync it:
+### The split, measured
 
-```bash
-ops/remote.sh run uv run python -m backtest.run --policy naive_momentum --delta-report --from 2016-09-01 --to 2026-08-31
-ops/remote.sh run uv run python -m backtest.run --policy naive_momentum --delta-report --from 2019-07-01 --to 2026-08-31
-ops/remote.sh run uv run python -m backtest.run --policy fundamentals_value --fundamentals-report --from 2019-07-01 --to 2026-08-31 --signal-l1-isins-only
-```
+Four arms, run on `4bab8e0` with the middle one held to L1's ISINs
+(`--signal-l1-isins-only`), so its candidate set is the raw run's exactly and `fixed − raw` is the
+price basis alone. Reports in `decomposition-2026-09-07/` and `M9-adjusted-backtest-report.md`.
+
+| Arm / window | Raw | Adjusted, fixed universe | Adjusted | **Price basis** | **Coverage** | Total |
+| --- | --- | --- | --- | --- | --- | --- |
+| Naive, full universe, decade | 11.67% | 12.42% | 10.92% | **+0.75** | **−1.50** | −0.75 |
+| Naive, full universe, 2019-26 | 19.77% | 20.88% | 18.84% | **+1.11** | **−2.04** | −0.93 |
+| Naive, investable, 2019-26 | 17.85% | 17.67% | 16.29% | −0.18 | **−1.38** | −1.56 |
+| v2 all-on, investable, 2019-26 | 18.52% | 18.59% | 17.13% | +0.07 | **−1.46** | −1.39 |
+
+**This reverses the reading that stood before the split was measured.** Back-adjusting the closes
+does not cost anything: the price basis is **+0.75 pp** and **+1.11 pp** on the full universe and
+flat (−0.18 / +0.07) once the M9.3 liquidity screen has already removed the thin names where split
+corruption bites hardest. Exactly what M9.2 predicted, now measured rather than assumed.
+
+**Every bit of the adjusted arms' shortfall is the identity coverage** — −1.38 to −2.04 pp in all
+four measurements. Those are the ~21 names a rebalance that only the stitched series makes
+rankable, and they are, by construction, names within twelve months of a face-value split. A
+company splits its face value after a long run-up, so such a name enters a momentum top-N carrying
+a very high trailing return and then mean-reverts. **The raw runs were not beating the adjusted
+ones by ranking better; they were beating them by being unable to see freshly-split names at all.**
+
+That is a finding, not a knob. Excluding names within N months of a reissue would have been worth
+1.4-2.0 pp on every arm above, and the ingredients are in the store already
+(`isin_lineage.effective_date`) — but it must be stated as an a-priori parameter and tested like the
+M9.5 toggles, not fitted to these four rows. Nothing has been changed in any policy on the strength
+of it.
+
+The measurement itself stays available: `--delta-report` runs the three arms and prints the split,
+and `--signal-l1-isins-only` puts the restriction on any mode. It is a measurement setting — a live
+run wants the unrestricted source, because a reissued name invisible to the rank for a year is the
+bug the stitching fixed, and the right answer to its momentum being untrustworthy is a stated
+exclusion rather than a blind spot.
 
 ## Still open
 
