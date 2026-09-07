@@ -1993,6 +1993,45 @@ tasks:
     - "the a-priori parameters are stated and unchanged across the reported runs"
   verify: "uv run pytest tests/unit/test_fundamentals_value.py -q"
 
+- id: M10.7
+  title: Swing-composite policy — stated entry and exit for a 7-90 day holding period
+  milestone: M10
+  module: X2
+  autonomy: AUTO
+  deps: [M10.6, M9.5]
+  spec: |
+    Both momentum policies rotate monthly on one trailing-return signal, so neither states a holding
+    period or an exit rule: a name leaves the book only because the next month's rank moved. This
+    asks the other question — over a 7-90 day horizon, what should make you buy, and what should
+    make you sell — and answers it from the lake rather than from preference.
+
+    Entry is a rank-normalised composite (ranks, not z-scores: every one of these signals has a tail
+    that would let one name buy its way in on a single leg). The legs are 52-week-high proximity,
+    the trailing mean NSE delivery share — the highest-t-statistic signal in the store, which no
+    policy reads — and 12-1 momentum. Each leg fails outright in at least one sub-period and the
+    composite is significant in all of them; that, not the average, is the argument for combining.
+
+    Exit is three separate rules, because one cannot state a holding period: a rank band (a holding
+    is sold when it leaves a wider outer band, not when it leaves the buy set), a re-underwrite at
+    max hold (a still-qualifying name is carried — force-selling it pays a round trip to buy it
+    back), and a wide trailing stop checked every session. Tight stops and profit targets are to be
+    measured, not assumed: report what they cost.
+
+    The holding period is a cost decision. Alpha here accrues at a near-constant rate per week while
+    friction is paid per trade, so state the arithmetic and let it set the defaults rather than
+    picking a horizon. Trade frequency is raised by the rebalance interval, not by holding less.
+  deliverables: [backtest/policies/swing_composite.py, tests/unit/test_swing_composite.py, ops/gates/M10-swing-composite-report.md]
+  acceptance:
+    - "every entry and exit rule is pinned by an inversion test — reverse the rule and a test fails"
+    - "the PIT guard fires on both reads the policy makes: the signal and the per-session marks"
+    - "the report runs both momentum policies and every swing arm on one window, universe, cost
+       model and benchmark, so each row is the price of one change"
+    - "turnover is reported as closed round trips, not journal entries — an order that never filled
+       is not a trade"
+    - "the holding-period arithmetic (per-turn excess against the modelled round trip) is stated,
+       including where it is negative"
+  verify: "uv run pytest tests/unit/test_swing_composite.py -q"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # M11 — Macro backdrop (PIT economic + market-state series)
 # ─────────────────────────────────────────────────────────────────────────────

@@ -4189,78 +4189,100 @@ def _holding_periods(journal: Sequence[JournalEntry]) -> tuple[int, int, int]:
     return sum(spans) // len(spans), spans[len(spans) // 2], len(spans)
 
 
-def _swing_configs(top_n: int) -> list[tuple[str, str, SwingCompositeParameters]]:
+def _swing_configs(
+    top_n: int,
+) -> list[tuple[str, str, SwingCompositeParameters, UniverseParameters | None]]:
     """The arms of the M10.7 comparison: a default, then one axis moved at a time.
 
     Every arm changes exactly one thing against the default, so each row is readable as the price of
     that one change. The cadence and band rows answer the holding-period question directly; the exit
-    rows are the stop ablation; the signal rows are the leg ablation the composite claim rests on.
+    rows are the stop ablation; the signal rows are the leg ablation the composite claim rests on;
+    the last row raises the liquidity floor, which is not a strategy choice but a statement about
+    how much of the measured edge a real book could actually reach (see the report).
+
+    The fourth element of each row is a universe override, or ``None`` for the shared default.
     """
+
+    def arm(
+        label: str,
+        note: str,
+        params: SwingCompositeParameters,
+        universe: UniverseParameters | None = None,
+    ) -> tuple[str, str, SwingCompositeParameters, UniverseParameters | None]:
+        return label, note, params, universe
+
     return [
-        (
+        arm(
             "Swing composite (default)",
             "fortnightly, band 3x, 25% trail",
             SwingCompositeParameters(top_n=top_n),
         ),
         # ── cadence: how often a decision is made ──
-        (
+        arm(
             "Cadence: weekly",
             "rebalance every 5 sessions",
             SwingCompositeParameters(top_n=top_n, rebalance_interval_sessions=5),
         ),
-        (
+        arm(
             "Cadence: monthly",
             "rebalance every 21 sessions",
             SwingCompositeParameters(top_n=top_n, rebalance_interval_sessions=21),
         ),
-        # ── band: what actually sets turnover and therefore the holding period ──
-        (
+        # ── band: what actually sets turnover, and therefore the holding period ──
+        arm(
             "Band: 1.5x top_n",
             f"sell outside top-{top_n * 3 // 2}",
             SwingCompositeParameters(top_n=top_n, sell_band=top_n * 3 // 2),
         ),
-        (
+        arm(
             "Band: 5x top_n",
             f"sell outside top-{top_n * 5}",
             SwingCompositeParameters(top_n=top_n, sell_band=top_n * 5),
         ),
         # ── exits ──
-        (
+        arm(
             "Exit: no trailing stop",
             "band + max-hold only",
             SwingCompositeParameters(top_n=top_n, trailing_stop=None),
         ),
-        (
+        arm(
             "Exit: 12% trailing stop",
             "the tight stop, measured",
             SwingCompositeParameters(top_n=top_n, trailing_stop=Decimal("0.12")),
         ),
-        (
+        arm(
             "Exit: max hold 21 sessions",
             "re-underwrite monthly",
             SwingCompositeParameters(top_n=top_n, max_hold_sessions=21),
         ),
         # ── signal legs ──
-        (
+        arm(
             "Signal: delivery only",
             "delivery share alone",
             SwingCompositeParameters(top_n=top_n, weight_high=_ZERO, weight_momentum=_ZERO),
         ),
-        (
+        arm(
             "Signal: no delivery leg",
             "52w-high + 12-1 only",
             SwingCompositeParameters(top_n=top_n, weight_delivery=_ZERO),
         ),
-        (
+        arm(
             "Signal: 12-1 momentum only",
             "the v2 signal, swing cadence",
             SwingCompositeParameters(top_n=top_n, weight_high=_ZERO, weight_delivery=_ZERO),
         ),
         # ── risk screen ──
-        (
+        arm(
             "Screen: no volatility cut",
             "score the whole set",
             SwingCompositeParameters(top_n=top_n, exclude_vol_fraction=_ZERO),
+        ),
+        # ── reachability: the same policy on a universe a real book could fill ──
+        arm(
+            "Universe: 10x liquidity floor",
+            "median turnover floor 10cr, not 1cr",
+            SwingCompositeParameters(top_n=top_n),
+            UniverseParameters(median_turnover_floor=_DEFAULT_TURNOVER_FLOOR * 10),
         ),
     ]
 
@@ -4325,10 +4347,10 @@ def run_swing_report(
                 opening_cash=opening_cash,
                 data_root=data_root,
                 adjusted=adjusted,
-                universe=universe,
+                universe=universe if override is None else override,
             ),
         )
-        for label, note, params in _swing_configs(top_n)
+        for label, note, params, override in _swing_configs(top_n)
     ]
     return render_swing_report(baselines, swing, top_n=top_n)
 
@@ -4401,13 +4423,88 @@ def render_swing_report(
         "return series, not the licensed feed (M9.4). The table's value is the *relative* standing "
         "of policies measured against one identical benchmark.",
         "",
+        "## Signal stability — why three legs and not one",
+        "",
+        "Measured offline over the same lake (weekly cross-sections, top-20 baskets, excess over "
+        "the equal-weight investable universe at 63 sessions, t in brackets). This is the table "
+        "the composite exists for:",
+        "",
+        "| Signal | 2017-09..2020-03 | 2020-04..2023-03 | 2023-04..2026-09 | Full window |",
+        "| --- | --- | --- | --- | --- |",
+        "| 52-week-high proximity | 3.40% (4.0) | -0.32% (-0.4) | 0.79% (1.0) | 1.17% (2.4) |",
+        "| Delivery share | 3.17% (4.3) | 6.05% (4.5) | 1.24% (1.8) | 3.46% (6.0) |",
+        "| 12-1 momentum | 0.53% (0.7) | 3.04% (2.9) | 5.05% (6.2) | 3.04% (5.8) |",
+        "| **Composite** | **5.92% (6.6)** | **6.28% (6.6)** | **2.95% (4.0)** | **4.97% (9.8)** |",
+        "",
+        "**Every single leg fails outright in at least one of the three sub-periods** — the "
+        "52-week-high leg is negative through 2020-23, delivery is not significant after 2023, "
+        "and 12-1 is "
+        "not significant before 2020. The composite is significant in all three (t 6.6, 6.6, 4.0) "
+        "and beats every leg in every one. The three are not combined because they add on average; "
+        "they are combined because they fail at different times, which is the only argument for a "
+        "composite that survives contact with a sub-period split.",
+        "",
+        "It also says plainly that **the edge is weaker now than it was**: 2.95% in the most "
+        "recent stretch against ~6% in the two before it. Size any live deployment on the recent "
+        "column, not the full-window one.",
+        "",
+        "## Why the holding period does not go below about a month",
+        "",
+        "The composite's excess accrues at a near-constant ~0.2%/week out to 125 sessions — the "
+        "marginal five-day slice earns about as much at day 120 as at day 20, so there is no burst "
+        "to capture early. Alpha is therefore linear in time held while friction is paid per "
+        "*trade*: 0.223% statutory (`execution/costs/rates.yaml` — STT 0.1% each side, 0.015% "
+        "stamp, exchange/SEBI/GST) plus roughly 0.22% of modelled slippage, about 0.45% the round "
+        "trip, plus a flat DP charge on each sell.",
+        "",
+        "| Hold | Top-decile excess | Round trip | Net per turn |",
+        "| --- | --- | --- | --- |",
+        "| 5 sessions (~7 days) | 0.35% | 0.45% | **-0.10%** |",
+        "| 10 sessions (~14 days) | 0.68% | 0.45% | +0.23% |",
+        "| 21 sessions (~30 days) | 1.29% | 0.45% | +0.84% |",
+        "| 42 sessions (~60 days) | 2.36% | 0.45% | +1.91% |",
+        "| 63 sessions (~90 days) | 3.35% | 0.45% | +2.90% |",
+        "",
+        "The bottom of a 7-90 day band is underwater before the first trade settles. Identical "
+        "entries exited purely on time net about 20%/yr at a 10-session hold against about 28%/yr "
+        "at 63. This is why `min_hold_sessions` exists and why the default cadence sits at the "
+        "slow end: the policy trades *often* (a decision every fortnight) but *holds* for weeks.",
+        "",
+        "## How much of this edge is reachable",
+        "",
+        "The edge is concentrated in the smaller, thinner half of the investable set. Measured "
+        "offline over the same lake (top-20 composite baskets, excess at 63 sessions), moving only "
+        "the median-turnover floor:",
+        "",
+        "| Liquidity floor | Universe | Excess at 63 sessions | t | Median turnover of the picks |",
+        "| --- | --- | --- | --- | --- |",
+        "| Rs 1 crore (the M9.3 default) | 894 | 5.16% | 10.2 | Rs 4.3 crore |",
+        "| Rs 5 crore | 532 | 3.09% | 7.1 | Rs 19.3 crore |",
+        "| Rs 10 crore | 396 | 2.78% | 6.0 | Rs 41.0 crore |",
+        "| Rs 25 crore | 256 | 2.11% | 4.8 | Rs 105.9 crore |",
+        "| Rs 50 crore | 217 | 2.17% | 5.1 | Rs 170.1 crore |",
+        "",
+        "**Read the default rows as the optimistic end.** At the inherited Rs 1 crore floor the "
+        "median name a basket picks trades about Rs 4.3 crore a day, where the fill model's 10 bp "
+        "base slippage is a claim rather than a measurement — a real book would pay a spread this "
+        "backtest does not charge it. The edge does not vanish with size (it settles near 2.1% "
+        "in the Rs 25-50 crore universe, still comfortably significant), but it roughly halves. "
+        "The `Universe: 10x liquidity floor` arm above is the same policy measured through the "
+        "replay on the Rs 10 crore universe, and it is the row to plan a live book against.",
+        "",
         "## Honest limits of this measurement",
         "",
-        "- **The delivery leg's coverage varies with the era.** NSE's `deliv_pct` is populated on "
-        "about 65% of 2016 prints rising to about 86% by 2026; a candidate with no delivery print "
-        "in its window is scored at the cross-section's median rather than dropped, so the "
-        "candidate set does not silently change with coverage. Early-window delivery results are "
-        "measured on thinner data than late-window ones.",
+        "- **The delivery leg's coverage varies with the era, and the survivor tilt that implies "
+        "was tested rather than assumed.** A delivery row carries a symbol, never an ISIN, so it "
+        "is placed through the identity master, and names the master cannot reach (renamed, "
+        "merged, delisted) have no delivery — which would flatter an early-history edge. "
+        "Inside the *liquid* universe this policy trades, coverage runs 77% (2017) to 92% (2026), "
+        "well above the lake-wide 65%->86%, because liquid names are the ones the master resolves; "
+        "a candidate with no print is scored at the cross-section's median rather than dropped, so "
+        "the candidate set does not move with coverage. Forcing survivorship on the whole universe "
+        "(keeping only ISINs still printing in 2026) changes the delivery edge by at most 0.45pp "
+        "and the composite by at most 0.32pp, and *lowers* both in the early period. The decline "
+        "in the delivery leg after 2023 is therefore real, not a coverage artifact.",
         "- **Index membership is not historical.** The store holds one constituents snapshot, so "
         "the investable screen is the liquidity floor alone (M9.3's stated fallback). The universe "
         "is survivorship-safe through L1 listing windows, but it is not the index's own as-of "
