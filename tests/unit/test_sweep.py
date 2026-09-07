@@ -16,22 +16,29 @@ under test is the ordering and the rendering, never the replay.
 
 from __future__ import annotations
 
-from datetime import date
+from collections.abc import Sequence
+from dataclasses import fields
+from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
-from backtest.run import _SwingFeatures
+from backtest.policies.swing_composite import SwingCompositeParameters
+from backtest.run import BacktestError, _SwingFeatures
 from backtest.sweep import (
     ARMS,
+    DURATION_ARMS,
     HIGH_FLOOR,
     LOW_FLOOR,
     Arm,
     SweepResult,
     SweepRow,
+    Window,
+    WindowRole,
     render_sweep_report,
+    run_multi_window_sweep,
 )
 
 _SESSION = date(2020, 1, 1)
@@ -48,6 +55,9 @@ def _stub_run(*, xirr: str, drawdown: str, excess: str = "0.02") -> Any:
         max_drawdown=Decimal(drawdown),
         total_charges=Decimal("100000"),
         benchmark_index_name="NIFTY-TRI L1 proxy",
+        mean_universe=Decimal("908.9"),
+        # The replay result a row reaches through for turnover and for the determinism digest.
+        result=SimpleNamespace(journal=(), digest=lambda: "0" * 64),
     )
 
 
@@ -320,3 +330,379 @@ def test_the_verdict_attaches_window_floor_and_drawdown_when_the_bar_is_cleared(
     )
     assert "**Answer: the bar was cleared**" in report
     assert "31.00%" in report and "28.00%" in report and "₹1 crore/day" in report
+
+
+# ── M12.3: the duration grid on M10.7 itself ─────────────────────────────────────────────────────
+#
+# The grid is a comparison, not a search, and that is a structural claim rather than a stylistic
+# one: every arm must score on exactly M10.7's three legs (or the whole table stops being a
+# duration measurement and becomes a signal measurement), and every arm must differ from a *named*
+# reference by exactly the fields its note claims. Both are pinned below against a table declared
+# here, so a silent edit to a weight or a knob fails a test rather than a reading of the report.
+
+#: What each duration arm changes against its named reference: field -> (from, to). Declared here
+#: rather than derived, so the test disagrees with the arm list when either one moves.
+_EXPECTED_DURATION_CHANGES: dict[str, dict[str, tuple[object, object]]] = {
+    "M10.7 @ fortnightly / 21-session hold": {"max_hold_sessions": (63, 21)},
+    "M10.7 @ fortnightly / 42-session hold": {"max_hold_sessions": (63, 42)},
+    "M10.7 @ weekly / 21-session hold": {"rebalance_interval_sessions": (10, 5)},
+    "M10.7 @ weekly / 10-session hold": {
+        "max_hold_sessions": (21, 10),
+        # The forced companion: a 10-session re-underwrite with a 5-session floor would leave a
+        # name almost no room to be judged. The note states both.
+        "min_hold_sessions": (5, 2),
+    },
+    "M10.7 @ monthly / 63-session hold": {"rebalance_interval_sessions": (10, 21)},
+    "M10.7 @ monthly / 126-session hold": {"max_hold_sessions": (63, 126)},
+    "M10.7 @ quarterly / 126-session hold": {"rebalance_interval_sessions": (21, 63)},
+    "M10.7, band 1.5x top_n": {"sell_band": (60, 30)},
+    "M10.7, band 5x top_n": {"sell_band": (60, 100)},
+}
+
+
+def _swing_diff(left: Any, right: Any) -> dict[str, tuple[object, object]]:
+    """Every ``SwingCompositeParameters`` field on which two arms disagree."""
+    return {
+        field.name: (getattr(left, field.name), getattr(right, field.name))
+        for field in fields(left)
+        if getattr(left, field.name) != getattr(right, field.name)
+    }
+
+
+def test_the_duration_grid_covers_the_cadences_and_holds_the_owner_asked_for() -> None:
+    """weekly/10, weekly/21, fortnightly/21, fortnightly/42, fortnightly/63, monthly/63,
+    monthly/126, quarterly/126 — plus the band axis at the default cadence."""
+    grid = {
+        (arm.swing.rebalance_interval_sessions, arm.swing.max_hold_sessions)
+        for arm in DURATION_ARMS
+        if arm.swing is not None and arm.swing.sell_band == 60
+    }
+    assert grid == {(5, 10), (5, 21), (10, 21), (10, 42), (10, 63), (21, 63), (21, 126), (63, 126)}
+    bands = {arm.swing.sell_band for arm in DURATION_ARMS if arm.swing is not None}
+    assert bands == {30, 60, 100}  # 1.5x, 3x (the default) and 5x of a top-20 basket
+
+
+def test_every_duration_arm_is_distinct() -> None:
+    """A grid with two identical cells is a table that prices the same change twice."""
+    labels = [arm.label for arm in DURATION_ARMS]
+    assert len(labels) == len(set(labels))
+    configs = [arm.swing for arm in DURATION_ARMS if arm.swing is not None]
+    assert len(configs) == len({repr(config) for config in configs})
+
+
+def test_every_duration_arm_differs_from_its_reference_by_exactly_the_stated_change() -> None:
+    """The convention M12.2 set: a row is readable only as the price of one named change."""
+    by_label = {arm.label: arm for arm in DURATION_ARMS}
+    for arm in DURATION_ARMS:
+        if arm.label not in _EXPECTED_DURATION_CHANGES:
+            continue
+        reference = by_label[arm.reference]
+        assert reference.swing is not None and arm.swing is not None, arm.label
+        assert _swing_diff(reference.swing, arm.swing) == _EXPECTED_DURATION_CHANGES[arm.label], (
+            arm.label
+        )
+
+
+def test_every_duration_change_is_holding_period_machinery_and_nothing_else() -> None:
+    """A duration axis that quietly moved a weight would be measuring the signal instead."""
+    machinery = {
+        "rebalance_interval_sessions",
+        "max_hold_sessions",
+        "min_hold_sessions",
+        "sell_band",
+    }
+    for changes in _EXPECTED_DURATION_CHANGES.values():
+        assert set(changes) <= machinery
+
+
+def test_every_duration_arm_scores_on_exactly_the_m10_7_legs() -> None:
+    """The grid is on M10.7 *itself*: its three legs at weight 1, every M12.1 leg at zero."""
+    for arm in DURATION_ARMS:
+        if arm.swing is None:
+            continue
+        swing = arm.swing
+        assert (swing.weight_high, swing.weight_delivery, swing.weight_momentum) == (
+            Decimal("1"),
+            Decimal("1"),
+            Decimal("1"),
+        ), arm.label
+        for leg in (
+            "weight_return_5",
+            "weight_momentum_1m",
+            "weight_delivery_trend",
+            "weight_turnover_expansion",
+            "weight_ma_proximity",
+            "weight_volatility",
+        ):
+            assert getattr(swing, leg) == Decimal("0"), f"{arm.label}: {leg}"
+        # Everything else that is not duration machinery stays at the M10.7 default.
+        assert swing.top_n == 20 and swing.trailing_stop == Decimal("0.25"), arm.label
+        assert swing.regime_filter is False, arm.label
+        assert swing.exclude_vol_fraction == Decimal("0.10"), arm.label
+
+
+def test_the_duration_grid_keeps_the_reference_and_both_baselines() -> None:
+    """Every row is priced against something, and against the policies the repo already had."""
+    labels = {arm.label for arm in DURATION_ARMS}
+    assert "Swing composite (M10.7)" in labels
+    assert {"Naive momentum (M4.10)", "Momentum v2, all on (M9.5)"} <= labels
+    assert all(arm.reference == "—" or arm.reference in labels for arm in DURATION_ARMS)
+
+
+def test_the_default_duration_arm_is_untouched_m10_7() -> None:
+    """The reference row must still reproduce M10.7's measurement — nothing here perturbs it."""
+    reference = next(arm for arm in DURATION_ARMS if arm.label == "Swing composite (M10.7)")
+    assert reference.swing == SwingCompositeParameters()
+
+
+def test_the_m12_2_arm_list_is_not_disturbed_by_the_duration_grid() -> None:
+    """M12.2's sweep is a signal comparison with a campaign running against it; it does not move."""
+    assert len(ARMS) == 23
+    assert not any(arm.family == "duration" for arm in ARMS)
+
+
+# ── M12.3: many windows, one lake pass each ──────────────────────────────────────────────────────
+#
+# The acceptance criterion M12.2 set for one window generalises to the criterion this task has to
+# meet for several: a *second* pass over a window is the defect. Twelve arms on two floors over four
+# windows is 96 arm-runs; at one pass per arm-run that is 96 windowed feature queries instead of 4,
+# which is the difference between a campaign that finishes overnight and one that does not finish.
+# The stubs below make that countable without a lake.
+
+
+class _CountingFeatures:
+    """Records every ``load`` so a test can count the windowed passes rather than time them."""
+
+    def __init__(self) -> None:
+        self.loads: list[tuple[date, ...]] = []
+
+    def load(self, dates: Sequence[date]) -> None:
+        self.loads.append(tuple(dates))
+
+
+class _CountingLake:
+    """A ``SwingLake`` stand-in carrying only what ``run_sweep`` reads off one."""
+
+    def __init__(self, sessions: Sequence[date]) -> None:
+        self.sessions = tuple(sessions)
+        self.features = _CountingFeatures()
+        self.closed = False
+
+    @property
+    def first_session(self) -> date:
+        return self.sessions[0]
+
+    @property
+    def terminal(self) -> date:
+        return self.sessions[-1]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _install_stub_lake(
+    monkeypatch: pytest.MonkeyPatch, *, failing: str = ""
+) -> tuple[list[_CountingLake], list[tuple[date, date]]]:
+    """Replace the lake and the replay with counters; return the lakes opened and the windows."""
+    lakes: list[_CountingLake] = []
+    opened: list[tuple[date, date]] = []
+
+    def fake_open(**kwargs: Any) -> _CountingLake:
+        start, end = kwargs["start"], kwargs["end"]
+        opened.append((start, end))
+        span = (end - start).days
+        lake = _CountingLake([start + timedelta(days=offset) for offset in range(0, span, 7)])
+        lakes.append(lake)
+        return lake
+
+    def fake_run_arm(arm: Arm, **kwargs: Any) -> Any:
+        if failing and failing in arm.label:
+            raise BacktestError(f"{arm.label} could not run")
+        # The XIRR is a function of the window, so a report that averaged two windows would show a
+        # figure neither window produced.
+        start: date = kwargs["start"]
+        return _stub_run(xirr=f"0.{start.year - 2000:02d}", drawdown="0.25")
+
+    monkeypatch.setattr("backtest.sweep.open_swing_lake", fake_open)
+    monkeypatch.setattr("backtest.sweep._run_arm", fake_run_arm)
+    monkeypatch.setattr("backtest.sweep._holding_periods", lambda journal: (40, 30, 12))
+    return lakes, opened
+
+
+_WINDOWS = (
+    Window(label="A", start=date(2018, 1, 1), end=date(2019, 12, 31)),
+    Window(label="B", start=date(2020, 1, 1), end=date(2021, 12, 31)),
+    Window(label="C", start=date(2022, 1, 1), end=date(2023, 12, 31), role=WindowRole.SELECTION),
+    Window(label="D", start=date(2024, 1, 1), end=date(2025, 12, 31), role=WindowRole.VERIFICATION),
+)
+
+
+def test_each_window_gets_exactly_one_lake_pass_no_matter_how_many_arms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The invariant the whole campaign rests on: 4 windows x 12 arms x 2 floors is 4 passes."""
+    lakes, opened = _install_stub_lake(monkeypatch)
+    sweep = run_multi_window_sweep(
+        windows=_WINDOWS, arms=DURATION_ARMS, floors=(LOW_FLOOR, HIGH_FLOOR)
+    )
+    assert len(opened) == len(_WINDOWS)  # one open_swing_lake per window, not per arm-run
+    assert len(lakes) == len(_WINDOWS)
+    for lake in lakes:
+        assert len(lake.features.loads) == 1, "a second windowed pass is the defect"
+        assert lake.closed, "every window's lake is released before the next opens"
+    # ...and the arm-runs really did all happen against those four passes.
+    total = sum(len(entry.result.rows) for entry in sweep.windows)
+    assert total == len(_WINDOWS) * len(DURATION_ARMS) * 2
+
+
+def test_the_one_pass_loads_the_union_of_every_cadence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A weekly arm and a quarterly arm share one query, not two."""
+    lakes, _ = _install_stub_lake(monkeypatch)
+    run_multi_window_sweep(windows=_WINDOWS[:1], arms=DURATION_ARMS, floors=(LOW_FLOOR,))
+    (loaded,) = lakes[0].features.loads
+    sessions = lakes[0].sessions
+    expected = {
+        session
+        for arm in DURATION_ARMS
+        if arm.swing is not None
+        for session in sessions[:: arm.swing.rebalance_interval_sessions]
+    }
+    assert set(loaded) == expected
+    assert list(loaded) == sorted(loaded)
+
+
+def test_every_window_runs_every_arm_on_both_liquidity_floors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both floors, every arm, every window — the discovery number and the reachable one."""
+    _install_stub_lake(monkeypatch)
+    sweep = run_multi_window_sweep(
+        windows=_WINDOWS, arms=DURATION_ARMS, floors=(LOW_FLOOR, HIGH_FLOOR)
+    )
+    for entry in sweep.windows:
+        for floor in (LOW_FLOOR, HIGH_FLOOR):
+            ranked = entry.result.ranked(floor)
+            assert len(ranked) == len(DURATION_ARMS)
+            assert {row.arm.label for row in ranked} == {arm.label for arm in DURATION_ARMS}
+
+
+def test_a_failed_arm_keeps_its_row_on_every_window_and_every_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An arm that raises is reported as a failed arm — never dropped from a window's table."""
+    _install_stub_lake(monkeypatch, failing="quarterly")
+    sweep = run_multi_window_sweep(
+        windows=_WINDOWS, arms=DURATION_ARMS, floors=(LOW_FLOOR, HIGH_FLOOR)
+    )
+    for entry in sweep.windows:
+        for floor in (LOW_FLOOR, HIGH_FLOOR):
+            ranked = entry.result.ranked(floor)
+            assert len(ranked) == len(DURATION_ARMS), "the table did not shrink"
+            broken = [row for row in ranked if not row.ok]
+            assert len(broken) == 1
+            assert "quarterly" in broken[0].arm.label
+            assert broken[0].error is not None and "could not run" in broken[0].error
+
+
+def test_no_figure_is_pooled_across_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each window keeps its own rows; there is no accessor that merges two into one ranking."""
+    _install_stub_lake(monkeypatch)
+    sweep = run_multi_window_sweep(windows=_WINDOWS, arms=DURATION_ARMS[:1], floors=(LOW_FLOOR,))
+    xirrs = {entry.window.label: entry.result.ranked(LOW_FLOOR)[0].xirr for entry in sweep.windows}
+    assert len(set(xirrs.values())) == len(_WINDOWS), "the stub made every window differ"
+    # Every window's result is its own object, and none of them carries another's rows.
+    for entry in sweep.windows:
+        others = [e for e in sweep.windows if e is not entry]
+        assert all(entry.result is not other.result for other in others)
+        assert len(entry.result.rows) == 1
+    assert not hasattr(sweep, "pooled")
+    assert not hasattr(sweep, "mean_xirr")
+
+
+def test_the_selection_winner_is_frozen_before_verification_is_swept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The name on record is the one the selection window alone could produce."""
+    _, opened = _install_stub_lake(monkeypatch)
+    sweep = run_multi_window_sweep(windows=_WINDOWS, arms=DURATION_ARMS, floors=(LOW_FLOOR,))
+    selection = sweep.with_role(WindowRole.SELECTION)
+    assert selection is not None
+    assert sweep.selected == selection.result.ranked(LOW_FLOOR)[0].arm.label
+    # The selection window's lake was opened before the verification window's, so the choice could
+    # not have been informed by figures that did not exist yet.
+    assert opened.index((date(2022, 1, 1), date(2023, 12, 31))) < opened.index(
+        (date(2024, 1, 1), date(2025, 12, 31))
+    )
+
+
+@pytest.mark.parametrize(
+    ("windows", "message"),
+    [
+        ((), "at least one window"),
+        (
+            (
+                Window(label="dup", start=date(2018, 1, 1), end=date(2019, 1, 1)),
+                Window(label="dup", start=date(2020, 1, 1), end=date(2021, 1, 1)),
+            ),
+            "unique",
+        ),
+        (
+            (
+                Window(
+                    label="sel",
+                    start=date(2016, 9, 1),
+                    end=date(2021, 12, 31),
+                    role=WindowRole.SELECTION,
+                ),
+                Window(
+                    label="ver",
+                    start=date(2021, 9, 1),
+                    end=date(2026, 8, 31),
+                    role=WindowRole.VERIFICATION,
+                ),
+            ),
+            "close before verification opens",
+        ),
+        (
+            (
+                Window(
+                    label="ver",
+                    start=date(2021, 9, 1),
+                    end=date(2026, 8, 31),
+                    role=WindowRole.VERIFICATION,
+                ),
+                Window(
+                    label="sel",
+                    start=date(2016, 9, 1),
+                    end=date(2021, 8, 31),
+                    role=WindowRole.SELECTION,
+                ),
+            ),
+            "swept before the verification window",
+        ),
+        (
+            (
+                Window(
+                    label="ver",
+                    start=date(2021, 9, 1),
+                    end=date(2026, 8, 31),
+                    role=WindowRole.VERIFICATION,
+                ),
+            ),
+            "verifies nothing",
+        ),
+    ],
+)
+def test_a_window_list_that_cannot_be_read_honestly_is_refused(
+    windows: tuple[Window, ...], message: str
+) -> None:
+    """An overlap or a reordering leaks the answer into the choice, so it raises not warns."""
+    with pytest.raises(ValueError, match=message):
+        run_multi_window_sweep(windows=windows, arms=DURATION_ARMS[:1])
+
+
+def test_a_window_states_its_own_span() -> None:
+    with pytest.raises(ValueError, match="is before"):
+        Window(label="backwards", start=date(2021, 1, 1), end=date(2020, 1, 1))
+    with pytest.raises(ValueError, match="must be labelled"):
+        Window(label="  ", start=date(2020, 1, 1), end=date(2021, 1, 1))
