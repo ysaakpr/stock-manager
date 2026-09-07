@@ -435,12 +435,15 @@ def _bar_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> list[str
             f"- **{entry.window.label}** ({result.start} → {result.terminal}): "
             f"no arm cleared {_pct(BAR)} on either floor — {top}."
         )
-    lines += ["", _bar_verdict(cleared, floors), ""]
+    lines += ["", _bar_verdict(cleared, floors, windows=len(sweep.windows)), ""]
     return lines
 
 
 def _bar_verdict(
-    cleared: Sequence[tuple[str, Decimal, SweepRow]], floors: Sequence[Decimal]
+    cleared: Sequence[tuple[str, Decimal, SweepRow]],
+    floors: Sequence[Decimal],
+    *,
+    windows: int,
 ) -> str:
     """The one sentence a reader who reads nothing else should get."""
     if not cleared:
@@ -449,6 +452,7 @@ def _bar_verdict(
             "of these windows at either liquidity floor. The honest reading is the ranking and the "
             "holding-period arithmetic above, not a number that was not reached."
         )
+    cleared_windows = len({hit[0] for hit in cleared})
     reachable = [hit for hit in cleared if hit[1] == max(floors)]
     if not reachable:
         return (
@@ -460,9 +464,9 @@ def _bar_verdict(
         )
     return (
         f"**Answer: the bar was cleared** — including at the {_floor_label(max(floors))} floor. "
-        "Read each line above with its window, its floor, its drawdown and its duration attached; "
-        "those are conditions, not footnotes, and a bar cleared on one window of four is one "
-        "window of four."
+        "Read each line above with its window, its floor, its drawdown and its duration "
+        f"attached; those are conditions, not footnotes, and a bar cleared on {cleared_windows} "
+        f"of {windows} windows is exactly that."
     )
 
 
