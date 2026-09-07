@@ -37,6 +37,8 @@ from backtest.sweep import (
     SweepRow,
     Window,
     WindowRole,
+    _run_arm,
+    independent_passes,
     render_sweep_report,
     run_multi_window_sweep,
 )
@@ -346,12 +348,10 @@ _EXPECTED_DURATION_CHANGES: dict[str, dict[str, tuple[object, object]]] = {
     "M10.7 @ fortnightly / 21-session hold": {"max_hold_sessions": (63, 21)},
     "M10.7 @ fortnightly / 42-session hold": {"max_hold_sessions": (63, 42)},
     "M10.7 @ weekly / 21-session hold": {"rebalance_interval_sessions": (10, 5)},
-    "M10.7 @ weekly / 10-session hold": {
-        "max_hold_sessions": (21, 10),
-        # The forced companion: a 10-session re-underwrite with a 5-session floor would leave a
-        # name almost no room to be judged. The note states both.
-        "min_hold_sessions": (5, 2),
-    },
+    "M10.7 @ weekly / 10-session hold": {"max_hold_sessions": (21, 10)},
+    # The min-hold floor is *not* forced down by a 10-session re-underwrite — 5 < 10 is legal, so
+    # moving it too would have priced two knobs in one row. It gets its own arm instead.
+    "M10.7 @ weekly / 10-session hold, 2-session floor": {"min_hold_sessions": (5, 2)},
     "M10.7 @ monthly / 63-session hold": {"rebalance_interval_sessions": (10, 21)},
     "M10.7 @ monthly / 126-session hold": {"max_hold_sessions": (63, 126)},
     "M10.7 @ quarterly / 126-session hold": {"rebalance_interval_sessions": (21, 63)},
@@ -398,9 +398,10 @@ def test_every_duration_arm_differs_from_its_reference_by_exactly_the_stated_cha
             continue
         reference = by_label[arm.reference]
         assert reference.swing is not None and arm.swing is not None, arm.label
-        assert _swing_diff(reference.swing, arm.swing) == _EXPECTED_DURATION_CHANGES[arm.label], (
-            arm.label
-        )
+        diff = _swing_diff(reference.swing, arm.swing)
+        assert diff == _EXPECTED_DURATION_CHANGES[arm.label], arm.label
+        # "One stated change" means one, not "one plus whatever the note calls forced".
+        assert len(diff) == 1, f"{arm.label} moves {sorted(diff)} — that is a confounded row"
 
 
 def test_every_duration_change_is_holding_period_machinery_and_nothing_else() -> None:
@@ -464,10 +465,16 @@ def test_the_m12_2_arm_list_is_not_disturbed_by_the_duration_grid() -> None:
 # ── M12.3: many windows, one lake pass each ──────────────────────────────────────────────────────
 #
 # The acceptance criterion M12.2 set for one window generalises to the criterion this task has to
-# meet for several: a *second* pass over a window is the defect. Twelve arms on two floors over four
-# windows is 96 arm-runs; at one pass per arm-run that is 96 windowed feature queries instead of 4,
-# which is the difference between a campaign that finishes overnight and one that does not finish.
-# The stubs below make that countable without a lake.
+# meet for several: a *second shared* pass over a window is the defect. The stubs below make that
+# countable without a lake.
+#
+# **What these tests do not prove.** They monkeypatch `_run_arm`, so every read a real arm would
+# make disappears behind the patch. In particular the two momentum baselines open their own
+# `_L1Reader` and `QueryService` inside `run_naive_momentum` / `run_momentum_v2` and re-walk the
+# window — a window costs one shared pass *plus* `independent_passes(arms, floors)` traversals, and
+# no amount of counting `open_swing_lake` will see them. `test_the_baselines_do_not_share_the_lake`
+# below counts that separately, and it is the reason the report says "one shared pass, plus each
+# baseline's own" rather than "one pass".
 
 
 class _CountingFeatures:
@@ -540,7 +547,11 @@ _WINDOWS = (
 def test_each_window_gets_exactly_one_lake_pass_no_matter_how_many_arms(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The invariant the whole campaign rests on: 4 windows x 12 arms x 2 floors is 4 passes."""
+    """The shared-pass invariant: N windows cost N shared passes, whatever the arm count.
+
+    This counts `open_swing_lake` only, which is the *shared* pass. It says nothing about the
+    baselines' own traversals — see the module comment above and the baseline test below.
+    """
     lakes, opened = _install_stub_lake(monkeypatch)
     sweep = run_multi_window_sweep(
         windows=_WINDOWS, arms=DURATION_ARMS, floors=(LOW_FLOOR, HIGH_FLOOR)
@@ -556,18 +567,42 @@ def test_each_window_gets_exactly_one_lake_pass_no_matter_how_many_arms(
 
 
 def test_the_one_pass_loads_the_union_of_every_cadence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A weekly arm and a quarterly arm share one query, not two."""
+    """A weekly arm and a quarterly arm share one query, not two.
+
+    The expectation is built from the *cadences* rather than by re-running the code's own slicing
+    expression, so this checks the union rather than detecting that the expression changed.
+    """
     lakes, _ = _install_stub_lake(monkeypatch)
-    run_multi_window_sweep(windows=_WINDOWS[:1], arms=DURATION_ARMS, floors=(LOW_FLOOR,))
+    # Three arms whose cadences are known here, not read back off the module: 5, 21 and 63.
+    arms = tuple(
+        arm
+        for arm in DURATION_ARMS
+        if arm.label
+        in {
+            "M10.7 @ weekly / 21-session hold",
+            "M10.7 @ monthly / 63-session hold",
+            "M10.7 @ quarterly / 126-session hold",
+        }
+    )
+    assert {a.swing.rebalance_interval_sessions for a in arms if a.swing} == {5, 21, 63}
+    run_multi_window_sweep(windows=_WINDOWS[:1], arms=arms, floors=(LOW_FLOOR,))
     (loaded,) = lakes[0].features.loads
     sessions = lakes[0].sessions
+
+    # Stated as index arithmetic rather than by re-running the code's own `sessions[::step]`:
+    # a session is a decision date iff its index is a multiple of some arm's cadence. 63 is a
+    # multiple of 21, so the quarterly arm adds nothing the monthly one had not already asked for
+    # — which is the redundancy that makes a union cheaper than three separate loads.
     expected = {
         session
-        for arm in DURATION_ARMS
-        if arm.swing is not None
-        for session in sessions[:: arm.swing.rebalance_interval_sessions]
+        for index, session in enumerate(sessions)
+        if index % 5 == 0 or index % 21 == 0 or index % 63 == 0
     }
     assert set(loaded) == expected
+    assert set(sessions[::63]) <= set(sessions[::21])
+    # A session no cadence lands on is not loaded: the union is not "the whole window".
+    assert sessions[1] not in set(loaded)
+    assert len(loaded) < len(sessions)
     assert list(loaded) == sorted(loaded)
 
 
@@ -615,8 +650,18 @@ def test_no_figure_is_pooled_across_windows(monkeypatch: pytest.MonkeyPatch) -> 
         others = [e for e in sweep.windows if e is not entry]
         assert all(entry.result is not other.result for other in others)
         assert len(entry.result.rows) == 1
-    assert not hasattr(sweep, "pooled")
-    assert not hasattr(sweep, "mean_xirr")
+
+    # The rule stated positively: no accessor on the sweep returns a value derived from more than
+    # one window. Anything that did — a pooled ranking, a mean XIRR — would have to read rows from
+    # two results, so every public accessor is checked to return only its own window's figures.
+    mean = sum(xirrs.values(), start=Decimal("0")) / Decimal(len(xirrs))
+    for entry in sweep.windows:
+        assert entry.result.ranked(LOW_FLOOR)[0].xirr == xirrs[entry.window.label]
+        assert entry.result.ranked(LOW_FLOOR)[0].xirr != mean
+        assert sweep.result_for(entry.window.label) is entry.result
+    # And a label that names no window raises rather than quietly returning something blended.
+    with pytest.raises(KeyError, match="no window called"):
+        sweep.result_for("every window")
 
 
 def test_the_selection_winner_is_frozen_before_verification_is_swept(
@@ -706,3 +751,60 @@ def test_a_window_states_its_own_span() -> None:
         Window(label="backwards", start=date(2021, 1, 1), end=date(2020, 1, 1))
     with pytest.raises(ValueError, match="must be labelled"):
         Window(label="  ", start=date(2020, 1, 1), end=date(2021, 1, 1))
+
+
+# ── M12.3: the shared pass covers the swing arms, and only the swing arms ────────────────────────
+#
+# The tests above monkeypatch `_run_arm`, so they can only ever count the *shared* pass. This one
+# patches one level lower — the three policy entry points `_run_arm` dispatches to — so it sees
+# which arm-runs are handed the window's lake and which go and build their own. That distinction is
+# the difference between the report's old claim ("one lake pass per window") and the true one.
+
+
+def test_the_baselines_do_not_share_the_lake(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Swing arms take the shared lake; each momentum baseline opens its own and re-walks."""
+    shared: list[str] = []
+    independent: list[str] = []
+
+    def fake_swing(**kwargs: Any) -> Any:
+        assert kwargs["lake"] is not None, "a swing arm must be given the window's shared lake"
+        shared.append(str(kwargs["parameters"].rebalance_interval_sessions))
+        return _stub_run(xirr="0.18", drawdown="0.25")
+
+    def fake_naive(**kwargs: Any) -> Any:
+        # The signature takes no lake at all — that is the whole finding.
+        assert "lake" not in kwargs
+        independent.append("naive")
+        return _stub_run(xirr="0.11", drawdown="0.25")
+
+    def fake_v2(**kwargs: Any) -> Any:
+        assert "lake" not in kwargs
+        independent.append("v2")
+        return _stub_run(xirr="0.14", drawdown="0.25")
+
+    lakes, _ = _install_stub_lake(monkeypatch)
+    monkeypatch.setattr("backtest.sweep._run_arm", _run_arm)  # restore the real dispatcher
+    monkeypatch.setattr("backtest.sweep.run_swing_composite", fake_swing)
+    monkeypatch.setattr("backtest.sweep.run_naive_momentum", fake_naive)
+    monkeypatch.setattr("backtest.sweep.run_momentum_v2", fake_v2)
+
+    floors = (LOW_FLOOR, HIGH_FLOOR)
+    run_multi_window_sweep(windows=_WINDOWS[:1], arms=DURATION_ARMS, floors=floors)
+
+    swing_arms = [arm for arm in DURATION_ARMS if arm.swing is not None]
+    baselines = [arm for arm in DURATION_ARMS if arm.swing is None]
+    assert len(shared) == len(swing_arms) * len(floors)
+    assert len(independent) == len(baselines) * len(floors)
+    # One shared pass for the window, and one traversal per baseline run on top of it.
+    assert len(lakes[0].features.loads) == 1
+    assert len(independent) == independent_passes(DURATION_ARMS, floors)
+    assert independent_passes(DURATION_ARMS, floors) == 4  # 2 baselines x 2 floors
+
+
+def test_independent_passes_counts_only_the_arms_that_build_their_own_lake() -> None:
+    """The number the report prints, so it can never be a hardcoded claim again."""
+    swing_only = tuple(arm for arm in DURATION_ARMS if arm.swing is not None)
+    assert independent_passes(swing_only, (LOW_FLOOR, HIGH_FLOOR)) == 0
+    assert independent_passes(DURATION_ARMS, (LOW_FLOOR,)) == 2
+    assert independent_passes(DURATION_ARMS, (LOW_FLOOR, HIGH_FLOOR)) == 4
+    assert independent_passes((), (LOW_FLOOR,)) == 0

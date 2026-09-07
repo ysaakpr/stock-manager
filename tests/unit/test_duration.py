@@ -20,6 +20,7 @@ under test is the rendering and the arithmetic, never the replay.
 
 from __future__ import annotations
 
+import re
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -31,6 +32,9 @@ from backtest.duration import (
     MANDATED_WINDOWS,
     MODELLED_ROUND_TRIP,
     _ad_hoc,
+    _duration_of,
+    _overlapping_pairs,
+    arms_that_ran,
     holding_period_math,
     render_duration_report,
 )
@@ -222,7 +226,16 @@ def test_a_negative_per_turn_figure_is_rendered_not_hidden() -> None:
     )
     report = render_duration_report(sweep, floors=[LOW_FLOOR])
     assert "Holding-period arithmetic" in report
-    assert "-0.1" in report or "-0.0" in report, "the negative per-turn figure was not printed"
+    # The exact cell, computed here rather than matched loosely: -3% annual excess over 4000 trips
+    # in a 20-name basket across ~9.997 years is -0.03 / (4000 / 9.997 / 20) per book turn.
+    math = holding_period_math(
+        _row(_FAST, xirr="0.06", drawdown="0.40", excess="-0.03", trips=4000),
+        years=Decimal((date(2026, 8, 31) - date(2016, 9, 1)).days) / Decimal("365.25"),
+    )
+    assert math is not None
+    cell = f"**{math.net_excess_per_book_turn:.2%}**"
+    assert cell in report, f"expected the exact rendered cell {cell}"
+    assert cell.startswith("**-")
 
 
 def test_an_arm_with_no_closed_round_trip_has_no_arithmetic_rather_than_a_zero() -> None:
@@ -326,28 +339,121 @@ def test_clearing_the_bar_only_on_the_discovery_floor_is_reported_as_that() -> N
     assert "**Answer: only on the discovery floor.**" in report
 
 
+def test_clearing_only_on_an_in_sample_window_is_not_clearing_the_bar() -> None:
+    """A bar cleared on the window that selected for it is the selection, not an edge.
+
+    This is the finding the old verdict erased: it treated all four windows alike, so a 31 % on
+    the *selection* window produced the headline "the bar was cleared".
+    """
+    sweep = _split(selection_xirr="0.31", verification_xirr="0.09")
+    for entry in sweep.windows:
+        entry.result.rows.append(_row(_REFERENCE, xirr="0.08", drawdown="0.30", floor=HIGH_FLOOR))
+    report = render_duration_report(sweep, floors=[LOW_FLOOR, HIGH_FLOOR])
+    assert "**Answer: in-sample only.**" in report
+    assert "the selection, not" in report
+
+
 def test_a_cleared_bar_carries_its_window_floor_drawdown_and_duration() -> None:
+    """Cleared out-of-sample and at the reachable floor — the only combination that counts."""
     sweep = _split(selection_xirr="0.31", verification_xirr="0.28")
     for entry in sweep.windows:
         entry.result.rows.append(_row(_REFERENCE, xirr="0.29", drawdown="0.26", floor=HIGH_FLOOR))
     report = render_duration_report(sweep, floors=[LOW_FLOOR, HIGH_FLOOR])
-    assert "**Answer: the bar was cleared**" in report
+    assert "**Answer: the bar was cleared out-of-sample**" in report
     bar = report[report.index("## The bar:") :]
-    assert "Walk-forward selection" in bar and "₹10 crore/day" in bar
+    assert "Walk-forward verification" in bar and "₹10 crore/day" in bar
     assert "26.00%" in bar  # the drawdown
     assert "fortnightly / 63-session re-underwrite" in bar  # the duration
+
+
+def test_the_bar_section_marks_which_windows_were_in_sample() -> None:
+    """Four overlapping windows are not four draws, and the section must not read as though."""
+    sweep = _split(selection_xirr="0.31", verification_xirr="0.28")
+    report = render_duration_report(sweep, floors=[LOW_FLOOR])
+    bar = report[report.index("## The bar:") : report.index("## What each arm changed")]
+    assert "out-of-sample" in bar and "in-sample" in bar
+    # The overlap claim is counted, not asserted in prose. A selection/verification pair
+    # *partitions*, so no pair shares a day and the sentence must say so rather than claim an
+    # overlap that is not there.
+    assert "do not overlap" in bar
+    assert "pieces of evidence" not in bar
+    # The selection window's clear is tagged in-sample; the verification window's is not.
+    selection_line = next(
+        line for line in bar.splitlines() if line.startswith("- **Walk-forward selection**")
+    )
+    verification_line = next(
+        line for line in bar.splitlines() if line.startswith("- **Walk-forward verification**")
+    )
+    assert "in-sample" in selection_line and "out-of-sample" not in selection_line
+    assert "**out-of-sample**" in verification_line
+
+
+def test_a_single_floor_verdict_says_only_one_floor_was_run() -> None:
+    """With one floor, max(floors) is min(floors): the discovery floor is not the reachable one."""
+    sweep = _split(selection_xirr="0.31", verification_xirr="0.28")
+    report = render_duration_report(sweep, floors=[LOW_FLOOR])
+    assert "Only one liquidity floor was run" in report
+    assert "a verdict needs both" in report
+    assert "what a real book could reach" not in report
+
+
+def test_a_single_floor_run_says_so_in_the_setup_too() -> None:
+    report = render_duration_report(_two_windows(), floors=[LOW_FLOOR])
+    assert "**one floor**" in report
 
 
 # ── the rest of the report's obligations ─────────────────────────────────────────────────────────
 
 
-def test_the_report_says_what_each_arm_changed_and_keeps_its_digests() -> None:
+def test_the_report_lists_exactly_the_arms_that_ran_and_no_others() -> None:
+    """The inventory is read off the rows. A one-arm sweep is a one-arm report, and says so.
+
+    This is the defect the earlier version of this test locked in: it rendered a one-arm sweep and
+    then asserted all twelve labels appeared, which passed only because the renderer iterated the
+    module constant instead of the rows. A filtered run could therefore write a file to the
+    deliverable's path claiming the whole grid ran.
+    """
     report = render_duration_report(_two_windows(), floors=[LOW_FLOOR])
     assert "## What each arm changed" in report
+    assert f"| {_REFERENCE} |" in report
     for arm in DURATION_ARMS:
-        assert f"| {arm.label} |" in report
+        if arm.label != _REFERENCE:
+            assert f"| {arm.label} |" not in report, f"{arm.label} never ran but was listed"
+    assert "**1 arms**" in report, "the count came from the module, not from the rows"
     assert "Run digests (determinism)" in report
     assert "d" * 64 in report
+
+
+def test_a_subset_run_is_banner_marked_as_a_subset() -> None:
+    """A filtered report must not read as the campaign, whatever path it was written to."""
+    report = render_duration_report(_two_windows(), floors=[LOW_FLOOR])
+    assert "filtered subset, not the duration grid" in report
+    assert "Do not read this file as the campaign" in report
+
+
+def test_a_full_run_carries_no_subset_banner() -> None:
+    sweep = MultiWindowSweep(
+        windows=[
+            WindowSweep(
+                window=Window(label="Decade", start=date(2016, 9, 1), end=date(2026, 8, 31)),
+                result=_result(
+                    [_row(arm.label, xirr="0.20", drawdown="0.25") for arm in DURATION_ARMS],
+                    start=date(2016, 9, 1),
+                    terminal=date(2026, 8, 31),
+                ),
+            )
+        ]
+    )
+    report = render_duration_report(sweep, floors=[LOW_FLOOR])
+    assert "filtered subset" not in report
+    assert f"**{len(DURATION_ARMS)} arms**" in report
+    for arm in DURATION_ARMS:
+        assert f"| {arm.label} |" in report
+
+
+def test_arms_that_ran_reads_the_rows_in_first_appearance_order() -> None:
+    sweep = _two_windows()
+    assert [arm.label for arm in arms_that_ran(sweep)] == [_REFERENCE]
 
 
 def test_the_report_states_its_honest_limits() -> None:
@@ -371,3 +477,106 @@ def test_a_malformed_ad_hoc_window_is_refused() -> None:
     for spec in ("Short", "Short:2023-09-01", "Short:2023-09-01:2024-08-31:nonsense", "::"):
         with pytest.raises(ValueError):
             _ad_hoc(spec)
+
+
+# ── the report's remaining honesty obligations ───────────────────────────────────────────────────
+
+
+def test_an_arm_the_sampler_never_caught_falling_is_marked_not_printed_as_zero() -> None:
+    """`0.00` for a missing denominator is the defect 4306e24 fixed; it must not reappear here."""
+    sweep = MultiWindowSweep(
+        windows=[
+            WindowSweep(
+                window=Window(label="Decade", start=date(2016, 9, 1), end=date(2026, 8, 31)),
+                result=_result(
+                    [
+                        _row(_REFERENCE, xirr="0.25", drawdown="0"),
+                        _row(_FAST, xirr="-0.10", drawdown="0.30"),
+                    ],
+                    start=date(2016, 9, 1),
+                    terminal=date(2026, 8, 31),
+                ),
+            )
+        ]
+    )
+    report = render_duration_report(sweep, floors=[LOW_FLOOR])
+    line = next(line for line in report.splitlines() if line.startswith(f"| 1 | {_REFERENCE}"))
+    assert "no drawdown sampled" in line
+    assert "**0.00**" not in line, "a missing denominator was printed as a real ratio"
+    # The negative-XIRR arm, which does have a measured drawdown, keeps its real figures.
+    other = next(line for line in report.splitlines() if line.startswith(f"| 2 | {_FAST}"))
+    assert "30.00%" in other and "no drawdown sampled" not in other
+    # And the legend explains the marker rather than leaving it to be guessed.
+    assert "It is not a zero drawdown and it is not a perfect ratio" in report
+
+
+def test_a_pipe_in_an_error_message_cannot_break_the_table() -> None:
+    """An unescaped `|` shifts every later cell under the wrong header."""
+    sweep = _two_windows()
+    sweep.windows[0].result.rows.append(
+        SweepRow(arm=_ARMS[_FAST], floor=LOW_FLOOR, error="bad SQL: a | b")
+    )
+    report = render_duration_report(sweep, floors=[LOW_FLOOR])
+    line = next(line for line in report.splitlines() if _FAST in line and "failed" in line)
+    assert r"a \| b" in line
+    header = next(line for line in report.splitlines() if line.startswith("| # | Strategy |"))
+    # Count only *delimiting* pipes — an escaped one is content, which is the whole point.
+    delimiters = len(re.findall(r"(?<!\\)\|", line))
+    assert delimiters == header.count("|"), "the failed row has a different column count"
+
+
+def test_the_report_states_the_baselines_own_traversals_not_one_pass_per_window() -> None:
+    """ "One lake pass per window" was false: the two baselines each open their own."""
+    report = render_duration_report(_two_windows(), floors=[LOW_FLOOR, HIGH_FLOOR])
+    assert "One shared lake pass" in report
+    assert "further traversals, one per momentum-baseline run" in report
+    assert "shared by every arm on this window" not in report
+
+
+def test_the_benchmark_line_does_not_claim_identical_cashflows() -> None:
+    """`SweepResult.benchmark_xirr` is the first successful arm's, not a figure all arms share."""
+    report = render_duration_report(_two_windows(), floors=[LOW_FLOOR])
+    assert "on identical cashflows" not in report
+    assert "first arm on this window to produce a result" in report
+
+
+def test_the_baselines_state_their_duration_rather_than_a_dash() -> None:
+    """The duration column is the table's whole point; both baselines rotate monthly."""
+    naive = next(arm for arm in DURATION_ARMS if arm.naive is not None)
+    v2 = next(arm for arm in DURATION_ARMS if arm.v2 is not None)
+    assert _duration_of(naive).startswith("monthly")
+    assert _duration_of(v2).startswith("monthly")
+    assert "—" not in _duration_of(naive) and "—" not in _duration_of(v2)
+
+
+def test_the_two_weekly_ten_arms_are_distinguishable_in_the_duration_column() -> None:
+    """The arm that moves only the min-hold floor must not render identically to its reference."""
+    base = next(a for a in DURATION_ARMS if a.label == "M10.7 @ weekly / 10-session hold")
+    floored = next(a for a in DURATION_ARMS if a.label.endswith("2-session floor"))
+    assert _duration_of(base) != _duration_of(floored)
+    assert "2-session floor" in _duration_of(floored)
+
+
+def test_the_legend_states_that_rank_numbers_skip() -> None:
+    """Inherited from the M12.2 renderer, so it is disclosed rather than restructured."""
+    report = render_duration_report(_two_windows(), floors=[LOW_FLOOR])
+    assert "Rank numbers skip" in report
+    assert "counts failed arms in M" in report
+
+
+def test_the_overlap_claim_is_counted_rather_than_asserted() -> None:
+    """The mandated set overlaps heavily; a set that does not must not be described as if it did."""
+    mandated = MultiWindowSweep(
+        windows=[
+            WindowSweep(window=w, result=_result([], start=w.start, terminal=w.end))
+            for w in MANDATED_WINDOWS
+        ]
+    )
+    # Decade x Six-year, Decade x each walk-forward leg, Six-year x each leg — every pair but the
+    # walk-forward's own, which partitions. Five of the six pairs.
+    assert _overlapping_pairs(mandated) == 5
+    report = render_duration_report(mandated, floors=[LOW_FLOOR, HIGH_FLOOR])
+    assert "5 of the window pairs below share sessions" in report
+    assert "do not overlap" not in report
+    # And the non-overlapping case says the opposite rather than nothing.
+    assert _overlapping_pairs(_split(selection_xirr="0.1", verification_xirr="0.1")) == 0

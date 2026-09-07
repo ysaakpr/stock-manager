@@ -75,6 +75,7 @@ __all__ = [
     "Window",
     "WindowRole",
     "WindowSweep",
+    "independent_passes",
     "rank_of",
     "render_sweep_report",
     "row_of",
@@ -371,10 +372,16 @@ ARMS: tuple[Arm, ...] = (
 #: Cadences in sessions. A trading week is 5 sessions, a month 21, a quarter 63.
 _WEEKLY, _FORTNIGHTLY, _MONTHLY, _QUARTERLY = 5, 10, 21, 63
 
+#: The M10.7 default cadence *is* the fortnight, and the reference arm gets it from the dataclass
+#: default rather than by passing it. Pinning the two together here stops the named constant and
+#: the default drifting apart silently, which would make every "instead of fortnightly" note wrong.
+assert SwingCompositeParameters().rebalance_interval_sessions == _FORTNIGHTLY
+
 _FN_21 = "M10.7 @ fortnightly / 21-session hold"
 _WK_21 = "M10.7 @ weekly / 21-session hold"
 _MO_63 = "M10.7 @ monthly / 63-session hold"
 _MO_126 = "M10.7 @ monthly / 126-session hold"
+_WK_10 = "M10.7 @ weekly / 10-session hold"
 
 #: The duration grid plus the rows that price it: the M10.7 reference and the two momentum
 #: baselines. Deliberately *not* folded into :data:`ARMS` — the M12.2 sweep is a signal comparison
@@ -417,11 +424,17 @@ DURATION_ARMS: tuple[Arm, ...] = (
         swing=_swing(rebalance_interval_sessions=_WEEKLY, max_hold_sessions=21),
     ),
     Arm(
-        label="M10.7 @ weekly / 10-session hold",
+        label=_WK_10,
         family="duration",
         reference=_WK_21,
-        note="re-underwrite at 10 sessions instead of 21, with the min-hold floor moved 5 -> 2 so "
-        "it stays below half the hold",
+        note="re-underwrite at 10 sessions instead of 21",
+        swing=_swing(rebalance_interval_sessions=_WEEKLY, max_hold_sessions=10),
+    ),
+    Arm(
+        label="M10.7 @ weekly / 10-session hold, 2-session floor",
+        family="duration",
+        reference=_WK_10,
+        note="min-hold floor of 2 sessions instead of 5 — the only arm that moves the floor",
         swing=_swing(
             rebalance_interval_sessions=_WEEKLY, max_hold_sessions=10, min_hold_sessions=2
         ),
@@ -496,6 +509,17 @@ class SweepRow:
     @property
     def excess(self) -> Decimal:
         return self.run.comparison.excess_over_benchmark if self.run is not None else _ZERO
+
+    @property
+    def drawdown_sampled(self) -> bool:
+        """Whether this run's NAV path ever recorded a fall (M12.3).
+
+        ``return_per_drawdown`` collapses "never fell" and "ranked worst" to the same zero, which
+        is the right *ranking* (an unmeasurable denominator is not a perfect score) but the wrong
+        thing to *print*: a reader sees ``0.00`` and cannot tell an arm the sampler never caught
+        falling from an arm that genuinely earned nothing. A renderer asks this before printing.
+        """
+        return self.run is not None and self.max_drawdown > _ZERO
 
     @property
     def return_per_drawdown(self) -> Decimal:
@@ -681,7 +705,12 @@ def _run_arm(
 #
 # A sweep over one window *selects* on that window. The answer is not a better single window but
 # several stated ones, each reported on its own — so this runs the same arm set over a list of
-# windows in one invocation, giving each window its own lake pass and its own table.
+# windows in one invocation, giving each window one *shared* lake pass and its own table.
+#
+# The shared pass serves the swing arms. The two momentum baselines each build their own lake
+# (`run_naive_momentum` and `run_momentum_v2` accept no `lake`), so a window really costs one
+# shared pass plus `independent_passes(arms, floors)` independent traversals. Nothing here
+# pretends otherwise, and `independent_passes` exists so a report can print the true number.
 #
 # **Nothing here averages.** There is deliberately no accessor that pools rows from two windows into
 # one ranking, because a mean XIRR across a decade and a six-year window inside it would hide the
@@ -752,6 +781,21 @@ class MultiWindowSweep:
         return next((entry for entry in self.windows if entry.window.role is role), None)
 
 
+def independent_passes(arms: Sequence[Arm], floors: Sequence[Decimal]) -> int:
+    """How many arm-runs build their own lake instead of sharing the window's (M12.3).
+
+    The shared pass covers the *swing* arms only. ``run_naive_momentum`` and ``run_momentum_v2``
+    take no ``lake`` argument — each call constructs its own ``_L1Reader`` and ``QueryService`` and
+    re-walks the window — so a window costs one shared pass **plus** one traversal per baseline per
+    floor. That is inherited M12.2 behaviour and is not fixed here: M12.1's acceptance requires the
+    baselines reproduce their prior run digests, and handing them a shared lake risks exactly that.
+
+    It is counted rather than described because a report that says "four lake passes" when there
+    were four shared passes and sixteen baseline traversals has misstated its own cost.
+    """
+    return sum(1 for arm in arms if arm.swing is None) * len(floors)
+
+
 def _validate_windows(windows: Sequence[Window]) -> None:
     """Refuse a window list that cannot produce an honest walk-forward, rather than warn on it."""
     if not windows:
@@ -789,12 +833,16 @@ def run_multi_window_sweep(
     data_root: Path | None = None,
     adjusted: bool = True,
 ) -> MultiWindowSweep:
-    """Run ``arms`` over every window in one invocation — one lake pass per window (M12.3).
+    """Run ``arms`` over every window in one invocation — one *shared* lake pass each (M12.3).
 
     Assumes each window is a stated choice, not a search: nothing is fitted to any of them. Sweeps
     the windows in the order given, so a selection window's winner is frozen before a verification
     window is read. Never averages a figure across windows and never pools two windows' rows into
     one ranking — each window keeps its own table.
+
+    The shared pass covers the swing arms. Each momentum baseline still opens its own lake and
+    re-walks the window (see :func:`independent_passes`), so a window costs one shared pass plus
+    those traversals — never "one pass" full stop.
     """
     _validate_windows(windows)
     out = MultiWindowSweep()
@@ -807,8 +855,9 @@ def run_multi_window_sweep(
             end=window.end.isoformat(),
             arms=len(arms),
         )
-        # One `run_sweep` per window is one `open_swing_lake` per window: a second pass on the same
-        # window is the defect `tests/unit/test_sweep.py` exists to catch.
+        # One `run_sweep` per window is one *shared* `open_swing_lake` per window: a second
+        # shared pass on the same window is the defect `tests/unit/test_sweep.py` catches. The
+        # baselines' own traversals are counted by `independent_passes`, not by this.
         result = run_sweep(
             start=window.start,
             end=window.end,

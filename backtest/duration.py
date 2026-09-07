@@ -34,10 +34,12 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from backtest.policies.swing_composite import SwingCompositeParameters
 from backtest.sweep import (
     DURATION_ARMS,
     HIGH_FLOOR,
@@ -49,6 +51,7 @@ from backtest.sweep import (
     Window,
     WindowRole,
     WindowSweep,
+    independent_passes,
     rank_of,
     row_of,
     run_multi_window_sweep,
@@ -60,6 +63,7 @@ __all__ = [
     "MANDATED_WINDOWS",
     "MODELLED_ROUND_TRIP",
     "HoldingPeriodMath",
+    "arms_that_ran",
     "holding_period_math",
     "render_duration_report",
 ]
@@ -70,6 +74,9 @@ _ZERO = Decimal("0")
 _DAYS_PER_YEAR = Decimal("365.25")
 
 _REPORT_PATH = Path("ops/gates/M12-swing-duration-window-report.md")
+
+#: M10.7's own min-hold floor, so the duration column can say when an arm has moved it.
+_DEFAULT_MIN_HOLD = SwingCompositeParameters().min_hold_sessions
 
 #: The modelled cost of one position round trip: 0.223 % statutory (``execution/costs/rates.yaml``
 #: — STT both sides, stamp, exchange/SEBI/GST) plus roughly 0.22 % of modelled slippage. This is the
@@ -111,6 +118,7 @@ MANDATED_WINDOWS: tuple[Window, ...] = (
 # ── the holding-period arithmetic ────────────────────────────────────────────────────────────────
 
 
+@dataclass(frozen=True, slots=True)
 class HoldingPeriodMath:
     """One arm's turnover priced against the modelled round trip, on one window and one floor.
 
@@ -135,40 +143,15 @@ class HoldingPeriodMath:
     represented by ``None`` rather than by zeros that would read as measurements.
     """
 
-    __slots__ = (
-        "book_turns_per_year",
-        "gross_excess_per_book_turn",
-        "label",
-        "median_hold_days",
-        "net_excess_per_book_turn",
-        "realised_cost_per_trip",
-        "round_trips",
-        "top_n",
-        "turns_per_year",
-    )
-
-    def __init__(
-        self,
-        *,
-        label: str,
-        top_n: int,
-        round_trips: int,
-        median_hold_days: int,
-        turns_per_year: Decimal,
-        book_turns_per_year: Decimal,
-        net_excess_per_book_turn: Decimal,
-        gross_excess_per_book_turn: Decimal,
-        realised_cost_per_trip: Decimal,
-    ) -> None:
-        self.label = label
-        self.top_n = top_n
-        self.round_trips = round_trips
-        self.median_hold_days = median_hold_days
-        self.turns_per_year = turns_per_year
-        self.book_turns_per_year = book_turns_per_year
-        self.net_excess_per_book_turn = net_excess_per_book_turn
-        self.gross_excess_per_book_turn = gross_excess_per_book_turn
-        self.realised_cost_per_trip = realised_cost_per_trip
+    label: str
+    top_n: int
+    round_trips: int
+    median_hold_days: int
+    turns_per_year: Decimal
+    book_turns_per_year: Decimal
+    net_excess_per_book_turn: Decimal
+    gross_excess_per_book_turn: Decimal
+    realised_cost_per_trip: Decimal
 
 
 def _top_n(arm: Arm) -> int:
@@ -182,21 +165,44 @@ def _top_n(arm: Arm) -> int:
 
 
 def _duration_of(arm: Arm) -> str:
-    """The arm's whole holding-period machinery in words, or ``—`` for a policy that states none.
+    """The arm's whole holding-period machinery in words. Every arm here states one.
 
-    All three knobs, not just the cadence: two arms on the same cadence and re-underwrite but
-    different sell bands hold for different lengths, and a column that showed them as identical
-    would make the band rows unreadable in a table that exists to compare durations.
+    All three knobs for a swing arm, not just the cadence: two arms on the same cadence and
+    re-underwrite but different sell bands hold for different lengths, and a column that showed
+    them as identical would make the band rows unreadable in a table that exists to compare
+    durations.
+
+    The momentum baselines state a duration too — both rotate monthly, and v2 carries a sell band —
+    so printing "—" for them made the table's own subject vanish on the two rows a reader most
+    wants to compare against. They have no re-underwrite rule at all, which is the M10.7 argument's
+    starting point, and that is said rather than left blank.
     """
-    if arm.swing is None:
-        return "—"
-    swing = arm.swing
-    cadence = {5: "weekly", 10: "fortnightly", 21: "monthly", 63: "quarterly"}.get(
-        swing.rebalance_interval_sessions,
-        f"every {swing.rebalance_interval_sessions} sessions",
+    if arm.swing is not None:
+        swing = arm.swing
+        band = (Decimal(swing.sell_band) / Decimal(swing.top_n)).normalize()
+        text = (
+            f"{_cadence(swing.rebalance_interval_sessions)} / "
+            f"{swing.max_hold_sessions}-session re-underwrite / {band}x band"
+        )
+        # The min-hold floor is shown only when it is not M10.7's, so the column stays readable —
+        # but it must be shown then, or the arm that moves only the floor is indistinguishable
+        # from the arm it is measured against.
+        if swing.min_hold_sessions != _DEFAULT_MIN_HOLD:
+            text += f" / {swing.min_hold_sessions}-session floor"
+        return text
+    if arm.naive is not None:
+        return "monthly / no re-underwrite / no band (sells on rank alone)"
+    assert arm.v2 is not None
+    if arm.v2.sell_band is None:
+        return "monthly / no re-underwrite / no band (sells on rank alone)"
+    band = (Decimal(arm.v2.sell_band) / Decimal(arm.v2.top_n)).normalize()
+    return f"monthly / no re-underwrite / {band}x band"
+
+
+def _cadence(sessions: int) -> str:
+    return {5: "weekly", 10: "fortnightly", 21: "monthly", 63: "quarterly"}.get(
+        sessions, f"every {sessions} sessions"
     )
-    band = (Decimal(swing.sell_band) / Decimal(swing.top_n)).normalize()
-    return f"{cadence} / {swing.max_hold_sessions}-session re-underwrite / {band}x band"
 
 
 def holding_period_math(row: SweepRow, *, years: Decimal) -> HoldingPeriodMath | None:
@@ -248,6 +254,34 @@ def _years(result: SweepResult) -> Decimal:
     return Decimal((result.terminal - result.start).days) / _DAYS_PER_YEAR
 
 
+def _cell(text: str) -> str:
+    """Make ``text`` safe inside a markdown table cell.
+
+    An arm's error string is arbitrary — a DuckDB message carrying a ``|`` would silently split the
+    row into extra columns and shift every later cell under the wrong header, which is how a failed
+    arm's message ends up reading as its excess.
+    """
+    return text.replace("|", "\\|").replace("\n", " ")
+
+
+#: What to print where a ratio cannot be computed because the sampler never caught the arm falling.
+_NO_DRAWDOWN = "— (no drawdown sampled)"
+
+
+def _ratio_cell(row: SweepRow) -> str:
+    """The ranking key as a cell — never a bare ``0.00`` for an arm that has no denominator.
+
+    ``return_per_drawdown`` returns zero both for an arm whose NAV never fell and for an arm that
+    genuinely earned nothing, and ranking them together is right (an unmeasurable denominator is
+    not a perfect score). *Printing* them together is not: it is the same family of defect as the
+    naive-momentum arm that reported never having had a drawdown (fixed in 4306e24), and this grid
+    makes it likely by design, because a fast arm on a short window may never be sampled falling.
+    """
+    if not row.drawdown_sampled:
+        return _NO_DRAWDOWN
+    return f"**{row.return_per_drawdown:.2f}**"
+
+
 def _ranked_table(result: SweepResult, floor: Decimal) -> list[str]:
     """One window, one floor: every arm ranked on XIRR / max drawdown, failures kept."""
     lines = [
@@ -260,13 +294,14 @@ def _ranked_table(result: SweepResult, floor: Decimal) -> list[str]:
         if not row.ok:
             lines.append(
                 f"| — | {row.arm.label} | {duration} | **failed** | — | — | — | — | — | "
-                f"{row.error} |"
+                f"{_cell(row.error or 'no error recorded')} |"
             )
             continue
         assert row.run is not None
+        drawdown = _pct(row.max_drawdown) if row.drawdown_sampled else _NO_DRAWDOWN
         lines.append(
             f"| {position} | {row.arm.label} | {duration} | {_pct(row.xirr)} | "
-            f"{_pct(row.max_drawdown)} | **{row.return_per_drawdown:.2f}** | {row.round_trips} | "
+            f"{drawdown} | {_ratio_cell(row)} | {row.round_trips} | "
             f"{row.median_hold_days}d | {_rupees(row.run.total_charges)} | {_pct(row.excess)} |"
         )
     return lines
@@ -286,7 +321,7 @@ def _arithmetic_table(result: SweepResult, floor: Decimal) -> list[str]:
             reason = row.error if not row.ok else "no closed round trip in the window"
             lines.append(
                 f"| {row.arm.label} | {_duration_of(row.arm)} | — | — | — | — | "
-                f"{_pct(MODELLED_ROUND_TRIP)} | — | {reason} |"
+                f"{_pct(MODELLED_ROUND_TRIP)} | — | {_cell(reason or 'no error recorded')} |"
             )
             continue
         net = math.net_excess_per_book_turn
@@ -300,22 +335,40 @@ def _arithmetic_table(result: SweepResult, floor: Decimal) -> list[str]:
     return lines
 
 
-def _window_section(entry: WindowSweep, floors: Sequence[Decimal]) -> list[str]:
+def arms_that_ran(sweep: MultiWindowSweep) -> list[Arm]:
+    """Every arm that produced a row, in the order they first appear (M12.3).
+
+    The report's arm inventory is derived from this and never from :data:`DURATION_ARMS`. Reading
+    the constant instead lets a filtered run write a file to the deliverable's path claiming twelve
+    arms while two ran, which is the survivor bias this module's own text condemns. M12.2's
+    ``render_sweep_report`` already does it this way; this matches it.
+    """
+    return list(dict.fromkeys(row.arm for entry in sweep.windows for row in entry.result.rows))
+
+
+def _window_section(
+    entry: WindowSweep, floors: Sequence[Decimal], *, arms: Sequence[Arm]
+) -> list[str]:
     """Everything about one window, in one place — so nothing invites reading across two."""
     result, window = entry.result, entry.window
     best = next((row for row in result.ranked(floors[0]) if row.ok), None)
     universe = best.run.mean_universe if best is not None and best.run is not None else _ZERO
+    baseline_passes = independent_passes(arms, floors)
     lines = [
         f"## Window — {window.label}: {result.start.isoformat()} → {result.terminal.isoformat()}",
         "",
         f"- Role: **{window.role.value}** (requested {window.start.isoformat()} → "
         f"{window.end.isoformat()})",
         f"- {result.sessions} sessions, {_years(result):.2f} years",
-        f"- Benchmark: **{_pct(result.benchmark_xirr)}** ({result.benchmark_name}) on identical "
-        "cashflows",
+        f"- Benchmark: **{_pct(result.benchmark_xirr)}** ({result.benchmark_name}) — this is the "
+        "first arm on this window to produce a result; each arm's Excess column is struck against "
+        "its own money-weighted benchmark on its own cashflows, so the arms' excesses are "
+        "comparable to each other but this single figure is one arm's, not all of theirs",
         f"- Mean investable universe per decision: {universe}",
-        f"- One windowed lake pass over **{result.feature_dates}** decision dates, built in "
-        f"{result.lake_seconds:.0f}s and shared by every arm on this window",
+        f"- **One shared lake pass** over **{result.feature_dates}** decision dates, built in "
+        f"{result.lake_seconds:.0f}s and shared by every *swing* arm on this window — plus "
+        f"**{baseline_passes}** further traversals, one per momentum-baseline run, because "
+        "`run_naive_momentum` and `run_momentum_v2` take no shared lake and each opens its own",
         f"- {len(result.rows)} arm-runs in {result.total_seconds / 60:.0f} min",
         "",
     ]
@@ -399,15 +452,62 @@ def _walk_forward_section(sweep: MultiWindowSweep, floor: Decimal) -> list[str]:
     return [*lines, ""]
 
 
+def _overlapping_pairs(sweep: MultiWindowSweep) -> int:
+    """How many pairs of this campaign's windows share at least one calendar day.
+
+    Counted rather than asserted: the mandated set overlaps heavily (the decade contains the
+    six-year window and the walk-forward pair partitions the decade), but a report that stated that
+    as prose would be wrong the moment someone ran a different set. The number is what licenses the
+    claim that the windows are not independent draws.
+    """
+    entries = sweep.windows
+    return sum(
+        1
+        for i, left in enumerate(entries)
+        for right in entries[i + 1 :]
+        if left.result.start <= right.result.terminal and right.result.start <= left.result.terminal
+    )
+
+
 def _bar_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> list[str]:
-    """Whether 25 % was cleared — with the window, the floor, the drawdown and the duration."""
-    lines = [
-        f"## The bar: was {_pct(BAR)} XIRR reached, and on what",
+    """Whether 25 % was cleared — with the window, the floor, the drawdown and the duration.
+
+    The four windows are **not** four independent draws and this section must not read as though
+    they are: the decade contains the six-year window, and the walk-forward pair partitions the
+    decade. Three of the four are in-sample by construction; only the verification window was
+    unseen when the arm was chosen. So the clears are grouped by that distinction rather than
+    listed flat, and the verdict is written from the verification window.
+    """
+    lines = [f"## The bar: was {_pct(BAR)} XIRR reached, and on what", ""]
+    verification = sweep.with_role(WindowRole.VERIFICATION)
+    overlaps = _overlapping_pairs(sweep)
+    in_sample = [
+        e.window.label for e in sweep.windows if e.window.role is not WindowRole.VERIFICATION
+    ]
+    lines += [
+        "*"
+        + (
+            f"Of the windows below, only **{verification.window.label}** is out-of-sample — it "
+            "was never seen when the arm was chosen. The other "
+            f"{len(in_sample)} are in-sample by construction."
+            if verification is not None
+            else "**No window here is out-of-sample.** This campaign ran no verification window, "
+            "so every figure below is in-sample by construction."
+        )
+        + (
+            f" They also overlap: {overlaps} of the window pairs below share sessions, so the "
+            "same days are counted more than once across these tables and clearing the bar on "
+            "several of them is not several pieces of evidence.*"
+            if overlaps
+            else " The windows below do not overlap.*"
+        ),
         "",
     ]
     cleared: list[tuple[str, Decimal, SweepRow]] = []
     for entry in sweep.windows:
         result = entry.result
+        out_of_sample = entry.window.role is WindowRole.VERIFICATION
+        tag = "**out-of-sample**" if out_of_sample else "in-sample"
         hits = [
             (entry.window.label, floor, row)
             for floor in floors
@@ -418,11 +518,15 @@ def _bar_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> list[str
         if hits:
             for label, floor, row in hits:
                 lines.append(
-                    f"- **{label}** ({result.start} → {result.terminal}), "
+                    f"- **{label}** ({tag}, {result.start} → {result.terminal}), "
                     f"{_floor_label(floor)}: **{row.arm.label}** at {_pct(row.xirr)} XIRR, "
-                    f"{_pct(row.max_drawdown)} max drawdown, "
-                    f"{row.return_per_drawdown:.2f} return per drawdown, at "
-                    f"{_duration_of(row.arm)}."
+                    + (
+                        f"{_pct(row.max_drawdown)} max drawdown, "
+                        f"{row.return_per_drawdown:.2f} return per drawdown"
+                        if row.drawdown_sampled
+                        else "no drawdown sampled, so it has no return-per-drawdown figure"
+                    )
+                    + f", at {_duration_of(row.arm)}."
                 )
             continue
         best = next((row for row in result.ranked(floors[0]) if row.ok), None)
@@ -432,10 +536,10 @@ def _bar_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> list[str
             else "no arm produced a result"
         )
         lines.append(
-            f"- **{entry.window.label}** ({result.start} → {result.terminal}): "
-            f"no arm cleared {_pct(BAR)} on either floor — {top}."
+            f"- **{entry.window.label}** ({tag}, {result.start} → {result.terminal}): "
+            f"no arm cleared {_pct(BAR)} on any floor run — {top}."
         )
-    lines += ["", _bar_verdict(cleared, floors, windows=len(sweep.windows)), ""]
+    lines += ["", _bar_verdict(cleared, floors, sweep=sweep), ""]
     return lines
 
 
@@ -443,30 +547,64 @@ def _bar_verdict(
     cleared: Sequence[tuple[str, Decimal, SweepRow]],
     floors: Sequence[Decimal],
     *,
-    windows: int,
+    sweep: MultiWindowSweep,
 ) -> str:
-    """The one sentence a reader who reads nothing else should get."""
+    """The one sentence a reader who reads nothing else should get.
+
+    Written from the *verification* window, because that is the only window in this campaign whose
+    figures were not available when the arm was chosen. A bar cleared on a selection window is a
+    bar cleared on the window that selected for it, which is not a finding about the strategy.
+    """
+    floor_caveat = (
+        ""
+        if len(set(floors)) > 1
+        else (
+            f" Only one liquidity floor was run ({_floor_label(floors[0])}), so this campaign "
+            "says nothing about whether the figure survives at the other — a verdict needs both."
+        )
+    )
     if not cleared:
         return (
             f"**Answer: no.** No duration of the swing composite cleared a {_pct(BAR)} XIRR on any "
-            "of these windows at either liquidity floor. The honest reading is the ranking and the "
-            "holding-period arithmetic above, not a number that was not reached."
+            "window at any liquidity floor run here. The honest reading is the ranking and the "
+            "holding-period arithmetic above, not a number that was not reached." + floor_caveat
         )
-    cleared_windows = len({hit[0] for hit in cleared})
-    reachable = [hit for hit in cleared if hit[1] == max(floors)]
+
+    verification = sweep.with_role(WindowRole.VERIFICATION)
+    out_of_sample = (
+        [hit for hit in cleared if hit[0] == verification.window.label]
+        if verification is not None
+        else []
+    )
+    if not out_of_sample:
+        where = ", ".join(sorted({hit[0] for hit in cleared}))
+        return (
+            f"**Answer: in-sample only.** The bar was cleared on {where}, and on no "
+            "out-of-sample window. Every one of those windows was either the window an arm was "
+            "chosen on or a window overlapping it, so what cleared the bar is the selection, not "
+            "a demonstrated edge." + floor_caveat
+        )
+
+    reachable = [hit for hit in out_of_sample if hit[1] == max(floors)]
+    if len(set(floors)) < 2:
+        return (
+            f"**Answer: cleared out-of-sample, on one floor only.** The bar was cleared on the "
+            f"verification window at {_floor_label(floors[0])}." + floor_caveat
+        )
     if not reachable:
         return (
-            f"**Answer: only on the discovery floor.** Every arm that cleared {_pct(BAR)} did so "
-            f"at the {_floor_label(min(floors))} floor and none did at "
-            f"{_floor_label(max(floors))}, where the fill model's slippage is defensible for a "
+            f"**Answer: only on the discovery floor.** The bar was cleared out-of-sample, but "
+            f"every arm that did so cleared it at the {_floor_label(min(floors))} floor and none "
+            f"at {_floor_label(max(floors))}, where the fill model's slippage is defensible for a "
             "real book. That is a finding about the thinness of the names, not a strategy that "
             "clears the bar."
         )
     return (
-        f"**Answer: the bar was cleared** — including at the {_floor_label(max(floors))} floor. "
-        "Read each line above with its window, its floor, its drawdown and its duration "
-        f"attached; those are conditions, not footnotes, and a bar cleared on {cleared_windows} "
-        f"of {windows} windows is exactly that."
+        f"**Answer: the bar was cleared out-of-sample**, on the verification window and at the "
+        f"{_floor_label(max(floors))} floor — the one combination in this report that is neither "
+        "in-sample nor unreachable. Read each line above with its window, its floor, its drawdown "
+        "and its duration attached; those are conditions, not footnotes, and one out-of-sample "
+        "window is one out-of-sample window."
     )
 
 
@@ -501,25 +639,49 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
     so there is no cross-window number for a reader to mistake for a summary.
     """
     low = floors[0]
+    # Everything the report says about "the arms" is read off the rows that exist, never off the
+    # module constant. A filtered run must not be able to claim the whole grid ran; that would be
+    # exactly the survivor bias this module's own text condemns, printed at the top of the file.
+    arms = arms_that_ran(sweep)
+    duration_arms = [arm for arm in arms if arm.family == "duration"]
+    baselines = [arm for arm in arms if arm.family == "baseline"]
+    missing = [arm.label for arm in DURATION_ARMS if arm.label not in {a.label for a in arms}]
+    floor_note = (
+        f"{_floor_label(min(floors))} (the inherited M9.3 discovery floor) and "
+        f"{_floor_label(max(floors))} (what a real book could reach)"
+        if len(set(floors)) > 1
+        else f"{_floor_label(floors[0])} only — **one floor**, so nothing here says whether a "
+        "figure survives at the other"
+    )
     lines = [
         "# M12.3 — The swing composite in multiple durations and multiple windows",
         "",
         "*Generated by `python -m backtest.duration --report`. The M10.7 composite's own three "
         "legs (52-week-high proximity, delivery share, 12-1 momentum) held at a grid of cadences "
-        "and re-underwrite horizons, run over four stated windows. Ranked on XIRR divided by max "
-        "drawdown — an owner decision (2026-09-07), because ranked on return alone the winner is "
-        "whichever arm carried the most risk.*",
+        f"and re-underwrite horizons, run over {len(sweep.windows)} stated windows. Ranked on "
+        "XIRR divided by max drawdown — an owner decision (2026-09-07), because ranked on return "
+        "alone the winner is whichever arm carried the most risk.*",
         "",
+    ]
+    if missing:
+        lines += [
+            "> **This is a filtered subset, not the duration grid.** "
+            f"{len(missing)} of the {len(DURATION_ARMS)} stated arms did not run: "
+            + ", ".join(f"`{label}`" for label in missing)
+            + ". Every table below is the subset's ranking, and a ranking of a subset is not the "
+            "grid's ranking. Do not read this file as the campaign.",
+            "",
+        ]
+    lines += [
         "## What was run, and what is deliberately absent",
         "",
-        f"- **{len(DURATION_ARMS)} arms**: the M10.7 reference, {len(DURATION_ARMS) - 3} duration "
-        "and band variations of it, and the two momentum baselines every row is priced against.",
+        f"- **{len(arms)} arms**, and this count is the arms that actually produced rows, not the "
+        f"arms the module defines: the M10.7 reference, {len(duration_arms)} duration and band "
+        f"variations of it, and {len(baselines)} momentum baselines every row is priced against.",
         "- **Every arm scores on exactly M10.7's three legs.** Every M12.1 leg is at zero, the "
         "trailing stop, the volatility screen and the basket size are at their defaults. A row is "
         "the price of the holding-period machinery and of nothing else.",
-        f"- **Both liquidity floors, every arm, every window**: {_floor_label(min(floors))} (the "
-        f"inherited M9.3 discovery floor) and {_floor_label(max(floors))} (what a real book could "
-        "reach).",
+        f"- **Liquidity floors, every arm, every window**: {floor_note}.",
         "- **Signal off L2 back-adjusted closes; execution, sizing and marks off raw** "
         "(invariant #3). Every read goes through the point-in-time guard (invariant #7).",
         "- **No figure below is averaged across windows, and there is no combined ranking.** The "
@@ -528,6 +690,18 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
         "on its own, with its own benchmark.",
         "- **A failed arm keeps its row** with the error in it. Silently shrinking a table is how "
         "a sweep reports a survivor bias it created.",
+        "",
+        "### How to read the tables",
+        "",
+        "- **Rank numbers skip.** A failed arm prints `—` in the rank column but still occupies a "
+        'position, so a table with a failure runs `1, 2, 3, —, 5`. Likewise "ranking N of M" '
+        "counts failed arms in M. This is inherited from the M12.2 renderer and is left alone "
+        "rather than restructured; the ordering is still strictly best-first among arms that ran.",
+        f"- **`{_NO_DRAWDOWN}`** means the NAV sampler never caught that arm falling. It is not a "
+        "zero drawdown and it is not a perfect ratio — it is a missing denominator, and the arm "
+        "is ranked as though its ratio were zero.",
+        "- **The Excess column is against a price-return L1 proxy** and each arm is struck "
+        "against its own money-weighted benchmark on its own cashflows.",
         "",
         "### The windows",
         "",
@@ -543,7 +717,7 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
     lines.append("")
 
     for entry in sweep.windows:
-        lines += _window_section(entry, floors)
+        lines += _window_section(entry, floors, arms=arms)
 
     lines += _walk_forward_section(sweep, low)
     lines += _bar_section(sweep, floors)
@@ -559,21 +733,24 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
         "| Strategy | Duration | Differs from | By |",
         "| --- | --- | --- | --- |",
     ]
-    for arm in DURATION_ARMS:
+    for arm in arms:
         lines.append(f"| {arm.label} | {_duration_of(arm)} | {arm.reference} | {arm.note} |")
 
     lines += [
         "",
         "## Honest limits of this measurement",
         "",
-        "- **Four windows are four draws, not a distribution.** The walk-forward has one split, so "
-        "it says whether the selected duration held up across a single boundary in 2021 — a "
-        "boundary that happens to sit just after the sharpest drawdown and just before the "
-        "sharpest recovery in the lake. It does not say the duration holds up across boundaries "
-        "in general.",
-        "- **The decade window contains the six-year window.** They are not independent evidence. "
-        "An arm that clears the bar on the six-year window and not the decade has told you when "
-        "its edge was, not that it has one.",
+        "- **These windows are not independent draws, and the count of them means nothing.** The "
+        "decade *contains* the six-year window, and the walk-forward pair *partitions* the "
+        "decade — so the same sessions are counted up to three times across the tables. An arm "
+        "that clears the bar on three windows has not cleared it three times. Only the "
+        "verification window is out-of-sample; everything else is in-sample by construction.",
+        "- **The walk-forward has one split.** It says whether the selected duration held up "
+        "across a single boundary in 2021 — a boundary that happens to sit just after the "
+        "sharpest drawdown and just before the sharpest recovery in the lake. It does not say "
+        "the duration holds up across boundaries in general.",
+        "- **An arm that clears the bar on the six-year window and not the decade has told you "
+        "when its edge was**, not that it has one.",
         "- **The duration axis is still a search.** Ten arms over four windows is forty numbers, "
         "and the best of forty is flattered by having been the best of forty. The walk-forward "
         "columns are the only out-of-sample figures in this report; every other cell is in-sample "
@@ -639,7 +816,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--arms",
         default=None,
         help="comma-separated substrings; only arms whose label matches one are run. For "
-        "smoke-testing the wiring, never for reporting a subset as the grid",
+        "smoke-testing the wiring: a filtered run is refused the default report path and any "
+        "report it does write is banner-marked as a subset",
     )
     parser.add_argument(
         "--floors",
@@ -694,6 +872,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyError as error:
         print(f"error: unknown floor {error}; use low, high or low,high", file=sys.stderr)
         return 2
+    # A repeated floor is not a harmless typo: every arm would run twice and print twice, and the
+    # duplicated rows would read as two measurements of the same thing rather than one run twice.
+    if len(set(floors)) != len(floors):
+        print(f"error: --floors {args.floors} repeats a floor", file=sys.stderr)
+        return 2
 
     arms = DURATION_ARMS
     if args.arms:
@@ -702,15 +885,53 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not arms:
             print(f"error: no arm matches {args.arms}", file=sys.stderr)
             return 2
+        # --arms is a smoke test. Letting it write the deliverable's own path produces a file that
+        # reads as the campaign while holding a subset's ranking, and the path is the only thing a
+        # later reader has to go on.
+        if args.report is not None and Path(args.report) == _REPORT_PATH:
+            print(
+                f"error: --arms filters the grid, so it may not write {_REPORT_PATH} — that path "
+                "is the campaign's. Pass --report <other path> for a smoke test.",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         windows = _select_windows(args)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    _LOG.info(
+        "duration.campaign_start",
+        windows=[window.label for window in windows],
+        arms=len(arms),
+        floors=[str(floor) for floor in floors],
+        shared_passes=len(windows),
+        baseline_passes=independent_passes(arms, floors) * len(windows),
+    )
+    try:
         sweep = run_multi_window_sweep(
             windows=windows, arms=arms, floors=floors, data_root=args.data_root
         )
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    for entry in sweep.windows:
+        _LOG.info(
+            "duration.window_complete",
+            window=entry.window.label,
+            role=entry.window.role.value,
+            rows=len(entry.result.rows),
+            failed=sum(1 for row in entry.result.rows if not row.ok),
+            seconds=round(entry.result.total_seconds, 1),
+        )
+    _LOG.info(
+        "duration.campaign_complete",
+        windows=len(sweep.windows),
+        selected=sweep.selected,
+        arms_that_ran=len(arms_that_ran(sweep)),
+    )
 
     for entry in sweep.windows:
         print(f"\n  {entry.window.label}: {entry.result.start} → {entry.result.terminal}")
@@ -732,6 +953,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         path = Path(args.report)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(render_duration_report(sweep, floors=floors), encoding="utf-8")
+        _LOG.info("duration.report_written", path=str(path))
         print(f"\n  report written to {path}")
     return 0
 
