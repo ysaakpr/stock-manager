@@ -1650,15 +1650,39 @@ def render_delta_report(
     """The M9.2 report: the adjusted 10-year run against the raw baseline, delta by delta.
 
     States XIRR, turnover (fills) and cost for the raw run and the adjusted run and the delta
-    between them, plus the run digests (equal here, because this store has no corporate actions so
-    L2 adjusted equals L1 raw — see the run banner). ``flipped`` lists names whose twelve-month
-    signal flipped across a known split between the two runs; it is empty over a CA-free store and
-    the flip is instead demonstrated on the fixture in ``tests/integration/test_backtest_adjusted``.
+    between them, plus the run digests. What the "data reality" section says depends on the runs:
+    equal digests mean the store's factor chains were all the identity (the M9.2-era lake, with no
+    corporate actions yet), so the run proved the plumbing and nothing else; different digests mean
+    the adjusted signal actually diverged from the raw one, and the delta is the measured cost of
+    the fake post-split momentum the raw signal was buying. ``flipped`` lists names whose
+    twelve-month signal flipped across a known split between the two runs, when the caller computed
+    them; this report does not compute them itself.
     """
     raw_x, adj_x = raw.comparison.portfolio_xirr, adjusted.comparison.portfolio_xirr
     raw_t, adj_t = _trades(raw), _trades(adjusted)
     raw_c, adj_c = raw.total_charges, adjusted.total_charges
     identical = raw.result.digest() == adjusted.result.digest()
+    if identical:
+        data_reality = (
+            "The two run digests match: every factor chain in this store was the identity, so "
+            "the materialized L2 equals L1 bar-for-bar and the adjusted signal equals the raw one "
+            "**over this store** — the lake before M9.1's corporate-action backfill landed. The "
+            "delta below is zero by construction; what this run proves is the plumbing "
+            "(materialize L2 -> read adjusted through the query layer -> replay) end-to-end. The "
+            "de-corruption itself — an adjusted signal that removes a split's fake ~-50% momentum "
+            "— is asserted on a controlled known-split fixture in "
+            "`tests/integration/test_backtest_adjusted.py`."
+        )
+        digest_note = "(adjusted equals raw: no factor in the store moved a close)."
+    else:
+        data_reality = (
+            "The two run digests differ: the store carries corporate actions and adjustment "
+            "factors, so the adjusted signal ranks on back-adjusted closes and the raw one on the "
+            "prices as traded. Where they disagree, the raw signal was reading a split or bonus as "
+            "a price move — the delta below is the measured cost of that, over this store's "
+            "factors as they stood when the run was made (`adjustment_factors`, D3)."
+        )
+        digest_note = "(the adjusted signal diverged from the raw one)."
     lines = [
         "# M9.2 — Momentum backtest on L2 adjusted prices (10 years)",
         "",
@@ -1669,15 +1693,7 @@ def render_delta_report(
         "",
         "## Data reality",
         "",
-        "This lake holds L1 raw NSE closes only; `corporate_actions` and `adjustment_factors` are "
-        "empty because M9.1's live ten-year CA backfill is a bulk-fetch campaign gated on a human "
-        "go (AGENTIC_CONTEXT B1). With no CA rows every factor chain is the identity, so the "
-        "materialized L2 equals L1 bar-for-bar and the adjusted signal equals the raw one **over "
-        "this store**. The delta below is therefore zero by construction, and the two run digests "
-        "match — the plumbing (materialize L2 -> read adjusted through the query layer -> replay) "
-        "is what this run proves end-to-end. The de-corruption itself — an adjusted signal that "
-        "removes a split's fake ~-50% momentum — is asserted on a controlled known-split "
-        "fixture in `tests/integration/test_backtest_adjusted.py`.",
+        data_reality,
         "",
         "## Window",
         "",
@@ -1698,17 +1714,14 @@ def render_delta_report(
         "",
         f"- **Run digest (raw):** `{raw.result.digest()}`",
         f"- **Run digest (adjusted):** `{adjusted.result.digest()}`",
-        f"- **Digests identical:** {identical} "
-        "(expected here — adjusted equals raw with no CAs in the store).",
+        f"- **Digests identical:** {identical} {digest_note}",
         "",
         "## Signal flips across a known split",
         "",
         (
-            "- None over this store: it holds no corporate actions, so no name's twelve-month "
-            "signal moves between the raw and adjusted runs. The flip is demonstrated on the "
-            "fixture split in `tests/integration/test_backtest_adjusted.py`, where the raw signal "
-            "shows a fake ~-50% twelve-month momentum across the ex-date and the adjusted signal "
-            "does not."
+            "- Not enumerated by this report. The flip is demonstrated on the fixture split in "
+            "`tests/integration/test_backtest_adjusted.py`, where the raw signal shows a fake "
+            "~-50% twelve-month momentum across the ex-date and the adjusted signal does not."
             if not flipped
             else "- " + ", ".join(flipped)
         ),

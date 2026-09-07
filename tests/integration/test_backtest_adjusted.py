@@ -291,6 +291,12 @@ def test_adjusted_and_raw_runs_complete_and_delta_reports(lake: Path) -> None:
     assert "Turnover" in report
     assert "Total costs" in report
     assert adjusted.result.digest() in report
+    # The prose follows the runs: these digests differ, so the report must not claim an empty
+    # corporate-action store — which it did, as fixed text, until the server's first real run
+    # (2,784 factors) printed "no CAs in the store" under a -0.75 pp delta on 2026-09-07.
+    assert "Digests identical:** False" in report
+    assert "digests differ" in report
+    assert "no CAs in the store" not in report
 
 
 # ── acceptance 3: wipe + rebuild L2 leaves the run digest byte-identical ─────────────────────────
