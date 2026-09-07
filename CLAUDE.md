@@ -87,8 +87,11 @@ every fetch campaign, every rebuild from L0 and any backtest over the whole lake
 CPU, the Postgres or the request budget. Push to the server only what is ready: code that has passed
 the gate here. `ops/remote.sh check|test` are for a quiet server between campaigns and refuse while
 a driver runs. The server never receives uncommitted work; `ops/remote.sh sync` refuses to sync a
-commit origin does not have. Agents cannot push (`git push` is on the deny list): commit, hand the
-owner the push, and start the server work once origin has the commit.
+commit origin does not have. **Agents may push** (owner decision, 2026-09-07: the deny was revoked so
+the laptop→origin→server loop needs no human hop). Only `--force`, `-f`, `--force-with-lease`,
+`--mirror` and `--delete` remain denied — history is never rewritten. What that does *not* change:
+this repo is public, so a push is the publication event, and only gate-green, secret-scanned work
+may be pushed.
 
 ```bash
 ops/remote.sh status                 # what the server is at and whether a driver is running

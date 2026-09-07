@@ -51,7 +51,7 @@ Once the CLI is available, agents need Bash without a prompt for each command:
 ```
 
 That removes the per-command gate. The standing guards are then `.claude/settings.json` (allowlist plus a
-deny list covering `git push` and every Kite order tool) and the invariants in `AGENTIC_CONTEXT.md` §6.
+deny list covering history-rewriting pushes and every Kite order tool) and the invariants in `AGENTIC_CONTEXT.md` §6.
 Read the deny list before you use this flag, and prefer running it while you are asleep rather than away
 for days — a wave that goes wrong is cheapest to catch early.
 
