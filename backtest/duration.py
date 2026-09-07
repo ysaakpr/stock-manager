@@ -725,7 +725,7 @@ def _divergence_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> l
     pairs: list[tuple[str, str, str]] = []
     present = {entry.window.label for entry in sweep.windows}
     if {"Six-year", "Decade"} <= present:
-        pairs.append(("Six-year", "Decade", "clears on the six-year window but not the decade"))
+        pairs.append(("Six-year", "Decade", "Clears on the six-year window but not the decade"))
     selection = sweep.with_role(WindowRole.SELECTION)
     verification = sweep.with_role(WindowRole.VERIFICATION)
     if selection is not None and verification is not None:
@@ -733,7 +733,7 @@ def _divergence_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> l
             (
                 selection.window.label,
                 verification.window.label,
-                "clears on the selection window but not on verification",
+                "Clears on the selection window but not on verification",
             )
         )
     if not pairs:
@@ -1010,9 +1010,15 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
         "when its edge was**, not that it has one.",
         f"- **The duration axis is still a search.** {_arm_count} over {_window_count} on "
         f"{_floor_count} is **{multiplicity} numbers**, and the best of {multiplicity} is "
-        f"flattered by having been the best of {multiplicity}. The walk-forward columns are the "
-        "only out-of-sample figures in this report; every other cell is in-sample by "
-        "construction.",
+        f"flattered by having been the best of {multiplicity}. "
+        + (
+            "The walk-forward columns are the only out-of-sample figures in this report; every "
+            "other cell is in-sample by construction."
+            if sweep.with_role(WindowRole.VERIFICATION) is not None
+            else "**No figure in this report is out-of-sample** — this run held out no "
+            "verification window, so every cell was measured on data the arms were already "
+            "chosen against."
+        ),
         "- **Two arms re-underwrite at 126 sessions, outside M10.7's stated 7-90 day band.** They "
         "are here because an axis that stops at its own assumption cannot test the assumption. If "
         "one of them wins, the finding is that the band was too narrow, not that the band was "

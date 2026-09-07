@@ -764,7 +764,7 @@ def test_arms_that_diverge_by_window_are_named() -> None:
         )
     report = render_duration_report(MultiWindowSweep(windows=windows), floors=[LOW_FLOOR])
     section = report[report.index("## Where the verdict changes with the window") :]
-    assert "clears on the six-year window but not the decade" in section
+    assert "Clears on the six-year window but not the decade" in section
     assert f"**{_REFERENCE}**" in section
     # The arm that cleared on neither is not named as diverging.
     diverging = section[: section.index("## ", 5)] if "## " in section[5:] else section
@@ -775,7 +775,7 @@ def test_divergence_reports_selection_against_verification_too() -> None:
     walk = _split(selection_xirr="0.31", verification_xirr="0.09")
     report = render_duration_report(walk, floors=[LOW_FLOOR])
     section = report[report.index("## Where the verdict changes with the window") :]
-    assert "clears on the selection window but not on verification" in section
+    assert "Clears on the selection window but not on verification" in section
     assert f"**{_REFERENCE}**" in section
 
 
@@ -806,3 +806,17 @@ def test_divergence_needs_a_comparable_pair() -> None:
     # ...and the scope paragraph does not promise a section that is not there.
     assert "there is no divergence to name" in report
     assert "*Where the verdict changes with the window* below" not in report
+
+
+def test_the_multiplicity_bullet_does_not_promise_walk_forward_columns_that_are_absent() -> None:
+    """Found by smoke-rendering: a run with no verification window has no out-of-sample cell."""
+    report = render_duration_report(_two_windows(), floors=[LOW_FLOOR])
+    assert "## Walk-forward" not in report
+    assert "walk-forward columns are the only out-of-sample figures" not in report
+    assert "No figure in this report is out-of-sample" in report
+    # ...and the converse still holds where a verification window does exist.
+    with_split = render_duration_report(
+        _split(selection_xirr="0.2", verification_xirr="0.2"), floors=[LOW_FLOOR]
+    )
+    assert "walk-forward columns are the only out-of-sample figures" in with_split
+    assert "No figure in this report is out-of-sample" not in with_split
