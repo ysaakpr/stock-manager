@@ -359,3 +359,25 @@ def test_a_float_bar_is_refused() -> None:
     """A bar compared against money is a Decimal, like the money it is compared with."""
     with pytest.raises(TypeError, match="never float"):
         ForecastDailyParameters(round_trip_cost=0.003)  # type: ignore[arg-type]
+
+
+def test_a_new_position_is_sized_to_one_top_n_th_of_the_book() -> None:
+    """Two fills a session must not build a two-name book and call it a twenty-name one.
+
+    With a turnover budget this small, spending all free cash on the day's picks would put ~50 % of
+    the portfolio into each of two names — and report a concentrated book's returns as a
+    diversified strategy's. The instalment is capped at the per-name target instead, so the book
+    fills toward `top_n` over the sessions the budget allows.
+    """
+    params = ForecastDailyParameters()
+    records = [_record(isin, "0.050", price="100") for isin in _isins(5)]
+    policy = ForecastDailyPolicy(_Data(records), params)
+
+    decision = policy.decide(_ctx(SESSION, _FakeBroker(cash=Decimal("1000000"))))
+
+    assert len(decision.orders) == 2
+    # ₹10 lakh over top_n = 20 is ₹50,000 a name, so ~500 shares at ₹100 — not ~4,900.
+    for order in decision.orders:
+        assert order.quantity == pytest.approx(500, abs=5)
+    deployed = sum(order.quantity for order in decision.orders) * 100
+    assert deployed < Decimal("120000"), "the session deployed more than two names' worth"

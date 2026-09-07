@@ -257,7 +257,7 @@ class ForecastDailyPolicy:
         actions = self._sell_actions(ctx.session, held, by_isin, marks, has_view=bool(candidates))
         budget = self._params.max_trades_per_session - sum(1 for a in actions if not a.exempt)
         selling = {action.isin for action in actions}
-        buys = self._buy_actions(ctx, held, by_isin, selling, budget)
+        buys = self._buy_actions(ctx, held, by_isin, selling, budget, self._held_value(held, marks))
 
         orders = tuple(
             OrderRequest(
@@ -272,6 +272,20 @@ class ForecastDailyPolicy:
         entries = tuple(self._entry(ctx, a) for a in (*actions, *buys))
         evidence = self._evidence(ctx.session, candidates, held, actions, buys)
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
+
+    @staticmethod
+    def _held_value(held: Mapping[str, Holding], marks: Mapping[str, Decimal]) -> Decimal:
+        """The book's marked value, from the marks available this session.
+
+        A holding with no mark today is carried at its average price rather than dropped: leaving it
+        out would understate the book and so overstate the target weight of the next buy, which is
+        the direction that concentrates. Names that did not print are rare and small either way.
+        """
+        total = _ZERO
+        for isin, holding in held.items():
+            price = marks.get(isin, holding.average_price)
+            total += Decimal(holding.quantity) * price
+        return total
 
     # ── per-position state ───────────────────────────────────────────────────────────────────────
 
@@ -426,10 +440,19 @@ class ForecastDailyPolicy:
         by_isin: Mapping[str, ForecastRecord],
         selling: frozenset[str] | set[str],
         budget: int,
+        held_value: Decimal,
     ) -> tuple[_Action, ...]:
         """Whole-share buys into the best-projected names the budget and free cash allow.
 
-        Sized from currently free cash only — sells staged this session fill T+1 and their proceeds
+        **Each new name is sized to one ``top_n``-th of the whole book**, not to a share of the cash
+        that happens to be free today. With a turnover budget of two fills a session, spending all
+        free cash on the day's two picks would build a two-name portfolio at ~50 % each and call it
+        a twenty-name one — the returns of a concentrated book reported as a diversified strategy's.
+        So the instalment is ``min(free cash x margin, per-name target x names chosen)`` where the
+        target is ``(free cash + marked holdings) / top_n``, and the book fills toward ``top_n``
+        over the sessions the budget allows rather than in one session.
+
+        Sized from currently *free* cash — sells staged this session fill T+1 and their proceeds
         have not settled, so a buy never depends on them. Room is what the book has left toward
         ``top_n`` after this session's releases.
         """
@@ -449,7 +472,12 @@ class ForecastDailyPolicy:
         chosen = wanted[: min(room, budget)]
         if not chosen:
             return ()
-        budget_cash = ctx.broker.margins().available * self._params.buy_budget_fraction
+        free = ctx.broker.margins().available
+        deployable = free * self._params.buy_budget_fraction
+        if deployable <= _ZERO:
+            return ()
+        per_name = (free + held_value) / Decimal(self._params.top_n)
+        budget_cash = min(deployable, per_name * Decimal(len(chosen)))
         if budget_cash <= _ZERO:
             return ()
         weights = _equal_weights([record.isin for record in chosen])
