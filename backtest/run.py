@@ -1354,7 +1354,24 @@ def run_naive_momentum(
         )
         book = PortfolioBook()
         book.deposit(first_session, opening_cash)  # the one external cashflow: the opening capital
-        broker = _AccountingBroker(sim, book)
+
+        # M12.2: sample the NAV every session so this policy reports a real max drawdown. It did
+        # not before — the sampler arrived with M9.5 and was wired into the v2, sector, fundamentals
+        # and swing runners but never back into this one, so every naive-momentum row ever printed
+        # carried a 0.00% drawdown. That reads as "never fell" rather than "never measured", and a
+        # comparison ranked on return per unit of drawdown would put the baseline last on an
+        # artefact. Same sampler, same skip-rather-than-guess rule as the others.
+        last_close: dict[str, Decimal] = {}
+        nav_path: list[Decimal] = []
+
+        def sample_nav(session: date) -> None:
+            last_close.update(reader.closes_on(session))
+            positions = book.positions()
+            if any(position.isin not in last_close for position in positions):
+                return  # a held name with no close seen yet — skip rather than guess
+            nav_path.append(book.net_asset_value(last_close))
+
+        broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = NaiveMomentumPolicy(data, params)
 
         engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
@@ -1402,6 +1419,7 @@ def run_naive_momentum(
             benchmark_source=resolved.source,
             benchmark_index_name=benchmark.index_name,
             benchmark_method=benchmark.method,
+            max_drawdown=_max_drawdown(nav_path),
         )
     finally:
         if service is not None:
