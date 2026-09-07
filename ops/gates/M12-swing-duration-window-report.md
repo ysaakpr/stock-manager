@@ -7,10 +7,12 @@
 
 The generator (`backtest/duration.py`) and its arm grid (`backtest.sweep.DURATION_ARMS`) landed
 under M12.3 and are covered by `tests/unit/test_sweep.py` and `tests/unit/test_duration.py`. What
-has *not* run is the campaign itself: twelve arms on two liquidity floors over four windows is 96
-arm-runs across four lake passes, and this box was already running the M12.2 decade sweep when the
-code was written, with CLAUDE.md capping it at two decade-scale replays in parallel. The wiring was
-validated end to end on a short window instead (see the PR).
+has *not* run is the campaign itself: thirteen arms on two liquidity floors over four windows is
+104 arm-runs, costing **four shared lake passes plus sixteen further traversals** — the two
+momentum baselines take no shared lake (`run_naive_momentum` and `run_momentum_v2` each build
+their own `_L1Reader`), so each contributes one traversal per floor per window. This box was
+already running an M12 sweep when the code was written, with CLAUDE.md capping it at two
+decade-scale replays in parallel. The wiring was validated end to end on a short window instead.
 
 ## Generating it
 
@@ -32,15 +34,17 @@ first: this box has 4 cores, and a second decade-scale replay alongside it is th
 ## What it will contain
 
 - The four mandated windows (owner decision, 2026-09-07), each reported on its own and **never
-  averaged**: the full decade `2016-09-01 → 2026-08-31`, the `2019-07-01 → 2026-08-31` window the
+  averaged** — and they overlap heavily, so they are four tables, not four independent draws: the full decade `2016-09-01 → 2026-08-31`, the `2019-07-01 → 2026-08-31` window the
   repo's existing ~23 % figures came from, and the walk-forward pair that chooses on
   `2016-09-01 → 2021-08-31` and verifies on `2021-09-01 → 2026-08-31`.
 - Per window: the setup, a ranked table at **both** liquidity floors (₹1 crore discovery, ₹10 crore
   reachable), and the holding-period arithmetic — net excess per book turn against the modelled
   0.45 % round trip, including the arms where it is negative.
 - The walk-forward's selection rank beside its verification rank, with the winner named from the
-  selection window alone and printed above any verification figure.
+  selection window alone and printed above any verification figure. Only the verification
+  window is out-of-sample; the verdict is written from it.
 - What each arm changes against its named reference, the honest-limits section, and every run's
   digest.
 - A plain answer on the owner's >25 % XIRR bar: on which window, on which floor, at which drawdown
-  and at which duration — or the word **no**.
+  and at which duration — or the word **no**. A bar cleared only on an in-sample window is
+  reported as *in-sample only*, not as cleared.
