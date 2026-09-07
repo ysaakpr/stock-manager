@@ -242,13 +242,18 @@ def classify(text: str) -> tuple[ActionType, ...]:
 
 #: A rupee amount: `RS.10/-`, `Rs. 18.0000`, `RE 0.50`, `₹90`, `Rs10/-`. The currency marker is
 #: required — a bare number in a purpose string is as likely to be a year or a percentage as an
-#: amount. The marker is closed by a lookahead rather than `\b` because NSE also writes the amount
+#: amount. A dash may sit between the marker and the number: BSE writes every one of its 31,147
+#: dividends as `Dividend - Rs. - 0.5000`, and a regex that demanded a digit straight after the
+#: marker read all of them as "amount not stated" — which then showed up as 8,386 phantom
+#: RATIO_MISMATCH flags against NSE rows that stated the very same figure. The dash is a separator
+#: in this feed's prose, never a sign: a negative dividend or face value does not exist.
+#: The marker is closed by a lookahead rather than `\b` because NSE also writes the amount
 #: flush against it (`From Rs10/- Per Share To Re 1/-`), and between `s` and `1` there is no word
 #: boundary at all — that one missing space left a real 2024 split unquantified, which surfaced
 #: only once D2 lineage let the action reach the factor chain. The lookahead still refuses a marker
 #: that is merely the start of a longer word: `reserve` is `re` followed by `s`, not by a digit,
 #: space or dot.
-_MONEY = r"(?:\b(?:rs|re|inr)(?=[\s.\d])\s*\.?|₹)\s*(\d[\d,]*(?:\.\d+)?)"
+_MONEY = r"(?:\b(?:rs|re|inr)(?=[\s.\d-])\s*\.?|₹)\s*-?\s*(\d[\d,]*(?:\.\d+)?)"
 _MONEY_RE: Final[re.Pattern[str]] = re.compile(_MONEY)
 
 #: `FROM <money> ... TO <money>`, non-greedy so it takes the first "to" after the first amount.

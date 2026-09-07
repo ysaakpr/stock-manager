@@ -183,6 +183,12 @@ PURPOSE_STRINGS: tuple[Case, ...] = (
     Case("Stock  Split From Rs.10/- to Rs.2/-", BSE, SPLIT, fv("10", "2")),
     Case("Sub-Division of Shares from Rs.2/- to Re.1/-", BSE, SPLIT, fv("2", "1")),
     Case("Consolidation of Shares from Re.1/- to Rs.10/-", BSE, SPLIT, fv("1", "10")),
+    # BSE puts a dash between the marker and the number on every one of its 31,147 dividends.
+    # Read as "amount not stated", they became 8,386 phantom RATIO_MISMATCH flags against NSE rows
+    # naming the very same figure. The dash is a separator in this prose, never a sign.
+    Case("Dividend - Rs. - 0.5000", BSE, DIVIDEND, div(DividendKind.UNSPECIFIED, "0.5")),
+    Case("Final Dividend - Rs. - 13.0000", BSE, DIVIDEND, div(DividendKind.FINAL, "13")),
+    Case("Dividend Rs.-4.25", BSE, DIVIDEND, div(DividendKind.UNSPECIFIED, "4.25")),
     # ── BONUS (new shares per shares held; 1:1 doubles the count) ─────────────────────────────
     Case("BONUS 1:1", NSE, BONUS, ratio("1", "1")),
     Case("BONUS 3:5", NSE, BONUS, ratio("3", "5")),
