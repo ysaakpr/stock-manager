@@ -72,6 +72,7 @@ __all__ = [
     "ParseOutcome",
     "classify",
     "parse_purpose",
+    "split_compound",
 ]
 
 _LOG: Final[FilteringBoundLogger] = get_logger(__name__)
@@ -163,6 +164,27 @@ class ParseOutcome:
     raw_text: str
     action: ParsedAction | None
     queue_entry: ManualQueueEntry | None
+
+
+# ── compound subjects ────────────────────────────────────────────────────────────────────────
+
+#: NSE lists several events with one ex-date on one line, joined by "/": `Bonus 2:1/Dividend- Rs
+#: 1.60 Per Share`, `Bonus 1:1/Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/-
+#: Per Share`. The same character closes a rupee amount (`Rs 10/-`) and sits inside a date, so a
+#: separator is a slash whose next non-space character is a letter — and nothing else is.
+_COMPOUND_SEPARATOR_RE: Final[re.Pattern[str]] = re.compile(r"\s*/\s*(?=[A-Za-z])")
+
+
+def split_compound(subject: str) -> tuple[str, ...]:
+    """The events one exchange subject line names, in feed order — one for a plain subject.
+
+    What it does: splits on the feed's "/" separator and drops empty pieces. What it never does:
+    split inside `Rs 10/-` or a date, or return nothing — an unsplittable line comes back whole.
+    The pieces are *segments* for `parse_purpose` to classify one at a time; the caller keeps the
+    whole line as the raw text of whatever it builds from them.
+    """
+    pieces = tuple(part.strip() for part in _COMPOUND_SEPARATOR_RE.split(subject) if part.strip())
+    return pieces or (subject,)
 
 
 # ── classification ───────────────────────────────────────────────────────────────────────────

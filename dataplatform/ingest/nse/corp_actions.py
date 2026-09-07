@@ -32,7 +32,14 @@ from datetime import date
 from typing import Any, Final
 
 from dataplatform.clock import Clock
-from dataplatform.corpactions.parse_terms import ManualEntryQueue, parse_purpose
+from dataplatform.corpactions.parse_terms import (
+    ManualEntryQueue,
+    ManualQueueEntry,
+    ManualQueueReason,
+    parse_purpose,
+    split_compound,
+)
+from dataplatform.corpactions.taxonomy import ParsedAction
 from dataplatform.identity.lineage import LineageResolver
 from dataplatform.identity.master import (
     AmbiguousSymbolError,
@@ -186,10 +193,10 @@ def _one(
 
     # Type and terms first: a subject we cannot classify never reaches identity resolution, because
     # there would be nothing to store even if the ISIN were perfect.
-    outcome = parse_purpose(subject, source=SOURCE_ID)
-    if outcome.queue_entry is not None:
-        queue.add(outcome.queue_entry)
-    if outcome.action is None:
+    parsed, entries = _parse_subject(subject)
+    for entry in entries:
+        queue.add(entry)
+    if not parsed:
         return
 
     resolution = _resolve_isin(
@@ -222,20 +229,69 @@ def _one(
         return
 
     isin, filed_against = resolution
-    actions.append(
-        CorporateAction.from_parsed(
-            outcome.action,
-            isin=isin,
-            filed_against_isin=filed_against,
-            source=SOURCE_ID,
-            ex_date=ex_date,
-            knowable_date=knowable,
-            record_date=record_date,
-            announcement_date=broadcast,
-            source_ref=f"{symbol}:{record.get('series', '')}".rstrip(":"),
-            l0_key=l0_key,
+    for action in parsed:
+        actions.append(
+            CorporateAction.from_parsed(
+                action,
+                isin=isin,
+                filed_against_isin=filed_against,
+                source=SOURCE_ID,
+                ex_date=ex_date,
+                knowable_date=knowable,
+                record_date=record_date,
+                announcement_date=broadcast,
+                source_ref=f"{symbol}:{record.get('series', '')}".rstrip(":"),
+                l0_key=l0_key,
+            )
         )
-    )
+
+
+def _parse_subject(subject: str) -> tuple[list[ParsedAction], list[ManualQueueEntry]]:
+    """The actions one subject line names, and what a human must still supply for it.
+
+    A plain subject is `parse_purpose` as ever. A compound one — several events NSE joined with the
+    feed's "/" — is parsed one event at a time, because `parse_purpose` reading `Bonus 2:1/Dividend-
+    Rs 1.60` as *one* string sees two types and queues it as AMBIGUOUS: right for a string that is
+    one event described two ways, wrong for a list. Measured 2026-09-07: UNOMINDA's 2:1 bonus and
+    HINDPETRO's 1:2 bonus never became NSE actions this way, and L2 carried both unadjusted.
+
+    Every action and queue entry produced carries the whole published line as its `raw_text`, so
+    provenance and the queue's "byte-for-byte" promise hold; the entry's detail names the segment.
+    A segment with no action keyword beside one that has (`Annual General Meeting/Dividend …`) is
+    an event that is not a corporate action, not a defect — it is not queued. A line where *no*
+    segment names an action is queued once, as a plain unrecognised subject would be.
+    """
+    segments = split_compound(subject)
+    if len(segments) <= 1:
+        outcome = parse_purpose(subject, source=SOURCE_ID)
+        return (
+            [outcome.action] if outcome.action is not None else [],
+            [outcome.queue_entry] if outcome.queue_entry is not None else [],
+        )
+    outcomes = [parse_purpose(segment, source=SOURCE_ID) for segment in segments]
+    if all(
+        o.action is None
+        and (o.queue_entry is None or o.queue_entry.reason is ManualQueueReason.UNRECOGNISED_TYPE)
+        for o in outcomes
+    ):
+        whole = parse_purpose(subject, source=SOURCE_ID)
+        return [], [whole.queue_entry] if whole.queue_entry is not None else []
+    parsed: list[ParsedAction] = []
+    entries: list[ManualQueueEntry] = []
+    for outcome in outcomes:
+        if outcome.action is not None:
+            parsed.append(outcome.action.model_copy(update={"raw_text": subject}))
+        entry = outcome.queue_entry
+        if entry is not None and entry.reason is not ManualQueueReason.UNRECOGNISED_TYPE:
+            entries.append(
+                entry.model_copy(
+                    update={
+                        "raw_text": subject,
+                        "detail": f"{entry.detail} — in segment {outcome.raw_text!r}",
+                    }
+                )
+            )
+    return parsed, entries
 
 
 def _resolve_isin(

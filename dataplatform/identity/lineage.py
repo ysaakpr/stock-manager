@@ -40,7 +40,7 @@ from typing import Final
 import duckdb
 
 from dataplatform.clock import Clock, SystemClock
-from dataplatform.corpactions.parse_terms import classify
+from dataplatform.corpactions.parse_terms import classify, split_compound
 from dataplatform.corpactions.taxonomy import ActionType
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection
@@ -52,6 +52,7 @@ __all__ = [
     "LineageEdge",
     "LineageResolver",
     "LineageStore",
+    "corroborating_type",
     "derive_edges",
     "read_corroboration",
     "read_equity_spans",
@@ -168,6 +169,28 @@ def read_equity_spans(
     return spans, tuple(s[0] for s in sessions)
 
 
+def corroborating_type(subject: str) -> ActionType | None:
+    """The reissue-making event one feed line names — SPLIT or BONUS — or None.
+
+    Each segment of a compound line (`split_compound`) is classified on its own: `Bonus 1:5/Face
+    Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share` names a bonus *and*
+    a split, and the split is what reissued the ISIN, so SPLIT wins when both are present. A single
+    segment that names two types is ambiguous and is not evidence; a line naming neither is None.
+    Until 2026-09-07 the whole line went through `classify` at once, so every compound line was
+    skipped and its edge recorded as DERIVED (BEARDSELL's 2017 reissue among them).
+    """
+    named: set[ActionType] = set()
+    for segment in split_compound(subject):
+        types = [t for t in classify(segment) if t in CORROBORATING_TYPES]
+        if len(types) == 1:
+            named.add(types[0])
+    if ActionType.SPLIT in named:
+        return ActionType.SPLIT
+    if ActionType.BONUS in named:
+        return ActionType.BONUS
+    return None
+
+
 def read_corroboration(*, data_root: Path | None = None) -> Mapping[tuple[str, date], ActionType]:
     """Map `(isin, ex_date)` to SPLIT or BONUS, read from the L0 corporate-action payloads.
 
@@ -175,9 +198,9 @@ def read_corroboration(*, data_root: Path | None = None) -> Mapping[tuple[str, d
     filed against the ISIN being retired, so they are exactly the rows the table's foreign key
     refused. L0 is immutable and holds them all (invariant #1).
 
-    Classification goes through `corpactions.parse_terms.classify`, the same tested subject→type
-    mapping the ingest path uses; a subject naming two types is ambiguous and is skipped rather
-    than guessed at. A row whose ex-date is not a real date is skipped for the same reason.
+    Classification is `corroborating_type`: the same tested subject→type mapping the ingest path
+    uses, one segment of a compound line at a time. A row whose ex-date is not a real date is
+    skipped rather than guessed at.
     """
     root = (Path("data") if data_root is None else data_root) / "L0" / _CA_DATASET
     found: dict[tuple[str, date], ActionType] = {}
@@ -187,14 +210,14 @@ def read_corroboration(*, data_root: Path | None = None) -> Mapping[tuple[str, d
             isin, raw_ex = record.get("isin"), record.get("exDate")
             if not isin or not raw_ex:
                 continue
-            types = [t for t in classify(record.get("subject") or "") if t in CORROBORATING_TYPES]
-            if len(types) != 1:
-                continue  # unclassifiable, or ambiguous between two types — not evidence
+            action = corroborating_type(record.get("subject") or "")
+            if action is None:
+                continue  # unclassifiable, or ambiguous within one segment — not evidence
             try:
                 ex_date = datetime.strptime(raw_ex, "%d-%b-%Y").date()
             except ValueError:
                 continue
-            found.setdefault((isin, ex_date), types[0])
+            found.setdefault((isin, ex_date), action)
     _LOG.info("lineage.corroboration_read", files=len(files), actions=len(found))
     return found
 
@@ -380,6 +403,10 @@ class LineageResolver:
         """The session `predecessor`'s successor first traded, or None if it was never reissued."""
         found = self._forward.get(predecessor)
         return None if found is None else found[1]
+
+    def survivors(self) -> frozenset[str]:
+        """Every ISIN that inherited history from at least one predecessor — the stitch's keys."""
+        return frozenset(self._backward)
 
     def __len__(self) -> int:
         return len(self._forward)

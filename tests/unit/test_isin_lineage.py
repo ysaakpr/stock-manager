@@ -17,6 +17,7 @@ from dataplatform.identity.lineage import (
     IsinSpan,
     LineageEdge,
     LineageResolver,
+    corroborating_type,
     derive_edges,
 )
 
@@ -196,6 +197,33 @@ def test_edges_are_ordered_by_effective_date() -> None:
         {},
     )
     assert [e.effective_date for e in edges] == [date(2021, 10, 6), date(2021, 10, 21)]
+
+
+@pytest.mark.parametrize(
+    ("subject", "expected"),
+    [
+        ("Bonus 1:1", ActionType.BONUS),
+        (
+            "Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per Share",
+            ActionType.SPLIT,
+        ),
+        # A compound line names two events; the split is what reissued the ISIN.
+        (
+            "Bonus 1:5/Face Value Split (Sub-Division) - From Rs 10/- Per Share To Rs 2/- Per "
+            "Share",
+            ActionType.SPLIT,
+        ),
+        ("Bonus 2:1/Dividend- Rs 1.60 Per Share", ActionType.BONUS),
+        ("Annual General Meeting/Dividend - Rs 10 Per Share", None),
+        # One segment naming two types is ambiguous, not evidence.
+        ("BONUS 1:1 AND FV SPLIT FROM RS.10/- TO RS.2/-", None),
+        ("", None),
+    ],
+)
+def test_corroborating_type_reads_compound_lines_one_event_at_a_time(
+    subject: str, expected: ActionType | None
+) -> None:
+    assert corroborating_type(subject) is expected
 
 
 @pytest.mark.parametrize("action", [ActionType.SPLIT, ActionType.BONUS])
