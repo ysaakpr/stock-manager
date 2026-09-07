@@ -50,6 +50,7 @@ from dataplatform.store.l2 import (
     load_factor_chain,
     materialize_isin,
     materialize_isins,
+    materialize_missing,
     open_connection,
     read_adjusted,
     read_raw_bars_from_l1,
@@ -575,3 +576,53 @@ def test_the_stitch_leaves_the_retired_isin_without_a_partition(
     )
     with pytest.raises(FileNotFoundError):
         read_adjusted(RETIRED, data_root=reissued_lake)
+
+
+# ── the first-time fill: L2 covers every EQ ISIN, not only the ones a recompute flagged ──────────
+
+
+def test_materialize_missing_covers_the_names_the_queue_never_reaches(
+    db_conn: object, lake: Path
+) -> None:
+    """Neither ISIN has a factor row or an invalidation; the queue would build nothing for them.
+
+    The fill builds both from L1 alone — adjusted equals raw — and a second run finds nothing to
+    do, leaving the partitions byte-identical. The DB-backed path of the offline tests in
+    `tests/unit/test_l2_fill.py`: the factor chain and the reconciled actions are read from the
+    real tables.
+    """
+    report = materialize_missing(db_conn, data_root=lake)  # type: ignore[arg-type]
+    assert report.candidates == 2
+    assert sorted(r.isin for r in report.written) == sorted((IRCTC, CONTROL))
+    assert report.already_materialized == 0 and report.skipped_retired == 0
+
+    control = _by_date(read_adjusted(CONTROL, data_root=lake))
+    assert control[DIV_EX].adj_close == Decimal("120.0000")
+    assert control[DIV_EX].cum_price_factor == Decimal(1)
+
+    payload = l2_isin_partition_path(PRICES_ADJUSTED_DATASET, IRCTC, data_root=lake).read_bytes()
+    again = materialize_missing(db_conn, data_root=lake)  # type: ignore[arg-type]
+    assert again.written == () and again.already_materialized == 2
+    assert l2_isin_partition_path(PRICES_ADJUSTED_DATASET, IRCTC, data_root=lake).read_bytes() == (
+        payload
+    )
+
+
+def test_materialize_missing_skips_the_retired_isin_and_stitches_its_survivor(
+    db_conn: object, reissued_lake: Path
+) -> None:
+    """With the lineage's `survivor_of`, the retired ISIN gets no partition of its own and the
+    survivor is built over the whole chain — the same shape `rebuild_invalidated` produces."""
+    report = materialize_missing(
+        db_conn,  # type: ignore[arg-type]
+        data_root=reissued_lake,
+        history_for={IRCTC: (RETIRED, IRCTC)},
+        survivor_of=lambda isin: IRCTC if isin == RETIRED else isin,
+    )
+    assert report.candidates == 2 and report.skipped_retired == 1
+    (written,) = report.written
+    assert written.isin == IRCTC and written.rows_written == 3
+    assert written.from_date == date(2021, 6, 1)
+    assert not l2_isin_partition_path(
+        PRICES_ADJUSTED_DATASET, RETIRED, data_root=reissued_lake
+    ).exists()

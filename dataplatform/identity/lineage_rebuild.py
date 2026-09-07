@@ -10,6 +10,8 @@ The four stages the lineage touches, in the only order they can run:
    actions into `adjustment_factors` rows and `l2_invalidation` flags.
 4. **Rebuild L2** for the invalidated ISINs, each over its whole lineage chain, so the adjusted
    series spans the reissue instead of starting at it.
+5. **Fill L2** for every ISIN L1 has EQ bars for and no stage ever built — the names with no
+   corporate action at all, which the invalidation queue never reaches (`materialize_missing`).
 
 **What it does not do:** fetch. Every stage reads L0 or L1 off local disk, so this runs on a
 laptop between campaigns and on the server without touching the request budget. `L0Store.iter_refs`
@@ -44,7 +46,7 @@ from dataplatform.ingest.nse import corp_actions as nse_ca
 from dataplatform.logging import get_logger
 from dataplatform.store.db import connect
 from dataplatform.store.l0 import L0Store
-from dataplatform.store.l2 import open_connection, rebuild_invalidated
+from dataplatform.store.l2 import materialize_missing, open_connection, rebuild_invalidated
 
 __all__ = ["LineageRebuildReport", "rebuild"]
 
@@ -65,6 +67,7 @@ class LineageRebuildReport:
     isins_recomputed: int
     l2_partitions_rebuilt: int
     l2_partitions_stitched: int
+    l2_partitions_filled: int
 
 
 def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> LineageRebuildReport:
@@ -84,7 +87,7 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         resolver = store.load()
 
         if derive_only:
-            return LineageRebuildReport(len(edges), written, 0, 0, 0, 0, 0, 0)
+            return LineageRebuildReport(len(edges), written, 0, 0, 0, 0, 0, 0, 0)
 
         # ── 2. replay L0 through the parser, now with the lineage ────────────────────────────
         # The source's rows go first. `write_corporate_actions` is ON CONFLICT DO NOTHING, so a
@@ -135,6 +138,17 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
             reports = rebuild_invalidated(
                 conn, clock=clock, con=con, data_root=data_root, history_for=history
             )
+            # ── 5. fill L2 for the names no invalidation ever reached ────────────────────────
+            # The queue rebuilds what a corporate action touched; a name with no action never
+            # gets a partition that way. Retired ISINs are skipped — their bars are in the
+            # survivor's stitched partition above — so the fill and the stitch never overlap.
+            fill = materialize_missing(
+                conn,
+                con=con,
+                data_root=data_root,
+                history_for=history,
+                survivor_of=resolver.survivor_of,
+            )
         finally:
             con.close()
         conn.commit()
@@ -149,6 +163,7 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         isins_recomputed=finalize.isins_recomputed,
         l2_partitions_rebuilt=len(reports),
         l2_partitions_stitched=stitched,
+        l2_partitions_filled=len(fill.written),
     )
     _LOG.info("lineage_rebuild.done", **asdict(report))
     return report

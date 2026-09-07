@@ -43,7 +43,7 @@ Offline by construction: DuckDB reads local Parquet, nothing fetches.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
@@ -86,12 +86,16 @@ __all__ = [
     "PRICES_ADJUSTED_DATASET",
     "PRICES_ADJUSTED_SCHEMA",
     "AdjustedBar",
+    "L2FillReport",
     "L2WriteReport",
     "RawBar",
     "build_adjusted_bars",
+    "isins_with_eq_bars",
     "load_factor_chain",
     "materialize_isin",
     "materialize_isins",
+    "materialize_missing",
+    "materialized_isins",
     "open_connection",
     "preload_raw_bars",
     "read_adjusted",
@@ -200,6 +204,25 @@ class L2WriteReport:
     rows_written: int
     from_date: date | None
     to_date: date | None
+
+
+@dataclass(frozen=True, slots=True)
+class L2FillReport:
+    """What one first-time fill (`materialize_missing`) did.
+
+    `candidates` is every ISIN with EQ bars in L1 — the population L2 must cover. Each one was
+    either already on disk, retired by a lineage edge (its bars live in the survivor's stitched
+    partition), or written here; the three counts sum to `candidates`.
+    """
+
+    candidates: int
+    already_materialized: int
+    skipped_retired: int
+    written: tuple[L2WriteReport, ...]
+
+    @property
+    def rows_written(self) -> int:
+        return sum(r.rows_written for r in self.written)
 
 
 def open_connection() -> duckdb.DuckDBPyConnection:
@@ -734,7 +757,124 @@ def rebuild_invalidated(
     return tuple(reports)
 
 
+# ── the first-time fill: every ISIN L1 has bars for and nothing ever built ────────────────────
+
+
+def isins_with_eq_bars(
+    con: duckdb.DuckDBPyConnection, *, data_root: Path | None = None
+) -> tuple[str, ...]:
+    """Every ISIN with at least one EQ bar in L1, sorted — the population L2 must cover.
+
+    One columnar pass over `prices_raw` reading two columns, scoped by the same `series = 'EQ'`
+    filter the materializer applies: an ISIN listed here has bars L2 would adjust, one absent here
+    (a BSE-only name, a name that only ever traded in BE) would materialize to nothing.
+    """
+    files = _l1_partition_files(data_root=data_root)
+    if not files:
+        return ()
+    rows = con.execute(
+        "SELECT DISTINCT isin FROM read_parquet($files) WHERE series = 'EQ' ORDER BY isin",
+        {"files": [str(f) for f in files]},
+    ).fetchall()
+    return tuple(str(r[0]) for r in rows)
+
+
+def materialized_isins(*, data_root: Path | None = None) -> frozenset[str]:
+    """The ISINs that have a `prices_adjusted` partition on disk right now."""
+    return frozenset(_isin_of_partition(path) for path in _l2_partition_files(data_root=data_root))
+
+
+def materialize_missing(
+    conn: Connection,
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    data_root: Path | None = None,
+    history_for: Mapping[str, Sequence[str]] | None = None,
+    survivor_of: Callable[[str], str] | None = None,
+) -> L2FillReport:
+    """Materialize every ISIN that has EQ bars in L1 and no L2 partition yet — a first-time fill.
+
+    Why this exists: `rebuild_invalidated` builds exactly the ISINs a corporate-action recompute
+    flagged, and nothing else ever built one. So a name that never split, paid or was reissued
+    never got a partition, however long it traded. Measured on the server 2026-09-07: 793 of the
+    2,716 NSE EQ names trading that month had no L2 partition — ADANIGREEN, ADANIENSOL and
+    ETERNAL among them — and were invisible to every reader of L2 (the query layer, the backtest).
+
+    What it does: takes the ISINs with EQ bars in L1; drops those already on disk and those a
+    lineage edge retired (`survivor_of(isin) != isin` — their bars belong to the survivor's
+    stitched partition, which is built here if it is the one missing); preloads the rest's bars in
+    one pass; and materializes each from L1 + its persisted factor chain. For the common case that
+    chain is empty and adjusted equals raw. Each write is still one ISIN's partition
+    (acceptance 3), and nothing already on disk is touched — rebuilding is the queue's job.
+
+    What it assumes: `survivor_of` and `history_for` come from the D2 lineage
+    (`LineageResolver.survivor_of`, `chain_to`); without them every ISIN is built from its own
+    bars, which is right for a lake with no reissues.
+
+    What it never does: invent a factor. An ISIN whose corporate actions never reached the factor
+    chain (single-source, unquantified, unresolved identity) is materialized unadjusted, exactly
+    as the queue would have left it — the fill changes which names L2 covers, not what a factor is.
+    """
+    owns = con is None
+    con = open_connection() if con is None else con
+    try:
+        candidates = isins_with_eq_bars(con, data_root=data_root)
+        present = materialized_isins(data_root=data_root)
+        missing: list[str] = []
+        retired = 0
+        for isin in candidates:
+            if isin in present:
+                continue
+            if survivor_of is not None and survivor_of(isin) != isin:
+                retired += 1
+                continue
+            missing.append(isin)
+        reports: list[L2WriteReport] = []
+        if missing:
+            wanted = set(missing)
+            if history_for is not None:
+                for isin in missing:
+                    wanted.update(history_for.get(isin, ()))
+            preload_raw_bars(con, wanted, data_root=data_root)
+            for isin in missing:
+                reports.append(
+                    materialize_isin(
+                        isin,
+                        chain=load_factor_chain(conn, isin),
+                        actions=load_reconciled_actions(conn, isin=isin),
+                        con=con,
+                        data_root=data_root,
+                        history_isins=None if history_for is None else history_for.get(isin),
+                    )
+                )
+    finally:
+        if owns:
+            con.close()
+    report = L2FillReport(
+        candidates=len(candidates),
+        already_materialized=len(candidates) - len(missing) - retired,
+        skipped_retired=retired,
+        written=tuple(reports),
+    )
+    _LOG.info(
+        "l2.missing_materialized",
+        dataset=PRICES_ADJUSTED_DATASET,
+        candidates=report.candidates,
+        already_materialized=report.already_materialized,
+        skipped_retired=report.skipped_retired,
+        written=len(report.written),
+        rows=report.rows_written,
+        state="PUBLISHED",
+    )
+    return report
+
+
 # ── internals ────────────────────────────────────────────────────────────────────────────────
+
+
+def _isin_of_partition(path: Path) -> str:
+    """The ISIN an L2 partition file belongs to, read back off its `isin=<ISIN>` directory."""
+    return path.parent.name.removeprefix("isin=")
 
 
 def _price_point(bar: RawBar) -> PricePoint:
