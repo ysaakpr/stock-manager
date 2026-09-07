@@ -14,12 +14,16 @@ validated end to end on a short window instead (see the PR).
 
 ## Generating it
 
+From the repo root, where the lake's default `data/` resolves without an override:
+
 ```bash
 nohup uv run python -m backtest.duration \
-  --data-root /home/ubuntu/stock-manager/data \
   --report ops/gates/M12-swing-duration-window-report.md \
   > ~/campaign/duration-window-$(date +%F).log 2>&1 &
 ```
+
+From a worktree, whose own `data/` is empty, add `--data-root <path to the lake>`. The lake is
+read-only for this command: it opens L1/L2 and writes nothing back.
 
 Run it uninterrupted — nothing else may compete with it for the CPU, the Postgres or the request
 budget (CLAUDE.md, single-machine loop). Check `uptime` and `ps aux | grep -E 'sweep|backfill|campaign'`
