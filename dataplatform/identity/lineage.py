@@ -79,6 +79,10 @@ _EQUITY_SECURITY_TYPE: Final = "01"
 #: The issuer code, `IN` + `E` + four characters. Two ISINs sharing it are the same issuer.
 _ISSUER_PREFIX_LEN: Final = 7
 
+#: The exchange whose L1 rows are span evidence. Only the NSE bhavcopy prints the ISIN as of each
+#: session; BSE legacy rows carry a scrip-master ISIN assigned today (see `read_equity_spans`).
+_SPAN_EXCHANGE: Final = "NSE"
+
 
 @dataclass(frozen=True, slots=True)
 class IsinSpan:
@@ -125,7 +129,15 @@ def read_equity_spans(
     Returns `(spans, sessions)`. Spans cover `INE…01…` ISINs only — equity shares — but every
     series, not just `EQ`: the question here is when the *security* existed, and a name that spent
     its last weeks in trade-to-trade (`BE`) before the reissue still traded. Sessions are every
-    distinct trade date in L1, which is what turns a calendar gap into a count of missed sessions.
+    distinct NSE trade date in L1, which turns a calendar gap into a count of missed sessions.
+
+    NSE rows only, and not because BSE is uninteresting: a span is evidence of when the *source*
+    printed the ISIN, and only the NSE bhavcopy prints it as of each session. The BSE legacy
+    bhavcopy (before the 2024-07 UDiFF cutover) carries no ISIN; its rows reach L1 labelled with
+    the ISIN the scrip master holds today — for a reissued security, the successor — so on a lake
+    holding both exchanges the successor appears to trade from the original listing, overlaps the
+    predecessor, and the derivation drops the reissue as concurrent. Measured on the server on
+    2026-09-07: IRCTC's INE335Y01020 on BSE from 2019-10-14, two years before NSE issued it.
     """
     owns = con is None
     con = open_connection() if con is None else con
@@ -134,12 +146,19 @@ def read_equity_spans(
         rows = con.execute(
             "SELECT isin, min(trade_date), max(trade_date), arg_min(symbol, trade_date) "
             "FROM prices_raw "
-            "WHERE substr(isin, 1, 3) = $prefix AND substr(isin, 8, 2) = $sec_type "
+            "WHERE exchange = $exchange "
+            "AND substr(isin, 1, 3) = $prefix AND substr(isin, 8, 2) = $sec_type "
             "GROUP BY isin ORDER BY isin",
-            {"prefix": _EQUITY_PREFIX, "sec_type": _EQUITY_SECURITY_TYPE},
+            {
+                "exchange": _SPAN_EXCHANGE,
+                "prefix": _EQUITY_PREFIX,
+                "sec_type": _EQUITY_SECURITY_TYPE,
+            },
         ).fetchall()
         sessions = con.execute(
-            "SELECT DISTINCT trade_date FROM prices_raw ORDER BY trade_date"
+            "SELECT DISTINCT trade_date FROM prices_raw WHERE exchange = $exchange "
+            "ORDER BY trade_date",
+            {"exchange": _SPAN_EXCHANGE},
         ).fetchall()
     finally:
         if owns:
