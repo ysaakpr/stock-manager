@@ -33,6 +33,7 @@ from backtest.duration import (
     MODELLED_ROUND_TRIP,
     _ad_hoc,
     _duration_of,
+    _inventory,
     _overlapping_pairs,
     arms_that_ran,
     holding_period_math,
@@ -580,3 +581,17 @@ def test_the_overlap_claim_is_counted_rather_than_asserted() -> None:
     assert "do not overlap" not in report
     # And the non-overlapping case says the opposite rather than nothing.
     assert _overlapping_pairs(_split(selection_xirr="0.1", verification_xirr="0.1")) == 0
+
+
+def test_the_inventory_sentence_names_only_the_arms_that_are_there() -> None:
+    """Prose describing a reference or a baseline that did not run is the same defect as a count."""
+    assert _inventory(DURATION_ARMS) == (
+        "the M10.7 reference, 10 duration and band variations of it and 2 momentum baselines "
+        "every row is priced against"
+    )
+    subset = [arm for arm in DURATION_ARMS if "weekly / 10" in arm.label or arm.naive is not None]
+    sentence = _inventory(subset)
+    assert "the M10.7 reference" not in sentence, "named a reference row that never ran"
+    assert "of the M10.7 composite" in sentence, "'of it' dangles with no reference to refer to"
+    assert "1 momentum baseline every" in sentence, "said '1 baselines'"
+    assert _inventory([]) == "no arms at all — every one of them failed to produce a row"

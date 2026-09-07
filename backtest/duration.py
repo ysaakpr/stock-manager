@@ -335,6 +335,42 @@ def _arithmetic_table(result: SweepResult, floor: Decimal) -> list[str]:
     return lines
 
 
+def _plural(count: int, singular: str, plural: str) -> str:
+    return f"{count} {singular if count == 1 else plural}"
+
+
+def _inventory(arms: Sequence[Arm]) -> str:
+    """Describe the arms that ran, naming only the parts that are actually there (M12.3).
+
+    A filtered run may hold no reference row and one baseline, and prose that names "the M10.7
+    reference" and "2 momentum baselines" regardless is the same defect as counting the module
+    constant — a sentence describing a campaign that did not happen.
+    """
+    parts: list[str] = []
+    has_reference = any(arm.family == "reference" for arm in arms)
+    if has_reference:
+        parts.append("the M10.7 reference")
+    variations = sum(1 for arm in arms if arm.family == "duration")
+    if variations:
+        kind = "duration or band variation" if variations == 1 else "duration and band variations"
+        # "of it" only reads when the reference is in the sentence to refer back to.
+        parts.append(f"{variations} {kind} of {'it' if has_reference else 'the M10.7 composite'}")
+    baselines = sum(1 for arm in arms if arm.family == "baseline")
+    if baselines:
+        parts.append(
+            f"{_plural(baselines, 'momentum baseline', 'momentum baselines')} every row is "
+            "priced against"
+        )
+    other = sum(1 for arm in arms if arm.family not in {"reference", "duration", "baseline"})
+    if other:
+        parts.append(_plural(other, "further arm", "further arms"))
+    if not parts:
+        return "no arms at all — every one of them failed to produce a row"
+    if len(parts) == 1:
+        return parts[0]
+    return ", ".join(parts[:-1]) + f" and {parts[-1]}"
+
+
 def arms_that_ran(sweep: MultiWindowSweep) -> list[Arm]:
     """Every arm that produced a row, in the order they first appear (M12.3).
 
@@ -643,8 +679,6 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
     # module constant. A filtered run must not be able to claim the whole grid ran; that would be
     # exactly the survivor bias this module's own text condemns, printed at the top of the file.
     arms = arms_that_ran(sweep)
-    duration_arms = [arm for arm in arms if arm.family == "duration"]
-    baselines = [arm for arm in arms if arm.family == "baseline"]
     missing = [arm.label for arm in DURATION_ARMS if arm.label not in {a.label for a in arms}]
     floor_note = (
         f"{_floor_label(min(floors))} (the inherited M9.3 discovery floor) and "
@@ -676,8 +710,7 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
         "## What was run, and what is deliberately absent",
         "",
         f"- **{len(arms)} arms**, and this count is the arms that actually produced rows, not the "
-        f"arms the module defines: the M10.7 reference, {len(duration_arms)} duration and band "
-        f"variations of it, and {len(baselines)} momentum baselines every row is priced against.",
+        f"arms the module defines: {_inventory(arms)}.",
         "- **Every arm scores on exactly M10.7's three legs.** Every M12.1 leg is at zero, the "
         "trailing stop, the volatility screen and the basket size are at their defaults. A row is "
         "the price of the holding-period machinery and of nothing else.",
