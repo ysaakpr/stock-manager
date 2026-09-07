@@ -18,9 +18,9 @@ Prices, the investable/liquidity screen and the PIT universe are the M9.2-M9.4 m
 
 ## Window
 
-- 2016-09-02 -> 2026-08-31 (2468 sessions, 120 monthly rebalances)
+- 2016-09-02 -> 2026-08-31 (2470 sessions, 120 monthly rebalances)
 - Mean sector-mapped investable universe / rebalance: 38.5
-- Regime split: 1513 of 2468 sessions risk-on (proxy index at/above its 200-session moving average), the rest risk-off
+- Regime split: 1514 of 2470 sessions risk-on (proxy index at/above its 200-session moving average), the rest risk-off
 - Market XIRR (identical cashflows): 8.56%
 
 ## Sector rotation vs plain momentum vs market

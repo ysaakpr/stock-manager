@@ -10,17 +10,17 @@
 
 ## Window
 
-- 2016-09-02 -> 2026-08-31 (2468 sessions, 120 monthly rebalances)
-- Replay time: 45.0 s
+- 2016-09-02 -> 2026-08-31 (2470 sessions, 120 monthly rebalances)
+- Replay time: 52.4 s
 
 ## Return vs benchmark (money-weighted XIRR, identical cashflows)
 
 | Series | XIRR |
 | --- | --- |
-| Portfolio (naive momentum, **costs included**) | 11.70% |
+| Portfolio (naive momentum, **costs included**) | 10.92% |
 | NIFTY-TRI (broad-market TRI proxy from L1) | 8.56% |
-| **Excess over benchmark** | 3.14% |
+| **Excess over benchmark** | 2.36% |
 
-> **Benchmark provenance (M9.4):** this store holds no M3.9 computed TRI (the close-all snapshot that feeds `compute_tri` is a gated bulk fetch — AGENTIC_CONTEXT B1), so the pre-M9.4 broad-market **L1 proxy** stands in (equal-weight average of the 50 most-liquid names at the start, seeded to 1000). It is a price-return proxy — this is not the licensed NIFTY-TRI feed (session-gated, FAILED at C.1) and not even the computed TRI. The M9.4 wiring — the M3.9 computed TRI read through `read_tri_series` and flowed through the identical `compare_to_benchmarks` path — is proven on the fixture in `tests/integration/test_backtest_benchmark.py`. Do not read the excess as alpha.
+> **Benchmark provenance (M9.4):** this store holds no M3.9 computed TRI (the close-all snapshot that feeds `compute_tri` is a gated bulk fetch — AGENTIC_CONTEXT B1), so the pre-M9.4 broad-market **L1 proxy** stands in (equal-weight average of the 50 most-liquid names at the start, seeded to 1000). It is a price-return proxy: this is not the licensed NIFTY-TRI feed (session-gated, FAILED at C.1) and not even the computed TRI. The M9.4 wiring — the M3.9 computed TRI read through `read_tri_series` and flowed through the identical `compare_to_benchmarks` path — is proven on the fixture in `tests/integration/test_backtest_benchmark.py`. Do not read the excess as alpha.
 
-- **Run digest (sha256 of journal + book):** `27f0444b31926e9ba00b09de086aebfa0f6bca711d00ddc2674f94461794ad2e`
+- **Run digest (sha256 of journal + book):** `dba85e3be7402a68412f481a20c2af01145b39b3244bf24143bc103fc962d0ea`
