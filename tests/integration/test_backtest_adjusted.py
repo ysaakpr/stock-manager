@@ -24,20 +24,23 @@ the true move of a company that only split. That flip is the whole point of the 
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from backtest.policies.naive_momentum import MomentumParameters, MomentumRecord
+from backtest.policies.naive_momentum import MomentumParameters
 from backtest.run import (
     _AdjustedCloseSource,
     _L1MomentumData,
     _L1Reader,
+    _L1SectorRotationData,
+    _signal_source_prose,
     render_delta_report,
     run_naive_momentum,
 )
@@ -50,6 +53,17 @@ from dataplatform.store.paths import l1_partition_path
 from dataplatform.store.schemas import PRICES_RAW_DATASET, PRICES_RAW_SCHEMA
 
 pytestmark = pytest.mark.integration
+
+
+class _HasMomentum(Protocol):
+    """What :func:`_momentum` needs of a signal record — every policy's record carries both."""
+
+    @property
+    def isin(self) -> str: ...
+
+    @property
+    def momentum(self) -> Decimal: ...
+
 
 _PRICE_Q: Final = Decimal("0.0001")
 
@@ -181,7 +195,7 @@ def lake(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _momentum(records: tuple[MomentumRecord, ...], isin: str) -> Decimal:
+def _momentum(records: Sequence[_HasMomentum], isin: str) -> Decimal:
     """The momentum of one ISIN in a signal's records (asserts it is present)."""
     for record in records:
         if record.isin == isin:
@@ -323,3 +337,50 @@ def test_wipe_and_rebuild_l2_keeps_digest_identical(lake: Path) -> None:
     )
 
     assert first.result.digest() == second.result.digest()
+
+
+# ── the multi-arm report adapters read the same signal source (M9.5/M10.3/M10.6) ─────────────────
+
+
+def test_sector_rotation_records_rank_on_the_supplied_signal_source(lake: Path) -> None:
+    """The sector adapter's momentum follows its ``signal_closes``, and its price stays raw.
+
+    The M10.3 (and by the same seam M9.5/M10.6) report drivers pass one signal source to every arm
+    they run, so the arms are comparable and the report can name the source. This pins that the
+    adapter honours it: the split name reads its fake -50 % on raw closes and its true 0 % on the
+    L2 back-adjusted ones, while the sizing price is the raw post-split close either way
+    (invariant #3 — an adjusted series never prices a fill).
+    """
+    sectors = dict.fromkeys((SPLIT_ISIN, *FILLERS), "Test Industry")
+    reader = _L1Reader(data_root=lake)
+    try:
+        raw = _L1SectorRotationData(reader, _SESSIONS, sectors).signal(REBALANCE).records
+        with QueryService(data_root=lake) as svc:
+            adjusted = (
+                _L1SectorRotationData(
+                    reader, _SESSIONS, sectors, signal_closes=_AdjustedCloseSource(svc, reader)
+                )
+                .signal(REBALANCE)
+                .records
+            )
+    finally:
+        reader.close()
+
+    assert _momentum(raw, SPLIT_ISIN) == Decimal("-0.5")
+    assert _momentum(adjusted, SPLIT_ISIN) == Decimal("0")
+    assert next(r.price for r in raw if r.isin == SPLIT_ISIN) == _POST_SPLIT_CLOSE
+    assert next(r.price for r in adjusted if r.isin == SPLIT_ISIN) == _POST_SPLIT_CLOSE
+
+
+def test_a_report_names_the_signal_source_it_ran_on() -> None:
+    """The one sentence every multi-arm report opens its data reality with is not interchangeable.
+
+    Two arms ranked on different closes are not comparable, and a reader cannot tell from the
+    numbers which source produced them — so the prose has to say. A report that claimed raw while
+    running adjusted (or the reverse) would be the kind of quiet false statement the gate reports
+    exist to prevent.
+    """
+    adjusted, raw = _signal_source_prose(True), _signal_source_prose(False)
+    assert "L2 back-adjusted" in adjusted and "adjusted=True" in adjusted
+    assert "raw" in raw and "adjusted=False" in raw
+    assert adjusted != raw

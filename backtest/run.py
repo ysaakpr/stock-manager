@@ -1317,7 +1317,7 @@ def run_momentum_v2(
     v2_parameters: MomentumV2Parameters,
     opening_cash: Decimal = _DEFAULT_OPENING_CASH,
     data_root: Path | None = None,
-    adjusted: bool = False,
+    adjusted: bool = True,
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
 ) -> BacktestResult:
@@ -1330,11 +1330,13 @@ def run_momentum_v2(
     peak-to-trough max drawdown. With every toggle in ``v2_parameters`` off the run reproduces the
     naive result exactly (the increment report's baseline).
 
-    ``adjusted`` defaults to ``False``: over this corporate-action-free store the L2 adjusted signal
-    equals the raw one bar-for-bar (M9.2) and the ten-year L2 is not materialized, so the raw signal
-    *is* the M9.2 signal here — the report says so. ``universe`` constrains the candidate set to the
-    investable, liquid names (M9.3); the benchmark is M3.9's computed TRI when the store holds it,
-    else the L1 proxy (M9.4). The regime overlay reads a broad-market L1 proxy index (stated).
+    ``adjusted`` picks the signal source and every caller states it: the store now carries
+    corporate actions and a materialized L2, so the adjusted and raw signals genuinely differ
+    (``ops/gates/M9-adjusted-backtest-report.md`` measures the gap) and the earlier build's
+    shortcut — raw is the M9.2 signal because an action-free store makes them identical — no longer
+    holds. ``universe`` constrains the candidate set to the investable, liquid names (M9.3); the
+    benchmark is M3.9's computed TRI when the store holds it, else the L1 proxy (M9.4). The regime
+    overlay reads a broad-market L1 proxy index (stated).
     """
     reader = _L1Reader(data_root=data_root)
     service = QueryService(data_root=data_root) if adjusted else None
@@ -1527,6 +1529,28 @@ def _pct(value: Decimal) -> str:
 def _rupees(value: Decimal) -> str:
     """Render a rupee amount to two places with a ₹ sign."""
     return f"₹{value:,.2f}"
+
+
+def _signal_source_prose(adjusted: bool) -> str:
+    """The one sentence a multi-arm report opens its data reality with: which closes ranked it.
+
+    Every arm of a sweep reads one source, so the sentence is the report's own record of which —
+    and the two are not interchangeable once the store carries corporate actions: on raw closes a
+    2:1 split reads as a fake ~-50% twelve-month return and the ranking drops the name. Says which
+    source ran; never states the delta between them (that is the M9.2 report's subject).
+    """
+    if adjusted:
+        return (
+            "Every arm reads the **L2 back-adjusted** momentum signal (`adjusted=True`, the M9.2 "
+            "signal: both endpoints of a trailing return expressed in one share basis, so a split "
+            "or bonus inside the look-back window is no longer read as a price move). Execution "
+            "stays raw — the sizing price, the fill reference bars and the terminal marks are the "
+            "prices that actually traded (invariant #3)."
+        )
+    return (
+        "Every arm reads the **raw** L1 momentum signal (`adjusted=False`, the pre-M9.2 baseline; "
+        "the adjusted-vs-raw delta is the M9.2 report's subject, not this one's)."
+    )
 
 
 def _benchmark_label(run: BacktestResult) -> str:
@@ -2074,7 +2098,9 @@ def _v2_configs(top_n: int, sell_band: int) -> list[tuple[str, MomentumV2Paramet
     ]
 
 
-def render_v2_report(increments: Sequence[_V2Increment], *, top_n: int, sell_band: int) -> str:
+def render_v2_report(
+    increments: Sequence[_V2Increment], *, top_n: int, sell_band: int, adjusted: bool
+) -> str:
     """The M9.5 report: naive vs each increment vs all-on, on the M9.2-M9.4 inputs.
 
     One table with a row per configuration and columns for portfolio XIRR, max drawdown, turnover
@@ -2116,8 +2142,7 @@ def render_v2_report(increments: Sequence[_V2Increment], *, top_n: int, sell_ban
         "",
         "## Data reality",
         "",
-        "Every run reads the **raw** L1 momentum signal (`adjusted=False`, the M9.2 baseline; the "
-        "adjusted-vs-raw delta is the M9.2 report's subject, not this one's). The universe is the "
+        _signal_source_prose(adjusted) + " The universe is the "
         "M9.3 investable/liquid set (as-of index membership ∩ a median-turnover floor; the store "
         "holds no historical membership snapshots, so the liquidity floor is what narrows it). The "
         "benchmark is the broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the "
@@ -2210,13 +2235,16 @@ def run_v2_report(
     sell_band: int = 30,
     opening_cash: Decimal = _DEFAULT_OPENING_CASH,
     data_root: Path | None = None,
+    adjusted: bool = True,
     universe: UniverseParameters | None = None,
 ) -> str:
     """Run naive, each single-toggle increment and all-on, and render the M9.5 increment report.
 
-    Every configuration runs on the same M9.2-M9.4 stack (adjusted-or-raw signal, the M9.3
-    investable universe, the M9.4 benchmark), so each row differs from naive only by the toggle(s)
-    it turns on. Returns the rendered markdown.
+    Every configuration runs on the same M9.2-M9.4 stack (one signal source, the M9.3 investable
+    universe, the M9.4 benchmark), so each row differs from naive only by the toggle(s) it turns
+    on. ``adjusted`` picks that one source for every row alike — L2 back-adjusted closes (the M9.2
+    signal, the default) or raw L1 closes (the pre-M9.2 baseline) — so a sweep never mixes the two
+    and the rendered report names the source it ran on. Returns the rendered markdown.
     """
     uni = universe if universe is not None else UniverseParameters()
     increments: list[_V2Increment] = []
@@ -2227,11 +2255,11 @@ def run_v2_report(
             v2_parameters=params,
             opening_cash=opening_cash,
             data_root=data_root,
-            adjusted=False,
+            adjusted=adjusted,
             universe=uni,
         )
         increments.append(_V2Increment(label=label, parameters=params, run=run))
-    return render_v2_report(increments, top_n=top_n, sell_band=sell_band)
+    return render_v2_report(increments, top_n=top_n, sell_band=sell_band, adjusted=adjusted)
 
 
 # ── M10.3: sector-rotation report ────────────────────────────────────────────────────────────────
@@ -2520,6 +2548,7 @@ def run_sector_rotation_report(
     top_n: int = _SECTOR_TOP_N,
     opening_cash: Decimal = _DEFAULT_OPENING_CASH,
     data_root: Path | None = None,
+    adjusted: bool = True,
     sector_map_dir: Path = _STATIC_SECTOR_MAP_DIR,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
 ) -> str:
@@ -2534,8 +2563,13 @@ def run_sector_rotation_report(
     the store holds it, else the L1 proxy). Costs are in every fill (invariant #4). Metrics are
     reported full-period and split by market regime (proxy index at/above vs below its moving
     average). Returns the rendered markdown.
+
+    Both arms read one signal source, picked by ``adjusted``: L2 back-adjusted closes (the M9.2
+    signal, the default) or raw L1 closes (the pre-M9.2 baseline). It is the same source on both
+    sides of the comparison, so the sector gate stays the only difference between them.
     """
     reader = _L1Reader(data_root=data_root)
+    service = QueryService(data_root=data_root) if adjusted else None
     try:
         sessions = reader.trading_sessions(start, end)
         if not sessions:
@@ -2550,6 +2584,7 @@ def run_sector_rotation_report(
             reader,
             sessions,
             sector_by_isin,
+            signal_closes=_AdjustedCloseSource(service, reader) if service is not None else None,
             universe_filter=universe_filter,
             lookback_sessions=calendar,
         )
@@ -2618,8 +2653,11 @@ def run_sector_rotation_report(
             risk_on_sessions=risk_on_sessions,
             benchmark_computed_tri=resolved.is_computed_tri,
             benchmark_xirr=arms[0].comparison.benchmark_xirr,
+            adjusted=adjusted,
         )
     finally:
+        if service is not None:
+            service.close()
         reader.close()
 
 
@@ -2639,6 +2677,7 @@ def render_sector_rotation_report(
     risk_on_sessions: int,
     benchmark_computed_tri: bool,
     benchmark_xirr: Decimal,
+    adjusted: bool,
 ) -> str:
     """The M10.3 report: sector rotation vs plain momentum (same universe) vs market, per regime."""
     rotation, plain = arms[0], arms[1]
@@ -2686,8 +2725,9 @@ def render_sector_rotation_report(
         "",
         "## Data reality (same M9 stack)",
         "",
-        "Prices, the investable/liquidity screen and the PIT universe are the M9.2-M9.4 machinery "
-        "unchanged: raw L1 closes for the signal (`adjusted=False`, the M9.2 baseline), the M9.3 "
+        _signal_source_prose(adjusted)
+        + " The investable/liquidity screen and the PIT universe are the M9.2-M9.4 machinery "
+        "unchanged: the M9.3 "
         "investable set (as-of index membership ∩ a median-turnover floor; no historical "
         "membership snapshots in the store, so the liquidity floor is what narrows it), look-backs "
         "walking the full L1 calendar so the first rebalance already has a signal, and the "
@@ -2812,7 +2852,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         dest="adjusted",
         action="store_false",
         help="source the momentum signal from raw L1 closes (pre-M9.2 baseline); default is the "
-        "L2 back-adjusted signal read through the query layer",
+        "L2 back-adjusted signal read through the query layer. Governs every mode — the single "
+        "run and each multi-arm report, whose every arm reads the one source and names it",
     )
     parser.add_argument(
         "--delta-report",
@@ -2943,6 +2984,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 top_n=args.top_n if args.top_n is not None else 20,
                 opening_cash=args.opening_cash,
                 data_root=args.data_root,
+                adjusted=args.adjusted,
             )
         except BacktestError as error:
             print(f"error: {error}", file=sys.stderr)
@@ -2959,6 +3001,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 end=end,
                 opening_cash=args.opening_cash,
                 data_root=args.data_root,
+                adjusted=args.adjusted,
             )
         except BacktestError as error:
             print(f"error: {error}", file=sys.stderr)
@@ -2976,6 +3019,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 top_n=args.top_n if args.top_n is not None else 20,
                 opening_cash=args.opening_cash,
                 data_root=args.data_root,
+                adjusted=args.adjusted,
             )
         except BacktestError as error:
             print(f"error: {error}", file=sys.stderr)
@@ -3056,11 +3100,19 @@ class _L1FundamentalsData:
         *,
         data_root: Path | None,
         universe_filter: _InvestableUniverse | None,
+        signal_closes: SignalCloses | None = None,
         max_staleness_days: int = _FUNDAMENTALS_MAX_STALENESS_DAYS,
         lookback_sessions: Sequence[date] | None = None,
     ) -> None:
         self._reader = reader
         self._universe_filter = universe_filter
+        # The closes the 12-1 momentum rank is struck on — L2 back-adjusted when supplied, raw
+        # otherwise. Only the *ranking* moves: the market cap every valuation metric divides by is
+        # raw close x shares outstanding (an adjusted close would divide by a share count from
+        # another basis and mis-state the yield), and the sizing price stays raw by invariant #3.
+        self._signal_closes: SignalCloses = (
+            signal_closes if signal_closes is not None else reader.closes_on
+        )
         self._max_staleness_days = max_staleness_days
         # The calendar the 12-1 momentum look-back walks (the MOMENTUM_VALUE arm's second signal);
         # the replay sessions alone would leave the first year without one (see _L1MomentumV2Data).
@@ -3195,13 +3247,17 @@ class _L1FundamentalsData:
         return tuple(records)
 
     def _momentum_12_1(self, as_of: date) -> dict[str, Decimal]:
-        """The raw 12-1 return per ISIN as of ``as_of`` — the momentum v2 signal, PIT by reads."""
+        """The 12-1 return per ISIN as of ``as_of`` — the momentum v2 signal, PIT by reads.
+
+        Struck on the configured signal source, so the MOMENTUM_VALUE arm ranks on the same closes
+        the momentum arms of the same report do.
+        """
         cutoff = bisect_right(self._calendar, as_of - timedelta(days=_LOOKBACK_DAYS)) - 1
         one_month = bisect_right(self._calendar, as_of - timedelta(days=_MONTH_DAYS)) - 1
         if cutoff < 0 or one_month < 0:
             return {}
-        base = self._reader.closes_on(self._calendar[cutoff])
-        recent = self._reader.closes_on(self._calendar[one_month])
+        base = self._signal_closes(self._calendar[cutoff])
+        recent = self._signal_closes(self._calendar[one_month])
         return {
             isin: recent[isin] / base[isin] - _ONE
             for isin in base
@@ -3294,6 +3350,7 @@ def run_fundamentals_report(
     top_n: int = 20,
     opening_cash: Decimal = _DEFAULT_OPENING_CASH,
     data_root: Path | None = None,
+    adjusted: bool = True,
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
 ) -> str:
@@ -3302,9 +3359,15 @@ def run_fundamentals_report(
     Every arm replays the same sessions on the same universe through the same broker, book and
     cost model; the market row is the proxy index's own path split by the same regime buckets.
     Returns the rendered markdown.
+
+    ``adjusted`` picks the momentum source every arm that ranks on momentum shares — the two
+    momentum arms and MOMENTUM_VALUE's second signal — L2 back-adjusted closes (the M9.2 signal,
+    the default) or raw L1 closes (the pre-M9.2 baseline). The valuation metrics are unaffected:
+    a market cap is raw close x shares outstanding either way.
     """
     uni = universe if universe is not None else UniverseParameters()
     reader = _L1Reader(data_root=data_root)
+    service = QueryService(data_root=data_root) if adjusted else None
     try:
         sessions = reader.trading_sessions(start, end)
         if not sessions:
@@ -3321,17 +3384,20 @@ def run_fundamentals_report(
             ma_days=_REGIME_MA_DAYS,
         )
         risk_on_by_session = {s: regime_source.reading(s).risk_on for s in sessions}
+        signal_closes = _AdjustedCloseSource(service, reader) if service is not None else None
         fundamentals = _L1FundamentalsData(
             reader,
             sessions,
             data_root=data_root,
             universe_filter=universe_filter,
+            signal_closes=signal_closes,
             lookback_sessions=calendar,
         )
         momentum = _L1MomentumV2Data(
             reader,
             sessions,
             regime_source,
+            signal_closes=signal_closes,
             universe_filter=universe_filter,
             lookback_sessions=calendar,
         )
@@ -3398,8 +3464,11 @@ def run_fundamentals_report(
             universe_last=(ordered[-1], sizes[ordered[-1]]) if ordered else None,
             latest_filing=fundamentals.latest_filing_date,
             fresh_at_terminal=fundamentals.fresh_isins_on(sessions[-1]),
+            adjusted=adjusted,
         )
     finally:
+        if service is not None:
+            service.close()
         reader.close()
 
 
@@ -3419,6 +3488,7 @@ def render_fundamentals_report(
     universe_last: tuple[date, int] | None = None,
     latest_filing: date | None = None,
     fresh_at_terminal: int | None = None,
+    adjusted: bool = True,
 ) -> str:
     """The M10.6 report: fundamentals arms vs momentum vs market, full period and per regime."""
     lines = [
@@ -3426,7 +3496,7 @@ def render_fundamentals_report(
         "",
         "*Generated by `python -m backtest.run --policy fundamentals_value --fundamentals-report`. "
         "Three a-priori fundamentals signals read point-in-time off the M10.4/M10.5 PIT store, run "
-        "through the identical M9 stack (adjusted-or-raw L1 closes, the M9.3 investable universe, "
+        "through the identical M9 stack (the same closes, the M9.3 investable universe, "
         "SimBroker with the one shared cost model, M4.6 accounting) as the momentum arms they are "
         "compared with. Costs included everywhere.*",
         "",
@@ -3443,8 +3513,19 @@ def render_fundamentals_report(
         "annual "
         "equity figure, which only the filings with a filled reserves tag carry, so this arm's "
         "universe is smaller (stated in the table).",
-        "- **MOMENTUM_VALUE:** mean of the earnings-yield rank and the 12-1 momentum rank (the raw "
-        "signal the momentum v2 arm ranks on), over names with positive trailing earnings.",
+        "- **MOMENTUM_VALUE:** mean of the earnings-yield rank and the 12-1 momentum rank (the "
+        "same signal the momentum v2 arm ranks on), over names with positive trailing earnings.",
+        "- **Signal source:** "
+        + (
+            "the momentum rank (MOMENTUM_VALUE's second signal, and both momentum arms) is struck "
+            "on **L2 back-adjusted** closes, so a split inside the look-back window is not read "
+            "as a price move (`adjusted=True`, the M9.2 signal). Valuation is unaffected: a "
+            "market cap is raw close x shares outstanding either way, and execution is raw "
+            "throughout (invariant #3)."
+            if adjusted
+            else "the momentum rank (MOMENTUM_VALUE's second signal, and both momentum arms) is "
+            "struck on **raw** L1 closes (`adjusted=False`, the pre-M9.2 baseline)."
+        ),
         "- **Staleness:** a name whose newest filing is older than 200 days on the rebalance date "
         "is "
         "not rankable.",
