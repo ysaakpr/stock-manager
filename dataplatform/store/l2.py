@@ -93,6 +93,7 @@ __all__ = [
     "materialize_isin",
     "materialize_isins",
     "open_connection",
+    "preload_raw_bars",
     "read_adjusted",
     "read_raw_bars_from_l1",
     "rebuild_invalidated",
@@ -211,6 +212,81 @@ def open_connection() -> duckdb.DuckDBPyConnection:
     return duckdb.connect(":memory:")
 
 
+#: The per-connection preload `preload_raw_bars` fills and `read_raw_bars_from_l1` consults: the
+#: EQ bars of a named set of ISINs, read out of L1 in one pass, and the set itself.
+_PRELOAD_BARS_TABLE: Final = "l1_eq_bars_preload"
+_PRELOAD_ISINS_TABLE: Final = "l1_eq_bars_preload_isins"
+
+#: The columns a raw bar is read with, in the order `RawBar` is built from them — one spelling
+#: shared by the per-ISIN scan and the preload, so the two can never drift apart.
+_RAW_BAR_COLUMNS: Final = "isin, exchange, trade_date, open, high, low, close, total_traded_qty"
+
+
+def preload_raw_bars(
+    con: duckdb.DuckDBPyConnection, isins: Iterable[str], *, data_root: Path | None = None
+) -> int:
+    """Read the listed ISINs' EQ bars out of L1 in one pass and keep them on `con` for later reads.
+
+    Why: `read_raw_bars_from_l1` scans every `prices_raw` date partition to find one ISIN. L1 is
+    partitioned by date, not ISIN, so a rebuild over N ISINs opened every partition N times —
+    measured 2026-09-07 on the server: ~3,450 invalidated ISINs over 2,475 partitions, ~0.45 s each,
+    half an hour to extract 3.5 M rows that a single pass reads in seconds. The same quadratic
+    shape the PIT writer had (M10.4), and the same fix: batch the read, not the unit of work.
+
+    What it guarantees: the bytes do not change. The preload holds the same columns with their
+    parquet types intact, and a preloaded read applies the same `series = 'EQ'` filter and the same
+    `(exchange, trade_date)` order as the scan, so the `RawBar`s are equal and the L2 partition
+    built from them is identical. An ISIN outside the preload falls back to the scan, so a caller
+    that preloads a subset is still correct — only slower for the rest.
+
+    Replaces any earlier preload on `con`; returns the number of bars now held. Both tables are
+    temporary to the connection and vanish with it.
+    """
+    wanted = sorted(set(isins))
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {_PRELOAD_ISINS_TABLE} (isin VARCHAR)")
+    if wanted:
+        con.executemany(f"INSERT INTO {_PRELOAD_ISINS_TABLE} VALUES (?)", [(i,) for i in wanted])
+    files = _l1_partition_files(data_root=data_root)
+    if files:
+        con.execute(
+            f"CREATE OR REPLACE TEMP TABLE {_PRELOAD_BARS_TABLE} AS "
+            f"SELECT {_RAW_BAR_COLUMNS} FROM read_parquet($files) WHERE series = 'EQ' "
+            f"AND isin IN (SELECT isin FROM {_PRELOAD_ISINS_TABLE})",
+            {"files": [str(f) for f in files]},
+        )
+    else:
+        # A cold lake: covered ISINs must read as empty, exactly as the scan would report them.
+        con.execute(
+            f"CREATE OR REPLACE TEMP TABLE {_PRELOAD_BARS_TABLE} (isin VARCHAR, exchange VARCHAR, "
+            "trade_date DATE, open DECIMAL(18, 4), high DECIMAL(18, 4), low DECIMAL(18, 4), "
+            "close DECIMAL(18, 4), total_traded_qty BIGINT)"
+        )
+    row = con.execute(f"SELECT count(*) FROM {_PRELOAD_BARS_TABLE}").fetchone()
+    count = 0 if row is None else int(row[0])
+    _LOG.info(
+        "l2.raw_bars_preloaded",
+        dataset=PRICES_ADJUSTED_DATASET,
+        isins=len(wanted),
+        rows=count,
+        partitions=len(files),
+    )
+    return count
+
+
+def _preload_covers(con: duckdb.DuckDBPyConnection, isin: str) -> bool:
+    """Whether `con` carries a preload (`preload_raw_bars`) that includes `isin`."""
+    present = con.execute(
+        "SELECT 1 FROM duckdb_tables() WHERE table_name = $name AND temporary",
+        {"name": _PRELOAD_ISINS_TABLE},
+    ).fetchone()
+    if present is None:
+        return False
+    covered = con.execute(
+        f"SELECT 1 FROM {_PRELOAD_ISINS_TABLE} WHERE isin = $isin", {"isin": isin}
+    ).fetchone()
+    return covered is not None
+
+
 def read_raw_bars_from_l1(
     isin: str, *, con: duckdb.DuckDBPyConnection | None = None, data_root: Path | None = None
 ) -> tuple[RawBar, ...]:
@@ -221,24 +297,33 @@ def read_raw_bars_from_l1(
     (§4.5(a), "adjusted OHLCV series per ISIN across years"). Returns the bars ordered by
     `(exchange, trade_date)`; an ISIN absent from L1 returns an empty tuple, not an error — a
     security with no price history yet is a gap, not a failure.
+
+    When `con` carries a preload that covers `isin` (`preload_raw_bars`), the bars come from it
+    instead and no partition is opened; the rows, their types and their order are the same.
     """
-    files = _l1_partition_files(data_root=data_root)
-    if not files:
-        return ()
     owns = con is None
     con = open_connection() if con is None else con
     try:
-        # Scope to the EQ (regular-market) series: a name also carries block (BL), trade-to-trade
-        # (BE/BZ) and special-settlement (T0) rows for the same (exchange, trade_date), and pulling
-        # them all in would give the adjusted builder two closes for one date — a spurious
-        # "duplicate price". The EQ series is the one price history L2 adjusts, matching the query
-        # layer and the backtest reader (both filter series='EQ').
-        rows = con.execute(
-            "SELECT isin, exchange, trade_date, open, high, low, close, total_traded_qty "
-            "FROM read_parquet($files) WHERE isin = $isin AND series = 'EQ' "
-            "ORDER BY exchange, trade_date",
-            {"files": [str(f) for f in files], "isin": isin},
-        ).fetchall()
+        if not owns and _preload_covers(con, isin):
+            rows = con.execute(
+                f"SELECT {_RAW_BAR_COLUMNS} FROM {_PRELOAD_BARS_TABLE} WHERE isin = $isin "
+                "ORDER BY exchange, trade_date",
+                {"isin": isin},
+            ).fetchall()
+        else:
+            files = _l1_partition_files(data_root=data_root)
+            if not files:
+                return ()
+            # Scope to the EQ (regular-market) series: a name also carries block (BL),
+            # trade-to-trade (BE/BZ) and special-settlement (T0) rows for the same (exchange,
+            # trade_date), and pulling them all in would give the adjusted builder two closes for
+            # one date — a spurious "duplicate price". The EQ series is the one price history L2
+            # adjusts, matching the query layer and the backtest reader (both filter series='EQ').
+            rows = con.execute(
+                f"SELECT {_RAW_BAR_COLUMNS} FROM read_parquet($files) "
+                "WHERE isin = $isin AND series = 'EQ' ORDER BY exchange, trade_date",
+                {"files": [str(f) for f in files], "isin": isin},
+            ).fetchall()
     finally:
         if owns:
             con.close()
@@ -611,6 +696,13 @@ def rebuild_invalidated(
     con = open_connection() if con is None else con
     reports: list[L2WriteReport] = []
     try:
+        # One pass over L1 for every ISIN this drain touches — and the retired ISINs whose history
+        # they inherit — instead of a whole-lake scan per ISIN (`preload_raw_bars`).
+        wanted = set(isins)
+        if history_for is not None:
+            for isin in isins:
+                wanted.update(history_for.get(isin, ()))
+        preload_raw_bars(con, wanted, data_root=data_root)
         for isin in isins:
             chain = load_factor_chain(conn, isin)
             actions = load_reconciled_actions(conn, isin=isin)
