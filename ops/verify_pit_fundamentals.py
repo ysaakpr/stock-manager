@@ -39,8 +39,7 @@ with connection(settings) as conn:
     before = {
         r[0]
         for r in conn.execute(
-            "SELECT split_part(source,'/',2) FROM sync_state "
-            "WHERE source LIKE 'nse_xbrl_filing%' AND state='PUBLISHED'"
+            "SELECT unit FROM sync_state WHERE source LIKE 'nse_xbrl_filing%' AND state='PUBLISHED'"
         ).fetchall()
     }
     master = IdentityStore(conn, clock=SystemClock()).load_master()
@@ -52,8 +51,7 @@ with connection(settings) as conn:
     after = {
         r[0]
         for r in conn.execute(
-            "SELECT split_part(source,'/',2) FROM sync_state "
-            "WHERE source LIKE 'nse_xbrl_filing%' AND state='PUBLISHED'"
+            "SELECT unit FROM sync_state WHERE source LIKE 'nse_xbrl_filing%' AND state='PUBLISHED'"
         ).fetchall()
     }
     row = conn.execute(
