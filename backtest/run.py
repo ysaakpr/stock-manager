@@ -449,6 +449,18 @@ class _AdjustedCloseSource:
     out of the signal: every ISIN asked for printed on NSE that session, so the NSE bar the pin
     selects is the one that exists.
 
+    **The answer can carry ISINs L1 did not print under that identity.** `cross_section` returns
+    L2's rows for the session, and L2 is stitched: a name whose ISIN changed on a face-value split
+    holds its predecessor's bars under the *surviving* ISIN, so on a pre-reissue session L2 answers
+    for an identity raw L1 has only under the retired one. That is the lineage work paying off —
+    the successor's look-back history genuinely is the predecessor's, and without it the name is
+    invisible to a momentum rank for a year after the reissue. But it also means an adjusted run's
+    candidate set is *larger* than the raw run's, so a raw-vs-adjusted delta measured this way
+    mixes the price basis with the identity coverage. ``l1_isins_only`` answers only for the ISINs
+    L1 printed that session: a run on it sees exactly the raw run's candidates and the delta
+    between the two is the price basis alone. Neither setting is "correct" — the unrestricted
+    source is the one to trade on, the restricted one is the one that isolates a cause.
+
     Raw is the base; L2 adjusted is overlaid where it exists. L2 is materialized only for names with
     a non-identity factor chain (a split/bonus/rights) — for every other name the adjusted close
     equals the raw close *exactly*, so the raw close IS its adjusted close, not an approximation.
@@ -458,9 +470,12 @@ class _AdjustedCloseSource:
     pays once.
     """
 
-    def __init__(self, service: QueryService, reader: _L1Reader) -> None:
+    def __init__(
+        self, service: QueryService, reader: _L1Reader, *, l1_isins_only: bool = False
+    ) -> None:
         self._service = service
         self._reader = reader
+        self._l1_isins_only = l1_isins_only
         self._closes: dict[date, dict[str, Decimal]] = {}
 
     def __call__(self, session: date) -> Mapping[str, Decimal]:
@@ -477,7 +492,13 @@ class _AdjustedCloseSource:
         )
         # Start from raw (exact for no-CA names); overlay the L2 adjusted close where it exists.
         closes = dict(raw)
-        closes.update({row.isin: row.adj_close for row in cross.rows})
+        closes.update(
+            {
+                row.isin: row.adj_close
+                for row in cross.rows
+                if not self._l1_isins_only or row.isin in raw
+            }
+        )
         self._closes[session] = closes
         return closes
 
@@ -1221,6 +1242,7 @@ def run_naive_momentum(
     parameters: MomentumParameters | None = None,
     data_root: Path | None = None,
     adjusted: bool = True,
+    signal_l1_isins_only: bool = False,
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
 ) -> BacktestResult:
@@ -1264,7 +1286,11 @@ def run_naive_momentum(
         sessions = _reserve_fill_headroom(sessions, calendar)
         first_session, terminal = sessions[0], sessions[-1]
 
-        signal_closes = _AdjustedCloseSource(service, reader) if service is not None else None
+        signal_closes = (
+            _AdjustedCloseSource(service, reader, l1_isins_only=signal_l1_isins_only)
+            if service is not None
+            else None
+        )
         universe_filter = (
             _InvestableUniverse(reader, universe, data_root=data_root)
             if universe is not None
@@ -1351,6 +1377,7 @@ def run_momentum_v2(
     opening_cash: Decimal = _DEFAULT_OPENING_CASH,
     data_root: Path | None = None,
     adjusted: bool = True,
+    signal_l1_isins_only: bool = False,
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
 ) -> BacktestResult:
@@ -1381,7 +1408,11 @@ def run_momentum_v2(
         sessions = _reserve_fill_headroom(sessions, calendar)
         first_session, terminal = sessions[0], sessions[-1]
 
-        signal_closes = _AdjustedCloseSource(service, reader) if service is not None else None
+        signal_closes = (
+            _AdjustedCloseSource(service, reader, l1_isins_only=signal_l1_isins_only)
+            if service is not None
+            else None
+        )
         universe_filter = (
             _InvestableUniverse(reader, universe, data_root=data_root)
             if universe is not None
@@ -1702,7 +1733,11 @@ def _trades(run: BacktestResult) -> int:
 
 
 def render_delta_report(
-    raw: BacktestResult, adjusted: BacktestResult, *, flipped: Sequence[str] = ()
+    raw: BacktestResult,
+    adjusted: BacktestResult,
+    *,
+    fixed_universe: BacktestResult | None = None,
+    flipped: Sequence[str] = (),
 ) -> str:
     """The M9.2 report: the adjusted 10-year run against the raw baseline, delta by delta.
 
@@ -1714,6 +1749,13 @@ def render_delta_report(
     the fake post-split momentum the raw signal was buying. ``flipped`` lists names whose
     twelve-month signal flipped across a known split between the two runs, when the caller computed
     them; this report does not compute them itself.
+
+    ``fixed_universe`` is the adjusted run held to the ISINs L1 printed each session — the raw
+    run's candidate set exactly. Given it, the report decomposes the raw-to-adjusted delta into the
+    part the *price basis* caused and the part the *identity coverage* caused, because reading L2
+    does both at once: L2 is stitched, so a name whose ISIN changed on a face-value split answers
+    under the surviving identity on sessions where raw L1 has it only under the retired one. Both
+    effects are real and wanted; attributing the sum to the signal alone is what this arm prevents.
     """
     raw_x, adj_x = raw.comparison.portfolio_xirr, adjusted.comparison.portfolio_xirr
     raw_t, adj_t = _trades(raw), _trades(adjusted)
@@ -1768,11 +1810,14 @@ def render_delta_report(
         f"| Total costs | {_rupees(raw_c)} | {_rupees(adj_c)} | {_rupees(adj_c - raw_c)} |",
         f"| Final NAV | {_rupees(raw.final_nav)} | {_rupees(adjusted.final_nav)} | "
         f"{_rupees(adjusted.final_nav - raw.final_nav)} |",
+        f"| Mean candidates / rebalance | {raw.mean_universe} | {adjusted.mean_universe} | "
+        f"{adjusted.mean_universe - raw.mean_universe:+} |",
         "",
         f"- **Run digest (raw):** `{raw.result.digest()}`",
         f"- **Run digest (adjusted):** `{adjusted.result.digest()}`",
         f"- **Digests identical:** {identical} {digest_note}",
         "",
+        *_delta_decomposition(raw, adjusted, fixed_universe),
         "## Signal flips across a known split",
         "",
         (
@@ -1794,6 +1839,52 @@ def render_delta_report(
     return "\n".join(lines)
 
 
+def _delta_decomposition(
+    raw: BacktestResult, adjusted: BacktestResult, fixed: BacktestResult | None
+) -> list[str]:
+    """The raw-to-adjusted delta split into its price-basis and identity-coverage halves.
+
+    Empty when the caller ran no fixed-universe arm. Given one, the middle run (adjusted closes,
+    the raw run's candidate set) splits the total delta in two: everything up to it is the price
+    basis, everything after it is the extra names L2's stitched identities make rankable. The two
+    parts sum to the total by construction, so the table is a decomposition and not three
+    independent readings.
+    """
+    if fixed is None:
+        return []
+    raw_x = raw.comparison.portfolio_xirr
+    fix_x = fixed.comparison.portfolio_xirr
+    adj_x = adjusted.comparison.portfolio_xirr
+    return [
+        "## What the delta is made of",
+        "",
+        "Reading L2 changes two things at once, so the row above is a sum, not a cause. The "
+        "middle arm below is the adjusted signal held to the ISINs L1 printed each session — the "
+        "raw run's candidate set exactly — so the first delta is the price basis alone and the "
+        "second is the identity coverage L2's stitching adds (a name whose ISIN changed on a "
+        "face-value split answers under the surviving identity on sessions where raw L1 carries "
+        "it only under the retired one).",
+        "",
+        "| Arm | Candidate set | Portfolio XIRR | Mean candidates / rebalance |",
+        "| --- | --- | --- | --- |",
+        f"| Raw signal | L1's ISINs | {_pct(raw_x)} | {raw.mean_universe} |",
+        f"| Adjusted signal, fixed universe | L1's ISINs | {_pct(fix_x)} | {fixed.mean_universe} |",
+        f"| Adjusted signal | L1's ISINs + L2's stitched identities | {_pct(adj_x)} | "
+        f"{adjusted.mean_universe} |",
+        "",
+        f"- **Price basis (fixed universe - raw):** {_pct(fix_x - raw_x)}",
+        f"- **Identity coverage (adjusted - fixed universe):** {_pct(adj_x - fix_x)}",
+        f"- **Total (adjusted - raw):** {_pct(adj_x - raw_x)}",
+        f"- **Run digest (adjusted, fixed universe):** `{fixed.result.digest()}`",
+        "",
+        "Neither half is a defect and neither is optional in a live run: the price basis is the "
+        "M9.2 correction, and the coverage is the M2/lineage work making a reissued name visible "
+        "to a rank at all. The split exists so a change in one is never read as evidence about "
+        "the other.",
+        "",
+    ]
+
+
 def run_delta_report(
     *,
     start: date,
@@ -1802,7 +1893,12 @@ def run_delta_report(
     parameters: MomentumParameters | None = None,
     data_root: Path | None = None,
 ) -> str:
-    """Run the raw and adjusted backtests over the same window and render the M9.2 delta report."""
+    """Run the raw, adjusted and fixed-universe backtests and render the M9.2 delta report.
+
+    Three arms, one window: the raw baseline, the adjusted signal on its own candidate set (the run
+    a live policy would make), and the adjusted signal held to L1's ISINs. The third is what makes
+    the report a decomposition rather than one number with two causes in it.
+    """
     raw = run_naive_momentum(
         start=start,
         end=end,
@@ -1819,7 +1915,16 @@ def run_delta_report(
         data_root=data_root,
         adjusted=True,
     )
-    return render_delta_report(raw, adjusted)
+    fixed = run_naive_momentum(
+        start=start,
+        end=end,
+        opening_cash=opening_cash,
+        parameters=parameters,
+        data_root=data_root,
+        adjusted=True,
+        signal_l1_isins_only=True,
+    )
+    return render_delta_report(raw, adjusted, fixed_universe=fixed)
 
 
 def render_universe_report(
@@ -2269,6 +2374,7 @@ def run_v2_report(
     opening_cash: Decimal = _DEFAULT_OPENING_CASH,
     data_root: Path | None = None,
     adjusted: bool = True,
+    signal_l1_isins_only: bool = False,
     universe: UniverseParameters | None = None,
 ) -> str:
     """Run naive, each single-toggle increment and all-on, and render the M9.5 increment report.
@@ -2289,6 +2395,7 @@ def run_v2_report(
             opening_cash=opening_cash,
             data_root=data_root,
             adjusted=adjusted,
+            signal_l1_isins_only=signal_l1_isins_only,
             universe=uni,
         )
         increments.append(_V2Increment(label=label, parameters=params, run=run))
@@ -2582,6 +2689,7 @@ def run_sector_rotation_report(
     opening_cash: Decimal = _DEFAULT_OPENING_CASH,
     data_root: Path | None = None,
     adjusted: bool = True,
+    signal_l1_isins_only: bool = False,
     sector_map_dir: Path = _STATIC_SECTOR_MAP_DIR,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
 ) -> str:
@@ -2617,7 +2725,11 @@ def run_sector_rotation_report(
             reader,
             sessions,
             sector_by_isin,
-            signal_closes=_AdjustedCloseSource(service, reader) if service is not None else None,
+            signal_closes=(
+                _AdjustedCloseSource(service, reader, l1_isins_only=signal_l1_isins_only)
+                if service is not None
+                else None
+            ),
             universe_filter=universe_filter,
             lookback_sessions=calendar,
         )
@@ -2924,6 +3036,14 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help=f"run the M10.6 fundamentals arms vs momentum vs market per regime and write the "
         f"report to {_FUNDAMENTALS_REPORT_PATH}",
     )
+    parser.add_argument(
+        "--signal-l1-isins-only",
+        action="store_true",
+        help="hold the signal to the ISINs L1 printed each session, so an adjusted run has the "
+        "raw run's candidate set exactly and the difference between them is the price basis alone "
+        "(L2 is stitched, so it otherwise answers for reissued identities raw L1 carries only "
+        "under a retired ISIN). A measurement setting: do not plan a live run on it",
+    )
     parser.set_defaults(adjusted=True)
     parser.add_argument(
         "--opening-cash",
@@ -3018,6 +3138,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 opening_cash=args.opening_cash,
                 data_root=args.data_root,
                 adjusted=args.adjusted,
+                signal_l1_isins_only=args.signal_l1_isins_only,
             )
         except BacktestError as error:
             print(f"error: {error}", file=sys.stderr)
@@ -3035,6 +3156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 opening_cash=args.opening_cash,
                 data_root=args.data_root,
                 adjusted=args.adjusted,
+                signal_l1_isins_only=args.signal_l1_isins_only,
             )
         except BacktestError as error:
             print(f"error: {error}", file=sys.stderr)
@@ -3053,6 +3175,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 opening_cash=args.opening_cash,
                 data_root=args.data_root,
                 adjusted=args.adjusted,
+                signal_l1_isins_only=args.signal_l1_isins_only,
             )
         except BacktestError as error:
             print(f"error: {error}", file=sys.stderr)
@@ -3079,6 +3202,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             parameters=params,
             data_root=args.data_root,
             adjusted=args.adjusted,
+            signal_l1_isins_only=args.signal_l1_isins_only,
         )
     except BacktestError as error:
         print(f"error: {error}", file=sys.stderr)
@@ -3384,6 +3508,7 @@ def run_fundamentals_report(
     opening_cash: Decimal = _DEFAULT_OPENING_CASH,
     data_root: Path | None = None,
     adjusted: bool = True,
+    signal_l1_isins_only: bool = False,
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
 ) -> str:
@@ -3417,7 +3542,11 @@ def run_fundamentals_report(
             ma_days=_REGIME_MA_DAYS,
         )
         risk_on_by_session = {s: regime_source.reading(s).risk_on for s in sessions}
-        signal_closes = _AdjustedCloseSource(service, reader) if service is not None else None
+        signal_closes = (
+            _AdjustedCloseSource(service, reader, l1_isins_only=signal_l1_isins_only)
+            if service is not None
+            else None
+        )
         fundamentals = _L1FundamentalsData(
             reader,
             sessions,

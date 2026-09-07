@@ -24,7 +24,7 @@ the true move of a company that only split. That flip is the whole point of the 
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -46,8 +46,10 @@ from backtest.run import (
 )
 from dataplatform.corpactions.factors import FactorChain, build_factor_chain
 from dataplatform.corpactions.taxonomy import ActionType, FaceValueTerms
+from dataplatform.identity.master import Exchange as IdentityExchange
 from dataplatform.ingest.corp_actions import CorporateAction
 from dataplatform.query.service import QueryService
+from dataplatform.query.shapes import AdjustedPoint, CrossSection, CrossSectionRequest
 from dataplatform.store.l2 import materialize_isin, wipe_adjusted
 from dataplatform.store.paths import l1_partition_path
 from dataplatform.store.schemas import PRICES_RAW_DATASET, PRICES_RAW_SCHEMA
@@ -384,3 +386,75 @@ def test_a_report_names_the_signal_source_it_ran_on() -> None:
     assert "L2 back-adjusted" in adjusted and "adjusted=True" in adjusted
     assert "raw" in raw and "adjusted=False" in raw
     assert adjusted != raw
+
+
+# ── the delta's two causes are separable (2026-09-07) ────────────────────────────────────────────
+
+
+class _StitchedService:
+    """A ``QueryService`` stand-in whose cross-section carries one ISIN L1 never printed.
+
+    That is the real shape of a stitched L2: a name whose ISIN changed on a face-value split holds
+    its predecessor's bars under the *surviving* identity, so L2 answers for an ISIN the session's
+    raw L1 partition has only under the retired one. Stubbed rather than built, because
+    manufacturing a reissue needs the lineage tables; what is under test here is what
+    ``_AdjustedCloseSource`` does with such a row, not how L2 came to hold it.
+    """
+
+    #: The surviving identity L2 answers for and L1 (under this identity) does not.
+    STITCHED: Final = "INE500A01010"
+
+    def __init__(self, adjusted: Mapping[str, Decimal]) -> None:
+        self._adjusted = dict(adjusted)
+
+    def cross_section(self, request: CrossSectionRequest) -> CrossSection:
+        rows = tuple(
+            AdjustedPoint(
+                isin=isin,
+                trade_date=request.trade_date,
+                exchange=IdentityExchange.NSE,
+                primary=IdentityExchange.NSE,
+                fell_back=False,
+                adj_open=close,
+                adj_high=close,
+                adj_low=close,
+                adj_close=close,
+                adj_volume=Decimal("1000"),
+                tr_close=close,
+                cum_price_factor=Decimal("1"),
+                cum_qty_factor=Decimal("1"),
+            )
+            for isin, close in sorted(self._adjusted.items())
+        )
+        return CrossSection(trade_date=request.trade_date, rows=rows)
+
+    def close(self) -> None: ...
+
+
+def test_l1_isins_only_holds_the_candidate_set_to_the_raw_run_s(lake: Path) -> None:
+    """The restricted source answers for L1's ISINs only; the open one admits L2's stitched ones.
+
+    Reading L2 changes the price basis *and* the identity coverage, so a raw-vs-adjusted delta
+    measured on the open source is a sum of two causes. `l1_isins_only=True` is the arm that
+    separates them: same candidates as the raw run, so the difference is the basis alone. A test
+    that fails if the restriction stops filtering — or starts dropping the adjusted closes it is
+    supposed to keep.
+    """
+    session = REBALANCE
+    reader = _L1Reader(data_root=lake)
+    try:
+        raw = reader.closes_on(session)
+        # L2 answers for every L1 name (halved for the split name) plus one stitched identity.
+        service = _StitchedService({**raw, _StitchedService.STITCHED: Decimal("7")})
+        open_closes = _AdjustedCloseSource(service, reader)(session)  # type: ignore[arg-type]
+        held = _AdjustedCloseSource(service, reader, l1_isins_only=True)(  # type: ignore[arg-type]
+            session
+        )
+    finally:
+        reader.close()
+
+    assert _StitchedService.STITCHED in open_closes
+    assert _StitchedService.STITCHED not in held
+    assert set(held) == set(raw)
+    # The restriction drops rows, never rewrites them: every kept ISIN carries L2's close.
+    assert all(held[isin] == open_closes[isin] for isin in held)
