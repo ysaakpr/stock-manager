@@ -202,16 +202,22 @@ class QueryService:
         the primary's, or the other venue's (flagged) when the primary was dark that session — so
         the result is exactly one row per ISIN that traded, never a double count. The primary map is
         `request`'s if supplied (the day's map M3.2 already builds — pass it to skip the scan), else
-        derived from L1 liquidity as of `trade_date`.
+        derived from L1 liquidity as of `trade_date`; an ISIN absent from either map whose bars come
+        from one venue only is deduped to that venue (`_single_venue_primaries`).
         """
         bars = self._read_cross_section_bars(request.trade_date)
-        if request.primary_by_isin is not None:
-            primary_by_isin: Mapping[str, Exchange] = request.primary_by_isin
-        else:
-            derived = self._derive_primary_map(
+        decided: Mapping[str, Exchange] = (
+            request.primary_by_isin
+            if request.primary_by_isin is not None
+            else self._derive_primary_map(
                 as_of=request.trade_date, isins=frozenset(b.isin for b in bars)
             )
-            primary_by_isin = {**_single_venue_primaries(bars), **derived}
+        )
+        # A decision — the caller's or the liquidity scan's — wins wherever one exists; an ISIN
+        # neither could place, whose bars all come from one venue, takes that venue. The backtest
+        # supplies M3.2's day map, built from L1 by ISIN, which is blind to a stitched name's
+        # inherited sessions exactly as the scan is, so the fallback applies to both routes.
+        primary_by_isin = {**_single_venue_primaries(bars), **decided}
         canon = self._dedup(bars, primary_by_isin)
         rows = tuple(self._to_point(c) for c in canon)
         _LOG.info(

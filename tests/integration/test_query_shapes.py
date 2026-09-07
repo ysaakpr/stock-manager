@@ -379,6 +379,20 @@ def test_cross_section_on_a_stitched_session_takes_the_only_venue_as_primary(
     assert row.adj_close == Decimal("50")
 
 
+def test_a_supplied_map_that_cannot_name_a_stitched_isin_still_gets_its_row(
+    stitched_lake: Path,
+) -> None:
+    """The backtest passes M3.2's day map, keyed by the ISINs L1 priced that session — the retired
+    one before the reissue, never the survivor. The survivor's bar must still be in the day."""
+    early = _XS_WINDOW[1]
+    with QueryService(data_root=stitched_lake) as svc:
+        xs = svc.cross_section(
+            CrossSectionRequest(trade_date=early, primary_by_isin={XS_RETIRED: Exchange.NSE})
+        )
+    (row,) = xs.rows
+    assert row.isin == XS_SURVIVOR and row.primary is Exchange.NSE and row.fell_back is False
+
+
 def test_adjusted_series_of_a_stitched_name_spans_the_reissue(stitched_lake: Path) -> None:
     with QueryService(data_root=stitched_lake) as svc:
         series = svc.adjusted_series(AdjustedSeriesRequest(isin=XS_SURVIVOR))
