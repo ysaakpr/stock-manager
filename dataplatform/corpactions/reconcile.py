@@ -55,6 +55,8 @@ from dataplatform.corpactions.factors import PRICE_EVENT_TYPES
 from dataplatform.corpactions.taxonomy import (
     TERMS_ADAPTER,
     ActionType,
+    DividendKind,
+    DividendTerms,
     Terms,
     UnquantifiedTerms,
     describe,
@@ -363,13 +365,43 @@ def _quantified_fill(left: Terms, right: Terms) -> Terms | None:
     that as a `RATIO_MISMATCH` sends a perfectly well-evidenced action to a human whose only
     possible move is to copy the number across from the other feed already in front of them.
 
-    So silence yields to a statement, and only to a statement: this fires when exactly one side is
-    `UnquantifiedTerms`. Two feeds that both state terms and *disagree* are still a mismatch, and
-    two that both say nothing still have nothing to fill from — a filled action is always backed by
-    one feed's explicit numbers, never by an average or an inference.
+    So silence yields to a statement, and only to a statement. Silence takes two shapes here.
+
+    **The whole terms.** Exactly one side is `UnquantifiedTerms` — the other's numbers stand.
+
+    **One field.** Both sides are `DividendTerms` naming the same money, and exactly one gives the
+    dividend's *kind* while the other says `UNSPECIFIED` — which the enum documents as "the feed
+    said only 'dividend'". BSE writes `Final Dividend - Rs. - 2.5000` and NSE writes
+    `Dividend - Rs 2.50 Per Share`: the same 2.50, and one feed happens to know it is the final
+    one. 3,982 of the 4,195 open ratio mismatches were this, against 213 where the feeds really do
+    name different money.
+
+    Two feeds that both state terms and *disagree* are still a mismatch, and two that both say
+    nothing still have nothing to fill from — a filled action is always backed by one feed's
+    explicit statement, never by an average or an inference.
     """
     left_silent = isinstance(left, UnquantifiedTerms)
     right_silent = isinstance(right, UnquantifiedTerms)
+    if left_silent != right_silent:
+        return right if left_silent else left
+    if left_silent:  # both silent — nothing to copy across
+        return None
+    if isinstance(left, DividendTerms) and isinstance(right, DividendTerms):
+        return _dividend_kind_fill(left, right)
+    return None
+
+
+def _dividend_kind_fill(left: DividendTerms, right: DividendTerms) -> DividendTerms | None:
+    """The side that named the dividend's kind, when the other said `UNSPECIFIED`.
+
+    The money must match exactly first — this fills in *which* dividend it is, never how much.
+    """
+    if left.amount_inr != right.amount_inr:
+        return None
+    if left.percent_of_face_value != right.percent_of_face_value:
+        return None
+    left_silent = left.dividend_kind is DividendKind.UNSPECIFIED
+    right_silent = right.dividend_kind is DividendKind.UNSPECIFIED
     if left_silent == right_silent:
         return None
     return right if left_silent else left

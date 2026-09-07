@@ -793,3 +793,68 @@ def test_another_isins_open_flag_is_not_touched() -> None:
 
     persist_reconciliation(cast("Connection", conn), reconcile(infy), clock=clock)
     assert _open_count(conn, clock) == 1, "TCS's disagreement is still open"
+
+
+# ── the same money, one feed knowing which dividend it is ───────────────────────────────────────
+
+
+def _dividend(
+    isin: str, source: str, ex: date, amount: str, kind: DividendKind, raw: str
+) -> CorporateAction:
+    return ca(
+        isin=isin,
+        source=source,
+        ex_date=ex,
+        action_type=ActionType.DIVIDEND,
+        terms=DividendTerms(dividend_kind=kind, amount_inr=Decimal(amount)),
+        raw_text=raw,
+    )
+
+
+def test_a_named_dividend_kind_fills_an_unspecified_one() -> None:
+    """`Final Dividend - Rs. - 2.5000` and `Dividend - Rs 2.50 Per Share` are the same event.
+
+    3,982 of 4,195 open ratio mismatches were exactly this: the same money, and one feed happening
+    to know it is the final one. `UNSPECIFIED` is the enum's own word for "the feed said only
+    'dividend'" — silence, not a competing claim.
+    """
+    ex = date(2024, 7, 18)
+    result = reconcile(
+        [
+            _dividend(INFY, BSE, ex, "2.5", DividendKind.FINAL, "Final Dividend - Rs. - 2.5000"),
+            _dividend(
+                INFY, NSE, ex, "2.5", DividendKind.UNSPECIFIED, "Dividend - Rs 2.50 Per Share"
+            ),
+        ]
+    )
+    assert result.queue == ()
+    (action,) = result.reconciled
+    assert isinstance(action.terms, DividendTerms)
+    assert action.terms.dividend_kind is DividendKind.FINAL
+    assert action.terms.amount_inr == Decimal("2.5")
+
+
+def test_two_feeds_naming_different_dividend_kinds_still_disagree() -> None:
+    """INTERIM against FINAL is two claims, not one claim and a silence."""
+    ex = date(2024, 7, 18)
+    result = reconcile(
+        [
+            _dividend(INFY, BSE, ex, "2.5", DividendKind.FINAL, "Final Dividend - Rs. - 2.5000"),
+            _dividend(INFY, NSE, ex, "2.5", DividendKind.INTERIM, "Interim Dividend - Rs 2.50"),
+        ]
+    )
+    assert result.reconciled == ()
+    assert [c.reason for c in result.queue] == [ReconciliationReason.RATIO_MISMATCH]
+
+
+def test_the_kind_fill_never_reconciles_different_money() -> None:
+    """The amounts must already agree — this fills in *which* dividend, never how much."""
+    ex = date(2024, 7, 18)
+    result = reconcile(
+        [
+            _dividend(INFY, BSE, ex, "2.5", DividendKind.FINAL, "Final Dividend - Rs. - 2.5000"),
+            _dividend(INFY, NSE, ex, "8", DividendKind.UNSPECIFIED, "Dividend - Rs 8 Per Share"),
+        ]
+    )
+    assert result.reconciled == ()
+    assert [c.reason for c in result.queue] == [ReconciliationReason.RATIO_MISMATCH]
