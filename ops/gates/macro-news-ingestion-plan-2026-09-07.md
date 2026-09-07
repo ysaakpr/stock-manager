@@ -188,9 +188,19 @@ revised. `MacroFact.revision_seq` is 0 for all of them, forever.
 | Index P/E, P/B, Div Yield (165 indices) | `IN.NSE.NIFTY_50.PE` | `ind_close_all` | **2012-10-01** measured | ~2,470 sessions |
 | 10Y G-sec yield | `IN.NSE.GSEC10_NSE_INDEX.CLOSE` | same file | same | free with the above |
 | Sector valuation dispersion, breadth | derived → **L2** | same file | same | offline |
-| FII / DII net flow | `IN.NSE.FII.NET_INR_CRORE` | `nse_fii_dii_flows` | probe required | daily forward + backfill |
-| India VIX (futures proxy) | `IN.NSE.INDIAVIX.FUT_CLOSE` | `nse_fo_bhavcopy` | probe required | daily forward |
-| PCR, aggregate OI | derived → **L2** | `fo_aggregates.py` | — | offline |
+| FII / DII net flow | `IN.NSE.FII.NET_INR_CRORE` | `nse_fii_dii_flows` | **forward only — not backfillable** | daily, unrecoverable if missed |
+| India VIX (futures proxy) | `IN.NSE.INDIAVIX.FUT_CLOSE` | `nse_fo_bhavcopy` | **era starts 2024-07-08** (~2 yr) | daily forward |
+| PCR, aggregate OI | derived → **L2** | `fo_aggregates.py` | same 2024-07 floor | offline |
+
+**Two of those rows are wasting assets, and it is a register fact rather than a guess.**
+`nse_fii_dii_flows` `pit_notes`: *"the endpoint serves only the latest session — there is no date
+parameter. It must be captured daily; a missed day is not recoverable from this URL."* Bulk and
+block deals are rolling current files with the same semantics. **Every day the daily job does not
+run is a day of flow history lost permanently** — the only route to historical foreign flow is the
+NSDL/CDSL monthly series, which is unprobed. And `nse_fo_bhavcopy`'s registered era begins
+2024-07-08 (UDiFF); the pre-Jul-2024 legacy F&O format is **not registered**, so 13-year PCR or VIX
+history is not available from this source. Provider-by-provider detail and the probe list:
+`ops/gates/macro-news-provider-evaluation-2026-09-07.md`.
 
 **M11.2 is the whole of row 1–3 and it is one decision away.** ~2,470 requests to
 `nsearchives.nseindia.com`, one small CSV each, resumable and checkpointed per session. Same shape
@@ -437,11 +447,19 @@ decade**, not the 23%/22% of the 2019–2025 window. Judge a regime filter again
 
 1. **Ratify EXECUTION_PLAN §4.1 row 17 "Macro / economic backdrop."** One line in §12. Until then
    two register rows sit under a row the constitution does not have.
-2. **`go` on M11.2** (~2,470 requests to `nsearchives.nseindia.com`). **This conflicts with M10.4**
-   — the fundamentals backfill, also NEEDS_GO, also NSE hosts. Two concurrent runners halve the
+2. **`go` on M11.2** (~2,470 requests). **As specified it conflicts with M10.4** — the fundamentals
+   backfill, also NEEDS_GO, also `nsearchives.nseindia.com`. Two concurrent runners halve the
    effective per-host spacing through a side channel. **Pick an order; do not authorise both.**
-   Recommendation: M11.2 first — it is ~2,470 small CSVs with no format eras against M10.4's
-   thousands of per-filing fetches, and it unblocks the entire Tier A panel.
+   Recommendation: M11.2 first — ~2,470 small CSVs with no format eras against M10.4's thousands of
+   per-filing fetches, and it unblocks the entire Tier A panel plus M3.9's TRI fallback.
+
+   **The conflict may be avoidable.** The register carries **two verified hosts** for this file with
+   a byte-identical payload: `niftyindices.com/Daily_Snapshot/ind_close_all_{DDMMYYYY}.csv` and
+   `nsearchives.nseindia.com/content/indices/ind_close_all_{DDMMYYYY}.csv`. The measured 2012
+   archive depth was established on the **nsearchives** host only. If `niftyindices.com` also serves
+   the 2012–2015 archive, M11.2 can run there and stop contending with M10.4's budget entirely —
+   the two campaigns become concurrent rather than serialised. That is a ~6-request bisect and it is
+   in Phase 0. Unprobed; do not assume it.
 3. **The RSS set:** implement Moneycontrol + Livemint as D7 ratified, or re-ratify RBI-only as the
    set. Either is fine; the current gap between decision and code is not.
 4. **Is macro allowed to be a mechanical input, or is it evidence only?** Today, news is
