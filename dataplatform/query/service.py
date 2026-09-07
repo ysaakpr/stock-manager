@@ -166,8 +166,14 @@ class QueryService:
         none in the window, yields an empty series — a gap for the caller to explain, not an error.
         """
         bars = self._read_series_bars(request)
+        venues = {_exchange(bar.exchange) for bar in bars}
         if request.primary is not None:
             primary = request.primary
+        elif len(venues) == 1:
+            # One venue printed every bar in the window: there is nothing to choose between, so
+            # no liquidity decision is needed — and none may be possible, because a survivor's
+            # stitched L2 history sits under ISINs L1 files elsewhere (`_single_venue_primaries`).
+            (primary,) = venues
         else:
             as_of = self._series_as_of(request, bars)
             primary = self._derive_primary_for_isin(request.isin, as_of=as_of)
@@ -199,13 +205,13 @@ class QueryService:
         derived from L1 liquidity as of `trade_date`.
         """
         bars = self._read_cross_section_bars(request.trade_date)
-        primary_by_isin = (
-            request.primary_by_isin
-            if request.primary_by_isin is not None
-            else self._derive_primary_map(
+        if request.primary_by_isin is not None:
+            primary_by_isin: Mapping[str, Exchange] = request.primary_by_isin
+        else:
+            derived = self._derive_primary_map(
                 as_of=request.trade_date, isins=frozenset(b.isin for b in bars)
             )
-        )
+            primary_by_isin = {**_single_venue_primaries(bars), **derived}
         canon = self._dedup(bars, primary_by_isin)
         rows = tuple(self._to_point(c) for c in canon)
         _LOG.info(
@@ -440,6 +446,23 @@ class QueryService:
             cum_price_factor=bar.cum_price_factor,
             cum_qty_factor=bar.cum_qty_factor,
         )
+
+
+def _single_venue_primaries(bars: Iterable[AdjustedBar]) -> dict[str, Exchange]:
+    """The primary of every ISIN whose bars in this set come from exactly one exchange: that one.
+
+    Why this exists: `_derive_primary_map` decides a primary from L1 liquidity *read by ISIN*, and a
+    survivor's stitched L2 history (D2 lineage, M2.5) carries bars on sessions L1 files under the
+    ISINs it retired. On such a session the liquidity scan finds nothing for the survivor, the map
+    has no entry, and `canonical_daily` refuses the whole cross-section — measured 2026-09-07 on the
+    server: GOLDIAM (`INE025B01025`) on 2017-10-03 took the ten-year backtest down with it. Where
+    only one venue printed there is nothing to decide, so that venue is the primary; a liquidity
+    decision, where one exists, still wins (the caller merges it over this map).
+    """
+    venues: dict[str, set[Exchange]] = {}
+    for bar in bars:
+        venues.setdefault(bar.isin, set()).add(_exchange(bar.exchange))
+    return {isin: next(iter(seen)) for isin, seen in venues.items() if len(seen) == 1}
 
 
 def _bar_from_row(row: Sequence[object]) -> AdjustedBar:

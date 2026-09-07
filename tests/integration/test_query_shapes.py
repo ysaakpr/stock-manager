@@ -336,6 +336,57 @@ def test_cross_section_falls_back_when_primary_dark(xs_lake: Path) -> None:
     assert b.adj_close == Decimal("200")
 
 
+# ── a stitched name: the survivor's L2 history sits under ISINs L1 files elsewhere ──────────────
+
+XS_RETIRED: Final = "INE444D01014"  # traded the first three sessions, then was reissued as…
+XS_SURVIVOR: Final = "INE444D01022"  # …this ISIN, which L1 knows only from the fourth session on
+_XS_REISSUE: Final = _XS_WINDOW[3]
+
+
+@pytest.fixture
+def stitched_lake(tmp_path: Path) -> Path:
+    """A survivor whose L2 partition carries its predecessor's sessions (the D2 lineage stitch)."""
+    for session in _XS_WINDOW:
+        isin = XS_RETIRED if session < _XS_REISSUE else XS_SURVIVOR
+        _write_l1_partition(tmp_path, session, [(isin, "NSE", "DDD", Decimal("50"), 2_000)])
+    materialize_isin(
+        XS_SURVIVOR,
+        chain=FactorChain(isin=XS_SURVIVOR),
+        actions=(),
+        data_root=tmp_path,
+        history_isins=(XS_RETIRED, XS_SURVIVOR),
+    )
+    return tmp_path
+
+
+def test_cross_section_on_a_stitched_session_takes_the_only_venue_as_primary(
+    stitched_lake: Path,
+) -> None:
+    """On a session L1 files under the retired ISIN, the survivor's bar is still in the day.
+
+    The liquidity scan reads L1 by ISIN and finds nothing for the survivor before the reissue; the
+    map used to have no entry and `canonical_daily` refused the whole day (GOLDIAM, 2017-10-03, on
+    the server on 2026-09-07 — the ten-year backtest died there). One venue printed, so it is the
+    primary; nothing was decided by liquidity, and nothing had to be.
+    """
+    early = _XS_WINDOW[1]
+    with QueryService(data_root=stitched_lake) as svc:
+        xs = svc.cross_section(CrossSectionRequest(trade_date=early))
+    (row,) = xs.rows
+    assert row.isin == XS_SURVIVOR
+    assert row.primary is Exchange.NSE
+    assert row.fell_back is False
+    assert row.adj_close == Decimal("50")
+
+
+def test_adjusted_series_of_a_stitched_name_spans_the_reissue(stitched_lake: Path) -> None:
+    with QueryService(data_root=stitched_lake) as svc:
+        series = svc.adjusted_series(AdjustedSeriesRequest(isin=XS_SURVIVOR))
+    assert series.primary is Exchange.NSE
+    assert [pt.trade_date for pt in series.points] == _XS_WINDOW
+    assert {pt.isin for pt in series.points} == {XS_SURVIVOR}
+
+
 def test_cross_section_supplied_primary_map_skips_derivation(xs_lake: Path) -> None:
     """A caller holding the day's primary map (M3.2) can pass it and pin the dedup exchange.
 
