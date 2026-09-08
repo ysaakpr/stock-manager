@@ -15,6 +15,13 @@ package opens the bundle (`bundle.py`), and parses the four members W2 targets:
               unfetchable while three years of it sat in the lake.
 * `mcap.py` — daily issue size, market cap and last-trade-date. ~2024-07 onward.
 
+and one module that consumes a reader rather than being one:
+
+* `membership.py` — `SymbolKeyedIndexMembership`, the dated membership dataset the whole `ffix`
+              corpus folds into, and the census that measures it: per-index spans and constituent
+              counts, the reconstitution events the series makes observable, calendar contiguity,
+              and the dated sectoral assignments.
+
 Every other member is registered by name in `MemberKind` and parsed by nothing yet.
 
 **Nothing in this package reads a clock.** A corporate action's knowable date comes from the
@@ -66,6 +73,22 @@ from dataplatform.ingest.nse.pr_bundle.mcap import (
     parse_mcap,
     parse_mcap_bundle,
 )
+from dataplatform.ingest.nse.pr_bundle.membership import (
+    HEADLINE_INDICES,
+    NOMINAL_SIZES,
+    SECTORAL_INDICES,
+    CountAnomaly,
+    IndexCensus,
+    MembershipCensus,
+    MembershipChange,
+    RecoveredBundle,
+    SectoralFindings,
+    SectorMove,
+    SymbolKeyedIndexMembership,
+    census_ffix_corpus,
+    render_census,
+    traded_universe,
+)
 
 __all__ = [
     "ARCHIVE_START",
@@ -74,22 +97,34 @@ __all__ = [
     "FFIX_COLUMNS",
     "FFIX_FIRST_SESSION",
     "FFIX_LAST_SESSION",
+    "HEADLINE_INDICES",
     "IX_COLUMNS",
     "LOWERCASE_ERA_START",
     "MCAP_COLUMNS",
     "MCAP_ERA_START",
+    "NOMINAL_SIZES",
     "PR_BUNDLE_SOURCE_ID",
+    "SECTORAL_INDICES",
     "URL_TEMPLATE",
     "BcRow",
     "BundleMember",
+    "CountAnomaly",
     "FfixFile",
     "FfixRow",
+    "IndexCensus",
     "IxFile",
     "IxRow",
     "McapFile",
     "McapRow",
     "MemberKind",
+    "MembershipCensus",
+    "MembershipChange",
     "PrBundle",
+    "RecoveredBundle",
+    "SectorMove",
+    "SectoralFindings",
+    "SymbolKeyedIndexMembership",
+    "census_ffix_corpus",
     "parse_bc",
     "parse_bc_bundle",
     "parse_ffix",
@@ -98,5 +133,7 @@ __all__ = [
     "parse_ix_bundle",
     "parse_mcap",
     "parse_mcap_bundle",
+    "render_census",
+    "traded_universe",
     "url_for",
 ]
