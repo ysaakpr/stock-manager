@@ -56,7 +56,7 @@ PREVIOUS_SESSION = date(2026, 8, 6)  # Thursday
 WEEKEND = date(2026, 8, 8)  # Saturday
 HOLIDAY = date(2026, 1, 26)  # Republic Day, a Monday — a weekday the exchange gave up
 LATER_WEEKEND = date(2026, 8, 15)  # Saturday, after the mid-August dates used for streaks
-UNCOVERED = date(2011, 6, 1)  # before the holiday file begins
+UNCOVERED = date(2001, 6, 1)  # before the holiday file begins (2006-01-01)
 
 #: `today` for every test — the session after the one being ingested, so lag is measurable.
 NOW = datetime(2026, 8, 10, 9, 15, tzinfo=IST)

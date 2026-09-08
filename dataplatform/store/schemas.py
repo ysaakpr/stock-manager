@@ -95,6 +95,13 @@ class PriceQuarantineReason:
     #: happened to 2021-02-16 until the 2026-09-06 audit.
     ISIN_NOT_PUBLISHED: Final = "isin_not_published"
 
+    #: A price row from a format era that had **no ISIN column at all** — the NSE bhavcopy before
+    #: 2011-06-22 (`eras.ERAS`, era E1). Distinct from `ISIN_NOT_PUBLISHED` on purpose: there the
+    #: exchange stated an instrument has no ISIN, here it never stated any instrument's, so the
+    #: fix is different (identity lineage work, not a per-instrument exception) and the counts must
+    #: not be summed as if they were the same problem.
+    ISIN_COLUMN_ABSENT: Final = "isin_column_absent"
+
 
 class PricesRawRow(BaseModel):
     """One security's raw traded session on one exchange — the canonical `prices_raw` L1 row.
