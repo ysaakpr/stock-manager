@@ -1663,3 +1663,262 @@ sources:
       - "MoSPI's own release archive carries genuine Indian release dates, but www.mospi.gov.in
          serves no robots policy (soft-404) and cpi.mospi.gov.in did not answer at all."
     owner_task: M11.1
+
+  # ── §4.1 row 18 (PROPOSED, EXECUTION_PLAN §12) — market-structure snapshots ─────────────────
+  #
+  # Five endpoints that answer "what is the exchange's own view of this security *today*": its
+  # industry, its price band, and its surveillance framework. Every one of them serves exactly
+  # one snapshot — the current one — with no date parameter, no archive host and no historical
+  # form. There is nothing to backfill and there never will be: a day nobody captured is a day
+  # that cannot be bought back. That is why all five carry `era.start: 2026-09-08` — not because
+  # the URL began serving then, but because for a snapshot-only endpoint the only dates a file
+  # was ever *obtainable* for are the dates we were running, and the D7 gap report must not
+  # manufacture owed sessions for the years before this job existed.
+  #
+  # Probed live on 2026-09-08 (7 requests, one per URL pattern plus two rejected candidates, 3.2 s
+  # spacing, browser UA + Referer, warm session on www.nseindia.com). Evidence:
+  # ops/gates/daily-snapshotter-2026-09-08.md.
+
+  - id: nse_industry_classification
+    plan_row: "Market-structure snapshots"
+    description: >-
+      NSE Indices' own company→industry assignment for the broad market, as the NIFTY TOTAL
+      MARKET constituent file — the only free, ISIN-native, machine-readable cut of the
+      classification whose HTML page (www.nseindia.com/static/products-services/
+      industry-classification) is otherwise the only published surface.
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv"
+    verified_url: "https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv"
+    cadence: daily
+    era: {start: 2026-09-08, end: null}
+    fallback:
+      - "bse_scrip_master (INDUSTRY per scrip, wider coverage, BSE's own taxonomy not NSE's)"
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: null, task: null}
+    robots_notes: No directives on the archive host; the sibling www.nseindia.com allows /.
+    pit_notes: >-
+      **The single most load-bearing snapshot in the register.** A thematic fund's universe rule
+      is a point-in-time classification, and the repo's only other sector source is a 42-ISIN
+      fixture CSV dated 2026 applied backward — survivorship *and* classification bias in one.
+      There is no historical form of this file. The past is unrecoverable; from 2026-09-08 forward
+      every captured day is a day of real PIT classification history. Never overwrite, never
+      deduplicate across dates.
+    status: VERIFIED
+    verified_at: 2026-09-08T18:36:04+05:30
+    last_http_status: 200
+    sample_bytes: 49377
+    content_type: text/csv
+    sample_sha256: 6b23b6c155d7ffead0b8ef89e75d54e61e74f6d39e2aece7392aa02a9492e445
+    parse_check: >-
+      CSV, 5 columns, header "Company Name,Industry,Symbol,Series,ISIN Code"; 755 data rows over
+      22 distinct NSE Indices sectors (Financial Services, Capital Goods, Healthcare, …). ISIN is
+      native, so the join key needs no resolution (invariant #2).
+    fixture: {frozen: true, task: OPS, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
+    history:
+      measured_at: 2026-09-08T18:36:04+05:30
+      measured_by: OPS
+      method: >-
+        One GET. The file carries no date, in its name, its header or its rows, and the URL takes
+        no date parameter — there is exactly one snapshot and it is the current one.
+      sessions_available: 1
+      accrues_forward: true
+      note: >-
+        Depth 1 is the finding, not a limitation of the probe. Captured daily from 2026-09-08.
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: OPS
+
+  - id: nse_price_bands
+    plan_row: "Market-structure snapshots"
+    description: >-
+      NSE's operative per-security price band (`sec_list.csv`) — the daily circuit limit, and the
+      series a security trades in.
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/content/equities/sec_list.csv"
+    verified_url: "https://nsearchives.nseindia.com/content/equities/sec_list.csv"
+    cadence: daily
+    era: {start: 2026-09-08, end: null}
+    fallback:
+      - "The daily Price Band report in the NSE all-reports hub (same numbers, HTML entry point)"
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: null, task: null}
+    robots_notes: No directives on the archive host; the sibling www.nseindia.com allows /.
+    pit_notes: >-
+      Snapshot only — the band in force now, with no date in the payload and no dated archive.
+      Buying at a locked upper circuit is the most flattering fiction a backtest can tell, and it
+      is only detectable against the band that was operative on the day. Capture daily.
+      Symbol-keyed, not ISIN-keyed: a reader must resolve through the identity master
+      (`nse_equity_list`), never join it on symbol to prices (invariant #2).
+    status: VERIFIED
+    verified_at: 2026-09-08T18:36:07+05:30
+    last_http_status: 200
+    sample_bytes: 172082
+    content_type: text/csv
+    sample_sha256: 5d7c01bf844f8d74ccac8236fe89b68875d713455093d658354ee279cfd97686
+    parse_check: >-
+      CSV, 5 columns, header "Symbol,Series,Security Name,Band,Remarks"; 3,524 data rows. `Band`
+      is a percentage as an integer-valued string ("2", "5", "10", "20", "No Band"); Decimal on
+      parse, never float.
+    fixture: {frozen: true, task: OPS, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
+    history:
+      measured_at: 2026-09-08T18:36:07+05:30
+      measured_by: OPS
+      method: One GET. No date parameter, no date in the payload, no dated archive path.
+      sessions_available: 1
+      accrues_forward: true
+      note: Depth 1 is the finding. Captured daily from 2026-09-08.
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: OPS
+
+  - id: nse_asm_list
+    plan_row: "Market-structure snapshots"
+    description: >-
+      NSE's Additional Surveillance Measure list, long-term and short-term, with each name's
+      stage — the framework that raises margin to 100% and narrows the price band to 2%.
+    host: www.nseindia.com
+    method: GET
+    url_template: "https://www.nseindia.com/api/reportASM"
+    verified_url: "https://www.nseindia.com/api/reportASM"
+    cadence: daily
+    era: {start: 2026-09-08, end: null}
+    fallback: ["BSE's own ASM list (a different framework, not a substitute)"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+      Accept: "application/json, text/plain, */*"
+    needs_session_cookie: true
+    parser: {id: null, task: null}
+    robots_notes: www.nseindia.com allows / except /market-data-test.
+    pit_notes: >-
+      Snapshot only, and it carries its own stamp: every row's `asmTime` is the file's date, not
+      the name's entry date (222/222 rows read 08-Sep-2026 on the probe). That makes staleness
+      detectable from the payload alone — NSE answers 200 with a previous session's file, so the
+      snapshotter compares `asmTime` to the capture date and records a distinct state rather than
+      filing yesterday's list under today. ASM began 2018-03-26; pre-2018 tradability is
+      structurally overstated in any backtest and that is unfixable.
+    status: VERIFIED
+    verified_at: 2026-09-08T18:36:11+05:30
+    last_http_status: 200
+    sample_bytes: 59094
+    content_type: application/json; charset=utf-8
+    sample_sha256: 9dc7c25293f2a6e063c87edea7a33be0683ac78ac7b3c12a1e3d7493f9cdcc3d
+    parse_check: >-
+      JSON object, keys `longterm` and `shortterm`, each `{"data": [...]}`; 138 + 84 rows. Row
+      keys srno, symbol, companyName, isin, series, asmSurvIndicator ("Stage I".."Stage IV"),
+      survCode, survDesc, asmTime (DD-Mon-YYYY). ISIN is native.
+    fixture: {frozen: true, task: OPS, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
+    history:
+      measured_at: 2026-09-08T18:36:11+05:30
+      measured_by: OPS
+      method: One GET. The endpoint takes no date parameter and serves only the current list.
+      sessions_available: 1
+      earliest_available: 2026-09-08
+      latest_available: 2026-09-08
+      accrues_forward: true
+      note: Depth 1 is the finding. Captured daily from 2026-09-08.
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: OPS
+
+  - id: nse_gsm_list
+    plan_row: "Market-structure snapshots"
+    description: >-
+      NSE's Graded Surveillance Measure list with each name's stage — the framework whose higher
+      stages effectively remove tradability altogether.
+    host: www.nseindia.com
+    method: GET
+    url_template: "https://www.nseindia.com/api/reportGSM"
+    verified_url: "https://www.nseindia.com/api/reportGSM"
+    cadence: daily
+    era: {start: 2026-09-08, end: null}
+    fallback: ["www.nseindia.com/static/regulations/graded-surveillance-measure (HTML)"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+      Accept: "application/json, text/plain, */*"
+    needs_session_cookie: true
+    parser: {id: null, task: null}
+    robots_notes: www.nseindia.com allows / except /market-data-test.
+    pit_notes: >-
+      Snapshot only, self-stamped: every row's `gsmTime` is the file's timestamp (75/75 rows read
+      08-Sep-2026 on the probe), so a stale 200 is detectable from the payload. GSM began
+      March 2017. A GSM stage is the difference between a name a fund could exit and one it could
+      not, so a backtest that ignores it overstates smallcap tradability.
+    status: VERIFIED
+    verified_at: 2026-09-08T18:36:14+05:30
+    last_http_status: 200
+    sample_bytes: 18757
+    content_type: application/json; charset=utf-8
+    sample_sha256: 4371942afd060af4fe270145a1776065be66b03e2a7f3bb8ca64f2b09e4400c8
+    parse_check: >-
+      JSON array, 75 rows; keys srno, symbol, companyName, isin, gsmStage (Roman numeral),
+      survCode, survDesc, gsmTime (DD-Mon-YYYY HH:MM:SS). ISIN is native.
+    fixture: {frozen: true, task: OPS, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
+    history:
+      measured_at: 2026-09-08T18:36:14+05:30
+      measured_by: OPS
+      method: One GET. The endpoint takes no date parameter and serves only the current list.
+      sessions_available: 1
+      earliest_available: 2026-09-08
+      latest_available: 2026-09-08
+      accrues_forward: true
+      note: Depth 1 is the finding. Captured daily from 2026-09-08.
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: OPS
+
+  - id: nse_esm_list
+    plan_row: "Market-structure snapshots"
+    description: >-
+      NSE's Enhanced Surveillance Measure list — the micro-cap framework introduced in 2023, with
+      each name's stage.
+    host: www.nseindia.com
+    method: GET
+    url_template: "https://www.nseindia.com/api/reportESM"
+    verified_url: "https://www.nseindia.com/api/reportESM"
+    cadence: daily
+    era: {start: 2026-09-08, end: null}
+    fallback: ["BSE's own ESM list (a different framework, not a substitute)"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+      Accept: "application/json, text/plain, */*"
+    needs_session_cookie: true
+    parser: {id: null, task: null}
+    robots_notes: www.nseindia.com allows / except /market-data-test.
+    pit_notes: >-
+      Snapshot only, self-stamped: every row's `esmTime` is the file's date (274/274 rows read
+      08-Sep-2026 on the probe), so a stale 200 is detectable from the payload. ESM began 2023 —
+      the framework did not exist before then, so its absence in an earlier backtest is a real
+      absence and not a data gap, and that distinction must survive into any report.
+    status: VERIFIED
+    verified_at: 2026-09-08T18:36:17+05:30
+    last_http_status: 200
+    sample_bytes: 64437
+    content_type: application/json; charset=utf-8
+    sample_sha256: a955454f2e81ccc846ec26452ba16a6b800de9bb8c0916022fe6958a04daffbc
+    parse_check: >-
+      JSON array, 274 rows; keys srno, symbol, companyName, isin, esmSurvIndicator
+      ("Stage I"/"Stage II"), survCode, survDesc, esmTime (DD-Mon-YYYY). ISIN is native.
+    fixture: {frozen: true, task: OPS, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
+    history:
+      measured_at: 2026-09-08T18:36:17+05:30
+      measured_by: OPS
+      method: One GET. The endpoint takes no date parameter and serves only the current list.
+      sessions_available: 1
+      earliest_available: 2026-09-08
+      latest_available: 2026-09-08
+      accrues_forward: true
+      note: Depth 1 is the finding. Captured daily from 2026-09-08.
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: OPS
