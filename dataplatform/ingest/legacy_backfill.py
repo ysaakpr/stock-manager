@@ -74,7 +74,7 @@ from dataplatform.ingest.fetcher import (
     FetchHTTPError,
     ForbiddenError,
     ForbiddenSpikeError,
-    build_fetcher,
+    leased_fetcher,
 )
 from dataplatform.ingest.models import ParseError
 from dataplatform.ingest.nse import bhavcopy, bhavcopy_legacy, eras
@@ -1354,15 +1354,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "acquire":
-        fetcher = build_fetcher(clock=clock, settings=settings, register=register)
-        report = LegacyAcquisition(
-            fetcher=fetcher,
-            l0=l0,
-            journal=journal,
+        # `leased_fetcher`, not `build_fetcher`: the archive host carries prices, delivery,
+        # corporate actions and fundamentals, and this campaign holds its budget for hours. The
+        # lease is the enforced form of the one-budget-per-host rule a Phase 2 run must not
+        # break, and a second driver on this box refuses to start rather than halving the spacing.
+        host = _host_of(register)
+        with leased_fetcher(
+            [host],
+            clock=clock,
+            command=f"legacy_backfill acquire {plan.start.isoformat()}..{plan.end.isoformat()}",
+            settings=settings,
             register=register,
-            error_streak_limit=args.error_streak_limit,
-            no_session_streak_limit=args.no_session_streak_limit,
-        ).run(plan.dates)
+        ) as fetcher:
+            report = LegacyAcquisition(
+                fetcher=fetcher,
+                l0=l0,
+                journal=journal,
+                register=register,
+                error_streak_limit=args.error_streak_limit,
+                no_session_streak_limit=args.no_session_streak_limit,
+            ).run(plan.dates)
         print(report.summary())
         return 3 if report.hard_stopped else 0
 
