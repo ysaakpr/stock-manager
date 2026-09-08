@@ -1,8 +1,12 @@
 """The NSE daily report bundle (`PR<DDMMYY>.zip`) — opening it and dating it (W2).
 
 One zip per trading session on the archive host, carrying ~14-25 member reports. The bundle is
-registered as `nse_pr_bundle`; W2 parses three of its members and *registers* the rest, so a
+registered as `nse_pr_bundle`; W2 parses four of its members and *registers* the rest, so a
 later task adding one starts from a name this module already knows rather than from a guess.
+
+A registry entry is load-bearing, and one wrong word in it cost three years of data: `FFIX` was
+documented here as "Fixed income" until 2026-09-08, and nobody opened the member to check. It is
+the free-float **index membership** file (`ffix.py`). Read a member before you name it.
 
 **Why this source exists in the platform at all.** `Bc<date>.csv` is a corporate-action list whose
 *file date is the broadcast date*. Every other corporate-action surface we hold is a query against
@@ -112,6 +116,16 @@ class MemberKind(StrEnum):
     """Corporate actions, broadcast-dated by the file itself. The reason this source exists."""
     IX = "ix"
     """Index membership with issue-cap, market cap and weightage. 2010 only; see `ix.py`."""
+    FFIX = "ffix"
+    """Dated index constituent membership with free-float weightage. 2010-01-04..2013-04-30.
+
+    **This entry said "Fixed income" until 2026-09-08 and that was wrong.** `ffix` is
+    *free-float index*, and the payload is the constituent list of every index NSE published
+    that session, with each member's investible factor, close, free-float market cap and index
+    weightage. Nothing in it is a bond. The mislabel is why 827 bundles of dated index
+    membership sat unread while `ops/BACKLOG.md:126` recorded that no such history exists to
+    fetch. See `ffix.py`.
+    """
     MCAP = "mcap"
     """Daily issue size, market cap and last-trade-date, per symbol. ~2024-07 onward."""
 
@@ -144,8 +158,6 @@ class MemberKind(StrEnum):
     """SME platform."""
     CORPBOND = "corpbond"
     """Corporate bonds."""
-    FFIX = "ffix"
-    """Fixed income."""
     FO = "fo"
     """Futures and options."""
     OP = "op"
@@ -165,7 +177,9 @@ class MemberKind(StrEnum):
         return self in _PARSED
 
 
-_PARSED: Final[frozenset[MemberKind]] = frozenset({MemberKind.BC, MemberKind.IX, MemberKind.MCAP})
+_PARSED: Final[frozenset[MemberKind]] = frozenset(
+    {MemberKind.BC, MemberKind.FFIX, MemberKind.IX, MemberKind.MCAP}
+)
 
 #: Members carrying no date and no rows — documentation shipped inside every bundle. Named so
 #: they are not mistaken for an unrecognised report.

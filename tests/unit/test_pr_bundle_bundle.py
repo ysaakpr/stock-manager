@@ -134,9 +134,10 @@ def test_every_real_member_name_is_registered(era: str, name: str, session: date
     assert not unknown, f"{era}: MemberKind does not know {unknown}"
 
 
-def test_the_three_parsed_members_are_flagged_as_such() -> None:
+def test_the_four_parsed_members_are_flagged_as_such() -> None:
+    """`FFIX` joined this set on 2026-09-08, when the member turned out to be index membership."""
     parsed = {k for k in MemberKind if k.parsed_by_w2}
-    assert parsed == {MemberKind.BC, MemberKind.IX, MemberKind.MCAP}
+    assert parsed == {MemberKind.BC, MemberKind.FFIX, MemberKind.IX, MemberKind.MCAP}
 
 
 def test_member_lookup_is_case_insensitive_across_the_2025_cutover() -> None:

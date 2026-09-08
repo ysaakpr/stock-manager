@@ -1,19 +1,29 @@
 """D1: the NSE daily report bundle (`PR<DDMMYY>.zip`) — W2.
 
 One zip per session on the archive host from 2010-01-04, carrying ~14-25 member reports. This
-package opens the bundle (`bundle.py`), and parses the three members W2 targets:
+package opens the bundle (`bundle.py`), and parses the four members W2 targets:
 
 * `bc.py`   — corporate actions **dated by the file's own publication date**. The reason the
               source is in the platform at all: it is the only surface that makes invariant #7
               non-vacuous for history.
 * `ix.py`   — index membership with weightage. Intermittent, 2010 only; a validation asset rather
               than a reconstructable series, and the docstring says so with the measurements.
+* `ffix.py` — **dated index constituent membership with free-float weightage**, on all 827
+              sessions from 2010-01-04 to 2013-04-30, across 17 indices. Registered in
+              `MemberKind` as "Fixed income" until 2026-09-08, which it is not and never was;
+              that one word is why the repo went on recording index-membership history as
+              unfetchable while three years of it sat in the lake.
 * `mcap.py` — daily issue size, market cap and last-trade-date. ~2024-07 onward.
 
 Every other member is registered by name in `MemberKind` and parsed by nothing yet.
 
 **Nothing in this package reads a clock.** A corporate action's knowable date comes from the
 bundle it was published in, never from ingest time — see `PrBundle.publication_date`.
+
+**Nothing in this package resolves a symbol to an ISIN.** Every member here is symbol-keyed and
+ISIN is the only join key (invariant #2), so no row this package produces can be joined to
+`security_master` yet. Doing it through a present-day listing would be survivorship-biased; it is
+W4 identity work, gated on a point-in-time symbol master.
 
 **Nothing in this package writes to `corporate_actions`.** Promoting these rows against the
 47,887 rows already there is a separate, separately-reviewed task; getting it wrong corrupts the
@@ -31,6 +41,16 @@ from dataplatform.ingest.nse.pr_bundle.bundle import (
     MemberKind,
     PrBundle,
     url_for,
+)
+from dataplatform.ingest.nse.pr_bundle.ffix import (
+    FFIX_BANNER_FIELDS,
+    FFIX_COLUMNS,
+    FFIX_FIRST_SESSION,
+    FFIX_LAST_SESSION,
+    FfixFile,
+    FfixRow,
+    parse_ffix,
+    parse_ffix_bundle,
 )
 from dataplatform.ingest.nse.pr_bundle.ix import (
     IX_COLUMNS,
@@ -50,6 +70,10 @@ from dataplatform.ingest.nse.pr_bundle.mcap import (
 __all__ = [
     "ARCHIVE_START",
     "BC_COLUMNS",
+    "FFIX_BANNER_FIELDS",
+    "FFIX_COLUMNS",
+    "FFIX_FIRST_SESSION",
+    "FFIX_LAST_SESSION",
     "IX_COLUMNS",
     "LOWERCASE_ERA_START",
     "MCAP_COLUMNS",
@@ -58,6 +82,8 @@ __all__ = [
     "URL_TEMPLATE",
     "BcRow",
     "BundleMember",
+    "FfixFile",
+    "FfixRow",
     "IxFile",
     "IxRow",
     "McapFile",
@@ -66,6 +92,8 @@ __all__ = [
     "PrBundle",
     "parse_bc",
     "parse_bc_bundle",
+    "parse_ffix",
+    "parse_ffix_bundle",
     "parse_ix",
     "parse_ix_bundle",
     "parse_mcap",
