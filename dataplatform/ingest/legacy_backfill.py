@@ -1214,7 +1214,6 @@ def coverage_report(
     archive, and silently omitting a year would make a coverage table that reads as complete.
     """
     rows: list[_YearRow] = []
-    served: list[date] = []
     for year in sorted({day.year for day in plan.dates}):
         days = [day for day in plan.dates if day.year == year]
         in_l0 = 0
@@ -1229,7 +1228,6 @@ def coverage_report(
             name = _filename(legacy_url(day, register=register))
             if l0.exists(era.source_id, day, name):
                 in_l0 += 1
-                served.append(day)
             elif journal.knows(day):
                 no_session += 1
             priced, quarantined = l1_row_counts(day, data_root=data_root)
@@ -1277,10 +1275,21 @@ def coverage_report(
         ", ".join(day.isoformat() for day in observed) if observed else "_none observed yet_"
     )
     lines += ["", "#### Calendar diff vs nse_holidays.yaml", ""]
+    # `served` here is every legacy payload L0 holds in the span, **not** the plan's dates. Those
+    # are different sets and the difference is the whole point of the diff: a plan built from the
+    # calendar can only contain dates the calendar already expects, so reconciling against it would
+    # make `unexpected_sessions` structurally empty and the report would print "0 sessions the
+    # calendar wrongly calls closed" while the lake held ten of them. Asking L0 what it actually
+    # has is the only version of this question that can come back non-zero.
+    stored = [
+        ref.logical_date
+        for ref in l0.iter_refs(bhavcopy_legacy.LEGACY_SOURCE_ID, start=plan.start, end=plan.end)
+        if plan.start <= ref.logical_date <= plan.end
+    ]
     diff = reconcile_calendar(
         start=plan.start,
         end=plan.end,
-        served=served,
+        served=stored,
         no_session=journal.dates,
         calendar=trading_calendar() if calendar is None else calendar,
     )

@@ -608,6 +608,48 @@ def test_the_coverage_report_tabulates_what_l0_and_the_journal_know(
     assert "Calendar diff vs nse_holidays.yaml" in text
 
 
+def test_the_coverage_report_diffs_against_l0_not_against_its_own_plan(
+    tmp_path: Path, register: SourceRegister
+) -> None:
+    """A session the calendar calls WEEKEND must still show up as a disagreement.
+
+    The bug this pins was real and it was mine: `coverage_report` reconciled against the dates in
+    its own plan, and a calendar-derived plan can only contain dates the calendar already expects.
+    So `unexpected_sessions` was structurally always empty — the W1 report printed "0 sessions the
+    calendar wrongly calls closed" while the lake held ten of them. Reconciling against what L0
+    *has* is the only version of the question that can come back non-zero.
+
+    Here 2015-02-28 is a real Saturday session (a Union Budget day) that the calendar classifies
+    WEEKEND, so it is absent from the plan and present in L0 — exactly the shape that used to hide.
+    """
+    budget_saturday = date(2015, 2, 28)
+    store = L0Store(clock=CLOCK, data_root=tmp_path)
+    store.put(
+        "nse_bhavcopy_legacy",
+        budget_saturday,
+        "cm28FEB2015bhav.csv.zip",
+        ISIN_FIXTURE.read_bytes(),
+        content_type="application/zip",
+    )
+    journal = lb.NoSessionJournal(lb.journal_path_for(tmp_path), clock=CLOCK)
+
+    calendar = extended_calendar()
+    assert calendar.classify(budget_saturday) is DayKind.WEEKEND
+    plan = lb.plan_sessions(date(2015, 2, 23), date(2015, 3, 6), calendar=calendar)
+    assert budget_saturday not in plan.dates, "the premise: the plan cannot contain it"
+
+    text = lb.coverage_report(
+        plan,
+        l0=store,
+        journal=journal,
+        register=register,
+        calendar=calendar,
+        data_root=tmp_path,
+    )
+    assert "1 sessions the calendar wrongly calls closed" in text
+    assert budget_saturday.isoformat() in text
+
+
 def test_the_coverage_report_reads_row_counts_off_l1_after_promotion(
     lake: _Lake, register: SourceRegister
 ) -> None:
