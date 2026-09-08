@@ -34,6 +34,7 @@ from dataplatform.ingest.models import ParseError
 from dataplatform.ingest.nse import pr_bundle
 from dataplatform.ingest.nse.pr_bundle import bc as bc_module
 from dataplatform.ingest.nse.pr_bundle import bundle as bundle_module
+from dataplatform.ingest.nse.pr_bundle import ffix as ffix_module
 from dataplatform.ingest.nse.pr_bundle import ix as ix_module
 from dataplatform.ingest.nse.pr_bundle import mcap as mcap_module
 from dataplatform.ingest.nse.pr_bundle.bc import BC_COLUMNS, parse_bc, parse_bc_bundle
@@ -104,7 +105,7 @@ def test_the_pr_bundle_package_reads_no_wall_clock() -> None:
     forbidden = re.compile(
         r"\b(datetime\.now|datetime\.utcnow|date\.today|time\.time|clock\.now|clock\.today)\b"
     )
-    for module in (bundle_module, bc_module, ix_module, mcap_module):
+    for module in (bundle_module, bc_module, ffix_module, ix_module, mcap_module):
         source = Path(inspect.getsourcefile(module) or "").read_text(encoding="utf-8")
         code = "\n".join(line for line in source.splitlines() if not line.lstrip().startswith("#"))
         # Docstrings legitimately *name* the defect; strip them before grepping for calls.
