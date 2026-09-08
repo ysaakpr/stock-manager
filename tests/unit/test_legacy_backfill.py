@@ -9,9 +9,14 @@ offline, and each has a test here that would fail if the claim broke:
   hard stop. A run of 404s against a real error streak is asserted separately, because the two
   counters must not be the same counter.
 * **The calendar guard is respected, not routed around.** With a calendar covering the range the
-  plan comes from it; with one that refuses the range the plan widens to weekdays and says so. The
-  fixture calendar here covers 2006-2016, which is exactly what `w0/era-coverage` will make the
-  real one do — so this is also the test that the merge is the only thing needed.
+  plan comes from it; with one that refuses the range the plan widens to weekdays and says so.
+  Both halves are asserted, and the refusing half is asserted against an **injected** calendar,
+  never against the shipped `nse_holidays.yaml`. That file is data and is expected to keep
+  growing: this suite once pinned the fallback to the real file refusing 2006, and went red the
+  day `w0/era-coverage` extended the file back to 2006-01-01 without touching a line of driver
+  code. A test that asserts the system *cannot* do something becomes a barrier the moment someone
+  does it. The real file is still exercised at the boundary it actually has — below 2006, where
+  the bhavcopy archive reaches and the calendar does not.
 * **E1 rows land in quarantine, never in `prices_raw`.** Asserted by reading the parquet back:
   `prices_raw` has no partition for the date at all, and the quarantine partition has every row.
 
@@ -28,6 +33,7 @@ from typing import Any, Final, cast
 
 import pyarrow.parquet as pq
 import pytest
+from structlog.testing import capture_logs
 
 from dataplatform.alerts import build_alerter
 from dataplatform.clock import IST, FrozenClock
@@ -35,6 +41,7 @@ from dataplatform.config import Settings
 from dataplatform.ingest import legacy_backfill as lb
 from dataplatform.ingest.backfill import NSE_BHAVCOPY
 from dataplatform.ingest.calendar import (
+    CalendarCoverageError,
     DayKind,
     Holiday,
     Provenance,
@@ -70,6 +77,15 @@ CLOCK: Final = FrozenClock(date(2026, 9, 8))
 E1_SESSION: Final = PRE_ISIN_ERA_LAST_SESSION
 E2_SESSION: Final = ISIN_ERA_START
 HOLIDAY_SESSION: Final = date(2011, 8, 15)  # Independence Day, a Monday — 404, verified live
+
+#: The campaign's deep range: the first session the extended calendar covers through the last
+#: session before the daily lake begins. The counts below are asserted, not described.
+DEEP_START: Final = date(2006, 1, 2)
+DEEP_END: Final = date(2016, 9, 1)
+
+#: A range the archive serves and the calendar does not reach — the real file's actual floor.
+PRE_CALENDAR_START: Final = date(2004, 1, 5)
+PRE_CALENDAR_END: Final = date(2005, 12, 30)
 
 
 # ── wiring ───────────────────────────────────────────────────────────────────────────────────
@@ -142,15 +158,16 @@ def acquisition_for(
     return driver, l0, journal
 
 
-# ── a calendar covering 2006-2016, which is what w0/era-coverage will produce ────────────────
+# ── injected calendars: one that covers the range, one that refuses it ───────────────────────
 
 
 def extended_calendar() -> TradingCalendar:
-    """A `TradingCalendar` covering 2006-2016 — the shape the extended holiday file will have.
+    """A `TradingCalendar` covering 2006-2016 — the shape the shipped holiday file now has.
 
-    Built in memory rather than by editing `nse_holidays.yaml`, which another task owns. It carries
-    exactly the two closures these tests need to distinguish, which is enough to prove the
-    injection point works: production swaps the real file in at the same seam with no code change.
+    Built in memory rather than by reading `nse_holidays.yaml`, so a test of the *driver* asserts
+    nothing about the file's contents. It carries exactly the two closures these tests need to
+    distinguish, which is enough to prove the injection point works: production swaps the real
+    file in at the same seam with no code change.
     """
     holidays = {
         day: Holiday(date=day, name="Independence Day")
@@ -171,27 +188,107 @@ def extended_calendar() -> TradingCalendar:
     )
 
 
+def refusing_calendar() -> TradingCalendar:
+    """A `TradingCalendar` covering 2016 only — one that refuses every range this driver plans.
+
+    The fallback in `plan_sessions` fires on `CalendarCoverageError`, and the seam that lets it be
+    provoked is calendar injection. Pinning it to the *shipped* file refusing 2006 is what rotted:
+    the file grew and the branch lost its only test. Nothing about this fixture can be invalidated
+    by `nse_holidays.yaml` gaining a year, because it never reads it.
+    """
+    return TradingCalendar(
+        coverage_start=date(2016, 1, 1),
+        coverage_end=date(2016, 12, 31),
+        provenance=Provenance(
+            curated_by="test",
+            curated_on=date(2026, 9, 8),
+            method="in-memory fixture standing in for any calendar too narrow for the range",
+            bhavcopy_probes=0,
+            known_limitation="declares no closures; only its coverage span is load-bearing",
+        ),
+        _holidays={},
+        _sources={2016: "test_fixture"},
+    )
+
+
 # ── planning: the calendar is an input, and the guard is not routed around ───────────────────
 
 
-def test_the_real_calendar_still_refuses_the_deep_range_and_the_plan_says_so() -> None:
-    """With today's checked-in calendar the plan falls back to weekdays, loudly and in writing.
+def test_the_real_calendar_covers_the_deep_range_and_the_plan_comes_from_it() -> None:
+    """The shipped calendar reaches 2006, so the deep plan is a calendar plan and says so.
 
-    The blocker this driver was designed around. The guard in `calendar.py` is untouched — it does
-    raise — and the driver answers by asking the archive instead of by widening the calendar.
+    The capability `w0/era-coverage` delivered, asserted through the driver rather than through
+    the YAML: `nse_holidays.yaml` covering 2006-01-01..2026-12-31 is what makes this range take
+    the narrow branch, with no edit to `plan_sessions` or to `calendar.py`. Declared holidays stop
+    costing a request, so an absence the campaign does observe is one the calendar did not
+    predict — which is the only kind worth reconciling.
     """
-    plan = lb.plan_sessions(date(2006, 1, 2), date(2016, 9, 1), calendar=trading_calendar())
+    plan = lb.plan_sessions(DEEP_START, DEEP_END, calendar=trading_calendar())
 
-    assert plan.basis == "weekday"
-    assert "calendar refused the range" in plan.note
-    assert "2016-01-01" in plan.note, "the note must name the coverage the calendar does have"
-    assert len(plan) == 2784, "every weekday in the range is a candidate"
-    assert all(day.weekday() < 5 for day in plan.dates)
+    assert plan.basis == "calendar"
+    assert len(plan) == 2636, "the calendar's expected sessions across the deep range"
+    assert plan.dates[0] == DEEP_START
+    assert plan.dates[-1] == DEEP_END
+    assert HOLIDAY_SESSION not in plan.dates, "a declared holiday owes no file and costs no request"
+    assert date(2011, 8, 16) in plan.dates, "and the session after it is still a candidate"
+    assert "spans the range" in plan.note
     assert [era.label for era in plan.eras] == ["E1", "E2"]
 
 
+def test_the_plan_widens_to_weekdays_when_the_calendar_refuses_the_range() -> None:
+    """A calendar too narrow for the range widens the plan and names the gap — never narrows it.
+
+    Deliberately named for the behaviour and not for the state of the shipped data file. The
+    refusal is injected, so this stays a test of the driver however far `nse_holidays.yaml` grows.
+    Widening is the only direction a fallback about missing data may go: it costs more requests
+    and proves each absence with a 404 instead of assuming it.
+    """
+    refusing = refusing_calendar()
+    with pytest.raises(CalendarCoverageError):
+        refusing.expected_data_dates(DEEP_START, DEEP_END)
+
+    with capture_logs() as entries:
+        plan = lb.plan_sessions(DEEP_START, DEEP_END, calendar=refusing)
+
+    assert plan.basis == "weekday"
+    assert len(plan) == 2784, "every weekday in the range is a candidate"
+    assert all(day.weekday() < 5 for day in plan.dates)
+    assert HOLIDAY_SESSION in plan.dates, "an absence must be proved by a 404, not assumed"
+    assert "calendar refused the range" in plan.note
+    assert "2016-01-01" in plan.note, "the note must name the coverage the calendar does have"
+
+    # Strictly wider than the covering calendar would have made it, over the same range.
+    assert len(plan) > len(lb.plan_sessions(DEEP_START, DEEP_END, calendar=trading_calendar()))
+
+    # And the gap reaches the log, not only the note: an operator reading the run must see that
+    # this plan cost ~6% more requests because the calendar could not answer.
+    (gap,) = [entry for entry in entries if entry["event"] == "legacy_backfill.calendar_gap"]
+    assert gap["log_level"] == "warning"
+    assert gap["coverage_start"] == "2016-01-01"
+    assert gap["coverage_end"] == "2016-12-31"
+    assert gap["basis"] == "weekday"
+    assert gap["start"] == DEEP_START.isoformat()
+    assert gap["end"] == DEEP_END.isoformat()
+
+
+def test_a_range_below_the_calendars_floor_still_meets_the_real_guard() -> None:
+    """The honest remaining refusal against the shipped file: the archive predates the calendar.
+
+    `nse_holidays.yaml` starts at 2006 and the bhavcopy archive starts in 1995, so a 2004 plan is
+    still a weekday plan. This keeps the real-file path tested at the boundary it actually has,
+    rather than at one that has moved once and may move again.
+    """
+    plan = lb.plan_sessions(PRE_CALENDAR_START, PRE_CALENDAR_END, calendar=trading_calendar())
+
+    assert plan.basis == "weekday"
+    assert len(plan) == 520, "every weekday across the two years"
+    assert all(day.weekday() < 5 for day in plan.dates)
+    assert "calendar refused the range" in plan.note
+    assert [era.label for era in plan.eras] == ["E1"]
+
+
 def test_with_a_covering_calendar_the_plan_comes_from_it_instead() -> None:
-    """The only thing the `w0/era-coverage` merge has to change: the plan narrows, no code edits.
+    """The same narrowing through the injection seam, on a range small enough to enumerate.
 
     A declared holiday stops being a candidate, so the campaign spends fewer requests and the
     absences it does observe are the ones the calendar did not predict.
@@ -418,17 +515,60 @@ def test_the_diff_reports_both_directions_of_disagreement() -> None:
     assert diff.undeclared_closures == (date(2011, 8, 17),)
 
 
-def test_an_uncovered_range_reconciles_to_no_claim_rather_than_raising() -> None:
-    """ "We cannot compare yet" is a legitimate answer and must not stop a campaign."""
+def test_the_covered_deep_range_reconciles_to_a_real_claim_against_the_shipped_calendar() -> None:
+    """Two independently derived sources agreeing about 2006, asserted rather than assumed.
+
+    `w0/era-coverage` derived the year from NSE Indices' NIFTY 50 daily history and the exchange's
+    own circulars; this driver proves a closure by asking the bhavcopy archive and getting a 404.
+    2006-08-15 is Independence Day in the file and a 404 in the archive, and 2006-01-02 is a
+    session in both — so the diff is empty in both directions and, crucially, `covered` is True.
+    An empty diff from an *uncovered* range would mean nothing at all, which is why `covered` is
+    asserted first.
+    """
     diff = lb.reconcile_calendar(
-        start=date(2006, 1, 2),
+        start=DEEP_START,
         end=date(2006, 12, 29),
         served=[date(2006, 1, 2)],
         no_session=[date(2006, 8, 15)],
         calendar=trading_calendar(),
     )
+    assert diff.covered is True, "the shipped calendar reaches 2006 and must make a claim"
+    assert diff.agrees is True
+    assert diff.undeclared_closures == ()
+    assert diff.unexpected_sessions == ()
+    assert "0 undeclared closures" in diff.summary()
+
+
+def test_reconcile_makes_no_claim_when_the_calendar_refuses_the_range() -> None:
+    """ "We cannot compare yet" is a legitimate answer and must not stop a campaign.
+
+    Injected refusal, for the same reason the planning fallback uses one: this branch must stay
+    covered no matter how far the shipped holiday file eventually reaches.
+    """
+    diff = lb.reconcile_calendar(
+        start=DEEP_START,
+        end=DEEP_END,
+        served=[E2_SESSION],
+        no_session=[HOLIDAY_SESSION],
+        calendar=refusing_calendar(),
+    )
     assert diff.covered is False
     assert diff.agrees is False
+    assert diff.undeclared_closures == ()
+    assert diff.unexpected_sessions == ()
+    assert "makes no claim" in diff.summary()
+
+
+def test_reconcile_below_the_calendars_floor_makes_no_claim_either() -> None:
+    """The same abstention against the shipped file, at the boundary the shipped file has."""
+    diff = lb.reconcile_calendar(
+        start=PRE_CALENDAR_START,
+        end=PRE_CALENDAR_END,
+        served=[PRE_CALENDAR_START],
+        no_session=[date(2004, 1, 26)],
+        calendar=trading_calendar(),
+    )
+    assert diff.covered is False
     assert diff.undeclared_closures == ()
     assert "makes no claim" in diff.summary()
 
@@ -701,6 +841,21 @@ def test_the_extended_calendar_fixture_is_a_real_trading_calendar() -> None:
         date(2011, 8, 18),
         date(2011, 8, 19),
     ]
+
+
+def test_the_refusing_calendar_fixture_refuses_by_the_real_guard() -> None:
+    """The narrow fixture must fail the way `calendar.py` does, or the fallback tests prove nothing.
+
+    Its refusal has to be a `CalendarCoverageError` raised by `_require_coverage` — not a stub that
+    raises something the driver would let escape — and it must still answer normally inside its own
+    span, so the branch under test is coverage and nothing else.
+    """
+    calendar = refusing_calendar()
+    assert calendar.covers(date(2016, 6, 1))
+    assert not calendar.covers(DEEP_START)
+    assert calendar.classify(date(2016, 6, 1)) is DayKind.SESSION
+    with pytest.raises(CalendarCoverageError, match="leaves the holiday calendar's coverage"):
+        calendar.classify(DEEP_START)
 
 
 def test_the_driver_module_names_ist_for_its_timestamps() -> None:
