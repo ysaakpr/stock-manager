@@ -77,6 +77,7 @@ __all__ = [
     "read_prices_raw",
     "rebuild_prices_raw_from_l0",
     "write_prices_raw",
+    "write_unidentified_quarantine",
 ]
 
 _LOG = get_logger(__name__)
@@ -379,6 +380,42 @@ def _price_to_raw(
     )
 
 
+def write_unidentified_quarantine(
+    rows: Sequence[UnidentifiedRow],
+    *,
+    exchange: Exchange = Exchange.NSE,
+    trade_date: date,
+    reason: str = PriceQuarantineReason.ISIN_COLUMN_ABSENT,
+    data_root: Path | None = None,
+) -> Path | None:
+    """Write a session whose rows have no identity at all to `prices_raw_quarantine`, and nowhere
+    else.
+
+    What it does: lands one quarantine row per source row, so a pre-ISIN (E1) session is *retained
+    and counted* rather than dropped or refused. Returns the partition path, or `None` for an empty
+    input.
+    What it assumes: `prices_raw` is deliberately left untouched for `trade_date` — these rows
+    cannot be keyed, and invariant #2 makes ISIN the only join key, so there is nothing legal to
+    write there. It also assumes it owns the date's quarantine partition: the partition is written
+    whole, so a session that already has *delivery* rows quarantined must be re-derived through
+    `write_prices_raw` instead, which passes both sets in one call.
+    What it never does: invent an ISIN, or preserve the prices. The prices stay where they are
+    already immutable and re-derivable — the L0 payload. The quarantine row is the honest
+    enumeration of what could not be joined, which is the number a coverage claim rests on.
+    """
+    if not rows:
+        return None
+    return _write_quarantine(
+        (),
+        (),
+        rows,
+        exchange=exchange,
+        trade_date=trade_date,
+        data_root=data_root,
+        unidentified_reason=reason,
+    )
+
+
 def _write_quarantine(
     unresolved: Sequence[DeliveryRow],
     orphaned: Sequence[ResolvedDeliveryRow],
@@ -387,6 +424,7 @@ def _write_quarantine(
     exchange: Exchange,
     trade_date: date,
     data_root: Path | None,
+    unidentified_reason: str = PriceQuarantineReason.ISIN_NOT_PUBLISHED,
 ) -> Path | None:
     """Write the delivery rows that could not be placed to the quarantine dataset, or nothing.
 
@@ -431,11 +469,13 @@ def _write_quarantine(
                 "exchange": exchange.value,
                 # The literal the exchange published, kept verbatim: "the source said DUMMY" is a
                 # fact, and blanking it would leave the row indistinguishable from an unresolved
-                # symbol, which is a different failure with a different fix.
-                "isin": row.stated_isin,
+                # symbol, which is a different failure with a different fix. An *empty* literal is
+                # the pre-ISIN era's honest answer — there was no column to quote — and it is
+                # stored as NULL, with `reason` carrying the distinction.
+                "isin": row.stated_isin or None,
                 "deliv_qty": None,
                 "deliv_pct": None,
-                "reason": PriceQuarantineReason.ISIN_NOT_PUBLISHED,
+                "reason": unidentified_reason,
             }
             for row in unidentified
         ]
