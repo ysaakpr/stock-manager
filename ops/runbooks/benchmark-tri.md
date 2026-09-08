@@ -78,22 +78,51 @@ knowing:
 
 ## Moving the lake
 
-`data/L0` is the immutable record and L1 is normally rebuilt from it, never copied between lakes
-(`move-campaign-to-a-server.md`). This dataset has **no rebuild-from-L0 entry point yet** — the
-runner fetches; it does not re-parse a stored payload — so promoting a run from one data root to
-another has two honest options:
+`data/L0` is the immutable record and L1 is a derivation of it, never copied between lakes
+(`move-campaign-to-a-server.md`). That rule holds here too, and since 2026-09-08 there is an entry
+point for it:
 
 ```bash
-# 1. copy both layers. They were derived from each other in one run, so they agree.
+# 1. carry the raw payloads across, with their receipts. cp -a, so mode 0o444, the mtimes and
+#    each sidecar's original `fetched_at` survive: the record of when these bytes were first seen
+#    is itself immutable, and `L0Store.put` would mint a fresh one.
 cp -a <from>/data/L0/nifty_tri_history <to>/data/L0/
-cp -a <from>/data/L1/benchmark_tri     <to>/data/L1/
 
-# 2. or just re-run it against the target lake. It is three requests.
+# 2. re-derive L1 from them. No network, no request, no sync write. ~10 s for the three indices.
+DATA_ROOT=<to>/data uv run python -m dataplatform.ingest.tri_backfill --from-l0
+```
+
+`--from-l0` reads every stored `nifty_tri_history` payload back through `L0Store.get` (which
+re-verifies the recorded sha256), recovers each one's index from its filename, re-parses and
+rewrites the L1 partitions. It is idempotent, and `tests/unit/test_tri_backfill.py` pins the
+property the route depends on: **the parquet it writes is byte-identical to what the fetching run
+wrote**, so re-deriving is not a second-best substitute for copying L1 — it is the same bytes with
+the immutable layer as the single source. Measured on the real transfer of 2026-09-08: 6,764 +
+6,765 + 4,382 points into 6,765 date partitions, 17,911 files, all byte-identical to the run that
+fetched them.
+
+Prefer this over re-running the fetch whenever the payloads are already on disk. A re-fetch costs
+three requests, but it also mints **new** L0 receipts with today's timestamps, and the endpoint
+stamps every record with a `RequestNumber` that regenerates per request — so the same logical
+history comes back as different bytes under a different key, and the lake ends up with two raw
+records of one fact. Route (2), a re-run against the target lake, stays the answer when the
+payloads are *not* on disk:
+
+```bash
 DATA_ROOT=<to>/data uv run python -m dataplatform.ingest.tri_backfill
 ```
 
-Prefer (1) if the payloads are already on disk: it costs no requests and keeps one set of L0 bytes
-as the record. A `--from-l0` rebuild path is worth adding the next time this module is opened.
+**What `--from-l0` does not do: touch `sync_state`.** The sync row records an *ingestion*, and a
+rebuild is not one — L0 is unchanged, and §4.4 closes `PUBLISHED` absolutely, so `begin` on an
+already-published date is an illegal transition by design. Two consequences:
+
+- Moving a lake *within one host* (the 2026-09-08 transfer between worktrees) needs nothing extra:
+  the sync rows already exist and their `checksum` and `l0_path` still name the payloads that were
+  carried across, so the row and the lake agree.
+- Moving a lake to a host with a **different database** leaves `/status/sync` with no history for
+  these payloads, and no rebuild can honestly invent one. Either accept that (nothing reads the
+  sync row to find the benchmark — `read_tri_series` and `_resolve_benchmark` read L1) or re-fetch
+  on that host so the ingestion really does happen there.
 
 Do not hand-edit `L1/benchmark_tri`: the stored `knowable_date` is re-derived and checked on read,
 so an edited partition raises rather than quietly moving the PIT boundary.

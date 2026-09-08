@@ -132,6 +132,7 @@ __all__ = [
     "parse_close_snapshot",
     "parse_constituents",
     "parse_constituents_l0",
+    "parse_l0_tri_filename",
     "parse_tri_l0",
     "parse_tri_native",
     "read_constituents_l1",
@@ -214,6 +215,11 @@ TRI_PUBLICATION_LAG_DAYS: Final = 0
 #: single-quoted string, so a name carrying a quote or a brace could reshape it; this refuses one
 #: rather than escaping it, because no NSE index name needs anything outside this set.
 _TRI_NAME_SAFE: Final = re.compile(r"[A-Z0-9 &.\-]+")
+
+#: The shape `l0_tri_filename` writes, read back by `parse_l0_tri_filename`. The slug group is
+#: non-greedy so the two trailing date groups win the digits: a slug may contain `_`, and a greedy
+#: group would swallow the window's start date into the index name.
+_L0_TRI_FILENAME: Final = re.compile(r"tri_(?P<slug>.+?)_(?P<start>\d{8})_(?P<end>\d{8})\.json")
 
 #: A price/index value or a rupee amount: strict `Decimal` (no float can be constructed into one),
 #: non-negative and finite, so a mis-parsed field cannot become a plausible-looking benchmark value.
@@ -1426,6 +1432,33 @@ def l0_tri_filename(index_slug: str, start: date, end: date) -> str:
     different window is a different payload.
     """
     return f"tri_{index_slug}_{start:%Y%m%d}_{end:%Y%m%d}.json"
+
+
+def parse_l0_tri_filename(filename: str) -> tuple[str, date, date]:
+    """The inverse of `l0_tri_filename`: recover `(index_slug, start, end)` from a stored name.
+
+    A rebuild reads L0 rather than a request, so the window and the index have to come back out of
+    the only place they were written down — the filename. Non-greedy on the slug and anchored on
+    two eight-digit groups at the end, because a slug may legally contain `_` (`TriPoint.index_slug`
+    allows it) and splitting on the separator would then take the window apart in the wrong place.
+
+    Assumes the name was produced by `l0_tri_filename`; raises `ParseError` if it was not, rather
+    than guessing a slug — a payload filed under a name this cannot read is a fact worth stopping
+    for, not one to skip past.
+    """
+    match = _L0_TRI_FILENAME.fullmatch(filename)
+    if match is None:
+        raise ParseError(
+            "not an L0 TRI filename; expected the "
+            "'tri_<slug>_<YYYYMMDD>_<YYYYMMDD>.json' shape `l0_tri_filename` writes",
+            filename=filename,
+        )
+    try:
+        start = date.fromisoformat(match.group("start"))
+        end = date.fromisoformat(match.group("end"))
+    except ValueError as exc:  # a well-shaped name carrying an impossible date, e.g. …_19901301_…
+        raise ParseError(str(exc), filename=filename) from exc
+    return match.group("slug"), start, end
 
 
 def tri_state_source(index_slug: str) -> str:
