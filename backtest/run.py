@@ -62,7 +62,9 @@ import csv
 import sys
 import time
 from bisect import bisect_right
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -182,16 +184,38 @@ _VOL_FLOOR = Decimal("0.05")
 _MONTH_DAYS = 30  # the calendar step between monthly volatility / skip-month reference points
 
 # ── M9.4 benchmark defaults (a priori, stated once) ──────────────────────────────────────────────
-#: The M3.9 index whose computed total-return series is the broad-market benchmark. NIFTY 50 is the
-#: headline NSE index; its computed TRI — §4.1's fallback, seeded to the published index close and
-#: stamped ``computed_price_plus_div`` (`dataplatform.ingest.indices.compute_tri`) — stands in for
-#: the licensed niftyindices TRI, whose historical endpoint is session-gated and FAILED at C.1.
+#: The index whose total-return series is the broad-market benchmark. NIFTY 50 is the headline NSE
+#: index; M3.9.b ingests its **published** TRI (`nifty_tri_history`, 1999-06-30 onward) into
+#: ``L1/benchmark_tri``, and §4.1's computed estimate remains only as the documented fallback.
 _BENCHMARK_TRI_SLUG = "nifty50"
-#: The two benchmark provenances the run reports honestly. ``m3.9_computed_tri`` is the M9.4 wiring:
-#: the M3.9 pipeline's computed TRI read out of L1. ``l1_proxy`` is the pre-M9.4 broad-market L1
-#: proxy that stands in only when the store holds no M3.9 TRI (the close-all backfill is gated).
+
+#: The three benchmark provenances a run can have, in descending order of honesty. Which one a run
+#: actually used is carried on the result and stated in every report, because the excess return
+#: means a different thing in each case.
+#:
+#: * ``published_tri`` — the exchange's own total-return series (M3.9.b). Excess over this is
+#:   excess over the real benchmark.
+#: * ``m3.9_computed_tri`` — §4.1's fallback: the price index chained with a constant-yield
+#:   dividend accrual. An estimate of the benchmark, not the benchmark.
+#: * ``l1_proxy`` — a broad-market basket built out of L1 prices here in this module. Not a TRI at
+#:   all, and not the exchange's view of the market either.
+#:
+#: Until 2026-09-08 the register recorded the published endpoint FAILED on a stale URL path, so no
+#: published series existed to find and *every* M9/M10/M12 benchmark figure resolved to one of the
+#: latter two. Both are now loud (a warning, a report flag, and a strict mode that refuses to run).
+_BENCHMARK_PUBLISHED_TRI = "published_tri"
 _BENCHMARK_COMPUTED_TRI = "m3.9_computed_tri"
 _BENCHMARK_L1_PROXY = "l1_proxy"
+
+#: Whether this run *requires* the published TRI. False by default, because a run over a window the
+#: lake has no published TRI for is still a legitimate thing to do — it just may not call the result
+#: excess-over-TRI. Set for the duration of a run with :func:`require_published_benchmark`, which
+#: the CLI's ``--require-real-tri`` uses; a ``ContextVar`` rather than a parameter because eight
+#: internal call sites resolve the benchmark and threading a flag through all of them would put the
+#: decision in eight places instead of one.
+_REQUIRE_PUBLISHED_TRI: ContextVar[bool] = ContextVar(
+    "backtest_require_published_tri", default=False
+)
 
 # ── M9.3 investable-universe defaults (a priori, stated once, never tuned) ───────────────────────
 #: The index whose as-of membership defines the investable set. NIFTY 500 is the broadest published
@@ -1133,18 +1157,45 @@ def _liquid_basket(reader: _L1Reader, session: date, size: int) -> list[str]:
 class _ResolvedBenchmark:
     """The benchmark series the run compared against, plus how it was sourced (for the report).
 
-    ``source`` is ``_BENCHMARK_COMPUTED_TRI`` when the store held the M3.9 computed TRI M9.4 wires,
-    and ``_BENCHMARK_L1_PROXY`` when the pre-M9.4 broad-market L1 proxy stood in because it did not.
-    ``method`` is the ``TriSeries`` method (``computed_price_plus_div`` or ``published``) — carried
-    so the report can say plainly the series is computed, never the licensed feed.
+    ``source`` is one of the three ``_BENCHMARK_*`` provenances — the published TRI, §4.1's
+    computed estimate, or this module's L1 proxy — and ``method`` is the ``TriSeries`` method the
+    series carries. Both travel onto :class:`BacktestResult` so no report can present a
+    proxy-derived excess as excess over a total-return index.
     """
 
     series: TriSeries
     source: str
 
     @property
+    def is_published_tri(self) -> bool:
+        """True only for the exchange's own total-return series."""
+        return self.source == _BENCHMARK_PUBLISHED_TRI
+
+    @property
     def is_computed_tri(self) -> bool:
+        """True for §4.1's computed estimate — a TRI-shaped series, not a published one."""
         return self.source == _BENCHMARK_COMPUTED_TRI
+
+    @property
+    def is_proxy(self) -> bool:
+        """True for the L1 basket, which is not a total-return index in any sense."""
+        return self.source == _BENCHMARK_L1_PROXY
+
+
+@contextmanager
+def require_published_benchmark() -> Iterator[None]:
+    """Run the enclosed backtest under strict benchmarking: no published TRI, no run.
+
+    Inside this block :func:`_resolve_benchmark` raises :class:`BenchmarkSourceError` rather than
+    quietly standing in the computed estimate or the L1 proxy. Use it whenever a number is going to
+    be published as excess over NIFTY-TRI — which is what the M9/M10/M12 reports were doing while
+    resolving to a proxy.
+    """
+    token = _REQUIRE_PUBLISHED_TRI.set(True)
+    try:
+        yield
+    finally:
+        _REQUIRE_PUBLISHED_TRI.reset(token)
 
 
 def _resolve_benchmark(
@@ -1155,39 +1206,88 @@ def _resolve_benchmark(
     *,
     slug: str,
     data_root: Path | None,
+    strict: bool | None = None,
 ) -> _ResolvedBenchmark:
-    """The broad-market benchmark: M3.9's computed TRI if the store holds it, else the L1 proxy.
+    """The broad-market benchmark: the published TRI if the lake holds it, else a stated fallback.
 
-    M9.4 wires the real NIFTY total-return series through the M3.9 pipeline. The licensed TRI
-    endpoint is session-gated and FAILED at C.1, so §4.1's computed TRI (seeded to the published
-    close, stamped ``computed_price_plus_div``) is the benchmark: this reads it out of L1 with
-    :func:`~dataplatform.ingest.indices.read_tri_series` for ``slug`` through ``terminal`` — the
-    point-in-time series knowable at the terminal valuation. When the store holds it *and* it covers
-    the first cashflow date (so every deposit can be valued at an index level in force), that series
-    is the benchmark and the source is ``_BENCHMARK_COMPUTED_TRI``.
+    Preference order, and it is a preference about honesty rather than about convenience:
 
-    When it does not — the current lake holds only L1 raw prices; the close-all snapshot that feeds
-    ``compute_tri`` is a gated bulk fetch (AGENTIC_CONTEXT B1) — the pre-M9.4 broad-market L1 proxy
-    stands in and the source is ``_BENCHMARK_L1_PROXY``, which the report states plainly. Either way
-    the series flows through the identical ``TriSeries`` / ``compare_to_benchmarks`` path
-    (acceptance #3), so the published series slots in unchanged the day the gate opens.
+    1. **The published series** (M3.9.b) — ``read_tri_series(slug, terminal,
+       method="published")``. When the lake holds it *and* it reaches the first cashflow date (so
+       every deposit can be valued at an index level in force), that is the benchmark.
+    2. **§4.1's computed estimate** — the same read without the method filter, which falls back to
+       ``computed_price_plus_div``. Logged at **warning**: it is a constant-yield dividend accrual,
+       so excess over it is excess over an estimate.
+    3. **This module's L1 proxy** — a broad-market basket built from L1 closes. Logged at
+       **warning**: it is not a total-return index at all.
+
+    Every case reads the point-in-time series through ``terminal``, so no level dated after the
+    valuation can reach it (invariant #7), and all three flow through the identical ``TriSeries`` /
+    ``compare_to_benchmarks`` path, so the choice changes the *series* and nothing else.
+
+    ``strict`` (defaulting to :func:`require_published_benchmark`'s context) turns cases 2 and 3
+    into a :class:`BenchmarkSourceError` naming what was asked for and what the lake has. Fail loud
+    and specific, CLAUDE.md — because the failure mode this replaces was silent: from M9.4 until
+    2026-09-08 the register recorded the published endpoint FAILED against a stale URL path, so
+    step 1 could never succeed, the fallback was taken on every run, and it logged at *info*.
     """
-    series = read_tri_series(slug, terminal, data_root=data_root)
-    if series is not None and series.points[0].as_of <= first_session:
+    require_published = _REQUIRE_PUBLISHED_TRI.get() if strict is None else strict
+
+    published = read_tri_series(slug, terminal, method="published", data_root=data_root)
+    if published is not None and published.points[0].as_of <= first_session:
         _LOG.info(
             "backtest.benchmark_source",
-            source=_BENCHMARK_COMPUTED_TRI,
-            index=series.index_slug,
-            method=series.method,
-            points=len(series.points),
-            first_point=series.points[0].as_of.isoformat(),
+            source=_BENCHMARK_PUBLISHED_TRI,
+            index=published.index_slug,
+            method=published.method,
+            points=len(published.points),
+            first_point=published.points[0].as_of.isoformat(),
         )
-        return _ResolvedBenchmark(series=series, source=_BENCHMARK_COMPUTED_TRI)
-    _LOG.info(
-        "backtest.benchmark_source",
+        return _ResolvedBenchmark(series=published, source=_BENCHMARK_PUBLISHED_TRI)
+
+    shortfall = (
+        "no published TRI in the store for this index"
+        if published is None
+        else (
+            f"the published TRI starts {published.points[0].as_of.isoformat()}, after the run's "
+            f"first cashflow on {first_session.isoformat()}"
+        )
+    )
+    if require_published:
+        raise BenchmarkSourceError(
+            f"a published total-return series is required for {slug!r} over "
+            f"{first_session.isoformat()}..{terminal.isoformat()}, and {shortfall}. Ingest it "
+            "(`uv run python -m dataplatform.ingest.tri_backfill`) or drop the strict requirement "
+            "— but do not report excess over an estimate as excess over NIFTY-TRI."
+        )
+
+    computed = read_tri_series(slug, terminal, data_root=data_root)
+    if computed is not None and computed.points[0].as_of <= first_session:
+        _LOG.warning(
+            "backtest.benchmark_fallback",
+            source=_BENCHMARK_COMPUTED_TRI,
+            index=computed.index_slug,
+            method=computed.method,
+            points=len(computed.points),
+            first_point=computed.points[0].as_of.isoformat(),
+            reason=shortfall,
+            consequence=(
+                "the benchmark is §4.1's constant-yield dividend estimate, not the exchange's "
+                "published TRI; excess over it is not excess over NIFTY-TRI"
+            ),
+        )
+        return _ResolvedBenchmark(series=computed, source=_BENCHMARK_COMPUTED_TRI)
+
+    _LOG.warning(
+        "backtest.benchmark_fallback",
         source=_BENCHMARK_L1_PROXY,
-        reason="no M3.9 computed TRI in the store covering the run window",
-        slug=slug,
+        index=slug,
+        reason=shortfall,
+        consequence=(
+            "the benchmark is a broad-market basket built from L1 closes — not a total-return "
+            "index of any kind, published or computed; no excess figure from this run may be "
+            "labelled excess over NIFTY-TRI"
+        ),
     )
     proxy = _build_benchmark_tri(reader, rebalance_dates, first_session, terminal)
     return _ResolvedBenchmark(series=proxy, source=_BENCHMARK_L1_PROXY)
@@ -1198,6 +1298,15 @@ def _resolve_benchmark(
 
 class BacktestError(Exception):
     """A backtest could not be set up or run. Fails loud (CLAUDE.md), never a silent skip."""
+
+
+class BenchmarkSourceError(BacktestError):
+    """A published total-return benchmark was required and the lake does not have one.
+
+    Raised only under :func:`require_published_benchmark`. Its whole reason to exist is that the
+    alternative — standing in an estimate and mentioning it in a log line — is what let six years
+    of reported excess return be struck against a proxy.
+    """
 
 
 def _reserve_fill_headroom(
@@ -1269,9 +1378,36 @@ class BacktestResult:
         return len(self.book.holdings)
 
     @property
+    def benchmark_is_published_tri(self) -> bool:
+        """True when the benchmark was the exchange's **published** TRI (M3.9.b).
+
+        The only case in which "excess over NIFTY-TRI" is a true description of this run's excess.
+        """
+        return self.benchmark_source == _BENCHMARK_PUBLISHED_TRI
+
+    @property
     def benchmark_is_computed_tri(self) -> bool:
-        """True when the benchmark is M3.9's computed TRI (M9.4), not the pre-M9.4 L1 proxy."""
+        """True when the benchmark was §4.1's computed TRI estimate, not the published series."""
         return self.benchmark_source == _BENCHMARK_COMPUTED_TRI
+
+    @property
+    def benchmark_is_proxy(self) -> bool:
+        """True when the benchmark was this module's L1 basket — not a total-return index at all."""
+        return self.benchmark_source == _BENCHMARK_L1_PROXY
+
+    @property
+    def benchmark_provenance(self) -> str:
+        """A short, unambiguous provenance tag for report headers and stdout.
+
+        Carried into every rendered report so no reader has to infer from a series name whether
+        the excess they are looking at is excess over a real total-return index. The bracketed
+        warnings are deliberate: the two fallbacks read as caveats even when quoted out of context.
+        """
+        if self.benchmark_is_published_tri:
+            return "published TRI"
+        if self.benchmark_is_computed_tri:
+            return "COMPUTED TRI ESTIMATE — not the published series"
+        return "L1 PROXY — not a total-return index"
 
 
 def run_naive_momentum(
@@ -1676,38 +1812,61 @@ def _signal_source_prose(adjusted: bool) -> str:
 
 
 def _benchmark_label(run: BacktestResult) -> str:
-    """The benchmark's row label in the returns table — states which series it actually is."""
+    """The benchmark's row label in the returns table — states which series it actually is.
+
+    Never the bare string "NIFTY-TRI" for anything that is not the published NIFTY TRI. The old
+    proxy label was "NIFTY-TRI (broad-market TRI proxy from L1)", which reads as a kind of TRI at
+    a glance and is not one.
+    """
+    if run.benchmark_is_published_tri:
+        return f"{run.benchmark_index_name} — published TRI (M3.9.b, `{run.benchmark_method}`)"
     if run.benchmark_is_computed_tri:
-        return f"{run.benchmark_index_name} — computed TRI (M3.9, `{run.benchmark_method}`)"
-    return "NIFTY-TRI (broad-market TRI proxy from L1)"
+        return (
+            f"{run.benchmark_index_name} — **computed TRI estimate**, not the published series "
+            f"(§4.1 fallback, `{run.benchmark_method}`)"
+        )
+    return "**L1 price-return proxy — not a TRI** (broad-market basket built here)"
 
 
 def _benchmark_provenance_note(run: BacktestResult) -> str:
-    """The provenance sentence under the returns table — computed vs licensed, plainly (M9.4)."""
+    """The provenance sentence under the returns table — which series, and what excess means.
+
+    One of three, and the two fallbacks say outright that the excess is not excess over NIFTY-TRI.
+    That sentence is the whole point: from M9.4 until 2026-09-08 the register recorded the
+    published endpoint FAILED against a stale URL path, so every report rendered here took a
+    fallback while its heading said "NIFTY-TRI".
+    """
+    if run.benchmark_is_published_tri:
+        return (
+            "> **Benchmark provenance:** the benchmark is the **published** NIFTY total-return "
+            f"series for `{run.benchmark_index_name}` — `nifty_tri_history` as ingested by M3.9.b "
+            f"(`{run.benchmark_method}`), read out of `L1/benchmark_tri` with `read_tri_series` "
+            "and point-in-time to the terminal valuation. Excess over this is excess over the "
+            "real benchmark. It is still not alpha: costs, survivorship of the traded universe "
+            "and the single-path nature of one backtest all sit between the two."
+        )
     if run.benchmark_is_computed_tri:
         return (
-            "> **Benchmark provenance (M9.4):** the benchmark is M3.9's **computed** total-return "
-            f"index for `{run.benchmark_index_name}` — §4.1's fallback (`{run.benchmark_method}`), "
-            "seeded to the published index close and chained off the price index plus an estimated "
-            "dividend accrual. This is not the licensed niftyindices TRI, whose historical "
-            "endpoint is session-gated and FAILED at C.1. So the excess over benchmark is measured "
-            "against a dividend *estimate*, not the exchange's own TRI: it slightly understates "
-            "the benchmark's true total return where realised dividends exceeded the accrual (and "
-            "the reverse where they fell short). The series flows through the same `TriSeries` / "
-            "`compare_to_benchmarks` path the licensed feed will, so it slots in unchanged once "
-            "the gate opens. Do not read the excess as alpha."
+            "> ⚠️ **Benchmark provenance — NOT the published TRI.** The store held no published "
+            f"NIFTY TRI covering this window, so §4.1's **computed estimate** for "
+            f"`{run.benchmark_index_name}` stood in (`{run.benchmark_method}`): seeded to the "
+            "published index close and chained off the price index plus a *constant-yield* "
+            "dividend accrual. So the excess below is excess over a dividend **estimate** — it "
+            "understates the benchmark where realised dividends beat the accrual and overstates "
+            "it where they fell short. **Do not quote it as excess over NIFTY-TRI.** The real "
+            "series is one request away: `uv run python -m dataplatform.ingest.tri_backfill` "
+            "(`ops/runbooks/benchmark-tri.md`)."
         )
     return (
-        "> **Benchmark provenance (M9.4):** this store holds no M3.9 computed TRI (the close-all "
-        "snapshot that feeds `compute_tri` is a gated bulk fetch — AGENTIC_CONTEXT B1), so the "
-        f"pre-M9.4 broad-market **L1 proxy** stands in (equal-weight average of the "
-        f"{_BENCHMARK_BASKET} most-liquid names at the start, seeded to 1000). It is a price-"
-        "return proxy: this is not the licensed NIFTY-TRI feed (session-gated, FAILED at C.1) and "
-        "not "
-        "even the computed TRI. The M9.4 wiring — the M3.9 computed TRI read through "
-        "`read_tri_series` and "
-        "flowed through the identical `compare_to_benchmarks` path — is proven on the fixture in "
-        "`tests/integration/test_backtest_benchmark.py`. Do not read the excess as alpha."
+        "> ⚠️ **Benchmark provenance — NOT a total-return index at all.** The store held neither "
+        "a published NIFTY TRI nor §4.1's computed estimate covering this window, so the "
+        f"broad-market **L1 proxy** stood in: an equal-weight basket of the {_BENCHMARK_BASKET} "
+        "most-liquid names at the start, seeded to 1000, built in this module from L1 closes. It "
+        "is a price-return series over a basket we chose — not the exchange's index, and not any "
+        "kind of TRI. **No excess figure in this report may be labelled excess over NIFTY-TRI.** "
+        "Ingest the real series with `uv run python -m dataplatform.ingest.tri_backfill` "
+        "(`ops/runbooks/benchmark-tri.md`), or run under `require_published_benchmark()` / "
+        "`--require-real-tri` so a missing TRI refuses to produce a number instead of this one."
     )
 
 
@@ -2134,51 +2293,31 @@ def run_universe_report(
 
 
 def render_benchmark_report(run: BacktestResult, *, benchmark_slug: str) -> str:
-    """The M9.4 report: the backtest return against M3.9's computed TRI, provenance stated plainly.
+    """The benchmark report: the backtest return against the NIFTY TRI, provenance stated plainly.
 
-    States which series actually stood as the benchmark (M3.9's computed TRI when the store held it,
-    else the L1 proxy), that it is computed and not the licensed feed, and re-states the portfolio
-    XIRR, the benchmark XIRR and the excess on that benchmark. The comparison is the one struck by
-    :meth:`PortfolioBook.compare_to_benchmarks` inside the run — unchanged by M9.4 (acceptance #3).
+    States which series actually stood as the benchmark — the published TRI (M3.9.b), §4.1's
+    computed estimate, or this module's L1 proxy — in the heading, in the provenance bullets and in
+    the returns table, so the answer cannot be missed by a reader who reads only one of the three.
+    The comparison is the one struck by :meth:`PortfolioBook.compare_to_benchmarks` inside the run,
+    unchanged (M9.4 acceptance #3).
     """
     c = run.comparison
-    computed = run.benchmark_is_computed_tri
     lines = [
-        "# M9.4 — NIFTY-TRI benchmark wired into the backtest (10 years)",
+        f"# Naive momentum vs NIFTY benchmark — {run.benchmark_provenance}",
         "",
-        "*Generated by `python -m backtest.run --policy naive_momentum --benchmark-report`. M9.4 "
-        "replaces the ad-hoc L1 broad-market proxy with the real NIFTY total-return series flowed "
-        "through the M3.9 pipeline: the benchmark is now M3.9's computed TRI "
-        "(`read_tri_series`), passed to the same `compare_to_benchmarks` path as before.*",
+        "*Generated by `python -m backtest.run --policy naive_momentum --benchmark-report`. The "
+        "benchmark is read out of `L1/benchmark_tri` with `read_tri_series`, which prefers the "
+        "exchange's **published** total-return series and falls back — loudly — to §4.1's computed "
+        "estimate and then to a broad-market L1 basket. The heading above names which of the three "
+        "this run actually got.*",
         "",
         "## Benchmark provenance",
         "",
-        (
-            f"- **Series:** M3.9 **computed** TRI for `{run.benchmark_index_name}` "
-            f"(slug `{benchmark_slug}`, method `{run.benchmark_method}`), read out of L1 with "
-            "`read_tri_series`."
-            if computed
-            else "- **Series:** the pre-M9.4 broad-market **L1 proxy** — this store holds no M3.9 "
-            f"computed TRI for slug `{benchmark_slug}` (the close-all snapshot that feeds "
-            "`compute_tri` is a gated bulk fetch, AGENTIC_CONTEXT B1)."
-        ),
-        "- **Computed, not licensed.** The licensed niftyindices historical-TRI endpoint is "
-        "session-gated and FAILED at C.1 (`nifty_tri_history`). The benchmark here is therefore an "
-        "**estimate**: §4.1's computed fallback seeds to the published index close and chains the "
-        "price return plus a dividend accrual estimated from the published yield — it is not the "
-        "exchange's own TRI. "
-        + (
-            "Read the excess below against a dividend *estimate*: it understates the benchmark's "
-            "true total return where realised dividends exceeded the constant-yield accrual, and "
-            "overstates it where they fell short."
-            if computed
-            else "Over this store not even the computed TRI is available, so the L1 proxy (a "
-            "price-return-only broad-market basket) stands in; the computed-TRI wiring is proven "
-            "on the fixture in `tests/integration/test_backtest_benchmark.py`."
-        ),
-        "- **Path unchanged:** the series flows through the same `TriSeries` / "
-        "`compare_to_benchmarks` machinery (acceptance #3), so the licensed feed slots in with no "
-        "code change the day its gate opens.",
+        f"- **Provenance:** `{run.benchmark_source}` — {run.benchmark_provenance}.",
+        _benchmark_series_bullet(run, benchmark_slug=benchmark_slug),
+        "- **Path unchanged:** whichever series stands, it flows through the same `TriSeries` / "
+        "`compare_to_benchmarks` machinery (M9.4 acceptance #3), so the provenance changes the "
+        "series and nothing else about how the excess is computed.",
         "",
         "## Window",
         "",
@@ -2192,7 +2331,8 @@ def render_benchmark_report(run: BacktestResult, *, benchmark_slug: str) -> str:
         "| --- | --- |",
         f"| Portfolio (naive momentum, **costs included**) | {_pct(c.portfolio_xirr)} |",
         f"| {_benchmark_label(run)} | {_pct(c.benchmark_xirr)} |",
-        f"| **Excess over benchmark** | {_pct(c.excess_over_benchmark)} |",
+        f"| **Excess over benchmark** ({run.benchmark_provenance}) | "
+        f"{_pct(c.excess_over_benchmark)} |",
         "",
         _benchmark_provenance_note(run),
         "",
@@ -2200,6 +2340,29 @@ def render_benchmark_report(run: BacktestResult, *, benchmark_slug: str) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def _benchmark_series_bullet(run: BacktestResult, *, benchmark_slug: str) -> str:
+    """The one bullet naming the exact series, per provenance."""
+    if run.benchmark_is_published_tri:
+        return (
+            f"- **Series:** the **published** NIFTY TRI for `{run.benchmark_index_name}` (slug "
+            f"`{benchmark_slug}`, method `{run.benchmark_method}`) — `nifty_tri_history`, ingested "
+            "by M3.9.b from `POST /BackPage/getTotalReturnIndexString`."
+        )
+    if run.benchmark_is_computed_tri:
+        return (
+            f"- **Series:** §4.1's **computed estimate** for `{run.benchmark_index_name}` (slug "
+            f"`{benchmark_slug}`, method `{run.benchmark_method}`) — the store held no published "
+            "TRI covering this window. Seeded to the published index close, then chained off the "
+            "price index plus a constant-yield dividend accrual."
+        )
+    return (
+        f"- **Series:** the broad-market **L1 proxy** — the store holds neither a published TRI "
+        f"nor a computed estimate for slug `{benchmark_slug}` over this window, so an "
+        f"equal-weight basket of the {_BENCHMARK_BASKET} most-liquid names (seeded to 1000) "
+        "stands in. This is a price-return series over a basket chosen here, not an index."
+    )
 
 
 def run_benchmark_report(
@@ -2212,7 +2375,7 @@ def run_benchmark_report(
     adjusted: bool = True,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
 ) -> str:
-    """Run the backtest and render the M9.4 benchmark report against M3.9's computed TRI."""
+    """Run the backtest and render the benchmark report, whichever series the lake supplied."""
     run = run_naive_momentum(
         start=start,
         end=end,
@@ -2854,6 +3017,7 @@ def run_sector_rotation_report(
             sector_count=data.sector_count,
             mapped_names=len(sector_by_isin),
             risk_on_sessions=risk_on_sessions,
+            benchmark_published_tri=resolved.is_published_tri,
             benchmark_computed_tri=resolved.is_computed_tri,
             benchmark_xirr=arms[0].comparison.benchmark_xirr,
             adjusted=adjusted,
@@ -2878,6 +3042,7 @@ def render_sector_rotation_report(
     sector_count: int,
     mapped_names: int,
     risk_on_sessions: int,
+    benchmark_published_tri: bool,
     benchmark_computed_tri: bool,
     benchmark_xirr: Decimal,
     adjusted: bool,
@@ -2935,10 +3100,14 @@ def render_sector_rotation_report(
         "membership snapshots in the store, so the liquidity floor is what narrows it), look-backs "
         "walking the full L1 calendar so the first rebalance already has a signal, and the "
         + (
-            "M3.9 computed TRI"
+            "**published** NIFTY TRI (M3.9.b)"
+            if benchmark_published_tri
+            else "§4.1 **computed TRI estimate** — the store holds no published TRI for this "
+            "window, so the excess-vs-market figure is excess over an estimate"
             if benchmark_computed_tri
-            else "pre-M9.4 broad-market **L1 proxy** (the store holds no M3.9 computed TRI — the "
-            "close-all backfill is gated, AGENTIC_CONTEXT B1)"
+            else "broad-market **L1 proxy** — the store holds neither a published TRI nor a "
+            "computed estimate for this window, so the market series is not a total-return "
+            "index at all"
         )
         + " as the market. The regime overlay reads the same broad-market L1 proxy index.",
         "",
@@ -2965,7 +3134,7 @@ def render_sector_rotation_report(
             f"{arm.trades} | {_rupees(arm.total_charges)} | {_pct(c.excess_over_benchmark)} |"
         )
     lines += [
-        f"| Market ({'computed TRI' if benchmark_computed_tri else 'L1 proxy'}) | "
+        f"| Market ({_market_series_label(benchmark_published_tri, benchmark_computed_tri)}) | "
         f"{_pct(benchmark_xirr)} | — | — | — | 0.00% |",
         "",
         "### Per-regime return (cumulative, costs embedded)",
@@ -2988,9 +3157,11 @@ def render_sector_rotation_report(
         f"top-{top_k} momentum sectors first. A positive excess over plain momentum is the sector "
         "effect; a negative one says the gate cost more than it gained on this (small, static-map) "
         "universe.",
-        "- **Do not read the excess-vs-market figure as alpha** — the market here is a "
-        "computed/proxy total-return series, not the licensed feed (M9.4), and the universe is a "
-        "small static-map sample. The comparison that is meaningful is rotation vs plain momentum.",
+        "- **Do not read the excess-vs-market figure as alpha** — the universe is a small "
+        "static-map sample, and the market series is whichever of the three the lake supplied "
+        f"(this run: **{_market_series_label(benchmark_published_tri, benchmark_computed_tri)}**; "
+        "the Market row above names it). The comparison that is meaningful is rotation vs plain "
+        "momentum.",
         "- **The per-regime split** is included because a sector tilt's value, if any, shows up "
         "unevenly across regimes rather than in the full-period average — the research that "
         "promoted M10 found static-map rotation a full-period wash but a clear winner in one "
@@ -3011,6 +3182,20 @@ def render_sector_rotation_report(
     return "\n".join(lines)
 
 
+def _market_series_label(published: bool, computed: bool) -> str:
+    """The short name of whichever market series a run actually resolved to.
+
+    Shared by the sector-rotation report's Market row and its reading notes so the two cannot
+    disagree — the failure this whole change exists to stop is a report naming one series in its
+    table and another (or none) in its prose.
+    """
+    if published:
+        return "published TRI"
+    if computed:
+        return "COMPUTED TRI ESTIMATE"
+    return "L1 PROXY — not a TRI"
+
+
 def _print_summary(run: BacktestResult) -> None:
     """A terse stdout summary; the full report is the markdown file when `--report` is passed."""
     c = run.comparison
@@ -3019,15 +3204,16 @@ def _print_summary(run: BacktestResult) -> None:
         f"{run.sessions} sessions, {run.rebalances} rebalances, {run.runtime_seconds:.1f}s"
     )
     print(f"  final NAV {_rupees(run.final_nav)} from {_rupees(run.opening_cash)}")
-    bench = (
-        f"{run.benchmark_index_name} computed TRI"
-        if run.benchmark_is_computed_tri
-        else "NIFTY-TRI L1 proxy"
-    )
+    bench = f"{run.benchmark_index_name} [{run.benchmark_provenance}]"
     print(
         f"  XIRR portfolio {_pct(c.portfolio_xirr)} vs {bench} {_pct(c.benchmark_xirr)} "
         f"(excess {_pct(c.excess_over_benchmark)})"
     )
+    if not run.benchmark_is_published_tri:
+        print(
+            "  WARNING: the benchmark is not the published NIFTY TRI — do not quote the excess "
+            "above as excess over NIFTY-TRI (see the report's provenance note)"
+        )
     print(f"  costs {_rupees(run.total_charges)}; journal {len(run.result.journal)} entries")
 
 
@@ -3121,6 +3307,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--data-root", type=Path, default=None, help="override the L0/L1/L2 lake root"
     )
+    parser.add_argument(
+        "--require-real-tri",
+        action="store_true",
+        help=(
+            "refuse to run unless the lake holds the published NIFTY TRI covering the window, "
+            "instead of falling back to §4.1's computed estimate or the L1 proxy. Pass it for any "
+            "run whose excess figure will be reported as excess over NIFTY-TRI"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -3136,6 +3331,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if end < start:
         print(f"error: --to {end} is before --from {start}", file=sys.stderr)
         return 2
+
+    with ExitStack() as strictness:
+        if args.require_real_tri:
+            strictness.enter_context(require_published_benchmark())
+        return _run_from_args(args, start=start, end=end)
+
+
+def _run_from_args(args: argparse.Namespace, *, start: date, end: date) -> int:
+    """Everything `main` does once the dates parse and the benchmark strictness is in force."""
 
     params = (
         MomentumParameters(top_n=args.top_n) if args.top_n is not None else MomentumParameters()
