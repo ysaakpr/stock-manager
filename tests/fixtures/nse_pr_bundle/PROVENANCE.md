@@ -1,0 +1,34 @@
+# `nse_pr_bundle` fixtures — provenance
+
+Four frozen bundles, one per format era measured by the W2 Phase 1 smoke fetch on **2026-09-08**
+(39 requests, ≥2.5 s spacing, host lease held). Full evidence:
+[`ops/studies/evidence/nse-pr-bundle.md`](../../../ops/studies/evidence/nse-pr-bundle.md).
+
+| fixture dir | session | archive file | era characteristics |
+|---|---|---|---|
+| `ix_era/`     | 2010-01-04 | `PR040110.zip` | first bundle the archive serves; `Ix` present; `Bc` uppercase `DDMMYY`, dates `DD/MM/YYYY` |
+| `classic/`    | 2013-01-02 | `PR020113.zip` | `Ix` gone, no `mcap` |
+| `mcap_upper/` | 2024-07-01 | `PR010724.zip` | `mcap` present; `Bc010724` (`DDMMYY`) and `MCAP01072024` (`DDMMYYYY`) **in one zip** |
+| `lowercase/`  | 2026-09-04 | `PR040926.zip` | all-lowercase names, `DDMMYYYY` throughout, `Bc` dates `YYYY-MM-DD` |
+
+## These zips are trimmed, and the trim is the only edit
+
+Each fixture zip contains the members the parsers read (`Bc`/`bc`, `Ix`, `MCAP`/`mcap`) plus the
+bundle's readme, **byte-for-byte as NSE published them**. No row was truncated, reordered or
+rewritten; a format regression in any parsed member still fires. The other 11-22 members
+(`fo`, `cd`, `op`, `tt`, `pr`, …) were dropped because W2 parses none of them and keeping them
+would put ~1.5 MB of unread payload in the repo.
+
+Because the member *list* is therefore not the real one, each directory carries a
+`manifest.json` recording the original bundle's byte count, sha256 and **complete** member list as
+served. `tests/unit/test_pr_bundle_bundle.py` runs the member-registry assertions against those
+manifests, so `MemberKind` is checked against every name the real archive produced, not against
+the reduced set in the zip.
+
+The unmodified originals are in the worktree lake at `data/L0/nse_pr_bundle/<YYYY>/<MM>/`, which is
+gitignored — `data/` is never committed.
+
+## Tests never hit the network
+
+Every test in `tests/unit/test_pr_bundle_*.py` reads these files from disk. Nothing in
+`dataplatform/ingest/nse/pr_bundle/` opens a socket; fetching is the crawl engine's job alone.

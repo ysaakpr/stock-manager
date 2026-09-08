@@ -565,6 +565,84 @@ sources:
     candidate_alternatives: []
     owner_task: M2.2
 
+  # §4.1 row 5 (second NSE surface) — the daily PR report bundle, W2 Phase 1.
+  - id: nse_pr_bundle
+    plan_row: "Corporate actions"
+    description: >-
+      NSE's daily report bundle: one zip per session carrying 13-25 member reports. Registered for
+      its `Bc` member — corporate actions whose *file date is the broadcast date*, which is the
+      only source measured so far that makes invariant #7 non-vacuous for history. Two further
+      members are parsed: `Ix` (index membership, 2010 only) and `mcap` (issue size / market cap).
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR{DDMMYY}.zip"
+    verified_url: "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR040926.zip"
+    cadence: daily
+    era: {start: 2010-01-04, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.nse.pr_bundle, task: W2}
+    robots_notes: No directives on the archive host; www.nseindia.com allows /.
+    pit_notes: >-
+      This is the entry's reason to exist. Every member is immutable once published, and the
+      bundle's own publication date is recoverable from the payload (the digits each member
+      carries in its name), so a `Bc` row's knowable_date is a measurement rather than an ingest
+      timestamp. Contrast `bse_corp_actions` and `nse_corp_actions`, which answer "what is true
+      now": all 47,887 rows in `corporate_actions` today share one knowable_date, which satisfies
+      invariant #7 vacuously. NOT YET PROMOTED — W2 Phase 1 parses and reports only; reconciling
+      dated Bc actions against the existing rows is a separate, separately-reviewed task.
+      Every member is symbol-keyed and carries NO ISIN, so none of these rows can be joined
+      under invariant #2 without dated symbol->ISIN lineage that does not exist yet.
+    status: VERIFIED
+    verified_at: 2026-09-08T08:22:58+05:30
+    last_http_status: 200
+    sample_bytes: 665049
+    content_type: application/zip
+    sample_sha256: 1edd9171e7b97fa8ccb1bf1f3da7ff8a119d3fec15dfbfe74180c5526ea74b0b
+    parse_check: >-
+      zip with 14 members; parsed bc04092026.csv (10 columns, header
+      SERIES,SYMBOL,SECURITY,RECORD_DT,BC_STRT_DT,BC_END_DT,EX_DT,ND_STRT_DT,ND_END_DT,PURPOSE,
+      350 rows) and mcap04092026.csv (10 columns, header Trade Date,Symbol,Series,Security Name,
+      Category,Last Trade Date,Face Value(Rs.),Issue Size,Close Price/Paid up value(Rs.),
+      Market Cap(Rs.), 3,165 securities + 3 subtotal lines). No Ix member in this era.
+    fixture: {frozen: true, task: W2, path: "tests/fixtures/nse_pr_bundle/"}
+    history:
+      measured_at: 2026-09-08T08:27:38+05:30
+      measured_by: W2
+      method: >-
+        39 requests to nsearchives.nseindia.com, >=2.5 s spacing, host lease held, browser UA and
+        NSE Referer, via the normal crawl engine. Coarse year scan 2005-2026, then bisection on
+        each boundary the scan exposed. 404 recorded as evidence of non-publication, never retried
+        and never widened. Full log: ops/studies/evidence/nse-pr-bundle.md.
+      sessions_available: 1
+      earliest_available: 2010-01-04
+      latest_available: 2026-09-04
+      accrues_forward: true
+      note: >-
+        Floor pinned exactly, not bracketed: PR311209.zip and PR010110.zip are both 404 while
+        PR040110.zip is 200, and probes at 2005-01-03, 2007-01-02, 2008-01-02, 2009-01-02,
+        2009-04-08, 2009-07-01, 2009-10-01, 2009-12-01 and 2009-12-16 are all 404. Four format
+        eras, two of whose boundaries are BRACKETS AND NOT PINNED — stated as ranges on purpose
+        rather than guessed to a date:
+        (1) `ix_era` 2010-01-04 -> the Ix member's disappearance, which falls in
+        (2010-10-04, 2010-10-18]; uppercase member names, DDMMYY, Bc dates DD/MM/YYYY.
+        (2) `classic` -> the mcap member's arrival, NOT PINNED, somewhere in
+        (2024-01-02, 2024-07-01]; a six-month bracket the 40-request budget did not buy down.
+        (3) `mcap_upper` -> the naming/date cutover, NOT PINNED, somewhere in
+        (2025-10-01, 2025-11-03]; a one-month bracket.
+        (4) `lowercase` from that cutover: all-lowercase member names, DDMMYYYY throughout, and
+        Bc dates in YYYY-MM-DD.
+        No parser dispatches on any of these boundaries — the readers sniff casing, name width and
+        date shape per file — so an unpinned boundary costs documentation accuracy, not
+        correctness. DDMMYY and DDMMYYYY member names coexist INSIDE one zip (Bc010724.csv beside
+        MCAP01072024.csv), so a per-bundle name format would be wrong by construction.
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: W2
+
   # §4.1 row 6 — symbol / ISIN master
   - id: nse_equity_list
     plan_row: "Symbol / ISIN master"
@@ -686,7 +764,7 @@ sources:
       User-Agent: browser
       Referer: "https://niftyindices.com/"
     needs_session_cookie: false
-    parser: {id: dataplatform.ingest.indices, task: M3.9}
+    parser: {id: dataplatform.ingest.indices, task: M3.9.a}
     robots_notes: >-
       Allow: / with two disallowed report paths, neither of which is /IndexConstituent/.
     pit_notes: >-
@@ -701,58 +779,81 @@ sources:
     sample_sha256: 9fb8832853c279448d2bc05f0e7dd5f460ed2ff35332fea8c40fc1250362ad28
     parse_check: >-
       CSV, 5 columns, header "Company Name,Industry,Symbol,Series,ISIN Code". ISIN is native.
-    fixture: {frozen: false, task: M3.9, path: "tests/fixtures/nifty_indices/"}
+    fixture: {frozen: false, task: M3.9.a, path: "tests/fixtures/nifty_indices/"}
     failure_note: null
     candidate_alternatives: []
-    owner_task: M3.9
+    owner_task: M3.9.a
 
-  # §4.1 row 8 — benchmark TRI (primary FAILED, fallback input VERIFIED)
+  # §4.1 row 8 — benchmark TRI (the published series, VERIFIED at D8's corrected path; the
+  # computed-proxy input below is retained as §4.1's documented fallback, not as a substitute)
   - id: nifty_tri_history
     plan_row: "Benchmark TRI series"
-    description: Historical total-return index values for a named index over a date range.
+    description: >-
+      Historical total-return index values for a named index over a date range — the real
+      published TRI, one POST per index for its whole history.
     host: niftyindices.com
     method: POST
-    url_template: "https://niftyindices.com/Backpage.aspx/getTotalReturnIndexString"
-    verified_url: "https://niftyindices.com/Backpage.aspx/getTotalReturnIndexString"
+    url_template: "https://niftyindices.com/BackPage/getTotalReturnIndexString"
+    verified_url: "https://niftyindices.com/BackPage/getTotalReturnIndexString"
     cadence: daily
-    era: {start: null, end: null}
+    era: {start: 1999-06-30, end: null}
     fallback:
       - "Computed price-index proxy + dividend estimate (§4.1's own fallback)"
       - nifty_index_close_snapshot
     required_headers:
       User-Agent: browser
-      Referer: "https://niftyindices.com/reports/historical-data"
       Content-Type: "application/json; charset=UTF-8"
-      X-Requested-With: XMLHttpRequest
-    needs_session_cookie: true
-    parser: {id: dataplatform.ingest.indices, task: M3.9}
-    robots_notes: Path is not disallowed by robots; the block is an application-level gate.
-    pit_notes: TRI is restated only on index reconstitution; treat published values as final.
-    status: FAILED
-    verified_at: 2026-08-08T18:14:21+05:30
+      Accept: "application/json, text/javascript, */*; q=0.01"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.indices, task: M3.9.b}
+    robots_notes: >-
+      Allow: / with two disallowed report paths, neither of which is /BackPage/. The 2026-08-08
+      sweep's "application-level gate" was a stale URL path, not a gate — D8.
+    pit_notes: >-
+      TRI is restated only on index reconstitution; treat published values as final. A level
+      dated D is published in NSE Indices' end-of-day dissemination for session D, so
+      knowable_date is the row's own session date and never the fetch date (the parser derives
+      it from the payload — dataplatform.ingest.indices.tri_knowable_date).
+    status: VERIFIED
+    verified_at: 2026-09-08T09:15:00+05:30
     last_http_status: 200
-    sample_bytes: 92911
+    sample_bytes: 957952
     content_type: text/html; charset=utf-8
-    sample_sha256: eb0b7852f57fad28115f86e526d600139238327d324b18e9d842f61cb3a08925
-    parse_check: null
-    fixture: {frozen: false, task: M3.9, path: null}
-    failure_note: >-
-      Tried twice, both POST with a JSON body {name, indexName, startDate, endDate}: bare, and
-      again after warming https://niftyindices.com/reports/historical-data in the same cookie
-      jar. Both returned HTTP 200 carrying the site's HTML home page, redirected to
-      /?ReturnUrl=%2fBackpage.aspx%2fgetTotalReturnIndexString — an application-level session
-      gate, not a robots or rate-limit block, and not something to evade. The warm GET set zero
-      cookies, which is why the gate never opens. A 200 with text/html is the failure signal
-      here: any fetcher that trusts the status code alone will happily store 92 KB of markup as
-      a TRI series.
+    sample_sha256: 2f85a8d762e0ef77719bb7ff60cb206c9701d7466eb675b306331409a209f082
+    parse_check: >-
+      Bare JSON array (no ASP.NET {"d": …} envelope), 6,764 records for NIFTY 50 at maximum
+      depth, newest-first; keys RequestNumber, "Index Name", Date, TotalReturnsIndex, NTR_Value.
+      Body is {"cinfo": "{'name':'<INDEX>','startDate':'DD-MMM-YYYY','endDate':'DD-MMM-YYYY',
+      'indexName':'<INDEX>'}"} — index name sent in CAPS, echoed back title-cased ("Nifty 50").
+      Dates are "DD Mon YYYY"; TotalReturnsIndex is a decimal string; NTR_Value is "-" wherever
+      the net-total-return series does not exist (all NIFTY IT and NIFTY CPSE rows, and NIFTY
+      50 before 2000-01-03) and must read as null, never 0. content_type is text/html even on
+      success, so a content-type check cannot discriminate this source's good response from its
+      block page (D9) — only a parse/shape assertion can. RequestNumber regenerates on every
+      request, so sample_sha256 identifies the sample observed and is deliberately not
+      reproducible across fetches; nothing derived from this payload carries it.
+    fixture: {frozen: true, task: M3.9.b, path: "tests/fixtures/nifty_indices/tri/2026-09-08/"}
+    history:
+      measured_at: 2026-09-08T09:15:00+05:30
+      measured_by: M3.9.b
+      method: >-
+        Six POSTs at >=2.5 s spacing (three narrow windows frozen as fixtures, three at maximum
+        depth). Depth is whatever the endpoint returns for a startDate far below any plausible
+        launch: 01-Apr-1990 -> endDate 08-Sep-2026 for each index.
+      earliest_available: 1999-06-30
+      latest_available: 2026-09-07
+      note: >-
+        NIFTY 50 6,764 rows from 1999-06-30; NIFTY IT 6,765 rows from 1999-06-30 (it carries
+        23-Oct-1999, a Saturday special session NIFTY 50 does not); NIFTY CPSE 4,382 rows from
+        2009-01-01. Deeper than D8's 2026-08-10 probe recorded (6,213 rows from 2001-04-02) —
+        that probe asked for startDate 01-Apr-2001 and got what it asked for. The whole history
+        of one index is one request, so re-fetching is the expensive path, not the deep fetch.
+    failure_note: null
     candidate_alternatives:
       - "Compute TRI from the price index plus the Div Yield column already present in
-         nifty_index_close_snapshot — this is §4.1's stated fallback and needs no new source."
-      - "Drive the historical-data page as a browser (it works interactively) to learn the real
-         session/token handshake, then replay it from the fetcher."
-      - "NSE indices archive on nsearchives.nseindia.com, which mirrors the daily index file
-         and may also carry a TRI variant under a name this sweep did not guess."
-    owner_task: M3.9
+         nifty_index_close_snapshot — this is §4.1's stated fallback and needs no new source.
+         Retained as the documented fallback, not as a substitute: it is a dividend estimate."
+    owner_task: M3.9.b
 
   - id: nifty_index_close_snapshot
     plan_row: "Benchmark TRI series"
@@ -772,7 +873,7 @@ sources:
       User-Agent: browser
       Referer: "https://niftyindices.com/"
     needs_session_cookie: false
-    parser: {id: dataplatform.ingest.indices, task: M3.9}
+    parser: {id: dataplatform.ingest.indices, task: M3.9.b}
     robots_notes: /Daily_Snapshot/ is not disallowed.
     pit_notes: Immutable once published.
     status: VERIFIED
@@ -813,7 +914,7 @@ sources:
         (ops/gates/M11-macro-source-probe.md).
     failure_note: null
     candidate_alternatives: []
-    owner_task: M3.9
+    owner_task: M3.9.b
 
   # §4.1 row 9 — FII/DII flows
   - id: nse_fii_dii_flows

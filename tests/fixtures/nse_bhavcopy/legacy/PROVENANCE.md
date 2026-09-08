@@ -11,29 +11,30 @@ URL pattern (`source_register.yaml` → `nse_bhavcopy_legacy`):
 
 | Session | File | Bytes | sha256 | Data rows | Era position |
 |---|---|---|---|---|---|
+| 2011-06-22 | `cm22JUN2011bhav.csv.zip` | 53,301 | `1eba7f9259b5638bf09c74bf96a0f66c8ac1c2c41c9e5fe40caf7c1c1da24381` | 1,502 | **the first session ever published with an ISIN column** (W1, fetched 2026-09-08) |
+| 2013-11-06 | `cm06NOV2013bhav.csv.zip` | 50,062 | `cddd57854c92f8c8766724124e78eaeb6d615fc3f4047c42481b35dda2cd1c22` | 1,442 | **`ICICI` series `M1` carries the literal `INE`** — a three-character ISIN (W1 Phase 2, 2026-09-08) |
 | 2016-01-01 | `cm01JAN2016bhav.csv.zip` | 58,943 | `8623d28a92924fd6d3432b3e21d307dd501a6f3891006e37d720fda2e436a5d7` | 1,607 | early |
 | 2020-03-23 | `cm23MAR2020bhav.csv.zip` | 66,967 | `2806459732d60d63adf7d3340307aa257d3677593dc5f27d118f5af89e1a7d32` | 1,965 | mid (the −13% circuit-breaker session) |
 | 2024-07-05 | `cm05JUL2024bhav.csv.zip` | 109,203 | `e08c8c0650e6807f8b1abd0658bc8d87cbe2d78c2fc77e05c82878f30be46665` | 2,775 | last legacy session before the 08-Jul-2024 UDiFF cutover |
 | 2020-07-13 | `cm13JUL2020bhav.csv.zip` | 71,297 | `fbb63a75cd0be53640989b6f904b0517d2b0ba7c724f24c8a195ac9bc8dd9d88` | 2,001 | **two-digit year, mixed-case month, nested zip member** |
 | 2021-02-16 | `cm16FEB2021bhav.csv.zip` | 74,595 | `eb59a06b86f4db851a8c02e1fdf1172b7f324df5bdfa976e0804e69d1e7e2a82` | 2,026 | **one row with `ISIN` = `DUMMY`** |
 
-All five carry the era's 14-field header
+All seven carry the era's 14-field header
 `SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,TOTALTRADES,ISIN,`
 (the trailing comma is part of the format).
 
-## The pre-ISIN sub-era is deliberately not represented here
+## The pre-ISIN sub-era now has its own directory (superseded 2026-09-08, W1)
 
-The archive reaches back past this format. `cm04JAN2010bhav.csv.zip` — fetched in the same sweep,
-kept in L0, not checked in — has only **eleven** columns and neither `TOTALTRADES` nor `ISIN`:
+This section used to say the eleven-column sub-era was "deliberately not represented here" because
+"no planned backfill reaches that sub-era". W1 reaches it. The frozen payloads live in
+`../pre_isin/`, with their own `PROVENANCE.md`, and `cm22JUN2011bhav.csv.zip` was added *here* as
+their counterpart: 2011-06-21 and 2011-06-22 are consecutive sessions in two different formats, and
+freezing only one side of a cutover pins nothing.
 
-```
-SYMBOL,SERIES,OPEN,HIGH,LOW,CLOSE,LAST,PREVCLOSE,TOTTRDQTY,TOTTRDVAL,TIMESTAMP,
-```
-
-`bhavcopy_legacy.parse` refuses that header on purpose rather than filling `ISIN` with `None`: a
-price row with no ISIN cannot be joined (invariant #2), and the platform's own trading calendar
-covers 2016-01-01 onwards, so no planned backfill reaches that sub-era. See `ops/BACKLOG.md` if it
-ever needs to.
+What has not changed is the refusal. `bhavcopy_legacy.parse` still rejects the eleven-column header
+rather than filling `ISIN` with `None` — a price row with no ISIN cannot be joined (invariant #2) —
+and `bhavcopy_legacy.parse_pre_isin` reads that era into `UnidentifiedRow` only, for quarantine.
+The pre-ISIN era is *retained*, not resolved.
 
 ## The last two: the sessions the parser could not read until 2026-09-06
 
@@ -46,10 +47,23 @@ examples of what they show, measured over all 1,940 legacy payloads in the lake:
   year *and* a mixed-case month, in all 2,001 of its rows. It is also the only archive whose CSV is
   nested inside a directory of the same name (`cm13JUL2020bhav.csv/cm13JUL2020bhav.csv`). One
   session, three format quirks, none of them anywhere else.
-* **`cm16FEB2021bhav.csv.zip`** holds the only non-ISIN value ever published in the `ISIN` column:
-  `ABFRLPP1` (Aditya Birla Fashion's partly-paid rights entitlement, series `E1`) carries the
-  literal `DUMMY`. That is the exchange stating the instrument has no ISIN, not a corrupt field, so
-  the row is refused and quarantined and the session's other 2,025 prices are kept.
+* **`cm16FEB2021bhav.csv.zip`** holds the only *declared* non-ISIN value in ten years of the
+  `ISIN` column: `ABFRLPP1` (Aditya Birla Fashion's partly-paid rights entitlement, series `E1`)
+  carries the literal `DUMMY`. That is the exchange stating the instrument has no ISIN, not a
+  corrupt field, so the row is refused and quarantined and the session's other 2,025 prices are
+  kept.
+* **`cm06NOV2013bhav.csv.zip`** is the file that showed the `DUMMY` fix had been made too narrowly.
+  `ICICI`, series `M1`, carries the literal **`INE`** — fourteen fields, every price and count
+  valid, an ISIN three characters long. `INE` was not in `PLACEHOLDER_ISINS`, so the row raised, so
+  the whole session failed, and the W1 backfill found `prices_raw` with no partition for
+  2013-11-06 and **1,441 real prices missing**. It was found by the campaign, not by a test, which
+  is the point: the closed list could only ever be as complete as the literals someone had already
+  seen. The rule is now the ISIN *shape*, so `_isin_is_unusable` covers every value that cannot be
+  a join key, and this fixture is what stops it narrowing again.
+
+The two sit next to each other deliberately. `DUMMY` and `INE` are both quarantined now, but
+`stated_isin` keeps each literal verbatim, so "the exchange said this instrument has no ISIN" stays
+distinguishable from "the exchange published nonsense" — different facts with different fixes.
 
 Neither is a hypothetical. Every rule they pin — `_TWO_DIGIT_PIVOT`, the case-insensitive month
 lookup, `PLACEHOLDER_ISINS` — exists because of one of these two files, and deleting either fixture
