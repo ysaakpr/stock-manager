@@ -11,13 +11,11 @@ implementation would quietly violate:
    against L1 with two monthly snapshots whose membership differs: a date between them sees the
    earlier one, a date after sees the later one, and a date before the first sees nothing — never
    today's list, which is what kills survivorship bias in M4's PIT universe (invariant #7).
-3. **A NIFTY-TRI series is ingested and spot-checked against a published value.** The direct TRI
-   endpoint is session-gated (register `nifty_tri_history` FAILED), so §4.1's computed fallback is
-   what runs: the series is seeded to the published closing index value (the spot-checked published
-   number), and a positive dividend yield makes it exceed the price return by the accrued amount —
-   an inverted dividend sign fails these tests. The native `getTotalReturnIndexString` parser is
-   also
-   exercised, so a real published series ingests unchanged once the gate opens.
+3. **§4.1's computed TRI fallback behaves as an estimate should.** The *published* series is
+   `nifty_tri_history` and it is M3.9.b's — parser, PIT boundary and the spot-check against
+   published levels live in `tests/unit/test_benchmark_tri.py`. What stays here is the fallback:
+   the series is seeded to the published closing index value, and a positive dividend yield makes
+   it exceed the price return by the accrued amount — an inverted dividend sign fails these tests.
 
 Money assertions are written so inverting the logic fails them: index values and yields stay
 `Decimal`, never `float`; a missing yield is `None`, never `0`; and the TRI seed equals a published
@@ -58,7 +56,6 @@ from dataplatform.ingest.indices import (
     membership_asof,
     parse_close_snapshot,
     parse_constituents,
-    parse_tri_native,
     read_constituents_l1,
     read_tri_series,
     tri_url,
@@ -78,7 +75,6 @@ NIFTYIT_AUG: Final = FIXTURES / "constituents/ind_niftyitlist_20260801.csv"
 CLOSE_03: Final = FIXTURES / "close/ind_close_all_03082026.csv"
 CLOSE_04: Final = FIXTURES / "close/ind_close_all_04082026.csv"
 CLOSE_05: Final = FIXTURES / "close/ind_close_all_05082026.csv"
-TRI_NATIVE: Final = FIXTURES / "tri/getTotalReturnIndexString_nifty50_20260803_20260805.json"
 
 JUL: Final = date(2026, 7, 1)
 AUG: Final = date(2026, 8, 1)
@@ -545,33 +541,6 @@ def test_tri_series_before_the_first_point_is_none(repo_root: Path, tmp_path: Pa
     assert read_tri_series("nifty50", date(2026, 8, 2), data_root=tmp_path) is None
 
 
-# ── the native TRI parser: ready for when the session gate opens ───────────────────────────────
-
-
-def test_native_tri_parser_preserves_the_published_value_exactly(repo_root: Path) -> None:
-    """A `getTotalReturnIndexString` response ingests, and its published value round-trips exactly.
-
-    This is the primary source (and the one we want); it is session-gated today, so it is not the
-    source of the spot-checked value above, but the parser is proven ready so a real series ingests
-    unchanged once the gate opens. The published TRI value is preserved as an exact `Decimal`.
-    """
-    series = parse_tri_native((repo_root / TRI_NATIVE).read_bytes(), filename=TRI_NATIVE.name)
-    assert series.method == "published"
-    assert series.index_name == "Nifty 50 TR"
-    assert [p.as_of for p in series.points] == [
-        date(2026, 8, 3),
-        date(2026, 8, 4),
-        date(2026, 8, 5),
-    ]
-    assert series.points[0].tri_value == Decimal("34500.1234")  # exact, no float corruption
-
-
-def test_native_tri_parser_rejects_the_html_the_gate_returns(repo_root: Path) -> None:
-    """The register warns: the gate answers with the site's HTML and a 200 — never a TRI series."""
-    with pytest.raises(ParseError, match="markup, not JSON"):
-        parse_tri_native(b"<!DOCTYPE html><html>login</html>", filename="gate.html")
-
-
 # ── URL helpers read the register, not a second copy in code (C.1) ─────────────────────────────
 
 
@@ -579,7 +548,7 @@ def test_urls_come_from_the_register(register: SourceRegister) -> None:
     assert constituents_url("nifty50", register).endswith("ind_nifty50list.csv")
     assert constituents_url("niftyit", register).endswith("ind_niftyitlist.csv")
     assert close_snapshot_url(date(2026, 8, 3), register).endswith("ind_close_all_03082026.csv")
-    assert "Backpage.aspx" in tri_url(register)
+    assert tri_url(register).endswith("/BackPage/getTotalReturnIndexString")
 
 
 def test_l0_filename_carries_the_snapshot_date(register: SourceRegister) -> None:
