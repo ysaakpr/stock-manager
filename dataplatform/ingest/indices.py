@@ -22,23 +22,37 @@ writer, not a convention a caller must remember.
 
 **Benchmark TRI — the return the strategy is measured against.** The plan wants a total-return index
 (price appreciation *plus* reinvested dividends) as the benchmark (§5.2, "NIFTY-TRI + theme proxy").
-The direct historical-TRI endpoint (`getTotalReturnIndexString`) is behind an application-level
-session gate that our fetcher cannot open without a real browser handshake — the register marks
-`nifty_tri_history` **FAILED** with the evidence, and §4.1 anticipated exactly this by naming a
-fallback: *"Computed price-index proxy + dividend estimate."* Both paths live here:
+The exchange publishes exactly that, and one POST returns a whole index's history:
+`POST /BackPage/getTotalReturnIndexString`, no session cookie, no Referer, no key. The 2026-08-08
+sweep recorded `nifty_tri_history` **FAILED** against `Backpage.aspx/getTotalReturnIndexString` —
+a stale path that answers 200 with the site's home page — and read that HTML as an application-level
+gate. D8 (2026-08-10) disproved the premise; the register now carries the corrected path VERIFIED,
+and `parse_tri_native` reads the real published series. Two paths still live here, and which one you
+are holding is never ambiguous:
 
-* `parse_tri_native` reads a `getTotalReturnIndexString` response, so the moment the session gate is
-  solved a real published TRI series ingests unchanged. It is exercised against a format fixture; it
-  is not the source of the spot-checked value, because we could not fetch a real one.
-* `compute_tri` is §4.1's fallback: it chains a total-return series off the price index and the
-  published `Div Yield` column of the daily close-all snapshot (`nifty_index_close_snapshot`, which
-  *is* VERIFIED). The series is **seeded to the published closing index value** on its first date,
-  its anchor is a published number (acceptance 3's "spot-checked against a published value"), and
-  each day adds the price return *plus* a dividend accrual estimated from the yield. Zero dividends
-  make it reproduce the price index exactly; a positive yield makes it exceed the price return by
-  accrued amount — the property a test asserts so an inverted sign fails loudly. It is explicitly an
-  estimate (a constant-yield daily accrual, not a dividend-event ledger), which is why it is tagged
-  `computed_price_plus_div` on every point and never presented as the exchange's own TRI.
+* **`parse_tri_native` — the published series, `method="published"`.** This is the benchmark. It
+  reads the endpoint's own shape: a *bare* JSON array (there is no ASP.NET `{"d": …}` envelope),
+  newest-first, `Date` rather than `HistoricalDate`, values as decimal *strings*, and a
+  `NTR_Value` that is `"-"` wherever the net-total-return series does not exist. Three observed
+  traps are handled here rather than left to callers: rows arrive newest-first and are sorted;
+  index names go out in CAPS and come back title-cased, so the lake slug comes from the *requested*
+  name and the echo is checked against it; and every record carries a `RequestNumber` that
+  regenerates per request, so it is read by nothing and stored nowhere — a value derived from it
+  would break "same inputs → byte-identical" on the next fetch.
+* **`compute_tri` — §4.1's documented fallback, `method="computed_price_plus_div"`.** It chains a
+  total-return series off the price index and the published `Div Yield` column of the daily
+  close-all snapshot (`nifty_index_close_snapshot`), seeded to the published closing index value on
+  its first date. Zero dividends make it reproduce the price index exactly; a positive yield makes
+  it exceed the price return by the accrued amount — the property a test asserts so an inverted sign
+  fails loudly. It is an estimate (a constant-yield daily accrual, not a dividend-event ledger),
+  tagged `computed_price_plus_div` on every point, and it is **not** a substitute for the published
+  series: `read_tri_series` prefers `published` and only falls back when no published partition
+  exists, and the backtest says which one it used in its own report.
+
+**The PIT boundary is derived from the data, never from a clock.** `TriPoint.knowable_date` is a
+computed field — `tri_knowable_date(as_of)` — so no constructor anywhere can inject an ingest date
+into it, and `TriSeries` re-derives it on every read. See `tri_knowable_date` for the publication
+schedule it encodes and for the defect it exists to avoid.
 
 Conventions inherited from the rest of D1: prices, index values and yields are `Decimal`, never
 `float` (a float benchmark would put float error straight into every XIRR-vs-benchmark comparison);
@@ -54,15 +68,23 @@ import csv
 import io
 import itertools
 import json
+import re
 from collections.abc import Iterator, Mapping, Sequence
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Any, Final, Protocol
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    computed_field,
+    model_validator,
+)
 
 from dataplatform.ingest.fetcher import (
     Fetcher,
@@ -84,6 +106,9 @@ __all__ = [
     "CONSTITUENTS_SOURCE_ID",
     "DIVIDEND_YEAR_DAYS",
     "TRI_DATASET",
+    "TRI_METHOD_COMPUTED",
+    "TRI_METHOD_PUBLISHED",
+    "TRI_PUBLICATION_LAG_DAYS",
     "TRI_SOURCE_ID",
     "ConstituentRow",
     "ConstituentSnapshot",
@@ -98,16 +123,23 @@ __all__ = [
     "constituents_url",
     "extend_tri",
     "ingest_constituents",
+    "ingest_tri",
     "ingest_tri_from_close",
     "l0_close_filename",
     "l0_constituents_filename",
+    "l0_tri_filename",
     "membership_asof",
     "parse_close_snapshot",
     "parse_constituents",
     "parse_constituents_l0",
+    "parse_l0_tri_filename",
+    "parse_tri_l0",
     "parse_tri_native",
     "read_constituents_l1",
     "read_tri_series",
+    "tri_knowable_date",
+    "tri_request_body",
+    "tri_state_source",
     "tri_url",
     "write_constituents_l1",
     "write_tri_l1",
@@ -160,6 +192,34 @@ _MONTHS: Final[Mapping[str, int]] = {
     "NOV": 11,
     "DEC": 12,
 }
+
+#: The published-TRI record's keys, verified on a real fetch (register `parse_check`). `Date` — not
+#: `HistoricalDate`, which the pre-D8 parser guessed at. `RequestNumber` is deliberately absent from
+#: this list: it regenerates on every request, so reading it would make anything derived from the
+#: payload differ between two fetches of the same history.
+_TRI_INDEX_NAME: Final = "Index Name"
+_TRI_DATE: Final = "Date"
+_TRI_VALUE: Final = "TotalReturnsIndex"
+_TRI_NTR_VALUE: Final = "NTR_Value"
+
+#: The two methods a TRI series can have been produced by, and the only two `method` values any
+#: `TriPoint` may carry. Named constants because the backtest branches on them and a typo in a
+#: string literal there would silently present an estimate as the exchange's own series.
+TRI_METHOD_PUBLISHED: Final = "published"
+TRI_METHOD_COMPUTED: Final = "computed_price_plus_div"
+
+#: Days between a session and the date its index level becomes knowable — see `tri_knowable_date`.
+TRI_PUBLICATION_LAG_DAYS: Final = 0
+
+#: What may appear in an index name going into the `cinfo` envelope. The envelope is a hand-built
+#: single-quoted string, so a name carrying a quote or a brace could reshape it; this refuses one
+#: rather than escaping it, because no NSE index name needs anything outside this set.
+_TRI_NAME_SAFE: Final = re.compile(r"[A-Z0-9 &.\-]+")
+
+#: The shape `l0_tri_filename` writes, read back by `parse_l0_tri_filename`. The slug group is
+#: non-greedy so the two trailing date groups win the digits: a slug may contain `_`, and a greedy
+#: group would swallow the window's start date into the index name.
+_L0_TRI_FILENAME: Final = re.compile(r"tri_(?P<slug>.+?)_(?P<start>\d{8})_(?P<end>\d{8})\.json")
 
 #: A price/index value or a rupee amount: strict `Decimal` (no float can be constructed into one),
 #: non-negative and finite, so a mis-parsed field cannot become a plausible-looking benchmark value.
@@ -644,26 +704,147 @@ def parse_close_snapshot(payload: bytes, *, filename: str) -> tuple[IndexCloseRo
     return tuple(rows)
 
 
-# ── benchmark TRI: the native published series (ready for when the gate opens) ──────────────────
+# ── benchmark TRI: the published series (§4.1 row 8, VERIFIED at D8's corrected path) ───────────
 
 
-def parse_tri_native(payload: bytes, *, filename: str, l0_key: str | None = None) -> TriSeries:
-    """Parse a `getTotalReturnIndexString` response into a published TRI series.
+def tri_knowable_date(as_of: date) -> date:
+    """The date a published TRI level for session `as_of` first became knowable (invariant #7).
 
-    The niftyindices historical-TRI endpoint answers with `{"d": "<json-string>"}`, where the inner
-    string is a JSON array of `{"Index Name", "HistoricalDate", "TotalReturnsIndex"}` records. This
-    reads that shape and preserves each published value as an exact `Decimal`.
+    What it does: encodes NSE Indices' publication schedule as an offset on the *session the level
+    belongs to* — `as_of + TRI_PUBLICATION_LAG_DAYS`, which is `as_of` itself. The exchange
+    disseminates end-of-day index values, total-return series included, after the close of the
+    session they describe: probed at 09:15 IST on 2026-09-08 the endpoint's newest row was
+    2026-09-07, the previous completed session, and no row for the session then in progress. So a
+    level dated D exists from D's close, and the earliest decision it may inform is one struck at
+    or after that close — which is exactly where this platform's decisions are struck (EOD, filling
+    T+1), and the same boundary the price series already lives on.
 
-    This is the *primary* TRI source and the one we want — but it is behind an application-level
-    session gate our fetcher cannot open (register `nifty_tri_history` is FAILED, with evidence).
-    The parser is kept ready so that the day the handshake is solved, a published series ingests
-    with no code change; until then §4.1's `compute_tri` fallback is what actually produces the
-    benchmark. `method` on the result is `published`, distinguishing it from the computed estimate.
+    What it assumes: the schedule above. If NSE ever publishes a session's TRI on the following
+    day instead, `TRI_PUBLICATION_LAG_DAYS` is the one number that changes and every stored point
+    is re-derived from it.
 
-    Raises `ParseError`, naming the file, for the HTML the gate returns instead of JSON (a 200
-    carrying markup — the failure signal the register warns about), a missing `d` envelope, or a
-    value that is not a plain decimal.
+    What it never does: **read a clock.** The argument is the row's own published date and the
+    result is a pure function of it, so re-deriving a 1999 level in 2026 yields 1999 — not "today".
+    That is not a stylistic preference: `dataplatform/ingest/bse/corp_actions.py:214` stamps
+    `knowable_date=clock.now().date()` on every corporate action it parses, which gave all 47,887
+    of them one knowable date of the day they were ingested. A PIT filter reading that column can
+    never find a violation, because nothing is ever knowable before the run that loaded it —
+    invariant #7 is satisfied *vacuously*, which is worse than failing. A benchmark is what every
+    excess-return figure is struck against, so it does not get to make that mistake.
     """
+    return as_of + timedelta(days=TRI_PUBLICATION_LAG_DAYS)
+
+
+def parse_tri_native(
+    payload: bytes,
+    *,
+    filename: str,
+    index_name: str,
+    index_slug: str,
+    l0_key: str | None = None,
+) -> TriSeries:
+    """Parse a `getTotalReturnIndexString` response into the published TRI series for one index.
+
+    What it does: reads the endpoint's own shape — a **bare** JSON array of records keyed
+    `RequestNumber`, `Index Name`, `Date`, `TotalReturnsIndex`, `NTR_Value` — and preserves every
+    published level as an exact `Decimal`. Rows arrive newest-first and come back ascending.
+    `NTR_Value` is `"-"` wherever the net-total-return series does not exist (every NIFTY IT and
+    NIFTY CPSE row, and NIFTY 50 before 2000-01-03); it reads as `None`, never `Decimal(0)`, so a
+    consumer cannot mistake an absent series for a zero one.
+
+    What it assumes: `index_name` is the name that was *sent* (CAPS, e.g. `"NIFTY 50"`) and
+    `index_slug` is the canonical lake identifier for it. The endpoint echoes the name back
+    title-cased (`"Nifty 50"`), so the slug is taken from the caller's canonical value and the echo
+    is only *checked* against it — a lake path that depended on the echo's casing would move the
+    day the site changed its title case.
+
+    What it never does: read `RequestNumber` (it regenerates per request, so anything derived from
+    it would differ between two fetches of the same history); accept a level that arrives as a bare
+    JSON number rather than a decimal string (that is a float in the wire format, and money and
+    index levels are `Decimal` here — `pyproject`'s rule and CLAUDE.md's); or stamp a knowable date
+    from a clock (see `tri_knowable_date`).
+
+    Raises `ParseError`, naming the file, for: an empty body; markup instead of JSON (the stale
+    path's 200-with-HTML, which must never become a benchmark — and note `Content-Type` is
+    `text/html` even on success, so only this shape assertion discriminates, D9); an object where
+    an array belongs; a record missing a required key; a level that is not a decimal string; a date
+    that is not `DD Mon YYYY`; two records for one date; or an index-name echo that does not match
+    the index that was asked for.
+    """
+    records = _tri_records(payload, filename=filename)
+
+    points: list[TriPoint] = []
+    seen: set[date] = set()
+    for position, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise ParseError(f"record {position} is not an object", filename=filename)
+        echoed = str(record.get(_TRI_INDEX_NAME, "") or "").strip()
+        raw_date = str(record.get(_TRI_DATE, "") or "").strip()
+        if not echoed or not raw_date or _TRI_VALUE not in record:
+            raise ParseError(
+                f"record {position} is missing {_TRI_INDEX_NAME!r}, {_TRI_DATE!r} or "
+                f"{_TRI_VALUE!r}",
+                filename=filename,
+            )
+        if _slug(echoed) != index_slug:
+            raise ParseError(
+                f"record {position} is {echoed!r} (slug {_slug(echoed)!r}) but this payload was "
+                f"requested for {index_name!r} (slug {index_slug!r}); the endpoint answered about "
+                "a different index and its levels must not be filed under this one",
+                filename=filename,
+            )
+        as_of = _index_date(raw_date, index=position, filename=filename)
+        if as_of in seen:
+            raise ParseError(
+                f"record {position}: two levels published for {as_of.isoformat()}",
+                filename=filename,
+            )
+        seen.add(as_of)
+        try:
+            points.append(
+                TriPoint(
+                    index_slug=index_slug,
+                    index_name=echoed,
+                    as_of=as_of,
+                    tri_value=_tri_level(
+                        record[_TRI_VALUE], key=_TRI_VALUE, line=position, filename=filename
+                    ),
+                    ntr_value=_tri_optional_level(
+                        record.get(_TRI_NTR_VALUE),
+                        key=_TRI_NTR_VALUE,
+                        line=position,
+                        filename=filename,
+                    ),
+                    price_close=None,
+                    method=TRI_METHOD_PUBLISHED,
+                    l0_key=l0_key,
+                )
+            )
+        except ValidationError as exc:
+            raise ParseError(f"record {position}: {exc}", filename=filename) from exc
+
+    points.sort(key=lambda point: point.as_of)
+    series = TriSeries(
+        index_slug=index_slug,
+        index_name=points[0].index_name,
+        method=TRI_METHOD_PUBLISHED,
+        points=tuple(points),
+    )
+    _LOG.info(
+        "indices.tri_native_parsed",
+        source=TRI_SOURCE_ID,
+        index=series.index_slug,
+        filename=filename,
+        points=len(series.points),
+        earliest=series.points[0].as_of.isoformat(),
+        latest=series.points[-1].as_of.isoformat(),
+        state="VALIDATED",
+    )
+    return series
+
+
+def _tri_records(payload: bytes, *, filename: str) -> list[Any]:
+    """The response's record array, or a `ParseError` naming what arrived instead."""
     if not payload.strip():
         raise ParseError("empty response body", filename=filename)
     try:
@@ -672,82 +853,78 @@ def parse_tri_native(payload: bytes, *, filename: str, l0_key: str | None = None
         raise ParseError(f"body is not UTF-8: {exc}", filename=filename) from exc
     if text.lstrip()[:1] == "<":
         raise ParseError(
-            "body is markup, not JSON — the historical-data session gate returned the site's HTML "
-            "with a 200 instead of a TRI series; it must not become a benchmark",
+            "body is markup, not JSON — the stale Backpage.aspx path answers 200 with the site's "
+            "home page, and this source's Content-Type is text/html even on success, so this "
+            "shape check is the only thing standing between that markup and the benchmark",
             filename=filename,
         )
     try:
-        envelope = json.loads(text)
+        decoded = json.loads(text)
     except json.JSONDecodeError as exc:
         raise ParseError(f"body is not valid JSON: {exc}", filename=filename) from exc
-    if not isinstance(envelope, dict) or "d" not in envelope:
+    if isinstance(decoded, dict):
         raise ParseError(
-            "response has no 'd' envelope; getTotalReturnIndexString wraps its array in {'d': …}",
+            "body is a JSON object; getTotalReturnIndexString answers with a bare array of "
+            f"records (keys seen: {sorted(decoded)[:6]})",
             filename=filename,
         )
-    inner = envelope["d"]
-    if isinstance(inner, str):
-        try:
-            records = json.loads(inner, parse_float=Decimal, parse_int=Decimal)
-        except json.JSONDecodeError as exc:
-            raise ParseError(
-                f"'d' is not a JSON string of records: {exc}", filename=filename
-            ) from exc
-    else:
-        records = inner
-    if not isinstance(records, list) or not records:
+    if not isinstance(decoded, list) or not decoded:
         raise ParseError("TRI payload carries no records", filename=filename)
+    return decoded
 
-    index_name = ""
-    points: list[TriPoint] = []
-    for index, record in enumerate(records):
-        if not isinstance(record, dict):
-            raise ParseError(f"record {index} is not an object", filename=filename)
-        index_name = str(record.get("Index Name", record.get("INDEX_NAME", "")) or "").strip()
-        raw_value = record.get("TotalReturnsIndex", record.get("TotalReturnIndex"))
-        raw_date = str(record.get("HistoricalDate", "") or "").strip()
-        if not index_name or raw_value is None or not raw_date:
-            raise ParseError(
-                f"record {index} is missing Index Name, HistoricalDate or TotalReturnsIndex",
-                filename=filename,
-            )
-        value = (
-            raw_value
-            if isinstance(raw_value, Decimal)
-            else _decimal(
-                str(raw_value).strip(), key="TotalReturnsIndex", line=index, filename=filename
-            )
+
+def _tri_level(value: object, *, key: str, line: int, filename: str) -> Decimal:
+    """A published index level: a decimal *string*, exactly as the endpoint sends it.
+
+    A bare JSON number is refused rather than coerced. `json.loads` would hand it over as a float
+    (or, with `parse_float=Decimal`, as a Decimal built from one) and the benchmark every excess
+    return is struck against would carry binary-float error from its first day. If the endpoint ever
+    starts sending numbers, that is a format-era change that earns a fixture and a decision, not a
+    silent widening here.
+    """
+    if not isinstance(value, str):
+        raise ParseError(
+            f"{key!r} arrived as {type(value).__name__} {value!r}, not a decimal string; an index "
+            "level is Decimal here and a JSON number cannot become one without a float",
+            filename=filename,
+            line=line,
         )
-        try:
-            points.append(
-                TriPoint(
-                    index_slug=_slug(index_name),
-                    index_name=index_name,
-                    as_of=_index_date(raw_date, index=index, filename=filename),
-                    tri_value=value,
-                    price_close=None,
-                    method="published",
-                    l0_key=l0_key,
-                )
-            )
-        except ValidationError as exc:
-            raise ParseError(f"record {index}: {exc}", filename=filename) from exc
+    return _decimal(value, key=key, line=line, filename=filename)
 
-    series = TriSeries(
-        index_slug=_slug(index_name),
+
+def _tri_optional_level(value: object, *, key: str, line: int, filename: str) -> Decimal | None:
+    """A published level the source may not have: `None` for `"-"` or blank, never `Decimal(0)`.
+
+    `NTR_Value` is `"-"` for every NIFTY IT and NIFTY CPSE row and for NIFTY 50 before 2000-01-03 —
+    the net-total-return series simply does not exist there. Zero would read as "no net return",
+    which is a different and false claim.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str) and (not value.strip() or value.strip() == "-"):
+        return None
+    return _tri_level(value, key=key, line=line, filename=filename)
+
+
+def parse_tri_l0(
+    l0: L0Store,
+    ref: L0Ref,
+    *,
+    index_name: str,
+    index_slug: str,
+) -> TriSeries:
+    """Read a stored TRI payload back out of L0 and parse it.
+
+    The bytes come back through `L0Store.get`, which re-verifies the recorded sha256 before handing
+    them over (invariant #1), so a parse only ever runs on the payload that was actually fetched.
+    """
+    return parse_tri_native(
+        l0.get(ref),
+        filename=ref.filename,
         index_name=index_name,
-        method="published",
-        points=tuple(sorted(points, key=lambda p: p.as_of)),
+        index_slug=index_slug,
+        l0_key=ref.key,
     )
-    _LOG.info(
-        "indices.tri_native_parsed",
-        source=TRI_SOURCE_ID,
-        index=series.index_slug,
-        filename=filename,
-        points=len(series.points),
-        state="VALIDATED",
-    )
-    return series
 
 
 # ── benchmark TRI: the computed fallback (§4.1) ────────────────────────────────────────────────
@@ -756,11 +933,13 @@ def parse_tri_native(payload: bytes, *, filename: str, l0_key: str | None = None
 class TriPoint(BaseModel):
     """One total-return index value for one index on one date.
 
-    What it does: carry a TRI value, the method that produced it, and — for the computed fallback —
-    the price close it was built from, so the estimate is auditable against the price index.
-    What it never does: hold a `float`, or hide how it was made — `method` is `published` for the
+    What it does: carry a TRI value, the method that produced it, the net-total-return level where
+    the source publishes one, and — for the computed fallback — the price close it was built from,
+    so the estimate is auditable against the price index.
+    What it never does: hold a `float`; hide how it was made (`method` is `published` for the
     exchange's own series and `computed_price_plus_div` for §4.1's estimate, and a consumer can tell
-    which it is holding.
+    which it is holding); or let a caller *set* `knowable_date` — that is a computed field derived
+    from `as_of` through `tri_knowable_date`, so no ingest clock can reach it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -769,6 +948,10 @@ class TriPoint(BaseModel):
     index_name: str = Field(min_length=1, description="human index label")
     as_of: date = Field(description="the session this TRI value is for")
     tri_value: IndexValue = Field(description="total-return index value (price + reinvested divs)")
+    ntr_value: IndexValue | None = Field(
+        default=None,
+        description="net-total-return level as published; None where the source sends '-'",
+    )
     price_close: IndexValue | None = Field(
         default=None, description="the price-index close this was computed from; None if published"
     )
@@ -777,6 +960,12 @@ class TriPoint(BaseModel):
         description="how the value was produced — the exchange's series or §4.1's estimate",
     )
     l0_key: str | None = Field(default=None, description="`source/date/filename` of the L0 payload")
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def knowable_date(self) -> date:
+        """The date this level first became knowable — `tri_knowable_date(as_of)`, never a clock."""
+        return tri_knowable_date(self.as_of)
 
 
 class TriSeries(BaseModel):
@@ -857,7 +1046,7 @@ def compute_tri(
             as_of=ordered[0].index_date,
             tri_value=running,
             price_close=ordered[0].close,
-            method="computed_price_plus_div",
+            method=TRI_METHOD_COMPUTED,
             l0_key=l0_key,
         )
     )
@@ -875,7 +1064,7 @@ def compute_tri(
                 as_of=curr.index_date,
                 tri_value=running,
                 price_close=curr.close,
-                method="computed_price_plus_div",
+                method=TRI_METHOD_COMPUTED,
                 l0_key=l0_key,
             )
         )
@@ -883,7 +1072,7 @@ def compute_tri(
     series = TriSeries(
         index_slug=index_slug,
         index_name=index_name,
-        method="computed_price_plus_div",
+        method=TRI_METHOD_COMPUTED,
         points=tuple(points),
     )
     _LOG.info(
@@ -909,7 +1098,7 @@ def extend_tri(prior: TriSeries, close: IndexCloseRow, *, prev_close: IndexClose
     Raises `IngestError` if `prior` is not the computed fallback, if the new date is not after the
     last, or if the previous close is non-positive.
     """
-    if prior.method != "computed_price_plus_div":
+    if prior.method != TRI_METHOD_COMPUTED:
         raise IngestError("extend_tri only extends a computed series; a published one is fetched")
     last = prior.points[-1]
     if close.index_date <= last.as_of:
@@ -943,12 +1132,17 @@ def extend_tri(prior: TriSeries, close: IndexCloseRow, *, prev_close: IndexClose
 
 #: The TRI L1 schema. `decimal128(18, 4)` holds an index value to four places — enough precision
 #: that the computed estimate is not rounded away, declared once and enforced on write and read.
+#: `knowable_date` is stored so a PIT filter can read the boundary off the store instead of
+#: re-deriving it, and is re-checked against `tri_knowable_date` on read (a hand-edited parquet
+#: raises rather than moving the boundary).
 _TRI_SCHEMA: Final = pa.schema(
     [
         pa.field("index_slug", pa.string(), nullable=False),
         pa.field("index_name", pa.string(), nullable=False),
         pa.field("as_of", pa.date32(), nullable=False),
+        pa.field("knowable_date", pa.date32(), nullable=False),
         pa.field("tri_value", pa.decimal128(18, 4), nullable=False),
+        pa.field("ntr_value", pa.decimal128(18, 4), nullable=True),
         pa.field("price_close", pa.decimal128(18, 4), nullable=True),
         pa.field("method", pa.string(), nullable=False),
         pa.field("source", pa.string(), nullable=False),
@@ -956,9 +1150,26 @@ _TRI_SCHEMA: Final = pa.schema(
     ]
 )
 
+#: Filename suffix per method. The published series and §4.1's computed estimate are *different
+#: series for the same index*, so they get different files inside a date partition instead of
+#: overwriting each other — which is what a single `<slug>.parquet` would have done, silently, in
+#: whichever order the two ingests happened to run.
+_TRI_METHOD_SUFFIX: Final[Mapping[str, str]] = {
+    TRI_METHOD_PUBLISHED: "published",
+    TRI_METHOD_COMPUTED: "computed",
+}
 
-def _tri_file(index_slug: str) -> str:
-    return f"{index_slug}.parquet"
+#: Read preference: the exchange's own series first, the estimate only if there is no published
+#: partition. `read_tri_series` walks this order, so a caller that does not name a method gets the
+#: most honest series available and never silently gets the estimate while the real one is on disk.
+_TRI_METHOD_PREFERENCE: Final = (TRI_METHOD_PUBLISHED, TRI_METHOD_COMPUTED)
+
+
+def _tri_file(index_slug: str, method: str) -> str:
+    try:
+        return f"{index_slug}.{_TRI_METHOD_SUFFIX[method]}.parquet"
+    except KeyError:
+        raise IngestError(f"unknown TRI method {method!r}") from None
 
 
 def write_tri_l1(series: TriSeries, *, data_root: Path | None = None) -> tuple[Path, ...]:
@@ -971,11 +1182,14 @@ def write_tri_l1(series: TriSeries, *, data_root: Path | None = None) -> tuple[P
     renamed over the target, so a re-derivation is byte-identical and a crash mid-write cannot leave
     a half file readable.
     """
-    source = TRI_SOURCE_ID if series.method == "published" else CLOSE_SNAPSHOT_SOURCE_ID
+    source = TRI_SOURCE_ID if series.method == TRI_METHOD_PUBLISHED else CLOSE_SNAPSHOT_SOURCE_ID
     written: list[Path] = []
     for point in series.points:
         path = l1_partition_path(
-            TRI_DATASET, point.as_of, filename=_tri_file(series.index_slug), data_root=data_root
+            TRI_DATASET,
+            point.as_of,
+            filename=_tri_file(series.index_slug, series.method),
+            data_root=data_root,
         )
         path.parent.mkdir(parents=True, exist_ok=True)
         table = pa.Table.from_pylist([_tri_record(point, source)], schema=_TRI_SCHEMA)
@@ -996,14 +1210,38 @@ def write_tri_l1(series: TriSeries, *, data_root: Path | None = None) -> tuple[P
 
 
 def read_tri_series(
-    index_slug: str, through: date, *, data_root: Path | None = None
+    index_slug: str,
+    through: date,
+    *,
+    method: str | None = None,
+    data_root: Path | None = None,
 ) -> TriSeries | None:
-    """Read the computed/published TRI series for one index, up to and including `through`.
+    """Read the TRI series for one index, up to and including `through`.
 
     Returns the points whose `as_of` is on or before `through`, in date order — the point-in-time
     benchmark as it was knowable on the decision date. Returns `None` when no partition exists on or
     before that date, rather than an empty series (which the model forbids).
+
+    `method` names which series to read. Left `None` it walks `_TRI_METHOD_PREFERENCE`: the
+    exchange's **published** series first and §4.1's computed estimate only if no published
+    partition exists, so a caller that does not care still cannot be handed the estimate while the
+    real series sits on disk. Pass `TRI_METHOD_PUBLISHED` to *require* the published series and get
+    `None` rather than a fallback — which is what a strict benchmark resolution wants.
     """
+    if method is not None:
+        return _read_tri_method(index_slug, through, method=method, data_root=data_root)
+    for candidate in _TRI_METHOD_PREFERENCE:
+        series = _read_tri_method(index_slug, through, method=candidate, data_root=data_root)
+        if series is not None:
+            return series
+    return None
+
+
+def _read_tri_method(
+    index_slug: str, through: date, *, method: str, data_root: Path | None
+) -> TriSeries | None:
+    """One method's series for one index through a date, or `None` if it has no partition."""
+    filename = _tri_file(index_slug, method)
     points: list[TriPoint] = []
     dataset_dir = layer_root(Layer.L1, data_root=data_root) / TRI_DATASET
     if not dataset_dir.is_dir():
@@ -1011,7 +1249,7 @@ def read_tri_series(
     for partition_dir in dataset_dir.iterdir():
         if not partition_dir.is_dir():
             continue
-        path = partition_dir / _tri_file(index_slug)
+        path = partition_dir / filename
         if not path.exists():
             continue
         try:
@@ -1055,7 +1293,9 @@ def _tri_record(point: TriPoint, source: str) -> dict[str, Any]:
         "index_slug": point.index_slug,
         "index_name": point.index_name,
         "as_of": point.as_of,
+        "knowable_date": point.knowable_date,
         "tri_value": point.tri_value,
+        "ntr_value": point.ntr_value,
         "price_close": point.price_close,
         "method": point.method,
         "source": source,
@@ -1064,16 +1304,26 @@ def _tri_record(point: TriPoint, source: str) -> dict[str, Any]:
 
 
 def _tri_point_of(path: Path) -> TriPoint:
+    """One stored point, with its PIT boundary re-derived and checked against what was stored."""
     record = pq.read_table(path, schema=_TRI_SCHEMA).to_pylist()[0]
-    return TriPoint(
+    point = TriPoint(
         index_slug=str(record["index_slug"]),
         index_name=str(record["index_name"]),
         as_of=record["as_of"],
         tri_value=record["tri_value"],
+        ntr_value=record["ntr_value"],
         price_close=record["price_close"],
         method=str(record["method"]),
         l0_key=None if record["l0_key"] is None else str(record["l0_key"]),
     )
+    stored = record["knowable_date"]
+    if stored != point.knowable_date:
+        raise IngestError(
+            f"{path}: stored knowable_date {stored} does not match the schedule's "
+            f"{point.knowable_date} for session {point.as_of}; the PIT boundary of a stored "
+            "benchmark level is not editable"
+        )
+    return point
 
 
 # ── URLs, filenames, and the constituents runner ───────────────────────────────────────────────
@@ -1130,10 +1380,97 @@ def close_snapshot_url(snapshot_date: date, register: SourceRegister | None = No
 def tri_url(register: SourceRegister | None = None) -> str:
     """The historical-TRI endpoint, from the register template (C.1).
 
-    Exposed for completeness and for the runner that will use it once the session gate is solved;
-    `nifty_tri_history` is FAILED today, so the computed fallback is what runs.
+    One URL for every index and every window — the index and the dates travel in the POST body
+    (`tri_request_body`), not the path.
     """
     return _source_entry(TRI_SOURCE_ID, register).url_template
+
+
+def tri_request_body(index_name: str, start: date, end: date) -> bytes:
+    """The POST body that asks for one index's published TRI over an inclusive date range.
+
+    The endpoint takes a single `cinfo` member whose *value is itself a string* — a
+    single-quoted, JSON-ish object the site's own page builds client-side:
+
+        {"cinfo": "{'name':'NIFTY 50','startDate':'01-Apr-2021',
+                    'endDate':'31-Mar-2026','indexName':'NIFTY 50'}"}
+
+    It is built by hand rather than by `json.dumps` on the inner object because single quotes are
+    not JSON and a correctly-quoted inner object is *not* what the endpoint accepts. `name` and
+    `indexName` carry the same value and both must be present.
+
+    What it assumes: `index_name` is the exchange's name in **CAPS**, which is how the endpoint
+    wants it sent; it echoes back title-cased, and `parse_tri_native` reconciles the two.
+    What it never does: interpolate anything unescaped — a name containing a quote or a brace is
+    refused rather than allowed to reshape the envelope.
+    """
+    if index_name != index_name.upper():
+        raise IngestError(
+            f"index name {index_name!r} must be sent in CAPS — the endpoint is case-sensitive on "
+            "the way in and title-cases on the way out"
+        )
+    if not _TRI_NAME_SAFE.fullmatch(index_name):
+        raise IngestError(
+            f"index name {index_name!r} carries characters that would reshape the cinfo envelope"
+        )
+    if end < start:
+        raise IngestError(f"TRI window ends ({end}) before it starts ({start})")
+    cinfo = (
+        f"{{'name':'{index_name}','startDate':'{start:%d-%b-%Y}',"
+        f"'endDate':'{end:%d-%b-%Y}','indexName':'{index_name}'}}"
+    )
+    return json.dumps({"cinfo": cinfo}).encode("utf-8")
+
+
+def l0_tri_filename(index_slug: str, start: date, end: date) -> str:
+    """The L0 filename for one TRI fetch — the URL carries neither index nor window.
+
+    The endpoint is one path for every index and every date range, so `Fetcher.fetch`'s default
+    (the URL's last segment) would file every index's whole history under one name and the second
+    fetch in a month would collide with the first (`L0Store.put`, by design). Both the index and
+    the window go in the name here, so a re-fetch of the *same* window is an idempotent no-op and a
+    different window is a different payload.
+    """
+    return f"tri_{index_slug}_{start:%Y%m%d}_{end:%Y%m%d}.json"
+
+
+def parse_l0_tri_filename(filename: str) -> tuple[str, date, date]:
+    """The inverse of `l0_tri_filename`: recover `(index_slug, start, end)` from a stored name.
+
+    A rebuild reads L0 rather than a request, so the window and the index have to come back out of
+    the only place they were written down — the filename. Non-greedy on the slug and anchored on
+    two eight-digit groups at the end, because a slug may legally contain `_` (`TriPoint.index_slug`
+    allows it) and splitting on the separator would then take the window apart in the wrong place.
+
+    Assumes the name was produced by `l0_tri_filename`; raises `ParseError` if it was not, rather
+    than guessing a slug — a payload filed under a name this cannot read is a fact worth stopping
+    for, not one to skip past.
+    """
+    match = _L0_TRI_FILENAME.fullmatch(filename)
+    if match is None:
+        raise ParseError(
+            "not an L0 TRI filename; expected the "
+            "'tri_<slug>_<YYYYMMDD>_<YYYYMMDD>.json' shape `l0_tri_filename` writes",
+            filename=filename,
+        )
+    try:
+        start = date.fromisoformat(match.group("start"))
+        end = date.fromisoformat(match.group("end"))
+    except ValueError as exc:  # a well-shaped name carrying an impossible date, e.g. …_19901301_…
+        raise ParseError(str(exc), filename=filename) from exc
+    return match.group("slug"), start, end
+
+
+def tri_state_source(index_slug: str) -> str:
+    """The sync-state source id for one index's TRI — `nifty_tri_history/<slug>`.
+
+    One register row serves every index, so a sweep of three indices on one logical date would
+    collide on one `(source, logical_date)` sync row and the second index's `begin` would be an
+    illegal transition out of a terminal state. Qualifying with the slug gives each index its own
+    row, exactly as `constituents_state_source` does — see that helper for why the separator is `/`
+    and how `SyncKey` splits it into the `unit` column.
+    """
+    return f"{TRI_SOURCE_ID}/{index_slug}"
 
 
 def l0_constituents_filename(index_slug: str, as_of: date) -> str:
@@ -1243,6 +1580,90 @@ def ingest_constituents(
         state="PUBLISHED",
     )
     return snapshot
+
+
+def ingest_tri(
+    *,
+    fetcher: Fetcher,
+    l0: L0Store,
+    tracker: SyncTracker,
+    index_name: str,
+    index_slug: str,
+    start: date,
+    end: date,
+    data_root: Path | None = None,
+    register: SourceRegister | None = None,
+    state_source: str | None = None,
+) -> TriSeries:
+    """Take one index's published TRI from nothing to `PUBLISHED`: fetch → L0 → parse → L1 → sync.
+
+    One POST returns the whole requested window, so this is a single unit of work per index rather
+    than a loop over dates: `start`/`end` bound the window asked for, and the whole history of an
+    index is `start` set below its launch. Re-fetching is the expensive path, not the deep fetch.
+
+    The §4.4 transitions are driven in order around the fetch and the write, so a partially
+    ingested series is visible as the state it actually reached rather than as an absence. The sync
+    row's **logical date is `end`** — the last session the window asked about, which is what "the
+    TRI history as known through this date" means. That is a property of the request, not of the
+    wall clock; the *levels* carry their own `knowable_date`, derived from each row's own session
+    (`tri_knowable_date`) and never from an ingest clock.
+
+    `state_source` defaults to the per-slug `tri_state_source(index_slug)` so three indices
+    ingested on one logical date do not collide on one sync row. The *fetch* always uses the bare
+    register id, because the URL, headers and 403 watch are per-endpoint.
+
+    A re-run of the same window is safe: L0 refuses to overwrite the payload with different bytes
+    and `write_tri_l1` rewrites each partition whole from the same values. Any failure is recorded
+    on the sync row — `retryable` set from what actually went wrong — then re-raised, so the caller
+    sees the exception and `/status/sync` sees the state.
+    """
+    sync_source = state_source or tri_state_source(index_slug)
+    url = tri_url(register)
+    tracker.begin(sync_source, end)
+    try:
+        ref = fetcher.fetch(
+            TRI_SOURCE_ID,
+            url,
+            end,
+            filename=l0_tri_filename(index_slug, start, end),
+            payload=tri_request_body(index_name, start, end),
+        )
+        tracker.mark_fetched(sync_source, end, checksum=ref.sha256, l0_path=ref.key)
+
+        series = parse_tri_l0(l0, ref, index_name=index_name, index_slug=index_slug)
+        tracker.mark_validated(sync_source, end)
+
+        write_tri_l1(series, data_root=data_root)
+        tracker.mark_normalized(sync_source, end)
+
+        tracker.mark_published(sync_source, end)
+    except Exception as exc:
+        tracker.mark_failed(
+            sync_source, end, f"{type(exc).__name__}: {exc}", retryable=_retryable(exc)
+        )
+        _LOG.error(
+            "indices.tri_ingest_failed",
+            source=sync_source,
+            index=index_slug,
+            start=start.isoformat(),
+            end=end.isoformat(),
+            error=f"{type(exc).__name__}: {exc}",
+            retryable=_retryable(exc),
+            state="FAILED",
+        )
+        raise
+
+    _LOG.info(
+        "indices.tri_published",
+        source=TRI_SOURCE_ID,
+        index=index_slug,
+        method=series.method,
+        points=len(series.points),
+        earliest=series.points[0].as_of.isoformat(),
+        latest=series.points[-1].as_of.isoformat(),
+        state="PUBLISHED",
+    )
+    return series
 
 
 # ── shared helpers ─────────────────────────────────────────────────────────────────────────────
