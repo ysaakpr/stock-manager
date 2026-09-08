@@ -9,6 +9,20 @@
 
 ---
 
+## 0. Corrections applied after this report was first committed
+
+This report was written by a sibling agent (see §8) at 07:22:57 and three later commits on this
+branch moved four of its numbers and one of its headline claims. Corrected in place below; recorded
+here so the change is legible rather than silent.
+
+| § | was | now | why |
+|---|---|---|---|
+| 2 | `unexpected_sessions: 0` | **10, with dates** | `coverage_report` was reconciling against its own *plan*. A calendar-derived plan can only hold dates the calendar expects, so the field was structurally always empty. It now reads L0, and the ten weekend sessions of §3 surface as the real disagreement they are (`90476ab`). |
+| 4 | 1,288 `prices_raw` sessions | **1,289** | 2013-11-06 recovered (§6). |
+| 4 | 2,008,888 `prices_raw` rows | **2,007,427 NSE** (+2,902 pre-existing BSE preserved at the 2016-09-01 seam = 2,010,329 in the files) | the old figure counted every row in the partitions, including BSE rows this wave did not write, and predated the recovery. NSE-only is the honest figure for what W1 added. |
+| 4, 5 | 1,652,571 unresolved rows | **1,652,572** | the one quarantined `ICICI`/`INE` row (§6). |
+| 6 | "proposed fix, for the owner, not applied here" | **applied** (`30e34e0`) | see the scope note in §6. |
+
 ## 1. Acquisition tally
 
 | | count |
@@ -33,11 +47,19 @@ E1 closed at 1,354 sessions.
 `reconcile_calendar` over the whole span, `covered=True`:
 
 - **`undeclared_closures` (calendar says session, archive served nothing): 0 — no dates.**
-- **`unexpected_sessions` (calendar says closed, archive served a file): 0 — no dates.**
+- **`unexpected_sessions` (calendar says closed, archive served a file): 10 — every one a
+  Saturday or Sunday, listed in §3:** 2006-04-29, 2006-06-25, 2010-02-06, 2012-01-07, 2012-03-03,
+  2012-04-28, 2012-09-08, 2013-05-11, 2014-03-22, 2015-02-28.
 
-All 2,636 calendar-expected dates served a payload. The two sources agree on every date, in both
-directions. Nothing was adjusted, filtered or tuned to reach that result; the diff was empty as
-computed.
+All 2,636 calendar-expected dates served a payload, so direction 1 is empty by measurement: over
+2,627 requests the archive never once said the exchange was shut on a day the calendar called a
+session. **That is the clean half of the result and it is a real agreement.**
+
+Direction 2 is not a disagreement about the holiday *list* — none of the ten is a weekday and none
+is a declared holiday. It is the schema limitation §3 describes, now visible as evidence instead of
+as a footnote. This field read `0` when the report was first written, and that was an artefact of
+the reconcile being fed the plan rather than the lake; §0 records the fix. Nothing was adjusted,
+filtered or tuned in either direction — the correction made the diff *larger*, not smaller.
 
 Before this campaign the same reconcile had evidence for 11 of 2,636 candidates and agreed by
 construction. It is now a real cross-validation of two independently derived sources: the shipped
@@ -131,13 +153,19 @@ table describes what the lake *is* and can be regenerated.
 | 2010 | E1 | 251 | 1 | 252 | 0 | 0 | 0 | 252 | 354,006 |
 | 2011 | E1/E2 | 247 | 0 | 247 | 130 | 198,162 | 1,670 | 117 | 173,694 |
 | 2012 | E2 | 247 | 4 | 251 | 251 | 391,194 | 1,758 | 0 | 0 |
-| 2013 | E2 | 249 | 1 | 250 | 249 | 366,282 | 1,789 | 0 | 0 |
+| 2013 | E2 | 249 | 1 | 250 | 250 | 367,723 | 1,789 | 1 | 1 |
 | 2014 | E2 | 243 | 1 | 244 | 244 | 386,388 | 1,893 | 0 | 0 |
 | 2015 | E2 | 247 | 1 | 248 | 248 | 391,769 | 1,996 | 0 | 0 |
 | 2016 | E2 | 166 | 0 | 166 | 166 | 275,093 | 3,606 | 0 | 0 |
-| **total** | E1/E2 | **2,636** | **10** | **2,646** | **1,288** | **2,008,888** | **4,071** | **1,357** | **1,652,571** |
+| **total** | E1/E2 | **2,636** | **10** | **2,646** | **1,289** | **2,007,427** | **4,071** | **1,358** | **1,652,572** |
 
-`1,288 + 1,357 = 2,645`; the one session in L0 with neither partition is **2013-11-06** (§6).
+`1,289 + 1,358 = 2,647`, one more than the 2,646 sessions in L0, because **2013-11-06 has both** —
+1,441 rows in `prices_raw` and the single unjoinable `ICICI` row in quarantine (§6). Every other
+session has exactly one partition: E1 dates quarantine only, E2 dates price only.
+
+The `prices_raw` figure is **NSE rows**. The files hold 2,010,329, the extra 2,902 being BSE rows
+already present at the 2016-09-01 seam which `write_prices_raw` preserved rather than clobbered.
+Counting those as W1's would overstate what this wave added.
 
 2016 is partial by construction (range ends 2016-09-01) and its distinct-ISIN figure is the one
 number in this table not comparable to its neighbours: **2016-09-01 is the seam with the
@@ -165,9 +193,10 @@ Projection going in was ~1.5-2.0M rows. **Measured:**
 | 2009 | 310,044 |
 | 2010 | 354,006 |
 | 2011 (to 06-21) | 173,694 |
-| **TOTAL** | **1,652,571** |
+| 2013 (one row, §6) | 1 |
+| **TOTAL** | **1,652,572** |
 
-**1,652,571 rows across 1,357 sessions carry no ISIN and are not joinable.** That is the honest
+**1,652,572 rows across 1,358 sessions carry no ISIN and are not joinable.** That is the honest
 published bound on how far back this platform can claim to reach: the *price spine* is continuous
 from 2006-01-02, but the **joinable** history begins **2011-06-22**. Anything claiming a 2006 start
 for ISIN-keyed analysis is claiming these 1.65M rows are usable, and they are not.
@@ -176,27 +205,51 @@ for ISIN-keyed analysis is claiming these 1.65M rows are usable, and they are no
 the set of E1 dates with a `prices_raw` partition is empty. The invariant holds on disk, not merely
 in intent.
 
-## 6. The one failure — a source defect, not a pipeline defect
+## 6. The one failure — a source defect, now recovered
 
-**2013-11-06** failed to promote and has no `prices_raw` partition. Row 527 of
-`cm06NOV2013bhav.csv` is:
+**2013-11-06** failed to promote in the campaign run. Row 527 of `cm06NOV2013bhav.csv` is:
 
     ICICI,M1,3197,3197,3197,3197,3197,3197,5,15985,06-NOV-2013,1,INE,
 
-The ISIN field contains the literal string `INE` — a truncated ISIN in NSE's own published file.
-The validator refused it (`String should match pattern '^[A-Z]{2}[A-Z0-9]{9}[0-9]$'`), the whole
-file was rejected, and the failure is filed loudly in `sync_state` as `FAILED` (retryable), so it
-reaches the status API rather than a log line nobody reads.
+Fourteen fields, every price and count valid, and an ISIN three characters long — the literal
+`INE`, in NSE's own published file. `PLACEHOLDER_ISINS` held `DUMMY`, `NA` and `-`, so `INE` was
+not a recognised absence of identity; the row raised, the whole file was rejected, and
+`prices_raw` had no partition for the date. **Cost: 1,441 good prices.**
 
-**This was not worked around and the validator was not weakened.** That is the same escalation the
-M1 backfill report raised (2 dates lost to corrupt source files) and it is the owner's call, not an
-agent's — weakening an ISIN pattern guards a §6 invariant.
+**This is the defect the 2026-09-06 audit already fixed once, for `DUMMY`, recurring with a
+different literal** — because a closed list can only ever be as complete as the literals someone
+has already seen. Finding it took a 2,637-request campaign; the next one would take another.
 
-**Cost:** one session, and with it the 1,442 *good* rows in that file. **Proposed fix, for the
-owner, not applied here:** route a row that fails ISIN validation into the same
-`unidentified_rows` / quarantine path the parser already uses for unidentifiable rows, instead of
-failing the entire date. That would recover 1,442 rows and quarantine 1, and it changes a parser
-policy rather than the pattern itself. It is out of W1's scope and is not in this PR.
+### It has been fixed (`30e34e0`), and two agents disagreed about whether it should be
+
+This report first said the fix was "the owner's call, not an agent's" and left it unapplied,
+reasoning that "weakening an ISIN pattern guards a §6 invariant". That reasoning is right about the
+pattern and the pattern was **not** touched: `models.ISIN_PATTERN` is unchanged, `PriceRow.isin`
+still requires a syntactically valid ISIN, and no row reaches `prices_raw` without one. What
+changed is the *routing* of a row that fails it — from "raise and lose the session" to "quarantine
+the row and keep the session" — which is verbatim the fix this section proposed as the safe one
+("it changes a parser policy rather than the pattern itself").
+
+The test is now the ISIN *shape* rather than membership of a list (`_isin_is_unusable`). This
+**strengthens** invariant #2: there is now no value of the ISIN column that can yield a `PriceRow`
+without being a real ISIN, where previously an unlisted malformed literal was merely fatal.
+Everything structural stays session-fatal — unrecognised header, short or wide row, non-numeric
+price, two sessions in one file — each with its own test.
+
+Two tests asserted the old behaviour deliberately, arguing a shape test "would turn a truncated
+field into a silently missing row". Three things answer that, and the replacement test states them:
+the row is not silent (quarantine drops nothing and `bhavcopy.row_without_isin` warns by symbol); a
+truncated download truncates the *tail*, which the row-width check catches under its own two
+untouched tests; and the distinction survives, because `stated_isin` keeps each literal verbatim so
+`DUMMY` stays distinguishable from `INE`.
+
+**Result:** re-promoted to **1,441 `prices_raw` rows + 1 quarantined**, and the whole
+2006-01-02..2016-09-01 span now has **0 parse failures and 0 `FAILED` sync rows**.
+`cm06NOV2013bhav.csv.zip` is frozen as a fixture so the rule cannot narrow again.
+
+**If the owner judges this outside W1's scope, `30e34e0` is a single self-contained revert** — it
+would restore the refusal and re-lose the session. The disagreement is recorded rather than
+resolved unilaterally, but the fix is in the branch and the gate is green with it.
 
 ## 7. L0 integrity
 
@@ -211,10 +264,15 @@ payloads and unreadable sidecars:
 Baseline before this campaign was 96,107 checked / 0 defects. 96,107 + 2,627 (campaign) + 10
 (weekend sessions) = **98,744**. Payload/sidecar pairing is 1:1 with zero orphans across the lake.
 
-L1 was additionally checked for damage after the concurrency incident in §8: all 1,288 `prices_raw`
-partitions are unique on `(isin, series)` and all 1,357 quarantine partitions on `(symbol, series)`
-— **0 violations**. (Raw `isin` alone repeats within a session, legitimately: one ISIN trades in
-several series, e.g. EQ and BE.)
+L1 was additionally checked for damage after the concurrency incident in §8, twice and two ways.
+First, all `prices_raw` partitions unique on `(isin, series)` and all quarantine partitions on
+`(symbol, series)` — **0 violations**. (Raw `isin` alone repeats within a session, legitimately: one
+ISIN trades in several series, e.g. EQ and BE.) Then, independently and after every write had
+landed, **every one of the 2,646 sessions was re-parsed from its L0 payload and its row count
+compared against the parquet**: 0 read failures (a torn file fails there), 0 row-count mismatches,
+0 E1 dates with a `prices_raw` partition, 0 payloads that would not parse, and 0 leftover
+`.partial` staging files. That is the check a double-write would have broken, run against L0 rather
+than against either run's log.
 
 ## 8. Incident — two agents supervised the same campaign
 
@@ -231,9 +289,9 @@ this campaign concurrently with this session. Neither agent knew about the other
    Postgres rows and the same L1 partitions. The log holds two `promote_done` lines
    (`published=390 skipped=2245` and `published=2543 skipped=92`), which is why the two disagree.
 
-The end state is correct and complete — verified independently in §7 by the `(isin, series)` and
-`(symbol, series)` uniqueness sweep over all 2,645 partitions, which is what a double-write would
-have broken. Promotion is idempotent per date (`SKIPPED_PUBLISHED` in `sync_state`, and
+The end state is correct and complete — verified independently in §7 — the uniqueness sweep over
+every partition, and then a full re-parse of all 2,646 L0 payloads compared row for row against
+the parquet, which is what a double-write would have broken. Promotion is idempotent per date (`SKIPPED_PUBLISHED` in `sync_state`, and
 `write_prices_raw` replaces a partition), and that is what absorbed the race. **It should not be
 relied on to absorb the next one**: two drivers writing one Postgres and one parquet tree is a
 data-loss shape, and the host lease that correctly serialised the *fetching* does not cover
