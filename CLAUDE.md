@@ -77,31 +77,34 @@ L0 immutable · ISIN-only joins · no adjusted prices in L1 · one shared cost m
 paper and real · rails unbypassable · no future data in a decision · restated fundamentals quarantined from
 backtests · every decision journaled including no-ops · red data means no trading.
 
-## Development model: the laptop codes and tests, the server fetches and rebuilds
+## Development model: one machine — the server codes, tests, fetches and rebuilds
 
-Two machines, one repo, synchronised only through git. **The laptop is the coding and testing
-engine**: edit, run the whole gate here (`make check`, against the laptop's docker Postgres — the
-integration suites use their own scratch database) and commit. **The server is the fetch engine**:
-every fetch campaign, every rebuild from L0 and any backtest over the whole lake run there, on the
-*pushed* HEAD, and they run **uninterrupted** — nothing else competes with a running driver for the
-CPU, the Postgres or the request budget. Push to the server only what is ready: code that has passed
-the gate here. `ops/remote.sh check|test` are for a quiet server between campaigns and refuse while
-a driver runs. The server never receives uncommitted work; `ops/remote.sh sync` refuses to sync a
-commit origin does not have. **Agents may push** (owner decision, 2026-09-07: the deny was revoked so
-the laptop→origin→server loop needs no human hop). Only `--force`, `-f`, `--force-with-lease`,
-`--mirror` and `--delete` remain denied — history is never rewritten. What that does *not* change:
-this repo is public, so a push is the publication event, and only gate-green, secret-scanned work
-may be pushed.
+**Superseded 2026-09-07 (owner decision).** The laptop/server split is retired: the repo is now
+onboarded on the server under Omnigent, and *everything* runs here — editing, `make check`, every
+fetch campaign, every rebuild from L0, every backtest over the whole lake. There is no remote hop
+and no `ops/remote.sh sync` in the normal loop.
 
-```bash
-ops/remote.sh status                 # what the server is at and whether a driver is running
-ops/remote.sh run ops/run_bse_campaign.sh          # sync, then start a campaign (nohup, dated log)
-ops/remote.sh run uv run python -m backtest.run --policy naive_momentum --v2-report ...
-ops/remote.sh logs bse               # progress of the newest log of a family (integrated, bse, …)
-ops/remote.sh exec <command>         # observe without syncing (logs, counts, ps) — never blocked by an unpushed commit
-ops/remote.sh check                  # quiet server only: sync, then `make check` there
-ops/remote.sh test tests/unit -q     # quiet server only: sync, then a pytest selection there
-```
+What that changes:
+
+- **Run the gate directly**: `make check` here, not `ops/remote.sh check`. Same for pytest.
+- **Run drivers directly**: `nohup uv run python -m … &` with a dated log under `~/campaign/`,
+  not `ops/remote.sh run`. A campaign still runs **uninterrupted** — nothing else competes with a
+  running driver for the CPU, the Postgres or the request budget, and that is now a rule about
+  *this* box rather than about a remote one. Check `uptime` and the running drivers before starting
+  anything long; the box has 4 cores, so two decade-long replays in parallel is the ceiling.
+- **One request budget, and it is local**: before starting a fetch campaign, make sure no other
+  driver is already running against the same host (`ps aux | grep -E 'backfill|campaign'`).
+- **The lake is here and it is authoritative.** `data/L0` is the immutable record; L1 and L2 are
+  rebuilt from it and never copied between machines.
+
+What that does *not* change: commit each coherent green piece as you reach it (the runner has died
+mid-task and taken the uncommitted tree with it), and this repo is public, so a push is the
+publication event and only gate-green, secret-scanned work may be pushed. **Agents may push**
+(owner decision, 2026-09-07). Only `--force`, `-f`, `--force-with-lease`, `--mirror` and `--delete`
+remain denied — history is never rewritten.
+
+`ops/remote.sh` and `.remote.env` are kept for the day a second machine comes back, and are unused
+in the single-machine loop. If you do use them, the rules below still bind.
 
 Connection details (host, user, key **path**, repo path) live only in the untracked, gitignored
 `.remote.env` at the repo root (`.remote.env.example` shows the keys). Rules that follow from the
