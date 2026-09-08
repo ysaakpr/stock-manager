@@ -593,12 +593,54 @@ def test_the_coverage_report_tabulates_what_l0_and_the_journal_know(
         note="three dates",
     )
     text = lb.coverage_report(
-        plan, l0=l0, journal=journal, register=register, calendar=extended_calendar()
+        plan,
+        l0=l0,
+        journal=journal,
+        register=register,
+        calendar=extended_calendar(),
+        data_root=tmp_path,
     )
 
-    assert "| 2011 | E1/E2 | 3 | 2 | 1 | 0 |" in text
+    # Two sessions in L0, one 404, nothing unattempted, and no L1 yet — the row counts are the
+    # lake's, not a run's, so they are zero until promotion has actually written something.
+    assert "| 2011 | E1/E2 | 3 | 2 | 1 | 0 | 0 | 0 |" in text
     assert HOLIDAY_SESSION.isoformat() in text
     assert "Calendar diff vs nse_holidays.yaml" in text
+
+
+def test_the_coverage_report_reads_row_counts_off_l1_after_promotion(
+    lake: _Lake, register: SourceRegister
+) -> None:
+    """Promoted and unresolved rows come from the parquet footers, so the artefact is regenerable.
+
+    This is the packet's per-year table in one call: the E2 session contributes 1,502 promoted rows
+    and none unresolved, the E1 session contributes 1,503 unresolved and none promoted, and nobody
+    had to transcribe either number out of a log.
+    """
+    promotion_for(lake, register).promote([E1_SESSION, E2_SESSION])
+
+    assert lb.l1_row_counts(E2_SESSION, data_root=lake.root) == (1502, 0)
+    assert lb.l1_row_counts(E1_SESSION, data_root=lake.root) == (0, 1503)
+    assert lb.l1_row_counts(date(2011, 6, 20), data_root=lake.root) == (0, 0)
+
+    journal = lb.NoSessionJournal(lb.journal_path_for(lake.root), clock=CLOCK)
+    plan = lb.SessionPlan(
+        start=E1_SESSION,
+        end=E2_SESSION,
+        dates=(E1_SESSION, E2_SESSION),
+        basis="explicit",
+        note="the two boundary sessions",
+    )
+    text = lb.coverage_report(
+        plan,
+        l0=lake.l0,
+        journal=journal,
+        register=register,
+        calendar=extended_calendar(),
+        data_root=lake.root,
+    )
+    assert "| 2011 | E1/E2 | 2 | 2 | 0 | 0 | 1502 | 1503 |" in text
+    assert "unresolved rows" in text
 
 
 # ── promotion: ISIN era to prices_raw, pre-ISIN era to quarantine and nowhere else ───────────

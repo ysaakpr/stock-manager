@@ -58,6 +58,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
+import pyarrow.parquet as pq
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dataplatform.clock import Clock, SystemClock
@@ -86,6 +87,8 @@ from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Store
 from dataplatform.store.l1 import write_prices_raw, write_unidentified_quarantine
+from dataplatform.store.paths import Layer, partition_path
+from dataplatform.store.schemas import PRICES_RAW_DATASET, PRICES_RAW_QUARANTINE_DATASET
 
 __all__ = [
     "DEFAULT_ERROR_STREAK_LIMIT",
@@ -104,6 +107,7 @@ __all__ = [
     "SessionState",
     "coverage_report",
     "journal_path_for",
+    "l1_row_counts",
     "legacy_url",
     "main",
     "plan_sessions",
@@ -1155,6 +1159,25 @@ def reconcile_calendar(
     return diff
 
 
+def l1_row_counts(day: date, *, data_root: Path | None = None) -> tuple[int, int]:
+    """`(prices_raw rows, prices_raw_quarantine rows)` for one session, read from parquet footers.
+
+    Offline and cheap: `read_metadata` reads the footer, not the columns, so a decade of partitions
+    costs a stat and a small read each rather than a full scan. A partition that does not exist is
+    zero — which for `prices_raw` on a pre-ISIN date is the fact worth reporting, not a missing
+    file.
+
+    Read off disk rather than carried in a run's memory on purpose: the coverage artefact should
+    describe what the lake *is*, so it can be regenerated after the fact and cannot drift from it.
+    """
+    counts: list[int] = []
+    for dataset in (PRICES_RAW_DATASET, PRICES_RAW_QUARANTINE_DATASET):
+        path = partition_path(Layer.L1, dataset, day, data_root=data_root)
+        counts.append(pq.read_metadata(path).num_rows if path.is_file() else 0)
+    priced, quarantined = counts
+    return priced, quarantined
+
+
 @dataclass(frozen=True, slots=True)
 class _YearRow:
     year: int
@@ -1163,6 +1186,8 @@ class _YearRow:
     in_l0: int
     no_session: int
     not_attempted: int
+    promoted_rows: int = 0
+    unresolved_rows: int = 0
 
 
 def coverage_report(
@@ -1172,13 +1197,18 @@ def coverage_report(
     journal: NoSessionJournal,
     register: SourceRegister,
     calendar: TradingCalendar | None = None,
+    data_root: Path | None = None,
 ) -> str:
-    """The markdown coverage artefact: per-year sessions, 404 list, and the calendar diff.
+    """The markdown coverage artefact: per-year sessions and rows, the 404 list, and the diff.
 
-    Offline and read-only — it opens no socket and no database. What it can say per year is
-    candidates / in L0 / 404 / not yet attempted, which is exactly what L0 and the journal know.
-    Row-level counts (`prices_raw` rows and unresolved rows per year) come from `promote`, which is
-    the step that reads the payloads.
+    Offline and read-only — it opens no socket and no database. Per year it reports candidates / in
+    L0 / 404 / not yet attempted from L0 and the journal, and promoted / unresolved row counts from
+    the L1 parquet footers (`l1_row_counts`). Reading the row counts off disk rather than from a
+    promotion run's memory is what makes the artefact regenerable and unable to drift from the lake.
+
+    The unresolved column is the number the whole wave rests on: it is the honest bound on how far
+    back this platform can claim to reach, and a coverage table that showed only *sessions* would
+    read as if 2006 were as usable as 2016.
 
     Raises `ValueError` for a plan reaching into the UDiFF era: this report is about the legacy
     archive, and silently omitting a year would make a coverage table that reads as complete.
@@ -1189,6 +1219,8 @@ def coverage_report(
         days = [day for day in plan.dates if day.year == year]
         in_l0 = 0
         no_session = 0
+        promoted_rows = 0
+        unresolved_rows = 0
         labels: list[str] = []
         for day in days:
             era = eras.era_for(day)
@@ -1200,6 +1232,9 @@ def coverage_report(
                 served.append(day)
             elif journal.knows(day):
                 no_session += 1
+            priced, quarantined = l1_row_counts(day, data_root=data_root)
+            promoted_rows += priced
+            unresolved_rows += quarantined
         rows.append(
             _YearRow(
                 year=year,
@@ -1208,6 +1243,8 @@ def coverage_report(
                 in_l0=in_l0,
                 no_session=no_session,
                 not_attempted=len(days) - in_l0 - no_session,
+                promoted_rows=promoted_rows,
+                unresolved_rows=unresolved_rows,
             )
         )
 
@@ -1216,18 +1253,21 @@ def coverage_report(
         "",
         f"Plan basis: **{plan.basis}** ({plan.note})",
         "",
-        "| year | era | candidates | in L0 | 404 (no session) | not attempted |",
-        "|---:|:---|---:|---:|---:|---:|",
+        "| year | era | candidates | in L0 | 404 (no session) | not attempted "
+        "| promoted rows | unresolved rows |",
+        "|---:|:---|---:|---:|---:|---:|---:|---:|",
     ]
     lines += [
         f"| {row.year} | {row.era_labels} | {row.candidates} | {row.in_l0} | "
-        f"{row.no_session} | {row.not_attempted} |"
+        f"{row.no_session} | {row.not_attempted} | {row.promoted_rows} | {row.unresolved_rows} |"
         for row in rows
     ]
     lines += [
         f"| **total** | | **{sum(r.candidates for r in rows)}** | "
         f"**{sum(r.in_l0 for r in rows)}** | **{sum(r.no_session for r in rows)}** | "
-        f"**{sum(r.not_attempted for r in rows)}** |",
+        f"**{sum(r.not_attempted for r in rows)}** | "
+        f"**{sum(r.promoted_rows for r in rows)}** | "
+        f"**{sum(r.unresolved_rows for r in rows)}** |",
         "",
         "#### 404 evidence (the exchange was shut)",
         "",
@@ -1350,7 +1390,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "report":
-        print(coverage_report(plan, l0=l0, journal=journal, register=register, calendar=calendar))
+        print(
+            coverage_report(
+                plan,
+                l0=l0,
+                journal=journal,
+                register=register,
+                calendar=calendar,
+                data_root=settings.data_root,
+            )
+        )
         return 0
 
     if args.command == "acquire":
