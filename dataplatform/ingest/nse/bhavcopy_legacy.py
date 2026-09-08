@@ -50,8 +50,11 @@ __all__ = [
     "LEGACY_COLUMNS",
     "LEGACY_ERA_END",
     "LEGACY_SOURCE_ID",
+    "PRE_ISIN_COLUMNS",
     "parse",
     "parse_l0",
+    "parse_pre_isin",
+    "parse_pre_isin_l0",
     "parse_text",
 ]
 
@@ -80,6 +83,38 @@ LEGACY_COLUMNS: Final = (
     "TIMESTAMP",
     "TOTALTRADES",
     "ISIN",
+)
+
+#: The header of the *pre-ISIN* sub-era (E1), which the archive published from 1995-01-02 until
+#: 2011-06-21 inclusive. Eleven names and the same trailing comma, with no `TOTALTRADES` and — the
+#: part that decides everything downstream — no `ISIN`. `parse` refuses this header on purpose
+#: (`_header_width`); `parse_pre_isin` below is the only thing that reads it, and it cannot return a
+#: `PriceRow`. See `dataplatform.ingest.nse.eras` for the measured boundary.
+PRE_ISIN_COLUMNS: Final = (
+    "SYMBOL",
+    "SERIES",
+    "OPEN",
+    "HIGH",
+    "LOW",
+    "CLOSE",
+    "LAST",
+    "PREVCLOSE",
+    "TOTTRDQTY",
+    "TOTTRDVAL",
+    "TIMESTAMP",
+)
+
+#: E1's numeric columns, validated and then discarded by `parse_pre_isin`. Reading them proves the
+#: payload is a whole, well-formed bhavcopy rather than a truncated one — which is a different fact
+#: from "these rows have no identity", and the two must not be answered the same way.
+_PRE_ISIN_DECIMAL_COLUMNS: Final = (
+    "OPEN",
+    "HIGH",
+    "LOW",
+    "CLOSE",
+    "LAST",
+    "PREVCLOSE",
+    "TOTTRDVAL",
 )
 
 #: A plain non-negative decimal literal, which is all this file ever contains. Deliberately
@@ -230,6 +265,64 @@ def parse_text_report(text: str, *, filename: str) -> BhavcopyParse:
             state="VALIDATED",
         )
     return BhavcopyParse(rows=tuple(rows), refused=tuple(refused))
+
+
+def parse_pre_isin(payload: bytes, *, filename: str) -> tuple[UnidentifiedRow, ...]:
+    """Enumerate a pre-ISIN (E1) bhavcopy as rows that have no identity, and nothing else.
+
+    What it does: reads the eleven-column sub-era the archive published until 2011-06-21, checks
+    the payload is whole (header exactly `PRE_ISIN_COLUMNS`, every row the header's width, every
+    numeric field a plain literal, every row the same session), and returns one `UnidentifiedRow`
+    per data row so the session can be *retained and counted* in `prices_raw_quarantine`.
+    What it assumes: nothing about identity. `stated_isin` is `""` — not `'DUMMY'`, not a guess —
+    because the exchange did not publish an ISIN column at all in this era, which is a different
+    fact from having published a placeholder in one.
+    What it never does: emit a `PriceRow`, or offer a symbol→ISIN path. ISIN is the only join key
+    (invariant #2); the only resolver available today is a current-day listing, and a company
+    delisted before today is absent from it, so resolving E1 through one would be survivorship-
+    biased in exactly the direction a backtest cares about. That is W4 identity work, not this.
+
+    Raises `ParseError` for a corrupt archive, the wrong header (an E2 file lands here and is
+    refused, the mirror of `parse` refusing an E1 one), a short row, a malformed field, or a file
+    spanning more than one session.
+    """
+    text = _text_of(payload, filename=filename)
+    reader = csv.reader(io.StringIO(text))
+    width = _pre_isin_header_width(next(reader, None), filename=filename)
+
+    rows: list[UnidentifiedRow] = []
+    for record in reader:
+        if not record or not any(value.strip() for value in record):
+            continue
+        rows.append(_pre_isin_row(record, line=reader.line_num, width=width, filename=filename))
+
+    if not rows:
+        raise ParseError(
+            "no data rows after the header; a session's bhavcopy always has some", filename=filename
+        )
+    sessions = {row.trade_date for row in rows}
+    if len(sessions) > 1:
+        raise ParseError(
+            "rows span more than one session: "
+            f"{', '.join(sorted(day.isoformat() for day in sessions))}",
+            filename=filename,
+        )
+    _LOG.warning(
+        "bhavcopy.pre_isin_enumerated",
+        source=LEGACY_SOURCE_ID,
+        era="E1",
+        filename=filename,
+        trade_date=rows[0].trade_date.isoformat(),
+        rows=0,
+        unresolved=len(rows),
+        state="QUARANTINED",
+    )
+    return tuple(rows)
+
+
+def parse_pre_isin_l0(store: L0Store, ref: L0Ref) -> tuple[UnidentifiedRow, ...]:
+    """`parse_pre_isin` over a stored L0 payload, re-verifying its checksum on the way in."""
+    return parse_pre_isin(store.get(ref), filename=ref.filename)
 
 
 # ── internals ────────────────────────────────────────────────────────────────────────────────
@@ -427,3 +520,70 @@ def _one_session(rows: list[PriceRow], *, filename: str) -> None:
             f"{', '.join(sorted(day.isoformat() for day in dates))}",
             filename=filename,
         )
+
+
+def _pre_isin_header_width(header: list[str] | None, *, filename: str) -> int:
+    """Check the header is exactly E1's, and return the physical field count rows must have.
+
+    The mirror of `_header_width`: an E2 file (which has `TOTALTRADES` and `ISIN`) reaching the
+    pre-ISIN enumerator is refused here, so a mis-dated payload cannot have its identities silently
+    thrown away by being read as if it had none.
+    """
+    if header is None:
+        raise ParseError("file is empty; expected the bhavcopy header row", filename=filename)
+
+    named = tuple(value.strip() for value in header)
+    while named and named[-1] == "":
+        named = named[:-1]
+
+    if named != PRE_ISIN_COLUMNS:
+        raise ParseError(
+            f"unexpected header {','.join(named)!r}; this reader enumerates the pre-2011-06-22 NSE "
+            f"bhavcopy, whose header is exactly {','.join(PRE_ISIN_COLUMNS)!r}. An ISIN-era file "
+            "lands here and is refused on purpose — it has identities, so it belongs in `parse`",
+            filename=filename,
+            line=1,
+        )
+    return len(header)
+
+
+def _pre_isin_row(record: list[str], *, line: int, width: int, filename: str) -> UnidentifiedRow:
+    """Turn one E1 CSV record into an `UnidentifiedRow`, validating the fields it then discards."""
+    if len(record) != width:
+        raise ParseError(
+            f"row has {len(record)} fields, header has {width}; a short row here is what a "
+            "truncated download looks like",
+            filename=filename,
+            line=line,
+        )
+    for index in range(len(PRE_ISIN_COLUMNS), width):
+        if record[index].strip():
+            raise ParseError(
+                f"unnamed trailing field {index + 1} carries data {record[index]!r}; this era's "
+                "trailing comma is always empty",
+                filename=filename,
+                line=line,
+            )
+
+    field = dict(zip(PRE_ISIN_COLUMNS, (value.strip() for value in record), strict=False))
+    # Validated for their side effect and then dropped: the quarantine dataset keys on identity and
+    # has no price columns, so the prices themselves stay where they are already immutable — in the
+    # L0 payload. Checking them anyway is what makes a truncated or mis-served file loud here.
+    for column in _PRE_ISIN_DECIMAL_COLUMNS:
+        _decimal(field[column], column=column, line=line, filename=filename)
+    _integer(field["TOTTRDQTY"], column="TOTTRDQTY", line=line, filename=filename)
+
+    try:
+        return UnidentifiedRow(
+            symbol=field["SYMBOL"],
+            series=field["SERIES"],
+            trade_date=_date(field["TIMESTAMP"], column="TIMESTAMP", line=line, filename=filename),
+            stated_isin="",
+            line=line,
+        )
+    except ValidationError as exc:
+        raise ParseError(
+            f"row is not a valid unidentified row: {exc.errors(include_url=False)}",
+            filename=filename,
+            line=line,
+        ) from exc

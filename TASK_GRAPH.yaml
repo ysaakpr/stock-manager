@@ -21,6 +21,8 @@ milestones:
   M9: {title: Trustworthy backtest inputs + momentum v2, depends: [M2, M3, M4]}
   M10: {title: Alternative signals — sector rotation + fundamentals, depends: [M3, M4, M7, M9]}
   M11: {title: Macro backdrop — PIT economic + market-state series, depends: [M4]}
+  M12: {title: Strategy search — short-horizon families and the risk-adjusted comparison,
+        depends: [M9, M10]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -2101,4 +2103,109 @@ tasks:
     why_blocked: "B1: a fetch campaign over ~200 requests to one source is owner-authorized, not agent-initiated."
     unblocks: [M11.3]
   verify: "uv run pytest tests/unit/test_macro_backfill.py -q"
+# ─────────────────────────────────────────────────────────────────────────────
+# M12 — Strategy search (short-horizon families + the risk-adjusted comparison)
+# ─────────────────────────────────────────────────────────────────────────────
 
+- id: M12.1
+  title: Widen the swing engine — six new signal legs and a regime gate, defaults unchanged
+  milestone: M12
+  module: X2
+  autonomy: AUTO
+  deps: [M10.7]
+  spec: |
+    M10.7 built a swing engine whose entry score is a weighted sum of rank-normalised legs, and
+    wired exactly three legs into it. The engine generalises for free; the legs do not exist. This
+    adds the ones the lake already carries and no policy reads, as *signed* weights so one leg can
+    be asked for its reverse:
+
+      * `return_5` — the 5-session return, for the short-term reversal family (a negative weight).
+        The one classical short-horizon effect nothing here has measured.
+      * `momentum_1m` — the 21-session return, the swing horizon's own trend, distinct from 12-1.
+      * `delivery_trend` — the 5-session delivery mean over its 63-session mean. The *acceleration*
+        of delivery, where M10.7's leg is its level; the largest name-level coefficient in X2's
+        fitted forecast.
+      * `turnover_expansion` — 5-session mean traded value over its 63-session mean.
+      * `ma_proximity` — close over its own 50-session mean.
+      * `volatility` as a scored leg, not only the screen it already is.
+
+    Plus a `regime_filter` gate of the shape momentum v2 already carries (M9.5): no new buys while
+    the broad market sits below its own 200-session mean. It is the largest drawdown lever measured
+    on this lake and the swing policy has no access to it.
+
+    Every new weight defaults to zero and the gate defaults off, so the default arm must reproduce
+    M10.7's measurement to the digit — that is the acceptance criterion, not a nicety. The features
+    join the one existing bulk windowed query rather than adding a pass over the lake.
+  deliverables: [backtest/policies/swing_composite.py, backtest/run.py, tests/unit/test_swing_composite.py]
+  acceptance:
+    - "every new leg defaults to weight zero and the default arm's run digest is unchanged against
+       M10.7's — proven by a test, not by inspection"
+    - "each new leg is pinned by an inversion test: flip the sign of its weight and a test fails"
+    - "the regime gate blocks buys and never blocks an exit; a test pins both directions"
+    - "every new feature window is ROWS BETWEEN n PRECEDING AND CURRENT ROW and no new pass over
+       the lake is added"
+  verify: "uv run pytest tests/unit/test_swing_composite.py -q"
+
+- id: M12.2
+  title: The strategy sweep runner — many arms, one lake pass, ranked on return per drawdown
+  milestone: M12
+  module: X2
+  autonomy: AUTO
+  deps: [M12.1]
+  spec: |
+    Every comparison report here re-reads the lake once per arm, which is why no report has ever
+    carried more than fourteen. A twenty-arm sweep at that cost is hours of repeated I/O for one
+    windowed query that does not change between arms. This builds the runner that reads once and
+    replays many.
+
+    The arms are the strategy families, not parameter noise: the two momentum baselines, the
+    fundamentals arms, the M10.7 swing family, and the short-horizon families M12.1's legs make
+    expressible — reversal, delivery acceleration, 1-month trend, breakout, and the regime-gated
+    and concentrated editions of each.
+
+    Ranking is on **return per unit of drawdown** (XIRR / max drawdown), by owner decision
+    2026-09-07, with XIRR, drawdown, round trips, cost and benchmark excess all reported beside it.
+    A ranking on return alone puts a 45%-drawdown arm first and is the reason this decision exists.
+
+    Each arm runs on two liquidity floors — the inherited Rs 1 crore median-turnover floor for
+    discovery and a Rs 10 crore floor for what a real book could reach — because M10.7 measured the
+    edge as concentrated in the thinner half of the investable set.
+  deliverables: [backtest/sweep.py, tests/unit/test_sweep.py, ops/gates/M12-strategy-sweep-report.md]
+  acceptance:
+    - "one windowed lake pass serves every arm; a second pass is a defect the test catches"
+    - "at least twenty distinct strategy arms, each differing from a named reference by one stated
+       change"
+    - "arms are ranked on XIRR / max drawdown, and every arm reports XIRR, max drawdown, round
+       trips, cost and excess against the same benchmark"
+    - "every arm runs on both liquidity floors and the report states both"
+    - "an arm that fails to run is reported as a failed arm, never dropped from the table"
+  verify: "uv run pytest tests/unit/test_sweep.py -q"
+
+- id: M12.3
+  title: Walk-forward the finalists, and the verdict on what the sweep can be asked to prove
+  milestone: M12
+  module: X2
+  autonomy: AUTO
+  deps: [M12.2]
+  spec: |
+    A sweep of twenty arms over one window selects on that window, and the arm that wins a sweep is
+    the arm most flattered by it. This is the out-of-sample check and the honest reading.
+
+    Three windows, stated separately and never averaged: the full decade 2016-09 to 2026-08, the
+    2019-07 to 2026-08 window the existing ~23% figures came from, and a walk-forward split that
+    chooses on 2016-09..2021-08 and verifies on 2021-09..2026-08. The selection window's winner is
+    named *before* the verification window is read, and the report prints both ranks so the decay
+    from selection to verification is visible rather than inferred.
+
+    The verdict states plainly whether the owner's >25% XIRR bar is met, on which window, on which
+    liquidity floor, and at what drawdown — and if it is met only on the flattering window or only
+    on the unreachable floor, it says that instead of reporting the number.
+  deliverables: [ops/gates/M12-strategy-verdict.md]
+  acceptance:
+    - "the selection-window winner is named before the verification window's figures are read, and
+       both ranks are printed"
+    - "no figure is averaged across windows; each window is reported on its own"
+    - "the >25% question is answered with the window, the floor and the drawdown attached, or
+       answered no"
+    - "every arm that beats the bar on the six-year window but not the decade is named as such"
+  verify: "test -s ops/gates/M12-strategy-verdict.md"

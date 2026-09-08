@@ -225,6 +225,18 @@ _SWING_MOM_SHORT = 21
 #: Minimum prints before a name is scoreable at all — a full year, so every leg has its window.
 _SWING_MIN_HISTORY = 260
 
+# ── M12.1 legs: the windows the new features are struck over. Every one is a round trading period
+# rather than a fitted length, and every one is <= _SWING_MIN_HISTORY, so adding these legs does
+# not narrow the candidate set that M10.7 measured.
+#: The short-horizon return the reversal family reads — one trading week.
+_SWING_RETURN_SHORT = 5
+#: The swing horizon's own trend — one trading month, the month 12-1 deliberately drops.
+_SWING_MOM_1M = 21
+#: Denominator for the delivery and turnover *trend* legs: a trading quarter as the "usual" level.
+_SWING_TREND_SLOW = 63
+#: The moving average `ma_proximity` measures the close against.
+_SWING_MA_WINDOW = 50
+
 
 # ── L1 lake reader ────────────────────────────────────────────────────────────────────────────────
 
@@ -1342,7 +1354,24 @@ def run_naive_momentum(
         )
         book = PortfolioBook()
         book.deposit(first_session, opening_cash)  # the one external cashflow: the opening capital
-        broker = _AccountingBroker(sim, book)
+
+        # M12.2: sample the NAV every session so this policy reports a real max drawdown. It did
+        # not before — the sampler arrived with M9.5 and was wired into the v2, sector, fundamentals
+        # and swing runners but never back into this one, so every naive-momentum row ever printed
+        # carried a 0.00% drawdown. That reads as "never fell" rather than "never measured", and a
+        # comparison ranked on return per unit of drawdown would put the baseline last on an
+        # artefact. Same sampler, same skip-rather-than-guess rule as the others.
+        last_close: dict[str, Decimal] = {}
+        nav_path: list[Decimal] = []
+
+        def sample_nav(session: date) -> None:
+            last_close.update(reader.closes_on(session))
+            positions = book.positions()
+            if any(position.isin not in last_close for position in positions):
+                return  # a held name with no close seen yet — skip rather than guess
+            nav_path.append(book.net_asset_value(last_close))
+
+        broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = NaiveMomentumPolicy(data, params)
 
         engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
@@ -1390,6 +1419,7 @@ def run_naive_momentum(
             benchmark_source=resolved.source,
             benchmark_index_name=benchmark.index_name,
             benchmark_method=benchmark.method,
+            max_drawdown=_max_drawdown(nav_path),
         )
     finally:
         if service is not None:
@@ -3826,6 +3856,19 @@ def render_fundamentals_report(
 # ── M10.7: the swing signal — 52w-high proximity, delivery share, 12-1, volatility ──────────────
 
 
+def _swing_leg(value: Any, neutral: Decimal) -> Decimal:
+    """One M12.1 leg as a ``Decimal``, or ``neutral`` when the lake has no value for it (M12.1).
+
+    Assumes ``value`` is a DuckDB DOUBLE or ``None``. Never drops the row: a name whose 50-session
+    mean is not yet computable must still be scoreable on the legs that *are*, because the arms
+    differ only in their weights and a candidate set that moved with the weight vector would make
+    every comparison between arms a comparison of two universes.
+    """
+    if value is None:
+        return neutral
+    return Decimal(str(round(value, 8)))
+
+
 class _SwingFeatures:
     """One bulk pass over L1 (+ the L2 overlay) that materializes every swing feature, PIT-safe.
 
@@ -3870,7 +3913,14 @@ class _SwingFeatures:
         return self._imputed
 
     def load(self, dates: Sequence[date]) -> None:
-        """Materialize every feature for the decision dates. Called once, before the replay."""
+        """Materialize every feature for the decision dates. Called once, before the replay.
+
+        Incremental since M12.2: dates already materialized are skipped, so one instance can serve
+        many arms whose cadences overlap — a sweep loads the union of every arm's decision dates
+        once and each arm's own ``load`` is then a no-op. Idempotent, and the union is what makes
+        the sweep report's "one windowed pass over the lake" true rather than aspirational.
+        """
+        dates = [session for session in dates if session not in self._by_date]
         if not dates:
             return
         px = "COALESCE(a.adj_close, r.close)" if self._adjusted else "r.close"
@@ -3908,11 +3958,29 @@ class _SwingFeatures:
                 stddev_samp(lr) OVER (PARTITION BY isin ORDER BY trade_date
                     ROWS BETWEEN {_SWING_VOL_WINDOW - 1} PRECEDING AND CURRENT ROW) AS vol,
                 median(ttv) OVER (PARTITION BY isin ORDER BY trade_date
-                    ROWS BETWEEN 251 PRECEDING AND CURRENT ROW) AS ttv_median
+                    ROWS BETWEEN 251 PRECEDING AND CURRENT ROW) AS ttv_median,
+                -- M12.1 legs. Same partition, same backward-only frames, same pass.
+                px / NULLIF(lag(px, {_SWING_RETURN_SHORT}) OVER (PARTITION BY isin
+                    ORDER BY trade_date), 0) - 1 AS return_5,
+                px / NULLIF(lag(px, {_SWING_MOM_1M}) OVER (PARTITION BY isin
+                    ORDER BY trade_date), 0) - 1 AS momentum_1m,
+                avg(dpct) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_RETURN_SHORT - 1} PRECEDING AND CURRENT ROW)
+                    / NULLIF(avg(dpct) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_TREND_SLOW - 1} PRECEDING AND CURRENT ROW), 0)
+                    AS delivery_trend,
+                avg(ttv) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_RETURN_SHORT - 1} PRECEDING AND CURRENT ROW)
+                    / NULLIF(avg(ttv) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_TREND_SLOW - 1} PRECEDING AND CURRENT ROW), 0)
+                    AS turnover_expansion,
+                px / NULLIF(avg(px) OVER (PARTITION BY isin ORDER BY trade_date
+                    ROWS BETWEEN {_SWING_MA_WINDOW - 1} PRECEDING AND CURRENT ROW), 0)
+                    AS ma_proximity
             FROM ret
         )
         SELECT trade_date, isin, raw_close, high_proximity, delivery, momentum_12_1, vol,
-               ttv_median
+               ttv_median, return_5, momentum_1m, delivery_trend, turnover_expansion, ma_proximity
         FROM feat
         WHERE trade_date IN ({",".join("?" for _ in dates)})
           AND n >= {_SWING_MIN_HISTORY}
@@ -3922,7 +3990,8 @@ class _SwingFeatures:
         """
         rows = self._con.execute(sql, list(dates)).fetchall()
         self._rows = len(rows)
-        # (trade_date, isin, raw_close, high_proximity, delivery, momentum_12_1, vol, ttv_median)
+        # (trade_date, isin, raw_close, high_proximity, delivery, momentum_12_1, vol, ttv_median,
+        #  return_5, momentum_1m, delivery_trend, turnover_expansion, ma_proximity)
         grouped: dict[date, list[tuple[Any, ...]]] = {}
         for row in rows:
             grouped.setdefault(row[0], []).append(row)
@@ -3930,7 +3999,15 @@ class _SwingFeatures:
             deliveries = sorted(r[4] for r in day_rows if r[4] is not None)
             fallback = deliveries[len(deliveries) // 2] if deliveries else 0.0
             records: list[SwingRecord] = []
-            for _, isin, raw_close, high, delivery, momentum, vol, _ttv in day_rows:
+            for row in day_rows:
+                isin, raw_close, high, delivery, momentum, vol = (
+                    row[1],
+                    row[2],
+                    row[3],
+                    row[4],
+                    row[5],
+                    row[6],
+                )
                 if delivery is None:
                     delivery = fallback
                     self._imputed += 1
@@ -3944,6 +4021,14 @@ class _SwingFeatures:
                         volatility=Decimal(str(round(vol, 8))),
                         price=Decimal(str(raw_close)),
                         knowable_date=session,
+                        # M12.1. A NULL leg takes its neutral value rather than dropping the name:
+                        # the candidate set must not move with a leg nobody weighted. Neutral is 0
+                        # for a return (no move) and 1 for a ratio (at its own average).
+                        return_5=_swing_leg(row[8], _ZERO),
+                        momentum_1m=_swing_leg(row[9], _ZERO),
+                        delivery_trend=_swing_leg(row[10], _ONE),
+                        turnover_expansion=_swing_leg(row[11], _ONE),
+                        ma_proximity=_swing_leg(row[12], _ONE),
                     )
                 )
             self._by_date[session] = tuple(records)
@@ -3974,10 +4059,12 @@ class _L1SwingData:
         *,
         interval: int,
         universe_filter: _InvestableUniverse | None = None,
+        regime_source: _RegimeSource,
     ) -> None:
         self._reader = reader
         self._features = features
         self._universe_filter = universe_filter
+        self._regime_source = regime_source
         self._rebalance = set(sessions[::interval])
         self._windows = reader.listing_windows()
         self._universe_sizes: dict[date, int] = {}
@@ -4013,6 +4100,15 @@ class _L1SwingData:
             f"swing_marks@{as_of.isoformat()}", records, knowable_date=lambda r: r.knowable_date
         )
 
+    def regime(self, as_of: date) -> Dataset[RegimeReading]:
+        """The same broad-market proxy reading momentum v2's gate reads (M12.1)."""
+        reading = self._regime_source.reading(as_of)
+        return Dataset.declaring(
+            f"swing_regime@{as_of.isoformat()}",
+            (reading,),
+            knowable_date=lambda r: r.knowable_date,
+        )
+
     def rebalance_dates(self) -> tuple[date, ...]:
         return tuple(sorted(self._rebalance))
 
@@ -4035,6 +4131,96 @@ class _L1SwingData:
         return kept
 
 
+@dataclass(frozen=True, slots=True)
+class SwingLake:
+    """Everything a swing arm reads that does not depend on the arm — built once, shared (M12.2).
+
+    Assembling this per arm is what made a fourteen-arm report cost fourteen passes over the lake:
+    the windowed feature query, the trading calendar, the liquidity screen's per-date turnover
+    medians and the regime index's per-session levels are identical for every arm on a window, and
+    all four are the expensive part. A sweep builds one of these, loads the union of every arm's
+    decision dates into ``features``, and hands it to each run.
+
+    ``universe_filters`` is keyed by the liquidity floor in rupees, because that is the one universe
+    knob the sweep varies (M10.7 measured the edge as concentrated in the thinner half of the
+    investable set, so a reachability row means re-running on a higher floor). One filter per floor,
+    shared by every arm on that floor, and its per-date caches warm across arms.
+
+    Owns its DuckDB connection and reader: ``close`` releases both, and no run closes them — a run
+    handed a lake must not shut down state its siblings still need.
+    """
+
+    reader: _L1Reader
+    features: _SwingFeatures
+    sessions: tuple[date, ...]
+    calendar: tuple[date, ...]
+    regime_source: _RegimeSource
+    universe_filters: Mapping[Decimal, _InvestableUniverse]
+    adjusted: bool
+
+    @property
+    def first_session(self) -> date:
+        return self.sessions[0]
+
+    @property
+    def terminal(self) -> date:
+        return self.sessions[-1]
+
+    def close(self) -> None:
+        self.features.close()
+        self.reader.close()
+
+
+def open_swing_lake(
+    *,
+    start: date,
+    end: date,
+    floors: Sequence[Decimal],
+    data_root: Path | None = None,
+    adjusted: bool = True,
+) -> SwingLake:
+    """Build the shared lake state for a swing sweep over ``[start, end]`` (M12.2).
+
+    Assumes ``floors`` lists every median-turnover floor the sweep will run on; a run asking for a
+    floor that is not here is a programming error, not a fallback. Never loads features — the caller
+    knows the union of its arms' decision dates and loads them itself. The caller owns ``close``.
+    """
+    reader = _L1Reader(data_root=data_root)
+    features = _SwingFeatures(data_root=data_root, adjusted=adjusted)
+    try:
+        sessions = reader.trading_sessions(start, end)
+        if not sessions:
+            raise BacktestError(f"no trading sessions in [{start.isoformat()}, {end.isoformat()}]")
+        calendar = reader.all_sessions()
+        sessions = _reserve_fill_headroom(sessions, calendar)
+        return SwingLake(
+            reader=reader,
+            features=features,
+            sessions=tuple(sessions),
+            calendar=tuple(calendar),
+            regime_source=_RegimeSource(
+                reader,
+                calendar,
+                first_session=sessions[0],
+                size=_BENCHMARK_BASKET,
+                ma_days=_REGIME_MA_DAYS,
+            ),
+            universe_filters={
+                floor: _InvestableUniverse(
+                    reader,
+                    UniverseParameters(median_turnover_floor=floor),
+                    data_root=data_root,
+                )
+                for floor in floors
+            },
+            adjusted=adjusted,
+        )
+    except BaseException:
+        features.close()
+        reader.close()
+        raise
+
+
 def run_swing_composite(
     *,
     start: date,
@@ -4045,6 +4231,7 @@ def run_swing_composite(
     adjusted: bool = True,
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
+    lake: SwingLake | None = None,
 ) -> BacktestResult:
     """Replay the swing-composite policy over ``[start, end]``, returning its metrics (M10.7).
 
@@ -4056,27 +4243,45 @@ def run_swing_composite(
     session (it checks its trailing stop against that session's close) and rebalances on every
     ``rebalance_interval_sessions``-th one.
     """
-    reader = _L1Reader(data_root=data_root)
-    features = _SwingFeatures(data_root=data_root, adjusted=adjusted)
-    try:
-        sessions = reader.trading_sessions(start, end)
-        if not sessions:
-            raise BacktestError(f"no trading sessions in [{start.isoformat()}, {end.isoformat()}]")
-        calendar = reader.all_sessions()
-        sessions = _reserve_fill_headroom(sessions, calendar)
-        first_session, terminal = sessions[0], sessions[-1]
-
-        universe_filter = (
-            _InvestableUniverse(reader, universe, data_root=data_root)
-            if universe is not None
-            else None
+    # M12.2: a shared lake, or this run's own. `owned` is what decides whether the connection is
+    # closed at the end — a run handed a lake must not shut down state its siblings still need.
+    owned = lake is None
+    if lake is None:
+        lake = open_swing_lake(
+            start=start,
+            end=end,
+            floors=() if universe is None else (universe.median_turnover_floor,),
+            data_root=data_root,
+            adjusted=adjusted,
         )
+    elif lake.adjusted != adjusted:
+        raise BacktestError(
+            f"the shared lake was built on the {'adjusted' if lake.adjusted else 'raw'} signal but "
+            f"this run asked for the {'adjusted' if adjusted else 'raw'} one — one sweep never "
+            "mixes the two price bases"
+        )
+    reader, features = lake.reader, lake.features
+    try:
+        sessions = list(lake.sessions)
+        calendar = list(lake.calendar)
+        first_session, terminal = lake.first_session, lake.terminal
+
+        universe_filter: _InvestableUniverse | None = None
+        if universe is not None:
+            floor = universe.median_turnover_floor
+            universe_filter = lake.universe_filters.get(floor)
+            if universe_filter is None:
+                raise BacktestError(
+                    f"the shared lake carries no liquidity screen for a floor of {floor} — "
+                    "open_swing_lake must be told every floor the sweep will run on"
+                )
         data = _L1SwingData(
             reader,
             sessions,
             features,
             interval=parameters.rebalance_interval_sessions,
             universe_filter=universe_filter,
+            regime_source=lake.regime_source,
         )
         clock = FrozenClock(first_session)
         sim = SimBroker(
@@ -4150,8 +4355,8 @@ def run_swing_composite(
             max_drawdown=_max_drawdown(nav_path),
         )
     finally:
-        features.close()
-        reader.close()
+        if owned:
+            lake.close()
 
 
 @dataclass(frozen=True, slots=True)
