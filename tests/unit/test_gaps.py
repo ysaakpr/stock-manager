@@ -257,7 +257,7 @@ def test_a_broken_row_is_reported_even_for_a_source_that_owes_no_session_files()
 def test_a_range_outside_the_calendar_coverage_raises_rather_than_guessing() -> None:
     """A year the holiday file does not cover would otherwise become ~250 phantom missing days."""
     with pytest.raises(CalendarCoverageError):
-        report_over(date(2011, 6, 1), date(2011, 6, 30))
+        report_over(date(2001, 6, 1), date(2001, 6, 30))
 
 
 def test_an_inverted_range_is_refused() -> None:
@@ -821,7 +821,7 @@ def test_a_unit_row_dated_outside_the_calendar_is_reported_rather_than_dropped()
     path where a real row exists for a day nothing can classify. Silently skipping it would be
     the drop this module exists to prevent.
     """
-    outside = date(2011, 3, 4)
+    outside = date(2001, 3, 4)
     row = record(SyncState.PUBLISHED, source="nse_xbrl_filing/IFOLD", logical_date=outside)
     report = build_report(
         SESSION,
