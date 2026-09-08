@@ -1,4 +1,8 @@
-# NSE PR report bundle — W2 Phase 1 acquisition evidence
+# NSE PR report bundle — W2 acquisition evidence
+
+Phase 1 measured the source; Phase 2 closed the two era boundaries Phase 1 left as brackets
+(§2, 12 further requests at 09:20 IST the same day) and built the campaign driver
+(`dataplatform.ingest.pr_bundle_campaign`).
 
 **Measured 2026-09-08, 08:22–08:27 IST. 39 requests to `nsearchives.nseindia.com`**, ≥2.5 s
 spacing, host lease held for the whole run, browser UA and `Referer: https://www.nseindia.com/`,
@@ -70,24 +74,50 @@ One zip per trading session, 13–25 members, 250 KB–665 KB. Registered as `ns
 200. Nine probes spread over 2005–2009 are all 404. The bundle does not reach further back, so the
 "roughly 2010-01" in the W2 brief is exactly 2010-01-04.
 
-### 2. Four format eras; two boundaries pinned, two are brackets
+### 2. Four format eras; three boundaries pinned, one left as a bracket
 
 | era | span | member names | `Bc` dates | `Ix` | `mcap` |
 |---|---|---|---|---|---|
 | `ix_era` | 2010-01-04 → **(2010-10-04, 2010-10-18]** | `Bc040110` upper, `DDMMYY` | `DD/MM/YYYY` | yes | no |
-| `classic` | → **(2024-01-02, 2024-07-01]** *(not pinned)* | same | `DD/MM/YYYY` | no | no |
-| `mcap_upper` | → **(2025-10-01, 2025-11-03]** *(not pinned)* | `Bc010724` + `MCAP01072024` | `DD/MM/YYYY` | no | yes |
-| `lowercase` | → open | `bc04092026` lower, `DDMMYYYY` | `YYYY-MM-DD` | no | yes |
+| `classic` | → **2024-01-31** | same | `DD/MM/YYYY` | no | no |
+| `mcap_upper` | **2024-02-01** → **2025-10-10** | `Bc010724` + `MCAP01072024` | `DD/MM/YYYY` | no | yes |
+| `lowercase` | **2025-10-13** → open | `bc04092026` lower, `DDMMYYYY` | `YYYY-MM-DD` | no | yes |
 
-The two unpinned boundaries are stated as brackets rather than guessed to a date. The request
-budget was spent on the boundaries that change what a parser must *do*; these two change only when
-a member appears, and **no parser dispatches on any era** — the readers sniff casing, name width
-and date shape from the bytes in front of them. An unpinned boundary therefore costs documentation
-accuracy, not correctness. Closing them costs ~8 requests of bisection each and belongs to Phase 2.
+**Phase 2, 2026-09-08: the two brackets closed by bisection, 12 requests total** (Phase 1 had
+estimated ~8 each; the two bracket ends were already in L0 from Phase 1's own probes, so both
+searches started free). Run as
+`uv run python -m dataplatform.ingest.pr_bundle_campaign pin-eras`, whose probes go through the
+ordinary acquisition path — so every payload below is in L0 and re-running the bisection costs
+zero requests.
+
+| boundary | question | last no | first yes | requests | confirmed |
+|---|---|---|---|---|---|
+| `classic` → `mcap_upper` | does the bundle carry an `mcap` member? | 2024-01-31 | **2024-02-01** | 7 | still yes at 2024-02-02 |
+| `mcap_upper` → `lowercase` | is the `Bc` member's name lowercase? | 2025-10-10 | **2025-10-13** | 5 | still yes at 2025-10-14 |
+
+Read off the payloads themselves (`PrBundle` re-verifying each checksum out of L0):
+
+```
+2024-01-31  members: ['Bc310124.csv']                             115 Bc rows
+2024-02-01  members: ['Bc010224.csv', 'MCAP01022024.csv']         114 Bc rows
+2025-10-10  members: ['Bc101025.csv', 'MCAP10102025.csv']         169 Bc rows
+2025-10-13  members: ['bc13102025.csv', 'mcap13102025.csv']       200 Bc rows
+```
 
 The casing change, the member-name width change and the `Bc` date-format change are **one event**,
-not three: 2025-10-01 is `Bc011025.csv` with `DD/MM/YYYY`, and 2025-11-03 is `bc03112025.csv` with
-`YYYY-MM-DD`.
+now pinned to one session rather than bracketed to a month. The first data row of each `Bc`:
+
+```
+2025-10-10  18,865SCL24B,SEC RE NCD 8.70% SR.VIII,13/10/2025, , ,13/10/2025, , ,INTEREST PAYMENT
+2025-10-13  NC,1003IIFL29,Sec Re NCD 10.03% Sr V,2025-10-17,,,2025-10-17,,,INTEREST PAYMENT
+```
+
+`ix_era` → `classic` is deliberately still a bracket. The `Ix` member's last day changes no parser
+behaviour — `ix.py` documents it as a 2010-only validation asset either way — and **no parser
+dispatches on any era**: the readers sniff casing, name width and date shape from the bytes in
+front of them. A boundary is documentation accuracy, never correctness. The bisection is monotone
+by assumption, so it checks that assumption by probing one session past the answer; a bracket
+whose answer flips back comes back `NOT PINNED` rather than reported.
 
 ### 3. `DDMMYY` and `DDMMYYYY` coexist inside a single zip
 

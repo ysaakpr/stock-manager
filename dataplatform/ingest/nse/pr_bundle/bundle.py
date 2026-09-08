@@ -15,22 +15,24 @@ imports a clock, calls `datetime.now()`, or accepts one, and `tests/unit/test_pr
 fails if that changes. The date comes from the digits the members carry in their own names, which
 survive re-download, re-zipping and mirroring; the archive filename is used only as a cross-check.
 
-**Format eras, measured on 2026-09-08** (39 requests, `ops/studies/evidence/nse-pr-bundle.md`):
+**Format eras** (39 requests on 2026-09-08, plus 12 of bisection on the same day;
+`ops/studies/evidence/nse-pr-bundle.md`):
 
 | era | span | member names | `Bc` dates | `Ix` | `mcap` |
 |---|---|---|---|---|---|
 | `ix_era`     | 2010-01-04 → ~2010-10 | `Bc040110` upper, DDMMYY | `DD/MM/YYYY` | yes | no |
-| `classic`    | ~2010-10 → ~2024-0?   | same                     | `DD/MM/YYYY` | no  | no |
-| `mcap_upper` | ~2024-0? → ~2025-10   | `Bc010724` + `MCAP01072024` [*] | `DD/MM/YYYY` | no | yes |
-| `lowercase`  | ~2025-10 → open       | `bc04092026` lower, DDMMYYYY | `YYYY-MM-DD` | no | yes |
+| `classic`    | ~2010-10 → 2024-01-31 | same                     | `DD/MM/YYYY` | no  | no |
+| `mcap_upper` | 2024-02-01 → 2025-10-10 | `Bc010724`+`MCAP01072024` [*] | `DD/MM/YYYY` | no | yes |
+| `lowercase`  | 2025-10-13 → open     | `bc04092026` lower, DDMMYYYY | `YYYY-MM-DD` | no | yes |
 
 [*] DDMMYY **and** DDMMYYYY member names inside one zip, which is why name width is read per
 member and never per bundle.
 
-Two of those boundaries are brackets, not dates, and are written that way on purpose: the smoke
-fetch had a 40-request budget and spent it on the boundaries that change parser behaviour. Nothing
-here dispatches on an era — the readers sniff casing, name width and date shape from the bytes in
-front of them, so an unpinned boundary costs documentation accuracy and not correctness.
+Three of the four boundaries are dates; `ix_era`→`classic` is still the bracket
+(2010-10-04, 2010-10-18], because the `Ix` member's disappearance changes no parser behaviour —
+`ix.py` documents it as a 2010-only validation asset either way. Nothing here dispatches on an
+era: the readers sniff casing, name width and date shape from the bytes in front of them, so a
+boundary is documentation accuracy and never correctness.
 
 Offline by construction: this module takes bytes, or an `L0Ref` it reads back through `L0Store`.
 It never fetches.
@@ -53,6 +55,8 @@ from dataplatform.store.l0 import L0Ref, L0Store
 
 __all__ = [
     "ARCHIVE_START",
+    "LOWERCASE_ERA_START",
+    "MCAP_ERA_START",
     "PR_BUNDLE_SOURCE_ID",
     "URL_TEMPLATE",
     "BundleMember",
@@ -75,6 +79,19 @@ URL_TEMPLATE: Final = (
 #: `PR311209.zip` and `PR010110.zip` are both 404 and `PR040110.zip` is 200 (2026-09-08). Probes
 #: at 2005, 2007, 2008 and four points across 2009 are all 404, so nothing older is published.
 ARCHIVE_START: Final = date(2010, 1, 4)
+
+#: The first bundle carrying an `mcap` member — the `classic` → `mcap_upper` boundary, pinned by
+#: bisection on 2026-09-08 (7 requests) inside the bracket Phase 1 left it in. `PR310124.zip`
+#: carries `Bc310124.csv` alone; `PR010224.zip` adds `MCAP01022024.csv`, and every bundle measured
+#: after it carries one.
+MCAP_ERA_START: Final = date(2024, 2, 1)
+
+#: The first bundle with lowercase member names — the `mcap_upper` → `lowercase` boundary, pinned
+#: by bisection on 2026-09-08 (5 requests). One event, not three: `PR101025.zip` has
+#: `Bc101025.csv` + `MCAP10102025.csv` with `Bc` dates `13/10/2025`, and the next session's
+#: `PR131025.zip` has `bc13102025.csv` + `mcap13102025.csv` with `2025-10-17` — casing, name width
+#: and date shape all change together.
+LOWERCASE_ERA_START: Final = date(2025, 10, 13)
 
 
 class MemberKind(StrEnum):

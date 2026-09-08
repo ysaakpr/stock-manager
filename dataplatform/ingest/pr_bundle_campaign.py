@@ -736,7 +736,10 @@ def _bc_name_is_lowercase(bundle: PrBundle) -> bool:
 
 
 #: `classic` → `mcap_upper`: the first bundle carrying an `mcap` member. Phase 1 measured
-#: 2024-01-02 without one and 2024-07-01 with one, and its 40-request budget stopped there.
+#: 2024-01-02 without one and 2024-07-01 with one, and its 40-request budget stopped there. The
+#: bracket is kept as the *search space* now that the answer is pinned
+#: (`pr_bundle.MCAP_ERA_START`, 2024-02-01): re-running the search re-verifies the measurement
+#: out of L0 for nothing, which is worth more than a constant asserting itself.
 MCAP_ARRIVAL: Final = BoundaryProbe(
     name="mcap_arrival",
     question="does the bundle carry an mcap member?",
@@ -750,7 +753,8 @@ MCAP_ARRIVAL: Final = BoundaryProbe(
 )
 
 #: `mcap_upper` → `lowercase`: the first bundle whose `Bc` member name is lowercase. Phase 1
-#: measured 2025-10-01 uppercase and 2025-11-03 lowercase.
+#: measured 2025-10-01 uppercase and 2025-11-03 lowercase; pinned to
+#: `pr_bundle.LOWERCASE_ERA_START` (2025-10-13).
 NAMING_CUTOVER: Final = BoundaryProbe(
     name="naming_cutover",
     question="is the Bc member's name lowercase?",

@@ -613,10 +613,12 @@ sources:
       measured_at: 2026-09-08T08:27:38+05:30
       measured_by: W2
       method: >-
-        39 requests to nsearchives.nseindia.com, >=2.5 s spacing, host lease held, browser UA and
+        51 requests to nsearchives.nseindia.com, >=2.5 s spacing, host lease held, browser UA and
         NSE Referer, via the normal crawl engine. Coarse year scan 2005-2026, then bisection on
-        each boundary the scan exposed. 404 recorded as evidence of non-publication, never retried
-        and never widened. Full log: ops/studies/evidence/nse-pr-bundle.md.
+        each boundary the scan exposed (39 requests, W2 Phase 1), then 12 more of bisection to
+        close the two brackets Phase 1 left open (W2 Phase 2,
+        `pr_bundle_campaign pin-eras`). 404 recorded as evidence of non-publication, never
+        retried and never widened. Full log: ops/studies/evidence/nse-pr-bundle.md.
       sessions_available: 1
       earliest_available: 2010-01-04
       latest_available: 2026-09-04
@@ -625,20 +627,25 @@ sources:
         Floor pinned exactly, not bracketed: PR311209.zip and PR010110.zip are both 404 while
         PR040110.zip is 200, and probes at 2005-01-03, 2007-01-02, 2008-01-02, 2009-01-02,
         2009-04-08, 2009-07-01, 2009-10-01, 2009-12-01 and 2009-12-16 are all 404. Four format
-        eras, two of whose boundaries are BRACKETS AND NOT PINNED — stated as ranges on purpose
-        rather than guessed to a date:
-        (1) `ix_era` 2010-01-04 -> the Ix member's disappearance, which falls in
-        (2010-10-04, 2010-10-18]; uppercase member names, DDMMYY, Bc dates DD/MM/YYYY.
-        (2) `classic` -> the mcap member's arrival, NOT PINNED, somewhere in
-        (2024-01-02, 2024-07-01]; a six-month bracket the 40-request budget did not buy down.
-        (3) `mcap_upper` -> the naming/date cutover, NOT PINNED, somewhere in
-        (2025-10-01, 2025-11-03]; a one-month bracket.
-        (4) `lowercase` from that cutover: all-lowercase member names, DDMMYYYY throughout, and
-        Bc dates in YYYY-MM-DD.
+        eras; Phase 2 closed the two boundaries Phase 1 left as brackets, so three of the four
+        are now dates:
+        (1) `ix_era` 2010-01-04 -> the Ix member's disappearance, still the bracket
+        (2010-10-04, 2010-10-18]; uppercase member names, DDMMYY, Bc dates DD/MM/YYYY. Left
+        bracketed on purpose: `Ix` is a 2010-only validation asset and its last day changes no
+        parser behaviour.
+        (2) `classic` -> 2024-01-31, the last bundle with no mcap member. PINNED by bisection
+        (7 requests): PR310124.zip carries Bc310124.csv alone and PR010224.zip adds
+        MCAP01022024.csv.
+        (3) `mcap_upper` 2024-02-01 -> 2025-10-10, the last bundle with uppercase names. PINNED
+        by bisection (5 requests).
+        (4) `lowercase` from 2025-10-13: all-lowercase member names, DDMMYYYY throughout, and Bc
+        dates in YYYY-MM-DD. Casing, name width and date shape are ONE event at that session --
+        PR101025.zip has Bc101025.csv + MCAP10102025.csv with Bc dates 13/10/2025, and
+        PR131025.zip has bc13102025.csv + mcap13102025.csv with 2025-10-17.
         No parser dispatches on any of these boundaries — the readers sniff casing, name width and
-        date shape per file — so an unpinned boundary costs documentation accuracy, not
-        correctness. DDMMYY and DDMMYYYY member names coexist INSIDE one zip (Bc010724.csv beside
-        MCAP01072024.csv), so a per-bundle name format would be wrong by construction.
+        date shape per file — so a boundary costs documentation accuracy, not correctness. DDMMYY
+        and DDMMYYYY member names coexist INSIDE one zip (Bc010724.csv beside MCAP01072024.csv),
+        so a per-bundle name format would be wrong by construction.
     failure_note: null
     candidate_alternatives: []
     owner_task: W2

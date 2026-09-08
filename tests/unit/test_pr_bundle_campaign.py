@@ -63,6 +63,12 @@ from dataplatform.ingest.nse.pr_bundle import (
     MemberKind,
     PrBundle,
 )
+from dataplatform.ingest.nse.pr_bundle import (
+    LOWERCASE_ERA_START as NAMING_CUTOVER_PINNED,
+)
+from dataplatform.ingest.nse.pr_bundle import (
+    MCAP_ERA_START as MCAP_ARRIVAL_PINNED,
+)
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.store.l0 import L0Store
@@ -805,3 +811,16 @@ def test_the_report_reads_the_lake_and_names_what_is_not_yet_attempted(
     assert SESSION_B.isoformat() in text
     assert "nothing here is promoted to L1" in text
     assert "promoted rows" not in text
+
+
+def test_the_pinned_era_dates_sit_inside_the_brackets_they_replaced() -> None:
+    """Phase 2's measurements must be *inside* Phase 1's brackets, or one of them is wrong.
+
+    The two are independent observations of the same boundary — Phase 1 bracketed it with a coarse
+    scan, Phase 2 bisected it — so a pinned date outside its own bracket would mean the archive
+    answered differently on the two runs, which is the one thing an immutable archive may not do.
+    """
+    assert date(2024, 2, 1) == MCAP_ARRIVAL_PINNED
+    assert campaign.MCAP_ARRIVAL.after < MCAP_ARRIVAL_PINNED <= campaign.MCAP_ARRIVAL.until
+    assert date(2025, 10, 13) == NAMING_CUTOVER_PINNED
+    assert campaign.NAMING_CUTOVER.after < NAMING_CUTOVER_PINNED <= campaign.NAMING_CUTOVER.until

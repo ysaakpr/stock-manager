@@ -23,6 +23,8 @@ adjustment chain.
 from dataplatform.ingest.nse.pr_bundle.bc import BC_COLUMNS, BcRow, parse_bc, parse_bc_bundle
 from dataplatform.ingest.nse.pr_bundle.bundle import (
     ARCHIVE_START,
+    LOWERCASE_ERA_START,
+    MCAP_ERA_START,
     PR_BUNDLE_SOURCE_ID,
     URL_TEMPLATE,
     BundleMember,
@@ -49,7 +51,9 @@ __all__ = [
     "ARCHIVE_START",
     "BC_COLUMNS",
     "IX_COLUMNS",
+    "LOWERCASE_ERA_START",
     "MCAP_COLUMNS",
+    "MCAP_ERA_START",
     "PR_BUNDLE_SOURCE_ID",
     "URL_TEMPLATE",
     "BcRow",
