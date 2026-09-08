@@ -1,0 +1,27 @@
+# Fires the daily snapshotter at 19:15 Asia/Kolkata, Monday to Friday.
+#
+# 19:15 IST: after the 15:30 close, after NSE has published the next session's price bands and
+# surveillance lists, and 45 minutes after the 18:30 EOD pipeline — the two share
+# nsearchives.nseindia.com, and a host lease is *refused* rather than queued, so an overlap would
+# be a skipped snapshot rather than a slow one.
+#
+# Weekdays only. The job itself files `GAP` for a closed day and spends no requests, so a weekend
+# fire would be harmless — but a declared holiday is exactly when NSE answers 200 with the previous
+# session's file, and not asking is better than asking and discarding.
+
+[Unit]
+Description=Daily market-structure snapshot at 19:15 IST (trading-platform)
+Documentation=file:///home/ubuntu/stock-manager/ops/runbooks/daily-snapshotter.md
+
+[Timer]
+OnCalendar=Mon..Fri 19:15 Asia/Kolkata
+# A fire missed because the box was down runs as soon as it comes back. These sources have no
+# archive, so a late capture is worth far more than a skipped one — and today's list is still
+# today's list at 23:00.
+Persistent=true
+# Nothing else is scheduled at 19:15, so jitter buys nothing and costs predictability in the log.
+AccuracySec=1min
+Unit=daily-snapshot.service
+
+[Install]
+WantedBy=timers.target
