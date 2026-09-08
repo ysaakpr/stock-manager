@@ -13,6 +13,7 @@ live campaign this driver performs is a driver run and this file is not it.
 from __future__ import annotations
 
 import json
+import shutil
 import socket
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -36,6 +37,8 @@ from dataplatform.ingest.indices import (
     SyncTracker,
     TriPoint,
     TriSeries,
+    l0_tri_filename,
+    parse_l0_tri_filename,
     read_tri_series,
     tri_state_source,
     tri_url,
@@ -47,8 +50,11 @@ from dataplatform.ingest.tri_backfill import (
     DEFAULT_INDEX_SET,
     EARLIEST_REQUESTED,
     IndexSpec,
+    NoStoredPayloadError,
     already_published,
+    rebuild_tri_from_l0,
     run_tri_backfill,
+    stored_tri_payloads,
 )
 from dataplatform.status.sync_state import SyncRecord, SyncState
 from dataplatform.store.l0 import L0Store
@@ -383,3 +389,136 @@ def _tracker_protocol_is_satisfied_by_the_double(tracker: RecordingTracker) -> S
 
 def _sync_record_is_used(record: SyncRecord) -> SyncState:
     return record.state
+
+
+# ── --from-l0: re-deriving L1 from the immutable record, with no fetch ────────────────────────
+
+
+def test_l0_filename_round_trips_through_its_parser() -> None:
+    """`parse_l0_tri_filename` is the exact inverse of `l0_tri_filename`, underscores included.
+
+    A slug may legally carry `_` (`TriPoint.index_slug` allows it), which is why the parser is not
+    a `split("_")` — that would take the window apart in the wrong place and file a rebuild's
+    output under a truncated index.
+    """
+    for slug in ("nifty50", "nifty_next_50"):
+        name = l0_tri_filename(slug, WINDOW_START, WINDOW_END)
+        assert parse_l0_tri_filename(name) == (slug, WINDOW_START, WINDOW_END)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["ind_nifty50list.csv", "tri_nifty50_20210401.json", "tri_nifty50_20211301_20260331.json"],
+)
+def test_a_name_that_is_not_an_l0_tri_payload_raises(filename: str) -> None:
+    """A payload filed under an unreadable name stops the rebuild instead of being skipped."""
+    with pytest.raises(Exception, match=filename):
+        parse_l0_tri_filename(filename)
+
+
+def test_rebuild_from_l0_reproduces_the_fetching_run_byte_for_byte(
+    clock: FrozenClock,
+    settings: Settings,
+    register: SourceRegister,
+    tracker: RecordingTracker,
+    tmp_path: Path,
+) -> None:
+    """L0 determines L1: rebuilding into a second lake gives the same parquet bytes, no requests.
+
+    This is the property that makes moving a campaign honest. `data/L0` is the immutable record and
+    L1 is a derivation of it (invariant #1), so promoting a run to another lake may copy the *raw*
+    payloads — their original receipts and all — and re-derive everything else, rather than copying
+    a derived layer and hoping the two agree. If this ever stops holding, `cp -a` of L1 is the only
+    remaining route and the runbook has to say so.
+    """
+    fetched_root, rebuilt_root = tmp_path / "fetched", tmp_path / "rebuilt"
+    fetcher, l0, transport = _wire(
+        {tri_url(register): [_ok("nifty50"), _ok("niftyit")]},
+        clock=clock,
+        settings=settings,
+        register=register,
+        data_root=fetched_root,
+    )
+    indices = (NIFTY50, IndexSpec(name="NIFTY IT", slug="niftyit"))
+    run_tri_backfill(
+        fetcher=fetcher,
+        l0=l0,
+        tracker=tracker,
+        indices=indices,
+        start=WINDOW_START,
+        end=WINDOW_END,
+        data_root=fetched_root,
+    )
+    requests_after_fetch = len(transport.requests)
+
+    # The transfer: the raw payloads and their receipts, copied verbatim. Nothing derived moves.
+    shutil.copytree(fetched_root / "L0", rebuilt_root / "L0")
+
+    outcomes = rebuild_tri_from_l0(
+        l0=L0Store(clock=clock, data_root=rebuilt_root),
+        indices=indices,
+        data_root=rebuilt_root,
+    )
+
+    assert [outcome.spec.slug for outcome in outcomes] == ["nifty50", "niftyit"]
+    assert [outcome.points for outcome in outcomes] == [1239, 1239]
+    assert all(not outcome.skipped for outcome in outcomes)
+    assert outcomes[0].l0_key == f"nifty_tri_history/{WINDOW_END.isoformat()}/" + l0_tri_filename(
+        "nifty50", WINDOW_START, WINDOW_END
+    )
+
+    fetched_l1, rebuilt_l1 = fetched_root / "L1", rebuilt_root / "L1"
+    written = sorted(path.relative_to(rebuilt_l1) for path in rebuilt_l1.rglob("*.parquet"))
+    assert written == sorted(path.relative_to(fetched_l1) for path in fetched_l1.rglob("*.parquet"))
+    assert written, "the rebuild wrote no partitions at all"
+    for relative in written:
+        assert (rebuilt_l1 / relative).read_bytes() == (fetched_l1 / relative).read_bytes()
+
+    # It costs nothing at the source and claims nothing about the sync row.
+    assert len(transport.requests) == requests_after_fetch
+    assert tracker.rows.keys() == {(tri_state_source(spec.slug), WINDOW_END) for spec in indices}
+
+
+def test_rebuild_from_l0_refuses_an_index_it_has_no_payload_for(
+    clock: FrozenClock, tmp_path: Path
+) -> None:
+    """An empty L0 is a stop, not a silent no-op — "no benchmark" must not look like "done"."""
+    with pytest.raises(NoStoredPayloadError, match="niftycpse"):
+        rebuild_tri_from_l0(
+            l0=L0Store(clock=clock, data_root=tmp_path),
+            indices=(IndexSpec(name="NIFTY CPSE", slug="niftycpse"),),
+            data_root=tmp_path,
+        )
+    assert read_tri_series("niftycpse", WINDOW_END, data_root=tmp_path) is None
+
+
+def test_stored_payloads_are_grouped_by_index_and_a_stranger_is_ignored(
+    clock: FrozenClock,
+    settings: Settings,
+    register: SourceRegister,
+    tracker: RecordingTracker,
+    tmp_path: Path,
+) -> None:
+    """A lake may hold indices this run was not asked about; they are not rebuilt by accident."""
+    fetcher, l0, _ = _wire(
+        {tri_url(register): [_ok("nifty50"), _ok("niftycpse")]},
+        clock=clock,
+        settings=settings,
+        register=register,
+        data_root=tmp_path,
+    )
+    run_tri_backfill(
+        fetcher=fetcher,
+        l0=l0,
+        tracker=tracker,
+        indices=(NIFTY50, IndexSpec(name="NIFTY CPSE", slug="niftycpse")),
+        start=WINDOW_START,
+        end=WINDOW_END,
+        data_root=tmp_path,
+    )
+
+    grouped = stored_tri_payloads(l0, (NIFTY50,))
+    assert set(grouped) == {"nifty50"}
+    assert [ref.filename for ref in grouped["nifty50"]] == [
+        l0_tri_filename("nifty50", WINDOW_START, WINDOW_END)
+    ]
