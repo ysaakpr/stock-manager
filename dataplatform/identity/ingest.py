@@ -81,10 +81,13 @@ __all__ = [
     "L0PayloadMissingError",
     "SymbolChange",
     "derive_master",
+    "equity_list_filename",
+    "identity_l0_files",
     "ingest_snapshot",
     "parse_equity_list",
     "parse_symbol_changes",
     "read_snapshot_from_l0",
+    "symbol_changes_filename",
 ]
 
 _log = get_logger(__name__)
@@ -99,9 +102,53 @@ NSE_EQUITY_LIST_SOURCE: Final = "nse_equity_list"
 #: nothing could re-derive from it.
 NSE_SYMBOL_CHANGES_SOURCE: Final = "nse_symbol_changes"
 
-#: The L0 filenames both sources land under — the last path segment of their register URLs.
+#: The names the *source* serves these files under — the last path segment of the register URLs,
+#: and what the frozen fixtures are called. They are **not** the L0 keys: see
+#: `equity_list_filename` for why an undated key cannot work here.
 EQUITY_LIST_FILENAME: Final = "EQUITY_L.csv"
 SYMBOL_CHANGES_FILENAME: Final = "symbolchange.csv"
+
+
+def _dated(filename: str, on: date) -> str:
+    """`stem_YYYYMMDD.suffix` — a snapshot filename that names the day it was captured."""
+    stem, _, suffix = filename.rpartition(".")
+    return f"{stem}_{on.strftime('%Y%m%d')}.{suffix}"
+
+
+def equity_list_filename(on: date) -> str:
+    """The L0 filename `EQUITY_L.csv` captured on `on` lands under.
+
+    Dated, and it has to be. L0 partitions by *month* (`store/paths.l0_path`), so a filename is a
+    key within a month however many dates the caller meant by it — two captures of `EQUITY_L.csv`
+    in one September are one key, and `L0Store.put` raises `L0ImmutabilityError` on the second
+    because the bytes have drifted. The register row's `pit_notes` require the opposite: *"keep
+    every snapshot forever and never overwrite; symbol changes and delistings are only
+    reconstructible from the accumulated series"*. A delisted company vanishes from this file the
+    day it dies, so the series is the only record it was ever listed, and the date must be in the
+    key for the series to exist at all.
+    """
+    return _dated(EQUITY_LIST_FILENAME, on)
+
+
+def symbol_changes_filename(on: date) -> str:
+    """The L0 filename `symbolchange.csv` captured on `on` lands under. Dated, as above.
+
+    Cumulative rather than a snapshot — a later copy is a superset — but a row NSE *removes* is a
+    claim it has retracted, and only the accumulated dated series records that it was ever made.
+    """
+    return _dated(SYMBOL_CHANGES_FILENAME, on)
+
+
+def identity_l0_files(on: date) -> tuple[tuple[str, str], ...]:
+    """`(register id, L0 filename)` for both identity files captured on `on`.
+
+    One definition of the pair, so the fetcher (`ingest.identity_refresh`, `ingest.daily_snapshot`)
+    and the reader (`read_snapshot_from_l0`) cannot disagree about where a payload lives.
+    """
+    return (
+        (NSE_EQUITY_LIST_SOURCE, equity_list_filename(on)),
+        (NSE_SYMBOL_CHANGES_SOURCE, symbol_changes_filename(on)),
+    )
 
 
 class L0PayloadMissingError(IdentityError):
@@ -127,10 +174,7 @@ def read_snapshot_from_l0(
     """
     resolved = L0Store(clock=SystemClock() if clock is None else clock) if store is None else store
     payloads: list[str] = []
-    for source, filename in (
-        (NSE_EQUITY_LIST_SOURCE, EQUITY_LIST_FILENAME),
-        (NSE_SYMBOL_CHANGES_SOURCE, SYMBOL_CHANGES_FILENAME),
-    ):
+    for source, filename in identity_l0_files(snapshot_date):
         try:
             ref = resolved.ref_for(source, snapshot_date, filename)
             payloads.append(resolved.get(ref).decode("utf-8"))

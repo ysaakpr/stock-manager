@@ -89,11 +89,15 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     registry = default_registry()
     assert registry.names() == (
         "eod_pipeline",
+        "daily_snapshot",
         "constituents_snapshot",
         "l0_verify",
         "identity_refresh",
     )
     assert registry.get("eod_pipeline").cron == "30 18 * * mon-fri"
+    # 19:15, after the 18:30 EOD pipeline: the two share nsearchives.nseindia.com, and a host
+    # lease is refused rather than queued, so an overlap would be a skipped snapshot.
+    assert registry.get("daily_snapshot").cron == "15 19 * * mon-fri"
     assert registry.get("constituents_snapshot").cron == "0 20 * * sat"
     assert registry.get("l0_verify").cron == "0 3 * * sun"
     assert registry.get("identity_refresh").cron == "0 7 * * sat"

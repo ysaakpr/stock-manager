@@ -633,7 +633,7 @@ def test_status_gaps_refuses_a_range_the_trading_calendar_does_not_cover(
     client: TestClient,
 ) -> None:
     """ "No holidays that year" would invent ~250 sessions and report every one as missing."""
-    response = client.get("/status/gaps", params={"from": "2011-06-01", "to": "2011-06-30"})
+    response = client.get("/status/gaps", params={"from": "2001-06-01", "to": "2001-06-30"})
     assert response.status_code == 400
     assert "coverage" in response.json()["detail"]
 

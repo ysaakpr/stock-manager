@@ -11,6 +11,7 @@ unverified endpoint.
 from __future__ import annotations
 
 import copy
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -35,8 +36,9 @@ from dataplatform.ingest.source_register import (
 #: legitimately postdates the sweep. The honest anti-fabrication invariant is therefore not
 #: "before the C.1 sweep" but "not after the build actually ran" — a fixed, checked-in ceiling so
 #: the suite stays offline and deterministic (B10). Bump this when a task records a verification on
-#: a newer date (M6.1 did, on 2026-09-02: curated_rss; M11.1 on 2026-09-04: the macro probe).
-LATEST_VERIFICATION: datetime = datetime(2026, 9, 6, 23, 59, 59, tzinfo=IST)
+#: a newer date (M6.1 did, on 2026-09-02: curated_rss; M11.1 on 2026-09-04: the macro probe;
+#: M3.9.b on 2026-09-08: nifty_tri_history, re-probed at D8's corrected path).
+LATEST_VERIFICATION: datetime = datetime(2026, 9, 8, 23, 59, 59, tzinfo=IST)
 
 
 @pytest.fixture(scope="module")
@@ -153,18 +155,35 @@ def test_every_referenced_task_exists_in_the_graph(
     Every entry names the task that will build its parser, freeze its fixture and — for the
     rows this sweep could not verify — resolve the failure. Those ids must resolve in
     TASK_GRAPH.yaml, or the handoff goes nowhere.
+
+    A **wave** id (`W1`, `W2`, …) also resolves. Waves are owner-directed units of work that
+    postdate the graph — the git history carries `[W1]` and `[W2]` commits and CLAUDE.md's commit
+    rule covers them — and TASK_GRAPH.yaml does not model them. Accepting the id keeps the
+    no-dangling-promise property (a wave is a real, named, auditable unit) without misattributing
+    a wave's parser to whichever graph task happens to sit nearest it.
     """
     with (repo_root / "TASK_GRAPH.yaml").open(encoding="utf-8") as fh:
         graph = yaml.safe_load(fh)
     known = {task["id"] for task in graph["tasks"]}
+    wave = re.compile(r"^W\d+$")
+
+    def resolves(task_id: str) -> bool:
+        return task_id in known or bool(wave.match(task_id))
 
     for source in register.sources:
-        assert source.parser.task in known, f"{source.id}: parser.task {source.parser.task}"
+        if source.parser.archive_only:
+            # No parser is named, so `owner_task` stands alone as the accountable task. It still
+            # has to resolve: an archive-only entry nobody owns is a payload nobody will parse.
+            assert source.owner_task is not None, f"{source.id}: archive-only with no owner_task"
+            assert resolves(source.owner_task), f"{source.id}: owner_task {source.owner_task}"
+            continue
+        assert source.parser.task is not None  # not archive-only, so the validator required it
+        assert resolves(source.parser.task), f"{source.id}: parser.task {source.parser.task}"
         assert source.owner_task == source.parser.task, (
             f"{source.id}: owner_task {source.owner_task} != parser.task {source.parser.task}"
         )
         if source.fixture.task is not None:
-            assert source.fixture.task in known, f"{source.id}: fixture.task {source.fixture.task}"
+            assert resolves(source.fixture.task), f"{source.id}: fixture.task {source.fixture.task}"
 
 
 def test_era_ranges_are_ordered(register: SourceRegister) -> None:
@@ -197,7 +216,7 @@ def test_validator_rejects_verified_without_a_parse(raw: dict[str, Any]) -> None
 
 
 def test_validator_rejects_a_failure_with_no_note(raw: dict[str, Any]) -> None:
-    broken = _mutate(raw, "nifty_tri_history", failure_note=None)
+    broken = _mutate(raw, "gdelt_doc_api", failure_note=None)
     assert any("no explicit failure note" in p for p in problems(broken))
 
 
@@ -231,11 +250,28 @@ def test_schema_rejects_an_unknown_field(raw: dict[str, Any]) -> None:
 
 
 def test_fetch_succeeded_is_false_for_a_soft_404(raw: dict[str, Any]) -> None:
-    """niftyindices answered the TRI POST with 200 + HTML; that must never read as success."""
+    """A 200 carrying HTML must never read as success — with or without a recorded parse.
+
+    This was written against `nifty_tri_history`, which the 2026-08-08 sweep recorded FAILED at
+    200 + 92 KB of markup. D8 established the markup came from a *stale URL path*, not a gate, and
+    M3.9.b re-verified the row at the corrected path — so the specimen is now the general property
+    instead of that one row: strip the `parse_check` off a VERIFIED entry and what is left is
+    exactly the soft-404 signature (a 2xx, a body, and nothing that parsed), which must not read
+    as a successful fetch. `content_type` is no help here and is deliberately left alone: this
+    source answers `text/html` on success too (D9).
+    """
     tri = next(s for s in load().sources if s.id == "nifty_tri_history")
     assert tri.last_http_status == 200
-    assert tri.status is Status.FAILED
-    assert tri.fetch_succeeded is False
+    assert tri.status is Status.VERIFIED
+    assert tri.content_type is not None and tri.content_type.startswith("text/html")
+    assert tri.fetch_succeeded is True
+
+    soft_404 = _mutate(raw, "nifty_tri_history", parse_check=None)
+    unparsed = next(s for s in soft_404.sources if s.id == "nifty_tri_history")
+    assert unparsed.fetch_succeeded is False
+    assert any(
+        "marked VERIFIED without a recorded successful fetch" in p for p in problems(soft_404)
+    )
 
 
 def test_fetch_succeeded_requires_all_three_signals() -> None:

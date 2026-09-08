@@ -48,8 +48,15 @@ packages = ["dataplatform", "analyst", "execution", "backtest", "accounting"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-# orchestrator/ predates the gate and is not product code (CLAUDE.md); see ops/BACKLOG.md.
-extend-exclude = ["orchestrator"]
+# ruff walks Markdown as well as Python (it formats fenced `python` blocks), so anything dropped
+# in the tree is gate surface. These three are not:
+#   orchestrator/ predates the gate and is not product code (CLAUDE.md); see ops/BACKLOG.md.
+#   .polly/       agent scratch — dropped run reports and registry, never a deliverable.
+#   ops/studies/  preserved investigation evidence; its prose is kept verbatim, so only the
+#                 Markdown is exempt — a .py committed under ops/ still lints (ops/sanity/*.py do).
+# Without these, an untracked report with an unformatted example snippet reddens `make check` at
+# its first step, and the gate never reaches lint, types or tests.
+extend-exclude = ["orchestrator", ".polly", "ops/studies/**/*.md"]
 
 [tool.ruff.lint]
 select = [

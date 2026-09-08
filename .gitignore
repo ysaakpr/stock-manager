@@ -26,3 +26,6 @@ __pycache__/
 
 # Testing-server connection details — local only, never committed (ops/remote.sh)
 .remote.env
+
+# polly orchestration scratch (registry, worker reports) - never committed
+.polly/
