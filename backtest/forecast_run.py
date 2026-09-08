@@ -715,7 +715,8 @@ def render_forecast_report(arms: Sequence[_Arm], *, stats: _ForecastStats) -> st
         f"- Mean scored candidates / session: {stats.mean_candidates}",
         f"- Rows with no delivery figure in their window (scored at the neutral middle): "
         f"{stats.delivery_absent:,}",
-        f"- Benchmark: {_pct(head.comparison.benchmark_xirr)} ({head.benchmark_index_name})",
+        f"- Benchmark: {_pct(head.comparison.benchmark_xirr)} ({head.benchmark_index_name} "
+        f"— **{head.benchmark_provenance}**)",
         "",
         "## Results",
         "",
@@ -770,9 +771,19 @@ def render_forecast_report(arms: Sequence[_Arm], *, stats: _ForecastStats) -> st
         "universe, same basket size, same cost model. If the daily arm does not beat them, the "
         "fitted forecast and the whole apparatus of deciding every session did not earn their "
         "keep, and the honest conclusion is that the monthly cadence was right.",
-        "- **Do not read excess-vs-benchmark as alpha.** The benchmark is a price-return L1 proxy, "
-        "not a licensed total-return index (M9.4), so it understates the market by roughly its "
-        "dividend yield.",
+        "- **Do not read excess-vs-benchmark as alpha.** "
+        + (
+            "The benchmark here is the exchange's published NIFTY TRI (M3.9.b), so the excess is "
+            "excess over the real benchmark — but costs and the single-path nature of one "
+            "backtest still sit between that and alpha."
+            if head.benchmark_is_published_tri
+            else "The benchmark here is §4.1's **computed TRI estimate**, not the published "
+            "series, so the excess is excess over a constant-yield dividend estimate."
+            if head.benchmark_is_computed_tri
+            else "The benchmark here is a **price-return L1 proxy** — not a total-return index of "
+            "any kind — so it understates the market by roughly its dividend yield. Ingest the "
+            "real series (`python -m dataplatform.ingest.tri_backfill`) to fix this."
+        ),
         "- **The coefficients are the interesting output even if the returns are not.** A feature "
         "whose fitted sign contradicts the a-priori expectation above is either a real finding or "
         "a symptom, and the delivery leg in particular is fitted over a window whose coverage "
