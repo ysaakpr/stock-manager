@@ -75,6 +75,28 @@ class Fixture(NamedTuple):
 #: re-reads that line): the "hand-checked sample row" of the acceptance criteria.
 FIXTURE_FILES: Final = (
     Fixture(
+        # The first session the exchange ever published an ISIN for (W1). Its 2011-06-21
+        # counterpart is in `../pre_isin/`, and `test_bhavcopy_eras.py` asserts the pair.
+        filename="cm22JUN2011bhav.csv.zip",
+        trade_date=date(2011, 6, 22),
+        data_rows=1502,
+        sample=PriceRow(
+            isin="INE002A01018",
+            symbol="RELIANCE",
+            series="EQ",
+            trade_date=date(2011, 6, 22),
+            open=Decimal("853.35"),
+            high=Decimal("858.15"),
+            low=Decimal("834.15"),
+            close=Decimal("845.8"),
+            last=Decimal("846.7"),
+            prev_close=Decimal("848.65"),
+            total_traded_qty=4596259,
+            total_traded_value=Decimal("3873641071.85"),
+            total_trades=96249,
+        ),
+    ),
+    Fixture(
         filename="cm01JAN2016bhav.csv.zip",
         trade_date=date(2016, 1, 1),
         data_rows=1607,
@@ -232,7 +254,7 @@ def test_the_frozen_set_really_spans_the_era() -> None:
     assert len(FIXTURE_FILES) >= 3
 
     sessions = sorted(fixture.trade_date for fixture in FIXTURE_FILES)
-    assert sessions[0].year <= 2016, "the earliest fixture must be early in the era"
+    assert sessions[0] == date(2011, 6, 22), "the earliest fixture must be the era's first session"
     assert sessions[-1] < LEGACY_ERA_END, "the latest fixture must precede the UDiFF cutover"
     assert (LEGACY_ERA_END - sessions[-1]).days <= 7, "and must be the run-up to it"
     assert len(set(sessions)) == len(sessions)
@@ -359,7 +381,9 @@ def test_every_field_of_every_row_matches_the_raw_csv(era_file: Fixture) -> None
 
 def test_decimal_conversion_is_exact_not_binary() -> None:
     """`1257352825.3` is not representable in binary floating point; the parsed value must be it."""
-    fixture = FIXTURE_FILES[0]
+    # Named, not indexed: the fixture set grows at the front as earlier eras are frozen, and an
+    # index would silently start asserting a different file's turnover.
+    (fixture,) = [f for f in FIXTURE_FILES if f.filename == "cm01JAN2016bhav.csv.zip"]
     rows = parse(payload_of(fixture), filename=fixture.filename)
     (reliance,) = [row for row in rows if row.symbol == "RELIANCE" and row.series == "EQ"]
 

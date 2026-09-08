@@ -686,7 +686,7 @@ sources:
       User-Agent: browser
       Referer: "https://niftyindices.com/"
     needs_session_cookie: false
-    parser: {id: dataplatform.ingest.indices, task: M3.9}
+    parser: {id: dataplatform.ingest.indices, task: M3.9.a}
     robots_notes: >-
       Allow: / with two disallowed report paths, neither of which is /IndexConstituent/.
     pit_notes: >-
@@ -701,58 +701,81 @@ sources:
     sample_sha256: 9fb8832853c279448d2bc05f0e7dd5f460ed2ff35332fea8c40fc1250362ad28
     parse_check: >-
       CSV, 5 columns, header "Company Name,Industry,Symbol,Series,ISIN Code". ISIN is native.
-    fixture: {frozen: false, task: M3.9, path: "tests/fixtures/nifty_indices/"}
+    fixture: {frozen: false, task: M3.9.a, path: "tests/fixtures/nifty_indices/"}
     failure_note: null
     candidate_alternatives: []
-    owner_task: M3.9
+    owner_task: M3.9.a
 
-  # §4.1 row 8 — benchmark TRI (primary FAILED, fallback input VERIFIED)
+  # §4.1 row 8 — benchmark TRI (the published series, VERIFIED at D8's corrected path; the
+  # computed-proxy input below is retained as §4.1's documented fallback, not as a substitute)
   - id: nifty_tri_history
     plan_row: "Benchmark TRI series"
-    description: Historical total-return index values for a named index over a date range.
+    description: >-
+      Historical total-return index values for a named index over a date range — the real
+      published TRI, one POST per index for its whole history.
     host: niftyindices.com
     method: POST
-    url_template: "https://niftyindices.com/Backpage.aspx/getTotalReturnIndexString"
-    verified_url: "https://niftyindices.com/Backpage.aspx/getTotalReturnIndexString"
+    url_template: "https://niftyindices.com/BackPage/getTotalReturnIndexString"
+    verified_url: "https://niftyindices.com/BackPage/getTotalReturnIndexString"
     cadence: daily
-    era: {start: null, end: null}
+    era: {start: 1999-06-30, end: null}
     fallback:
       - "Computed price-index proxy + dividend estimate (§4.1's own fallback)"
       - nifty_index_close_snapshot
     required_headers:
       User-Agent: browser
-      Referer: "https://niftyindices.com/reports/historical-data"
       Content-Type: "application/json; charset=UTF-8"
-      X-Requested-With: XMLHttpRequest
-    needs_session_cookie: true
-    parser: {id: dataplatform.ingest.indices, task: M3.9}
-    robots_notes: Path is not disallowed by robots; the block is an application-level gate.
-    pit_notes: TRI is restated only on index reconstitution; treat published values as final.
-    status: FAILED
-    verified_at: 2026-08-08T18:14:21+05:30
+      Accept: "application/json, text/javascript, */*; q=0.01"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.indices, task: M3.9.b}
+    robots_notes: >-
+      Allow: / with two disallowed report paths, neither of which is /BackPage/. The 2026-08-08
+      sweep's "application-level gate" was a stale URL path, not a gate — D8.
+    pit_notes: >-
+      TRI is restated only on index reconstitution; treat published values as final. A level
+      dated D is published in NSE Indices' end-of-day dissemination for session D, so
+      knowable_date is the row's own session date and never the fetch date (the parser derives
+      it from the payload — dataplatform.ingest.indices.tri_knowable_date).
+    status: VERIFIED
+    verified_at: 2026-09-08T09:15:00+05:30
     last_http_status: 200
-    sample_bytes: 92911
+    sample_bytes: 957952
     content_type: text/html; charset=utf-8
-    sample_sha256: eb0b7852f57fad28115f86e526d600139238327d324b18e9d842f61cb3a08925
-    parse_check: null
-    fixture: {frozen: false, task: M3.9, path: null}
-    failure_note: >-
-      Tried twice, both POST with a JSON body {name, indexName, startDate, endDate}: bare, and
-      again after warming https://niftyindices.com/reports/historical-data in the same cookie
-      jar. Both returned HTTP 200 carrying the site's HTML home page, redirected to
-      /?ReturnUrl=%2fBackpage.aspx%2fgetTotalReturnIndexString — an application-level session
-      gate, not a robots or rate-limit block, and not something to evade. The warm GET set zero
-      cookies, which is why the gate never opens. A 200 with text/html is the failure signal
-      here: any fetcher that trusts the status code alone will happily store 92 KB of markup as
-      a TRI series.
+    sample_sha256: 2f85a8d762e0ef77719bb7ff60cb206c9701d7466eb675b306331409a209f082
+    parse_check: >-
+      Bare JSON array (no ASP.NET {"d": …} envelope), 6,764 records for NIFTY 50 at maximum
+      depth, newest-first; keys RequestNumber, "Index Name", Date, TotalReturnsIndex, NTR_Value.
+      Body is {"cinfo": "{'name':'<INDEX>','startDate':'DD-MMM-YYYY','endDate':'DD-MMM-YYYY',
+      'indexName':'<INDEX>'}"} — index name sent in CAPS, echoed back title-cased ("Nifty 50").
+      Dates are "DD Mon YYYY"; TotalReturnsIndex is a decimal string; NTR_Value is "-" wherever
+      the net-total-return series does not exist (all NIFTY IT and NIFTY CPSE rows, and NIFTY
+      50 before 2000-01-03) and must read as null, never 0. content_type is text/html even on
+      success, so a content-type check cannot discriminate this source's good response from its
+      block page (D9) — only a parse/shape assertion can. RequestNumber regenerates on every
+      request, so sample_sha256 identifies the sample observed and is deliberately not
+      reproducible across fetches; nothing derived from this payload carries it.
+    fixture: {frozen: true, task: M3.9.b, path: "tests/fixtures/nifty_indices/tri/2026-09-08/"}
+    history:
+      measured_at: 2026-09-08T09:15:00+05:30
+      measured_by: M3.9.b
+      method: >-
+        Six POSTs at >=2.5 s spacing (three narrow windows frozen as fixtures, three at maximum
+        depth). Depth is whatever the endpoint returns for a startDate far below any plausible
+        launch: 01-Apr-1990 -> endDate 08-Sep-2026 for each index.
+      earliest_available: 1999-06-30
+      latest_available: 2026-09-07
+      note: >-
+        NIFTY 50 6,764 rows from 1999-06-30; NIFTY IT 6,765 rows from 1999-06-30 (it carries
+        23-Oct-1999, a Saturday special session NIFTY 50 does not); NIFTY CPSE 4,382 rows from
+        2009-01-01. Deeper than D8's 2026-08-10 probe recorded (6,213 rows from 2001-04-02) —
+        that probe asked for startDate 01-Apr-2001 and got what it asked for. The whole history
+        of one index is one request, so re-fetching is the expensive path, not the deep fetch.
+    failure_note: null
     candidate_alternatives:
       - "Compute TRI from the price index plus the Div Yield column already present in
-         nifty_index_close_snapshot — this is §4.1's stated fallback and needs no new source."
-      - "Drive the historical-data page as a browser (it works interactively) to learn the real
-         session/token handshake, then replay it from the fetcher."
-      - "NSE indices archive on nsearchives.nseindia.com, which mirrors the daily index file
-         and may also carry a TRI variant under a name this sweep did not guess."
-    owner_task: M3.9
+         nifty_index_close_snapshot — this is §4.1's stated fallback and needs no new source.
+         Retained as the documented fallback, not as a substitute: it is a dividend estimate."
+    owner_task: M3.9.b
 
   - id: nifty_index_close_snapshot
     plan_row: "Benchmark TRI series"
@@ -772,7 +795,7 @@ sources:
       User-Agent: browser
       Referer: "https://niftyindices.com/"
     needs_session_cookie: false
-    parser: {id: dataplatform.ingest.indices, task: M3.9}
+    parser: {id: dataplatform.ingest.indices, task: M3.9.b}
     robots_notes: /Daily_Snapshot/ is not disallowed.
     pit_notes: Immutable once published.
     status: VERIFIED
@@ -813,7 +836,7 @@ sources:
         (ops/gates/M11-macro-source-probe.md).
     failure_note: null
     candidate_alternatives: []
-    owner_task: M3.9
+    owner_task: M3.9.b
 
   # §4.1 row 9 — FII/DII flows
   - id: nse_fii_dii_flows
