@@ -1717,10 +1717,10 @@ sources:
       CSV, 5 columns, header "Company Name,Industry,Symbol,Series,ISIN Code"; 755 data rows over
       22 distinct NSE Indices sectors (Financial Services, Capital Goods, Healthcare, …). ISIN is
       native, so the join key needs no resolution (invariant #2).
-    fixture: {frozen: true, task: OPS, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
+    fixture: {frozen: true, task: W8, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
     history:
       measured_at: 2026-09-08T18:36:04+05:30
-      measured_by: OPS
+      measured_by: W8
       method: >-
         One GET. The file carries no date, in its name, its header or its rows, and the URL takes
         no date parameter — there is exactly one snapshot and it is the current one.
@@ -1730,7 +1730,7 @@ sources:
         Depth 1 is the finding, not a limitation of the probe. Captured daily from 2026-09-08.
     failure_note: null
     candidate_alternatives: []
-    owner_task: OPS
+    owner_task: W8
 
   - id: nse_price_bands
     plan_row: "Market-structure snapshots"
@@ -1767,17 +1767,17 @@ sources:
       CSV, 5 columns, header "Symbol,Series,Security Name,Band,Remarks"; 3,524 data rows. `Band`
       is a percentage as an integer-valued string ("2", "5", "10", "20", "No Band"); Decimal on
       parse, never float.
-    fixture: {frozen: true, task: OPS, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
+    fixture: {frozen: true, task: W8, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
     history:
       measured_at: 2026-09-08T18:36:07+05:30
-      measured_by: OPS
+      measured_by: W8
       method: One GET. No date parameter, no date in the payload, no dated archive path.
       sessions_available: 1
       accrues_forward: true
       note: Depth 1 is the finding. Captured daily from 2026-09-08.
     failure_note: null
     candidate_alternatives: []
-    owner_task: OPS
+    owner_task: W8
 
   - id: nse_asm_list
     plan_row: "Market-structure snapshots"
@@ -1815,10 +1815,10 @@ sources:
       JSON object, keys `longterm` and `shortterm`, each `{"data": [...]}`; 138 + 84 rows. Row
       keys srno, symbol, companyName, isin, series, asmSurvIndicator ("Stage I".."Stage IV"),
       survCode, survDesc, asmTime (DD-Mon-YYYY). ISIN is native.
-    fixture: {frozen: true, task: OPS, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
+    fixture: {frozen: true, task: W8, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
     history:
       measured_at: 2026-09-08T18:36:11+05:30
-      measured_by: OPS
+      measured_by: W8
       method: One GET. The endpoint takes no date parameter and serves only the current list.
       sessions_available: 1
       earliest_available: 2026-09-08
@@ -1827,7 +1827,7 @@ sources:
       note: Depth 1 is the finding. Captured daily from 2026-09-08.
     failure_note: null
     candidate_alternatives: []
-    owner_task: OPS
+    owner_task: W8
 
   - id: nse_gsm_list
     plan_row: "Market-structure snapshots"
@@ -1862,10 +1862,10 @@ sources:
     parse_check: >-
       JSON array, 75 rows; keys srno, symbol, companyName, isin, gsmStage (Roman numeral),
       survCode, survDesc, gsmTime (DD-Mon-YYYY HH:MM:SS). ISIN is native.
-    fixture: {frozen: true, task: OPS, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
+    fixture: {frozen: true, task: W8, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
     history:
       measured_at: 2026-09-08T18:36:14+05:30
-      measured_by: OPS
+      measured_by: W8
       method: One GET. The endpoint takes no date parameter and serves only the current list.
       sessions_available: 1
       earliest_available: 2026-09-08
@@ -1874,7 +1874,7 @@ sources:
       note: Depth 1 is the finding. Captured daily from 2026-09-08.
     failure_note: null
     candidate_alternatives: []
-    owner_task: OPS
+    owner_task: W8
 
   - id: nse_esm_list
     plan_row: "Market-structure snapshots"
@@ -1909,10 +1909,10 @@ sources:
     parse_check: >-
       JSON array, 274 rows; keys srno, symbol, companyName, isin, esmSurvIndicator
       ("Stage I"/"Stage II"), survCode, survDesc, esmTime (DD-Mon-YYYY). ISIN is native.
-    fixture: {frozen: true, task: OPS, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
+    fixture: {frozen: true, task: W8, path: "tests/fixtures/nse_market_structure/2026-09-08/"}
     history:
       measured_at: 2026-09-08T18:36:17+05:30
-      measured_by: OPS
+      measured_by: W8
       method: One GET. The endpoint takes no date parameter and serves only the current list.
       sessions_available: 1
       earliest_available: 2026-09-08
@@ -1921,4 +1921,4 @@ sources:
       note: Depth 1 is the finding. Captured daily from 2026-09-08.
     failure_note: null
     candidate_alternatives: []
-    owner_task: OPS
+    owner_task: W8
