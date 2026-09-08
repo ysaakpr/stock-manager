@@ -33,6 +33,7 @@ from dataplatform.logging import get_logger
 
 __all__ = [
     "CONSTITUENTS_SNAPSHOT",
+    "DAILY_SNAPSHOT",
     "EOD_PIPELINE",
     "JOB_NAME",
     "Job",
@@ -41,6 +42,7 @@ __all__ = [
     "JobNotRegisteredError",
     "JobRegistry",
     "constituents_snapshot",
+    "daily_snapshot",
     "default_registry",
     "eod_pipeline",
 ]
@@ -241,6 +243,42 @@ CONSTITUENTS_SNAPSHOT = Job(
 )
 
 
+def daily_snapshot(context: JobContext) -> None:
+    """The daily market-structure snapshot (OPS): the only job here with a real deadline.
+
+    What it does: captures every snapshot-only source into L0 under today's date — the NSE and BSE
+    industry classifications, the price bands, the ASM/GSM/ESM surveillance lists, `EQUITY_L.csv`,
+    `symbolchange.csv` and the index constituent lists. None of these has a past: each endpoint
+    serves only its current snapshot, so every day this does not run is a day of history destroyed
+    that no later effort can recover. Idempotent per (source, date) — a second run the same day
+    makes zero requests. A source that fails, returns a malformed body, or answers 200 with another
+    session's file is journaled to `sync_state`, alerted, and left behind while the sweep goes on.
+    What it assumes: the injected clock and settings are the run's (B10), the database is migrated,
+    and the network is reachable — the real wiring is built inside `run_daily_snapshot_job`.
+    What it never does: fetch into a lake the operator did not declare
+    (`snapshot_expect_lake_root`, asserted before the first request), capture on a day the exchange
+    was shut (those are filed `GAP`), or file a payload whose own date is not today's as today's
+    data. The import is deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.daily_snapshot import run_daily_snapshot_job
+
+    run_daily_snapshot_job(context)
+
+
+#: The daily snapshot (OPS). 19:15 IST Monday to Friday — after the 15:30 close and after the
+#: surveillance lists and price bands for the next session are published, and comfortably clear of
+#: the 18:30 EOD pipeline so the two are not competing for the same host budget. Trading days only:
+#: the sweep files `GAP` for a closed day, so a *missed* day stays distinguishable from a day
+#: nothing was owed on. The timezone comes from `Settings`, never the host's.
+DAILY_SNAPSHOT = Job(
+    name="daily_snapshot",
+    cron="15 19 * * mon-fri",
+    fn=daily_snapshot,
+    timeout=timedelta(minutes=30),
+    description="Daily capture of every snapshot-only source — the deadline job (OPS)",
+)
+
+
 def l0_verify(context: JobContext) -> None:
     """The weekly L0 integrity sweep (2026-09-06 audit, finding N6).
 
@@ -318,4 +356,6 @@ def default_registry() -> JobRegistry:
     A fresh object each call rather than a module-level singleton: two processes in one test, or a
     test that registers an extra job, must not be able to mutate what the next one sees.
     """
-    return JobRegistry([EOD_PIPELINE, CONSTITUENTS_SNAPSHOT, L0_VERIFY, IDENTITY_REFRESH])
+    return JobRegistry(
+        [EOD_PIPELINE, DAILY_SNAPSHOT, CONSTITUENTS_SNAPSHOT, L0_VERIFY, IDENTITY_REFRESH]
+    )

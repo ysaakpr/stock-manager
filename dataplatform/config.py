@@ -138,6 +138,13 @@ class Settings(BaseSettings):
         default=Path("data"),
         description="root of the L0/L1/L2 lake; a relative path is anchored at the repo root",
     )
+    snapshot_expect_lake_root: Path | None = Field(
+        default=None,
+        description=(
+            "absolute L0 root the daily snapshotter asserts before its first request; unset "
+            "disables the check"
+        ),
+    )
 
     # ── crawl policy (§4.1: 2-3 s spacing, backoff, hard stop on a 403 spike) ─────────────────
     http_user_agent: str = Field(

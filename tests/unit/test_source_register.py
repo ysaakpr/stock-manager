@@ -171,6 +171,13 @@ def test_every_referenced_task_exists_in_the_graph(
         return task_id in known or bool(wave.match(task_id))
 
     for source in register.sources:
+        if source.parser.archive_only:
+            # No parser is named, so `owner_task` stands alone as the accountable task. It still
+            # has to resolve: an archive-only entry nobody owns is a payload nobody will parse.
+            assert source.owner_task is not None, f"{source.id}: archive-only with no owner_task"
+            assert resolves(source.owner_task), f"{source.id}: owner_task {source.owner_task}"
+            continue
+        assert source.parser.task is not None  # not archive-only, so the validator required it
         assert resolves(source.parser.task), f"{source.id}: parser.task {source.parser.task}"
         assert source.owner_task == source.parser.task, (
             f"{source.id}: owner_task {source.owner_task} != parser.task {source.parser.task}"
