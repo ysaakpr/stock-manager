@@ -786,6 +786,7 @@ def render_census(census: MembershipCensus, *, title: str | None = None) -> str:
     """
     lines: list[str] = []
     lines += _render_preamble(census, title=title)
+    lines += _render_preamble_tail(census)
     lines += _render_per_index(census)
     lines += _render_contiguity(census)
     lines += _render_changes(census)
@@ -809,12 +810,77 @@ def _render_preamble(census: MembershipCensus, *, title: str | None) -> list[str
         f"- **Distinct indices:** {len(census.indices)}",
         f"- **Distinct symbols, all indices:** {census.distinct_symbols:,}",
         f"- **Membership change events:** {census.total_changes:,}",
-        f"- **Header shapes / index-set shapes:** {len(census.headers)}",
+        f"- **Index-set shapes (arrival cohorts):** {len(census.headers)}",
         "",
+        "## 0. What this is, and how to reproduce it",
+        "",
+        "`ffix<DDMMYY>.csv` is a member of every NSE daily report bundle from 2010-01-04 to",
+        '2013-04-30. It was registered in `MemberKind` as **"Fixed income"**, which it is not:',
+        "`ffix` is *free-float index*, and the payload is the complete constituent list of every",
+        "index NSE published that session, with each member's investible factor, close, free-float",
+        "market cap and **index weightage**. That one wrong word is why `ops/BACKLOG.md:126`,",
+        "`AGENTIC_CONTEXT §4.1` and the multi-fund study all went on recording historical index",
+        "membership as structurally unbackfillable while three years of it sat in L0.",
+        "",
+        "**No bytes were fetched for this report.** Every number below was measured off the",
+        "authoritative lake by re-reading payloads that were already there, each re-checksummed",
+        "against its sidecar on the way in:",
+        "",
+        "```",
+        "DATA_ROOT=/home/ubuntu/stock-manager/data uv run python -m \\",
+        "    dataplatform.ingest.nse.pr_bundle.membership \\",
+        f"    --from {census.start.isoformat()} --to {census.end.isoformat()} --universe \\",
+        "    --out ops/gates/ffix-index-membership-census-2026-09-08.md",
+        "```",
+        "",
+        "### Format eras: there are none the parser can see",
+        "",
+        "The brief for this task assumed the format changes somewhere across 3.3 years. Swept",
+        f"rather than sampled, it does not: all {census.ffix_sessions:,} files carry the identical",
+        "9-column header `INDEX_FLG, SYMBOL, SERIES, SECURITY, ISSUE_CAP, INVESTIBLE_FACTOR,",
+        "CLOSE_PRIC, FF_MKT_CAP, WEIGHTAGE`, the identical row shape, and `INDEX_FLG` values that",
+        "are stable strings for the whole life of each index. Two things *do* change, and neither",
+        "is a parse era because the reader dispatches on neither:",
+        "",
+        f"**The index set**, in {len(census.headers)} arrival cohorts — and no index ever leaves:",
+        "",
+        "| from | indices | sessions on this shape |",
+        "|---|---|---|",
     ]
+
+    # A cohort's arrival is the *latest* first-seen among the indices in that shape: the shape
+    # exists from the day its newest member started being published. Sorted on the same value it
+    # displays, so the table reads as the timeline it is.
+    def _arrival(shape: str) -> date:
+        return max(
+            (i.first_seen for i in census.indices if i.index_name in shape.split(",")),
+            default=census.start,
+        )
+
+    for shape, count in sorted(census.headers.items(), key=lambda item: _arrival(item[0])):
+        out.append(f"| {_arrival(shape).isoformat()} | {len(shape.split(','))} | {count:,} |")
+    out += [
+        "",
+        "**One banner string.** The display banner above each index's block renamed",
+        "`S&P CNX Nifty Sec.` → `CNX Nifty Sec.` in March 2013, and relapsed to the old text for",
+        "exactly one session before the rename stuck. `INDEX_FLG` never moved, and membership is",
+        "read from `INDEX_FLG` alone — a banner-keyed reader would have reported all 50 NIFTY",
+        "constituents removed and 50 added to a brand-new index on a date nothing happened.",
+        "",
+        "| banner (display name only, never an index identity) | sessions |",
+        "|---|---|",
+    ]
+    for banner, count in sorted(census.announced_banners.items()):
+        out.append(f"| `{banner}` | {count:,} |")
+    out.append("")
+    return out
+
+
+def _render_preamble_tail(census: MembershipCensus) -> list[str]:
+    out: list[str] = []
     if census.recovered:
         out += [
-            "## Bundles recovered by dating the `ffix` member from its own name",
+            "### Bundles recovered by dating the `ffix` member from its own name",
             "",
             "`PrBundle` refuses to date a bundle whose members disagree, which is correct for a",
             "corporate action. These two would otherwise have been lost; the `ffix` member's own",
@@ -1058,6 +1124,22 @@ def _render_sector(census: MembershipCensus) -> list[str]:
             "which cuts both ways: it is one less thing a point-in-time series has to model, and",
             "it is also years of evidence that these ten indices are not where a reclassification",
             "would show up first — a sector *rename* or a new index would not appear as a move.",
+            "",
+        ]
+    if sector.symbols_whose_sector_changed:
+        arrivals = sorted({index.first_seen for index in census.indices if index.is_sectoral})
+        out += [
+            "**Read those changes carefully — half of each is an artefact of the corpus, not an",
+            "event.** The sectoral indices arrive in cohorts ("
+            + ", ".join(day.isoformat() for day in arrivals)
+            + "), and on a cohort's arrival date every one of its members *gains* that sector in",
+            "this file for the first time. That gain is the index starting to be published, not",
+            "the exchange reclassifying anything. What is unambiguously real is the **departure**:",
+            "a symbol that stops appearing in a sectoral it had been in, on a date no index",
+            "arrived. Each of the symbols above ends the span holding a sector it did not start",
+            "with *and* having lost one it did hold, so all of them changed sector — but the date",
+            "to trust is the loss, and a reconstruction validated against this corpus must treat",
+            "a cohort-arrival date as uninformative rather than as a reconstitution.",
             "",
         ]
     fraction = sector.coverage_fraction

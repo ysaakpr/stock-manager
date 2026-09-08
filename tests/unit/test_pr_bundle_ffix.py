@@ -326,6 +326,14 @@ def test_numeric_fields_survive_their_leading_pad() -> None:
 
 
 def test_every_numeric_field_is_a_decimal() -> None:
+    """At runtime, on a row read from a real file — pydantic coerces, so this is not a tautology.
+
+    A `float` annotation on any of these fields would still *parse*; it would just quietly lose
+    precision. There is no companion `assert not isinstance(value, float)` here because
+    `mypy --strict` rejects it as unreachable — `Decimal` and `float` have disjoint bases — which
+    is a stronger guarantee than the assert would have been, enforced at the gate rather than
+    only on the rows a test happens to read.
+    """
     row = _era("ffix_three_index").rows[0]
     for field in (
         "issue_cap",
@@ -336,7 +344,7 @@ def test_every_numeric_field_is_a_decimal() -> None:
     ):
         value = getattr(row, field)
         assert isinstance(value, Decimal), f"{field} is {type(value).__name__}, not Decimal"
-        assert not isinstance(value, float)
+        assert type(value) is Decimal
 
 
 def test_a_free_float_market_cap_is_held_exactly_and_float_cannot_hold_it() -> None:
