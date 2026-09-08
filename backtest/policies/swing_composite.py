@@ -50,10 +50,28 @@ trailing stop** — return-neutral (6.43 % vs 6.33 %) while cutting the 5th-perc
 -25.3 % to -24.0 %, and materially more at tighter settings for those who want it. It is checked
 every session against that session's close, so it is a real stop and not a month-end approximation.
 
+**M12.1 widened the engine without moving a default.** The entry score was always a weighted sum of
+rank-normalised legs; only three legs existed. Five more now do — the 5-session return, the
+21-session return, delivery *acceleration* (its 5-session mean over its 63-session mean), turnover
+expansion and proximity to a 50-session mean — plus volatility as a scored leg rather than only the
+screen it already was. Every weight is **signed**, so a leg can be asked for its reverse: a negative
+``weight_return_5`` is the short-term reversal family, which nothing in this repo had measured, and
+a positive one is short-term trend. Every new weight defaults to zero, so the policy above this
+paragraph is bit-for-bit the one M10.7 measured, and a leg the lake cannot compute for a name takes
+its neutral value (0 for a return, 1 for a ratio) rather than dropping the name — the candidate set
+must not move with the weight vector, or an arm-to-arm comparison becomes a universe comparison.
+
+M12.1 also added the ``regime_filter`` gate momentum v2 has carried since M9.5 and this policy did
+not: no new buys while the broad-market proxy sits below its own 200-session mean. It suppresses
+*buys only*. Every exit is staged before the gate is consulted, because risk-off must never trap a
+position the band, the re-underwrite or the stop has already decided to sell — the book runs down
+through its own exits rather than being liquidated on the gate. A session with no regime reading at
+all is treated as risk-**off**: an absent regime is not a licence to buy.
+
 Point-in-time (invariant #7): every figure on a record — the 252-session high, the delivery mean,
-the 12-1 return, the volatility — is struck over sessions on or before the record's
-``knowable_date``, and every read goes through ``ctx.pit.admit``. The trailing stop reads only the
-current session's close.
+the 12-1 return, the volatility, every M12.1 leg — is struck over sessions on or before the record's
+``knowable_date``, and every read goes through ``ctx.pit.admit``, the regime reading included. The
+trailing stop reads only the current session's close.
 
 What it never does: read a wall clock (time is ``ctx.clock``), key on a symbol (ISIN only —
 invariant #2), hold a cost model (the injected broker owns the one shared model — invariants #4/#5),
@@ -72,12 +90,14 @@ from typing import Protocol, runtime_checkable
 
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from backtest.policies.momentum_v2 import RegimeReading
 from backtest.replay import SessionContext, SessionDecision
 from backtest.sip import simulate_sip_instalment
 from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, Holding, OrderRequest, Side
 
 __all__ = [
+    "RegimeReading",
     "SwingCompositeData",
     "SwingCompositeParameters",
     "SwingCompositePolicy",
@@ -108,6 +128,21 @@ class SwingRecord:
     * ``price`` — the raw close the whole-share sizing and the trailing stop read (invariant #3:
       the adjusted series is for the signal, never for a fill).
 
+    M12.1 added five more legs, each of which the lake already carried and no policy read. They are
+    *features*, not directions: the sign lives in the weight, so ``weight_return_5`` negative is the
+    short-term reversal family and positive is short-term trend, and neither is asserted here.
+
+    * ``return_5`` — the 5-session return. The input to the one classical short-horizon effect
+      nothing in this repo had measured.
+    * ``momentum_1m`` — the 21-session return: the swing horizon's own trend, which the 12-1 leg
+      deliberately excludes (12-1 skips the most recent month).
+    * ``delivery_trend`` — the 5-session delivery mean over its 63-session mean, so ``1.2`` is a
+      fifth more delivery than usual. Where ``delivery_share`` is the *level*, this is the change,
+      and it is the largest name-level coefficient in X2's fitted forecast.
+    * ``turnover_expansion`` — the 5-session mean traded value over its 63-session mean: whether the
+      tape is getting busier in this name.
+    * ``ma_proximity`` — the close over its own 50-session mean.
+
     Never holds a ``float``, a non-positive price, or a non-positive high proximity.
     """
 
@@ -118,9 +153,27 @@ class SwingRecord:
     volatility: Decimal
     price: Decimal
     knowable_date: date
+    # M12.1 legs. Neutral defaults, so a record built for the three original legs — or for the
+    # per-session marks, which carry only a price — is unchanged and scores these at zero weight.
+    return_5: Decimal = _ZERO
+    momentum_1m: Decimal = _ZERO
+    delivery_trend: Decimal = _ONE
+    turnover_expansion: Decimal = _ONE
+    ma_proximity: Decimal = _ONE
 
     def __post_init__(self) -> None:
-        for name in ("high_proximity", "delivery_share", "momentum_12_1", "volatility", "price"):
+        for name in (
+            "high_proximity",
+            "delivery_share",
+            "momentum_12_1",
+            "volatility",
+            "price",
+            "return_5",
+            "momentum_1m",
+            "delivery_trend",
+            "turnover_expansion",
+            "ma_proximity",
+        ):
             if not isinstance(getattr(self, name), Decimal):
                 raise TypeError(
                     f"{name} must be a Decimal — money/signal is never float (CLAUDE.md)"
@@ -189,6 +242,16 @@ class SwingCompositeParameters:
     weight_high: Decimal = _ONE
     weight_delivery: Decimal = _ONE
     weight_momentum: Decimal = _ONE
+    # M12.1: signed weights on the new legs, every one zero by default so the arm above this line
+    # is bit-for-bit the M10.7 policy. A negative weight ranks a leg's reverse — that is how the
+    # reversal family is expressed, rather than by storing a negated feature.
+    weight_return_5: Decimal = _ZERO
+    weight_momentum_1m: Decimal = _ZERO
+    weight_delivery_trend: Decimal = _ZERO
+    weight_turnover_expansion: Decimal = _ZERO
+    weight_ma_proximity: Decimal = _ZERO
+    weight_volatility: Decimal = _ZERO
+    regime_filter: bool = False
     buy_budget_fraction: Decimal = Decimal("0.98")
     sleeve: Sleeve = Sleeve.TACTICAL
 
@@ -220,6 +283,12 @@ class SwingCompositeParameters:
             "weight_high",
             "weight_delivery",
             "weight_momentum",
+            "weight_return_5",
+            "weight_momentum_1m",
+            "weight_delivery_trend",
+            "weight_turnover_expansion",
+            "weight_ma_proximity",
+            "weight_volatility",
         ):
             if not isinstance(getattr(self, name), Decimal):
                 raise TypeError(f"{name} must be a Decimal")
@@ -260,6 +329,14 @@ class SwingCompositeData(Protocol):
     def marks(self, as_of: date) -> Dataset[SwingRecord]:
         """This session's raw closes, as records, for stop checking."""
 
+    def regime(self, as_of: date) -> Dataset[RegimeReading]:
+        """The broad-market regime as of ``as_of``, as a one-element guardable dataset (M12.1).
+
+        Read only when ``regime_filter`` is on. The reading is momentum v2's
+        :class:`~backtest.policies.momentum_v2.RegimeReading` unchanged, so both policies are gated
+        by the same definition of risk-off and a difference between them is never the definition.
+        """
+
 
 def composite_scores(
     records: Sequence[SwingRecord], params: SwingCompositeParameters
@@ -282,6 +359,12 @@ def composite_scores(
         ("high_proximity", params.weight_high),
         ("delivery_share", params.weight_delivery),
         ("momentum_12_1", params.weight_momentum),
+        ("return_5", params.weight_return_5),
+        ("momentum_1m", params.weight_momentum_1m),
+        ("delivery_trend", params.weight_delivery_trend),
+        ("turnover_expansion", params.weight_turnover_expansion),
+        ("ma_proximity", params.weight_ma_proximity),
+        ("volatility", params.weight_volatility),
     ):
         if weight == _ZERO:
             continue
@@ -439,12 +522,31 @@ class SwingCompositePolicy:
         sells = list(stopped) + rule_sells
         exiting = {order.isin for order, _ in sells}
         target = {record.isin: record for record in chosen if record.isin not in exiting}
+        # M12.1's regime gate suppresses *buys* only. Every exit above this line has already been
+        # staged, which is the whole point: risk-off must never trap a position the band, the
+        # re-underwrite or the stop has decided to sell. With no buys the book runs down through its
+        # own exits rather than being liquidated on the gate.
+        if self._params.regime_filter and not self._risk_on(ctx):
+            target = {}
         buys, drift = self._buys(ctx, held, target)
 
         orders = tuple(order for order, _ in (*sells, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
         evidence = self._evidence(ctx.session, chosen, scores, by_isin, drift, len(candidates))
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
+
+    def _risk_on(self, ctx: SessionContext) -> bool:
+        """Whether the broad market sits at or above its own trailing mean (M12.1).
+
+        Assumes the data source serves exactly one reading for the session, admitted through the
+        same point-in-time guard as every other read. A session with no reading at all is treated
+        as risk-**off**: an absent regime is not a licence to buy, and silently defaulting to
+        risk-on would make the gate disappear on exactly the sessions the store is thinnest.
+        """
+        readings = tuple(ctx.pit.admit(self._data.regime(ctx.session)))
+        if not readings:
+            return False
+        return readings[0].risk_on
 
     def _screen(self, candidates: Sequence[SwingRecord]) -> tuple[SwingRecord, ...]:
         """The names eligible to be *bought*: all but the most volatile ``exclude_vol_fraction``."""

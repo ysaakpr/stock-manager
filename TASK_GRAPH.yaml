@@ -21,6 +21,8 @@ milestones:
   M9: {title: Trustworthy backtest inputs + momentum v2, depends: [M2, M3, M4]}
   M10: {title: Alternative signals — sector rotation + fundamentals, depends: [M3, M4, M7, M9]}
   M11: {title: Macro backdrop — PIT economic + market-state series, depends: [M4]}
+  M12: {title: Strategy search — short-horizon families and the risk-adjusted comparison,
+        depends: [M9, M10]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -846,8 +848,13 @@ tasks:
     - "a break-condition keyword set matches the intended announcements and not obvious false positives"
   verify: "uv run pytest tests/unit/test_announcements.py -q"
 
-- id: M3.9
-  title: Index constituents history + benchmark TRI
+# M3.9 was one task owning two §4.1 rows — row 7 (index constituents, VERIFIED) and row 8
+# (benchmark TRI, recorded FAILED). It could therefore be neither honestly done nor honestly
+# blocked, and it was closed DONE with row 8 satisfied by the computed fallback instead of the
+# published series. D8 (2026-08-10) approved the split, one task per source row.
+
+- id: M3.9.a
+  title: Index constituents history (monthly snapshots, PIT membership)
   milestone: M3
   module: D1
   autonomy: AUTO
@@ -855,21 +862,51 @@ tasks:
   spec: |
     Ingest niftyindices constituent CSVs (NIFTY 50, sectoral, thematic) as monthly snapshots — constituent
     history accumulates from day one (§4.1) and is what kills survivorship bias in M4's PIT universe.
-    Ingest benchmark TRI series (with the computed price-index + dividend-estimate fallback noted).
     Snapshot semantics: never overwrite a prior month's membership.
+    Source: `nifty_index_constituents` (§4.1 row 7).
   deliverables: [dataplatform/ingest/indices.py, tests/unit/test_indices.py]
   acceptance:
     - "a monthly snapshot is stored immutably with its as-of date"
     - "membership as-of a historical date is queryable and returns the snapshot in force then"
-    - "NIFTY-TRI series ingested and spot-checked against a published value"
   verify: "uv run pytest tests/unit/test_indices.py -q"
+
+- id: M3.9.b
+  title: Benchmark TRI ingest — the published NIFTY total-return series
+  milestone: M3
+  module: D1
+  autonomy: AUTO
+  deps: [M1.2, M1.7]
+  spec: |
+    Ingest the *published* NIFTY total-return series (§4.1 row 8, `nifty_tri_history`) for NIFTY 50,
+    NIFTY IT and NIFTY CPSE at maximum depth: `POST https://niftyindices.com/BackPage/getTotalReturnIndexString`
+    with the `cinfo` string envelope — one request per index for its whole history, no session cookie,
+    no Referer, no key. The pre-D8 register recorded this row FAILED against `Backpage.aspx/...`, a
+    stale path that answers 200 with the site's home page; D8 corrected it.
+    Land L0 (immutable, sidecar receipt) -> parse -> L1 `benchmark_tri` -> `sync_state`, per index.
+    Three observed parser traps are part of the contract, not folklore: rows arrive newest-first;
+    index names are sent in CAPS and echo back title-cased, so the lake slug comes from the requested
+    name; and `RequestNumber` regenerates per request, so nothing derived from the payload may carry it.
+    `knowable_date` is a pure function of each row's own published session date (the exchange
+    disseminates a session's TRI after that session's close) — never `clock.now().date()`, which is
+    the live defect at dataplatform/ingest/bse/corp_actions.py:214 that made invariant #7 vacuous.
+    §4.1's computed price-index + dividend-estimate series stays as the documented *fallback*: reads
+    prefer the published series, and the backtest states which one it used.
+  deliverables: [dataplatform/ingest/indices.py, dataplatform/ingest/tri_backfill.py, tests/unit/test_benchmark_tri.py, "tests/fixtures/nifty_indices/tri/2026/"]
+  acceptance:
+    - "the published TRI parses from tests/fixtures/nifty_indices/tri/2026/ for NIFTY 50, NIFTY IT and NIFTY CPSE over 2021-04-01..2026-03-31: 1,239 rows per index with identical date sets"
+    - "dates are strictly increasing after normalisation, with no duplicate and no gap against the M1.7 trading calendar"
+    - "the literal Decimal levels 33655.43 / 41606.83 / 11793.29 on 2026-03-30 (D8's independently recorded published values — M3.9's never-satisfied spot-check, now offline)"
+    - "every level is Decimal and positive, and NTR_Value is None — never Decimal 0 — where the source publishes '-'"
+    - "knowable_date is derived from the row's own session date and is unmoved by any clock"
+    - "no acceptance criterion here requires a network fetch at verify time (D8, rule B8)"
+  verify: "uv run pytest tests/unit/test_benchmark_tri.py -q"
 
 - id: M3.10
   title: "GATE M3 — BSE + flows + F&O audit"
   milestone: M3
   module: "—"
   autonomy: GATE_AUDIT
-  deps: [M3.3, M3.4, M3.5, M3.6, M3.7, M3.8, M3.9]
+  deps: [M3.3, M3.4, M3.5, M3.6, M3.7, M3.8, M3.9.a, M3.9.b]
   spec: |
     Verify M3's three boxes: cross-exchange sanity checker live; flows queryable as far back as sources
     genuinely permit (state the real depth per source, don't claim 10y if it isn't there); announcements
@@ -906,7 +943,7 @@ tasks:
   milestone: M4
   module: D4
   autonomy: AUTO
-  deps: [M4.1, M3.9]
+  deps: [M4.1, M3.9.a]
   spec: |
     Shape (c) screen-style filters over cross-sections joined to flows/fundamentals; shape (d)
     point-in-time universe as of a historical date, built from index-constituent history + listing status,
@@ -980,7 +1017,7 @@ tasks:
   milestone: M4
   module: X2
   autonomy: AUTO
-  deps: [M4.5, M3.9]
+  deps: [M4.5, M3.9.b]
   spec: |
     backtest/accounting.py: positions, cash ledger, realized/unrealized P&L, corporate-action handling in
     the book (splits change quantity, demergers create positions), XIRR for irregular SIP cashflows, and
@@ -1796,7 +1833,7 @@ tasks:
   milestone: M9
   module: X2
   autonomy: AUTO
-  deps: [M9.2, M3.9]
+  deps: [M9.2, M3.9.a]
   spec: |
     Constrain the backtest universe from "every name that traded" to an investable, liquid set as-of
     each rebalance, killing the fake microcap momentum the current run can pick (ops/BACKLOG.md,
@@ -1815,7 +1852,7 @@ tasks:
   milestone: M9
   module: X2
   autonomy: AUTO
-  deps: [M9.3, M3.9]
+  deps: [M9.3, M3.9.b]
   spec: |
     Replace the L1 broad-market proxy benchmark with the real NIFTY total-return series through the
     M3.9 pipeline. The licensed niftyindices TRI endpoint is session-gated and FAILED at C.1, so use
@@ -1867,7 +1904,7 @@ tasks:
   milestone: M10
   module: D1
   autonomy: AUTO
-  deps: [M3.9]
+  deps: [M3.9.a]
   spec: |
     Land the sector/industry classification the M3.9 constituents ingester already parses but no
     runner fills. Build a fetch->L0->parse->persist runner over the niftyindices constituent CSVs
@@ -2101,4 +2138,109 @@ tasks:
     why_blocked: "B1: a fetch campaign over ~200 requests to one source is owner-authorized, not agent-initiated."
     unblocks: [M11.3]
   verify: "uv run pytest tests/unit/test_macro_backfill.py -q"
+# ─────────────────────────────────────────────────────────────────────────────
+# M12 — Strategy search (short-horizon families + the risk-adjusted comparison)
+# ─────────────────────────────────────────────────────────────────────────────
 
+- id: M12.1
+  title: Widen the swing engine — six new signal legs and a regime gate, defaults unchanged
+  milestone: M12
+  module: X2
+  autonomy: AUTO
+  deps: [M10.7]
+  spec: |
+    M10.7 built a swing engine whose entry score is a weighted sum of rank-normalised legs, and
+    wired exactly three legs into it. The engine generalises for free; the legs do not exist. This
+    adds the ones the lake already carries and no policy reads, as *signed* weights so one leg can
+    be asked for its reverse:
+
+      * `return_5` — the 5-session return, for the short-term reversal family (a negative weight).
+        The one classical short-horizon effect nothing here has measured.
+      * `momentum_1m` — the 21-session return, the swing horizon's own trend, distinct from 12-1.
+      * `delivery_trend` — the 5-session delivery mean over its 63-session mean. The *acceleration*
+        of delivery, where M10.7's leg is its level; the largest name-level coefficient in X2's
+        fitted forecast.
+      * `turnover_expansion` — 5-session mean traded value over its 63-session mean.
+      * `ma_proximity` — close over its own 50-session mean.
+      * `volatility` as a scored leg, not only the screen it already is.
+
+    Plus a `regime_filter` gate of the shape momentum v2 already carries (M9.5): no new buys while
+    the broad market sits below its own 200-session mean. It is the largest drawdown lever measured
+    on this lake and the swing policy has no access to it.
+
+    Every new weight defaults to zero and the gate defaults off, so the default arm must reproduce
+    M10.7's measurement to the digit — that is the acceptance criterion, not a nicety. The features
+    join the one existing bulk windowed query rather than adding a pass over the lake.
+  deliverables: [backtest/policies/swing_composite.py, backtest/run.py, tests/unit/test_swing_composite.py]
+  acceptance:
+    - "every new leg defaults to weight zero and the default arm's run digest is unchanged against
+       M10.7's — proven by a test, not by inspection"
+    - "each new leg is pinned by an inversion test: flip the sign of its weight and a test fails"
+    - "the regime gate blocks buys and never blocks an exit; a test pins both directions"
+    - "every new feature window is ROWS BETWEEN n PRECEDING AND CURRENT ROW and no new pass over
+       the lake is added"
+  verify: "uv run pytest tests/unit/test_swing_composite.py -q"
+
+- id: M12.2
+  title: The strategy sweep runner — many arms, one lake pass, ranked on return per drawdown
+  milestone: M12
+  module: X2
+  autonomy: AUTO
+  deps: [M12.1]
+  spec: |
+    Every comparison report here re-reads the lake once per arm, which is why no report has ever
+    carried more than fourteen. A twenty-arm sweep at that cost is hours of repeated I/O for one
+    windowed query that does not change between arms. This builds the runner that reads once and
+    replays many.
+
+    The arms are the strategy families, not parameter noise: the two momentum baselines, the
+    fundamentals arms, the M10.7 swing family, and the short-horizon families M12.1's legs make
+    expressible — reversal, delivery acceleration, 1-month trend, breakout, and the regime-gated
+    and concentrated editions of each.
+
+    Ranking is on **return per unit of drawdown** (XIRR / max drawdown), by owner decision
+    2026-09-07, with XIRR, drawdown, round trips, cost and benchmark excess all reported beside it.
+    A ranking on return alone puts a 45%-drawdown arm first and is the reason this decision exists.
+
+    Each arm runs on two liquidity floors — the inherited Rs 1 crore median-turnover floor for
+    discovery and a Rs 10 crore floor for what a real book could reach — because M10.7 measured the
+    edge as concentrated in the thinner half of the investable set.
+  deliverables: [backtest/sweep.py, tests/unit/test_sweep.py, ops/gates/M12-strategy-sweep-report.md]
+  acceptance:
+    - "one windowed lake pass serves every arm; a second pass is a defect the test catches"
+    - "at least twenty distinct strategy arms, each differing from a named reference by one stated
+       change"
+    - "arms are ranked on XIRR / max drawdown, and every arm reports XIRR, max drawdown, round
+       trips, cost and excess against the same benchmark"
+    - "every arm runs on both liquidity floors and the report states both"
+    - "an arm that fails to run is reported as a failed arm, never dropped from the table"
+  verify: "uv run pytest tests/unit/test_sweep.py -q"
+
+- id: M12.3
+  title: Walk-forward the finalists, and the verdict on what the sweep can be asked to prove
+  milestone: M12
+  module: X2
+  autonomy: AUTO
+  deps: [M12.2]
+  spec: |
+    A sweep of twenty arms over one window selects on that window, and the arm that wins a sweep is
+    the arm most flattered by it. This is the out-of-sample check and the honest reading.
+
+    Three windows, stated separately and never averaged: the full decade 2016-09 to 2026-08, the
+    2019-07 to 2026-08 window the existing ~23% figures came from, and a walk-forward split that
+    chooses on 2016-09..2021-08 and verifies on 2021-09..2026-08. The selection window's winner is
+    named *before* the verification window is read, and the report prints both ranks so the decay
+    from selection to verification is visible rather than inferred.
+
+    The verdict states plainly whether the owner's >25% XIRR bar is met, on which window, on which
+    liquidity floor, and at what drawdown — and if it is met only on the flattering window or only
+    on the unreachable floor, it says that instead of reporting the number.
+  deliverables: [ops/gates/M12-strategy-verdict.md]
+  acceptance:
+    - "the selection-window winner is named before the verification window's figures are read, and
+       both ranks are printed"
+    - "no figure is averaged across windows; each window is reported on its own"
+    - "the >25% question is answered with the window, the floor and the drawdown attached, or
+       answered no"
+    - "every arm that beats the bar on the six-year window but not the decade is named as such"
+  verify: "test -s ops/gates/M12-strategy-verdict.md"

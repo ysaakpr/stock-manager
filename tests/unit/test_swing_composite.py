@@ -1,10 +1,18 @@
-"""M10.7 — the swing-composite policy, unit-tested offline (EXECUTION_PLAN §7, X2).
+"""M10.7/M12.1 — the swing-composite policy, unit-tested offline (EXECUTION_PLAN §7, X2).
 
 Every entry and exit rule is pinned by an **inversion test**: a test that fails if the rule is
 reversed — the wrong end of the composite bought, a name churned that the band should carry, a
 still-qualifying name liquidated at ``max_hold``, a stop that fires upward, a rejected sell
-re-staged the very next session. The point-in-time guard is pinned on both reads the policy makes
-(the signal and the daily marks), and determinism is pinned by deciding the same session twice.
+re-staged the very next session. The point-in-time guard is pinned on all three reads the policy
+makes (the signal, the daily marks and M12.1's regime reading), and determinism is pinned by
+deciding the same session twice.
+
+M12.1's tests are at the foot of the file and answer its two acceptance questions directly. Each new
+leg gets the same inversion treatment, parametrised: score on that leg alone and the basket must
+flip end for end with the weight's sign. The "no default moved" claim is proven rather than asserted
+— scoring the fixture with absurd new-leg values against scoring it with neutral ones must give
+*identical* scores under default parameters, which is the offline form of "the default arm's run
+digest is unchanged".
 
 No store, no network, no wall clock (B8, invariant #11): the policy stands alone against an
 in-memory source.
@@ -14,11 +22,13 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 
 from analyst.journal.models import Decision, Sleeve
 from backtest.policies.swing_composite import (
+    RegimeReading,
     SwingCompositeParameters,
     SwingCompositePolicy,
     SwingRecord,
@@ -48,6 +58,11 @@ def _rec(
     vol: str = "0.02",
     price: str = "100",
     knowable: date = SESSION,
+    return_5: str = "0",
+    momentum_1m: str = "0",
+    delivery_trend: str = "1",
+    turnover_expansion: str = "1",
+    ma_proximity: str = "1",
 ) -> SwingRecord:
     return SwingRecord(
         isin=isin,
@@ -57,6 +72,34 @@ def _rec(
         volatility=Decimal(vol),
         price=Decimal(price),
         knowable_date=knowable,
+        return_5=Decimal(return_5),
+        momentum_1m=Decimal(momentum_1m),
+        delivery_trend=Decimal(delivery_trend),
+        turnover_expansion=Decimal(turnover_expansion),
+        ma_proximity=Decimal(ma_proximity),
+    )
+
+
+#: The M12.1 legs: the ``_rec`` keyword that sets one, and the weight field that scores it.
+#: ``volatility`` predates M12.1 as a *screen*; M12.1 is what lets it also be scored.
+_M12_LEGS = (
+    ("return_5", "weight_return_5"),
+    ("momentum_1m", "weight_momentum_1m"),
+    ("delivery_trend", "weight_delivery_trend"),
+    ("turnover_expansion", "weight_turnover_expansion"),
+    ("ma_proximity", "weight_ma_proximity"),
+    ("vol", "weight_volatility"),
+)
+
+
+def _only(weight_field: str, weight: str) -> SwingCompositeParameters:
+    """Parameters that score on exactly one leg — the three M10.7 legs off, ``weight_field`` on."""
+    override: dict[str, Any] = {weight_field: Decimal(weight)}
+    return SwingCompositeParameters(
+        weight_high=Decimal("0"),
+        weight_delivery=Decimal("0"),
+        weight_momentum=Decimal("0"),
+        **override,
     )
 
 
@@ -79,10 +122,12 @@ class _Data:
         *,
         rebalance: bool = True,
         marks: dict[str, str] | None = None,
+        risk_on: bool = True,
     ) -> None:
         self._records = records
         self.rebalance = rebalance
         self.marks_at = marks
+        self.risk_on = risk_on
 
     def at(self, *, rebalance: bool | None = None, marks: dict[str, str] | None = None) -> _Data:
         """Move the fixture to the next session's state — what a test flips between decisions."""
@@ -112,6 +157,40 @@ class _Data:
         return Dataset.declaring(
             f"marks@{as_of.isoformat()}", records, knowable_date=lambda r: r.knowable_date
         )
+
+    def regime(self, as_of: date) -> Dataset[RegimeReading]:
+        """A one-element regime reading. ``risk_on`` picks which side of the mean it sits on."""
+        level, mean = (
+            (Decimal("110"), Decimal("100"))
+            if self.risk_on
+            else (
+                Decimal("90"),
+                Decimal("100"),
+            )
+        )
+        reading = RegimeReading(index_level=level, moving_average=mean, knowable_date=as_of)
+        return Dataset.declaring(
+            f"regime@{as_of.isoformat()}", (reading,), knowable_date=lambda r: r.knowable_date
+        )
+
+
+class _EmptyRegime(_Data):
+    """A source that serves no regime reading at all — the store is thin on this session."""
+
+    def regime(self, as_of: date) -> Dataset[RegimeReading]:
+        return Dataset.declaring("regime", (), knowable_date=lambda r: r.knowable_date)
+
+
+class _LeakingRegime(_Data):
+    """A source whose regime reading claims to be knowable after the session — a leak."""
+
+    def regime(self, as_of: date) -> Dataset[RegimeReading]:
+        reading = RegimeReading(
+            index_level=Decimal("110"),
+            moving_average=Decimal("100"),
+            knowable_date=as_of + timedelta(days=1),
+        )
+        return Dataset.declaring("leak", (reading,), knowable_date=lambda r: r.knowable_date)
 
 
 class _LeakingSignal(_Data):
@@ -550,3 +629,141 @@ def test_a_float_signal_or_price_is_refused(field: str) -> None:
 def test_a_non_positive_price_is_refused() -> None:
     with pytest.raises(ValueError):
         _rec(A, price="0")
+
+
+# ── M12.1: the new legs, and the regime gate ─────────────────────────────────────────────────────
+
+
+def test_every_new_leg_defaults_to_zero_weight() -> None:
+    """The acceptance criterion, stated directly: M12.1 changed no default."""
+    params = SwingCompositeParameters()
+    for _attribute, weight_field in _M12_LEGS:
+        assert getattr(params, weight_field) == Decimal("0"), weight_field
+    assert params.regime_filter is False
+
+
+def test_the_new_legs_cannot_move_a_default_arm() -> None:
+    """Score the fixture twice — neutral legs, then absurd ones. Default weights ignore both.
+
+    This is the "M10.7's measurement is reproduced" proof at the level where it can be proven
+    offline: the composite is a pure function of records and weights, so if a wild leg value cannot
+    move the default score, it cannot move the default arm's fills either.
+    """
+    wild = tuple(
+        _rec(
+            record.isin,
+            high=str(record.high_proximity),
+            delivery=str(record.delivery_share),
+            momentum=str(record.momentum_12_1),
+            # Reversed against the composite order, and large enough to dominate any leg that read
+            # them — E best, A worst on every new leg.
+            return_5=str(Decimal("0.5") - Decimal(index) / Decimal("10")),
+            momentum_1m=str(Decimal("9") - Decimal(index)),
+            delivery_trend=str(Decimal("5") - Decimal(index)),
+            turnover_expansion=str(Decimal("5") - Decimal(index)),
+            ma_proximity=str(Decimal("5") - Decimal(index)),
+            vol=str(record.volatility),
+        )
+        for index, record in enumerate(_RECORDS)
+    )
+    default = SwingCompositeParameters()
+    assert composite_scores(wild, default) == composite_scores(_RECORDS, default)
+
+
+@pytest.mark.parametrize(("keyword", "weight_field"), _M12_LEGS)
+def test_each_new_leg_buys_its_top_end_and_inverts_with_its_sign(
+    keyword: str, weight_field: str
+) -> None:
+    """The inversion test, one per leg: flip the weight's sign and the basket flips end for end.
+
+    Every other leg is off, so the ranking is this leg alone. A leg that scored nothing would fail
+    both halves; a leg wired to the wrong attribute would fail at least one.
+    """
+
+    def leg(index: int) -> dict[str, Any]:
+        # 0.01 upward, so no leg's value is zero — a zero volatility is legal but uninformative.
+        return {keyword: str((Decimal(index) + 1) / Decimal("100"))}
+
+    records = tuple(_rec(isin, **leg(index)) for index, isin in enumerate((A, B, C, D, E)))
+    ascending = [r.isin for r in records]  # A lowest, E highest on this leg
+    positive = composite_scores(records, _only(weight_field, "1"))
+    negative = composite_scores(records, _only(weight_field, "-1"))
+    assert max(positive, key=lambda isin: positive[isin]) == ascending[-1]
+    assert max(negative, key=lambda isin: negative[isin]) == ascending[0]
+
+
+def test_a_negative_return_5_weight_is_the_reversal_family() -> None:
+    """Named separately because it is the point of the signed weights, not an incidental case."""
+    records = (
+        _rec(A, return_5="0.30"),  # a week of strong gains
+        _rec(B, return_5="-0.20"),  # a week of losses
+    )
+    reversal = composite_scores(records, _only("weight_return_5", "-1"))
+    assert reversal[B] > reversal[A]
+
+
+def test_the_regime_gate_blocks_every_buy_when_the_market_is_below_its_mean() -> None:
+    params = SwingCompositeParameters(
+        top_n=2, exclude_vol_fraction=Decimal("0"), regime_filter=True
+    )
+    broker = _FakeBroker(cash=Decimal("100000"))
+    decision = SwingCompositePolicy(_Data(risk_on=False), params).decide(_ctx(SESSION, broker))
+    assert _bought(decision) == set()
+
+
+def test_the_regime_gate_does_not_block_a_buy_when_the_market_is_above_its_mean() -> None:
+    """The inversion of the test above: the same arm, the only change the side of the mean."""
+    params = SwingCompositeParameters(
+        top_n=2, exclude_vol_fraction=Decimal("0"), regime_filter=True
+    )
+    broker = _FakeBroker(cash=Decimal("100000"))
+    decision = SwingCompositePolicy(_Data(risk_on=True), params).decide(_ctx(SESSION, broker))
+    assert _bought(decision) == {A, B}
+
+
+def test_the_regime_gate_never_blocks_an_exit() -> None:
+    """Risk-off must not trap a position the band has already decided to sell."""
+    params = SwingCompositeParameters(
+        top_n=2,
+        sell_band=3,
+        min_hold_sessions=2,
+        exclude_vol_fraction=Decimal("0"),
+        regime_filter=True,
+    )
+    decision = _aged(params, E, _Data(risk_on=False))
+    assert E in _sold(decision)
+    assert _bought(decision) == set()
+
+
+def test_an_absent_regime_reading_is_risk_off_not_risk_on() -> None:
+    """A thin store must not read as a licence to buy."""
+    params = SwingCompositeParameters(
+        top_n=2, exclude_vol_fraction=Decimal("0"), regime_filter=True
+    )
+    broker = _FakeBroker(cash=Decimal("100000"))
+    decision = SwingCompositePolicy(_EmptyRegime(), params).decide(_ctx(SESSION, broker))
+    assert _bought(decision) == set()
+
+
+def test_a_regime_reading_not_yet_knowable_trips_the_pit_guard() -> None:
+    """The gate is a third read, so it is guarded like the signal and the marks."""
+    params = SwingCompositeParameters(regime_filter=True)
+    with pytest.raises(PitError):
+        SwingCompositePolicy(_LeakingRegime(), params).decide(
+            _ctx(SESSION, _FakeBroker(cash=Decimal("100000")))
+        )
+
+
+def test_the_gate_is_not_read_at_all_when_it_is_off() -> None:
+    """An arm that does not use the gate must not depend on a source that can serve one."""
+
+    class _Explodes(_Data):
+        def regime(self, as_of: date) -> Dataset[RegimeReading]:
+            raise AssertionError("regime() must not be read while regime_filter is off")
+
+    params = SwingCompositeParameters(top_n=2, exclude_vol_fraction=Decimal("0"))
+    broker = _FakeBroker(cash=Decimal("100000"))
+    assert _bought(SwingCompositePolicy(_Explodes(), params).decide(_ctx(SESSION, broker))) == {
+        A,
+        B,
+    }
