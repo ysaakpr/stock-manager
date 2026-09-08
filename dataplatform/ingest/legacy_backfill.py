@@ -48,18 +48,16 @@ Operator flow (see `ops/runbooks/backfill.md` for the shallow one):
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
 import pyarrow.parquet as pq
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
@@ -78,6 +76,11 @@ from dataplatform.ingest.fetcher import (
     leased_fetcher,
 )
 from dataplatform.ingest.models import ParseError
+from dataplatform.ingest.no_session_journal import (
+    NoSessionJournal,
+    NoSessionRecord,
+    journal_path,
+)
 from dataplatform.ingest.nse import bhavcopy, bhavcopy_legacy, eras
 from dataplatform.ingest.nse.eras import BhavcopyEra
 from dataplatform.ingest.source_register import SourceRegister
@@ -93,6 +96,7 @@ from dataplatform.store.schemas import PRICES_RAW_DATASET, PRICES_RAW_QUARANTINE
 __all__ = [
     "DEFAULT_ERROR_STREAK_LIMIT",
     "DEFAULT_NO_SESSION_STREAK_LIMIT",
+    "JOURNAL_FILENAME",
     "NSE_BHAVCOPY_PRE_ISIN",
     "AcquisitionReport",
     "CalendarDiff",
@@ -152,118 +156,15 @@ _MON: Final[tuple[str, ...]] = (
 
 # ── the 404 evidence journal ─────────────────────────────────────────────────────────────────
 
-
-class NoSessionRecord(BaseModel):
-    """One dated observation that the archive served no file — a closed exchange, recorded.
-
-    Written as one JSON object per line so the journal is append-only in the strongest sense the
-    filesystem offers: a crash mid-campaign truncates at a line boundary and loses one
-    observation, never the file. It is validated on the way back in because it is *evidence* — a
-    line this schema does not recognise is a corrupt journal, and reading past it would quietly
-    turn a lost 404 into a re-fetch.
-    """
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    trade_date: date = Field(description="the candidate session the archive had no file for")
-    era: str = Field(description="the format era label the date falls in, e.g. 'E1'")
-    url: str = Field(description="the exact URL that answered")
-    http_status: int = Field(ge=100, le=599, description="the status observed, normally 404")
-    observed_at: datetime = Field(description="tz-aware instant of the observation (injected)")
-    evidence: str = Field(
-        default="HOLIDAY_OR_NO_SESSION",
-        description="what the absence means: the exchange was shut, not that a fetch failed",
-    )
+#: This campaign's evidence journal lives under this name in the lake's `campaign/` directory.
+#: One file per archive: W2's PR-bundle sweep keeps its own, so neither can consume the other's
+#: observations as its own resume state.
+JOURNAL_FILENAME: Final = "nse_bhavcopy_no_session.jsonl"
 
 
 def journal_path_for(data_root: Path) -> Path:
-    """Where the 404 evidence journal lives for a lake root.
-
-    Beside the lake rather than inside `L0/`: `L0Store.verify_checksums` walks the L0 tree looking
-    for payloads without sidecars, and a stray file there would be reported as an orphan defect.
-    The journal is derived observation, not a fetched payload.
-    """
-    return data_root / "campaign" / "nse_bhavcopy_no_session.jsonl"
-
-
-class NoSessionJournal:
-    """The append-only record of which candidate dates the archive answered 404 for.
-
-    What it does: remembers, across runs and without a database, that a date has already been
-    proved a non-session — so the resume path costs zero requests for it — and hands the whole
-    observation set to the calendar reconciler and the coverage report.
-    What it assumes: it owns its file. Two concurrent campaigns over the same range would both
-    append, which is harmless for the date set but duplicates lines.
-    What it never does: forget, rewrite, or delete a line. This is the highest-authority record of
-    the historical NSE trading calendar that exists, and the campaign only gets to observe each
-    date once cheaply.
-    """
-
-    def __init__(self, path: Path, *, clock: Clock | None = None) -> None:
-        self._path = path
-        self._clock = SystemClock() if clock is None else clock
-        self._records: list[NoSessionRecord] = list(_read_journal(path))
-        self._dates = {record.trade_date for record in self._records}
-
-    def __repr__(self) -> str:
-        return f"NoSessionJournal(path={str(self._path)!r}, records={len(self._records)})"
-
-    @property
-    def path(self) -> Path:
-        """The journal file, which may not exist yet."""
-        return self._path
-
-    @property
-    def dates(self) -> frozenset[date]:
-        """Every date observed to have no file."""
-        return frozenset(self._dates)
-
-    @property
-    def records(self) -> tuple[NoSessionRecord, ...]:
-        """Every observation, in the order it was written."""
-        return tuple(self._records)
-
-    def knows(self, day: date) -> bool:
-        """Whether `day` has already been proved a non-session — the free half of resume."""
-        return day in self._dates
-
-    def record(self, day: date, *, era: BhavcopyEra, url: str, http_status: int) -> NoSessionRecord:
-        """Append one observation and return it. Idempotent for a date already recorded."""
-        existing = next((rec for rec in self._records if rec.trade_date == day), None)
-        if existing is not None:
-            return existing
-        record = NoSessionRecord(
-            trade_date=day,
-            era=era.label,
-            url=url,
-            http_status=http_status,
-            observed_at=self._clock.now(),
-        )
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(record.model_dump_json() + "\n")
-        self._records.append(record)
-        self._dates.add(day)
-        return record
-
-
-def _read_journal(path: Path) -> Iterable[NoSessionRecord]:
-    """Parse an existing journal, failing loud on a line this schema does not recognise."""
-    if not path.is_file():
-        return ()
-    records: list[NoSessionRecord] = []
-    with path.open(encoding="utf-8") as handle:
-        for number, line in enumerate(handle, start=1):
-            if not line.strip():
-                continue
-            try:
-                records.append(NoSessionRecord.model_validate(json.loads(line)))
-            except (ValidationError, json.JSONDecodeError) as exc:
-                raise ValueError(
-                    f"{path}:{number} is not a no-session record ({exc}); the 404 evidence "
-                    "journal is append-only and is not repaired automatically"
-                ) from exc
-    return records
+    """Where the 404 evidence journal lives for a lake root."""
+    return journal_path(data_root, filename=JOURNAL_FILENAME)
 
 
 # ── planning ─────────────────────────────────────────────────────────────────────────────────
@@ -735,7 +636,9 @@ class LegacyAcquisition:
         except FetchHTTPError as http_error:
             if http_error.status_code != _HTTP_NOT_FOUND:
                 return self._failed(day, era, url, name, f"HTTP {http_error.status_code}")
-            record = self._journal.record(day, era=era, url=url, http_status=http_error.status_code)
+            record = self._journal.record(
+                day, era=era.label, url=url, http_status=http_error.status_code
+            )
             _LOG.info(
                 "legacy_backfill.no_session",
                 source=era.source_id,
