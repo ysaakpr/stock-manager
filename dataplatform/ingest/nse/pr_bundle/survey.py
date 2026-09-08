@@ -81,6 +81,7 @@ __all__ = [
     "PURPOSE_TAGS",
     "BcSurvey",
     "CorpusSurvey",
+    "DuplicatePayload",
     "FfixCensus",
     "InjectionProof",
     "IxIndexSpan",
@@ -363,6 +364,21 @@ class FfixCensus:
 
 
 @dataclass(frozen=True, slots=True)
+class DuplicatePayload:
+    """Two or more date keys whose payloads are byte-identical.
+
+    A real thing this archive does, and one the calendar reconcile is structurally blind to: on
+    2018-01-02 the host served the *2019-01-02* bundle, so a file exists under the 2018 key and
+    the reconcile is right to call the date present. Only the payload's own contents disagree.
+    Detected off the sidecars' recorded sha256, which the whole-lake sweep (§5) proves match their
+    bytes, so this needs no second hashing pass.
+    """
+
+    sha256: str
+    keys: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ParseFailure:
     """One bundle the sweep could not read, and why. Collected so the sweep finishes."""
 
@@ -392,6 +408,7 @@ class CorpusSurvey:
     mcap: McapSurvey
     ffix: FfixCensus
     zipped_members: Mapping[str, int]
+    duplicates: tuple[DuplicatePayload, ...]
     failures: tuple[ParseFailure, ...]
     reconciliation: Reconciliation
     proofs: tuple[InjectionProof, ...]
@@ -548,6 +565,7 @@ def survey_corpus(
         mcap=_mcap_survey(acc, served=served),
         ffix=_ffix_census(acc, present=_family(families, MemberKind.FFIX)),
         zipped_members=dict(acc.zipped_members.most_common()),
+        duplicates=_duplicates(store, source=source, start=start, end=end),
         failures=tuple(acc.failures),
         reconciliation=reconciliation,
         proofs=prove_reconcile_can_fail(calendar, served, start, end),
@@ -561,6 +579,20 @@ def survey_corpus(
         unexpected=len(reconciliation.unexpected),
     )
     return survey
+
+
+def _duplicates(
+    store: L0Store, *, source: str, start: date, end: date
+) -> tuple[DuplicatePayload, ...]:
+    """Date keys sharing a payload digest — the substitution a reconcile cannot see."""
+    by_digest: defaultdict[str, list[str]] = defaultdict(list)
+    for ref in store.iter_refs(source, start=start, end=end):
+        by_digest[ref.sha256].append(ref.key)
+    return tuple(
+        DuplicatePayload(sha256=digest, keys=tuple(sorted(keys)))
+        for digest, keys in sorted(by_digest.items())
+        if len(keys) > 1
+    )
 
 
 def _fold_members(acc: _Accumulator, bundle: PrBundle, *, day: date) -> None:
@@ -1185,7 +1217,39 @@ def _render_preamble(survey: CorpusSurvey) -> list[str]:
             "Every bundle opened and every `Bc`, `Ix` and `mcap` member parsed: 0 failures.",
             "",
         ]
+    lines += _render_duplicates(survey)
     return lines
+
+
+def _render_duplicates(survey: CorpusSurvey) -> list[str]:
+    """Byte-identical payloads under different date keys — measured, not assumed."""
+    distinct = survey.bundles - sum(len(dup.keys) - 1 for dup in survey.duplicates)
+    if not survey.duplicates:
+        return [
+            f"All {survey.bundles:,} payload digests are distinct: no date key holds another "
+            "session's bundle.",
+            "",
+        ]
+    return [
+        f"### ⚠ {len(survey.duplicates)} payload(s) served under more than one date key",
+        "",
+        "The archive substituted another session's bundle. **The calendar reconcile is "
+        "structurally blind to this** — a file does exist under the key, so §4 is right to call "
+        "the date present — and only the payload's own member names disagree, which is what "
+        "`PrBundle`'s filename cross-check caught. Checked across every digest in range, not "
+        "spot-checked.",
+        "",
+        "| sha256 | date keys |",
+        "|---|---|",
+        *(
+            f"| `{dup.sha256[:16]}…` | {', '.join(f'`{key}`' for key in dup.keys)} |"
+            for dup in survey.duplicates
+        ),
+        "",
+        f"**So {survey.bundles:,} bundles are present but only {distinct:,} distinct sessions were "
+        "published.**",
+        "",
+    ]
 
 
 def _render_availability(survey: CorpusSurvey) -> list[str]:

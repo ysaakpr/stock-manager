@@ -440,3 +440,43 @@ def test_the_report_renders_every_section(lake: Path) -> None:
 def test_payload_counts_are_per_source_and_exclude_sidecars(lake: Path) -> None:
     assert payload_counts(lake / "L0") == {PR_BUNDLE_SOURCE_ID: len(ERAS)}
     assert payload_counts(lake / "nowhere") == {}
+
+
+# ── the substitution the reconcile cannot see ────────────────────────────────────────────────
+
+
+def test_two_date_keys_sharing_a_payload_are_reported(tmp_path: Path) -> None:
+    """The 2018-01-02 shape: the archive served 2019's bundle, and the reconcile cannot tell.
+
+    A file exists under both keys, so `reconcile` is right to call both dates present — which is
+    exactly why the duplicate check has to be a separate measurement rather than a reconcile
+    direction.
+    """
+    store = _store(tmp_path)
+    payload = (FIXTURES / "classic" / "PR020113.zip").read_bytes()
+    store.put(PR_BUNDLE_SOURCE_ID, date(2013, 1, 2), "PR020113.zip", payload)
+    store.put(PR_BUNDLE_SOURCE_ID, date(2014, 1, 2), "PR020114.zip", payload)
+
+    survey = survey_corpus(
+        store, calendar=_calendar(), start=date(2013, 1, 2), end=date(2014, 1, 2)
+    )
+
+    (duplicate,) = survey.duplicates
+    assert duplicate.keys == (
+        f"{PR_BUNDLE_SOURCE_ID}/2013-01-02/PR020113.zip",
+        f"{PR_BUNDLE_SOURCE_ID}/2014-01-02/PR020114.zip",
+    )
+    # Both dates are "present" as far as the reconcile is concerned.
+    assert date(2014, 1, 2) not in survey.reconciliation.missing
+    body = render_report(survey)
+    assert "served under more than one date key" in body
+    assert "only 1 distinct sessions were published" in body
+
+
+def test_distinct_payloads_are_stated_as_distinct(lake: Path) -> None:
+    survey = survey_corpus(
+        _store(lake), calendar=_calendar(), start=date(2010, 1, 4), end=date(2026, 9, 4)
+    )
+
+    assert survey.duplicates == ()
+    assert "payload digests are distinct" in render_report(survey)
