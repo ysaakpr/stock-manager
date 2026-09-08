@@ -39,10 +39,23 @@ from dataplatform.store.paths import Layer, layer_root
 
 __all__ = [
     "LakeComparison",
+    "MissingLakeError",
     "PayloadRecord",
     "compare_lakes",
     "enumerate_payloads",
 ]
+
+
+class MissingLakeError(ValueError):
+    """A root that has no `L0` directory was handed to `compare_lakes`.
+
+    Raised rather than answered, because the answer would be the dangerous one: a tree with no
+    payloads is trivially "fully duplicated", so a mistyped root — `…/w0-benchmark-tri` for
+    `…/w0-benchmark-tri/data` — would return *safe to delete* about a lake it never looked at.
+    That happened on the first run of this tool. `enumerate_payloads` still answers `()` for an
+    absent tree; it is the comparison, whose output is a deletion verdict, that refuses.
+    """
+
 
 _LOG = get_logger(__name__)
 
@@ -167,9 +180,18 @@ def compare_lakes(
     the normal case and not a finding.
 
     What it assumes: `right_root`'s sidecars are trustworthy, which is what the whole-lake
-    checksum sweep (`L0Store.verify_checksums`) establishes separately. What it never does: copy,
-    delete, or modify anything in either tree.
+    checksum sweep (`L0Store.verify_checksums`) establishes separately. Raises `MissingLakeError`
+    when either root has no `L0` directory — see that class for why silence would be worse.
+    What it never does: copy, delete, or modify anything in either tree.
     """
+    for role, root in (("left", left_root), ("right", right_root)):
+        if not layer_root(Layer.L0, data_root=root).is_dir():
+            raise MissingLakeError(
+                f"{role} root {root} has no L0 directory. A lake root is the directory *holding* "
+                f"L0 — pass `<worktree>/data`, not `<worktree>`. Refusing rather than reporting "
+                "an empty tree as fully duplicated."
+            )
+
     right = {record.key: record for record in enumerate_payloads(right_root, source=source)}
 
     matched: list[PayloadRecord] = []

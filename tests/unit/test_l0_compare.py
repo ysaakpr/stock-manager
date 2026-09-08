@@ -17,9 +17,15 @@ from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from dataplatform.clock import FrozenClock
 from dataplatform.store.l0 import L0Store
-from dataplatform.store.l0_compare import compare_lakes, enumerate_payloads
+from dataplatform.store.l0_compare import (
+    MissingLakeError,
+    compare_lakes,
+    enumerate_payloads,
+)
 
 IST = ZoneInfo("Asia/Kolkata")
 SOURCE = "nse_pr_bundle"
@@ -178,3 +184,15 @@ def test_summary_names_both_roots_and_every_count(tmp_path: Path) -> None:
     assert "1 payload(s)" in summary
     assert str(tmp_path / "stranded") in summary
     assert str(tmp_path / "authoritative") in summary
+
+
+def test_a_root_with_no_l0_is_refused_not_called_safe(tmp_path: Path) -> None:
+    _lake(tmp_path / "authoritative", {"PR040110.zip": b"one"})
+    # The real mistake this guards: `<worktree>` passed where `<worktree>/data` was meant. An
+    # empty tree is trivially "fully duplicated", so answering would return the dangerous verdict
+    # about a lake the tool never looked at.
+    with pytest.raises(MissingLakeError, match="has no L0 directory"):
+        compare_lakes(tmp_path / "typo", tmp_path / "authoritative")
+
+    with pytest.raises(MissingLakeError, match="right root"):
+        compare_lakes(tmp_path / "authoritative", tmp_path / "typo")
