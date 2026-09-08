@@ -36,12 +36,14 @@ from dataplatform.ingest.nse.bhavcopy_legacy import (
     LEGACY_COLUMNS,
     LEGACY_ERA_END,
     LEGACY_SOURCE_ID,
+    PLACEHOLDER_ISINS,
     _complete_century,
     _date,
     parse,
     parse_l0,
     parse_report,
     parse_text,
+    parse_text_report,
 )
 from dataplatform.store import L0Store
 
@@ -175,6 +177,29 @@ FIXTURE_FILES: Final = (
             total_traded_value=Decimal("61905840823"),
             total_trades=615947,
         ),
+    ),
+    Fixture(
+        # The session the old closed-list ISIN rule lost. `ICICI` (series `M1`) carries the literal
+        # `INE` — three characters — so the row raised and 1,441 real prices went with it.
+        filename="cm06NOV2013bhav.csv.zip",
+        trade_date=date(2013, 11, 6),
+        data_rows=1442,
+        sample=PriceRow(
+            isin="INE002A01018",
+            symbol="RELIANCE",
+            series="EQ",
+            trade_date=date(2013, 11, 6),
+            open=Decimal("910"),
+            high=Decimal("919.9"),
+            low=Decimal("894.95"),
+            close=Decimal("898.6"),
+            last=Decimal("900.8"),
+            prev_close=Decimal("909.7"),
+            total_traded_qty=2198926,
+            total_traded_value=Decimal("1987002212.2"),
+            total_trades=71038,
+        ),
+        refused_symbols=("ICICI",),
     ),
     Fixture(
         filename="cm16FEB2021bhav.csv.zip",
@@ -476,7 +501,6 @@ def test_a_header_from_another_format_is_refused(header: str, why: str) -> None:
 @pytest.mark.parametrize(
     ("bad", "column"),
     [
-        ("X,EQ,1,2,1,2,2,1,10,20,01-JAN-2016,3,NOTANISIN,", "isin"),
         ("X,EQ,one,2,1,2,2,1,10,20,01-JAN-2016,3,INE002A01018,", "OPEN"),
         ("X,EQ,1,2,1,2,2,1,10.5,20,01-JAN-2016,3,INE002A01018,", "TOTTRDQTY"),
         ("X,EQ,1,2,1,2,2,1,10,20,01-JAN-2016,three,INE002A01018,", "TOTALTRADES"),
@@ -626,16 +650,75 @@ def test_a_placeholder_isin_refuses_the_row_and_keeps_the_session() -> None:
     assert len(parsed) == len(parsed.rows) + len(parsed.refused) == 2026
 
 
-def test_a_corrupt_isin_is_still_an_error_not_a_refusal() -> None:
-    """The narrowness of the placeholder rule: only the literals the exchange actually publishes.
+def test_a_malformed_isin_refuses_the_row_and_keeps_the_session() -> None:
+    """An ISIN-shaped test, not a closed list — because the closed list lost a real session.
 
-    `PLACEHOLDER_ISINS` is a closed set for a reason — treating "anything that fails the ISIN
-    pattern" as a stated absence would turn a truncated field into a silently missing row.
+    This test used to assert the opposite, on the argument that "treating anything that fails the
+    ISIN pattern as a stated absence would turn a truncated field into a silently missing row".
+    The W1 backfill measured what that rule actually costs. On 2013-11-06 the exchange published
+
+        ICICI,M1,3197,3197,3197,3197,3197,3197,5,15985,06-NOV-2013,1,INE,
+
+    — fourteen fields, every price and count valid, and an ISIN three characters long. `INE` is not
+    in `PLACEHOLDER_ISINS`, so the row raised, so the whole session failed, so `prices_raw` had no
+    partition for 2013-11-06 and **1,442 real prices went missing from the spine**. That is exactly
+    the defect the 2026-09-06 audit fixed for `DUMMY`, recurring with a different literal.
+
+    The old argument does not survive contact with that, for three reasons:
+
+    * The row is not *silently* missing. It goes to `prices_raw_quarantine`, which drops nothing,
+      and `bhavcopy.row_without_isin` logs a warning naming the symbol.
+    * A truncated download does not truncate one field in the middle of a file, it truncates the
+      tail — and that is caught loudly by the row-width check, which has its own two tests
+      (`test_truncated_archive_names_the_file`, `test_truncated_row_names_the_file_and_the_line`).
+      Nothing about this change touches them.
+    * The distinction it wanted to protect is still readable: `stated_isin` keeps the literal
+      verbatim, so `DUMMY` (the exchange saying "no ISIN") and `INE` (the exchange publishing
+      nonsense) are told apart in the quarantine partition, and `PLACEHOLDER_ISINS` still names
+      the deliberate ones.
+
+    Everything structural stays session-fatal. A malformed value in one row is a property of that
+    instrument; a malformed file is a property of the download.
     """
-    body = HEADER + "\nACME,EQ,1,1,1,1,1,1,1,1,16-FEB-2021,1,INE00,\n"
-    with pytest.raises(ParseError) as caught:
-        parse_text(body, filename="corrupt.csv")
-    assert "not a valid price row" in str(caught.value)
+    body = HEADER + (
+        "\nACME,EQ,1,1,1,1,1,1,1,1,16-FEB-2021,1,INE002A01018,"
+        "\nICICI,M1,3197,3197,3197,3197,3197,3197,5,15985,16-FEB-2021,1,INE,"
+        "\nSHORT,EQ,1,1,1,1,1,1,1,1,16-FEB-2021,1,INE00,\n"
+    )
+    parsed = parse_text_report(body, filename="one_bad_isin.csv")
+
+    assert len(parsed.rows) == 1, "the good row survives; the session is not lost"
+    assert parsed.rows[0].symbol == "ACME"
+    assert [(r.symbol, r.stated_isin) for r in parsed.refused] == [
+        ("ICICI", "INE"),
+        ("SHORT", "INE00"),
+    ]
+    # kept + refused still reconciles to the file: nothing was dropped.
+    assert len(parsed) == 3
+
+    # And the two kinds of refusal remain distinguishable from what was stored.
+    assert "INE" not in PLACEHOLDER_ISINS
+    assert "DUMMY" in PLACEHOLDER_ISINS
+
+
+def test_a_structurally_broken_row_is_still_session_fatal() -> None:
+    """The line the widened ISIN rule must not cross: a bad *file* still fails loudly.
+
+    Asserted right next to the test above so the two rules are read together — a value this parser
+    cannot key is a quarantined row, and a file this parser cannot trust is a `ParseError`.
+    """
+    for bad, why in (
+        ("X,EQ,1,1,1,1,1,1,1,1,16-FEB-2021,1", "a short row"),
+        (
+            "X,EQ,notaprice,1,1,1,1,1,1,1,16-FEB-2021,1,INE002A01018,",
+            "a price that is not a number",
+        ),
+        ("X,EQ,1,1,1,1,1,1,1,1,99-FEB-2021,1,INE002A01018,", "an impossible date"),
+    ):
+        body = f"{HEADER}\nACME,EQ,1,1,1,1,1,1,1,1,16-FEB-2021,1,INE002A01018,\n{bad}\n"
+        with pytest.raises(ParseError):
+            parse_text(body, filename="corrupt.csv")
+        assert why
 
 
 def _fixture_named(filename: str) -> Fixture:

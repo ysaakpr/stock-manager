@@ -42,7 +42,13 @@ from typing import Final
 
 from pydantic import ValidationError
 
-from dataplatform.ingest.models import BhavcopyParse, ParseError, PriceRow, UnidentifiedRow
+from dataplatform.ingest.models import (
+    ISIN_PATTERN,
+    BhavcopyParse,
+    ParseError,
+    PriceRow,
+    UnidentifiedRow,
+)
 from dataplatform.logging import get_logger
 from dataplatform.store.l0 import L0Ref, L0Store
 
@@ -50,6 +56,7 @@ __all__ = [
     "LEGACY_COLUMNS",
     "LEGACY_ERA_END",
     "LEGACY_SOURCE_ID",
+    "PLACEHOLDER_ISINS",
     "PRE_ISIN_COLUMNS",
     "parse",
     "parse_l0",
@@ -161,7 +168,38 @@ _TWO_DIGIT_PIVOT: Final = 94
 #: only such row in ten years and 1,940 payloads. It is not a malformed row: the exchange stated
 #: that this instrument has no ISIN, which is a different fact from a corrupt field. Refusing the
 #: whole session for it cost 2,000 real prices, so the row is refused and the session is not.
+#:
+#: Kept as a named set even though `_UNUSABLE_ISIN` below now subsumes it: these three are the
+#: literals the exchange uses *deliberately*, and "the source declared no ISIN" is worth being able
+#: to distinguish from "the source published nonsense" when reading a quarantine partition back.
 PLACEHOLDER_ISINS: Final[frozenset[str]] = frozenset({"DUMMY", "NA", "-"})
+
+
+#: An ISIN column value this parser cannot key a row on, for any reason.
+#:
+#: Enumerating placeholders was whack-a-mole and the W1 backfill proved it: on 2013-11-06 the
+#: exchange published `ICICI` (series `M1`) with the literal `INE` in the ISIN column — well-formed
+#: row, 14 fields, every price and count valid, and an ISIN three characters long. `INE` is not in
+#: `PLACEHOLDER_ISINS`, so the row raised, so the *session* failed, so `prices_raw` had no partition
+#: for 2013-11-06 and 1,442 real prices went missing from the spine. That is exactly the defect the
+#: 2026-09-06 audit fixed for `DUMMY`, recurring with a different literal.
+#:
+#: So the test is now the shape of the value, not membership of a list: anything that is not a
+#: syntactically valid ISIN cannot be a join key, whatever it says. The row is quarantined with the
+#: literal preserved and the session survives. This *strengthens* invariant #2 — there is now no
+#: value of the ISIN column that can produce a `PriceRow` without being a real ISIN.
+#:
+#: What stays session-fatal is everything structural: an unrecognised header, a short or wide row, a
+#: price that is not a number, a file spanning two sessions. A malformed value in one row is a
+#: property of that instrument; a malformed *file* is a property of the download.
+def _isin_is_unusable(value: str) -> bool:
+    """Whether the ISIN column's literal cannot serve as a join key. See the note above."""
+    return value.upper() in PLACEHOLDER_ISINS or _ISIN_LITERAL.match(value) is None
+
+
+#: The canonical ISIN shape, shared with `PriceRow.isin` so the parser and the model cannot
+#: disagree about what an ISIN is.
+_ISIN_LITERAL: Final = re.compile(ISIN_PATTERN)
 
 #: The zip local-file-header magic. Used to tell "a zipped bhavcopy" from "the CSV inside one",
 #: because both are things a caller legitimately has: L0 holds the zip the source served, and a
@@ -391,9 +429,10 @@ def _header_width(header: list[str] | None, *, filename: str) -> int:
 def _row(record: list[str], *, line: int, width: int, filename: str) -> PriceRow | UnidentifiedRow:
     """Turn one CSV record into a `PriceRow`, or say precisely which line and field was wrong.
 
-    Returns an `UnidentifiedRow` instead when the exchange published a placeholder in the ISIN
-    column: that is a stated absence of identity, not a malformed field, and the two must not be
-    answered the same way (`PLACEHOLDER_ISINS`).
+    Returns an `UnidentifiedRow` instead when the ISIN column holds anything that cannot be a
+    join key — a stated placeholder, or a value that is simply not a valid ISIN. Neither is a
+    corrupt *file*, and answering them the way a corrupt file is answered loses a whole session's
+    real prices for the sake of one bad instrument (`_isin_is_unusable`).
     """
     if len(record) != width:
         raise ParseError(
@@ -412,7 +451,7 @@ def _row(record: list[str], *, line: int, width: int, filename: str) -> PriceRow
             )
 
     field = dict(zip(LEGACY_COLUMNS, (value.strip() for value in record), strict=False))
-    if field["ISIN"].upper() in PLACEHOLDER_ISINS:
+    if _isin_is_unusable(field["ISIN"]):
         return UnidentifiedRow(
             symbol=field["SYMBOL"],
             series=field["SERIES"],
