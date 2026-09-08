@@ -494,6 +494,11 @@ def _write_quarantine(
         path=str(path),
         unresolved=len(unresolved),
         orphaned=len(orphaned),
+        # Counted separately from the delivery pair: a row with no ISIN is a different failure from
+        # a delivery row that could not be placed, and a log line that reported only the pair said
+        # `unresolved=0 orphaned=0` while writing 1,503 identity-less rows.
+        unidentified=len(unidentified),
+        reason=unidentified_reason if unidentified else None,
     )
     return path
 
