@@ -250,13 +250,15 @@ def build_llm(settings: Settings | None = None) -> LLM:
 
     What it does: reads `LLM_PROVIDER` and returns the matching implementation.
     What it assumes: `STUB` is the default, because no credential exists (B4).
-    What it never does: downgrade. Selecting `anthropic` without a key raises here, at startup,
-    rather than producing a process that believes it is calling a model and is not.
+    What it never does: downgrade. Selecting `anthropic` without a key — or `claude_cli` without
+    the CLI on PATH — raises here, at startup, rather than producing a process that believes it is
+    calling a model and is not.
 
     The implementations are imported inside the function on purpose: both import this module for
     the protocol and the value types, so importing them at the top would be a cycle.
     """
     from analyst.llm.anthropic import AnthropicLLM
+    from analyst.llm.claude_cli import ClaudeCliLLM
     from analyst.llm.stub import StubLLM
 
     resolved = get_settings() if settings is None else settings
@@ -265,6 +267,8 @@ def build_llm(settings: Settings | None = None) -> LLM:
             return StubLLM()
         case LlmProvider.ANTHROPIC:
             return AnthropicLLM.from_settings(resolved)
+        case LlmProvider.CLAUDE_CLI:
+            return ClaudeCliLLM.from_settings(resolved)
         case _:  # pragma: no cover — exhaustive over LlmProvider
             assert_never(resolved.llm_provider)
 
