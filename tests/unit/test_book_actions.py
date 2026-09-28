@@ -57,6 +57,7 @@ from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, OrderRequest, Side
 from execution.costs import CostModel, load_rate_card
 from execution.sim_broker import NoReferenceBarError, ReferenceBar, SimBroker
+from tests.rails_support import mechanics_gate
 
 A = "INE001A01036"
 P = "INE335Y01012"  # retired at the reissue
@@ -64,6 +65,7 @@ S = "INE335Y01020"  # the survivor
 
 D1, D2, D3, D4, D5 = (date(2024, 1, d) for d in (1, 2, 3, 4, 5))
 SESSIONS = (D1, D2, D3, D4, D5)
+_ONE = Decimal("1")
 _CASH = Decimal("1000000")
 _LIQUID = Decimal("1000000000000")  # huge turnover: slippage stays at the 2 bps base
 
@@ -157,6 +159,7 @@ class _Walk:
             broker=self.broker,
             clock=clock,
             sessions=sessions,
+            rails=mechanics_gate(prices),
         )
 
     def _sample(self, session: date) -> None:
@@ -239,9 +242,12 @@ def test_an_inverted_split_is_caught() -> None:
 
 
 def test_a_sell_staged_before_the_split_exits_the_whole_post_split_position() -> None:
+    # A second, untouched holding (S, flat) keeps the book at two names, so the full exit of A is
+    # not a sell-out of the whole book — which A8's min-holdings rail (floor >= 1) always refuses.
+    prices = {**_flat_then(A, Decimal("100"), Decimal("50")), **_flat_then(S, _ONE, _ONE)}
     walk = _Walk(
-        _flat_then(A, Decimal("100"), Decimal("50")),
-        _Scripted({D1: (_buy(A, 100),), D2: (_sell(A, 100),)}),
+        prices,
+        _Scripted({D1: (_buy(A, 100), _buy(S, 10)), D2: (_sell(A, 100),)}),
         BookActionCalendar([_SPLIT_2_FOR_1]),
     )
     walk.run()

@@ -108,6 +108,7 @@ from backtest.policies.swing_composite import (
     SwingCompositePolicy,
     SwingRecord,
 )
+from backtest.rails import BacktestRailPolicy, RailGate, ratified_backtest_rail_policy
 from backtest.replay import BookSnapshot, Policy, ReplayEngine, ReplayResult
 from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import Exchange as IdentityExchange
@@ -1450,6 +1451,7 @@ def run_naive_momentum(
     signal_l1_isins_only: bool = False,
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
+    rail_policy: BacktestRailPolicy | None = None,
 ) -> BacktestResult:
     """Run the naive momentum policy over ``[start, end]`` and return the result + report metrics.
 
@@ -1539,7 +1541,13 @@ def run_naive_momentum(
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = NaiveMomentumPolicy(data, params)
 
-        engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
+        engine = ReplayEngine(
+            policy=policy,
+            broker=broker,
+            clock=clock,
+            sessions=sessions,
+            rails=RailGate(rail_policy or ratified_backtest_rail_policy(), reader.closes_on),
+        )
         started = time.perf_counter()
         result = engine.run()
         runtime = time.perf_counter() - started
@@ -1603,6 +1611,7 @@ def run_momentum_v2(
     signal_l1_isins_only: bool = False,
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
+    rail_policy: BacktestRailPolicy | None = None,
 ) -> BacktestResult:
     """Run the momentum v2 policy over ``[start, end]`` and return the report metrics (M9.5).
 
@@ -1682,7 +1691,13 @@ def run_momentum_v2(
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = MomentumV2Policy(data, v2_parameters)
 
-        engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
+        engine = ReplayEngine(
+            policy=policy,
+            broker=broker,
+            clock=clock,
+            sessions=sessions,
+            rails=RailGate(rail_policy or ratified_backtest_rail_policy(), reader.closes_on),
+        )
         started = time.perf_counter()
         result = engine.run()
         runtime = time.perf_counter() - started
@@ -1964,7 +1979,7 @@ def render_report(run: BacktestResult) -> str:
         f"- **Total entries:** {len(run.result.journal)}",
         f"- **BUY:** {counts[Decision.BUY.value]}  ·  **SELL:** {counts[Decision.SELL.value]}  ·  "
         f"**HEARTBEAT:** {counts[Decision.HEARTBEAT.value]}",
-        f"- **Run digest (sha256 of journal + book):** `{run.result.digest()}`",
+        f"- **Run digest (sha256 of journal + book + rail policy):** `{run.result.digest()}`",
         "- **PIT:** the run completed with every session's queries scoped to that session; no "
         "`PitError` was raised (a look-ahead read would have failed the run). The dedicated leak "
         "harness is M4.11.",
@@ -2365,7 +2380,7 @@ def render_benchmark_report(run: BacktestResult, *, benchmark_slug: str) -> str:
         "",
         _benchmark_provenance_note(run),
         "",
-        f"- **Run digest (sha256 of journal + book):** `{run.result.digest()}`",
+        f"- **Run digest (sha256 of journal + book + rail policy):** `{run.result.digest()}`",
         "",
     ]
     return "\n".join(lines)
@@ -2892,6 +2907,7 @@ def _run_sector_arm(
         broker=broker,
         clock=clock,
         sessions=sessions,
+        rails=RailGate(ratified_backtest_rail_policy(), reader.closes_on),
     )
     result = engine.run()
 
@@ -3795,7 +3811,13 @@ def _run_policy_arm(
         nav_path.append((session, book.net_asset_value(prices)))
 
     broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
-    engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
+    engine = ReplayEngine(
+        policy=policy,
+        broker=broker,
+        clock=clock,
+        sessions=sessions,
+        rails=RailGate(ratified_backtest_rail_policy(), reader.closes_on),
+    )
     result = engine.run()
     terminal_prices = _terminal_prices(reader, book, sessions)
     resolved = _resolve_benchmark(
@@ -4485,6 +4507,7 @@ def run_swing_composite(
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
     lake: SwingLake | None = None,
+    rail_policy: BacktestRailPolicy | None = None,
 ) -> BacktestResult:
     """Replay the swing-composite policy over ``[start, end]``, returning its metrics (M10.7).
 
@@ -4559,7 +4582,13 @@ def run_swing_composite(
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = SwingCompositePolicy(data, parameters)
 
-        engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
+        engine = ReplayEngine(
+            policy=policy,
+            broker=broker,
+            clock=clock,
+            sessions=sessions,
+            rails=RailGate(rail_policy or ratified_backtest_rail_policy(), reader.closes_on),
+        )
         started = time.perf_counter()
         result = engine.run()
         runtime = time.perf_counter() - started
