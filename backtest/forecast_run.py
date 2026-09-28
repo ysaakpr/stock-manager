@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from backtest.accounting import PortfolioBook
+from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
 from backtest.forecast import (
     FEATURE_NAMES,
     LOOKBACK_1M,
@@ -828,31 +829,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.set_defaults(adjusted=True)
     parser.add_argument("--opening-cash", type=Decimal, default=_DEFAULT_OPENING_CASH)
     parser.add_argument("--data-root", type=Path, default=None)
+    add_book_actions_flag(parser)
     args = parser.parse_args(argv)
     if args.end < args.start:
         print(f"error: --to {args.end} is before --from {args.start}", file=sys.stderr)
         return 2
 
     try:
-        if args.report:
-            report = run_forecast_report(
+        with store_book_actions_unless(args):
+            if args.report:
+                report = run_forecast_report(
+                    start=args.start,
+                    end=args.end,
+                    opening_cash=args.opening_cash,
+                    data_root=args.data_root,
+                    adjusted=args.adjusted,
+                )
+                _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+                _REPORT_PATH.write_text(report, encoding="utf-8")
+                print(f"  forecast report written to {_REPORT_PATH}")
+                return 0
+            run, stats = run_forecast_daily(
                 start=args.start,
                 end=args.end,
                 opening_cash=args.opening_cash,
                 data_root=args.data_root,
                 adjusted=args.adjusted,
             )
-            _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _REPORT_PATH.write_text(report, encoding="utf-8")
-            print(f"  forecast report written to {_REPORT_PATH}")
-            return 0
-        run, stats = run_forecast_daily(
-            start=args.start,
-            end=args.end,
-            opening_cash=args.opening_cash,
-            data_root=args.data_root,
-            adjusted=args.adjusted,
-        )
     except BacktestError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

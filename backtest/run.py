@@ -74,6 +74,13 @@ from typing import Any, NamedTuple
 
 from analyst.journal.models import Decision, JournalEntry
 from backtest.accounting import BenchmarkComparison, PortfolioBook
+from backtest.book_actions import (
+    BookActionApplier,
+    BookActionSource,
+    add_book_actions_flag,
+    current_book_actions,
+    store_book_actions_unless,
+)
 from backtest.policies.fundamentals_value import (
     FundamentalsRecord,
     FundamentalsSignal,
@@ -1038,6 +1045,13 @@ class _AccountingBroker:
     SIP cashflow) needed to strike XIRR and compare to the benchmark. The book is fed the same fills
     priced by the same cost model, so its cash tracks the broker's exactly. Total broker charges are
     accumulated here for the cost line of the report.
+
+    Corporate actions (``backtest.book_actions``) are applied here too, at the top of each
+    session and before its fills, to both books at once: every driver walks through this class, so
+    this is the one seam that reaches all of them. ``corporate_actions`` defaults to whatever
+    :func:`~backtest.book_actions.book_corporate_actions` has in force. It is accounting only — the
+    policy never receives the source, only its consequence on the account (the module docstring
+    says why that matters while ``knowable_date`` is wrong in the store).
     """
 
     def __init__(
@@ -1046,9 +1060,17 @@ class _AccountingBroker:
         book: PortfolioBook,
         *,
         nav_sink: Callable[[date], None] | None = None,
+        corporate_actions: BookActionSource | None = None,
     ) -> None:
         self._sim = sim
         self._book = book
+        source = corporate_actions if corporate_actions is not None else current_book_actions()
+        self._actions = BookActionApplier(source) if source is not None else None
+        if source is None:
+            _LOG.warning(
+                "backtest.book_corporate_actions_off",
+                detail="splits, bonuses and dividends will not be applied to the book",
+            )
         self.total_charges: Decimal = _ZERO
         # Optional per-session NAV sampler (M9.5): called after each session's fills are posted, so
         # a caller can build the NAV path a max-drawdown needs. ``None`` (the default) is the
@@ -1059,7 +1081,14 @@ class _AccountingBroker:
     def book(self) -> PortfolioBook:
         return self._book
 
+    @property
+    def corporate_actions_applied(self) -> Mapping[str, int]:
+        """How many book actions of each kind this walk applied (empty when switched off)."""
+        return {} if self._actions is None else dict(sorted(self._actions.applied.items()))
+
     def execute_session(self, session: date) -> tuple[Order, ...]:
+        if self._actions is not None:
+            self._actions.apply(session, sim=self._sim, book=self._book)
         filled = self._sim.execute_session(session)
         for order in filled:
             if order.status is OrderStatus.COMPLETE and order.fill is not None:
@@ -3316,6 +3345,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "run whose excess figure will be reported as excess over NIFTY-TRI"
         ),
     )
+    add_book_actions_flag(parser)
     return parser.parse_args(argv)
 
 
@@ -3335,6 +3365,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     with ExitStack() as strictness:
         if args.require_real_tri:
             strictness.enter_context(require_published_benchmark())
+        strictness.enter_context(store_book_actions_unless(args))
         return _run_from_args(args, start=start, end=end)
 
 

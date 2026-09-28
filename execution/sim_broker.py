@@ -33,7 +33,7 @@ visible refusal in the order book, never a silent skip or a phantom fill.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import StrEnum
@@ -548,6 +548,138 @@ class SimBroker:
             target_session=order.target_session,
             reason=reason,
         )
+
+    # ── corporate actions (the backtest walk only) ───────────────────────────────────────────
+    #
+    # Not part of `Broker`: a live broker's account is adjusted by the depository, not by the
+    # caller. The backtest walk (`backtest.book_actions`) is the only caller, on an ex-date, before
+    # that session's `execute_session`. None of these reads a clock, a price or a signal.
+
+    def held_quantity(self, isin: str) -> int:
+        """Shares of `isin` on the book: settled holdings plus this session's unsettled buys."""
+        held = self._holdings.get(isin)
+        unsettled = self._positions.get(isin)
+        return (0 if held is None else held.quantity) + (
+            0 if unsettled is None else unsettled.quantity
+        )
+
+    def apply_share_rescale(
+        self, isin: str, *, numerator: Decimal, denominator: Decimal
+    ) -> tuple[int, int]:
+        """Multiply the shares of `isin` by `numerator / denominator` (a split or bonus).
+
+        Returns `(old, new)` whole-share counts. The *combined* count (holdings + unsettled) is
+        rescaled and floored once — the same arithmetic `PortfolioBook` applies to its single
+        position, so the two books agree share for share; the floored fraction is forfeited (see
+        `PortfolioBook._rescale_quantity`). Cost basis is untouched, so the average price divides by
+        the factor. Every order still staged for `isin` is rescaled the same way (a limit price
+        inversely, rounded against the trader) so a sell sized on the pre-split count still exits
+        the whole position; one floored to zero is cancelled with the reason on it.
+        """
+        if numerator <= _ZERO or denominator <= _ZERO:
+            raise ValueError("a share rescale needs positive terms")
+        old = self.held_quantity(isin)
+        new = int((old * numerator / denominator).to_integral_value(rounding=ROUND_FLOOR))
+        unsettled = self._positions.get(isin)
+        if unsettled is not None:
+            scaled = int(
+                (unsettled.quantity * numerator / denominator).to_integral_value(
+                    rounding=ROUND_FLOOR
+                )
+            )
+            self._set_lot(self._positions, isin, unsettled, scaled)
+        held = self._holdings.get(isin)
+        if held is not None:
+            already = self.held_quantity(isin) - held.quantity
+            self._set_lot(self._holdings, isin, held, new - already)
+        for order in list(self._orders.values()):
+            if order.status is not OrderStatus.STAGED or order.request.isin != isin:
+                continue
+            self._orders[order.order_id] = self._rescaled_order(order, numerator, denominator)
+        _log.info(
+            "sim_broker.share_rescale",
+            isin=isin,
+            old_quantity=old,
+            new_quantity=new,
+            numerator=str(numerator),
+            denominator=str(denominator),
+        )
+        return old, new
+
+    def carry_over(self, from_isin: str, to_isin: str) -> int:
+        """Move every share of `from_isin` to `to_isin`, 1:1, basis carried — an ISIN reissue.
+
+        A face-value split on NSE usually retires the ISIN; the holder's shares continue under the
+        successor. Holdings, unsettled buys and staged orders all move; returns the share count
+        moved (0 when nothing was held under `from_isin`).
+        """
+        moved = 0
+        for lots in (self._holdings, self._positions):
+            lot = lots.pop(from_isin, None)
+            if lot is None:
+                continue
+            moved += lot.quantity
+            target = lots.get(to_isin)
+            if target is None:
+                lots[to_isin] = _Lot(lot.exchange, lot.quantity, lot.cost)
+            else:
+                target.quantity += lot.quantity
+                target.cost += lot.cost
+        for order in list(self._orders.values()):
+            if order.status is not OrderStatus.STAGED or order.request.isin != from_isin:
+                continue
+            self._orders[order.order_id] = replace(
+                order, request=replace(order.request, isin=to_isin)
+            )
+        if moved:
+            _log.info("sim_broker.carry_over", from_isin=from_isin, to_isin=to_isin, moved=moved)
+        return moved
+
+    def credit_corporate_cash(
+        self, session: date, isin: str, amount: Decimal, description: str
+    ) -> None:
+        """Credit `amount` of corporate-action cash (a dividend) to free cash, with a ledger row."""
+        if not isinstance(amount, Decimal):
+            raise TypeError("amount must be a Decimal — money is never float (CLAUDE.md)")
+        if amount <= _ZERO:
+            raise ValueError(f"a corporate cash credit must be positive, got {amount}")
+        self._cash += amount
+        self._ledger.append(
+            LedgerEntry(
+                seq=self._next_ledger_seq,
+                session=session,
+                isin=isin,
+                description=description,
+                debit=_ZERO,
+                credit=amount,
+                balance=self._cash,
+            )
+        )
+        self._next_ledger_seq += 1
+
+    @staticmethod
+    def _set_lot(lots: dict[str, _Lot], isin: str, lot: _Lot, quantity: int) -> None:
+        if quantity <= 0:
+            del lots[isin]
+        else:
+            lot.quantity = quantity
+
+    def _rescaled_order(self, order: Order, numerator: Decimal, denominator: Decimal) -> Order:
+        request = order.request
+        quantity = int(
+            (request.quantity * numerator / denominator).to_integral_value(rounding=ROUND_FLOOR)
+        )
+        if quantity <= 0:
+            return replace(
+                order,
+                status=OrderStatus.CANCELLED,
+                reason="cancelled: corporate action left less than one share to trade",
+            )
+        limit = request.limit_price
+        if limit is not None:
+            rounding = ROUND_FLOOR if request.side is Side.BUY else ROUND_CEILING
+            limit = (limit * denominator / numerator).quantize(_TICK, rounding=rounding)
+        return replace(order, request=replace(request, quantity=quantity, limit_price=limit))
 
     # ── Broker: account views ────────────────────────────────────────────────────────────────
 

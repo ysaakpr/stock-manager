@@ -49,6 +49,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
 from backtest.policies.momentum_v2 import MomentumV2Parameters
 from backtest.policies.naive_momentum import MomentumParameters
 from backtest.policies.swing_composite import SwingCompositeParameters
@@ -666,6 +667,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--opening-cash", type=Decimal, default=_DEFAULT_OPENING_CASH)
     parser.add_argument("--data-root", type=Path, default=None)
+    add_book_actions_flag(parser)
     return parser.parse_args(argv)
 
 
@@ -696,14 +698,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"error: no arm matches {args.arms}", file=sys.stderr)
             return 2
 
-    result = run_sweep(
-        start=start,
-        end=end,
-        arms=arms,
-        floors=floors,
-        opening_cash=args.opening_cash,
-        data_root=args.data_root,
-    )
+    with store_book_actions_unless(args):
+        result = run_sweep(
+            start=start,
+            end=end,
+            arms=arms,
+            floors=floors,
+            opening_cash=args.opening_cash,
+            data_root=args.data_root,
+        )
     for floor in floors:
         print(f"\n  {_floor_label(floor)}:")
         for position, row in enumerate(result.ranked(floor), start=1):
