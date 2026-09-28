@@ -4091,11 +4091,23 @@ def render_fundamentals_report(
 # ── M10.7: the swing signal — 52w-high proximity, delivery share, 12-1, volatility ──────────────
 
 
+def _exact_price(value: Any) -> Decimal:
+    """A lake price as the exact ``Decimal`` DuckDB returns for a decimal column — never a float.
+
+    Refuses anything else, so a query that casts a price back to DOUBLE fails here rather than
+    rounding a rupee through binary floating point.
+    """
+    if not isinstance(value, Decimal):
+        raise TypeError(f"a lake price must arrive as Decimal, got {type(value).__name__}")
+    return value
+
+
 def _swing_leg(value: Any, neutral: Decimal) -> Decimal:
     """One M12.1 leg as a ``Decimal``, or ``neutral`` when the lake has no value for it (M12.1).
 
-    Assumes ``value`` is a DuckDB DOUBLE or ``None``. Never drops the row: a name whose 50-session
-    mean is not yet computable must still be scoreable on the legs that *are*, because the arms
+    Assumes ``value`` is a DuckDB DOUBLE (a dimensionless ratio or statistic) or ``None``. Never
+    drops the row: a name whose 50-session mean is not yet computable must still be scoreable on
+    the legs that *are*, because the arms
     differ only in their weights and a candidate set that moved with the weight vector would make
     every comparison between arms a comparison of two universes.
     """
@@ -4165,13 +4177,19 @@ class _SwingFeatures:
             if self._adjusted
             else ""
         )
+        # No CAST to DOUBLE (X2). Every column stays the lake's exact decimal, so `raw_close` — the
+        # price the whole-share sizing and the trailing stop read — reaches SwingRecord.price
+        # exactly. The features derived below are dimensionless ranking keys (ratios, a log-return
+        # stdev); DuckDB evaluates DECIMAL / DECIMAL, avg, ln and stddev in DOUBLE whatever the
+        # input type, and each is then quantised to 8 dp. That is deterministic and a ranking
+        # never compares two names closer than 1e-8 apart, so no rupee depends on a float.
         sql = f"""
         WITH base AS (
             SELECT r.isin, r.trade_date,
-                   CAST({px} AS DOUBLE) AS px,
-                   CAST(r.close AS DOUBLE) AS raw_close,
-                   CAST(r.deliv_pct AS DOUBLE) AS dpct,
-                   CAST(r.total_traded_value AS DOUBLE) AS ttv
+                   {px} AS px,
+                   r.close AS raw_close,
+                   r.deliv_pct AS dpct,
+                   r.total_traded_value AS ttv
             FROM l1_swing_raw r {join}
             WHERE r.exchange = 'NSE' AND r.series = 'EQ' AND r.close > 0
         ),
@@ -4254,7 +4272,7 @@ class _SwingFeatures:
                         delivery_share=Decimal(str(round(delivery / 100.0, 8))),
                         momentum_12_1=Decimal(str(round(momentum, 8))),
                         volatility=Decimal(str(round(vol, 8))),
-                        price=Decimal(str(raw_close)),
+                        price=_exact_price(raw_close),
                         knowable_date=session,
                         # M12.1. A NULL leg takes its neutral value rather than dropping the name:
                         # the candidate set must not move with a leg nobody weighted. Neutral is 0

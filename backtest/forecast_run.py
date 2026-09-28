@@ -88,6 +88,7 @@ from backtest.run import (
     UniverseParameters,
     _AccountingBroker,
     _decision_counts,
+    _exact_price,
     _InvestableUniverse,
     _L1Market,
     _L1Reader,
@@ -195,13 +196,17 @@ class _FeatureCursor:
             else ""
         )
         w = "PARTITION BY isin ORDER BY trade_date"
+        # No CAST to DOUBLE (X2): `raw_close`, the price the policy sizes against, stays the lake's
+        # exact decimal. The features and the fitted target are dimensionless (ratios, a log-return
+        # stdev) and are evaluated in DOUBLE by DuckDB regardless of input type — they feed a
+        # least-squares fit, never a rupee.
         return f"""
         WITH base AS (
             SELECT r.isin, r.trade_date,
-                   CAST({px} AS DOUBLE) AS px,
-                   CAST(r.close AS DOUBLE) AS raw_close,
-                   CAST(r.deliv_pct AS DOUBLE) AS dpct,
-                   CAST(r.total_traded_value AS DOUBLE) AS ttv
+                   {px} AS px,
+                   r.close AS raw_close,
+                   r.deliv_pct AS dpct,
+                   r.total_traded_value AS ttv
             FROM l1_fc_raw r {join}
             WHERE r.exchange = 'NSE' AND r.series = 'EQ' AND r.close > 0
               AND r.trade_date BETWEEN ? AND ?
@@ -277,7 +282,7 @@ class _FeatureCursor:
                 _Row(
                     session=row_date,
                     isin=str(row[1]),
-                    price=Decimal(str(row[2])),
+                    price=_exact_price(row[2]),
                     mom_12_1=row[3],
                     mom_1=row[4],
                     mom_6=row[5],
