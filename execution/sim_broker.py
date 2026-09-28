@@ -20,6 +20,10 @@ decision code cannot tell it from `KiteBroker`. It simulates how an EOD decision
   a strategy neither ever ran.
 * **No fractional shares.** Enforced by `OrderRequest` at the interface; a fill is always a whole
   number of shares.
+* **The settlement cycle of the trade date.** T+N is read per fill from the dated schedule in
+  `execution.settlement` (T+2 from 2003, T+1 from 2023) and N is counted in *trading sessions* on
+  the market's calendar (`SessionMarket.next_session`), never calendar days. A buy's shares become
+  a deliverable holding, and a sale's proceeds spendable cash, only when their cycle allows.
 
 Market data is injected as a `SessionMarket`, not read from DuckDB here: the query service (M4.1) is
 one implementation of it, and a test supplies bars directly so the unit suite never touches the
@@ -58,6 +62,7 @@ from execution.broker import (
     UnknownOrderError,
 )
 from execution.costs import CostModel, Trade
+from execution.settlement import SettlementSchedule, load_settlement_schedule
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -242,6 +247,30 @@ def _quantise_adverse(price: Decimal, side: Side) -> Decimal:
 
 
 @dataclass(slots=True)
+class _PendingLot:
+    """A buy that has filled but not settled: its shares are not yet deliverable.
+
+    `traded` is the fill session and `lag` the N of its T+N, fixed at fill time from the schedule
+    in force on `traded`: a trade dealt just before an era boundary keeps its own cycle.
+    """
+
+    isin: str
+    traded: date
+    lag: int
+    lot: _Lot
+
+
+@dataclass(frozen=True, slots=True)
+class _Receivable:
+    """A sale's net proceeds, owed by the clearing house until the trade settles."""
+
+    isin: str
+    traded: date
+    lag: int
+    amount: Decimal
+
+
+@dataclass(slots=True)
 class _Lot:
     """A running position in one scrip: whole-share quantity and its total cost basis (ex-charges).
 
@@ -266,8 +295,9 @@ class SimBroker:
 
     Satisfies `Broker` (invariant #5). Construct it with an injected `Clock` (B10), the one shared
     `CostModel` (invariant #4), a `SessionMarket` for reference bars, a `FillPolicy`, and the
-    opening cash. `place` stages an order for the next session; `execute_session(session)` fills
-    every order staged for that session and settles the previous session's buys into holdings.
+    opening cash, plus optionally the dated `SettlementSchedule` (the checked-in one by default).
+    `place` stages an order for the next session; `execute_session(session)` settles whatever the
+    cycle says is due, then fills every order staged for that session.
 
     What it never does: read a wall clock, invent a fill, or hold two implementations of Indian
     costs. Given the same market and the same order stream it produces byte-identical fills, which
@@ -282,6 +312,7 @@ class SimBroker:
         market: SessionMarket,
         opening_cash: Decimal,
         policy: FillPolicy | None = None,
+        settlement: SettlementSchedule | None = None,
     ) -> None:
         if not isinstance(opening_cash, Decimal):
             raise TypeError("opening_cash must be a Decimal — money is never float (CLAUDE.md)")
@@ -291,11 +322,15 @@ class SimBroker:
         self._costs = cost_model
         self._market = market
         self._policy = policy if policy is not None else FillPolicy()
+        self._settlement = settlement if settlement is not None else load_settlement_schedule()
 
-        self._cash: Decimal = opening_cash
+        self._cash: Decimal = opening_cash  # settled, spendable
         self._orders: dict[str, Order] = {}
         self._holdings: dict[str, _Lot] = {}  # settled
-        self._positions: dict[str, _Lot] = {}  # current (unsettled) session's buys
+        self._positions: list[_PendingLot] = []  # filled buys awaiting settlement, in fill order
+        self._receivables: list[
+            _Receivable
+        ] = []  # sale proceeds awaiting settlement, in fill order
         self._current_session: date | None = None
         self._ledger: list[LedgerEntry] = []
         self._next_order_seq: int = 0
@@ -396,10 +431,15 @@ class SimBroker:
     def execute_session(self, session: date) -> tuple[Order, ...]:
         """Fill every order staged for `session`, in placement order; return them post-fill.
 
-        Settles first: the previous session's buys roll from positions into holdings (T+1), so a
-        sell staged for `session` can be filled out of what settled overnight. Then each staged
-        order for `session` is priced (reference → slippage → shared cost model) and either
-        `COMPLETE` with a `Fill` or `REJECTED` with a reason (no bar, no cash, nothing to deliver).
+        Settles first: every buy whose T+N has arrived rolls from positions into holdings, and every
+        sale whose T+N has arrived credits its proceeds, so a sell staged for `session` can deliver
+        shares that settled by now. Then each staged order for `session` is priced (reference →
+        slippage → shared cost model) and either `COMPLETE` with a `Fill` or `REJECTED` with a
+        reason (no bar, no cash, nothing to deliver).
+
+        After the fills, sale proceeds that settle on the *next* session are released too: an EOD
+        decision made tonight can only fill tomorrow, when that cash has been paid out. Proceeds
+        from a sale filled in `session` are never usable by another fill in `session` (T+0).
         """
         self._settle_into(session)
         filled: list[Order] = []
@@ -409,6 +449,7 @@ class SimBroker:
             resolved = self._fill(order, session)
             self._orders[order.order_id] = resolved
             filled.append(resolved)
+        self._release_proceeds(session, inclusive=True)
         return tuple(filled)
 
     def _fill(self, order: Order, session: date) -> Order:
@@ -485,19 +526,32 @@ class SimBroker:
         )
 
     def _apply(self, fill: Fill) -> None:
-        """Post a completed fill to the book: cash, positions/holdings, and one ledger line."""
+        """Post a completed fill to the book: cash, positions/holdings, and one ledger line.
+
+        A buy pays at once (the cash check already required it settled) and its shares wait for
+        T+N as a position. A sell delivers settled shares at once and its proceeds wait for T+N as
+        a receivable — never spendable cash on the fill session.
+        """
         gross = fill.gross
+        # Raises NoSettlementCycleError for a date the schedule does not cover — before the book
+        # moves, so an unsettleable trade leaves no half-posted fill behind.
+        lag = self._settlement.lag_for(fill.session, fill.isin)
         if fill.side is Side.BUY:
             self._cash += fill.net_cash  # net_cash is negative on a buy
-            lot = self._positions.get(fill.isin)
-            if lot is None:
-                self._positions[fill.isin] = _Lot(fill.exchange, fill.quantity, gross)
+            for pending in self._positions:
+                if pending.isin == fill.isin and pending.traded == fill.session:
+                    pending.lot.quantity += fill.quantity
+                    pending.lot.cost += gross
+                    break
             else:
-                lot.quantity += fill.quantity
-                lot.cost += gross
+                self._positions.append(
+                    _PendingLot(
+                        fill.isin, fill.session, lag, _Lot(fill.exchange, fill.quantity, gross)
+                    )
+                )
             self._post_ledger(fill, debit=fill.cost.net_amount, credit=_ZERO)
         else:
-            self._cash += fill.net_cash  # positive on a sell
+            self._receivables.append(_Receivable(fill.isin, fill.session, lag, fill.net_cash))
             self._reduce_holding(fill.isin, fill.quantity)
             self._post_ledger(fill, debit=_ZERO, credit=fill.cost.net_amount)
 
@@ -514,10 +568,12 @@ class SimBroker:
         lot.quantity = remaining
 
     def _settle_into(self, session: date) -> None:
-        """Advance to `session`, rolling the previous session's buys into settled holdings (T+1).
+        """Advance to `session`, settling every buy and sale whose T+N is on or before it.
 
-        Called at the start of `execute_session`. Idempotent within a session: running the same
-        session twice does not double-settle, because positions are cleared once rolled.
+        A buy traded on T with cycle N becomes a deliverable holding for fills on the N-th trading
+        session after T onward; its sale-side twin, a receivable, becomes spendable for the same
+        fills. Called at the start of `execute_session`. Idempotent within a session: a settled
+        lot or receivable is removed once rolled, so running a session twice never double-settles.
         """
         if self._current_session == session:
             return
@@ -526,15 +582,67 @@ class SimBroker:
                 f"cannot execute {session.isoformat()} after already settling "
                 f"{self._current_session.isoformat()}; sessions run forward only"
             )
-        for isin, lot in self._positions.items():
-            held = self._holdings.get(isin)
+        still_pending: list[_PendingLot] = []
+        for pending in self._positions:
+            if not self._settles_by(pending.traded, pending.lag, session, inclusive=False):
+                still_pending.append(pending)
+                continue
+            lot = pending.lot
+            held = self._holdings.get(pending.isin)
             if held is None:
-                self._holdings[isin] = _Lot(lot.exchange, lot.quantity, lot.cost)
+                self._holdings[pending.isin] = _Lot(lot.exchange, lot.quantity, lot.cost)
             else:
                 held.quantity += lot.quantity
                 held.cost += lot.cost
-        self._positions.clear()
+            _log.info(
+                "sim_broker.settled_buy",
+                isin=pending.isin,
+                traded=pending.traded.isoformat(),
+                lag_sessions=pending.lag,
+                session=session.isoformat(),
+            )
+        self._positions = still_pending
+        self._release_proceeds(session, inclusive=False)
         self._current_session = session
+
+    def _release_proceeds(self, session: date, *, inclusive: bool) -> None:
+        """Credit to spendable cash every receivable due for a fill in `session` (or the next one).
+
+        `inclusive=False` (start of a session) releases what settles on or before `session`;
+        `inclusive=True` (end of a session) also releases what settles on the next session, the
+        earliest any order decided tonight can fill.
+        """
+        still_owed: list[_Receivable] = []
+        for receivable in self._receivables:
+            if self._settles_by(receivable.traded, receivable.lag, session, inclusive=inclusive):
+                self._cash += receivable.amount
+                _log.info(
+                    "sim_broker.settled_sale",
+                    isin=receivable.isin,
+                    traded=receivable.traded.isoformat(),
+                    lag_sessions=receivable.lag,
+                    session=session.isoformat(),
+                    amount=str(receivable.amount),
+                )
+            else:
+                still_owed.append(receivable)
+        self._receivables = still_owed
+
+    def _settles_by(self, traded: date, lag: int, session: date, *, inclusive: bool) -> bool:
+        """Whether a trade on `traded` settling T+`lag` is settled for a fill on `session`.
+
+        Walks trading sessions on the market's calendar, never calendar days. With `inclusive`,
+        "for a fill on the session after `session`" instead. Only ever calls `next_session` on a
+        date before `session`, so the walk never asks the market about a date past the replay.
+        """
+        # Settled for a fill on S  ⇔  the (lag-1)-th session after `traded` is strictly before S.
+        # Settled for a fill on next(S)  ⇔  that session is on or before S.
+        day = traded
+        for _ in range(lag - 1):
+            if day >= session:
+                return False
+            day = self._market.next_session(day)
+        return day <= session if inclusive else day < session
 
     def _reject(self, order: Order, reason: str) -> Order:
         _log.warning(
@@ -552,16 +660,20 @@ class SimBroker:
     # ── Broker: account views ────────────────────────────────────────────────────────────────
 
     def positions(self) -> tuple[Position, ...]:
-        """Open, not-yet-settled positions — this session's buys, one per ISIN, in ISIN order."""
+        """Filled, not-yet-settled buys — one per (ISIN, fill session), in ISIN then session order.
+
+        Under T+1 that is at most the last session's buys; under T+2 an ISIN bought on two
+        consecutive sessions shows two positions, each with its own fill session.
+        """
         return tuple(
             Position(
-                isin=isin,
-                exchange=lot.exchange,
-                quantity=lot.quantity,
-                average_price=lot.average_price,
-                session=self._current_session if self._current_session is not None else date.min,
+                isin=pending.isin,
+                exchange=pending.lot.exchange,
+                quantity=pending.lot.quantity,
+                average_price=pending.lot.average_price,
+                session=pending.traded,
             )
-            for isin, lot in sorted(self._positions.items())
+            for pending in sorted(self._positions, key=lambda p: (p.isin, p.traded))
         )
 
     def holdings(self) -> tuple[Holding, ...]:
@@ -581,17 +693,26 @@ class SimBroker:
         return tuple(self._ledger)
 
     def margins(self) -> Margins:
-        """Free cash, cash tied up in positions and holdings (cost basis), and their total."""
+        """Free cash, cash tied up in positions and holdings (cost basis), and their total.
+
+        `available` is settled cash only: proceeds still in settlement (`unsettled_proceeds`) are
+        not free to deploy, so a policy sizing from `available` cannot spend them early.
+        """
         utilised = sum(
-            (lot.cost for lot in (*self._positions.values(), *self._holdings.values())),
+            (lot.cost for lot in (*(p.lot for p in self._positions), *self._holdings.values())),
             _ZERO,
         )
         return Margins(available=self._cash, utilised=utilised)
 
     @property
     def cash(self) -> Decimal:
-        """Free cash right now. A convenience view; the ledger is the record of how it got here."""
+        """Free (settled, spendable) cash right now. Excludes `unsettled_proceeds`."""
         return self._cash
+
+    @property
+    def unsettled_proceeds(self) -> Decimal:
+        """Net sale proceeds filled but not yet released by the settlement cycle."""
+        return sum((receivable.amount for receivable in self._receivables), _ZERO)
 
     def order(self, order_id: str) -> Order:
         """The current state of one order. Raises `UnknownOrderError` if never issued."""
@@ -625,7 +746,9 @@ class SimBroker:
                 description=f"{fill.side} {fill.quantity} @ {fill.fill_price}",
                 debit=debit,
                 credit=credit,
-                balance=self._cash,
+                # The account balance: spendable cash plus proceeds still in settlement, so the
+                # ledger reconciles to its own debits and credits whatever the cycle.
+                balance=self._cash + self.unsettled_proceeds,
             )
         )
         self._next_ledger_seq += 1
