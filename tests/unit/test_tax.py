@@ -52,6 +52,7 @@ from backtest.xirr import Cashflow
 from dataplatform.identity import Exchange
 from dataplatform.query import AdjustedPoint, AdjustedSeries, AdjustedSeriesRequest, QueryService
 from execution.broker import Side
+from execution.costs import CostModel, Trade, load_rate_card
 
 A = "INE000A01011"
 B = "INE000B01012"
@@ -374,6 +375,47 @@ def test_stt_is_not_deductible() -> None:
     )
     realised, _ = match_lots(run, SCHEDULE, NO_FMV)
     assert realised[0].gain == Decimal("983")
+
+
+def _dust_round_trip() -> tuple[TaxTrade, TaxTrade]:
+    """The campaign's real dust exit: 1 x INE270A01011 bought @ 7.16, sold a week later @ 7.04.
+
+    Priced by the one cost model, the sell's flat DP charge (13.50 + service tax/SBC = 15.46)
+    exceeds its turnover, so the account pays 8.42 to deliver the share.
+    """
+    model = CostModel(load_rate_card(), account_state="MH")
+    isin = "INE270A01011"
+    trades = []
+    for on, side, price in (
+        (date(2015, 11, 30), Side.BUY, "7.16"),
+        (date(2015, 12, 7), Side.SELL, "7.04"),
+    ):
+        cost = model.charge(
+            Trade(isin=isin, trade_date=on, side=side, quantity=1, price=Decimal(price))
+        )
+        trades.append(
+            TaxTrade(isin, on, side, 1, cost.net_amount, cost.securities_transaction_tax, True)
+        )
+    return trades[0], trades[1]  # fmt: skip
+
+
+def test_a_sell_whose_charges_exceed_its_turnover_is_a_capital_loss(tmp_path: Path) -> None:
+    bought, sold = _dust_round_trip()
+    assert sold.net_amount == Decimal("-8.42")
+    run = ledger([bought, sold])
+    path = tmp_path / "ledger.json"
+    write_run_ledger(run, path)
+    assert read_run_ledger(path) == run
+    realised, _ = match_lots(read_run_ledger(path), SCHEDULE, NO_FMV)
+    # The loss is the whole cost plus what the exit cost on top — never clamped at the cost.
+    assert [r.gain for r in realised] == [-(bought.tax_amount + Decimal("8.42"))]
+    assert realised[0].gain == Decimal("-15.58")
+
+
+def test_a_buy_with_a_non_positive_net_amount_is_refused() -> None:
+    for amount in ("0", "-8.42"):
+        with pytest.raises(ValueError, match="buy net amount must be positive"):
+            buy(A, date(2021, 1, 4), 1, amount)
 
 
 def test_split_after_grandfathering_date_scales_lot_not_fmv() -> None:
