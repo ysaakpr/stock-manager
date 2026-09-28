@@ -1,0 +1,186 @@
+# What a resident individual pays on listed-equity gains and dividends, as a dated schedule (X2).
+#
+# Read by `backtest/tax.py`. Every regime is keyed by the date the law keys it on:
+#   - capital-gains RATES and the long-term THRESHOLD by the date of TRANSFER (the trade date —
+#     CBDT Circular 704 of 28-04-1995: for shares sold through a stock exchange, the date of the
+#     broker's note is the date of transfer and of acquisition);
+#   - the Sec 112A EXEMPTION and the CESS by FINANCIAL YEAR (the law states them per assessment
+#     year), so their `effective_from` is always an April 1;
+#   - DIVIDEND treatment by the date the dividend is received (paid/credited).
+# A lookup takes the last entry whose `effective_from` is on or before the date. A date before
+# `coverage.from` or after `coverage.through` raises `TaxScheduleCoverageError` — the schedule
+# never borrows a neighbouring era's rate for a date it does not cover.
+#
+# Every number is a QUOTED STRING: YAML parses a bare 0.15 as a float, and a float in a money
+# computation is a bug (CLAUDE.md). `backtest/tax.py` rejects a non-string number.
+#
+# `provenance` on each entry:
+#   primary     — read in this session off a primary government source (CBDT FAQ / press release
+#                 text as published) whose URL is cited.
+#   secondary   — the statutory text/date as reproduced by a professional secondary source fetched
+#                 in this session (the primary page itself refused automated fetch: incometaxindia
+#                 and PIB returned HTTP 403). The citation names the statute; the URL is the
+#                 reproduction actually read.
+#   statute     — the statutory position as known at authoring; NO page was fetched for it in this
+#                 session. Marked so an auditor knows exactly which boundaries to re-check first.
+
+version: 1
+
+coverage:
+  # STT, Sec 111A and Sec 10(38) all start with transfers on or after 1 Oct 2004 (Finance (No.2)
+  # Act 2004). Before that date listed-equity gains were taxed under a different regime entirely.
+  from: "2004-10-01"
+  # Tax year 2026-27 under the Income-tax Act 2025 (secs 196/198 re-enact 111A/112A at unchanged
+  # rates). Nothing later is known; a later date raises.
+  through: "2027-03-31"
+
+# A listed equity share is short-term if held for NOT MORE THAN this many months (Sec 2(42A)
+# proviso; re-stated by Finance (No.2) Act 2024 for transfers on or after 23-07-2024: "for listed
+# securities, it is one year"). Held for more than 12 months => long-term.
+long_term_after_months:
+  - effective_from: "2004-10-01"
+    months: "12"
+    citation: "Income-tax Act 1961, Sec 2(42A) first proviso (listed shares: 12 months)"
+    provenance: statute
+  - effective_from: "2024-07-23"
+    months: "12"
+    citation: >-
+      Finance (No.2) Act 2024; CBDT FAQs on the new capital gains regime (23-07-2024): "for listed
+      securities, it is one year" — https://cacult.com/faqs-issued-by-cbdt-on-the-new-capital-gains-tax-regime/
+    provenance: secondary
+
+# Sec 111A: STT-paid short-term gains on listed equity, flat rate, by date of transfer.
+stcg_rates:
+  - effective_from: "2004-10-01"
+    rate: "0.10"
+    citation: "Finance (No.2) Act 2004 inserting Sec 111A for STT-paid transfers on/after 01-10-2004"
+    provenance: secondary
+    source_url: "https://www.taxtmi.com/acts?id=3202"
+  - effective_from: "2008-04-01"
+    rate: "0.15"
+    citation: >-
+      Finance Act 2008 raised the Sec 111A rate from 10% to 15% from AY 2009-10 (FY 2008-09)
+    provenance: secondary
+    source_url: "https://bcajonline.org/journal/short-term-capital-gains-on-shares-taxed-at-a-rate-higher-than-normal-slab-rate-anomaly-in-s-111a/"
+  - effective_from: "2024-07-23"
+    rate: "0.20"
+    citation: >-
+      Finance (No.2) Act 2024; CBDT FAQs (23-07-2024): "Rate for short-term STT paid listed equity
+      ... (Section 111A) has increased from 15 to 20%", for any transfer on or after 23.7.2024.
+      Carried into Income-tax Act 2025 Sec 196 for tax year 2026-27 at 20%.
+    provenance: secondary
+    source_url: "https://cacult.com/faqs-issued-by-cbdt-on-the-new-capital-gains-tax-regime/"
+
+# Long-term gains on STT-paid listed equity, by date of transfer.
+#   taxable: "false" — Sec 10(38) exemption: the gain is exempt and (by the settled exempt-source
+#                      rule) a loss from it is disregarded — it neither sets off nor carries forward.
+#   taxable: "true"  — Sec 112A: `rate` on the FY's net LTCG above the FY's exemption (below).
+ltcg_regimes:
+  - effective_from: "2004-10-01"
+    taxable: "false"
+    rate: "0"
+    citation: "Sec 10(38) (Finance (No.2) Act 2004): LTCG on STT-paid listed equity exempt"
+    provenance: statute
+  - effective_from: "2018-04-01"
+    taxable: "true"
+    rate: "0.10"
+    citation: >-
+      Finance Act 2018: Sec 10(38) withdrawn and Sec 112A inserted for transfers on/after
+      01-04-2018 — 10% on LTCG exceeding Rs 1 lakh; cost of shares acquired before 01-02-2018
+      stepped up per Sec 55(2)(ac) to the higher of actual cost and the lower of (FMV on
+      31-01-2018, sale consideration)
+    provenance: secondary
+    source_url: "https://taxguru.in/income-tax/section-112a-tax-transfer-long-term-capital-assets.html"
+  - effective_from: "2024-07-23"
+    taxable: "true"
+    rate: "0.125"
+    citation: >-
+      Finance (No.2) Act 2024; CBDT FAQs (23-07-2024): "the rate for these assets for long-term
+      (S. 112A) has increased from 10 to 12.5%". Income-tax Act 2025 Sec 198 carries 12.5%.
+    provenance: secondary
+    source_url: "https://cacult.com/faqs-issued-by-cbdt-on-the-new-capital-gains-tax-regime/"
+
+# Sec 55(2)(ac) grandfathering. Applies to a long-term transfer under a taxable regime of a lot
+# acquired on or before `acquired_on_or_before`. FMV = the HIGHEST price quoted on a recognised
+# stock exchange on `fmv_date` (or, if not traded that day, on the last prior day it traded) —
+# the statute says highest price, not close.
+grandfathering:
+  acquired_on_or_before: "2018-01-31"
+  fmv_date: "2018-01-31"
+  citation: >-
+    Income-tax Act 1961 Sec 55(2)(ac) and its Explanation (a)(i), inserted by Finance Act 2018
+  provenance: secondary
+  source_url: "https://taxguru.in/income-tax/section-55-cost-acquisition-improvement.html"
+
+# Sec 112A exemption on the FY's aggregate LTCG, keyed by FY start.
+ltcg_exemption_by_fy:
+  - effective_from: "2018-04-01"
+    amount: "100000"
+    citation: "Finance Act 2018, Sec 112A(1): LTCG exceeding one lakh rupees"
+    provenance: secondary
+    source_url: "https://taxguru.in/income-tax/section-112a-tax-transfer-long-term-capital-assets.html"
+  - effective_from: "2024-04-01"
+    amount: "125000"
+    citation: >-
+      Finance (No.2) Act 2024; CBDT FAQs: "The exemption limit of 1 lakh ... increased to 1.25
+      lakh Rs. This increased exemption limit will apply for FY 2024-25 and subsequent years."
+      (Hence keyed to 2024-04-01, the whole FY, not 2024-07-23.)
+    provenance: secondary
+    source_url: "https://cacult.com/faqs-issued-by-cbdt-on-the-new-capital-gains-tax-regime/"
+
+# Cess on (tax + surcharge), keyed by FY start. Surcharge is NOT here: it depends on the
+# investor's total income, so it is an explicit InvestorProfile parameter.
+cess_by_fy:
+  - effective_from: "2004-04-01"
+    rate: "0.02"
+    citation: "Education cess 2% (Finance (No.2) Act 2004, from AY 2005-06)"
+    provenance: statute
+  - effective_from: "2007-04-01"
+    rate: "0.03"
+    citation: "Education cess 2% + Secondary & Higher Education cess 1% (Finance Act 2007)"
+    provenance: statute
+  - effective_from: "2018-04-01"
+    rate: "0.04"
+    citation: "Health & Education cess 4% (Finance Act 2018, from AY 2019-20)"
+    provenance: statute
+
+# Dividends from domestic listed companies, keyed by the date received.
+#   ddt_exempt        — company paid DDT (Sec 115-O); investor exempt (Sec 10(34)).
+#   ddt_exempt_115bbda — as above, but a resident individual pays `rate` on the FY's aggregate
+#                        dividends exceeding `threshold` (Sec 115BBDA).
+#   slab              — taxable in the investor's hands at their slab rate (an InvestorProfile
+#                        parameter, not a schedule number).
+dividend_regimes:
+  - effective_from: "2004-10-01"
+    kind: ddt_exempt
+    threshold: "0"
+    rate: "0"
+    citation: "Sec 115-O DDT on the company; Sec 10(34) exemption for the shareholder"
+    provenance: statute
+  - effective_from: "2016-04-01"
+    kind: ddt_exempt_115bbda
+    threshold: "1000000"
+    rate: "0.10"
+    citation: >-
+      Sec 115BBDA (Finance Act 2016, from AY 2017-18): 10% on dividends exceeding Rs 10 lakh for
+      resident individuals/HUFs/firms
+    provenance: secondary
+    source_url: "https://taxguru.in/income-tax/impact-removal-dividend-distribution-tax-finance-act-2020.html"
+  - effective_from: "2020-04-01"
+    kind: slab
+    threshold: "0"
+    rate: "0"
+    citation: >-
+      Finance Act 2020 abolished DDT; Sec 10(34) and Sec 115BBDA limited to dividends received on
+      or before 31-03-2020; dividends thereafter taxed in the shareholder's hands (Sec 56(2)(i))
+    provenance: secondary
+    source_url: "https://taxguru.in/income-tax/impact-removal-dividend-distribution-tax-finance-act-2020.html"
+
+# Losses (Secs 70, 71, 74). Current-year STCL sets off against STCG or LTCG; LTCL only against
+# LTCG (Sec 70(2), 70(3)); unabsorbed capital losses carry forward for this many assessment years
+# immediately following, STCL against either, LTCL against LTCG only (Sec 74). Carry-forward
+# assumes the return was filed on time (Sec 80) — stated in the report.
+loss_carry_forward:
+  years: "8"
+  citation: "Income-tax Act 1961 Secs 70(2), 70(3), 74(1); Sec 80 (return filed by due date)"
+  provenance: statute
