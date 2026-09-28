@@ -382,3 +382,52 @@ def test_benchmark_before_series_start_is_refused() -> None:
     nifty = _tri("niftytri", "NIFTY 50 TRI", {date(2022, 6, 1): "1000", as_of: "1100"})
     with pytest.raises(PriceUnavailableError):
         book.compare_to_benchmarks(as_of, {_ISIN_A: _D("110")}, benchmark=nifty, theme=nifty)
+
+
+# ── X2: cash dividends and fractional entitlements in the walk ─────────────────────────────────
+
+
+def _held(quantity: int, price: str = "100") -> PortfolioBook:
+    book = PortfolioBook(_D("1000000"))
+    book.record_fill(_fill(_ISIN_A, Side.BUY, quantity, _D(price), date(2024, 1, 2)))
+    return book
+
+
+def test_a_dividend_credits_cash_and_income_but_never_the_xirr_stream() -> None:
+    book = _held(100)
+    before_cash, before_basis = book.cash, book.position(_ISIN_A).cost_basis  # type: ignore[union-attr]
+    amount = book.credit_dividend(date(2024, 1, 3), _ISIN_A, per_share=_D("2.25"))
+    assert amount == _D("225.00")
+    assert book.cash - before_cash == _D("225.00")
+    assert book.dividend_income == _D("225.00")
+    assert book.position(_ISIN_A).cost_basis == before_basis  # type: ignore[union-attr]
+    assert book.ledger()[-1].description == "dividend"
+    assert book._external == []  # income, not an investor flow
+
+
+def test_a_dividend_on_a_name_not_held_or_a_float_amount_is_refused() -> None:
+    book = _held(100)
+    with pytest.raises(InsufficientSharesError):
+        book.credit_dividend(date(2024, 1, 3), _ISIN_B, per_share=_D("1"))
+    with pytest.raises(TypeError):
+        book.credit_dividend(date(2024, 1, 3), _ISIN_A, per_share=1.0)  # type: ignore[arg-type]
+    with pytest.raises(CorporateActionError):
+        book.credit_dividend(date(2024, 1, 3), _ISIN_A, per_share=_D("0"))
+
+
+def test_a_fractional_bonus_is_refused_unless_the_walk_asks_to_forfeit_it() -> None:
+    book = _held(101)
+    with pytest.raises(CorporateActionError):
+        book.apply_bonus(_ISIN_A, new_shares=_D("3"), held_shares=_D("2"))
+    book.apply_bonus(_ISIN_A, new_shares=_D("3"), held_shares=_D("2"), forfeit_fraction=True)
+    assert book.position(_ISIN_A).quantity == 252  # type: ignore[union-attr]
+
+
+def test_a_consolidation_below_one_share_books_the_basis_as_a_realized_loss() -> None:
+    book = _held(3)
+    basis = book.position(_ISIN_A).cost_basis  # type: ignore[union-attr]
+    book.apply_split(
+        _ISIN_A, from_face_value=_D("1"), to_face_value=_D("10"), forfeit_fraction=True
+    )
+    assert book.position(_ISIN_A) is None
+    assert book.realized_pnl == -basis
