@@ -296,9 +296,23 @@ class RailGate:
     """Clear a replayed session's orders through A8, in order, against the projected book.
 
     Construct it with the ``BacktestRailPolicy`` and a ``marks`` source (session -> ISIN -> raw
-    close). ``clear`` builds the book A8 checks from the broker — settled holdings plus unsettled
-    positions, valued at the session's marks, with the broker's free cash — then puts each order to
-    ``RailEngine.guard_order``. An allowed order is applied to the projected book before the next
+    close). ``clear`` builds the book A8 checks from the broker, then puts each order to
+    ``RailEngine.guard_order``. Under settlement (T+2 before 2023, T+1 since) the book is built so
+    each cap sees what the account is *exposed to and worth*, and spending sees only what it may
+    spend:
+
+    * **Lots**: settled holdings *plus* every pending (bought, unsettled) lot, summed per ISIN. A
+      name bought yesterday is exposure today; ignoring it would let the next buy take the name past
+      its position cap while its first lot is still in settlement.
+    * **Cash in the book** is ``Margins.cash_value`` — settled cash plus unsettled sale proceeds —
+      so the percentage caps are fractions of the account's full value, not of a value that dips by
+      every sale until it settles.
+    * **Spendable cash** is ``Margins.available`` alone, less every buy already cleared this
+      session. A buy larger than that is not fundable; unsettled proceeds never fund it.
+
+    Corporate actions are applied at the top of the session, before the policy decides, so the
+    quantities read here are already post-split and the session's raw close is the post-split
+    price. An allowed order is applied to the projected book before the next
     is checked, so twelve sells that would each be fine alone cannot together take the book under
     the minimum-holdings floor.
 
@@ -339,11 +353,12 @@ class RailGate:
         sink = _SessionRailJournal(clock)
         engine = RailEngine(sink, clock=clock)
         book = self._book(broker, case_id or BACKTEST_CASE_ID)
+        spendable = broker.margins().available
         allowed: list[OrderRequest] = []
         refused: list[OrderRequest] = []
         for request in orders:
             proposed = self._propose(request, session)
-            reason = _unexecutable(proposed, book)
+            reason = _unexecutable(proposed, book, spendable)
             if reason is not None:
                 sink.entries.append(
                     _unexecutable_entry(clock, session, book.case_id, proposed, reason, sleeves)
@@ -369,6 +384,8 @@ class RailGate:
                 continue
             # A8's own book transition, so the next order is checked against what this one leaves.
             book = apply_order(book, proposed)
+            if proposed.side is Side.BUY:
+                spendable -= proposed.value  # a sale's proceeds stay unsettled: never spendable
             allowed.append(request)
         return GateOutcome(
             allowed=tuple(allowed), entries=tuple(sink.entries), refused=tuple(refused)
@@ -401,7 +418,7 @@ class RailGate:
                     price=price,
                 )
             )
-        return Portfolio(case_id=case_id, lots=tuple(lots), cash=broker.margins().available)
+        return Portfolio(case_id=case_id, lots=tuple(lots), cash=broker.margins().cash_value)
 
     def _propose(self, request: OrderRequest, session: date) -> ProposedOrder:
         price = self._price(request.isin, None)
@@ -417,11 +434,15 @@ class RailGate:
         )
 
 
-def _unexecutable(order: ProposedOrder, book: Portfolio) -> str | None:
-    """Why ``order`` cannot be applied to ``book`` at all (A8's precondition), or None."""
+def _unexecutable(order: ProposedOrder, book: Portfolio, spendable: Decimal) -> str | None:
+    """Why ``order`` cannot be applied to ``book`` at all (A8's precondition), or None.
+
+    A buy is measured against ``spendable`` (settled cash), not ``book.cash`` (which includes
+    unsettled proceeds); a sell against every share on the book, settled or pending.
+    """
     if order.side is Side.BUY:
-        if order.value > book.cash:
-            return f"buy of {order.value} at the reference price exceeds free cash {book.cash}"
+        if order.value > spendable:
+            return f"buy of {order.value} at the reference price exceeds free cash {spendable}"
         return None
     lot = book.lot(order.isin)
     held = 0 if lot is None else lot.quantity

@@ -75,8 +75,15 @@ class _FlatBroker:
     in the result is a cap A8 cleared, not one moved by slippage or a price path.
     """
 
-    def __init__(self, cash: Decimal, holdings: dict[str, int] | None = None) -> None:
+    def __init__(
+        self,
+        cash: Decimal,
+        holdings: dict[str, int] | None = None,
+        *,
+        unsettled_proceeds: Decimal = Decimal(0),
+    ) -> None:
         self.cash = cash
+        self.unsettled_proceeds = unsettled_proceeds
         self.held: dict[str, int] = dict(holdings or {})
         self.placed: list[OrderRequest] = []
         self._staged: list[OrderRequest] = []
@@ -130,7 +137,11 @@ class _FlatBroker:
         return ()
 
     def margins(self) -> Margins:
-        return Margins(available=self.cash, utilised=Decimal(0))
+        return Margins(
+            available=self.cash,
+            utilised=Decimal(0),
+            unsettled_proceeds=self.unsettled_proceeds,
+        )
 
 
 def _evidence(session: date) -> EvidenceBundle:
@@ -283,6 +294,38 @@ def test_an_order_the_book_cannot_hold_is_escalated_not_placed_unchecked() -> No
     assert all(
         e.payload is not None and e.payload["event"] == UNEXECUTABLE_EVENT for e in escalations
     )
+
+
+# ── settlement: what the caps are a fraction of, and what a buy may spend ────────────────────────
+
+
+def test_unsettled_proceeds_count_in_book_value_but_never_fund_a_buy() -> None:
+    """Caps divide by ``cash_value``; spendability is ``available`` alone.
+
+    ₹10,000 settled and ₹90,000 of sale proceeds still in settlement: the account is worth
+    ₹1,00,000. A ₹10,000 buy is 10% of that — inside every cap — and fundable. Valued on settled
+    cash alone it would be 100% of the book and blocked; funded from ``cash_value`` a ₹14,000 buy
+    would be placed against money the account may not yet spend.
+    """
+    broker = _FlatBroker(Decimal("10000"), unsettled_proceeds=Decimal("90000"))
+    result = _run({S1: [_buy(NAMES[0], 100), _buy(NAMES[1], 1)]}, broker)
+    # 100 x ₹100 spends all ₹10,000 settled; the next ₹100 is unfunded, whatever is unsettled.
+    assert broker.placed == [_buy(NAMES[0], 100)]
+    assert _blocks(result) == []
+    [escalation] = [e for e in result.journal if e.decision is Decision.ESCALATE]
+    assert escalation.isin == NAMES[1]
+    assert escalation.payload is not None
+    assert escalation.payload["event"] == UNEXECUTABLE_EVENT
+    assert "exceeds free cash 0" in escalation.payload["reason"]
+
+
+def test_a_buy_larger_than_settled_cash_is_not_funded_by_unsettled_proceeds() -> None:
+    broker = _FlatBroker(Decimal("10000"), unsettled_proceeds=Decimal("90000"))
+    result = _run({S1: [_buy(NAMES[0], 140)]}, broker)  # ₹14,000: 14% of value, > settled cash
+    assert broker.placed == []
+    [escalation] = [e for e in result.journal if e.decision is Decision.ESCALATE]
+    assert escalation.payload is not None
+    assert escalation.payload["reason"].endswith("exceeds free cash 10000")
 
 
 # ── the same entry point as the paper loop ─────────────────────────────────────────────────────
