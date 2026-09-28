@@ -219,6 +219,11 @@ class PortfolioBook:
 
     # -- external cashflows (the SIP stream) -----------------------------------------------------
 
+    @property
+    def external_flows(self) -> tuple[Cashflow, ...]:
+        """Every deposit (negative) and withdrawal (positive), in order — the XIRR stream."""
+        return tuple(self._external)
+
     def deposit(self, when: date, amount: Decimal) -> None:
         """Record cash paid into the account (a SIP instalment). Increases free cash.
 

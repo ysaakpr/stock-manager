@@ -44,6 +44,7 @@ from backtest.tax import (
     InvestorProfile,
     MissingGrandfatheringPriceError,
     PaymentTiming,
+    ReissueEvent,
     RunLedger,
     SplitEvent,
     TaxError,
@@ -64,6 +65,8 @@ if TYPE_CHECKING:
 __all__ = [
     "L1GrandfatheringPrices",
     "LedgerFormatError",
+    "add_investor_flags",
+    "investor_profile_from_args",
     "main",
     "read_run_ledger",
     "render_after_tax_report",
@@ -181,26 +184,27 @@ def write_run_ledger(ledger: RunLedger, path: Path) -> None:
     """Persist ``ledger`` as JSON — money as exact strings, dates ISO, keys sorted."""
     events: list[dict[str, str]] = []
     for event in ledger.corporate_events:
-        if isinstance(event, SplitEvent):
-            events.append(
-                {
-                    "kind": "split",
-                    "isin": event.isin,
-                    "ex_date": event.ex_date.isoformat(),
-                    "numerator": str(event.numerator),
-                    "denominator": str(event.denominator),
-                }
-            )
+        row: dict[str, str]
+        if isinstance(event, ReissueEvent):
+            row = {"kind": "reissue", "from_isin": event.from_isin}
+        elif isinstance(event, SplitEvent):
+            row = {
+                "kind": "split",
+                "numerator": str(event.numerator),
+                "denominator": str(event.denominator),
+            }
         else:
-            events.append(
-                {
-                    "kind": "bonus",
-                    "isin": event.isin,
-                    "ex_date": event.ex_date.isoformat(),
-                    "new_shares": str(event.new_shares),
-                    "held_shares": str(event.held_shares),
-                }
-            )
+            row = {
+                "kind": "bonus",
+                "new_shares": str(event.new_shares),
+                "held_shares": str(event.held_shares),
+            }
+        row["isin"] = event.isin
+        row["ex_date"] = event.ex_date.isoformat()
+        resulting = getattr(event, "resulting_quantity", None)
+        if resulting is not None:
+            row["resulting_quantity"] = str(resulting)
+        events.append(row)
     document = {
         "version": 1,
         "source": ledger.source,
@@ -228,7 +232,11 @@ def write_run_ledger(ledger: RunLedger, path: Path) -> None:
         ],
         "corporate_events": events,
     }
-    path.write_text(json.dumps(document, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    # Written beside the target and renamed over it, so a run killed mid-write leaves no partial
+    # ledger for a resumed campaign to mistake for a finished one.
+    partial = path.with_name(path.name + ".partial")
+    partial.write_text(json.dumps(document, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    partial.replace(path)
 
 
 def _money(raw: object, where: str) -> Decimal:
@@ -244,6 +252,7 @@ def read_run_ledger(path: Path) -> RunLedger:
         raise LedgerFormatError(f"{path}: not a version-1 run ledger")
     events: list[CorporateEvent] = []
     for e in doc["corporate_events"]:
+        resulting = int(e["resulting_quantity"]) if "resulting_quantity" in e else None
         if e["kind"] == "split":
             events.append(
                 SplitEvent(
@@ -251,6 +260,7 @@ def read_run_ledger(path: Path) -> RunLedger:
                     date.fromisoformat(e["ex_date"]),
                     int(e["numerator"]),
                     int(e["denominator"]),
+                    resulting,
                 )
             )
         elif e["kind"] == "bonus":
@@ -260,8 +270,11 @@ def read_run_ledger(path: Path) -> RunLedger:
                     date.fromisoformat(e["ex_date"]),
                     int(e["new_shares"]),
                     int(e["held_shares"]),
+                    resulting,
                 )
             )
+        elif e["kind"] == "reissue":
+            events.append(ReissueEvent(e["isin"], date.fromisoformat(e["ex_date"]), e["from_isin"]))
         else:
             raise LedgerFormatError(f"unsupported corporate event kind {e['kind']!r}")
     return RunLedger(
@@ -464,6 +477,51 @@ def render_after_tax_report(result: AfterTaxResult, schedule: TaxSchedule) -> st
 # ── CLI ────────────────────────────────────────────────────────────────────────────────────────
 
 
+def add_investor_flags(parser: argparse.ArgumentParser) -> None:
+    """The investor assumptions every after-tax CLI takes — all required, none defaulted.
+
+    Shared by this CLI, ``backtest.sweep``, ``backtest.verdict`` and ``backtest.campaign`` so the
+    four state the same assumptions under the same names. A missing flag is an argparse error:
+    an after-tax figure struck on an assumption nobody stated is the defect this refuses.
+    """
+    group = parser.add_argument_group("investor (resident individual; every flag required)")
+    group.add_argument(
+        "--slab-rate",
+        type=Decimal,
+        required=True,
+        help="marginal slab rate dividends are taxed at from FY2020-21, as a ratio (e.g. 0.30)",
+    )
+    group.add_argument(
+        "--cg-surcharge",
+        type=Decimal,
+        required=True,
+        help="surcharge on Sec 111A/112A tax, as a ratio (e.g. 0.15)",
+    )
+    group.add_argument(
+        "--dividend-surcharge",
+        type=Decimal,
+        required=True,
+        help="surcharge on dividend tax, as a ratio",
+    )
+    group.add_argument(
+        "--payment",
+        choices=[t.value for t in PaymentTiming],
+        required=True,
+        help="when each FY's tax is paid: fy_end (31 Mar) or self_assessment (31 Jul after)",
+    )
+
+
+def investor_profile_from_args(args: argparse.Namespace) -> InvestorProfile:
+    """The ``InvestorProfile`` the flags of :func:`add_investor_flags` state."""
+    return InvestorProfile(
+        residency="resident_individual",
+        slab_rate=args.slab_rate,
+        cg_surcharge_rate=args.cg_surcharge,
+        dividend_surcharge_rate=args.dividend_surcharge,
+        payment_timing=PaymentTiming(args.payment),
+    )
+
+
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="python -m backtest.tax_report",
@@ -471,10 +529,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("ledger", type=Path, help="run ledger JSON written by write_run_ledger")
     # No defaults on purpose: every investor assumption is stated by whoever runs the report.
-    parser.add_argument("--slab-rate", type=Decimal, required=True)
-    parser.add_argument("--cg-surcharge", type=Decimal, required=True)
-    parser.add_argument("--dividend-surcharge", type=Decimal, required=True)
-    parser.add_argument("--payment", choices=[t.value for t in PaymentTiming], required=True)
+    add_investor_flags(parser)
     parser.add_argument("--report", type=Path, help="write the markdown report here")
     return parser.parse_args(argv)
 
@@ -484,13 +539,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     ledger = read_run_ledger(args.ledger)
     schedule = load_tax_schedule()
-    profile = InvestorProfile(
-        residency="resident_individual",
-        slab_rate=args.slab_rate,
-        cg_surcharge_rate=args.cg_surcharge,
-        dividend_surcharge_rate=args.dividend_surcharge,
-        payment_timing=PaymentTiming(args.payment),
-    )
+    profile = investor_profile_from_args(args)
     with QueryService() as service:
         fmv = L1GrandfatheringPrices(service, fmv_date=schedule.grandfather_fmv_date)
         result = compute_after_tax(ledger, profile, schedule=schedule, fmv=fmv)

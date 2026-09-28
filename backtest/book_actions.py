@@ -86,6 +86,10 @@ _ONE = Decimal("1")
 _log = structlog.get_logger(__name__)
 
 __all__ = [
+    "AppliedBookAction",
+    "AppliedCarry",
+    "AppliedDividend",
+    "AppliedRescale",
     "BookActionApplier",
     "BookActionCalendar",
     "BookActionSource",
@@ -161,6 +165,47 @@ class UnmodelledAction:
 
 
 BookAction = ShareRescale | CashDividend | UnmodelledAction
+
+
+# ── what an applier did — the record a run's tax ledger is built from ─────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedDividend:
+    """``amount`` rupees of dividend on ``isin`` credited to both books on ``session``."""
+
+    isin: str
+    session: date
+    amount: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedCarry:
+    """Every share of ``from_isin`` carried 1:1 to ``isin`` on ``ex_date`` (an ISIN reissue)."""
+
+    from_isin: str
+    isin: str
+    ex_date: date
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedRescale:
+    """A split or bonus applied on ``ex_date``: ``old_quantity`` shares became ``new_quantity``.
+
+    ``new_quantity`` is the floored count the books actually hold (a fraction is forfeited), which
+    is what a tax-lot rebuild has to reach, not the unfloored ratio.
+    """
+
+    isin: str
+    ex_date: date
+    kind: RescaleKind
+    numerator: Decimal
+    denominator: Decimal
+    old_quantity: int
+    new_quantity: int
+
+
+AppliedBookAction = AppliedDividend | AppliedCarry | AppliedRescale
 
 #: Within one ex-date: dividends first (paid on the pre-action count), then reissue carries and
 #: rescales, then the unmodelled notices. Then ISIN, for a stable order.
@@ -256,6 +301,9 @@ class BookActionApplier:
         self._source = source
         self._last: date | None = None
         self.applied: Counter[str] = Counter()
+        #: Every action that moved shares or cash, in the order it was applied — the run's tax
+        #: ledger (``backtest.run_ledger``) is rebuilt from this and the fills, nothing else.
+        self.log: list[AppliedBookAction] = []
 
     def apply(self, session: date, *, sim: SimBroker, book: PortfolioBook) -> None:
         """Apply every action with ex-date in ``(previous session, session]``."""
@@ -284,6 +332,7 @@ class BookActionApplier:
         )
         _check_agree(action.isin, sim, book)
         self.applied["DIVIDEND"] += 1
+        self.log.append(AppliedDividend(action.isin, session, amount))
 
     def _rescale(self, action: ShareRescale, sim: SimBroker, book: PortfolioBook) -> None:
         if action.carried_from is not None and sim.held_quantity(action.carried_from) > 0:
@@ -296,9 +345,10 @@ class BookActionApplier:
             )
             _check_agree(action.isin, sim, book)
             self.applied["REISSUE"] += 1
+            self.log.append(AppliedCarry(action.carried_from, action.isin, action.ex_date))
         if _entitled(action.isin, action.ex_date, sim) == 0:
             return
-        sim.apply_share_rescale(
+        old, new = sim.apply_share_rescale(
             action.isin,
             numerator=action.numerator,
             denominator=action.denominator,
@@ -321,6 +371,17 @@ class BookActionApplier:
             )
         _check_agree(action.isin, sim, book)
         self.applied[action.kind.value] += 1
+        self.log.append(
+            AppliedRescale(
+                isin=action.isin,
+                ex_date=action.ex_date,
+                kind=action.kind,
+                numerator=action.numerator,
+                denominator=action.denominator,
+                old_quantity=old,
+                new_quantity=new,
+            )
+        )
 
     def _unmodelled(self, action: UnmodelledAction, sim: SimBroker) -> None:
         if sim.held_quantity(action.isin) == 0:

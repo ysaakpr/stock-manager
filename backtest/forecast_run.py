@@ -90,6 +90,7 @@ from backtest.run import (
     _AccountingBroker,
     _decision_counts,
     _exact_price,
+    _finish_backtest,
     _InvestableUniverse,
     _L1Market,
     _L1Reader,
@@ -101,8 +102,10 @@ from backtest.run import (
     _rupees,
     _terminal_prices,
     _trades,
+    backtest_spec,
     run_momentum_v2,
 )
+from backtest.run_ledger import add_ledger_dir_flag, ledger_dir_unless
 from dataplatform.clock import FrozenClock
 from dataplatform.logging import get_logger
 from dataplatform.query.pit import Dataset
@@ -537,6 +540,16 @@ def run_forecast_daily(
     """
     params = parameters if parameters is not None else ForecastDailyParameters()
     uni = universe if universe is not None else UniverseParameters()
+    spec = backtest_spec(
+        "forecast_daily",
+        start=start,
+        end=end,
+        parameters=params,
+        opening_cash=opening_cash,
+        adjusted=adjusted,
+        universe=uni,
+        benchmark_slug=benchmark_slug,
+    )
     reader = _L1Reader(data_root=data_root)
     cursor: _FeatureCursor | None = None
     try:
@@ -633,6 +646,7 @@ def run_forecast_daily(
             benchmark_method=benchmark.method,
             max_drawdown=_max_drawdown(nav_path),
         )
+        run = _finish_backtest(run, broker=broker, spec=spec, terminal_prices=terminal_prices)
         return run, data.stats
     finally:
         if cursor is not None:
@@ -840,13 +854,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--opening-cash", type=Decimal, default=_DEFAULT_OPENING_CASH)
     parser.add_argument("--data-root", type=Path, default=None)
     add_book_actions_flag(parser)
+    add_ledger_dir_flag(parser)
     args = parser.parse_args(argv)
     if args.end < args.start:
         print(f"error: --to {args.end} is before --from {args.start}", file=sys.stderr)
         return 2
 
     try:
-        with store_book_actions_unless(args):
+        with store_book_actions_unless(args), ledger_dir_unless(args):
             if args.report:
                 report = run_forecast_report(
                     start=args.start,

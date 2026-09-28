@@ -79,6 +79,7 @@ __all__ = [
     "OpenLot",
     "PaymentTiming",
     "Realisation",
+    "ReissueEvent",
     "RunLedger",
     "SplitEvent",
     "TaxError",
@@ -425,12 +426,19 @@ class SplitEvent:
     """A split/consolidation: every open lot's count scales by ``numerator/denominator``.
 
     Acquisition date and cost carry over unchanged (the holding is the same asset re-denominated).
+
+    ``resulting_quantity`` is set when the book floored a fractional entitlement and forfeited the
+    fraction (``backtest.book_actions``): the holding after the split is exactly that many shares.
+    Each lot is then scaled and floored on its own and the whole shares the per-lot floors leave
+    over go to the oldest lot, so the lots sum to what the account holds. Which lot carries the
+    odd share moves at most one share's holding period; ``None`` refuses a fractional lot instead.
     """
 
     isin: str
     ex_date: date
     numerator: int
     denominator: int
+    resulting_quantity: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,16 +446,33 @@ class BonusEvent:
     """A bonus ``new:held``: a new lot of ``held_qty * new / held`` shares at nil cost.
 
     Sec 55(2)(aa)(iiia): the cost of bonus shares is nil, and the holding period runs from the
-    allotment date (taken as the ex-date). The original lots are untouched.
+    allotment date (taken as the ex-date). The original lots are untouched. ``resulting_quantity``
+    as for :class:`SplitEvent`: the whole holding after the allotment, the fraction forfeited.
     """
 
     isin: str
     ex_date: date
     new_shares: int
     held_shares: int
+    resulting_quantity: int | None = None
 
 
-CorporateEvent = SplitEvent | BonusEvent
+@dataclass(frozen=True, slots=True)
+class ReissueEvent:
+    """An ISIN reissue: every lot of ``from_isin`` continues as ``isin`` from ``ex_date``, 1:1.
+
+    A face-value split on NSE usually retires the ISIN, and the holder's shares continue under the
+    successor (the carry in ``backtest.book_actions``). Not a transfer (no gain arises): each lot
+    keeps its acquisition date and cost, and its own ``OpenLot.isin`` (the ISIN it was bought
+    under), so a Sec 55(2)(ac) FMV is still looked up on the ISIN that traded on 31-01-2018.
+    """
+
+    isin: str
+    ex_date: date
+    from_isin: str
+
+
+CorporateEvent = SplitEvent | BonusEvent | ReissueEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -676,6 +701,33 @@ def _sell_fifo(
     return out
 
 
+def _split_lots(lots: deque[OpenLot], event: SplitEvent, schedule: TaxSchedule) -> None:
+    """Scale every open lot by the split ratio in place (see :class:`SplitEvent` on fractions)."""
+    ratio = Decimal(event.numerator) / event.denominator
+    floored = event.resulting_quantity is not None
+    for lot in lots:
+        scaled = Decimal(lot.quantity * event.numerator) / event.denominator
+        if not floored and scaled != scaled.to_integral_value():
+            raise LotMatchError(f"split on {event.isin} leaves a fractional lot ({scaled})")
+        lot.quantity = int(scaled)  # int() truncates toward zero: the floor, for a positive count
+        if event.ex_date > schedule.grandfather_fmv_date:
+            lot.gf_units *= ratio
+    if event.resulting_quantity is not None and lots:
+        leftover = event.resulting_quantity - sum(lot.quantity for lot in lots)
+        if not 0 <= leftover < len(lots):
+            raise LotMatchError(
+                f"split on {event.isin} leaves {event.resulting_quantity} shares, which the "
+                f"floored lots ({sum(lot.quantity for lot in lots)}) cannot reach"
+            )
+        lots[0].quantity += leftover
+    empty = [lot for lot in lots if lot.quantity == 0]
+    for lot in empty:
+        lots.remove(lot)
+    if lots:
+        # A lot floored to nothing keeps its cost in the holding, as the book's basis does.
+        lots[0].cost += sum((lot.cost for lot in empty), _ZERO)
+
+
 def match_lots(
     ledger: RunLedger, schedule: TaxSchedule, fmv: GrandfatheringPrices
 ) -> tuple[tuple[Realisation, ...], dict[str, deque[OpenLot]]]:
@@ -695,19 +747,28 @@ def match_lots(
 
     realisations: list[Realisation] = []
     for _, _, _, item in timeline:
-        if isinstance(item, SplitEvent):
-            for lot in lots[item.isin]:
-                scaled = Decimal(lot.quantity * item.numerator) / item.denominator
-                if scaled != scaled.to_integral_value():
-                    raise LotMatchError(f"split on {item.isin} leaves a fractional lot ({scaled})")
-                lot.quantity = int(scaled)
-                if item.ex_date > schedule.grandfather_fmv_date:
-                    lot.gf_units *= Decimal(item.numerator) / item.denominator
+        if isinstance(item, ReissueEvent):
+            carried = lots.pop(item.from_isin, deque())
+            if carried:
+                merged = sorted([*lots[item.isin], *carried], key=lambda lot: lot.acquired)
+                lots[item.isin] = deque(merged)
+        elif isinstance(item, SplitEvent):
+            _split_lots(lots[item.isin], item, schedule)
         elif isinstance(item, BonusEvent):
             held = sum(lot.quantity for lot in lots[item.isin])
-            new = Decimal(held * item.new_shares) / item.held_shares
-            if new != new.to_integral_value():
-                raise LotMatchError(f"bonus on {item.isin} gives a fractional allotment ({new})")
+            if item.resulting_quantity is not None:
+                if item.resulting_quantity < held:
+                    raise LotMatchError(
+                        f"bonus on {item.isin} leaves {item.resulting_quantity} shares, fewer than "
+                        f"the {held} the lots hold"
+                    )
+                new = Decimal(item.resulting_quantity - held)
+            else:
+                new = Decimal(held * item.new_shares) / item.held_shares
+                if new != new.to_integral_value():
+                    raise LotMatchError(
+                        f"bonus on {item.isin} gives a fractional allotment ({new})"
+                    )
             if new:
                 lots[item.isin].append(OpenLot(item.isin, item.ex_date, int(new), _ZERO))
         elif item.side is Side.BUY:
