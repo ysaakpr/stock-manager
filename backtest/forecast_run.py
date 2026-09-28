@@ -56,6 +56,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from backtest.accounting import PortfolioBook
+from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
 from backtest.forecast import (
     FEATURE_NAMES,
     LOOKBACK_1M,
@@ -88,6 +89,7 @@ from backtest.run import (
     UniverseParameters,
     _AccountingBroker,
     _decision_counts,
+    _exact_price,
     _InvestableUniverse,
     _L1Market,
     _L1Reader,
@@ -195,13 +197,17 @@ class _FeatureCursor:
             else ""
         )
         w = "PARTITION BY isin ORDER BY trade_date"
+        # No CAST to DOUBLE (X2): `raw_close`, the price the policy sizes against, stays the lake's
+        # exact decimal. The features and the fitted target are dimensionless (ratios, a log-return
+        # stdev) and are evaluated in DOUBLE by DuckDB regardless of input type — they feed a
+        # least-squares fit, never a rupee.
         return f"""
         WITH base AS (
             SELECT r.isin, r.trade_date,
-                   CAST({px} AS DOUBLE) AS px,
-                   CAST(r.close AS DOUBLE) AS raw_close,
-                   CAST(r.deliv_pct AS DOUBLE) AS dpct,
-                   CAST(r.total_traded_value AS DOUBLE) AS ttv
+                   {px} AS px,
+                   r.close AS raw_close,
+                   r.deliv_pct AS dpct,
+                   r.total_traded_value AS ttv
             FROM l1_fc_raw r {join}
             WHERE r.exchange = 'NSE' AND r.series = 'EQ' AND r.close > 0
               AND r.trade_date BETWEEN ? AND ?
@@ -277,7 +283,7 @@ class _FeatureCursor:
                 _Row(
                     session=row_date,
                     isin=str(row[1]),
-                    price=Decimal(str(row[2])),
+                    price=_exact_price(row[2]),
                     mom_12_1=row[3],
                     mom_1=row[4],
                     mom_6=row[5],
@@ -833,31 +839,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.set_defaults(adjusted=True)
     parser.add_argument("--opening-cash", type=Decimal, default=_DEFAULT_OPENING_CASH)
     parser.add_argument("--data-root", type=Path, default=None)
+    add_book_actions_flag(parser)
     args = parser.parse_args(argv)
     if args.end < args.start:
         print(f"error: --to {args.end} is before --from {args.start}", file=sys.stderr)
         return 2
 
     try:
-        if args.report:
-            report = run_forecast_report(
+        with store_book_actions_unless(args):
+            if args.report:
+                report = run_forecast_report(
+                    start=args.start,
+                    end=args.end,
+                    opening_cash=args.opening_cash,
+                    data_root=args.data_root,
+                    adjusted=args.adjusted,
+                )
+                _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+                _REPORT_PATH.write_text(report, encoding="utf-8")
+                print(f"  forecast report written to {_REPORT_PATH}")
+                return 0
+            run, stats = run_forecast_daily(
                 start=args.start,
                 end=args.end,
                 opening_cash=args.opening_cash,
                 data_root=args.data_root,
                 adjusted=args.adjusted,
             )
-            _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _REPORT_PATH.write_text(report, encoding="utf-8")
-            print(f"  forecast report written to {_REPORT_PATH}")
-            return 0
-        run, stats = run_forecast_daily(
-            start=args.start,
-            end=args.end,
-            opening_cash=args.opening_cash,
-            data_root=args.data_root,
-            adjusted=args.adjusted,
-        )
     except BacktestError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
