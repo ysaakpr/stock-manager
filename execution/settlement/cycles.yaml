@@ -1,0 +1,99 @@
+# Indian equity cash-market settlement cycle, as a dated schedule (X1).
+#
+# Same pattern as the dated rate card (`execution/costs/rates.yaml`): one era per settlement regime,
+# in ascending `effective_from` order. A trade settles on the cycle of the last era whose
+# `effective_from` is on or before its trade date. A trade before the first era RAISES
+# (`NoSettlementCycleError`) rather than borrowing a later cycle — a 2002 backtest settled T+2
+# would be handed liquidity the market did not give it (it was T+3 until 2003-03-31).
+#
+# `lag_sessions` is N in T+N and counts TRADING sessions on the exchange calendar, never calendar
+# days: a sale on a Thursday before a Friday holiday settles T+2 on the Tuesday, not the Saturday.
+# The broker walks it with `SessionMarket.next_session`, which in a backtest is the exchange
+# calendar the replay runs on.
+#
+# `provenance` on each era:
+#   verified      — the boundary date and cycle were read off the cited primary or exchange source
+#                   on `sources_read_on`.
+#   reconstructed — the regime is real and its boundaries are cited, but the cycle applied inside
+#                   it is a rule chosen here, not a per-security fact. The era's `approximation`
+#                   states which direction the error runs.
+#
+# Out of scope, deliberately: the optional T+0 (beta) segment NSE opened on 2024-03-28 for a small
+# list of scrips. It is opt-in per order, not the default cycle, and nothing here routes an order
+# to it; the default delivery cycle stays T+1.
+
+version: 1
+
+schedule:
+  market: India equity cash (NSE/BSE), rolling settlement, delivery
+  scope: >-
+    Delivery equity. The settlement cycle decides when a buy's shares become deliverable (a
+    settled holding) and when a sale's proceeds become spendable cash.
+
+eras:
+  # ── 2003-04-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: t2-rolling
+    effective_from: "2003-04-01"
+    lag_sessions: 2
+    label: T+2 rolling settlement, all securities
+    provenance: verified
+    sources_read_on: "2026-09-28"
+    sources:
+      - "SEBI Circular No. 19 (2003-03-04), 'Calendar for the implementation of T+2 rolling
+         settlement w.e.f. April 1, 2003': the cycle is shortened 'from the existing T+3 rolling
+         settlement to T+2 rolling settlement w.e.f. April 1, 2003' —
+         https://www.sebi.gov.in/legal/circulars/mar-2003/circular-no-19-calendar-for-the-implementation-of-t-2-rolling-settlement-w-e-f-april-1-2003-_15830.html"
+      - "SEBI Master Circular — Settlement: 'The settlement cycle of T+3 ... was shortened further
+         to T+2 rolling settlement with effect from April 01, 2003' —
+         https://www.sebi.gov.in/sebi_data/commondocs/mcann3_p.pdf"
+    notes: >-
+      The schedule starts here. Before 2003-04-01 the market was T+3 (from 2002-04-01) and T+5
+      before that; neither is encoded because the price lake starts in 2006, and an uncovered date
+      raising is the intended behaviour rather than a gap to paper over.
+
+  # ── 2022-02-25 ─────────────────────────────────────────────────────────────────────────────
+  - id: t1-phase-in
+    effective_from: "2022-02-25"
+    lag_sessions: 2
+    label: T+1 phase-in by market-cap tranche — modelled as T+2 for every security
+    provenance: reconstructed
+    approximation: conservative
+    sources_read_on: "2026-09-28"
+    sources:
+      - "SEBI circular SEBI/HO/MRD2/DCAP/P/CIR/2021/628 (2021-09-07), 'Introduction of T+1 rolling
+         settlement on an optional basis' —
+         https://www.cdslindia.com/downloads/Publications/Communique/Introduction%20of%20T%20plust%201%20rolling%20settlement%20on%20an%20optional%20basis.pdf"
+      - "MII joint decision, phased T+1 from 2022-02-25 starting with the bottom 100 stocks by
+         market capitalisation (daily market cap averaged over October 2021), then the next 500
+         on the last Friday of each month — Business Standard, 2021-11-08,
+         https://www.business-standard.com/amp/article/pti-stories/exchanges-decide-to-implement-t-1-settlement-cycle-in-phased-manner-121110800863_1.html ;
+         Zee Business, 2022-02-25,
+         https://www.zeebiz.com/market-news/news-nse-bse-to-roll-out-t1-settlement-for-stocks-from-february-25-what-it-is-how-it-helps-investors-exchanges-explained-179425"
+    notes: >-
+      Per-security tranche lists (NSE circulars naming the securities moved in each monthly phase)
+      were NOT sourced for this schedule: they are ~11 annexures of symbol lists that would need a
+      symbol-to-ISIN mapping (invariant #2) to use, which is a data task, not a lookup. So every
+      security is held at T+2 until the final phase. Direction of the error: CONSERVATIVE — a
+      security that really moved to T+1 early is modelled as settling one session later than it
+      did, so its sale proceeds become spendable (and its bought shares deliverable) a session
+      late. The schedule therefore never grants liquidity the market did not; at worst it
+      withholds one session of it, for the smaller-cap tranches, for at most eleven months.
+      `SettlementSchedule.lag_for` already takes the ISIN, so the tranche lists can later be added
+      as per-security overrides without touching a call site.
+
+  # ── 2023-01-27 ─────────────────────────────────────────────────────────────────────────────
+  - id: t1
+    effective_from: "2023-01-27"
+    lag_sessions: 1
+    label: T+1 rolling settlement, all securities
+    provenance: verified
+    sources_read_on: "2026-09-28"
+    sources:
+      - "NSE announcement of completion of the transition: all equity securities (including SME,
+         ETFs, REITs, InvITs, SGBs, government and corporate bonds) moved to T+1 on 2023-01-27 —
+         https://globalexchanges.com/latest-news/india-nse-announces-completion-of-transition-to-t1-settlement-cycle-in-india-equity-markets/134141/"
+      - "Deutsche Bank flow, 'India trumpets T+1 settlement': phase-in from 2022-02-25, final batch
+         by 27 January 2023 — https://flow.db.com/topics/trust-and-securities-services/india-trumpets-t1-settlement"
+    notes: >-
+      Current regime; open-ended until a later era is added. Trades dated 2023-01-27 onward
+      settle T+1 for every security.
