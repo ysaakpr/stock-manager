@@ -63,6 +63,7 @@ from dataplatform.query.pit import Dataset, PitContext, PitError
 from execution.broker import Exchange, OrderRequest, Side
 from execution.costs import CostModel, load_rate_card
 from execution.sim_broker import NoReferenceBarError, ReferenceBar, SimBroker
+from tests.rails_support import mechanics_gate
 
 # ── fixtures: two names, four sessions, a moving price path ─────────────────────────────────────
 
@@ -404,7 +405,13 @@ def _run(policy: Policy) -> ReplayResult:
         market=InMemoryMarket(CALENDAR, CLOSES),
         opening_cash=OPENING_CASH,
     )
-    engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=SESSIONS)
+    engine = ReplayEngine(
+        policy=policy,
+        broker=broker,
+        clock=clock,
+        sessions=SESSIONS,
+        rails=mechanics_gate(CLOSES),
+    )
     return engine.run()
 
 

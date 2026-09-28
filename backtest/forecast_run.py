@@ -75,6 +75,7 @@ from backtest.policies.forecast_daily import (
 )
 from backtest.policies.momentum_v2 import MomentumV2Parameters
 from backtest.policies.naive_momentum import MomentumParameters
+from backtest.rails import RailGate, ratified_backtest_rail_policy
 from backtest.replay import ReplayEngine
 from backtest.run import (
     _ACCOUNT_STATE,
@@ -583,7 +584,11 @@ def run_forecast_daily(
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         engine = ReplayEngine(
-            policy=ForecastDailyPolicy(data, params), broker=broker, clock=clock, sessions=sessions
+            policy=ForecastDailyPolicy(data, params),
+            broker=broker,
+            clock=clock,
+            sessions=sessions,
+            rails=RailGate(ratified_backtest_rail_policy(), reader.closes_on),
         )
         started = time.perf_counter()
         result = engine.run()
