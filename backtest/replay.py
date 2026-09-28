@@ -62,10 +62,10 @@ import structlog
 from analyst.journal.evidence import EvidenceBundle, canonical_bytes, digest_of
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
 from analyst.journal.writer import Journal
-from backtest.rails import RailGate, rail_blocks_by_rail
+from backtest.rails import GateOutcome, RailGate, rail_blocks_by_rail
 from dataplatform.clock import Clock, FrozenClock
 from dataplatform.query.pit import PitContext
-from execution.broker import Broker, Order, OrderRequest
+from execution.broker import Broker, Order, OrderRequest, Side
 
 _log = structlog.get_logger(__name__)
 
@@ -430,13 +430,13 @@ class ReplayEngine:
 
         # 6. Journal the decision and the rails' verdicts. Every session writes at least one entry
         #    (invariant #9), and a blocked order is one of them, never an absence.
-        return self._journal_decision(decision, session, cleared.entries)
+        return self._journal_decision(decision, session, cleared)
 
     def _journal_decision(
         self,
         decision: SessionDecision,
         session: date,
-        rail_entries: Sequence[JournalEntry] = (),
+        cleared: GateOutcome,
     ) -> list[JournalEntry]:
         """Write the session's entries (or a heartbeat), persisting them if a Journal is attached.
 
@@ -449,7 +449,10 @@ class ReplayEngine:
         if self._journal is not None:
             self._journal.snapshot(decision.evidence)
 
-        entries = list(decision.entries)
+        # A refused order's BUY/SELL line is replaced by the rails' line for it, as in the paper
+        # loop, where a blocked order is journalled by its RAIL_BLOCK alone: the journal records
+        # the trades that reached the broker, and every one that did not, by why it did not.
+        entries = [*_without_refused(decision.entries, cleared.refused), *cleared.entries]
         if not entries:
             # "Checked, nothing to do" is a decision with evidence behind it, not a missing row.
             entries = [
@@ -462,9 +465,6 @@ class ReplayEngine:
                     evidence_snapshot_ref=evidence_ref,
                 )
             ]
-
-        # The rails' lines follow the decision they judged: "T0 decided BUY X; RAILS blocked it".
-        entries.extend(rail_entries)
 
         written: list[JournalEntry] = []
         for entry in entries:
@@ -480,6 +480,20 @@ class ReplayEngine:
                 self._journal.append(stamped)
             written.append(stamped)
         return written
+
+
+def _without_refused(
+    entries: Sequence[JournalEntry], refused: Sequence[OrderRequest]
+) -> list[JournalEntry]:
+    """``entries`` less one BUY/SELL line per refused order (same ISIN and side), first match."""
+    remaining = list(entries)
+    for order in refused:
+        decision = Decision.BUY if order.side is Side.BUY else Decision.SELL
+        for index, entry in enumerate(remaining):
+            if entry.isin == order.isin and entry.decision is decision:
+                del remaining[index]
+                break
+    return remaining
 
 
 def _sleeves_of(entries: Sequence[JournalEntry]) -> dict[str, Sleeve]:

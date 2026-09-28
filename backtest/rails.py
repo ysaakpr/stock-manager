@@ -280,10 +280,16 @@ class _SessionRailJournal:
 
 @dataclass(frozen=True, slots=True)
 class GateOutcome:
-    """One session's verdict: the orders A8 cleared, in policy order, and what was journalled."""
+    """One session's verdict: the orders A8 cleared, in policy order, and what was journalled.
+
+    ``refused`` is every order not placed — blocked by a rail or unexecutable — so the engine can
+    retire the policy's own BUY/SELL line for it: in the paper loop a refused order is recorded by
+    its ``RAIL_BLOCK`` alone, and a replay must not report a trade that never reached the broker.
+    """
 
     allowed: tuple[OrderRequest, ...]
     entries: tuple[JournalEntry, ...]
+    refused: tuple[OrderRequest, ...] = ()
 
 
 class RailGate:
@@ -334,6 +340,7 @@ class RailGate:
         engine = RailEngine(sink, clock=clock)
         book = self._book(broker, case_id or BACKTEST_CASE_ID)
         allowed: list[OrderRequest] = []
+        refused: list[OrderRequest] = []
         for request in orders:
             proposed = self._propose(request, session)
             reason = _unexecutable(proposed, book)
@@ -348,6 +355,7 @@ class RailGate:
                     side=request.side.value,
                     reason=reason,
                 )
+                refused.append(request)
                 continue
             assessment = engine.guard_order(
                 proposed,
@@ -357,11 +365,14 @@ class RailGate:
                 sleeve=sleeves.get(request.isin),
             )
             if not assessment.allowed:
+                refused.append(request)
                 continue
             # A8's own book transition, so the next order is checked against what this one leaves.
             book = apply_order(book, proposed)
             allowed.append(request)
-        return GateOutcome(allowed=tuple(allowed), entries=tuple(sink.entries))
+        return GateOutcome(
+            allowed=tuple(allowed), entries=tuple(sink.entries), refused=tuple(refused)
+        )
 
     def _price(self, isin: str, fallback: Decimal | None) -> Decimal | None:
         """Today's close, else the last close seen, else ``fallback`` (the broker's cost basis)."""

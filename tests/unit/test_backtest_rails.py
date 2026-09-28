@@ -226,9 +226,10 @@ def test_a_blocked_order_never_reaches_the_broker_and_is_journalled_naming_the_r
     assert block.rationale is not None and "MAX_POSITION" in block.rationale
     # Stamped with the evidence the decision was made on, like every other entry of the session.
     assert block.evidence_snapshot_ref == _evidence(S1).ref().ref
-    # The decision it judged comes first: "T0 decided BUY; RAILS blocked it".
+    # As in the paper loop, the refused order is journalled by its RAIL_BLOCK alone: no BUY line
+    # claims a trade that never reached the broker.
     session_one = [entry for entry in result.journal if entry.trading_date == S1]
-    assert [entry.decision for entry in session_one] == [Decision.BUY, Decision.RAIL_BLOCK]
+    assert [entry.decision for entry in session_one] == [Decision.RAIL_BLOCK]
     assert result.rail_blocks == {"MAX_ORDER_PCT": 1, "MAX_POSITION": 1}
 
 
@@ -241,13 +242,21 @@ def test_an_order_inside_every_cap_is_placed_and_journals_no_block() -> None:
 
 
 def test_orders_are_cleared_against_the_book_the_earlier_ones_leave() -> None:
-    # Two 10% buys of one name: each alone is inside 15%, together they are 20%.
+    # Three IT buys at 14% each: each alone is inside the 35% sector cap, the third takes IT to 42%.
+    it_names = [isin for isin, sector in SECTORS.items() if sector == "IT"][:3]
     broker = _FlatBroker(Decimal("100000"))
-    result = _run({S1: [_buy(NAMES[0], 100), _buy(NAMES[1], 100), _buy(NAMES[0], 100)]}, broker)
-    assert broker.placed == [_buy(NAMES[0], 100), _buy(NAMES[1], 100)]
+    result = _run({S1: [_buy(isin, 140) for isin in it_names]}, broker)
+    assert broker.placed == [_buy(isin, 140) for isin in it_names[:2]]
     [block] = _blocks(result)
-    assert block.isin == NAMES[0]
-    assert block.payload is not None and block.payload["rails"] == "MAX_POSITION"
+    assert block.isin == it_names[2]
+    assert block.payload is not None and block.payload["rails"] == "MAX_SECTOR"
+    # The two placed buys keep their BUY lines; the refused third is its RAIL_BLOCK only.
+    session_one = [(e.decision, e.isin) for e in result.journal if e.trading_date == S1]
+    assert session_one == [
+        (Decision.BUY, it_names[0]),
+        (Decision.BUY, it_names[1]),
+        (Decision.RAIL_BLOCK, it_names[2]),
+    ]
 
 
 def test_a_basket_of_sells_cannot_take_the_book_below_min_holdings() -> None:
