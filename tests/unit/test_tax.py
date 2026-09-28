@@ -514,6 +514,7 @@ def test_deemed_liquidation_taxes_open_lots() -> None:
     result = compute_after_tax(run, PROFILE, schedule=SCHEDULE, fmv=NO_FMV)
     assert result.total_tax == Decimal("0")
     assert result.total_tax_liquidated == Decimal("104000.00")  # 5L @ 20% + 4% cess
+    assert result.after_tax_xirr_liquidated is not None
     assert result.after_tax_xirr_liquidated < result.after_tax_xirr_realised
 
 

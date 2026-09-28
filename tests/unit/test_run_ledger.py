@@ -52,6 +52,7 @@ from backtest.tax import (
     ReissueEvent,
     RunLedger,
     SplitEvent,
+    TaxTrade,
     compute_after_tax,
     load_tax_schedule,
 )
@@ -346,7 +347,36 @@ def test_a_reissue_carries_the_lots_to_the_survivor() -> None:
     assert ledger.corporate_events == (ReissueEvent(S, D3, P), SplitEvent(S, D3, 2, 1, 80))
     result = compute_after_tax(ledger, _PROFILE, fmv=MappingGrandfatheringPrices({}))
     (lot,) = result.deemed_realisations
-    assert (lot.quantity, lot.acquired, lot.isin) == (80, D2, P)  # the lot keeps its own ISIN
+    # Reissued after 31-01-2018: the FMV (were one needed) is the bar of the ISIN bought, P.
+    assert (lot.quantity, lot.acquired, lot.isin) == (80, D2, P)
+
+
+def test_a_reissue_before_the_grandfathering_date_takes_its_fmv_from_the_survivor() -> None:
+    """A lot bought under P, reissued as S in Dec 2017: on 31-01-2018 only S traded.
+
+    Looking the FMV up on P finds no bar (the failure the first real-lake smoke hit on JSW
+    Steel's 2017 split); inverted, the lot would be grandfathered at the wrong ISIN's price.
+    """
+    bought, reissued, sold = date(2016, 1, 4), date(2017, 12, 15), date(2019, 6, 3)
+    buy = TaxTrade(P, bought, Side.BUY, 100, Decimal("10000"), Decimal("10"), True)
+    sell = TaxTrade(S, sold, Side.SELL, 1000, Decimal("30000"), Decimal("30"), True)
+    ledger = RunLedger(
+        source="reissue",
+        trades=(buy, sell),
+        external_flows=(Cashflow(bought, -_CASH),),
+        terminal_date=sold,
+        terminal_nav=_CASH,
+        terminal_prices={},
+        corporate_events=(
+            ReissueEvent(S, reissued, P),
+            SplitEvent(S, reissued, 10, 1, 1000),
+        ),
+    )
+    # FMV per S share (post-split units) on 31-01-2018: ₹25 -> grandfathered cost ₹25,000.
+    result = compute_after_tax(ledger, _PROFILE, fmv=MappingGrandfatheringPrices({S: Decimal(25)}))
+    (sale,) = result.realisations
+    assert sale.grandfathered and sale.isin == S
+    assert sale.cost == Decimal("25000")
 
 
 # ── identity and location ──────────────────────────────────────────────────────────────────────
@@ -377,3 +407,29 @@ def test_a_ledger_directory_inside_the_lake_is_refused(tmp_path: Path) -> None:
     with pytest.raises(RunOutputLocationError):
         refuse_lake_location(lake, lake)
     assert refuse_lake_location(tmp_path / "runs", lake) == (tmp_path / "runs").resolve()
+
+
+def test_a_missing_fmv_for_an_unsold_lot_withholds_only_the_liquidated_figure() -> None:
+    """A pre-2018 lot still held at the end needs its FMV only for the deemed sale.
+
+    The realised after-tax XIRR does not depend on it and stands; the liquidated one is withheld
+    with the reason, never struck on a guessed cost.
+    """
+    bought, end = date(2016, 1, 4), date(2020, 1, 3)
+    ledger = RunLedger(
+        source="held",
+        trades=(TaxTrade(A, bought, Side.BUY, 100, Decimal("10000"), Decimal("10"), True),),
+        external_flows=(Cashflow(bought, -_CASH),),
+        terminal_date=end,
+        terminal_nav=Decimal("1200000"),
+        terminal_prices={A: Decimal("300")},
+    )
+    result = compute_after_tax(ledger, _PROFILE, fmv=MappingGrandfatheringPrices({}))
+    assert result.after_tax_xirr_realised == result.pre_tax_xirr  # nothing sold, no dividend
+    assert result.after_tax_xirr_liquidated is None
+    assert result.liquidation_error is not None and A in result.liquidation_error
+    with_fmv = compute_after_tax(
+        ledger, _PROFILE, fmv=MappingGrandfatheringPrices({A: Decimal("150")})
+    )
+    assert with_fmv.after_tax_xirr_liquidated is not None
+    assert with_fmv.liquidation_error is None

@@ -443,11 +443,20 @@ def render_after_tax_report(result: AfterTaxResult, schedule: TaxSchedule) -> st
         f"| After tax — realised gains only (holdings pre-tax) | "
         f"{_pct(result.after_tax_xirr_realised)} |",
         f"| After tax — deemed liquidation on {result.terminal_date.isoformat()} | "
-        f"{_pct(result.after_tax_xirr_liquidated)} |",
+        + (
+            f"{_pct(result.after_tax_xirr_liquidated)} |"
+            if result.after_tax_xirr_liquidated is not None
+            else f"n/a — {result.liquidation_error} |"
+        ),
         "",
         f"Total tax on realised gains: {_rupees(result.total_tax)}; including the deemed "
-        f"liquidation: {_rupees(result.total_tax_liquidated)}. Terminal NAV (pre-tax): "
-        f"{_rupees(result.terminal_nav)}.",
+        "liquidation: "
+        + (
+            _rupees(result.total_tax_liquidated)
+            if result.liquidation_error is None
+            else "n/a (see above)"
+        )
+        + f". Terminal NAV (pre-tax): {_rupees(result.terminal_nav)}.",
         "",
         "## Tax per financial year (realised)",
         "",

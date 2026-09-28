@@ -463,8 +463,9 @@ class ReissueEvent:
 
     A face-value split on NSE usually retires the ISIN, and the holder's shares continue under the
     successor (the carry in ``backtest.book_actions``). Not a transfer (no gain arises): each lot
-    keeps its acquisition date and cost, and its own ``OpenLot.isin`` (the ISIN it was bought
-    under), so a Sec 55(2)(ac) FMV is still looked up on the ISIN that traded on 31-01-2018.
+    keeps its acquisition date and cost. Its ``OpenLot.isin`` — the ISIN a Sec 55(2)(ac) FMV is
+    looked up on — becomes the survivor's only if the reissue is on or before the FMV date: the
+    FMV is the bar of whichever ISIN actually traded on 31-01-2018.
     """
 
     isin: str
@@ -749,6 +750,10 @@ def match_lots(
     for _, _, _, item in timeline:
         if isinstance(item, ReissueEvent):
             carried = lots.pop(item.from_isin, deque())
+            if item.ex_date <= schedule.grandfather_fmv_date:
+                # The survivor is what traded on the FMV date, so its bar is the Sec 55(2)(ac) FMV.
+                for lot in carried:
+                    lot.isin = item.isin
             if carried:
                 merged = sorted([*lots[item.isin], *carried], key=lambda lot: lot.acquired)
                 lots[item.isin] = deque(merged)
@@ -999,11 +1004,14 @@ class AfterTaxResult:
     fy_taxes_liquidated: tuple[FyTax, ...]
     pre_tax_xirr: Decimal
     after_tax_xirr_realised: Decimal
-    after_tax_xirr_liquidated: Decimal
+    #: ``None`` when the deemed sale could not be taxed; ``liquidation_error`` then says why.
+    after_tax_xirr_liquidated: Decimal | None
     stt_known: bool
     dividends_credited: int
     terminal_date: date
     terminal_nav: Decimal
+    #: Why the deemed-liquidation variant was withheld (a missing Sec 55(2)(ac) FMV), or None.
+    liquidation_error: str | None = None
 
     @property
     def total_tax(self) -> Decimal:
@@ -1036,21 +1044,32 @@ def compute_after_tax(
     realisations, open_lots = match_lots(ledger, schedule, fmv)
 
     deemed: list[Realisation] = []
-    for isin in sorted(open_lots):
-        lots = open_lots[isin]
-        price = ledger.terminal_prices.get(isin)
-        if price is None:
-            raise TaxError(f"no terminal price for held {isin}; cannot value the deemed sale")
-        _require_decimal("terminal price", price)
-        qty = sum(lot.quantity for lot in lots)
-        deemed.extend(
-            _sell_fifo(
-                lots, isin, qty, price * qty, ledger.terminal_date, schedule, fmv, deemed=True
+    liquidation_error: str | None = None
+    try:
+        for isin in sorted(open_lots):
+            lots = open_lots[isin]
+            price = ledger.terminal_prices.get(isin)
+            if price is None:
+                raise TaxError(f"no terminal price for held {isin}; cannot value the deemed sale")
+            _require_decimal("terminal price", price)
+            qty = sum(lot.quantity for lot in lots)
+            deemed.extend(
+                _sell_fifo(
+                    lots, isin, qty, price * qty, ledger.terminal_date, schedule, fmv, deemed=True
+                )
             )
-        )
+    except MissingGrandfatheringPriceError as error:
+        # Only the deemed sale needed this FMV: the realised figure does not depend on it, so it
+        # stands, and the liquidated one is withheld with the reason rather than guessed.
+        liquidation_error = str(error)
+        deemed = []
 
     fy_taxes = _fy_taxes(realisations, ledger.dividends, schedule, profile)
-    fy_liq = _fy_taxes([*realisations, *deemed], ledger.dividends, schedule, profile)
+    fy_liq = (
+        ()
+        if liquidation_error is not None
+        else _fy_taxes([*realisations, *deemed], ledger.dividends, schedule, profile)
+    )
 
     terminal = Cashflow(ledger.terminal_date, ledger.terminal_nav)
     base = [*ledger.external_flows, terminal]
@@ -1063,7 +1082,10 @@ def compute_after_tax(
         fy_taxes_liquidated=fy_liq,
         pre_tax_xirr=xirr(base),
         after_tax_xirr_realised=xirr([*base, *_tax_flows(fy_taxes)]),
-        after_tax_xirr_liquidated=xirr([*base, *_tax_flows(fy_liq)]),
+        after_tax_xirr_liquidated=(
+            None if liquidation_error is not None else xirr([*base, *_tax_flows(fy_liq)])
+        ),
+        liquidation_error=liquidation_error,
         stt_known=all(t.stt_known for t in ledger.trades),
         dividends_credited=len(ledger.dividends),
         terminal_date=ledger.terminal_date,
@@ -1076,6 +1098,7 @@ def compute_after_tax(
         pre_tax_xirr=str(result.pre_tax_xirr),
         after_tax_xirr_realised=str(result.after_tax_xirr_realised),
         after_tax_xirr_liquidated=str(result.after_tax_xirr_liquidated),
+        liquidation_error=result.liquidation_error,
         total_tax=str(result.total_tax),
     )
     return result
