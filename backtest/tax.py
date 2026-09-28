@@ -377,8 +377,11 @@ def _require_decimal(name: str, value: object) -> None:
 class TaxTrade:
     """One delivery fill, as the tax computation needs it.
 
-    ``net_amount`` is the cash the fill moved, always positive: turnover *plus* every charge on a
-    buy, turnover *minus* every charge on a sell (``CostBreakdown.net_amount``). ``stt`` is the STT
+    ``net_amount`` is the cash the fill moved: turnover *plus* every charge on a buy (always
+    positive), turnover *minus* every charge on a sell (``CostBreakdown.net_amount``). A sell's can
+    be zero or negative: a one-share dust lot whose flat DP charge exceeds its turnover costs more
+    to exit than it fetches, and under Sec 48 that is a capital loss of the cost *plus* the
+    shortfall, not an invalid trade. ``stt`` is the STT
     inside that figure, which Sec 48 does not allow as a deduction; it is backed out of the cost or
     added back to the proceeds. ``stt_known`` is False when the source could not separate STT (a
     ledger row carries only the net cash) — the report then says STT was treated as deductible,
@@ -398,8 +401,10 @@ class TaxTrade:
         _require_decimal("stt", self.stt)
         if self.quantity <= 0:
             raise ValueError(f"trade quantity must be positive, got {self.quantity}")
-        if self.net_amount <= _ZERO or self.stt < _ZERO:
-            raise ValueError("trade net amount must be positive and STT non-negative")
+        if self.side is Side.BUY and self.net_amount <= _ZERO:
+            raise ValueError(f"buy net amount must be positive, got {self.net_amount}")
+        if self.stt < _ZERO:
+            raise ValueError(f"trade STT must be non-negative, got {self.stt}")
 
     @property
     def tax_amount(self) -> Decimal:

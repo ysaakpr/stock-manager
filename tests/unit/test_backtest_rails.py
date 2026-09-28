@@ -296,6 +296,65 @@ def test_an_order_the_book_cannot_hold_is_escalated_not_placed_unchecked() -> No
     )
 
 
+class _BasisBroker(_FlatBroker):
+    """A ``_FlatBroker`` whose holdings cost ``basis`` each, so the fallback is visible."""
+
+    def __init__(self, cash: Decimal, holdings: dict[str, int], basis: Decimal) -> None:
+        super().__init__(cash, holdings)
+        self.basis = basis
+
+    def holdings(self) -> tuple[Holding, ...]:
+        return tuple(
+            Holding(isin=isin, exchange=Exchange.NSE, quantity=quantity, average_price=self.basis)
+            for isin, quantity in sorted(self.held.items())
+        )
+
+
+def _marks_without(missing: str) -> Any:
+    return lambda session: {isin: PRICE for isin in NAMES if isin != missing}
+
+
+def test_a_held_name_with_no_close_is_sold_at_its_cost_basis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successor ISIN with no EQ close yet: the exit is valued at the broker's cost basis.
+
+    The rails see the same price the book carries the lot at, and the sell clears; before the
+    fallback the gate raised and killed the whole run.
+    """
+    seen: list[ProposedOrder] = []
+    real_guard = RailEngine.guard_order
+
+    def spy_guard(self: RailEngine, order: ProposedOrder, *args: Any, **kwargs: Any) -> Any:
+        seen.append(order)
+        return real_guard(self, order, *args, **kwargs)
+
+    monkeypatch.setattr(RailEngine, "guard_order", spy_guard)
+    orphan = NAMES[0]
+    basis = Decimal("87.5")
+    broker = _BasisBroker(Decimal("100000"), dict.fromkeys(NAMES[:10], 10), basis)
+    gate = RailGate(_policy(), _marks_without(orphan))
+
+    outcome = gate.clear(
+        S1, [_sell(orphan, 5)], broker=broker, clock=FrozenClock(S1), case_id=None, sleeves={}
+    )
+
+    assert outcome.allowed == (_sell(orphan, 5),)
+    [order] = seen
+    assert order.request == _sell(orphan, 5)
+    assert order.price == basis
+
+
+def test_a_buy_of_a_name_with_no_close_still_raises() -> None:
+    orphan = NAMES[0]
+    broker = _BasisBroker(Decimal("100000"), dict.fromkeys(NAMES[:10], 10), Decimal("87.5"))
+    gate = RailGate(_policy(), _marks_without(orphan))
+    with pytest.raises(ValueError, match=f"no close for {orphan}"):
+        gate.clear(
+            S1, [_buy(orphan, 1)], broker=broker, clock=FrozenClock(S1), case_id=None, sleeves={}
+        )
+
+
 # ── settlement: what the caps are a fraction of, and what a buy may spend ────────────────────────
 
 
