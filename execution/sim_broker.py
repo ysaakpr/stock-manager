@@ -37,7 +37,7 @@ visible refusal in the order book, never a silent skip or a phantom fill.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import StrEnum
@@ -229,6 +229,11 @@ def _adverse(price: Decimal, side: Side, bps: Decimal) -> Decimal:
     """Move `price` `bps` basis points in the direction that hurts `side` (up buy, down sell)."""
     factor = _ONE + bps / _BPS if side is Side.BUY else _ONE - bps / _BPS
     return price * factor
+
+
+def _floor_ratio(quantity: int, numerator: Decimal, denominator: Decimal) -> int:
+    """`quantity * numerator / denominator` floored to whole shares (multiply first)."""
+    return int((quantity * numerator / denominator).to_integral_value(rounding=ROUND_FLOOR))
 
 
 def _quantise_adverse(price: Decimal, side: Side) -> Decimal:
@@ -656,6 +661,167 @@ class SimBroker:
             target_session=order.target_session,
             reason=reason,
         )
+
+    # ── corporate actions (the backtest walk only) ───────────────────────────────────────────
+    #
+    # Not part of `Broker`: a live broker's account is adjusted by the depository, not by the
+    # caller. The backtest walk (`backtest.book_actions`) is the only caller, on an ex-date, before
+    # that session's `execute_session`. None of these reads a clock, a price or a signal.
+    #
+    # Entitlement follows the trade date, not the settlement state. The exchange fixes the record
+    # date so that a buy traded before the ex-date is on the register: under T+2 the record date is
+    # the session after the ex-date and a buy on ex-1 settles on it; under T+1 (from 2023) the two
+    # coincide and a buy on ex-1 settles that day. Either way a buy traded before the ex-date is
+    # entitled — to the split shares, the bonus, the dividend — even while its shares are still
+    # pending on the ex-date, and a sale traded before it is not. So every lot below is counted by
+    # `traded < ex_date`, pending or settled, and a rescaled pending lot settles its rescaled count.
+
+    def held_quantity(self, isin: str, *, bought_before: date | None = None) -> int:
+        """Shares of `isin` on the book: settled holdings plus every pending (unsettled) buy.
+
+        With `bought_before`, a pending lot counts only if it traded before that date — the ex-date
+        entitlement rule above. Settled holdings always traded earlier than any pending lot.
+        """
+        held = self._holdings.get(isin)
+        total = 0 if held is None else held.quantity
+        for pending in self._positions:
+            if pending.isin != isin:
+                continue
+            if bought_before is not None and pending.traded >= bought_before:
+                continue
+            total += pending.lot.quantity
+        return total
+
+    def apply_share_rescale(
+        self, isin: str, *, numerator: Decimal, denominator: Decimal, ex_date: date
+    ) -> tuple[int, int]:
+        """Multiply the entitled shares of `isin` by `numerator / denominator` (a split or bonus).
+
+        Returns `(old, new)` whole-share counts over the entitled lots — settled holdings and every
+        pending buy traded before `ex_date`. The *combined* count is rescaled and floored once, the
+        same arithmetic `PortfolioBook` applies to its single position, so the two books agree share
+        for share (the floored fraction is forfeited, see `PortfolioBook._rescale_quantity`). Each
+        pending lot is scaled and floored on its own, so it settles the rescaled count at its T+N;
+        whatever whole shares the per-lot floors leave over go to the settled holding, or, with
+        none, to the latest pending lot. Cost basis is untouched on every lot. Every order still
+        staged for `isin` is rescaled the same way (a limit price inversely, rounded against the
+        trader) so a sell sized on the pre-split count still exits the whole position; one floored
+        to zero is cancelled with the reason on it.
+        """
+        if numerator <= _ZERO or denominator <= _ZERO:
+            raise ValueError("a share rescale needs positive terms")
+        old = self.held_quantity(isin, bought_before=ex_date)
+        new = _floor_ratio(old, numerator, denominator)
+        entitled = [p for p in self._positions if p.isin == isin and p.traded < ex_date]
+        for pending in entitled:
+            pending.lot.quantity = _floor_ratio(pending.lot.quantity, numerator, denominator)
+        remainder = new - sum(p.lot.quantity for p in entitled)
+        held = self._holdings.get(isin)
+        if held is not None:
+            if remainder <= 0:
+                del self._holdings[isin]
+            else:
+                held.quantity = remainder
+        elif remainder > 0:
+            entitled[-1].lot.quantity += remainder  # fill order: the last traded, last to settle
+        self._positions = [p for p in self._positions if p.lot.quantity > 0]
+        for order in list(self._orders.values()):
+            if order.status is not OrderStatus.STAGED or order.request.isin != isin:
+                continue
+            self._orders[order.order_id] = self._rescaled_order(order, numerator, denominator)
+        _log.info(
+            "sim_broker.share_rescale",
+            isin=isin,
+            old_quantity=old,
+            new_quantity=new,
+            pending_lots=len(entitled),
+            numerator=str(numerator),
+            denominator=str(denominator),
+        )
+        return old, new
+
+    def carry_over(self, from_isin: str, to_isin: str) -> int:
+        """Move every share of `from_isin` to `to_isin`, 1:1, basis carried — an ISIN reissue.
+
+        A face-value split on NSE usually retires the ISIN; the holder's shares continue under the
+        successor. The settled holding, every pending lot (each keeping its own trade date and
+        T+N, so it still settles when it would have) and every staged order move; returns the
+        share count moved (0 when nothing was held under `from_isin`).
+        """
+        moved = 0
+        lot = self._holdings.pop(from_isin, None)
+        if lot is not None:
+            moved += lot.quantity
+            target = self._holdings.get(to_isin)
+            if target is None:
+                self._holdings[to_isin] = _Lot(lot.exchange, lot.quantity, lot.cost)
+            else:
+                target.quantity += lot.quantity
+                target.cost += lot.cost
+        merged: list[_PendingLot] = []
+        for pending in self._positions:
+            if pending.isin == from_isin:
+                moved += pending.lot.quantity
+                pending = _PendingLot(to_isin, pending.traded, pending.lag, pending.lot)
+            twin = next(
+                (m for m in merged if m.isin == pending.isin and m.traded == pending.traded), None
+            )
+            if twin is None:
+                merged.append(pending)
+            else:  # one position per (ISIN, fill session), as `_apply` keeps it
+                twin.lot.quantity += pending.lot.quantity
+                twin.lot.cost += pending.lot.cost
+        self._positions = merged
+        for order in list(self._orders.values()):
+            if order.status is not OrderStatus.STAGED or order.request.isin != from_isin:
+                continue
+            self._orders[order.order_id] = replace(
+                order, request=replace(order.request, isin=to_isin)
+            )
+        if moved:
+            _log.info("sim_broker.carry_over", from_isin=from_isin, to_isin=to_isin, moved=moved)
+        return moved
+
+    def credit_corporate_cash(
+        self, session: date, isin: str, amount: Decimal, description: str
+    ) -> None:
+        """Credit `amount` of corporate-action cash (a dividend) to free cash, with a ledger row.
+
+        Spendable at once, like the book's credit on the ex-date (`PortfolioBook.credit_dividend`
+        says why the ex-date, not the payment date): a dividend is not a trade and has no T+N.
+        """
+        if not isinstance(amount, Decimal):
+            raise TypeError("amount must be a Decimal — money is never float (CLAUDE.md)")
+        if amount <= _ZERO:
+            raise ValueError(f"a corporate cash credit must be positive, got {amount}")
+        self._cash += amount
+        self._ledger.append(
+            LedgerEntry(
+                seq=self._next_ledger_seq,
+                session=session,
+                isin=isin,
+                description=description,
+                debit=_ZERO,
+                credit=amount,
+                balance=self._cash,
+            )
+        )
+        self._next_ledger_seq += 1
+
+    def _rescaled_order(self, order: Order, numerator: Decimal, denominator: Decimal) -> Order:
+        request = order.request
+        quantity = _floor_ratio(request.quantity, numerator, denominator)
+        if quantity <= 0:
+            return replace(
+                order,
+                status=OrderStatus.CANCELLED,
+                reason="cancelled: corporate action left less than one share to trade",
+            )
+        limit = request.limit_price
+        if limit is not None:
+            rounding = ROUND_FLOOR if request.side is Side.BUY else ROUND_CEILING
+            limit = (limit * denominator / numerator).quantize(_TICK, rounding=rounding)
+        return replace(order, request=replace(request, quantity=quantity, limit_price=limit))
 
     # ── Broker: account views ────────────────────────────────────────────────────────────────
 
