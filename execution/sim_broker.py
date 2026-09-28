@@ -695,14 +695,17 @@ class SimBroker:
     def margins(self) -> Margins:
         """Free cash, cash tied up in positions and holdings (cost basis), and their total.
 
-        `available` is settled cash only: proceeds still in settlement (`unsettled_proceeds`) are
-        not free to deploy, so a policy sizing from `available` cannot spend them early.
+        `available` is settled cash only: proceeds still in settlement are reported separately as
+        `unsettled_proceeds`, so a policy sizing from `available` cannot spend them early and a
+        valuation from `cash_value` does not lose them.
         """
         utilised = sum(
             (lot.cost for lot in (*(p.lot for p in self._positions), *self._holdings.values())),
             _ZERO,
         )
-        return Margins(available=self._cash, utilised=utilised)
+        return Margins(
+            available=self._cash, utilised=utilised, unsettled_proceeds=self.unsettled_proceeds
+        )
 
     @property
     def cash(self) -> Decimal:
