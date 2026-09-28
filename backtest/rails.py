@@ -357,7 +357,7 @@ class RailGate:
         allowed: list[OrderRequest] = []
         refused: list[OrderRequest] = []
         for request in orders:
-            proposed = self._propose(request, session)
+            proposed = self._propose(request, session, book)
             reason = _unexecutable(proposed, book, spendable)
             if reason is not None:
                 sink.entries.append(
@@ -420,8 +420,23 @@ class RailGate:
             )
         return Portfolio(case_id=case_id, lots=tuple(lots), cash=broker.margins().cash_value)
 
-    def _propose(self, request: OrderRequest, session: date) -> ProposedOrder:
+    def _propose(self, request: OrderRequest, session: date, book: Portfolio) -> ProposedOrder:
         price = self._price(request.isin, None)
+        if price is None and request.side is Side.SELL:
+            # A held name with no close yet is valued as ``_book`` values it: its broker cost
+            # basis. A face-value split's successor ISIN can trade only in series BE for a while,
+            # which the EQ-only reader never sees; refusing to value the exit would kill the run
+            # over a holding the rails already carry at that price.
+            held = next((lot for lot in book.lots if lot.isin == request.isin), None)
+            if held is not None:
+                price = held.price
+                _log.warning(
+                    "replay.sell_valued_at_cost_basis",
+                    session=session.isoformat(),
+                    isin=request.isin,
+                    basis=str(price),
+                    reason="no close on or before the session",
+                )
         if price is None:
             # A buy of a name with no close on or before the decision session is a policy that
             # priced an order off something other than the market; fail loud rather than guess.
