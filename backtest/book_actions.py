@@ -275,7 +275,7 @@ class BookActionApplier:
     def _dividend(
         self, action: CashDividend, session: date, sim: SimBroker, book: PortfolioBook
     ) -> None:
-        quantity = sim.held_quantity(action.isin)
+        quantity = _entitled(action.isin, action.ex_date, sim)
         if quantity == 0:
             return
         amount = book.credit_dividend(session, action.isin, per_share=action.per_share)
@@ -296,10 +296,13 @@ class BookActionApplier:
             )
             _check_agree(action.isin, sim, book)
             self.applied["REISSUE"] += 1
-        if sim.held_quantity(action.isin) == 0:
+        if _entitled(action.isin, action.ex_date, sim) == 0:
             return
         sim.apply_share_rescale(
-            action.isin, numerator=action.numerator, denominator=action.denominator
+            action.isin,
+            numerator=action.numerator,
+            denominator=action.denominator,
+            ex_date=action.ex_date,
         )
         if action.kind is RescaleKind.SPLIT:
             book.apply_split(
@@ -330,6 +333,27 @@ class BookActionApplier:
             action_type=action.action_type,
             detail="held on the ex-date; the store carries no applicable terms, book unchanged",
         )
+
+
+def _entitled(isin: str, ex_date: date, sim: SimBroker) -> int:
+    """Shares of ``isin`` entitled on ``ex_date`` — every lot traded before it, settled or pending.
+
+    The exchange rule (``SimBroker``'s corporate-action section states it for both T+2 and T+1):
+    entitlement follows the trade date, so a buy still pending settlement on the ex-date is
+    entitled. The applier runs before the first fill on or after the ex-date, so every lot on the
+    book traded before it; one that did not would be rescaled or paid in ``PortfolioBook`` (which
+    keeps no trade dates) but not in the broker, so that is refused rather than let the books part.
+    The check sees pending lots only — a settled holding carries no trade date — which is where
+    such a lot would be: nothing traded on the ex-date can have settled before it.
+    """
+    entitled = sim.held_quantity(isin, bought_before=ex_date)
+    on_book = sim.held_quantity(isin)
+    if entitled != on_book:
+        raise BookError(
+            f"{isin} holds {on_book - entitled} shares traded on or after the ex-date "
+            f"{ex_date.isoformat()}; corporate actions must be applied before that session's fills"
+        )
+    return entitled
 
 
 def _check_agree(isin: str, sim: SimBroker, book: PortfolioBook) -> None:

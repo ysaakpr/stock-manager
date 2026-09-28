@@ -29,8 +29,9 @@ import pytest
 
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor
-from backtest.accounting import PortfolioBook
+from backtest.accounting import BookError, PortfolioBook
 from backtest.book_actions import (
+    BookActionApplier,
     BookActionCalendar,
     CashDividend,
     RescaleKind,
@@ -146,6 +147,8 @@ class _Walk:
         self.book.deposit(D1, _CASH)
         self.nav: dict[date, Decimal] = {}
         self.cash: dict[date, Decimal] = {}
+        self.settled: dict[date, dict[str, int]] = {}
+        self.pending: dict[date, tuple[tuple[str, date, int], ...]] = {}
         self.broker = _AccountingBroker(
             self.sim, self.book, nav_sink=self._sample, corporate_actions=actions
         )
@@ -162,6 +165,9 @@ class _Walk:
         }
         self.nav[session] = self.book.net_asset_value(closes)
         self.cash[session] = self.book.cash
+        # The broker's two share states at the session's end: delivered, and still in settlement.
+        self.settled[session] = {h.isin: h.quantity for h in self.sim.holdings()}
+        self.pending[session] = tuple((p.isin, p.session, p.quantity) for p in self.sim.positions())
 
     def run(self) -> ReplayResult:
         return self.engine.run()
@@ -538,3 +544,135 @@ def test_the_context_switch_reaches_an_accounting_broker_built_inside_it() -> No
 def test_a_float_dividend_is_refused() -> None:
     with pytest.raises(TypeError):
         CashDividend(isin=A, ex_date=D3, per_share=7.35)  # type: ignore[arg-type]
+
+
+# ── under settlement: T+2 (2019), where a buy is still pending on the ex-date ───────────────────
+#
+# 2019 is the T+2 rolling era (execution/settlement/cycles.yaml). A buy staged on T1 fills on T2
+# and its shares are deliverable for fills from T4; on T3 they are pending. Entitlement follows the
+# trade date, so a split or dividend ex on T3 reaches them anyway — and every test below fails if
+# the pending lot is skipped (the broker and the book part, or the NAV steps down).
+
+T1, T2, T3, T4, T5 = (date(2019, 3, d) for d in (4, 5, 6, 7, 8))
+T2_ERA = (T1, T2, T3, T4, T5)
+
+
+def _t2_prices(
+    isin: str, before: Decimal, after: Decimal, ex: date = T3
+) -> dict[tuple[str, date], Decimal]:
+    return {(isin, day): (before if day < ex else after) for day in T2_ERA}
+
+
+def test_t2_a_split_ex_while_the_buy_is_pending_delivers_twice_the_shares() -> None:
+    split = ShareRescale(A, T3, RescaleKind.SPLIT, Decimal("10"), Decimal("5"))
+    walk = _Walk(
+        _t2_prices(A, Decimal("100"), Decimal("50")),
+        _Scripted({T1: (_buy(A, 100),)}),
+        BookActionCalendar([split]),
+        sessions=T2_ERA,
+    )
+    walk.run()
+    # On the ex-date the lot is still in settlement — and already rescaled.
+    assert walk.settled[T3] == {}
+    assert walk.pending[T3] == ((A, T2, 200),)
+    # Its settlement delivers the rescaled count, not the traded one.
+    assert walk.settled[T4] == {A: 200}
+    assert walk.pending[T4] == ()
+    position = walk.book.position(A)
+    assert position is not None and position.quantity == 200
+    assert walk.nav[T3] == walk.nav[T2]
+    assert walk.nav[T5] == walk.nav[T2]
+
+
+def test_t2_the_same_walk_without_the_action_is_the_fake_drawdown() -> None:
+    walk = _Walk(
+        _t2_prices(A, Decimal("100"), Decimal("50")),
+        _Scripted({T1: (_buy(A, 100),)}),
+        BookActionCalendar(),
+        sessions=T2_ERA,
+    )
+    walk.run()
+    assert walk.settled[T4] == {A: 100}
+    assert walk.nav[T3] < walk.nav[T2] - Decimal("4900")
+
+
+def test_t2_two_pending_lots_are_both_rescaled_and_both_settle_the_rescaled_count() -> None:
+    # Bought on T2 and T3; a 3:2 bonus ex T4 finds both pending (one per fill session). 101 + 101
+    # shares x 5/2 is 505 exactly, while each lot alone floors 252.5 to 252: the left-over share
+    # goes to the later lot so the broker agrees with the book's single position.
+    bonus = ShareRescale(A, T4, RescaleKind.BONUS, Decimal("5"), Decimal("2"))
+    walk = _Walk(
+        _t2_prices(A, Decimal("100"), Decimal("40"), ex=T4),
+        _Scripted({T1: (_buy(A, 101),), T2: (_buy(A, 101),)}),
+        BookActionCalendar([bonus]),
+        sessions=T2_ERA,
+    )
+    walk.run()
+    assert walk.pending[T3] == ((A, T2, 101), (A, T3, 101))
+    assert walk.pending[T4] == ((A, T3, 253),)  # T2's lot settled into holdings on T4
+    assert walk.settled[T4] == {A: 252}
+    assert walk.settled[T5] == {A: 505}
+    position = walk.book.position(A)
+    assert position is not None and position.quantity == 505
+    assert walk.nav[T4] == walk.nav[T3]
+
+
+def test_t2_a_dividend_ex_while_the_buy_is_pending_is_credited_once() -> None:
+    dps = Decimal("4.20")
+    walk = _Walk(
+        _t2_prices(A, Decimal("100"), Decimal("100") - dps),
+        _Scripted({T1: (_buy(A, 100),)}),
+        BookActionCalendar([CashDividend(isin=A, ex_date=T3, per_share=dps)]),
+        sessions=T2_ERA,
+    )
+    walk.run()
+    assert walk.pending[T3] == ((A, T2, 100),)  # still in settlement on the ex-date
+    assert walk.cash[T3] - walk.cash[T2] == Decimal("420.00")
+    assert walk.book.dividend_income == Decimal("420.00")  # once — not again when it settles
+    rows = [e for e in walk.sim.ledger() if e.description.startswith("DIVIDEND")]
+    assert len(rows) == 1 and rows[0].credit == Decimal("420.00")
+    assert walk.sim.cash == walk.book.cash
+    assert walk.nav[T3] == walk.nav[T2]
+
+
+def test_t2_a_buy_filled_on_the_ex_date_is_not_entitled() -> None:
+    dps = Decimal("4.20")
+    walk = _Walk(
+        _t2_prices(A, Decimal("100"), Decimal("100") - dps),
+        _Scripted({T2: (_buy(A, 100),)}),
+        BookActionCalendar([CashDividend(isin=A, ex_date=T3, per_share=dps)]),
+        sessions=T2_ERA,
+    )
+    walk.run()
+    assert walk.book.dividend_income == 0
+
+
+def test_t2_a_reissue_carries_a_pending_lot_which_settles_under_the_survivor() -> None:
+    prices = {(P, T1): Decimal("100"), (P, T2): Decimal("100")}
+    prices.update({(S, day): Decimal("50") for day in (T3, T4, T5)})
+    split = ShareRescale(S, T3, RescaleKind.SPLIT, Decimal("2"), Decimal("1"), carried_from=P)
+    walk = _Walk(
+        prices, _Scripted({T1: (_buy(P, 100),)}), BookActionCalendar([split]), sessions=T2_ERA
+    )
+    walk.run()
+    assert walk.pending[T3] == ((S, T2, 200),)  # moved and rescaled, keeping its trade date
+    assert walk.settled[T4] == {S: 200}
+    assert walk.nav[T3] == walk.nav[T2]
+
+
+def test_a_lot_traded_on_the_ex_date_is_refused_rather_than_let_the_books_part() -> None:
+    # Walk T1..T2 only: A is bought on T2 and still pending. An action dated T2 applied late would
+    # hit a lot the ex-date rule excludes in the broker but the date-less book would include.
+    walk = _Walk(
+        _t2_prices(A, Decimal("100"), Decimal("50")),
+        _Scripted({T1: (_buy(A, 100),)}),
+        BookActionCalendar(),
+        sessions=(T1, T2),
+    )
+    walk.run()
+    assert walk.pending[T2] == ((A, T2, 100),)
+    late = BookActionApplier(
+        BookActionCalendar([ShareRescale(A, T2, RescaleKind.SPLIT, Decimal(2), Decimal(1))])
+    )
+    with pytest.raises(BookError):
+        late.apply(T3, sim=walk.sim, book=walk.book)
