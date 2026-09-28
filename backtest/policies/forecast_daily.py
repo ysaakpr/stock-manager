@@ -449,7 +449,9 @@ class ForecastDailyPolicy:
         free cash on the day's two picks would build a two-name portfolio at ~50 % each and call it
         a twenty-name one — the returns of a concentrated book reported as a diversified strategy's.
         So the instalment is ``min(free cash x margin, per-name target x names chosen)`` where the
-        target is ``(free cash + marked holdings) / top_n``, and the book fills toward ``top_n``
+        target is ``(cash + marked holdings) / top_n`` — cash including proceeds still in
+        settlement, which are the book's even though they cannot be spent yet — and the book fills
+        toward ``top_n``
         over the sessions the budget allows rather than in one session.
 
         Sized from currently *free* cash — sells staged this session fill T+1 and their proceeds
@@ -472,11 +474,13 @@ class ForecastDailyPolicy:
         chosen = wanted[: min(room, budget)]
         if not chosen:
             return ()
-        free = ctx.broker.margins().available
+        margins = ctx.broker.margins()
+        free = margins.available
         deployable = free * self._params.buy_budget_fraction
         if deployable <= _ZERO:
             return ()
-        per_name = (free + held_value) / Decimal(self._params.top_n)
+        # The book is valued with proceeds still in settlement; only the spend is limited to free.
+        per_name = (margins.cash_value + held_value) / Decimal(self._params.top_n)
         budget_cash = min(deployable, per_name * Decimal(len(chosen)))
         if budget_cash <= _ZERO:
             return ()
