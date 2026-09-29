@@ -59,7 +59,7 @@ from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
 from backtest.forecast import HORIZON_3M
 from backtest.replay import SessionContext, SessionDecision
-from backtest.sip import simulate_sip_instalment
+from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, Holding, OrderRequest, Side
 
@@ -487,7 +487,11 @@ class ForecastDailyPolicy:
         weights = _equal_weights([record.isin for record in chosen])
         prices = {record.isin: record.price for record in chosen}
         allocation = simulate_sip_instalment(
-            instalment=budget_cash, targets=weights, prices=prices, existing_value={}
+            instalment=budget_cash,
+            targets=weights,
+            prices=prices,
+            existing_value={},
+            min_order_value=MIN_ORDER_VALUE_INR,
         )
         return tuple(
             _Action(

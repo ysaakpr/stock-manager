@@ -92,7 +92,7 @@ from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
 from backtest.policies.momentum_v2 import RegimeReading
 from backtest.replay import SessionContext, SessionDecision
-from backtest.sip import simulate_sip_instalment
+from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, Holding, OrderRequest, Side
 
@@ -619,7 +619,11 @@ class SwingCompositePolicy:
             isin: Decimal(held[isin].quantity) * prices[isin] for isin in target if isin in held
         }
         allocation = simulate_sip_instalment(
-            instalment=budget, targets=weights, prices=prices, existing_value=existing_value
+            instalment=budget,
+            targets=weights,
+            prices=prices,
+            existing_value=existing_value,
+            min_order_value=MIN_ORDER_VALUE_INR,
         )
         buys = [
             (

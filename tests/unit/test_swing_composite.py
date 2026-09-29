@@ -322,15 +322,27 @@ def test_volatility_screen_excludes_the_most_volatile_from_being_bought() -> Non
     assert _bought(decision) == {B, C}
 
 
-def test_orders_are_whole_shares_and_never_outrun_the_budget() -> None:
+def test_a_budget_too_small_for_an_economic_lot_buys_nothing_and_keeps_the_cash() -> None:
+    """₹10,000 over two names is ₹4,900 a lot — below the ₹5,000 floor, so no buy is placed (X2).
+
+    Remove ``min_order_value`` from the policy's allocation and both lots are bought.
+    """
     params = SwingCompositeParameters(top_n=2, exclude_vol_fraction=Decimal("0"))
     decision = SwingCompositePolicy(_Data(), params).decide(
         _ctx(SESSION, _FakeBroker(cash=Decimal("10000")))
     )
+    assert _bought(decision) == set()
+
+
+def test_orders_are_whole_shares_and_never_outrun_the_budget() -> None:
+    params = SwingCompositeParameters(top_n=2, exclude_vol_fraction=Decimal("0"))
+    decision = SwingCompositePolicy(_Data(), params).decide(
+        _ctx(SESSION, _FakeBroker(cash=Decimal("20000")))
+    )
     buys = [o for o in decision.orders if o.side is Side.BUY]
     assert buys and all(isinstance(o.quantity, int) and o.quantity > 0 for o in buys)
     spent = sum(o.quantity * Decimal("100") for o in buys)
-    assert spent <= Decimal("10000") * params.buy_budget_fraction
+    assert spent <= Decimal("20000") * params.buy_budget_fraction
 
 
 def test_no_candidates_means_no_orders_but_still_evidence() -> None:
