@@ -74,6 +74,11 @@ from typing import Any, NamedTuple
 
 from analyst.journal.models import Decision, JournalEntry
 from backtest.accounting import BenchmarkComparison, PortfolioBook
+from backtest.band_hits import (
+    BAND_HIT_AVOIDANCE_IDENTITY,
+    BAND_HIT_LOOKBACK_SESSIONS,
+    BandHitIndex,
+)
 from backtest.book_actions import (
     AppliedBookAction,
     BookActionApplier,
@@ -1941,14 +1946,21 @@ def backtest_spec(
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
     rail_policy: BacktestRailPolicy | None = None,
     signal_l1_isins_only: bool = False,
+    band_hit_avoidance: bool = False,
 ) -> dict[str, str]:
     """The specification a runner's ledger is persisted under (``backtest.run_ledger.run_spec``).
 
     Public so a caller can compute a run's digest *before* running it — that is how a sweep skips
     a run a campaign has already finished. Must be called with exactly the arguments the runner
     gets; the corporate actions in force are read the way the runner's broker reads them.
+
+    ``band_hit_avoidance`` (X2 H2) adds a key only when on, so every run specified without it
+    keeps the digest it was persisted under — the frozen round-2 baseline included.
     """
     rails = rail_policy if rail_policy is not None else ratified_backtest_rail_policy()
+    extra: dict[str, object] = (
+        {"band_hit_avoidance": BAND_HIT_AVOIDANCE_IDENTITY} if band_hit_avoidance else {}
+    )
     return run_spec(
         runner,
         start=start,
@@ -1961,6 +1973,7 @@ def backtest_spec(
         benchmark=benchmark_slug,
         rail_policy=rails.digest(),
         signal_l1_isins_only=signal_l1_isins_only,
+        **extra,
     )
 
 
@@ -4797,6 +4810,8 @@ class SwingLake:
     regime_source: _RegimeSource
     universe_filters: Mapping[Decimal, _InvestableUniverse]
     adjusted: bool
+    #: X2 H2: every resolved PR-bundle band hit of the window, in memory; ``None`` unless asked for.
+    band_hits: BandHitIndex | None = None
 
     @property
     def first_session(self) -> date:
@@ -4818,12 +4833,15 @@ def open_swing_lake(
     floors: Sequence[Decimal],
     data_root: Path | None = None,
     adjusted: bool = True,
+    band_hits: bool = False,
 ) -> SwingLake:
     """Build the shared lake state for a swing sweep over ``[start, end]`` (M12.2).
 
     Assumes ``floors`` lists every median-turnover floor the sweep will run on; a run asking for a
     floor that is not here is a programming error, not a fallback. Never loads features — the caller
     knows the union of its arms' decision dates and loads them itself. The caller owns ``close``.
+    ``band_hits`` (X2 H2) also reads the window's PR-bundle band hits into memory, from far enough
+    back that the first session's lookback is full.
     """
     reader = _L1Reader(data_root=data_root)
     # X2: the pre-seam split factors come from the CLI's store context (signal_split_factors);
@@ -4837,7 +4855,17 @@ def open_swing_lake(
             raise BacktestError(f"no trading sessions in [{start.isoformat()}, {end.isoformat()}]")
         calendar = reader.all_sessions()
         sessions = _reserve_fill_headroom(sessions, calendar)
+        hits: BandHitIndex | None = None
+        if band_hits:
+            before = [session for session in calendar if session < sessions[0]]
+            hits = BandHitIndex.from_lake(
+                start=(before[-BAND_HIT_LOOKBACK_SESSIONS:] or [sessions[0]])[0],
+                end=sessions[-1],
+                calendar=calendar,
+                data_root=data_root,
+            )
         return SwingLake(
+            band_hits=hits,
             reader=reader,
             features=features,
             sessions=tuple(sessions),
@@ -4875,8 +4903,13 @@ def run_swing_composite(
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
     lake: SwingLake | None = None,
     rail_policy: BacktestRailPolicy | None = None,
+    band_hit_avoidance: bool = False,
 ) -> BacktestResult:
     """Replay the swing-composite policy over ``[start, end]``, returning its metrics (M10.7).
+
+    ``band_hit_avoidance`` (X2 H2) blocks new buys of names that hit a daily price band in the
+    last five sessions (``backtest.band_hits``); a shared ``lake`` must have been opened with
+    ``band_hits=True`` for it.
 
     Identical wiring to :func:`run_momentum_v2` — the same L1 bars, the one shared cost model behind
     ``SimBroker`` (invariant #4), the M4.7 whole-share allocator inside the policy, M4.6 accounting
@@ -4896,6 +4929,7 @@ def run_swing_composite(
         universe=universe,
         benchmark_slug=benchmark_slug,
         rail_policy=rail_policy,
+        band_hit_avoidance=band_hit_avoidance,
     )
     # M12.2: a shared lake, or this run's own. `owned` is what decides whether the connection is
     # closed at the end — a run handed a lake must not shut down state its siblings still need.
@@ -4907,6 +4941,7 @@ def run_swing_composite(
             floors=() if universe is None else (universe.median_turnover_floor,),
             data_root=data_root,
             adjusted=adjusted,
+            band_hits=band_hit_avoidance,
         )
     elif lake.adjusted != adjusted:
         raise BacktestError(
@@ -4958,7 +4993,14 @@ def run_swing_composite(
             nav_path.append(book.net_asset_value(last_close))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
-        policy = SwingCompositePolicy(data, parameters)
+        if band_hit_avoidance and lake.band_hits is None:
+            raise BacktestError(
+                "band-hit avoidance asked for, but the shared lake was opened without band hits — "
+                "open_swing_lake(band_hits=True) must be told"
+            )
+        policy = SwingCompositePolicy(
+            data, parameters, band_hits=lake.band_hits if band_hit_avoidance else None
+        )
 
         engine = ReplayEngine(
             policy=policy,

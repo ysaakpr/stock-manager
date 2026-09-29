@@ -48,6 +48,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Final
 
 from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
 from backtest.cash_interest import (
@@ -97,6 +98,7 @@ from dataplatform.query import QueryService
 
 __all__ = [
     "ARMS",
+    "BAND_HIT_ARM",
     "RETIRED_ARMS",
     "Arm",
     "SweepResult",
@@ -146,11 +148,17 @@ class Arm:
     swing: SwingCompositeParameters | None = None
     naive: MomentumParameters | None = None
     v2: MomentumV2Parameters | None = None
+    #: X2 H2: no new buy of a name that hit a daily price band in the last five sessions
+    #: (``backtest.band_hits``). Swing arms only. Off by default, and absent from the spec when
+    #: off, so no arm defined before it changes digest.
+    band_hit_avoidance: bool = False
 
     def __post_init__(self) -> None:
         driving = [p for p in (self.swing, self.naive, self.v2) if p is not None]
         if len(driving) != 1:
             raise ValueError(f"{self.label}: an arm drives exactly one policy, got {len(driving)}")
+        if self.band_hit_avoidance and self.swing is None:
+            raise ValueError(f"{self.label}: band-hit avoidance is a swing-policy filter")
 
 
 def _swing(**overrides: object) -> SwingCompositeParameters:
@@ -369,6 +377,20 @@ ARMS: tuple[Arm, ...] = (
 )
 
 
+#: H2 of the round-2 pre-registration (``ops/studies/preregistration-signals-2026-09-29.md`` §3):
+#: the fixed-code M10.7 composite, with no new buy of a name that closed at a daily price band in
+#: any of the last five sessions. Not in :data:`ARMS`: that tuple is the round-1 sweep the campaign
+#: and verdict default to, and the round-2 H-arms run only after the baseline is frozen.
+BAND_HIT_ARM: Final = Arm(
+    label="Swing composite + band-hit avoidance (H2)",
+    family="round-2 hypothesis",
+    reference=_M10_7,
+    note="no new buy of a name at its upper or lower price band in the last 5 sessions",
+    swing=_swing(),
+    band_hit_avoidance=True,
+)
+
+
 #: Arms taken out of the sweep, each with the reason it is gone — printed in every sweep report so
 #: a reader comparing against an older table knows the row was removed rather than lost.
 RETIRED_ARMS: tuple[tuple[str, str], ...] = (
@@ -505,6 +527,7 @@ def _arm_spec(
         opening_cash=opening_cash,
         adjusted=adjusted,
         universe=universe,
+        band_hit_avoidance=arm.band_hit_avoidance,
     )
 
 
@@ -600,7 +623,12 @@ def run_sweep(
     fresh: dict[tuple[str, Decimal], SweepRow] = {}
     if pending:
         lake = open_swing_lake(
-            start=start, end=end, floors=floors, data_root=data_root, adjusted=adjusted
+            start=start,
+            end=end,
+            floors=floors,
+            data_root=data_root,
+            adjusted=adjusted,
+            band_hits=any(arm.band_hit_avoidance for _, arm in pending),
         )
         out.start, out.terminal, out.sessions = (
             lake.first_session,
@@ -755,6 +783,7 @@ def _run_arm(
             adjusted=adjusted,
             universe=universe,
             lake=lake,  # type: ignore[arg-type]
+            band_hit_avoidance=arm.band_hit_avoidance,
         )
     if arm.naive is not None:
         return run_naive_momentum(

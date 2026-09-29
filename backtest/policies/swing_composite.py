@@ -115,6 +115,7 @@ from typing import Protocol, runtime_checkable
 
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from backtest.band_hits import BAND_HIT_BLOCK_RATIONALE, BandHitData, band_hit_blocked
 from backtest.policies.momentum_v2 import RegimeReading
 from backtest.replay import SessionContext, SessionDecision
 from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
@@ -565,14 +566,22 @@ class SwingCompositePolicy:
     session it additionally re-scores the universe and applies the band and re-underwrite rules.
     """
 
-    __slots__ = ("_data", "_params", "_positions")
+    __slots__ = ("_band_hits", "_data", "_params", "_positions")
 
     def __init__(
-        self, data: SwingCompositeData, params: SwingCompositeParameters | None = None
+        self,
+        data: SwingCompositeData,
+        params: SwingCompositeParameters | None = None,
+        *,
+        band_hits: BandHitData | None = None,
     ) -> None:
         self._data = data
         self._params = params if params is not None else SwingCompositeParameters()
         self._positions: dict[str, _Position] = {}
+        # X2 H2: band-hit avoidance is on exactly when a source is injected. It is not a field of
+        # SwingCompositeParameters on purpose — a new field would change the repr, and so the
+        # persisted digest, of every arm already run, the frozen baseline included.
+        self._band_hits = band_hits
 
     def decide(self, ctx: SessionContext) -> SessionDecision:
         """Age the book and check stops every session; re-score and rotate on a decision session."""
@@ -726,6 +735,12 @@ class SwingCompositePolicy:
         ranked = sorted(candidates, key=lambda r: (-scores[r.isin], r.isin))
         rank_of = {record.isin: rank for rank, record in enumerate(ranked, start=1)}
         buyable = {record.isin for record in self._screen(ranked)}
+        # X2 H2: no *new* buy of a name that hit a price band in the lookback. It narrows only what
+        # may be bought, like the volatility screen, so a blocked holding keeps its rank and is
+        # never sold for it; the next-ranked unblocked name takes the slot.
+        would_choose = [record.isin for record in ranked if record.isin in buyable]
+        blocked = self._band_hit_blocked(ctx)
+        buyable -= blocked
         chosen = [record for record in ranked if record.isin in buyable][: self._params.top_n]
 
         already_selling = {order.isin for order, _ in stopped}
@@ -740,11 +755,20 @@ class SwingCompositePolicy:
         # own exits rather than being liquidated on the gate.
         if self._params.regime_filter and not self._risk_on(ctx):
             target = {}
+            would_choose = []
         buys, drift = self._buys(ctx, held, target)
 
         orders = tuple(order for order, _ in (*sells, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
         evidence = self._evidence(ctx.session, chosen, scores, by_isin, drift, len(candidates))
+        withheld = [
+            isin
+            for isin in would_choose[: self._params.top_n]
+            if isin in blocked and isin not in exiting
+        ]
+        if withheld:
+            evidence, blocked_lines = self._band_hit_entries(ctx, held, withheld, evidence)
+            entries += blocked_lines
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
 
     def _unscoreable_note(self, candidates: Sequence[SwingRecord]) -> str:
@@ -771,6 +795,63 @@ class SwingCompositePolicy:
         if not readings:
             return False
         return readings[0].risk_on
+
+    def _band_hit_blocked(self, ctx: SessionContext) -> frozenset[str]:
+        """The ISINs H2 bars from a buy this session; empty when the filter is off (X2)."""
+        if self._band_hits is None:
+            return frozenset()
+        hits = ctx.pit.admit(self._band_hits.band_hits(ctx.session))
+        return band_hit_blocked(hits, as_of=ctx.session, window=self._band_hits.window(ctx.session))
+
+    def _band_hit_entries(
+        self,
+        ctx: SessionContext,
+        held: Mapping[str, Holding],
+        withheld: Sequence[str],
+        evidence: EvidenceBundle,
+    ) -> tuple[EvidenceBundle, tuple[JournalEntry, ...]]:
+        """The session's evidence with the withheld names added, and one no-op line for each.
+
+        ``withheld`` are the names the session would have targeted without H2 that the filter
+        blocked and no exit is already selling: buys that did not happen *because of* H2, the count
+        the smoke reports. A no-op is still a decision (invariant #9), so each is journaled against
+        the evidence that names it. A withheld name already on the book is kept, and only its top-up
+        toward equal weight is withheld; its line says so.
+        """
+        items = tuple(
+            EvidenceItem(
+                kind=EvidenceKind.POLICY,
+                source="nse_pr_bundle",
+                label="band_hit_blocked",
+                isin=isin,
+                as_of=ctx.session,
+                text="hit a daily price band in the last 5 sessions",
+            )
+            for isin in withheld
+        )
+        evidence = EvidenceBundle(
+            trading_date=evidence.trading_date,
+            actor=evidence.actor,
+            items=(*evidence.items, *items),
+        )
+        ref = evidence.ref().ref
+        entries = tuple(
+            JournalEntry(
+                ts=ctx.clock.now(),
+                trading_date=ctx.session,
+                actor=Actor.T0,
+                decision=Decision.HEARTBEAT,
+                isin=isin,
+                evidence_snapshot_ref=ref,
+                rationale=(
+                    f"{BAND_HIT_BLOCK_RATIONALE}: composite top-{self._params.top_n} but hit a "
+                    "daily price band in the last 5 sessions; "
+                    + ("held, kept, not topped up" if isin in held else "not bought")
+                ),
+            )
+            for isin in withheld
+        )
+        return evidence, entries
 
     def _screen(self, candidates: Sequence[SwingRecord]) -> tuple[SwingRecord, ...]:
         """The names eligible to be *bought*: all but the most volatile ``exclude_vol_fraction``."""
