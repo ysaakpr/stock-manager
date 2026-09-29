@@ -41,6 +41,7 @@ from execution.broker import Side
 
 _ISIN = "INE001A01036"
 _CASH = Decimal("1000000")
+_BUY_LEVY = Decimal(500)  # the stub buy's STT (a fixture value, not a rate)
 _FOLDS = load_folds()
 _PINNED = fc.Pinned(commit="a" * 40, data_root="/lake", lake_last_session=date(2026, 9, 25))
 _FMV = MappingGrandfatheringPrices({})
@@ -84,7 +85,7 @@ def _ledger(label: str, start: date, end: date) -> RunLedger:
                 side=Side.BUY,
                 quantity=1000,
                 net_amount=Decimal("500000"),
-                stt=Decimal(500),
+                stt=_BUY_LEVY,
                 stt_known=True,
             ),
         ),
