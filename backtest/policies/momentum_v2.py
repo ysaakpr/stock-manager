@@ -64,7 +64,7 @@ from typing import Final, Protocol, runtime_checkable
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
 from backtest.replay import SessionContext, SessionDecision
-from backtest.sip import simulate_sip_instalment
+from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, Holding, OrderRequest, Side
 
@@ -481,6 +481,7 @@ class MomentumV2Policy:
             targets=weights,
             prices=prices,
             existing_value=existing_value,
+            min_order_value=MIN_ORDER_VALUE_INR,
         )
         buys = [
             (
@@ -513,7 +514,12 @@ class MomentumV2Policy:
         prices: Mapping[str, Decimal],
         ranked: Sequence[MomentumV2Record],
     ) -> Decimal:
-        """Free cash plus every holding marked at its candidate price (average cost if unpriced)."""
+        """Cash (settled or in settlement) plus every holding marked at its candidate price.
+
+        Unpriced holdings are carried at average cost. Proceeds still in settlement count: they are
+        the account's, and leaving them out would shrink the book for a session or two after every
+        sale — under T+2 a rebalance's own sells would cut its target weights.
+        """
         price_of = {record.isin: record.price for record in ranked}
         price_of.update(prices)
         marked = sum(
@@ -523,7 +529,7 @@ class MomentumV2Policy:
             ),
             _ZERO,
         )
-        return ctx.broker.margins().available + marked
+        return ctx.broker.margins().cash_value + marked
 
     def _trims(
         self,
@@ -597,7 +603,11 @@ class MomentumV2Policy:
             isin: Decimal(held[isin].quantity) * prices[isin] for isin in priced if isin in held
         }
         allocation = simulate_sip_instalment(
-            instalment=budget, targets=weights_norm, prices=prices, existing_value=existing_value
+            instalment=budget,
+            targets=weights_norm,
+            prices=prices,
+            existing_value=existing_value,
+            min_order_value=MIN_ORDER_VALUE_INR,
         )
         if not allocation.orders:
             return self._redeploy_heartbeat(ctx, budget, reason="no affordable share reduces drift")

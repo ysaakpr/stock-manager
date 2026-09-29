@@ -1,0 +1,38 @@
+# The campaign's backtest windows (X2). Loaded by backtest/windows.py; verified against the lake
+# calendar by `uv run python -m backtest.windows --data-root <lake>`, which fails if any window's
+# first decision date lacks the full lookback its arms read.
+#
+# Joinable L1 history starts 2011-06-22: the 2006-2011 bhavcopies carry no ISIN and sit in
+# prices_raw_quarantine, which no backtest reads.
+#
+# full.start is derived, not chosen: the first NSE session on which every arm's longest lookback
+# lies wholly in joinable data. On the 2026-09 lake that is 2012-07-04, bound by the swing engine's
+# 260-print minimum history (_SWING_MIN_HISTORY; the 260th NSE-EQ session from 2011-06-22). The
+# next-longest are the 12-1 lag (253 prints, 2012-06-25) and the 365-day liquidity / 12-month
+# momentum lookbacks (2012-06-21).
+#
+# The walk-forward split is full cut into two halves of equal session count (1750 + 1750 of its
+# 3500 sessions), selection first.
+
+version: 1
+
+joinable_l1_from: "2011-06-22"
+
+windows:
+  full:
+    start: "2012-07-04"
+    end: "2026-08-31"
+  decade:
+    start: "2016-09-02"
+    end: "2026-08-31"
+  six-year:
+    start: "2019-07-01"
+    end: "2026-08-31"
+
+walk_forward:
+  selection:
+    start: "2012-07-04"
+    end: "2019-07-31"
+  verification:
+    start: "2019-08-01"
+    end: "2026-08-31"

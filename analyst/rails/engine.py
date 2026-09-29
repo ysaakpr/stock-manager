@@ -28,10 +28,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
-from typing import Final
+from typing import Final, Protocol
 
 from analyst.cases import RiskRails
-from analyst.journal import Actor, Decision, Journal, JournalEntry, Sleeve
+from analyst.journal import Actor, Decision, JournalEntry, RecordedEntry, Sleeve
 from analyst.rails.policies import (
     DrawdownStatus,
     HouseholdExposure,
@@ -51,6 +51,7 @@ from execution.broker import Side
 __all__ = [
     "FORCED_REVIEW_EVENT",
     "RailEngine",
+    "RailJournal",
     "apply_order",
     "assess_drawdown",
     "check_order",
@@ -310,6 +311,22 @@ def assess_drawdown(values: Sequence[Decimal], rails: RiskRails) -> DrawdownStat
 # ── journalling ──────────────────────────────────────────────────────────────────────────────
 
 
+class RailJournal(Protocol):
+    """The one journal operation A8 performs: append an entry and get the recorded row back.
+
+    `analyst.journal.Journal` satisfies it, and is what the daily loop passes. The seam exists so
+    the replay engine (X2) can run the *same* `RailEngine` offline — collecting the `RAIL_BLOCK`
+    lines into its own deterministic journal, and persisting them only when a database is attached
+    — rather than re-implementing the verdict or the journal line beside it (invariant #5: one
+    decision path for paper, real and replay). It narrows what the engine may do with a journal;
+    it widens nothing about what a rail decides.
+    """
+
+    def append(self, entry: JournalEntry) -> RecordedEntry:
+        """Append `entry` and return it as recorded."""
+        ...
+
+
 class RailEngine:
     """A8 wired to the journal: it clears orders and monitors drawdown, and writes down what it did.
 
@@ -326,7 +343,7 @@ class RailEngine:
 
     __slots__ = ("_clock", "_journal")
 
-    def __init__(self, journal: Journal, *, clock: Clock | None = None) -> None:
+    def __init__(self, journal: RailJournal, *, clock: Clock | None = None) -> None:
         self._journal = journal
         self._clock = SystemClock() if clock is None else clock
 
