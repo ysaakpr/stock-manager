@@ -82,6 +82,7 @@ from backtest.book_actions import (
     current_book_actions,
     store_book_actions_unless,
 )
+from backtest.cash_interest import CashInterestAccrual, InterestCredit, current_cash_interest
 from backtest.policies.fundamentals_value import (
     FundamentalsRecord,
     FundamentalsSignal,
@@ -1065,6 +1066,11 @@ class _AccountingBroker:
     :func:`~backtest.book_actions.book_corporate_actions` has in force. It is accounting only — the
     policy never receives the source, only its consequence on the account (the module docstring
     says why that matters while ``knowable_date`` is wrong in the store).
+
+    Interest on idle settled cash (``backtest.cash_interest``) is credited here too, when
+    :func:`~backtest.cash_interest.accrue_cash_interest` has it in force: the month's credit at the
+    top of the session, after the corporate actions and before the fills, and the settled balance
+    recorded after the fills. Off (the default outside the switch) it does nothing at all.
     """
 
     def __init__(
@@ -1084,6 +1090,8 @@ class _AccountingBroker:
                 "backtest.book_corporate_actions_off",
                 detail="splits, bonuses and dividends will not be applied to the book",
             )
+        schedule = current_cash_interest()
+        self._interest = CashInterestAccrual(schedule) if schedule is not None else None
         self.total_charges: Decimal = _ZERO
         # Every fill, in fill order — with the applier's log, the run's tax ledger (X2).
         self.fills: list[Fill] = []
@@ -1106,6 +1114,11 @@ class _AccountingBroker:
         """Every dividend, split, bonus and ISIN carry this walk applied, in order."""
         return () if self._actions is None else tuple(self._actions.log)
 
+    @property
+    def interest_credits(self) -> tuple[InterestCredit, ...]:
+        """Every monthly interest credit this walk made (empty when interest is off)."""
+        return () if self._interest is None else tuple(self._interest.credits)
+
     def run_ledger(
         self,
         *,
@@ -1124,17 +1137,25 @@ class _AccountingBroker:
             terminal_nav=terminal_nav,
             terminal_prices=terminal_prices,
             closing_quantities={p.isin: p.quantity for p in self._book.positions()},
+            interest=self.interest_credits,
         )
 
     def execute_session(self, session: date) -> tuple[Order, ...]:
         if self._actions is not None:
             self._actions.apply(session, sim=self._sim, book=self._book)
+        if self._interest is not None:
+            credit = self._interest.credit_due(session)
+            if credit is not None:
+                self._sim.credit_interest(session, credit.amount, credit.description)
+                self._book.credit_interest(session, credit.amount)
         filled = self._sim.execute_session(session)
         for order in filled:
             if order.status is OrderStatus.COMPLETE and order.fill is not None:
                 self._book.record_fill(order.fill)
                 self.fills.append(order.fill)
                 self.total_charges += order.fill.cost.total
+        if self._interest is not None:
+            self._interest.close_session(session, self._sim.interest_bearing_cash)
         if self._nav_sink is not None:
             self._nav_sink(session)
         return filled

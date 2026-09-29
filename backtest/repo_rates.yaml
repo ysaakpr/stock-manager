@@ -1,0 +1,294 @@
+# RBI policy repo rate, as a dated schedule — what idle backtest cash earns (X2 cash interest).
+#
+# Uninvested, *settled* cash in a backtest earns (repo rate - 0.50%) a year, accrued daily and
+# credited monthly (`backtest/cash_interest.py` states the convention). The 50 bp haircut is fixed
+# in code, not configured here: this file holds facts, never a tunable.
+#
+# One row per change of the policy (LAF) repo rate, in ascending `effective_from` order. A day is
+# priced at the last row whose `effective_from` is on or before it. A day outside
+# [`coverage.from`, `coverage.through`] RAISES `RepoRateCoverageError` — no row is ever borrowed
+# for a date it was not in force, and a run past `through` fails until someone extends this file
+# (after checking whether the MPC has moved the rate since).
+#
+# Every rate is a QUOTED STRING, in per cent as RBI quotes it. YAML would parse a bare 6.25 as a
+# float, and the loader rejects one (CLAUDE.md: money-adjacent figures are Decimal).
+#
+# `provenance` per row:
+#   verified      — the rate and its effective date were read off the cited rbi.org.in page.
+#   reconstructed — the change is real and dated as RBI announced it, but the RBI page itself was
+#                   not read (rbidocs.rbi.org.in serves a CAPTCHA to automated readers, and it is
+#                   not evaded; a secondary timeline returned 403). Every row except the latest is
+#                   reconstructed as of 2026-09-29: upgrade a row only by reading its RBI release. Materiality: an effective date off by a day moves a year's
+#                   interest by ~1/365 of 25 bp — immaterial against any backtest figure.
+#
+# Before 2011-05-03 the "repo rate" is the LAF repo rate of the corridor era (RBI then quoted a
+# repo and a reverse-repo); from 2011-05-03 the repo rate is the single policy rate. The row is
+# the rate at which RBI lent; which rate a sweep account tracks is not modelled.
+
+version: 1
+
+haircut_note: >-
+  Earning rate = repo - 0.50% per annum, fixed in backtest/cash_interest.py (HAIRCUT). Not a
+  parameter: changing it is a change of measurement, reviewed as code.
+
+coverage:
+  from: "2006-01-01"
+  # The last date on which the latest row was confirmed still in force: https://www.rbi.org.in/
+  # read 2026-09-29 shows "Policy Repo Rate : 5.25%" (the Feb, Apr, Jun and Aug 2026 MPCs held).
+  # The next MPC decision falls after this date; extend `through` only after checking it.
+  through: "2026-09-29"
+  read_on: "2026-09-29"
+
+changes:
+  - effective_from: "2005-10-26"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2005-10-26 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2006-01-24"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2006-01-24 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2006-06-09"
+    repo_rate_pct: "6.75"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2006-06-09 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2006-07-25"
+    repo_rate_pct: "7.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2006-07-25 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2006-10-31"
+    repo_rate_pct: "7.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2006-10-31 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2007-01-31"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2007-01-31 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2007-03-31"
+    repo_rate_pct: "7.75"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2007-03-31 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2008-06-12"
+    repo_rate_pct: "8.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2008-06-12 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2008-06-25"
+    repo_rate_pct: "8.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2008-06-25 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2008-07-30"
+    repo_rate_pct: "9.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2008-07-30 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2008-10-20"
+    repo_rate_pct: "8.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2008-10-20 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2008-11-03"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2008-11-03 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2008-12-08"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2008-12-08 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2009-01-05"
+    repo_rate_pct: "5.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2009-01-05 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2009-03-05"
+    repo_rate_pct: "5.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2009-03-05 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2009-04-21"
+    repo_rate_pct: "4.75"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2009-04-21 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2010-03-19"
+    repo_rate_pct: "5.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2010-03-19 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2010-04-20"
+    repo_rate_pct: "5.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2010-04-20 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2010-07-02"
+    repo_rate_pct: "5.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2010-07-02 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2010-07-27"
+    repo_rate_pct: "5.75"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2010-07-27 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2010-09-16"
+    repo_rate_pct: "6.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2010-09-16 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2010-11-02"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2010-11-02 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2011-01-25"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2011-01-25 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2011-03-17"
+    repo_rate_pct: "6.75"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2011-03-17 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2011-05-03"
+    repo_rate_pct: "7.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2011-05-03 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2011-06-16"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2011-06-16 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2011-07-26"
+    repo_rate_pct: "8.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2011-07-26 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2011-09-16"
+    repo_rate_pct: "8.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2011-09-16 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2011-10-25"
+    repo_rate_pct: "8.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2011-10-25 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2012-04-17"
+    repo_rate_pct: "8.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2012-04-17 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2013-01-29"
+    repo_rate_pct: "7.75"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2013-01-29 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2013-03-19"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2013-03-19 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2013-05-03"
+    repo_rate_pct: "7.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2013-05-03 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2013-09-20"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2013-09-20 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2013-10-29"
+    repo_rate_pct: "7.75"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2013-10-29 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2014-01-28"
+    repo_rate_pct: "8.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2014-01-28 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2015-01-15"
+    repo_rate_pct: "7.75"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2015-01-15 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2015-03-04"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2015-03-04 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2015-06-02"
+    repo_rate_pct: "7.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2015-06-02 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2015-09-29"
+    repo_rate_pct: "6.75"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2015-09-29 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2016-04-05"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2016-04-05 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2016-10-04"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2016-10-04 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2017-08-02"
+    repo_rate_pct: "6.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2017-08-02 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2018-06-06"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2018-06-06 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2018-08-01"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2018-08-01 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2019-02-07"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2019-02-07 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2019-04-04"
+    repo_rate_pct: "6.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2019-04-04 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2019-06-06"
+    repo_rate_pct: "5.75"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2019-06-06 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2019-08-07"
+    repo_rate_pct: "5.40"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2019-08-07 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2019-10-04"
+    repo_rate_pct: "5.15"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2019-10-04 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2020-03-27"
+    repo_rate_pct: "4.40"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2020-03-27 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2020-05-22"
+    repo_rate_pct: "4.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2020-05-22 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2022-05-04"
+    repo_rate_pct: "4.40"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2022-05-04 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2022-06-08"
+    repo_rate_pct: "4.90"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2022-06-08 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2022-08-05"
+    repo_rate_pct: "5.40"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2022-08-05 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2022-09-30"
+    repo_rate_pct: "5.90"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2022-09-30 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2022-12-07"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2022-12-07 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2023-02-08"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2023-02-08 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2025-02-07"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2025-02-07 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2025-04-09"
+    repo_rate_pct: "6.00"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2025-04-09 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2025-06-06"
+    repo_rate_pct: "5.50"
+    provenance: reconstructed
+    source: "RBI monetary-policy announcement of 2025-06-06 (rate and date as RBI announced them, reconstructed from the published policy record; the rbi.org.in release itself was not read)"
+  - effective_from: "2025-12-05"
+    repo_rate_pct: "5.25"
+    provenance: verified
+    source: "RBI press release, Monetary Policy Statement 2025-26 (MPC 3-5 Dec 2025), 2025-12-05:
+      'the MPC voted unanimously to reduce the policy repo rate under the liquidity adjustment
+      facility (LAF) to 5.25 per cent' —
+      https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=61749 (read 2026-09-29).
+      Effective date is the announcement date: a repo change takes effect on the day announced."

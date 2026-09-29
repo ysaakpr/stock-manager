@@ -21,6 +21,11 @@ computes for the NAV.
 ``DIVIDEND`` is read as ``DividendCredit(isin, session, credit)`` — gross amount, credit date. Any
 other description that is not a fill raises ``LedgerFormatError`` rather than being skipped: a row
 this adapter does not understand is cash it would silently leave untaxed.
+
+**Interest on idle cash** (``backtest.cash_interest``). A row whose description starts with
+``INTEREST`` is a monthly interest credit; :func:`interest_from_ledger_rows` reads it as an
+``InterestIncome`` and :func:`run_ledger_from_backtest` carries both, so the fill adapter passes
+such rows over knowing they are taxed, not dropped.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from backtest.tax import (
     CorporateEvent,
     DividendCredit,
     FyTax,
+    InterestIncome,
     InvestorProfile,
     MissingGrandfatheringPriceError,
     PaymentTiming,
@@ -121,6 +127,8 @@ def trades_from_ledger_rows(
         if description.upper().startswith("DIVIDEND"):
             dividends.append(DividendCredit(row["isin"], session, Decimal(row["credit"])))
             continue
+        if description.upper().startswith("INTEREST"):
+            continue  # read by interest_from_ledger_rows, which run_ledger_from_backtest also calls
         match = _FILL_ROW.match(description)
         if match is None:
             raise LedgerFormatError(
@@ -140,6 +148,15 @@ def trades_from_ledger_rows(
             )
         )
     return tuple(trades), tuple(dividends)
+
+
+def interest_from_ledger_rows(rows: Iterable[Mapping[str, str]]) -> tuple[InterestIncome, ...]:
+    """The ``INTEREST`` credit rows of a ``BookSnapshot.ledger``, as ``InterestIncome``."""
+    return tuple(
+        InterestIncome(date.fromisoformat(row["session"]), Decimal(row["credit"]))
+        for row in rows
+        if row["description"].upper().startswith("INTEREST")
+    )
 
 
 def run_ledger_from_backtest(
@@ -174,6 +191,7 @@ def run_ledger_from_backtest(
         terminal_nav=result.final_nav,
         terminal_prices=dict(terminal_prices),
         dividends=dividends,
+        interest=interest_from_ledger_rows(result.book.ledger),
     )
 
 
@@ -232,6 +250,11 @@ def write_run_ledger(ledger: RunLedger, path: Path) -> None:
         ],
         "corporate_events": events,
     }
+    if ledger.interest:
+        # Only when there is any: a ledger with no interest writes the bytes it always did.
+        document["interest"] = [
+            {"received": i.received.isoformat(), "amount": str(i.amount)} for i in ledger.interest
+        ]
     # Written beside the target and renamed over it, so a run killed mid-write leaves no partial
     # ledger for a resumed campaign to mistake for a finished one.
     partial = path.with_name(path.name + ".partial")
@@ -303,6 +326,10 @@ def read_run_ledger(path: Path) -> RunLedger:
             for d in doc["dividends"]
         ),
         corporate_events=tuple(events),
+        interest=tuple(
+            InterestIncome(date.fromisoformat(i["received"]), _money(i["amount"], "interest"))
+            for i in doc.get("interest", [])
+        ),
     )
 
 
@@ -374,9 +401,9 @@ def _buckets(buckets: Mapping[Decimal, Decimal]) -> str:
 def _fy_table(rows: Sequence[FyTax]) -> list[str]:
     lines = [
         "| FY | STCG gross | LTCG gross | STCL | LTCL | Exempt LTCG (10(38)) | B/F used | "
-        "112A exemption | Taxable STCG | Taxable LTCG | Dividends | Tax | Surcharge | Cess | "
-        "Total | C/F ST / LT | Paid on |",
-        "|---|---|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---|---|",
+        "112A exemption | Taxable STCG | Taxable LTCG | Dividends | Interest | Tax | Surcharge | "
+        "Cess | Total | C/F ST / LT | Paid on |",
+        "|---|---|---|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for f in rows:
         lines.append(
@@ -384,7 +411,8 @@ def _fy_table(rows: Sequence[FyTax]) -> list[str]:
             f"{_rupees(f.st_loss)} | {_rupees(f.lt_loss)} | {_rupees(f.exempt_ltcg_net)} | "
             f"{_rupees(f.brought_forward_used)} | {_rupees(f.exemption_used)} | "
             f"{_buckets(f.stcg_taxable)} | {_buckets(f.ltcg_taxable)} | {_rupees(f.dividends)} | "
-            f"{_rupees(f.cg_tax + f.dividend_tax)} | {_rupees(f.surcharge)} | {_rupees(f.cess)} | "
+            f"{_rupees(f.interest)} | {_rupees(f.cg_tax + f.dividend_tax + f.interest_tax)} | "
+            f"{_rupees(f.surcharge)} | {_rupees(f.cess)} | "
             f"{_rupees(f.total)} | {_rupees(f.carried_forward_st)} / "
             f"{_rupees(f.carried_forward_lt)} | {f.payment_date.isoformat()} |"
         )
@@ -430,6 +458,15 @@ def render_after_tax_report(result: AfterTaxResult, schedule: TaxSchedule) -> st
             "untaxed."
             if result.dividends_credited == 0
             else "."
+        ),
+        f"- Interest on idle cash credited in this run: **{result.interest_credits}** monthly "
+        f"credit(s), {_rupees(result.interest_income)} gross"
+        + (
+            " — taxed at the slab rate as income from other sources in the FY credited, "
+            f"surcharge at {_pct(p.dividend_surcharge_rate)} (the dividend band rate; exact for "
+            "total income up to ₹2 crore)."
+            if result.interest_credits
+            else " (the run accrued none, or ran with cash interest off)."
         ),
         f"- Lots grandfathered under Sec 55(2)(ac): {gf}. Buybacks: none modelled (exchange sells "
         "are ordinary transfers; the 01-10-2024 deemed-dividend rule touches only tendered "

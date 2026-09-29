@@ -17,7 +17,7 @@ Offline: the lake and the replay are stubbed at the sweep's two seams (``open_sw
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -32,6 +32,7 @@ from backtest.book_actions import BookActionCalendar
 from backtest.campaign import (
     CampaignError,
     CampaignPlan,
+    build_manifest,
     check_manifest,
     check_render_only,
     missing_runs,
@@ -466,3 +467,51 @@ def test_a_report_without_an_investor_profile_is_an_error_not_a_default() -> Non
         render_sweep_report(SweepResult(rows=[row]), floors=[LOW_FLOOR])
     with pytest.raises(ValueError, match="no after-tax figures attached"):
         render_sweep_report(SweepResult(rows=[row], profile=_PROFILE), floors=[LOW_FLOOR])
+
+
+# ── idle cash interest: on by default, recorded, and stated at the top of every report ─────────
+
+
+def test_campaign_cash_interest_is_on_by_default_and_can_be_switched_off() -> None:
+    assert _plan(Path("x")).cash_interest is True
+    base = ["--out", "x", "--workers", "1", *_INVESTOR]
+    assert campaign_args(base).cash_interest is True
+    assert campaign_args([*base, "--no-cash-interest"]).cash_interest is False
+
+
+def test_every_report_states_whether_idle_cash_earned_interest(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    on = _plan(tmp_path / "on")
+    run_campaign(on, workers=1)
+    for text in render_campaign(on, _PROFILE, fmv=MappingGrandfatheringPrices({})).values():
+        assert text.startswith("> Idle cash: settled cash earns RBI repo - 0.50% p.a.")
+    off = replace(_plan(tmp_path / "off"), cash_interest=False)
+    run_campaign(off, workers=1)
+    for text in render_campaign(off, _PROFILE, fmv=MappingGrandfatheringPrices({})).values():
+        assert text.startswith("> Idle cash: earns **0%**")
+
+
+def test_an_interest_run_never_resumes_an_interest_free_one(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    on = _plan(tmp_path)
+    run_campaign(on, workers=1)
+    assert missing_runs(on, None) == []
+    # Same directory, interest off: every digest differs, so every run is missing.
+    assert len(missing_runs(replace(on, cash_interest=False), None)) == 20
+
+
+def test_the_manifest_records_cash_interest_only_when_on(tmp_path: Path) -> None:
+    on = build_manifest(_plan(tmp_path), commit="c", last_session=date(2026, 9, 1))
+    assert on["cash_interest"].startswith("repo-50bp:")
+    off = build_manifest(
+        replace(_plan(tmp_path), cash_interest=False), commit="c", last_session=date(2026, 9, 1)
+    )
+    assert "cash_interest" not in off  # a pre-interest directory's manifest still matches
+
+
+def test_the_sweep_cli_accrues_cash_interest_by_default_too() -> None:
+    base = ["--from", "2020-01-01", "--to", "2021-01-01", *_INVESTOR]
+    assert sweep_args(base).cash_interest is True
+    assert sweep_args([*base, "--no-cash-interest"]).cash_interest is False

@@ -19,7 +19,13 @@ from the fills themselves.
   brought-forward losses (Sec 74, eight years, same restriction), oldest first;
 - the Sec 112A exemption on the FY's net LTCG, then tax at the dated rate of each gain's
   transfer date, surcharge (an explicit investor parameter) and cess (dated, from the schedule);
-- dividend tax for the regime in force on the credit date (DDT-exempt / Sec 115BBDA / slab).
+- dividend tax for the regime in force on the credit date (DDT-exempt / Sec 115BBDA / slab);
+- tax on interest earned by idle cash (``backtest.cash_interest``): income from other sources
+  (Sec 56), taxed at the investor's slab rate in the FY it was credited, in every year. No
+  deduction is taken — Sec 80TTA/80TTB cover savings-bank interest, not a sweep or a fund. Its
+  surcharge is the investor's ``dividend_surcharge_rate``: the two coincide for any total income
+  up to ₹2 crore (the 15% cap on dividend surcharge binds only above that), so above it the
+  interest surcharge is understated, and the report says which rate was applied.
 
 **Taxpayer-favourable orderings (stated, not hidden).** Sec 70 and Sec 74 prescribe *which* gains
 a loss may absorb but not the order among eligible gains, and Sec 112A(1) as amended in 2024 does
@@ -72,6 +78,7 @@ __all__ = [
     "DividendCredit",
     "FyTax",
     "GrandfatheringPrices",
+    "InterestIncome",
     "InvestorProfile",
     "LotMatchError",
     "MappingGrandfatheringPrices",
@@ -427,6 +434,23 @@ class DividendCredit:
 
 
 @dataclass(frozen=True, slots=True)
+class InterestIncome:
+    """Interest on idle cash credited to the account on ``received`` (gross, one monthly credit).
+
+    Income from other sources: taxed at slab in the FY of ``received`` (``backtest.cash_interest``
+    credits a month's accrual on the first session of the next month, so March's lands in April).
+    """
+
+    received: date
+    amount: Decimal
+
+    def __post_init__(self) -> None:
+        _require_decimal("amount", self.amount)
+        if self.amount <= _ZERO:
+            raise ValueError("interest amount must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class SplitEvent:
     """A split/consolidation: every open lot's count scales by ``numerator/denominator``.
 
@@ -499,6 +523,8 @@ class RunLedger:
     terminal_prices: Mapping[str, Decimal]
     dividends: tuple[DividendCredit, ...] = ()
     corporate_events: tuple[CorporateEvent, ...] = ()
+    #: Interest on idle cash, one row per monthly credit (empty when the run accrued none).
+    interest: tuple[InterestIncome, ...] = ()
 
 
 class PaymentTiming(StrEnum):
@@ -806,7 +832,7 @@ def match_lots(
 
 @dataclass(frozen=True, slots=True)
 class FyTax:
-    """One financial year's capital-gains and dividend tax, with every set-off step visible."""
+    """One financial year's capital-gains, dividend and interest tax, every set-off visible."""
 
     fy: int
     stcg_gross: Mapping[Decimal, Decimal]
@@ -828,11 +854,14 @@ class FyTax:
     surcharge: Decimal
     cess: Decimal
     payment_date: date
+    #: Interest on idle cash credited in the FY, and its slab-rate tax (before surcharge and cess).
+    interest: Decimal = _ZERO
+    interest_tax: Decimal = _ZERO
 
     @property
     def total(self) -> Decimal:
         """Everything payable for the year: tax, surcharge and cess."""
-        return self.cg_tax + self.dividend_tax + self.surcharge + self.cess
+        return self.cg_tax + self.dividend_tax + self.interest_tax + self.surcharge + self.cess
 
 
 @dataclass(slots=True)
@@ -862,6 +891,7 @@ def _fy_taxes(
     dividends: Iterable[DividendCredit],
     schedule: TaxSchedule,
     profile: InvestorProfile,
+    interest: Iterable[InterestIncome] = (),
 ) -> tuple[FyTax, ...]:
     by_fy: dict[int, list[Realisation]] = defaultdict(list)
     for r in realisations:
@@ -869,13 +899,19 @@ def _fy_taxes(
     div_by_fy: dict[int, list[DividendCredit]] = defaultdict(list)
     for d in dividends:
         div_by_fy[financial_year(d.received)].append(d)
-    if not by_fy and not div_by_fy:
+    int_by_fy: dict[int, Decimal] = defaultdict(lambda: _ZERO)
+    for i in interest:
+        # Slab in every year, so nothing is looked up — but a date the schedule does not cover
+        # still refuses, as every other income does.
+        schedule._covered(i.received, "interest income")
+        int_by_fy[financial_year(i.received)] += i.amount
+    if not by_fy and not div_by_fy and not int_by_fy:
         return ()
 
     carried: list[_CarriedLoss] = []
     out: list[FyTax] = []
-    first = min([*by_fy, *div_by_fy])
-    last = max([*by_fy, *div_by_fy])
+    first = min([*by_fy, *div_by_fy, *int_by_fy])
+    last = max([*by_fy, *div_by_fy, *int_by_fy])
     for fy in range(first, last + 1):
         # Losses older than the carry-forward window lapse before this year's set-off (Sec 74(1)).
         expired = sum(
@@ -950,11 +986,18 @@ def _fy_taxes(
             else:
                 raise TaxScheduleError(f"unknown dividend regime kind {kind!r}")
 
-        surcharge = cg_tax * profile.cg_surcharge_rate + div_tax * profile.dividend_surcharge_rate
+        # Income from other sources (Sec 56): the whole credit, at slab — no exemption, no set-off.
+        int_total = int_by_fy.get(fy, _ZERO)
+        int_tax = int_total * profile.slab_rate
+
+        surcharge = (
+            cg_tax * profile.cg_surcharge_rate
+            + (div_tax + int_tax) * profile.dividend_surcharge_rate
+        )
         cess_rate = (
             profile.cess_override if profile.cess_override is not None else schedule.cess_rate(fy)
         )
-        cess = (cg_tax + div_tax + surcharge) * cess_rate
+        cess = (cg_tax + div_tax + int_tax + surcharge) * cess_rate
         out.append(
             FyTax(
                 fy=fy,
@@ -981,6 +1024,8 @@ def _fy_taxes(
                 surcharge=_quantize(surcharge),
                 cess=_quantize(cess),
                 payment_date=profile.payment_timing.payment_date(fy),
+                interest=_quantize(int_total),
+                interest_tax=_quantize(int_tax),
             )
         )
     return tuple(out)
@@ -1022,6 +1067,9 @@ class AfterTaxResult:
     liquidation_error: str | None = None
     #: Why the realised after-tax XIRR was withheld (no XIRR for its stream), or None.
     realised_xirr_error: str | None = None
+    #: Monthly interest credits on idle cash in the ledger, and their gross total.
+    interest_credits: int = 0
+    interest_income: Decimal = _ZERO
 
     @property
     def total_tax(self) -> Decimal:
@@ -1086,11 +1134,13 @@ def compute_after_tax(
         liquidation_error = str(error)
         deemed = []
 
-    fy_taxes = _fy_taxes(realisations, ledger.dividends, schedule, profile)
+    fy_taxes = _fy_taxes(realisations, ledger.dividends, schedule, profile, ledger.interest)
     fy_liq = (
         ()
         if liquidation_error is not None
-        else _fy_taxes([*realisations, *deemed], ledger.dividends, schedule, profile)
+        else _fy_taxes(
+            [*realisations, *deemed], ledger.dividends, schedule, profile, ledger.interest
+        )
     )
 
     terminal = Cashflow(ledger.terminal_date, ledger.terminal_nav)
@@ -1117,6 +1167,8 @@ def compute_after_tax(
         realised_xirr_error=realised_xirr_error,
         stt_known=all(t.stt_known for t in ledger.trades),
         dividends_credited=len(ledger.dividends),
+        interest_credits=len(ledger.interest),
+        interest_income=sum((i.amount for i in ledger.interest), _ZERO),
         terminal_date=ledger.terminal_date,
         terminal_nav=ledger.terminal_nav,
     )
