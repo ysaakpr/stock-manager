@@ -45,7 +45,11 @@ from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 
-from backtest.book_actions import book_corporate_actions, load_store_book_actions
+from backtest.book_actions import (
+    BookActionSource,
+    book_corporate_actions,
+    load_store_book_actions,
+)
 from backtest.run import _L1Reader
 from backtest.run_ledger import (
     ledger_path,
@@ -330,18 +334,21 @@ def check_render_only(existing: dict[str, Any], manifest: dict[str, Any], runs_c
         raise CampaignError(f"render-only: {pinned} is not an ancestor of HEAD {head}")
 
 
-def missing_runs(plan: CampaignPlan) -> list[str]:
+def missing_runs(plan: CampaignPlan, actions: BookActionSource | None) -> list[str]:
     """Every run the reports need that has no summary and ledger on disk, as ``window arm floor``.
 
     A render-only pass refuses on a non-empty list: rendering would replay those runs at the
-    rendering commit and put two engines in one table.
+    rendering commit and put two engines in one table. ``actions`` is the corporate-action source
+    the render runs under: a run's digest covers it, so it is put in force here rather than left
+    to the caller — derived outside it, every digest would miss.
     """
     windows = [*plan.windows.sweeps, plan.windows.selection, plan.windows.verification]
     missing: list[str] = []
     for window in windows:
-        digests = run_digests(
-            start=window.start, end=window.end, arms=plan.arms, floors=plan.floors
-        )
+        with book_corporate_actions(actions):
+            digests = run_digests(
+                start=window.start, end=window.end, arms=plan.arms, floors=plan.floors
+            )
         for (label, floor), digest in digests.items():
             files = (summary_path(plan.out_dir, digest), ledger_path(plan.out_dir, digest))
             if not all(f.is_file() for f in files):
@@ -414,13 +421,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             build_manifest(plan, commit=head, last_session=sessions[-1]),
             runs_from_commit=args.runs_from_commit,
         )
-        if args.runs_from_commit is not None:
-            missing = missing_runs(plan)
-            if missing:
-                raise CampaignError(
-                    f"render-only: {len(missing)} run(s) not on disk, and replaying them here "
-                    f"would mix engines: {', '.join(missing[:5])}"
-                )
         if not args.reports_only:
             outcomes = run_campaign(plan, workers=args.workers)
             for outcome in outcomes:
@@ -433,6 +433,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     actions = load_store_book_actions() if plan.book_actions else None
+    if args.runs_from_commit is not None:
+        missing = missing_runs(plan, actions)
+        if missing:
+            print(
+                f"error: render-only: {len(missing)} run(s) not on disk, and replaying them here "
+                f"would mix engines: {', '.join(missing[:5])}",
+                file=sys.stderr,
+            )
+            return 2
     service, fmv = l1_grandfathering(args.data_root)
     with service, book_corporate_actions(actions):
         reports = render_campaign(plan, profile, fmv=fmv)

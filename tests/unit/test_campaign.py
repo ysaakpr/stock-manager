@@ -28,6 +28,7 @@ import pytest
 
 import backtest.run as run_module
 import backtest.sweep as sweep_module
+from backtest.book_actions import BookActionCalendar
 from backtest.campaign import (
     CampaignError,
     CampaignPlan,
@@ -354,11 +355,23 @@ def test_render_only_refuses_anything_but_the_named_commit_differing(
 def test_missing_runs_names_every_run_a_render_would_have_to_replay(
     tmp_path: Path, stubbed: _Counters
 ) -> None:
-    assert len(missing_runs(_plan(tmp_path))) == 20  # nothing on disk yet
+    assert len(missing_runs(_plan(tmp_path), None)) == 20  # nothing on disk yet
     run_campaign(_plan(tmp_path), workers=1)
-    assert missing_runs(_plan(tmp_path)) == []
+    assert missing_runs(_plan(tmp_path), None) == []
     sorted((tmp_path / "runs").glob("*.json"))[0].unlink()
-    assert len(missing_runs(_plan(tmp_path))) == 1
+    assert len(missing_runs(_plan(tmp_path), None)) == 1
+
+
+def test_missing_runs_keys_on_the_corporate_action_source_it_is_given(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    # A run's digest covers the corporate-action source. Runs made without one are not the runs a
+    # render under a calendar needs — the check must say so, not wave them through or miss them
+    # because it derived digests outside the source the render will use.
+    run_campaign(_plan(tmp_path), workers=1)
+    calendar = BookActionCalendar(())
+    assert len(missing_runs(_plan(tmp_path), calendar)) == 20
+    assert missing_runs(_plan(tmp_path), None) == []
 
 
 # ── the sweep's pre-run digest is the runner's own ─────────────────────────────────────────────
