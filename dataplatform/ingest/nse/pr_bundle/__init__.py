@@ -14,6 +14,7 @@ package opens the bundle (`bundle.py`), and parses the four members W2 targets:
               that one word is why the repo went on recording index-membership history as
               unfetchable while three years of it sat in the lake.
 * `mcap.py` — daily issue size, market cap and last-trade-date. ~2024-07 onward.
+* `bh.py`   — the securities that hit a daily price band, 2010-01-04 onward (X2, for H2).
 
 and one module that consumes a reader rather than being one:
 
@@ -38,6 +39,14 @@ adjustment chain.
 """
 
 from dataplatform.ingest.nse.pr_bundle.bc import BC_COLUMNS, BcRow, parse_bc, parse_bc_bundle
+from dataplatform.ingest.nse.pr_bundle.bh import (
+    BH_COLUMNS,
+    BandHitRow,
+    BandSide,
+    BhFile,
+    parse_bh,
+    parse_bh_bundle,
+)
 from dataplatform.ingest.nse.pr_bundle.bundle import (
     ARCHIVE_START,
     LOWERCASE_ERA_START,
@@ -93,6 +102,7 @@ from dataplatform.ingest.nse.pr_bundle.membership import (
 __all__ = [
     "ARCHIVE_START",
     "BC_COLUMNS",
+    "BH_COLUMNS",
     "FFIX_BANNER_FIELDS",
     "FFIX_COLUMNS",
     "FFIX_FIRST_SESSION",
@@ -106,7 +116,10 @@ __all__ = [
     "PR_BUNDLE_SOURCE_ID",
     "SECTORAL_INDICES",
     "URL_TEMPLATE",
+    "BandHitRow",
+    "BandSide",
     "BcRow",
+    "BhFile",
     "BundleMember",
     "CountAnomaly",
     "FfixFile",
@@ -127,6 +140,8 @@ __all__ = [
     "census_ffix_corpus",
     "parse_bc",
     "parse_bc_bundle",
+    "parse_bh",
+    "parse_bh_bundle",
     "parse_ffix",
     "parse_ffix_bundle",
     "parse_ix",

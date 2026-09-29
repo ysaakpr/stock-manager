@@ -27,6 +27,16 @@ says "Name of Security" but a data row spends *two* fields on it — symbol then
 record carries seven fields against the header's six. Splitting on the header count would silently
 shear the series off every row.
 
+**Settlement blocks.** A file is one or more blocks, each opened by its own `Trade Date <...>,
+Settlement Type <X>,...` line and column header. Most files carry one `N` block; some — the first
+seen is 2011-07-01, `D` then `N` — carry several, and whether a given file does is a property of
+that session, not of a contiguous era (of 10 sampled 2011-2016 payloads only 2011-07-01 had two).
+`parse` segments every file the same way and yields **one row per `(symbol, series)` for the
+session**: a key restated with identical figures in a second block is one fact said twice and is
+kept once, and a key given *different* figures by two blocks is a `ParseError`. Summing them would
+double-count if the blocks restate, and picking one would be arbitrary if they do not; neither is a
+decision a parser gets to make silently. Each block's own trade date is checked against the file's.
+
 What this module never does: infer a missing figure, treat the file's own totals as advisory, or
 accept a record whose stated trade date disagrees with the date the caller asked for. A delivery
 number attached to the wrong session is a look-ahead leak in a backtest, not a cosmetic error.
@@ -46,8 +56,10 @@ from dataplatform.store.l0 import L0Ref, L0Store
 
 __all__ = [
     "MTO_SOURCE_ID",
+    "block_shape",
     "parse",
     "parse_l0",
+    "stated_date",
 ]
 
 _LOG = get_logger(__name__)
@@ -64,6 +76,10 @@ _SECURITY_RECORD: Final = "20"
 _SECURITY_FIELDS: Final = 7
 
 _TRADE_DATE: Final = re.compile(r"Trade Date\s*<(\d{2})-([A-Za-z]{3})-(\d{4})>")
+_SETTLEMENT_TYPE: Final = re.compile(r"Settlement Type\s*<([^>]*)>")
+
+#: The block label for security records that precede any `Trade Date` line (an M2-shaped file).
+_UNTYPED: Final = "untyped"
 _MONTHS: Final = {
     m: i
     for i, m in enumerate(
@@ -86,15 +102,15 @@ def parse(
     mismatch is a `ParseError`. The archive is addressed by date in the URL, so this is the check
     that a wrong or stale file cannot quietly become another session's delivery figures.
 
+    A file with several settlement blocks yields one row per `(symbol, series)` — see the module
+    docstring: an identical restatement in a later block is kept once, never counted twice.
+
     Raises `ParseError` for anything that is not this format: an unreadable body, no header record,
-    an unparseable trade date, a security record with the wrong field count, a non-numeric
-    quantity, or a duplicate `(symbol, series)`.
+    an unparseable trade date, a block whose trade date disagrees with the file's, a security
+    record with the wrong field count, a non-numeric quantity, a duplicate `(symbol, series)`
+    within a block, or one key given different figures by two blocks.
     """
-    try:
-        text = payload.decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
-        text = payload.decode("latin-1")
-    lines = [line for line in text.splitlines() if line.strip()]
+    lines = _lines(payload)
     if not lines:
         raise ParseError("file is empty", filename=filename)
 
@@ -108,9 +124,28 @@ def parse(
         )
 
     rows: list[DeliveryRow] = []
-    seen: set[tuple[str, str]] = set()
+    # key -> (the block that stated it, its figures), so a later block's restatement can be told
+    # apart from a conflicting figure — the one per-session row is the double-count guard.
+    stated_in: dict[tuple[str, str], tuple[str, tuple[str, str, str]]] = {}
+    block = _UNTYPED
+    block_keys: set[tuple[str, str]] = set()
+    blocks = 0
+    restated = 0
     for number, line in enumerate(lines, start=1):
         fields = [field.strip() for field in line.split(",")]
+        if _TRADE_DATE.search(line):
+            block_date = _trade_date_of(line, filename=filename)
+            if block_date != stated:
+                raise ParseError(
+                    f"line {number}: a settlement block states trade date "
+                    f"{block_date.isoformat()} inside a file for {stated.isoformat()}",
+                    filename=filename,
+                )
+            found = _SETTLEMENT_TYPE.search(line)
+            block = found.group(1).strip() if found else _UNTYPED
+            block_keys = set()
+            blocks += 1
+            continue
         if fields[0] != _SECURITY_RECORD:
             continue
         if len(fields) != _SECURITY_FIELDS:
@@ -125,13 +160,28 @@ def parse(
                 f"line {number}: security record has no symbol/series", filename=filename
             )
         key = (symbol, series)
-        if key in seen:
+        if key in block_keys:
             raise ParseError(
                 f"line {number}: {symbol}/{series} appears twice; the file's key is "
                 "(symbol, series) and two delivery figures for one key cannot both be right",
                 filename=filename,
             )
-        seen.add(key)
+        block_keys.add(key)
+        figures = (_traded, delivered, percent)
+        earlier = stated_in.get(key)
+        if earlier is not None:
+            earlier_block, earlier_figures = earlier
+            if earlier_figures != figures:
+                raise ParseError(
+                    f"line {number}: {symbol}/{series} is in settlement blocks {earlier_block} and "
+                    f"{block} with different figures ({'/'.join(earlier_figures)} vs "
+                    f"{'/'.join(figures)}); summing them could double-count and picking one "
+                    "would be arbitrary",
+                    filename=filename,
+                )
+            restated += 1
+            continue
+        stated_in[key] = (block, figures)
         rows.append(
             DeliveryRow(
                 symbol=symbol,
@@ -157,6 +207,8 @@ def parse(
         filename=filename,
         trade_date=stated.isoformat(),
         rows=len(rows),
+        blocks=max(blocks, 1),
+        restated=restated,
         state="VALIDATED",
     )
     return tuple(rows)
@@ -165,6 +217,36 @@ def parse(
 def parse_l0(store: L0Store, ref: L0Ref) -> tuple[DeliveryRow, ...]:
     """Parse the stored payload, re-verifying its checksum on the way in (`L0Store.get`)."""
     return parse(store.get(ref), filename=ref.filename, trade_date=ref.logical_date)
+
+
+def _lines(payload: bytes) -> list[str]:
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        text = payload.decode("latin-1")
+    return [line for line in text.splitlines() if line.strip()]
+
+
+def stated_date(payload: bytes, *, filename: str) -> date:
+    """The session a payload says it is about, read from its own header — never from the filename.
+
+    Public so an acquisition step can refuse a stale payload (a holiday served as the previous
+    session, the `sec_bhavdata_full` trap) the moment it lands, rather than at promotion.
+    """
+    lines = _lines(payload)
+    if not lines:
+        raise ParseError("file is empty", filename=filename)
+    return _stated_date(lines, filename=filename)
+
+
+def block_shape(payload: bytes) -> str:
+    """The file's settlement-block layout, e.g. ``N`` or ``D+N``; ``untyped`` when it names none.
+
+    Descriptive evidence for the coverage report — which layouts the archive actually served over a
+    range — not a dispatch key: `parse` segments whatever blocks a file carries.
+    """
+    kinds = [m.group(1).strip() for m in _SETTLEMENT_TYPE.finditer("\n".join(_lines(payload)))]
+    return "+".join(kinds) if kinds else _UNTYPED
 
 
 def _stated_date(lines: list[str], *, filename: str) -> date:
@@ -184,17 +266,27 @@ def _stated_date(lines: list[str], *, filename: str) -> date:
                     f"header record has an unreadable date {stamp!r}", filename=filename
                 ) from exc
     for line in lines[:6]:
-        found = _TRADE_DATE.search(line)
-        if found:
-            day, mon, year = found.groups()
-            month = _MONTHS.get(mon.upper())
-            if month is None:
-                raise ParseError(f"unknown month {mon!r} in the trade-date line", filename=filename)
-            return date(int(year), month, int(day))
+        if _TRADE_DATE.search(line):
+            return _trade_date_of(line, filename=filename)
     raise ParseError(
         "no header record and no 'Trade Date <...>' line; the file does not state its session",
         filename=filename,
     )
+
+
+def _trade_date_of(line: str, *, filename: str) -> date:
+    """The date a `Trade Date <DD-MON-YYYY>` line states; the caller has matched the pattern."""
+    found = _TRADE_DATE.search(line)
+    if found is None:  # pragma: no cover — every caller has already matched
+        raise ParseError("no 'Trade Date <...>' on the line", filename=filename)
+    day, mon, year = found.groups()
+    month = _MONTHS.get(mon.upper())
+    if month is None:
+        raise ParseError(f"unknown month {mon!r} in the trade-date line", filename=filename)
+    try:
+        return date(int(year), month, int(day))
+    except ValueError as exc:
+        raise ParseError(f"unreadable trade date in {line[:40]!r}", filename=filename) from exc
 
 
 def _integer(value: str, *, column: str, line: int, filename: str) -> int | None:

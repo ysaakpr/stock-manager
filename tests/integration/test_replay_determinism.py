@@ -71,6 +71,7 @@ from dataplatform.store.migrate import migrate
 from execution.broker import Exchange, OrderRequest, Side
 from execution.costs import CostModel, load_rate_card
 from execution.sim_broker import NoReferenceBarError, ReferenceBar, SimBroker
+from tests.rails_support import mechanics_gate
 
 # ── fixtures shared by every section: two names, a five-session window, a price path ──────────────
 
@@ -307,7 +308,12 @@ def _run(policy: Policy, *, journal: Journal | None = None) -> ReplayResult:
         opening_cash=OPENING_CASH,
     )
     engine = ReplayEngine(
-        policy=policy, broker=broker, clock=clock, sessions=SESSIONS, journal=journal
+        policy=policy,
+        broker=broker,
+        clock=clock,
+        sessions=SESSIONS,
+        rails=mechanics_gate(CLOSES),
+        journal=journal,
     )
     return engine.run()
 

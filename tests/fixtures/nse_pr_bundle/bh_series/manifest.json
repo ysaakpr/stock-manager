@@ -1,0 +1,103 @@
+{
+  "era": "bh_series",
+  "session": "2013-07-01",
+  "archive_filename": "PR010713.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR010713.zip",
+  "why_this_era": "SERIES header, LF, DDMMYY member name, four-cell rows under a five-cell header; the H2 smoke window",
+  "reduced_from_l0": true,
+  "original_bytes": 294552,
+  "original_sha256": "7cf449660bc2c1a78ca78e7140312db47d8b0e71dc70a4e49691f5faa8858482",
+  "original_members": [
+    {
+      "name": "An010713.txt",
+      "bytes": 289443
+    },
+    {
+      "name": "Bc010713.csv",
+      "bytes": 78411
+    },
+    {
+      "name": "bh010713.csv",
+      "bytes": 5665
+    },
+    {
+      "name": "Bm010713.txt",
+      "bytes": 4237
+    },
+    {
+      "name": "cd01072013.zip",
+      "bytes": 6877
+    },
+    {
+      "name": "corpbond010713.csv",
+      "bytes": 7860
+    },
+    {
+      "name": "etf010713.csv",
+      "bytes": 5741
+    },
+    {
+      "name": "fo01072013.zip",
+      "bytes": 90233
+    },
+    {
+      "name": "Gl010713.csv",
+      "bytes": 8246
+    },
+    {
+      "name": "HL010713.csv",
+      "bytes": 1540
+    },
+    {
+      "name": "NPD010713.txt",
+      "bytes": 5561
+    },
+    {
+      "name": "nuver.txt",
+      "bytes": 2553
+    },
+    {
+      "name": "Pd010713.csv",
+      "bytes": 257576
+    },
+    {
+      "name": "Pr010713.csv",
+      "bytes": 240665
+    },
+    {
+      "name": "RDM.doc",
+      "bytes": 34304
+    },
+    {
+      "name": "Rdm_help.txt",
+      "bytes": 705
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 3084
+    },
+    {
+      "name": "RPD010713.csv",
+      "bytes": 351
+    },
+    {
+      "name": "Rtt010713.csv",
+      "bytes": 134
+    },
+    {
+      "name": "sme010713.csv",
+      "bytes": 296
+    },
+    {
+      "name": "Tt010713.csv",
+      "bytes": 2211
+    }
+  ],
+  "members_kept_in_fixture": [
+    "bh010713.csv",
+    "Readme.txt"
+  ],
+  "bh_member": "bh010713.csv",
+  "bh_member_bytes": 5665,
+  "bh_member_sha256": "dc15cd4da70d2e603f3ea745f137e89a8310187ece9ceed9ffe6aee5a14dfae5"
+}

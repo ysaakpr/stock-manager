@@ -53,3 +53,24 @@ gitignored — `data/` is never committed.
 
 Every test in `tests/unit/test_pr_bundle_*.py` reads these files from disk. Nothing in
 `dataplatform/ingest/nse/pr_bundle/` opens a socket; fetching is the crawl engine's job alone.
+
+## Eight more, for the `bh` member (added 2026-09-29, X2 H2)
+
+`bh` — the securities that hit a daily price band, the source H2 of
+`ops/studies/preregistration-signals-2026-09-29.md` names. **Reduced from the authoritative lake**,
+not fetched: zero requests. Each zip holds that bundle's `bh` member plus its readme, byte-for-byte;
+`manifest.json` records the original bundle and the `bh` member's own sha256, which
+`tests/unit/test_pr_bundle_bh.py` re-hashes.
+
+The eras were found by sniffing the member in all 4,124 bundles in L0, not by sampling:
+
+| fixture dir | session | archive file | why |
+|---|---|---|---|
+| `bh_sr/`         | 2010-01-04 | `PR040110.zip` | `SR` header, CRLF, `DDMMYYYY` member name, four- and five-cell rows under a five-cell header |
+| `bh_index_flag/` | 2010-08-11 | `PR110810.zip` | `INDEX FLAG` actually filled on some rows |
+| `bh_sr_padded/`  | 2010-09-17 | `PR170910.zip` | no `INDEX FLAG` in the header; header and rows padded to ten cells |
+| `bh_sr_swapped/` | 2010-11-09 | `PR091110.zip` | the one file with `HIGH/LOW` and `SECURITY` swapped |
+| `bh_series/`     | 2013-07-01 | `PR010713.zip` | `SERIES` header, LF, `DDMMYY` name, four-cell rows; the long 2012-2025 era |
+| `bh_empty/`      | 2021-05-17 | `PR170521.zip` | header and no rows |
+| `bh_no_flag/`    | 2026-09-04 | `PR040926.zip` | the 2025-10 lowercase era: four-cell header |
+| `bh_misserved/`  | 2018-01-02 | `PR020118.zip` | NSE serves the **2019-01-02** bundle under this name; `PrBundle` must refuse to date it. The original carries no readme, so the zip is the `bh` member alone |
