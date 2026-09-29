@@ -1518,6 +1518,10 @@ class BacktestResult:
     ledger: RunLedger | None = None
     #: ``run_digest`` of the run's specification: the key its ledger is persisted under.
     digest: str = ""
+    #: Every sampled (session, pre-tax NAV) of the run, in session order — what ``max_drawdown``
+    #: is struck from, persisted beside the ledger (``backtest.nav``). Empty for the runners that
+    #: sample no NAV path.
+    nav_path: tuple[tuple[date, Decimal], ...] = ()
 
     @property
     def held_names(self) -> int:
@@ -1657,14 +1661,14 @@ def run_naive_momentum(
         # comparison ranked on return per unit of drawdown would put the baseline last on an
         # artefact. Same sampler, same skip-rather-than-guess rule as the others.
         last_close: dict[str, Decimal] = {}
-        nav_path: list[Decimal] = []
+        nav_path: list[tuple[date, Decimal]] = []
 
         def sample_nav(session: date) -> None:
             last_close.update(reader.closes_on(session))
             positions = book.positions()
             if any(position.isin not in last_close for position in positions):
                 return  # a held name with no close seen yet — skip rather than guess
-            nav_path.append(book.net_asset_value(last_close))
+            nav_path.append((session, book.net_asset_value(last_close)))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = NaiveMomentumPolicy(data, params)
@@ -1721,7 +1725,8 @@ def run_naive_momentum(
                 benchmark_source=resolved.source,
                 benchmark_index_name=benchmark.index_name,
                 benchmark_method=benchmark.method,
-                max_drawdown=_max_drawdown(nav_path),
+                max_drawdown=_max_drawdown([nav for _, nav in nav_path]),
+                nav_path=tuple(nav_path),
             ),
             broker=broker,
             spec=spec,
@@ -1822,14 +1827,14 @@ def run_momentum_v2(
         # each held name's last-known close (a name that did not print that day is carried at its
         # previous close, never guessed or zeroed), so the path is a real point-in-time NAV series.
         last_close: dict[str, Decimal] = {}
-        nav_path: list[Decimal] = []
+        nav_path: list[tuple[date, Decimal]] = []
 
         def sample_nav(session: date) -> None:
             last_close.update(reader.closes_on(session))
             positions = book.positions()
             if any(position.isin not in last_close for position in positions):
                 return  # a held name with no close seen yet — skip this sample rather than guess
-            nav_path.append(book.net_asset_value(last_close))
+            nav_path.append((session, book.net_asset_value(last_close)))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = MomentumV2Policy(data, v2_parameters)
@@ -1889,7 +1894,8 @@ def run_momentum_v2(
                 benchmark_source=resolved.source,
                 benchmark_index_name=benchmark.index_name,
                 benchmark_method=benchmark.method,
-                max_drawdown=_max_drawdown(nav_path),
+                max_drawdown=_max_drawdown([nav for _, nav in nav_path]),
+                nav_path=tuple(nav_path),
             ),
             broker=broker,
             spec=spec,
@@ -1998,7 +2004,7 @@ def _finish_backtest(
         median_hold_days=median,
         replay_digest=run.result.digest(),
     )
-    persist_run(spec, ledger, summary)
+    persist_run(spec, ledger, summary, nav=run.nav_path)
     return replace(run, ledger=ledger, digest=digest)
 
 
@@ -4948,14 +4954,14 @@ def run_swing_composite(
         book.deposit(first_session, opening_cash)
 
         last_close: dict[str, Decimal] = {}
-        nav_path: list[Decimal] = []
+        nav_path: list[tuple[date, Decimal]] = []
 
         def sample_nav(session: date) -> None:
             last_close.update(reader.closes_on(session))
             positions = book.positions()
             if any(position.isin not in last_close for position in positions):
                 return  # a held name with no close seen yet — skip rather than guess
-            nav_path.append(book.net_asset_value(last_close))
+            nav_path.append((session, book.net_asset_value(last_close)))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = SwingCompositePolicy(data, parameters)
@@ -5013,7 +5019,8 @@ def run_swing_composite(
                 benchmark_source=resolved.source,
                 benchmark_index_name=benchmark.index_name,
                 benchmark_method=benchmark.method,
-                max_drawdown=_max_drawdown(nav_path),
+                max_drawdown=_max_drawdown([nav for _, nav in nav_path]),
+                nav_path=tuple(nav_path),
             ),
             broker=broker,
             spec=spec,

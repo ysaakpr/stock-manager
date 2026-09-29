@@ -49,6 +49,7 @@ from backtest.book_actions import (
     RescaleKind,
 )
 from backtest.cash_interest import InterestCredit, current_cash_interest_identity
+from backtest.nav import PRE_TAX, NavSeries, nav_file, write_nav
 from backtest.tax import (
     BonusEvent,
     CorporateEvent,
@@ -399,12 +400,17 @@ class RunSummary:
 
 
 def persist_run(
-    spec: Mapping[str, str], ledger: RunLedger, summary: RunSummary | None
+    spec: Mapping[str, str],
+    ledger: RunLedger,
+    summary: RunSummary | None,
+    *,
+    nav: Sequence[tuple[date, Decimal]] = (),
 ) -> Path | None:
-    """Write the run's ledger (and summary) under the directory in force; ``None`` when off.
+    """Write the run's ledger (and NAV path, and summary) under the directory in force.
 
-    The ledger is written first and the summary last, each atomically: a summary on disk means its
-    ledger is complete, which is the one fact :func:`load_run` resumes on.
+    Returns ``None`` when persistence is off. The ledger and the NAV path (``backtest.nav``, only
+    when the runner sampled one) are written first and the summary last, each atomically: a summary
+    on disk means the rest is complete, which is the one fact :func:`load_run` resumes on.
     """
     out_dir = current_ledger_dir()
     if out_dir is None:
@@ -413,6 +419,8 @@ def persist_run(
     path = ledger_path(out_dir, digest)
     path.parent.mkdir(parents=True, exist_ok=True)
     write_run_ledger(ledger, path)
+    if nav:
+        write_nav(NavSeries(digest, PRE_TAX, tuple(nav)), nav_file(out_dir, digest))
     if summary is not None:
         target = summary_path(out_dir, digest)
         target.parent.mkdir(parents=True, exist_ok=True)
