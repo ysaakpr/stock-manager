@@ -20,8 +20,10 @@ in-memory source.
 
 from __future__ import annotations
 
+import ast
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -37,7 +39,7 @@ from backtest.policies.swing_composite import (
 from backtest.replay import SessionContext, SessionDecision
 from dataplatform.clock import FrozenClock
 from dataplatform.query.pit import Dataset, PitContext, PitError
-from execution.broker import Exchange, Holding, Margins, Side
+from execution.broker import Exchange, Holding, Margins, Position, Side
 
 SESSION = date(2020, 1, 1)
 
@@ -212,14 +214,28 @@ class _LeakingMarks(_Data):
 
 
 class _FakeBroker:
-    """A minimal ``Broker`` read surface: fixed holdings and free cash. Records nothing."""
+    """A minimal ``Broker`` read surface: holdings, pending buys and free cash. Records nothing.
 
-    def __init__(self, *, cash: Decimal, holdings: tuple[Holding, ...] = ()) -> None:
+    A test moves the account between decisions by assigning ``holdings_now`` / ``positions_now`` —
+    what the book's corporate-action applier or a fill would have done to it.
+    """
+
+    def __init__(
+        self,
+        *,
+        cash: Decimal,
+        holdings: tuple[Holding, ...] = (),
+        positions: tuple[Position, ...] = (),
+    ) -> None:
         self._cash = cash
-        self._holdings = holdings
+        self.holdings_now = holdings
+        self.positions_now = positions
 
     def holdings(self) -> tuple[Holding, ...]:
-        return self._holdings
+        return self.holdings_now
+
+    def positions(self) -> tuple[Position, ...]:
+        return self.positions_now
 
     def margins(self) -> Margins:
         return Margins(available=self._cash, utilised=Decimal("0"))
@@ -492,6 +508,206 @@ def test_no_trailing_stop_means_no_stop_outs() -> None:
     policy.decide(_ctx(SESSION, broker))
     data.at(marks={A: "1"})
     assert _sold(policy.decide(_ctx(SESSION + timedelta(days=1), broker))) == set()
+
+
+# ── the trailing stop across a split or bonus ────────────────────────────────────────────────────
+#
+# The book applies a split to the broker before the session decides (``backtest.book_actions``):
+# the count moves, the total basis does not, and the raw close steps down by the same ratio. These
+# fixtures do to the fake broker exactly what the applier does to ``SimBroker``.
+
+_STOP = SwingCompositeParameters(trailing_stop=Decimal("0.25"), min_hold_sessions=0)
+
+
+def _stop_fixture(
+    quantity: int = 10, basis: str = "100", mark: str = "100"
+) -> tuple[SwingCompositePolicy, _Data, _FakeBroker]:
+    """A policy holding ``quantity`` of A at ``basis``, its peak struck at ``mark`` on SESSION."""
+    broker = _FakeBroker(cash=Decimal("0"), holdings=(_holding(A, quantity, basis),))
+    data = _Data(rebalance=False, marks={A: mark})
+    policy = SwingCompositePolicy(data, _STOP)
+    assert _sold(policy.decide(_ctx(SESSION, broker))) == set()
+    return policy, data, broker
+
+
+def _next(
+    policy: SwingCompositePolicy,
+    data: _Data,
+    broker: _FakeBroker,
+    day: int,
+    mark: str,
+    holdings: tuple[Holding, ...] | None = None,
+) -> SessionDecision:
+    if holdings is not None:
+        broker.holdings_now = holdings
+    data.at(marks={A: mark})
+    return policy.decide(_ctx(SESSION + timedelta(days=day), broker))
+
+
+def _peak(policy: SwingCompositePolicy, isin: str = A) -> Decimal:
+    return policy._positions[isin].peak
+
+
+def test_a_two_for_one_split_on_a_held_name_is_not_a_stop_exit() -> None:
+    """10 shares at a 100 peak become 20 at 50: the close halved, the holding did not."""
+    policy, data, broker = _stop_fixture()
+    decision = _next(policy, data, broker, 1, "50", (_holding(A, 20, "50"),))
+    assert _sold(decision) == set()
+    assert _peak(policy) == Decimal("50")
+
+
+def test_a_genuine_fifty_percent_crash_with_no_corporate_action_still_exits() -> None:
+    """The inversion: the same close, but the account still holds 10 shares — a real crash."""
+    policy, data, broker = _stop_fixture()
+    assert A in _sold(_next(policy, data, broker, 1, "50"))
+
+
+def test_a_three_for_two_bonus_rescales_the_peak_by_two_thirds() -> None:
+    """A 1:2 bonus (3 for 2): 10 shares at a 150 peak become 15, the close 100. The peak must go
+    to 100 — the stop sits at 75 — not up to 225 (the ratio inverted) or stay at 150."""
+    policy, data, broker = _stop_fixture(quantity=10, basis="150", mark="150")
+    assert _sold(_next(policy, data, broker, 1, "100", (_holding(A, 15, "100"),))) == set()
+    assert _peak(policy) == Decimal("100")
+    assert _sold(_next(policy, data, broker, 2, "76")) == set()
+    assert A in _sold(_next(policy, data, broker, 3, "74"))
+
+
+def test_the_stop_still_fires_on_a_real_drawdown_after_the_split() -> None:
+    """Rescaled, the stop keeps trailing on the new scale: 50 → 60 → 44 is a 26.7 % fall."""
+    policy, data, broker = _stop_fixture()
+    assert _sold(_next(policy, data, broker, 1, "50", (_holding(A, 20, "50"),))) == set()
+    assert _sold(_next(policy, data, broker, 2, "60")) == set()
+    assert _peak(policy) == Decimal("60")
+    assert A in _sold(_next(policy, data, broker, 3, "44"))
+
+
+def test_a_top_up_that_settles_does_not_rescale_the_peak() -> None:
+    """More shares at a *higher* basis is a buy, not a split: the peak stays and a crash exits."""
+    policy, data, broker = _stop_fixture()
+    topped_up = Holding(isin=A, exchange=Exchange.NSE, quantity=20, average_price=Decimal("75"))
+    assert A in _sold(_next(policy, data, broker, 1, "50", (topped_up,)))
+    assert _peak(policy) == Decimal("100")
+
+
+def test_a_pending_lot_is_rescaled_with_the_holding_and_a_same_day_fill_is_ignored() -> None:
+    """The split counts pending buys too; a buy filled on the ex-date itself is not part of it."""
+    session_zero_fill = Position(
+        isin=A, exchange=Exchange.NSE, quantity=5, average_price=Decimal("100"), session=SESSION
+    )
+    broker = _FakeBroker(
+        cash=Decimal("0"), holdings=(_holding(A, 10, "100"),), positions=(session_zero_fill,)
+    )
+    data = _Data(rebalance=False, marks={A: "100"})
+    policy = SwingCompositePolicy(data, _STOP)
+    policy.decide(_ctx(SESSION, broker))
+    ex_date = SESSION + timedelta(days=1)
+    broker.positions_now = (
+        Position(
+            isin=A, exchange=Exchange.NSE, quantity=10, average_price=Decimal("50"), session=SESSION
+        ),
+        Position(
+            isin=A, exchange=Exchange.NSE, quantity=7, average_price=Decimal("50"), session=ex_date
+        ),
+    )
+    decision = _next(policy, data, broker, 1, "50", (_holding(A, 20, "50"),))
+    assert _sold(decision) == set()
+    assert _peak(policy) == Decimal("50")
+
+
+def test_an_isin_reissue_carries_the_position_and_its_peak_to_the_survivor() -> None:
+    """A face-value split that retires A for B: the book carries 10 A to 20 B at the same basis.
+    B is the same position — its age continues and its peak is A's, halved — not a fresh entry."""
+    policy, data, broker = _stop_fixture()
+    broker.holdings_now = (_holding(B, 20, "50"),)
+    data.at(marks={B: "50"})
+    decision = policy.decide(_ctx(SESSION + timedelta(days=1), broker))
+    assert _sold(decision) == set()
+    assert A not in policy._positions
+    carried = policy._positions[B]
+    assert (carried.entered_on, carried.sessions_held, carried.peak) == (SESSION, 1, Decimal("50"))
+    data.at(marks={B: "37"})
+    assert B in _sold(policy.decide(_ctx(SESSION + timedelta(days=2), broker)))
+
+
+def test_a_name_sold_last_session_is_not_mistaken_for_a_reissue() -> None:
+    """A stopped-out A and a new B arriving at the same basis are two positions: B starts fresh."""
+    policy, data, broker = _stop_fixture()
+    assert A in _sold(_next(policy, data, broker, 1, "50"))  # stop staged on A
+    broker.holdings_now = (_holding(B, 20, "50"),)
+    data.at(marks={B: "50"})
+    policy.decide(_ctx(SESSION + timedelta(days=2), broker))
+    fresh = policy._positions[B]
+    assert (fresh.entered_on, fresh.sessions_held) == (SESSION + timedelta(days=2), 0)
+
+
+class _RecordingData(_Data):
+    """A ``_Data`` that records every read the policy makes, in order."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.reads: list[tuple[str, date]] = []
+
+    def is_rebalance(self, session: date) -> bool:
+        self.reads.append(("is_rebalance", session))
+        return super().is_rebalance(session)
+
+    def signal(self, as_of: date) -> Dataset[SwingRecord]:
+        self.reads.append(("signal", as_of))
+        return super().signal(as_of)
+
+    def marks(self, as_of: date) -> Dataset[SwingRecord]:
+        self.reads.append(("marks", as_of))
+        return super().marks(as_of)
+
+    def regime(self, as_of: date) -> Dataset[RegimeReading]:
+        self.reads.append(("regime", as_of))
+        return super().regime(as_of)
+
+
+def test_a_split_changes_the_stop_reference_and_no_other_decision_input() -> None:
+    """Twin walks of one name: unsplit (10 shares, closes 100 → 90 → 70) and split 2:1 on day 1
+    (20 shares, closes 100 → 45 → 35). The policy must make the same reads, hold the same age and
+    sell history, decide the same exit on the same day, and differ only in the peak's scale."""
+
+    def walk(split: bool) -> tuple[_RecordingData, SwingCompositePolicy, list[SessionDecision]]:
+        broker = _FakeBroker(cash=Decimal("0"), holdings=(_holding(A, 10, "100"),))
+        data = _RecordingData(rebalance=False, marks={A: "100"})
+        policy = SwingCompositePolicy(data, _STOP)
+        decisions = [policy.decide(_ctx(SESSION, broker))]
+        for day, (plain, after) in enumerate((("90", "45"), ("70", "35")), start=1):
+            if split:
+                broker.holdings_now = (_holding(A, 20, "50"),)
+            data.at(marks={A: after if split else plain})
+            decisions.append(policy.decide(_ctx(SESSION + timedelta(days=day), broker)))
+        return data, policy, decisions
+
+    plain_data, plain, plain_decisions = walk(split=False)
+    split_data, split, split_decisions = walk(split=True)
+    assert split_data.reads == plain_data.reads
+    for ours, theirs in zip(split_decisions, plain_decisions, strict=True):
+        assert [(o.isin, o.side) for o in ours.orders] == [(o.isin, o.side) for o in theirs.orders]
+    assert A in _sold(split_decisions[-1])
+    ours_p, theirs_p = split._positions[A], plain._positions[A]
+    assert (ours_p.entered_on, ours_p.sessions_held, ours_p.sell_staged_ago) == (
+        theirs_p.entered_on,
+        theirs_p.sessions_held,
+        theirs_p.sell_staged_ago,
+    )
+    assert ours_p.peak * 2 == theirs_p.peak
+
+
+def test_the_policy_never_reads_corporate_actions() -> None:
+    """The split reaches the stop only as its consequence on the account (invariant #7): the policy
+    imports neither the book's action source nor the corporate-action store, whose knowable_date
+    is the ingest day."""
+    import backtest.policies.swing_composite as module
+
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    imported = {n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
+    imported |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    assert not any(
+        m.startswith(("backtest.book_actions", "dataplatform.corpactions")) for m in imported
+    )
 
 
 # ── an exit that cannot fill is not re-staged every session ──────────────────────────────────────

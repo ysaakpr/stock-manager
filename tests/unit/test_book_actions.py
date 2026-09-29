@@ -41,6 +41,12 @@ from backtest.book_actions import (
     book_corporate_actions,
 )
 from backtest.policies.naive_momentum import MomentumParameters, MomentumRecord, NaiveMomentumPolicy
+from backtest.policies.swing_composite import (
+    RegimeReading,
+    SwingCompositeParameters,
+    SwingCompositePolicy,
+    SwingRecord,
+)
 from backtest.replay import ReplayEngine, ReplayResult, SessionContext, SessionDecision
 from backtest.run import _AccountingBroker
 from dataplatform.clock import FrozenClock
@@ -682,3 +688,81 @@ def test_a_lot_traded_on_the_ex_date_is_refused_rather_than_let_the_books_part()
     )
     with pytest.raises(BookError):
         late.apply(T3, sim=walk.sim, book=walk.book)
+
+
+# ── the swing policy's trailing stop reads the split off the account ──────────────────────────
+
+
+class _SwingMarks:
+    """A ``SwingCompositeData`` with no candidates: only the day's raw closes, for the stop."""
+
+    def __init__(self, prices: Mapping[tuple[str, date], Decimal]) -> None:
+        self._prices = prices
+
+    def is_rebalance(self, session: date) -> bool:
+        return False
+
+    def signal(self, as_of: date) -> Dataset[SwingRecord]:
+        return Dataset.declaring("swing", (), knowable_date=lambda r: r.knowable_date)
+
+    def marks(self, as_of: date) -> Dataset[SwingRecord]:
+        zero = Decimal("0")
+        records = tuple(
+            SwingRecord(
+                isin=isin,
+                high_proximity=_ONE,
+                delivery_share=zero,
+                momentum_12_1=zero,
+                volatility=zero,
+                price=price,
+                knowable_date=as_of,
+            )
+            for (isin, day), price in sorted(self._prices.items())
+            if day == as_of
+        )
+        return Dataset.declaring("marks", records, knowable_date=lambda r: r.knowable_date)
+
+    def regime(self, as_of: date) -> Dataset[RegimeReading]:
+        return Dataset.declaring("regime", (), knowable_date=lambda r: r.knowable_date)
+
+
+class _BuyThenSwing:
+    """Buys 100 A on D1, then leaves every decision to the swing policy — whose stops it records."""
+
+    def __init__(self, swing: SwingCompositePolicy) -> None:
+        self._swing = swing
+        self.stop_sells: list[date] = []
+
+    def decide(self, ctx: SessionContext) -> SessionDecision:
+        decision = self._swing.decide(ctx)
+        self.stop_sells += [ctx.session for o in decision.orders if o.side is Side.SELL]
+        if ctx.session != D1:
+            return decision
+        return SessionDecision(evidence=decision.evidence, orders=(*decision.orders, _buy(A, 100)))
+
+
+def _swing_split_walk(actions: BookActionCalendar, after: Decimal) -> _BuyThenSwing:
+    """100 A bought on D1 (settles D3 under T+1), closes 100 until a D5 ex-date, then ``after``."""
+    prices = _flat_then(A, Decimal("100"), after, ex=D5)
+    policy = _BuyThenSwing(
+        SwingCompositePolicy(
+            _SwingMarks(prices),
+            SwingCompositeParameters(trailing_stop=Decimal("0.25"), min_hold_sessions=0),
+        )
+    )
+    _Walk(prices, policy, actions).run()
+    return policy
+
+
+def test_the_swing_stop_does_not_sell_a_split_the_book_applied() -> None:
+    """Real stack: the applier doubles the count on D5 at an unchanged basis, the close halves,
+    and the swing policy reads that off its broker — no stop."""
+    split_on_d5 = ShareRescale(
+        isin=A, ex_date=D5, kind=RescaleKind.SPLIT, numerator=Decimal("2"), denominator=_ONE
+    )
+    assert _swing_split_walk(BookActionCalendar([split_on_d5]), Decimal("50")).stop_sells == []
+
+
+def test_the_swing_stop_sells_the_same_close_with_no_split_on_the_account() -> None:
+    """The inversion: the same halved close with the count unchanged is a crash, and exits."""
+    assert _swing_split_walk(BookActionCalendar(), Decimal("50")).stop_sells == [D5]
