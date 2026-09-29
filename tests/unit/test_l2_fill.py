@@ -25,6 +25,7 @@ import pytest
 from dataplatform.corpactions.factors import FactorChain
 from dataplatform.identity.master import Exchange
 from dataplatform.ingest.models import PriceRow
+from dataplatform.store import l2_fill
 from dataplatform.store.db import Connection
 from dataplatform.store.l1 import write_prices_raw
 from dataplatform.store.l2 import (
@@ -37,7 +38,7 @@ from dataplatform.store.l2 import (
     read_adjusted,
     rebuild_truncated,
 )
-from dataplatform.store.l2_fill import extension_coverage
+from dataplatform.store.l2_fill import ExtensionCoverage, extension_coverage
 from dataplatform.store.paths import l2_isin_partition_path
 
 RELIANCE = "INE002A01018"  # NSE EQ on every session
@@ -305,6 +306,115 @@ def test_truncation_is_judged_over_the_whole_lineage_chain(tmp_path: Path) -> No
     bars = read_adjusted(RELIANCE, data_root=tmp_path)
     assert [b.trade_date for b in bars] == list(SESSIONS)
     assert {b.isin for b in bars} == {RELIANCE}
+
+
+# A retired ISIN's partition is left alone by --extend: its chain is only itself, so extending it
+# would duplicate the pre-reissue history the survivor's stitched partition carries.
+
+
+def _retired_into_reliance(isin: str) -> str:
+    return RELIANCE if isin == HDFC else isin
+
+
+_REISSUE = {RELIANCE: (HDFC, RELIANCE)}
+
+
+@pytest.fixture
+def reissued(tmp_path: Path) -> Path:
+    """HDFC traded to SESSIONS[1] and was reissued as RELIANCE, which trades from SESSIONS[2]. Both
+    got partitions from their own bars while L1 began at SESSIONS[1] (HDFC's is the pre-lineage
+    leftover); then HDFC's SESSIONS[0] bar was backfilled — so HDFC's own partition and RELIANCE's
+    stitched one are now both truncated, and only the survivor's may be extended."""
+    write_prices_raw(
+        [_row(HDFC, SESSIONS[1], series="EQ", close="1601.00")],
+        exchange=Exchange.NSE,
+        data_root=tmp_path,
+    )
+    write_prices_raw(
+        [_row(RELIANCE, SESSIONS[2], series="EQ", close="2402.50")],
+        exchange=Exchange.NSE,
+        data_root=tmp_path,
+    )
+    for isin in (HDFC, RELIANCE):
+        materialize_isin(
+            isin, chain=FactorChain(isin=isin, rows=()), actions=(), data_root=tmp_path
+        )
+    write_prices_raw(
+        [_row(HDFC, SESSIONS[0], series="EQ", close="1600.00")],
+        exchange=Exchange.NSE,
+        data_root=tmp_path,
+    )
+    return tmp_path
+
+
+def test_extend_neither_extends_nor_creates_a_retired_partition(reissued: Path) -> None:
+    hdfc_before = _part(reissued, HDFC).read_bytes()
+    rebuild_truncated(
+        _conn(), data_root=reissued, history_for=_REISSUE, survivor_of=_retired_into_reliance
+    )
+    assert _part(reissued, HDFC).read_bytes() == hdfc_before, "a retired partition was extended"
+    assert [b.trade_date for b in read_adjusted(HDFC, data_root=reissued)] == [SESSIONS[1]]
+    assert materialized_isins(data_root=reissued) == frozenset({HDFC, RELIANCE}), "nothing new"
+
+
+def test_extend_still_extends_the_survivor_over_its_chain(reissued: Path) -> None:
+    report = rebuild_truncated(
+        _conn(), data_root=reissued, history_for=_REISSUE, survivor_of=_retired_into_reliance
+    )
+    assert [r.isin for r in report.written] == [RELIANCE], "only the survivor is rebuilt"
+    bars = read_adjusted(RELIANCE, data_root=reissued)
+    assert [b.trade_date for b in bars] == list(SESSIONS)
+    assert {b.isin for b in bars} == {RELIANCE}
+
+
+def test_a_dry_run_counts_the_skipped_retired_partitions(reissued: Path) -> None:
+    report = rebuild_truncated(
+        _conn(),
+        data_root=reissued,
+        history_for=_REISSUE,
+        survivor_of=_retired_into_reliance,
+        dry_run=True,
+    )
+    assert report.truncated == {RELIANCE: (SESSIONS[2], SESSIONS[0])}
+    assert report.skipped_retired == 1, "one retired partition on disk, one skip"
+    assert report.partitions == 2 and report.written == ()
+
+
+def test_the_extend_cli_passes_the_lineage_and_prints_the_skip_count(
+    reissued: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`l2_fill --extend --dry-run` wires the resolver's `survivor_of` through and reports it."""
+
+    class _Resolver:
+        survivor_of = staticmethod(_retired_into_reliance)
+
+    class _Session:
+        def __enter__(self) -> Connection:
+            return _conn()
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+    class _Settings:
+        data_root = reissued
+
+    monkeypatch.setattr(l2_fill, "get_settings", _Settings)
+    monkeypatch.setattr(l2_fill, "connect", _Session)
+    monkeypatch.setattr(l2_fill, "_history", lambda conn: (dict(_REISSUE), _Resolver()))
+    monkeypatch.setattr(
+        l2_fill,
+        "extension_coverage",
+        lambda conn, truncated: ExtensionCoverage(len(truncated), 0, 0, 0, 0, {}),
+    )
+    before = {isin: _part(reissued, isin).read_bytes() for isin in (HDFC, RELIANCE)}
+
+    assert l2_fill.main(["--extend", "--dry-run"]) == 0
+
+    lines = dict(line.split(maxsplit=1) for line in capsys.readouterr().out.splitlines())
+    assert lines["truncated"] == "1"
+    assert lines["skipped_retired"] == "1"
+    assert lines["written"] == "0"
+    assert {isin: _part(reissued, isin).read_bytes() for isin in before} == before
 
 
 class _RecordingStore:
