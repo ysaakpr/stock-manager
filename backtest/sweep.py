@@ -758,14 +758,19 @@ def tax_cells(row: SweepRow) -> tuple[str, str, str]:
     """
     if row.after_tax is not None:
         at = row.after_tax
+        realised = (
+            _pct(at.after_tax_xirr_realised)
+            if at.after_tax_xirr_realised is not None
+            else f"n/a ({at.realised_xirr_error})"
+        )
         if at.after_tax_xirr_liquidated is None:
             return (
-                _pct(at.after_tax_xirr_realised),
+                realised,
                 f"n/a ({at.liquidation_error})",
                 f"{_rupees(at.total_tax)} / n/a",
             )
         return (
-            _pct(at.after_tax_xirr_realised),
+            realised,
             _pct(at.after_tax_xirr_liquidated),
             f"{_rupees(at.total_tax)} / {_rupees(at.total_tax_liquidated)}",
         )

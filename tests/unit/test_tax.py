@@ -33,6 +33,7 @@ from backtest.tax import (
     TaxScheduleError,
     TaxTrade,
     Term,
+    _tax_flows,
     compute_after_tax,
     financial_year,
     fy_label,
@@ -48,7 +49,7 @@ from backtest.tax_report import (
     trades_from_ledger_rows,
     write_run_ledger,
 )
-from backtest.xirr import Cashflow
+from backtest.xirr import Cashflow, XIRRError
 from dataplatform.identity import Exchange
 from dataplatform.query import AdjustedPoint, AdjustedSeries, AdjustedSeriesRequest, QueryService
 from execution.broker import Side
@@ -532,6 +533,7 @@ def test_after_tax_xirr_is_below_pre_tax_by_the_tax_flows() -> None:
     # 2L STCG @ 15% = 30,000 + 4% cess = 31,200, paid 31-03-2023.
     assert result.total_tax == Decimal("31200.00")
     assert result.fy_taxes[0].payment_date == date(2023, 3, 31)
+    assert result.after_tax_xirr_realised is not None
     assert result.after_tax_xirr_realised < result.pre_tax_xirr
     assert result.after_tax_xirr_liquidated == result.after_tax_xirr_realised  # nothing open
 
@@ -557,7 +559,63 @@ def test_deemed_liquidation_taxes_open_lots() -> None:
     assert result.total_tax == Decimal("0")
     assert result.total_tax_liquidated == Decimal("104000.00")  # 5L @ 20% + 4% cess
     assert result.after_tax_xirr_liquidated is not None
+    assert result.after_tax_xirr_realised is not None
     assert result.after_tax_xirr_liquidated < result.after_tax_xirr_realised
+
+
+def test_tax_on_the_terminal_fy_is_an_outflow_dated_after_the_terminal_value() -> None:
+    # The shape of the stream that crashed the ce49e0f render: a dividend in the run's last,
+    # unfinished FY is taxed at the slab and paid at that FY's end, after the terminal date. That
+    # is the investor's real bill, so it is kept — as an outflow of exactly the tax, never an
+    # inflow, and never pulled back to the terminal date.
+    run = ledger(
+        [buy(A, date(2018, 2, 5), 100, "1000000")],
+        dividends=(DividendCredit(A, date(2026, 6, 15), Decimal("2233.75")),),
+        terminal=date(2026, 8, 31),
+        nav="4254373.57",
+        prices={A: Decimal("42543.7357")},
+    )
+    result = compute_after_tax(run, PROFILE, schedule=SCHEDULE, fmv=NO_FMV)
+    (last,) = [f for f in result.fy_taxes if f.fy == 2026]
+    assert last.payment_date == date(2027, 3, 31) > run.terminal_date
+    assert last.dividend_tax == Decimal("670.13")  # 30 % slab
+    assert last.cess == Decimal("26.81")  # 4 % on the unrounded 670.125
+    assert last.total == Decimal("696.94")
+    flows = _tax_flows(result.fy_taxes)
+    assert flows == [Cashflow(date(2027, 3, 31), Decimal("-696.94"))]
+    assert result.after_tax_xirr_realised is not None
+    assert result.after_tax_xirr_realised < result.pre_tax_xirr
+
+
+def test_an_after_tax_stream_with_no_rate_is_withheld_with_its_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A stream the solver cannot price must reach the report as n/a and a reason — not crash the
+    # render, and not be shown as the pre-tax rate or any other made-up figure.
+    from backtest.xirr import xirr as real_xirr
+
+    run = ledger(
+        [buy(A, date(2022, 4, 4), 100, "1000000"), sell(A, date(2022, 10, 3), 100, "1200000")],
+        terminal=date(2023, 4, 3),
+        nav="1200000",
+    )
+    base_size = len(run.external_flows) + 1
+
+    def refuse_taxed(flows: list[Cashflow]) -> Decimal:
+        if len(flows) > base_size:
+            raise XIRRError("XIRR did not converge to a rate for this cashflow stream")
+        return real_xirr(flows)
+
+    monkeypatch.setattr("backtest.tax.xirr", refuse_taxed)
+    result = compute_after_tax(run, PROFILE, schedule=SCHEDULE, fmv=NO_FMV)
+    assert result.pre_tax_xirr > 0
+    assert result.total_tax == Decimal("31200.00")
+    assert result.after_tax_xirr_realised is None
+    assert result.realised_xirr_error is not None
+    assert "realised gains" in result.realised_xirr_error
+    assert result.after_tax_xirr_liquidated is None
+    assert result.liquidation_error is not None
+    assert "deemed liquidation" in result.liquidation_error
 
 
 # ── report, adapters, persistence ──────────────────────────────────────────────────────────────
