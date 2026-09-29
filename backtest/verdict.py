@@ -34,6 +34,8 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
+from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
+from backtest.run_ledger import add_ledger_dir_flag, ledger_dir_unless
 from backtest.sweep import (
     ARMS,
     HIGH_FLOOR,
@@ -41,13 +43,21 @@ from backtest.sweep import (
     Arm,
     SweepResult,
     SweepRow,
+    attach_after_tax,
+    investor_assumption_lines,
+    l1_grandfathering,
     run_sweep,
+    tax_cells,
 )
+from backtest.tax import GrandfatheringPrices, InvestorProfile
+from backtest.tax_report import add_investor_flags, investor_profile_from_args
+from backtest.windows import load_windows
 from dataplatform.logging import get_logger
 
 __all__ = [
     "BAR",
     "WalkForward",
+    "attach_walk_after_tax",
     "render_verdict",
     "run_walk_forward",
 ]
@@ -121,6 +131,20 @@ def run_walk_forward(
     return WalkForward(selection=chosen_on, verification=verified_on, selected=winner)
 
 
+def attach_walk_after_tax(
+    walk: WalkForward, profile: InvestorProfile, *, fmv: GrandfatheringPrices
+) -> None:
+    """Strike after-tax figures on every window the verdict reports (``sweep.attach_after_tax``).
+
+    Runs after the choice is frozen and changes no rank: the selection is on pre-tax XIRR / max
+    drawdown, and the after-tax columns sit beside it.
+    """
+    walk.selection = attach_after_tax(walk.selection, profile, fmv=fmv)
+    walk.verification = attach_after_tax(walk.verification, profile, fmv=fmv)
+    for name, result in list(walk.context.items()):
+        walk.context[name] = attach_after_tax(result, profile, fmv=fmv)
+
+
 # ── the verdict ──────────────────────────────────────────────────────────────────────────────────
 
 
@@ -171,6 +195,7 @@ def render_verdict(
         f"{verification_window[1].isoformat()}**",
         f"- Ranked on XIRR / max drawdown at the {_floor_label(low)} floor",
         "",
+        *investor_assumption_lines(walk.verification.profile),
         f"**Chosen: {walk.selected or '(no arm produced a result)'}**",
         "",
     ]
@@ -186,12 +211,14 @@ def render_verdict(
         ]
     if chosen_verification is not None and chosen_verification.ok:
         rank = walk.rank_of(walk.verification, walk.selected, low)
+        realised, liquidated, paid = tax_cells(chosen_verification)
         lines += [
             f"On the verification window — never seen when it was chosen — it earned "
             f"**{_pct(chosen_verification.xirr)}** against a "
             f"{_pct(chosen_verification.max_drawdown)} drawdown "
             f"({chosen_verification.return_per_drawdown:.2f}), ranking **{rank}** of "
-            f"{len(walk.verification.ranked(low))}.",
+            f"{len(walk.verification.ranked(low))}. After tax: **{realised}** realised, "
+            f"**{liquidated}** liquidated at the end (tax paid {paid}).",
             "",
         ]
     else:
@@ -201,8 +228,10 @@ def render_verdict(
         "## Selection rank against verification rank",
         "",
         "| Strategy | Selection rank | Selection XIRR/DD | Verification rank | "
-        "Verification XIRR/DD | Verification XIRR |",
-        "| --- | --- | --- | --- | --- | --- |",
+        "Verification XIRR/DD | Verification XIRR | Verification after-tax XIRR (realised) | "
+        "Verification after-tax XIRR (liquidated) | "
+        "Verification tax paid (realised / liquidated) |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for position, row in enumerate(walk.selection.ranked(low), start=1):
         label = row.arm.label
@@ -211,12 +240,15 @@ def render_verdict(
         marker = " ←" if label == walk.selected else ""
         if verified is None or not verified.ok:
             lines.append(
-                f"| {label}{marker} | {position} | {row.return_per_drawdown:.2f} | — | — | — |"
+                f"| {label}{marker} | {position} | {row.return_per_drawdown:.2f} | — | — | — | "
+                "— | — | — |"
             )
             continue
+        realised, liquidated, paid = tax_cells(verified)
         lines.append(
             f"| {label}{marker} | {position} | {row.return_per_drawdown:.2f} | {vrank} | "
-            f"{verified.return_per_drawdown:.2f} | {_pct(verified.xirr)} |"
+            f"{verified.return_per_drawdown:.2f} | {_pct(verified.xirr)} | {realised} | "
+            f"{liquidated} | {paid} |"
         )
 
     lines += ["", "## The bar: was 25 % reached, and on what", ""]
@@ -237,11 +269,13 @@ def render_verdict(
             continue
         any_cleared = True
         for floor_label, _floor, row in cleared:
+            realised, liquidated, _paid = tax_cells(row)
             lines.append(
                 f"- **{name}** ({result.start} → {result.terminal}), {floor_label}: "
                 f"**{row.arm.label}** at {_pct(row.xirr)} XIRR, "
                 f"{_pct(row.max_drawdown)} max drawdown, "
-                f"{row.return_per_drawdown:.2f} return per drawdown."
+                f"{row.return_per_drawdown:.2f} return per drawdown; after tax {realised} "
+                f"realised, {liquidated} liquidated."
             )
     scope = ", ".join(name for name, _ in windows)
     lines += [
@@ -276,12 +310,20 @@ def render_verdict(
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
+    windows = load_windows()
     parser = argparse.ArgumentParser(
         prog="python -m backtest.verdict",
         description="Walk-forward the strategy sweep and write the verdict (M12.3).",
     )
-    parser.add_argument("--selection", default="2016-09-01:2021-08-31", help="START:END")
-    parser.add_argument("--verification", default="2021-09-01:2026-08-31", help="START:END")
+    # The defaults are the configured walk-forward split (backtest/windows.yaml), not literals.
+    parser.add_argument("--selection", default=windows.selection.spec, help="START:END")
+    parser.add_argument("--verification", default=windows.verification.spec, help="START:END")
+    parser.add_argument(
+        "--context",
+        default="",
+        help="comma-separated configured window names (e.g. full,decade,six-year) to sweep and "
+        "report beside the walk-forward",
+    )
     parser.add_argument(
         "--report",
         nargs="?",
@@ -292,6 +334,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--floors", default="low,high")
     parser.add_argument("--arms", default=None, help="substring filter, for smoke-testing only")
     parser.add_argument("--data-root", type=Path, default=None)
+    add_book_actions_flag(parser)
+    add_ledger_dir_flag(parser)
+    add_investor_flags(parser)
     return parser.parse_args(argv)
 
 
@@ -321,17 +366,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         wanted = [p.strip().lower() for p in args.arms.split(",") if p.strip()]
         arms = tuple(a for a in ARMS if any(w in a.label.lower() for w in wanted))
 
+    profile = investor_profile_from_args(args)
+    configured = load_windows()
     try:
-        walk = run_walk_forward(
-            selection=selection,
-            verification=verification,
-            arms=arms,
-            floors=floors,
-            data_root=args.data_root,
-        )
+        context = [configured.named(n.strip()) for n in args.context.split(",") if n.strip()]
+        with store_book_actions_unless(args), ledger_dir_unless(args):
+            walk = run_walk_forward(
+                selection=selection,
+                verification=verification,
+                arms=arms,
+                floors=floors,
+                data_root=args.data_root,
+            )
+            for window in context:
+                walk.context[window.name] = run_sweep(
+                    start=window.start,
+                    end=window.end,
+                    arms=arms,
+                    floors=floors,
+                    data_root=args.data_root,
+                )
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
+    service, fmv = l1_grandfathering(args.data_root)
+    with service:
+        attach_walk_after_tax(walk, profile, fmv=fmv)
 
     print(f"\n  selected on {selection[0]}..{selection[1]}: {walk.selected}")
     verified = walk.row_of(walk.verification, walk.selected, floors[0])
