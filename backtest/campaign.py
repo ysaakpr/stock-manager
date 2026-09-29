@@ -47,7 +47,12 @@ from typing import Any
 
 from backtest.book_actions import book_corporate_actions, load_store_book_actions
 from backtest.run import _L1Reader
-from backtest.run_ledger import persist_run_ledgers, refuse_lake_location
+from backtest.run_ledger import (
+    ledger_path,
+    persist_run_ledgers,
+    refuse_lake_location,
+    summary_path,
+)
 from backtest.sweep import (
     ARMS,
     HIGH_FLOOR,
@@ -57,6 +62,7 @@ from backtest.sweep import (
     attach_after_tax,
     l1_grandfathering,
     render_sweep_report,
+    run_digests,
     run_sweep,
 )
 from backtest.tax import GrandfatheringPrices, InvestorProfile
@@ -265,9 +271,21 @@ def build_manifest(plan: CampaignPlan, *, commit: str, last_session: date) -> di
     }
 
 
-def check_manifest(out_dir: Path, manifest: dict[str, Any]) -> None:
-    """Write the manifest on a fresh directory; refuse a directory whose manifest differs."""
+def check_manifest(
+    out_dir: Path, manifest: dict[str, Any], *, runs_from_commit: str | None = None
+) -> None:
+    """Write the manifest on a fresh directory; refuse a directory whose manifest differs.
+
+    ``runs_from_commit`` is the render-only exception (see :func:`check_render_only`): the
+    directory's runs were replayed at that earlier commit, and only ``commit`` may differ.
+    """
     path = out_dir / "manifest.json"
+    if runs_from_commit is not None:
+        if not path.is_file():
+            raise CampaignError(f"{out_dir} has no manifest; there are no runs to render")
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        check_render_only(existing, manifest, runs_from_commit)
+        return
     if path.is_file():
         existing = json.loads(path.read_text(encoding="utf-8"))
         if existing != manifest:
@@ -280,6 +298,55 @@ def check_manifest(out_dir: Path, manifest: dict[str, Any]) -> None:
         return
     out_dir.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def check_render_only(existing: dict[str, Any], manifest: dict[str, Any], runs_commit: str) -> None:
+    """Refuse a render-only pass unless the runs are provably one engine's, and named as such.
+
+    The manifest pins the commit so one table never compares two engines. A render that replays
+    nothing cannot mix engines — every row is still the pinned commit's run — so rendering at a
+    later commit is honest when: every field but ``commit`` matches; the operator names the
+    directory's commit (``runs_commit``) rather than having it waved through; that commit is an
+    ancestor of a clean HEAD; and (checked separately, :func:`missing_runs`) every run is on disk.
+    """
+    differs = sorted(k for k in manifest if existing.get(k) != manifest[k] and k != "commit")
+    if differs:
+        raise CampaignError(
+            f"render-only: the directory differs on more than the commit ({', '.join(differs)})"
+        )
+    pinned = str(existing.get("commit", ""))
+    if len(runs_commit) < 7 or not pinned.startswith(runs_commit) or pinned.endswith("-dirty"):
+        raise CampaignError(
+            f"render-only: --runs-from-commit {runs_commit} does not name this directory's "
+            f"clean commit {pinned}"
+        )
+    head = str(manifest["commit"])
+    if head.endswith("-dirty"):
+        raise CampaignError("render-only: the rendering tree is dirty; commit first")
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", pinned, head], check=False, capture_output=True
+    )
+    if ancestor.returncode != 0:
+        raise CampaignError(f"render-only: {pinned} is not an ancestor of HEAD {head}")
+
+
+def missing_runs(plan: CampaignPlan) -> list[str]:
+    """Every run the reports need that has no summary and ledger on disk, as ``window arm floor``.
+
+    A render-only pass refuses on a non-empty list: rendering would replay those runs at the
+    rendering commit and put two engines in one table.
+    """
+    windows = [*plan.windows.sweeps, plan.windows.selection, plan.windows.verification]
+    missing: list[str] = []
+    for window in windows:
+        digests = run_digests(
+            start=window.start, end=window.end, arms=plan.arms, floors=plan.floors
+        )
+        for (label, floor), digest in digests.items():
+            files = (summary_path(plan.out_dir, digest), ledger_path(plan.out_dir, digest))
+            if not all(f.is_file() for f in files):
+                missing.append(f"{window.name} {label} {floor}")
+    return missing
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────────────────────
@@ -307,6 +374,14 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         action="store_true",
         help="render the reports from the runs already on disk; replay only what is missing",
     )
+    parser.add_argument(
+        "--runs-from-commit",
+        default=None,
+        metavar="SHA",
+        help="with --reports-only: render at this (later) commit runs that were replayed at SHA, "
+        "the directory's pinned commit; refused unless every run is on disk and only the commit "
+        "differs. Nothing is replayed.",
+    )
     add_investor_flags(parser)
     return parser.parse_args(argv)
 
@@ -331,9 +406,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             data_root=args.data_root,
             book_actions=args.book_corporate_actions,
         )
+        if args.runs_from_commit is not None and not args.reports_only:
+            raise CampaignError("--runs-from-commit renders only; add --reports-only")
+        head = _git_commit()
         check_manifest(
-            out_dir, build_manifest(plan, commit=_git_commit(), last_session=sessions[-1])
+            out_dir,
+            build_manifest(plan, commit=head, last_session=sessions[-1]),
+            runs_from_commit=args.runs_from_commit,
         )
+        if args.runs_from_commit is not None:
+            missing = missing_runs(plan)
+            if missing:
+                raise CampaignError(
+                    f"render-only: {len(missing)} run(s) not on disk, and replaying them here "
+                    f"would mix engines: {', '.join(missing[:5])}"
+                )
         if not args.reports_only:
             outcomes = run_campaign(plan, workers=args.workers)
             for outcome in outcomes:
@@ -351,6 +438,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         reports = render_campaign(plan, profile, fmv=fmv)
     report_dir = out_dir / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
+    if args.runs_from_commit is not None:
+        pinned = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["commit"]
+        stamp = (
+            f"> Runs replayed at `{pinned}`; this report rendered at `{head}` "
+            "(`--reports-only --runs-from-commit`). "
+            "No run was replayed at the rendering commit.\n\n"
+        )
+        reports = {name: stamp + text for name, text in reports.items()}
     for name, text in reports.items():
         (report_dir / name).write_text(text, encoding="utf-8")
         print(f"  report written to {report_dir / name}")

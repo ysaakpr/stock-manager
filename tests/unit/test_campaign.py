@@ -32,6 +32,8 @@ from backtest.campaign import (
     CampaignError,
     CampaignPlan,
     check_manifest,
+    check_render_only,
+    missing_runs,
     render_campaign,
     run_campaign,
 )
@@ -297,6 +299,66 @@ def test_a_directory_started_by_another_commit_is_refused(tmp_path: Path) -> Non
     check_manifest(tmp_path, {"version": 1, "commit": "aaa"})  # the same campaign resumes
     with pytest.raises(CampaignError, match="commit"):
         check_manifest(tmp_path, {"version": 1, "commit": "bbb"})
+
+
+# ── render-only at a later commit: honest only if nothing is replayed ──────────────────────────
+
+_PINNED = "a" * 40
+_LATER = "b" * 40
+
+
+def _ancestry(monkeypatch: pytest.MonkeyPatch, *, is_ancestor: bool) -> None:
+    def fake_run(cmd: list[str], **_: Any) -> SimpleNamespace:
+        assert cmd[:3] == ["git", "merge-base", "--is-ancestor"]
+        return SimpleNamespace(returncode=0 if is_ancestor else 1)
+
+    monkeypatch.setattr("backtest.campaign.subprocess.run", fake_run)
+
+
+def test_render_only_accepts_a_later_commit_that_descends_from_the_pinned_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ancestry(monkeypatch, is_ancestor=True)
+    check_manifest(tmp_path, {"version": 1, "commit": _PINNED})
+    check_manifest(tmp_path, {"version": 1, "commit": _LATER}, runs_from_commit=_PINNED[:7])
+    # Without the flag the ordinary guard still refuses, and the pinned manifest is untouched.
+    with pytest.raises(CampaignError, match="commit"):
+        check_manifest(tmp_path, {"version": 1, "commit": _LATER})
+    assert _PINNED in (tmp_path / "manifest.json").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("existing", "current", "named", "is_ancestor", "why"),
+    [
+        ({"commit": _PINNED, "lake": "x"}, {"commit": _LATER, "lake": "y"}, _PINNED, True, "lake"),
+        ({"commit": _PINNED}, {"commit": _LATER}, "c" * 40, True, "does not name"),
+        ({"commit": _PINNED}, {"commit": _LATER}, "aaa", True, "does not name"),  # too short
+        ({"commit": _PINNED + "-dirty"}, {"commit": _LATER}, _PINNED, True, "clean commit"),
+        ({"commit": _PINNED}, {"commit": _LATER + "-dirty"}, _PINNED, True, "dirty"),
+        ({"commit": _PINNED}, {"commit": _LATER}, _PINNED, False, "not an ancestor"),
+    ],
+)
+def test_render_only_refuses_anything_but_the_named_commit_differing(
+    monkeypatch: pytest.MonkeyPatch,
+    existing: dict[str, Any],
+    current: dict[str, Any],
+    named: str,
+    is_ancestor: bool,
+    why: str,
+) -> None:
+    _ancestry(monkeypatch, is_ancestor=is_ancestor)
+    with pytest.raises(CampaignError, match=why):
+        check_render_only(existing, current, named)
+
+
+def test_missing_runs_names_every_run_a_render_would_have_to_replay(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    assert len(missing_runs(_plan(tmp_path))) == 20  # nothing on disk yet
+    run_campaign(_plan(tmp_path), workers=1)
+    assert missing_runs(_plan(tmp_path)) == []
+    sorted((tmp_path / "runs").glob("*.json"))[0].unlink()
+    assert len(missing_runs(_plan(tmp_path))) == 1
 
 
 # ── the sweep's pre-run digest is the runner's own ─────────────────────────────────────────────

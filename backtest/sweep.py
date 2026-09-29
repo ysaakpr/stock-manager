@@ -98,6 +98,7 @@ __all__ = [
     "attach_after_tax",
     "investor_assumption_lines",
     "render_sweep_report",
+    "run_digests",
     "run_sweep",
     "tax_cells",
 ]
@@ -504,6 +505,36 @@ def _resumed_row(arm: Arm, floor: Decimal, summary: RunSummary, ledger: RunLedge
     )
 
 
+def run_digests(
+    *,
+    start: date,
+    end: date,
+    arms: Sequence[Arm] = ARMS,
+    floors: Sequence[Decimal] = (LOW_FLOOR, HIGH_FLOOR),
+    opening_cash: Decimal = _DEFAULT_OPENING_CASH,
+    adjusted: bool = True,
+) -> dict[tuple[str, Decimal], str]:
+    """The persistence digest of every (arm, floor) run a sweep over this window would make.
+
+    The one place a sweep's run identities are derived: :func:`run_sweep` resumes by them and a
+    render-only campaign checks them, so the two can never disagree on what "already run" means.
+    """
+    digests: dict[tuple[str, Decimal], str] = {}
+    for floor in floors:
+        universe = UniverseParameters(median_turnover_floor=floor)
+        for arm in arms:
+            spec = _arm_spec(
+                arm,
+                start=start,
+                end=end,
+                universe=universe,
+                opening_cash=opening_cash,
+                adjusted=adjusted,
+            )
+            digests[(arm.label, floor)] = run_digest(spec)
+    return digests
+
+
 def run_sweep(
     *,
     start: date,
@@ -529,17 +560,17 @@ def run_sweep(
     universes = {floor: UniverseParameters(median_turnover_floor=floor) for floor in floors}
     done: dict[tuple[str, Decimal], SweepRow] = {}
     if out_dir is not None:
+        digests = run_digests(
+            start=start,
+            end=end,
+            arms=arms,
+            floors=floors,
+            opening_cash=opening_cash,
+            adjusted=adjusted,
+        )
         for floor in floors:
             for arm in arms:
-                spec = _arm_spec(
-                    arm,
-                    start=start,
-                    end=end,
-                    universe=universes[floor],
-                    opening_cash=opening_cash,
-                    adjusted=adjusted,
-                )
-                loaded = load_run(out_dir, run_digest(spec))
+                loaded = load_run(out_dir, digests[(arm.label, floor)])
                 if loaded is not None:
                     done[(arm.label, floor)] = _resumed_row(arm, floor, *loaded)
     pending = [(floor, arm) for floor in floors for arm in arms if (arm.label, floor) not in done]

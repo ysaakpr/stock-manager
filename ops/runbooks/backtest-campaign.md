@@ -100,6 +100,22 @@ uv run python -m backtest.campaign --out "$OUT" --data-root data --workers 1 --r
     --slab-rate 0.30 --cg-surcharge 0.15 --dividend-surcharge 0.15 --payment self_assessment
 ```
 
+Render at a **later commit** — a fix to rendering or tax after the runs finished — without
+replaying anything:
+
+```bash
+uv run python -m backtest.campaign --out "$OUT" --data-root data --workers 1 --reports-only \
+    --runs-from-commit <the manifest's commit> \
+    --slab-rate 0.30 --cg-surcharge 0 --dividend-surcharge 0 --payment fy_end
+```
+
+The manifest guard exists so one table never holds two engines' runs; a render that replays
+nothing cannot mix them. So this is accepted only when every manifest field but `commit` matches,
+you name the directory's own commit, it is an ancestor of a clean HEAD, and **every** run is on
+disk (a missing one would be replayed at HEAD — refused instead). The manifest is left as it was;
+each report opens with a line naming both commits. Render into a copy (`cp -a "$OUT" "$OUT-render-<sha>"`)
+if the original directory should stay exactly as the campaign left it.
+
 One run's full after-tax report, per FY, with rate provenance:
 
 ```bash
