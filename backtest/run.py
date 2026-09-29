@@ -4376,7 +4376,10 @@ class _SwingFeatures:
     ``deliv_pct`` is populated on 65 % of 2016 prints rising to 86 % by 2026, and a name with no
     delivery print on a session contributes nothing to its own mean. A name with no delivery data
     at all in the window scores at the universe's median rather than being dropped, so the
-    candidate set does not silently change with the coverage — ``delivery_imputed`` counts it.
+    candidate set does not silently change with the coverage — ``delivery_imputed`` counts it, and
+    each record says whether its delivery legs were measured (``delivery_observed``,
+    ``delivery_trend_observed``) so the policy can refuse to rank on a leg the lake barely covers
+    (X2: before 2016-09-02 it covers nothing, and every name's stand-in was the same 0.0).
     """
 
     def __init__(self, *, data_root: Path | None = None, adjusted: bool = True) -> None:
@@ -4496,6 +4499,7 @@ class _SwingFeatures:
                     row[5],
                     row[6],
                 )
+                delivery_observed = delivery is not None
                 if delivery is None:
                     delivery = fallback
                     self._imputed += 1
@@ -4517,6 +4521,9 @@ class _SwingFeatures:
                         delivery_trend=_swing_leg(row[10], _ONE),
                         turnover_expansion=_swing_leg(row[11], _ONE),
                         ma_proximity=_swing_leg(row[12], _ONE),
+                        # X2. The policy gates a delivery leg on how many of these are True.
+                        delivery_observed=delivery_observed,
+                        delivery_trend_observed=row[10] is not None,
                     )
                 )
             self._by_date[session] = tuple(records)

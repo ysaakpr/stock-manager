@@ -20,6 +20,7 @@ in-memory source.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
@@ -28,10 +29,12 @@ import pytest
 
 from analyst.journal.models import Decision, Sleeve
 from backtest.policies.swing_composite import (
+    DELIVERY_COVERAGE_THRESHOLD,
     RegimeReading,
     SwingCompositeParameters,
     SwingCompositePolicy,
     SwingRecord,
+    active_legs,
     composite_scores,
 )
 from backtest.replay import SessionContext, SessionDecision
@@ -779,3 +782,125 @@ def test_the_gate_is_not_read_at_all_when_it_is_off() -> None:
         A,
         B,
     }
+
+
+# ── X2: delivery is gated on coverage, and a tie never ranks by ISIN ─────────────────────────────
+
+#: Ten real-shaped ISINs, in ascending order, for the coverage fixtures.
+_TEN = tuple(f"INE{n:03d}A01010" for n in range(100, 110))
+
+
+def _coverage_fixture(observed: int) -> tuple[SwingRecord, ...]:
+    """Ten names: 52w-high ascends with ISIN, delivery *descends* — so the two legs disagree.
+
+    The first ``observed`` names carry a measured delivery share; the rest carry one shared imputed
+    stand-in (as ``_SwingFeatures`` imputes the session median) and ``delivery_observed=False``.
+    """
+    records = []
+    for i, isin in enumerate(_TEN):
+        measured = i < observed
+        delivery = Decimal("0.90") - Decimal(i) / Decimal(100) if measured else Decimal("0.855")
+        records.append(
+            SwingRecord(
+                isin=isin,
+                high_proximity=Decimal("0.50") + Decimal(i) / Decimal(100),
+                delivery_share=delivery,
+                momentum_12_1=Decimal("0.10"),
+                volatility=Decimal("0.02"),
+                price=Decimal("100"),
+                knowable_date=SESSION,
+                delivery_observed=measured,
+            )
+        )
+    return tuple(records)
+
+
+_HIGH_AND_DELIVERY = SwingCompositeParameters(
+    weight_high=Decimal("1"), weight_delivery=Decimal("1"), weight_momentum=Decimal("0")
+)
+_HIGH_ONLY = SwingCompositeParameters(
+    weight_high=Decimal("1"), weight_delivery=Decimal("0"), weight_momentum=Decimal("0")
+)
+
+
+def test_the_stated_coverage_threshold_is_eighty_percent() -> None:
+    assert Decimal("0.80") == DELIVERY_COVERAGE_THRESHOLD
+
+
+def test_a_thinly_covered_delivery_leg_is_dropped_and_the_composite_reweights() -> None:
+    """At 50 % coverage the composite is the 52w-high leg alone — score for score.
+
+    Remove the coverage gate and the descending delivery leg cancels the 52w-high leg, so the
+    scores differ from the high-only scores and this fails.
+    """
+    records = _coverage_fixture(observed=5)
+    assert [leg for leg, _ in active_legs(records, _HIGH_AND_DELIVERY)] == ["high_proximity"]
+    assert composite_scores(records, _HIGH_AND_DELIVERY) == composite_scores(records, _HIGH_ONLY)
+
+
+def test_a_well_covered_delivery_leg_contributes() -> None:
+    """At 90 % coverage (above 80 %) the delivery leg is scored, and it moves the composite."""
+    records = _coverage_fixture(observed=9)
+    assert [leg for leg, _ in active_legs(records, _HIGH_AND_DELIVERY)] == [
+        "high_proximity",
+        "delivery_share",
+    ]
+    assert composite_scores(records, _HIGH_AND_DELIVERY) != composite_scores(records, _HIGH_ONLY)
+
+
+def _pre_seam(isins: tuple[str, ...]) -> tuple[SwingRecord, ...]:
+    """The pre-2016-09 lake: no delivery print anywhere, every stand-in the same 0.0 and 1."""
+    return tuple(
+        SwingRecord(
+            isin=isin,
+            high_proximity=Decimal("0.90"),
+            delivery_share=Decimal("0"),
+            momentum_12_1=Decimal("0.10"),
+            volatility=Decimal("0.02"),
+            price=Decimal("100"),
+            knowable_date=SESSION,
+            delivery_observed=False,
+            delivery_trend_observed=False,
+        )
+        for isin in isins
+    )
+
+
+@pytest.mark.parametrize("weight_field", ["weight_delivery", "weight_delivery_trend"])
+def test_a_delivery_only_arm_with_no_coverage_never_ranks_by_isin(weight_field: str) -> None:
+    """The defect: pre-2016-09 every name scored 0.0 and the ISIN tie-break picked the basket.
+
+    With the gate, a delivery-only arm has no active leg, so no ranking is struck: nothing is
+    bought (the ISIN-first names were before), and a held name is not sold on a rank it never had.
+    """
+    override: dict[str, Any] = {weight_field: Decimal("1")}
+    params = replace(_only("weight_delivery_trend", "0"), **override)
+    records = _pre_seam(_TEN)
+    assert active_legs(records, params) == ()
+    assert composite_scores(records, params) == {}
+    held = (_holding(_TEN[-1], 10),)
+    policy = SwingCompositePolicy(_Data(records), replace(params, top_n=3, sell_band=3))
+    decision = policy.decide(_ctx(SESSION, _FakeBroker(cash=Decimal("1000000"), holdings=held)))
+    assert decision.orders == ()
+    assert any("not ranked" in (item.text or "") for item in decision.evidence.items)
+
+
+def test_a_tie_shares_its_mean_rank_rather_than_ranking_by_isin() -> None:
+    """Five names tied on the one weighted leg all score the same — the neutral middle, 0.
+
+    Break ties by ISIN again and the scores spread from -2/3 to +2/3 in ISIN order, and this fails.
+    """
+    records = tuple(_rec(isin, high="0.90") for isin in (A, B, C, D, E))
+    scores = composite_scores(records, _HIGH_ONLY)
+    assert set(scores.values()) == {Decimal("0")}
+
+
+def test_an_imputed_block_ties_while_measured_names_keep_their_order() -> None:
+    """Above the floor, the imputed names share one rank; the measured ones are ordered by value."""
+    records = _coverage_fixture(observed=8)
+    params = replace(_HIGH_ONLY, weight_high=Decimal("0"), weight_delivery=Decimal("1"))
+    scores = composite_scores(records, params)
+    imputed = [scores[isin] for isin in _TEN[8:]]
+    assert imputed[0] == imputed[1]
+    measured = [scores[isin] for isin in _TEN[:8]]
+    assert measured == sorted(measured, reverse=True)  # delivery descends with ISIN
