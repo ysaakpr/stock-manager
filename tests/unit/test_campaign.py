@@ -509,3 +509,9 @@ def test_the_manifest_records_cash_interest_only_when_on(tmp_path: Path) -> None
         replace(_plan(tmp_path), cash_interest=False), commit="c", last_session=date(2026, 9, 1)
     )
     assert "cash_interest" not in off  # a pre-interest directory's manifest still matches
+
+
+def test_the_sweep_cli_accrues_cash_interest_by_default_too() -> None:
+    base = ["--from", "2020-01-01", "--to", "2021-01-01", *_INVESTOR]
+    assert sweep_args(base).cash_interest is True
+    assert sweep_args([*base, "--no-cash-interest"]).cash_interest is False
