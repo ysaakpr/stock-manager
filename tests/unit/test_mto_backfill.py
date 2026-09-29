@@ -179,7 +179,31 @@ def test_the_plan_is_the_calendars_sessions() -> None:
     plan = mb.plan_sessions(START, date(2011, 7, 1), calendar=trading_calendar())
     assert plan.dates[0] == START and plan.dates[-1] == MULTI
     assert all(day.weekday() < 5 for day in plan.dates)
-    assert plan.basis == "calendar"
+    assert plan.basis == "calendar+prices_raw"
+
+
+def test_a_priced_session_the_calendar_omits_is_planned() -> None:
+    """2012-01-07 was a special Saturday session: W1 holds its bhavcopy, the calendar lists no
+    session. Delivery for it is planned from the price evidence; a priced date outside the range
+    is not."""
+    saturday = date(2012, 1, 7)
+    calendar = trading_calendar()
+    assert saturday not in calendar.expected_data_dates(date(2012, 1, 2), date(2012, 1, 9))
+    plan = mb.plan_sessions(
+        date(2012, 1, 2),
+        date(2012, 1, 9),
+        calendar=calendar,
+        priced=(saturday, date(2012, 1, 14)),
+    )
+    assert saturday in plan.dates
+    assert date(2012, 1, 14) not in plan.dates
+    assert "1 priced session(s) outside the calendar added (2012-01-07)" in plan.note
+
+
+def test_price_sessions_are_read_off_the_lake(lake: _Lake) -> None:
+    assert mb.price_sessions(data_root=lake.root) == frozenset()
+    lake.promotion.promote([START])
+    assert mb.price_sessions(data_root=lake.root) == {START}
 
 
 # ── acquisition ──────────────────────────────────────────────────────────────────────────────

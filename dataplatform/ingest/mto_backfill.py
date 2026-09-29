@@ -54,7 +54,7 @@ import argparse
 import signal
 import sys
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
@@ -124,6 +124,7 @@ __all__ = [
     "main",
     "mto_url",
     "plan_sessions",
+    "price_sessions",
     "require_l0_root",
 ]
 
@@ -234,27 +235,50 @@ def _require_range(start: date, end: date) -> None:
         )
 
 
+def price_sessions(*, data_root: Path | None) -> frozenset[date]:
+    """Every session with a `prices_raw` partition: the sessions a delivery figure can join."""
+    root = partition_path(Layer.L1, PRICES_RAW_DATASET, CAMPAIGN_FLOOR, data_root=data_root)
+    dataset = root.parent.parent
+    if not dataset.is_dir():
+        return frozenset()
+    return frozenset(
+        date.fromisoformat(child.name.removeprefix("date="))
+        for child in dataset.glob("date=*")
+        if (child / root.name).is_file()
+    )
+
+
 def plan_sessions(
     start: date,
     end: date,
     *,
     calendar: TradingCalendar,
     limit: int | None = None,
+    priced: Iterable[date] = (),
 ) -> SessionPlan:
-    """The candidate sessions for a range: the calendar's expected-data dates, optionally sampled.
+    """The candidate sessions for a range: the calendar's expected-data dates plus every session
+    `priced` names (a `prices_raw` partition exists), optionally sampled.
 
-    What it does: refuses a range outside `[CAMPAIGN_FLOOR, MTO_ERA_END)`, then asks the calendar.
+    What it does: refuses a range outside `[CAMPAIGN_FLOOR, MTO_ERA_END)`, asks the calendar, and
+    unions in the in-range `priced` sessions. The union is not a widening: a W1 price partition is
+    the exchange's own bhavcopy for that day, and the seven special Saturday sessions of 2012-2015
+    (2012-01-07 … 2015-02-28) are sessions the calendar does not list and W1 holds prices for — a
+    calendar-only plan would leave them without delivery for no reason but the plan.
     What it assumes: the calendar covers the range. Unlike W1 there is no weekday fallback — W1's
     campaign *was* the calendar's evidence, and a range the calendar cannot vouch for is one this
     driver has no business spending requests on. `CalendarCoverageError` propagates.
-    What it never does: invent a session, or widen the calendar.
+    What it never does: invent a session, or request a date neither the calendar nor L1 vouches for.
     """
     _require_range(start, end)
-    dates = calendar.expected_data_dates(start, end)
+    expected = calendar.expected_data_dates(start, end)
+    extra = sorted({day for day in priced if start <= day <= end} - set(expected))
+    dates = sorted({*expected, *extra})
     chosen = tuple(sample_dates(dates, limit))
     note = (
         f"calendar coverage {calendar.coverage_start.isoformat()}.."
-        f"{calendar.coverage_end.isoformat()}; declared holidays are not requested"
+        f"{calendar.coverage_end.isoformat()}; declared holidays are not requested; "
+        f"{len(extra)} priced session(s) outside the calendar added"
+        + (f" ({', '.join(d.isoformat() for d in extra)})" if extra else "")
     )
     _LOG.info(
         "mto_backfill.planned",
@@ -262,9 +286,10 @@ def plan_sessions(
         start=start.isoformat(),
         end=end.isoformat(),
         candidates=len(chosen),
+        priced_outside_calendar=len(extra),
         state="PLANNED",
     )
-    return SessionPlan(start=start, end=end, dates=chosen, basis="calendar", note=note)
+    return SessionPlan(start=start, end=end, dates=chosen, basis="calendar+prices_raw", note=note)
 
 
 def _source_row(register: SourceRegister) -> tuple[str, str]:
@@ -930,7 +955,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _plan_from_args(args: argparse.Namespace, *, calendar: TradingCalendar) -> SessionPlan:
+def _plan_from_args(
+    args: argparse.Namespace, *, calendar: TradingCalendar, priced: Iterable[date]
+) -> SessionPlan:
     if args.dates:
         dates = list(args.dates)
         _require_range(dates[0], dates[-1])
@@ -943,7 +970,9 @@ def _plan_from_args(args: argparse.Namespace, *, calendar: TradingCalendar) -> S
         )
     if args.from_date is None or args.to_date is None:
         raise ValueError("give either --dates or both --from and --to")
-    return plan_sessions(args.from_date, args.to_date, calendar=calendar, limit=args.limit)
+    return plan_sessions(
+        args.from_date, args.to_date, calendar=calendar, limit=args.limit, priced=priced
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -954,7 +983,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     register = load_register()
     calendar = trading_calendar()
     try:
-        plan = _plan_from_args(args, calendar=calendar)
+        plan = _plan_from_args(
+            args, calendar=calendar, priced=price_sessions(data_root=settings.data_root)
+        )
     except ValueError as exc:
         print(f"cannot plan: {exc}", file=sys.stderr)
         return 2
