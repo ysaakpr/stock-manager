@@ -50,6 +50,11 @@ from decimal import Decimal
 from pathlib import Path
 
 from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
+from backtest.cash_interest import (
+    add_cash_interest_flag,
+    cash_interest_unless,
+    describe_cash_interest,
+)
 from backtest.policies.momentum_v2 import MomentumV2Parameters
 from backtest.policies.naive_momentum import MomentumParameters
 from backtest.policies.swing_composite import SwingCompositeParameters
@@ -978,6 +983,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--opening-cash", type=Decimal, default=_DEFAULT_OPENING_CASH)
     parser.add_argument("--data-root", type=Path, default=None)
     add_book_actions_flag(parser)
+    add_cash_interest_flag(parser, default=True)
     add_ledger_dir_flag(parser)
     add_investor_flags(parser)
     return parser.parse_args(argv)
@@ -1018,7 +1024,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
 
     profile = investor_profile_from_args(args)
-    with store_book_actions_unless(args), ledger_dir_unless(args):
+    print(f"  {describe_cash_interest(args.cash_interest)}")
+    with store_book_actions_unless(args), cash_interest_unless(args), ledger_dir_unless(args):
         result = run_sweep(
             start=start,
             end=end,
@@ -1046,7 +1053,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.report:
         path = Path(args.report)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_sweep_report(result, floors=floors), encoding="utf-8")
+        header = f"> {describe_cash_interest(args.cash_interest)}\n\n"
+        path.write_text(header + render_sweep_report(result, floors=floors), encoding="utf-8")
         print(f"\n  report written to {path}")
     return 0
 

@@ -337,6 +337,9 @@ class SimBroker:
             _Receivable
         ] = []  # sale proceeds awaiting settlement, in fill order
         self._current_session: date | None = None
+        # Proceeds released at the end of the last session for the *next* session's fills: in
+        # `_cash` so tonight's decision can spend them, but not paid out until that session.
+        self._released_ahead: Decimal = _ZERO
         self._ledger: list[LedgerEntry] = []
         self._next_order_seq: int = 0
         self._next_ledger_seq: int = 0
@@ -454,7 +457,7 @@ class SimBroker:
             resolved = self._fill(order, session)
             self._orders[order.order_id] = resolved
             filled.append(resolved)
-        self._release_proceeds(session, inclusive=True)
+        self._released_ahead = self._release_proceeds(session, inclusive=True)
         return tuple(filled)
 
     def _fill(self, order: Order, session: date) -> Order:
@@ -610,17 +613,19 @@ class SimBroker:
         self._release_proceeds(session, inclusive=False)
         self._current_session = session
 
-    def _release_proceeds(self, session: date, *, inclusive: bool) -> None:
+    def _release_proceeds(self, session: date, *, inclusive: bool) -> Decimal:
         """Credit to spendable cash every receivable due for a fill in `session` (or the next one).
 
         `inclusive=False` (start of a session) releases what settles on or before `session`;
         `inclusive=True` (end of a session) also releases what settles on the next session, the
-        earliest any order decided tonight can fill.
+        earliest any order decided tonight can fill. Returns the total released.
         """
+        released = _ZERO
         still_owed: list[_Receivable] = []
         for receivable in self._receivables:
             if self._settles_by(receivable.traded, receivable.lag, session, inclusive=inclusive):
                 self._cash += receivable.amount
+                released += receivable.amount
                 _log.info(
                     "sim_broker.settled_sale",
                     isin=receivable.isin,
@@ -632,6 +637,7 @@ class SimBroker:
             else:
                 still_owed.append(receivable)
         self._receivables = still_owed
+        return released
 
     def _settles_by(self, traded: date, lag: int, session: date, *, inclusive: bool) -> bool:
         """Whether a trade on `traded` settling T+`lag` is settled for a fill on `session`.
@@ -794,6 +800,21 @@ class SimBroker:
             raise TypeError("amount must be a Decimal — money is never float (CLAUDE.md)")
         if amount <= _ZERO:
             raise ValueError(f"a corporate cash credit must be positive, got {amount}")
+        self._credit_cash(session, isin, amount, description)
+
+    def credit_interest(self, session: date, amount: Decimal, description: str) -> None:
+        """Credit `amount` of interest on idle cash to free cash, with a ledger row (no ISIN).
+
+        The backtest's measurement of what idle money earns (`backtest.cash_interest`); a real
+        broker account pays none, so like the corporate-action credits this is not on `Broker`.
+        """
+        if not isinstance(amount, Decimal):
+            raise TypeError("amount must be a Decimal — money is never float (CLAUDE.md)")
+        if amount <= _ZERO:
+            raise ValueError(f"an interest credit must be positive, got {amount}")
+        self._credit_cash(session, "", amount, description)
+
+    def _credit_cash(self, session: date, isin: str, amount: Decimal, description: str) -> None:
         self._cash += amount
         self._ledger.append(
             LedgerEntry(
@@ -877,6 +898,15 @@ class SimBroker:
     def cash(self) -> Decimal:
         """Free (settled, spendable) cash right now. Excludes `unsettled_proceeds`."""
         return self._cash
+
+    @property
+    def interest_bearing_cash(self) -> Decimal:
+        """Cash actually settled by the end of the current session — what earns interest.
+
+        `cash` less the proceeds released early for the next session's fills: those are spendable
+        by tonight's decision but are not paid out until the next session settles them.
+        """
+        return self._cash - self._released_ahead
 
     @property
     def unsettled_proceeds(self) -> Decimal:
