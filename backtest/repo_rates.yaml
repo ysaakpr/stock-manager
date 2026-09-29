@@ -1,0 +1,288 @@
+# RBI policy repo rate, as a dated schedule — what idle backtest cash earns (X2 cash interest).
+#
+# Uninvested, *settled* cash in a backtest earns (repo rate - 0.50%) a year, accrued daily and
+# credited monthly (`backtest/cash_interest.py` states the convention). The 50 bp haircut is fixed
+# in code, not configured here: this file holds facts, never a tunable.
+#
+# One row per change of the policy (LAF) repo rate, in ascending `effective_from` order. A day is
+# priced at the last row whose `effective_from` is on or before it. A day outside
+# [`coverage.from`, `coverage.through`] RAISES `RepoRateCoverageError` — no row is ever borrowed
+# for a date it was not in force, and a run past `through` fails until someone extends this file
+# (after checking whether the MPC has moved the rate since).
+#
+# Every rate is a QUOTED STRING, in per cent as RBI quotes it. YAML would parse a bare 6.25 as a
+# float, and the loader rejects one (CLAUDE.md: money-adjacent figures are Decimal).
+#
+# `provenance` per row:
+#   verified      — the rate and its effective date were read off the cited rbi.org.in page.
+#   reconstructed — the change is real and dated as RBI announced it, but the RBI page itself was
+#                   not read (rbidocs.rbi.org.in serves a CAPTCHA to automated readers, and it is
+#                   not evaded). Materiality: an effective date off by a day moves a year's
+#                   interest by ~1/365 of 25 bp — immaterial against any backtest figure.
+#
+# Before 2011-05-03 the "repo rate" is the LAF repo rate of the corridor era (RBI then quoted a
+# repo and a reverse-repo); from 2011-05-03 the repo rate is the single policy rate. The row is
+# the rate at which RBI lent; which rate a sweep account tracks is not modelled.
+
+version: 1
+
+haircut_note: >-
+  Earning rate = repo - 0.50% per annum, fixed in backtest/cash_interest.py (HAIRCUT). Not a
+  parameter: changing it is a change of measurement, reviewed as code.
+
+coverage:
+  from: "2006-01-01"
+  # The last date on which the rate below was confirmed still in force (the 2026-08 MPC held at
+  # 5.25%; the next MPC decision falls after this date).
+  through: "2026-09-29"
+  read_on: "2026-09-29"
+
+changes:
+  - effective_from: "2005-10-26"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2005-10-26 (press release not read on rbi.org.in)"
+  - effective_from: "2006-01-24"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2006-01-24 (press release not read on rbi.org.in)"
+  - effective_from: "2006-06-09"
+    repo_rate_pct: "6.75"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2006-06-09 (press release not read on rbi.org.in)"
+  - effective_from: "2006-07-25"
+    repo_rate_pct: "7.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2006-07-25 (press release not read on rbi.org.in)"
+  - effective_from: "2006-10-31"
+    repo_rate_pct: "7.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2006-10-31 (press release not read on rbi.org.in)"
+  - effective_from: "2007-01-31"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2007-01-31 (press release not read on rbi.org.in)"
+  - effective_from: "2007-03-31"
+    repo_rate_pct: "7.75"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2007-03-31 (press release not read on rbi.org.in)"
+  - effective_from: "2008-06-12"
+    repo_rate_pct: "8.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2008-06-12 (press release not read on rbi.org.in)"
+  - effective_from: "2008-06-25"
+    repo_rate_pct: "8.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2008-06-25 (press release not read on rbi.org.in)"
+  - effective_from: "2008-07-30"
+    repo_rate_pct: "9.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2008-07-30 (press release not read on rbi.org.in)"
+  - effective_from: "2008-10-20"
+    repo_rate_pct: "8.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2008-10-20 (press release not read on rbi.org.in)"
+  - effective_from: "2008-11-03"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2008-11-03 (press release not read on rbi.org.in)"
+  - effective_from: "2008-12-08"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2008-12-08 (press release not read on rbi.org.in)"
+  - effective_from: "2009-01-05"
+    repo_rate_pct: "5.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2009-01-05 (press release not read on rbi.org.in)"
+  - effective_from: "2009-03-05"
+    repo_rate_pct: "5.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2009-03-05 (press release not read on rbi.org.in)"
+  - effective_from: "2009-04-21"
+    repo_rate_pct: "4.75"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2009-04-21 (press release not read on rbi.org.in)"
+  - effective_from: "2010-03-19"
+    repo_rate_pct: "5.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2010-03-19 (press release not read on rbi.org.in)"
+  - effective_from: "2010-04-20"
+    repo_rate_pct: "5.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2010-04-20 (press release not read on rbi.org.in)"
+  - effective_from: "2010-07-02"
+    repo_rate_pct: "5.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2010-07-02 (press release not read on rbi.org.in)"
+  - effective_from: "2010-07-27"
+    repo_rate_pct: "5.75"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2010-07-27 (press release not read on rbi.org.in)"
+  - effective_from: "2010-09-16"
+    repo_rate_pct: "6.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2010-09-16 (press release not read on rbi.org.in)"
+  - effective_from: "2010-11-02"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2010-11-02 (press release not read on rbi.org.in)"
+  - effective_from: "2011-01-25"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2011-01-25 (press release not read on rbi.org.in)"
+  - effective_from: "2011-03-17"
+    repo_rate_pct: "6.75"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2011-03-17 (press release not read on rbi.org.in)"
+  - effective_from: "2011-05-03"
+    repo_rate_pct: "7.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2011-05-03 (press release not read on rbi.org.in)"
+  - effective_from: "2011-06-16"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2011-06-16 (press release not read on rbi.org.in)"
+  - effective_from: "2011-07-26"
+    repo_rate_pct: "8.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2011-07-26 (press release not read on rbi.org.in)"
+  - effective_from: "2011-09-16"
+    repo_rate_pct: "8.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2011-09-16 (press release not read on rbi.org.in)"
+  - effective_from: "2011-10-25"
+    repo_rate_pct: "8.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2011-10-25 (press release not read on rbi.org.in)"
+  - effective_from: "2012-04-17"
+    repo_rate_pct: "8.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2012-04-17 (press release not read on rbi.org.in)"
+  - effective_from: "2013-01-29"
+    repo_rate_pct: "7.75"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2013-01-29 (press release not read on rbi.org.in)"
+  - effective_from: "2013-03-19"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2013-03-19 (press release not read on rbi.org.in)"
+  - effective_from: "2013-05-03"
+    repo_rate_pct: "7.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2013-05-03 (press release not read on rbi.org.in)"
+  - effective_from: "2013-09-20"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2013-09-20 (press release not read on rbi.org.in)"
+  - effective_from: "2013-10-29"
+    repo_rate_pct: "7.75"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2013-10-29 (press release not read on rbi.org.in)"
+  - effective_from: "2014-01-28"
+    repo_rate_pct: "8.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2014-01-28 (press release not read on rbi.org.in)"
+  - effective_from: "2015-01-15"
+    repo_rate_pct: "7.75"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2015-01-15 (press release not read on rbi.org.in)"
+  - effective_from: "2015-03-04"
+    repo_rate_pct: "7.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2015-03-04 (press release not read on rbi.org.in)"
+  - effective_from: "2015-06-02"
+    repo_rate_pct: "7.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2015-06-02 (press release not read on rbi.org.in)"
+  - effective_from: "2015-09-29"
+    repo_rate_pct: "6.75"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2015-09-29 (press release not read on rbi.org.in)"
+  - effective_from: "2016-04-05"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2016-04-05 (press release not read on rbi.org.in)"
+  - effective_from: "2016-10-04"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2016-10-04 (press release not read on rbi.org.in)"
+  - effective_from: "2017-08-02"
+    repo_rate_pct: "6.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2017-08-02 (press release not read on rbi.org.in)"
+  - effective_from: "2018-06-06"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2018-06-06 (press release not read on rbi.org.in)"
+  - effective_from: "2018-08-01"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2018-08-01 (press release not read on rbi.org.in)"
+  - effective_from: "2019-02-07"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2019-02-07 (press release not read on rbi.org.in)"
+  - effective_from: "2019-04-04"
+    repo_rate_pct: "6.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2019-04-04 (press release not read on rbi.org.in)"
+  - effective_from: "2019-06-06"
+    repo_rate_pct: "5.75"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2019-06-06 (press release not read on rbi.org.in)"
+  - effective_from: "2019-08-07"
+    repo_rate_pct: "5.40"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2019-08-07 (press release not read on rbi.org.in)"
+  - effective_from: "2019-10-04"
+    repo_rate_pct: "5.15"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2019-10-04 (press release not read on rbi.org.in)"
+  - effective_from: "2020-03-27"
+    repo_rate_pct: "4.40"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2020-03-27 (press release not read on rbi.org.in)"
+  - effective_from: "2020-05-22"
+    repo_rate_pct: "4.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2020-05-22 (press release not read on rbi.org.in)"
+  - effective_from: "2022-05-04"
+    repo_rate_pct: "4.40"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2022-05-04 (press release not read on rbi.org.in)"
+  - effective_from: "2022-06-08"
+    repo_rate_pct: "4.90"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2022-06-08 (press release not read on rbi.org.in)"
+  - effective_from: "2022-08-05"
+    repo_rate_pct: "5.40"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2022-08-05 (press release not read on rbi.org.in)"
+  - effective_from: "2022-09-30"
+    repo_rate_pct: "5.90"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2022-09-30 (press release not read on rbi.org.in)"
+  - effective_from: "2022-12-07"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2022-12-07 (press release not read on rbi.org.in)"
+  - effective_from: "2023-02-08"
+    repo_rate_pct: "6.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2023-02-08 (press release not read on rbi.org.in)"
+  - effective_from: "2025-02-07"
+    repo_rate_pct: "6.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2025-02-07 (press release not read on rbi.org.in)"
+  - effective_from: "2025-04-09"
+    repo_rate_pct: "6.00"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2025-04-09 (press release not read on rbi.org.in)"
+  - effective_from: "2025-06-06"
+    repo_rate_pct: "5.50"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2025-06-06 (press release not read on rbi.org.in)"
+  - effective_from: "2025-12-05"
+    repo_rate_pct: "5.25"
+    provenance: reconstructed
+    source: "RBI policy announcement of 2025-12-05 (press release not read on rbi.org.in)"

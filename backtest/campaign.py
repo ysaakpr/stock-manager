@@ -25,6 +25,11 @@ lake root, last L1 session, window config, corporate actions on/off). Resuming i
 whose manifest disagrees is refused: mixing runs from two commits in one table is how a ranking
 silently compares two different engines.
 
+**Idle cash earns interest by default.** Every run accrues RBI repo - 0.50% on settled idle cash
+(``backtest.cash_interest``) unless ``--no-cash-interest`` says otherwise; either way the first
+line of every report states which, the run specs (and so the digests) record it, and the manifest
+records it when on — an interest-on campaign never resumes into an interest-off directory.
+
 What this module never does: read a wall clock into a result, write under the lake, or rank on an
 after-tax figure (ranking stays pre-tax XIRR / max drawdown, the owner decision).
 """
@@ -49,6 +54,12 @@ from backtest.book_actions import (
     BookActionSource,
     book_corporate_actions,
     load_store_book_actions,
+)
+from backtest.cash_interest import (
+    RepoRateSchedule,
+    accrue_cash_interest,
+    describe_cash_interest,
+    load_repo_rate_schedule,
 )
 from backtest.run import _L1Reader
 from backtest.run_ledger import (
@@ -108,6 +119,9 @@ class CampaignPlan:
     book_actions: bool
     arms: tuple[Arm, ...] = ARMS
     floors: tuple[Decimal, ...] = _FLOORS
+    #: Idle settled cash earns repo - 50 bp (``backtest.cash_interest``). On for every campaign
+    #: unless switched off for a before/after measurement.
+    cash_interest: bool = True
 
     @property
     def units(self) -> tuple[str, ...]:
@@ -125,6 +139,11 @@ class UnitOutcome:
     replayed: int
     resumed: int
     failed: int
+
+
+def _interest(plan: CampaignPlan) -> RepoRateSchedule | None:
+    """The cash-interest schedule ``plan`` runs under, or ``None`` when it is switched off."""
+    return load_repo_rate_schedule() if plan.cash_interest else None
 
 
 def _count(result: SweepResult) -> tuple[int, int, int]:
@@ -162,7 +181,11 @@ def run_unit(plan: CampaignPlan, name: str) -> UnitOutcome:
     would pickle thirty-odd thousand actions for no gain.
     """
     actions = load_store_book_actions() if plan.book_actions else None
-    with book_corporate_actions(actions), persist_run_ledgers(plan.out_dir):
+    with (
+        book_corporate_actions(actions),
+        accrue_cash_interest(_interest(plan)),
+        persist_run_ledgers(plan.out_dir),
+    ):
         results = _sweep_unit(plan, name)
     replayed = resumed = failed = 0
     for result in results:
@@ -205,10 +228,11 @@ def render_campaign(
     Re-enters each sweep under persistence, which loads every finished run rather than replaying
     it; a run that is still missing (a failed arm) is retried here, so call this after
     :func:`run_campaign`. The corporate-action switch must match the one the runs were made under,
-    or no digest would match — the caller puts it in force.
+    or no digest would match — the caller puts it in force. Cash interest is the plan's own, put in
+    force here, and the first line of every report states it.
     """
     reports: dict[str, str] = {}
-    with persist_run_ledgers(plan.out_dir):
+    with persist_run_ledgers(plan.out_dir), accrue_cash_interest(_interest(plan)):
         context: dict[str, SweepResult] = {}
         for window in plan.windows.sweeps:
             result = run_sweep(
@@ -236,7 +260,8 @@ def render_campaign(
         selection_window=(plan.windows.selection.start, plan.windows.selection.end),
         verification_window=(plan.windows.verification.start, plan.windows.verification.end),
     )
-    return reports
+    header = f"> {describe_cash_interest(plan.cash_interest)}\n\n"
+    return {name: header + text for name, text in reports.items()}
 
 
 # ── the manifest: one directory, one commit, one lake ──────────────────────────────────────────
@@ -263,7 +288,7 @@ def _git_commit() -> str:
 def build_manifest(plan: CampaignPlan, *, commit: str, last_session: date) -> dict[str, Any]:
     """The facts a resumed campaign must share with the one that started the directory."""
     config = WINDOWS_PATH.read_bytes()
-    return {
+    manifest: dict[str, Any] = {
         "version": 1,
         "commit": commit,
         "data_root": str(plan.data_root.resolve()) if plan.data_root else "(configured)",
@@ -273,6 +298,11 @@ def build_manifest(plan: CampaignPlan, *, commit: str, last_session: date) -> di
         "arms": [arm.label for arm in plan.arms],
         "floors": [str(floor) for floor in plan.floors],
     }
+    if plan.cash_interest:
+        # Only when on: a directory made before cash interest existed keeps its manifest, and one
+        # made with interest refuses to resume the other.
+        manifest["cash_interest"] = load_repo_rate_schedule().identity()
+    return manifest
 
 
 def check_manifest(
@@ -340,12 +370,12 @@ def missing_runs(plan: CampaignPlan, actions: BookActionSource | None) -> list[s
     A render-only pass refuses on a non-empty list: rendering would replay those runs at the
     rendering commit and put two engines in one table. ``actions`` is the corporate-action source
     the render runs under: a run's digest covers it, so it is put in force here rather than left
-    to the caller — derived outside it, every digest would miss.
+    to the caller — derived outside it, every digest would miss. The plan's cash interest likewise.
     """
     windows = [*plan.windows.sweeps, plan.windows.selection, plan.windows.verification]
     missing: list[str] = []
     for window in windows:
-        with book_corporate_actions(actions):
+        with book_corporate_actions(actions), accrue_cash_interest(_interest(plan)):
             digests = run_digests(
                 start=window.start, end=window.end, arms=plan.arms, floors=plan.floors
             )
@@ -375,6 +405,13 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         dest="book_corporate_actions",
         action="store_false",
         help="run without splits/bonuses/dividends in the book (before/after measurement only)",
+    )
+    parser.add_argument(
+        "--no-cash-interest",
+        dest="cash_interest",
+        action="store_false",
+        help="idle cash earns 0%% instead of RBI repo - 0.50%% (before/after measurement only); "
+        "every report states which",
     )
     parser.add_argument(
         "--reports-only",
@@ -412,6 +449,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             windows=windows,
             data_root=args.data_root,
             book_actions=args.book_corporate_actions,
+            cash_interest=args.cash_interest,
         )
         if args.runs_from_commit is not None and not args.reports_only:
             raise CampaignError("--runs-from-commit renders only; add --reports-only")

@@ -48,10 +48,12 @@ from backtest.book_actions import (
     BookActionSource,
     RescaleKind,
 )
+from backtest.cash_interest import InterestCredit, current_cash_interest_identity
 from backtest.tax import (
     BonusEvent,
     CorporateEvent,
     DividendCredit,
+    InterestIncome,
     ReissueEvent,
     RunLedger,
     SplitEvent,
@@ -200,6 +202,10 @@ def run_spec(
     ``fields`` are the runner's own parameters (policy parameters, universe, rail-policy digest,
     benchmark slug, signal basis); each is rendered exactly (``repr`` of a frozen dataclass,
     ``str`` of a Decimal) so two specs are equal iff the runs were asked the same thing.
+
+    Interest on idle cash (``backtest.cash_interest``) adds a ``cash_interest`` key naming the rate
+    schedule when it is in force, and nothing when it is off — so every run specified before
+    interest existed keeps the digest it was persisted under, and an on run never resumes one.
     """
     spec = {
         "spec_version": _SPEC_VERSION,
@@ -209,6 +215,9 @@ def run_spec(
         "opening_cash": str(opening_cash),
         "book_actions": _actions_identity(book_actions),
     }
+    interest = current_cash_interest_identity()
+    if interest is not None:
+        spec["cash_interest"] = interest
     for key, value in sorted(fields.items()):
         spec[key] = _render(value)
     return spec
@@ -280,13 +289,15 @@ def build_run_ledger(
     terminal_nav: Decimal,
     terminal_prices: Mapping[str, Decimal],
     closing_quantities: Mapping[str, int],
+    interest: Sequence[InterestCredit] = (),
 ) -> RunLedger:
     """A finished run's ``RunLedger``: its fills, its dividend credits and its share-count events.
 
     Assumes ``fills`` are in the order the broker filled them and ``applied`` in the order the
     books applied it. Raises ``LedgerFormatError`` when the ledger does not reproduce
     ``closing_quantities`` share for share — a ledger that disagrees with the book would tax shares
-    the account never held, or leave untaxed ones it did.
+    the account never held, or leave untaxed ones it did. ``interest`` is every monthly credit of
+    interest on idle cash, taxed as income from other sources in the FY it was credited.
     """
     dividends, events = _tax_events(applied)
     ledger = RunLedger(
@@ -298,6 +309,7 @@ def build_run_ledger(
         terminal_prices={isin: terminal_prices[isin] for isin in sorted(closing_quantities)},
         dividends=dividends,
         corporate_events=events,
+        interest=tuple(InterestIncome(c.credited, c.amount) for c in interest),
     )
     rebuilt = _replayed_quantities(ledger)
     book = {isin: qty for isin, qty in closing_quantities.items() if qty}

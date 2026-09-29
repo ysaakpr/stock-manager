@@ -176,6 +176,7 @@ class PortfolioBook:
         self._positions: dict[str, BookPosition] = {}
         self._realized: Decimal = _ZERO
         self._dividends: Decimal = _ZERO
+        self._interest: Decimal = _ZERO
         self._ledger: list[LedgerEntry] = []
         #: External cashflows in XIRR sign convention: pay-in negative, pay-out positive.
         self._external: list[Cashflow] = []
@@ -197,6 +198,11 @@ class PortfolioBook:
     def dividend_income(self) -> Decimal:
         """Cumulative cash dividends credited so far (gross — no TDS is modelled here)."""
         return self._dividends
+
+    @property
+    def interest_income(self) -> Decimal:
+        """Cumulative interest on idle cash credited so far (gross; ``backtest.cash_interest``)."""
+        return self._interest
 
     def positions(self) -> tuple[BookPosition, ...]:
         """Open positions with a non-zero share count, ordered by ISIN for a stable read."""
@@ -503,6 +509,17 @@ class PortfolioBook:
             amount=str(amount),
         )
         return amount
+
+    def credit_interest(self, when: date, amount: Decimal) -> None:
+        """Credit ``amount`` of interest on idle cash (``backtest.cash_interest``) to free cash.
+
+        Income, not an external flow, exactly as a dividend is: it raises cash and
+        :attr:`interest_income`, never the XIRR stream. Gross — its tax is post-processed.
+        """
+        amount = self._require_positive_money("interest", amount)
+        self._cash += amount
+        self._interest += amount
+        self._post_ledger(when, "", "interest", debit=_ZERO, credit=amount)
 
     def _rescale_quantity(
         self,
