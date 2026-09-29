@@ -146,3 +146,35 @@ def test_an_isin_with_no_lineage_edge_is_held_back() -> None:
     )
     assert result.actions == ()
     assert len(result.unresolved) == 1
+
+
+def test_a_retired_isin_the_master_knows_still_lands_on_the_survivor() -> None:
+    """The rebuild registers a chain's retired middle as DELISTED, and a stale snapshot can list
+    a just-retired ISIN: either way the factor chain reads the survivor's actions only. Like a
+    registered middle, the retired ISIN here is a security with no symbol window of its own."""
+    survivor_only = _master(_SURVIVOR)
+    master = IdentityMaster(
+        list(survivor_only.windows_for(_SURVIVOR)),
+        securities=[
+            *survivor_only.securities.values(),
+            Security(
+                isin=_RETIRED,
+                name="IRCTC",
+                primary_exchange=Exchange.NSE,
+                status=ListingStatus.DELISTED,
+                first_seen_date=date(2019, 10, 14),
+                last_seen_date=_EX,
+            ),
+        ],
+        listings=[],
+    )
+    result = parse(
+        _payload(_RETIRED),
+        filename="ca.json",
+        master=master,
+        clock=_CLOCK,
+        lineage=_lineage(),
+    )
+    assert len(result.actions) == 1
+    assert result.actions[0].isin == _SURVIVOR
+    assert result.actions[0].filed_against_isin == _RETIRED

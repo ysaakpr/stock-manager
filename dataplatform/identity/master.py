@@ -872,6 +872,51 @@ class IdentityStore:
         ).fetchall()
         return len(rows)
 
+    def register_inferred(self, securities: Sequence[Security], *, registered_by: str) -> int:
+        """Insert master rows no snapshot listed, marked `registered_by`; return how many landed.
+
+        For an ISIN the D2 lineage rebuild inferred from L1 — a reissue chain's retired middle,
+        which no current snapshot carries. Insert-only (`ON CONFLICT DO NOTHING`): a row an
+        exchange snapshot already wrote is the better evidence and is never overwritten, and a
+        re-run over rows this wrote earlier is a no-op, so a rebuild stays idempotent. It never
+        writes `symbol_history`: the survivor's windows already claim the symbol over the retired
+        ISIN's span, and a second window would make that symbol ambiguous on every such date.
+        """
+        if not securities:
+            return 0
+        rows = self._conn.execute(
+            """
+            INSERT INTO security_master (isin, name, primary_exchange, status, face_value_inr,
+                                         first_seen_date, last_seen_date, registered_by,
+                                         created_at, updated_at)
+            SELECT t.isin, t.name, t.primary_exchange, t.status, NULL, t.first_seen_date,
+                   t.last_seen_date, %(registered_by)s, %(now)s::timestamptz,
+                   %(now)s::timestamptz
+              FROM unnest(%(isin)s::text[], %(name)s::text[], %(exchange)s::text[],
+                          %(status)s::text[], %(first_seen)s::date[], %(last_seen)s::date[])
+                AS t(isin, name, primary_exchange, status, first_seen_date, last_seen_date)
+            ON CONFLICT (isin) DO NOTHING
+            RETURNING isin
+            """,
+            {
+                "now": self._clock.now(),
+                "registered_by": registered_by,
+                "isin": [s.isin for s in securities],
+                "name": [s.name for s in securities],
+                "exchange": [s.primary_exchange.value for s in securities],
+                "status": [s.status.value for s in securities],
+                "first_seen": [s.first_seen_date for s in securities],
+                "last_seen": [s.last_seen_date for s in securities],
+            },
+        ).fetchall()
+        _log.info(
+            "identity.master.registered_inferred",
+            registered_by=registered_by,
+            offered=len(securities),
+            inserted=len(rows),
+        )
+        return len(rows)
+
     def write_listings(self, listings: Sequence[Listing]) -> int:
         """Upsert `exchange_listing` rows; returns how many actually changed."""
         if not listings:
