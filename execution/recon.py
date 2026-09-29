@@ -19,9 +19,11 @@ What it compares:
   settled holdings *and* unsettled positions, aggregated by ISIN. Identity is the ISIN and only the
   ISIN (invariant #2); a holding the book knows nothing about, or one the book has and the broker
   does not, is a break as much as a quantity difference is.
-* **Cash** — the believed cash (`InternalBook.cash`) against the broker's available cash. Costs are
-  computed on both sides from the one shared cost model (invariant #4), so an exact match is the
-  expectation, not an approximate one.
+* **Cash** — the believed cash (`InternalBook.cash`) against the broker's cash, settled or not
+  (`Margins.cash_value`: available plus sale proceeds still in settlement). The book credits a sale
+  when it fills; the broker holds the proceeds as unsettled until T+N — the same money, so a sale
+  in settlement is not a break. Costs are computed on both sides from the one shared cost model
+  (invariant #4), so an exact match is the expectation, not an approximate one.
 
 What it never does: repair a break. Reconciliation *detects* and *halts*; deciding what the correct
 state is and re-arming the switch is a human act (`KillSwitch.reset`). A recon job that silently
@@ -131,7 +133,7 @@ class BreakKind(StrEnum):
     """A share count for an ISIN differs between the book and the broker (or exists on only one)."""
 
     CASH = "CASH"
-    """The believed cash differs from the broker's available cash."""
+    """The believed cash differs from the broker's cash, settled or in settlement."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,9 +263,9 @@ class Reconciler:
         return tuple(breaks)
 
     def _cash_break(self) -> tuple[ReconBreak, ...]:
-        """A break if the believed cash differs from the broker's available cash, else nothing."""
+        """A break if the believed cash differs from the broker's cash (settled + in settlement)."""
         expected = self.book.cash
-        actual = self.broker.margins().available
+        actual = self.broker.margins().cash_value
         if expected == actual:
             return ()
         return (ReconBreak(kind=BreakKind.CASH, expected=expected, actual=actual),)
