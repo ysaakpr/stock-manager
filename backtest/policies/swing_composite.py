@@ -73,6 +73,22 @@ the 12-1 return, the volatility, every M12.1 leg — is struck over sessions on 
 ``knowable_date``, and every read goes through ``ctx.pit.admit``, the regime reading included. The
 trailing stop reads only the current session's close.
 
+**The stop is split-invariant.** A trailing stop on raw closes (invariant #3) sees a 2:1 split as a
+50 % crash: the peak was struck on the pre-split scale, the close is on the post-split one. The fix
+rescales the stop's reference — the running peak, and nothing else — on the ex-date, from the one
+place that fact is knowable on the decision date without a corporate-action read: the policy's own
+account. ``backtest.book_actions`` applies a split or bonus to the broker before the session's
+decision, exactly as the depository credits a live account; the policy sees the holding's share
+count change while its total cost basis does not. Nothing the policy trades can do that — a fill
+moves count *and* basis, a settlement moves a lot from pending to settled without changing either —
+so a count change at an unchanged basis is a split or bonus, and ``old / new`` shares is its
+inverse ratio (floored counts make a bonus's ratio approximate to one share in the holding). An ISIN
+reissue (the retired holding carried to its survivor at the same basis) keeps the position's age
+and peak rather than starting a fresh one. The ``corporate_actions`` store, whose ``knowable_date``
+is the ingest day, is never read: the reference moves on the day the account changes and never
+before, which is what a live holder sees. The raw-price *signal* legs (the 52-week-high proximity,
+the returns) are not rescaled here — they are struck by the data source, not the policy.
+
 What it never does: read a wall clock (time is ``ctx.clock``), key on a symbol (ISIN only —
 invariant #2), hold a cost model (the injected broker owns the one shared model — invariants #4/#5),
 or reach data outside the point-in-time context. It carries per-position state (entry session and
@@ -391,6 +407,64 @@ class _Position:
     sessions_held: int = 0
     peak: Decimal = _ZERO
     sell_staged_ago: int | None = None
+    lots: _Lots | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Lots:
+    """One ISIN's shares on the account — settled and pending — and their total cost basis."""
+
+    quantity: int
+    cost: Decimal
+
+
+#: How close two cost bases must be to count as unchanged. The broker keeps each lot's total cost
+#: and reports ``cost / quantity``; ``quantity x average_price`` recovers it to Decimal precision
+#: (~1e-27 relative), while the smallest trade the policy can make moves it by a whole share.
+_SAME_COST = Decimal("1e-12")
+
+
+def _same_cost(a: Decimal, b: Decimal) -> bool:
+    return abs(a - b) <= max(abs(a), abs(b)) * _SAME_COST
+
+
+def _account_lots(ctx: SessionContext, *, before: date | None = None) -> dict[str, _Lots]:
+    """Each ISIN's settled holding plus pending buys, or only those filled before ``before``.
+
+    ``before=ctx.session`` leaves out this session's fills, so what remains is exactly the lots the
+    account held at the previous decision, moved on only by settlement (neutral) or a corporate
+    action.
+    """
+    quantity: dict[str, int] = {}
+    cost: dict[str, Decimal] = {}
+    lines: list[tuple[str, int, Decimal]] = [
+        (h.isin, h.quantity, h.average_price) for h in ctx.broker.holdings()
+    ]
+    lines += [
+        (p.isin, p.quantity, p.average_price)
+        for p in ctx.broker.positions()
+        if before is None or p.session < before
+    ]
+    for isin, qty, average in lines:
+        quantity[isin] = quantity.get(isin, 0) + qty
+        cost[isin] = cost.get(isin, _ZERO) + Decimal(qty) * average
+    return {isin: _Lots(quantity[isin], cost[isin]) for isin in quantity}
+
+
+def _rescale_reference(position: _Position, now: _Lots | None) -> None:
+    """Put the stop's peak on the post-split scale when the share count moved at an unchanged basis.
+
+    ``position.lots`` is what the previous decision saw; ``now`` is the same lots today, before this
+    session's fills. Equal basis and a different count is a split or bonus (nothing the policy
+    trades does that), and ``old / new`` shares is the inverse of its ratio. Anything else leaves
+    the peak be.
+    """
+    before = position.lots
+    if before is None or now is None or now.quantity <= 0 or now.quantity == before.quantity:
+        return
+    if not _same_cost(before.cost, now.cost):
+        return
+    position.peak = position.peak * Decimal(before.quantity) / Decimal(now.quantity)
 
 
 class SwingCompositePolicy:
@@ -417,7 +491,13 @@ class SwingCompositePolicy:
         marks = {
             record.isin: record.price for record in ctx.pit.admit(self._data.marks(ctx.session))
         }
-        self._age(ctx.session, held, marks)
+        self._age(
+            ctx.session,
+            held,
+            marks,
+            carried=_account_lots(ctx, before=ctx.session),
+            book=_account_lots(ctx),
+        )
 
         stopped = self._stop_outs(held, marks)
         self._record_sell(stopped)
@@ -428,9 +508,21 @@ class SwingCompositePolicy:
     # ── position bookkeeping ─────────────────────────────────────────────────────────────────────
 
     def _age(
-        self, session: date, held: Mapping[str, Holding], marks: Mapping[str, Decimal]
+        self,
+        session: date,
+        held: Mapping[str, Holding],
+        marks: Mapping[str, Decimal],
+        *,
+        carried: Mapping[str, _Lots],
+        book: Mapping[str, _Lots],
     ) -> None:
-        """Advance each holding's age and running peak; forget names no longer on the book."""
+        """Advance each holding's age and running peak; forget names no longer on the book.
+
+        ``carried`` is the account as the previous decision left it, moved on only by settlement and
+        corporate actions; ``book`` is the whole account now, remembered for the next session. A
+        split or bonus rescales the peak before today's close is compared to it (module docstring).
+        """
+        self._follow_reissues(held, carried)
         for isin in list(self._positions):
             if isin not in held:
                 del self._positions[isin]
@@ -443,9 +535,35 @@ class SwingCompositePolicy:
                 position.sessions_held += 1
                 if position.sell_staged_ago is not None:
                     position.sell_staged_ago += 1
+                _rescale_reference(position, carried.get(isin))
             mark = marks.get(isin)
             if mark is not None and mark > position.peak:
                 position.peak = mark
+            position.lots = book.get(isin)
+
+    def _follow_reissues(self, held: Mapping[str, Holding], carried: Mapping[str, _Lots]) -> None:
+        """Move a position to its survivor ISIN when the account carried the holding over a reissue.
+
+        A face-value split usually retires the ISIN: the book carries the holding 1:1 to the
+        survivor and rescales it there, at the same total basis. So a tracked name that left the
+        book with no sell staged last session, and an untracked one that arrived at its basis, are
+        one position — its age, peak and sell history continue rather than start again.
+        """
+        gone = [
+            isin
+            for isin, position in sorted(self._positions.items())
+            if isin not in held and position.lots is not None and position.sell_staged_ago != 0
+        ]
+        for arrival in sorted(isin for isin in held if isin not in self._positions):
+            lots = carried.get(arrival)
+            if lots is None:
+                continue
+            for isin in gone:
+                previous = self._positions[isin].lots
+                if previous is not None and _same_cost(previous.cost, lots.cost):
+                    self._positions[arrival] = self._positions.pop(isin)
+                    gone.remove(isin)
+                    break
 
     def _may_sell(self, isin: str) -> bool:
         """Whether a sell may be staged for ``isin`` now — i.e. no recent attempt is outstanding.
