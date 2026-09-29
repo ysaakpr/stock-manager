@@ -22,6 +22,7 @@ from decimal import Decimal
 import pytest
 
 from backtest.sip import (
+    MIN_ORDER_VALUE_INR,
     SipAllocation,
     SipError,
     SipOrder,
@@ -325,3 +326,52 @@ def test_non_positive_weight_is_refused() -> None:
 def test_empty_targets_is_refused() -> None:
     with pytest.raises(SipError, match="empty"):
         simulate_sip_instalment(instalment=_D("10000"), targets={}, prices={})
+
+
+# ── X2: the minimum order value ──────────────────────────────────────────────────────────────────
+
+
+def _top_up_case(min_order_value: Decimal) -> SipAllocation:
+    """A book already near its model: the walk tops a ₹7 name up by a ₹497 lot (71 shares)."""
+    cheap, dear = _EIGHT[0], _EIGHT[1]
+    return simulate_sip_instalment(
+        instalment=_D("20000"),
+        targets={cheap: _D("0.5"), dear: _D("0.5")},
+        prices={cheap: _D("7"), dear: _D("100")},
+        existing_value={cheap: _D("24000"), dear: _D("5000")},
+        min_order_value=min_order_value,
+    )
+
+
+def test_an_uneconomic_lot_is_dropped_and_its_cash_stays_cash() -> None:
+    """The motivating case: a few shares of a ₹7 name whose sale would cost more than it returns.
+
+    Without the floor the walk buys it; with the ₹5,000 floor it is gone, every surviving order
+    clears the floor, and the cash it would have spent is residual — not poured into the other name.
+    """
+    unfloored = _top_up_case(_ZERO)
+    small = [o for o in unfloored.orders if o.cost < MIN_ORDER_VALUE_INR]
+    assert small, "the fixture must produce a sub-floor lot, or this test proves nothing"
+
+    floored = _top_up_case(MIN_ORDER_VALUE_INR)
+    assert all(o.cost >= MIN_ORDER_VALUE_INR for o in floored.orders)
+    assert {o.isin for o in floored.orders} == {o.isin for o in unfloored.orders} - {
+        o.isin for o in small
+    }
+    # The dropped lot's cash is carried, and the other name's order is exactly what it was.
+    assert floored.residual_cash == unfloored.residual_cash + sum((o.cost for o in small), _ZERO)
+    kept = {o.isin: o.quantity for o in floored.orders}
+    assert kept == {o.isin: o.quantity for o in unfloored.orders if o.isin in kept}
+    assert floored.deployed + floored.residual_cash == floored.available
+
+
+def test_the_floor_is_the_stated_a_priori_number() -> None:
+    """₹5,000: the DP charge (₹13.50 + GST) is 0.32 % of it — no longer the dominant cost line."""
+    assert _D("5000") == MIN_ORDER_VALUE_INR
+    dp_with_gst = _D("13.50") * _D("1.18")
+    assert dp_with_gst / MIN_ORDER_VALUE_INR < _D("0.0035")
+
+
+def test_a_negative_floor_is_refused() -> None:
+    with pytest.raises(SipError, match="min_order_value"):
+        _top_up_case(_D("-1"))

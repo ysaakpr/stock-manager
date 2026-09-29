@@ -14,12 +14,16 @@ import pytest
 
 from dataplatform.corpactions.taxonomy import ActionType
 from dataplatform.identity.lineage import (
+    EqPresence,
     IsinSpan,
     LineageEdge,
     LineageResolver,
+    SkipReason,
     corroborating_type,
     derive_edges,
+    plan_registrations,
 )
+from dataplatform.identity.master import ListingStatus
 
 # A session calendar dense enough to count gaps in: every weekday of October 2021.
 _SESSIONS = tuple(d for d in (date(2021, 10, day) for day in range(1, 32)) if d.weekday() < 5)
@@ -244,3 +248,74 @@ def test_confidence_tracks_the_action_on_the_edge_itself() -> None:
     explained = LineageEdge(_OLD, _NEW, date(2021, 10, 29), 0, "IRCTC", ActionType.SPLIT)
     assert bare.confidence == "DERIVED"
     assert explained.confidence == "CORROBORATED"
+
+
+# ── registering a chain's retired middle (plan_registrations) ─────────────────────────────────
+
+_A, _B, _C = "INE296A01016", "INE296A01024", "INE296A01032"  # BAJFINANCE, 2011 → 2016 → 2025
+
+
+def _edge(predecessor: str, successor: str, effective: date) -> LineageEdge:
+    return LineageEdge(predecessor, successor, effective, 0, "BAJFINANCE", None)
+
+
+def _seen(isin: str, first: date, last: date) -> EqPresence:
+    return EqPresence(isin=isin, first_date=first, last_date=last, last_symbol="BAJFINANCE")
+
+
+_CHAIN = (_edge(_A, _B, date(2016, 9, 9)), _edge(_B, _C, date(2025, 6, 16)))
+
+
+def test_an_unknown_middle_with_l1_bars_is_registered_delisted_from_its_own_rows() -> None:
+    plan = plan_registrations(_CHAIN, {_C}, {_B: _seen(_B, date(2016, 9, 9), date(2025, 6, 13))})
+    assert plan.writable == _CHAIN
+    assert plan.skipped == ()
+    [registered] = plan.register
+    assert registered.isin == _B
+    assert registered.status is ListingStatus.DELISTED
+    assert (registered.first_seen_date, registered.last_seen_date) == (
+        date(2016, 9, 9),
+        date(2025, 6, 13),
+    )
+    assert registered.name == "BAJFINANCE"
+
+
+def test_a_middle_with_no_l1_bars_is_never_invented() -> None:
+    plan = plan_registrations(_CHAIN, {_C}, {})
+    assert plan.register == ()
+    assert plan.writable == (_CHAIN[1],)
+    assert plan.skipped == ((_CHAIN[0], SkipReason.NO_L1_EQ_HISTORY),)
+
+
+def test_an_unknown_chain_end_is_not_registered_even_with_l1_bars() -> None:
+    """The survivor's status is not L1's to decide — that is an identity-refresh gap."""
+    seen = {
+        _B: _seen(_B, date(2016, 9, 9), date(2025, 6, 13)),
+        _C: _seen(_C, date(2025, 6, 16), date(2026, 9, 25)),
+    }
+    plan = plan_registrations(_CHAIN, set(), seen)
+    assert plan.register == ()
+    assert plan.writable == ()
+    assert [reason for _, reason in plan.skipped] == [
+        SkipReason.CHAIN_SURVIVOR_NOT_IN_MASTER,
+        SkipReason.TERMINAL_SUCCESSOR_NOT_IN_MASTER,
+    ]
+
+
+def test_a_middle_whose_onward_middle_cannot_register_is_not_registered_either() -> None:
+    """A → B → X → C with X unevidenced: registering B would still leave the chain cut at X."""
+    x = "INE296A01040"
+    edges = (_CHAIN[0], _edge(_B, x, date(2020, 1, 1)), _edge(x, _C, date(2025, 6, 16)))
+    plan = plan_registrations(edges, {_C}, {_B: _seen(_B, date(2016, 9, 9), date(2019, 12, 31))})
+    assert plan.register == ()
+    assert plan.writable == (edges[2],)
+    assert [reason for _, reason in plan.skipped] == [
+        SkipReason.CHAIN_SURVIVOR_NOT_IN_MASTER,
+        SkipReason.NO_L1_EQ_HISTORY,
+    ]
+
+
+def test_a_known_successor_needs_no_registration() -> None:
+    plan = plan_registrations(_CHAIN, {_B, _C}, {})
+    assert plan.register == ()
+    assert plan.writable == _CHAIN
