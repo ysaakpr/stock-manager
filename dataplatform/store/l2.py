@@ -233,11 +233,13 @@ class L2TruncatedReport:
 
     `truncated` maps each ISIN whose partition starts after its L1 EQ history to
     `(L2 first date, L1 first date)` — the evidence, kept whether or not anything was written.
-    `written` is empty on a dry run.
+    `skipped_retired` counts the partitions on disk that belong to an ISIN a lineage edge retired:
+    never judged, never rebuilt (their history is the survivor's). `written` is empty on a dry run.
     """
 
     partitions: int
     truncated: Mapping[str, tuple[date, date]]
+    skipped_retired: int
     written: tuple[L2WriteReport, ...]
 
     @property
@@ -895,6 +897,7 @@ def rebuild_truncated(
     con: duckdb.DuckDBPyConnection | None = None,
     data_root: Path | None = None,
     history_for: Mapping[str, Sequence[str]] | None = None,
+    survivor_of: Callable[[str], str] | None = None,
     dry_run: bool = False,
 ) -> L2TruncatedReport:
     """Rebuild every L2 partition whose adjusted series starts later than the L1 history under it.
@@ -909,11 +912,15 @@ def rebuild_truncated(
     (`history_for`, oldest-first; the ISIN alone otherwise) predates the partition's first row.
     Each truncated ISIN is rebuilt through `materialize_isin` from L1 + its persisted factor chain
     — the same unit, the same bytes a fresh build would write. Idempotent: after one pass nothing
-    is truncated, so a second pass writes nothing.
+    is truncated, so a second pass writes nothing. A partition whose ISIN a lineage edge retired
+    (`survivor_of(isin) != isin`) is skipped and counted, as `materialize_missing` skips it: its
+    chain is only itself, so extending it would duplicate the pre-reissue history the survivor's
+    stitched partition already carries — one company twice to any direct L2 reader.
     What it assumes: the factor chain is already what it should be (`adjustment_factors` holds
     ex-dates back to 2000 from the ISIN-keyed BSE actions); this reads it and never extends it.
     What it never does: create a partition that does not exist (that is `materialize_missing`),
-    touch a partition that is not truncated, or invent a factor for an unreconciled action.
+    touch a partition that is not truncated or is retired, or invent a factor for an unreconciled
+    action. Nor does it delete a retired partition already on disk — it only stops growing one.
     """
     owns = con is None
     con = open_connection() if con is None else con
@@ -921,6 +928,7 @@ def rebuild_truncated(
         l2_files = _l2_partition_files(data_root=data_root)
         l1_files = _l1_partition_files(data_root=data_root)
         truncated: dict[str, tuple[date, date]] = {}
+        retired = 0
         if l2_files and l1_files:
             l2_first = dict(
                 con.execute(
@@ -936,6 +944,9 @@ def rebuild_truncated(
                 ).fetchall()
             )
             for isin, starts in sorted(l2_first.items()):
+                if survivor_of is not None and survivor_of(isin) != isin:
+                    retired += 1
+                    continue
                 chain = (isin,) if history_for is None else history_for.get(isin, (isin,))
                 earliest = [l1_first[i] for i in chain if i in l1_first]
                 if earliest and min(earliest) < starts:
@@ -962,13 +973,17 @@ def rebuild_truncated(
         if owns:
             con.close()
     report = L2TruncatedReport(
-        partitions=len(l2_files), truncated=truncated, written=tuple(reports)
+        partitions=len(l2_files),
+        truncated=truncated,
+        skipped_retired=retired,
+        written=tuple(reports),
     )
     _LOG.info(
         "l2.truncated_rebuilt",
         dataset=PRICES_ADJUSTED_DATASET,
         partitions=report.partitions,
         truncated=len(report.truncated),
+        skipped_retired=report.skipped_retired,
         written=len(report.written),
         rows=report.rows_written,
         dry_run=dry_run,

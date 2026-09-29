@@ -9,8 +9,10 @@ their bars in the survivor's stitched partition — and nothing already on disk 
 
 `--extend` (W3) is the other half: it rebuilds the partitions that *do* exist but start later than
 the L1 history under them, which is every partition once W1 took L1 back to 2011-06-22 while L2
-stayed at 2016-09-02 (`l2.rebuild_truncated`). `--dry-run` reports what it would rebuild and how
-much of the newly exposed window the factor chain covers, and writes nothing.
+stayed at 2016-09-02 (`l2.rebuild_truncated`). Retired ISINs' partitions are skipped and counted
+here too — extending one would duplicate the survivor's stitched history. `--dry-run` reports
+what it would rebuild and how much of the newly exposed window the factor chain covers, and
+writes nothing.
 
 Offline: reads L1 and Postgres, fetches nothing. `lineage_rebuild` runs the same fill as its last
 stage; this entry point is for a lake where only the fill is wanted.
@@ -138,11 +140,16 @@ def extend(*, dry_run: bool) -> tuple[L2TruncatedReport, ExtensionCoverage]:
     """Rebuild (or, on a dry run, only find) every truncated partition; measure factor coverage."""
     settings = get_settings()
     with connect() as conn:
-        history, _ = _history(conn)
+        history, resolver = _history(conn)
         con = open_connection()
         try:
             report = rebuild_truncated(
-                conn, con=con, data_root=settings.data_root, history_for=history, dry_run=dry_run
+                conn,
+                con=con,
+                data_root=settings.data_root,
+                history_for=history,
+                survivor_of=resolver.survivor_of,
+                dry_run=dry_run,
             )
         finally:
             con.close()
@@ -173,6 +180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report, coverage = extend(dry_run=args.dry_run)
         print(f"{'partitions':<32} {report.partitions}")
         print(f"{'truncated':<32} {len(report.truncated)}")
+        print(f"{'skipped_retired':<32} {report.skipped_retired}")
         print(f"{'written':<32} {len(report.written)}")
         print(f"{'rows_written':<32} {report.rows_written}")
         for field, value in asdict(coverage).items():
