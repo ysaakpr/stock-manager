@@ -141,6 +141,56 @@ def test_xirr_handles_a_loss() -> None:
     assert abs(rate - _D("-0.20")) < _D("0.0005")
 
 
+# The after-tax stream of the campaign arm that crashed the ce49e0f report render ("Momentum v2,
+# all on (M9.5)", decade window, ₹10 crore floor, 30 % slab, tax paid at FY end): ₹10 lakh in,
+# per-FY tax out each 31 March, the terminal NAV, and then the FY 2026-27 tax on April-August
+# dividends, due 31-03-2027 — seven months *after* the terminal value.
+_POST_TERMINAL_TAX_STREAM = [
+    Cashflow(date(2016, 9, 2), _D("-1000000")),
+    Cashflow(date(2018, 3, 31), _D("-11734.53")),
+    Cashflow(date(2021, 3, 31), _D("-12969.93")),
+    Cashflow(date(2022, 3, 31), _D("-48612.24")),
+    Cashflow(date(2023, 3, 31), _D("-1880.23")),
+    Cashflow(date(2024, 3, 31), _D("-101124.00")),
+    Cashflow(date(2025, 3, 31), _D("-13317.31")),
+    Cashflow(date(2026, 3, 31), _D("-2046.03")),
+    Cashflow(date(2026, 8, 31), _D("4254373.5700")),
+    Cashflow(date(2027, 3, 31), _D("-697.13")),
+]
+
+
+def test_xirr_converges_on_a_million_rupee_stream_newton_cannot_zero_exactly() -> None:
+    # Newton reaches 14.69 % in five steps, then flips between NPV ±1e-9 rupees — float noise on
+    # a ₹42-lakh stream. Judged by an absolute 1e-9 NPV alone it "failed", fell to bisection,
+    # and bisection overflowed. The rate is real; reverting the step-size test loses it.
+    rate = xirr(_POST_TERMINAL_TAX_STREAM)
+    assert rate == _D("0.14690167")
+    assert abs(npv(float(rate), _POST_TERMINAL_TAX_STREAM)) < 1.0  # ₹1 on ₹42 lakh
+
+
+def test_bisection_returns_none_rather_than_overflowing() -> None:
+    # A tax paid after the terminal value makes NPV negative near -100 % and at every high rate,
+    # so no bracket forms; widening it used to double the rate towards 2**200 and overflow float.
+    from backtest.xirr import _solve_bisection
+
+    assert (
+        npv(-0.9999999, _POST_TERMINAL_TAX_STREAM) < 0 and npv(1.0, _POST_TERMINAL_TAX_STREAM) < 0
+    )
+    assert _solve_bisection(_POST_TERMINAL_TAX_STREAM, 100, 1e-9) is None
+
+
+def test_xirr_refuses_a_rootless_two_signed_stream_without_overflowing() -> None:
+    # -100, +50, -100 over sixteen years: NPV = -100 + 50x - 100x² < 0 for every discount x, so
+    # there is no rate. It must be refused as such, not crash with OverflowError.
+    stream = [
+        Cashflow(date(2010, 1, 1), _D("-100")),
+        Cashflow(date(2018, 1, 1), _D("50")),
+        Cashflow(date(2026, 1, 1), _D("-100")),
+    ]
+    with pytest.raises(XIRRError, match="did not converge"):
+        xirr(stream)
+
+
 # ── acceptance 2: a split changes quantity without changing value ───────────────────────────────
 
 
@@ -382,3 +432,52 @@ def test_benchmark_before_series_start_is_refused() -> None:
     nifty = _tri("niftytri", "NIFTY 50 TRI", {date(2022, 6, 1): "1000", as_of: "1100"})
     with pytest.raises(PriceUnavailableError):
         book.compare_to_benchmarks(as_of, {_ISIN_A: _D("110")}, benchmark=nifty, theme=nifty)
+
+
+# ── X2: cash dividends and fractional entitlements in the walk ─────────────────────────────────
+
+
+def _held(quantity: int, price: str = "100") -> PortfolioBook:
+    book = PortfolioBook(_D("1000000"))
+    book.record_fill(_fill(_ISIN_A, Side.BUY, quantity, _D(price), date(2024, 1, 2)))
+    return book
+
+
+def test_a_dividend_credits_cash_and_income_but_never_the_xirr_stream() -> None:
+    book = _held(100)
+    before_cash, before_basis = book.cash, book.position(_ISIN_A).cost_basis  # type: ignore[union-attr]
+    amount = book.credit_dividend(date(2024, 1, 3), _ISIN_A, per_share=_D("2.25"))
+    assert amount == _D("225.00")
+    assert book.cash - before_cash == _D("225.00")
+    assert book.dividend_income == _D("225.00")
+    assert book.position(_ISIN_A).cost_basis == before_basis  # type: ignore[union-attr]
+    assert book.ledger()[-1].description == "dividend"
+    assert book._external == []  # income, not an investor flow
+
+
+def test_a_dividend_on_a_name_not_held_or_a_float_amount_is_refused() -> None:
+    book = _held(100)
+    with pytest.raises(InsufficientSharesError):
+        book.credit_dividend(date(2024, 1, 3), _ISIN_B, per_share=_D("1"))
+    with pytest.raises(TypeError):
+        book.credit_dividend(date(2024, 1, 3), _ISIN_A, per_share=1.0)  # type: ignore[arg-type]
+    with pytest.raises(CorporateActionError):
+        book.credit_dividend(date(2024, 1, 3), _ISIN_A, per_share=_D("0"))
+
+
+def test_a_fractional_bonus_is_refused_unless_the_walk_asks_to_forfeit_it() -> None:
+    book = _held(101)
+    with pytest.raises(CorporateActionError):
+        book.apply_bonus(_ISIN_A, new_shares=_D("3"), held_shares=_D("2"))
+    book.apply_bonus(_ISIN_A, new_shares=_D("3"), held_shares=_D("2"), forfeit_fraction=True)
+    assert book.position(_ISIN_A).quantity == 252  # type: ignore[union-attr]
+
+
+def test_a_consolidation_below_one_share_books_the_basis_as_a_realized_loss() -> None:
+    book = _held(3)
+    basis = book.position(_ISIN_A).cost_basis  # type: ignore[union-attr]
+    book.apply_split(
+        _ISIN_A, from_face_value=_D("1"), to_face_value=_D("10"), forfeit_fraction=True
+    )
+    assert book.position(_ISIN_A) is None
+    assert book.realized_pnl == -basis

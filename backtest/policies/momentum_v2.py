@@ -513,7 +513,12 @@ class MomentumV2Policy:
         prices: Mapping[str, Decimal],
         ranked: Sequence[MomentumV2Record],
     ) -> Decimal:
-        """Free cash plus every holding marked at its candidate price (average cost if unpriced)."""
+        """Cash (settled or in settlement) plus every holding marked at its candidate price.
+
+        Unpriced holdings are carried at average cost. Proceeds still in settlement count: they are
+        the account's, and leaving them out would shrink the book for a session or two after every
+        sale — under T+2 a rebalance's own sells would cut its target weights.
+        """
         price_of = {record.isin: record.price for record in ranked}
         price_of.update(prices)
         marked = sum(
@@ -523,7 +528,7 @@ class MomentumV2Policy:
             ),
             _ZERO,
         )
-        return ctx.broker.margins().available + marked
+        return ctx.broker.margins().cash_value + marked
 
     def _trims(
         self,

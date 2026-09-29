@@ -35,7 +35,9 @@ from dataplatform.store.l2 import (
     materialized_isins,
     open_connection,
     read_adjusted,
+    rebuild_truncated,
 )
+from dataplatform.store.l2_fill import extension_coverage
 from dataplatform.store.paths import l2_isin_partition_path
 
 RELIANCE = "INE002A01018"  # NSE EQ on every session
@@ -195,3 +197,140 @@ def test_a_retired_isin_is_skipped_and_its_survivor_stitched(lake: Path) -> None
     bars = read_adjusted(RELIANCE, data_root=lake)
     assert len(bars) == 2 * len(SESSIONS)
     assert {b.isin for b in bars} == {RELIANCE}
+
+
+# ── rebuild_truncated (W3): L1 grew backwards under partitions that already exist ─────────────
+
+
+def _write_session(root: Path, day: date, i: int) -> None:
+    write_prices_raw(
+        [
+            _row(RELIANCE, day, series="EQ", close=f"{2400 + i}.50"),
+            _row(INFOSYS, day, series="EQ", close=f"{1500 + i}.25"),
+            _row(HDFC, day, series="EQ", close=f"{1600 + i}.00"),
+        ],
+        exchange=Exchange.NSE,
+        data_root=root,
+    )
+
+
+@pytest.fixture
+def grown(tmp_path: Path) -> Path:
+    """L2 built when L1 began at SESSIONS[1]; then the first session was backfilled into L1 for
+    RELIANCE and INFOSYS only — HDFC's history genuinely begins at SESSIONS[1]."""
+    for i, day in enumerate(SESSIONS[1:], start=1):
+        _write_session(tmp_path, day, i)
+    materialize_missing(_conn(), data_root=tmp_path)
+    write_prices_raw(
+        [
+            _row(RELIANCE, SESSIONS[0], series="EQ", close="2400.50"),
+            _row(INFOSYS, SESSIONS[0], series="EQ", close="1500.25"),
+        ],
+        exchange=Exchange.NSE,
+        data_root=tmp_path,
+    )
+    return tmp_path
+
+
+def _part(root: Path, isin: str) -> Path:
+    return l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=root)
+
+
+def test_a_partition_older_than_its_l1_history_is_found(grown: Path) -> None:
+    report = rebuild_truncated(_conn(), data_root=grown, dry_run=True)
+    assert report.truncated == {
+        RELIANCE: (SESSIONS[1], SESSIONS[0]),
+        INFOSYS: (SESSIONS[1], SESSIONS[0]),
+    }
+    assert HDFC not in report.truncated, "a partition that already spans its L1 is not stale"
+
+
+def test_a_dry_run_writes_nothing(grown: Path) -> None:
+    before = {isin: _part(grown, isin).read_bytes() for isin in (RELIANCE, INFOSYS, HDFC)}
+    report = rebuild_truncated(_conn(), data_root=grown, dry_run=True)
+    assert report.written == ()
+    assert {isin: _part(grown, isin).read_bytes() for isin in before} == before
+
+
+def test_the_rebuild_extends_to_l1_and_equals_a_fresh_build(grown: Path, tmp_path: Path) -> None:
+    hdfc_before = _part(grown, HDFC).read_bytes()
+    report = rebuild_truncated(_conn(), data_root=grown)
+    assert sorted(r.isin for r in report.written) == sorted((RELIANCE, INFOSYS))
+    assert all(r.from_date == SESSIONS[0] for r in report.written)
+    assert _part(grown, HDFC).read_bytes() == hdfc_before, "an up-to-date partition was rewritten"
+
+    fresh = tmp_path / "fresh"
+    for i, day in enumerate(SESSIONS):
+        _write_session(fresh, day, i)
+    materialize_missing(_conn(), data_root=fresh)
+    assert _part(grown, RELIANCE).read_bytes() == _part(fresh, RELIANCE).read_bytes()
+
+
+def test_a_second_pass_finds_nothing(grown: Path) -> None:
+    rebuild_truncated(_conn(), data_root=grown)
+    again = rebuild_truncated(_conn(), data_root=grown)
+    assert again.truncated == {} and again.written == ()
+
+
+def test_truncation_is_judged_over_the_whole_lineage_chain(tmp_path: Path) -> None:
+    """RELIANCE's partition is built from its own bars; its chain says HDFC is its earlier ISIN,
+    whose bars start sooner — so the stitched series is truncated even though RELIANCE's own is
+    not, and the rebuild carries the retired ISIN's bars keyed to the survivor."""
+    write_prices_raw(
+        [_row(HDFC, SESSIONS[0], series="EQ", close="1600.00")],
+        exchange=Exchange.NSE,
+        data_root=tmp_path,
+    )
+    for i, day in enumerate(SESSIONS[1:], start=1):
+        write_prices_raw(
+            [_row(RELIANCE, day, series="EQ", close=f"{2400 + i}.50")],
+            exchange=Exchange.NSE,
+            data_root=tmp_path,
+        )
+    con = open_connection()
+    try:
+        materialize_isin(
+            RELIANCE,
+            chain=FactorChain(isin=RELIANCE, rows=()),
+            actions=(),
+            con=con,
+            data_root=tmp_path,
+        )
+    finally:
+        con.close()
+    history = {RELIANCE: (HDFC, RELIANCE)}
+    assert rebuild_truncated(_conn(), data_root=tmp_path, dry_run=True).truncated == {}
+    report = rebuild_truncated(_conn(), data_root=tmp_path, history_for=history)
+    assert report.truncated == {RELIANCE: (SESSIONS[1], SESSIONS[0])}
+    bars = read_adjusted(RELIANCE, data_root=tmp_path)
+    assert [b.trade_date for b in bars] == list(SESSIONS)
+    assert {b.isin for b in bars} == {RELIANCE}
+
+
+class _RecordingStore:
+    """Records each query's parameters and answers every count with 1."""
+
+    def __init__(self) -> None:
+        self.params: list[tuple[object, ...]] = []
+
+    def execute(self, sql: str, params: tuple[object, ...] = ()) -> _RecordingStore:
+        self.params.append(params)
+        return self
+
+    def fetchone(self) -> tuple[int]:
+        return (1,)
+
+
+def test_extension_coverage_measures_the_new_window_only() -> None:
+    """The window is `[L1 first, L2 first)` — the bars the extension adds. Inverted, it would be
+    empty for every ISIN and report zero coverage over a window it never looked at."""
+    store = _RecordingStore()
+    coverage = extension_coverage(
+        cast(Connection, store), {RELIANCE: (date(2016, 9, 2), date(2011, 6, 22))}
+    )
+    assert coverage.truncated == 1
+    assert coverage.with_factors == 1 and coverage.with_unreconciled_level_action == 1
+    assert coverage.new_first_year == {2011: 1}
+    for params in store.params:
+        assert params[0] == RELIANCE
+        assert params[-2:] == (date(2011, 6, 22), date(2016, 9, 2))

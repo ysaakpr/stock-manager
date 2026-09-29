@@ -65,7 +65,7 @@ from bisect import bisect_right
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from itertools import pairwise
@@ -74,6 +74,14 @@ from typing import Any, NamedTuple
 
 from analyst.journal.models import Decision, JournalEntry
 from backtest.accounting import BenchmarkComparison, PortfolioBook
+from backtest.book_actions import (
+    AppliedBookAction,
+    BookActionApplier,
+    BookActionSource,
+    add_book_actions_flag,
+    current_book_actions,
+    store_book_actions_unless,
+)
 from backtest.policies.fundamentals_value import (
     FundamentalsRecord,
     FundamentalsSignal,
@@ -101,7 +109,18 @@ from backtest.policies.swing_composite import (
     SwingCompositePolicy,
     SwingRecord,
 )
+from backtest.rails import BacktestRailPolicy, RailGate, ratified_backtest_rail_policy
 from backtest.replay import BookSnapshot, Policy, ReplayEngine, ReplayResult
+from backtest.run_ledger import (
+    RunSummary,
+    add_ledger_dir_flag,
+    build_run_ledger,
+    ledger_dir_unless,
+    persist_run,
+    run_digest,
+    run_spec,
+)
+from backtest.tax import RunLedger
 from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import Exchange as IdentityExchange
 from dataplatform.identity.master import ListingStatus
@@ -127,6 +146,7 @@ from dataplatform.store.paths import Layer, l1_partition_path, layer_root
 from dataplatform.store.pit_fundamentals import PIT_FUNDAMENTALS_DATASET
 from execution.broker import (
     Exchange,
+    Fill,
     Holding,
     LedgerEntry,
     Margins,
@@ -1038,6 +1058,13 @@ class _AccountingBroker:
     SIP cashflow) needed to strike XIRR and compare to the benchmark. The book is fed the same fills
     priced by the same cost model, so its cash tracks the broker's exactly. Total broker charges are
     accumulated here for the cost line of the report.
+
+    Corporate actions (``backtest.book_actions``) are applied here too, at the top of each
+    session and before its fills, to both books at once: every driver walks through this class, so
+    this is the one seam that reaches all of them. ``corporate_actions`` defaults to whatever
+    :func:`~backtest.book_actions.book_corporate_actions` has in force. It is accounting only — the
+    policy never receives the source, only its consequence on the account (the module docstring
+    says why that matters while ``knowable_date`` is wrong in the store).
     """
 
     def __init__(
@@ -1046,10 +1073,20 @@ class _AccountingBroker:
         book: PortfolioBook,
         *,
         nav_sink: Callable[[date], None] | None = None,
+        corporate_actions: BookActionSource | None = None,
     ) -> None:
         self._sim = sim
         self._book = book
+        source = corporate_actions if corporate_actions is not None else current_book_actions()
+        self._actions = BookActionApplier(source) if source is not None else None
+        if source is None:
+            _LOG.warning(
+                "backtest.book_corporate_actions_off",
+                detail="splits, bonuses and dividends will not be applied to the book",
+            )
         self.total_charges: Decimal = _ZERO
+        # Every fill, in fill order — with the applier's log, the run's tax ledger (X2).
+        self.fills: list[Fill] = []
         # Optional per-session NAV sampler (M9.5): called after each session's fills are posted, so
         # a caller can build the NAV path a max-drawdown needs. ``None`` (the default) is the
         # pre-M9.5 behaviour exactly — no extra work, no change to the shared M9.2-M9.4 run.
@@ -1059,11 +1096,44 @@ class _AccountingBroker:
     def book(self) -> PortfolioBook:
         return self._book
 
+    @property
+    def corporate_actions_applied(self) -> Mapping[str, int]:
+        """How many book actions of each kind this walk applied (empty when switched off)."""
+        return {} if self._actions is None else dict(sorted(self._actions.applied.items()))
+
+    @property
+    def applied_actions(self) -> tuple[AppliedBookAction, ...]:
+        """Every dividend, split, bonus and ISIN carry this walk applied, in order."""
+        return () if self._actions is None else tuple(self._actions.log)
+
+    def run_ledger(
+        self,
+        *,
+        source: str,
+        terminal: date,
+        terminal_nav: Decimal,
+        terminal_prices: Mapping[str, Decimal],
+    ) -> RunLedger:
+        """This walk's tax ledger (``run_ledger.build_run_ledger``), checked against the book."""
+        return build_run_ledger(
+            source=source,
+            fills=self.fills,
+            applied=self.applied_actions,
+            external_flows=self._book.external_flows,
+            terminal_date=terminal,
+            terminal_nav=terminal_nav,
+            terminal_prices=terminal_prices,
+            closing_quantities={p.isin: p.quantity for p in self._book.positions()},
+        )
+
     def execute_session(self, session: date) -> tuple[Order, ...]:
+        if self._actions is not None:
+            self._actions.apply(session, sim=self._sim, book=self._book)
         filled = self._sim.execute_session(session)
         for order in filled:
             if order.status is OrderStatus.COMPLETE and order.fill is not None:
                 self._book.record_fill(order.fill)
+                self.fills.append(order.fill)
                 self.total_charges += order.fill.cost.total
         if self._nav_sink is not None:
             self._nav_sink(session)
@@ -1372,6 +1442,10 @@ class BacktestResult:
     #: Peak-to-trough max drawdown of the NAV path over the run, as a positive ratio (0.25 = -25%).
     #: Zero when no NAV path was sampled (the pre-M9.5 naive/adjusted/universe/benchmark runs).
     max_drawdown: Decimal = _ZERO
+    #: The run's tax ledger — fills, dividend credits, share-count events (X2, ``run_ledger``).
+    ledger: RunLedger | None = None
+    #: ``run_digest`` of the run's specification: the key its ledger is persisted under.
+    digest: str = ""
 
     @property
     def held_names(self) -> int:
@@ -1421,6 +1495,7 @@ def run_naive_momentum(
     signal_l1_isins_only: bool = False,
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
+    rail_policy: BacktestRailPolicy | None = None,
 ) -> BacktestResult:
     """Run the naive momentum policy over ``[start, end]`` and return the result + report metrics.
 
@@ -1449,6 +1524,18 @@ def run_naive_momentum(
     ``compare_to_benchmarks`` path, so the licensed series slots in unchanged once its gate opens.
     """
     params = parameters if parameters is not None else MomentumParameters()
+    spec = backtest_spec(
+        "naive_momentum",
+        start=start,
+        end=end,
+        parameters=params,
+        opening_cash=opening_cash,
+        adjusted=adjusted,
+        universe=universe,
+        benchmark_slug=benchmark_slug,
+        rail_policy=rail_policy,
+        signal_l1_isins_only=signal_l1_isins_only,
+    )
     reader = _L1Reader(data_root=data_root)
     service = QueryService(data_root=data_root) if adjusted else None
     try:
@@ -1510,7 +1597,13 @@ def run_naive_momentum(
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = NaiveMomentumPolicy(data, params)
 
-        engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
+        engine = ReplayEngine(
+            policy=policy,
+            broker=broker,
+            clock=clock,
+            sessions=sessions,
+            rails=RailGate(rail_policy or ratified_backtest_rail_policy(), reader.closes_on),
+        )
         started = time.perf_counter()
         result = engine.run()
         runtime = time.perf_counter() - started
@@ -1532,30 +1625,35 @@ def run_naive_momentum(
         comparison = book.compare_to_benchmarks(
             terminal, terminal_prices, benchmark=benchmark, theme=benchmark
         )
-        return BacktestResult(
-            policy="naive_momentum",
-            adjusted=adjusted,
-            start=first_session,
-            terminal=terminal,
-            sessions=len(sessions),
-            rebalances=len(data.rebalance_dates()),
-            parameters=params,
-            opening_cash=opening_cash,
-            runtime_seconds=runtime,
-            result=result,
-            book=result.book,
-            final_nav=book.net_asset_value(terminal_prices),
-            total_charges=broker.total_charges,
-            realized_pnl=book.realized_pnl,
-            unrealized_pnl=book.unrealized_pnl(terminal_prices),
-            comparison=comparison,
-            decision_counts=_decision_counts(result.journal),
-            universe_filtered=universe is not None,
-            mean_universe=data.mean_universe_size,
-            benchmark_source=resolved.source,
-            benchmark_index_name=benchmark.index_name,
-            benchmark_method=benchmark.method,
-            max_drawdown=_max_drawdown(nav_path),
+        return _finish_backtest(
+            BacktestResult(
+                policy="naive_momentum",
+                adjusted=adjusted,
+                start=first_session,
+                terminal=terminal,
+                sessions=len(sessions),
+                rebalances=len(data.rebalance_dates()),
+                parameters=params,
+                opening_cash=opening_cash,
+                runtime_seconds=runtime,
+                result=result,
+                book=result.book,
+                final_nav=book.net_asset_value(terminal_prices),
+                total_charges=broker.total_charges,
+                realized_pnl=book.realized_pnl,
+                unrealized_pnl=book.unrealized_pnl(terminal_prices),
+                comparison=comparison,
+                decision_counts=_decision_counts(result.journal),
+                universe_filtered=universe is not None,
+                mean_universe=data.mean_universe_size,
+                benchmark_source=resolved.source,
+                benchmark_index_name=benchmark.index_name,
+                benchmark_method=benchmark.method,
+                max_drawdown=_max_drawdown(nav_path),
+            ),
+            broker=broker,
+            spec=spec,
+            terminal_prices=terminal_prices,
         )
     finally:
         if service is not None:
@@ -1574,6 +1672,7 @@ def run_momentum_v2(
     signal_l1_isins_only: bool = False,
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
+    rail_policy: BacktestRailPolicy | None = None,
 ) -> BacktestResult:
     """Run the momentum v2 policy over ``[start, end]`` and return the report metrics (M9.5).
 
@@ -1592,6 +1691,18 @@ def run_momentum_v2(
     benchmark is M3.9's computed TRI when the store holds it, else the L1 proxy (M9.4). The regime
     overlay reads a broad-market L1 proxy index (stated).
     """
+    spec = backtest_spec(
+        "momentum_v2",
+        start=start,
+        end=end,
+        parameters=v2_parameters,
+        opening_cash=opening_cash,
+        adjusted=adjusted,
+        universe=universe,
+        benchmark_slug=benchmark_slug,
+        rail_policy=rail_policy,
+        signal_l1_isins_only=signal_l1_isins_only,
+    )
     reader = _L1Reader(data_root=data_root)
     service = QueryService(data_root=data_root) if adjusted else None
     try:
@@ -1653,7 +1764,13 @@ def run_momentum_v2(
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = MomentumV2Policy(data, v2_parameters)
 
-        engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
+        engine = ReplayEngine(
+            policy=policy,
+            broker=broker,
+            clock=clock,
+            sessions=sessions,
+            rails=RailGate(rail_policy or ratified_backtest_rail_policy(), reader.closes_on),
+        )
         started = time.perf_counter()
         result = engine.run()
         runtime = time.perf_counter() - started
@@ -1678,30 +1795,35 @@ def run_momentum_v2(
             buy_budget_fraction=v2_parameters.buy_budget_fraction,
             sleeve=v2_parameters.sleeve,
         )
-        return BacktestResult(
-            policy="momentum_v2",
-            adjusted=adjusted,
-            start=first_session,
-            terminal=terminal,
-            sessions=len(sessions),
-            rebalances=len(data.rebalance_dates()),
-            parameters=shared_params,
-            opening_cash=opening_cash,
-            runtime_seconds=runtime,
-            result=result,
-            book=result.book,
-            final_nav=book.net_asset_value(terminal_prices),
-            total_charges=broker.total_charges,
-            realized_pnl=book.realized_pnl,
-            unrealized_pnl=book.unrealized_pnl(terminal_prices),
-            comparison=comparison,
-            decision_counts=_decision_counts(result.journal),
-            universe_filtered=universe is not None,
-            mean_universe=data.mean_universe_size,
-            benchmark_source=resolved.source,
-            benchmark_index_name=benchmark.index_name,
-            benchmark_method=benchmark.method,
-            max_drawdown=_max_drawdown(nav_path),
+        return _finish_backtest(
+            BacktestResult(
+                policy="momentum_v2",
+                adjusted=adjusted,
+                start=first_session,
+                terminal=terminal,
+                sessions=len(sessions),
+                rebalances=len(data.rebalance_dates()),
+                parameters=shared_params,
+                opening_cash=opening_cash,
+                runtime_seconds=runtime,
+                result=result,
+                book=result.book,
+                final_nav=book.net_asset_value(terminal_prices),
+                total_charges=broker.total_charges,
+                realized_pnl=book.realized_pnl,
+                unrealized_pnl=book.unrealized_pnl(terminal_prices),
+                comparison=comparison,
+                decision_counts=_decision_counts(result.journal),
+                universe_filtered=universe is not None,
+                mean_universe=data.mean_universe_size,
+                benchmark_source=resolved.source,
+                benchmark_index_name=benchmark.index_name,
+                benchmark_method=benchmark.method,
+                max_drawdown=_max_drawdown(nav_path),
+            ),
+            broker=broker,
+            spec=spec,
+            terminal_prices=terminal_prices,
         )
     finally:
         if service is not None:
@@ -1735,6 +1857,117 @@ def _terminal_prices(
             f"no terminal price for held ISINs {sorted(wanted)} anywhere in the run window"
         )
     return prices
+
+
+def backtest_spec(
+    runner: str,
+    *,
+    start: date,
+    end: date,
+    parameters: object,
+    opening_cash: Decimal,
+    adjusted: bool,
+    universe: UniverseParameters | None,
+    benchmark_slug: str = _BENCHMARK_TRI_SLUG,
+    rail_policy: BacktestRailPolicy | None = None,
+    signal_l1_isins_only: bool = False,
+) -> dict[str, str]:
+    """The specification a runner's ledger is persisted under (``backtest.run_ledger.run_spec``).
+
+    Public so a caller can compute a run's digest *before* running it — that is how a sweep skips
+    a run a campaign has already finished. Must be called with exactly the arguments the runner
+    gets; the corporate actions in force are read the way the runner's broker reads them.
+    """
+    rails = rail_policy if rail_policy is not None else ratified_backtest_rail_policy()
+    return run_spec(
+        runner,
+        start=start,
+        end=end,
+        opening_cash=opening_cash,
+        book_actions=current_book_actions(),
+        parameters=parameters,
+        adjusted=adjusted,
+        universe=universe,
+        benchmark=benchmark_slug,
+        rail_policy=rails.digest(),
+        signal_l1_isins_only=signal_l1_isins_only,
+    )
+
+
+def _finish_backtest(
+    run: BacktestResult,
+    *,
+    broker: _AccountingBroker,
+    spec: Mapping[str, str],
+    terminal_prices: Mapping[str, Decimal],
+) -> BacktestResult:
+    """Attach the run's tax ledger and digest, and persist both if a ledger dir is in force (X2)."""
+    digest = run_digest(spec)
+    ledger = broker.run_ledger(
+        source=f"{run.policy} {run.start.isoformat()}..{run.terminal.isoformat()} [{digest[:12]}]",
+        terminal=run.terminal,
+        terminal_nav=run.final_nav,
+        terminal_prices=terminal_prices,
+    )
+    _mean, median, trips = _holding_periods(run.result.journal)
+    summary = RunSummary(
+        digest=digest,
+        spec=spec,
+        policy=run.policy,
+        start=run.start,
+        terminal=run.terminal,
+        sessions=run.sessions,
+        xirr=run.comparison.portfolio_xirr,
+        max_drawdown=run.max_drawdown,
+        excess=run.comparison.excess_over_benchmark,
+        benchmark_xirr=run.comparison.benchmark_xirr,
+        benchmark_name=run.benchmark_index_name,
+        total_charges=run.total_charges,
+        final_nav=run.final_nav,
+        round_trips=trips,
+        median_hold_days=median,
+        replay_digest=run.result.digest(),
+    )
+    persist_run(spec, ledger, summary)
+    return replace(run, ledger=ledger, digest=digest)
+
+
+def _persist_arm_ledger(
+    runner: str,
+    *,
+    label: str,
+    parameters: object,
+    broker: _AccountingBroker,
+    first_session: date,
+    terminal: date,
+    opening_cash: Decimal,
+    benchmark_slug: str,
+    terminal_prices: Mapping[str, Decimal],
+) -> None:
+    """Persist a report arm's tax ledger when a ledger dir is in force (X2).
+
+    The sector and fundamentals report arms return their own row types rather than a
+    ``BacktestResult``, so they persist the ledger alone: those reports have no resumable campaign
+    to feed, but their runs are backtests like any other and their fills are kept the same way.
+    """
+    spec = run_spec(
+        runner,
+        start=first_session,
+        end=terminal,
+        opening_cash=opening_cash,
+        book_actions=current_book_actions(),
+        label=label,
+        parameters=parameters,
+        benchmark=benchmark_slug,
+        rail_policy=ratified_backtest_rail_policy().digest(),
+    )
+    ledger = broker.run_ledger(
+        source=f"{runner} {label} {first_session.isoformat()}..{terminal.isoformat()}",
+        terminal=terminal,
+        terminal_nav=broker.book.net_asset_value(terminal_prices),
+        terminal_prices=terminal_prices,
+    )
+    persist_run(spec, ledger, None)
 
 
 def _decision_counts(journal: Sequence[JournalEntry]) -> dict[str, int]:
@@ -1935,7 +2168,7 @@ def render_report(run: BacktestResult) -> str:
         f"- **Total entries:** {len(run.result.journal)}",
         f"- **BUY:** {counts[Decision.BUY.value]}  ·  **SELL:** {counts[Decision.SELL.value]}  ·  "
         f"**HEARTBEAT:** {counts[Decision.HEARTBEAT.value]}",
-        f"- **Run digest (sha256 of journal + book):** `{run.result.digest()}`",
+        f"- **Run digest (sha256 of journal + book + rail policy):** `{run.result.digest()}`",
         "- **PIT:** the run completed with every session's queries scoped to that session; no "
         "`PitError` was raised (a look-ahead read would have failed the run). The dedicated leak "
         "harness is M4.11.",
@@ -2336,7 +2569,7 @@ def render_benchmark_report(run: BacktestResult, *, benchmark_slug: str) -> str:
         "",
         _benchmark_provenance_note(run),
         "",
-        f"- **Run digest (sha256 of journal + book):** `{run.result.digest()}`",
+        f"- **Run digest (sha256 of journal + book + rail policy):** `{run.result.digest()}`",
         "",
     ]
     return "\n".join(lines)
@@ -2863,6 +3096,7 @@ def _run_sector_arm(
         broker=broker,
         clock=clock,
         sessions=sessions,
+        rails=RailGate(ratified_backtest_rail_policy(), reader.closes_on),
     )
     result = engine.run()
 
@@ -2879,6 +3113,17 @@ def _run_sector_arm(
         terminal, terminal_prices, benchmark=resolved.series, theme=resolved.series
     )
     trades = sum(1 for entry in result.journal if entry.decision in (Decision.BUY, Decision.SELL))
+    _persist_arm_ledger(
+        "sector_rotation",
+        label=label,
+        parameters=params,
+        broker=broker,
+        first_session=first_session,
+        terminal=terminal,
+        opening_cash=opening_cash,
+        benchmark_slug=benchmark_slug,
+        terminal_prices=terminal_prices,
+    )
     return _SectorArm(
         label=label,
         comparison=comparison,
@@ -3316,6 +3561,8 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
             "run whose excess figure will be reported as excess over NIFTY-TRI"
         ),
     )
+    add_book_actions_flag(parser)
+    add_ledger_dir_flag(parser)
     return parser.parse_args(argv)
 
 
@@ -3335,6 +3582,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     with ExitStack() as strictness:
         if args.require_real_tri:
             strictness.enter_context(require_published_benchmark())
+        strictness.enter_context(store_book_actions_unless(args))
+        strictness.enter_context(ledger_dir_unless(args))
         return _run_from_args(args, start=start, end=end)
 
 
@@ -3764,7 +4013,13 @@ def _run_policy_arm(
         nav_path.append((session, book.net_asset_value(prices)))
 
     broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
-    engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
+    engine = ReplayEngine(
+        policy=policy,
+        broker=broker,
+        clock=clock,
+        sessions=sessions,
+        rails=RailGate(ratified_backtest_rail_policy(), reader.closes_on),
+    )
     result = engine.run()
     terminal_prices = _terminal_prices(reader, book, sessions)
     resolved = _resolve_benchmark(
@@ -3774,6 +4029,17 @@ def _run_policy_arm(
         terminal, terminal_prices, benchmark=resolved.series, theme=resolved.series
     )
     trades = sum(1 for entry in result.journal if entry.decision in (Decision.BUY, Decision.SELL))
+    _persist_arm_ledger(
+        "policy_arm",
+        label=label,
+        parameters=parameters,
+        broker=broker,
+        first_session=first_session,
+        terminal=terminal,
+        opening_cash=opening_cash,
+        benchmark_slug=benchmark_slug,
+        terminal_prices=terminal_prices,
+    )
     return _FundamentalsArm(
         label=label,
         parameters=parameters,
@@ -4060,11 +4326,23 @@ def render_fundamentals_report(
 # ── M10.7: the swing signal — 52w-high proximity, delivery share, 12-1, volatility ──────────────
 
 
+def _exact_price(value: Any) -> Decimal:
+    """A lake price as the exact ``Decimal`` DuckDB returns for a decimal column — never a float.
+
+    Refuses anything else, so a query that casts a price back to DOUBLE fails here rather than
+    rounding a rupee through binary floating point.
+    """
+    if not isinstance(value, Decimal):
+        raise TypeError(f"a lake price must arrive as Decimal, got {type(value).__name__}")
+    return value
+
+
 def _swing_leg(value: Any, neutral: Decimal) -> Decimal:
     """One M12.1 leg as a ``Decimal``, or ``neutral`` when the lake has no value for it (M12.1).
 
-    Assumes ``value`` is a DuckDB DOUBLE or ``None``. Never drops the row: a name whose 50-session
-    mean is not yet computable must still be scoreable on the legs that *are*, because the arms
+    Assumes ``value`` is a DuckDB DOUBLE (a dimensionless ratio or statistic) or ``None``. Never
+    drops the row: a name whose 50-session mean is not yet computable must still be scoreable on
+    the legs that *are*, because the arms
     differ only in their weights and a candidate set that moved with the weight vector would make
     every comparison between arms a comparison of two universes.
     """
@@ -4134,13 +4412,19 @@ class _SwingFeatures:
             if self._adjusted
             else ""
         )
+        # No CAST to DOUBLE (X2). Every column stays the lake's exact decimal, so `raw_close` — the
+        # price the whole-share sizing and the trailing stop read — reaches SwingRecord.price
+        # exactly. The features derived below are dimensionless ranking keys (ratios, a log-return
+        # stdev); DuckDB evaluates DECIMAL / DECIMAL, avg, ln and stddev in DOUBLE whatever the
+        # input type, and each is then quantised to 8 dp. That is deterministic and a ranking
+        # never compares two names closer than 1e-8 apart, so no rupee depends on a float.
         sql = f"""
         WITH base AS (
             SELECT r.isin, r.trade_date,
-                   CAST({px} AS DOUBLE) AS px,
-                   CAST(r.close AS DOUBLE) AS raw_close,
-                   CAST(r.deliv_pct AS DOUBLE) AS dpct,
-                   CAST(r.total_traded_value AS DOUBLE) AS ttv
+                   {px} AS px,
+                   r.close AS raw_close,
+                   r.deliv_pct AS dpct,
+                   r.total_traded_value AS ttv
             FROM l1_swing_raw r {join}
             WHERE r.exchange = 'NSE' AND r.series = 'EQ' AND r.close > 0
         ),
@@ -4223,7 +4507,7 @@ class _SwingFeatures:
                         delivery_share=Decimal(str(round(delivery / 100.0, 8))),
                         momentum_12_1=Decimal(str(round(momentum, 8))),
                         volatility=Decimal(str(round(vol, 8))),
-                        price=Decimal(str(raw_close)),
+                        price=_exact_price(raw_close),
                         knowable_date=session,
                         # M12.1. A NULL leg takes its neutral value rather than dropping the name:
                         # the candidate set must not move with a leg nobody weighted. Neutral is 0
@@ -4436,6 +4720,7 @@ def run_swing_composite(
     universe: UniverseParameters | None = None,
     benchmark_slug: str = _BENCHMARK_TRI_SLUG,
     lake: SwingLake | None = None,
+    rail_policy: BacktestRailPolicy | None = None,
 ) -> BacktestResult:
     """Replay the swing-composite policy over ``[start, end]``, returning its metrics (M10.7).
 
@@ -4447,6 +4732,17 @@ def run_swing_composite(
     session (it checks its trailing stop against that session's close) and rebalances on every
     ``rebalance_interval_sessions``-th one.
     """
+    spec = backtest_spec(
+        "swing_composite",
+        start=start,
+        end=end,
+        parameters=parameters,
+        opening_cash=opening_cash,
+        adjusted=adjusted,
+        universe=universe,
+        benchmark_slug=benchmark_slug,
+        rail_policy=rail_policy,
+    )
     # M12.2: a shared lake, or this run's own. `owned` is what decides whether the connection is
     # closed at the end — a run handed a lake must not shut down state its siblings still need.
     owned = lake is None
@@ -4510,7 +4806,13 @@ def run_swing_composite(
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = SwingCompositePolicy(data, parameters)
 
-        engine = ReplayEngine(policy=policy, broker=broker, clock=clock, sessions=sessions)
+        engine = ReplayEngine(
+            policy=policy,
+            broker=broker,
+            clock=clock,
+            sessions=sessions,
+            rails=RailGate(rail_policy or ratified_backtest_rail_policy(), reader.closes_on),
+        )
         started = time.perf_counter()
         result = engine.run()
         runtime = time.perf_counter() - started
@@ -4533,30 +4835,35 @@ def run_swing_composite(
             buy_budget_fraction=parameters.buy_budget_fraction,
             sleeve=parameters.sleeve,
         )
-        return BacktestResult(
-            policy="swing_composite",
-            adjusted=adjusted,
-            start=first_session,
-            terminal=terminal,
-            sessions=len(sessions),
-            rebalances=len(data.rebalance_dates()),
-            parameters=shared_params,
-            opening_cash=opening_cash,
-            runtime_seconds=runtime,
-            result=result,
-            book=result.book,
-            final_nav=book.net_asset_value(terminal_prices),
-            total_charges=broker.total_charges,
-            realized_pnl=book.realized_pnl,
-            unrealized_pnl=book.unrealized_pnl(terminal_prices),
-            comparison=comparison,
-            decision_counts=_decision_counts(result.journal),
-            universe_filtered=universe is not None,
-            mean_universe=data.mean_universe_size,
-            benchmark_source=resolved.source,
-            benchmark_index_name=benchmark.index_name,
-            benchmark_method=benchmark.method,
-            max_drawdown=_max_drawdown(nav_path),
+        return _finish_backtest(
+            BacktestResult(
+                policy="swing_composite",
+                adjusted=adjusted,
+                start=first_session,
+                terminal=terminal,
+                sessions=len(sessions),
+                rebalances=len(data.rebalance_dates()),
+                parameters=shared_params,
+                opening_cash=opening_cash,
+                runtime_seconds=runtime,
+                result=result,
+                book=result.book,
+                final_nav=book.net_asset_value(terminal_prices),
+                total_charges=broker.total_charges,
+                realized_pnl=book.realized_pnl,
+                unrealized_pnl=book.unrealized_pnl(terminal_prices),
+                comparison=comparison,
+                decision_counts=_decision_counts(result.journal),
+                universe_filtered=universe is not None,
+                mean_universe=data.mean_universe_size,
+                benchmark_source=resolved.source,
+                benchmark_index_name=benchmark.index_name,
+                benchmark_method=benchmark.method,
+                max_drawdown=_max_drawdown(nav_path),
+            ),
+            broker=broker,
+            spec=spec,
+            terminal_prices=terminal_prices,
         )
     finally:
         if owned:
