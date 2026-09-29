@@ -62,7 +62,7 @@ its neutral value (0 for a return, 1 for a ratio) rather than dropping the name 
 must not move with the weight vector, or an arm-to-arm comparison becomes a universe comparison.
 
 M12.1 also added the ``regime_filter`` gate momentum v2 has carried since M9.5 and this policy did
-not: no new buys while the broad-market proxy sits below its own 200-session mean. It suppresses
+not: no new buys while the published NIFTY 50 sits below its own 200-session mean. It suppresses
 *buys only*. Every exit is staged before the gate is consulted, because risk-off must never trap a
 position the band, the re-underwrite or the stop has already decided to sell — the book runs down
 through its own exits rather than being liquidated on the gate. A session with no regime reading at

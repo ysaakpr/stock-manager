@@ -80,7 +80,6 @@ from backtest.rails import RailGate, ratified_backtest_rail_policy
 from backtest.replay import ReplayEngine
 from backtest.run import (
     _ACCOUNT_STATE,
-    _BENCHMARK_BASKET,
     _BENCHMARK_TRI_SLUG,
     _DEFAULT_OPENING_CASH,
     _REGIME_MA_DAYS,
@@ -560,12 +559,10 @@ def run_forecast_daily(
         sessions = _reserve_fill_headroom(sessions, calendar)
         first_session, terminal = sessions[0], sessions[-1]
 
-        regime = _RegimeSource(
-            reader,
-            calendar,
-            first_session=first_session,
-            size=_BENCHMARK_BASKET,
+        regime = _RegimeSource.published(
+            through=sessions[-1],
             ma_days=_REGIME_MA_DAYS,
+            data_root=data_root,
         )
         cursor = _FeatureCursor(
             horizon=params.horizon,
