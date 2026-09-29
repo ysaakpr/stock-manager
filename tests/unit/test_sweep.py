@@ -24,11 +24,15 @@ from typing import Any, cast
 
 import pytest
 
+from analyst.rails import Portfolio, ProposedOrder, RailId, check_order
+from backtest.rails import ratified_backtest_rail_policy
 from backtest.run import _SwingFeatures
 from backtest.sweep import (
+    _DEFAULT_OPENING_CASH,
     ARMS,
     HIGH_FLOOR,
     LOW_FLOOR,
+    RETIRED_ARMS,
     Arm,
     SweepResult,
     SweepRow,
@@ -36,6 +40,7 @@ from backtest.sweep import (
     tax_cells,
 )
 from backtest.tax import InvestorProfile, PaymentTiming
+from execution.broker import OrderRequest, Side
 
 _SESSION = date(2020, 1, 1)
 
@@ -117,6 +122,49 @@ def test_every_arm_states_a_change() -> None:
     for arm in ARMS:
         assert arm.note.strip(), arm.label
         assert arm.family.strip(), arm.label
+
+
+def test_every_swing_arm_s_basket_is_one_the_ratified_rails_admit() -> None:
+    """A top-N whose equal-weight entry the rails block never trades — that was the top-5 arm (X2).
+
+    Checked against the rails themselves, not loosened to fit: an equal-weight buy of 1/N of the
+    case must clear the position cap and the per-order % cap, one lot of the opening budget must
+    clear the rupee order cap, and N must reach the minimum-holdings floor so the book it builds
+    is one A8 lets it rotate. Re-add "top-5" (or any N below 9 at ₹10 lakh) and this fails.
+    """
+    rails = ratified_backtest_rail_policy().rails
+    for arm in ARMS:
+        if arm.swing is None:
+            continue
+        n = Decimal(arm.swing.top_n)
+        assert Decimal(100) / n <= rails.max_position_pct, arm.label
+        assert Decimal(100) / n <= rails.max_order_pct_of_case, arm.label
+        lot = _DEFAULT_OPENING_CASH * arm.swing.buy_budget_fraction / n
+        assert lot <= rails.max_order_value_inr, arm.label
+        assert arm.swing.top_n >= rails.min_holdings, arm.label
+
+
+def test_the_retired_top_5_arm_is_gone_with_its_reason_stated() -> None:
+    labels = {arm.label for arm in ARMS}
+    for label, reason in RETIRED_ARMS:
+        assert label not in labels
+        assert reason.strip(), label
+    assert "Short composite, top-5" in {label for label, _ in RETIRED_ARMS}
+
+
+def test_the_rails_block_a_top_5_entry_which_is_why_the_arm_never_traded() -> None:
+    """The diagnosis, reproduced: the first equal-weight top-5 buy is 19.6 % of a fresh case."""
+    rails = ratified_backtest_rail_policy().rails
+    book = Portfolio(case_id="sweep", lots=(), cash=_DEFAULT_OPENING_CASH)
+    lot_value = _DEFAULT_OPENING_CASH * Decimal("0.98") / 5
+    order = ProposedOrder(
+        request=OrderRequest(isin="INE002A01018", side=Side.BUY, quantity=int(lot_value / 100)),
+        price=Decimal("100"),
+        sector="UNKNOWN",
+    )
+    breached = {breach.rail for breach in check_order(order, book, rails).breaches}
+    assert RailId.MAX_POSITION in breached
+    assert RailId.MAX_ORDER_PCT in breached
 
 
 def test_an_arm_must_drive_exactly_one_policy() -> None:
@@ -208,6 +256,9 @@ def test_the_report_states_both_floors_and_what_each_arm_changed() -> None:
     assert "₹10 crore/day" in report
     assert "What each arm changed" in report
     assert "cannot be asked to prove" in report
+    # A removed arm is named with its reason, so an older table's missing row is explained.
+    assert "## Arms removed from the sweep" in report
+    assert "| Short composite, top-5 |" in report
 
 
 # ── one windowed pass over the lake ──────────────────────────────────────────────────────────────
