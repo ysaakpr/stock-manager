@@ -57,6 +57,7 @@ from backtest.cash_interest import (
 )
 from backtest.policies.momentum_v2 import MomentumV2Parameters
 from backtest.policies.naive_momentum import MomentumParameters
+from backtest.policies.residual_momentum import with_residual_momentum
 from backtest.policies.swing_composite import SwingCompositeParameters
 from backtest.run import (
     BacktestError,
@@ -97,6 +98,7 @@ from dataplatform.query import QueryService
 
 __all__ = [
     "ARMS",
+    "H1_RESIDUAL_MOMENTUM",
     "RETIRED_ARMS",
     "Arm",
     "SweepResult",
@@ -178,6 +180,8 @@ _SHORT_COMPOSITE: dict[str, object] = {
 
 _M10_7 = "Swing composite (M10.7)"
 _SHORT = "Short composite"
+#: Round 2's H1 arm (ops/studies/preregistration-signals-2026-09-29.md §3).
+H1_RESIDUAL_MOMENTUM = "Swing composite + residual momentum (H1)"
 
 ARMS: tuple[Arm, ...] = (
     # ── the reference ────────────────────────────────────────────────────────────────────────────
@@ -365,6 +369,14 @@ ARMS: tuple[Arm, ...] = (
             redeploy_next_session=True,
             vol_target_annual=Decimal("0.15"),
         ),
+    ),
+    # ── round 2: pre-registered hypotheses (ops/studies/preregistration-signals-2026-09-29.md) ───
+    Arm(
+        label=H1_RESIDUAL_MOMENTUM,
+        family="round-2 hypothesis",
+        reference=_M10_7,
+        note="12-1 momentum leg replaced by residual momentum on the NIFTY 50 TRI (H1, §3)",
+        swing=with_residual_momentum(_swing()),
     ),
 )
 
@@ -600,7 +612,16 @@ def run_sweep(
     fresh: dict[tuple[str, Decimal], SweepRow] = {}
     if pending:
         lake = open_swing_lake(
-            start=start, end=end, floors=floors, data_root=data_root, adjusted=adjusted
+            start=start,
+            end=end,
+            floors=floors,
+            data_root=data_root,
+            adjusted=adjusted,
+            # Round 2, H1: the residual leg's extra pass only when a pending arm weights it.
+            residual_momentum=any(
+                arm.swing is not None and arm.swing.weight_residual_momentum != _ZERO
+                for _, arm in pending
+            ),
         )
         out.start, out.terminal, out.sessions = (
             lake.first_session,
