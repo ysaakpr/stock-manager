@@ -1,0 +1,70 @@
+{
+  "era": "bh_misserved",
+  "session": "2018-01-02",
+  "archive_filename": "PR020118.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR020118.zip",
+  "why_this_era": "the 2019-01-02 bundle served under the 2018-01-02 name; PrBundle refuses to date it",
+  "reduced_from_l0": true,
+  "original_bytes": 283235,
+  "original_sha256": "553598a532395e016c2e493f6b50593f4666bc35df4c248432660be45fac7ddc",
+  "original_members": [
+    {
+      "name": "Pr020119.csv",
+      "bytes": 315362
+    },
+    {
+      "name": "sme020119.csv",
+      "bytes": 14320
+    },
+    {
+      "name": "Tt020119.csv",
+      "bytes": 2203
+    },
+    {
+      "name": "ReadmeNEW.txt",
+      "bytes": 2226
+    },
+    {
+      "name": "An020119.txt",
+      "bytes": 822594
+    },
+    {
+      "name": "Bc020119.csv",
+      "bytes": 14303
+    },
+    {
+      "name": "bh020119.csv",
+      "bytes": 7173
+    },
+    {
+      "name": "Bm020119.txt",
+      "bytes": 3188
+    },
+    {
+      "name": "corpbond020119.csv",
+      "bytes": 20450
+    },
+    {
+      "name": "etf020119.csv",
+      "bytes": 11587
+    },
+    {
+      "name": "Gl020119.csv",
+      "bytes": 8276
+    },
+    {
+      "name": "HL020119.csv",
+      "bytes": 1128
+    },
+    {
+      "name": "Pd020119.csv",
+      "bytes": 337010
+    }
+  ],
+  "members_kept_in_fixture": [
+    "bh020119.csv"
+  ],
+  "bh_member": "bh020119.csv",
+  "bh_member_bytes": 7173,
+  "bh_member_sha256": "36bd84b33fd6c94ebc0bffeed5981a30ae519e8791ac6f5b5cd936a00f908f61"
+}

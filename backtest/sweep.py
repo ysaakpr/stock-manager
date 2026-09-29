@@ -48,6 +48,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Final
 
 from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
 from backtest.cash_interest import (
@@ -98,7 +99,10 @@ from dataplatform.query import QueryService
 
 __all__ = [
     "ARMS",
+    "BAND_HIT_ARM",
     "H1_RESIDUAL_MOMENTUM",
+    "H2_BAND_HIT_AVOIDANCE",
+    "H3_RESIDUAL_AND_BAND_HIT",
     "RETIRED_ARMS",
     "Arm",
     "SweepResult",
@@ -148,11 +152,17 @@ class Arm:
     swing: SwingCompositeParameters | None = None
     naive: MomentumParameters | None = None
     v2: MomentumV2Parameters | None = None
+    #: X2 H2: no new buy of a name that hit a daily price band in the last five sessions
+    #: (``backtest.band_hits``). Swing arms only. Off by default, and absent from the spec when
+    #: off, so no arm defined before it changes digest.
+    band_hit_avoidance: bool = False
 
     def __post_init__(self) -> None:
         driving = [p for p in (self.swing, self.naive, self.v2) if p is not None]
         if len(driving) != 1:
             raise ValueError(f"{self.label}: an arm drives exactly one policy, got {len(driving)}")
+        if self.band_hit_avoidance and self.swing is None:
+            raise ValueError(f"{self.label}: band-hit avoidance is a swing-policy filter")
 
 
 def _swing(**overrides: object) -> SwingCompositeParameters:
@@ -182,6 +192,27 @@ _M10_7 = "Swing composite (M10.7)"
 _SHORT = "Short composite"
 #: Round 2's H1 arm (ops/studies/preregistration-signals-2026-09-29.md §3).
 H1_RESIDUAL_MOMENTUM = "Swing composite + residual momentum (H1)"
+#: Round 2's H2 and H3 arms (same pre-registration, §3). H3 is H1 + H2, the only combination.
+H2_BAND_HIT_AVOIDANCE = "Swing composite + band-hit avoidance (H2)"
+H3_RESIDUAL_AND_BAND_HIT = "Swing composite + residual momentum + band-hit avoidance (H3)"
+
+#: H2: no buy of any kind — new position or top-up — of a name that hit its upper or lower daily
+#: price band in the last five sessions (§3, amended 2026-09-29). Holdings are never sold for it.
+_H2 = Arm(
+    label=H2_BAND_HIT_AVOIDANCE,
+    family="round-2 hypothesis",
+    reference=_M10_7,
+    note="no buy of a name at its upper or lower price band in the last 5 sessions (H2, §3)",
+    swing=_swing(),
+    band_hit_avoidance=True,
+)
+#: H3: H1's transform applied to the H2 arm, which keeps H2's filter. No parameter of its own.
+_H3 = replace(
+    _H2,
+    label=H3_RESIDUAL_AND_BAND_HIT,
+    note="H1's residual momentum leg on the H2 arm, band-hit filter kept (H3, §3)",
+    swing=with_residual_momentum(_H2.swing),  # type: ignore[arg-type]  # _H2 is a swing arm
+)
 
 ARMS: tuple[Arm, ...] = (
     # ── the reference ────────────────────────────────────────────────────────────────────────────
@@ -378,7 +409,12 @@ ARMS: tuple[Arm, ...] = (
         note="12-1 momentum leg replaced by residual momentum on the NIFTY 50 TRI (H1, §3)",
         swing=with_residual_momentum(_swing()),
     ),
+    _H2,
+    _H3,
 )
+
+#: The H2 arm, by object — what ``backtest.band_hits`` tests and callers reach for.
+BAND_HIT_ARM: Final = next(arm for arm in ARMS if arm.label == H2_BAND_HIT_AVOIDANCE)
 
 
 #: Arms taken out of the sweep, each with the reason it is gone — printed in every sweep report so
@@ -517,6 +553,7 @@ def _arm_spec(
         opening_cash=opening_cash,
         adjusted=adjusted,
         universe=universe,
+        band_hit_avoidance=arm.band_hit_avoidance,
     )
 
 
@@ -617,6 +654,7 @@ def run_sweep(
             floors=floors,
             data_root=data_root,
             adjusted=adjusted,
+            band_hits=any(arm.band_hit_avoidance for _, arm in pending),
             # Round 2, H1: the residual leg's extra pass only when a pending arm weights it.
             residual_momentum=any(
                 arm.swing is not None and arm.swing.weight_residual_momentum != _ZERO
@@ -776,6 +814,7 @@ def _run_arm(
             adjusted=adjusted,
             universe=universe,
             lake=lake,  # type: ignore[arg-type]
+            band_hit_avoidance=arm.band_hit_avoidance,
         )
     if arm.naive is not None:
         return run_naive_momentum(
