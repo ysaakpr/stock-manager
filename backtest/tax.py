@@ -61,7 +61,7 @@ from typing import Any, Protocol
 import structlog
 import yaml
 
-from backtest.xirr import Cashflow, xirr
+from backtest.xirr import Cashflow, XIRRError, xirr
 from execution.broker import Side
 
 __all__ = [
@@ -1008,15 +1008,20 @@ class AfterTaxResult:
     fy_taxes: tuple[FyTax, ...]
     fy_taxes_liquidated: tuple[FyTax, ...]
     pre_tax_xirr: Decimal
-    after_tax_xirr_realised: Decimal
-    #: ``None`` when the deemed sale could not be taxed; ``liquidation_error`` then says why.
+    #: ``None`` when the after-tax stream has no solvable rate; ``realised_xirr_error`` says why.
+    after_tax_xirr_realised: Decimal | None
+    #: ``None`` when the deemed sale could not be taxed or its stream has no solvable rate;
+    #: ``liquidation_error`` then says why.
     after_tax_xirr_liquidated: Decimal | None
     stt_known: bool
     dividends_credited: int
     terminal_date: date
     terminal_nav: Decimal
-    #: Why the deemed-liquidation variant was withheld (a missing Sec 55(2)(ac) FMV), or None.
+    #: Why the deemed-liquidation variant was withheld (a missing Sec 55(2)(ac) FMV, or no XIRR
+    #: for its stream), or None.
     liquidation_error: str | None = None
+    #: Why the realised after-tax XIRR was withheld (no XIRR for its stream), or None.
+    realised_xirr_error: str | None = None
 
     @property
     def total_tax(self) -> Decimal:
@@ -1029,6 +1034,18 @@ class AfterTaxResult:
 
 def _tax_flows(fy_taxes: Iterable[FyTax]) -> list[Cashflow]:
     return [Cashflow(f.payment_date, -f.total) for f in fy_taxes if f.total > _ZERO]
+
+
+def _after_tax_xirr(flows: Sequence[Cashflow], what: str) -> tuple[Decimal | None, str | None]:
+    """(rate, None), or (None, reason) when the stream has no XIRR — never a made-up rate.
+
+    Only the after-tax streams go through here. The pre-tax stream is the one the run itself was
+    already scored on, so a failure there is a fault in the run, and it still raises.
+    """
+    try:
+        return xirr(flows), None
+    except XIRRError as error:
+        return None, f"no after-tax XIRR ({what}): {error}"
 
 
 def compute_after_tax(
@@ -1078,6 +1095,14 @@ def compute_after_tax(
 
     terminal = Cashflow(ledger.terminal_date, ledger.terminal_nav)
     base = [*ledger.external_flows, terminal]
+    realised_xirr, realised_xirr_error = _after_tax_xirr(
+        [*base, *_tax_flows(fy_taxes)], "realised gains"
+    )
+    liquidated_xirr: Decimal | None = None
+    if liquidation_error is None:
+        liquidated_xirr, liquidation_error = _after_tax_xirr(
+            [*base, *_tax_flows(fy_liq)], "deemed liquidation"
+        )
     result = AfterTaxResult(
         source=ledger.source,
         profile=profile,
@@ -1086,11 +1111,10 @@ def compute_after_tax(
         fy_taxes=fy_taxes,
         fy_taxes_liquidated=fy_liq,
         pre_tax_xirr=xirr(base),
-        after_tax_xirr_realised=xirr([*base, *_tax_flows(fy_taxes)]),
-        after_tax_xirr_liquidated=(
-            None if liquidation_error is not None else xirr([*base, *_tax_flows(fy_liq)])
-        ),
+        after_tax_xirr_realised=realised_xirr,
+        after_tax_xirr_liquidated=liquidated_xirr,
         liquidation_error=liquidation_error,
+        realised_xirr_error=realised_xirr_error,
         stt_known=all(t.stt_known for t in ledger.trades),
         dividends_credited=len(ledger.dividends),
         terminal_date=ledger.terminal_date,
@@ -1104,6 +1128,7 @@ def compute_after_tax(
         after_tax_xirr_realised=str(result.after_tax_xirr_realised),
         after_tax_xirr_liquidated=str(result.after_tax_xirr_liquidated),
         liquidation_error=result.liquidation_error,
+        realised_xirr_error=result.realised_xirr_error,
         total_tax=str(result.total_tax),
     )
     return result

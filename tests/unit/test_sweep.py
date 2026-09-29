@@ -16,6 +16,7 @@ under test is the ordering and the rendering, never the replay.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -32,6 +33,7 @@ from backtest.sweep import (
     SweepResult,
     SweepRow,
     render_sweep_report,
+    tax_cells,
 )
 from backtest.tax import InvestorProfile, PaymentTiming
 
@@ -352,3 +354,21 @@ def test_the_verdict_attaches_window_floor_and_drawdown_when_the_bar_is_cleared(
     )
     assert "**Answer: the bar was cleared**" in report
     assert "31.00%" in report and "28.00%" in report and "₹1 crore/day" in report
+
+
+def test_a_withheld_after_tax_xirr_renders_as_n_a_with_its_reason() -> None:
+    """No solvable after-tax rate reads as n/a and why — never a crash, never the pre-tax rate."""
+    reason = "no after-tax XIRR (realised gains): XIRR did not converge"
+    withheld = SimpleNamespace(
+        after_tax_xirr_realised=None,
+        realised_xirr_error=reason,
+        after_tax_xirr_liquidated=None,
+        liquidation_error="no after-tax XIRR (deemed liquidation): x",
+        total_tax=Decimal("250000"),
+    )
+    row = replace(_row("Withheld", xirr="0.15", drawdown="0.30"), after_tax=cast(Any, withheld))
+    realised, liquidated, tax = tax_cells(row)
+    assert realised == f"n/a ({reason})"
+    assert liquidated.startswith("n/a (no after-tax XIRR (deemed liquidation)")
+    assert "15.00" not in realised
+    assert tax.endswith("/ n/a")

@@ -268,6 +268,7 @@ def test_the_tax_post_processor_on_the_persisted_file_matches_the_hand_computati
     expected_tax, expected_xirr = _hand_after_tax(ledger)
     assert abs(result.total_tax - expected_tax) <= Decimal("0.02")  # paisa rounding per component
     # A paisa of rounding moves the eighth decimal at most; a dropped leg moves the fourth.
+    assert result.after_tax_xirr_realised is not None
     assert abs(result.after_tax_xirr_realised - expected_xirr) <= Decimal("0.0000002")
     assert result.after_tax_xirr_realised < result.pre_tax_xirr
     # The pre-tax XIRR off the ledger is the book's own: same deposit, same terminal NAV.

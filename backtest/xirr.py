@@ -45,6 +45,17 @@ _DAYS_PER_YEAR = 365.0
 #: every run (replay determinism, invariant #11) and two rates compare equal without a tolerance.
 _RATE_QUANTUM = Decimal("0.00000001")
 
+#: Newton has converged once its step in rate falls under ``tolerance`` *and* the NPV left over is
+#: this small a fraction of the stream's gross size. An absolute rupee tolerance alone is not
+#: reachable: a ₹10-lakh stream's NPV, summed in float, cannot get below ~1e-9 rupees, so Newton
+#: would sit on the root flipping between ±1e-9 and report it as a failure to converge.
+_RELATIVE_RESIDUAL = 1e-9
+
+#: The bracket search stops widening here: 1000.0 is 100,000 % a year, past any return a stream
+#: of SIP instalments and a terminal NAV can mean. Widening further only drives
+#: ``(1 + rate) ** years`` towards float overflow; a root out there is no rate worth reporting.
+_MAX_BRACKET_RATE = 1000.0
+
 
 class XIRRError(ValueError):
     """The cashflow stream has no well-defined internal rate of return.
@@ -158,21 +169,30 @@ def _solve_newton(
 ) -> float | None:
     """Newton-Raphson from ``guess``; returns the rate, or ``None`` to hand off to bisection.
 
-    Bails to ``None`` (rather than diverging) the moment a step would push the rate to ``-1`` or
-    below — where the discount factor is undefined — or the slope goes flat, so the caller's
+    Converged when a step moves the rate by less than ``tolerance`` and the NPV left is within
+    float noise of the stream's size (:data:`_RELATIVE_RESIDUAL`). Bails to ``None`` (rather than
+    diverging) the moment a step would push the rate to ``-1`` or below — where the discount factor
+    is undefined — the slope goes flat, or a probe overflows ``float``, so the caller's
     bracketed fallback can take over on the hard streams Newton cannot handle from this seed.
     """
+    residual = _RELATIVE_RESIDUAL * sum(abs(float(flow.amount)) for flow in cashflows)
     rate = guess
     for _ in range(max_iterations):
-        value = npv(rate, cashflows)
+        try:
+            value = npv(rate, cashflows)
+            slope = _npv_derivative(rate, cashflows)
+        except ArithmeticError:
+            # Newton ran off to a rate whose discount factor float cannot hold.
+            return None
         if abs(value) < tolerance:
             return rate
-        slope = _npv_derivative(rate, cashflows)
         if slope == 0.0:
             return None
         next_rate = rate - value / slope
         if next_rate <= -1.0:
             return None
+        if abs(next_rate - rate) < tolerance and abs(value) <= residual:
+            return next_rate
         rate = next_rate
     return None
 
@@ -182,20 +202,26 @@ def _solve_bisection(
 ) -> float | None:
     """Bracketed fallback: widen a bracket over ``(-1, ∞)`` until NPV changes sign, then bisect.
 
-    Slower but far more robust than Newton for a steep or awkwardly-seeded stream: as long as a
-    real root exists above ``-100 %`` it is found. Returns ``None`` only if no sign change can be
-    bracketed within the search range, which for a stream that already has both flow signs means
-    the root is outside any economically-meaningful rate.
+    Slower but far more robust than Newton for a steep or awkwardly-seeded stream: a real root
+    between ``-100 %`` and :data:`_MAX_BRACKET_RATE` that the bracket straddles is found. Returns
+    ``None`` if no sign change can be bracketed in that range — which for a stream that already
+    has both flow signs means the root is outside any economically-meaningful rate, or there is
+    one the fixed low end can pair with (a tax paid after the terminal value turns NPV negative
+    near ``-100 %`` as well as at high rates, so no bracket straddles the real root). It also
+    returns ``None``, never raises, if a probe's discount factor overflows or underflows ``float``:
+    that is a rate no stream means, not a crash.
     """
     low, high = -0.9999999, 1.0
-    value_low = npv(low, cashflows)
-    value_high = npv(high, cashflows)
-    # Grow the upper bound until the bracket straddles a sign change.
-    expansions = 0
-    while value_low * value_high > 0.0 and expansions < 200:
-        high *= 2.0
+    try:
+        value_low = npv(low, cashflows)
         value_high = npv(high, cashflows)
-        expansions += 1
+        # Grow the upper bound until the bracket straddles a sign change, or the rate stops
+        # meaning anything.
+        while value_low * value_high > 0.0 and high < _MAX_BRACKET_RATE:
+            high = min(high * 2.0, _MAX_BRACKET_RATE)
+            value_high = npv(high, cashflows)
+    except ArithmeticError:
+        return None
     if value_low * value_high > 0.0:
         return None
 

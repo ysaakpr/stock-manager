@@ -440,8 +440,12 @@ def render_after_tax_report(result: AfterTaxResult, schedule: TaxSchedule) -> st
         "| Measure | XIRR |",
         "|---|---:|",
         f"| Pre-tax | {_pct(result.pre_tax_xirr)} |",
-        f"| After tax — realised gains only (holdings pre-tax) | "
-        f"{_pct(result.after_tax_xirr_realised)} |",
+        "| After tax — realised gains only (holdings pre-tax) | "
+        + (
+            f"{_pct(result.after_tax_xirr_realised)} |"
+            if result.after_tax_xirr_realised is not None
+            else f"n/a — {result.realised_xirr_error} |"
+        ),
         f"| After tax — deemed liquidation on {result.terminal_date.isoformat()} | "
         + (
             f"{_pct(result.after_tax_xirr_liquidated)} |"
