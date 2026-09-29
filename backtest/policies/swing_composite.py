@@ -108,7 +108,7 @@ same start reproduces every decision exactly.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
@@ -213,8 +213,13 @@ class SwingRecord:
     # default, so a record built without the flags is read as measured.
     delivery_observed: bool = True
     delivery_trend_observed: bool = True
+    # Round 2, H1 (backtest.policies.residual_momentum). ``None`` is "excluded from the leg" — not
+    # computed, or fewer than 200 valid sessions — and ranks at the leg's mean, never at a value.
+    residual_momentum: Decimal | None = None
 
     def __post_init__(self) -> None:
+        if self.residual_momentum is not None and not isinstance(self.residual_momentum, Decimal):
+            raise TypeError("residual_momentum must be a Decimal or None")
         for name in (
             "high_proximity",
             "delivery_share",
@@ -239,7 +244,13 @@ class SwingRecord:
             raise ValueError(f"volatility must be non-negative, got {self.volatility}")
 
 
-@dataclass(frozen=True, slots=True)
+#: Parameters added after run digests were first persisted, each with the default at which it is
+#: left out of ``repr`` — the run ledger keys a run on ``repr(parameters)``, so every arm that does
+#: not use a newer leg keeps the digest it was persisted (and frozen as a baseline) under.
+_DIGEST_OPTIONAL_PARAMETERS: dict[str, object] = {"weight_residual_momentum": _ZERO}
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class SwingCompositeParameters:
     """The stated knobs. Every default is a measured finding or a round number, never a fit.
 
@@ -307,6 +318,18 @@ class SwingCompositeParameters:
     regime_filter: bool = False
     buy_budget_fraction: Decimal = Decimal("0.98")
     sleeve: Sleeve = Sleeve.TACTICAL
+    # Round 2, H1: the residual-momentum leg (backtest.policies.residual_momentum). Zero by default,
+    # and absent from ``repr`` at zero (see _DIGEST_OPTIONAL_PARAMETERS).
+    weight_residual_momentum: Decimal = _ZERO
+
+    def __repr__(self) -> str:
+        shown = (
+            f"{f.name}={getattr(self, f.name)!r}"
+            for f in fields(self)
+            if f.name not in _DIGEST_OPTIONAL_PARAMETERS
+            or getattr(self, f.name) != _DIGEST_OPTIONAL_PARAMETERS[f.name]
+        )
+        return f"{type(self).__qualname__}({', '.join(shown)})"
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -342,6 +365,7 @@ class SwingCompositeParameters:
             "weight_turnover_expansion",
             "weight_ma_proximity",
             "weight_volatility",
+            "weight_residual_momentum",
         ):
             if not isinstance(getattr(self, name), Decimal):
                 raise TypeError(f"{name} must be a Decimal")
@@ -403,6 +427,7 @@ def _weighted_legs(params: SwingCompositeParameters) -> tuple[tuple[str, Decimal
         ("turnover_expansion", params.weight_turnover_expansion),
         ("ma_proximity", params.weight_ma_proximity),
         ("volatility", params.weight_volatility),
+        ("residual_momentum", params.weight_residual_momentum),
     )
     return tuple((attribute, weight) for attribute, weight in legs if weight != _ZERO)
 
@@ -456,14 +481,17 @@ def composite_scores(
 
     Assumes ``records`` is the already-screened candidate set. Never reads a clock or a store.
     """
-    n = len(records)
     legs = active_legs(records, params)
-    if n == 0 or not legs:
+    if not records or not legs:
         return {}
-    scale = Decimal(n + 1)
     scores: dict[str, Decimal] = dict.fromkeys((r.isin for r in records), _ZERO)
     for attribute, weight in legs:
-        order = sorted(records, key=lambda r: getattr(r, attribute))
+        # A name excluded from a leg (a ``None`` value — only residual momentum has one) is ranked
+        # on the others and scores 0 here, the leg's mean rank; the rest rank among themselves.
+        ranked = [r for r in records if getattr(r, attribute) is not None]
+        n = len(ranked)
+        scale = Decimal(n + 1)
+        order = sorted(ranked, key=lambda r: getattr(r, attribute))
         start = 0
         while start < n:
             value = getattr(order[start], attribute)
@@ -922,6 +950,12 @@ class SwingCompositePolicy:
                     "delivery_share": str(record.delivery_share),
                     "momentum_12_1": str(record.momentum_12_1),
                     "price": str(record.price),
+                    # Only on an arm that weights it, so every other arm's journal is unchanged.
+                    **(
+                        {"residual_momentum": str(record.residual_momentum)}
+                        if self._params.weight_residual_momentum != _ZERO
+                        else {}
+                    ),
                 },
             )
             for rank, record in enumerate(chosen, start=1)
