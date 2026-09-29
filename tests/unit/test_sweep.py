@@ -283,6 +283,7 @@ def _features_with(connection: _RecordingConnection) -> _SwingFeatures:
     features = _SwingFeatures.__new__(_SwingFeatures)
     features._con = cast(Any, connection)
     features._adjusted = True
+    features._have_factors = False
     features._by_date = {}
     features._imputed = 0
     features._rows = 0

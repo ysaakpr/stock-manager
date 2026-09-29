@@ -30,6 +30,17 @@ path:
 A signal that wanted to *know* a split was coming would have to read it through the PIT layer, and
 would (correctly) see nothing until the knowable-date defect is repaired. That is a separate fix.
 
+**One further consumer, and why it is not a decision input either (X2).** L2's adjusted series
+starts on 2016-09-02; before it the swing features read raw closes, so a lookback return that
+straddled the seam divided an adjusted price by a raw one (HPCL: ₹1,210.40 raw → ₹182.47 adjusted
+overnight). :func:`signal_split_factors` hands the same SPLIT/BONUS rescales to
+``backtest.run._SwingFeatures``, which back-adjusts the pre-seam raw closes onto L2's basis. That
+is what L2 itself is — a price series rebuilt from these very rows by ex-date — so it gives a
+signal no fact L2 does not already carry, and a return struck inside a window only ever sees the
+factors of actions ex-dated inside that window, which its raw prices already reflect. It is a
+separate switch from the book's: ``--no-book-corporate-actions`` changes the book and nothing
+else, so a before/after book measurement still holds the signal fixed.
+
 **What is modelled.**
 
 * ``SPLIT`` (``FaceValueTerms``): shares x ``from / to``; basis unchanged.
@@ -64,7 +75,7 @@ import argparse
 from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
-from contextlib import AbstractContextManager, contextmanager, nullcontext
+from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date
@@ -100,8 +111,10 @@ __all__ = [
     "add_book_actions_flag",
     "book_corporate_actions",
     "current_book_actions",
+    "current_signal_split_factors",
     "load_book_actions",
     "load_store_book_actions",
+    "signal_split_factors",
     "store_book_actions_unless",
 ]
 
@@ -279,6 +292,36 @@ def book_corporate_actions(source: BookActionSource | None) -> Iterator[None]:
 def current_book_actions() -> BookActionSource | None:
     """The source :func:`book_corporate_actions` put in force, or ``None``."""
     return _CURRENT.get()
+
+
+_SIGNAL: ContextVar[tuple[ShareRescale, ...] | None] = ContextVar(
+    "signal_split_factors", default=None
+)
+
+
+@contextmanager
+def signal_split_factors(source: BookActionSource | None) -> Iterator[None]:
+    """Give the swing features ``source``'s SPLIT/BONUS rescales for the pre-2016-09 seam (X2).
+
+    Only the share rescales are carried: they are the price factors. Dividends and unmodelled
+    actions are not, because L2's ``adj_close`` carries no dividend effect either. ``None`` turns
+    it off, and the features then exclude a name's pre-seam window rather than mix bases.
+    """
+    rescales = (
+        None
+        if source is None
+        else tuple(a for a in source.between(None, date.max) if isinstance(a, ShareRescale))
+    )
+    token = _SIGNAL.set(rescales)
+    try:
+        yield
+    finally:
+        _SIGNAL.reset(token)
+
+
+def current_signal_split_factors() -> tuple[ShareRescale, ...] | None:
+    """The rescales :func:`signal_split_factors` put in force, or ``None``."""
+    return _SIGNAL.get()
 
 
 # ── applying them ────────────────────────────────────────────────────────────────────────────────
@@ -578,7 +621,21 @@ def add_book_actions_flag(parser: argparse.ArgumentParser) -> None:
 
 
 def store_book_actions_unless(args: argparse.Namespace) -> AbstractContextManager[None]:
-    """The context a CLI runs its backtest in: the store's actions, unless the flag said no."""
-    if not getattr(args, "book_corporate_actions", True):
-        return nullcontext()
-    return book_corporate_actions(load_store_book_actions())
+    """The context a CLI runs its backtest in: the store's actions, unless the flag said no.
+
+    The signal's pre-seam split factors (:func:`signal_split_factors`) are loaded either way — the
+    flag switches the *book* wiring off for a before/after measurement, and holding the signal
+    fixed is what keeps that measurement a measurement of the book.
+    """
+    return _store_actions(apply_to_book=getattr(args, "book_corporate_actions", True))
+
+
+@contextmanager
+def _store_actions(*, apply_to_book: bool) -> Iterator[None]:
+    calendar = load_store_book_actions()
+    with signal_split_factors(calendar):
+        if apply_to_book:
+            with book_corporate_actions(calendar):
+                yield
+        else:
+            yield

@@ -78,8 +78,10 @@ from backtest.book_actions import (
     AppliedBookAction,
     BookActionApplier,
     BookActionSource,
+    ShareRescale,
     add_book_actions_flag,
     current_book_actions,
+    current_signal_split_factors,
     store_book_actions_unless,
 )
 from backtest.policies.fundamentals_value import (
@@ -4395,6 +4397,57 @@ def _swing_leg(value: Any, neutral: Decimal) -> Decimal:
     return Decimal(str(round(value, 8)))
 
 
+#: Where L2 begins — the adjusted-price seam. Before it the lake has raw closes only (X2).
+_L2_SEAM = date(2016, 9, 2)
+
+
+def _register_split_factors(con: Any, table: str, rescales: Sequence[ShareRescale] | None) -> bool:
+    """Put ``rescales`` on ``con`` as ``table(isin, ex_date, lf)``, ``lf = ln(price factor)`` (X2).
+
+    A SPLIT or BONUS multiplies shares by ``numerator / denominator``, so it multiplies the price
+    by ``denominator / numerator``. Returns whether a factor source was supplied at all — ``None``
+    is "no source" (the caller then excludes pre-seam windows), not "no actions".
+    """
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {table} (isin VARCHAR, ex_date DATE, lf DOUBLE)")
+    if rescales is None:
+        return False
+    rows = [
+        (r.isin, r.ex_date, float(r.denominator / r.numerator)) for r in rescales
+    ]  # a ranking key's factor, never a rupee — DOUBLE like every other feature input
+    if rows:
+        con.executemany(f"INSERT INTO {table} VALUES (?, ?, ln(?))", rows)
+    return True
+
+
+def _seam_consistent_px(*, factors: str, have_factors: bool) -> str:
+    """The signal price on one consistent back-adjusted basis for every row of a name (X2).
+
+    L2 exists from :data:`_L2_SEAM` and is ``raw * cum_price_factor``, the factor of
+    every action ex-dated *after* the row. A row before a name's first L2 row (its anchor, dated
+    ``d0`` with factor ``c0``) is put on the same basis as ``raw * c0 * prod(f)`` over the actions
+    ex-dated in ``(trade_date, d0]``; a name with no L2 at all is ``raw * prod(f)`` over every later
+    action. Either way the price ratio across any window depends only on the actions ex-dated
+    inside it — no future factor survives a return. Without a factor source a pre-anchor row is
+    NULL, so every window reaching back across the seam is excluded until the name has a clean
+    one; nothing straddles the seam on mixed bases.
+
+    Assumes the query aliases the raw row ``r``, its L2 row ``a`` and the name's anchor ``an``
+    (``d0``, ``c0``), and that ``factors`` is a table :func:`_register_split_factors` built.
+    """
+    multiplier = (
+        f"COALESCE((SELECT exp(sum(f.lf)) FROM {factors} f WHERE f.isin = r.isin "
+        f"AND f.ex_date > r.trade_date AND f.ex_date <= COALESCE(an.d0, DATE '9999-12-31')), 1)"
+    )
+    pre_anchor = f"r.close * an.c0 * {multiplier}" if have_factors else "NULL"
+    no_l2 = f"r.close * {multiplier}" if have_factors else "r.close"
+    return (
+        f"CASE WHEN a.adj_close IS NOT NULL THEN a.adj_close "
+        f"WHEN an.d0 IS NULL THEN {no_l2} "
+        f"WHEN r.trade_date < an.d0 THEN {pre_anchor} "
+        f"ELSE NULL END"
+    )
+
+
 class _SwingFeatures:
     """One bulk pass over L1 (+ the L2 overlay) that materializes every swing feature, PIT-safe.
 
@@ -4426,11 +4479,27 @@ class _SwingFeatures:
     (X2: before 2016-09-02 it covers nothing, and every name's stand-in was the same 0.0).
     """
 
-    def __init__(self, *, data_root: Path | None = None, adjusted: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        data_root: Path | None = None,
+        adjusted: bool = True,
+        split_factors: Sequence[ShareRescale] | None = None,
+    ) -> None:
         self._con = open_connection()
         register_raw_view(self._con, view="l1_swing_raw", data_root=data_root)
+        self._have_factors = False
         if adjusted:
             register_adjusted_view(self._con, view="l2_swing_adj", data_root=data_root)
+            self._have_factors = _register_split_factors(
+                self._con, "swing_split_factors", split_factors
+            )
+            _LOG.info(
+                "backtest.swing_seam",
+                seam=_L2_SEAM.isoformat(),
+                mode="adjusted_on_the_fly" if self._have_factors else "pre_seam_excluded",
+                split_factors=0 if split_factors is None else len(split_factors),
+            )
         self._adjusted = adjusted
         self._by_date: dict[date, tuple[SwingRecord, ...]] = {}
         self._imputed = 0
@@ -4452,10 +4521,21 @@ class _SwingFeatures:
         dates = [session for session in dates if session not in self._by_date]
         if not dates:
             return
-        px = "COALESCE(a.adj_close, r.close)" if self._adjusted else "r.close"
+        px = (
+            _seam_consistent_px(factors="swing_split_factors", have_factors=self._have_factors)
+            if self._adjusted
+            else "r.close"
+        )
         join = (
             "LEFT JOIN l2_swing_adj a ON a.isin = r.isin AND a.trade_date = r.trade_date "
-            "AND a.exchange = 'NSE'"
+            "AND a.exchange = 'NSE' LEFT JOIN l2_swing_anchor an ON an.isin = r.isin"
+            if self._adjusted
+            else ""
+        )
+        anchor_cte = (
+            "l2_swing_anchor AS (SELECT isin, min(trade_date) AS d0, "
+            "arg_min(cum_price_factor, trade_date) AS c0 FROM l2_swing_adj "
+            "WHERE exchange = 'NSE' GROUP BY isin),"
             if self._adjusted
             else ""
         )
@@ -4466,7 +4546,7 @@ class _SwingFeatures:
         # input type, and each is then quantised to 8 dp. That is deterministic and a ranking
         # never compares two names closer than 1e-8 apart, so no rupee depends on a float.
         sql = f"""
-        WITH base AS (
+        WITH {anchor_cte} base AS (
             SELECT r.isin, r.trade_date,
                    {px} AS px,
                    r.close AS raw_close,
@@ -4725,7 +4805,11 @@ def open_swing_lake(
     knows the union of its arms' decision dates and loads them itself. The caller owns ``close``.
     """
     reader = _L1Reader(data_root=data_root)
-    features = _SwingFeatures(data_root=data_root, adjusted=adjusted)
+    # X2: the pre-seam split factors come from the CLI's store context (signal_split_factors);
+    # with none in force, a pre-seam window is excluded rather than straddled on mixed bases.
+    features = _SwingFeatures(
+        data_root=data_root, adjusted=adjusted, split_factors=current_signal_split_factors()
+    )
     try:
         sessions = reader.trading_sessions(start, end)
         if not sessions:
