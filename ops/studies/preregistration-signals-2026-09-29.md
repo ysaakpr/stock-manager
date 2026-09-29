@@ -90,3 +90,10 @@ steady stock-specific trend would score about zero, contrary to the hypothesis. 
 market both have a print on it and on the session before it.
 This was decided from the definition alone: no H1 return, XIRR or drawdown had been computed or
 seen (the implementation smoke reported trade counts only). It is a clarification, not a new trial.
+
+**2026-09-29, H2 "new buys".** A blocked name gets no buy order of any kind for the 5-session window.
+That covers both opening a new position and topping up an existing holding towards equal weight.
+Existing holdings are never force-sold. The H2 smoke over 2013-07 → 2014-06 at ₹10cr blocked 0
+buys: 44 blocked names fell in the candidate set, and none of them was in a top-20 the composite
+would have bought. This was reported as a count only; no return figure was computed or seen. It is
+a clarification, not a new trial.
