@@ -107,6 +107,7 @@ from backtest.policies.naive_momentum import (
     MomentumRecord,
     NaiveMomentumPolicy,
 )
+from backtest.policies.residual_momentum import MarketSession, ResidualMomentumPanel
 from backtest.policies.sector_rotation import (
     SectorRotationParameters,
     SectorRotationPolicy,
@@ -1523,6 +1524,10 @@ class BacktestResult:
     ledger: RunLedger | None = None
     #: ``run_digest`` of the run's specification: the key its ledger is persisted under.
     digest: str = ""
+    #: Every sampled (session, pre-tax NAV) of the run, in session order — what ``max_drawdown``
+    #: is struck from, persisted beside the ledger (``backtest.nav``). Empty for the runners that
+    #: sample no NAV path.
+    nav_path: tuple[tuple[date, Decimal], ...] = ()
 
     @property
     def held_names(self) -> int:
@@ -1662,14 +1667,14 @@ def run_naive_momentum(
         # comparison ranked on return per unit of drawdown would put the baseline last on an
         # artefact. Same sampler, same skip-rather-than-guess rule as the others.
         last_close: dict[str, Decimal] = {}
-        nav_path: list[Decimal] = []
+        nav_path: list[tuple[date, Decimal]] = []
 
         def sample_nav(session: date) -> None:
             last_close.update(reader.closes_on(session))
             positions = book.positions()
             if any(position.isin not in last_close for position in positions):
                 return  # a held name with no close seen yet — skip rather than guess
-            nav_path.append(book.net_asset_value(last_close))
+            nav_path.append((session, book.net_asset_value(last_close)))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = NaiveMomentumPolicy(data, params)
@@ -1726,7 +1731,8 @@ def run_naive_momentum(
                 benchmark_source=resolved.source,
                 benchmark_index_name=benchmark.index_name,
                 benchmark_method=benchmark.method,
-                max_drawdown=_max_drawdown(nav_path),
+                max_drawdown=_max_drawdown([nav for _, nav in nav_path]),
+                nav_path=tuple(nav_path),
             ),
             broker=broker,
             spec=spec,
@@ -1827,14 +1833,14 @@ def run_momentum_v2(
         # each held name's last-known close (a name that did not print that day is carried at its
         # previous close, never guessed or zeroed), so the path is a real point-in-time NAV series.
         last_close: dict[str, Decimal] = {}
-        nav_path: list[Decimal] = []
+        nav_path: list[tuple[date, Decimal]] = []
 
         def sample_nav(session: date) -> None:
             last_close.update(reader.closes_on(session))
             positions = book.positions()
             if any(position.isin not in last_close for position in positions):
                 return  # a held name with no close seen yet — skip this sample rather than guess
-            nav_path.append(book.net_asset_value(last_close))
+            nav_path.append((session, book.net_asset_value(last_close)))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         policy = MomentumV2Policy(data, v2_parameters)
@@ -1894,7 +1900,8 @@ def run_momentum_v2(
                 benchmark_source=resolved.source,
                 benchmark_index_name=benchmark.index_name,
                 benchmark_method=benchmark.method,
-                max_drawdown=_max_drawdown(nav_path),
+                max_drawdown=_max_drawdown([nav for _, nav in nav_path]),
+                nav_path=tuple(nav_path),
             ),
             broker=broker,
             spec=spec,
@@ -2011,7 +2018,7 @@ def _finish_backtest(
         median_hold_days=median,
         replay_digest=run.result.digest(),
     )
-    persist_run(spec, ledger, summary)
+    persist_run(spec, ledger, summary, nav=run.nav_path)
     return replace(run, ledger=ledger, digest=digest)
 
 
@@ -4513,6 +4520,9 @@ class _SwingFeatures:
     (X2: before 2016-09-02 it covers nothing, and every name's stand-in was the same 0.0).
     """
 
+    #: The H1 leg's market panel, or ``None`` when no arm needs it (see :meth:`attach_market`).
+    _residual: ResidualMomentumPanel | None = None
+
     def __init__(
         self,
         *,
@@ -4538,6 +4548,27 @@ class _SwingFeatures:
         self._by_date: dict[date, tuple[SwingRecord, ...]] = {}
         self._imputed = 0
         self._rows = 0
+
+    def attach_market(self, series: TriSeries) -> None:
+        """Compute the H1 residual-momentum leg on every record, against ``series`` (round 2).
+
+        ``series`` must be the published NIFTY 50 TRI (pre-registration §3). Must be called before
+        the first ``load``: a record materialized without the leg would silently rank as excluded.
+        """
+        if series.method != TRI_METHOD_PUBLISHED:
+            raise BacktestError(
+                f"residual momentum regresses on the published index, got {series.method!r}"
+            )
+        if self._by_date:
+            raise BacktestError("attach the market series before the first load, not after")
+        self._residual = ResidualMomentumPanel(
+            [MarketSession(p.as_of, Decimal(p.tri_value), p.knowable_date) for p in series.points]
+        )
+
+    @property
+    def residual_momentum(self) -> bool:
+        """Whether records carry the residual-momentum leg (a market series is attached)."""
+        return self._residual is not None
 
     @property
     def delivery_imputed(self) -> int:
@@ -4579,7 +4610,7 @@ class _SwingFeatures:
         # stdev); DuckDB evaluates DECIMAL / DECIMAL, avg, ln and stddev in DOUBLE whatever the
         # input type, and each is then quantised to 8 dp. That is deterministic and a ranking
         # never compares two names closer than 1e-8 apart, so no rupee depends on a float.
-        sql = f"""
+        base = f"""
         WITH {anchor_cte} base AS (
             SELECT r.isin, r.trade_date,
                    {px} AS px,
@@ -4588,7 +4619,9 @@ class _SwingFeatures:
                    r.total_traded_value AS ttv
             FROM l1_swing_raw r {join}
             WHERE r.exchange = 'NSE' AND r.series = 'EQ' AND r.close > 0
-        ),
+        )"""
+        sql = f"""
+        {base},
         ret AS (
             SELECT *, ln(px / NULLIF(lag(px, 1) OVER w, 0)) AS lr, row_number() OVER w AS n
             FROM base WINDOW w AS (PARTITION BY isin ORDER BY trade_date)
@@ -4644,6 +4677,7 @@ class _SwingFeatures:
         grouped: dict[date, list[tuple[Any, ...]]] = {}
         for row in rows:
             grouped.setdefault(row[0], []).append(row)
+        residual = self._residual_scores(base, grouped)
         for session, day_rows in grouped.items():
             deliveries = sorted(r[4] for r in day_rows if r[4] is not None)
             fallback = deliveries[len(deliveries) // 2] if deliveries else 0.0
@@ -4682,9 +4716,65 @@ class _SwingFeatures:
                         # X2. The policy gates a delivery leg on how many of these are True.
                         delivery_observed=delivery_observed,
                         delivery_trend_observed=row[10] is not None,
+                        residual_momentum=residual.get((session, str(isin))),
                     )
                 )
             self._by_date[session] = tuple(records)
+
+    def _residual_scores(
+        self, base: str, grouped: Mapping[date, Sequence[tuple[Any, ...]]]
+    ) -> dict[tuple[date, str], Decimal | None]:
+        """H1's score for every (decision session, ISIN) row, or ``{}`` with no market attached.
+
+        Reads the same seam-consistent signal price (``px``) every other swing leg reads, over the
+        market sessions the earliest decision's window reaches back to, one ISIN at a time so a
+        decade's closes are never all in memory. The panel reads only sessions strictly before each
+        decision, so the ``trade_date <= max(decision)`` bound is for I/O, not for PIT.
+        """
+        panel = self._residual
+        if panel is None or not grouped:
+            return {}
+        wanted: dict[str, list[date]] = {}
+        for session, day_rows in grouped.items():
+            for row in day_rows:
+                wanted.setdefault(str(row[1]), []).append(session)
+        first = panel.window(min(grouped))[0]
+        cursor = self._con.execute(
+            f"""{base}
+            SELECT isin, trade_date, px FROM base
+            WHERE trade_date >= ? AND trade_date < ? AND list_contains(?, isin)
+            ORDER BY isin, trade_date""",
+            [first, max(grouped), sorted(wanted)],
+        )
+        out: dict[tuple[date, str], Decimal | None] = {}
+
+        def score(isin: str, closes: Mapping[date, float | None]) -> None:
+            for session in wanted[isin]:
+                out[(session, isin)] = panel.score(session, closes)
+
+        current: str | None = None
+        closes: dict[date, float | None] = {}
+        while batch := cursor.fetchmany(100_000):
+            for isin, trade_date, value in batch:
+                if isin != current:
+                    if current is not None:
+                        score(current, closes)
+                    current, closes = isin, {}
+                # px is a dimensionless ranking input like every other feature: DOUBLE is fine.
+                closes[trade_date] = None if value is None else float(value)
+        if current is not None:
+            score(current, closes)
+        for isin in wanted.keys() - {i for _, i in out}:
+            score(isin, {})  # no closes in the window at all: excluded, and said so by None
+        scored = sum(1 for v in out.values() if v is not None)
+        _LOG.info(
+            "backtest.swing_residual_momentum",
+            decision_dates=len(grouped),
+            rows=len(out),
+            scored=scored,
+            excluded=len(out) - scored,
+        )
+        return out
 
     def records(self, session: date) -> tuple[SwingRecord, ...]:
         return self._by_date.get(session, ())
@@ -4834,12 +4924,18 @@ def open_swing_lake(
     data_root: Path | None = None,
     adjusted: bool = True,
     band_hits: bool = False,
+    residual_momentum: bool = False,
 ) -> SwingLake:
     """Build the shared lake state for a swing sweep over ``[start, end]`` (M12.2).
 
     Assumes ``floors`` lists every median-turnover floor the sweep will run on; a run asking for a
     floor that is not here is a programming error, not a fallback. Never loads features — the caller
     knows the union of its arms' decision dates and loads them itself. The caller owns ``close``.
+
+    ``residual_momentum`` (round 2, H1) attaches the published NIFTY 50 TRI to the features so every
+    record carries the residual-momentum leg; off by default, so a lake no arm needs it for does no
+    extra pass. With it on and no published series in the lake, it raises — no proxy stands in.
+
     ``band_hits`` (X2 H2) also reads the window's PR-bundle band hits into memory, from far enough
     back that the first session's lookback is full.
     """
@@ -4855,6 +4951,17 @@ def open_swing_lake(
             raise BacktestError(f"no trading sessions in [{start.isoformat()}, {end.isoformat()}]")
         calendar = reader.all_sessions()
         sessions = _reserve_fill_headroom(sessions, calendar)
+        if residual_momentum:
+            market = read_tri_series(
+                _BENCHMARK_TRI_SLUG, sessions[-1], method=TRI_METHOD_PUBLISHED, data_root=data_root
+            )
+            if market is None:
+                raise BacktestError(
+                    f"residual momentum regresses on the published {_BENCHMARK_TRI_SLUG!r} TRI "
+                    "and the lake has none: ingest it "
+                    "(`uv run python -m dataplatform.ingest.tri_backfill`)"
+                )
+            features.attach_market(market)
         hits: BandHitIndex | None = None
         if band_hits:
             before = [session for session in calendar if session < sessions[0]]
@@ -4942,6 +5049,13 @@ def run_swing_composite(
             data_root=data_root,
             adjusted=adjusted,
             band_hits=band_hit_avoidance,
+            residual_momentum=parameters.weight_residual_momentum != _ZERO,
+        )
+    elif parameters.weight_residual_momentum != _ZERO and not lake.features.residual_momentum:
+        raise BacktestError(
+            "this arm weights residual momentum but the shared lake was opened without it — "
+            "open_swing_lake(residual_momentum=True) before loading, or every name ranks as "
+            "excluded"
         )
     elif lake.adjusted != adjusted:
         raise BacktestError(
@@ -4983,14 +5097,14 @@ def run_swing_composite(
         book.deposit(first_session, opening_cash)
 
         last_close: dict[str, Decimal] = {}
-        nav_path: list[Decimal] = []
+        nav_path: list[tuple[date, Decimal]] = []
 
         def sample_nav(session: date) -> None:
             last_close.update(reader.closes_on(session))
             positions = book.positions()
             if any(position.isin not in last_close for position in positions):
                 return  # a held name with no close seen yet — skip rather than guess
-            nav_path.append(book.net_asset_value(last_close))
+            nav_path.append((session, book.net_asset_value(last_close)))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         if band_hit_avoidance and lake.band_hits is None:
@@ -5055,7 +5169,8 @@ def run_swing_composite(
                 benchmark_source=resolved.source,
                 benchmark_index_name=benchmark.index_name,
                 benchmark_method=benchmark.method,
-                max_drawdown=_max_drawdown(nav_path),
+                max_drawdown=_max_drawdown([nav for _, nav in nav_path]),
+                nav_path=tuple(nav_path),
             ),
             broker=broker,
             spec=spec,

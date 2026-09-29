@@ -78,3 +78,22 @@ If no arm passes, the answer is "no improvement found", and it is reported as su
 - The Kesar Terminals bonus ratio (INE096L01025) looks mis-recorded (1:25 vs 1:1).
 - The ₹1.2 lakh per-order cap still needs an owner decision on scaling.
 - Sector data remains current-snapshot only, so the sector cap mostly binds on the unknown bucket.
+
+## 6. Clarifications recorded before any evaluation
+
+**2026-09-29, H1 regression intercept.** §3 did not say whether the regression has an intercept.
+With one, the residuals over t−252…t−1 sum to zero by construction, so their t−252…t−21 sum is
+just minus the last 20 sessions' residuals. That turns H1 into a one-month reversal signal, and a
+steady stock-specific trend would score about zero, contrary to the hypothesis. H1 therefore fits
+**β = Σ(r·m)/Σ(m²) with no intercept**, which keeps the stock's own drift in the residual. The
+200-valid-session count is taken over t−252…t−21. A session is valid only when the stock and the
+market both have a print on it and on the session before it.
+This was decided from the definition alone: no H1 return, XIRR or drawdown had been computed or
+seen (the implementation smoke reported trade counts only). It is a clarification, not a new trial.
+
+**2026-09-29, H2 "new buys".** A blocked name gets no buy order of any kind for the 5-session window.
+That covers both opening a new position and topping up an existing holding towards equal weight.
+Existing holdings are never force-sold. The H2 smoke over 2013-07 → 2014-06 at ₹10cr blocked 0
+buys: 44 blocked names fell in the candidate set, and none of them was in a top-20 the composite
+would have bought. This was reported as a count only; no return figure was computed or seen. It is
+a clarification, not a new trial.
