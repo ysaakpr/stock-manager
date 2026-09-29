@@ -101,6 +101,8 @@ __all__ = [
     "ARMS",
     "BAND_HIT_ARM",
     "H1_RESIDUAL_MOMENTUM",
+    "H2_BAND_HIT_AVOIDANCE",
+    "H3_RESIDUAL_AND_BAND_HIT",
     "RETIRED_ARMS",
     "Arm",
     "SweepResult",
@@ -190,6 +192,27 @@ _M10_7 = "Swing composite (M10.7)"
 _SHORT = "Short composite"
 #: Round 2's H1 arm (ops/studies/preregistration-signals-2026-09-29.md §3).
 H1_RESIDUAL_MOMENTUM = "Swing composite + residual momentum (H1)"
+#: Round 2's H2 and H3 arms (same pre-registration, §3). H3 is H1 + H2, the only combination.
+H2_BAND_HIT_AVOIDANCE = "Swing composite + band-hit avoidance (H2)"
+H3_RESIDUAL_AND_BAND_HIT = "Swing composite + residual momentum + band-hit avoidance (H3)"
+
+#: H2: no buy of any kind — new position or top-up — of a name that hit its upper or lower daily
+#: price band in the last five sessions (§3, amended 2026-09-29). Holdings are never sold for it.
+_H2 = Arm(
+    label=H2_BAND_HIT_AVOIDANCE,
+    family="round-2 hypothesis",
+    reference=_M10_7,
+    note="no buy of a name at its upper or lower price band in the last 5 sessions (H2, §3)",
+    swing=_swing(),
+    band_hit_avoidance=True,
+)
+#: H3: H1's transform applied to the H2 arm, which keeps H2's filter. No parameter of its own.
+_H3 = replace(
+    _H2,
+    label=H3_RESIDUAL_AND_BAND_HIT,
+    note="H1's residual momentum leg on the H2 arm, band-hit filter kept (H3, §3)",
+    swing=with_residual_momentum(_H2.swing),  # type: ignore[arg-type]  # _H2 is a swing arm
+)
 
 ARMS: tuple[Arm, ...] = (
     # ── the reference ────────────────────────────────────────────────────────────────────────────
@@ -386,21 +409,12 @@ ARMS: tuple[Arm, ...] = (
         note="12-1 momentum leg replaced by residual momentum on the NIFTY 50 TRI (H1, §3)",
         swing=with_residual_momentum(_swing()),
     ),
+    _H2,
+    _H3,
 )
 
-
-#: H2 of the round-2 pre-registration (``ops/studies/preregistration-signals-2026-09-29.md`` §3):
-#: the fixed-code M10.7 composite, with no new buy of a name that closed at a daily price band in
-#: any of the last five sessions. Not in :data:`ARMS`: that tuple is the round-1 sweep the campaign
-#: and verdict default to, and the round-2 H-arms run only after the baseline is frozen.
-BAND_HIT_ARM: Final = Arm(
-    label="Swing composite + band-hit avoidance (H2)",
-    family="round-2 hypothesis",
-    reference=_M10_7,
-    note="no new buy of a name at its upper or lower price band in the last 5 sessions",
-    swing=_swing(),
-    band_hit_avoidance=True,
-)
+#: The H2 arm, by object — what ``backtest.band_hits`` tests and callers reach for.
+BAND_HIT_ARM: Final = next(arm for arm in ARMS if arm.label == H2_BAND_HIT_AVOIDANCE)
 
 
 #: Arms taken out of the sweep, each with the reason it is gone — printed in every sweep report so

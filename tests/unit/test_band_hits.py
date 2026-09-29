@@ -19,6 +19,7 @@ PR-bundle fixture and a synthetic L1 partition. No network, no wall clock.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -37,6 +38,7 @@ from backtest.band_hits import (
     lookback_window,
     resolve_session,
 )
+from backtest.policies.residual_momentum import with_residual_momentum
 from backtest.policies.swing_composite import (
     RegimeReading,
     SwingCompositeParameters,
@@ -45,7 +47,12 @@ from backtest.policies.swing_composite import (
 )
 from backtest.replay import SessionContext, SessionDecision
 from backtest.run import UniverseParameters, backtest_spec
-from backtest.sweep import ARMS, BAND_HIT_ARM, _arm_spec
+from backtest.sweep import (
+    ARMS,
+    BAND_HIT_ARM,
+    H3_RESIDUAL_AND_BAND_HIT,
+    _arm_spec,
+)
 from dataplatform.clock import FrozenClock
 from dataplatform.ingest.nse.pr_bundle import BandHitRow, BandSide
 from dataplatform.query.pit import Dataset, PitContext, PitError
@@ -300,7 +307,7 @@ def test_the_arm_is_the_m10_7_composite_plus_the_filter_and_nothing_else() -> No
     assert BAND_HIT_ARM.label == "Swing composite + band-hit avoidance (H2)"
     assert BAND_HIT_ARM.swing == ARMS[0].swing == SwingCompositeParameters()
     assert BAND_HIT_ARM.band_hit_avoidance
-    assert BAND_HIT_ARM not in ARMS
+    assert BAND_HIT_ARM in ARMS
 
 
 def test_no_existing_arm_changes_its_spec_and_the_h2_arm_does() -> None:
@@ -314,6 +321,8 @@ def test_no_existing_arm_changes_its_spec_and_the_h2_arm_does() -> None:
         "adjusted": True,
     }
     for arm in ARMS:
+        if arm.band_hit_avoidance:
+            continue
         assert "band_hit_avoidance" not in _arm_spec(arm, **kwargs)  # type: ignore[arg-type]
     spec = _arm_spec(BAND_HIT_ARM, **kwargs)  # type: ignore[arg-type]
     assert spec["band_hit_avoidance"] == BAND_HIT_AVOIDANCE_IDENTITY
@@ -389,3 +398,83 @@ def _write_l1(root: Path, session: date, rows: list[tuple[str, str, str]]) -> No
     con.execute("INSERT INTO t VALUES ('INE999Z01011', 'BSE', 'ADSL', 'EQ', ?)", [session])
     con.execute(f"COPY t TO '{path}' (FORMAT PARQUET)")
     con.close()
+
+
+# ── H3: H1 + H2, the only combination ────────────────────────────────────────────────────────────
+
+_H3 = next(arm for arm in ARMS if arm.label == H3_RESIDUAL_AND_BAND_HIT)
+
+
+def test_h3_is_h1s_transform_on_the_h2_arm_and_nothing_else() -> None:
+    assert _H3.label == "Swing composite + residual momentum + band-hit avoidance (H3)"
+    assert BAND_HIT_ARM.swing is not None
+    assert _H3.swing == with_residual_momentum(BAND_HIT_ARM.swing)
+    assert _H3.band_hit_avoidance
+    assert _H3.swing is not None
+    assert _H3.swing.weight_momentum == Decimal("0")
+    assert _H3.swing.weight_residual_momentum == Decimal("1")
+
+
+def _residual_rec(isin: str, momentum: str, residual: str) -> SwingRecord:
+    """Every leg but the momentum one tied, so plain and residual momentum alone decide."""
+    return SwingRecord(
+        isin=isin,
+        high_proximity=Decimal("0.9"),
+        delivery_share=Decimal("0.5"),
+        momentum_12_1=Decimal(momentum),
+        volatility=Decimal("0.02"),
+        price=Decimal("100"),
+        knowable_date=SESSION,
+        residual_momentum=Decimal(residual),
+    )
+
+
+#: Plain momentum ranks A > B > C > D; residual momentum ranks the reverse, D > C > B > A.
+_OPPOSED = (
+    _residual_rec(A, "0.9", "-1.0"),
+    _residual_rec(B, "0.8", "-0.5"),
+    _residual_rec(C, "0.7", "0.5"),
+    _residual_rec(D, "0.6", "1.0"),
+)
+
+
+class _OpposedData(_Data):
+    def signal(self, as_of: date) -> Dataset[SwingRecord]:
+        return Dataset.declaring("swing", _OPPOSED, knowable_date=lambda r: r.knowable_date)
+
+    def marks(self, as_of: date) -> Dataset[SwingRecord]:
+        return Dataset.declaring("marks", _OPPOSED, knowable_date=lambda r: r.knowable_date)
+
+
+def _small(params: SwingCompositeParameters) -> SwingCompositeParameters:
+    """The arm's own parameters at a two-name basket, so the fixture can see every slot."""
+    return replace(params, top_n=2, sell_band=2, exclude_vol_fraction=Decimal("0"))
+
+
+def _h3_decide(params: SwingCompositeParameters, *, filtered: bool) -> set[str]:
+    hits = BandHitIndex([_hit(D, _ago(2))], CALENDAR) if filtered else None
+    policy = SwingCompositePolicy(_OpposedData(), _small(params), band_hits=hits)
+    ctx = SessionContext(
+        session=SESSION,
+        pit=PitContext(as_of=SESSION),
+        broker=_Broker(),  # type: ignore[arg-type]
+        clock=FrozenClock(SESSION),
+    )
+    return _bought(policy.decide(ctx))
+
+
+def test_h3_applies_both_the_residual_leg_and_the_band_filter() -> None:
+    """Residual ranks D, C, B, A; D hit a band two sessions ago, so H3 buys C and B."""
+    assert _H3.swing is not None
+    assert _h3_decide(_H3.swing, filtered=True) == {C, B}
+
+
+def test_h3_without_the_band_filter_buys_the_blocked_name() -> None:
+    assert _H3.swing is not None
+    assert _h3_decide(_H3.swing, filtered=False) == {D, C}
+
+
+def test_h3_without_the_residual_leg_ranks_on_plain_momentum() -> None:
+    """H2's parameters alone: plain 12-1 momentum picks A and B, and D's hit changes nothing."""
+    assert BAND_HIT_ARM.swing is not None
+    assert _h3_decide(BAND_HIT_ARM.swing, filtered=True) == {A, B}
