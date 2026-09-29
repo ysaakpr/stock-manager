@@ -97,6 +97,7 @@ from dataplatform.query import QueryService
 
 __all__ = [
     "ARMS",
+    "RETIRED_ARMS",
     "Arm",
     "SweepResult",
     "SweepRow",
@@ -336,13 +337,6 @@ ARMS: tuple[Arm, ...] = (
         swing=_swing(**_SHORT_COMPOSITE, top_n=10, sell_band=30),
     ),
     Arm(
-        label="Short composite, top-5",
-        family="concentration",
-        reference=_SHORT,
-        note="five names instead of twenty; band stays 3x the basket",
-        swing=_swing(**_SHORT_COMPOSITE, top_n=5, sell_band=15),
-    ),
-    Arm(
         label="Short composite, top-10 + regime",
         family="concentration",
         reference="Short composite, top-10",
@@ -371,6 +365,21 @@ ARMS: tuple[Arm, ...] = (
             redeploy_next_session=True,
             vol_target_annual=Decimal("0.15"),
         ),
+    ),
+)
+
+
+#: Arms taken out of the sweep, each with the reason it is gone — printed in every sweep report so
+#: a reader comparing against an older table knows the row was removed rather than lost.
+RETIRED_ARMS: tuple[tuple[str, str], ...] = (
+    (
+        "Short composite, top-5",
+        "never traded (0 trades on every window): an equal-weight top-5 buy is 20 % of the case, "
+        "and the ratified rails cap a position and a single order at 15 % (RailId.MAX_POSITION, "
+        "MAX_ORDER_PCT), so A8 blocked every entry. The rails are not loosened to admit it; the "
+        "most concentrated basket they admit at ₹10 lakh is nine names (1/9 = 11.1 % < 15 %, "
+        "₹9.8 lakh / 9 < the ₹1.2 lakh order cap, >= the 8-holding floor), and "
+        "'Short composite, top-10' already measures concentration at that end",
     ),
 )
 
@@ -920,6 +929,9 @@ def render_sweep_report(result: SweepResult, *, floors: Sequence[Decimal]) -> st
     ]
     for arm in dict.fromkeys(row.arm for row in result.rows):
         lines.append(f"| {arm.label} | {arm.reference} | {arm.note} |")
+    if RETIRED_ARMS:
+        lines += ["", "## Arms removed from the sweep", "", "| Strategy | Why |", "| --- | --- |"]
+        lines += [f"| {label} | {reason} |" for label, reason in RETIRED_ARMS]
     lines += [
         "",
         "## What this table cannot be asked to prove",

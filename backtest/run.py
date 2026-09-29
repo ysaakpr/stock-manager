@@ -78,8 +78,10 @@ from backtest.book_actions import (
     AppliedBookAction,
     BookActionApplier,
     BookActionSource,
+    ShareRescale,
     add_book_actions_flag,
     current_book_actions,
+    current_signal_split_factors,
     store_book_actions_unless,
 )
 from backtest.cash_interest import CashInterestAccrual, InterestCredit, current_cash_interest
@@ -126,6 +128,7 @@ from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import Exchange as IdentityExchange
 from dataplatform.identity.master import ListingStatus
 from dataplatform.ingest.indices import (
+    TRI_METHOD_PUBLISHED,
     TriPoint,
     TriSeries,
     membership_asof,
@@ -191,9 +194,8 @@ _STATIC_SECTOR_MAP_DIR = Path("tests/fixtures/nifty_indices/constituents")
 
 # ── M9.5 momentum v2 defaults (a priori, stated once, never tuned) ───────────────────────────────
 #: The trailing window over which the regime index's moving average is struck. 200 sessions is the
-#: standard trend filter. The regime index is the same broad-market L1 basket the benchmark proxy
-#: uses (equal-weight price relative of the most-liquid names at the start), so the regime overlay
-#: reads a proxy for the index, stated plainly in the report.
+#: standard trend filter. Since X2 the regime index is the exchange's published NIFTY 50 (the TRI
+#: level — the lake has no published price-index level); see :class:`_RegimeSource`.
 _REGIME_MA_DAYS = 200
 #: The number of trailing monthly points the volatility estimate is struck over — a year of monthly
 #: returns. Monthly (not daily) keeps the ten-year walk cheap and is ample for risk-parity sizing.
@@ -809,73 +811,114 @@ class _L1MomentumData:
         return self._sessions[index]
 
 
-# ── M9.5: the regime index (a broad-market proxy) and its trailing moving average ────────────────
+# ── M9.5 / X2: the regime index — the published NIFTY 50 — and its trailing moving average ─────
 
 
 class _RegimeSource:
-    """The regime overlay's index level and its trailing moving average, both point-in-time (M9.5).
+    """The regime overlay's index level and its trailing moving average, both point-in-time.
 
-    The regime index is the same broad-market L1 basket the benchmark proxy uses — an equal-weight
-    price relative of the ``size`` most-liquid names on the first session, seeded to
-    :data:`_TRI_SEED`. Its ``ma_days``-session simple moving average, struck over sessions on or
-    before the decision date, is the trend filter: the momentum basket is held only while the level
-    is at or above the average.
+    **The index is the exchange's published NIFTY 50** (X2), read out of ``L1/benchmark_tri`` with
+    ``method="published"``. Until X2 it was an equal-weight basket of the fifty most-liquid names on
+    the run's first session, built here from raw L1 closes — and a split in one basket name halved
+    that name's relative overnight, which could drag the proxy through its own 200-session mean and
+    flip the regime on a corporate action rather than on the market. The published level is
+    maintained by NSE Indices through every split, bonus and constituent change.
 
-    Point-in-time by construction (invariant #7): both the level and the moving average read only
-    closes on sessions ``<= as_of`` — no future close enters the average, so the regime a rebalance
-    sees is exactly what was knowable that day. Levels are cached per session, so the ten-year walk
-    computes each session's level once even though the moving-average windows overlap heavily.
+    **Which series, and why.** The price-index level is what a trend filter conventionally reads,
+    and :meth:`published` uses it when every published point carries one (``price_close``). The
+    lake's published NIFTY 50 does not: NSE's historical TRI endpoint returns the total-return and
+    net-total-return levels only, so ``price_close`` is empty on all 6,764 points (1999-06-30 ..
+    2026-09-07) and the TRI level is used instead. The two differ by reinvested dividends, about
+    1.2-1.5 % a year; over a 200-session window that lifts the TRI a little faster than the price
+    index, so a TRI-read gate is marginally more often risk-on at a crossing. It is stated, not
+    corrected: the store holds no price-index series to correct it with, and no proxy may stand in.
 
-    It is a *proxy* index, stated plainly in the report: the store holds no licensed index level, so
-    the regime is read off the same L1 broad-market basket the benchmark proxy is built from.
+    Point-in-time (invariant #7): a reading as of ``as_of`` sees only points whose
+    ``knowable_date`` is on or before ``as_of`` (a session's level is knowable at its own close,
+    :func:`~dataplatform.ingest.indices.tri_knowable_date`). The moving average is struck over the
+    last ``ma_days`` such points.
+
+    **Fails loud, never falls back.** A reading needs a published level dated the decision session
+    itself and ``ma_days`` points behind it; either missing raises :class:`RegimeSourceError`. There
+    is no proxy fallback — a gate that silently reverted to the L1 basket would put back exactly
+    the defect this replaced.
     """
 
-    def __init__(
-        self,
-        reader: _L1Reader,
-        calendar: Sequence[date],
-        *,
-        first_session: date,
-        size: int,
-        ma_days: int,
-    ) -> None:
-        self._reader = reader
-        self._calendar = list(calendar)
-        self._ma_days = ma_days
-        self._basket = reader.most_liquid_on(first_session, size)
-        base = reader.closes_on(first_session)
-        self._base = {isin: base[isin] for isin in self._basket if isin in base}
-        if not self._base:
-            raise BacktestError(
-                f"cannot build a regime index: no basket closes on {first_session.isoformat()}"
+    def __init__(self, series: TriSeries, *, ma_days: int) -> None:
+        if series.method != TRI_METHOD_PUBLISHED:
+            raise RegimeSourceError(
+                f"the regime index must be the published series, got method {series.method!r} "
+                f"for {series.index_slug!r}"
             )
-        self._levels: dict[date, Decimal | None] = {}
+        if ma_days <= 0:
+            raise ValueError(f"ma_days must be positive, got {ma_days}")
+        self._slug = series.index_slug
+        self._ma_days = ma_days
+        points = series.points
+        self.basis = "price" if all(p.price_close is not None for p in points) else "tri"
+        self._knowable = [p.knowable_date for p in points]
+        self._levels: list[Decimal] = [
+            Decimal(
+                p.price_close
+                if self.basis == "price" and p.price_close is not None
+                else p.tri_value
+            )
+            for p in points
+        ]
+        self._by_session = {p.as_of: level for p, level in zip(points, self._levels, strict=True)}
+        self._as_of = [p.as_of for p in points]
 
-    def _level(self, session: date) -> Decimal | None:
-        """The broad-market proxy level on ``session`` — ``None`` if no basket name printed."""
-        if session in self._levels:
-            return self._levels[session]
-        closes = self._reader.closes_on(session)
-        relatives = [closes[isin] / self._base[isin] for isin in self._base if isin in closes]
-        level = _TRI_SEED * (sum(relatives, _ZERO) / Decimal(len(relatives))) if relatives else None
-        self._levels[session] = level
-        return level
+    @classmethod
+    def published(
+        cls,
+        *,
+        through: date,
+        ma_days: int,
+        slug: str = _BENCHMARK_TRI_SLUG,
+        data_root: Path | None = None,
+    ) -> _RegimeSource:
+        """The regime source over the published ``slug`` series through ``through``, or raise."""
+        series = read_tri_series(slug, through, method=TRI_METHOD_PUBLISHED, data_root=data_root)
+        if series is None:
+            raise RegimeSourceError(
+                f"no published {slug!r} index series in L1/benchmark_tri through "
+                f"{through.isoformat()}: the regime gate reads the published NIFTY 50 and has no "
+                "fallback. Ingest it (`uv run python -m dataplatform.ingest.tri_backfill`)."
+            )
+        source = cls(series, ma_days=ma_days)
+        _LOG.info(
+            "backtest.regime_source",
+            index=slug,
+            method=series.method,
+            basis=source.basis,
+            points=len(series.points),
+            first_point=series.points[0].as_of.isoformat(),
+            last_point=series.points[-1].as_of.isoformat(),
+            ma_days=ma_days,
+        )
+        return source
 
     def level_on(self, session: date) -> Decimal | None:
-        """The broad-market proxy level on ``session`` — the market's own return path (M10.3)."""
-        return self._level(session)
+        """The published level dated ``session`` — the market's own return path (M10.3)."""
+        return self._by_session.get(session)
 
     def reading(self, as_of: date) -> RegimeReading:
-        """The regime reading as of ``as_of``: the current level and its trailing moving average."""
-        cutoff = bisect_right(self._calendar, as_of)
-        window = self._calendar[:cutoff][-self._ma_days :]
-        levels = [level for s in window if (level := self._level(s)) is not None]
-        if not levels:
-            raise BacktestError(f"no regime index level on or before {as_of.isoformat()}")
-        current = self._level(as_of)
+        """The regime as of ``as_of``: the session's published level and its trailing mean."""
+        current = self._by_session.get(as_of)
         if current is None:
-            current = levels[-1]  # no print on the date itself — carry the last real level
-        moving_average = sum(levels, _ZERO) / Decimal(len(levels))
+            raise RegimeSourceError(
+                f"the published {self._slug!r} series has no level for {as_of.isoformat()} "
+                f"(it covers {self._as_of[0].isoformat()}..{self._as_of[-1].isoformat()}); the "
+                "regime gate does not carry a stale level or fall back to a proxy"
+            )
+        cutoff = bisect_right(self._knowable, as_of)
+        window = self._levels[max(0, cutoff - self._ma_days) : cutoff]
+        if len(window) < self._ma_days:
+            raise RegimeSourceError(
+                f"the published {self._slug!r} series has {len(window)} points knowable by "
+                f"{as_of.isoformat()}, short of the {self._ma_days}-session moving average"
+            )
+        moving_average = sum(window, _ZERO) / Decimal(len(window))
         return RegimeReading(
             index_level=current, moving_average=moving_average, knowable_date=as_of
         )
@@ -1391,6 +1434,14 @@ class BacktestError(Exception):
     """A backtest could not be set up or run. Fails loud (CLAUDE.md), never a silent skip."""
 
 
+class RegimeSourceError(BacktestError):
+    """The published index the regime gate reads does not cover a decision date (X2).
+
+    Raised rather than falling back to an L1-built proxy basket, which a split in one basket name
+    could flip.
+    """
+
+
 class BenchmarkSourceError(BacktestError):
     """A published total-return benchmark was required and the lake does not have one.
 
@@ -1710,7 +1761,7 @@ def run_momentum_v2(
     shortcut — raw is the M9.2 signal because an action-free store makes them identical — no longer
     holds. ``universe`` constrains the candidate set to the investable, liquid names (M9.3); the
     benchmark is M3.9's computed TRI when the store holds it, else the L1 proxy (M9.4). The regime
-    overlay reads a broad-market L1 proxy index (stated).
+    overlay reads the published NIFTY 50 and fails loud where it does not cover a date (X2).
     """
     spec = backtest_spec(
         "momentum_v2",
@@ -1744,12 +1795,10 @@ def run_momentum_v2(
             if universe is not None
             else None
         )
-        regime_source = _RegimeSource(
-            reader,
-            calendar,
-            first_session=first_session,
-            size=_BENCHMARK_BASKET,
+        regime_source = _RegimeSource.published(
+            through=sessions[-1],
             ma_days=v2_parameters.regime_ma_days,
+            data_root=data_root,
         )
         data = _L1MomentumV2Data(
             reader,
@@ -3158,7 +3207,7 @@ def _run_sector_arm(
 def _market_regime_returns(
     regime_source: _RegimeSource, sessions: Sequence[date], risk_on_by_session: Mapping[date, bool]
 ) -> _RegimeReturns:
-    """The market (proxy index) return split by regime — the same buckets the strategies use."""
+    """The market (published NIFTY 50) return split by regime — the buckets the strategies use."""
     path: list[tuple[date, Decimal]] = []
     for session in sessions:
         level = regime_source.level_on(session)
@@ -3189,8 +3238,8 @@ def run_sector_rotation_report(
     names across the whole universe. So the only thing that differs between the two is the sector
     gate — the sector effect, isolated (M10.3). The market is the M9.4 benchmark (computed TRI when
     the store holds it, else the L1 proxy). Costs are in every fill (invariant #4). Metrics are
-    reported full-period and split by market regime (proxy index at/above vs below its moving
-    average). Returns the rendered markdown.
+    reported full-period and split by market regime (published NIFTY 50 at/above vs below its
+    moving average). Returns the rendered markdown.
 
     Both arms read one signal source, picked by ``adjusted``: L2 back-adjusted closes (the M9.2
     signal, the default) or raw L1 closes (the pre-M9.2 baseline). It is the same source on both
@@ -3221,12 +3270,10 @@ def run_sector_rotation_report(
             lookback_sessions=calendar,
         )
 
-        regime_source = _RegimeSource(
-            reader,
-            calendar,
-            first_session=first_session,
-            size=_BENCHMARK_BASKET,
+        regime_source = _RegimeSource.published(
+            through=sessions[-1],
             ma_days=_REGIME_MA_DAYS,
+            data_root=data_root,
         )
         risk_on_by_session = {
             session: regime_source.reading(session).risk_on for session in sessions
@@ -3375,7 +3422,8 @@ def render_sector_rotation_report(
             "computed estimate for this window, so the market series is not a total-return "
             "index at all"
         )
-        + " as the market. The regime overlay reads the same broad-market L1 proxy index.",
+        + " as the market. The regime overlay reads the published NIFTY 50 (TRI level) against its "
+        f"own {_REGIME_MA_DAYS}-session mean.",
         "",
         "## Window",
         "",
@@ -4089,8 +4137,8 @@ def run_fundamentals_report(
     """Run the three fundamentals arms beside naive and all-on momentum, per regime (M10.6).
 
     Every arm replays the same sessions on the same universe through the same broker, book and
-    cost model; the market row is the proxy index's own path split by the same regime buckets.
-    Returns the rendered markdown.
+    cost model; the market row is the published NIFTY 50's own path split by the same regime
+    buckets. Returns the rendered markdown.
 
     ``adjusted`` picks the momentum source every arm that ranks on momentum shares — the two
     momentum arms and MOMENTUM_VALUE's second signal — L2 back-adjusted closes (the M9.2 signal,
@@ -4108,12 +4156,10 @@ def run_fundamentals_report(
         sessions = _reserve_fill_headroom(sessions, calendar)
         first_session = sessions[0]
         universe_filter = _InvestableUniverse(reader, uni, data_root=data_root)
-        regime_source = _RegimeSource(
-            reader,
-            calendar,
-            first_session=first_session,
-            size=_BENCHMARK_BASKET,
+        regime_source = _RegimeSource.published(
+            through=sessions[-1],
             ma_days=_REGIME_MA_DAYS,
+            data_root=data_root,
         )
         risk_on_by_session = {s: regime_source.reading(s).risk_on for s in sessions}
         signal_closes = (
@@ -4276,8 +4322,8 @@ def render_fundamentals_report(
         "",
         f"- {start.isoformat()} -> {terminal.isoformat()} ({sessions} sessions, {rebalances} "
         "monthly rebalances)",
-        f"- Regime split: {risk_on_sessions} of {sessions} sessions risk-on (proxy index at/above "
-        f"its {_REGIME_MA_DAYS}-session moving average)",
+        f"- Regime split: {risk_on_sessions} of {sessions} sessions risk-on (published NIFTY 50 "
+        f"at/above its {_REGIME_MA_DAYS}-session moving average)",
         f"- Market XIRR (identical cashflows): {_pct(market_xirr)}",
     ]
     if latest_filing is not None:
@@ -4372,6 +4418,57 @@ def _swing_leg(value: Any, neutral: Decimal) -> Decimal:
     return Decimal(str(round(value, 8)))
 
 
+#: Where L2 begins — the adjusted-price seam. Before it the lake has raw closes only (X2).
+_L2_SEAM = date(2016, 9, 2)
+
+
+def _register_split_factors(con: Any, table: str, rescales: Sequence[ShareRescale] | None) -> bool:
+    """Put ``rescales`` on ``con`` as ``table(isin, ex_date, lf)``, ``lf = ln(price factor)`` (X2).
+
+    A SPLIT or BONUS multiplies shares by ``numerator / denominator``, so it multiplies the price
+    by ``denominator / numerator``. Returns whether a factor source was supplied at all — ``None``
+    is "no source" (the caller then excludes pre-seam windows), not "no actions".
+    """
+    con.execute(f"CREATE OR REPLACE TEMP TABLE {table} (isin VARCHAR, ex_date DATE, lf DOUBLE)")
+    if rescales is None:
+        return False
+    rows = [
+        (r.isin, r.ex_date, float(r.denominator / r.numerator)) for r in rescales
+    ]  # a ranking key's factor, never a rupee — DOUBLE like every other feature input
+    if rows:
+        con.executemany(f"INSERT INTO {table} VALUES (?, ?, ln(?))", rows)
+    return True
+
+
+def _seam_consistent_px(*, factors: str, have_factors: bool) -> str:
+    """The signal price on one consistent back-adjusted basis for every row of a name (X2).
+
+    L2 exists from :data:`_L2_SEAM` and is ``raw * cum_price_factor``, the factor of
+    every action ex-dated *after* the row. A row before a name's first L2 row (its anchor, dated
+    ``d0`` with factor ``c0``) is put on the same basis as ``raw * c0 * prod(f)`` over the actions
+    ex-dated in ``(trade_date, d0]``; a name with no L2 at all is ``raw * prod(f)`` over every later
+    action. Either way the price ratio across any window depends only on the actions ex-dated
+    inside it — no future factor survives a return. Without a factor source a pre-anchor row is
+    NULL, so every window reaching back across the seam is excluded until the name has a clean
+    one; nothing straddles the seam on mixed bases.
+
+    Assumes the query aliases the raw row ``r``, its L2 row ``a`` and the name's anchor ``an``
+    (``d0``, ``c0``), and that ``factors`` is a table :func:`_register_split_factors` built.
+    """
+    multiplier = (
+        f"COALESCE((SELECT exp(sum(f.lf)) FROM {factors} f WHERE f.isin = r.isin "
+        f"AND f.ex_date > r.trade_date AND f.ex_date <= COALESCE(an.d0, DATE '9999-12-31')), 1)"
+    )
+    pre_anchor = f"r.close * an.c0 * {multiplier}" if have_factors else "NULL"
+    no_l2 = f"r.close * {multiplier}" if have_factors else "r.close"
+    return (
+        f"CASE WHEN a.adj_close IS NOT NULL THEN a.adj_close "
+        f"WHEN an.d0 IS NULL THEN {no_l2} "
+        f"WHEN r.trade_date < an.d0 THEN {pre_anchor} "
+        f"ELSE NULL END"
+    )
+
+
 class _SwingFeatures:
     """One bulk pass over L1 (+ the L2 overlay) that materializes every swing feature, PIT-safe.
 
@@ -4397,14 +4494,33 @@ class _SwingFeatures:
     ``deliv_pct`` is populated on 65 % of 2016 prints rising to 86 % by 2026, and a name with no
     delivery print on a session contributes nothing to its own mean. A name with no delivery data
     at all in the window scores at the universe's median rather than being dropped, so the
-    candidate set does not silently change with the coverage — ``delivery_imputed`` counts it.
+    candidate set does not silently change with the coverage — ``delivery_imputed`` counts it, and
+    each record says whether its delivery legs were measured (``delivery_observed``,
+    ``delivery_trend_observed``) so the policy can refuse to rank on a leg the lake barely covers
+    (X2: before 2016-09-02 it covers nothing, and every name's stand-in was the same 0.0).
     """
 
-    def __init__(self, *, data_root: Path | None = None, adjusted: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        data_root: Path | None = None,
+        adjusted: bool = True,
+        split_factors: Sequence[ShareRescale] | None = None,
+    ) -> None:
         self._con = open_connection()
         register_raw_view(self._con, view="l1_swing_raw", data_root=data_root)
+        self._have_factors = False
         if adjusted:
             register_adjusted_view(self._con, view="l2_swing_adj", data_root=data_root)
+            self._have_factors = _register_split_factors(
+                self._con, "swing_split_factors", split_factors
+            )
+            _LOG.info(
+                "backtest.swing_seam",
+                seam=_L2_SEAM.isoformat(),
+                mode="adjusted_on_the_fly" if self._have_factors else "pre_seam_excluded",
+                split_factors=0 if split_factors is None else len(split_factors),
+            )
         self._adjusted = adjusted
         self._by_date: dict[date, tuple[SwingRecord, ...]] = {}
         self._imputed = 0
@@ -4426,10 +4542,21 @@ class _SwingFeatures:
         dates = [session for session in dates if session not in self._by_date]
         if not dates:
             return
-        px = "COALESCE(a.adj_close, r.close)" if self._adjusted else "r.close"
+        px = (
+            _seam_consistent_px(factors="swing_split_factors", have_factors=self._have_factors)
+            if self._adjusted
+            else "r.close"
+        )
         join = (
             "LEFT JOIN l2_swing_adj a ON a.isin = r.isin AND a.trade_date = r.trade_date "
-            "AND a.exchange = 'NSE'"
+            "AND a.exchange = 'NSE' LEFT JOIN l2_swing_anchor an ON an.isin = r.isin"
+            if self._adjusted
+            else ""
+        )
+        anchor_cte = (
+            "l2_swing_anchor AS (SELECT isin, min(trade_date) AS d0, "
+            "arg_min(cum_price_factor, trade_date) AS c0 FROM l2_swing_adj "
+            "WHERE exchange = 'NSE' GROUP BY isin),"
             if self._adjusted
             else ""
         )
@@ -4440,7 +4567,7 @@ class _SwingFeatures:
         # input type, and each is then quantised to 8 dp. That is deterministic and a ranking
         # never compares two names closer than 1e-8 apart, so no rupee depends on a float.
         sql = f"""
-        WITH base AS (
+        WITH {anchor_cte} base AS (
             SELECT r.isin, r.trade_date,
                    {px} AS px,
                    r.close AS raw_close,
@@ -4517,6 +4644,7 @@ class _SwingFeatures:
                     row[5],
                     row[6],
                 )
+                delivery_observed = delivery is not None
                 if delivery is None:
                     delivery = fallback
                     self._imputed += 1
@@ -4538,6 +4666,9 @@ class _SwingFeatures:
                         delivery_trend=_swing_leg(row[10], _ONE),
                         turnover_expansion=_swing_leg(row[11], _ONE),
                         ma_proximity=_swing_leg(row[12], _ONE),
+                        # X2. The policy gates a delivery leg on how many of these are True.
+                        delivery_observed=delivery_observed,
+                        delivery_trend_observed=row[10] is not None,
                     )
                 )
             self._by_date[session] = tuple(records)
@@ -4610,7 +4741,7 @@ class _L1SwingData:
         )
 
     def regime(self, as_of: date) -> Dataset[RegimeReading]:
-        """The same broad-market proxy reading momentum v2's gate reads (M12.1)."""
+        """The same published NIFTY 50 reading momentum v2's gate reads (M12.1, X2)."""
         reading = self._regime_source.reading(as_of)
         return Dataset.declaring(
             f"swing_regime@{as_of.isoformat()}",
@@ -4695,7 +4826,11 @@ def open_swing_lake(
     knows the union of its arms' decision dates and loads them itself. The caller owns ``close``.
     """
     reader = _L1Reader(data_root=data_root)
-    features = _SwingFeatures(data_root=data_root, adjusted=adjusted)
+    # X2: the pre-seam split factors come from the CLI's store context (signal_split_factors);
+    # with none in force, a pre-seam window is excluded rather than straddled on mixed bases.
+    features = _SwingFeatures(
+        data_root=data_root, adjusted=adjusted, split_factors=current_signal_split_factors()
+    )
     try:
         sessions = reader.trading_sessions(start, end)
         if not sessions:
@@ -4707,12 +4842,10 @@ def open_swing_lake(
             features=features,
             sessions=tuple(sessions),
             calendar=tuple(calendar),
-            regime_source=_RegimeSource(
-                reader,
-                calendar,
-                first_session=sessions[0],
-                size=_BENCHMARK_BASKET,
+            regime_source=_RegimeSource.published(
+                through=sessions[-1],
                 ma_days=_REGIME_MA_DAYS,
+                data_root=data_root,
             ),
             universe_filters={
                 floor: _InvestableUniverse(

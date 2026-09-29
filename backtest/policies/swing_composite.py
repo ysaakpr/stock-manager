@@ -62,11 +62,20 @@ its neutral value (0 for a return, 1 for a ratio) rather than dropping the name 
 must not move with the weight vector, or an arm-to-arm comparison becomes a universe comparison.
 
 M12.1 also added the ``regime_filter`` gate momentum v2 has carried since M9.5 and this policy did
-not: no new buys while the broad-market proxy sits below its own 200-session mean. It suppresses
+not: no new buys while the published NIFTY 50 sits below its own 200-session mean. It suppresses
 *buys only*. Every exit is staged before the gate is consulted, because risk-off must never trap a
 position the band, the re-underwrite or the stop has already decided to sell — the book runs down
 through its own exits rather than being liquidated on the gate. A session with no regime reading at
 all is treated as risk-**off**: an absent regime is not a licence to buy.
+
+X2 closed two ways the composite could rank on noise. A delivery-derived leg contributes only on a
+session where at least :data:`DELIVERY_COVERAGE_THRESHOLD` (80 %) of the candidates carry a real
+delivery print; below it the leg is dropped and the composite is struck over the remaining legs.
+Before 2016-09-02 the lake has no delivery at all, every name's stand-in was the same 0.0, and the
+ISIN tie-break chose the basket. And tied values now share their mean rank instead of being ranked
+in ISIN order. A session on which *no* weighted leg survives the gate is not ranked at all — no
+band or re-underwrite sell, no buy — because a zero-information composite ordered by ISIN is not a
+decision.
 
 Point-in-time (invariant #7): every figure on a record — the 252-session high, the delivery mean,
 the 12-1 return, the volatility, every M12.1 leg — is struck over sessions on or before the record's
@@ -108,23 +117,43 @@ from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
 from backtest.policies.momentum_v2 import RegimeReading
 from backtest.replay import SessionContext, SessionDecision
-from backtest.sip import simulate_sip_instalment
+from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, Holding, OrderRequest, Side
 
 __all__ = [
+    "DELIVERY_COVERAGE_THRESHOLD",
     "RegimeReading",
     "SwingCompositeData",
     "SwingCompositeParameters",
     "SwingCompositePolicy",
     "SwingRecord",
+    "active_legs",
     "composite_scores",
+    "delivery_coverage",
 ]
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
 _TWO = Decimal("2")
 _WEIGHT_QUANTUM = Decimal("0.00000001")
+
+#: The share of a session's scored candidates that must carry a real NSE delivery print before a
+#: delivery-derived leg (``delivery_share``, ``delivery_trend``) contributes to the composite (X2).
+#: Below it the leg is dropped for that session and the composite is struck over the remaining
+#: weighted legs — never scored off imputed values. Fixed a priori at 80 %: at most one candidate in
+#: five may be carrying the median stand-in, so the leg ranks the cross-section on what was measured
+#: It was not tuned against returns. It does bite on real data, and a reader must know where: before
+#: 2016-09-02 the lake has no delivery prints at all (0 %, the ISIN-ordered noise this gate exists
+#: to stop), and on the liquid universe after it coverage runs ~72 % in 2016 rising past 80 % around
+#: 2019-2020 and ~92 % by 2026 — so the delivery legs switch on part-way through a decade window.
+DELIVERY_COVERAGE_THRESHOLD = Decimal("0.80")
+
+#: Each delivery-derived leg and the record flag that says its value was measured, not imputed.
+_DELIVERY_LEGS: dict[str, str] = {
+    "delivery_share": "delivery_observed",
+    "delivery_trend": "delivery_trend_observed",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +188,9 @@ class SwingRecord:
       tape is getting busier in this name.
     * ``ma_proximity`` — the close over its own 50-session mean.
 
+    ``delivery_observed`` / ``delivery_trend_observed`` (X2) mark whether the two delivery legs were
+    measured or imputed; :func:`composite_scores` reads them to gate a delivery leg on coverage.
+
     Never holds a ``float``, a non-positive price, or a non-positive high proximity.
     """
 
@@ -176,6 +208,11 @@ class SwingRecord:
     delivery_trend: Decimal = _ONE
     turnover_expansion: Decimal = _ONE
     ma_proximity: Decimal = _ONE
+    # X2. Whether ``delivery_share`` / ``delivery_trend`` came from real prints in the window, or
+    # are the stand-ins (the session median; the neutral 1) the lake could not measure. True by
+    # default, so a record built without the flags is read as measured.
+    delivery_observed: bool = True
+    delivery_trend_observed: bool = True
 
     def __post_init__(self) -> None:
         for name in (
@@ -354,24 +391,9 @@ class SwingCompositeData(Protocol):
         """
 
 
-def composite_scores(
-    records: Sequence[SwingRecord], params: SwingCompositeParameters
-) -> dict[str, Decimal]:
-    """Rank-normalise each component across ``records`` and return the weighted composite per ISIN.
-
-    Each component is converted to its cross-sectional rank scaled onto ``[-1, +1]``
-    (``2 * rank / (n + 1) - 1``) rather than a z-score, because every one of these signals has fat
-    tails — a name at a 400 % trailing return would otherwise dominate a z-scored basket. Ranks are
-    struck with ties broken by ISIN, so the result is deterministic and a replay reproduces it.
-
-    Assumes ``records`` is the already-screened candidate set. Never reads a clock or a store.
-    """
-    n = len(records)
-    if n == 0:
-        return {}
-    scale = Decimal(n + 1)
-    scores: dict[str, Decimal] = dict.fromkeys((r.isin for r in records), _ZERO)
-    for attribute, weight in (
+def _weighted_legs(params: SwingCompositeParameters) -> tuple[tuple[str, Decimal], ...]:
+    """Every leg with a non-zero weight, in a fixed order."""
+    legs = (
         ("high_proximity", params.weight_high),
         ("delivery_share", params.weight_delivery),
         ("momentum_12_1", params.weight_momentum),
@@ -381,12 +403,79 @@ def composite_scores(
         ("turnover_expansion", params.weight_turnover_expansion),
         ("ma_proximity", params.weight_ma_proximity),
         ("volatility", params.weight_volatility),
-    ):
-        if weight == _ZERO:
-            continue
-        order = sorted(records, key=lambda r: (getattr(r, attribute), r.isin))
-        for rank, record in enumerate(order, start=1):
-            scores[record.isin] += weight * (_TWO * Decimal(rank) / scale - _ONE)
+    )
+    return tuple((attribute, weight) for attribute, weight in legs if weight != _ZERO)
+
+
+def delivery_coverage(records: Sequence[SwingRecord], attribute: str) -> Decimal:
+    """The share of ``records`` whose delivery-derived ``attribute`` was measured (X2).
+
+    Zero for an empty set. Assumes ``attribute`` is one of the delivery legs.
+    """
+    if not records:
+        return _ZERO
+    flag = _DELIVERY_LEGS[attribute]
+    observed = sum(1 for record in records if getattr(record, flag))
+    return Decimal(observed) / Decimal(len(records))
+
+
+def active_legs(
+    records: Sequence[SwingRecord], params: SwingCompositeParameters
+) -> tuple[tuple[str, Decimal], ...]:
+    """The weighted legs that contribute this session: a delivery leg only at sufficient coverage.
+
+    A delivery-derived leg whose coverage over ``records`` is below
+    :data:`DELIVERY_COVERAGE_THRESHOLD` is left out, so the composite is struck over the rest. An
+    empty result means no leg can rank the candidates at all — the caller must not rank them
+    (ordering by ISIN is what a zero-information composite would otherwise collapse to).
+    """
+    return tuple(
+        (attribute, weight)
+        for attribute, weight in _weighted_legs(params)
+        if attribute not in _DELIVERY_LEGS
+        or delivery_coverage(records, attribute) >= DELIVERY_COVERAGE_THRESHOLD
+    )
+
+
+def composite_scores(
+    records: Sequence[SwingRecord], params: SwingCompositeParameters
+) -> dict[str, Decimal]:
+    """Rank-normalise each active leg across ``records`` and return the weighted composite per ISIN.
+
+    Each component is converted to its cross-sectional rank scaled onto ``[-1, +1]``
+    (``2 * rank / (n + 1) - 1``) rather than a z-score, because every one of these signals has fat
+    tails — a name at a 400 % trailing return would otherwise dominate a z-scored basket. **Tied
+    values share their mean rank** (X2): before, ties were broken by ISIN, which handed a block of
+    imputed or neutral-filled values — a 28 % median-imputed delivery block, every unmeasurable
+    ``return_5`` at 0 — a spread of ranks in ISIN order, noise that looked like signal. A tie now
+    scores identically, and a leg on which every name ties adds the same constant to every score.
+
+    Only :func:`active_legs` contribute: a delivery leg below the coverage threshold is dropped and
+    the composite reweights over the remaining legs. Returns ``{}`` when no leg is active, so no
+    caller can mistake a zero-information composite for a ranking.
+
+    Assumes ``records`` is the already-screened candidate set. Never reads a clock or a store.
+    """
+    n = len(records)
+    legs = active_legs(records, params)
+    if n == 0 or not legs:
+        return {}
+    scale = Decimal(n + 1)
+    scores: dict[str, Decimal] = dict.fromkeys((r.isin for r in records), _ZERO)
+    for attribute, weight in legs:
+        order = sorted(records, key=lambda r: getattr(r, attribute))
+        start = 0
+        while start < n:
+            value = getattr(order[start], attribute)
+            end = start
+            while end + 1 < n and getattr(order[end + 1], attribute) == value:
+                end += 1
+            # 1-based ranks start+1 .. end+1 share their mean.
+            rank = Decimal(start + end + 2) / _TWO
+            leg_score = weight * (_TWO * rank / scale - _ONE)
+            for record in order[start : end + 1]:
+                scores[record.isin] += leg_score
+            start = end + 1
     return scores
 
 
@@ -622,6 +711,11 @@ class SwingCompositePolicy:
     ) -> SessionDecision:
         """Score the universe, apply the three exit rules, then size buys toward the target set."""
         candidates = tuple(ctx.pit.admit(self._data.signal(ctx.session)))
+        if candidates and not active_legs(candidates, self._params):
+            # X2. Every weighted leg is delivery-derived and delivery is too thin to rank on. No
+            # ranking is struck — so no band or re-underwrite sell (they read ranks) and no buy.
+            # Ordering by ISIN is what this session would otherwise have traded on.
+            return self._session_decision(ctx, stopped, note=self._unscoreable_note(candidates))
         # Score the *whole* candidate set, so a holding is ranked among everything that is
         # scoreable. The volatility screen then narrows only what may be *bought*: screening before
         # scoring would leave a holding that turned volatile unranked, and the exit rules would read
@@ -652,6 +746,18 @@ class SwingCompositePolicy:
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
         evidence = self._evidence(ctx.session, chosen, scores, by_isin, drift, len(candidates))
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
+
+    def _unscoreable_note(self, candidates: Sequence[SwingRecord]) -> str:
+        coverage = ", ".join(
+            f"{attribute} {delivery_coverage(candidates, attribute):.1%}"
+            for attribute, _ in _weighted_legs(self._params)
+            if attribute in _DELIVERY_LEGS
+        )
+        return (
+            f"rebalance not ranked: every weighted leg is delivery-derived and delivery coverage "
+            f"of the {len(candidates)} candidates ({coverage}) is below "
+            f"{DELIVERY_COVERAGE_THRESHOLD:.0%}"
+        )
 
     def _risk_on(self, ctx: SessionContext) -> bool:
         """Whether the broad market sits at or above its own trailing mean (M12.1).
@@ -737,7 +843,11 @@ class SwingCompositePolicy:
             isin: Decimal(held[isin].quantity) * prices[isin] for isin in target if isin in held
         }
         allocation = simulate_sip_instalment(
-            instalment=budget, targets=weights, prices=prices, existing_value=existing_value
+            instalment=budget,
+            targets=weights,
+            prices=prices,
+            existing_value=existing_value,
+            min_order_value=MIN_ORDER_VALUE_INR,
         )
         buys = [
             (
@@ -823,10 +933,27 @@ class SwingCompositePolicy:
                 label="tracking_drift",
                 as_of=session,
                 value=tracking_drift,
-                text=f"equal-weight top-{self._params.top_n} of {universe_size} scored candidates",
+                text=f"equal-weight top-{self._params.top_n} of {universe_size} scored candidates"
+                + self._gated_note(by_isin),
             )
         )
         return EvidenceBundle(trading_date=session, actor=Actor.T0, items=tuple(items))
+
+    def _gated_note(self, by_isin: Mapping[str, SwingRecord]) -> str:
+        """Which weighted delivery legs the coverage gate dropped this session, for the journal."""
+        records = tuple(by_isin.values())
+        active = {attribute for attribute, _ in active_legs(records, self._params)}
+        gated = [
+            f"{attribute} ({delivery_coverage(records, attribute):.1%} covered)"
+            for attribute, _ in _weighted_legs(self._params)
+            if attribute in _DELIVERY_LEGS and attribute not in active
+        ]
+        if not gated:
+            return ""
+        return (
+            f"; below the {DELIVERY_COVERAGE_THRESHOLD:.0%} delivery-coverage floor, not scored: "
+            + ", ".join(gated)
+        )
 
 
 def _equal_weights(isins: Sequence[str]) -> dict[str, Decimal]:

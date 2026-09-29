@@ -56,7 +56,11 @@ from pathlib import Path
 from typing import Any, Final
 
 from backtest.accounting import PortfolioBook
-from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
+from backtest.book_actions import (
+    add_book_actions_flag,
+    current_signal_split_factors,
+    store_book_actions_unless,
+)
 from backtest.forecast import (
     FEATURE_NAMES,
     LOOKBACK_1M,
@@ -80,7 +84,6 @@ from backtest.rails import RailGate, ratified_backtest_rail_policy
 from backtest.replay import ReplayEngine
 from backtest.run import (
     _ACCOUNT_STATE,
-    _BENCHMARK_BASKET,
     _BENCHMARK_TRI_SLUG,
     _DEFAULT_OPENING_CASH,
     _REGIME_MA_DAYS,
@@ -97,9 +100,11 @@ from backtest.run import (
     _max_drawdown,
     _pct,
     _RegimeSource,
+    _register_split_factors,
     _reserve_fill_headroom,
     _resolve_benchmark,
     _rupees,
+    _seam_consistent_px,
     _terminal_prices,
     _trades,
     backtest_spec,
@@ -172,15 +177,23 @@ class _FeatureCursor:
     ) -> None:
         self._con = open_connection()
         register_raw_view(self._con, view="l1_fc_raw", data_root=data_root)
+        have_factors = False
         if adjusted:
             register_adjusted_view(self._con, view="l2_fc_adj", data_root=data_root)
+            # X2: the same one-basis rule across the 2016-09-02 L2 seam the swing features use.
+            have_factors = _register_split_factors(
+                self._con, "fc_split_factors", current_signal_split_factors()
+            )
         self._buffer: list[tuple[Any, ...]] = []
         self._offset = 0
         self._exhausted = False
         self._last_taken: date | None = None
         scan_from = start - timedelta(days=_HISTORY_DAYS)
         started = time.perf_counter()
-        self._con.execute(self._sql(horizon, adjusted=adjusted), [scan_from, end, start, end])
+        self._con.execute(
+            self._sql(horizon, adjusted=adjusted, have_factors=have_factors),
+            [scan_from, end, start, end],
+        )
         _LOG.info(
             "forecast.features_queried",
             scan_from=scan_from.isoformat(),
@@ -191,11 +204,22 @@ class _FeatureCursor:
         )
 
     @staticmethod
-    def _sql(horizon: int, *, adjusted: bool) -> str:
-        px = "COALESCE(a.adj_close, r.close)" if adjusted else "r.close"
+    def _sql(horizon: int, *, adjusted: bool, have_factors: bool = False) -> str:
+        px = (
+            _seam_consistent_px(factors="fc_split_factors", have_factors=have_factors)
+            if adjusted
+            else "r.close"
+        )
         join = (
             "LEFT JOIN l2_fc_adj a ON a.isin = r.isin AND a.trade_date = r.trade_date "
-            "AND a.exchange = 'NSE'"
+            "AND a.exchange = 'NSE' LEFT JOIN l2_fc_anchor an ON an.isin = r.isin"
+            if adjusted
+            else ""
+        )
+        anchor_cte = (
+            "l2_fc_anchor AS (SELECT isin, min(trade_date) AS d0, "
+            "arg_min(cum_price_factor, trade_date) AS c0 FROM l2_fc_adj "
+            "WHERE exchange = 'NSE' GROUP BY isin),"
             if adjusted
             else ""
         )
@@ -205,7 +229,7 @@ class _FeatureCursor:
         # stdev) and are evaluated in DOUBLE by DuckDB regardless of input type — they feed a
         # least-squares fit, never a rupee.
         return f"""
-        WITH base AS (
+        WITH {anchor_cte} base AS (
             SELECT r.isin, r.trade_date,
                    {px} AS px,
                    r.close AS raw_close,
@@ -560,12 +584,10 @@ def run_forecast_daily(
         sessions = _reserve_fill_headroom(sessions, calendar)
         first_session, terminal = sessions[0], sessions[-1]
 
-        regime = _RegimeSource(
-            reader,
-            calendar,
-            first_session=first_session,
-            size=_BENCHMARK_BASKET,
+        regime = _RegimeSource.published(
+            through=sessions[-1],
             ma_days=_REGIME_MA_DAYS,
+            data_root=data_root,
         )
         cursor = _FeatureCursor(
             horizon=params.horizon,
