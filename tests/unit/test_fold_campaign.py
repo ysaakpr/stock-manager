@@ -1,0 +1,370 @@
+"""X2 — the round-2 fold campaign: baseline first and frozen, H-arms only against the freeze.
+
+* ``baseline-folds`` runs exactly the two baseline arms, on the three test and three selection
+  windows, at the ₹10 crore floor only, persisting summary + ledger + NAV per run; it resumes with
+  zero replays and two directories get byte-identical NAV files;
+* the frozen record names every run's digest and file hashes, is never rewritten, and is not
+  written from a partial campaign;
+* ``round2-signals`` refuses to start with no frozen record, a record from another lake, a baseline
+  digest the current code no longer gives (a changed baseline arm), or a file changed since the
+  freeze — and refuses a baseline arm, an unknown arm or a missing trial count as input;
+* end to end, it renders §4's PASS/FAIL per criterion against the named baseline.
+
+Offline: the lake and the replay are stubbed at the sweep's two seams (``open_swing_lake`` and
+``_run_arm``), as in ``test_campaign``.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from dataclasses import dataclass, field, replace
+from datetime import date, timedelta
+from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+
+import backtest.fold_campaign as fc
+import backtest.sweep as sweep_module
+from backtest.folds import load_folds
+from backtest.nav import nav_file
+from backtest.policies.swing_composite import SwingCompositeParameters
+from backtest.run import UniverseParameters
+from backtest.run_ledger import RunSummary, persist_run, run_digest
+from backtest.sweep import HIGH_FLOOR, Arm, _arm_spec
+from backtest.tax import MappingGrandfatheringPrices, RunLedger, TaxTrade
+from backtest.xirr import Cashflow
+from execution.broker import Side
+
+_ISIN = "INE001A01036"
+_CASH = Decimal("1000000")
+_FOLDS = load_folds()
+_PINNED = fc.Pinned(commit="a" * 40, data_root="/lake", lake_last_session=date(2026, 9, 25))
+_FMV = MappingGrandfatheringPrices({})
+_H_ARM = "Short composite"  # a stand-in H-arm: any non-baseline sweep arm drives the same path
+
+#: Per-arm drift of the stub NAV, so the arms' Sharpe ratios differ.
+_DRIFT = {"Swing composite (M10.7)": 1, "M10.7 + regime gate": 2, _H_ARM: 9}
+
+
+class _FakeLake:
+    def __init__(self, start: date, end: date) -> None:
+        self.sessions = (start, end)
+        self.first_session, self.terminal = start, end
+        self.features = SimpleNamespace(load=lambda dates: None)
+
+    def close(self) -> None:
+        pass
+
+
+@dataclass
+class _Counters:
+    lakes: int = 0
+    backtests: list[tuple[str, Decimal, date, date]] = field(default_factory=list)
+
+
+def _nav(label: str, start: date) -> tuple[tuple[date, Decimal], ...]:
+    drift = _DRIFT[label]
+    return tuple(
+        (start + timedelta(days=i), _CASH + Decimal(drift * 100 * i + (i % 3) * 700))
+        for i in range(40)
+    )
+
+
+def _ledger(label: str, start: date, end: date) -> RunLedger:
+    return RunLedger(
+        source="stub",
+        trades=(
+            TaxTrade(
+                isin=_ISIN,
+                trade_date=start,
+                side=Side.BUY,
+                quantity=1000,
+                net_amount=Decimal("500000"),
+                stt=Decimal(500),
+                stt_known=True,
+            ),
+        ),
+        external_flows=(Cashflow(start, -_CASH),),
+        terminal_date=end,
+        terminal_nav=_CASH + Decimal(_DRIFT[label] * 20000),
+        terminal_prices={_ISIN: Decimal("600")},
+    )
+
+
+@pytest.fixture
+def stubbed(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Counters]:
+    counters = _Counters()
+
+    def open_lake(**kwargs: Any) -> _FakeLake:
+        counters.lakes += 1
+        return _FakeLake(kwargs["start"], kwargs["end"])
+
+    def run_arm(
+        arm: Arm,
+        *,
+        start: date,
+        end: date,
+        universe: UniverseParameters,
+        opening_cash: Decimal,
+        data_root: Path | None,
+        adjusted: bool,
+        lake: object,
+    ) -> Any:
+        counters.backtests.append((arm.label, universe.median_turnover_floor, start, end))
+        spec = _arm_spec(
+            arm,
+            start=start,
+            end=end,
+            universe=universe,
+            opening_cash=opening_cash,
+            adjusted=adjusted,
+        )
+        digest = run_digest(spec)
+        ledger = _ledger(arm.label, start, end)
+        persist_run(
+            spec,
+            ledger,
+            RunSummary(
+                digest=digest,
+                spec=spec,
+                policy="stub",
+                start=start,
+                terminal=end,
+                sessions=40,
+                xirr=Decimal("0.1"),
+                max_drawdown=Decimal("0.2"),
+                excess=Decimal("0"),
+                benchmark_xirr=Decimal("0.1"),
+                benchmark_name="stub",
+                total_charges=Decimal("0"),
+                final_nav=ledger.terminal_nav,
+                round_trips=0,
+                median_hold_days=0,
+                replay_digest="0" * 64,
+            ),
+            nav=_nav(arm.label, start),
+        )
+        return SimpleNamespace(
+            result=SimpleNamespace(journal=()),
+            comparison=SimpleNamespace(
+                portfolio_xirr=Decimal("0.1"),
+                benchmark_xirr=Decimal("0.1"),
+                excess_over_benchmark=Decimal("0"),
+            ),
+            max_drawdown=Decimal("0.2"),
+            total_charges=Decimal("0"),
+            benchmark_index_name="stub",
+            digest=digest,
+            ledger=ledger,
+        )
+
+    monkeypatch.setattr(sweep_module, "open_swing_lake", open_lake)
+    monkeypatch.setattr(sweep_module, "_run_arm", run_arm)
+    yield counters
+
+
+def _baseline(out: Path) -> fc.FoldRunPlan:
+    return fc.baseline_plan(out, _FOLDS, data_root=None, book_actions=False)
+
+
+def _frozen(out: Path) -> fc.FoldRunPlan:
+    plan = _baseline(out)
+    fc.run_fold_units(plan, workers=1)
+    fc.freeze_baseline(plan, _PINNED, None)
+    return plan
+
+
+# ── baseline-folds ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_baseline_folds_runs_only_the_two_baselines_on_every_fold_window(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    fc.run_fold_units(_baseline(tmp_path), workers=1)
+    assert {label for label, *_ in stubbed.backtests} == set(fc.BASELINE_LABELS)
+    assert {floor for _, floor, *_ in stubbed.backtests} == {HIGH_FLOOR}
+    windows = {(start, end) for *_, start, end in stubbed.backtests}
+    expected = {(f.test.start, f.test.end) for f in _FOLDS.folds}
+    expected |= {(f.selection.start, f.selection.end) for f in _FOLDS.folds}
+    assert windows == expected
+    assert len(stubbed.backtests) == 12
+    assert len(list((tmp_path / "navs").glob("*.json"))) == 12
+
+
+def test_baseline_folds_resumes_with_zero_replays(tmp_path: Path, stubbed: _Counters) -> None:
+    fc.run_fold_units(_baseline(tmp_path), workers=1)
+    stubbed.backtests.clear()
+    stubbed.lakes = 0
+    outcomes = fc.run_fold_units(_baseline(tmp_path), workers=1)
+    assert stubbed.backtests == [] and stubbed.lakes == 0
+    assert sum(o.resumed for o in outcomes) == 12
+
+
+def test_two_directories_get_byte_identical_nav_files(tmp_path: Path, stubbed: _Counters) -> None:
+    one, two = tmp_path / "one", tmp_path / "two"
+    for out in (one, two):
+        fc.run_fold_units(_baseline(out), workers=1)
+    names = sorted(p.name for p in (one / "navs").glob("*.json"))
+    assert names and all(
+        (one / "navs" / n).read_bytes() == (two / "navs" / n).read_bytes() for n in names
+    )
+
+
+def test_the_frozen_record_names_every_run_and_its_hashes(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    _frozen(tmp_path)
+    record = json.loads((tmp_path / fc.FROZEN_NAME).read_text(encoding="utf-8"))
+    assert record["arms"] == list(fc.BASELINE_LABELS)
+    assert record["floor"] == str(HIGH_FLOOR)
+    assert record["commit"] == "a" * 40
+    assert len(record["runs"]) == 12
+    assert {(r["fold"], r["role"]) for r in record["runs"]} == {
+        (f, role) for f in ("F1", "F2", "F3") for role in ("test", "selection")
+    }
+    assert all(
+        len(r[k]) == 64
+        for r in record["runs"]
+        for k in ("digest", "summary_sha256", "ledger_sha256", "nav_sha256")
+    )
+
+
+def test_a_partial_campaign_is_not_frozen(tmp_path: Path, stubbed: _Counters) -> None:
+    plan = _baseline(tmp_path)
+    fc.run_fold_units(plan, workers=1)
+    next((tmp_path / "navs").glob("*.json")).unlink()
+    with pytest.raises(fc.FoldCampaignError, match="incomplete"):
+        fc.freeze_baseline(plan, _PINNED, None)
+    assert not (tmp_path / fc.FROZEN_NAME).exists()
+
+
+def test_a_frozen_record_is_never_rewritten(tmp_path: Path, stubbed: _Counters) -> None:
+    plan = _frozen(tmp_path)
+    fc.freeze_baseline(plan, _PINNED, None)  # the identical record: left as it is
+    with pytest.raises(fc.FoldCampaignError, match="never rewritten"):
+        fc.freeze_baseline(plan, replace(_PINNED, commit="b" * 40), None)
+
+
+# ── round2-signals refuses a missing or stale freeze ───────────────────────────────────────────
+
+
+def _verify(baseline_dir: Path, pinned: fc.Pinned = _PINNED) -> dict[str, Any]:
+    return fc.verify_frozen(baseline_dir, pinned, _FOLDS, None, book_actions=False)
+
+
+def test_round2_refuses_without_a_frozen_baseline(tmp_path: Path) -> None:
+    with pytest.raises(fc.FoldCampaignError, match="no frozen baseline"):
+        _verify(tmp_path)
+
+
+def test_round2_accepts_a_matching_freeze_at_a_later_commit(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    _frozen(tmp_path)
+    assert len(_verify(tmp_path, replace(_PINNED, commit="c" * 40))["runs"]) == 12
+
+
+def test_round2_refuses_a_freeze_from_another_lake(tmp_path: Path, stubbed: _Counters) -> None:
+    _frozen(tmp_path)
+    with pytest.raises(fc.FoldCampaignError, match="lake_last_session"):
+        _verify(tmp_path, replace(_PINNED, lake_last_session=date(2026, 10, 30)))
+
+
+def test_round2_refuses_when_the_baseline_arm_changed_in_code(
+    tmp_path: Path, stubbed: _Counters, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _frozen(tmp_path)
+    changed = tuple(
+        replace(arm, swing=SwingCompositeParameters(top_n=arm.swing.top_n + 1))
+        if arm.label == fc.BASELINE_LABELS[0] and arm.swing is not None
+        else arm
+        for arm in sweep_module.ARMS
+    )
+    monkeypatch.setattr(fc, "ARMS", changed)
+    with pytest.raises(fc.FoldCampaignError, match="does not match the current code"):
+        _verify(tmp_path)
+
+
+def test_round2_refuses_a_file_changed_since_the_freeze(tmp_path: Path, stubbed: _Counters) -> None:
+    _frozen(tmp_path)
+    victim = next((tmp_path / "navs").glob("*.json"))
+    victim.write_text(victim.read_text(encoding="utf-8") + " ", encoding="utf-8")
+    with pytest.raises(fc.FoldCampaignError, match="changed since the freeze"):
+        _verify(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("labels", "match"),
+    [
+        ([fc.BASELINE_LABELS[1]], "frozen baseline arm"),
+        (["No such arm"], "no sweep arm"),
+        ([], "at least one"),
+        ([_H_ARM, _H_ARM], "twice"),
+    ],
+)
+def test_round2_refuses_bad_arm_lists(tmp_path: Path, labels: list[str], match: str) -> None:
+    with pytest.raises(fc.FoldCampaignError, match=match):
+        fc.round2_plan(tmp_path, _FOLDS, labels, data_root=None, book_actions=False)
+
+
+def test_round2_runs_test_windows_only(tmp_path: Path) -> None:
+    plan = fc.round2_plan(tmp_path, _FOLDS, [_H_ARM], data_root=None, book_actions=False)
+    assert [(w.fold, w.role) for w in plan.windows] == [
+        ("F1", "test"),
+        ("F2", "test"),
+        ("F3", "test"),
+    ]
+
+
+def test_the_trial_count_is_a_required_flag() -> None:
+    argv = ["round2-signals", "--baseline-dir", "b", "--out", "o", "--arms", _H_ARM]
+    argv += ["--baseline", fc.BASELINE_LABELS[0], "--workers", "1"]
+    with pytest.raises(SystemExit):
+        fc._parse_args(argv)
+    assert fc._parse_args([*argv, "--trials", "31"]).trials == 31
+
+
+# ── end to end ─────────────────────────────────────────────────────────────────────────────────
+
+
+def test_round2_renders_pass_or_fail_per_criterion_against_the_named_baseline(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    base_dir, h_dir = tmp_path / "base", tmp_path / "h"
+    _frozen(base_dir)
+    _verify(base_dir)
+    plan = fc.round2_plan(h_dir, _FOLDS, [_H_ARM], data_root=None, book_actions=False)
+    stubbed.backtests.clear()
+    fc.run_fold_units(plan, workers=1)
+    assert {label for label, *_ in stubbed.backtests} == {_H_ARM}
+    text = fc.render_round2(
+        plan, base_dir, _FOLDS, None, _FMV, baseline_label=fc.BASELINE_LABELS[0], trials=28
+    )
+    assert f"### {_H_ARM} vs {fc.BASELINE_LABELS[0]}:" in text
+    assert text.count("**PASS**") + text.count("**FAIL**") == 4
+    assert "Trial count for the deflation: **28**" in text
+    assert "₹10 crore/day" in text
+    # The after-tax NAV is written beside each H-arm run it was struck from.
+    assert len(list((h_dir / "navs").glob("*.after-tax.*.json"))) == 3
+    assert all(nav_file(h_dir, d).is_file() for d in fc._digests(plan, None).values())
+
+
+def test_round2_refuses_an_unnamed_baseline(tmp_path: Path, stubbed: _Counters) -> None:
+    base_dir = tmp_path / "base"
+    _frozen(base_dir)
+    plan = fc.round2_plan(tmp_path / "h", _FOLDS, [_H_ARM], data_root=None, book_actions=False)
+    with pytest.raises(fc.FoldCampaignError, match="frozen baseline arm"):
+        fc.render_round2(plan, base_dir, _FOLDS, None, _FMV, baseline_label=_H_ARM, trials=28)
+
+
+def test_the_baseline_report_renders_every_fold_and_role(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    plan = _frozen(tmp_path)
+    text = fc.render_baseline_report(plan, _FOLDS, None, _FMV)
+    rows = [line for line in text.splitlines() if line.startswith("| Swing") or "regime" in line]
+    assert sum(1 for line in rows if line.startswith("| ")) == 12
