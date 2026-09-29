@@ -53,7 +53,7 @@ from typing import Protocol, runtime_checkable
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
 from backtest.replay import SessionContext, SessionDecision
-from backtest.sip import simulate_sip_instalment
+from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, Holding, OrderRequest, Side
 
@@ -316,6 +316,7 @@ class SectorRotationPolicy:
             targets=weights,
             prices=prices,
             existing_value=existing_value,
+            min_order_value=MIN_ORDER_VALUE_INR,
         )
         buys = [
             (
