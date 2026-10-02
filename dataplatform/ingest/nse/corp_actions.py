@@ -315,21 +315,27 @@ def _resolve_isin(
     lineage resolves it to a survivor the master does know, the action is filed against the
     survivor and `filed_against` carries the retired ISIN for provenance. Without a lineage — or
     when the survivor is itself unknown — the row is still held back.
+
+    A retired ISIN the master *does* know goes the same way: the lineage rebuild registers a
+    chain's retired middle as DELISTED (BAJFINANCE's INE296A01024), and a stale snapshot can still
+    list a just-retired ISIN as ACTIVE. The factor chain and the L2 stitch read the survivor's
+    actions only, so an action left on the retired ISIN would never adjust anything. For such a
+    row the symbol may resolve to either ISIN of the pair; anything else is still a conflict.
     """
     isin, filed_against = native_isin, None
-    if native_isin not in master.securities:
-        if lineage is None:
-            return None
-        survivor = lineage.survivor_of(native_isin)
-        if survivor == native_isin or survivor not in master.securities:
+    survivor = native_isin if lineage is None else lineage.survivor_of(native_isin)
+    if survivor != native_isin:
+        if survivor not in master.securities:
             return None
         isin, filed_against = survivor, native_isin
+    elif native_isin not in master.securities:
+        return None
     try:
         resolved = master.try_resolve(symbol, ex_date, exchange=Exchange.NSE)
     except AmbiguousSymbolError:
         # The master has already queued the ambiguity; we simply do not file this row against it.
         return None
-    if resolved is not None and resolved != isin:
+    if resolved is not None and resolved not in (isin, native_isin):
         return None
     return isin, filed_against
 

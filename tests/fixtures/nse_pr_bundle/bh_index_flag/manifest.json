@@ -1,0 +1,119 @@
+{
+  "era": "bh_index_flag",
+  "session": "2010-08-11",
+  "archive_filename": "PR110810.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR110810.zip",
+  "why_this_era": "INDEX FLAG populated on some rows (CNX Nifty Junior)",
+  "reduced_from_l0": true,
+  "original_bytes": 314378,
+  "original_sha256": "5f44152943c7656abe099e2d2f18f69ed7c10ec6dc4625e9501d0516ad321805",
+  "original_members": [
+    {
+      "name": "cd11082010.doc",
+      "bytes": 49152
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 3092
+    },
+    {
+      "name": "help.txt",
+      "bytes": 3510
+    },
+    {
+      "name": "Rdm_help.txt",
+      "bytes": 705
+    },
+    {
+      "name": "nuver.txt",
+      "bytes": 2670
+    },
+    {
+      "name": "bh11082010.csv",
+      "bytes": 2396
+    },
+    {
+      "name": "rdm.doc",
+      "bytes": 33280
+    },
+    {
+      "name": "fo11082010.csv",
+      "bytes": 77052
+    },
+    {
+      "name": "op11082010.csv",
+      "bytes": 285585
+    },
+    {
+      "name": "etf110810.csv",
+      "bytes": 3766
+    },
+    {
+      "name": "Pd110810.csv",
+      "bytes": 252866
+    },
+    {
+      "name": "Pr110810.csv",
+      "bytes": 236201
+    },
+    {
+      "name": "Bc110810.csv",
+      "bytes": 63849
+    },
+    {
+      "name": "An110810.txt",
+      "bytes": 70461
+    },
+    {
+      "name": "Bm110810.txt",
+      "bytes": 5015
+    },
+    {
+      "name": "Tt110810.csv",
+      "bytes": 2209
+    },
+    {
+      "name": "ffix110810.csv",
+      "bytes": 42749
+    },
+    {
+      "name": "HL110810.csv",
+      "bytes": 1848
+    },
+    {
+      "name": "Ix110810.csv",
+      "bytes": 51715
+    },
+    {
+      "name": "NPD110810.txt",
+      "bytes": 3357
+    },
+    {
+      "name": "RPD110810.csv",
+      "bytes": 203
+    },
+    {
+      "name": "Rtt110810.csv",
+      "bytes": 55
+    },
+    {
+      "name": "Gl110810.csv",
+      "bytes": 6232
+    },
+    {
+      "name": "fo11082010.doc",
+      "bytes": 319488
+    },
+    {
+      "name": "cf11082010.csv",
+      "bytes": 1744
+    }
+  ],
+  "members_kept_in_fixture": [
+    "Readme.txt",
+    "bh11082010.csv"
+  ],
+  "bh_member": "bh11082010.csv",
+  "bh_member_bytes": 2396,
+  "bh_member_sha256": "5a18438991ef95aa6d8241fa9c2d855aa4b6af456d2fabe966ea3cd88587a6d7"
+}

@@ -87,6 +87,7 @@ __all__ = [
     "PRICES_ADJUSTED_SCHEMA",
     "AdjustedBar",
     "L2FillReport",
+    "L2TruncatedReport",
     "L2WriteReport",
     "RawBar",
     "build_adjusted_bars",
@@ -101,6 +102,7 @@ __all__ = [
     "read_adjusted",
     "read_raw_bars_from_l1",
     "rebuild_invalidated",
+    "rebuild_truncated",
     "register_adjusted_view",
     "register_raw_view",
     "wipe_adjusted",
@@ -217,6 +219,26 @@ class L2FillReport:
 
     candidates: int
     already_materialized: int
+    skipped_retired: int
+    written: tuple[L2WriteReport, ...]
+
+    @property
+    def rows_written(self) -> int:
+        return sum(r.rows_written for r in self.written)
+
+
+@dataclass(frozen=True, slots=True)
+class L2TruncatedReport:
+    """What one `rebuild_truncated` pass found and (unless a dry run) rebuilt.
+
+    `truncated` maps each ISIN whose partition starts after its L1 EQ history to
+    `(L2 first date, L1 first date)` — the evidence, kept whether or not anything was written.
+    `skipped_retired` counts the partitions on disk that belong to an ISIN a lineage edge retired:
+    never judged, never rebuilt (their history is the survivor's). `written` is empty on a dry run.
+    """
+
+    partitions: int
+    truncated: Mapping[str, tuple[date, date]]
     skipped_retired: int
     written: tuple[L2WriteReport, ...]
 
@@ -865,6 +887,107 @@ def materialize_missing(
         written=len(report.written),
         rows=report.rows_written,
         state="PUBLISHED",
+    )
+    return report
+
+
+def rebuild_truncated(
+    conn: Connection,
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    data_root: Path | None = None,
+    history_for: Mapping[str, Sequence[str]] | None = None,
+    survivor_of: Callable[[str], str] | None = None,
+    dry_run: bool = False,
+) -> L2TruncatedReport:
+    """Rebuild every L2 partition whose adjusted series starts later than the L1 history under it.
+
+    Why this exists: L1 grew *backwards* (W1 put 2011-06-22 → 2016-09-01 prices into `prices_raw`)
+    and neither door that writes L2 notices. `rebuild_invalidated` builds what a corporate-action
+    recompute flagged, and `materialize_missing` builds only ISINs with no partition — so every
+    existing partition kept starting at 2016-09-02 over an L1 that reaches five years further.
+
+    What it does: one columnar pass each over L1 (first EQ date per ISIN) and L2 (first date per
+    partition); a partition is truncated when the earliest EQ bar of any ISIN in its lineage chain
+    (`history_for`, oldest-first; the ISIN alone otherwise) predates the partition's first row.
+    Each truncated ISIN is rebuilt through `materialize_isin` from L1 + its persisted factor chain
+    — the same unit, the same bytes a fresh build would write. Idempotent: after one pass nothing
+    is truncated, so a second pass writes nothing. A partition whose ISIN a lineage edge retired
+    (`survivor_of(isin) != isin`) is skipped and counted, as `materialize_missing` skips it: its
+    chain is only itself, so extending it would duplicate the pre-reissue history the survivor's
+    stitched partition already carries — one company twice to any direct L2 reader.
+    What it assumes: the factor chain is already what it should be (`adjustment_factors` holds
+    ex-dates back to 2000 from the ISIN-keyed BSE actions); this reads it and never extends it.
+    What it never does: create a partition that does not exist (that is `materialize_missing`),
+    touch a partition that is not truncated or is retired, or invent a factor for an unreconciled
+    action. Nor does it delete a retired partition already on disk — it only stops growing one.
+    """
+    owns = con is None
+    con = open_connection() if con is None else con
+    try:
+        l2_files = _l2_partition_files(data_root=data_root)
+        l1_files = _l1_partition_files(data_root=data_root)
+        truncated: dict[str, tuple[date, date]] = {}
+        retired = 0
+        if l2_files and l1_files:
+            l2_first = dict(
+                con.execute(
+                    "SELECT isin, min(trade_date) FROM read_parquet($files) GROUP BY isin",
+                    {"files": [str(f) for f in l2_files]},
+                ).fetchall()
+            )
+            l1_first = dict(
+                con.execute(
+                    "SELECT isin, min(trade_date) FROM read_parquet($files) "
+                    "WHERE series = 'EQ' GROUP BY isin",
+                    {"files": [str(f) for f in l1_files]},
+                ).fetchall()
+            )
+            for isin, starts in sorted(l2_first.items()):
+                if survivor_of is not None and survivor_of(isin) != isin:
+                    retired += 1
+                    continue
+                chain = (isin,) if history_for is None else history_for.get(isin, (isin,))
+                earliest = [l1_first[i] for i in chain if i in l1_first]
+                if earliest and min(earliest) < starts:
+                    truncated[str(isin)] = (starts, min(earliest))
+        reports: list[L2WriteReport] = []
+        if truncated and not dry_run:
+            wanted = set(truncated)
+            if history_for is not None:
+                for isin in truncated:
+                    wanted.update(history_for.get(isin, ()))
+            preload_raw_bars(con, wanted, data_root=data_root)
+            for isin in truncated:
+                reports.append(
+                    materialize_isin(
+                        isin,
+                        chain=load_factor_chain(conn, isin),
+                        actions=load_reconciled_actions(conn, isin=isin),
+                        con=con,
+                        data_root=data_root,
+                        history_isins=None if history_for is None else history_for.get(isin),
+                    )
+                )
+    finally:
+        if owns:
+            con.close()
+    report = L2TruncatedReport(
+        partitions=len(l2_files),
+        truncated=truncated,
+        skipped_retired=retired,
+        written=tuple(reports),
+    )
+    _LOG.info(
+        "l2.truncated_rebuilt",
+        dataset=PRICES_ADJUSTED_DATASET,
+        partitions=report.partitions,
+        truncated=len(report.truncated),
+        skipped_retired=report.skipped_retired,
+        written=len(report.written),
+        rows=report.rows_written,
+        dry_run=dry_run,
+        state="PLANNED" if dry_run else "PUBLISHED",
     )
     return report
 
