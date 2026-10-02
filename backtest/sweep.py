@@ -1050,10 +1050,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 def l1_grandfathering(data_root: Path | None) -> tuple[QueryService, L1GrandfatheringPrices]:
-    """The query service and the Sec 55(2)(ac) FMV reader over it (the tax module's L1 reader)."""
+    """The query service and the Sec 55(2)(ac) FMV reader (L1 ``prices_raw``, the same lake)."""
     service = QueryService(data_root=data_root)
     schedule = load_tax_schedule()
-    return service, L1GrandfatheringPrices(service, fmv_date=schedule.grandfather_fmv_date)
+    return service, L1GrandfatheringPrices(
+        fmv_date=schedule.grandfather_fmv_date, data_root=data_root
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

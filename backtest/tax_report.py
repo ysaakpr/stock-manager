@@ -35,10 +35,12 @@ import json
 import re
 import sys
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
+
+import duckdb
 
 from backtest.tax import (
     AfterTaxResult,
@@ -62,7 +64,9 @@ from backtest.tax import (
 )
 from backtest.xirr import Cashflow
 from dataplatform.identity import Exchange
-from dataplatform.query import AdjustedSeriesRequest, QueryService
+from dataplatform.logging import get_logger
+from dataplatform.store.l1 import read_prices_raw
+from dataplatform.store.l2 import open_connection, register_raw_view
 from execution.broker import Fill, Side
 
 if TYPE_CHECKING:
@@ -81,6 +85,8 @@ __all__ = [
     "trades_from_ledger_rows",
     "write_run_ledger",
 ]
+
+_log = get_logger(__name__)
 
 _ZERO = Decimal("0")
 _FILL_ROW = re.compile(r"^(BUY|SELL) (\d+) @ (\S+)$")
@@ -333,51 +339,128 @@ def read_run_ledger(path: Path) -> RunLedger:
     )
 
 
-# ── grandfathering FMV from L1 via the public query surface ─────────────────────────────────
+# ── grandfathering FMV from L1 prices_raw (the as-quoted record) ───────────────────────────────
+
+#: The one quote the FMV is read from. NSE only: legacy-era BSE rows were resolved to an ISIN
+#: through today's scrip master, so a retired ISIN's BSE bar sits under its successor (HDFC Bank's
+#: 31-01-2018 BSE row carries INE040A01034, the post-2019 ISIN) — reading it would price the wrong
+#: instrument. EQ only: the rolling-settlement series the book trades.
+_FMV_EXCHANGE: Final = Exchange.NSE.value
+_FMV_SERIES: Final = "EQ"
+#: The DuckDB view the FMV fallback scan registers on its own connection.
+_FMV_RAW_VIEW: Final = "tax_fmv_prices_raw"
 
 
 class L1GrandfatheringPrices:
-    """Sec 55(2)(ac) FMVs read from the lake through ``QueryService`` (the public query surface).
+    """Sec 55(2)(ac) FMVs read from L1 ``prices_raw`` — the price as quoted, under the ISIN quoted.
 
-    The statute's FMV is the **highest price quoted** on a recognised exchange on 31-01-2018 (or,
-    if the share did not trade that day, on the last day before it that it did) — the day's high,
-    not its close. Each exchange's own bar is read (``primary`` pinned, fall-back bars discarded),
-    the raw high recovered as ``adj_high / cum_price_factor`` (L2 stores ``raw x factor``), and the
-    higher of the two exchanges taken. Raw, because lots carry the shares of their own date and a
-    later split is applied to the lot, not to this price.
+    The statute's FMV is the **highest price quoted** on a recognised exchange on 31-01-2018, the
+    day's high. This reads the NSE EQ high on ``fmv_date`` for the ISIN asked — the ISIN the lot
+    held on that date (``backtest.tax.match_lots`` moves a lot to a successor only for a reissue on
+    or before it). Raw, never adjusted: the lot is in shares of its own date, and a split or bonus
+    after the FMV date is applied to the lot's ``gf_units``, not to this price. L2 is the wrong
+    store for this: a retired ISIN's adjusted history is stitched under its successor, so the ISIN
+    a lot actually held on 31-01-2018 (HDFC Bank's INE040A01026) has no L2 partition at all.
+
+    Fallback (Explanation (a)(ii) to Sec 55(2)(ac)): an ISIN that did not trade on ``fmv_date``
+    takes the high of the last NSE EQ session before it on which it did — but only when the ISIN
+    trades again afterwards, i.e. it was a live listing that was merely untraded that day. One that
+    never trades after ``fmv_date`` had ceased (a merger, a delisting, or a reissue the ledger did
+    not carry) and was not what the holder held on 31-01-2018; its last pre-cessation quote is a
+    different instrument's price, so it raises ``MissingGrandfatheringPriceError`` naming why.
+
+    What it never does: guess, read BSE, read L2, or write. A missing ``fmv_date`` partition (a
+    lake gap, not a non-trading day) raises rather than falling back.
     """
 
-    def __init__(self, service: QueryService, *, fmv_date: date, lookback_days: int = 30) -> None:
-        self._service = service
+    def __init__(
+        self,
+        *,
+        fmv_date: date,
+        data_root: Path | None = None,
+        con: duckdb.DuckDBPyConnection | None = None,
+    ) -> None:
         self._fmv_date = fmv_date
-        self._lookback = timedelta(days=lookback_days)
+        self._data_root = data_root
+        self._con = con
+        self._days: dict[date, dict[str, Decimal]] = {}
         self._cache: dict[str, Decimal] = {}
+        self._missing: dict[str, str] = {}
 
     def fmv_per_share(self, isin: str) -> Decimal:
         cached = self._cache.get(isin)
         if cached is not None:
             return cached
-        highs: list[Decimal] = []
-        for exchange in (Exchange.NSE, Exchange.BSE):
-            series = self._service.adjusted_series(
-                AdjustedSeriesRequest(
-                    isin=isin,
-                    start=self._fmv_date - self._lookback,
-                    end=self._fmv_date,
-                    primary=exchange,
-                )
-            )
-            own = [p for p in series.points if p.exchange == exchange and not p.fell_back]
-            if own:
-                last = max(own, key=lambda p: p.trade_date)
-                highs.append(last.adj_high / last.cum_price_factor)
-        if not highs:
+        if isin in self._missing:
+            raise MissingGrandfatheringPriceError(self._missing[isin])
+        try:
+            price = self._resolve(isin)
+        except MissingGrandfatheringPriceError as error:
+            self._missing[isin] = str(error)
+            raise
+        self._cache[isin] = price
+        return price
+
+    def _resolve(self, isin: str) -> Decimal:
+        day = self._fmv_date.isoformat()
+        high = self._highs_on(self._fmv_date).get(isin)
+        if high is not None:
+            return high
+        before, after = self._neighbours(isin)
+        if before is None:
             raise MissingGrandfatheringPriceError(
-                f"no L1 bar for {isin} on or within {self._lookback.days} days before "
-                f"{self._fmv_date.isoformat()} on either exchange"
+                f"no 31-01-2018 FMV for {isin}: never quoted on {_FMV_EXCHANGE} {_FMV_SERIES} on "
+                f"or before {day} in L1"
             )
-        self._cache[isin] = max(highs)
-        return self._cache[isin]
+        if after is None:
+            raise MissingGrandfatheringPriceError(
+                f"no 31-01-2018 FMV for {isin}: last quoted on {_FMV_EXCHANGE} {_FMV_SERIES} on "
+                f"{before.isoformat()} and never after, so it had ceased before {day} — the share "
+                "held that day is a successor the ledger did not carry onto the lot"
+            )
+        # Explanation (a)(ii): untraded on the FMV date, so the high of the last day it traded.
+        fallback = self._highs_on(before).get(isin)
+        if fallback is None:  # the scan saw it; the partition read must too
+            raise MissingGrandfatheringPriceError(
+                f"no 31-01-2018 FMV for {isin}: L1 scan found {before.isoformat()} but its "
+                "partition holds no matching row"
+            )
+        _log.info("tax_report.fmv_fallback", isin=isin, fmv_date=day, quoted_on=before.isoformat())
+        return fallback
+
+    def _highs_on(self, day: date) -> dict[str, Decimal]:
+        """Every ISIN's NSE EQ high in one session's partition (raises if it was never written)."""
+        highs = self._days.get(day)
+        if highs is None:
+            try:
+                rows = read_prices_raw(day, data_root=self._data_root)
+            except FileNotFoundError as error:
+                raise MissingGrandfatheringPriceError(
+                    f"no L1 prices_raw partition for {day.isoformat()}: a lake gap, not a "
+                    f"non-trading day ({error})"
+                ) from error
+            highs = {}
+            for row in rows:
+                if row["exchange"] == _FMV_EXCHANGE and row["series"] == _FMV_SERIES:
+                    highs[str(row["isin"])] = Decimal(str(row["high"]))
+            self._days[day] = highs
+        return highs
+
+    def _neighbours(self, isin: str) -> tuple[date | None, date | None]:
+        """The ISIN's last NSE EQ session before ``fmv_date`` and its first one after it."""
+        if self._con is None:
+            self._con = open_connection()
+            register_raw_view(self._con, view=_FMV_RAW_VIEW, data_root=self._data_root)
+        found = self._con.execute(
+            "SELECT max(trade_date) FILTER (WHERE trade_date < ?), "
+            f"min(trade_date) FILTER (WHERE trade_date > ?) FROM {_FMV_RAW_VIEW} "
+            "WHERE isin = ? AND exchange = ? AND series = ?",
+            [self._fmv_date, self._fmv_date, isin, _FMV_EXCHANGE, _FMV_SERIES],
+        ).fetchone()
+        if found is None:
+            return None, None
+        before, after = found
+        return before, after
 
 
 # ── the report ─────────────────────────────────────────────────────────────────────────────────
@@ -585,14 +668,13 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Tax a persisted ledger, reading grandfathering FMVs from the lake via ``QueryService``."""
+    """Tax a persisted ledger, reading grandfathering FMVs from L1 ``prices_raw``."""
     args = _parse_args(argv)
     ledger = read_run_ledger(args.ledger)
     schedule = load_tax_schedule()
     profile = investor_profile_from_args(args)
-    with QueryService() as service:
-        fmv = L1GrandfatheringPrices(service, fmv_date=schedule.grandfather_fmv_date)
-        result = compute_after_tax(ledger, profile, schedule=schedule, fmv=fmv)
+    fmv = L1GrandfatheringPrices(fmv_date=schedule.grandfather_fmv_date)
+    result = compute_after_tax(ledger, profile, schedule=schedule, fmv=fmv)
     report = render_after_tax_report(result, schedule)
     if args.report is not None:
         args.report.write_text(report, encoding="utf-8")
