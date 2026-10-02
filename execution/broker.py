@@ -230,11 +230,12 @@ class Order:
 
 @dataclass(frozen=True, slots=True)
 class Position:
-    """An open, not-yet-settled position — a same-session buy before it becomes a holding.
+    """An open, not-yet-settled position — a filled buy before it becomes a holding.
 
-    Indian delivery settles T+1: a buy filled today is a *position* today and a *holding* the next
-    session. Keyed by ISIN (invariant #2). `average_price` excludes costs — it is the traded price,
-    the way a broker's position book shows it.
+    A buy filled on `session` is a *position* until its settlement cycle completes and a *holding*
+    after. The cycle is the trade date's (T+2 before 2023, T+1 since — `execution.settlement`),
+    counted in trading sessions. Keyed by ISIN (invariant #2). `average_price` excludes costs — it
+    is the traded price, the way a broker's position book shows it.
     """
 
     isin: str
@@ -274,18 +275,32 @@ class LedgerEntry:
 
 @dataclass(frozen=True, slots=True)
 class Margins:
-    """Account funds: cash free to deploy, cash tied up in holdings, and their sum.
+    """Account funds: cash free to deploy, cash tied up in holdings, sale proceeds in settlement.
 
     Delivery equity is fully paid, so `utilised` is the cost basis of open positions and holdings,
-    not a leveraged margin. Real brokers report more; this is the subset the decision layer needs.
+    not a leveraged margin. `unsettled_proceeds` is net sale proceeds the account is owed but may
+    not yet spend: never part of `available`, always part of what the account is worth
+    (`cash_value`, `total`). Defaults to zero for a broker that does not report it separately.
+    Real brokers report more; this is the subset the decision layer needs.
     """
 
     available: Decimal
     utilised: Decimal
+    unsettled_proceeds: Decimal = _ZERO
     total: Decimal = field(init=False)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "total", self.available + self.utilised)
+        object.__setattr__(self, "total", self.available + self.unsettled_proceeds + self.utilised)
+
+    @property
+    def cash_value(self) -> Decimal:
+        """Cash the account owns, settled or not: what a valuation adds to its marked holdings.
+
+        Size a *buy* from `available`; value the *book* from this. A valuation that used
+        `available` would dip by every sale's proceeds until they settle — a drawdown that is only
+        the settlement cycle.
+        """
+        return self.available + self.unsettled_proceeds
 
 
 # ── the interface ────────────────────────────────────────────────────────────────────────────
