@@ -26,6 +26,7 @@ from backtest.decision_rule import (
     SharpeVariance,
     TrialSharpe,
     evaluate,
+    rail_blocks_cell,
     render_decision,
     trial_sharpe_variance,
 )
@@ -441,3 +442,11 @@ def test_the_render_prints_the_variance_source_n_and_the_folds_used() -> None:
     assert "| **FAIL** | none |" in text
     assert "| **PASS** | F1, F2, F3 |" in text  # criterion 3 of H2
     assert "| 4 | deflated Sharpe ratio" in text and "**INCONCLUSIVE**" in text
+
+
+def test_rail_blocks_are_shown_by_rail_name_per_row() -> None:
+    assert rail_blocks_cell((("MAX_ORDER_PCT", 1), ("MAX_POSITION", 3))) == (
+        "MAX_ORDER_PCT 1, MAX_POSITION 3"
+    )
+    assert rail_blocks_cell(()) == "none"
+    assert rail_blocks_cell(None) == "not recorded"
