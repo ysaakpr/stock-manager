@@ -37,8 +37,14 @@ HDFC_OLD = "INE040A01026"  # face value 2, retired at the 2019 sub-division
 HDFC_NEW = "INE040A01034"  # face value 1
 LIVE = "INE000L01011"  # untraded on the FMV date, trades again after it
 GONE = "INE000G01011"  # last traded before the FMV date, never again (a reissue not carried)
+IB_OLD = "INE483S01012"  # Infibeam: 1:10 split ex 31-08-2017 on its last session
+IB_NEW = "INE483S01020"  # its successor, first traded 01-09-2017
 
 _Q = Decimal("0.0001")
+
+_PROFILE = InvestorProfile(
+    "resident_individual", Decimal("0.3"), Decimal(0), Decimal(0), PaymentTiming.FY_END
+)
 
 
 def _row(
@@ -63,6 +69,8 @@ def _write(root: Path, day: date, rows: list[dict[str, object]]) -> None:
 
 @pytest.fixture
 def lake(tmp_path: Path) -> Path:
+    _write(tmp_path, date(2017, 8, 31), [_row(IB_OLD, date(2017, 8, 31), "150")])
+    _write(tmp_path, date(2017, 9, 1), [_row(IB_NEW, date(2017, 9, 1), "151")])
     _write(tmp_path, date(2017, 11, 9), [_row(GONE, date(2017, 11, 9), "900")])
     _write(tmp_path, date(2018, 1, 29), [_row(LIVE, date(2018, 1, 29), "51.25")])
     _write(tmp_path, date(2018, 1, 30), [_row(HDFC_OLD, date(2018, 1, 30), "2001")])
@@ -77,6 +85,7 @@ def lake(tmp_path: Path) -> Path:
             # legacy BSE resolution. Reading BSE would give a lot on HDFC_NEW a pre-split FMV.
             _row(HDFC_NEW, FMV_DATE, "2011.9", exchange="BSE", series="A"),
             _row(GONE, FMV_DATE, "950", exchange="BSE", series="A"),
+            _row(IB_NEW, FMV_DATE, "158.5"),
         ],
     )
     _write(tmp_path, date(2018, 2, 1), [_row(LIVE, date(2018, 2, 1), "60")])
@@ -116,12 +125,19 @@ def test_missing_fmv_date_partition_is_a_lake_gap_not_a_fallback(tmp_path: Path)
         fmv.fmv_per_share(HDFC_OLD)
 
 
+@pytest.mark.parametrize(
+    "reissue_day",
+    [date(2019, 9, 19), date(2019, 9, 20)],
+    ids=["reissue-on-split-day", "reissue-next-session"],
+)
 def test_hdfc_lot_split_after_the_fmv_date_is_grandfathered_at_raw_fmv_over_gf_units(
-    lake: Path,
+    lake: Path, reissue_day: date
 ) -> None:
     # 100 shares bought 2016 at ₹1,500; the 2019 1:2 sub-division and ISIN reissue make them 200
     # of the new ISIN; sold 2020 at ₹1,200. The lot stays on the old ISIN for its FMV (reissue
     # after 31-01-2018), and gf_units = 2 halves the per-current-share FMV: 2013.5 x 200 / 2.
+    # The split is ex on the old ISIN's last session; the book (PR #29) carries the holding on the
+    # successor's first session, the next one — both orderings must price the same.
     split_day = date(2019, 9, 19)
     run = RunLedger(
         source="test",
@@ -139,15 +155,55 @@ def test_hdfc_lot_split_after_the_fmv_date_is_grandfathered_at_raw_fmv_over_gf_u
         terminal_prices={},
         corporate_events=(
             SplitEvent(HDFC_OLD, split_day, 2, 1),
-            ReissueEvent(HDFC_NEW, split_day, HDFC_OLD),
+            ReissueEvent(HDFC_NEW, reissue_day, HDFC_OLD),
         ),
     )
-    profile = InvestorProfile(
-        "resident_individual", Decimal("0.3"), Decimal(0), Decimal(0), PaymentTiming.FY_END
-    )
     fmv = L1GrandfatheringPrices(fmv_date=FMV_DATE, data_root=lake)
-    result = compute_after_tax(run, profile, fmv=fmv)
+    result = compute_after_tax(run, _PROFILE, fmv=fmv)
     (real,) = result.realisations
     assert real.grandfathered
     assert real.cost == Decimal("201350")  # max(150000, min(201350, 240000))
     assert real.gain == Decimal("38650")
+
+
+def _infibeam_run(*, carried: bool) -> RunLedger:
+    # 100 shares bought 2016 at ₹1,00,000; 1:10 split ex 31-08-2017 on the old ISIN; the book
+    # carries the 1,000 shares to the successor on 01-09-2017 (PR #29) — or, before it, did not.
+    events: tuple[SplitEvent | ReissueEvent, ...] = (SplitEvent(IB_OLD, date(2017, 8, 31), 10, 1),)
+    if carried:
+        events = (*events, ReissueEvent(IB_NEW, date(2017, 9, 1), IB_OLD))
+    held = IB_NEW if carried else IB_OLD
+    return RunLedger(
+        source="test",
+        trades=(
+            TaxTrade(IB_OLD, date(2016, 6, 1), Side.BUY, 100, Decimal("100000"), Decimal(0), True),
+            TaxTrade(held, date(2019, 6, 3), Side.SELL, 1000, Decimal("200000"), Decimal(0), True),
+        ),
+        external_flows=(Cashflow(date(2016, 6, 1), Decimal("-1000000")),),
+        terminal_date=date(2019, 6, 3),
+        terminal_nav=Decimal("1100000"),
+        terminal_prices={},
+        corporate_events=events,
+    )
+
+
+def test_lot_carried_to_its_successor_before_the_fmv_date_is_priced_on_the_successor(
+    lake: Path,
+) -> None:
+    # The carry (01-09-2017) precedes 31-01-2018, so the lot's FMV ISIN is the successor's, at its
+    # own as-quoted high: 158.5 x 1,000 shares (the split was before the FMV date: gf_units 1).
+    fmv = L1GrandfatheringPrices(fmv_date=FMV_DATE, data_root=lake)
+    (real,) = compute_after_tax(_infibeam_run(carried=True), _PROFILE, fmv=fmv).realisations
+    assert real.grandfathered
+    assert real.cost == Decimal("158500")
+
+
+def test_lot_stranded_on_a_retired_isin_is_unavailable_not_priced_off_its_last_quote(
+    lake: Path,
+) -> None:
+    # The pre-#29 ledger shape: the split rescaled the lot but nothing carried it, so it still
+    # names an ISIN that last traded 31-08-2017. Its 150 is a pre-split quote on a post-split count
+    # — exactly the guess the reader refuses.
+    fmv = L1GrandfatheringPrices(fmv_date=FMV_DATE, data_root=lake)
+    with pytest.raises(MissingGrandfatheringPriceError, match="ceased before 2018-01-31"):
+        compute_after_tax(_infibeam_run(carried=False), _PROFILE, fmv=fmv)
