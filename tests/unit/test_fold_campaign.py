@@ -8,7 +8,12 @@
 * ``round2-signals`` refuses to start with no frozen record, a record from another lake, a baseline
   digest the current code no longer gives (a changed baseline arm), or a file changed since the
   freeze — and refuses a baseline arm, an unknown arm or a missing trial count as input;
-* end to end, it renders §4's PASS/FAIL per criterion against the named baseline.
+* end to end, it renders §4's PASS/FAIL per criterion against the named baseline, naming the
+  folds each criterion read and the Sharpe variance's source and n, and never writes into the
+  frozen directory;
+* ``trial-sharpes`` writes the round-1 arms' Sharpes on the folds, refused on other folds or
+  another lake, and ``round2-signals``/``render-round2`` pool them into the variance;
+* ``render-round2`` replays nothing: it reads runs already on disk and writes elsewhere.
 
 Offline: the lake and the replay are stubbed at the sweep's two seams (``open_swing_lake`` and
 ``_run_arm``), as in ``test_campaign``.
@@ -48,7 +53,14 @@ _FMV = MappingGrandfatheringPrices({})
 _H_ARM = "Short composite"  # a stand-in H-arm: any non-baseline sweep arm drives the same path
 
 #: Per-arm drift of the stub NAV, so the arms' Sharpe ratios differ.
-_DRIFT = {"Swing composite (M10.7)": 1, "M10.7 + regime gate": 2, _H_ARM: 9}
+_DRIFT = {
+    "Swing composite (M10.7)": 1,
+    "M10.7 + regime gate": 2,
+    _H_ARM: 9,
+    "Breakout": 4,
+    "Trend: 1-month": 6,
+}
+_TRIAL_ARMS = ["Breakout", "Trend: 1-month"]
 
 
 class _FakeLake:
@@ -346,7 +358,12 @@ def test_round2_renders_pass_or_fail_per_criterion_against_the_named_baseline(
         plan, base_dir, _FOLDS, None, _FMV, baseline_label=fc.BASELINE_LABELS[0], trials=28
     )
     assert f"### {_H_ARM} vs {fc.BASELINE_LABELS[0]}:" in text
-    assert text.count("**PASS**") + text.count("**FAIL**") == 4
+    assert text.count("**PASS**") + text.count("**FAIL**") + text.count("**INCONCLUSIVE**") == 4
+    # Three arms evaluated is far short of the minimum: the variance and its n are printed, and
+    # criterion 4 cannot PASS on it.
+    assert "from 3 trial Sharpes (3 arms evaluated in this round)" in text
+    assert "too few: criterion 4 cannot PASS" in text
+    assert "| Folds used |" in text and "| F1, F2, F3 |" in text
     assert "Trial count for the deflation: **28**" in text
     assert "₹10 crore/day" in text
     # The after-tax NAV is written beside each H-arm run it was struck from.
@@ -369,3 +386,129 @@ def test_the_baseline_report_renders_every_fold_and_role(
     text = fc.render_baseline_report(plan, _FOLDS, None, _FMV)
     rows = [line for line in text.splitlines() if line.startswith("| Swing") or "regime" in line]
     assert sum(1 for line in rows if line.startswith("| ")) == 12
+
+
+def _tree(root: Path) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+def _round2(tmp_path: Path) -> tuple[Path, fc.FoldRunPlan]:
+    base_dir = tmp_path / "base"
+    _frozen(base_dir)
+    plan = fc.round2_plan(tmp_path / "h", _FOLDS, [_H_ARM], data_root=None, book_actions=False)
+    fc.run_fold_units(plan, workers=1)
+    return base_dir, plan
+
+
+def test_round2_never_writes_into_the_frozen_directory(tmp_path: Path, stubbed: _Counters) -> None:
+    base_dir, plan = _round2(tmp_path)
+    before = _tree(base_dir)
+    fc.render_round2(
+        plan, base_dir, _FOLDS, None, _FMV, baseline_label=fc.BASELINE_LABELS[0], trials=28
+    )
+    assert _tree(base_dir) == before
+
+
+def test_a_render_to_another_directory_writes_nothing_beside_the_runs(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    base_dir, plan = _round2(tmp_path)
+    runs_before, base_before = _tree(plan.out_dir), _tree(base_dir)
+    elsewhere = tmp_path / "render"
+    stubbed.backtests.clear()
+    fc.render_round2(
+        plan,
+        base_dir,
+        _FOLDS,
+        None,
+        _FMV,
+        baseline_label=fc.BASELINE_LABELS[0],
+        trials=28,
+        nav_dir=elsewhere,
+    )
+    assert stubbed.backtests == []
+    assert _tree(plan.out_dir) == runs_before and _tree(base_dir) == base_before
+    assert len(list((elsewhere / "navs").glob("*.after-tax.*.json"))) == 3
+
+
+def test_absent_runs_are_named_for_a_render_that_replays_nothing(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    _, plan = _round2(tmp_path)
+    assert fc._absent_runs(plan, None) == []
+    digest = fc._digests(plan, None)[(_H_ARM, "F2", "test")]
+    nav_file(plan.out_dir, digest).unlink()
+    assert fc._absent_runs(plan, None) == [f"{_H_ARM} F2 test"]
+
+
+# ── trial-sharpes: the round-1 arms on the same folds, as the variance source ───────────────────
+
+
+def _trial_sharpes(tmp_path: Path) -> Path:
+    plan = fc.round2_plan(
+        tmp_path / "trials", _FOLDS, _TRIAL_ARMS, data_root=None, book_actions=False
+    )
+    fc.run_fold_units(plan, workers=1)
+    return fc.write_trial_sharpes(plan, _PINNED, _FOLDS, None, _FMV)
+
+
+def test_the_round_one_arms_are_every_non_baseline_non_hypothesis_arm() -> None:
+    labels = fc.round1_labels()
+    assert not set(labels) & set(fc.BASELINE_LABELS)
+    assert all("(H" not in label for label in labels)
+    assert len(labels) == len(sweep_module.ARMS) - len(fc.BASELINE_LABELS) - 3
+
+
+def test_trial_sharpes_are_written_per_arm_on_every_fold(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    path = _trial_sharpes(tmp_path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    assert [t["arm"] for t in document["trials"]] == _TRIAL_ARMS
+    assert document["folds"] == ["F1", "F2", "F3"] and document["excluded"] == []
+    assert all(set(t["digests"]) == {"F1", "F2", "F3"} for t in document["trials"])
+    loaded = fc.load_trial_sharpes(path, _PINNED, _FOLDS, book_actions=False)
+    assert [t.label for t in loaded.sharpes] == _TRIAL_ARMS
+    assert loaded.source.startswith(fc.TRIAL_SHARPES_NAME)
+
+
+def test_trial_sharpes_from_another_lake_or_other_folds_are_refused(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    path = _trial_sharpes(tmp_path)
+    with pytest.raises(fc.FoldCampaignError, match="lake_last_session"):
+        fc.load_trial_sharpes(
+            path, replace(_PINNED, lake_last_session=date(2026, 10, 30)), _FOLDS, book_actions=False
+        )
+    two_folds = replace(_FOLDS, folds=_FOLDS.folds[:2])
+    with pytest.raises(fc.FoldCampaignError, match="folds"):
+        fc.load_trial_sharpes(path, _PINNED, two_folds, book_actions=False)
+
+
+def test_supplied_trial_sharpes_are_pooled_and_reported(tmp_path: Path, stubbed: _Counters) -> None:
+    base_dir, plan = _round2(tmp_path)
+    supplied = fc.load_trial_sharpes(_trial_sharpes(tmp_path), _PINNED, _FOLDS, book_actions=False)
+    text = fc.render_round2(
+        plan,
+        base_dir,
+        _FOLDS,
+        None,
+        _FMV,
+        baseline_label=fc.BASELINE_LABELS[0],
+        trials=28,
+        trial_sharpes=supplied,
+    )
+    assert "from 5 trial Sharpes (3 arms evaluated in this round + 2 supplied by " in text
+    assert "Breakout" in text and "Trend: 1-month" in text
+
+
+def test_the_render_and_trial_sharpes_commands_parse() -> None:
+    argv = ["render-round2", "--baseline-dir", "b", "--runs-dir", "r", "--runs-from-commit"]
+    argv += ["52ff874", "--out", "o", "--arms", _H_ARM, "--baseline", fc.BASELINE_LABELS[0]]
+    render = fc._parse_args([*argv, "--trials", "28", "--trial-sharpes", "t.json"])
+    assert render.runs_from_commit == "52ff874" and render.trial_sharpes == Path("t.json")
+    assert not hasattr(render, "workers")
+    trials = fc._parse_args(["trial-sharpes", "--out", "o", "--workers", "2"])
+    assert trials.arms is None and trials.workers == 2

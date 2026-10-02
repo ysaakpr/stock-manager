@@ -29,6 +29,7 @@ from backtest.accounting import PortfolioBook
 from backtest.book_actions import (
     BookActionCalendar,
     CashDividend,
+    IsinReissue,
     RescaleKind,
     ShareRescale,
 )
@@ -350,6 +351,32 @@ def test_a_reissue_carries_the_lots_to_the_survivor() -> None:
     (lot,) = result.deemed_realisations
     # Reissued after 31-01-2018: the FMV (were one needed) is the bar of the ISIN bought, P.
     assert (lot.quantity, lot.acquired, lot.isin) == (80, D2, P)
+
+
+def test_a_split_ex_the_session_before_the_reissue_keeps_the_lot_date_across_the_hop() -> None:
+    """NSE's real shape (HDFC Bank 2019): split ex on P's last session, S trading from the next.
+
+    The lot bought under P on D2 is split on P, carried to S the next session, and still dates
+    from D2 — the holding period runs from the original purchase, not the reissue.
+    """
+    prices = {(P, d): Decimal("100") for d in (D1, D2)}
+    prices[(P, D3)] = Decimal("50")  # the ex-date bar is still the old ISIN's
+    prices |= {(S, d): Decimal("50") for d in (D4, D5)}
+    _broker, book, ledger = _walk(
+        prices,
+        {D1: (_order(P, Side.BUY, 40),)},
+        BookActionCalendar(
+            [
+                ShareRescale(P, D3, RescaleKind.SPLIT, Decimal("10"), Decimal("5")),
+                IsinReissue(S, D4, P, explained=True),
+            ]
+        ),
+    )
+    assert {p.isin: p.quantity for p in book.positions()} == {S: 80}
+    assert ledger.corporate_events == (SplitEvent(P, D3, 2, 1, 80), ReissueEvent(S, D4, P))
+    result = compute_after_tax(ledger, _PROFILE, fmv=MappingGrandfatheringPrices({}))
+    (lot,) = result.deemed_realisations
+    assert (lot.quantity, lot.acquired) == (80, D2)
 
 
 def test_a_reissue_before_the_grandfathering_date_takes_its_fmv_from_the_survivor() -> None:
