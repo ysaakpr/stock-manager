@@ -52,17 +52,26 @@ else, so a before/after book measurement still holds the signal fixed.
   available a few weeks early. Gross of TDS (taxes are post-processed).
 * **ISIN reissue.** A face-value split usually retires the ISIN; the action is stored against the
   survivor (``filed_against_isin`` names the retired one) while the book, which bought off raw L1,
-  holds the predecessor. When a SPLIT/BONUS for survivor ``S`` sits on the effective date of a
-  lineage edge ``P → S``, the holding in ``P`` is carried to ``S`` 1:1 and then rescaled. A dividend
-  stored under ``S`` but dated before the reissue is paid on the ISIN that was live on its ex-date.
+  holds the predecessor. The split and the reissue are two events on two dates: the split is ex on
+  the predecessor's *last* session (``P``'s own bar already prints the post-split price), and the
+  successor first trades on the next one — the lineage edge's ``effective_date`` (HDFC Bank 2019:
+  ex 19-09 on INE040A01026, INE040A01034 from 20-09). So the rescale lands on ``P`` on its ex-date,
+  and an :class:`IsinReissue` carries the (already rescaled) holding ``P → S`` 1:1 on the edge's
+  effective date — settled shares, every pending lot with its own trade date, and every staged
+  order. When both fall on one date the carry runs first. A carry is made only when a SPLIT/BONUS of
+  that chain is ex within :data:`_REISSUE_WINDOW_DAYS` on or before the effective date, which is
+  what explains a 1:1 continuation; a reissue nothing explains is counted and logged when held
+  (``book_actions.reissue_unexplained``) and left alone — carrying it would be a guess that the
+  share count did not change. A dividend stored under ``S`` but dated before the reissue is paid on
+  the ISIN that was live on its ex-date.
 
 **What is not, and why.** ``MERGER``, ``DEMERGER`` and ``SCHEME_OF_ARRANGEMENT`` rows in the store
 are all ``UnquantifiedTerms`` and none names the counterparty ISIN, so the book cannot apply them
-without inventing terms; ``RIGHTS`` is a subscription decision, and an un-exercised entitlement
-lapses. Each is counted and logged when the book holds the name on its ex-date
-(``book_actions.unmodelled``), never silently dropped. A reissue with no split/bonus on its date is
-left alone and logged: carrying it 1:1 would be a guess that the shares did not change. A dividend
-stated only as a percentage of face value is skipped for the same reason (none exist today).
+without inventing terms (the lineage table is not a merger map either: one issuer, linear chains).
+Each merger row is named at load (``book_actions.merger_skipped``). ``RIGHTS`` is a subscription
+decision, and an un-exercised entitlement lapses. Each is counted and logged when the book holds
+the name on its ex-date (``book_actions.unmodelled``), never silently dropped. A dividend stated
+only as a percentage of face value is skipped for the same reason (none exist today).
 
 Fractional entitlements (a 3:2 bonus on an odd count) are floored and forfeited — the conservative
 side of the cash-in-lieu the store does not carry. Money is ``Decimal`` throughout; nothing here
@@ -105,6 +114,7 @@ __all__ = [
     "BookActionCalendar",
     "BookActionSource",
     "CashDividend",
+    "IsinReissue",
     "RescaleKind",
     "ShareRescale",
     "UnmodelledAction",
@@ -177,7 +187,27 @@ class UnmodelledAction:
     action_type: str
 
 
-BookAction = ShareRescale | CashDividend | UnmodelledAction
+@dataclass(frozen=True, slots=True)
+class IsinReissue:
+    """On ``ex_date``, the successor's first session, the holding in ``from_isin`` becomes ``isin``.
+
+    One lineage edge ``from_isin → isin``. ``explained`` says a SPLIT/BONUS of the chain is ex
+    within :data:`_REISSUE_WINDOW_DAYS` on or before ``ex_date``; only then is the holding carried.
+    """
+
+    isin: str
+    ex_date: date
+    from_isin: str
+    explained: bool
+
+
+BookAction = IsinReissue | ShareRescale | CashDividend | UnmodelledAction
+
+#: How far before a lineage edge's effective date a SPLIT/BONUS may be ex and still explain the
+#: reissue. Measured over the store's 593 edges: the explaining action is ex on the effective date
+#: (198), or 1-7 calendar days before it — the predecessor's last session, across a weekend or a
+#: holiday (291); 104 edges have no action within 10 days.
+_REISSUE_WINDOW_DAYS = 10
 
 
 # ── what an applier did — the record a run's tax ledger is built from ─────────────────────────
@@ -220,9 +250,11 @@ class AppliedRescale:
 
 AppliedBookAction = AppliedDividend | AppliedCarry | AppliedRescale
 
-#: Within one ex-date: dividends first (paid on the pre-action count), then reissue carries and
-#: rescales, then the unmodelled notices. Then ISIN, for a stable order.
-_ORDER = {CashDividend: 0, ShareRescale: 1, UnmodelledAction: 2}
+#: Within one ex-date: reissue carries first (1:1, so no count changes, and a dividend or split
+#: dated the survivor's first session then finds the holding under the survivor), then dividends
+#: (paid on the pre-action count), then rescales, then the unmodelled notices. Then ISIN, for a
+#: stable order.
+_ORDER = {IsinReissue: 0, CashDividend: 1, ShareRescale: 2, UnmodelledAction: 3}
 
 
 def _sort_key(action: BookAction) -> tuple[date, int, str]:
@@ -259,6 +291,8 @@ class BookActionCalendar:
                 tally[f"unmodelled:{action.action_type}"] += 1
             elif isinstance(action, ShareRescale):
                 tally[action.kind.value] += 1
+            elif isinstance(action, IsinReissue):
+                tally["REISSUE" if action.explained else "REISSUE:unexplained"] += 1
             else:
                 tally["DIVIDEND"] += 1
         return dict(sorted(tally.items()))
@@ -359,6 +393,8 @@ class BookActionApplier:
                 self._dividend(action, session, sim, book)
             elif isinstance(action, ShareRescale):
                 self._rescale(action, sim, book)
+            elif isinstance(action, IsinReissue):
+                self._reissue(action, sim, book)
             else:
                 self._unmodelled(action, sim)
         self._last = session
@@ -377,18 +413,36 @@ class BookActionApplier:
         self.applied["DIVIDEND"] += 1
         self.log.append(AppliedDividend(action.isin, session, amount))
 
+    def _carry(
+        self, from_isin: str, isin: str, ex_date: date, sim: SimBroker, book: PortfolioBook
+    ) -> None:
+        if sim.held_quantity(from_isin) == 0:
+            return
+        sim.carry_over(from_isin, isin)
+        book.apply_merger(from_isin, surviving_isin=isin, shares_received=_ONE, shares_held=_ONE)
+        _check_agree(isin, sim, book)
+        _check_agree(from_isin, sim, book)
+        self.applied["REISSUE"] += 1
+        self.log.append(AppliedCarry(from_isin, isin, ex_date))
+
+    def _reissue(self, action: IsinReissue, sim: SimBroker, book: PortfolioBook) -> None:
+        if action.explained:
+            self._carry(action.from_isin, action.isin, action.ex_date, sim, book)
+            return
+        if sim.held_quantity(action.from_isin) == 0:
+            return
+        self.applied["unmodelled:REISSUE"] += 1
+        _log.warning(
+            "book_actions.reissue_unexplained",
+            isin=action.from_isin,
+            successor_isin=action.isin,
+            ex_date=action.ex_date.isoformat(),
+            detail="held across a reissue no split/bonus explains; not carried, book unchanged",
+        )
+
     def _rescale(self, action: ShareRescale, sim: SimBroker, book: PortfolioBook) -> None:
-        if action.carried_from is not None and sim.held_quantity(action.carried_from) > 0:
-            sim.carry_over(action.carried_from, action.isin)
-            book.apply_merger(
-                action.carried_from,
-                surviving_isin=action.isin,
-                shares_received=_ONE,
-                shares_held=_ONE,
-            )
-            _check_agree(action.isin, sim, book)
-            self.applied["REISSUE"] += 1
-            self.log.append(AppliedCarry(action.carried_from, action.isin, action.ex_date))
+        if action.carried_from is not None:
+            self._carry(action.carried_from, action.isin, action.ex_date, sim, book)
         if _entitled(action.isin, action.ex_date, sim) == 0:
             return
         old, new = sim.apply_share_rescale(
@@ -488,7 +542,9 @@ def load_book_actions(conn: Connection) -> BookActionCalendar:
     actions = load_reconciled_actions(conn)
     resolver = LineageStore(conn).load()
     calendar = BookActionCalendar(
-        _to_book_actions(actions, resolver.chain_to, resolver.effective_date)
+        _to_book_actions(
+            actions, resolver.chain_to, resolver.effective_date, reissues=resolver.edges()
+        )
     )
     _log.info("book_actions.loaded", total=len(calendar), **calendar.counts())
     return calendar
@@ -511,12 +567,20 @@ def _to_book_actions(
     rows: Iterable[_ActionRow],
     chain_to: _ChainTo,
     effective_date: _EffectiveDate,
+    *,
+    reissues: Iterable[tuple[str, str, date]] = (),
 ) -> list[BookAction]:
-    """Translate store rows into book actions, resolving each onto the ISIN held on its ex-date."""
+    """Translate store rows into book actions, resolving each onto the ISIN held on its ex-date.
+
+    ``reissues`` are the lineage's one-hop edges ``(predecessor, successor, effective_date)``; each
+    becomes an :class:`IsinReissue` on its effective date, explained when a SPLIT/BONUS resolved
+    onto either end of the edge is ex within :data:`_REISSUE_WINDOW_DAYS` on or before it.
+    """
     from dataplatform.corpactions import DividendTerms, FaceValueTerms, RatioTerms
 
     out: list[BookAction] = []
     skipped: Counter[str] = Counter()
+    mergers = 0
     for row in rows:
         action_type = str(getattr(row.action_type, "value", row.action_type))
         chain = chain_to(row.isin)
@@ -530,7 +594,6 @@ def _to_book_actions(
                     kind=RescaleKind.SPLIT,
                     numerator=terms.from_value,
                     denominator=terms.to_value,
-                    carried_from=_reissued_on(live, row.ex_date, chain, effective_date),
                 )
             )
         elif action_type == "BONUS" and isinstance(terms, RatioTerms):
@@ -541,7 +604,6 @@ def _to_book_actions(
                     kind=RescaleKind.BONUS,
                     numerator=terms.new_shares + terms.held_shares,
                     denominator=terms.held_shares,
-                    carried_from=_reissued_on(live, row.ex_date, chain, effective_date),
                 )
             )
         elif action_type == "DIVIDEND":
@@ -550,9 +612,30 @@ def _to_book_actions(
             else:
                 skipped["DIVIDEND:no_rupee_amount"] += 1
         elif action_type in ("MERGER", "DEMERGER", "SCHEME_OF_ARRANGEMENT", "RIGHTS"):
+            if action_type == "MERGER":
+                # No stored merger names its surviving ISIN (and the lineage is not a merger map),
+                # so even a stated ratio has nowhere to go: named here, never guessed.
+                mergers += 1
+                _log.warning(
+                    "book_actions.merger_skipped",
+                    isin=live,
+                    ex_date=row.ex_date.isoformat(),
+                    terms=type(terms).__name__,
+                    detail="no surviving ISIN in the store; the book leaves the holding as it is",
+                )
             out.append(UnmodelledAction(isin=live, ex_date=row.ex_date, action_type=action_type))
         else:
             skipped[action_type] += 1  # BUYBACK, DELISTING, NAME_CHANGE: no share/cash effect here
+    rescaled = [(a.isin, a.ex_date) for a in out if isinstance(a, ShareRescale)]
+    for predecessor, successor, effective in reissues:
+        explained = any(
+            isin in (predecessor, successor)
+            and 0 <= (effective - ex_date).days <= _REISSUE_WINDOW_DAYS
+            for isin, ex_date in rescaled
+        )
+        out.append(IsinReissue(successor, effective, predecessor, explained))
+    if mergers:
+        skipped["MERGER:no_surviving_isin"] = mergers
     if skipped:
         _log.info("book_actions.skipped", **dict(sorted(skipped.items())))
     return out
@@ -583,16 +666,6 @@ def _live_isin(
         if end is not None and on < end < best_end:
             best, best_end = member, end
     return best
-
-
-def _reissued_on(
-    live: str, on: date, chain: Sequence[str], effective_date: _EffectiveDate
-) -> str | None:
-    """The predecessor whose successor first trades on ``on``: the holding carried into ``live``."""
-    for member in chain:
-        if member != live and effective_date(member) == on:
-            return member
-    return None
 
 
 def load_store_book_actions() -> BookActionCalendar:

@@ -34,6 +34,7 @@ from backtest.book_actions import (
     BookActionApplier,
     BookActionCalendar,
     CashDividend,
+    IsinReissue,
     RescaleKind,
     ShareRescale,
     UnmodelledAction,
@@ -422,16 +423,159 @@ def test_store_rows_land_on_the_isin_live_on_their_ex_date() -> None:
             ExchangeRatioTerms(shares_received=Decimal(1), shares_held=Decimal(1)),
         ),
     ]
-    out = _to_book_actions(rows, lambda isin: chain.get(isin, (isin,)), effective.get)
+    out = _to_book_actions(
+        rows, lambda isin: chain.get(isin, (isin,)), effective.get, reissues=[(P, S, reissue)]
+    )
     assert out == [
-        ShareRescale(S, reissue, RescaleKind.SPLIT, Decimal(10), Decimal(2), carried_from=P),
+        ShareRescale(S, reissue, RescaleKind.SPLIT, Decimal(10), Decimal(2)),
         CashDividend(P, date(2021, 8, 1), Decimal("2.5")),  # before the reissue: paid on P
         CashDividend(S, date(2022, 8, 1), Decimal("3")),
         ShareRescale(A, date(2022, 1, 3), RescaleKind.BONUS, Decimal(3), Decimal(2)),
         UnmodelledAction(A, date(2022, 2, 1), "DEMERGER"),
         # the percent-of-face-value dividend is skipped, not guessed
         UnmodelledAction(A, date(2022, 4, 1), "MERGER"),
+        # the split on the reissue date explains it: carried (before the split, see _ORDER)
+        IsinReissue(S, reissue, P, explained=True),
     ]
+
+
+# ── the split ex on the retired ISIN's last session, the survivor trading from the next ─────────
+#
+# How NSE actually prints it (HDFC Bank 2019, Britannia 2018, IGL 2017, BEL 2017, IRCTC 2021): the
+# split is ex on 19-09-2019 and the *old* ISIN INE040A01026 carries that day's halved bar; the new
+# ISIN INE040A01034 first trades on 20-09-2019, the lineage edge's effective date. The ex-date is
+# one session before the reissue, so a carry keyed on "a split on the effective date" never fired:
+# the doubled holding stayed on the dead ISIN, marked at its last price for ever.
+
+HDFC_P = "INE040A01026"
+HDFC_S = "INE040A01034"
+HDFC_EX, HDFC_NEW = date(2019, 9, 19), date(2019, 9, 20)
+
+
+def _hdfc_rows() -> list[_Row]:
+    return [
+        _Row(
+            HDFC_S,  # stored against the survivor, as the store files it
+            HDFC_EX,
+            ActionType.SPLIT,
+            FaceValueTerms(from_value=Decimal(2), to_value=Decimal(1)),
+        )
+    ]
+
+
+def _hdfc_actions(*, reissues: bool = True) -> list[object]:
+    chain = {HDFC_S: (HDFC_P, HDFC_S)}
+    return list(
+        _to_book_actions(
+            _hdfc_rows(),
+            lambda isin: chain.get(isin, (isin,)),
+            {HDFC_P: HDFC_NEW}.get,
+            reissues=[(HDFC_P, HDFC_S, HDFC_NEW)] if reissues else (),
+        )
+    )
+
+
+def test_a_split_ex_the_session_before_the_reissue_lands_on_the_retired_isin_then_carries() -> None:
+    assert _hdfc_actions() == [
+        # P's own bar prints the split on 19-09: the rescale is P's ...
+        ShareRescale(HDFC_P, HDFC_EX, RescaleKind.SPLIT, Decimal(2), Decimal(1)),
+        # ... and the holding moves to S on S's first session.
+        IsinReissue(HDFC_S, HDFC_NEW, HDFC_P, explained=True),
+    ]
+
+
+def test_a_reissue_no_split_or_bonus_explains_is_not_carried() -> None:
+    far = [(HDFC_P, HDFC_S, date(2019, 12, 2))]  # the split is 74 days earlier
+    chain = {HDFC_S: (HDFC_P, HDFC_S)}
+    out = _to_book_actions(
+        _hdfc_rows(), lambda isin: chain.get(isin, (isin,)), {HDFC_P: far[0][2]}.get, reissues=far
+    )
+    assert IsinReissue(HDFC_S, date(2019, 12, 2), HDFC_P, explained=False) in out
+
+
+class _StaleMarkWalk(_Walk):
+    """A walk that marks a held ISIN with no bar at its last close, as the drivers' NAV does."""
+
+    def _sample(self, session: date) -> None:
+        last: dict[str, Decimal] = {}
+        for (isin, day), price in sorted(self.market.prices.items(), key=lambda kv: kv[0][1]):
+            if day <= session:
+                last[isin] = price
+        self.nav[session] = self.book.net_asset_value(last)
+        self.cash[session] = self.book.cash
+        self.settled[session] = {h.isin: h.quantity for h in self.sim.holdings()}
+        self.pending[session] = tuple((p.isin, p.session, p.quantity) for p in self.sim.positions())
+
+
+# T+2 era sessions around the HDFC split: Tue 17-09 .. Mon 23-09-2019.
+H1, H2, H3, H4, H5 = (date(2019, 9, d) for d in (17, 18, 19, 20, 23))
+HDFC_SESSIONS = (H1, H2, H3, H4, H5)
+assert (H3, H4) == (HDFC_EX, HDFC_NEW)
+
+
+def _hdfc_prices(survivor_close: Decimal = Decimal("1230")) -> dict[tuple[str, date], Decimal]:
+    prices = {(HDFC_P, H1): Decimal("2240"), (HDFC_P, H2): Decimal("2200")}
+    prices[(HDFC_P, H3)] = Decimal("1100")  # the ex-date bar, still on the old ISIN
+    prices[(HDFC_S, H4)] = Decimal("1100")
+    prices[(HDFC_S, H5)] = survivor_close
+    return prices
+
+
+def _hdfc_walk(policy: object, *, reissues: bool = True) -> _StaleMarkWalk:
+    walk = _StaleMarkWalk(
+        _hdfc_prices(),
+        policy,
+        BookActionCalendar(_hdfc_actions(reissues=reissues)),  # type: ignore[arg-type]
+        sessions=HDFC_SESSIONS,
+    )
+    walk.run()
+    return walk
+
+
+def test_hdfc_2019_the_split_holding_follows_the_stock_to_its_new_isin() -> None:
+    walk = _hdfc_walk(_Scripted({H1: (_buy(HDFC_P, 100),)}))
+    assert walk.sim.held_quantity(HDFC_P) == 0 and walk.book.position(HDFC_P) is None
+    survivor = walk.book.position(HDFC_S)
+    assert survivor is not None and survivor.quantity == 200
+    # NAV is continuous through the ex-date and the reissue, then follows the survivor's price.
+    assert walk.nav[H3] == walk.nav[H2]  # 100 x 2200 became 200 x 1100 on the old ISIN
+    assert walk.nav[H4] == walk.nav[H3]
+    assert walk.nav[H5] - walk.nav[H4] == 200 * (Decimal("1230") - Decimal("1100"))
+    assert walk.broker.corporate_actions_applied == {"REISSUE": 1, "SPLIT": 1}
+
+
+def test_hdfc_2019_without_the_carry_the_holding_is_stranded_at_a_stale_mark() -> None:
+    walk = _hdfc_walk(_Scripted({H1: (_buy(HDFC_P, 100),)}), reissues=False)
+    assert walk.sim.held_quantity(HDFC_P) == 200  # split applied, never carried
+    assert walk.nav[H5] == walk.nav[H4]  # the survivor's +₹130 never reaches the book
+
+
+def test_hdfc_2019_the_tax_ledger_keeps_the_original_acquisition_date() -> None:
+    walk = _hdfc_walk(_Scripted({H1: (_buy(HDFC_P, 100),)}))
+    from backtest.tax import ReissueEvent, SplitEvent
+
+    ledger = walk.broker.run_ledger(
+        source="hdfc",
+        terminal=H5,
+        terminal_nav=walk.nav[H5],
+        terminal_prices={HDFC_S: Decimal("1230")},
+    )
+    assert ledger.corporate_events == (
+        SplitEvent(HDFC_P, H3, 2, 1, 200),
+        ReissueEvent(HDFC_S, H4, HDFC_P),
+    )
+    (buy,) = ledger.trades
+    assert (buy.isin, buy.trade_date) == (HDFC_P, H2)  # the lots carry this date across the hop
+
+
+def test_t2_a_pending_lot_is_split_on_the_old_isin_and_settles_under_the_new_one() -> None:
+    # Staged H1, filled H2: under T+2 the lot is pending through the ex-date H3 and settles on
+    # H4 — the reissue session, after the carry has moved it.
+    walk = _hdfc_walk(_Scripted({H1: (_buy(HDFC_P, 100),)}))
+    assert walk.settled[H3] == {}
+    assert walk.pending[H3] == ((HDFC_P, H2, 200),)  # rescaled while still in settlement
+    assert walk.settled[H4] == {HDFC_S: 200}  # carried pending, delivered under the survivor
+    assert walk.pending[H4] == ()
 
 
 def test_an_unmodelled_action_on_a_held_name_is_counted_and_changes_nothing() -> None:
@@ -488,6 +632,44 @@ class _RecordingPolicy:
     def decide(self, ctx: SessionContext) -> SessionDecision:
         self.scopes.append(ctx.pit.as_of)
         return self._inner.decide(ctx)
+
+
+class _HdfcRecordingData(_RecordingData):
+    """The decision-side view of the HDFC fixture: the raw bar of whichever ISIN traded."""
+
+    def signal(self, as_of: date) -> Dataset[MomentumRecord]:
+        isin, price = (HDFC_P, Decimal("2200")) if as_of < H4 else (HDFC_S, Decimal("1100"))
+        if as_of == H3:
+            price = Decimal("1100")
+        records = (
+            MomentumRecord(isin=isin, momentum=Decimal("0.1"), price=price, knowable_date=as_of),
+        )
+        self.reads.append((as_of, records))
+        return Dataset.declaring(
+            f"m@{as_of.isoformat()}", records, knowable_date=lambda r: r.knowable_date
+        )
+
+
+def test_the_reissue_carry_changes_no_decision_input() -> None:
+    """With and without the carry: every signal read, PIT scope and split factor byte-identical."""
+    from backtest.book_actions import current_signal_split_factors, signal_split_factors
+
+    runs = []
+    for reissues in (False, True):
+        data = _HdfcRecordingData()
+        policy = _RecordingPolicy(data)
+        calendar = BookActionCalendar(_hdfc_actions(reissues=reissues))  # type: ignore[arg-type]
+        with signal_split_factors(calendar):
+            factors = current_signal_split_factors()
+        walk = _StaleMarkWalk(_hdfc_prices(), policy, calendar, sessions=HDFC_SESSIONS)
+        walk.run()
+        runs.append((repr(data.reads).encode(), policy.scopes, repr(factors).encode(), walk))
+    (reads_off, scopes_off, factors_off, off), (reads_on, scopes_on, factors_on, on) = runs
+    assert reads_on == reads_off
+    assert scopes_on == scopes_off == list(HDFC_SESSIONS)
+    assert factors_on == factors_off
+    # ...while the account did change: the fix is live.
+    assert on.sim.held_quantity(HDFC_P) != off.sim.held_quantity(HDFC_P)
 
 
 def test_a_policys_decision_inputs_are_identical_with_and_without_the_wiring() -> None:

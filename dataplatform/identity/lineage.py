@@ -596,6 +596,19 @@ class LineageResolver:
         found = self._forward.get(predecessor)
         return None if found is None else found[1]
 
+    def edges(self) -> tuple[tuple[str, str, date], ...]:
+        """Every one-hop edge as ``(predecessor, successor, effective_date)``, by effective date.
+
+        The backtest book carries a holding across each hop on the successor's first session, so it
+        needs the edges themselves, not the transitive chain.
+        """
+        return tuple(
+            sorted(
+                ((p, s, eff) for p, (s, eff) in self._forward.items()),
+                key=lambda edge: (edge[2], edge[0]),
+            )
+        )
+
     def survivors(self) -> frozenset[str]:
         """Every ISIN that inherited history from at least one predecessor — the stitch's keys."""
         return frozenset(self._backward)
