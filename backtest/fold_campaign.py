@@ -21,7 +21,23 @@ module is that order, as two commands that cannot be run the other way round:
     code* gives the same run, and every file it names is on disk with the recorded hash. Then runs
     the named H-arms on the fold test windows under ``DIR2`` (the frozen directory is only read)
     and writes ``DIR2/reports/round2-decision.md``: PASS/FAIL per criterion per arm against the
-    named baseline, with the trial count printed.
+    named baseline, with the trial count, the folds each criterion read and the Sharpe variance's
+    source and n printed. ``--trial-sharpes FILE`` adds a ``trial-sharpes`` file's Sharpes to the
+    variance (below ``MIN_VARIANCE_SHARPES`` distinct Sharpes criterion 4 cannot PASS).
+
+``python -m backtest.fold_campaign trial-sharpes --out DIR3 [--arms ...] --workers N``
+    Runs the round-1 sweep's arms (default: every one in ``backtest.sweep.ARMS`` that is neither a
+    baseline nor a round-2 hypothesis) on the fold test windows and writes ``DIR3/trial-sharpes
+    .json``: each arm's per-period Sharpe on its concatenated after-tax test returns — the trials
+    §2 counts, on the same folds, as the variance source for criterion 4. An arm missing a fold is
+    recorded as excluded with the reason, never scored on the folds it has.
+
+``python -m backtest.fold_campaign render-round2 --baseline-dir DIR --runs-dir DIR2
+--runs-from-commit SHA --out DIR4 --arms ... --baseline LABEL --trials N [--trial-sharpes FILE]``
+    Re-renders the decision from H-arm runs already on disk, **replaying nothing**: refuses unless
+    every run is there and ``DIR2`` differs from this checkout's pin on the commit alone (named by
+    ``--runs-from-commit``, an ancestor of a clean HEAD). ``DIR`` and ``DIR2`` are only read; the
+    report and the after-tax NAVs go under ``DIR4``.
 
 **The investor is fixed, not a flag**: a resident individual at the 30 % slab, no surcharge, tax
 paid at FY end (§2). A different investor would be a different study.
@@ -44,7 +60,7 @@ import sys
 from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
 from multiprocessing import get_context
@@ -56,7 +72,13 @@ from backtest.book_actions import (
     book_corporate_actions,
     load_store_book_actions,
 )
-from backtest.campaign import MAX_WORKERS, UnitOutcome, _git_commit, check_manifest
+from backtest.campaign import (
+    MAX_WORKERS,
+    CampaignError,
+    UnitOutcome,
+    _git_commit,
+    check_manifest,
+)
 from backtest.cash_interest import (
     accrue_cash_interest,
     describe_cash_interest,
@@ -66,6 +88,7 @@ from backtest.decision_rule import (
     PREREGISTERED_MIN_TRIALS,
     ArmFolds,
     FoldResult,
+    TrialSharpe,
     evaluate,
     render_decision,
     trial_sharpe_variance,
@@ -112,17 +135,22 @@ __all__ = [
     "FROZEN_NAME",
     "PREREGISTRATION_PATH",
     "PROFILE",
+    "TRIAL_SHARPES_NAME",
     "FoldCampaignError",
     "FoldRunPlan",
     "FoldWindow",
     "Pinned",
+    "TrialSharpeSet",
     "baseline_plan",
     "build_arm_folds",
     "freeze_baseline",
+    "load_trial_sharpes",
     "main",
+    "round1_labels",
     "round2_plan",
     "run_fold_units",
     "verify_frozen",
+    "write_trial_sharpes",
 ]
 
 _LOG = get_logger(__name__)
@@ -143,6 +171,9 @@ PREREGISTRATION_PATH = (
     Path(__file__).resolve().parent.parent / "ops/studies/preregistration-signals-2026-09-29.md"
 )
 FROZEN_NAME = "frozen-baseline.json"
+TRIAL_SHARPES_NAME = "trial-sharpes.json"
+#: The sweep family the round-2 hypotheses carry; every other non-baseline arm is a round-1 trial.
+_HYPOTHESIS_FAMILY = "round-2 hypothesis"
 _TEST, _SELECTION = "test", "selection"
 
 
@@ -452,12 +483,15 @@ def build_arm_folds(
     folds: FoldPlan,
     *,
     fmv: GrandfatheringPrices,
+    nav_dir: Path | None,
     role: str = _TEST,
 ) -> ArmFolds:
-    """One arm's :class:`ArmFolds` from its persisted runs, writing each after-tax NAV file.
+    """One arm's :class:`ArmFolds` from its persisted runs under ``out_dir`` (only read).
 
-    A fold whose ledger cannot be taxed keeps its drawdown and pre-tax returns out of the rule:
-    its after-tax XIRR is ``None`` with the reason, and its returns are empty.
+    Writes each after-tax NAV file under ``nav_dir``, or nowhere when it is ``None`` (a frozen
+    or render-only directory is never written to). A fold whose ledger cannot be taxed keeps its
+    drawdown and pre-tax returns out of the rule: its after-tax XIRR is ``None`` with the reason,
+    and its returns are empty — which the rule reads as a *missing* fold, never a shorter one.
     """
     schedule = load_tax_schedule()
     results: list[FoldResult] = []
@@ -474,7 +508,8 @@ def build_arm_folds(
             results.append(FoldResult(fold.name, None, summary.max_drawdown, (), str(error)))
             continue
         net = after_tax_nav(pre_tax, taxed.fy_taxes, PROFILE)
-        write_nav(net, after_tax_nav_file(out_dir, digest, PROFILE))
+        if nav_dir is not None:
+            write_nav(net, after_tax_nav_file(nav_dir, digest, PROFILE))
         results.append(
             FoldResult(
                 fold=fold.name,
@@ -518,7 +553,9 @@ def render_baseline_report(
     ]
     for role in (_TEST, _SELECTION):
         for arm in plan.arms:
-            arm_folds = build_arm_folds(plan.out_dir, arm.label, digests, folds, fmv=fmv, role=role)
+            arm_folds = build_arm_folds(
+                plan.out_dir, arm.label, digests, folds, fmv=fmv, nav_dir=plan.out_dir, role=role
+            )
             for fold, result in zip(folds.folds, arm_folds.folds, strict=True):
                 window = fold.test if role == _TEST else fold.selection
                 xirr = (
@@ -533,6 +570,105 @@ def render_baseline_report(
     return "\n".join(lines) + "\n"
 
 
+@dataclass(frozen=True, slots=True)
+class TrialSharpeSet:
+    """Trial Sharpes read from a ``trial-sharpes`` file, with where they came from."""
+
+    source: str
+    sharpes: tuple[TrialSharpe, ...]
+    excluded: tuple[str, ...]
+
+
+def round1_labels() -> tuple[str, ...]:
+    """The round-1 sweep's arms still in ``ARMS``: neither a baseline nor a round-2 hypothesis."""
+    return tuple(
+        arm.label
+        for arm in ARMS
+        if arm.family != _HYPOTHESIS_FAMILY and arm.label not in BASELINE_LABELS
+    )
+
+
+def write_trial_sharpes(
+    plan: FoldRunPlan,
+    pinned: Pinned,
+    folds: FoldPlan,
+    actions: BookActionSource | None,
+    fmv: GrandfatheringPrices,
+) -> Path:
+    """``plan.out_dir/trial-sharpes.json``: each arm's Sharpe on its concatenated test returns.
+
+    An arm with no after-tax returns on some fold is listed under ``excluded`` with the folds and
+    the reason — it is not scored on the folds it has (that is the comparison §4 does not make).
+    """
+    digests = _digests(plan, actions)
+    trials: list[dict[str, Any]] = []
+    excluded: list[str] = []
+    for arm in plan.arms:
+        arm_folds = build_arm_folds(
+            plan.out_dir, arm.label, digests, folds, fmv=fmv, nav_dir=plan.out_dir
+        )
+        if arm_folds.missing_returns:
+            reasons = "; ".join(
+                f"{f.fold}: {f.error or 'no after-tax returns'}"
+                for f in arm_folds.folds
+                if not f.has_returns
+            )
+            excluded.append(f"{arm.label}: {reasons}")
+            continue
+        try:
+            stats = arm_folds.stats()
+        except ValueError as error:
+            excluded.append(f"{arm.label}: {error}")
+            continue
+        trials.append(
+            {
+                "arm": arm.label,
+                "sharpe": stats.sharpe,
+                "observations": stats.observations,
+                "digests": {f.name: digests[(arm.label, f.name, _TEST)] for f in folds.folds},
+            }
+        )
+    document = {
+        **_pin_document(pinned),
+        "book_corporate_actions": plan.book_actions,
+        "folds": [f.name for f in folds.folds],
+        "trials": trials,
+        "excluded": excluded,
+    }
+    path = plan.out_dir / TRIAL_SHARPES_NAME
+    path.write_text(json.dumps(document, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def load_trial_sharpes(
+    path: Path, pinned: Pinned, folds: FoldPlan, *, book_actions: bool = True
+) -> TrialSharpeSet:
+    """The trial Sharpes in a ``trial-sharpes`` file, refused unless struck on these folds.
+
+    Refuses a file made on another lake, other folds, another pre-registration, floor or interest
+    schedule (the commit may differ, as for the frozen baseline), or with a non-finite Sharpe.
+    """
+    if not path.is_file():
+        raise FoldCampaignError(f"no trial-sharpes file at {path}")
+    document = json.loads(path.read_text(encoding="utf-8"))
+    current = _pin_document(pinned)
+    differs = sorted(k for k in current if k != "commit" and document.get(k) != current[k])
+    if document.get("book_corporate_actions") != book_actions:
+        differs.append("book_corporate_actions")
+    if document.get("folds") != [f.name for f in folds.folds]:
+        differs.append("folds")
+    if differs:
+        raise FoldCampaignError(
+            f"{path} was struck under different conditions ({', '.join(sorted(set(differs)))})"
+        )
+    sharpes = tuple(TrialSharpe(str(t["arm"]), float(t["sharpe"])) for t in document["trials"])
+    return TrialSharpeSet(
+        source=f"{path.name} @ {str(document['commit'])[:12]}",
+        sharpes=sharpes,
+        excluded=tuple(str(e) for e in document.get("excluded", [])),
+    )
+
+
 def render_round2(
     plan: FoldRunPlan,
     baseline_dir: Path,
@@ -542,8 +678,15 @@ def render_round2(
     *,
     baseline_label: str,
     trials: int,
+    trial_sharpes: TrialSharpeSet | None = None,
+    nav_dir: Path | None = None,
 ) -> str:
-    """The round-2 decision: every H-arm against the named frozen baseline arm (§4)."""
+    """The round-2 decision: every H-arm against the named frozen baseline arm (§4).
+
+    H-arm runs are read from ``plan.out_dir``; their after-tax NAVs are written under ``nav_dir``
+    (default ``plan.out_dir``). ``baseline_dir`` is only read. The Sharpe variance pools every
+    evaluated arm with all its folds and ``trial_sharpes``, and the report names its source and n.
+    """
     if baseline_label not in BASELINE_LABELS:
         raise FoldCampaignError(
             f"--baseline must name a frozen baseline arm ({', '.join(BASELINE_LABELS)})"
@@ -552,14 +695,22 @@ def render_round2(
     base_digests = _digests(frozen, actions)
     cand_digests = _digests(plan, actions)
     baselines = [
-        build_arm_folds(baseline_dir, label, base_digests, folds, fmv=fmv)
+        build_arm_folds(baseline_dir, label, base_digests, folds, fmv=fmv, nav_dir=None)
         for label in BASELINE_LABELS
     ]
+    written = plan.out_dir if nav_dir is None else nav_dir
     candidates = [
-        build_arm_folds(plan.out_dir, arm.label, cand_digests, folds, fmv=fmv) for arm in plan.arms
+        build_arm_folds(plan.out_dir, arm.label, cand_digests, folds, fmv=fmv, nav_dir=written)
+        for arm in plan.arms
     ]
     arms = [*baselines, *candidates]
-    variance = trial_sharpe_variance(arms)
+    variance = trial_sharpe_variance(
+        arms,
+        supplied=trial_sharpes.sharpes if trial_sharpes else (),
+        supplied_source=trial_sharpes.source if trial_sharpes else None,
+    )
+    if trial_sharpes and trial_sharpes.excluded:
+        variance = replace(variance, excluded=(*variance.excluded, *trial_sharpes.excluded))
     named = next(b for b in baselines if b.label == baseline_label)
     verdicts = [evaluate(c, named, trials=trials, sharpe_variance=variance) for c in candidates]
     return render_decision(
@@ -592,16 +743,42 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     h = sub.add_parser("round2-signals", help="run H-arms against the frozen baseline")
     h.add_argument("--baseline-dir", type=Path, required=True)
     h.add_argument("--out", type=Path, required=True, help="round-2 directory (not data/)")
-    h.add_argument("--arms", required=True, help="comma-separated H-arm sweep labels")
-    h.add_argument("--baseline", required=True, help=f"one of: {', '.join(BASELINE_LABELS)}")
-    h.add_argument(
-        "--trials",
-        type=int,
-        required=True,
-        help=f"the recorded trial count (pre-registration §2; at least {PREREGISTERED_MIN_TRIALS})",
+    render = sub.add_parser(
+        "render-round2", help="re-render the round-2 decision from runs on disk; replays nothing"
     )
-    for p in (base, h):
+    render.add_argument("--runs-dir", type=Path, required=True, help="a round2-signals --out")
+    render.add_argument(
+        "--runs-from-commit", required=True, help="the commit --runs-dir's runs were made at"
+    )
+    render.add_argument("--out", type=Path, required=True, help="where the report goes (new)")
+    for p in (h, render):
+        p.add_argument("--arms", required=True, help="comma-separated H-arm sweep labels")
+        p.add_argument("--baseline", required=True, help=f"one of: {', '.join(BASELINE_LABELS)}")
+        p.add_argument(
+            "--trials",
+            type=int,
+            required=True,
+            help=f"the recorded trial count (pre-registration §2; at least "
+            f"{PREREGISTERED_MIN_TRIALS})",
+        )
+        p.add_argument(
+            "--trial-sharpes",
+            type=Path,
+            default=None,
+            help="a trial-sharpes file (round-1 arms on these folds) pooled into the Sharpe "
+            "variance criterion 4 deflates with",
+        )
+    render.add_argument("--baseline-dir", type=Path, required=True)
+    t = sub.add_parser("trial-sharpes", help="run round-1 arms on the folds; write their Sharpes")
+    t.add_argument("--out", type=Path, required=True, help="trial-sharpes directory (not data/)")
+    t.add_argument(
+        "--arms",
+        default=None,
+        help="comma-separated sweep labels (default: every round-1 arm, baselines excluded)",
+    )
+    for p in (base, h, render, t):
         p.add_argument("--data-root", type=Path, default=None)
+    for p in (base, h, t):
         p.add_argument(
             "--workers", type=int, required=True, help=f"worker processes, 1..{MAX_WORKERS}"
         )
@@ -633,6 +810,19 @@ def _pinned(data_root: Path | None, folds: FoldPlan) -> Pinned:
 
 def _resume_manifest(pinned: Pinned, command: str) -> dict[str, Any]:
     return {**_pin_document(pinned), "command": command}
+
+
+def _labels(arms: str) -> list[str]:
+    return [part.strip() for part in arms.split(",") if part.strip()]
+
+
+def _absent_runs(plan: FoldRunPlan, actions: BookActionSource | None) -> list[str]:
+    """Every run of ``plan`` without its summary, ledger and NAV on disk, as ``arm fold role``."""
+    return [
+        " ".join(key)
+        for key, digest in sorted(_digests(plan, actions).items())
+        if not all(path.is_file() for path in _run_files(plan.out_dir, digest).values())
+    ]
 
 
 def _print_outcomes(outcomes: Sequence[UnitOutcome]) -> int:
@@ -673,6 +863,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             name, service_fmv = "baseline-folds.md", l1_grandfathering(args.data_root)
             with service_fmv[0]:
                 text = render_baseline_report(plan, folds, actions, service_fmv[1])
+        elif args.command == "trial-sharpes":
+            labels = _labels(args.arms) if args.arms else list(round1_labels())
+            plan = round2_plan(out_dir, folds, labels, data_root=args.data_root)
+            if _print_outcomes(run_fold_units(plan, workers=args.workers)):
+                raise FoldCampaignError("a trial run failed; no trial Sharpes written (re-run)")
+            service_fmv = l1_grandfathering(args.data_root)
+            with service_fmv[0]:
+                path = write_trial_sharpes(plan, pinned, folds, actions, service_fmv[1])
+            print(f"  trial Sharpes written to {path}")
+            return 0
         else:
             baseline_dir = args.baseline_dir.resolve()
             if baseline_dir == out_dir:
@@ -686,10 +886,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.baseline not in BASELINE_LABELS:
                 raise FoldCampaignError(f"--baseline must be one of: {', '.join(BASELINE_LABELS)}")
             verify_frozen(baseline_dir, pinned, folds, actions)
-            labels = [part.strip() for part in args.arms.split(",") if part.strip()]
-            plan = round2_plan(out_dir, folds, labels, data_root=args.data_root)
-            if _print_outcomes(run_fold_units(plan, workers=args.workers)):
-                raise FoldCampaignError("an H-arm run failed; no decision rendered (re-run)")
+            trial_sharpes = (
+                load_trial_sharpes(args.trial_sharpes, pinned, folds)
+                if args.trial_sharpes is not None
+                else None
+            )
+            labels = _labels(args.arms)
+            if args.command == "render-round2":
+                runs_dir = args.runs_dir.resolve()
+                if out_dir in (runs_dir, baseline_dir):
+                    raise FoldCampaignError("render-round2 --out must be a new directory")
+                check_manifest(
+                    runs_dir,
+                    _resume_manifest(pinned, "round2-signals"),
+                    runs_from_commit=args.runs_from_commit,
+                )
+                plan = round2_plan(runs_dir, folds, labels, data_root=args.data_root)
+                absent = _absent_runs(plan, actions)
+                if absent:
+                    raise FoldCampaignError(
+                        "render-round2 replays nothing; not on disk: " + "; ".join(absent[:6])
+                    )
+            else:
+                plan = round2_plan(out_dir, folds, labels, data_root=args.data_root)
+                if _print_outcomes(run_fold_units(plan, workers=args.workers)):
+                    raise FoldCampaignError("an H-arm run failed; no decision rendered (re-run)")
             name, service_fmv = "round2-decision.md", l1_grandfathering(args.data_root)
             with service_fmv[0]:
                 text = render_round2(
@@ -700,8 +921,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     service_fmv[1],
                     baseline_label=args.baseline,
                     trials=args.trials,
+                    trial_sharpes=trial_sharpes,
+                    nav_dir=out_dir,
                 )
-    except (FoldCampaignError, WindowError, ValueError) as error:
+    except (FoldCampaignError, CampaignError, WindowError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     report = out_dir / "reports" / name
