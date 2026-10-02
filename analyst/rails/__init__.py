@@ -15,6 +15,7 @@ market is the one thing invariant #6 forbids.
 from analyst.rails.engine import (
     FORCED_REVIEW_EVENT,
     RailEngine,
+    RailJournal,
     apply_order,
     assess_drawdown,
     check_order,
@@ -42,6 +43,7 @@ __all__ = [
     "RailBreach",
     "RailEngine",
     "RailId",
+    "RailJournal",
     "apply_order",
     "assess_drawdown",
     "check_order",

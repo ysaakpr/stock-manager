@@ -56,6 +56,11 @@ from pathlib import Path
 from typing import Any, Final
 
 from backtest.accounting import PortfolioBook
+from backtest.book_actions import (
+    add_book_actions_flag,
+    current_signal_split_factors,
+    store_book_actions_unless,
+)
 from backtest.forecast import (
     FEATURE_NAMES,
     LOOKBACK_1M,
@@ -75,10 +80,10 @@ from backtest.policies.forecast_daily import (
 )
 from backtest.policies.momentum_v2 import MomentumV2Parameters
 from backtest.policies.naive_momentum import MomentumParameters
+from backtest.rails import RailGate, ratified_backtest_rail_policy
 from backtest.replay import ReplayEngine
 from backtest.run import (
     _ACCOUNT_STATE,
-    _BENCHMARK_BASKET,
     _BENCHMARK_TRI_SLUG,
     _DEFAULT_OPENING_CASH,
     _REGIME_MA_DAYS,
@@ -87,19 +92,25 @@ from backtest.run import (
     UniverseParameters,
     _AccountingBroker,
     _decision_counts,
+    _exact_price,
+    _finish_backtest,
     _InvestableUniverse,
     _L1Market,
     _L1Reader,
     _max_drawdown,
     _pct,
     _RegimeSource,
+    _register_split_factors,
     _reserve_fill_headroom,
     _resolve_benchmark,
     _rupees,
+    _seam_consistent_px,
     _terminal_prices,
     _trades,
+    backtest_spec,
     run_momentum_v2,
 )
+from backtest.run_ledger import add_ledger_dir_flag, ledger_dir_unless
 from dataplatform.clock import FrozenClock
 from dataplatform.logging import get_logger
 from dataplatform.query.pit import Dataset
@@ -166,15 +177,23 @@ class _FeatureCursor:
     ) -> None:
         self._con = open_connection()
         register_raw_view(self._con, view="l1_fc_raw", data_root=data_root)
+        have_factors = False
         if adjusted:
             register_adjusted_view(self._con, view="l2_fc_adj", data_root=data_root)
+            # X2: the same one-basis rule across the 2016-09-02 L2 seam the swing features use.
+            have_factors = _register_split_factors(
+                self._con, "fc_split_factors", current_signal_split_factors()
+            )
         self._buffer: list[tuple[Any, ...]] = []
         self._offset = 0
         self._exhausted = False
         self._last_taken: date | None = None
         scan_from = start - timedelta(days=_HISTORY_DAYS)
         started = time.perf_counter()
-        self._con.execute(self._sql(horizon, adjusted=adjusted), [scan_from, end, start, end])
+        self._con.execute(
+            self._sql(horizon, adjusted=adjusted, have_factors=have_factors),
+            [scan_from, end, start, end],
+        )
         _LOG.info(
             "forecast.features_queried",
             scan_from=scan_from.isoformat(),
@@ -185,22 +204,37 @@ class _FeatureCursor:
         )
 
     @staticmethod
-    def _sql(horizon: int, *, adjusted: bool) -> str:
-        px = "COALESCE(a.adj_close, r.close)" if adjusted else "r.close"
+    def _sql(horizon: int, *, adjusted: bool, have_factors: bool = False) -> str:
+        px = (
+            _seam_consistent_px(factors="fc_split_factors", have_factors=have_factors)
+            if adjusted
+            else "r.close"
+        )
         join = (
             "LEFT JOIN l2_fc_adj a ON a.isin = r.isin AND a.trade_date = r.trade_date "
-            "AND a.exchange = 'NSE'"
+            "AND a.exchange = 'NSE' LEFT JOIN l2_fc_anchor an ON an.isin = r.isin"
+            if adjusted
+            else ""
+        )
+        anchor_cte = (
+            "l2_fc_anchor AS (SELECT isin, min(trade_date) AS d0, "
+            "arg_min(cum_price_factor, trade_date) AS c0 FROM l2_fc_adj "
+            "WHERE exchange = 'NSE' GROUP BY isin),"
             if adjusted
             else ""
         )
         w = "PARTITION BY isin ORDER BY trade_date"
+        # No CAST to DOUBLE (X2): `raw_close`, the price the policy sizes against, stays the lake's
+        # exact decimal. The features and the fitted target are dimensionless (ratios, a log-return
+        # stdev) and are evaluated in DOUBLE by DuckDB regardless of input type — they feed a
+        # least-squares fit, never a rupee.
         return f"""
-        WITH base AS (
+        WITH {anchor_cte} base AS (
             SELECT r.isin, r.trade_date,
-                   CAST({px} AS DOUBLE) AS px,
-                   CAST(r.close AS DOUBLE) AS raw_close,
-                   CAST(r.deliv_pct AS DOUBLE) AS dpct,
-                   CAST(r.total_traded_value AS DOUBLE) AS ttv
+                   {px} AS px,
+                   r.close AS raw_close,
+                   r.deliv_pct AS dpct,
+                   r.total_traded_value AS ttv
             FROM l1_fc_raw r {join}
             WHERE r.exchange = 'NSE' AND r.series = 'EQ' AND r.close > 0
               AND r.trade_date BETWEEN ? AND ?
@@ -276,7 +310,7 @@ class _FeatureCursor:
                 _Row(
                     session=row_date,
                     isin=str(row[1]),
-                    price=Decimal(str(row[2])),
+                    price=_exact_price(row[2]),
                     mom_12_1=row[3],
                     mom_1=row[4],
                     mom_6=row[5],
@@ -530,6 +564,16 @@ def run_forecast_daily(
     """
     params = parameters if parameters is not None else ForecastDailyParameters()
     uni = universe if universe is not None else UniverseParameters()
+    spec = backtest_spec(
+        "forecast_daily",
+        start=start,
+        end=end,
+        parameters=params,
+        opening_cash=opening_cash,
+        adjusted=adjusted,
+        universe=uni,
+        benchmark_slug=benchmark_slug,
+    )
     reader = _L1Reader(data_root=data_root)
     cursor: _FeatureCursor | None = None
     try:
@@ -540,12 +584,10 @@ def run_forecast_daily(
         sessions = _reserve_fill_headroom(sessions, calendar)
         first_session, terminal = sessions[0], sessions[-1]
 
-        regime = _RegimeSource(
-            reader,
-            calendar,
-            first_session=first_session,
-            size=_BENCHMARK_BASKET,
+        regime = _RegimeSource.published(
+            through=sessions[-1],
             ma_days=_REGIME_MA_DAYS,
+            data_root=data_root,
         )
         cursor = _FeatureCursor(
             horizon=params.horizon,
@@ -583,7 +625,11 @@ def run_forecast_daily(
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         engine = ReplayEngine(
-            policy=ForecastDailyPolicy(data, params), broker=broker, clock=clock, sessions=sessions
+            policy=ForecastDailyPolicy(data, params),
+            broker=broker,
+            clock=clock,
+            sessions=sessions,
+            rails=RailGate(ratified_backtest_rail_policy(), reader.closes_on),
         )
         started = time.perf_counter()
         result = engine.run()
@@ -622,6 +668,7 @@ def run_forecast_daily(
             benchmark_method=benchmark.method,
             max_drawdown=_max_drawdown(nav_path),
         )
+        run = _finish_backtest(run, broker=broker, spec=spec, terminal_prices=terminal_prices)
         return run, data.stats
     finally:
         if cursor is not None:
@@ -828,31 +875,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.set_defaults(adjusted=True)
     parser.add_argument("--opening-cash", type=Decimal, default=_DEFAULT_OPENING_CASH)
     parser.add_argument("--data-root", type=Path, default=None)
+    add_book_actions_flag(parser)
+    add_ledger_dir_flag(parser)
     args = parser.parse_args(argv)
     if args.end < args.start:
         print(f"error: --to {args.end} is before --from {args.start}", file=sys.stderr)
         return 2
 
     try:
-        if args.report:
-            report = run_forecast_report(
+        with store_book_actions_unless(args), ledger_dir_unless(args):
+            if args.report:
+                report = run_forecast_report(
+                    start=args.start,
+                    end=args.end,
+                    opening_cash=args.opening_cash,
+                    data_root=args.data_root,
+                    adjusted=args.adjusted,
+                )
+                _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+                _REPORT_PATH.write_text(report, encoding="utf-8")
+                print(f"  forecast report written to {_REPORT_PATH}")
+                return 0
+            run, stats = run_forecast_daily(
                 start=args.start,
                 end=args.end,
                 opening_cash=args.opening_cash,
                 data_root=args.data_root,
                 adjusted=args.adjusted,
             )
-            _REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-            _REPORT_PATH.write_text(report, encoding="utf-8")
-            print(f"  forecast report written to {_REPORT_PATH}")
-            return 0
-        run, stats = run_forecast_daily(
-            start=args.start,
-            end=args.end,
-            opening_cash=args.opening_cash,
-            data_root=args.data_root,
-            adjusted=args.adjusted,
-        )
     except BacktestError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

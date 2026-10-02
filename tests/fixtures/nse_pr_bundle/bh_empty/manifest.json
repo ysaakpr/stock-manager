@@ -1,0 +1,71 @@
+{
+  "era": "bh_empty",
+  "session": "2021-05-17",
+  "archive_filename": "PR170521.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR170521.zip",
+  "why_this_era": "a header and no rows: an empty session, not a failure",
+  "reduced_from_l0": true,
+  "original_bytes": 307942,
+  "original_sha256": "ab176439be0a56c9534b91ccc9db54358561bf631f4c3b4f919421e6397b120f",
+  "original_members": [
+    {
+      "name": "An170521.txt",
+      "bytes": 640271
+    },
+    {
+      "name": "Bc170521.csv",
+      "bytes": 25301
+    },
+    {
+      "name": "bh170521.csv",
+      "bytes": 43
+    },
+    {
+      "name": "Bm170521.txt",
+      "bytes": 16750
+    },
+    {
+      "name": "corpbond170521.csv",
+      "bytes": 25925
+    },
+    {
+      "name": "etf170521.csv",
+      "bytes": 18018
+    },
+    {
+      "name": "Gl170521.csv",
+      "bytes": 8538
+    },
+    {
+      "name": "HL170521.csv",
+      "bytes": 2466
+    },
+    {
+      "name": "Pd170521.csv",
+      "bytes": 379301
+    },
+    {
+      "name": "Pr170521.csv",
+      "bytes": 354961
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 2008
+    },
+    {
+      "name": "sme170521.csv",
+      "bytes": 10534
+    },
+    {
+      "name": "Tt170521.csv",
+      "bytes": 2189
+    }
+  ],
+  "members_kept_in_fixture": [
+    "bh170521.csv",
+    "Readme.txt"
+  ],
+  "bh_member": "bh170521.csv",
+  "bh_member_bytes": 43,
+  "bh_member_sha256": "46c9061b057707228c00c0f2d77ba0a537278a999a7336286832dacc4db3f8d8"
+}

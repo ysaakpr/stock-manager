@@ -18,8 +18,10 @@ laptop between campaigns and on the server without touching the request budget. 
 yields the payloads in a stable order, so two runs over the same lake do the same work.
 
 **What it assumes:** L0 holds the corporate-action payloads and L1 the prices — a rebuild cannot
-invent either. An ISIN whose successor the identity master does not know is skipped with a count,
-not raised on: one unseen name must not cost the other four hundred edges.
+invent either. A successor the identity master does not know is registered as a DELISTED master row
+when it is a chain's retired middle with NSE EQ bars in L1 (`registered_intermediates`); any other
+unknown successor is skipped and counted per reason, not raised on: one unseen name must not cost
+the other five hundred edges.
 
     uv run python -m dataplatform.identity.lineage_rebuild            # the whole thing
     uv run python -m dataplatform.identity.lineage_rebuild --derive-only   # stage 1, to inspect
@@ -37,6 +39,7 @@ from dataplatform.identity.lineage import (
     LineageStore,
     derive_edges,
     read_corroboration,
+    read_eq_presence,
     read_equity_spans,
 )
 from dataplatform.identity.master import IdentityStore
@@ -61,6 +64,8 @@ class LineageRebuildReport:
 
     edges_derived: int
     edges_written: int
+    registered_intermediates: int
+    edges_still_skipped: int
     payloads_replayed: int
     actions_resolved_through_lineage: int
     actions_inserted: int
@@ -68,6 +73,12 @@ class LineageRebuildReport:
     l2_partitions_rebuilt: int
     l2_partitions_stitched: int
     l2_partitions_filled: int
+    #: `(predecessor, successor, reason)` for every edge not written — printed after the counts.
+    skipped_edges: tuple[tuple[str, str, str], ...] = ()
+
+    def counts(self) -> dict[str, int]:
+        """Every per-stage count, in field order — what the CLI prints as its table."""
+        return {k: v for k, v in asdict(self).items() if isinstance(v, int)}
 
 
 def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> LineageRebuildReport:
@@ -79,15 +90,34 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
     # ── 1. derive ────────────────────────────────────────────────────────────────────────────
     spans, sessions = read_equity_spans(data_root=data_root)
     edges = derive_edges(spans, sessions, read_corroboration(data_root=data_root))
+    presence = read_eq_presence({e.successor_isin for e in edges}, data_root=data_root)
 
     with connect() as conn:
         store = LineageStore(conn, clock=clock)
-        written = store.replace_derived(edges)
+        lineage = store.replace_derived(edges, presence=presence)
         conn.commit()
         resolver = store.load()
+        skipped_edges = tuple(
+            (e.predecessor_isin, e.successor_isin, reason.value) for e, reason in lineage.skipped
+        )
 
         if derive_only:
-            return LineageRebuildReport(len(edges), written, 0, 0, 0, 0, 0, 0, 0)
+            report = LineageRebuildReport(
+                edges_derived=lineage.derived,
+                edges_written=lineage.written,
+                registered_intermediates=len(lineage.registered_intermediates),
+                edges_still_skipped=lineage.still_skipped,
+                payloads_replayed=0,
+                actions_resolved_through_lineage=0,
+                actions_inserted=0,
+                isins_recomputed=0,
+                l2_partitions_rebuilt=0,
+                l2_partitions_stitched=0,
+                l2_partitions_filled=0,
+                skipped_edges=skipped_edges,
+            )
+            _LOG.info("lineage_rebuild.done", **report.counts())
+            return report
 
         # ── 2. replay L0 through the parser, now with the lineage ────────────────────────────
         # The source's rows go first. `write_corporate_actions` is ON CONFLICT DO NOTHING, so a
@@ -155,8 +185,10 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
 
     stitched = sum(1 for r in reports if r.isin in history)
     report = LineageRebuildReport(
-        edges_derived=len(edges),
-        edges_written=written,
+        edges_derived=lineage.derived,
+        edges_written=lineage.written,
+        registered_intermediates=len(lineage.registered_intermediates),
+        edges_still_skipped=lineage.still_skipped,
         payloads_replayed=replayed,
         actions_resolved_through_lineage=resolved,
         actions_inserted=inserted,
@@ -164,8 +196,9 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         l2_partitions_rebuilt=len(reports),
         l2_partitions_stitched=stitched,
         l2_partitions_filled=len(fill.written),
+        skipped_edges=skipped_edges,
     )
-    _LOG.info("lineage_rebuild.done", **asdict(report))
+    _LOG.info("lineage_rebuild.done", **report.counts())
     return report
 
 
@@ -179,8 +212,15 @@ def main() -> int:
     )
     args = parser.parse_args()
     report = rebuild(derive_only=args.derive_only)
-    for field, value in asdict(report).items():
+    for field, value in report.counts().items():
         print(f"{field:<36} {value}")
+    by_reason: dict[str, int] = {}
+    for _, _, reason in report.skipped_edges:
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    for reason, count in sorted(by_reason.items()):
+        print(f"  skipped: {reason:<32} {count}")
+    for predecessor, successor, reason in report.skipped_edges:
+        print(f"  skipped edge {predecessor} -> {successor}  {reason}")
     return 0
 
 
