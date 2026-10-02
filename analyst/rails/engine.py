@@ -25,9 +25,10 @@ allows it, and the fact that *every* caller must ask first is what makes the rai
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from typing import Final, Protocol
 
 from analyst.cases import RiskRails
@@ -50,11 +51,14 @@ from execution.broker import Side
 
 __all__ = [
     "FORCED_REVIEW_EVENT",
+    "ExitClearance",
     "RailEngine",
     "RailJournal",
     "apply_order",
     "assess_drawdown",
     "check_order",
+    "max_child_quantity",
+    "slice_exit",
 ]
 
 _LOG = get_logger(__name__)
@@ -183,6 +187,63 @@ def _order_sanity_breaches(
             )
         )
     return breaches
+
+
+def max_child_quantity(order: ProposedOrder, portfolio: Portfolio, rails: RiskRails) -> int:
+    """The most shares of ``order``'s instrument one order may carry under both per-order caps.
+
+    What it does: the largest whole-share count whose value at the order's reference price is
+    within ``max_order_value_inr`` *and* within ``max_order_pct_of_case`` of the case's value.
+    What it assumes: ``portfolio`` is the book the order would be checked against. A sell moves
+    value from a lot to cash at the same price, so the case's value — and with it the percentage
+    cap in rupees — is the same for every child of one exit.
+    What it never does: round up. Zero means one share is already above a cap.
+    """
+    cap = rails.max_order_value_inr
+    if portfolio.total_value > _ZERO:
+        cap = min(cap, rails.max_order_pct_of_case * portfolio.total_value / _HUNDRED)
+    shares = int((cap / order.price).to_integral_value(rounding=ROUND_FLOOR))
+    # Decimal division is exact to the context's precision, not exactly; the caps are checked as
+    # ``price * quantity``, so the slice is held to the same product the rail will compute.
+    while shares > 0 and order.price * shares > cap:
+        shares -= 1
+    return max(shares, 0)
+
+
+def slice_exit(
+    order: ProposedOrder, portfolio: Portfolio, rails: RiskRails
+) -> tuple[ProposedOrder, ...]:
+    """Split a risk-reducing sell into child orders that each fit the per-order caps.
+
+    What it does: return ``(order,)`` unchanged unless it is a SELL of a held long, no larger
+    than the held quantity, whose value breaches a per-order cap; then return the fewest children
+    (as equal as whole shares allow, larger ones first) that sum to the order's quantity, each
+    within both ``max_order_value_inr`` and ``max_order_pct_of_case``. A real broker slices a
+    large order the same way; the fat-finger cap exists to stop a typo opening exposure, not to
+    trap a position the case has decided to leave.
+    What it assumes: ``portfolio`` is the book the order is checked against.
+    What it never does: slice a buy, a sell of something not held, or a sell larger than the
+    held quantity — those reach ``check_order`` whole, and are refused there or by the caller's
+    executability check. It never decides anything either: every child still goes through
+    ``check_order`` one by one, against the book the children before it leave.
+    """
+    if order.side is not Side.SELL:
+        return (order,)
+    lot = portfolio.lot(order.isin)
+    if lot is None or order.quantity > lot.quantity:
+        return (order,)
+    if not _order_sanity_breaches(order, portfolio, rails):
+        return (order,)
+    per_child = max_child_quantity(order, portfolio, rails)
+    if per_child <= 0:
+        # One share is above the cap: there is no slice that fits, so the rail refuses it whole.
+        return (order,)
+    count = -(-order.quantity // per_child)
+    base, extra = divmod(order.quantity, count)
+    quantities = [base + 1] * extra + [base] * (count - extra)
+    return tuple(
+        replace(order, request=replace(order.request, quantity=quantity)) for quantity in quantities
+    )
 
 
 def _position_breaches(
@@ -327,6 +388,52 @@ class RailJournal(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class ExitClearance:
+    """A8's verdict on one exit, cleared as the children ``slice_exit`` cut it into.
+
+    ``children`` is every child in order and ``assessments`` the verdict on each child that was
+    checked — clearing stops at the first refused child, so the two are the same length only when
+    every child passed. ``allowed`` is the children the caller may place, in order: all of them,
+    or none. An exit is one decision; a rail that refuses any part of it refuses the exit, exactly
+    as it would have refused the unsliced order, so slicing changes the outcome of the per-order
+    caps and of nothing else.
+    """
+
+    parent: ProposedOrder
+    children: tuple[ProposedOrder, ...]
+    assessments: tuple[RailAssessment, ...]
+
+    @property
+    def sliced(self) -> bool:
+        """True when the parent was cut into more than one child."""
+        return len(self.children) > 1
+
+    @property
+    def allowed(self) -> tuple[ProposedOrder, ...]:
+        """Every child when every rail allowed every child; otherwise nothing."""
+        if self.blocked is not None or len(self.assessments) != len(self.children):
+            return ()
+        return self.children
+
+    @property
+    def blocked(self) -> RailAssessment | None:
+        """The assessment of the child that stopped the exit, or None when every child passed."""
+        for assessment in self.assessments:
+            if not assessment.allowed:
+                return assessment
+        return None
+
+    def payload(self) -> dict[str, str]:
+        """The parent intent and each child, for the parent's journal line (strings only)."""
+        return {
+            "exit_parent_quantity": str(self.parent.quantity),
+            "exit_children": ",".join(str(child.quantity) for child in self.children),
+            "exit_children_allowed": str(len(self.allowed)),
+            "exit_reference_price": str(self.parent.price),
+        }
+
+
 class RailEngine:
     """A8 wired to the journal: it clears orders and monitors drawdown, and writes down what it did.
 
@@ -372,12 +479,87 @@ class RailEngine:
         changes the verdict — `household` and `sleeve` add context, they do not grant exceptions.
         """
         assessment = check_order(order, portfolio, rails, household=household)
-        if assessment.allowed:
-            return assessment
+        if not assessment.allowed:
+            self._journal_block(
+                order, portfolio, assessment, trading_date=trading_date, sleeve=sleeve
+            )
+        return assessment
+
+    def guard_exit(
+        self,
+        order: ProposedOrder,
+        portfolio: Portfolio,
+        rails: RiskRails,
+        *,
+        trading_date: date,
+        sleeve: Sleeve | None = None,
+    ) -> ExitClearance:
+        """Clear a sell as ``slice_exit``'s children, each through every rail, in order.
+
+        What it does: cut the order with ``slice_exit`` (a no-op for anything but an over-cap sell
+        of a held long), then ``check_order`` each child against the book the children before it
+        leave. A refused child is journalled as a ``RAIL_BLOCK`` naming its rails and its place in
+        the exit, and refuses the exit: no child is placed, the ones before it included, so a rail
+        other than the per-order caps decides a sliced exit exactly as it decided the whole one.
+        What it assumes: the caller places exactly ``allowed``, in order, in one session, and
+        journals the parent intent with ``ExitClearance.payload`` when the exit was sliced.
+        What it never does: weaken a rail. The per-order caps are the same numbers, applied to
+        every child; slicing only stops a whole-position exit from being refused for its size.
+        A buy handed here is cleared whole, exactly as ``guard_order`` would clear it.
+        """
+        children = slice_exit(order, portfolio, rails)
+        assessments: list[RailAssessment] = []
+        book = portfolio
+        for index, child in enumerate(children):
+            assessment = check_order(child, book, rails)
+            assessments.append(assessment)
+            if not assessment.allowed:
+                context = (
+                    {
+                        "exit_child": f"{index + 1}/{len(children)}",
+                        "exit_parent_quantity": str(order.quantity),
+                    }
+                    if len(children) > 1
+                    else {}
+                )
+                self._journal_block(
+                    child,
+                    book,
+                    assessment,
+                    trading_date=trading_date,
+                    sleeve=sleeve,
+                    context=context,
+                )
+                break
+            book = apply_order(book, child)
+        clearance = ExitClearance(parent=order, children=children, assessments=tuple(assessments))
+        if clearance.sliced:
+            _LOG.info(
+                "rails.exit_sliced",
+                case_id=portfolio.case_id,
+                isin=order.isin,
+                parent_quantity=order.quantity,
+                children=len(children),
+                allowed=len(clearance.allowed),
+            )
+        return clearance
+
+    def _journal_block(
+        self,
+        order: ProposedOrder,
+        portfolio: Portfolio,
+        assessment: RailAssessment,
+        *,
+        trading_date: date,
+        sleeve: Sleeve | None,
+        context: Mapping[str, str] | None = None,
+    ) -> None:
+        """Append the ``RAIL_BLOCK`` line for a refused order, naming every breached rail."""
         payload = {
             f"breach_{index}": breach.message() for index, breach in enumerate(assessment.breaches)
         }
         payload["rails"] = ",".join(rail.value for rail in assessment.breached_rails)
+        payload.update(context or {})
         entry = JournalEntry(
             ts=self._clock.now(),
             trading_date=trading_date,
@@ -398,7 +580,6 @@ class RailEngine:
             rails=payload["rails"],
             entry_id=recorded.id,
         )
-        return assessment
 
     def review_drawdown(
         self,

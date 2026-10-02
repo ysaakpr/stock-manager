@@ -62,7 +62,7 @@ import structlog
 from analyst.journal.evidence import EvidenceBundle, canonical_bytes, digest_of
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
 from analyst.journal.writer import Journal
-from backtest.rails import GateOutcome, RailGate, rail_blocks_by_rail
+from backtest.rails import GateOutcome, RailGate, SlicedExit, rail_blocks_by_rail
 from dataplatform.clock import Clock, FrozenClock
 from dataplatform.query.pit import PitContext
 from execution.broker import Broker, Order, OrderRequest, Side
@@ -452,7 +452,10 @@ class ReplayEngine:
         # A refused order's BUY/SELL line is replaced by the rails' line for it, as in the paper
         # loop, where a blocked order is journalled by its RAIL_BLOCK alone: the journal records
         # the trades that reached the broker, and every one that did not, by why it did not.
-        entries = [*_without_refused(decision.entries, cleared.refused), *cleared.entries]
+        # A sliced exit keeps the policy's one SELL line — the parent intent — and names on it
+        # every child order it was placed as.
+        kept = _with_slices(_without_refused(decision.entries, cleared.refused), cleared.sliced)
+        entries = [*kept, *cleared.entries]
         if not entries:
             # "Checked, nothing to do" is a decision with evidence behind it, not a missing row.
             entries = [
@@ -494,6 +497,25 @@ def _without_refused(
                 del remaining[index]
                 break
     return remaining
+
+
+def _with_slices(
+    entries: Sequence[JournalEntry], sliced: Sequence[SlicedExit]
+) -> list[JournalEntry]:
+    """``entries`` with each sliced exit's children merged onto its SELL line, first match."""
+    annotated = list(entries)
+    claimed: set[int] = set()
+    for exit_ in sliced:
+        for index, entry in enumerate(annotated):
+            if index in claimed or entry.isin != exit_.parent.isin:
+                continue
+            if entry.decision is not Decision.SELL:
+                continue
+            payload = {**(entry.payload or {}), **exit_.payload}
+            annotated[index] = entry.model_copy(update={"payload": payload})
+            claimed.add(index)
+            break
+    return annotated
 
 
 def _sleeves_of(entries: Sequence[JournalEntry]) -> dict[str, Sleeve]:
