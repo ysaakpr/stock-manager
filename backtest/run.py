@@ -118,7 +118,12 @@ from backtest.policies.swing_composite import (
     SwingCompositePolicy,
     SwingRecord,
 )
-from backtest.rails import BacktestRailPolicy, RailGate, ratified_backtest_rail_policy
+from backtest.rails import (
+    BacktestRailPolicy,
+    RailGate,
+    rail_blocks_by_rail,
+    ratified_backtest_rail_policy,
+)
 from backtest.replay import BookSnapshot, Policy, ReplayEngine, ReplayResult
 from backtest.run_ledger import (
     RunSummary,
@@ -235,6 +240,59 @@ _BENCHMARK_TRI_SLUG = "nifty50"
 _BENCHMARK_PUBLISHED_TRI = "published_tri"
 _BENCHMARK_COMPUTED_TRI = "m3.9_computed_tri"
 _BENCHMARK_L1_PROXY = "l1_proxy"
+
+
+def describe_benchmark(source: str | None, name: str) -> str:
+    """What a run's benchmark series was, for a report cell — read from its recorded ``source``.
+
+    ``source`` is the provenance the run recorded (``BacktestResult.benchmark_source``, or the
+    persisted ``RunSummary.benchmark_source``); ``None`` means a summary written before the
+    provenance was kept, and the text says so rather than guessing the series.
+    """
+    if source == _BENCHMARK_PUBLISHED_TRI:
+        return f"published {name} TRI"
+    if source == _BENCHMARK_COMPUTED_TRI:
+        return f"{name} computed TRI estimate (§4.1), not the published series"
+    if source == _BENCHMARK_L1_PROXY:
+        return f"{name} — an L1 price-return proxy, not a TRI"
+    if source is None:
+        return f"{name} (benchmark source not recorded)"
+    return f"{name} ({source})"
+
+
+def benchmark_caveat(sources: Sequence[str | None]) -> str:
+    """The report bullet on what an excess return is excess *over*, from the runs' sources.
+
+    Reads every row's recorded source: one bullet for one source, and a mixed set says it is mixed
+    — the rows are then not on one benchmark and their excesses do not compare.
+    """
+    distinct = sorted({s or "unrecorded" for s in sources})
+    if distinct == [_BENCHMARK_PUBLISHED_TRI]:
+        return (
+            "- **Excess is against the exchange's published TRI** (M3.9.b): dividends are in the "
+            "benchmark as they are in the book, so the excess is excess over the real index — "
+            "costs and the single path of one backtest still sit between it and alpha."
+        )
+    if distinct == [_BENCHMARK_COMPUTED_TRI]:
+        return (
+            "- **Excess is against §4.1's computed TRI estimate**, not the published series: a "
+            "constant-yield dividend accrual, so the excess is excess over an estimate."
+        )
+    if distinct == [_BENCHMARK_L1_PROXY]:
+        return (
+            "- **Excess is against a price-return L1 proxy** (M9.4), not a total-return index, so "
+            "it overstates excess by roughly the market's dividend yield."
+        )
+    if distinct == ["unrecorded"]:
+        return (
+            "- **The benchmark's source was not recorded** for these runs (persisted before it "
+            "was kept): read the benchmark name above, and do not assume it was a TRI."
+        )
+    return (
+        f"- **The rows are not on one benchmark** (sources: {', '.join(distinct)}): their excess "
+        "returns do not compare with one another."
+    )
+
 
 #: Whether this run *requires* the published TRI. False by default, because a run over a window the
 #: lake has no published TRI for is still a legitimate thing to do — it just may not call the result
@@ -2017,6 +2075,8 @@ def _finish_backtest(
         round_trips=trips,
         median_hold_days=median,
         replay_digest=run.result.digest(),
+        benchmark_source=run.benchmark_source,
+        rail_blocks=rail_blocks_by_rail(run.result.journal),
     )
     persist_run(spec, ledger, summary, nav=run.nav_path)
     return replace(run, ledger=ledger, digest=digest)

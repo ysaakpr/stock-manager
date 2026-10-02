@@ -66,6 +66,8 @@ from backtest.run import (
     UniverseParameters,
     _holding_periods,
     backtest_spec,
+    benchmark_caveat,
+    describe_benchmark,
     open_swing_lake,
     run_momentum_v2,
     run_naive_momentum,
@@ -477,6 +479,13 @@ class SweepRow:
         if self.run is not None:
             return self.run.comparison.excess_over_benchmark
         return self.summary.excess if self.summary is not None else _ZERO
+
+    @property
+    def benchmark_source(self) -> str | None:
+        """The benchmark series' recorded provenance; ``None`` when no run or summary carries it."""
+        if self.run is not None:
+            return self.run.benchmark_source
+        return self.summary.benchmark_source if self.summary is not None else None
 
     @property
     def total_charges(self) -> Decimal:
@@ -955,7 +964,8 @@ def render_sweep_report(result: SweepResult, *, floors: Sequence[Decimal]) -> st
         "",
         f"- {result.start.isoformat()} → {result.terminal.isoformat()} "
         f"({result.sessions} sessions)",
-        f"- Benchmark: **{_pct(result.benchmark_xirr)}** ({result.benchmark_name})",
+        f"- Benchmark: **{_pct(result.benchmark_xirr)}** "
+        f"({describe_benchmark(top.benchmark_source if top else None, result.benchmark_name)})",
         f"- One windowed lake pass over **{result.feature_dates}** decision dates, built in "
         f"{result.lake_seconds:.0f}s and shared by every swing arm",
         f"- {len(result.rows)} arm-runs in {result.total_seconds / 60:.0f} min total"
@@ -1003,8 +1013,7 @@ def render_sweep_report(result: SweepResult, *, floors: Sequence[Decimal]) -> st
         "median name a basket picks trades a few crore a day, where the fill model's base "
         "slippage is a claim and not a measurement. The ₹10 crore table is the one to plan "
         "against; where the two disagree, believe the second.",
-        "- **Excess is against a price-return L1 proxy** (M9.4), not a licensed total-return "
-        "index, so it overstates excess by roughly the market's dividend yield.",
+        benchmark_caveat([row.benchmark_source for row in result.rows if row.ok]),
         "- **Return per drawdown is a ratio of two noisy numbers.** Max drawdown is a single "
         "worst path, not a distribution, and two arms within a few hundredths of each other are "
         "not distinguishable on this evidence.",

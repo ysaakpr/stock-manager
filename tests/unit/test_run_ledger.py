@@ -37,6 +37,7 @@ from backtest.replay import ReplayEngine, SessionContext, SessionDecision
 from backtest.run import _AccountingBroker
 from backtest.run_ledger import (
     RunOutputLocationError,
+    RunSummary,
     build_run_ledger,
     ledger_path,
     persist_run,
@@ -461,3 +462,43 @@ def test_a_missing_fmv_for_an_unsold_lot_withholds_only_the_liquidated_figure() 
     )
     assert with_fmv.after_tax_xirr_liquidated is not None
     assert with_fmv.liquidation_error is None
+
+
+def _summary(
+    benchmark_source: str | None = None, rail_blocks: Mapping[str, int] | None = None
+) -> RunSummary:
+    return RunSummary(
+        digest="d" * 64,
+        spec={"runner": "stub"},
+        policy="stub",
+        start=date(2020, 1, 1),
+        terminal=date(2020, 12, 31),
+        sessions=250,
+        xirr=Decimal("0.1"),
+        max_drawdown=Decimal("0.2"),
+        excess=Decimal("0.01"),
+        benchmark_xirr=Decimal("0.09"),
+        benchmark_name="Nifty 50",
+        total_charges=Decimal("0"),
+        final_nav=Decimal("1100000"),
+        round_trips=3,
+        median_hold_days=20,
+        replay_digest="0" * 64,
+        benchmark_source=benchmark_source,
+        rail_blocks=rail_blocks,
+    )
+
+
+def test_a_summary_keeps_its_benchmark_source_and_rail_blocks() -> None:
+    kept = _summary(benchmark_source="published_tri", rail_blocks={"MAX_POSITION": 4})
+    document = kept.to_document()
+    assert document["benchmark_source"] == "published_tri"
+    assert document["rail_blocks"] == {"MAX_POSITION": 4}
+    assert RunSummary.from_document(document) == kept
+
+
+def test_a_summary_persisted_before_them_reads_as_not_recorded() -> None:
+    document = _summary().to_document()
+    assert "benchmark_source" not in document and "rail_blocks" not in document
+    loaded = RunSummary.from_document(document)
+    assert loaded.benchmark_source is None and loaded.rail_blocks is None
