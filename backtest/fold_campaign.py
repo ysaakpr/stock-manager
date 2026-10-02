@@ -69,7 +69,7 @@ from typing import Any
 
 from backtest.book_actions import (
     BookActionSource,
-    book_corporate_actions,
+    corporate_actions_in_force,
     load_store_book_actions,
 )
 from backtest.campaign import (
@@ -202,7 +202,9 @@ class FoldRunPlan:
     arms: tuple[Arm, ...]
     windows: tuple[FoldWindow, ...]
     data_root: Path | None
-    #: Corporate actions in the book. On for every real run; tests switch it off.
+    #: The store's corporate actions in force — in the book *and* as the swing signal's pre-seam
+    #: split factors, exactly as the sweep CLI's default puts them. On for every real run; tests
+    #: switch it off, which turns both off (the run spec then says so, under its own digest).
     book_actions: bool = True
 
     @property
@@ -282,8 +284,13 @@ def round2_plan(
 
 
 def _contexts(stack: ExitStack, plan: FoldRunPlan, actions: BookActionSource | None) -> None:
-    """Put in force what every run and every digest of ``plan`` is made under."""
-    stack.enter_context(book_corporate_actions(actions if plan.book_actions else None))
+    """Put in force what every run and every digest of ``plan`` is made under.
+
+    The corporate actions go through ``corporate_actions_in_force`` — the helper the sweep CLI uses
+    too — so a fold run and a ``backtest.sweep`` run of the same digest replay identically.
+    """
+    source = actions if plan.book_actions else None
+    stack.enter_context(corporate_actions_in_force(source, apply_to_book=True))
     stack.enter_context(accrue_cash_interest(load_repo_rate_schedule()))
 
 

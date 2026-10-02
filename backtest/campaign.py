@@ -52,7 +52,7 @@ from typing import Any
 
 from backtest.book_actions import (
     BookActionSource,
-    book_corporate_actions,
+    corporate_actions_in_force,
     load_store_book_actions,
 )
 from backtest.cash_interest import (
@@ -182,7 +182,7 @@ def run_unit(plan: CampaignPlan, name: str) -> UnitOutcome:
     """
     actions = load_store_book_actions() if plan.book_actions else None
     with (
-        book_corporate_actions(actions),
+        corporate_actions_in_force(actions, apply_to_book=True),
         accrue_cash_interest(_interest(plan)),
         persist_run_ledgers(plan.out_dir),
     ):
@@ -375,7 +375,10 @@ def missing_runs(plan: CampaignPlan, actions: BookActionSource | None) -> list[s
     windows = [*plan.windows.sweeps, plan.windows.selection, plan.windows.verification]
     missing: list[str] = []
     for window in windows:
-        with book_corporate_actions(actions), accrue_cash_interest(_interest(plan)):
+        with (
+            corporate_actions_in_force(actions, apply_to_book=True),
+            accrue_cash_interest(_interest(plan)),
+        ):
             digests = run_digests(
                 start=window.start, end=window.end, arms=plan.arms, floors=plan.floors
             )
@@ -481,7 +484,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
     service, fmv = l1_grandfathering(args.data_root)
-    with service, book_corporate_actions(actions):
+    with service, corporate_actions_in_force(actions, apply_to_book=True):
         reports = render_campaign(plan, profile, fmv=fmv)
     report_dir = out_dir / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)

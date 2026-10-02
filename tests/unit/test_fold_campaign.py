@@ -13,7 +13,9 @@
   frozen directory;
 * ``trial-sharpes`` writes the round-1 arms' Sharpes on the folds, refused on other folds or
   another lake, and ``round2-signals``/``render-round2`` pool them into the variance;
-* ``render-round2`` replays nothing: it reads runs already on disk and writes elsewhere.
+* ``render-round2`` replays nothing: it reads runs already on disk and writes elsewhere;
+* a fold run puts in force exactly what ``backtest.sweep`` does — the signal's pre-seam split
+  factors as well as the book — and a run without them never shares a digest with one with them.
 
 Offline: the lake and the replay are stubbed at the sweep's two seams (``open_swing_lake`` and
 ``_run_arm``), as in ``test_campaign``.
@@ -21,8 +23,10 @@ Offline: the lake and the replay are stubbed at the sweep's two seams (``open_sw
 
 from __future__ import annotations
 
+import argparse
 import json
 from collections.abc import Iterator
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal
@@ -32,8 +36,19 @@ from typing import Any
 
 import pytest
 
+import backtest.book_actions as book_actions_module
 import backtest.fold_campaign as fc
 import backtest.sweep as sweep_module
+from backtest.book_actions import (
+    RescaleKind,
+    ShareRescale,
+    book_corporate_actions,
+    current_book_actions,
+    current_signal_split_factors,
+    signal_split_factors,
+    store_book_actions_unless,
+)
+from backtest.cash_interest import cash_interest_unless
 from backtest.folds import load_folds
 from backtest.nav import nav_file
 from backtest.policies.swing_composite import SwingCompositeParameters
@@ -512,3 +527,74 @@ def test_the_render_and_trial_sharpes_commands_parse() -> None:
     assert not hasattr(render, "workers")
     trials = fc._parse_args(["trial-sharpes", "--out", "o", "--workers", "2"])
     assert trials.arms is None and trials.workers == 2
+
+
+# ── the fold path puts in force what the sweep CLI does (X2: one digest, one replay) ──────────
+
+#: A split ex before L2's 2016-09-02 seam: the factor a swing signal needs across it.
+_PRE_SEAM_SPLIT = ShareRescale(
+    isin=_ISIN,
+    ex_date=date(2015, 6, 1),
+    kind=RescaleKind.SPLIT,
+    numerator=Decimal(10),
+    denominator=Decimal(2),
+)
+
+
+class _StubActions:
+    """A ``BookActionSource`` holding one pre-seam split (no calendar, no Postgres)."""
+
+    def between(self, after: date | None, upto: date) -> tuple[ShareRescale, ...]:
+        due = after is None or after < _PRE_SEAM_SPLIT.ex_date
+        return (_PRE_SEAM_SPLIT,) if due and _PRE_SEAM_SPLIT.ex_date <= upto else ()
+
+
+def test_the_fold_contexts_put_the_signal_split_factors_in_force(tmp_path: Path) -> None:
+    """Before the fix ``_contexts`` set the book and cash interest only: this read ``None``."""
+    plan = fc.baseline_plan(tmp_path, _FOLDS, data_root=None, book_actions=True)
+    with ExitStack() as stack:
+        fc._contexts(stack, plan, _StubActions())
+        assert current_signal_split_factors() == (_PRE_SEAM_SPLIT,)
+        assert current_book_actions() is not None
+    assert current_signal_split_factors() is None
+
+
+def test_the_fold_contexts_switched_off_turn_the_signal_factors_off_too(tmp_path: Path) -> None:
+    plan = fc.baseline_plan(tmp_path, _FOLDS, data_root=None, book_actions=False)
+    with ExitStack() as stack:
+        fc._contexts(stack, plan, _StubActions())
+        assert current_signal_split_factors() is None
+        assert current_book_actions() is None
+
+
+def _fold_digest(window: Any, *, signal: bool) -> str:
+    arm = fc._resolve(fc.BASELINE_LABELS[:1])
+    with book_corporate_actions(_StubActions()), ExitStack() as stack:
+        if signal:
+            stack.enter_context(signal_split_factors(_StubActions()))
+        digests = sweep_module.run_digests(
+            start=window.start, end=window.end, arms=arm, floors=(HIGH_FLOOR,)
+        )
+    return digests[(fc.BASELINE_LABELS[0], HIGH_FLOOR)]
+
+
+def test_a_run_with_signal_split_factors_never_shares_a_digest_with_one_without() -> None:
+    window = _FOLDS.folds[1].test
+    assert _fold_digest(window, signal=True) != _fold_digest(window, signal=False)
+    assert _fold_digest(window, signal=True) == _fold_digest(window, signal=True)
+
+
+def test_the_fold_path_and_the_sweep_cli_derive_the_same_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same window, arm and floor: the fold unit and ``backtest.sweep`` name one run, not two."""
+    monkeypatch.setattr(book_actions_module, "load_store_book_actions", _StubActions)
+    plan = fc.baseline_plan(tmp_path, _FOLDS, data_root=None, book_actions=True)
+    fold = fc._digests(plan, _StubActions())[(fc.BASELINE_LABELS[0], "F2", "test")]
+    window = _FOLDS.folds[1].test
+    args = argparse.Namespace(book_corporate_actions=True, cash_interest=True)
+    with store_book_actions_unless(args), cash_interest_unless(args):
+        cli = sweep_module.run_digests(
+            start=window.start, end=window.end, arms=plan.arms, floors=(HIGH_FLOOR,)
+        )[(fc.BASELINE_LABELS[0], HIGH_FLOOR)]
+    assert fold == cli
