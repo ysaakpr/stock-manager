@@ -81,6 +81,7 @@ reads a clock.
 from __future__ import annotations
 
 import argparse
+import hashlib
 from bisect import bisect_left, bisect_right
 from collections import Counter
 from collections.abc import Iterable, Iterator, Sequence
@@ -120,8 +121,10 @@ __all__ = [
     "UnmodelledAction",
     "add_book_actions_flag",
     "book_corporate_actions",
+    "corporate_actions_in_force",
     "current_book_actions",
     "current_signal_split_factors",
+    "current_signal_split_factors_identity",
     "load_book_actions",
     "load_store_book_actions",
     "signal_split_factors",
@@ -356,6 +359,46 @@ def signal_split_factors(source: BookActionSource | None) -> Iterator[None]:
 def current_signal_split_factors() -> tuple[ShareRescale, ...] | None:
     """The rescales :func:`signal_split_factors` put in force, or ``None``."""
     return _SIGNAL.get()
+
+
+def current_signal_split_factors_identity() -> str | None:
+    """A stable name for the rescales in force — ``None`` when :func:`signal_split_factors` is off.
+
+    The run specification carries it (``backtest.run_ledger.run_spec``): the factors change what a
+    swing signal reads before the seam, so a run made with them and one made without are different
+    runs and must never share a digest. Content-addressed — the count and a hash of every rescale
+    — so a store whose split rows changed is a different specification too.
+    """
+    rescales = _SIGNAL.get()
+    if rescales is None:
+        return None
+    canonical = "\n".join(
+        sorted(
+            f"{r.isin}|{r.ex_date.isoformat()}|{r.kind.value}|{r.numerator}|{r.denominator}|"
+            f"{r.carried_from or ''}"
+            for r in rescales
+        )
+    )
+    return f"rescales[{len(rescales)}]:{hashlib.sha256(canonical.encode()).hexdigest()[:16]}"
+
+
+@contextmanager
+def corporate_actions_in_force(
+    source: BookActionSource | None, *, apply_to_book: bool
+) -> Iterator[None]:
+    """Put ``source`` in force for the enclosed backtest(s): signal split factors, and the book.
+
+    The one place a driver turns the store's corporate actions on, so the sweep CLI and the fold
+    campaign cannot drift apart again (X2: the fold path once put the book in force without the
+    signal factors, and the same run digest replayed to two different results). The signal's
+    pre-seam factors follow ``source`` whatever ``apply_to_book`` says — the book switch is a
+    before/after measurement of the *book*, which holds the signal fixed. ``None`` turns both off.
+    """
+    with (
+        signal_split_factors(source),
+        book_corporate_actions(source if apply_to_book else None),
+    ):
+        yield
 
 
 # ── applying them ────────────────────────────────────────────────────────────────────────────────
@@ -705,10 +748,5 @@ def store_book_actions_unless(args: argparse.Namespace) -> AbstractContextManage
 
 @contextmanager
 def _store_actions(*, apply_to_book: bool) -> Iterator[None]:
-    calendar = load_store_book_actions()
-    with signal_split_factors(calendar):
-        if apply_to_book:
-            with book_corporate_actions(calendar):
-                yield
-        else:
-            yield
+    with corporate_actions_in_force(load_store_book_actions(), apply_to_book=apply_to_book):
+        yield

@@ -35,6 +35,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
+from backtest.run import describe_benchmark
 from backtest.run_ledger import add_ledger_dir_flag, ledger_dir_unless
 from backtest.sweep import (
     ARMS,
@@ -170,6 +171,20 @@ def _bar_rows(
     return out
 
 
+def _benchmark_basis(walk: WalkForward) -> str:
+    """What the windows' benchmark was, read from the rows' recorded source — never assumed."""
+    results = [walk.selection, walk.verification, *walk.context.values()]
+    named = {
+        describe_benchmark(row.benchmark_source, result.benchmark_name)
+        for result in results
+        for row in result.rows
+        if row.ok
+    }
+    if not named:
+        return "no run produced one"
+    return "; ".join(sorted(named))
+
+
 def render_verdict(
     walk: WalkForward,
     *,
@@ -297,8 +312,9 @@ def render_verdict(
         "- **A walk-forward with one split is one draw.** It says the selected arm did or did not "
         "hold up across a single boundary, not that it holds up across boundaries in general.",
         "- **Both windows share a lake, a cost model and a fill model.** An error common to both — "
-        "the 10 bp base slippage at the low liquidity floor, the price-return benchmark proxy — "
-        "moves selection and verification together and is invisible to this comparison.",
+        "the 10 bp base slippage at the low liquidity floor, the benchmark series "
+        f"({_benchmark_basis(walk)}) — moves selection and verification together and is invisible "
+        "to this comparison.",
         "- **Survivorship in the universe is handled; survivorship in the *signals* is not.** "
         "The legs swept here are the ones this repo built because earlier work suggested they "
         "worked, which is a selection effect no split inside this lake can undo.",

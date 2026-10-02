@@ -45,7 +45,9 @@ from execution.broker import OrderRequest, Side
 _SESSION = date(2020, 1, 1)
 
 
-def _stub_run(*, xirr: str, drawdown: str, excess: str = "0.02") -> Any:
+def _stub_run(
+    *, xirr: str, drawdown: str, excess: str = "0.02", benchmark_source: str = "published_tri"
+) -> Any:
     """A stand-in for ``BacktestResult`` carrying only what a row reads off it."""
     return SimpleNamespace(
         comparison=SimpleNamespace(
@@ -55,7 +57,8 @@ def _stub_run(*, xirr: str, drawdown: str, excess: str = "0.02") -> Any:
         ),
         max_drawdown=Decimal(drawdown),
         total_charges=Decimal("100000"),
-        benchmark_index_name="NIFTY-TRI L1 proxy",
+        benchmark_index_name="Nifty 50",
+        benchmark_source=benchmark_source,
     )
 
 
@@ -79,7 +82,14 @@ def _stub_after_tax(xirr: str) -> Any:
     )
 
 
-def _row(label: str, *, xirr: str, drawdown: str, floor: Decimal = LOW_FLOOR) -> SweepRow:
+def _row(
+    label: str,
+    *,
+    xirr: str,
+    drawdown: str,
+    floor: Decimal = LOW_FLOOR,
+    benchmark_source: str = "published_tri",
+) -> SweepRow:
     arm = Arm(
         label=label,
         family="test",
@@ -90,7 +100,7 @@ def _row(label: str, *, xirr: str, drawdown: str, floor: Decimal = LOW_FLOOR) ->
     return SweepRow(
         arm=arm,
         floor=floor,
-        run=cast(Any, _stub_run(xirr=xirr, drawdown=drawdown)),
+        run=cast(Any, _stub_run(xirr=xirr, drawdown=drawdown, benchmark_source=benchmark_source)),
         round_trips=10,
         median_hold_days=30,
         after_tax=cast(Any, _stub_after_tax(xirr)),
@@ -261,6 +271,29 @@ def test_the_report_states_both_floors_and_what_each_arm_changed() -> None:
     assert "| Short composite, top-5 |" in report
 
 
+def _report_on(source: str) -> str:
+    result = SweepResult(
+        rows=[_row("a", xirr="0.20", drawdown="0.25", benchmark_source=source)],
+        start=_SESSION,
+        terminal=date(2026, 8, 31),
+        sessions=2470,
+        benchmark_name="Nifty 50",
+        profile=_PROFILE,
+    )
+    return render_sweep_report(result, floors=[LOW_FLOOR])
+
+
+def test_the_report_names_the_benchmark_from_the_rows_recorded_source() -> None:
+    """The stale "price-return L1 proxy" caveat is read from the source, never hard-coded."""
+    published = _report_on("published_tri")
+    assert "price-return L1 proxy" not in published
+    assert "Excess is against the exchange's published TRI" in published
+    assert "published Nifty 50 TRI" in published
+    proxy = _report_on("l1_proxy")
+    assert "Excess is against a price-return L1 proxy" in proxy
+    assert "published TRI" not in proxy
+
+
 # ── one windowed pass over the lake ──────────────────────────────────────────────────────────────
 
 
@@ -365,6 +398,9 @@ def test_the_verdict_names_its_choice_before_any_verification_figure() -> None:
         verification_window=(date(2021, 9, 1), date(2026, 8, 31)),
     )
     assert report.index("**Chosen: winner**") < report.index("Selection rank against verification")
+    # The benchmark caveat is read from the rows' source: published TRI, not a stale proxy line.
+    assert "price-return benchmark proxy" not in report
+    assert "the benchmark series (published" in report
     # The decay is visible: chosen first on selection, second on verification.
     assert walk.rank_of(selection, "winner", LOW_FLOOR) == 1
     assert walk.rank_of(verification, "winner", LOW_FLOOR) == 2
