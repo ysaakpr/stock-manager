@@ -680,6 +680,7 @@ def render_round2(
     trials: int,
     trial_sharpes: TrialSharpeSet | None = None,
     nav_dir: Path | None = None,
+    command: str = "round2-signals",
 ) -> str:
     """The round-2 decision: every H-arm against the named frozen baseline arm (§4).
 
@@ -720,6 +721,7 @@ def render_round2(
         sharpe_variance=variance,
         floor_label=_floor_label(),
         assumptions=_assumptions(),
+        command=command,
     )
 
 
@@ -923,6 +925,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     trials=args.trials,
                     trial_sharpes=trial_sharpes,
                     nav_dir=out_dir,
+                    command=args.command,
                 )
     except (FoldCampaignError, CampaignError, WindowError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
