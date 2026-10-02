@@ -230,8 +230,9 @@ def test_same_inputs_produce_the_same_decision() -> None:
 def test_equal_weight_targets_sum_to_one_and_allocate() -> None:
     """With more names than fit the budget cleanly, it still allocates and carries no fractional."""
     policy = NaiveMomentumPolicy(_Data(_RECORDS), MomentumParameters(top_n=5))
-    decision = policy.decide(_ctx(SESSION, _FakeBroker(cash=Decimal("10000"))))
-    # A small budget across five names still yields whole-share buys (some names may get none).
+    decision = policy.decide(_ctx(SESSION, _FakeBroker(cash=Decimal("50000"))))
+    # A modest budget across five names still yields whole-share buys (some names may get none),
+    # each above the ₹5,000 minimum order value.
     buys = [o for o in decision.orders if o.side is Side.BUY]
     assert buys, "even a small budget should buy at least one share of the cheapest name"
     assert all(o.quantity >= 1 for o in buys)

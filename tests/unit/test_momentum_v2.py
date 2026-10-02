@@ -515,8 +515,9 @@ def _two_days(
     policy = MomentumV2Policy(data or _TwoDayData(), params)
     dropout = (_holding(E, 100),)
     day1 = policy.decide(_ctx(SESSION, _FakeBroker(cash=Decimal("50"), holdings=dropout)))
-    # E sold overnight: ~10,000 of cash is now free and the dropout is gone.
-    day2 = policy.decide(_ctx(NEXT, _FakeBroker(cash=Decimal("10000"))))
+    # E sold overnight: ~20,000 of cash is now free and the dropout is gone. Enough that each of
+    # the two buys clears the ₹5,000 minimum order value (backtest.sip.MIN_ORDER_VALUE_INR).
+    day2 = policy.decide(_ctx(NEXT, _FakeBroker(cash=Decimal("20000"))))
     return day1, day2
 
 
@@ -534,15 +535,15 @@ def test_with_redeploy_the_next_session_buys_the_chosen_basket_from_the_freed_ca
     assert {o.isin for o in buys} <= {A, B}  # yesterday's top-2, never a re-ranked name
     assert all(o.tag == "MOMENTUM" and isinstance(o.quantity, int) for o in buys)
     assert all(e.decision is Decision.BUY for e in day2.entries)
-    # Sized from the freed cash: 98% of 10,000 at ₹100 a share buys ~98 shares across the basket.
-    assert sum(o.quantity for o in buys) == 98
+    # Sized from the freed cash: 98% of 20,000 at ₹100 a share buys 196 shares across the basket.
+    assert sum(o.quantity for o in buys) == 196
 
 
 def test_redeploy_is_consumed_once_and_needs_a_sell_to_arm() -> None:
     params = MomentumV2Parameters(top_n=2, redeploy_next_session=True)
     policy = MomentumV2Policy(_TwoDayData(), params)
     policy.decide(_ctx(SESSION, _FakeBroker(cash=Decimal("50"), holdings=(_holding(E, 100),))))
-    rich = _FakeBroker(cash=Decimal("10000"))
+    rich = _FakeBroker(cash=Decimal("20000"))
     assert policy.decide(_ctx(NEXT, rich)).orders
     assert policy.decide(_ctx(date(2020, 1, 3), rich)).orders == ()  # consumed
 
