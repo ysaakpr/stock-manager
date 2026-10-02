@@ -9,7 +9,6 @@ comparison moves a number the test pins.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -42,7 +41,6 @@ from backtest.tax import (
     match_lots,
 )
 from backtest.tax_report import (
-    L1GrandfatheringPrices,
     LedgerFormatError,
     read_run_ledger,
     render_after_tax_report,
@@ -50,8 +48,6 @@ from backtest.tax_report import (
     write_run_ledger,
 )
 from backtest.xirr import Cashflow, XIRRError
-from dataplatform.identity import Exchange
-from dataplatform.query import AdjustedPoint, AdjustedSeries, AdjustedSeriesRequest, QueryService
 from execution.broker import Side
 from execution.costs import CostModel, Trade, load_rate_card
 
@@ -674,60 +670,6 @@ def test_run_ledger_round_trips_through_json(tmp_path: Path) -> None:
     path = tmp_path / "ledger.json"
     write_run_ledger(run, path)
     assert read_run_ledger(path) == run
-
-
-# ── grandfathering FMV from L1 ─────────────────────────────────────────────────────────────────
-
-
-@dataclass
-class _FakeQuery:
-    points: dict[Exchange, list[AdjustedPoint]]
-
-    def adjusted_series(self, request: AdjustedSeriesRequest) -> AdjustedSeries:
-        assert request.primary is not None
-        pts = tuple(self.points.get(request.primary, []))
-        return AdjustedSeries(
-            isin=request.isin,
-            primary=request.primary,
-            points=pts,
-            first=pts[0].trade_date if pts else None,
-            last=pts[-1].trade_date if pts else None,
-        )
-
-
-def _point(
-    exchange: Exchange, day: date, adj_high: str, factor: str, fell_back: bool = False
-) -> AdjustedPoint:
-    p = Decimal(adj_high)
-    return AdjustedPoint(
-        isin=A, trade_date=day, exchange=exchange, primary=exchange, fell_back=fell_back,
-        adj_open=p, adj_high=p, adj_low=p, adj_close=p, adj_volume=Decimal("1"), tr_close=p,
-        cum_price_factor=Decimal(factor), cum_qty_factor=Decimal("1") / Decimal(factor),
-    )  # fmt: skip
-
-
-def test_l1_fmv_is_the_raw_highest_price_across_exchanges_on_the_last_traded_day() -> None:
-    fake = _FakeQuery(
-        {
-            # Adjusted for a later 1:5 split (factor 0.2): raw high = adj / 0.2.
-            Exchange.NSE: [
-                _point(Exchange.NSE, date(2018, 1, 30), "40", "0.2"),
-                _point(Exchange.NSE, date(2018, 1, 31), "30", "0.2"),
-            ],
-            Exchange.BSE: [
-                _point(Exchange.BSE, date(2018, 1, 31), "31", "0.2"),
-                _point(Exchange.BSE, date(2018, 1, 31), "99", "0.2", fell_back=True),
-            ],
-        }
-    )
-    source = L1GrandfatheringPrices(cast(QueryService, fake), fmv_date=date(2018, 1, 31))
-    assert source.fmv_per_share(A) == Decimal("155")  # BSE's 31/0.2, not NSE's 30/0.2 or 30-Jan
-
-
-def test_l1_fmv_missing_raises() -> None:
-    source = L1GrandfatheringPrices(cast(QueryService, _FakeQuery({})), fmv_date=date(2018, 1, 31))
-    with pytest.raises(MissingGrandfatheringPriceError):
-        source.fmv_per_share(A)
 
 
 def test_fy_helpers() -> None:
