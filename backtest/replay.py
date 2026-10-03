@@ -37,13 +37,20 @@ harness runs offline in CI without Postgres, because the journal the engine *pro
 in ``ReplayResult`` — is the same whether or not a database is attached. Every evidence reference on
 an entry is content-addressed (``EvidenceBundle.ref``), so it is stable without a store behind it.
 
+* **Every order passes the rails before it reaches the broker (invariant #6).** The engine takes a
+  required ``RailGate`` (``backtest.rails``) and places only what A8's ``RailEngine.guard_order`` —
+  the same entry point the paper loop calls — allowed. A blocked order is journalled as A8's
+  ``RAIL_BLOCK`` line, in the session it was decided, and the rail policy in force is part of the
+  run's digest. There is no constructor without a gate: an unrailed replay reports returns for a
+  portfolio this system would never have been allowed to hold.
+
 What the engine never does: read a wall clock, decide whether to trade, or hold a second cost model
 — the broker it drives already imports the one shared ``execution.costs`` (invariant #4).
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -53,11 +60,12 @@ from typing import Any, Protocol, runtime_checkable
 import structlog
 
 from analyst.journal.evidence import EvidenceBundle, canonical_bytes, digest_of
-from analyst.journal.models import Actor, Decision, JournalEntry
+from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
 from analyst.journal.writer import Journal
+from backtest.rails import GateOutcome, RailGate, SlicedExit, rail_blocks_by_rail
 from dataplatform.clock import Clock, FrozenClock
 from dataplatform.query.pit import PitContext
-from execution.broker import Broker, Order, OrderRequest
+from execution.broker import Broker, Order, OrderRequest, Side
 
 _log = structlog.get_logger(__name__)
 
@@ -264,6 +272,17 @@ class ReplayResult:
 
     journal: tuple[JournalEntry, ...]
     book: BookSnapshot
+    #: The canonical document of the ``BacktestRailPolicy`` the run was cleared under.
+    rail_policy: Mapping[str, Any]
+
+    @property
+    def rail_blocks(self) -> dict[str, int]:
+        """``RAIL_BLOCK`` count per breached rail over the whole run."""
+        return rail_blocks_by_rail(self.journal)
+
+    def rail_policy_bytes(self) -> bytes:
+        """The canonical byte string of the rail policy in force."""
+        return canonical_bytes(dict(self.rail_policy))
 
     def journal_document(self) -> list[dict[str, Any]]:
         """The journal as a JSON-safe list — each entry dumped in the same mode evidence uses."""
@@ -278,13 +297,16 @@ class ReplayResult:
         return self.book.canonical_bytes()
 
     def digest(self) -> str:
-        """A single sha256 over journal-then-book — the one number that identifies this run.
+        """One sha256 over journal, book and rail policy — the one number that identifies a run.
 
-        Two runs share a digest iff they share both the journal and the book byte-for-byte, so a
-        determinism check can compare one value, and a regression perturbing either half moves
-        it.
+        Two runs share a digest iff they share the journal, the book and the rails they were cleared
+        under, byte-for-byte, so a determinism check can compare one value, and a regression
+        perturbing any of the three moves it. The rail policy is in it because the same orders
+        under different caps are a different run even on a day no rail happened to bite.
         """
-        return digest_of(self.journal_bytes() + b"\x00" + self.book_bytes())
+        return digest_of(
+            self.journal_bytes() + b"\x00" + self.book_bytes() + b"\x00" + self.rail_policy_bytes()
+        )
 
 
 # ── the engine ───────────────────────────────────────────────────────────────────────────────────
@@ -294,10 +316,11 @@ class ReplayEngine:
     """Drive a policy over a session range through a broker, point-in-time and deterministically.
 
     Construct it with an injected ``Policy``, a ``Broker`` (the paper ``SimBroker`` for a backtest),
-    the ``FrozenClock`` that broker shares, and the ordered ``sessions``. You may also inject
-    a ``Journal`` to persist every entry to the real append-only ``decision_journal`` (invariants #9
-    and #12); omit it to run offline — the journal is still produced in the ``ReplayResult`` either
-    way.
+    the ``FrozenClock`` that broker shares, the ordered ``sessions`` and the ``RailGate`` every
+    order must pass (invariant #6) — required, because a default here would be a bypass. You may
+    also inject a ``Journal`` to persist every entry to the real append-only ``decision_journal``
+    (invariants #9 and #12); omit it to run offline — the journal is still produced in the
+    ``ReplayResult`` either way.
 
     The broker **must** have been built with the same ``clock`` instance passed here: the engine
     re-freezes that clock at each session, and a broker holding a different clock would stage orders
@@ -306,14 +329,15 @@ class ReplayEngine:
 
     ``run`` walks the sessions in order. For each: it re-freezes the clock, settles and fills the
     orders staged by the previous session (``Broker.execute_session``), builds the session's
-    ``PitContext``, asks the policy to decide, places the returned orders (staged for the next
-    session), and journals the decision. It returns a ``ReplayResult`` whose bytes are identical
-    across runs of the same inputs (§8.3.3).
+    ``PitContext``, asks the policy to decide, clears the returned orders through the rails, places
+    the ones A8 allowed (staged for the next session), and journals the decision and any block.
+    It returns a ``ReplayResult`` whose bytes are identical across runs of the same inputs
+    (§8.3.3).
 
     What it never does: implement a strategy, read a wall clock, or run sessions out of order.
     """
 
-    __slots__ = ("_broker", "_clock", "_journal", "_policy", "_sessions")
+    __slots__ = ("_broker", "_clock", "_journal", "_policy", "_rails", "_sessions")
 
     def __init__(
         self,
@@ -322,6 +346,7 @@ class ReplayEngine:
         broker: ReplayBroker,
         clock: FrozenClock,
         sessions: Sequence[date],
+        rails: RailGate,
         journal: Journal | None = None,
     ) -> None:
         ordered = tuple(sessions)
@@ -337,6 +362,7 @@ class ReplayEngine:
         self._broker = broker
         self._clock = clock
         self._sessions = ordered
+        self._rails = rails
         self._journal = journal
 
     def run(self) -> ReplayResult:
@@ -344,13 +370,19 @@ class ReplayEngine:
         produced: list[JournalEntry] = []
         for session in self._sessions:
             produced.extend(self._run_session(session))
-        result = ReplayResult(journal=tuple(produced), book=BookSnapshot.of(self._broker))
+        result = ReplayResult(
+            journal=tuple(produced),
+            book=BookSnapshot.of(self._broker),
+            rail_policy=self._rails.policy.to_document(),
+        )
         _log.info(
             "replay.complete",
             sessions=len(self._sessions),
             first=self._sessions[0].isoformat(),
             last=self._sessions[-1].isoformat(),
             entries=len(result.journal),
+            rail_policy=self._rails.policy.label,
+            rail_blocks=result.rail_blocks,
             digest=result.digest(),
         )
         return result
@@ -378,16 +410,34 @@ class ReplayEngine:
         decision = self._policy.decide(ctx)
         _validate_decision(decision, session)
 
-        # 4. Carry out the intent: stage each order for the next session (SimBroker.place reads the
-        #    now-frozen clock for its decision date). The engine chooses no orders; it places the
-        #    ones the policy returned, in the order it returned them.
-        for request in decision.orders:
+        # 4. Clear the intent through A8 (invariant #6), in the order the policy returned it, each
+        #    order against the book the ones before it leave. What A8 refuses never reaches the
+        #    broker; its RAIL_BLOCK line joins this session's journal below.
+        cleared = self._rails.clear(
+            session,
+            decision.orders,
+            broker=self._broker,
+            clock=self._clock,
+            case_id=decision.evidence.case_id,
+            sleeves=_sleeves_of(decision.entries),
+        )
+
+        # 5. Carry out the cleared intent: stage each order for the next session (SimBroker.place
+        #    reads the now-frozen clock for its decision date). The engine chooses no orders; it
+        #    places the ones the policy returned and A8 allowed, in the order they were returned.
+        for request in cleared.allowed:
             self._broker.place(request)
 
-        # 5. Journal the decision. Every session writes at least one entry (invariant #9).
-        return self._journal_decision(decision, session)
+        # 6. Journal the decision and the rails' verdicts. Every session writes at least one entry
+        #    (invariant #9), and a blocked order is one of them, never an absence.
+        return self._journal_decision(decision, session, cleared)
 
-    def _journal_decision(self, decision: SessionDecision, session: date) -> list[JournalEntry]:
+    def _journal_decision(
+        self,
+        decision: SessionDecision,
+        session: date,
+        cleared: GateOutcome,
+    ) -> list[JournalEntry]:
         """Write the session's entries (or a heartbeat), persisting them if a Journal is attached.
 
         The evidence reference is content-addressed, so it is the same with or without a store
@@ -399,7 +449,13 @@ class ReplayEngine:
         if self._journal is not None:
             self._journal.snapshot(decision.evidence)
 
-        entries = list(decision.entries)
+        # A refused order's BUY/SELL line is replaced by the rails' line for it, as in the paper
+        # loop, where a blocked order is journalled by its RAIL_BLOCK alone: the journal records
+        # the trades that reached the broker, and every one that did not, by why it did not.
+        # A sliced exit keeps the policy's one SELL line — the parent intent — and names on it
+        # every child order it was placed as.
+        kept = _with_slices(_without_refused(decision.entries, cleared.refused), cleared.sliced)
+        entries = [*kept, *cleared.entries]
         if not entries:
             # "Checked, nothing to do" is a decision with evidence behind it, not a missing row.
             entries = [
@@ -427,6 +483,48 @@ class ReplayEngine:
                 self._journal.append(stamped)
             written.append(stamped)
         return written
+
+
+def _without_refused(
+    entries: Sequence[JournalEntry], refused: Sequence[OrderRequest]
+) -> list[JournalEntry]:
+    """``entries`` less one BUY/SELL line per refused order (same ISIN and side), first match."""
+    remaining = list(entries)
+    for order in refused:
+        decision = Decision.BUY if order.side is Side.BUY else Decision.SELL
+        for index, entry in enumerate(remaining):
+            if entry.isin == order.isin and entry.decision is decision:
+                del remaining[index]
+                break
+    return remaining
+
+
+def _with_slices(
+    entries: Sequence[JournalEntry], sliced: Sequence[SlicedExit]
+) -> list[JournalEntry]:
+    """``entries`` with each sliced exit's children merged onto its SELL line, first match."""
+    annotated = list(entries)
+    claimed: set[int] = set()
+    for exit_ in sliced:
+        for index, entry in enumerate(annotated):
+            if index in claimed or entry.isin != exit_.parent.isin:
+                continue
+            if entry.decision is not Decision.SELL:
+                continue
+            payload = {**(entry.payload or {}), **exit_.payload}
+            annotated[index] = entry.model_copy(update={"payload": payload})
+            claimed.add(index)
+            break
+    return annotated
+
+
+def _sleeves_of(entries: Sequence[JournalEntry]) -> dict[str, Sleeve]:
+    """The sleeve each instrument's decision was tagged with, for the rail line that follows it."""
+    sleeves: dict[str, Sleeve] = {}
+    for entry in entries:
+        if entry.isin is not None and entry.sleeve is not None:
+            sleeves.setdefault(entry.isin, entry.sleeve)
+    return sleeves
 
 
 def _validate_decision(decision: SessionDecision, session: date) -> None:

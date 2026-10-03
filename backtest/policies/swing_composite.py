@@ -62,16 +62,41 @@ its neutral value (0 for a return, 1 for a ratio) rather than dropping the name 
 must not move with the weight vector, or an arm-to-arm comparison becomes a universe comparison.
 
 M12.1 also added the ``regime_filter`` gate momentum v2 has carried since M9.5 and this policy did
-not: no new buys while the broad-market proxy sits below its own 200-session mean. It suppresses
+not: no new buys while the published NIFTY 50 sits below its own 200-session mean. It suppresses
 *buys only*. Every exit is staged before the gate is consulted, because risk-off must never trap a
 position the band, the re-underwrite or the stop has already decided to sell — the book runs down
 through its own exits rather than being liquidated on the gate. A session with no regime reading at
 all is treated as risk-**off**: an absent regime is not a licence to buy.
 
+X2 closed two ways the composite could rank on noise. A delivery-derived leg contributes only on a
+session where at least :data:`DELIVERY_COVERAGE_THRESHOLD` (80 %) of the candidates carry a real
+delivery print; below it the leg is dropped and the composite is struck over the remaining legs.
+Before 2016-09-02 the lake has no delivery at all, every name's stand-in was the same 0.0, and the
+ISIN tie-break chose the basket. And tied values now share their mean rank instead of being ranked
+in ISIN order. A session on which *no* weighted leg survives the gate is not ranked at all — no
+band or re-underwrite sell, no buy — because a zero-information composite ordered by ISIN is not a
+decision.
+
 Point-in-time (invariant #7): every figure on a record — the 252-session high, the delivery mean,
 the 12-1 return, the volatility, every M12.1 leg — is struck over sessions on or before the record's
 ``knowable_date``, and every read goes through ``ctx.pit.admit``, the regime reading included. The
 trailing stop reads only the current session's close.
+
+**The stop is split-invariant.** A trailing stop on raw closes (invariant #3) sees a 2:1 split as a
+50 % crash: the peak was struck on the pre-split scale, the close is on the post-split one. The fix
+rescales the stop's reference — the running peak, and nothing else — on the ex-date, from the one
+place that fact is knowable on the decision date without a corporate-action read: the policy's own
+account. ``backtest.book_actions`` applies a split or bonus to the broker before the session's
+decision, exactly as the depository credits a live account; the policy sees the holding's share
+count change while its total cost basis does not. Nothing the policy trades can do that — a fill
+moves count *and* basis, a settlement moves a lot from pending to settled without changing either —
+so a count change at an unchanged basis is a split or bonus, and ``old / new`` shares is its
+inverse ratio (floored counts make a bonus's ratio approximate to one share in the holding). An ISIN
+reissue (the retired holding carried to its survivor at the same basis) keeps the position's age
+and peak rather than starting a fresh one. The ``corporate_actions`` store, whose ``knowable_date``
+is the ingest day, is never read: the reference moves on the day the account changes and never
+before, which is what a live holder sees. The raw-price *signal* legs (the 52-week-high proximity,
+the returns) are not rescaled here — they are struck by the data source, not the policy.
 
 What it never does: read a wall clock (time is ``ctx.clock``), key on a symbol (ISIN only —
 invariant #2), hold a cost model (the injected broker owns the one shared model — invariants #4/#5),
@@ -83,32 +108,55 @@ same start reproduces every decision exactly.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
+from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from analyst.rails import order_value_ceiling
+from backtest.band_hits import BAND_HIT_BLOCK_RATIONALE, BandHitData, band_hit_blocked
 from backtest.policies.momentum_v2 import RegimeReading
 from backtest.replay import SessionContext, SessionDecision
-from backtest.sip import simulate_sip_instalment
+from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
-from execution.broker import Exchange, Holding, OrderRequest, Side
+from execution.broker import Exchange, Holding, OrderRequest, Position, Side
 
 __all__ = [
+    "DELIVERY_COVERAGE_THRESHOLD",
     "RegimeReading",
     "SwingCompositeData",
     "SwingCompositeParameters",
     "SwingCompositePolicy",
     "SwingRecord",
+    "active_legs",
     "composite_scores",
+    "delivery_coverage",
 ]
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
 _TWO = Decimal("2")
 _WEIGHT_QUANTUM = Decimal("0.00000001")
+
+#: The share of a session's scored candidates that must carry a real NSE delivery print before a
+#: delivery-derived leg (``delivery_share``, ``delivery_trend``) contributes to the composite (X2).
+#: Below it the leg is dropped for that session and the composite is struck over the remaining
+#: weighted legs — never scored off imputed values. Fixed a priori at 80 %: at most one candidate in
+#: five may be carrying the median stand-in, so the leg ranks the cross-section on what was measured
+#: It was not tuned against returns. It does bite on real data, and a reader must know where: before
+#: 2016-09-02 the lake has no delivery prints at all (0 %, the ISIN-ordered noise this gate exists
+#: to stop), and on the liquid universe after it coverage runs ~72 % in 2016 rising past 80 % around
+#: 2019-2020 and ~92 % by 2026 — so the delivery legs switch on part-way through a decade window.
+DELIVERY_COVERAGE_THRESHOLD = Decimal("0.80")
+
+#: Each delivery-derived leg and the record flag that says its value was measured, not imputed.
+_DELIVERY_LEGS: dict[str, str] = {
+    "delivery_share": "delivery_observed",
+    "delivery_trend": "delivery_trend_observed",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +191,9 @@ class SwingRecord:
       tape is getting busier in this name.
     * ``ma_proximity`` — the close over its own 50-session mean.
 
+    ``delivery_observed`` / ``delivery_trend_observed`` (X2) mark whether the two delivery legs were
+    measured or imputed; :func:`composite_scores` reads them to gate a delivery leg on coverage.
+
     Never holds a ``float``, a non-positive price, or a non-positive high proximity.
     """
 
@@ -160,8 +211,18 @@ class SwingRecord:
     delivery_trend: Decimal = _ONE
     turnover_expansion: Decimal = _ONE
     ma_proximity: Decimal = _ONE
+    # X2. Whether ``delivery_share`` / ``delivery_trend`` came from real prints in the window, or
+    # are the stand-ins (the session median; the neutral 1) the lake could not measure. True by
+    # default, so a record built without the flags is read as measured.
+    delivery_observed: bool = True
+    delivery_trend_observed: bool = True
+    # Round 2, H1 (backtest.policies.residual_momentum). ``None`` is "excluded from the leg" — not
+    # computed, or fewer than 200 valid sessions — and ranks at the leg's mean, never at a value.
+    residual_momentum: Decimal | None = None
 
     def __post_init__(self) -> None:
+        if self.residual_momentum is not None and not isinstance(self.residual_momentum, Decimal):
+            raise TypeError("residual_momentum must be a Decimal or None")
         for name in (
             "high_proximity",
             "delivery_share",
@@ -186,7 +247,13 @@ class SwingRecord:
             raise ValueError(f"volatility must be non-negative, got {self.volatility}")
 
 
-@dataclass(frozen=True, slots=True)
+#: Parameters added after run digests were first persisted, each with the default at which it is
+#: left out of ``repr`` — the run ledger keys a run on ``repr(parameters)``, so every arm that does
+#: not use a newer leg keeps the digest it was persisted (and frozen as a baseline) under.
+_DIGEST_OPTIONAL_PARAMETERS: dict[str, object] = {"weight_residual_momentum": _ZERO}
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class SwingCompositeParameters:
     """The stated knobs. Every default is a measured finding or a round number, never a fit.
 
@@ -254,6 +321,18 @@ class SwingCompositeParameters:
     regime_filter: bool = False
     buy_budget_fraction: Decimal = Decimal("0.98")
     sleeve: Sleeve = Sleeve.TACTICAL
+    # Round 2, H1: the residual-momentum leg (backtest.policies.residual_momentum). Zero by default,
+    # and absent from ``repr`` at zero (see _DIGEST_OPTIONAL_PARAMETERS).
+    weight_residual_momentum: Decimal = _ZERO
+
+    def __repr__(self) -> str:
+        shown = (
+            f"{f.name}={getattr(self, f.name)!r}"
+            for f in fields(self)
+            if f.name not in _DIGEST_OPTIONAL_PARAMETERS
+            or getattr(self, f.name) != _DIGEST_OPTIONAL_PARAMETERS[f.name]
+        )
+        return f"{type(self).__qualname__}({', '.join(shown)})"
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -289,6 +368,7 @@ class SwingCompositeParameters:
             "weight_turnover_expansion",
             "weight_ma_proximity",
             "weight_volatility",
+            "weight_residual_momentum",
         ):
             if not isinstance(getattr(self, name), Decimal):
                 raise TypeError(f"{name} must be a Decimal")
@@ -338,24 +418,9 @@ class SwingCompositeData(Protocol):
         """
 
 
-def composite_scores(
-    records: Sequence[SwingRecord], params: SwingCompositeParameters
-) -> dict[str, Decimal]:
-    """Rank-normalise each component across ``records`` and return the weighted composite per ISIN.
-
-    Each component is converted to its cross-sectional rank scaled onto ``[-1, +1]``
-    (``2 * rank / (n + 1) - 1``) rather than a z-score, because every one of these signals has fat
-    tails — a name at a 400 % trailing return would otherwise dominate a z-scored basket. Ranks are
-    struck with ties broken by ISIN, so the result is deterministic and a replay reproduces it.
-
-    Assumes ``records`` is the already-screened candidate set. Never reads a clock or a store.
-    """
-    n = len(records)
-    if n == 0:
-        return {}
-    scale = Decimal(n + 1)
-    scores: dict[str, Decimal] = dict.fromkeys((r.isin for r in records), _ZERO)
-    for attribute, weight in (
+def _weighted_legs(params: SwingCompositeParameters) -> tuple[tuple[str, Decimal], ...]:
+    """Every leg with a non-zero weight, in a fixed order."""
+    legs = (
         ("high_proximity", params.weight_high),
         ("delivery_share", params.weight_delivery),
         ("momentum_12_1", params.weight_momentum),
@@ -365,12 +430,83 @@ def composite_scores(
         ("turnover_expansion", params.weight_turnover_expansion),
         ("ma_proximity", params.weight_ma_proximity),
         ("volatility", params.weight_volatility),
-    ):
-        if weight == _ZERO:
-            continue
-        order = sorted(records, key=lambda r: (getattr(r, attribute), r.isin))
-        for rank, record in enumerate(order, start=1):
-            scores[record.isin] += weight * (_TWO * Decimal(rank) / scale - _ONE)
+        ("residual_momentum", params.weight_residual_momentum),
+    )
+    return tuple((attribute, weight) for attribute, weight in legs if weight != _ZERO)
+
+
+def delivery_coverage(records: Sequence[SwingRecord], attribute: str) -> Decimal:
+    """The share of ``records`` whose delivery-derived ``attribute`` was measured (X2).
+
+    Zero for an empty set. Assumes ``attribute`` is one of the delivery legs.
+    """
+    if not records:
+        return _ZERO
+    flag = _DELIVERY_LEGS[attribute]
+    observed = sum(1 for record in records if getattr(record, flag))
+    return Decimal(observed) / Decimal(len(records))
+
+
+def active_legs(
+    records: Sequence[SwingRecord], params: SwingCompositeParameters
+) -> tuple[tuple[str, Decimal], ...]:
+    """The weighted legs that contribute this session: a delivery leg only at sufficient coverage.
+
+    A delivery-derived leg whose coverage over ``records`` is below
+    :data:`DELIVERY_COVERAGE_THRESHOLD` is left out, so the composite is struck over the rest. An
+    empty result means no leg can rank the candidates at all — the caller must not rank them
+    (ordering by ISIN is what a zero-information composite would otherwise collapse to).
+    """
+    return tuple(
+        (attribute, weight)
+        for attribute, weight in _weighted_legs(params)
+        if attribute not in _DELIVERY_LEGS
+        or delivery_coverage(records, attribute) >= DELIVERY_COVERAGE_THRESHOLD
+    )
+
+
+def composite_scores(
+    records: Sequence[SwingRecord], params: SwingCompositeParameters
+) -> dict[str, Decimal]:
+    """Rank-normalise each active leg across ``records`` and return the weighted composite per ISIN.
+
+    Each component is converted to its cross-sectional rank scaled onto ``[-1, +1]``
+    (``2 * rank / (n + 1) - 1``) rather than a z-score, because every one of these signals has fat
+    tails — a name at a 400 % trailing return would otherwise dominate a z-scored basket. **Tied
+    values share their mean rank** (X2): before, ties were broken by ISIN, which handed a block of
+    imputed or neutral-filled values — a 28 % median-imputed delivery block, every unmeasurable
+    ``return_5`` at 0 — a spread of ranks in ISIN order, noise that looked like signal. A tie now
+    scores identically, and a leg on which every name ties adds the same constant to every score.
+
+    Only :func:`active_legs` contribute: a delivery leg below the coverage threshold is dropped and
+    the composite reweights over the remaining legs. Returns ``{}`` when no leg is active, so no
+    caller can mistake a zero-information composite for a ranking.
+
+    Assumes ``records`` is the already-screened candidate set. Never reads a clock or a store.
+    """
+    legs = active_legs(records, params)
+    if not records or not legs:
+        return {}
+    scores: dict[str, Decimal] = dict.fromkeys((r.isin for r in records), _ZERO)
+    for attribute, weight in legs:
+        # A name excluded from a leg (a ``None`` value — only residual momentum has one) is ranked
+        # on the others and scores 0 here, the leg's mean rank; the rest rank among themselves.
+        ranked = [r for r in records if getattr(r, attribute) is not None]
+        n = len(ranked)
+        scale = Decimal(n + 1)
+        order = sorted(ranked, key=lambda r: getattr(r, attribute))
+        start = 0
+        while start < n:
+            value = getattr(order[start], attribute)
+            end = start
+            while end + 1 < n and getattr(order[end + 1], attribute) == value:
+                end += 1
+            # 1-based ranks start+1 .. end+1 share their mean.
+            rank = Decimal(start + end + 2) / _TWO
+            leg_score = weight * (_TWO * rank / scale - _ONE)
+            for record in order[start : end + 1]:
+                scores[record.isin] += leg_score
+            start = end + 1
     return scores
 
 
@@ -391,6 +527,64 @@ class _Position:
     sessions_held: int = 0
     peak: Decimal = _ZERO
     sell_staged_ago: int | None = None
+    lots: _Lots | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Lots:
+    """One ISIN's shares on the account — settled and pending — and their total cost basis."""
+
+    quantity: int
+    cost: Decimal
+
+
+#: How close two cost bases must be to count as unchanged. The broker keeps each lot's total cost
+#: and reports ``cost / quantity``; ``quantity x average_price`` recovers it to Decimal precision
+#: (~1e-27 relative), while the smallest trade the policy can make moves it by a whole share.
+_SAME_COST = Decimal("1e-12")
+
+
+def _same_cost(a: Decimal, b: Decimal) -> bool:
+    return abs(a - b) <= max(abs(a), abs(b)) * _SAME_COST
+
+
+def _account_lots(ctx: SessionContext, *, before: date | None = None) -> dict[str, _Lots]:
+    """Each ISIN's settled holding plus pending buys, or only those filled before ``before``.
+
+    ``before=ctx.session`` leaves out this session's fills, so what remains is exactly the lots the
+    account held at the previous decision, moved on only by settlement (neutral) or a corporate
+    action.
+    """
+    quantity: dict[str, int] = {}
+    cost: dict[str, Decimal] = {}
+    lines: list[tuple[str, int, Decimal]] = [
+        (h.isin, h.quantity, h.average_price) for h in ctx.broker.holdings()
+    ]
+    lines += [
+        (p.isin, p.quantity, p.average_price)
+        for p in ctx.broker.positions()
+        if before is None or p.session < before
+    ]
+    for isin, qty, average in lines:
+        quantity[isin] = quantity.get(isin, 0) + qty
+        cost[isin] = cost.get(isin, _ZERO) + Decimal(qty) * average
+    return {isin: _Lots(quantity[isin], cost[isin]) for isin in quantity}
+
+
+def _rescale_reference(position: _Position, now: _Lots | None) -> None:
+    """Put the stop's peak on the post-split scale when the share count moved at an unchanged basis.
+
+    ``position.lots`` is what the previous decision saw; ``now`` is the same lots today, before this
+    session's fills. Equal basis and a different count is a split or bonus (nothing the policy
+    trades does that), and ``old / new`` shares is the inverse of its ratio. Anything else leaves
+    the peak be.
+    """
+    before = position.lots
+    if before is None or now is None or now.quantity <= 0 or now.quantity == before.quantity:
+        return
+    if not _same_cost(before.cost, now.cost):
+        return
+    position.peak = position.peak * Decimal(before.quantity) / Decimal(now.quantity)
 
 
 class SwingCompositePolicy:
@@ -402,14 +596,30 @@ class SwingCompositePolicy:
     session it additionally re-scores the universe and applies the band and re-underwrite rules.
     """
 
-    __slots__ = ("_data", "_params", "_positions")
+    __slots__ = ("_band_hits", "_data", "_order_caps", "_params", "_positions")
 
     def __init__(
-        self, data: SwingCompositeData, params: SwingCompositeParameters | None = None
+        self,
+        data: SwingCompositeData,
+        params: SwingCompositeParameters | None = None,
+        *,
+        band_hits: BandHitData | None = None,
+        order_caps: RiskRails | None = None,
     ) -> None:
         self._data = data
         self._params = params if params is not None else SwingCompositeParameters()
         self._positions: dict[str, _Position] = {}
+        # X2 H2: band-hit avoidance is on exactly when a source is injected. It is not a field of
+        # SwingCompositeParameters on purpose — a new field would change the repr, and so the
+        # persisted digest, of every arm already run, the frozen baseline included.
+        self._band_hits = band_hits
+        # The rails A8 will clear this policy's orders against. With them, no buy is sized past the
+        # per-order ceiling (``analyst.rails.order_value_ceiling``): a buy the rail is bound to
+        # refuse leaves its cash idle, the next rebalance spreads the larger idle balance over the
+        # same names, and every buy grows past the cap until the book is all cash. Sized to the
+        # ceiling, a name below its weight is topped up across rebalances instead. Not a field of
+        # the parameters, for the same digest reason as ``band_hits``.
+        self._order_caps = order_caps
 
     def decide(self, ctx: SessionContext) -> SessionDecision:
         """Age the book and check stops every session; re-score and rotate on a decision session."""
@@ -417,7 +627,13 @@ class SwingCompositePolicy:
         marks = {
             record.isin: record.price for record in ctx.pit.admit(self._data.marks(ctx.session))
         }
-        self._age(ctx.session, held, marks)
+        self._age(
+            ctx.session,
+            held,
+            marks,
+            carried=_account_lots(ctx, before=ctx.session),
+            book=_account_lots(ctx),
+        )
 
         stopped = self._stop_outs(held, marks)
         self._record_sell(stopped)
@@ -428,9 +644,21 @@ class SwingCompositePolicy:
     # ── position bookkeeping ─────────────────────────────────────────────────────────────────────
 
     def _age(
-        self, session: date, held: Mapping[str, Holding], marks: Mapping[str, Decimal]
+        self,
+        session: date,
+        held: Mapping[str, Holding],
+        marks: Mapping[str, Decimal],
+        *,
+        carried: Mapping[str, _Lots],
+        book: Mapping[str, _Lots],
     ) -> None:
-        """Advance each holding's age and running peak; forget names no longer on the book."""
+        """Advance each holding's age and running peak; forget names no longer on the book.
+
+        ``carried`` is the account as the previous decision left it, moved on only by settlement and
+        corporate actions; ``book`` is the whole account now, remembered for the next session. A
+        split or bonus rescales the peak before today's close is compared to it (module docstring).
+        """
+        self._follow_reissues(held, carried)
         for isin in list(self._positions):
             if isin not in held:
                 del self._positions[isin]
@@ -443,9 +671,35 @@ class SwingCompositePolicy:
                 position.sessions_held += 1
                 if position.sell_staged_ago is not None:
                     position.sell_staged_ago += 1
+                _rescale_reference(position, carried.get(isin))
             mark = marks.get(isin)
             if mark is not None and mark > position.peak:
                 position.peak = mark
+            position.lots = book.get(isin)
+
+    def _follow_reissues(self, held: Mapping[str, Holding], carried: Mapping[str, _Lots]) -> None:
+        """Move a position to its survivor ISIN when the account carried the holding over a reissue.
+
+        A face-value split usually retires the ISIN: the book carries the holding 1:1 to the
+        survivor and rescales it there, at the same total basis. So a tracked name that left the
+        book with no sell staged last session, and an untracked one that arrived at its basis, are
+        one position — its age, peak and sell history continue rather than start again.
+        """
+        gone = [
+            isin
+            for isin, position in sorted(self._positions.items())
+            if isin not in held and position.lots is not None and position.sell_staged_ago != 0
+        ]
+        for arrival in sorted(isin for isin in held if isin not in self._positions):
+            lots = carried.get(arrival)
+            if lots is None:
+                continue
+            for isin in gone:
+                previous = self._positions[isin].lots
+                if previous is not None and _same_cost(previous.cost, lots.cost):
+                    self._positions[arrival] = self._positions.pop(isin)
+                    gone.remove(isin)
+                    break
 
     def _may_sell(self, isin: str) -> bool:
         """Whether a sell may be staged for ``isin`` now — i.e. no recent attempt is outstanding.
@@ -504,6 +758,11 @@ class SwingCompositePolicy:
     ) -> SessionDecision:
         """Score the universe, apply the three exit rules, then size buys toward the target set."""
         candidates = tuple(ctx.pit.admit(self._data.signal(ctx.session)))
+        if candidates and not active_legs(candidates, self._params):
+            # X2. Every weighted leg is delivery-derived and delivery is too thin to rank on. No
+            # ranking is struck — so no band or re-underwrite sell (they read ranks) and no buy.
+            # Ordering by ISIN is what this session would otherwise have traded on.
+            return self._session_decision(ctx, stopped, note=self._unscoreable_note(candidates))
         # Score the *whole* candidate set, so a holding is ranked among everything that is
         # scoreable. The volatility screen then narrows only what may be *bought*: screening before
         # scoring would leave a holding that turned volatile unranked, and the exit rules would read
@@ -514,6 +773,12 @@ class SwingCompositePolicy:
         ranked = sorted(candidates, key=lambda r: (-scores[r.isin], r.isin))
         rank_of = {record.isin: rank for rank, record in enumerate(ranked, start=1)}
         buyable = {record.isin for record in self._screen(ranked)}
+        # X2 H2: no *new* buy of a name that hit a price band in the lookback. It narrows only what
+        # may be bought, like the volatility screen, so a blocked holding keeps its rank and is
+        # never sold for it; the next-ranked unblocked name takes the slot.
+        would_choose = [record.isin for record in ranked if record.isin in buyable]
+        blocked = self._band_hit_blocked(ctx)
+        buyable -= blocked
         chosen = [record for record in ranked if record.isin in buyable][: self._params.top_n]
 
         already_selling = {order.isin for order, _ in stopped}
@@ -528,12 +793,33 @@ class SwingCompositePolicy:
         # own exits rather than being liquidated on the gate.
         if self._params.regime_filter and not self._risk_on(ctx):
             target = {}
-        buys, drift = self._buys(ctx, held, target)
+            would_choose = []
+        buys, drift = self._buys(ctx, held, target, marks)
 
         orders = tuple(order for order, _ in (*sells, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
         evidence = self._evidence(ctx.session, chosen, scores, by_isin, drift, len(candidates))
+        withheld = [
+            isin
+            for isin in would_choose[: self._params.top_n]
+            if isin in blocked and isin not in exiting
+        ]
+        if withheld:
+            evidence, blocked_lines = self._band_hit_entries(ctx, held, withheld, evidence)
+            entries += blocked_lines
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
+
+    def _unscoreable_note(self, candidates: Sequence[SwingRecord]) -> str:
+        coverage = ", ".join(
+            f"{attribute} {delivery_coverage(candidates, attribute):.1%}"
+            for attribute, _ in _weighted_legs(self._params)
+            if attribute in _DELIVERY_LEGS
+        )
+        return (
+            f"rebalance not ranked: every weighted leg is delivery-derived and delivery coverage "
+            f"of the {len(candidates)} candidates ({coverage}) is below "
+            f"{DELIVERY_COVERAGE_THRESHOLD:.0%}"
+        )
 
     def _risk_on(self, ctx: SessionContext) -> bool:
         """Whether the broad market sits at or above its own trailing mean (M12.1).
@@ -547,6 +833,63 @@ class SwingCompositePolicy:
         if not readings:
             return False
         return readings[0].risk_on
+
+    def _band_hit_blocked(self, ctx: SessionContext) -> frozenset[str]:
+        """The ISINs H2 bars from a buy this session; empty when the filter is off (X2)."""
+        if self._band_hits is None:
+            return frozenset()
+        hits = ctx.pit.admit(self._band_hits.band_hits(ctx.session))
+        return band_hit_blocked(hits, as_of=ctx.session, window=self._band_hits.window(ctx.session))
+
+    def _band_hit_entries(
+        self,
+        ctx: SessionContext,
+        held: Mapping[str, Holding],
+        withheld: Sequence[str],
+        evidence: EvidenceBundle,
+    ) -> tuple[EvidenceBundle, tuple[JournalEntry, ...]]:
+        """The session's evidence with the withheld names added, and one no-op line for each.
+
+        ``withheld`` are the names the session would have targeted without H2 that the filter
+        blocked and no exit is already selling: buys that did not happen *because of* H2, the count
+        the smoke reports. A no-op is still a decision (invariant #9), so each is journaled against
+        the evidence that names it. A withheld name already on the book is kept, and only its top-up
+        toward equal weight is withheld; its line says so.
+        """
+        items = tuple(
+            EvidenceItem(
+                kind=EvidenceKind.POLICY,
+                source="nse_pr_bundle",
+                label="band_hit_blocked",
+                isin=isin,
+                as_of=ctx.session,
+                text="hit a daily price band in the last 5 sessions",
+            )
+            for isin in withheld
+        )
+        evidence = EvidenceBundle(
+            trading_date=evidence.trading_date,
+            actor=evidence.actor,
+            items=(*evidence.items, *items),
+        )
+        ref = evidence.ref().ref
+        entries = tuple(
+            JournalEntry(
+                ts=ctx.clock.now(),
+                trading_date=ctx.session,
+                actor=Actor.T0,
+                decision=Decision.HEARTBEAT,
+                isin=isin,
+                evidence_snapshot_ref=ref,
+                rationale=(
+                    f"{BAND_HIT_BLOCK_RATIONALE}: composite top-{self._params.top_n} but hit a "
+                    "daily price band in the last 5 sessions; "
+                    + ("held, kept, not topped up" if isin in held else "not bought")
+                ),
+            )
+            for isin in withheld
+        )
+        return evidence, entries
 
     def _screen(self, candidates: Sequence[SwingRecord]) -> tuple[SwingRecord, ...]:
         """The names eligible to be *bought*: all but the most volatile ``exclude_vol_fraction``."""
@@ -604,11 +947,13 @@ class SwingCompositePolicy:
         ctx: SessionContext,
         held: Mapping[str, Holding],
         target: Mapping[str, SwingRecord],
+        marks: Mapping[str, Decimal],
     ) -> tuple[list[tuple[OrderRequest, str]], Decimal]:
         """Whole-share buys toward equal weight over the target set, sized from currently-free cash.
 
         Budget is the cash *already* free times ``buy_budget_fraction`` — never this session's sale
         proceeds, which have not settled — so a buy is never rejected for cash it does not yet hold.
+        With ``order_caps`` no buy is sized past A8's per-order ceiling, for the same reason.
         """
         if not target:
             return [], _ZERO
@@ -619,7 +964,12 @@ class SwingCompositePolicy:
             isin: Decimal(held[isin].quantity) * prices[isin] for isin in target if isin in held
         }
         allocation = simulate_sip_instalment(
-            instalment=budget, targets=weights, prices=prices, existing_value=existing_value
+            instalment=budget,
+            targets=weights,
+            prices=prices,
+            existing_value=existing_value,
+            min_order_value=MIN_ORDER_VALUE_INR,
+            order_ceiling=self._order_ceiling(ctx, marks, prices),
         )
         buys = [
             (
@@ -632,6 +982,26 @@ class SwingCompositePolicy:
             for order in allocation.orders
         ]
         return buys, allocation.tracking_drift
+
+    def _order_ceiling(
+        self,
+        ctx: SessionContext,
+        marks: Mapping[str, Decimal],
+        prices: Mapping[str, Decimal],
+    ) -> Decimal | None:
+        """A8's per-order ceiling for this account, or None when no rails were given.
+
+        The case is valued as the rail book values it: cash including unsettled proceeds, plus every
+        settled and pending lot at its mark (the signal price, else the broker's cost basis).
+        """
+        if self._order_caps is None:
+            return None
+        value = ctx.broker.margins().cash_value
+        lots: list[Holding | Position] = [*ctx.broker.holdings(), *ctx.broker.positions()]
+        for lot in lots:
+            price = marks.get(lot.isin, prices.get(lot.isin, lot.average_price))
+            value += price * lot.quantity
+        return order_value_ceiling(self._order_caps, value)
 
     # ── journal + evidence ───────────────────────────────────────────────────────────────────────
 
@@ -694,6 +1064,12 @@ class SwingCompositePolicy:
                     "delivery_share": str(record.delivery_share),
                     "momentum_12_1": str(record.momentum_12_1),
                     "price": str(record.price),
+                    # Only on an arm that weights it, so every other arm's journal is unchanged.
+                    **(
+                        {"residual_momentum": str(record.residual_momentum)}
+                        if self._params.weight_residual_momentum != _ZERO
+                        else {}
+                    ),
                 },
             )
             for rank, record in enumerate(chosen, start=1)
@@ -705,10 +1081,27 @@ class SwingCompositePolicy:
                 label="tracking_drift",
                 as_of=session,
                 value=tracking_drift,
-                text=f"equal-weight top-{self._params.top_n} of {universe_size} scored candidates",
+                text=f"equal-weight top-{self._params.top_n} of {universe_size} scored candidates"
+                + self._gated_note(by_isin),
             )
         )
         return EvidenceBundle(trading_date=session, actor=Actor.T0, items=tuple(items))
+
+    def _gated_note(self, by_isin: Mapping[str, SwingRecord]) -> str:
+        """Which weighted delivery legs the coverage gate dropped this session, for the journal."""
+        records = tuple(by_isin.values())
+        active = {attribute for attribute, _ in active_legs(records, self._params)}
+        gated = [
+            f"{attribute} ({delivery_coverage(records, attribute):.1%} covered)"
+            for attribute, _ in _weighted_legs(self._params)
+            if attribute in _DELIVERY_LEGS and attribute not in active
+        ]
+        if not gated:
+            return ""
+        return (
+            f"; below the {DELIVERY_COVERAGE_THRESHOLD:.0%} delivery-coverage floor, not scored: "
+            + ", ".join(gated)
+        )
 
 
 def _equal_weights(isins: Sequence[str]) -> dict[str, Decimal]:

@@ -42,17 +42,22 @@ from execution.broker import (
     Position,
     Side,
 )
+from tests.rails_support import mechanics_gate
 
 S1, S2, S3 = date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)
 ISIN = "INE009A01021"
+HELD = "INE002A01018"
+#: Every name the scripted orders touch, marked flat across the sessions — for the rail gate.
+CLOSES = {(isin, s): Decimal("10") for isin in (ISIN, HELD) for s in (S1, S2, S3)}
 
 
 class _Broker:
     """A recording broker: enough of the surface for the engine, and a log of what it was asked."""
 
-    def __init__(self) -> None:
+    def __init__(self, holdings: tuple[Holding, ...] = ()) -> None:
         self.executed: list[date] = []
         self.placed: list[OrderRequest] = []
+        self._holdings = holdings
 
     def execute_session(self, session: date) -> tuple[Order, ...]:
         self.executed.append(session)
@@ -81,7 +86,7 @@ class _Broker:
         return ()
 
     def holdings(self) -> tuple[Holding, ...]:
-        return ()
+        return self._holdings
 
     def ledger(self) -> tuple[LedgerEntry, ...]:
         return ()
@@ -118,12 +123,19 @@ def _engine(policy: _Policy, sessions: list[date], broker: _Broker | None = None
         broker=broker if broker is not None else _Broker(),
         clock=FrozenClock(sessions[0]),
         sessions=sessions,
+        rails=mechanics_gate(CLOSES),
     )
 
 
 def test_an_empty_session_list_is_refused() -> None:
     with pytest.raises(ReplayError, match="at least one session"):
-        ReplayEngine(policy=_Policy({}), broker=_Broker(), clock=FrozenClock(S1), sessions=[])
+        ReplayEngine(
+            policy=_Policy({}),
+            broker=_Broker(),
+            clock=FrozenClock(S1),
+            sessions=[],
+            rails=mechanics_gate(CLOSES),
+        )
 
 
 @pytest.mark.parametrize("sessions", [[S2, S1], [S1, S1], [S1, S3, S2]])
@@ -200,9 +212,10 @@ def test_entries_without_a_snapshot_are_stamped_and_those_with_one_are_kept() ->
 
 def test_orders_are_placed_in_the_order_returned_and_none_are_the_engines_own() -> None:
     first = OrderRequest(isin=ISIN, side=Side.BUY, quantity=3, exchange=Exchange.NSE)
-    second = OrderRequest(isin="INE002A01018", side=Side.SELL, quantity=1, exchange=Exchange.NSE)
+    second = OrderRequest(isin=HELD, side=Side.SELL, quantity=1, exchange=Exchange.NSE)
     policy = _Policy({S1: SessionDecision(evidence=_evidence(S1), orders=(first, second))})
-    broker = _Broker()
+    held = Holding(isin=HELD, exchange=Exchange.NSE, quantity=1, average_price=Decimal("10"))
+    broker = _Broker(holdings=(held,))
     _engine(policy, [S1, S2], broker).run()
     assert broker.placed == [first, second]
 

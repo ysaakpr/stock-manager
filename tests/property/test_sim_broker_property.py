@@ -137,7 +137,9 @@ def _drive(stream: _Stream) -> tuple[SimBroker, list[Order], list[date]]:
     decision_days = [_FIRST, *stream.sessions[:-1]]
     for day, session, intents in zip(decision_days, stream.sessions, stream.intents, strict=True):
         clock.freeze_at(day)
-        staged: set[str] = set()
+        # Sells of one scrip may stand together (a sliced exit's children); anything else is one
+        # order per scrip per session.
+        staged: dict[str, set[Side]] = {}
         for intent in intents:
             isin = _ISINS[intent.isin_index]
             request = OrderRequest(
@@ -146,17 +148,30 @@ def _drive(stream: _Stream) -> tuple[SimBroker, list[Order], list[date]]:
                 quantity=intent.quantity,
                 exchange=Exchange.NSE,
             )
-            if isin in staged:
+            if isin in staged and staged[isin] | {request.side} != {Side.SELL}:
                 try:
                     broker.place(request)
                 except DuplicateStagedOrderError:
                     continue
                 raise AssertionError("a second staged order for one scrip and session was accepted")
             broker.place(request)
-            staged.add(isin)
-        filled.extend(broker.execute_session(session))
+            staged.setdefault(isin, set()).add(request.side)
+        session_fills = broker.execute_session(session)
+        _assert_one_dp_charge_per_scrip(session_fills)
+        filled.extend(session_fills)
         _assert_book_invariants(broker, stream.opening_cash, filled)
     return broker, filled, stream.sessions
+
+
+def _assert_one_dp_charge_per_scrip(orders: tuple[Order, ...]) -> None:
+    """However many sells of one scrip fill in a session, the depository bills it once."""
+    charged: dict[str, int] = {}
+    for order in orders:
+        fill = order.fill
+        if fill is None or fill.side is not Side.SELL or fill.cost.depository_charge == _ZERO:
+            continue
+        charged[fill.isin] = charged.get(fill.isin, 0) + 1
+    assert all(count == 1 for count in charged.values()), charged
 
 
 def _assert_book_invariants(broker: SimBroker, opening: Decimal, filled: list[Order]) -> None:

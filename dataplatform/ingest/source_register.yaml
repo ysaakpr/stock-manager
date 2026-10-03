@@ -305,7 +305,9 @@ sources:
     verified_url: "https://nsearchives.nseindia.com/archives/equities/mto/MTO_07082026.DAT"
     cadence: daily
     # Serves at least 2016-01-04 (probed), which is before this platform's first price session
-    # (2016-09-02), so the delivery history has no hole once both eras are used.
+    # (2016-09-02), so the delivery history has no hole once both eras are used. W3's smoke
+    # (2026-09-29) served 2011-06-22 .. 2016-09-01 samples; a 404 on a declared holiday
+    # (2012-01-26) is the no-session signal, as for the bhavcopy.
     era: {start: null, end: null}
     fallback: []
     required_headers:

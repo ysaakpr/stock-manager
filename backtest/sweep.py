@@ -44,32 +44,77 @@ import argparse
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Final
 
+from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
+from backtest.cash_interest import (
+    add_cash_interest_flag,
+    cash_interest_unless,
+    describe_cash_interest,
+)
 from backtest.policies.momentum_v2 import MomentumV2Parameters
 from backtest.policies.naive_momentum import MomentumParameters
+from backtest.policies.residual_momentum import with_residual_momentum
 from backtest.policies.swing_composite import SwingCompositeParameters
 from backtest.run import (
     BacktestError,
     BacktestResult,
     UniverseParameters,
     _holding_periods,
+    backtest_spec,
+    benchmark_caveat,
+    describe_benchmark,
     open_swing_lake,
     run_momentum_v2,
     run_naive_momentum,
     run_swing_composite,
 )
+from backtest.run_ledger import (
+    RunSummary,
+    add_ledger_dir_flag,
+    current_ledger_dir,
+    ledger_dir_unless,
+    load_run,
+    run_digest,
+)
+from backtest.tax import (
+    AfterTaxResult,
+    GrandfatheringPrices,
+    InvestorProfile,
+    RunLedger,
+    TaxError,
+    TaxSchedule,
+    compute_after_tax,
+    load_tax_schedule,
+)
+from backtest.tax_report import (
+    L1GrandfatheringPrices,
+    add_investor_flags,
+    investor_profile_from_args,
+)
 from dataplatform.logging import get_logger
+from dataplatform.query import QueryService
 
 __all__ = [
     "ARMS",
+    "BAND_HIT_ARM",
+    "H1_RESIDUAL_MOMENTUM",
+    "H2_BAND_HIT_AVOIDANCE",
+    "H3_RESIDUAL_AND_BAND_HIT",
+    "RETIRED_ARMS",
     "Arm",
+    "SweepResult",
     "SweepRow",
+    "attach_after_tax",
+    "investor_assumption_lines",
     "render_sweep_report",
+    "run_digests",
     "run_sweep",
+    "tax_cells",
 ]
 
 _LOG = get_logger(__name__)
@@ -109,11 +154,17 @@ class Arm:
     swing: SwingCompositeParameters | None = None
     naive: MomentumParameters | None = None
     v2: MomentumV2Parameters | None = None
+    #: X2 H2: no new buy of a name that hit a daily price band in the last five sessions
+    #: (``backtest.band_hits``). Swing arms only. Off by default, and absent from the spec when
+    #: off, so no arm defined before it changes digest.
+    band_hit_avoidance: bool = False
 
     def __post_init__(self) -> None:
         driving = [p for p in (self.swing, self.naive, self.v2) if p is not None]
         if len(driving) != 1:
             raise ValueError(f"{self.label}: an arm drives exactly one policy, got {len(driving)}")
+        if self.band_hit_avoidance and self.swing is None:
+            raise ValueError(f"{self.label}: band-hit avoidance is a swing-policy filter")
 
 
 def _swing(**overrides: object) -> SwingCompositeParameters:
@@ -141,6 +192,29 @@ _SHORT_COMPOSITE: dict[str, object] = {
 
 _M10_7 = "Swing composite (M10.7)"
 _SHORT = "Short composite"
+#: Round 2's H1 arm (ops/studies/preregistration-signals-2026-09-29.md §3).
+H1_RESIDUAL_MOMENTUM = "Swing composite + residual momentum (H1)"
+#: Round 2's H2 and H3 arms (same pre-registration, §3). H3 is H1 + H2, the only combination.
+H2_BAND_HIT_AVOIDANCE = "Swing composite + band-hit avoidance (H2)"
+H3_RESIDUAL_AND_BAND_HIT = "Swing composite + residual momentum + band-hit avoidance (H3)"
+
+#: H2: no buy of any kind — new position or top-up — of a name that hit its upper or lower daily
+#: price band in the last five sessions (§3, amended 2026-09-29). Holdings are never sold for it.
+_H2 = Arm(
+    label=H2_BAND_HIT_AVOIDANCE,
+    family="round-2 hypothesis",
+    reference=_M10_7,
+    note="no buy of a name at its upper or lower price band in the last 5 sessions (H2, §3)",
+    swing=_swing(),
+    band_hit_avoidance=True,
+)
+#: H3: H1's transform applied to the H2 arm, which keeps H2's filter. No parameter of its own.
+_H3 = replace(
+    _H2,
+    label=H3_RESIDUAL_AND_BAND_HIT,
+    note="H1's residual momentum leg on the H2 arm, band-hit filter kept (H3, §3)",
+    swing=with_residual_momentum(_H2.swing),  # type: ignore[arg-type]  # _H2 is a swing arm
+)
 
 ARMS: tuple[Arm, ...] = (
     # ── the reference ────────────────────────────────────────────────────────────────────────────
@@ -300,13 +374,6 @@ ARMS: tuple[Arm, ...] = (
         swing=_swing(**_SHORT_COMPOSITE, top_n=10, sell_band=30),
     ),
     Arm(
-        label="Short composite, top-5",
-        family="concentration",
-        reference=_SHORT,
-        note="five names instead of twenty; band stays 3x the basket",
-        swing=_swing(**_SHORT_COMPOSITE, top_n=5, sell_band=15),
-    ),
-    Arm(
         label="Short composite, top-10 + regime",
         family="concentration",
         reference="Short composite, top-10",
@@ -336,6 +403,34 @@ ARMS: tuple[Arm, ...] = (
             vol_target_annual=Decimal("0.15"),
         ),
     ),
+    # ── round 2: pre-registered hypotheses (ops/studies/preregistration-signals-2026-09-29.md) ───
+    Arm(
+        label=H1_RESIDUAL_MOMENTUM,
+        family="round-2 hypothesis",
+        reference=_M10_7,
+        note="12-1 momentum leg replaced by residual momentum on the NIFTY 50 TRI (H1, §3)",
+        swing=with_residual_momentum(_swing()),
+    ),
+    _H2,
+    _H3,
+)
+
+#: The H2 arm, by object — what ``backtest.band_hits`` tests and callers reach for.
+BAND_HIT_ARM: Final = next(arm for arm in ARMS if arm.label == H2_BAND_HIT_AVOIDANCE)
+
+
+#: Arms taken out of the sweep, each with the reason it is gone — printed in every sweep report so
+#: a reader comparing against an older table knows the row was removed rather than lost.
+RETIRED_ARMS: tuple[tuple[str, str], ...] = (
+    (
+        "Short composite, top-5",
+        "never traded (0 trades on every window): an equal-weight top-5 buy is 20 % of the case, "
+        "and the ratified rails cap a position and a single order at 15 % (RailId.MAX_POSITION, "
+        "MAX_ORDER_PCT), so A8 blocked every entry. The rails are not loosened to admit it; the "
+        "most concentrated basket they admit at ₹10 lakh is nine names (1/9 = 11.1 % < 15 %, "
+        "₹9.8 lakh / 9 < the ₹1.2 lakh order cap, >= the 8-holding floor), and "
+        "'Short composite, top-10' already measures concentration at that end",
+    ),
 )
 
 
@@ -344,7 +439,13 @@ ARMS: tuple[Arm, ...] = (
 
 @dataclass(frozen=True, slots=True)
 class SweepRow:
-    """One arm's result on one liquidity floor — or the reason it has no result."""
+    """One arm's result on one liquidity floor — or the reason it has no result.
+
+    A row is backed by the run it just replayed (``run``) or, in a resumed campaign, by the run's
+    persisted summary and ledger (``summary``, ``ledger``); every figure reads the same either way.
+    ``after_tax`` is attached afterwards by :func:`attach_after_tax`, from the ledger alone;
+    ``after_tax_error`` says why a row has none.
+    """
 
     arm: Arm
     floor: Decimal
@@ -352,22 +453,52 @@ class SweepRow:
     error: str | None = None
     round_trips: int = 0
     median_hold_days: int = 0
+    summary: RunSummary | None = None
+    ledger: RunLedger | None = None
+    after_tax: AfterTaxResult | None = None
+    after_tax_error: str | None = None
 
     @property
     def ok(self) -> bool:
-        return self.run is not None
+        return self.run is not None or self.summary is not None
 
     @property
     def xirr(self) -> Decimal:
-        return self.run.comparison.portfolio_xirr if self.run is not None else _ZERO
+        if self.run is not None:
+            return self.run.comparison.portfolio_xirr
+        return self.summary.xirr if self.summary is not None else _ZERO
 
     @property
     def max_drawdown(self) -> Decimal:
-        return self.run.max_drawdown if self.run is not None else _ZERO
+        if self.run is not None:
+            return self.run.max_drawdown
+        return self.summary.max_drawdown if self.summary is not None else _ZERO
 
     @property
     def excess(self) -> Decimal:
-        return self.run.comparison.excess_over_benchmark if self.run is not None else _ZERO
+        if self.run is not None:
+            return self.run.comparison.excess_over_benchmark
+        return self.summary.excess if self.summary is not None else _ZERO
+
+    @property
+    def benchmark_source(self) -> str | None:
+        """The benchmark series' recorded provenance; ``None`` when no run or summary carries it."""
+        if self.run is not None:
+            return self.run.benchmark_source
+        return self.summary.benchmark_source if self.summary is not None else None
+
+    @property
+    def total_charges(self) -> Decimal:
+        if self.run is not None:
+            return self.run.total_charges
+        return self.summary.total_charges if self.summary is not None else _ZERO
+
+    @property
+    def run_ledger(self) -> RunLedger | None:
+        """The ledger after-tax figures are struck from — the run's own, or the persisted one."""
+        if self.ledger is not None:
+            return self.ledger
+        return self.run.ledger if self.run is not None else None
 
     @property
     def return_per_drawdown(self) -> Decimal:
@@ -377,7 +508,7 @@ class SweepRow:
         arm, it is an arm the sampler never caught falling, so it is ranked last rather than first:
         an unmeasurable denominator is not a measurement.
         """
-        if self.run is None or self.max_drawdown <= _ZERO:
+        if not self.ok or self.max_drawdown <= _ZERO:
             return _ZERO
         return self.xirr / self.max_drawdown
 
@@ -395,11 +526,85 @@ class SweepResult:
     total_seconds: float = 0.0
     benchmark_xirr: Decimal = _ZERO
     benchmark_name: str = ""
+    #: Rows loaded from a persisted run rather than replayed (a resumed campaign).
+    resumed: int = 0
+    #: The investor the after-tax columns were struck for (``attach_after_tax``); None until then.
+    profile: InvestorProfile | None = None
 
     def ranked(self, floor: Decimal) -> list[SweepRow]:
         """Rows on ``floor``, best return-per-drawdown first, failures last."""
         rows = [row for row in self.rows if row.floor == floor]
         return sorted(rows, key=lambda r: (-r.return_per_drawdown, r.arm.label))
+
+
+def _arm_spec(
+    arm: Arm,
+    *,
+    start: date,
+    end: date,
+    universe: UniverseParameters,
+    opening_cash: Decimal,
+    adjusted: bool,
+) -> dict[str, str]:
+    """The specification :func:`_run_arm`'s runner will persist this arm under."""
+    runner, parameters = (
+        ("swing_composite", arm.swing)
+        if arm.swing is not None
+        else ("naive_momentum", arm.naive)
+        if arm.naive is not None
+        else ("momentum_v2", arm.v2)
+    )
+    return backtest_spec(
+        runner,
+        start=start,
+        end=end,
+        parameters=parameters,
+        opening_cash=opening_cash,
+        adjusted=adjusted,
+        universe=universe,
+        band_hit_avoidance=arm.band_hit_avoidance,
+    )
+
+
+def _resumed_row(arm: Arm, floor: Decimal, summary: RunSummary, ledger: RunLedger) -> SweepRow:
+    return SweepRow(
+        arm=arm,
+        floor=floor,
+        summary=summary,
+        ledger=ledger,
+        round_trips=summary.round_trips,
+        median_hold_days=summary.median_hold_days,
+    )
+
+
+def run_digests(
+    *,
+    start: date,
+    end: date,
+    arms: Sequence[Arm] = ARMS,
+    floors: Sequence[Decimal] = (LOW_FLOOR, HIGH_FLOOR),
+    opening_cash: Decimal = _DEFAULT_OPENING_CASH,
+    adjusted: bool = True,
+) -> dict[tuple[str, Decimal], str]:
+    """The persistence digest of every (arm, floor) run a sweep over this window would make.
+
+    The one place a sweep's run identities are derived: :func:`run_sweep` resumes by them and a
+    render-only campaign checks them, so the two can never disagree on what "already run" means.
+    """
+    digests: dict[tuple[str, Decimal], str] = {}
+    for floor in floors:
+        universe = UniverseParameters(median_turnover_floor=floor)
+        for arm in arms:
+            spec = _arm_spec(
+                arm,
+                start=start,
+                end=end,
+                universe=universe,
+                opening_cash=opening_cash,
+                adjusted=adjusted,
+            )
+            digests[(arm.label, floor)] = run_digest(spec)
+    return digests
 
 
 def run_sweep(
@@ -416,76 +621,184 @@ def run_sweep(
 
     Assumes the arms are stated configurations, not a grid to be searched: nothing here is fitted to
     the window. Never drops a failing arm — its row carries the error instead of a result.
+
+    **Resumable (X2).** Under ``backtest.run_ledger.persist_run_ledgers`` every run persists its
+    ledger and summary keyed by its specification's digest, and a run whose summary and ledger are
+    already on disk is loaded rather than replayed. When every run is on disk the lake is never
+    opened at all. A failed arm persists nothing, so it is retried on the next invocation.
     """
     began = time.perf_counter()
-    lake = open_swing_lake(
-        start=start, end=end, floors=floors, data_root=data_root, adjusted=adjusted
-    )
-    out = SweepResult(start=lake.first_session, terminal=lake.terminal, sessions=len(lake.sessions))
-    try:
-        # The one windowed pass: the union of every swing arm's decision dates, loaded once.
-        intervals = {arm.swing.rebalance_interval_sessions for arm in arms if arm.swing is not None}
-        decision_dates = sorted(
-            {session for step in intervals for session in lake.sessions[::step]}
+    out_dir = current_ledger_dir()
+    universes = {floor: UniverseParameters(median_turnover_floor=floor) for floor in floors}
+    done: dict[tuple[str, Decimal], SweepRow] = {}
+    if out_dir is not None:
+        digests = run_digests(
+            start=start,
+            end=end,
+            arms=arms,
+            floors=floors,
+            opening_cash=opening_cash,
+            adjusted=adjusted,
         )
-        lake.features.load(decision_dates)
-        out.feature_dates = len(decision_dates)
-        out.lake_seconds = time.perf_counter() - began
-        _LOG.info(
-            "sweep.lake_ready",
-            sessions=len(lake.sessions),
-            decision_dates=len(decision_dates),
-            cadences=sorted(intervals),
-            seconds=round(out.lake_seconds, 1),
-        )
-
         for floor in floors:
-            universe = UniverseParameters(median_turnover_floor=floor)
             for arm in arms:
-                started = time.perf_counter()
-                try:
-                    run = _run_arm(
-                        arm,
-                        start=start,
-                        end=end,
-                        universe=universe,
-                        opening_cash=opening_cash,
-                        data_root=data_root,
-                        adjusted=adjusted,
-                        lake=lake,
-                    )
-                except (BacktestError, ValueError, ArithmeticError) as error:
-                    _LOG.warning(
-                        "sweep.arm_failed", arm=arm.label, floor=str(floor), error=str(error)
-                    )
-                    out.rows.append(SweepRow(arm=arm, floor=floor, error=str(error)))
-                    continue
-                _mean, median, trips = _holding_periods(run.result.journal)
-                out.rows.append(
-                    SweepRow(
-                        arm=arm,
-                        floor=floor,
-                        run=run,
-                        round_trips=trips,
-                        median_hold_days=median,
-                    )
+                loaded = load_run(out_dir, digests[(arm.label, floor)])
+                if loaded is not None:
+                    done[(arm.label, floor)] = _resumed_row(arm, floor, *loaded)
+    pending = [(floor, arm) for floor in floors for arm in arms if (arm.label, floor) not in done]
+    _LOG.info(
+        "sweep.plan",
+        window=f"{start.isoformat()}..{end.isoformat()}",
+        runs=len(floors) * len(arms),
+        resumed=len(done),
+        pending=len(pending),
+    )
+
+    out = SweepResult(resumed=len(done))
+    fresh: dict[tuple[str, Decimal], SweepRow] = {}
+    if pending:
+        lake = open_swing_lake(
+            start=start,
+            end=end,
+            floors=floors,
+            data_root=data_root,
+            adjusted=adjusted,
+            band_hits=any(arm.band_hit_avoidance for _, arm in pending),
+            # Round 2, H1: the residual leg's extra pass only when a pending arm weights it.
+            residual_momentum=any(
+                arm.swing is not None and arm.swing.weight_residual_momentum != _ZERO
+                for _, arm in pending
+            ),
+        )
+        out.start, out.terminal, out.sessions = (
+            lake.first_session,
+            lake.terminal,
+            len(lake.sessions),
+        )
+        try:
+            # The one windowed pass: the union of every pending swing arm's decision dates.
+            intervals = {
+                arm.swing.rebalance_interval_sessions for _, arm in pending if arm.swing is not None
+            }
+            decision_dates = sorted(
+                {session for step in intervals for session in lake.sessions[::step]}
+            )
+            lake.features.load(decision_dates)
+            out.feature_dates = len(decision_dates)
+            out.lake_seconds = time.perf_counter() - began
+            _LOG.info(
+                "sweep.lake_ready",
+                sessions=len(lake.sessions),
+                decision_dates=len(decision_dates),
+                cadences=sorted(intervals),
+                seconds=round(out.lake_seconds, 1),
+            )
+            for floor, arm in pending:
+                fresh[(arm.label, floor)] = _replay_arm(
+                    arm,
+                    floor,
+                    start=start,
+                    end=end,
+                    universe=universes[floor],
+                    opening_cash=opening_cash,
+                    data_root=data_root,
+                    adjusted=adjusted,
+                    lake=lake,
                 )
-                if not out.benchmark_name:
-                    out.benchmark_name = run.benchmark_index_name
-                    out.benchmark_xirr = run.comparison.benchmark_xirr
-                _LOG.info(
-                    "sweep.arm_done",
-                    arm=arm.label,
-                    floor=str(floor),
-                    xirr=str(run.comparison.portfolio_xirr),
-                    max_drawdown=str(run.max_drawdown),
-                    round_trips=trips,
-                    seconds=round(time.perf_counter() - started, 1),
-                )
-    finally:
-        lake.close()
+        finally:
+            lake.close()
+
+    for floor in floors:
+        for arm in arms:
+            row = done.get((arm.label, floor)) or fresh[(arm.label, floor)]
+            out.rows.append(row)
+            if row.summary is not None and not out.sessions:
+                out.start, out.terminal = row.summary.start, row.summary.terminal
+                out.sessions = row.summary.sessions
+            if row.ok and not out.benchmark_name:
+                if row.run is not None:
+                    out.benchmark_name = row.run.benchmark_index_name
+                    out.benchmark_xirr = row.run.comparison.benchmark_xirr
+                elif row.summary is not None:
+                    out.benchmark_name = row.summary.benchmark_name
+                    out.benchmark_xirr = row.summary.benchmark_xirr
     out.total_seconds = time.perf_counter() - began
     return out
+
+
+def _replay_arm(
+    arm: Arm,
+    floor: Decimal,
+    *,
+    start: date,
+    end: date,
+    universe: UniverseParameters,
+    opening_cash: Decimal,
+    data_root: Path | None,
+    adjusted: bool,
+    lake: object,
+) -> SweepRow:
+    """One arm on one floor against the shared lake — its row, or its failure as a row."""
+    started = time.perf_counter()
+    try:
+        run = _run_arm(
+            arm,
+            start=start,
+            end=end,
+            universe=universe,
+            opening_cash=opening_cash,
+            data_root=data_root,
+            adjusted=adjusted,
+            lake=lake,
+        )
+    except (BacktestError, ValueError, ArithmeticError) as error:
+        _LOG.warning("sweep.arm_failed", arm=arm.label, floor=str(floor), error=str(error))
+        return SweepRow(arm=arm, floor=floor, error=str(error))
+    _mean, median, trips = _holding_periods(run.result.journal)
+    _LOG.info(
+        "sweep.arm_done",
+        arm=arm.label,
+        floor=str(floor),
+        xirr=str(run.comparison.portfolio_xirr),
+        max_drawdown=str(run.max_drawdown),
+        round_trips=trips,
+        digest=run.digest,
+        seconds=round(time.perf_counter() - started, 1),
+    )
+    return SweepRow(arm=arm, floor=floor, run=run, round_trips=trips, median_hold_days=median)
+
+
+def attach_after_tax(
+    result: SweepResult,
+    profile: InvestorProfile,
+    *,
+    fmv: GrandfatheringPrices,
+    schedule: TaxSchedule | None = None,
+) -> SweepResult:
+    """Strike every row's after-tax figures from its ledger, for ``profile`` (X2).
+
+    A row whose ledger cannot be taxed — a lot needing a grandfathering price the lake lacks, a
+    date the schedule does not cover — keeps its pre-tax figures and carries the reason in
+    ``after_tax_error``; it is never silently shown as untaxed. Returns a new result.
+    """
+    schedule = schedule or load_tax_schedule()
+    rows: list[SweepRow] = []
+    for row in result.rows:
+        ledger = row.run_ledger
+        if not row.ok:
+            rows.append(row)
+            continue
+        if ledger is None:
+            rows.append(replace(row, after_tax_error="no fill ledger for this run"))
+            continue
+        try:
+            taxed = compute_after_tax(ledger, profile, schedule=schedule, fmv=fmv)
+        except TaxError as error:
+            _LOG.warning("sweep.after_tax_failed", arm=row.arm.label, error=str(error))
+            rows.append(replace(row, after_tax_error=str(error)))
+            continue
+        rows.append(replace(row, after_tax=taxed))
+    return replace(result, rows=rows, profile=profile)
 
 
 def _run_arm(
@@ -510,6 +823,7 @@ def _run_arm(
             adjusted=adjusted,
             universe=universe,
             lake=lake,  # type: ignore[arg-type]
+            band_hit_avoidance=arm.band_hit_avoidance,
         )
     if arm.naive is not None:
         return run_naive_momentum(
@@ -549,24 +863,86 @@ def _floor_label(floor: Decimal) -> str:
     return f"₹{floor / Decimal('10000000'):.0f} crore/day"
 
 
+def tax_cells(row: SweepRow) -> tuple[str, str, str]:
+    """(after-tax XIRR realised, after-tax XIRR liquidated, tax paid) as report cells.
+
+    Raises ``ValueError`` for a row that has results but neither after-tax figures nor a stated
+    reason: a report whose after-tax cells were left blank because nobody computed them would read
+    as a run that paid no tax.
+    """
+    if row.after_tax is not None:
+        at = row.after_tax
+        realised = (
+            _pct(at.after_tax_xirr_realised)
+            if at.after_tax_xirr_realised is not None
+            else f"n/a ({at.realised_xirr_error})"
+        )
+        if at.after_tax_xirr_liquidated is None:
+            return (
+                realised,
+                f"n/a ({at.liquidation_error})",
+                f"{_rupees(at.total_tax)} / n/a",
+            )
+        return (
+            realised,
+            _pct(at.after_tax_xirr_liquidated),
+            f"{_rupees(at.total_tax)} / {_rupees(at.total_tax_liquidated)}",
+        )
+    if row.after_tax_error is not None:
+        return ("n/a", "n/a", f"not computed: {row.after_tax_error}")
+    raise ValueError(
+        f"{row.arm.label}: no after-tax figures attached — call attach_after_tax before rendering"
+    )
+
+
+def investor_assumption_lines(profile: InvestorProfile | None) -> list[str]:
+    """The header block every after-tax report opens with: who is paying, stated, not defaulted."""
+    if profile is None:
+        raise ValueError(
+            "after-tax columns need an investor profile — call attach_after_tax with the "
+            "investor's stated assumptions before rendering"
+        )
+    return [
+        "## Investor assumptions (after-tax columns; every one stated on the command line)",
+        "",
+        "- **Resident individual.** Listed-equity gains under Secs 111A/112A/10(38), Sec 55(2)(ac) "
+        "grandfathering with 31-01-2018 FMVs read from L1, dividends by the regime in force on "
+        "the credit date (`backtest/tax_schedule.yaml`).",
+        f"- **Slab rate on dividends** (from FY2020-21): {_pct(profile.slab_rate)} before "
+        "surcharge and cess.",
+        f"- **Surcharge:** {_pct(profile.cg_surcharge_rate)} on 111A/112A tax; "
+        f"{_pct(profile.dividend_surcharge_rate)} on dividend tax. Cess: the dated schedule.",
+        f"- **Tax paid:** `{profile.payment_timing.value}` — each FY's tax an investor outflow on "
+        "that date, from outside the book (the walk and its NAV are untouched).",
+        "- **After-tax XIRR (realised)** taxes only what the strategy sold; its closing holdings "
+        "stay pre-tax. **(liquidated)** also taxes a deemed sale of every open lot at the "
+        "terminal marks. Tax paid is shown as realised / including that deemed sale.",
+        "- Ranking stays on pre-tax XIRR / max drawdown (owner decision, 2026-09-07); the "
+        "after-tax columns sit beside it and do not re-order the table.",
+        "",
+    ]
+
+
 def _table(result: SweepResult, floor: Decimal) -> list[str]:
     lines = [
-        "| # | Strategy | Family | XIRR | Max DD | **XIRR/DD** | Round trips | Median hold | "
+        "| # | Strategy | Family | XIRR | After-tax XIRR (realised) | After-tax XIRR (liquidated) "
+        "| Tax paid (realised / liquidated) | Max DD | **XIRR/DD** | Round trips | Median hold | "
         "Cost | Excess |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for position, row in enumerate(result.ranked(floor), start=1):
         if not row.ok:
             lines.append(
-                f"| — | {row.arm.label} | {row.arm.family} | **failed** | — | — | — | — | — | "
-                f"{row.error} |"
+                f"| — | {row.arm.label} | {row.arm.family} | **failed** | — | — | — | — | — | — | "
+                f"— | — | {row.error} |"
             )
             continue
-        assert row.run is not None
+        realised, liquidated, paid = tax_cells(row)
         lines.append(
             f"| {position} | {row.arm.label} | {row.arm.family} | {_pct(row.xirr)} | "
+            f"{realised} | {liquidated} | {paid} | "
             f"{_pct(row.max_drawdown)} | **{row.return_per_drawdown:.2f}** | {row.round_trips} | "
-            f"{row.median_hold_days}d | {_rupees(row.run.total_charges)} | {_pct(row.excess)} |"
+            f"{row.median_hold_days}d | {_rupees(row.total_charges)} | {_pct(row.excess)} |"
         )
     return lines
 
@@ -588,11 +964,18 @@ def render_sweep_report(result: SweepResult, *, floors: Sequence[Decimal]) -> st
         "",
         f"- {result.start.isoformat()} → {result.terminal.isoformat()} "
         f"({result.sessions} sessions)",
-        f"- Benchmark: **{_pct(result.benchmark_xirr)}** ({result.benchmark_name})",
+        f"- Benchmark: **{_pct(result.benchmark_xirr)}** "
+        f"({describe_benchmark(top.benchmark_source if top else None, result.benchmark_name)})",
         f"- One windowed lake pass over **{result.feature_dates}** decision dates, built in "
         f"{result.lake_seconds:.0f}s and shared by every swing arm",
-        f"- {len(result.rows)} arm-runs in {result.total_seconds / 60:.0f} min total",
+        f"- {len(result.rows)} arm-runs in {result.total_seconds / 60:.0f} min total"
+        + (
+            f"; {result.resumed} loaded from their persisted ledgers rather than replayed"
+            if result.resumed
+            else ""
+        ),
         "",
+        *investor_assumption_lines(result.profile),
     ]
     if top is not None:
         lines += [
@@ -616,6 +999,9 @@ def render_sweep_report(result: SweepResult, *, floors: Sequence[Decimal]) -> st
     ]
     for arm in dict.fromkeys(row.arm for row in result.rows):
         lines.append(f"| {arm.label} | {arm.reference} | {arm.note} |")
+    if RETIRED_ARMS:
+        lines += ["", "## Arms removed from the sweep", "", "| Strategy | Why |", "| --- | --- |"]
+        lines += [f"| {label} | {reason} |" for label, reason in RETIRED_ARMS]
     lines += [
         "",
         "## What this table cannot be asked to prove",
@@ -627,8 +1013,7 @@ def render_sweep_report(result: SweepResult, *, floors: Sequence[Decimal]) -> st
         "median name a basket picks trades a few crore a day, where the fill model's base "
         "slippage is a claim and not a measurement. The ₹10 crore table is the one to plan "
         "against; where the two disagree, believe the second.",
-        "- **Excess is against a price-return L1 proxy** (M9.4), not a licensed total-return "
-        "index, so it overstates excess by roughly the market's dividend yield.",
+        benchmark_caveat([row.benchmark_source for row in result.rows if row.ok]),
         "- **Return per drawdown is a ratio of two noisy numbers.** Max drawdown is a single "
         "worst path, not a distribution, and two arms within a few hundredths of each other are "
         "not distinguishable on this evidence.",
@@ -666,7 +1051,20 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--opening-cash", type=Decimal, default=_DEFAULT_OPENING_CASH)
     parser.add_argument("--data-root", type=Path, default=None)
+    add_book_actions_flag(parser)
+    add_cash_interest_flag(parser, default=True)
+    add_ledger_dir_flag(parser)
+    add_investor_flags(parser)
     return parser.parse_args(argv)
+
+
+def l1_grandfathering(data_root: Path | None) -> tuple[QueryService, L1GrandfatheringPrices]:
+    """The query service and the Sec 55(2)(ac) FMV reader (L1 ``prices_raw``, the same lake)."""
+    service = QueryService(data_root=data_root)
+    schedule = load_tax_schedule()
+    return service, L1GrandfatheringPrices(
+        fmv_date=schedule.grandfather_fmv_date, data_root=data_root
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -696,29 +1094,38 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"error: no arm matches {args.arms}", file=sys.stderr)
             return 2
 
-    result = run_sweep(
-        start=start,
-        end=end,
-        arms=arms,
-        floors=floors,
-        opening_cash=args.opening_cash,
-        data_root=args.data_root,
-    )
+    profile = investor_profile_from_args(args)
+    print(f"  {describe_cash_interest(args.cash_interest)}")
+    with store_book_actions_unless(args), cash_interest_unless(args), ledger_dir_unless(args):
+        result = run_sweep(
+            start=start,
+            end=end,
+            arms=arms,
+            floors=floors,
+            opening_cash=args.opening_cash,
+            data_root=args.data_root,
+        )
+    service, fmv = l1_grandfathering(args.data_root)
+    with service:
+        result = attach_after_tax(result, profile, fmv=fmv)
     for floor in floors:
         print(f"\n  {_floor_label(floor)}:")
         for position, row in enumerate(result.ranked(floor), start=1):
             if not row.ok:
                 print(f"    --  {row.arm.label}: FAILED — {row.error}")
                 continue
+            realised, liquidated, _paid = tax_cells(row)
             print(
                 f"    {position:>2}. {row.arm.label:<34} XIRR {_pct(row.xirr):>8}  "
+                f"after-tax {realised:>8} / {liquidated:>8}  "
                 f"DD {_pct(row.max_drawdown):>7}  ratio {row.return_per_drawdown:>5.2f}  "
                 f"trips {row.round_trips:>5}"
             )
     if args.report:
         path = Path(args.report)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(render_sweep_report(result, floors=floors), encoding="utf-8")
+        header = f"> {describe_cash_interest(args.cash_interest)}\n\n"
+        path.write_text(header + render_sweep_report(result, floors=floors), encoding="utf-8")
         print(f"\n  report written to {path}")
     return 0
 
