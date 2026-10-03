@@ -113,14 +113,16 @@ from datetime import date
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
+from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from analyst.rails import order_value_ceiling
 from backtest.band_hits import BAND_HIT_BLOCK_RATIONALE, BandHitData, band_hit_blocked
 from backtest.policies.momentum_v2 import RegimeReading
 from backtest.replay import SessionContext, SessionDecision
 from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
-from execution.broker import Exchange, Holding, OrderRequest, Side
+from execution.broker import Exchange, Holding, OrderRequest, Position, Side
 
 __all__ = [
     "DELIVERY_COVERAGE_THRESHOLD",
@@ -594,7 +596,7 @@ class SwingCompositePolicy:
     session it additionally re-scores the universe and applies the band and re-underwrite rules.
     """
 
-    __slots__ = ("_band_hits", "_data", "_params", "_positions")
+    __slots__ = ("_band_hits", "_data", "_order_caps", "_params", "_positions")
 
     def __init__(
         self,
@@ -602,6 +604,7 @@ class SwingCompositePolicy:
         params: SwingCompositeParameters | None = None,
         *,
         band_hits: BandHitData | None = None,
+        order_caps: RiskRails | None = None,
     ) -> None:
         self._data = data
         self._params = params if params is not None else SwingCompositeParameters()
@@ -610,6 +613,13 @@ class SwingCompositePolicy:
         # SwingCompositeParameters on purpose — a new field would change the repr, and so the
         # persisted digest, of every arm already run, the frozen baseline included.
         self._band_hits = band_hits
+        # The rails A8 will clear this policy's orders against. With them, no buy is sized past the
+        # per-order ceiling (``analyst.rails.order_value_ceiling``): a buy the rail is bound to
+        # refuse leaves its cash idle, the next rebalance spreads the larger idle balance over the
+        # same names, and every buy grows past the cap until the book is all cash. Sized to the
+        # ceiling, a name below its weight is topped up across rebalances instead. Not a field of
+        # the parameters, for the same digest reason as ``band_hits``.
+        self._order_caps = order_caps
 
     def decide(self, ctx: SessionContext) -> SessionDecision:
         """Age the book and check stops every session; re-score and rotate on a decision session."""
@@ -784,7 +794,7 @@ class SwingCompositePolicy:
         if self._params.regime_filter and not self._risk_on(ctx):
             target = {}
             would_choose = []
-        buys, drift = self._buys(ctx, held, target)
+        buys, drift = self._buys(ctx, held, target, marks)
 
         orders = tuple(order for order, _ in (*sells, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
@@ -937,11 +947,13 @@ class SwingCompositePolicy:
         ctx: SessionContext,
         held: Mapping[str, Holding],
         target: Mapping[str, SwingRecord],
+        marks: Mapping[str, Decimal],
     ) -> tuple[list[tuple[OrderRequest, str]], Decimal]:
         """Whole-share buys toward equal weight over the target set, sized from currently-free cash.
 
         Budget is the cash *already* free times ``buy_budget_fraction`` — never this session's sale
         proceeds, which have not settled — so a buy is never rejected for cash it does not yet hold.
+        With ``order_caps`` no buy is sized past A8's per-order ceiling, for the same reason.
         """
         if not target:
             return [], _ZERO
@@ -957,6 +969,7 @@ class SwingCompositePolicy:
             prices=prices,
             existing_value=existing_value,
             min_order_value=MIN_ORDER_VALUE_INR,
+            order_ceiling=self._order_ceiling(ctx, marks, prices),
         )
         buys = [
             (
@@ -969,6 +982,26 @@ class SwingCompositePolicy:
             for order in allocation.orders
         ]
         return buys, allocation.tracking_drift
+
+    def _order_ceiling(
+        self,
+        ctx: SessionContext,
+        marks: Mapping[str, Decimal],
+        prices: Mapping[str, Decimal],
+    ) -> Decimal | None:
+        """A8's per-order ceiling for this account, or None when no rails were given.
+
+        The case is valued as the rail book values it: cash including unsettled proceeds, plus every
+        settled and pending lot at its mark (the signal price, else the broker's cost basis).
+        """
+        if self._order_caps is None:
+            return None
+        value = ctx.broker.margins().cash_value
+        lots: list[Holding | Position] = [*ctx.broker.holdings(), *ctx.broker.positions()]
+        for lot in lots:
+            price = marks.get(lot.isin, prices.get(lot.isin, lot.average_price))
+            value += price * lot.quantity
+        return order_value_ceiling(self._order_caps, value)
 
     # ── journal + evidence ───────────────────────────────────────────────────────────────────────
 

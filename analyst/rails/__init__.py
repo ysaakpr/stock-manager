@@ -23,6 +23,7 @@ from analyst.rails.engine import (
     assess_drawdown,
     check_order,
     max_child_quantity,
+    order_value_ceiling,
     slice_exit,
 )
 from analyst.rails.policies import (
@@ -55,5 +56,6 @@ __all__ = [
     "check_order",
     "drawdown_of",
     "max_child_quantity",
+    "order_value_ceiling",
     "slice_exit",
 ]

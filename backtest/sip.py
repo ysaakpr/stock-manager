@@ -179,6 +179,7 @@ def simulate_sip_instalment(
     carried_in: Decimal = _ZERO,
     existing_value: Mapping[str, Decimal] | None = None,
     min_order_value: Decimal = _ZERO,
+    order_ceiling: Decimal | None = None,
 ) -> SipAllocation:
     """Allocate one SIP instalment into whole-share buys, carrying the unspendable remainder on.
 
@@ -195,6 +196,11 @@ def simulate_sip_instalment(
     cash it would have spent stays in ``residual_cash`` rather than being poured into another name,
     because redistributing it would buy the model's weights wrong to avoid holding cash. Zero (the
     default) keeps every order; backtest policies pass :data:`MIN_ORDER_VALUE_INR`.
+    ``order_ceiling`` is the most one order may cost — A8's per-order ceiling
+    (``analyst.rails.order_value_ceiling``). The walk never takes a name's order past it, so no
+    order is proposed that the rail is bound to refuse; the cash it could not place stays in
+    ``residual_cash`` for the next instalment's top-up rather than being poured into other names.
+    ``None`` (the default) sets no ceiling.
 
     Never: invents fractional shares, spends more than ``instalment + carried_in``, reads a clock,
     or keys on anything but the ISIN.
@@ -202,6 +208,8 @@ def simulate_sip_instalment(
     instalment = _require_nonneg_money("instalment", instalment)
     carried_in = _require_nonneg_money("carried_in", carried_in)
     min_order_value = _require_nonneg_money("min_order_value", min_order_value)
+    if order_ceiling is not None:
+        order_ceiling = _require_nonneg_money("order_ceiling", order_ceiling)
     weights = _validated_weights(targets)
     unit_prices = _validated_prices(weights, prices)
     base_value = _validated_existing(existing_value)
@@ -242,6 +250,8 @@ def simulate_sip_instalment(
         for isin in isins:  # sorted → first strictly-better wins, so ties break to the lowest ISIN
             if unit_prices[isin] > remaining:
                 continue
+            if order_ceiling is not None and unit_prices[isin] * (bought[isin] + 1) > order_ceiling:
+                continue  # one more share would take this order past the rail's per-order ceiling
             candidate = drift_after(isin)
             if candidate < best_drift:
                 best_drift = candidate
@@ -276,6 +286,7 @@ def simulate_sip_instalment(
         residual_cash=str(remaining),
         names_bought=len(orders),
         below_min_order_value=dropped,
+        order_ceiling=None if order_ceiling is None else str(order_ceiling),
         tracking_drift=str(sum((abs(d.drift) for d in drifts), _ZERO)),
     )
     return SipAllocation(

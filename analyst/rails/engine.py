@@ -58,6 +58,7 @@ __all__ = [
     "assess_drawdown",
     "check_order",
     "max_child_quantity",
+    "order_value_ceiling",
     "slice_exit",
 ]
 
@@ -189,19 +190,35 @@ def _order_sanity_breaches(
     return breaches
 
 
+def order_value_ceiling(rails: RiskRails, case_value: Decimal) -> Decimal:
+    """The most rupees one order may carry under both per-order caps, for a case of ``case_value``.
+
+    What it does: the smaller of ``max_order_value_inr`` and ``max_order_pct_of_case`` of the case's
+    value — the same two numbers ``check_order`` refuses an order above. It is the one place the
+    order-size ceiling is derived, so the exit slicer and a policy sizing its buys read it from A8
+    rather than re-deriving a cap the rail might then disagree with.
+    What it assumes: ``case_value`` is the case's value as the rail book would mark it.
+    What it never does: decide. An order sized to the ceiling still goes through ``check_order``,
+    and every other rail, like any other.
+    """
+    require_decimal("case value", case_value)
+    ceiling = rails.max_order_value_inr
+    if case_value > _ZERO:
+        ceiling = min(ceiling, rails.max_order_pct_of_case * case_value / _HUNDRED)
+    return ceiling
+
+
 def max_child_quantity(order: ProposedOrder, portfolio: Portfolio, rails: RiskRails) -> int:
     """The most shares of ``order``'s instrument one order may carry under both per-order caps.
 
     What it does: the largest whole-share count whose value at the order's reference price is
-    within ``max_order_value_inr`` *and* within ``max_order_pct_of_case`` of the case's value.
+    within ``order_value_ceiling`` for the book's value.
     What it assumes: ``portfolio`` is the book the order would be checked against. A sell moves
     value from a lot to cash at the same price, so the case's value — and with it the percentage
     cap in rupees — is the same for every child of one exit.
     What it never does: round up. Zero means one share is already above a cap.
     """
-    cap = rails.max_order_value_inr
-    if portfolio.total_value > _ZERO:
-        cap = min(cap, rails.max_order_pct_of_case * portfolio.total_value / _HUNDRED)
+    cap = order_value_ceiling(rails, portfolio.total_value)
     shares = int((cap / order.price).to_integral_value(rounding=ROUND_FLOOR))
     # Decimal division is exact to the context's precision, not exactly; the caps are checked as
     # ``price * quantity``, so the slice is held to the same product the rail will compute.
