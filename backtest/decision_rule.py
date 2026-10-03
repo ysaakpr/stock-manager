@@ -75,6 +75,7 @@ __all__ = [
     "SharpeVariance",
     "TrialSharpe",
     "evaluate",
+    "rail_blocks_cell",
     "render_decision",
     "trial_sharpe_variance",
 ]
@@ -117,6 +118,9 @@ class FoldResult:
     #: when the after-tax NAV could not be struck — the fold is then *missing* for criterion 4.
     after_tax_returns: tuple[float, ...]
     error: str | None = None
+    #: ``RAIL_BLOCK`` count per rail over the run, for the report only — no criterion reads it.
+    #: ``None`` when the run's summary did not record it.
+    rail_blocks: tuple[tuple[str, int], ...] | None = None
 
     @property
     def has_returns(self) -> bool:
@@ -240,6 +244,13 @@ def _pct(value: Decimal | None) -> str:
     return "n/a" if value is None else f"{value:.2%}"
 
 
+def rail_blocks_cell(blocks: Sequence[tuple[str, int]] | None) -> str:
+    """A run's rail blocks as a report cell, by rail name: ``none``, or ``not recorded``."""
+    if blocks is None:
+        return "not recorded"
+    return ", ".join(f"{rail} {count}" for rail, count in blocks) or "none"
+
+
 def _outcome(passed: bool) -> Outcome:
     return Outcome.PASS if passed else Outcome.FAIL
 
@@ -350,7 +361,7 @@ def _xirr_criteria(candidate: ArmFolds, baseline: ArmFolds) -> tuple[Criterion, 
         1,
         one,
         _outcome(total >= MIN_MEAN_XIRR_IMPROVEMENT * n),
-        f"mean {_pct(sum(cand_x, Decimal(0)) / n)} vs baseline "
+        f"arithmetic mean {_pct(sum(cand_x, Decimal(0)) / n)} vs baseline "
         f"{_pct(sum(base_x, Decimal(0)) / n)}: "
         f"{_pp(total / n)} (bar {_pp(MIN_MEAN_XIRR_IMPROVEMENT)})",
         used,
@@ -519,11 +530,14 @@ def render_decision(
     floor_label: str,
     assumptions: Sequence[str] = (),
     command: str = "round2-signals",
+    headline: Sequence[str] = (),
 ) -> str:
     """The round-2 decision as markdown: per-fold figures, then the outcome per criterion per arm.
 
     Every criterion row names the folds it was struck on; the header names the Sharpe variance's
-    source, its n and every trial left out of it.
+    source, its n and every trial left out of it. ``headline`` (markdown lines — the continuous
+    run and the per-fold stability evidence) goes after the header and before the rule's own
+    figures; it is presentation, and nothing in it reaches a criterion.
     """
     baselines = sorted({v.baseline for v in verdicts})
     variance = sharpe_variance
@@ -548,17 +562,22 @@ def render_decision(
         ),
         *(f"- {line}" for line in assumptions),
         "",
-        "## Test-window figures",
+        *headline,
+        *([""] if headline else []),
+        "## Test-window figures the rule reads (§4)",
         "",
-        "| Arm | Fold | After-tax XIRR (realised) | Max drawdown | Daily returns |",
-        "| --- | --- | --- | --- | --- |",
+        "*Criterion 1 reads the **arithmetic** mean of these per-fold XIRRs, as pre-registered; it "
+        "is a decision statistic, not a return anyone earned.*",
+        "",
+        "| Arm | Fold | After-tax XIRR (realised) | Max drawdown | Daily returns | Rail blocks |",
+        "| --- | --- | --- | --- | --- | --- |",
     ]
     for arm in arms:
         for fold in arm.folds:
             xirr = _pct(fold.after_tax_xirr) if fold.error is None else f"n/a ({fold.error})"
             lines.append(
                 f"| {arm.label} | {fold.fold} | {xirr} | {_pct(fold.max_drawdown)} | "
-                f"{len(fold.after_tax_returns)} |"
+                f"{len(fold.after_tax_returns)} | {rail_blocks_cell(fold.rail_blocks)} |"
             )
     lines += ["", "## Verdict per arm", ""]
     for verdict in verdicts:

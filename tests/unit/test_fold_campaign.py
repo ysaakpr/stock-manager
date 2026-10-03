@@ -13,7 +13,9 @@
   frozen directory;
 * ``trial-sharpes`` writes the round-1 arms' Sharpes on the folds, refused on other folds or
   another lake, and ``round2-signals``/``render-round2`` pool them into the variance;
-* ``render-round2`` replays nothing: it reads runs already on disk and writes elsewhere.
+* ``render-round2`` replays nothing: it reads runs already on disk and writes elsewhere;
+* a fold run puts in force exactly what ``backtest.sweep`` does — the signal's pre-seam split
+  factors as well as the book — and a run without them never shares a digest with one with them.
 
 Offline: the lake and the replay are stubbed at the sweep's two seams (``open_swing_lake`` and
 ``_run_arm``), as in ``test_campaign``.
@@ -21,8 +23,10 @@ Offline: the lake and the replay are stubbed at the sweep's two seams (``open_sw
 
 from __future__ import annotations
 
+import argparse
 import json
 from collections.abc import Iterator
+from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal
@@ -32,8 +36,19 @@ from typing import Any
 
 import pytest
 
+import backtest.book_actions as book_actions_module
 import backtest.fold_campaign as fc
 import backtest.sweep as sweep_module
+from backtest.book_actions import (
+    RescaleKind,
+    ShareRescale,
+    book_corporate_actions,
+    current_book_actions,
+    current_signal_split_factors,
+    signal_split_factors,
+    store_book_actions_unless,
+)
+from backtest.cash_interest import cash_interest_unless
 from backtest.folds import load_folds
 from backtest.nav import nav_file
 from backtest.policies.swing_composite import SwingCompositeParameters
@@ -85,6 +100,11 @@ def _nav(label: str, start: date) -> tuple[tuple[date, Decimal], ...]:
         (start + timedelta(days=i), _CASH + Decimal(drift * 100 * i + (i % 3) * 700))
         for i in range(40)
     )
+
+
+def _stub_xirr(start: date) -> Decimal:
+    """A pre-tax XIRR that differs per window, so a chain and a mean of them differ too."""
+    return Decimal(start.year - 2010) / Decimal(50)
 
 
 def _ledger(label: str, start: date, end: date) -> RunLedger:
@@ -148,16 +168,18 @@ def stubbed(monkeypatch: pytest.MonkeyPatch) -> Iterator[_Counters]:
                 start=start,
                 terminal=end,
                 sessions=40,
-                xirr=Decimal("0.1"),
+                xirr=_stub_xirr(start),
                 max_drawdown=Decimal("0.2"),
                 excess=Decimal("0"),
                 benchmark_xirr=Decimal("0.1"),
-                benchmark_name="stub",
+                benchmark_name="Nifty 50",
                 total_charges=Decimal("0"),
                 final_nav=ledger.terminal_nav,
                 round_trips=0,
                 median_hold_days=0,
                 replay_digest="0" * 64,
+                benchmark_source="published_tri",
+                rail_blocks={"MAX_POSITION": 2},
             ),
             nav=_nav(arm.label, start),
         )
@@ -203,9 +225,10 @@ def test_baseline_folds_runs_only_the_two_baselines_on_every_fold_window(
     windows = {(start, end) for *_, start, end in stubbed.backtests}
     expected = {(f.test.start, f.test.end) for f in _FOLDS.folds}
     expected |= {(f.selection.start, f.selection.end) for f in _FOLDS.folds}
+    expected |= {(_FOLDS.folds[0].test.start, _FOLDS.folds[-1].test.end)}  # the continuous run
     assert windows == expected
-    assert len(stubbed.backtests) == 12
-    assert len(list((tmp_path / "navs").glob("*.json"))) == 12
+    assert len(stubbed.backtests) == 14
+    assert len(list((tmp_path / "navs").glob("*.json"))) == 14
 
 
 def test_baseline_folds_resumes_with_zero_replays(tmp_path: Path, stubbed: _Counters) -> None:
@@ -214,7 +237,7 @@ def test_baseline_folds_resumes_with_zero_replays(tmp_path: Path, stubbed: _Coun
     stubbed.lakes = 0
     outcomes = fc.run_fold_units(_baseline(tmp_path), workers=1)
     assert stubbed.backtests == [] and stubbed.lakes == 0
-    assert sum(o.resumed for o in outcomes) == 12
+    assert sum(o.resumed for o in outcomes) == 14
 
 
 def test_two_directories_get_byte_identical_nav_files(tmp_path: Path, stubbed: _Counters) -> None:
@@ -235,10 +258,10 @@ def test_the_frozen_record_names_every_run_and_its_hashes(
     assert record["arms"] == list(fc.BASELINE_LABELS)
     assert record["floor"] == str(HIGH_FLOOR)
     assert record["commit"] == "a" * 40
-    assert len(record["runs"]) == 12
+    assert len(record["runs"]) == 14
     assert {(r["fold"], r["role"]) for r in record["runs"]} == {
         (f, role) for f in ("F1", "F2", "F3") for role in ("test", "selection")
-    }
+    } | {("F1-F3", "continuous")}
     assert all(
         len(r[k]) == 64
         for r in record["runs"]
@@ -278,7 +301,7 @@ def test_round2_accepts_a_matching_freeze_at_a_later_commit(
     tmp_path: Path, stubbed: _Counters
 ) -> None:
     _frozen(tmp_path)
-    assert len(_verify(tmp_path, replace(_PINNED, commit="c" * 40))["runs"]) == 12
+    assert len(_verify(tmp_path, replace(_PINNED, commit="c" * 40))["runs"]) == 14
 
 
 def test_round2_refuses_a_freeze_from_another_lake(tmp_path: Path, stubbed: _Counters) -> None:
@@ -324,13 +347,32 @@ def test_round2_refuses_bad_arm_lists(tmp_path: Path, labels: list[str], match: 
         fc.round2_plan(tmp_path, _FOLDS, labels, data_root=None, book_actions=False)
 
 
-def test_round2_runs_test_windows_only(tmp_path: Path) -> None:
+def test_round2_runs_the_test_windows_and_the_continuous_headline_run(tmp_path: Path) -> None:
     plan = fc.round2_plan(tmp_path, _FOLDS, [_H_ARM], data_root=None, book_actions=False)
     assert [(w.fold, w.role) for w in plan.windows] == [
         ("F1", "test"),
         ("F2", "test"),
         ("F3", "test"),
+        ("F1-F3", "continuous"),
     ]
+    continuous = plan.windows[-1].window
+    assert (continuous.start, continuous.end) == (date(2016, 9, 1), date(2026, 8, 31))
+
+
+def test_trial_sharpes_run_the_test_windows_only(tmp_path: Path) -> None:
+    plan = fc.round2_plan(
+        tmp_path, _FOLDS, _TRIAL_ARMS, data_root=None, book_actions=False, continuous=False
+    )
+    assert {w.role for w in plan.windows} == {"test"}
+
+
+def test_a_union_with_a_hole_is_not_one_continuous_window() -> None:
+    f1, f2, f3 = _FOLDS.folds
+    holed = replace(
+        _FOLDS, folds=(f1, replace(f2, test=replace(f2.test, start=date(2019, 10, 1))), f3)
+    )
+    with pytest.raises(fc.FoldCampaignError, match="do not abut"):
+        fc.continuous_window(holed)
 
 
 def test_the_trial_count_is_a_required_flag() -> None:
@@ -371,6 +413,27 @@ def test_round2_renders_pass_or_fail_per_criterion_against_the_named_baseline(
     assert all(nav_file(h_dir, d).is_file() for d in fc._digests(plan, None).values())
 
 
+def test_the_round2_report_heads_with_the_continuous_runs_and_shows_rail_blocks(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    base_dir, plan = _round2(tmp_path)
+    text = fc.render_round2(
+        plan, base_dir, _FOLDS, None, _FMV, baseline_label=fc.BASELINE_LABELS[0], trials=28
+    )
+    headline = _rows(_section(text, "## Headline — one continuous run, 2016-09-01 → 2026-08-31"))
+    assert [row[0] for row in headline] == [*fc.BASELINE_LABELS, _H_ARM]
+    assert all(row[6] == "published Nifty 50 TRI" for row in headline)
+    # The headline and the stability evidence come before the rule's own figures and verdicts.
+    assert text.index("## Headline") < text.index("## Per-fold test windows — stability")
+    assert text.index("## Per-fold test windows") < text.index("## Test-window figures the rule")
+    assert text.index("## Test-window figures the rule") < text.index("## Verdict per arm")
+    assert "geometric: (Π(1 + r_i)^t_i)^(1/T) - 1" in text
+    rule = _rows(_section(text, "## Test-window figures the rule reads (§4)"))
+    assert len(rule) == 9 and all(row[-1] == "MAX_POSITION 2" for row in rule)
+    # Criterion 1 is the pre-registered arithmetic mean, and says so.
+    assert "arithmetic mean" in text
+
+
 def test_round2_refuses_an_unnamed_baseline(tmp_path: Path, stubbed: _Counters) -> None:
     base_dir = tmp_path / "base"
     _frozen(base_dir)
@@ -384,8 +447,95 @@ def test_the_baseline_report_renders_every_fold_and_role(
 ) -> None:
     plan = _frozen(tmp_path)
     text = fc.render_baseline_report(plan, _FOLDS, None, _FMV)
-    rows = [line for line in text.splitlines() if line.startswith("| Swing") or "regime" in line]
-    assert sum(1 for line in rows if line.startswith("| ")) == 12
+    every = _section(text, "## Every fold window, as frozen")
+    assert len(_rows(every)) == 12
+    assert all(row[-1] == "MAX_POSITION 2" for row in _rows(every))  # rail blocks per row
+
+
+def _section(text: str, heading: str) -> str:
+    """The markdown under ``heading`` up to the next heading of any level."""
+    body = text.split(heading, 1)[1]
+    return body.split("\n#", 1)[0]
+
+
+def _rows(section: str) -> list[list[str]]:
+    """The data rows of the first table in ``section``, as cells."""
+    lines = section.splitlines()
+    first = next(i for i, line in enumerate(lines) if line.startswith("| "))
+    table: list[str] = []
+    for line in lines[first:]:
+        if not line.startswith("| "):
+            break
+        table.append(line)
+    return [[c.strip() for c in line.strip("|").split("|")] for line in table[2:]]
+
+
+def test_the_baseline_report_heads_with_one_continuous_run(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    """The headline is the continuous run over 2016-09-01 → 2026-08-31, not a fold mean."""
+    plan = _frozen(tmp_path)
+    text = fc.render_baseline_report(plan, _FOLDS, None, _FMV)
+    headline = _section(text, "## Headline — one continuous run, 2016-09-01 → 2026-08-31")
+    rows = _rows(headline)
+    assert [row[0] for row in rows] == list(fc.BASELINE_LABELS)
+    for row in rows:
+        assert row[1] == "2016-09-01 → 2026-08-31"
+        assert row[2] == f"{_stub_xirr(date(2016, 9, 1)):.2%}"  # pre-tax, the continuous run's
+        assert row[3].endswith("%")  # after-tax realised
+        assert row[4] == "20.00%"  # max drawdown
+        assert row[6] == "published Nifty 50 TRI"  # read from the recorded source
+        assert row[8] == "MAX_POSITION 2"
+    assert text.index("## Headline") < text.index("## Per-fold test windows")
+    assert "price-return L1 proxy" not in text
+
+
+def test_the_per_fold_xirrs_are_shown_as_stability_evidence(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    plan = _frozen(tmp_path)
+    text = fc.render_baseline_report(plan, _FOLDS, None, _FMV)
+    rows = _rows(_section(text, "## Per-fold test windows — stability evidence"))
+    assert [(row[0], row[1]) for row in rows] == [
+        (label, fold) for label in fc.BASELINE_LABELS for fold in ("F1", "F2", "F3")
+    ]
+    assert [row[3] for row in rows[:3]] == [f"{_stub_xirr(f.test.start):.2%}" for f in _FOLDS.folds]
+    assert all(row[-1] == "MAX_POSITION 2" for row in rows)
+
+
+def test_the_chained_figure_is_geometric_never_an_arithmetic_mean(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    """Fails if the chain is computed as the arithmetic mean of the fold XIRRs (or weighted)."""
+    plan = _frozen(tmp_path)
+    text = fc.render_baseline_report(plan, _FOLDS, None, _FMV)
+    chained = text.split("**Chained across F1, F2, F3 — geometric: (Π(1 + r_i)^t_i)^(1/T) - 1**")
+    assert len(chained) == 2, "the chained figure must be labelled as geometric"
+    swing = next(row for row in _rows(chained[1]) if row[0] == fc.BASELINE_LABELS[0])
+    legs = [
+        (_stub_xirr(f.test.start), Decimal((f.test.end - f.test.start).days) / Decimal(365))
+        for f in _FOLDS.folds
+    ]
+    rates = [r for r, _ in legs]
+    arithmetic = sum(rates, Decimal(0)) / len(rates)
+    weighted = sum((r * t for r, t in legs), Decimal(0)) / sum((t for _, t in legs), Decimal(0))
+    assert swing[1] == f"{fc.geometric_chain(legs):.2%}"
+    assert swing[1] not in (f"{arithmetic:.2%}", f"{weighted:.2%}")
+
+
+def test_geometric_chain_compounds_to_the_legs_terminal_wealth() -> None:
+    legs = [(Decimal("0.50"), Decimal(1)), (Decimal("-0.30"), Decimal(1))]
+    chained = fc.geometric_chain(legs)
+    # 1.5 x 0.7 = 1.05 over two years: sqrt(1.05) - 1, not the arithmetic 10 %.
+    assert abs(chained - (Decimal("1.05").sqrt() - 1)) < Decimal("1e-20")
+    assert chained < Decimal("0.03")
+    weighted = [(Decimal("0.10"), Decimal(3)), (Decimal("0.20"), Decimal(1))]
+    expected = (Decimal("1.10") ** 3 * Decimal("1.20")) ** (Decimal(1) / 4) - 1
+    assert abs(fc.geometric_chain(weighted) - expected) < Decimal("1e-20")
+    with pytest.raises(ValueError):
+        fc.geometric_chain([])
+    with pytest.raises(ValueError):
+        fc.geometric_chain([(Decimal("-1"), Decimal(1))])
 
 
 def _tree(root: Path) -> dict[str, bytes]:
@@ -512,3 +662,74 @@ def test_the_render_and_trial_sharpes_commands_parse() -> None:
     assert not hasattr(render, "workers")
     trials = fc._parse_args(["trial-sharpes", "--out", "o", "--workers", "2"])
     assert trials.arms is None and trials.workers == 2
+
+
+# ── the fold path puts in force what the sweep CLI does (X2: one digest, one replay) ──────────
+
+#: A split ex before L2's 2016-09-02 seam: the factor a swing signal needs across it.
+_PRE_SEAM_SPLIT = ShareRescale(
+    isin=_ISIN,
+    ex_date=date(2015, 6, 1),
+    kind=RescaleKind.SPLIT,
+    numerator=Decimal(10),
+    denominator=Decimal(2),
+)
+
+
+class _StubActions:
+    """A ``BookActionSource`` holding one pre-seam split (no calendar, no Postgres)."""
+
+    def between(self, after: date | None, upto: date) -> tuple[ShareRescale, ...]:
+        due = after is None or after < _PRE_SEAM_SPLIT.ex_date
+        return (_PRE_SEAM_SPLIT,) if due and _PRE_SEAM_SPLIT.ex_date <= upto else ()
+
+
+def test_the_fold_contexts_put_the_signal_split_factors_in_force(tmp_path: Path) -> None:
+    """Before the fix ``_contexts`` set the book and cash interest only: this read ``None``."""
+    plan = fc.baseline_plan(tmp_path, _FOLDS, data_root=None, book_actions=True)
+    with ExitStack() as stack:
+        fc._contexts(stack, plan, _StubActions())
+        assert current_signal_split_factors() == (_PRE_SEAM_SPLIT,)
+        assert current_book_actions() is not None
+    assert current_signal_split_factors() is None
+
+
+def test_the_fold_contexts_switched_off_turn_the_signal_factors_off_too(tmp_path: Path) -> None:
+    plan = fc.baseline_plan(tmp_path, _FOLDS, data_root=None, book_actions=False)
+    with ExitStack() as stack:
+        fc._contexts(stack, plan, _StubActions())
+        assert current_signal_split_factors() is None
+        assert current_book_actions() is None
+
+
+def _fold_digest(window: Any, *, signal: bool) -> str:
+    arm = fc._resolve(fc.BASELINE_LABELS[:1])
+    with book_corporate_actions(_StubActions()), ExitStack() as stack:
+        if signal:
+            stack.enter_context(signal_split_factors(_StubActions()))
+        digests = sweep_module.run_digests(
+            start=window.start, end=window.end, arms=arm, floors=(HIGH_FLOOR,)
+        )
+    return digests[(fc.BASELINE_LABELS[0], HIGH_FLOOR)]
+
+
+def test_a_run_with_signal_split_factors_never_shares_a_digest_with_one_without() -> None:
+    window = _FOLDS.folds[1].test
+    assert _fold_digest(window, signal=True) != _fold_digest(window, signal=False)
+    assert _fold_digest(window, signal=True) == _fold_digest(window, signal=True)
+
+
+def test_the_fold_path_and_the_sweep_cli_derive_the_same_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same window, arm and floor: the fold unit and ``backtest.sweep`` name one run, not two."""
+    monkeypatch.setattr(book_actions_module, "load_store_book_actions", _StubActions)
+    plan = fc.baseline_plan(tmp_path, _FOLDS, data_root=None, book_actions=True)
+    fold = fc._digests(plan, _StubActions())[(fc.BASELINE_LABELS[0], "F2", "test")]
+    window = _FOLDS.folds[1].test
+    args = argparse.Namespace(book_corporate_actions=True, cash_interest=True)
+    with store_book_actions_unless(args), cash_interest_unless(args):
+        cli = sweep_module.run_digests(
+            start=window.start, end=window.end, arms=plan.arms, floors=(HIGH_FLOOR,)
+        )[(fc.BASELINE_LABELS[0], HIGH_FLOOR)]
+    assert fold == cli

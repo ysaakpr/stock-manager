@@ -47,6 +47,7 @@ from backtest.book_actions import (
     BookActionCalendar,
     BookActionSource,
     RescaleKind,
+    current_signal_split_factors_identity,
 )
 from backtest.cash_interest import InterestCredit, current_cash_interest_identity
 from backtest.nav import PRE_TAX, NavSeries, nav_file, write_nav
@@ -207,6 +208,9 @@ def run_spec(
     Interest on idle cash (``backtest.cash_interest``) adds a ``cash_interest`` key naming the rate
     schedule when it is in force, and nothing when it is off — so every run specified before
     interest existed keeps the digest it was persisted under, and an on run never resumes one.
+    The swing signal's pre-seam split factors (``backtest.book_actions.signal_split_factors``) add a
+    ``signal_split_factors`` key the same way: a run made without them never shares a digest with
+    one made with them (X2: the fold campaign once did, and one digest replayed two ways).
     """
     spec = {
         "spec_version": _SPEC_VERSION,
@@ -219,6 +223,9 @@ def run_spec(
     interest = current_cash_interest_identity()
     if interest is not None:
         spec["cash_interest"] = interest
+    signal_factors = current_signal_split_factors_identity()
+    if signal_factors is not None:
+        spec["signal_split_factors"] = signal_factors
     for key, value in sorted(fields.items()):
         spec[key] = _render(value)
     return spec
@@ -353,9 +360,22 @@ class RunSummary:
     round_trips: int
     median_hold_days: int
     replay_digest: str
+    #: Where the benchmark series came from (``backtest.run``'s ``published_tri`` /
+    #: ``m3.9_computed_tri`` / ``l1_proxy``). ``None`` on a summary persisted before it was kept —
+    #: a report then says "not recorded" rather than guessing which series it was.
+    benchmark_source: str | None = None
+    #: ``RAIL_BLOCK`` count per breached rail over the run (``backtest.rails.rail_blocks_by_rail``);
+    #: ``None`` on a summary persisted before it was kept, ``{}`` when no rail blocked anything.
+    rail_blocks: Mapping[str, int] | None = None
 
     def to_document(self) -> dict[str, Any]:
+        optional: dict[str, Any] = {}
+        if self.benchmark_source is not None:
+            optional["benchmark_source"] = self.benchmark_source
+        if self.rail_blocks is not None:
+            optional["rail_blocks"] = dict(sorted(self.rail_blocks.items()))
         return {
+            **optional,
             "version": 1,
             "digest": self.digest,
             "spec": dict(sorted(self.spec.items())),
@@ -396,6 +416,14 @@ class RunSummary:
             round_trips=int(doc["round_trips"]),
             median_hold_days=int(doc["median_hold_days"]),
             replay_digest=str(doc["replay_digest"]),
+            benchmark_source=(
+                str(doc["benchmark_source"]) if doc.get("benchmark_source") is not None else None
+            ),
+            rail_blocks=(
+                {str(k): int(v) for k, v in doc["rail_blocks"].items()}
+                if doc.get("rail_blocks") is not None
+                else None
+            ),
         )
 
 

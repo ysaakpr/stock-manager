@@ -7,8 +7,10 @@ module is that order, as two commands that cannot be run the other way round:
 
 ``python -m backtest.fold_campaign baseline-folds --out DIR --workers N``
     Runs **only** the two baseline arms — Swing composite (M10.7) and M10.7 + regime gate — on
-    every fold's test window (``backtest/folds.yaml``) and, for the record, its selection window:
-    ₹10 crore floor, cash interest on, corporate actions in the book. Every run persists its
+    every fold's test window (``backtest/folds.yaml``) and, for the record, its selection window —
+    plus one **continuous** run over the union of the test windows (F1 test start → F3 test end),
+    the report's headline: ₹10 crore floor, cash interest on, the store's corporate actions in the
+    book and as the signal's pre-seam split factors. Every run persists its
     summary, fill ledger and daily NAV (``backtest.nav``) under ``DIR``; once all have finished it
     writes ``DIR/frozen-baseline.json``: each run's digest and the sha256 of each file, plus the
     commit, lake, folds and pre-registration they were made under, and ``DIR/reports/
@@ -19,8 +21,10 @@ module is that order, as two commands that cannot be run the other way round:
     **Refuses to start** unless ``DIR/frozen-baseline.json`` exists, was made on this lake, these
     folds and this pre-registration, every baseline digest it records is the digest the *current
     code* gives the same run, and every file it names is on disk with the recorded hash. Then runs
-    the named H-arms on the fold test windows under ``DIR2`` (the frozen directory is only read)
-    and writes ``DIR2/reports/round2-decision.md``: PASS/FAIL per criterion per arm against the
+    the named H-arms on the fold test windows and the continuous window under ``DIR2`` (the frozen
+    directory is only read) and writes ``DIR2/reports/round2-decision.md``: the continuous runs as
+    the headline, the per-fold figures as stability evidence, then PASS/FAIL per criterion per arm
+    against the
     named baseline, with the trial count, the folds each criterion read and the Sharpe variance's
     source and n printed. ``--trial-sharpes FILE`` adds a ``trial-sharpes`` file's Sharpes to the
     variance (below ``MIN_VARIANCE_SHARPES`` distinct Sharpes criterion 4 cannot PASS).
@@ -38,6 +42,13 @@ module is that order, as two commands that cannot be run the other way round:
     every run is there and ``DIR2`` differs from this checkout's pin on the commit alone (named by
     ``--runs-from-commit``, an ancestor of a clean HEAD). ``DIR`` and ``DIR2`` are only read; the
     report and the after-tax NAVs go under ``DIR4``.
+
+**How the reports read.** The headline is the continuous run — pre-tax XIRR, after-tax XIRR on
+realised gains, max drawdown, and the benchmark its summary recorded (the published NIFTY 50 TRI,
+read from the run's ``benchmark_source``, never assumed). The per-fold XIRRs follow as stability
+evidence, and the only figure that chains them is labelled geometric, ``(Π(1 + r_i)^t_i)^(1/T) -
+1`` — never an arithmetic mean (criterion 1's mean is the pre-registered decision statistic and is
+labelled arithmetic where the rule prints it). Every run's row carries its rail blocks by rail.
 
 **The investor is fixed, not a flag**: a resident individual at the 30 % slab, no surcharge, tax
 paid at FY end (§2). A different investor would be a different study.
@@ -63,13 +74,14 @@ from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
+from itertools import pairwise
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
 
 from backtest.book_actions import (
     BookActionSource,
-    book_corporate_actions,
+    corporate_actions_in_force,
     load_store_book_actions,
 )
 from backtest.campaign import (
@@ -90,6 +102,7 @@ from backtest.decision_rule import (
     FoldResult,
     TrialSharpe,
     evaluate,
+    rail_blocks_cell,
     render_decision,
     trial_sharpe_variance,
 )
@@ -102,8 +115,9 @@ from backtest.nav import (
     read_nav,
     write_nav,
 )
-from backtest.run import _L1Reader
+from backtest.run import _L1Reader, describe_benchmark
 from backtest.run_ledger import (
+    RunSummary,
     ledger_path,
     load_run,
     persist_run_ledgers,
@@ -131,6 +145,7 @@ from dataplatform.logging import get_logger
 
 __all__ = [
     "BASELINE_LABELS",
+    "CONTINUOUS",
     "FLOOR",
     "FROZEN_NAME",
     "PREREGISTRATION_PATH",
@@ -140,14 +155,20 @@ __all__ = [
     "FoldRunPlan",
     "FoldWindow",
     "Pinned",
+    "RunFigures",
     "TrialSharpeSet",
     "baseline_plan",
     "build_arm_folds",
+    "continuous_fold",
+    "continuous_window",
     "freeze_baseline",
+    "geometric_chain",
+    "headline_lines",
     "load_trial_sharpes",
     "main",
     "round1_labels",
     "round2_plan",
+    "run_figures",
     "run_fold_units",
     "verify_frozen",
     "write_trial_sharpes",
@@ -175,6 +196,11 @@ TRIAL_SHARPES_NAME = "trial-sharpes.json"
 #: The sweep family the round-2 hypotheses carry; every other non-baseline arm is a round-1 trial.
 _HYPOTHESIS_FAMILY = "round-2 hypothesis"
 _TEST, _SELECTION = "test", "selection"
+#: The role of the one uninterrupted run over the union of the fold test windows — the headline.
+CONTINUOUS = "continuous"
+#: The longest gap, in calendar days, between one fold's test window and the next that still lets
+#: their union be one continuous window (a weekend plus a market holiday or two).
+_MAX_TEST_GAP_DAYS = 7
 
 
 class FoldCampaignError(RuntimeError):
@@ -202,7 +228,9 @@ class FoldRunPlan:
     arms: tuple[Arm, ...]
     windows: tuple[FoldWindow, ...]
     data_root: Path | None
-    #: Corporate actions in the book. On for every real run; tests switch it off.
+    #: The store's corporate actions in force — in the book *and* as the swing signal's pre-seam
+    #: split factors, exactly as the sweep CLI's default puts them. On for every real run; tests
+    #: switch it off, which turns both off (the run spec then says so, under its own digest).
     book_actions: bool = True
 
     @property
@@ -229,21 +257,49 @@ def _resolve(labels: Sequence[str]) -> tuple[Arm, ...]:
     return tuple(by_label[label] for label in labels)
 
 
-def _windows(folds: FoldPlan, *, selection: bool) -> tuple[FoldWindow, ...]:
+def continuous_fold(folds: FoldPlan) -> str:
+    """The name the continuous run is recorded under: the first and last fold, ``F1-F3``."""
+    return f"{folds.folds[0].name}-{folds.folds[-1].name}"
+
+
+def continuous_window(folds: FoldPlan) -> Window:
+    """The union of the fold test windows as one window: first test start to last test end.
+
+    Raises ``FoldCampaignError`` unless the test windows are in order, do not overlap and abut
+    (each opening within :data:`_MAX_TEST_GAP_DAYS` of the last one's end) — a union with a hole
+    in it is not one continuous run, and calling it one would hide the hole.
+    """
+    tests = [f.test for f in folds.folds]
+    for before, after in pairwise(tests):
+        gap = (after.start - before.end).days
+        if not 0 < gap <= _MAX_TEST_GAP_DAYS:
+            raise FoldCampaignError(
+                f"test windows {before.name} and {after.name} do not abut ({gap} days apart): "
+                "their union is not one continuous window"
+            )
+    return Window(f"continuous-{continuous_fold(folds)}", tests[0].start, tests[-1].end)
+
+
+def _windows(
+    folds: FoldPlan, *, selection: bool, continuous: bool = False
+) -> tuple[FoldWindow, ...]:
     out = [FoldWindow(f.name, _TEST, f.test) for f in folds.folds]
     if selection:
         out += [FoldWindow(f.name, _SELECTION, f.selection) for f in folds.folds]
+    if continuous:
+        out.append(FoldWindow(continuous_fold(folds), CONTINUOUS, continuous_window(folds)))
     return tuple(out)
 
 
 def baseline_plan(
     out_dir: Path, folds: FoldPlan, *, data_root: Path | None, book_actions: bool = True
 ) -> FoldRunPlan:
-    """The baseline-folds plan: the two baseline arms on every test and selection window."""
+    """The baseline-folds plan: the two baseline arms on every test and selection window, and on
+    the continuous window over the test windows' union (the headline run)."""
     return FoldRunPlan(
         out_dir=out_dir,
         arms=_resolve(BASELINE_LABELS),
-        windows=_windows(folds, selection=True),
+        windows=_windows(folds, selection=True, continuous=True),
         data_root=data_root,
         book_actions=book_actions,
     )
@@ -256,11 +312,14 @@ def round2_plan(
     *,
     data_root: Path | None,
     book_actions: bool = True,
+    continuous: bool = True,
 ) -> FoldRunPlan:
-    """The round2-signals plan: the named H-arms on the fold test windows only.
+    """The round2-signals plan: the named H-arms on the fold test windows, plus (``continuous``)
+    the one continuous run over their union that the report's headline is struck from.
 
     Refuses a baseline arm among ``labels`` (it is frozen, not re-run), an unknown label, a
-    duplicate, or an empty list.
+    duplicate, or an empty list. ``trial-sharpes`` passes ``continuous=False``: a trial's Sharpe
+    reads the fold test windows only.
     """
     if not labels:
         raise FoldCampaignError("name at least one H-arm to run (--arms)")
@@ -272,7 +331,7 @@ def round2_plan(
     return FoldRunPlan(
         out_dir=out_dir,
         arms=_resolve(labels),
-        windows=_windows(folds, selection=False),
+        windows=_windows(folds, selection=False, continuous=continuous),
         data_root=data_root,
         book_actions=book_actions,
     )
@@ -282,8 +341,13 @@ def round2_plan(
 
 
 def _contexts(stack: ExitStack, plan: FoldRunPlan, actions: BookActionSource | None) -> None:
-    """Put in force what every run and every digest of ``plan`` is made under."""
-    stack.enter_context(book_corporate_actions(actions if plan.book_actions else None))
+    """Put in force what every run and every digest of ``plan`` is made under.
+
+    The corporate actions go through ``corporate_actions_in_force`` — the helper the sweep CLI uses
+    too — so a fold run and a ``backtest.sweep`` run of the same digest replay identically.
+    """
+    source = actions if plan.book_actions else None
+    stack.enter_context(corporate_actions_in_force(source, apply_to_book=True))
     stack.enter_context(accrue_cash_interest(load_repo_rate_schedule()))
 
 
@@ -501,11 +565,12 @@ def build_arm_folds(
         if loaded is None:
             raise FoldCampaignError(f"{arm_label} {fold.name} {role}: run not on disk ({digest})")
         summary, ledger = loaded
+        rails = _rail_blocks(summary)
         pre_tax = read_nav(nav_file(out_dir, digest), digest=digest)
         try:
             taxed = compute_after_tax(ledger, PROFILE, schedule=schedule, fmv=fmv)
         except TaxError as error:
-            results.append(FoldResult(fold.name, None, summary.max_drawdown, (), str(error)))
+            results.append(FoldResult(fold.name, None, summary.max_drawdown, (), str(error), rails))
             continue
         net = after_tax_nav(pre_tax, taxed.fy_taxes, PROFILE)
         if nav_dir is not None:
@@ -517,9 +582,182 @@ def build_arm_folds(
                 max_drawdown=summary.max_drawdown,
                 after_tax_returns=tuple(daily_returns(net.points)),
                 error=taxed.realised_xirr_error,
+                rail_blocks=rails,
             )
         )
     return ArmFolds(arm_label, tuple(results))
+
+
+def _rail_blocks(summary: RunSummary) -> tuple[tuple[str, int], ...] | None:
+    blocks = summary.rail_blocks
+    return None if blocks is None else tuple(sorted(blocks.items()))
+
+
+# ── the headline: one continuous run, the folds as stability evidence ─────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class RunFigures:
+    """One persisted run's report figures: pre-tax, after-tax realised, drawdown, benchmark."""
+
+    arm: str
+    fold: str
+    start: date
+    terminal: date
+    pre_tax_xirr: Decimal
+    #: ``None`` when it could not be struck; ``after_tax_error`` then says why.
+    after_tax_xirr: Decimal | None
+    after_tax_error: str | None
+    max_drawdown: Decimal
+    benchmark_xirr: Decimal
+    #: What the benchmark series was, read from the run's recorded source (never assumed).
+    benchmark: str
+    excess: Decimal
+    rail_blocks: tuple[tuple[str, int], ...] | None
+
+    @property
+    def years(self) -> Decimal:
+        """The run's span in years (Actual/365), the weight its rate carries in a chain."""
+        return Decimal((self.terminal - self.start).days) / Decimal(365)
+
+
+def run_figures(
+    out_dir: Path, digest: str, *, arm: str, fold: str, fmv: GrandfatheringPrices
+) -> RunFigures:
+    """The report figures of the run persisted under ``digest`` in ``out_dir`` (only read)."""
+    loaded = load_run(out_dir, digest)
+    if loaded is None:
+        raise FoldCampaignError(f"{arm} {fold}: run not on disk ({digest})")
+    summary, ledger = loaded
+    after_tax: Decimal | None
+    try:
+        taxed = compute_after_tax(ledger, PROFILE, schedule=load_tax_schedule(), fmv=fmv)
+        after_tax, error = taxed.after_tax_xirr_realised, taxed.realised_xirr_error
+    except TaxError as failure:
+        after_tax, error = None, str(failure)
+    return RunFigures(
+        arm=arm,
+        fold=fold,
+        start=summary.start,
+        terminal=summary.terminal,
+        pre_tax_xirr=summary.xirr,
+        after_tax_xirr=after_tax,
+        after_tax_error=error if after_tax is None else None,
+        max_drawdown=summary.max_drawdown,
+        benchmark_xirr=summary.benchmark_xirr,
+        benchmark=describe_benchmark(summary.benchmark_source, summary.benchmark_name),
+        excess=summary.excess,
+        rail_blocks=_rail_blocks(summary),
+    )
+
+
+def geometric_chain(legs: Sequence[tuple[Decimal, Decimal]]) -> Decimal:
+    """Annualised rates chained geometrically: ``(Π(1 + r_i)^t_i)^(1/T) - 1``, ``T = Σ t_i``.
+
+    ``legs`` are ``(r_i, t_i)``: an annualised rate and the years it ran for. This is the one rate
+    that compounds to the same terminal wealth over ``T`` years as the legs did one after another
+    (each restarting from the last one's ending value). It is **never** the arithmetic mean of the
+    ``r_i``, which overstates it whenever they differ. Raises ``ValueError`` on no legs, a
+    non-positive span, or a rate at or below -100 %.
+    """
+    if not legs:
+        raise ValueError("nothing to chain")
+    total = sum((t for _, t in legs), Decimal(0))
+    if total <= 0 or any(t <= 0 for _, t in legs):
+        raise ValueError("every leg needs a positive span")
+    growth = Decimal(1)
+    for rate, years in legs:
+        if rate <= -1:
+            raise ValueError(f"a rate of {rate:.2%} cannot be compounded")
+        growth *= (1 + rate) ** years
+    return growth ** (1 / total) - 1
+
+
+def _cell(value: Decimal | None, error: str | None = None) -> str:
+    return f"{value:.2%}" if value is not None else f"n/a ({error or 'not computable'})"
+
+
+def _chain_cell(legs: Sequence[tuple[Decimal | None, Decimal]], names: Sequence[str]) -> str:
+    missing = [name for name, (rate, _) in zip(names, legs, strict=True) if rate is None]
+    if missing:
+        return f"n/a (no figure on {', '.join(missing)})"
+    return f"{geometric_chain([(r, t) for r, t in legs if r is not None]):.2%}"
+
+
+def headline_lines(
+    sources: Sequence[tuple[str, Path]],
+    digests: dict[tuple[str, str, str], str],
+    folds: FoldPlan,
+    *,
+    fmv: GrandfatheringPrices,
+) -> list[str]:
+    """The headline (one continuous run per arm), the per-fold stability table and the chain.
+
+    ``sources`` are ``(arm label, directory its runs are in)``; ``digests`` maps ``(label, fold,
+    role)`` to the run's digest, continuous run included. Every directory is only read.
+    """
+    window = continuous_window(folds)
+    whole = continuous_fold(folds)
+    names = [f.name for f in folds.folds]
+    lines = [
+        f"## Headline — one continuous run, {window.start} → {window.end}",
+        "",
+        f"*One uninterrupted replay over the union of the fold test windows ({names[0]} test "
+        f"start → {names[-1]} test end), made exactly as the fold runs are: the same arm, floor, "
+        "cash interest, corporate actions, investor and run path. This is the figure to quote; the "
+        "per-fold runs below restart from cash at every boundary and are stability evidence.*",
+        "",
+        "| Arm | Dates | Pre-tax XIRR | After-tax XIRR (realised) | Max drawdown | "
+        "Benchmark XIRR | Benchmark | Excess (pre-tax) | Rail blocks |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for label, out_dir in sources:
+        run = run_figures(
+            out_dir, digests[(label, whole, CONTINUOUS)], arm=label, fold=whole, fmv=fmv
+        )
+        lines.append(
+            f"| {label} | {run.start} → {run.terminal} | {run.pre_tax_xirr:.2%} | "
+            f"{_cell(run.after_tax_xirr, run.after_tax_error)} | {run.max_drawdown:.2%} | "
+            f"{run.benchmark_xirr:.2%} | {run.benchmark} | {run.excess:+.2%} | "
+            f"{rail_blocks_cell(run.rail_blocks)} |"
+        )
+    lines += [
+        "",
+        "## Per-fold test windows — stability evidence",
+        "",
+        "| Arm | Fold | Dates | Pre-tax XIRR | After-tax XIRR (realised) | Max drawdown | "
+        "Benchmark XIRR | Rail blocks |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    chains: list[str] = []
+    for label, out_dir in sources:
+        runs = [
+            run_figures(out_dir, digests[(label, name, _TEST)], arm=label, fold=name, fmv=fmv)
+            for name in names
+        ]
+        for run in runs:
+            lines.append(
+                f"| {label} | {run.fold} | {run.start} → {run.terminal} | "
+                f"{run.pre_tax_xirr:.2%} | {_cell(run.after_tax_xirr, run.after_tax_error)} | "
+                f"{run.max_drawdown:.2%} | {run.benchmark_xirr:.2%} | "
+                f"{rail_blocks_cell(run.rail_blocks)} |"
+            )
+        pre = _chain_cell([(r.pre_tax_xirr, r.years) for r in runs], names)
+        post = _chain_cell([(r.after_tax_xirr, r.years) for r in runs], names)
+        span = sum((r.years for r in runs), Decimal(0))
+        chains.append(f"| {label} | {pre} | {post} | {span:.2f} |")
+    lines += [
+        "",
+        f"**Chained across {', '.join(names)} — geometric: (Π(1 + r_i)^t_i)^(1/T) - 1**, with "
+        "r_i each fold's XIRR, t_i its run's span in years (Actual/365) and T = Σ t_i. Not an "
+        "arithmetic mean, and not the headline: it chains runs that each restarted from cash.",
+        "",
+        "| Arm | Chained pre-tax XIRR (geometric) | Chained after-tax XIRR, realised (geometric) "
+        "| T (years) |",
+        "| --- | --- | --- | --- |",
+        *chains,
+    ]
+    return lines
 
 
 def _floor_label() -> str:
@@ -548,8 +786,13 @@ def render_baseline_report(
         f"- Floor: **{_floor_label()}**",
         *(f"- {line}" for line in _assumptions()),
         "",
-        "| Arm | Fold | Window | Dates | After-tax XIRR (realised) | Max drawdown | NAV points |",
-        "| --- | --- | --- | --- | --- | --- | --- |",
+        *headline_lines([(arm.label, plan.out_dir) for arm in plan.arms], digests, folds, fmv=fmv),
+        "",
+        "## Every fold window, as frozen",
+        "",
+        "| Arm | Fold | Window | Dates | After-tax XIRR (realised) | Max drawdown | NAV points "
+        "| Rail blocks |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for role in (_TEST, _SELECTION):
         for arm in plan.arms:
@@ -558,14 +801,11 @@ def render_baseline_report(
             )
             for fold, result in zip(folds.folds, arm_folds.folds, strict=True):
                 window = fold.test if role == _TEST else fold.selection
-                xirr = (
-                    f"{result.after_tax_xirr:.2%}"
-                    if result.after_tax_xirr is not None
-                    else f"n/a ({result.error})"
-                )
                 lines.append(
                     f"| {arm.label} | {fold.name} | {role} | {window.start} → {window.end} | "
-                    f"{xirr} | {result.max_drawdown:.2%} | {len(result.after_tax_returns) + 1} |"
+                    f"{_cell(result.after_tax_xirr, result.error)} | "
+                    f"{result.max_drawdown:.2%} | {len(result.after_tax_returns) + 1} | "
+                    f"{rail_blocks_cell(result.rail_blocks)} |"
                 )
     return "\n".join(lines) + "\n"
 
@@ -714,6 +954,15 @@ def render_round2(
         variance = replace(variance, excluded=(*variance.excluded, *trial_sharpes.excluded))
     named = next(b for b in baselines if b.label == baseline_label)
     verdicts = [evaluate(c, named, trials=trials, sharpe_variance=variance) for c in candidates]
+    headline = headline_lines(
+        [
+            *((label, baseline_dir) for label in BASELINE_LABELS),
+            *((arm.label, plan.out_dir) for arm in plan.arms),
+        ],
+        {**base_digests, **cand_digests},
+        folds,
+        fmv=fmv,
+    )
     return render_decision(
         verdicts,
         arms,
@@ -722,6 +971,7 @@ def render_round2(
         floor_label=_floor_label(),
         assumptions=_assumptions(),
         command=command,
+        headline=headline,
     )
 
 
@@ -867,7 +1117,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 text = render_baseline_report(plan, folds, actions, service_fmv[1])
         elif args.command == "trial-sharpes":
             labels = _labels(args.arms) if args.arms else list(round1_labels())
-            plan = round2_plan(out_dir, folds, labels, data_root=args.data_root)
+            plan = round2_plan(out_dir, folds, labels, data_root=args.data_root, continuous=False)
             if _print_outcomes(run_fold_units(plan, workers=args.workers)):
                 raise FoldCampaignError("a trial run failed; no trial Sharpes written (re-run)")
             service_fmv = l1_grandfathering(args.data_root)
