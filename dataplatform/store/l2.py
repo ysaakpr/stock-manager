@@ -62,9 +62,11 @@ from dataplatform.corpactions.factors import (
     FactorError,
     FactorRow,
     total_return_series,
+    with_events,
     with_price_events,
 )
 from dataplatform.corpactions.implied import ImpliedSplit, SessionBar, detect_implied_splits
+from dataplatform.corpactions.manual_actions import default_manual_actions
 from dataplatform.corpactions.reconcile import load_reconciled_actions
 from dataplatform.ingest.models import ISIN_PATTERN
 from dataplatform.logging import get_logger
@@ -94,6 +96,7 @@ __all__ = [
     "L2WriteReport",
     "RawBar",
     "build_adjusted_bars",
+    "curated_actions",
     "implied_splits",
     "isins_with_eq_bars",
     "load_factor_chain",
@@ -108,6 +111,7 @@ __all__ = [
     "read_raw_bars_from_l1",
     "rebuild_all",
     "rebuild_invalidated",
+    "rebuild_isins",
     "rebuild_truncated",
     "register_adjusted_view",
     "register_raw_view",
@@ -206,7 +210,8 @@ class L2WriteReport:
     case any stale partition was removed, so a rebuild is still identical: absent). `from_date`/
     `to_date` bound the series written; both are `None` for an empty ISIN. `implied_splits` are
     the share-basis changes read off L1 that no feed published (`corpactions.implied`), each
-    carried into the partition's `cum_price_factor`.
+    carried into the partition's `cum_price_factor`; `curated` are the hand-transcribed, sourced
+    actions (`corpactions.manual_actions`) composed in the same way.
     """
 
     isin: str
@@ -215,6 +220,7 @@ class L2WriteReport:
     from_date: date | None
     to_date: date | None
     implied_splits: tuple[ImpliedSplit, ...] = ()
+    curated: tuple[CorporateAction, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +284,10 @@ class L2RebuildReport:
     @property
     def implied_splits(self) -> tuple[ImpliedSplit, ...]:
         return tuple(s for r in self.written for s in r.implied_splits)
+
+    @property
+    def curated(self) -> tuple[CorporateAction, ...]:
+        return tuple(a for r in self.written for a in r.curated)
 
 
 def open_connection() -> duckdb.DuckDBPyConnection:
@@ -500,6 +510,7 @@ def materialize_isin(
     data_root: Path | None = None,
     history_isins: Sequence[str] | None = None,
     infer_splits: bool = True,
+    curated: Sequence[CorporateAction] | None = None,
 ) -> L2WriteReport:
     """Materialize one ISIN's L2 adjusted partition from L1 + its factor chain.
 
@@ -520,6 +531,11 @@ def materialize_isin(
     the partition carries no unadjusted step for them. Each is logged with its evidence and listed
     on the report; the partition's `cum_price_factor` is the factor actually applied, so
     `adj = raw x cum_price_factor` holds row by row either way.
+
+    `curated` are the sourced actions no feed carries (`corpactions.manual_actions`); `None` reads
+    the repo's curated file. They are composed in before the implied-split scan — a curated split
+    is a recorded event to it, so the same step is never adjusted twice — and one a feed has since
+    published (same ex-date and type) is skipped in the feed's favour (`curated_actions`).
     """
     if chain.isin != isin:
         raise ValueError(
@@ -550,6 +566,16 @@ def materialize_isin(
         return L2WriteReport(isin=isin, path=None, rows_written=0, from_date=None, to_date=None)
 
     actions = tuple(actions)
+    manual = curated_actions(
+        isin,
+        actions,
+        tuple(a.as_action() for a in default_manual_actions().actions_for(isin))
+        if curated is None
+        else tuple(curated),
+    )
+    if manual:
+        chain = with_events(chain, manual)
+        actions = actions + manual
     implied = implied_splits(isin, chain, actions, raw_bars) if infer_splits else ()
     if implied:
         extra = tuple(s.as_action() for s in implied)
@@ -570,6 +596,7 @@ def materialize_isin(
         from_date=min(dates),
         to_date=max(dates),
         implied_splits=implied,
+        curated=manual,
     )
     _LOG.info(
         "l2.prices_adjusted_written",
@@ -580,9 +607,49 @@ def materialize_isin(
         from_date=report.from_date.isoformat() if report.from_date else None,
         to_date=report.to_date.isoformat() if report.to_date else None,
         implied_splits=len(implied),
+        curated_actions=len(manual),
         state="PUBLISHED",
     )
     return report
+
+
+def curated_actions(
+    isin: str,
+    recorded: Iterable[CorporateAction],
+    curated: Sequence[CorporateAction],
+) -> tuple[CorporateAction, ...]:
+    """The curated actions for `isin` that the recorded ones do not already state.
+
+    What it does: drops any curated action whose `(ex_date, action_type)` a recorded (feed) action
+    shares — once a feed publishes the event, the feed's row is the one that counts, and composing
+    both would apply it twice — logging each one it drops, and each one it keeps.
+
+    What it never does: read a file or a database (the caller passes the curated rows), or drop a
+    recorded action.
+    """
+    have = {(a.ex_date, a.action_type) for a in recorded}
+    kept: list[CorporateAction] = []
+    for action in curated:
+        if action.isin != isin:
+            raise ValueError(f"curated action for {action.isin} passed for {isin}")
+        if (action.ex_date, action.action_type) in have:
+            _LOG.warning(
+                "l2.curated_action_superseded",
+                isin=isin,
+                ex_date=action.ex_date.isoformat(),
+                action_type=action.action_type.value,
+                state="SKIPPED",
+            )
+            continue
+        _LOG.info(
+            "l2.curated_action",
+            isin=isin,
+            ex_date=action.ex_date.isoformat(),
+            action_type=action.action_type.value,
+            l0_key=action.l0_key,
+        )
+        kept.append(action)
+    return tuple(kept)
 
 
 def implied_splits(
@@ -1234,10 +1301,71 @@ def rebuild_all(
         written=len(report.written),
         rows=report.rows_written,
         implied_splits=len(report.implied_splits),
+        curated_actions=len(report.curated),
         pruned_retired=len(report.pruned_retired),
         state="PUBLISHED",
     )
     return report
+
+
+def rebuild_isins(
+    conn: Connection,
+    isins: Sequence[str],
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    data_root: Path | None = None,
+    history_for: Mapping[str, Sequence[str]] | None = None,
+    survivor_of: Callable[[str], str] | None = None,
+) -> tuple[L2WriteReport, ...]:
+    """Rebuild exactly the named ISINs' partitions, as `rebuild_all` would write them.
+
+    For a change that reaches a known handful of ISINs — a curated action added to
+    `corpactions.manual_actions` — without a twelve-minute pass over every partition. Each ISIN is
+    rebuilt through `materialize_isin` over its lineage chain, byte-identical to what
+    `rebuild_all` writes for it; no other partition is touched.
+
+    What it never does: build a lineage-retired ISIN (its bars are its survivor's — name the
+    survivor instead; it raises `ValueError` rather than guess), or write L0, L1 or Postgres.
+    """
+    wanted = tuple(dict.fromkeys(isins))
+    if survivor_of is not None:
+        retired = [i for i in wanted if survivor_of(i) != i]
+        if retired:
+            raise ValueError(
+                "lineage-retired ISINs have no partition of their own; rebuild their survivors: "
+                + ", ".join(f"{i} -> {survivor_of(i)}" for i in retired)
+            )
+    owns = con is None
+    con = open_connection() if con is None else con
+    try:
+        load = set(wanted)
+        if history_for is not None:
+            for isin in wanted:
+                load.update(history_for.get(isin, ()))
+        preload_raw_bars(con, load, data_root=data_root)
+        reports = tuple(
+            materialize_isin(
+                isin,
+                chain=load_factor_chain(conn, isin),
+                actions=load_reconciled_actions(conn, isin=isin),
+                con=con,
+                data_root=data_root,
+                history_isins=None if history_for is None else history_for.get(isin),
+            )
+            for isin in wanted
+        )
+    finally:
+        if owns:
+            con.close()
+    _LOG.info(
+        "l2.rebuilt_isins",
+        dataset=PRICES_ADJUSTED_DATASET,
+        isins=len(reports),
+        rows=sum(r.rows_written for r in reports),
+        curated_actions=sum(len(r.curated) for r in reports),
+        state="PUBLISHED",
+    )
+    return reports
 
 
 # ── internals ────────────────────────────────────────────────────────────────────────────────

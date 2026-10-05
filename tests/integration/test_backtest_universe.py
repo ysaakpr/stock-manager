@@ -12,8 +12,9 @@ Every acceptance criterion of the task is a test here:
 
 The lake is built through the *real* seam: raw ``prices_raw`` L1 partitions under ``tmp_path``
 with a per-name turnover engineered to bracket the liquidity floor, and real M3.9 constituents
-snapshots written through ``write_constituents_l1`` so ``membership_asof`` reads the same on-disk
-contract production does. No postgres, no network, deterministic.
+snapshots written through ``write_constituents_l1`` beside a point-in-time membership history
+anchored before them, so the screen reads the same on-disk contract production does (a snapshot
+newer than the history's anchor is the fresher record). No postgres, no network, deterministic.
 
 The fixture is a six-name market at one rebalance whose twelve-month look-back window is complete:
 
@@ -58,6 +59,7 @@ from dataplatform.ingest.indices import (
 from dataplatform.store.l2 import materialize_isin
 from dataplatform.store.paths import l1_partition_path
 from dataplatform.store.schemas import PRICES_RAW_DATASET, PRICES_RAW_SCHEMA
+from tests.index_history_support import write_index_history
 
 pytestmark = pytest.mark.integration
 
@@ -219,8 +221,15 @@ def lake(tmp_path: Path) -> Path:
     """An L1 lake of six names plus an as-of index snapshot in force for the 2024-02-01 date."""
     for session in _SESSIONS:
         _write_l1_partition(tmp_path, session, _ALL_NAMES)
-    # A snapshot captured before the rebalance, naming every member but NONMEMBER — the membership
-    # in force on 2024-02-01.
+    # The membership history (anchored before the snapshot) covers the whole window, and a snapshot
+    # captured before the rebalance names every member but NONMEMBER — in force on 2024-02-01.
+    write_index_history(
+        tmp_path,
+        INDEX_SLUG,
+        coverage_start=_SESSIONS[0],
+        anchor=date(2023, 12, 1),
+        members=_MEMBERS,
+    )
     _write_snapshot(tmp_path, date(2024, 1, 1), _MEMBERS)
     # No corporate actions in this fixture, so every name's L2 adjusted series is its raw series
     # (identity factor chain) — the store the M9.2-state adjusted signal reads.
@@ -291,8 +300,8 @@ def test_membership_screen_is_pit_safe(lake: Path) -> None:
         reader.close()
 
     assert members_now == frozenset(_MEMBERS)
-    assert newco not in (members_now or frozenset())  # the future addition did not leak back
-    assert members_future is not None and newco in members_future  # but is seen once in force
+    assert newco not in members_now  # the future addition did not leak back
+    assert newco in members_future  # but is seen once in force
 
 
 def test_liquidity_screen_is_pit_safe(lake: Path) -> None:
@@ -399,8 +408,8 @@ def test_constrained_run_completes_and_report_states_deltas(lake: Path) -> None:
 def test_run_universe_report_end_to_end(lake: Path) -> None:
     """``run_universe_report`` runs both backtests and renders a report that names the thresholds.
 
-    It also probes ``membership_asof`` and reports honestly that this store *does* carry a snapshot,
-    so the full intersection applied (the ``membership_present`` branch of the report).
+    The history covers every rebalance, so the full intersection applied (the
+    ``membership_present`` branch of the report).
     """
     report = run_universe_report(
         start=_SESSIONS[0],

@@ -47,7 +47,7 @@ from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.identity.master import Exchange, IdentityMaster, IdentityStore
 from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
-from dataplatform.ingest.bse.bhavcopy import BseLegacyQuote
+from dataplatform.ingest.bse.bhavcopy import LegacyParse, MalformedLine
 from dataplatform.ingest.calendar import (
     CalendarCoverageError,
     TradingCalendar,
@@ -59,7 +59,7 @@ from dataplatform.ingest.fetcher import (
     ForbiddenSpikeError,
     build_fetcher,
 )
-from dataplatform.ingest.models import BhavcopyParse, ParseError, PriceRow
+from dataplatform.ingest.models import BhavcopyParse, ParseError, PriceRow, UnidentifiedRow
 from dataplatform.ingest.nse import bhavcopy, delivery, mto
 from dataplatform.ingest.nse.bhavcopy_legacy import LEGACY_SOURCE_ID
 from dataplatform.ingest.nse.bhavcopy_udiff import UDIFF_SOURCE_ID
@@ -71,6 +71,7 @@ from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Ref, L0Store
 from dataplatform.store.l1 import write_prices_raw
+from dataplatform.store.schemas import PriceQuarantineReason
 
 __all__ = [
     "SOURCE_SETS",
@@ -313,14 +314,34 @@ def _bse_legacy_request(trade_date: date, register: SourceRegister) -> FetchRequ
     )
 
 
-def _parse_bse_legacy(store: L0Store, ref: L0Ref) -> tuple[BseLegacyQuote, ...]:
-    """Parse one stored legacy payload. The trade date comes from the ref — the file has none."""
-    return bse_bhavcopy.parse_legacy(
+def _parse_bse_legacy(store: L0Store, ref: L0Ref) -> LegacyParse:
+    """Parse one stored legacy payload. The trade date comes from the ref — the file has none.
+
+    The report form, so a line the parser quarantined (two records run together that could not be
+    split unambiguously) reaches the writer and lands in `prices_raw_quarantine`.
+    """
+    return bse_bhavcopy.parse_legacy_report(
         store.get(ref), filename=ref.filename, trade_date=ref.logical_date
     )
 
 
-def _write_bse_legacy(quotes: Sequence[BseLegacyQuote], ctx: WriteContext) -> object:
+def _quarantine_row(malformed: MalformedLine, trade_date: date) -> UnidentifiedRow:
+    """A quarantined legacy line as the quarantine dataset's identity-less row.
+
+    `symbol`/`series` are the line's first and third fields as published — the scrip code and group
+    of its first record. Both are required non-empty by the dataset, and a line malformed enough to
+    lack them is still landed, under a placeholder naming the line, rather than dropped.
+    """
+    return UnidentifiedRow(
+        symbol=malformed.scrip_code or f"line:{malformed.line}",
+        series=malformed.group or "?",
+        trade_date=trade_date,
+        stated_isin="",
+        line=malformed.line,
+    )
+
+
+def _write_bse_legacy(parsed: LegacyParse, ctx: WriteContext) -> object:
     """Resolve a legacy session through the BSE scrip master and write its `prices_raw` partition.
 
     The whole reason this set declares `needs_master`: a legacy row is keyed on `SC_CODE` and has
@@ -332,9 +353,16 @@ def _write_bse_legacy(quotes: Sequence[BseLegacyQuote], ctx: WriteContext) -> ob
     """
     if ctx.master is None:  # pragma: no cover - the runner refuses to wire this set without one
         raise ValueError(f"{BSE_BHAVCOPY_LEGACY} needs the identity master to resolve scrip codes")
-    resolution = bse_bhavcopy.resolve_legacy(quotes, build_scrip_index(ctx.master, Exchange.BSE))
+    resolution = bse_bhavcopy.resolve_legacy(
+        parsed.quotes, build_scrip_index(ctx.master, Exchange.BSE)
+    )
+    trade_date = parsed.quotes[0].trade_date
     return write_prices_raw(
-        list(resolution.resolved), exchange=Exchange.BSE, data_root=ctx.data_root
+        list(resolution.resolved),
+        exchange=Exchange.BSE,
+        unidentified_rows=[_quarantine_row(line, trade_date) for line in parsed.quarantined],
+        unidentified_reason=PriceQuarantineReason.MERGED_RECORDS_UNSPLITTABLE,
+        data_root=ctx.data_root,
     )
 
 

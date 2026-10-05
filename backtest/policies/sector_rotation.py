@@ -31,11 +31,12 @@ survivorship bias — it silently assumes a name was in the industry (and the in
 guard against that is structural, not a convention: every candidate carries the ``knowable_date`` on
 which its sector *and* its momentum became knowable, and the policy reads the candidate set only
 through ``ctx.pit.admit``, so a record whose sector was resolved from a snapshot dated after the
-session trips ``PitError`` rather than reaching a decision. The production data source resolves each
-name's sector through ``membership_asof`` — the snapshot *in force on the decision date*, never
-today's list — and stamps that snapshot's own capture date as the ``knowable_date`` (M3.9/M10.1). A
-static current-day map used before M10.2's forward history has accrued is survivorship-biased by
-construction; that limitation is stated in the report, and this policy does not paper over it.
+session trips ``PitError`` rather than reaching a decision. The production data source takes *who
+is in the universe* from the point-in-time index membership history (effective on the decision date
+and announced by it, never today's list) and fails a date before the history's coverage; the sector
+map is only a label on those members, and a member it does not name is pooled under the rails'
+``UNKNOWN_SECTOR`` rather than dropped. The label itself is a static current-day classification —
+a limitation the report states, and this policy does not paper over.
 
 What it never does: read a wall clock (time is ``ctx.clock`` — B10), key on a symbol (ISIN only —
 invariant #2), hold a cost model (the injected broker owns the one shared model — invariant #4/#5),
@@ -182,8 +183,8 @@ class SectorRotationData(Protocol):
       ``ctx.pit`` and the guard proves there is no membership or price leak.
 
     A test supplies an in-memory implementation; the ten-year run supplies one backed by L1 prices
-    and the M3.9/M10.1 constituent snapshots (``membership_asof``) through the query layer. Either
-    way the policy never reaches past this surface.
+    and the point-in-time index membership history (``index_membership_asof``) through the query
+    layer. Either way the policy never reaches past this surface.
     """
 
     def is_rebalance(self, session: date) -> bool:

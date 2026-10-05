@@ -56,6 +56,7 @@ from dataplatform.query.pit import Dataset, PitContext, PitError
 from dataplatform.store.paths import l1_partition_path
 from dataplatform.store.schemas import PRICES_RAW_DATASET, PRICES_RAW_SCHEMA
 from execution.broker import Exchange, Holding, Margins, Position, Side
+from tests.index_history_support import digests_without_index_membership
 
 _PRICE_Q: Final = Decimal("0.0001")
 _DIGESTS: Final = Path("tests/fixtures/cap_tiers/arm_digests_43bbb57.json")
@@ -475,9 +476,14 @@ def test_each_cap_tier_arm_has_its_own_run_id() -> None:
 
 
 def test_every_existing_arm_keeps_its_run_id_byte_for_byte() -> None:
-    """The digests main (43bbb57) gave every arm in ``ARMS`` at both floors, pinned."""
+    """The digests main (43bbb57) gave every arm in ``ARMS`` at both floors, pinned.
+
+    Only the point-in-time index membership key moves them, and it moves every one of them: a
+    ledger persisted under the snapshot-era screen is never resumed as today's reading.
+    """
     pinned = json.loads(_DIGESTS.read_text())
-    now = run_digests(
-        start=date(2012, 7, 4), end=date(2026, 8, 31), arms=ARMS, floors=(LOW_FLOOR, HIGH_FLOOR)
-    )
-    assert {f"{label}|{floor}": digest for (label, floor), digest in now.items()} == pinned
+    start, end, floors = date(2012, 7, 4), date(2026, 8, 31), (LOW_FLOOR, HIGH_FLOOR)
+    before = digests_without_index_membership(start=start, end=end, arms=ARMS, floors=floors)
+    now = run_digests(start=start, end=end, arms=ARMS, floors=floors)
+    assert {f"{label}|{floor}": digest for (label, floor), digest in before.items()} == pinned
+    assert not set(now.values()) & set(pinned.values())

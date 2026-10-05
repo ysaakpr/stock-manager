@@ -33,6 +33,7 @@ stage; this entry point is for a lake where only the fill is wanted.
     uv run python -m dataplatform.store.l2_fill --extend
     uv run python -m dataplatform.store.l2_fill --rebuild-all
     uv run python -m dataplatform.store.l2_fill --prune-retired
+    uv run python -m dataplatform.store.l2_fill --rebuild INE018I01017 INF846K01ZL0
     uv run python -m dataplatform.store.l2_fill --rebuild-invalidated
 """
 
@@ -60,6 +61,7 @@ from dataplatform.store.l2 import (
     prune_retired,
     rebuild_all,
     rebuild_invalidated,
+    rebuild_isins,
     rebuild_truncated,
 )
 
@@ -72,6 +74,7 @@ __all__ = [
     "fill",
     "prune",
     "rebuild_everything",
+    "rebuild_named",
 ]
 
 _LOG = get_logger(__name__)
@@ -166,6 +169,25 @@ def rebuild_everything() -> L2RebuildReport:
         try:
             return rebuild_all(
                 conn,
+                con=con,
+                data_root=settings.data_root,
+                history_for=history,
+                survivor_of=resolver.survivor_of,
+            )
+        finally:
+            con.close()
+
+
+def rebuild_named(isins: Sequence[str]) -> tuple[L2WriteReport, ...]:
+    """Rebuild only the named partitions of the configured lake (`l2.rebuild_isins`)."""
+    settings = get_settings()
+    with connect() as conn:
+        history, resolver = _history(conn)
+        con = open_connection()
+        try:
+            return rebuild_isins(
+                conn,
+                isins,
                 con=con,
                 data_root=settings.data_root,
                 history_for=history,
@@ -275,6 +297,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="rebuild every partition from L1 + factors (and implied splits); prune retired",
     )
     parser.add_argument(
+        "--rebuild",
+        nargs="+",
+        metavar="ISIN",
+        help="rebuild only these partitions (lineage survivors), e.g. after a curated action",
+    )
+    parser.add_argument(
         "--prune-retired",
         action="store_true",
         help="only remove the partitions of lineage-retired ISINs",
@@ -287,19 +315,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.dry_run and not args.extend:
         parser.error("--dry-run applies to --extend")
-    modes = (args.extend, args.rebuild_all, args.prune_retired, args.rebuild_invalidated)
+    modes = (
+        args.extend,
+        args.rebuild_all,
+        args.prune_retired,
+        bool(args.rebuild),
+        args.rebuild_invalidated,
+    )
     if sum(modes) > 1:
         parser.error(
-            "--extend, --rebuild-all, --prune-retired and --rebuild-invalidated are separate modes"
+            "--extend, --rebuild-all, --rebuild, --prune-retired and --rebuild-invalidated are "
+            "separate modes"
         )
     if args.rebuild_invalidated:
         drained = drain_invalidated()
         print(f"{'rebuilt':<24} {len(drained)}")
         print(f"{'rows_written':<24} {sum(r.rows_written for r in drained)}")
         print(f"{'implied_splits':<24} {sum(len(r.implied_splits) for r in drained)}")
-        for written in drained:
-            for split in written.implied_splits:
+        for drained_isin in drained:
+            for split in drained_isin.implied_splits:
                 print(f"{'  implied':<24} {split.isin} {split.ex_date.isoformat()}")
+        return 0
+    if args.rebuild:
+        written = rebuild_named(args.rebuild)
+        for r in written:
+            print(
+                f"{r.isin} rows={r.rows_written} curated={len(r.curated)} "
+                f"implied={len(r.implied_splits)}"
+            )
         return 0
     if args.prune_retired:
         pruned = prune()
@@ -313,6 +356,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{'written':<24} {len(rebuilt.written)}")
         print(f"{'rows_written':<24} {rebuilt.rows_written}")
         print(f"{'implied_splits':<24} {len(rebuilt.implied_splits)}")
+        print(f"{'curated_actions':<24} {len(rebuilt.curated)}")
         return 0
     if args.extend:
         report, coverage = extend(dry_run=args.dry_run)
