@@ -21,6 +21,11 @@ proxy's validation is ``ops/studies/cap-tier-size-measure-2026-10-05.md``).
     to recover, trades, total costs, rail blocks by rail, end cash share and holdings stuck in names
     that stopped printing; the NIFTY 50, Midcap 150 and Smallcap 250 TRIs on the same windows; and
     for the smallcap arm the top-5 names' share of profit and the 2018-01 → 2020-03 small-cap crash.
+    Per window x floor it also splits each arm's idle cash by cause, from the saved ledger and NAV
+    (``backtest.idle_cash``): mean cash share of NAV, waiting proceeds, ceiling-bound and other
+    leftover, and buys at the per-order ceiling. It flags any arm whose longest buy-free span runs
+    past ``EMPTY_TIER_DECISIONS`` decision sessions, with its XIRR from its first buy as an
+    informational figure beside the headline.
 
 What this module never does: tune a parameter (every arm is fixed in ``backtest.sweep``), write
 under the lake, read a wall clock into a result, or value a name that stopped printing at anything
@@ -54,8 +59,17 @@ from backtest.campaign import MAX_WORKERS, UnitOutcome, _git_commit
 from backtest.cash_interest import accrue_cash_interest, load_repo_rate_schedule
 from backtest.fold_campaign import PROFILE
 from backtest.folds import load_folds
+from backtest.idle_cash import (
+    EMPTY_TIER_DECISIONS,
+    BuyFreeSpan,
+    IdleCash,
+    idle_cash,
+    longest_buy_free_span,
+    xirr_from_first_buy,
+)
 from backtest.nav import nav_file, read_nav
-from backtest.run import _L1Reader
+from backtest.rails import ratified_backtest_rail_policy
+from backtest.run import _first_session_of_each_month, _L1Reader
 from backtest.run_ledger import (
     RunSummary,
     _replayed_quantities,
@@ -95,6 +109,7 @@ __all__ = [
     "PathFigures",
     "annualised_growth",
     "cap_tier_plan",
+    "decision_sessions",
     "longest_drawdown",
     "main",
     "max_drawdown",
@@ -390,6 +405,22 @@ class RunRow:
     stuck: tuple[tuple[str, date, Decimal, bool], ...]  # isin, last print, value, merger in store
     contributions: Mapping[str, Decimal]
     crash: tuple[Decimal, Decimal] | None  # return, max drawdown inside CRASH_WINDOW
+    idle: IdleCash
+    buy_free: BuyFreeSpan | None
+    from_first_buy: tuple[date, Decimal] | None  # first populated session, XIRR from it
+
+
+def decision_sessions(arm: Arm, sessions: Sequence[date]) -> tuple[date, ...]:
+    """The sessions ``arm``'s policy decides on in a window's ``sessions``, as its runner sets them.
+
+    A swing arm decides every ``rebalance_interval_sessions``-th session counted from the first
+    (``backtest.run._L1SwingData``); the momentum baselines on the first session of each month.
+    Momentum v2's next-session redeploy is not a decision of its own here: its buys credit the
+    month's decision, which is all the buy-free span needs.
+    """
+    if arm.swing is not None:
+        return tuple(sessions[:: arm.swing.rebalance_interval_sessions])
+    return tuple(_first_session_of_each_month(sessions))
 
 
 def _crash(points: Sequence[tuple[date, Decimal]]) -> tuple[Decimal, Decimal] | None:
@@ -410,11 +441,18 @@ def _row(
     fmv: GrandfatheringPrices,
     last_print: Mapping[str, date],
     mergers: frozenset[str],
+    decisions: Sequence[date],
 ) -> RunRow:
     loaded = load_run(out_dir, digest)
     if loaded is None:
         raise CapTierCampaignError(f"{arm}: run {digest[:12]} is not on disk — run it first")
     summary, ledger = loaded
+    policy = ratified_backtest_rail_policy()
+    if summary.spec.get("rail_policy") != policy.digest():
+        raise CapTierCampaignError(
+            f"{arm}: run {digest[:12]} ran under rail policy {summary.spec.get('rail_policy')}, "
+            f"not {policy.label}; its per-order ceiling cannot be measured against the ratified one"
+        )
     nav = read_nav(nav_file(out_dir, digest), digest=digest).points
     try:
         taxed = compute_after_tax(ledger, PROFILE, schedule=load_tax_schedule(), fmv=fmv)
@@ -440,6 +478,11 @@ def _row(
         stuck=stuck,
         contributions=name_contributions(ledger),
         crash=_crash(nav),
+        idle=idle_cash(ledger, nav, rails=policy.rails),
+        buy_free=longest_buy_free_span(
+            decisions, [t.trade_date for t in ledger.trades if t.side is Side.BUY]
+        ),
+        from_first_buy=xirr_from_first_buy(ledger, nav),
     )
 
 
@@ -496,6 +539,7 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
             w.isin: w.delisted_on - timedelta(days=1) if w.delisted_on is not None else date.max
             for w in reader.listing_windows()
         }
+        sessions = {w.name: reader.trading_sessions(w.start, w.end) for w in plan.windows}
     finally:
         reader.close()
     _service, fmv = l1_grandfathering(plan.data_root)
@@ -516,6 +560,19 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
         "number carries that caveat.",
         "- A name that stops printing is valued at its last printed close until the end (never "
         "written down, never credited a merger consideration): see 'stuck' below.",
+        "- **Idle cash** (each window's second table) is rebuilt from the saved ledger and NAV "
+        "(`backtest.idle_cash`). It is the mean over NAV sessions of cash / NAV, split into "
+        "*waiting proceeds* (sale cash since the last buy session; a buy never spends its own "
+        "session's sale proceeds), *ceiling leftover* (the rest, after a buy session where at "
+        "least one buy hit the per-order ceiling min(₹1.2 L, 15 % of NAV)) and *other leftover*. "
+        "The three add up to the mean cash. *Buys at ceiling*: buys within one share of that "
+        "ceiling.",
+        f"- **Empty-tier flag**: an arm with no buy on more than {EMPTY_TIER_DECISIONS} "
+        "consecutive decision sessions (one trading year at the swing cadence; longer than any "
+        "regime-gate stand-aside in these runs). The ledger cannot see candidates, so buys stand "
+        "in for them. *XIRR from first buy* is **informational only**: measured from the "
+        "decision session before the first buy. It does not replace the pre-tax XIRR headline, "
+        "because the investor's money was in the run from the window's start.",
         "",
     ]
     rows: dict[tuple[str, Decimal, str], RunRow] = {}
@@ -539,6 +596,7 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
                     fmv=fmv,
                     last_print=last_print,
                     mergers=mergers,
+                    decisions=decision_sessions(arm, sessions[window.name]),
                 )
                 rows[(window.name, floor, arm.label)] = row
                 s = row.summary
@@ -564,8 +622,76 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
                     f"| {_days(p)} | — | — | — | — | — |"
                 )
             lines.append("")
+            lines += _idle_cash_table([rows[(window.name, floor, a.label)] for a in plan.arms])
+    lines += _empty_tier_section(rows, plan)
     lines += _smallcap_section(rows, plan)
     return "\n".join(lines) + "\n"
+
+
+def _span(span: BuyFreeSpan | None) -> str:
+    if span is None:
+        return "0"
+    end = f"next buy {span.next_buy}" if span.next_buy else "no buy to the end"
+    flag = " **EMPTY TIER**" if span.flagged else ""
+    return f"{span.decisions} from {span.start} ({end}){flag}"
+
+
+def _first_buy(row: RunRow) -> str:
+    if row.from_first_buy is None:
+        return "n/a"
+    start, rate = row.from_first_buy
+    return f"{_pct(rate)} from {start}"
+
+
+def _idle_cash_table(rows: Sequence[RunRow]) -> list[str]:
+    lines = [
+        "Idle cash by cause (mean over NAV sessions, share of NAV):",
+        "",
+        "| strategy | mean cash | waiting proceeds | ceiling leftover | other leftover "
+        "| waiting share of cash | buys at ceiling | longest buy-free span (decision sessions) "
+        "| XIRR from first buy (info only) |",
+        "|---|---|---|---|---|---|---|---|---|",
+    ]
+    for row in rows:
+        idle = row.idle
+        lines.append(
+            f"| {row.arm} | {_pct(idle.mean_cash_share)} | {_pct(idle.mean_waiting_share)} "
+            f"| {_pct(idle.mean_ceiling_share)} | {_pct(idle.mean_other_share)} "
+            f"| {_pct(idle.waiting_share_of_cash)} | {idle.ceiling_buys} of {idle.buys} "
+            f"| {_span(row.buy_free)} | {_first_buy(row)} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _empty_tier_section(
+    rows: Mapping[tuple[str, Decimal, str], RunRow], plan: CapTierPlan
+) -> list[str]:
+    lines = [
+        f"## Empty tiers: no buy on more than {EMPTY_TIER_DECISIONS} consecutive decision sessions",
+        "",
+    ]
+    flagged = [
+        (window, floor, arm.label, row, span)
+        for window in plan.windows
+        for floor in _FLOORS
+        for arm in plan.arms
+        if (span := (row := rows[(window.name, floor, arm.label)]).buy_free) is not None
+        and span.flagged
+    ]
+    if not flagged:
+        return [*lines, "None.", ""]
+    for window, floor, label, row, span in flagged:
+        lines.append(
+            f"- {window.name}, {_floor(floor).split(' (')[0]}, {label}: no buy on {span.decisions} "
+            f"decision sessions from {span.start}"
+            + (f" to the first buy on {span.next_buy}" if span.next_buy else " to the end")
+            + f". Mean cash {_pct(row.idle.mean_cash_share)} of NAV. Headline pre-tax XIRR "
+            f"{_pct(row.summary.xirr)}; XIRR from first buy (informational, not the headline) "
+            f"{_first_buy(row)}."
+        )
+    lines.append("")
+    return lines
 
 
 def _smallcap_section(
