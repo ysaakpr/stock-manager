@@ -142,25 +142,26 @@ def test_rows_arrive_newest_first_and_come_back_ascending(parsed: dict[str, TriS
 def test_no_gap_against_the_trading_calendar(parsed: dict[str, TriSeries]) -> None:
     """Every M1.7 calendar session in the window has a published level (D8 criterion ii).
 
-    The containment is one-directional on purpose. The published series is a *superset* of the
-    checked-in calendar's sessions: it also carries the five Budget/DR-site Saturday sessions
-    (2024-01-20, 2024-03-02, 2024-05-18, 2025-02-01, 2026-02-01) that `expected_data_dates` does
-    not model. Those are real sessions the exchange traded and priced, so a level on one is not a
-    defect in the TRI — it is a hole in the calendar, recorded here rather than papered over. What
-    *would* be a defect is a calendar session with no level, and there is none.
+    Both directions now. This test used to allow five extra published levels — the Budget/DR-site
+    weekend sessions 2024-01-20, 2024-03-02, 2024-05-18, 2025-02-01 and 2026-02-01, which the
+    calendar could not then model. The 2026-10-05 audit declared them (`DayKind.SPECIAL`), so the
+    published series and the calendar's expected-data dates must now be the same set: a level on
+    a date the calendar calls closed is a calendar hole again, and a session with no level a TRI
+    gap.
     """
     calendar = set(expected_data_dates(WINDOW_START, WINDOW_END))
     assert calendar, "the checked-in calendar must cover the acceptance window"
+    assert {
+        date(2024, 1, 20),
+        date(2024, 3, 2),
+        date(2024, 5, 18),
+        date(2025, 2, 1),
+        date(2026, 2, 1),
+    } <= calendar, "the weekend sessions the TRI proved are expected data dates"
     for slug, series in parsed.items():
         published = {point.as_of for point in series.points}
         assert not calendar - published, f"{slug}: sessions with no published level"
-        assert published - calendar == {
-            date(2024, 1, 20),
-            date(2024, 3, 2),
-            date(2024, 5, 18),
-            date(2025, 2, 1),
-            date(2026, 2, 1),
-        }, f"{slug}: unexpected extra sessions"
+        assert not published - calendar, f"{slug}: a level on a date the calendar calls closed"
 
 
 # ── acceptance (iii): the literal published levels — M3.9's never-satisfied spot-check ─────────

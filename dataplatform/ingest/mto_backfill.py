@@ -261,9 +261,10 @@ def plan_sessions(
 
     What it does: refuses a range outside `[CAMPAIGN_FLOOR, MTO_ERA_END)`, asks the calendar, and
     unions in the in-range `priced` sessions. The union is not a widening: a W1 price partition is
-    the exchange's own bhavcopy for that day, and the seven special Saturday sessions of 2012-2015
-    (2012-01-07 … 2015-02-28) are sessions the calendar does not list and W1 holds prices for — a
-    calendar-only plan would leave them without delivery for no reason but the plan.
+    the exchange's own bhavcopy for that day. It was added for the seven special Saturday sessions
+    of 2012-2015 (2012-01-07 … 2015-02-28), which the calendar did not then list; the calendar now
+    declares them (`special_sessions:`, DayKind.SPECIAL), so the union is a backstop that names any
+    priced date the calendar still misses — in the plan's note, so the calendar gets corrected.
     What it assumes: the calendar covers the range. Unlike W1 there is no weekday fallback — W1's
     campaign *was* the calendar's evidence, and a range the calendar cannot vouch for is one this
     driver has no business spending requests on. `CalendarCoverageError` propagates.

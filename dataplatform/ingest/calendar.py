@@ -16,6 +16,15 @@ exist" are not the same question. `expected_sessions` answers the first and excl
 `expected_data_dates` answers the second and includes them. A fetcher that used the first would
 silently skip eleven real trading days over this decade.
 
+**Weekend sessions.** The exchange also trades on the odd Saturday or Sunday that is no holiday at
+all: a Union Budget presented on a weekend, a live drill from the disaster-recovery site, the
+cut-over to a new trading system. Those dates are not in any holiday list, so a calendar built from
+"weekdays minus holidays" calls them WEEKEND and nothing ever asks for their files — and
+`reconcile` cannot see the miss, because a date nobody fetches never reaches `observed`. They are
+declared in the file's `special_sessions:` block, each with the evidence that the exchange
+actually traded (a priced file or a published index value, never an announcement alone), and
+classified `SPECIAL`: not a weekday session, but a date that owes data.
+
 **Coverage.** Asking for sessions in a year the holiday file does not cover is an error, never an
 empty holiday list. Silently assuming a future year has no holidays invents about fifteen sessions
 that never happened, and every one of them becomes a phantom gap for a human to chase.
@@ -29,7 +38,7 @@ from __future__ import annotations
 import argparse
 import sys
 from collections.abc import Iterable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from enum import StrEnum
 from functools import lru_cache
@@ -54,6 +63,7 @@ __all__ = [
     "Reconciliation",
     "SpecialSession",
     "TradingCalendar",
+    "WeekendSession",
     "expected_data_dates",
     "expected_sessions",
     "load",
@@ -81,14 +91,30 @@ class SpecialSession(StrEnum):
     """A session the exchange holds on a day it is otherwise closed."""
 
     MUHURAT = "MUHURAT"
-    """Diwali Laxmi Pujan ceremonial session. Short, real, and it publishes a bhavcopy."""
+    """Diwali Laxmi Pujan ceremonial session. Short, real, and it publishes a bhavcopy.
+
+    The only kind a `Holiday` may carry: Muhurat is a session *on* a declared holiday. Every other
+    kind is a session on a weekend that was never a holiday, and lives in `special_sessions:`.
+    """
+
+    BUDGET = "BUDGET"
+    """Union Budget presented on a weekend; the exchange runs a normal-hours session for it."""
+
+    LIVE_DR = "LIVE_DR"
+    """A live session with an intraday switch-over to the disaster-recovery (BCP) site."""
+
+    SYSTEM_UPGRADE = "SYSTEM_UPGRADE"
+    """A live session held to cut over to new trading-system hardware or software."""
+
+    UNATTRIBUTED = "UNATTRIBUTED"
+    """Priced files prove the exchange traded; no circular naming the reason has been located."""
 
 
 class DayKind(StrEnum):
     """What one calendar date is, for gap-reporting purposes.
 
-    Exactly one applies to any date, so counts over a range partition it: `SESSION + MUHURAT`
-    is the set of dates that owe us data, `WEEKEND + HOLIDAY` the set that does not, and
+    Exactly one applies to any date, so counts over a range partition it: `SESSION + MUHURAT +
+    SPECIAL` is the set of dates that owe us data, `WEEKEND + HOLIDAY` the set that does not, and
     `HOLIDAY` alone is the number of trading days the exchange actually gave up that year.
     """
 
@@ -97,6 +123,9 @@ class DayKind(StrEnum):
 
     MUHURAT = "MUHURAT"
     """A ceremonial session on a declared holiday. Data expected."""
+
+    SPECIAL = "SPECIAL"
+    """A declared session on a non-holiday weekend (Budget day, DR drill, ...). Data expected."""
 
     WEEKEND = "WEEKEND"
     """Saturday or Sunday, with no special session. No data."""
@@ -107,7 +136,7 @@ class DayKind(StrEnum):
     @property
     def expects_data(self) -> bool:
         """Whether a bhavcopy should exist for a day of this kind."""
-        return self in (DayKind.SESSION, DayKind.MUHURAT)
+        return self in (DayKind.SESSION, DayKind.MUHURAT, DayKind.SPECIAL)
 
 
 # ── the checked-in file ──────────────────────────────────────────────────────────────────────
@@ -126,6 +155,24 @@ class Holiday(BaseModel):
     def has_session(self) -> bool:
         """True when the exchange traded anyway, so a file exists despite the holiday."""
         return self.special_session is not None
+
+
+class WeekendSession(BaseModel):
+    """One session the exchange held on a Saturday or Sunday that is not a declared holiday.
+
+    `evidence` is required and must be *observed*: a priced file the archive served for the date,
+    or an index value published for it. An announcement says a session was planned, not that it
+    happened, so `announced_by` (the circular or contemporaneous report naming the reason) is the
+    supporting citation and may be absent — that is what `UNATTRIBUTED` means.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    date: date
+    name: str
+    kind: SpecialSession
+    evidence: str = Field(min_length=1)
+    announced_by: str | None = None
 
 
 class Coverage(BaseModel):
@@ -168,6 +215,7 @@ class HolidayFile(BaseModel):
     coverage: Coverage
     provenance: Provenance
     years: list[HolidayYear] = Field(min_length=1)
+    special_sessions: list[WeekendSession] = Field(default_factory=list)
 
 
 # ── the calendar ─────────────────────────────────────────────────────────────────────────────
@@ -208,8 +256,8 @@ class Reconciliation:
 class TradingCalendar:
     """Expected NSE trading sessions over a bounded span of dates.
 
-    What it does: classifies any date in its coverage as a session, a Muhurat session, a weekend
-    or a declared holiday, and enumerates each of those over a range.
+    What it does: classifies any date in its coverage as a session, a Muhurat session, a declared
+    weekend session, a weekend or a declared holiday, and enumerates each of those over a range.
     What it assumes: the holiday file is complete for *weekdays* across its coverage — that is the
     property `reconcile` exists to keep true against real bhavcopy availability.
     What it never does: guess. A date outside coverage raises; it is never treated as a session.
@@ -220,6 +268,7 @@ class TradingCalendar:
     provenance: Provenance
     _holidays: dict[date, Holiday]
     _sources: dict[int, str]
+    _special: dict[date, WeekendSession] = field(default_factory=dict)
 
     # ── coverage ─────────────────────────────────────────────────────────────────────────────
 
@@ -253,8 +302,9 @@ class TradingCalendar:
     def classify(self, day: date) -> DayKind:
         """What `day` is. Raises `CalendarCoverageError` outside the covered span.
 
-        Order matters: a special session outranks everything (the exchange traded, so a file
-        exists), then the weekend, then a declared closure. That ordering is what makes
+        Order matters: a special session — Muhurat on a holiday, or a declared weekend session —
+        outranks everything (the exchange traded, so a file exists), then the weekend, then a
+        declared closure. That ordering is what makes
         `HOLIDAY` mean "a weekday the exchange gave up" rather than "a date on the holiday list",
         which is the count anyone actually wants.
         """
@@ -262,6 +312,8 @@ class TradingCalendar:
         declared = self._holidays.get(day)
         if declared is not None and declared.has_session:
             return DayKind.MUHURAT
+        if day in self._special:
+            return DayKind.SPECIAL
         if day.weekday() >= _WEEKEND_START:
             return DayKind.WEEKEND
         if declared is not None:
@@ -269,11 +321,11 @@ class TradingCalendar:
         return DayKind.SESSION
 
     def is_session(self, day: date) -> bool:
-        """Whether `day` is a normal full trading session. Muhurat is not one."""
+        """Whether `day` is a normal weekday trading session. Muhurat and SPECIAL are not."""
         return self.classify(day) is DayKind.SESSION
 
     def expects_data(self, day: date) -> bool:
-        """Whether a bhavcopy should exist for `day` — sessions and Muhurat alike."""
+        """Whether a bhavcopy should exist for `day` — sessions, Muhurat and SPECIAL alike."""
         return self.classify(day).expects_data
 
     # ── ranges ───────────────────────────────────────────────────────────────────────────────
@@ -289,16 +341,18 @@ class TradingCalendar:
     def expected_sessions(self, start: date, end: date) -> list[date]:
         """Normal trading sessions in the inclusive range: weekdays minus declared holidays.
 
-        Excludes weekends, every declared holiday, and Muhurat dates — a Muhurat date is a
-        declared holiday, so it is not a session even though data exists for it. Use
-        `expected_data_dates` when the question is "should a file exist".
+        Excludes weekends, every declared holiday, Muhurat dates — a Muhurat date is a declared
+        holiday, so it is not a session even though data exists for it — and declared weekend
+        sessions. Use `expected_data_dates` when the question is "should a file exist"; that is
+        the one every fetch planner and the gap report use.
         """
         return [day for day, kind in self.days(start, end) if kind is DayKind.SESSION]
 
     def expected_data_dates(self, start: date, end: date) -> list[date]:
         """Every date in the range the exchange should have published a bhavcopy for.
 
-        Sessions plus Muhurat sessions. This is what a fetcher iterates and what the gap report
+        Sessions, Muhurat sessions and declared weekend sessions. This is what a fetcher iterates
+        and what the gap report
         measures against; anything absent from it is not a gap, it is a closed exchange.
         """
         return [day for day, kind in self.days(start, end) if kind.expects_data]
@@ -307,6 +361,11 @@ class TradingCalendar:
         """Declared holidays in the inclusive range, ascending, Muhurat dates included."""
         self._require_coverage(start, end)
         return [self._holidays[day] for day in sorted(self._holidays) if start <= day <= end]
+
+    def special_sessions(self, start: date, end: date) -> list[WeekendSession]:
+        """Declared weekend sessions in the inclusive range, ascending. Never a Muhurat date."""
+        self._require_coverage(start, end)
+        return [self._special[day] for day in sorted(self._special) if start <= day <= end]
 
     def source_for(self, year: int) -> str:
         """How `year`'s holidays were established (see the file's provenance block)."""
@@ -389,6 +448,44 @@ def _check(parsed: HolidayFile) -> None:
                     f"{holiday.date} ({holiday.name!r}) lies outside coverage "
                     f"{parsed.coverage.start}..{parsed.coverage.end}"
                 )
+            if holiday.special_session not in (None, SpecialSession.MUHURAT):
+                raise CalendarDataError(
+                    f"{holiday.date} ({holiday.name!r}) carries {holiday.special_session.value}; "
+                    f"only MUHURAT is a session on a holiday — declare a weekend session under "
+                    f"`special_sessions:` instead"
+                )
+
+    _check_special(parsed, holidays=seen)
+
+
+def _check_special(parsed: HolidayFile, *, holidays: set[date]) -> None:
+    """Reject a `special_sessions:` entry that would make the calendar quietly wrong.
+
+    A weekend session declared on a weekday adds nothing (the weekday is a session already) and
+    almost always means a typo'd date; one on a holiday contradicts the holiday; MUHURAT here
+    would be a second spelling of something the holiday list already says.
+    """
+    seen: set[date] = set()
+    for session in parsed.special_sessions:
+        where = f"special session {session.date} ({session.name!r})"
+        if session.date in seen:
+            raise CalendarDataError(f"{where} appears twice")
+        seen.add(session.date)
+        if not (parsed.coverage.start <= session.date <= parsed.coverage.end):
+            raise CalendarDataError(
+                f"{where} lies outside coverage {parsed.coverage.start}..{parsed.coverage.end}"
+            )
+        if session.date.weekday() < _WEEKEND_START:
+            raise CalendarDataError(
+                f"{where} is a {session.date:%A}; a weekday is already a session unless it is a "
+                f"declared holiday, so this entry is either redundant or a mistyped date"
+            )
+        if session.date in holidays:
+            raise CalendarDataError(f"{where} is also listed as a holiday")
+        if session.kind is SpecialSession.MUHURAT:
+            raise CalendarDataError(
+                f"{where} is MUHURAT; Muhurat belongs on its Diwali holiday entry"
+            )
 
 
 def load(path: Path = HOLIDAYS_PATH) -> TradingCalendar:
@@ -416,6 +513,7 @@ def load(path: Path = HOLIDAYS_PATH) -> TradingCalendar:
         provenance=parsed.provenance,
         _holidays={h.date: h for entry in parsed.years for h in entry.holidays},
         _sources={entry.year: entry.source for entry in parsed.years},
+        _special={session.date: session for session in parsed.special_sessions},
     )
 
 
@@ -444,9 +542,11 @@ def _validate(calendar: TradingCalendar) -> int:
     data_dates = calendar.expected_data_dates(calendar.coverage_start, calendar.coverage_end)
     holidays = calendar.holidays(calendar.coverage_start, calendar.coverage_end)
     muhurat = [h for h in holidays if h.has_session]
+    special = calendar.special_sessions(calendar.coverage_start, calendar.coverage_end)
     print(
         f"calendar OK — {calendar.coverage_start}..{calendar.coverage_end} "
         f"({span_days} days): {len(sessions)} sessions, {len(muhurat)} Muhurat sessions, "
+        f"{len(special)} weekend sessions, "
         f"{len(data_dates)} dates expecting a bhavcopy, {len(holidays)} declared holidays"
     )
     for year in range(calendar.coverage_start.year, calendar.coverage_end.year + 1):

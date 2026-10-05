@@ -212,13 +212,14 @@ class PriceRebuilder:
 
 
 def plan_sessions(start: date, end: date, *, calendar: TradingCalendar | None = None) -> list[date]:
-    """Every trading session in `[start, end]`, ascending — the rebuild's work list.
+    """Every date in `[start, end]` the exchange published for, ascending — the rebuild's work list.
 
-    Uses the same trading calendar the backfill plans against, so the rebuild asks for exactly the
-    dates the ingest path fetched and never invents a session the exchange did not hold.
+    Uses the same calendar question the backfill plans against (`expected_data_dates`), so the
+    rebuild asks for exactly the dates the ingest path fetched — Muhurat and declared weekend
+    sessions included — and never invents a session the exchange did not hold.
     """
     cal = calendar if calendar is not None else trading_calendar()
-    return list(cal.expected_sessions(start, end))
+    return list(cal.expected_data_dates(start, end))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

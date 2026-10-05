@@ -223,6 +223,24 @@ def test_a_muhurat_session_owes_a_file_even_though_it_is_a_holiday() -> None:
     assert not report.fully_explained
 
 
+def test_a_weekend_special_session_with_no_file_is_flagged() -> None:
+    """Saturday 2025-02-01 (Union Budget) traded. Missing, it is a real miss — never WEEKEND."""
+    budget = date(2025, 2, 1)
+    report = report_over(budget, budget)
+
+    assert [entry.reason for entry in report.entries] == [GapReason.NEVER_ATTEMPTED]
+    assert report.entries[0].day_kind is DayKind.SPECIAL
+    assert not report.fully_explained
+
+
+def test_an_ordinary_saturday_beside_it_is_still_explained() -> None:
+    """The inversion: the Saturday after the Budget owes nothing."""
+    report = report_over(date(2025, 2, 8), date(2025, 2, 8))
+
+    assert [entry.reason for entry in report.entries] == [GapReason.WEEKEND]
+    assert report.fully_explained
+
+
 def test_a_session_outside_the_sources_era_is_explained_not_missing() -> None:
     """The legacy bhavcopy stopped serving after the UDiFF cutover; it owes nothing after it."""
     entry = classify_pair(

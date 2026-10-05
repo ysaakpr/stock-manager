@@ -182,22 +182,32 @@ def test_the_plan_is_the_calendars_sessions() -> None:
     assert plan.basis == "calendar+prices_raw"
 
 
-def test_a_priced_session_the_calendar_omits_is_planned() -> None:
-    """2012-01-07 was a special Saturday session: W1 holds its bhavcopy, the calendar lists no
-    session. Delivery for it is planned from the price evidence; a priced date outside the range
-    is not."""
+def test_the_special_saturdays_are_planned_from_the_calendar_itself() -> None:
+    """2012-01-07 was a special Saturday session. The calendar now declares it, so delivery for it
+    is planned without any price evidence at all."""
     saturday = date(2012, 1, 7)
+    plan = mb.plan_sessions(date(2012, 1, 2), date(2012, 1, 9), calendar=trading_calendar())
+    assert saturday in plan.dates
+    assert date(2012, 1, 8) not in plan.dates
+    assert "0 priced session(s) outside the calendar added" in plan.note
+
+
+def test_a_priced_session_the_calendar_omits_is_planned() -> None:
+    """The backstop: a priced date the calendar does not list is planned and named in the note, so
+    the calendar can be corrected; a priced date outside the range is not. 2012-01-08 is a Sunday
+    the calendar calls WEEKEND, standing in for a session it has yet to learn about."""
+    sunday = date(2012, 1, 8)
     calendar = trading_calendar()
-    assert saturday not in calendar.expected_data_dates(date(2012, 1, 2), date(2012, 1, 9))
+    assert sunday not in calendar.expected_data_dates(date(2012, 1, 2), date(2012, 1, 9))
     plan = mb.plan_sessions(
         date(2012, 1, 2),
         date(2012, 1, 9),
         calendar=calendar,
-        priced=(saturday, date(2012, 1, 14)),
+        priced=(sunday, date(2012, 1, 14)),
     )
-    assert saturday in plan.dates
+    assert sunday in plan.dates
     assert date(2012, 1, 14) not in plan.dates
-    assert "1 priced session(s) outside the calendar added (2012-01-07)" in plan.note
+    assert "1 priced session(s) outside the calendar added (2012-01-08)" in plan.note
 
 
 def test_price_sessions_are_read_off_the_lake(lake: _Lake) -> None:
