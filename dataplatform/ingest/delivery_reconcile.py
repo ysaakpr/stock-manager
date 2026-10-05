@@ -95,10 +95,10 @@ class Outcome(StrEnum):
     """Payload in L0, parsed, delivery in L1 — the full lifecycle is recorded."""
 
     PARSE_FAILED = "PARSE_FAILED"
-    """Payload in L0 but it does not parse. Recorded FETCHED then FAILED, with the parser's reason."""
+    """Payload in L0 that does not parse. Recorded FETCHED then FAILED, with the parser's reason."""
 
     NOT_DERIVED = "NOT_DERIVED"
-    """Payload parses but L1 carries no delivery for the session. Nothing written: run the rebuild."""
+    """Payload parses but L1 has no delivery for the session. Nothing written: run the rebuild."""
 
     NO_PAYLOAD = "NO_PAYLOAD"
     """No payload in L0. Nothing written: the backfill owes this session a fetch."""
@@ -148,7 +148,7 @@ def delivery_rows_in_l1(session: date, *, data_root: Path | None = None) -> int:
         return 0
     table = pq.read_table(path, columns=["exchange", "deliv_qty"])
     nse = table.filter(pc.equal(table["exchange"], Exchange.NSE.value))
-    return nse.num_rows - nse["deliv_qty"].null_count
+    return int(nse.num_rows - nse["deliv_qty"].null_count)
 
 
 class DeliveryReconciler:
@@ -214,7 +214,7 @@ class DeliveryReconciler:
         try:
             rows = self._set.parse(self._l0, ref)
             if not rows:
-                raise ParseError(f"{request.filename}: parsed to zero delivery rows")
+                raise ParseError("parsed to zero delivery rows", filename=request.filename)
         except Exception as exc:  # recorded as the backfill records it, never swallowed
             message = (
                 f"parse failed: {exc}"
