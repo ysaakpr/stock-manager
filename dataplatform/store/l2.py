@@ -963,9 +963,10 @@ def materialize_missing(
     (`LineageResolver.survivor_of`, `chain_to`); without them every ISIN is built from its own
     bars, which is right for a lake with no reissues.
 
-    What it never does: invent a factor. An ISIN whose corporate actions never reached the factor
-    chain (single-source, unquantified, unresolved identity) is materialized unadjusted, exactly
-    as the queue would have left it — the fill changes which names L2 covers, not what a factor is.
+    What it never does: invent a factor from a recorded action. An ISIN whose corporate actions
+    never reached the factor chain (single-source, unquantified, unresolved identity) is
+    materialized without them, exactly as the queue would have left it — only a share-basis change
+    L1 itself evidences (`implied_splits`, the same in every build path) is composed in.
     """
     owns = con is None
     con = open_connection() if con is None else con
