@@ -631,7 +631,7 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
 def _span(span: BuyFreeSpan | None) -> str:
     if span is None:
         return "0"
-    end = f"first buy after {span.next_buy}" if span.next_buy else "no buy to the end"
+    end = f"next buy {span.next_buy}" if span.next_buy else "no buy to the end"
     flag = " **EMPTY TIER**" if span.flagged else ""
     return f"{span.decisions} from {span.start} ({end}){flag}"
 
