@@ -89,6 +89,7 @@ from backtest.book_actions import (
     current_signal_split_factors,
     store_book_actions_unless,
 )
+from backtest.cap_tiers import LiquidityRankTiers, TierSleeve, describe_sleeves
 from backtest.cash_interest import CashInterestAccrual, InterestCredit, current_cash_interest
 from backtest.policies.fundamentals_value import (
     FundamentalsRecord,
@@ -2024,6 +2025,7 @@ def backtest_spec(
     rail_policy: BacktestRailPolicy | None = None,
     signal_l1_isins_only: bool = False,
     band_hit_avoidance: bool = False,
+    cap_tiers: Sequence[TierSleeve] | None = None,
 ) -> dict[str, str]:
     """The specification a runner's ledger is persisted under (``backtest.run_ledger.run_spec``).
 
@@ -2033,11 +2035,14 @@ def backtest_spec(
 
     ``band_hit_avoidance`` (X2 H2) adds a key only when on, so every run specified without it
     keeps the digest it was persisted under — the frozen round-2 baseline included.
+    ``cap_tiers`` (X2) adds a ``cap_tiers`` key the same way, naming the size measure and sleeves.
     """
     rails = rail_policy if rail_policy is not None else ratified_backtest_rail_policy()
     extra: dict[str, object] = (
         {"band_hit_avoidance": BAND_HIT_AVOIDANCE_IDENTITY} if band_hit_avoidance else {}
     )
+    if cap_tiers is not None:
+        extra["cap_tiers"] = describe_sleeves(cap_tiers)
     if runner in _CEILING_SIZED_RUNNERS:
         extra["buy_sizing"] = BUY_SIZING_IDENTITY
     return run_spec(
@@ -4988,6 +4993,8 @@ class SwingLake:
     adjusted: bool
     #: X2 H2: every resolved PR-bundle band hit of the window, in memory; ``None`` unless asked for.
     band_hits: BandHitIndex | None = None
+    #: X2 cap tiers: the liquidity-rank tier source (``backtest.cap_tiers``); ``None`` unless asked.
+    cap_tiers: LiquidityRankTiers | None = None
 
     @property
     def first_session(self) -> date:
@@ -4998,6 +5005,8 @@ class SwingLake:
         return self.sessions[-1]
 
     def close(self) -> None:
+        if self.cap_tiers is not None:
+            self.cap_tiers.close()
         self.features.close()
         self.reader.close()
 
@@ -5011,6 +5020,7 @@ def open_swing_lake(
     adjusted: bool = True,
     band_hits: bool = False,
     residual_momentum: bool = False,
+    cap_tiers: bool = False,
 ) -> SwingLake:
     """Build the shared lake state for a swing sweep over ``[start, end]`` (M12.2).
 
@@ -5024,6 +5034,9 @@ def open_swing_lake(
 
     ``band_hits`` (X2 H2) also reads the window's PR-bundle band hits into memory, from far enough
     back that the first session's lookback is full.
+
+    ``cap_tiers`` (X2) attaches the liquidity-rank tier source; each run loads its own decision
+    sessions into it, and a session already loaded by a sibling arm is not struck twice.
     """
     reader = _L1Reader(data_root=data_root)
     # X2: the pre-seam split factors come from the CLI's store context (signal_split_factors);
@@ -5058,6 +5071,7 @@ def open_swing_lake(
                 data_root=data_root,
             )
         return SwingLake(
+            cap_tiers=LiquidityRankTiers(calendar, data_root=data_root) if cap_tiers else None,
             band_hits=hits,
             reader=reader,
             features=features,
@@ -5097,12 +5111,16 @@ def run_swing_composite(
     lake: SwingLake | None = None,
     rail_policy: BacktestRailPolicy | None = None,
     band_hit_avoidance: bool = False,
+    cap_tiers: Sequence[TierSleeve] | None = None,
 ) -> BacktestResult:
     """Replay the swing-composite policy over ``[start, end]``, returning its metrics (M10.7).
 
     ``band_hit_avoidance`` (X2 H2) blocks new buys of names that hit a daily price band in the
     last five sessions (``backtest.band_hits``); a shared ``lake`` must have been opened with
     ``band_hits=True`` for it.
+
+    ``cap_tiers`` (X2) buys the book tier by tier from liquidity-rank tiers that proxy AMFI cap
+    tiers (``backtest.cap_tiers``); a shared ``lake`` must have been opened with ``cap_tiers=True``.
 
     Identical wiring to :func:`run_momentum_v2` — the same L1 bars, the one shared cost model behind
     ``SimBroker`` (invariant #4), the M4.7 whole-share allocator inside the policy, M4.6 accounting
@@ -5123,6 +5141,7 @@ def run_swing_composite(
         benchmark_slug=benchmark_slug,
         rail_policy=rail_policy,
         band_hit_avoidance=band_hit_avoidance,
+        cap_tiers=cap_tiers,
     )
     # M12.2: a shared lake, or this run's own. `owned` is what decides whether the connection is
     # closed at the end — a run handed a lake must not shut down state its siblings still need.
@@ -5136,6 +5155,7 @@ def run_swing_composite(
             adjusted=adjusted,
             band_hits=band_hit_avoidance,
             residual_momentum=parameters.weight_residual_momentum != _ZERO,
+            cap_tiers=cap_tiers is not None,
         )
     elif parameters.weight_residual_momentum != _ZERO and not lake.features.residual_momentum:
         raise BacktestError(
@@ -5198,6 +5218,15 @@ def run_swing_composite(
                 "band-hit avoidance asked for, but the shared lake was opened without band hits — "
                 "open_swing_lake(band_hits=True) must be told"
             )
+        tier_source: LiquidityRankTiers | None = None
+        if cap_tiers is not None:
+            if lake.cap_tiers is None:
+                raise BacktestError(
+                    "cap tiers asked for, but the shared lake was opened without them — "
+                    "open_swing_lake(cap_tiers=True) must be told"
+                )
+            tier_source = lake.cap_tiers
+            tier_source.load(data.rebalance_dates())
         # One rail policy for both: the gate enforces it, and the policy sizes its buys to it.
         rails_in_force = rail_policy or ratified_backtest_rail_policy()
         policy = SwingCompositePolicy(
@@ -5205,6 +5234,8 @@ def run_swing_composite(
             parameters,
             band_hits=lake.band_hits if band_hit_avoidance else None,
             order_caps=rails_in_force.rails,
+            tiers=tier_source,
+            sleeves=cap_tiers,
         )
 
         engine = ReplayEngine(
