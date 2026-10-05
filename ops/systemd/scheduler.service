@@ -1,0 +1,34 @@
+# The platform scheduler (§8.1) as a systemd *user* unit: one long-running process that fires every
+# job in `dataplatform.scheduler.registry.default_registry()` on that job's own cron, in
+# Asia/Kolkata, and writes the heartbeat `/health` reads. `GET /status/jobs` says, per job, whether
+# it is on schedule — a job this process is not firing shows NEVER_RAN or OVERDUE there.
+#
+# It supersedes `daily-snapshot.timer`, which ran one job and was the only scheduling this host ever
+# had (2026-10-05 audit). `install-scheduler.sh` disables that timer: both would fire
+# `daily_snapshot` at 19:15 and the loser would be recorded SKIPPED_LOCKED — harmless, but noise.
+#
+# Code is read at start: after a merge to main, `systemctl --user restart scheduler.service`.
+
+[Unit]
+Description=trading-platform scheduler (every registered job, on its own cron)
+Documentation=file:///home/ubuntu/stock-manager/ops/runbooks/daily-eod.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=1h
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu/stock-manager
+Environment=SCHEDULER_REPO=/home/ubuntu/stock-manager
+Environment=DATA_ROOT=/home/ubuntu/stock-manager/data
+Environment=SNAPSHOT_EXPECT_LAKE_ROOT=/home/ubuntu/stock-manager/data/L0
+ExecStart=/home/ubuntu/stock-manager/ops/scheduler.sh
+# A crashed scheduler is a day of missing data per day it stays down; restart it, and let the
+# heartbeat going stale on /health be what tells a human it is flapping.
+Restart=always
+RestartSec=30
+Nice=5
+
+[Install]
+WantedBy=default.target
