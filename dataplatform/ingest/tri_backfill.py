@@ -88,6 +88,14 @@ DEFAULT_INDEX_SET: Final[tuple[IndexSpec, ...]] = (
     IndexSpec(name="NIFTY CPSE", slug="niftycpse"),
 )
 
+#: Indices fetched only when named with ``--index`` (X2, 2026-10-05): the size-tier benchmarks the
+#: cap-tier strategies are measured against, so a mid- or small-cap book is not judged against the
+#: NIFTY 50 alone. Opt-in, so the default run stays the three-request campaign above.
+OPT_IN_INDEX_SET: Final[tuple[IndexSpec, ...]] = (
+    IndexSpec(name="NIFTY MIDCAP 150", slug="niftymidcap150"),
+    IndexSpec(name="NIFTY SMALLCAP 250", slug="niftysmallcap250"),
+)
+
 #: The default window's lower bound: below every NIFTY index's launch, so the endpoint returns
 #: whatever depth it actually has rather than whatever we guessed. D8's own probe recorded
 #: 2001-04-02 as NIFTY 50's earliest because it *asked* for 2001-04-01; asked from 1990 the same
@@ -305,7 +313,8 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         metavar="SLUG",
         help="index slug to backfill, repeatable (default: all of "
-        f"{' '.join(s.slug for s in DEFAULT_INDEX_SET)})",
+        f"{' '.join(s.slug for s in DEFAULT_INDEX_SET)}; opt-in: "
+        f"{' '.join(s.slug for s in OPT_IN_INDEX_SET)})",
     )
     parser.add_argument(
         "--start",
@@ -330,7 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    known = {spec.slug: spec for spec in DEFAULT_INDEX_SET}
+    known = {spec.slug: spec for spec in (*DEFAULT_INDEX_SET, *OPT_IN_INDEX_SET)}
     if args.indices is None:
         indices = DEFAULT_INDEX_SET
     else:

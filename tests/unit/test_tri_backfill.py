@@ -49,6 +49,7 @@ from dataplatform.ingest.source_register import load as load_register
 from dataplatform.ingest.tri_backfill import (
     DEFAULT_INDEX_SET,
     EARLIEST_REQUESTED,
+    OPT_IN_INDEX_SET,
     IndexSpec,
     NoStoredPayloadError,
     already_published,
@@ -522,3 +523,18 @@ def test_stored_payloads_are_grouped_by_index_and_a_stranger_is_ignored(
     assert [ref.filename for ref in grouped["nifty50"]] == [
         l0_tri_filename("nifty50", WINDOW_START, WINDOW_END)
     ]
+
+
+def test_size_tier_benchmarks_are_opt_in_and_resolvable() -> None:
+    """X2 cap tiers: Midcap 150 / Smallcap 250 are fetched only when named, never by default.
+
+    The default run stays the three-request campaign; naming an opt-in slug must still resolve to
+    the CAPS name the endpoint wants, which is not derivable from the slug.
+    """
+    defaults = {spec.slug for spec in DEFAULT_INDEX_SET}
+    opt_in = {spec.slug: spec.name for spec in OPT_IN_INDEX_SET}
+    assert opt_in == {
+        "niftymidcap150": "NIFTY MIDCAP 150",
+        "niftysmallcap250": "NIFTY SMALLCAP 250",
+    }
+    assert not defaults & set(opt_in)
