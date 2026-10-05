@@ -19,7 +19,8 @@ acceptance criterion:
   Monday's run picks it up and finishes it. This is what makes the M1 gate's "self-heal on one
   induced failure" true — a 500 on one run becomes a PUBLISHED partition on the next, with no human
   in the loop. The mechanism is `sync_state` itself: a retryable FAILED row transitions back to
-  PENDING and is re-driven, a PUBLISHED row is skipped.
+  PENDING and is re-driven, a PUBLISHED row is skipped. A session the calendar expected that has
+  no row at all — the trace a missed run leaves — is owed too, and is driven the same way.
 
 * **Idempotent.** Running twice for the same session changes nothing. The runner never re-fetches a
   PUBLISHED date (M1.9), and the archive is published only when the target has no bundle yet, so a
@@ -46,7 +47,9 @@ from dataplatform.clock import Clock
 from dataplatform.config import Settings
 from dataplatform.identity.master import IdentityStore
 from dataplatform.ingest.backfill import (
+    BSE_BHAVCOPY,
     NSE_BHAVCOPY,
+    NSE_DELIVERY,
     SOURCE_SETS,
     BackfillReport,
     BackfillRunner,
@@ -58,6 +61,13 @@ from dataplatform.ingest.calendar import (
     trading_calendar,
 )
 from dataplatform.ingest.fetcher import Fetcher, build_fetcher
+from dataplatform.ingest.no_session_journal import NoSessionJournal
+from dataplatform.ingest.pr_bundle_campaign import (
+    EVIDENCE_NO_BUNDLE,
+    AcquisitionReport,
+    BundleAcquisition,
+    journal_path_for,
+)
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.logging import get_logger, log_context
@@ -91,13 +101,17 @@ __all__ = [
 
 _LOG = get_logger(__name__)
 
-#: The daily NSE source sets this job drives, by `BackfillRunner` source-set name (which is also the
-#: `sync_state` source name — see `backfill.FetchRequest.state_source`). Only the cash bhavcopy is
-#: wired end-to-end into a source set today (M1.9); delivery, corp-actions and the other daily NSE
-#: rows join here as their own source sets land in later milestones. Keeping the list explicit means
-#: "all daily NSE sources" is one auditable tuple, not a register scan that would sweep in a source
-#: whose parser does not exist yet.
-DAILY_NSE_SOURCES: Final[tuple[str, ...]] = (NSE_BHAVCOPY,)
+#: The daily source sets this job drives, by `BackfillRunner` source-set name (which is also the
+#: `sync_state` source name — see `backfill.FetchRequest.state_source`). Every dated price source
+#: with a source set is here: the NSE bhavcopy, NSE delivery (`sec_bhavdata_full`) and the BSE
+#: UDiFF bhavcopy. Until the 2026-10-05 audit this tuple held only `nse_bhavcopy`, so delivery and
+#: BSE had no daily path at all and were current only as far as the last manual campaign took them.
+#: Order matters: delivery's write step re-derives the session's partition from the *stored* NSE
+#: bhavcopy, so the bhavcopy must land first. Keeping the list explicit means "all daily price
+#: sources" is one auditable tuple, not a register scan that would sweep in a source whose parser
+#: does not exist yet; `scheduler.registry` declares which register rows it covers and a test holds
+#: the two in step.
+DAILY_NSE_SOURCES: Final[tuple[str, ...]] = (NSE_BHAVCOPY, NSE_DELIVERY, BSE_BHAVCOPY)
 
 #: How far back the self-heal step looks for a FAILED(retryable) date to re-attempt. A week covers a
 #: long weekend plus a couple of missed runs without re-scanning the whole decade every night — the
@@ -170,6 +184,7 @@ class EodReport:
     quarantine: QuarantineReport | None = None
     quarantine_steps: tuple[QuarantineStep, ...] = ()
     archive: PublishReport | None = None
+    pr_bundles: AcquisitionReport | None = None
     alerts_sent: int = 0
 
     @property
@@ -184,6 +199,13 @@ class EodReport:
         for outcome in self.outcomes.values():
             seen.update(outcome.healed)
         return tuple(sorted(seen))
+
+    @property
+    def pr_bundles_failed(self) -> bool:
+        """True when the PR-bundle capture ran and left a session unacquired for a reason other
+        than the archive proving it unpublished (a journaled 404 is evidence, not a failure)."""
+        report = self.pr_bundles
+        return report is not None and (report.failed > 0 or report.hard_stopped)
 
     @property
     def failed_sources(self) -> tuple[str, ...]:
@@ -218,6 +240,7 @@ class EodPipeline:
         data_root: Path | None = None,
         sources: tuple[str, ...] = DAILY_NSE_SOURCES,
         lookback: timedelta = DEFAULT_LOOKBACK,
+        capture_pr_bundles: bool = True,
     ) -> None:
         self._conn = conn
         self._fetcher = fetcher
@@ -230,6 +253,7 @@ class EodPipeline:
         self._data_root = data_root
         self._sources = sources
         self._lookback = lookback
+        self._capture_pr_bundles = capture_pr_bundles
         self._sync = SyncStateStore(conn, clock=clock, calendar=calendar)
 
     def run(self) -> EodReport:
@@ -259,6 +283,9 @@ class EodPipeline:
                     SOURCE_SETS[name], target=target, lookback_from=lookback_from
                 )
 
+            if self._capture_pr_bundles:
+                report.pr_bundles = self._pr_bundles(lookback_from, target)
+
             report.gap_report = self._gap_check(lookback_from, target)
             report.quarantine, report.quarantine_steps = self._quarantine_check(target)
             report.alerts_sent = self._emit_alerts(report)
@@ -282,9 +309,9 @@ class EodPipeline:
     def _run_source(
         self, source_set: SourceSet[Any], *, target: date, lookback_from: date
     ) -> SourceOutcome:
-        """Self-heal the source's retryable stragglers, then drive the target, then report on it."""
+        """Self-heal the source's owed stragglers, then drive the target, then report on it."""
         source = source_set.name
-        healed = self._failed_retryable(source, lookback_from, target)
+        healed = self._owed(source, lookback_from, target)
         dates = sorted(set(healed) | {target})
         plan = [source_set.build_request(day, self._register) for day in dates]
 
@@ -325,19 +352,63 @@ class EodPipeline:
             report=backfill_report,
         )
 
-    def _failed_retryable(self, source: str, from_date: date, to_date: date) -> list[date]:
-        """Dates for `source` left FAILED(retryable) in the window — the self-heal work list.
+    def _owed(self, source: str, from_date: date, to_date: date) -> list[date]:
+        """Dates in the window `source` still owes — the self-heal work list.
 
+        Two kinds: a date left FAILED(retryable), and a date the calendar expected data for that
+        has *no row at all*. The second is what a missed run leaves behind — a scheduler that was
+        down for a day never began that day's row, so a list built from FAILED rows alone would
+        step straight over it and the hole would be filled only by a human noticing (the
+        2026-10-05 audit: three weeks of sessions, none of them FAILED, all of them missing).
         Excludes the target itself: the target is always in the plan, so listing it here would
         double it. A non-retryable FAILED date is deliberately left alone — re-driving a date the
         source will not serve is the hot loop the `retryable` flag exists to prevent (M1.3).
         """
         rows = self._sync.rows_in_range(from_date, to_date, sources=[source])
-        return [
+        seen = {row.logical_date for row in rows}
+        failed = {
             row.logical_date
             for row in rows
             if row.state is SyncState.FAILED and row.retryable and row.logical_date != to_date
-        ]
+        }
+        never_begun = {
+            day
+            for day in self._calendar.expected_data_dates(from_date, to_date)
+            if day not in seen and day != to_date
+        }
+        return sorted(failed | never_begun)
+
+    def _pr_bundles(self, from_date: date, target: date) -> AcquisitionReport:
+        """Bring the window's NSE PR bundles into L0 — archive-only, one session behind.
+
+        The bundle is L0-only by design (`pr_bundle_campaign`: symbol-keyed, no ISIN, nothing
+        joinable yet), so this reuses that driver's `BundleAcquisition` unchanged: present keys and
+        journaled 404s cost nothing, a fresh 404 is journaled as evidence, anything else is a
+        counted failure the next run retries. Until the 2026-10-05 audit nothing ran it daily and
+        the lake stopped at the last campaign's end.
+
+        Strictly *before* the target: the journal treats a 404 as permanent proof that no bundle
+        was published, and at 18:30 the evening's bundle may simply not be out yet. Taking it on
+        the next session's run means a 404 can only ever be the archive's real answer.
+        """
+        sessions = [d for d in self._calendar.expected_data_dates(from_date, target) if d < target]
+        journal = NoSessionJournal(
+            journal_path_for(self._l0.data_root), clock=self._clock, evidence=EVIDENCE_NO_BUNDLE
+        )
+        acquisition = BundleAcquisition(
+            fetcher=self._fetcher, l0=self._l0, journal=journal, register=self._register
+        )
+        report = acquisition.run(sessions)
+        _LOG.info(
+            "eod.pr_bundles",
+            sessions=len(sessions),
+            fetched=report.fetched,
+            already_in_l0=report.already_in_l0,
+            no_bundle=report.no_bundle,
+            failed=report.failed,
+            hard_stopped=report.hard_stopped,
+        )
+        return report
 
     # ── gap check, alerts, archive ─────────────────────────────────────────────────────────────
 
@@ -410,6 +481,19 @@ class EodPipeline:
                 f"The daily EOD run left {name} FAILED for {report.logical_date.isoformat()}. "
                 f"It will be re-attempted (self-heal) on the next run. First failure — {detail}.",
                 f"eod:{name}:{report.logical_date.isoformat()}:FAILED",
+            )
+            sent += int(result.value == "sent")
+
+        if report.pr_bundles_failed and report.pr_bundles is not None:
+            bundles = report.pr_bundles
+            result = self._alerter.send(
+                Severity.WARNING,
+                f"EOD pipeline: PR bundle capture incomplete through "
+                f"{report.logical_date.isoformat()}",
+                f"{bundles.failed} session(s) failed"
+                + (f"; stopped: {bundles.stop_reason}" if bundles.hard_stopped else "")
+                + ". They stay retryable and the next run re-attempts them.",
+                f"eod:pr_bundle:{report.logical_date.isoformat()}:FAILED",
             )
             sent += int(result.value == "sent")
 
@@ -505,4 +589,9 @@ def run_eod_pipeline(context: JobContext) -> None:
             f"EOD run for {report.logical_date.isoformat()} left "
             f"{', '.join(report.failed_sources)} not PUBLISHED; recorded FAILED(retryable) for "
             "the next run to self-heal. See the alert and /status/sources."
+        )
+    if report.pr_bundles_failed:
+        raise EodPipelineError(
+            f"EOD run for {report.logical_date.isoformat()}: the PR bundle capture left sessions "
+            "unacquired; they stay retryable for the next run. See the alert and the log."
         )

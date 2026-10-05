@@ -502,6 +502,9 @@ class SourceStatus:
     `lag_sessions` is the honest measure — calendar days count a long weekend as three days of
     lateness when the exchange was shut for two of them — and is `None` only when the span leaves
     the C.2 calendar's coverage, where a number would be a guess.
+
+    `max_lag_sessions` is the scheduled job's budget for this source (`Job.max_lag_sessions`), or
+    `None` for a source no job keeps current, which has no lag it can be *late* against.
     """
 
     source: str
@@ -515,15 +518,33 @@ class SourceStatus:
     last_error: str | None
     last_failure_retryable: bool | None
     counts: Mapping[SyncState, int]
+    max_lag_sessions: int | None = None
+
+    @property
+    def overdue(self) -> bool:
+        """More sessions behind than its job's budget — or a lag the calendar cannot measure.
+
+        An unmeasurable lag on a scheduled source is reported overdue rather than fine: the
+        2026-10-05 audit's failure was a status surface that said "healthy" about a source three
+        weeks stale, and "we cannot tell" must never round up to "healthy" again.
+        """
+        if self.max_lag_sessions is None:
+            return False
+        return self.lag_sessions is None or self.lag_sessions > self.max_lag_sessions
 
     @property
     def healthy(self) -> bool:
-        """A source with a success, no current failure streak and nothing stuck mid-pipeline."""
+        """A success, no failure streak, nothing stuck mid-pipeline, and not behind its schedule."""
         in_flight = sum(
             self.counts.get(state, 0)
             for state in (SyncState.FETCHED, SyncState.VALIDATED, SyncState.NORMALIZED)
         )
-        return self.last_success_date is not None and self.failure_streak == 0 and in_flight == 0
+        return (
+            self.last_success_date is not None
+            and self.failure_streak == 0
+            and in_flight == 0
+            and not self.overdue
+        )
 
 
 # ── the store ────────────────────────────────────────────────────────────────────────────────
@@ -911,18 +932,26 @@ class SyncStateStore:
         )
         return status
 
-    def source_statuses(self) -> tuple[SourceStatus, ...]:
+    def source_statuses(
+        self, lag_budgets: Mapping[str, int] | None = None
+    ) -> tuple[SourceStatus, ...]:
         """Per-source last success, lag and failure streak — the `/status/sources` payload.
 
         Reports the sources that have rows. A source the platform has never touched has nothing
         true to say about its lag, and inventing a line for it would be the fabricated data the
-        status API is not allowed to serve.
+        status API is not allowed to serve. `lag_budgets` maps a source to the sessions it may
+        fall behind before it is `overdue` (the scheduler registry's `max_lag_sessions`).
         """
         as_of = self._clock.today()
+        budgets = {} if lag_budgets is None else lag_budgets
         rows = self._conn.execute(_SOURCE_STATUS_SQL).fetchall()
-        return tuple(self._source_status(row, as_of=as_of) for row in rows)
+        return tuple(
+            self._source_status(row, as_of=as_of, budget=budgets.get(str(row[0]))) for row in rows
+        )
 
-    def _source_status(self, row: tuple[Any, ...], *, as_of: date) -> SourceStatus:
+    def _source_status(
+        self, row: tuple[Any, ...], *, as_of: date, budget: int | None = None
+    ) -> SourceStatus:
         last_success: date | None = row[1]
         return SourceStatus(
             source=str(row[0]),
@@ -944,6 +973,7 @@ class SyncStateStore:
                 SyncState.FAILED: int(row[9]),
                 SyncState.GAP: int(row[10]),
             },
+            max_lag_sessions=budget,
         )
 
     def _lag_sessions(self, last_success: date | None, as_of: date) -> int | None:

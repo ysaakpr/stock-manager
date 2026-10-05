@@ -283,6 +283,49 @@ def test_a_second_run_of_the_same_window_fetches_nothing(
     assert "skipped" in again[0].line
 
 
+def test_a_published_series_that_stopped_advancing_is_fetched_again(
+    clock: FrozenClock,
+    settings: Settings,
+    register: SourceRegister,
+    tracker: RecordingTracker,
+    tmp_path: Path,
+) -> None:
+    """The 2026-10-05 audit's TRI defect: resume checked only the series' *start*.
+
+    NIFTY 50, IT and CPSE were published once (to 2026-09-07) and every later run skipped them as
+    "already published", so the benchmark froze while the market moved. A run whose window ends
+    weeks past the stored series' last level must fetch; inverted, this test fails.
+    """
+    fetcher, l0, transport = _wire(
+        {tri_url(register): _ok("nifty50")},
+        clock=clock,
+        settings=settings,
+        register=register,
+        data_root=tmp_path,
+    )
+    common: dict[str, Any] = {
+        "fetcher": fetcher,
+        "l0": l0,
+        "tracker": tracker,
+        "indices": (NIFTY50,),
+        "start": WINDOW_START,
+        "data_root": tmp_path,
+    }
+    run_tri_backfill(**common, end=WINDOW_END)
+    assert len(transport.requests) == 1
+    stored = read_tri_series("nifty50", date.max, data_root=tmp_path)
+    assert stored is not None
+    last_level = stored.points[-1].as_of
+
+    later = date(2026, 4, 20)
+    assert not already_published(NIFTY50, WINDOW_START, tmp_path, through=date(2026, 4, 17))
+    assert already_published(NIFTY50, WINDOW_START, tmp_path, through=last_level)
+
+    outcome = run_tri_backfill(**common, end=later)
+    assert len(transport.requests) == 2
+    assert outcome[0].skipped is False
+
+
 def test_a_computed_series_on_disk_is_not_a_reason_to_skip(tmp_path: Path) -> None:
     """The estimate existing must never stop the real series being fetched.
 

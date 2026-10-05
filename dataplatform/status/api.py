@@ -45,11 +45,15 @@ from dataplatform.ingest.calendar import CalendarError
 from dataplatform.logging import get_logger
 from dataplatform.quality.gaps import GapReportError, GapScanner, LakeL1Presence
 from dataplatform.scheduler import Heartbeat, read_heartbeat
+from dataplatform.scheduler.health import read_job_health
+from dataplatform.scheduler.registry import UNSCHEDULED, default_registry, lag_budgets
 from dataplatform.status.models import (
     ArchivesOut,
     DatabaseHealthOut,
     GapsOut,
     HealthOut,
+    JobHealthOut,
+    JobsOut,
     QualityOut,
     QuarantineOut,
     SchedulerHealthOut,
@@ -295,11 +299,33 @@ def status_sources(store: SyncStoreDep, clock: ClockDep) -> SourcesOut:
 
     Lists the sources the platform has actually recorded a row for. A source that has never been
     fetched has nothing true to say about its lag, and an invented line for it would be exactly
-    the fabricated status this API must never serve.
+    the fabricated status this API must never serve. A source a registered job keeps current is
+    `overdue`, and not `healthy`, once it is more sessions behind than that job's budget.
     """
+    budgets = lag_budgets(default_registry())
     return SourcesOut(
         as_of=clock.today(),
-        sources=[SourceStatusOut.of(status) for status in store.source_statuses()],
+        sources=[SourceStatusOut.of(status) for status in store.source_statuses(budgets)],
+    )
+
+
+@app.get("/status/jobs", summary="Every registered job: on schedule, overdue, failing or never run")
+def status_jobs(conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> JobsOut:
+    """Each registered job against its own cron, and the live sources no job keeps current.
+
+    What it does: reads `job_run` for every job in the production registry and reports NEVER_RAN,
+    FAILING, OVERDUE, RUNNING or OK (`scheduler.health.assess`), plus the registry's `UNSCHEDULED`
+    ledger. A job registered in code that no process ever fires is NEVER_RAN here — the state
+    `eod_pipeline` sat in, unseen, from M1.10 to the 2026-10-05 audit.
+    What it never does: report only the jobs that happen to have rows; the registry is the list.
+    """
+    now = clock.now()
+    jobs = read_job_health(conn, default_registry(), now=now, timezone=settings.tzinfo)
+    return JobsOut(
+        as_of=now,
+        healthy=all(job.healthy for job in jobs),
+        jobs=[JobHealthOut.of(job) for job in jobs],
+        unscheduled=dict(UNSCHEDULED),
     )
 
 

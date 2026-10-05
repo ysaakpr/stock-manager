@@ -647,9 +647,7 @@ class BackfillRunner:
         )
         try:
             self._sync.begin(source, day)
-            ref = self._fetcher.fetch(
-                request.fetch_source, request.url, day, filename=request.filename
-            )
+            ref = self._stored_or_fetched(request)
             self._sync.mark_fetched(source, day, checksum=ref.sha256, l0_path=ref.key)
 
             rows = self._set.parse(self._l0, ref)
@@ -678,6 +676,30 @@ class BackfillRunner:
             self._fail(request, f"parse failed: {exc}", retryable=True, report=report)
         except Exception as exc:  # fetch/write/DB — recorded, not swallowed; the run continues
             self._fail(request, f"{type(exc).__name__}: {exc}", retryable=True, report=report)
+
+    def _stored_or_fetched(self, request: FetchRequest) -> L0Ref:
+        """The session's payload from L0 when the lake already holds it, else from the archive.
+
+        L0 is immutable, so a stored key *is* the bytes a fetch would land — re-requesting them
+        spends budget for nothing, and for a payload the archive re-serves with a fresh zip
+        timestamp it would raise `L0ImmutabilityError` and fail a session whose bytes we hold. This
+        is what lets an L0-only catch-up (`l0_acquire`) be derived into L1 later with zero requests
+        (BACKLOG M3.1). The ref's checksum is re-verified when the parser reads it back.
+        """
+        day = request.trade_date
+        if self._l0.exists(request.fetch_source, day, request.filename):
+            ref = self._l0.ref_for(request.fetch_source, day, request.filename)
+            _LOG.info(
+                "backfill.l0_reused",
+                source=request.state_source,
+                date=day.isoformat(),
+                l0_key=ref.key,
+                state="FETCHED",
+            )
+            return ref
+        return self._fetcher.fetch(
+            request.fetch_source, request.url, day, filename=request.filename
+        )
 
     def _fail(
         self, request: FetchRequest, message: str, *, retryable: bool, report: BackfillReport

@@ -43,7 +43,7 @@ from dataplatform.clock import FrozenClock
 from dataplatform.config import Settings
 from dataplatform.ingest.backfill import NSE_BHAVCOPY, SOURCE_SETS
 from dataplatform.ingest.calendar import trading_calendar
-from dataplatform.ingest.eod import DAILY_NSE_SOURCES, EodPipeline
+from dataplatform.ingest.eod import EodPipeline
 from dataplatform.ingest.fetcher import Fetcher, RecordedResponse, RecordedTransport
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
@@ -182,6 +182,12 @@ def _fetcher(
     )
 
 
+#: The pipeline's mechanics (one run, self-heal, idempotence, the five-session loop) are proved over
+#: the one source these fixtures script. The production tuple — NSE bhavcopy, delivery and BSE —
+#: and its register coverage are held by `tests/unit/test_scheduler_coverage.py`.
+SOURCES: Final = (NSE_BHAVCOPY,)
+
+
 def _pipeline(
     transport: RecordedTransport,
     *,
@@ -202,7 +208,9 @@ def _pipeline(
         register=register,
         archive_root=settings.data_root,
         data_root=settings.data_root,
+        sources=SOURCES,
         lookback=lookback,
+        capture_pr_bundles=False,
     )
 
 
@@ -307,11 +315,11 @@ def test_one_invocation_publishes_the_session(
 
     assert report.logical_date == UDIFF_SESSION
     assert report.session_published
-    assert report.sources == DAILY_NSE_SOURCES
+    assert report.sources == SOURCES
 
     # Every daily NSE source is PUBLISHED for the session, and the data really landed in L1.
     store = _store(conn, clock)
-    for source in DAILY_NSE_SOURCES:
+    for source in SOURCES:
         record = store.get(source, UDIFF_SESSION)
         assert record is not None and record.state is SyncState.PUBLISHED
     assert l1_partition_path("prices_raw", UDIFF_SESSION, data_root=settings.data_root).exists()
@@ -431,6 +439,38 @@ def test_self_heals_a_prior_days_failure(
     assert len(read_prices_raw(LEGACY_SESSION, data_root=settings.data_root)) > 0
     assert len(read_prices_raw(UDIFF_SESSION, data_root=settings.data_root)) > 0
     assert second.gap_report is not None and second.gap_report.fully_explained
+
+
+def test_a_session_no_run_ever_began_is_driven_by_the_next_run(
+    settings: Settings, conn: Connection, register: SourceRegister
+) -> None:
+    """A missed *run*, not a failed fetch: the day has no sync row at all, and is still owed.
+
+    The 2026-10-05 audit: the scheduler never fired, so three weeks of sessions had no row — none
+    FAILED, so a self-heal that only re-drove FAILED rows stepped over every one. Here 2024-07-09
+    has no row when 2024-07-10's run starts; the run must plan it, land it and say it healed it.
+    Inverted (FAILED-only self-heal), the session stays absent and this fails.
+    """
+    missed, target = CONSECUTIVE_SESSIONS[1], CONSECUTIVE_SESSIONS[2]
+    clock = FrozenClock(target)
+    store = _store(conn, clock)
+    assert store.get(NSE_BHAVCOPY, missed) is None
+
+    report = _pipeline(
+        _consecutive_transport(register),
+        settings=settings,
+        conn=conn,
+        clock=clock,
+        register=register,
+        alerter=RecordingAlerter(),
+        lookback=timedelta(days=1),
+    ).run()
+
+    assert report.session_published
+    assert missed in report.healed
+    for day in (missed, target):
+        record = store.get(NSE_BHAVCOPY, day)
+        assert record is not None and record.state is SyncState.PUBLISHED, day
 
 
 # ── acceptance 3: a second run for the same session is a no-op ─────────────────────────────────
