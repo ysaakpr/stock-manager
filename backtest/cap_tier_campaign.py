@@ -38,7 +38,7 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Final
@@ -93,6 +93,7 @@ __all__ = [
     "CRASH_WINDOW",
     "CapTierPlan",
     "PathFigures",
+    "annualised_growth",
     "cap_tier_plan",
     "longest_drawdown",
     "main",
@@ -123,6 +124,9 @@ CRASH_WINDOW: Final = (date(2017, 12, 31), date(2020, 3, 31))
 _FLOORS: Final = (LOW_FLOOR, HIGH_FLOOR)
 _FULL = "full"
 _ZERO = Decimal(0)
+#: Significant digits for the annualising power; far past the report's two places, and fixed so the
+#: figure is the same whatever context the caller runs in.
+_CAGR_PRECISION: Final = 28
 _ONE = Decimal(1)
 
 
@@ -299,12 +303,29 @@ def longest_drawdown(points: Sequence[tuple[date, Decimal]]) -> tuple[int, bool]
     return longest, True
 
 
+def annualised_growth(growth: Decimal, days: int) -> Decimal:
+    """The compound annual rate that turns 1 into ``growth`` over ``days`` calendar days.
+
+    ``growth ** (365 / days) - 1``, ACT/365F like ``backtest.xirr``, in ``Decimal`` end to end: a
+    return is held to the money rule (CLAUDE.md), and a float round-trip here would also make the
+    figure depend on binary rounding rather than on the path. The power runs in a local context of
+    :data:`_CAGR_PRECISION` digits so the result never depends on the caller's ambient context.
+    Assumes ``growth >= 0`` and ``days > 0``; raises ``CapTierCampaignError`` otherwise rather than
+    returning a rate for a span that has none.
+    """
+    if days <= 0 or growth < 0:
+        raise CapTierCampaignError(f"no annual rate for growth {growth} over {days} days")
+    with localcontext() as ctx:
+        ctx.prec = _CAGR_PRECISION
+        return growth ** (Decimal(365) / Decimal(days)) - 1
+
+
 def path_figures(points: Sequence[tuple[date, Decimal]]) -> PathFigures:
     if len(points) < 2 or points[0][1] <= 0:
         raise CapTierCampaignError("a path needs two or more points and a positive start")
     days = (points[-1][0] - points[0][0]).days
     growth = points[-1][1] / points[0][1]
-    cagr = Decimal(float(growth) ** (365 / days) - 1) if days > 0 else _ZERO
+    cagr = annualised_growth(growth, days) if days > 0 else _ZERO
     longest, recovered = longest_drawdown(points)
     return PathFigures(
         cagr=cagr,
