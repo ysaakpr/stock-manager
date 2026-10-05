@@ -102,7 +102,7 @@ class SyncStatusOut(BaseModel):
 
     date: date
     day_kind: str | None = Field(
-        description="SESSION | MUHURAT | WEEKEND | HOLIDAY from the C.2 calendar; "
+        description="SESSION | MUHURAT | SPECIAL | WEEKEND | HOLIDAY from the C.2 calendar; "
         "null outside its coverage"
     )
     expects_data: bool | None = Field(
@@ -345,7 +345,9 @@ class GapEntryOut(BaseModel):
     date: date
     reason: GapReason
     explained: bool = Field(description="False means somebody owes an answer for this day")
-    day_kind: str = Field(description="SESSION | MUHURAT | WEEKEND | HOLIDAY from the C.2 calendar")
+    day_kind: str = Field(
+        description="SESSION | MUHURAT | SPECIAL | WEEKEND | HOLIDAY from the C.2 calendar"
+    )
     detail: str = Field(description="One line naming the reason concretely, for an operator")
     state: SyncState | None = Field(description="Null when the pair has no sync_state row at all")
     attempts: int
