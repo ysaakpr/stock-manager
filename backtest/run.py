@@ -121,6 +121,7 @@ from backtest.policies.swing_composite import (
     SwingRecord,
 )
 from backtest.rails import (
+    UNKNOWN_SECTOR,
     BacktestRailPolicy,
     RailGate,
     rail_blocks_by_rail,
@@ -140,11 +141,11 @@ from backtest.tax import RunLedger
 from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import Exchange as IdentityExchange
 from dataplatform.identity.master import ListingStatus
+from dataplatform.ingest.index_history import read_membership_history
 from dataplatform.ingest.indices import (
     TRI_METHOD_PUBLISHED,
     TriPoint,
     TriSeries,
-    membership_asof,
     read_tri_series,
 )
 from dataplatform.ingest.xbrl import Nature
@@ -153,7 +154,12 @@ from dataplatform.query.fundamentals_metrics import CONCEPTS_USED, compute_metri
 from dataplatform.query.pit import Dataset
 from dataplatform.query.service import QueryService
 from dataplatform.query.shapes import CrossSectionRequest
-from dataplatform.query.universe import InMemoryListingCalendar, ListingWindow, pit_universe
+from dataplatform.query.universe import (
+    InMemoryListingCalendar,
+    ListingWindow,
+    index_membership_asof,
+    pit_universe,
+)
 from dataplatform.store.l2 import (
     open_connection,
     register_adjusted_view,
@@ -666,11 +672,12 @@ class UniverseParameters:
     Two screens, both point-in-time:
 
     * ``index_slug`` — the index whose *as-of* membership defines the investable map. The screen
-      reads the M3.9 constituents history through :func:`membership_asof`, which returns the
-      snapshot in force on the decision date (never today's list — the survivorship-bias kill,
-      invariant #7). When the store holds no snapshot on or before a date (``membership_asof`` →
-      ``None``), the membership screen is a no-op for that date and only the liquidity floor
-      applies; the run reports plainly whether membership data was present (see the report).
+      reads the point-in-time membership history (DQ-5) through the query layer's
+      :func:`~dataplatform.query.universe.index_membership_asof`: members effective on the decision
+      date *and* announced by it, never today's list (the survivorship-bias kill, invariant #7).
+      A decision date before the history's own ``coverage_start`` raises
+      :class:`IndexCoverageError` — there is no fallback to a later list and no silently empty or
+      unscreened universe (see :class:`_InvestableUniverse`).
 
     * ``median_turnover_floor`` / ``liquidity_lookback_days`` — a name's median daily traded value
       over the trailing ``liquidity_lookback_days`` (ending on the decision date) must reach the
@@ -704,9 +711,11 @@ class _InvestableUniverse:
     The rebalance universe is the intersection of two point-in-time screens applied to the
     survivorship-safe PIT candidate set the momentum data already builds:
 
-      1. **as-of index membership** — the M3.9 constituents snapshot in force on the date
-         (:func:`membership_asof`); absent when the store carries no snapshot for the date, in which
-         case this screen does not narrow the set (and the report says so);
+      1. **as-of index membership** — the point-in-time membership history (DQ-5) read through
+         :func:`~dataplatform.query.universe.index_membership_asof`: members effective on the date
+         and announced by it (a captured snapshot newer than the history's anchor wins there, as
+         the fresher primary record). A date the history does not cover raises
+         :class:`IndexCoverageError`;
       2. **a stated liquidity floor** — the name's median daily traded value over the trailing
          look-back reaches ``median_turnover_floor``.
 
@@ -714,6 +723,14 @@ class _InvestableUniverse:
     no future membership change and no post-decision turnover can enter it. Results are cached per
     date so the ten-year walk pays for each screen once. ``members_asof`` and ``liquid_asof`` are
     exposed so a test can assert either screen in isolation.
+
+    **Before coverage: fail loud, no opt-in.** Coverage is read from the stored history itself
+    (``coverage_start`` of its newest build), so it moves back on its own as the history is
+    extended. A date before it has no point-in-time answer, and every alternative is a different
+    experiment wearing the same name: today's list is survivorship bias (invariant #7), and an
+    unscreened or empty set is a different universe. An opt-in flag would let such a run land in
+    a ranked campaign table beside clean ones, with the bias visible only in a manifest field; a
+    raised :class:`IndexCoverageError` names the index, the date and the coverage start instead.
     """
 
     def __init__(
@@ -726,15 +743,37 @@ class _InvestableUniverse:
         self._reader = reader
         self._params = params
         self._data_root = data_root
-        self._members: dict[date, frozenset[str] | None] = {}
+        self._members: dict[date, frozenset[str]] = {}
         self._liquid: dict[date, frozenset[str]] = {}
+        self._coverage: tuple[date | None] | None = None
 
-    def members_asof(self, as_of: date) -> frozenset[str] | None:
-        """The as-of index membership on ``as_of`` — ``None`` when no snapshot is in force then."""
+    def coverage_start(self) -> date | None:
+        """The first date the stored membership history answers for; ``None`` with no history.
+
+        Read once from the history's newest build, never hard-coded, so a history extended back
+        widens what a run may cover without a change here.
+        """
+        if self._coverage is None:
+            history = read_membership_history(self._params.index_slug, data_root=self._data_root)
+            self._coverage = (None if history is None else history.coverage_start,)
+        return self._coverage[0]
+
+    def members_asof(self, as_of: date) -> frozenset[str]:
+        """The point-in-time index membership on ``as_of``.
+
+        What it does: returns the members effective on ``as_of`` and announced by it.
+        What it never does: answer for a date the history does not cover, or return an empty set —
+        both raise :class:`IndexCoverageError`.
+        """
         if as_of in self._members:
             return self._members[as_of]
-        snapshot = membership_asof(self._params.index_slug, as_of, data_root=self._data_root)
-        members = None if snapshot is None else snapshot.members
+        slug = self._params.index_slug
+        coverage = self.coverage_start()
+        if coverage is None or as_of < coverage:
+            raise IndexCoverageError(slug, as_of, coverage)
+        members = index_membership_asof((slug,), as_of, data_root=self._data_root)
+        if not members:
+            raise IndexCoverageError(slug, as_of, coverage, empty=True)
         self._members[as_of] = members
         return members
 
@@ -751,11 +790,7 @@ class _InvestableUniverse:
 
     def constrain(self, as_of: date, candidates: Iterable[str]) -> set[str]:
         """Candidates surviving both screens as of ``as_of`` (index membership ∩ liquidity)."""
-        result = set(candidates) & self.liquid_asof(as_of)
-        members = self.members_asof(as_of)
-        if members is not None:
-            result &= members
-        return result
+        return set(candidates) & self.liquid_asof(as_of) & self.members_asof(as_of)
 
 
 # ── data source: the PIT momentum signal the policy reads ─────────────────────────────────────────
@@ -1498,6 +1533,44 @@ def _resolve_benchmark(
 
 class BacktestError(Exception):
     """A backtest could not be set up or run. Fails loud (CLAUDE.md), never a silent skip."""
+
+
+class IndexCoverageError(BacktestError):
+    """A decision date the point-in-time index membership history cannot answer (invariant #7).
+
+    Raised by :class:`_InvestableUniverse` for a date before the history's ``coverage_start`` (or
+    for an index with no stored history at all), and for a covered date on which the history names
+    no member. Never answered with today's constituent list, an unscreened set or an empty one.
+    """
+
+    def __init__(
+        self,
+        index_slug: str,
+        as_of: date,
+        coverage_start: date | None,
+        *,
+        empty: bool = False,
+    ) -> None:
+        self.index_slug = index_slug
+        self.as_of = as_of
+        self.coverage_start = coverage_start
+        if empty:
+            detail = (
+                f"the history covers it (from {coverage_start}) but names no member — "
+                "a broken build, not an empty index"
+            )
+        elif coverage_start is None:
+            detail = "no point-in-time membership history is stored for this index"
+        else:
+            detail = (
+                f"its membership history covers {coverage_start.isoformat()} onward; start the "
+                "window on or after that date, or extend the history back"
+            )
+        super().__init__(
+            f"index {index_slug!r} has no point-in-time membership on {as_of.isoformat()}: "
+            f"{detail}. Refusing to fall back to a later constituent list (survivorship bias) "
+            "or to an unscreened or empty universe."
+        )
 
 
 class RegimeSourceError(BacktestError):
@@ -2578,8 +2651,9 @@ def render_universe_report(
         "",
         "## A-priori thresholds (stated once, not tuned)",
         "",
-        f"- **Investable index:** `{universe.index_slug}` — as-of membership via "
-        "`membership_asof` (the snapshot in force on the decision date, never today's list).",
+        f"- **Investable index:** `{universe.index_slug}` — point-in-time membership from the "
+        "DQ-5 history via `index_membership_asof` (effective on the decision date and announced "
+        "by it, never today's list; a date before the history's coverage start fails the run).",
         f"- **Liquidity floor:** median daily traded value ≥ {_rupees(floor)} over a trailing "
         f"{universe.liquidity_lookback_days}-day window ending on the rebalance date.",
         "",
@@ -2596,8 +2670,8 @@ def render_universe_report(
             "on a controlled fixture in `tests/integration/test_backtest_universe.py`, which loads "
             "real snapshots."
             if not membership_present
-            else "This store holds index-constituents snapshots, so the run applies the full "
-            "intersection: as-of membership ∩ the liquidity floor, both point-in-time."
+            else "The index membership history covers every rebalance, so the run applies the "
+            "full intersection: as-of membership ∩ the liquidity floor, both point-in-time."
         ),
         "",
         (
@@ -2637,11 +2711,11 @@ def render_universe_report(
         "",
         "## PIT",
         "",
-        "- Both screens read only sessions on or before the decision date: `membership_asof` "
-        "refuses a snapshot captured after the date, and the turnover median is measured over a "
-        "window ending on it. No future membership change or post-decision turnover enters a "
-        "past decision "
-        "(invariant #7). Both runs completed with no `PitError` raised.",
+        "- Both screens read only what was knowable on the decision date: the membership history "
+        "admits a change only once it is both effective and announced, and the turnover median is "
+        "measured over a window ending on it. No future membership change or post-decision "
+        "turnover enters a past decision (invariant #7). Both runs completed with no `PitError` "
+        "raised.",
         "",
     ]
     return "\n".join(lines)
@@ -2664,9 +2738,10 @@ def run_universe_report(
     the L2 adjusted signal equals the raw one bar-for-bar (no corporate actions — M9.2 established
     this and the ten-year L2 is not materialized), so the raw signal *is* the M9.2 signal here and
     the run completes without a materialized L2; pass ``adjusted=True`` on a store with a
-    materialized L2 to strike the delta on the back-adjusted signal explicitly. ``membership_asof``
-    is probed once over the rebalance window to record honestly whether the store held any snapshot
-    the membership screen could apply.
+    materialized L2 to strike the delta on the back-adjusted signal explicitly. The constrained run
+    reads the point-in-time membership history on every rebalance and raises
+    :class:`IndexCoverageError` on a date it does not cover, so a report that renders at all had
+    the membership screen applied throughout.
     """
     uni = universe if universe is not None else UniverseParameters()
     baseline = run_naive_momentum(
@@ -2687,13 +2762,7 @@ def run_universe_report(
         adjusted=adjusted,
         universe=uni,
     )
-    membership_present = any(
-        membership_asof(uni.index_slug, rebalance, data_root=data_root) is not None
-        for rebalance in (baseline.start, constrained.terminal)
-    )
-    return render_universe_report(
-        baseline, constrained, universe=uni, membership_present=membership_present
-    )
+    return render_universe_report(baseline, constrained, universe=uni, membership_present=True)
 
 
 def render_benchmark_report(run: BacktestResult, *, benchmark_slug: str) -> str:
@@ -3063,16 +3132,16 @@ class _L1SectorRotationData:
     Built exactly like :class:`_L1MomentumData` — rebalance on the first session of each month, the
     survivorship-safe PIT price universe narrowed by the same M9.3 investable/liquidity screen, the
     momentum ratio from the same L2-adjusted-or-raw close source (M9.2), the sizing price from raw
-    (invariant #3) — but each candidate is additionally tagged with the ``sector`` it belonged to,
-    and the candidate set is narrowed to names that *have* a resolvable sector.
+    (invariant #3) — but each candidate is additionally tagged with the ``sector`` it belonged to.
 
-    Sector resolution is point-in-time by contract. When the L1 store holds constituent snapshots
-    (post M10.1 live fetch / M10.2 accrual) the sector is read through ``membership_asof`` — the
-    snapshot in force on the decision date — and stamped with that snapshot's own capture date, so a
-    future map cannot leak (invariant #7). When the store holds no snapshots (as this lake does), a
-    static current-day map (:func:`_load_static_sector_map`) stands in, stamped as-of the decision
-    date; that is survivorship-biased and the report says so. Either way the record carries a
-    ``knowable_date`` the policy's PIT guard checks.
+    Membership and classification are separate. *Who is in the universe* is the investable screen
+    alone — the point-in-time index membership history (:class:`_InvestableUniverse`). The sector
+    map is only a label: it is a static current-day classification (:func:`_load_static_sector_map`,
+    built from today's constituent lists), so it must never filter the set — a name that was a
+    member on the decision date but has since left every list would otherwise drop out, which is
+    survivorship bias by the back door. A member the map does not name is pooled under
+    ``UNKNOWN_SECTOR`` (the rails' convention), never dropped and never guessed. Every record
+    carries a ``knowable_date`` the policy's PIT guard checks.
 
     The same instance serves both report arms — sector rotation and plain momentum on the identical
     universe — because the arms differ only in the policy's ``top_k`` (the sector gate), never in
@@ -3132,7 +3201,11 @@ class _L1SectorRotationData:
 
     @property
     def sector_count(self) -> int:
-        """How many distinct industries the mapped universe spans — for the top-K context."""
+        """How many distinct industries the map names — for the top-K context.
+
+        Excludes the ``UNKNOWN_SECTOR`` pool, so the plain-momentum arm's ``sector_count + 1``
+        still exceeds every sector a candidate can carry and its gate stays a no-op.
+        """
         return len(set(self._sector_by_isin.values()))
 
     def _lookback_session(self, as_of: date) -> date | None:
@@ -3147,8 +3220,6 @@ class _L1SectorRotationData:
         universe = pit_universe(as_of, InMemoryListingCalendar(self._windows)).isins
         if self._universe_filter is not None:
             universe = frozenset(self._universe_filter.constrain(as_of, universe))
-        # Only names with a resolvable sector are sector-rotation candidates (never guessed).
-        universe = frozenset(isin for isin in universe if isin in self._sector_by_isin)
         signal_now = self._signal_closes(as_of)
         signal_then = self._signal_closes(reference)
         raw_now = self._reader.closes_on(as_of)
@@ -3164,7 +3235,7 @@ class _L1SectorRotationData:
                     isin=isin,
                     momentum=now / then - _ONE,
                     price=price,
-                    sector=self._sector_by_isin[isin],
+                    sector=self._sector_by_isin.get(isin, UNKNOWN_SECTOR),
                     knowable_date=as_of,
                 )
             )
@@ -3493,27 +3564,22 @@ def render_sector_rotation_report(
         "",
         "## Survivorship / static-map limitation (read this before the numbers)",
         "",
-        "**This run applies a static, current-day sector map backward over the history, which "
-        "is survivorship-biased.** niftyindices publishes constituents *as of today only*; the L1 "
-        "store here holds **no** constituent snapshots yet (M10.1's fetch is a live operation; "
-        "M10.2 accrues forward point-in-time history week by week), so the sector of each name is "
-        f"taken from the checked-in current-day classification ({mapped_names} names across "
-        f"{sector_count} industries) and stamped as-of each decision date. That silently assumes a "
-        "name was always in the industry — and in the index — it sits in now, which flatters any "
-        "result. The policy is point-in-time by construction: it resolves membership through "
-        "`membership_asof` (the snapshot in force on the decision date) and its guard refuses a "
-        "record whose sector became knowable after the session, so **once M10.2's forward history "
-        "matures the policy runs survivorship-free with no code change** — only the map source "
-        "flips from the static fallback to the accrued snapshots. Then read the numbers below "
-        "as a mechanism demonstration on a small mapped universe, not as an estimate of live edge.",
+        "**Index membership is point-in-time; the sector *label* is not.** Who is in the universe "
+        "on a decision date is read from the DQ-5 membership history (effective on the date and "
+        "announced by it), and a date before its coverage start fails the run rather than "
+        "falling back to today's list. The sector of each name, though, comes from the "
+        f"checked-in current-day classification ({mapped_names} names across {sector_count} "
+        "industries), stamped as-of each decision date: it assumes a name was always in the "
+        "industry it sits in now. It is a label only — a past member the map does not name is "
+        f"pooled under `{UNKNOWN_SECTOR}`, never dropped — so it cannot narrow the universe to "
+        "today's survivors, but a reclassified name is still ranked in its current industry.",
         "",
         "## Data reality (same M9 stack)",
         "",
         _signal_source_prose(adjusted)
         + " The investable/liquidity screen and the PIT universe are the M9.2-M9.4 machinery "
         "unchanged: the M9.3 "
-        "investable set (as-of index membership ∩ a median-turnover floor; no historical "
-        "membership snapshots in the store, so the liquidity floor is what narrows it), look-backs "
+        "investable set (point-in-time index membership ∩ a median-turnover floor), look-backs "
         "walking the full L1 calendar so the first rebalance already has a signal, and the "
         + (
             "**published** NIFTY TRI (M3.9.b)"
@@ -3589,11 +3655,10 @@ def render_sector_rotation_report(
         "- Every arm completed with each session's queries scoped to that session; no `PitError` "
         "was raised. Sector membership is read through the PIT seam and the policy's guard "
         "refuses any record whose sector is not yet knowable on the session — the structural "
-        "defence against a future sector map. The static current-day map used here is the one "
-        "documented exception (stated above), stamped as-of the decision date; the "
-        "`membership_asof`-backed path that stamps the in-force snapshot's own date is pinned in "
-        "`tests/unit/test_sector_rotation.py` (a future snapshot trips the guard, an in-force one "
-        "admits).",
+        "defence against a future sector map. The static current-day *label* used here is the one "
+        "documented exception (stated above), stamped as-of the decision date; membership itself "
+        "is the point-in-time history, pinned in "
+        "`tests/integration/test_backtest_pit_index_universe.py`.",
         "",
     ]
     return "\n".join(lines)
@@ -5654,10 +5719,9 @@ def render_swing_report(
         "(keeping only ISINs still printing in 2026) changes the delivery edge by at most 0.45pp "
         "and the composite by at most 0.32pp, and *lowers* both in the early period. The decline "
         "in the delivery leg after 2023 is therefore real, not a coverage artifact.",
-        "- **Index membership is not historical.** The store holds one constituents snapshot, so "
-        "the investable screen is the liquidity floor alone (M9.3's stated fallback). The universe "
-        "is survivorship-safe through L1 listing windows, but it is not the index's own as-of "
-        "membership.",
+        "- **Index membership is as deep as its history.** The investable screen is the index's "
+        "point-in-time membership (DQ-5 history) ∩ the liquidity floor, and a window that starts "
+        "before the history's coverage start fails rather than screening on today's list.",
         "- **Slippage is a model, not a measurement.** Fills price off the next session's open "
         "with a participation-scaled slippage (`execution.sim_broker`); a real book at this "
         "cadence would discover its own impact. Higher-turnover arms carry more of this model "
