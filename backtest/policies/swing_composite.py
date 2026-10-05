@@ -252,7 +252,10 @@ class SwingRecord:
 #: Parameters added after run digests were first persisted, each with the default at which it is
 #: left out of ``repr`` — the run ledger keys a run on ``repr(parameters)``, so every arm that does
 #: not use a newer leg keeps the digest it was persisted (and frozen as a baseline) under.
-_DIGEST_OPTIONAL_PARAMETERS: dict[str, object] = {"weight_residual_momentum": _ZERO}
+_DIGEST_OPTIONAL_PARAMETERS: dict[str, object] = {
+    "weight_residual_momentum": _ZERO,
+    "redeploy_next_session": False,
+}
 
 
 @dataclass(frozen=True, slots=True, repr=False)
@@ -298,6 +301,10 @@ class SwingCompositeParameters:
       knob that raises trade frequency; the sell band, not the calendar, sets turnover.
     * ``buy_budget_fraction`` (0.98) — the mechanical execution margin, as elsewhere.
     * ``sleeve`` — the journal sleeve every trade is tagged with.
+    * ``redeploy_next_session`` (off) — once the sale proceeds of a rebalance that sold something
+      have *settled*, deploy the free cash into that rebalance's own target set, instead of letting
+      it sit until the next decision session. See :meth:`SwingCompositePolicy._redeploy`. Off by
+      default, and absent from ``repr`` when off (see ``_DIGEST_OPTIONAL_PARAMETERS``).
     """
 
     top_n: int = 20
@@ -326,6 +333,9 @@ class SwingCompositeParameters:
     # Round 2, H1: the residual-momentum leg (backtest.policies.residual_momentum). Zero by default,
     # and absent from ``repr`` at zero (see _DIGEST_OPTIONAL_PARAMETERS).
     weight_residual_momentum: Decimal = _ZERO
+    # Idle-cash fix: momentum v2's ``redeploy_next_session``, settlement-aware. Off by default, and
+    # absent from ``repr`` when off, so no arm persisted before it changes digest.
+    redeploy_next_session: bool = False
 
     def __repr__(self) -> str:
         shown = (
@@ -546,6 +556,19 @@ class _Lots:
 _SAME_COST = Decimal("1e-12")
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingTarget:
+    """A rebalance's target set, awaiting the settlement of that rebalance's sale proceeds.
+
+    ``target`` and ``sleeve_of`` are exactly what the rebalance sized its buys against; nothing is
+    re-scored while it waits. ``decided_on`` is the rebalance session, for the journal.
+    """
+
+    decided_on: date
+    target: dict[str, SwingRecord]
+    sleeve_of: dict[str, TierSleeve] | None
+
+
 def _same_cost(a: Decimal, b: Decimal) -> bool:
     return abs(a - b) <= max(abs(a), abs(b)) * _SAME_COST
 
@@ -603,6 +626,7 @@ class SwingCompositePolicy:
         "_data",
         "_order_caps",
         "_params",
+        "_pending",
         "_positions",
         "_sleeves",
         "_tiers",
@@ -621,6 +645,10 @@ class SwingCompositePolicy:
         self._data = data
         self._params = params if params is not None else SwingCompositeParameters()
         self._positions: dict[str, _Position] = {}
+        #: The last rebalance's target, while its sale proceeds settle (``redeploy_next_session``).
+        #: ``None`` when nothing is pending. A pure function of earlier decisions and the broker's
+        #: reported book, so a replay reproduces it.
+        self._pending: _PendingTarget | None = None
         # X2 H2: band-hit avoidance is on exactly when a source is injected. It is not a field of
         # SwingCompositeParameters on purpose — a new field would change the repr, and so the
         # persisted digest, of every arm already run, the frozen baseline included.
@@ -670,9 +698,13 @@ class SwingCompositePolicy:
 
         stopped = self._stop_outs(held, marks)
         self._record_sell(stopped)
-        if not self._data.is_rebalance(ctx.session):
-            return self._session_decision(ctx, stopped, note="stop check only; no rebalance due")
-        return self._rebalance(ctx, held, marks, stopped)
+        if self._data.is_rebalance(ctx.session):
+            # A new rebalance supersedes whatever the last one left pending.
+            self._pending = None
+            return self._rebalance(ctx, held, marks, stopped)
+        if self._pending is not None:
+            return self._redeploy(ctx, self._pending, marks, stopped)
+        return self._session_decision(ctx, stopped, note="stop check only; no rebalance due")
 
     # ── position bookkeeping ─────────────────────────────────────────────────────────────────────
 
@@ -833,7 +865,16 @@ class SwingCompositePolicy:
         if self._params.regime_filter and not self._risk_on(ctx):
             target = {}
             would_choose = []
-        buys, drift = self._buys(ctx, held, target, marks, sleeve_of)
+        buys, drift = self._buys(
+            ctx, {isin: h.quantity for isin, h in held.items()}, target, marks, sleeve_of
+        )
+        if self._params.redeploy_next_session and target and sells:
+            # Only a rebalance that sold something leaves proceeds to deploy once they settle.
+            self._pending = _PendingTarget(
+                decided_on=ctx.session,
+                target=dict(target),
+                sleeve_of=dict(sleeve_of) if sleeve_of is not None else None,
+            )
 
         orders = tuple(order for order, _ in (*sells, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
@@ -848,6 +889,80 @@ class SwingCompositePolicy:
         if withheld:
             evidence, blocked_lines = self._band_hit_entries(ctx, held, withheld, evidence)
             entries += blocked_lines
+        return SessionDecision(evidence=evidence, orders=orders, entries=entries)
+
+    def _redeploy(
+        self,
+        ctx: SessionContext,
+        pending: _PendingTarget,
+        marks: Mapping[str, Decimal],
+        stopped: Sequence[tuple[OrderRequest, str]],
+    ) -> SessionDecision:
+        """Deploy settled cash into the last rebalance's target set, once its proceeds have settled.
+
+        A rebalance's sells fill the next session and pay out on that fill's settlement cycle (T+2
+        before 2023-01-27, T+1 after, counted in trading sessions by the broker). While any sale
+        proceeds are still in settlement the session only checks stops and says it is waiting —
+        nothing is bought on cash the account does not yet hold, and the budget is ``available``
+        (settled cash) exactly as on a rebalance. The first session with nothing in settlement
+        sizes buys toward the stored target through the same :meth:`_buys` path, rail ceiling
+        included, and the pending target is spent. The next rebalance supersedes it either way.
+
+        Decides by the stored target only: no signal, regime or band-hit read, no re-ranking. The
+        only input it reads that a stop-check session does not is the broker's own book. A target
+        name stopped out since the rebalance is dropped from the target rather than bought back,
+        and one without a mark this session is left out of this pass (never priced on a guess).
+        """
+        for order, _ in stopped:
+            pending.target.pop(order.isin, None)
+        margins = ctx.broker.margins()
+        if margins.unsettled_proceeds > _ZERO:
+            note = (
+                f"redeploy pending: {margins.unsettled_proceeds} of sale proceeds still settling "
+                f"from the {pending.decided_on.isoformat()} rebalance; nothing bought"
+            )
+            return self._session_decision(ctx, stopped, note=note)
+        self._pending = None
+        target = {isin: record for isin, record in pending.target.items() if isin in marks}
+        quantities = {isin: lots.quantity for isin, lots in _account_lots(ctx).items()}
+        buys, drift = self._buys(
+            ctx,
+            quantities,
+            target,
+            marks,
+            pending.sleeve_of,
+            prices={isin: marks[isin] for isin in target},
+            note=f"redeploy settled proceeds of the {pending.decided_on.isoformat()} rebalance",
+        )
+        if not buys:
+            return self._session_decision(
+                ctx,
+                stopped,
+                note=f"redeploy session for the {pending.decided_on.isoformat()} rebalance: "
+                "nothing affordable reduces drift",
+            )
+        orders = tuple(order for order, _ in (*stopped, *buys))
+        entries = tuple(self._entry(ctx, order, note) for order, note in (*stopped, *buys))
+        evidence = EvidenceBundle(
+            trading_date=ctx.session,
+            actor=Actor.T0,
+            items=(
+                EvidenceItem(
+                    kind=EvidenceKind.POSITION,
+                    source="book",
+                    label="redeploy_budget",
+                    as_of=ctx.session,
+                    value=margins.available * self._params.buy_budget_fraction,
+                    detail={
+                        "rebalance": pending.decided_on.isoformat(),
+                        "names_bought": str(len(buys)),
+                        "tracking_drift": str(drift),
+                    },
+                    text="settled proceeds of the last rebalance's sells, deployed into its target"
+                    f"; {len(stopped)} trailing-stop exit(s)",
+                ),
+            ),
+        )
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
 
     def _tiered(
@@ -1035,24 +1150,30 @@ class SwingCompositePolicy:
     def _buys(
         self,
         ctx: SessionContext,
-        held: Mapping[str, Holding],
+        held: Mapping[str, int],
         target: Mapping[str, SwingRecord],
         marks: Mapping[str, Decimal],
         sleeve_of: Mapping[str, TierSleeve] | None = None,
+        *,
+        prices: Mapping[str, Decimal] | None = None,
+        note: str | None = None,
     ) -> tuple[list[tuple[OrderRequest, str]], Decimal]:
         """Whole-share buys toward equal weight over the target set, sized from currently-free cash.
 
         Budget is the cash *already* free times ``buy_budget_fraction`` — never this session's sale
         proceeds, which have not settled — so a buy is never rejected for cash it does not yet hold.
         With ``order_caps`` no buy is sized past A8's per-order ceiling, for the same reason.
+        ``held`` is the share count already owned per ISIN; ``prices`` overrides the records' own
+        (the redeploy pass sizes at this session's marks), and ``note`` prefixes each rationale.
         """
         if not target:
             return [], _ZERO
         budget = ctx.broker.margins().available * self._params.buy_budget_fraction
-        prices = {isin: record.price for isin, record in target.items()}
+        if prices is None:
+            prices = {isin: record.price for isin, record in target.items()}
         weights = _equal_weights(sorted(target))
         existing_value = {
-            isin: Decimal(held[isin].quantity) * prices[isin] for isin in target if isin in held
+            isin: Decimal(held[isin]) * prices[isin] for isin in target if isin in held
         }
         allocation = simulate_sip_instalment(
             instalment=budget,
@@ -1068,7 +1189,8 @@ class SwingCompositePolicy:
         buys = [
             (
                 order.to_order_request(exchange=Exchange.NSE, tag="SWING"),
-                f"{self._basket_label(order.isin, sleeve_of)}: 52w-high proximity "
+                (f"{note}; " if note is not None else "")
+                + f"{self._basket_label(order.isin, sleeve_of)}: 52w-high proximity "
                 f"{target[order.isin].high_proximity}, delivery "
                 f"{target[order.isin].delivery_share}, 12-1 "
                 f"{target[order.isin].momentum_12_1:+}; buy {order.quantity} @ {order.price}",
