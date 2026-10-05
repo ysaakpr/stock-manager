@@ -43,7 +43,9 @@ from typing import Any
 from backtest.book_actions import (
     AppliedBookAction,
     AppliedCarry,
+    AppliedCashExit,
     AppliedDividend,
+    AppliedMerger,
     BookActionCalendar,
     BookActionSource,
     RescaleKind,
@@ -93,6 +95,7 @@ _LOG = get_logger(__name__)
 
 #: Bumped when the specification's rendering changes, so an old directory's digests stop matching.
 _SPEC_VERSION = "1"
+_NIL = Decimal("0")
 
 
 # ── where runs are persisted: one process-wide switch, like book_corporate_actions ────────────
@@ -186,7 +189,9 @@ def _actions_identity(source: BookActionSource | None) -> str:
         return "off"
     if isinstance(source, BookActionCalendar):
         counts = ",".join(f"{k}={v}" for k, v in source.counts().items())
-        return f"calendar[{len(source)}]:{counts}"
+        terms = source.merger_terms_identity()
+        suffix = "" if terms is None else f";{terms}"
+        return f"calendar[{len(source)}]:{counts}{suffix}"
     return type(source).__name__
 
 
@@ -247,15 +252,42 @@ def _ratio(numerator: Decimal, denominator: Decimal) -> tuple[int, int]:
 
 def _tax_events(
     applied: Iterable[AppliedBookAction],
-) -> tuple[tuple[DividendCredit, ...], tuple[CorporateEvent, ...]]:
-    """The applier's log in the tax module's terms, in the order the books applied it."""
+) -> tuple[tuple[DividendCredit, ...], tuple[CorporateEvent, ...], tuple[TaxTrade, ...]]:
+    """The applier's log in the tax module's terms, in the order the books applied it.
+
+    A share swap is a rescale of the old ISIN's lots followed by a carry into the survivor: each
+    lot keeps its acquisition date and its cost, which is the amalgamation rule (Sec 47(vii): not
+    a transfer; Sec 2(42A) Expl. 1(b)(c): held from the original purchase). A cash exit is a sale
+    of every lot at the exit price, with no charges and no STT — the tender is off-market.
+    """
     dividends: list[DividendCredit] = []
     events: list[CorporateEvent] = []
+    exits: list[TaxTrade] = []
     for action in applied:
         if isinstance(action, AppliedDividend):
             dividends.append(DividendCredit(action.isin, action.session, action.amount))
         elif isinstance(action, AppliedCarry):
             events.append(ReissueEvent(action.isin, action.ex_date, action.from_isin))
+        elif isinstance(action, AppliedMerger):
+            numerator, denominator = _ratio(action.numerator, action.denominator)
+            events.append(
+                SplitEvent(
+                    action.from_isin, action.ex_date, numerator, denominator, action.new_quantity
+                )
+            )
+            events.append(ReissueEvent(action.isin, action.ex_date, action.from_isin))
+        elif isinstance(action, AppliedCashExit):
+            exits.append(
+                TaxTrade(
+                    isin=action.isin,
+                    trade_date=action.ex_date,
+                    side=Side.SELL,
+                    quantity=action.quantity,
+                    net_amount=action.amount,
+                    stt=_NIL,  # an off-market tender in the exit window carries no STT
+                    stt_known=True,
+                )
+            )
         elif action.kind is RescaleKind.SPLIT:
             numerator, denominator = _ratio(action.numerator, action.denominator)
             events.append(
@@ -265,7 +297,7 @@ def _tax_events(
             # The book's bonus multiple is (new + held) / held; the tax lot wants new : held.
             new, held = _ratio(action.numerator - action.denominator, action.denominator)
             events.append(BonusEvent(action.isin, action.ex_date, new, held, action.new_quantity))
-    return tuple(dividends), tuple(events)
+    return tuple(dividends), tuple(events), tuple(exits)
 
 
 def _replayed_quantities(ledger: RunLedger) -> dict[str, int]:
@@ -307,10 +339,10 @@ def build_run_ledger(
     the account never held, or leave untaxed ones it did. ``interest`` is every monthly credit of
     interest on idle cash, taxed as income from other sources in the FY it was credited.
     """
-    dividends, events = _tax_events(applied)
+    dividends, events, exits = _tax_events(applied)
     ledger = RunLedger(
         source=source,
-        trades=trades_from_fills(fills),
+        trades=(*trades_from_fills(fills), *exits),
         external_flows=tuple(external_flows),
         terminal_date=terminal_date,
         terminal_nav=terminal_nav,
