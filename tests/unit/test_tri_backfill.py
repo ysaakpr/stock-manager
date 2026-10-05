@@ -173,7 +173,12 @@ def test_one_index_lands_in_l0_and_l1_and_reaches_published(
     assert outcomes[0].latest == date(2026, 3, 30)
 
     # L0 holds the payload byte-for-byte, under a name that carries the index and the window.
-    stored = next((tmp_path / "L0" / "nifty_tri_history").rglob("tri_nifty50_*.json"))
+    # The glob also matches the `.json.meta.json` sidecar, and rglob order is the filesystem's.
+    (stored,) = [
+        path
+        for path in (tmp_path / "L0" / "nifty_tri_history").rglob("tri_nifty50_*.json")
+        if not path.name.endswith(".meta.json")
+    ]
     assert stored.read_bytes() == _payload("nifty50")
     assert (
         stored.with_suffix(".json.meta.json").exists()
