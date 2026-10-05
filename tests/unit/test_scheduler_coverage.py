@@ -16,7 +16,9 @@ Offline: no database, no network, no scheduler started.
 
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Final
 
 import pytest
@@ -214,3 +216,32 @@ def test_every_daily_price_source_has_a_one_session_budget() -> None:
     for source in ("nse_bhavcopy", "nse_delivery", "bse_bhavcopy"):
         assert budgets[source] == 1, source
     assert timedelta(minutes=45) == EOD_PIPELINE.timeout
+
+
+# ── the process that fires them ──────────────────────────────────────────────────────────────
+
+REPO: Final = Path(__file__).resolve().parents[2]
+
+
+def test_a_unit_runs_the_whole_scheduler_and_restarts_it() -> None:
+    """The audit's ops root cause: the only unit installed ran `run-once daily_snapshot`.
+
+    A registry is a schedule only if a process fires it. This holds the checked-in unit to running
+    `scheduler run` — every registered job — and to coming back when it dies.
+    """
+    unit = (REPO / "ops/systemd/scheduler.service").read_text()
+    lines = {
+        line.split("=", 1)[0]: line.split("=", 1)[1] for line in unit.splitlines() if "=" in line
+    }
+    assert lines["Restart"] == "always"
+    assert "Environment=DATA_ROOT=/" in unit and "Environment=SNAPSHOT_EXPECT_LAKE_ROOT=/" in unit
+    wrapper = REPO / "ops" / Path(lines["ExecStart"]).name
+    assert wrapper.is_file() and os.access(wrapper, os.X_OK)
+    assert "-m dataplatform.scheduler run\n" in wrapper.read_text()
+    assert "run-once" not in wrapper.read_text()
+
+
+def test_installing_the_scheduler_retires_the_single_job_timer() -> None:
+    script = (REPO / "ops/systemd/install-scheduler.sh").read_text()
+    assert "disable --now daily-snapshot.timer" in script
+    assert "enable --now scheduler.service" in script
