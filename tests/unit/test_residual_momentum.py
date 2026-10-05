@@ -328,7 +328,8 @@ def test_an_arm_that_does_not_weight_the_leg_keeps_its_run_digest() -> None:
     old = ", ".join(
         f"{f.name}={getattr(params, f.name)!r}"
         for f in fields(params)
-        if f.name != "weight_residual_momentum"
+        # Every digest-optional field is left out at its default, not only this one.
+        if f.name not in ("weight_residual_momentum", "redeploy_next_session")
     )
     assert repr(params) == f"SwingCompositeParameters({old})"
     assert "weight_residual_momentum=Decimal('1')" in repr(with_residual_momentum(params))

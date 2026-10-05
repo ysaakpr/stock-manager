@@ -127,6 +127,7 @@ from backtest.run_ledger import (
 from backtest.sweep import (
     ARMS,
     HIGH_FLOOR,
+    REDEPLOY_ARMS,
     Arm,
     l1_grandfathering,
     run_digests,
@@ -250,7 +251,7 @@ class Pinned:
 
 
 def _resolve(labels: Sequence[str]) -> tuple[Arm, ...]:
-    by_label = {arm.label: arm for arm in ARMS}
+    by_label = {arm.label: arm for arm in (*ARMS, *REDEPLOY_ARMS)}
     unknown = [label for label in labels if label not in by_label]
     if unknown:
         raise FoldCampaignError(f"no sweep arm labelled {', '.join(map(repr, unknown))}")
