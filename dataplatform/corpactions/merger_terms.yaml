@@ -17,6 +17,9 @@
 #     D2 identity master; the book resolves the ISIN that was live on the record date through the
 #     lineage chain (Grasim, Kotak and Tech Mahindra were reissued since).
 #   * `sources[].l0_key` is the L0 object; `member`/`line` locate the text inside a PR bundle.
+#     `line` is 1-BASED (`sed -n '<line>p'` prints it); `line_end` (inclusive) is set only where
+#     the source hard-wraps the quoted sentence across lines. `...` in a quote is an elision;
+#     every fragment between them is verbatim on those lines (tests/unit/test_merger_terms.py).
 
 share_swaps:
   - old_isin: INE894F01025
@@ -30,7 +33,7 @@ share_swaps:
     sources:
       - l0_key: nse_pr_bundle/2013/03/PR110313.zip
         member: An110313.txt
-        line: 548
+        line: 549
         quote: >-
           fixed March 20, 2013, as the Record Date ... equity shares in the ratio of 1 (one)
           equity share of face value Rs. 2 ... in IHFL for every 1 (one) equity share of face
@@ -50,7 +53,7 @@ share_swaps:
     sources:
       - l0_key: nse_pr_bundle/2013/07/PR080713.zip
         member: An080713.txt
-        line: 33
+        line: 34
         quote: >-
           Record date i.e. July 05, 2013 ... approved swap ratio i.e. 2 equity Shares of Rs. 10/-
           each fully paid up in respect of 17 equity shares of Rs. 2/- each fully paid up of
@@ -67,7 +70,7 @@ share_swaps:
     sources:
       - l0_key: nse_pr_bundle/2015/03/PR250315.zip
         member: An250315.txt
-        line: 3339
+        line: 2394
         quote: >-
           fixed Record Date as April 7, 2015 ... entitled to receive 8 ( eight) equity shares of
           Re.1 each of the Company for every 10 (ten) equity shares of Rs.5 each of erstwhile
@@ -84,7 +87,7 @@ share_swaps:
     sources:
       - l0_key: nse_pr_bundle/2015/04/PR070415.zip
         member: An070415.txt
-        line: 1076
+        line: 1077
         quote: >-
           fixed Record Date as April 17, 2015 ... in the ratio of 725 equity shares of Rs. 5/-
           each in the transferee Bank i.e. Kotak Mahindra Bank Limited for every 1000 equity
@@ -101,7 +104,7 @@ share_swaps:
     sources:
       - l0_key: nse_pr_bundle/2015/11/PR091115.zip
         member: An091115.txt
-        line: 1564
+        line: 606
         quote: >-
           fixed Record Date as November 19, 2015 ... in the exchange ratio of 5 (five) equity
           shares of Rs. 10/- each of Strides for every 16 (sixteen) equity shares of Rs. 2/- each
@@ -118,7 +121,7 @@ share_swaps:
     sources:
       - l0_key: nse_pr_bundle/2017/06/PR210617.zip
         member: An210617.txt
-        line: 356
+        line: 357
         quote: >-
           fixed Record Date as July 6, 2017 ... fully paid up equity shares of Rs.2 each ... of
           Grasim in the ratio of 15 (fifteen) equity shares of Grasim ... for every 10 (ten)
@@ -135,7 +138,8 @@ share_swaps:
     sources:
       - l0_key: nse_pr_bundle/2018/12/PR191218.zip
         member: An191218.txt
-        line: 3195
+        line: 3194
+        line_end: 3197
         quote: >-
           IDFC Bank has fixed, Monday, December 31, 2018 as the Record Date ... 139 Equity Shares
           of Rs. 10 each of IDFC Bank, fully paid-up, for every 10 Equity Shares of Rs. 10 each,

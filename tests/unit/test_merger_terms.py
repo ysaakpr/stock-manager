@@ -415,3 +415,37 @@ def test_a_malformed_terms_file_is_refused(tmp_path: Path, patch: str, message: 
     bad.write_text(body.replace(patch, message, 1))
     with pytest.raises(MergerTermsError):
         load_merger_terms(bad)
+
+
+_LAKE = Path("/home/ubuntu/stock-manager/data/L0")
+
+
+def _member_sources() -> list[tuple[str, TermSource]]:
+    terms = load_merger_terms()
+    sourced: list[ShareSwapTerm | CashExitTerm] = [*terms.share_swaps, *terms.cash_exits]
+    return [(t.old_isin, s) for t in sourced for s in t.sources if s.member and s.line]
+
+
+@pytest.mark.parametrize(
+    ("isin", "source"), _member_sources(), ids=[isin for isin, _ in _member_sources()]
+)
+def test_every_quoted_line_number_is_one_based_and_holds_the_quote(
+    isin: str, source: TermSource
+) -> None:
+    """``line`` (to ``line_end``) is the 1-based line range of the member the quote reproduces."""
+    import zipfile
+
+    path = _LAKE / source.l0_key
+    if not path.is_file():
+        pytest.skip(f"L0 object {source.l0_key} is not on this host (no lake, e.g. CI)")
+    assert source.member is not None and source.line is not None
+    lines = zipfile.ZipFile(path).read(source.member).decode("latin-1").splitlines()
+    end = source.line if source.line_end is None else source.line_end
+    assert 1 <= source.line <= end <= len(lines), (isin, source.line, end)
+    span = " ".join(" ".join(lines[n - 1].split()) for n in range(source.line, end + 1))
+    fragments = [f.strip() for f in source.quote.split("...") if f.strip()]
+    missing = [f for f in fragments if f not in span]
+    assert not missing, f"{isin}: not on line(s) {source.line}-{end}: {missing}"
+    # The range is tight: the first fragment opens on `line`, the last closes on `line_end`.
+    assert fragments[0] in " ".join(lines[source.line - 1].split()), isin
+    assert fragments[-1].split()[-1] in lines[end - 1], isin

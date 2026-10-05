@@ -57,12 +57,18 @@ class MergerTermsError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class TermSource:
-    """Where a term is stated: an L0 object, its location inside it, and the quoted sentence."""
+    """Where a term is stated: an L0 object, its location inside it, and the quoted sentence.
+
+    ``line`` is the **1-based** line of ``member`` the quote reproduces (``sed -n '<line>p'``);
+    ``line_end`` (inclusive, 1-based) is set only when the source hard-wraps the quoted sentence
+    across lines. ``...`` in ``quote`` marks an elision; every fragment between them is verbatim.
+    """
 
     l0_key: str
     quote: str
     member: str | None = None
     line: int | None = None
+    line_end: int | None = None
     url: str | None = None
 
 
@@ -196,13 +202,18 @@ def _sources(row: dict[str, Any]) -> tuple[TermSource, ...]:
         key, quote = entry.get("l0_key"), entry.get("quote")
         if not key or not quote:
             raise MergerTermsError(f"{row.get('old_isin')}: every source needs l0_key and quote")
-        line = entry.get("line")
+        line, line_end = entry.get("line"), entry.get("line_end")
+        if line is not None and int(line) < 1:
+            raise MergerTermsError(f"{row.get('old_isin')}: line is 1-based, got {line}")
+        if line_end is not None and (line is None or int(line_end) < int(line)):
+            raise MergerTermsError(f"{row.get('old_isin')}: line_end {line_end} before line")
         out.append(
             TermSource(
                 l0_key=str(key),
                 quote=" ".join(str(quote).split()),
                 member=entry.get("member"),
                 line=None if line is None else int(line),
+                line_end=None if line_end is None else int(line_end),
                 url=entry.get("url"),
             )
         )
