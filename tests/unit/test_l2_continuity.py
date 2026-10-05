@@ -111,7 +111,8 @@ def _write(root: Path, rows: list[tuple[str, date, str, int]]) -> None:
 
 
 def _sessions(n: int) -> list[date]:
-    out, day = [], date(2019, 12, 2)
+    out: list[date] = []
+    day = date(2019, 12, 2)
     while len(out) < n:
         if day.weekday() < 5:
             out.append(day)
