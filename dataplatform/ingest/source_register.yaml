@@ -793,6 +793,50 @@ sources:
     candidate_alternatives: []
     owner_task: M3.9.a
 
+  # §4.1 row 7, history half — the exchange's own record of every constituent change. The CSV
+  # above is "as of today" only; these press releases are what lets membership be reconstructed
+  # backward from it (DQ-5, audit 2026-10-05).
+  - id: nifty_index_press_releases
+    plan_row: "Index constituents"
+    description: >-
+      NSE Indices press releases — the index-change announcements (semi-annual reconstitutions,
+      ad-hoc replacements, demerger/suspension exclusions) each with its announcement date and
+      effective date, plus the press-release listing page that indexes them back to 1998.
+    host: niftyindices.com
+    method: GET
+    url_template: "https://niftyindices.com/Press_Release/{filename}"
+    verified_url: "https://niftyindices.com/Press_Release/ind_prs10082026.pdf"
+    cadence: event
+    era: {start: 1998-01-01, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://niftyindices.com/press-release"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.index_changes, task: M10.2}
+    robots_notes: >-
+      Allow: / with four disallowed paths, none of which is /Press_Release/ or /press-release.
+    pit_notes: >-
+      Each release states its own announcement date (the listing's data-date, and the "Mumbai,
+      <date>" / "Date:" line) and the date the change takes effect ("effective from", "w.e.f.").
+      The announcement date is the knowable date of the membership change; the effective date is
+      when it holds. The listing page (https://niftyindices.com/press-release) carries every
+      release with its date and title in the static HTML — one request indexes the archive.
+    status: VERIFIED
+    verified_at: 2026-10-05T10:36:00+05:30
+    last_http_status: 200
+    sample_bytes: 983307
+    content_type: application/pdf
+    sample_sha256: 56a3d162e4aabd8767686010afb01eb8dd21dc089d5cf8995a8a34091eef9bff
+    parse_check: >-
+      PDF; per index a numbered heading ("1) Nifty 50"), then "The following compan(y is|ies are)
+      being excluded/included" and a "Sr. No. Company Name Symbol" table. Releases before ~2015
+      lay the tables out detached from their headings and carry no symbol.
+    fixture: {frozen: true, task: M10.2, path: "tests/fixtures/nifty_index_press_releases/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M10.2
+
   # §4.1 row 8 — benchmark TRI (the published series, VERIFIED at D8's corrected path; the
   # computed-proxy input below is retained as §4.1's documented fallback, not as a substitute)
   - id: nifty_tri_history

@@ -16,6 +16,7 @@ dependencies = [
     "pyarrow>=17",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
+    "pypdf>=6.19.0",
     "pyyaml>=6.0",
     "structlog>=24.4",
     "tenacity>=9.0",

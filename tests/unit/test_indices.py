@@ -42,6 +42,7 @@ from dataplatform.ingest.fetcher import (
     ScriptedOutcome,
 )
 from dataplatform.ingest.indices import (
+    ConstituentRow,
     ConstituentSnapshot,
     ImmutableSnapshotError,
     IndexCloseRow,
@@ -52,6 +53,7 @@ from dataplatform.ingest.indices import (
     extend_tri,
     ingest_constituents,
     ingest_tri_from_close,
+    is_placeholder_constituent,
     l0_constituents_filename,
     membership_asof,
     parse_close_snapshot,
@@ -554,3 +556,93 @@ def test_urls_come_from_the_register(register: SourceRegister) -> None:
 def test_l0_filename_carries_the_snapshot_date(register: SourceRegister) -> None:
     """The URL has no date, so the L0 name must, or two months collide (`L0Store.put`)."""
     assert l0_constituents_filename("nifty50", AUG) == "ind_nifty50list_20260801.csv"
+
+
+# ── placeholder rows: a demerger stand-in is never an index member (audit 2026-10-05) ───────────
+
+_WITH_DUMMY: Final = (
+    b"Company Name,Industry,Symbol,Series,ISIN Code\n"
+    b"Reliance Industries Ltd.,Oil Gas & Consumable Fuels,RELIANCE,EQ,INE002A01018\n"
+    b"Dummy HEG Ltd.,Metals & Mining,DUMMYHEG,EQ,DUM545A01024\n"
+    b"Kotak Mahindra Bank Ltd.,Financial Services,KOTAKBANK,EQ,INE237A01028\n"
+)
+
+
+def test_a_placeholder_row_is_rejected_at_parse_time() -> None:
+    """NIFTY 500 read as 501 because `DUM545A01024` passed the ISIN pattern; it must not."""
+    snap = parse_constituents(
+        _WITH_DUMMY, index_slug="nifty500", index_name="NIFTY 500", as_of=JUL, filename="d.csv"
+    )
+    assert snap.members == frozenset({RELIANCE, KOTAKBANK})
+    assert "DUM545A01024" not in snap.members
+    assert snap.rejected_placeholders == ("DUM545A01024",)
+
+
+def test_a_placeholder_cannot_be_constructed_as_a_row() -> None:
+    """Bypassing the parser does not admit it either — the row model refuses it."""
+    with pytest.raises(ValueError, match="placeholder"):
+        ConstituentRow(
+            isin="DUM545A01024",
+            symbol="DUMMYHEG",
+            series="EQ",
+            company_name="Dummy HEG Ltd.",
+            industry="Metals & Mining",
+        )
+
+
+@pytest.mark.parametrize(
+    ("isin", "symbol", "company"),
+    [
+        ("DUM545A01024", "HEGX", "HEG Ltd."),  # the ISIN alone marks it
+        ("INE545A01024", "DUMMYHEG", "HEG Ltd."),  # the symbol alone marks it
+        ("INE545A01024", "HEGX", "Dummy HEG Ltd."),  # the name alone marks it
+    ],
+)
+def test_each_placeholder_mark_is_recognised(isin: str, symbol: str, company: str) -> None:
+    assert is_placeholder_constituent(isin, symbol, company)
+
+
+def test_a_real_security_is_not_a_placeholder() -> None:
+    assert not is_placeholder_constituent(RELIANCE, "RELIANCE", "Reliance Industries Ltd.")
+
+
+def test_a_stored_snapshot_with_a_placeholder_reads_back_without_it(tmp_path: Path) -> None:
+    """L1 written before the fix holds the dummy row; it is refused on read, L1 untouched."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from dataplatform.store.paths import l1_partition_path
+
+    path = l1_partition_path(
+        "index_constituents", JUL, filename="nifty500.parquet", data_root=tmp_path
+    )
+    path.parent.mkdir(parents=True)
+    rows = [
+        ("Reliance Industries Ltd.", "RELIANCE", RELIANCE),
+        ("Dummy HEG Ltd.", "DUMMYHEG", "DUM545A01024"),
+    ]
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "index_slug": "nifty500",
+                    "index_name": "NIFTY 500",
+                    "as_of": JUL,
+                    "isin": isin,
+                    "symbol": symbol,
+                    "series": "EQ",
+                    "company_name": name,
+                    "industry": "X",
+                    "source": "nifty_index_constituents",
+                    "l0_key": None,
+                }
+                for name, symbol, isin in rows
+            ]
+        ),
+        path,
+    )
+    before = path.read_bytes()
+    back = read_constituents_l1("nifty500", JUL, data_root=tmp_path)
+    assert back.members == frozenset({RELIANCE})
+    assert back.rejected_placeholders == ("DUM545A01024",)
+    assert path.read_bytes() == before

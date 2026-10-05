@@ -13,9 +13,12 @@ result. The fix is two facts, both point-in-time:
   a name that first listed in 2023 must not. This is the half that keeps the dead names in
   (invariant #8 is about fundamentals; this is the universe-membership analogue for §4.5).
 * **index-constituent history** — when the universe is scoped to an index, membership is read from
-  the monthly snapshot that was *in force on `as_of`* (M3.9's `membership_asof`), never today's
-  list. The accumulated snapshots are exactly what make "who was in NIFTY 50 in March 2023"
-  answerable without a look-ahead (§4.1, invariant #7).
+  the reconstructed membership history (`ingest.index_history`, DQ-5) for any date it covers: the
+  intervals the exchange's own change announcements imply, filtered by the PIT rule — effective on
+  `as_of` *and* knowable (announced) by it. A captured snapshot (M3.9's `membership_asof`) newer
+  than the history's anchor wins, because it is the fresher primary record. Never today's list:
+  before the history's coverage start and before the first snapshot an index contributes nothing
+  (§4.1, invariant #7).
 
 The listing calendar is *injected*, not read from the Parquet lake: listing status lives in the
 identity master (Postgres `security_master` / `exchange_listing`), not in L1/L2. `ListingCalendar`
@@ -36,6 +39,7 @@ from datetime import date
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from dataplatform.identity.master import ListingStatus
+from dataplatform.ingest.index_history import members_asof as history_members_asof
 from dataplatform.ingest.indices import membership_asof
 from dataplatform.logging import get_logger
 
@@ -141,19 +145,32 @@ class PitUniverse:
 def index_membership_asof(
     index_slugs: Iterable[str], on_date: date, *, data_root: Path | None = None
 ) -> frozenset[str]:
-    """The union of the named indices' memberships in force on `on_date` (M3.9, file-backed).
+    """The union of the named indices' memberships in force on `on_date` (file-backed).
 
-    Reads, per index, the most recent monthly constituent snapshot whose `as_of` is on or before
-    `on_date` — never today's list — via M3.9's `membership_asof`, and unions the members. An index
-    with no snapshot in force then contributes nothing (a gap for D7 to explain, not today's list).
+    Per index, in order of preference:
+
+    1. the most recent captured snapshot on or before `on_date` (`membership_asof`) when it is
+       *newer* than the reconstructed history's anchor — a fresher primary record;
+    2. otherwise the reconstructed history (`index_history.members_asof`) when it covers
+       `on_date`: members effective on `on_date` and announced by it, nothing later;
+    3. otherwise the snapshot in force, if any.
+
+    An index with neither contributes nothing (a gap for D7 to explain, not today's list).
     Returns an empty set when `index_slugs` is empty — the caller then screens the whole listed
     market rather than an index subset.
     """
     members: set[str] = set()
     for slug in index_slugs:
         snapshot = membership_asof(slug, on_date, data_root=data_root)
-        if snapshot is not None:
+        history = history_members_asof(slug, on_date, data_root=data_root)
+        source = "none"
+        if history is not None and (snapshot is None or snapshot.as_of <= history[1].anchor_date):
+            members |= history[0]
+            source = "history"
+        elif snapshot is not None:
             members |= snapshot.members
+            source = "snapshot"
+        _LOG.debug("query.index_membership", index=slug, on_date=on_date.isoformat(), source=source)
     return frozenset(members)
 
 
