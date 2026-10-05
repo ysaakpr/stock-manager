@@ -98,6 +98,9 @@ class PriceRebuildReport:
     delivery_joined: int = 0
     delivery_unresolved: int = 0
     delivery_orphaned: int = 0
+    delivery_via_lineage: int = 0
+    delivery_via_session: int = 0
+    delivery_session_disagrees: int = 0
     missing: list[date] = field(default_factory=list)
     failures: list[tuple[date, str]] = field(default_factory=list)
 
@@ -114,6 +117,9 @@ class PriceRebuildReport:
         self.delivery_joined += write_report.delivery_joined
         self.delivery_unresolved += write_report.delivery_unresolved
         self.delivery_orphaned += write_report.delivery_orphaned
+        self.delivery_via_lineage += write_report.delivery_via_lineage
+        self.delivery_via_session += write_report.delivery_via_session
+        self.delivery_session_disagrees += write_report.delivery_session_disagrees
 
 
 class PriceRebuilder:
@@ -160,6 +166,9 @@ class PriceRebuilder:
             delivery_joined=report.delivery_joined,
             delivery_unresolved=report.delivery_unresolved,
             delivery_orphaned=report.delivery_orphaned,
+            delivery_via_lineage=report.delivery_via_lineage,
+            delivery_via_session=report.delivery_via_session,
+            delivery_session_disagrees=report.delivery_session_disagrees,
         )
         return report
 
@@ -305,6 +314,11 @@ def _run(
         f"  delivery rows {report.delivery_rows}: {report.delivery_joined} joined "
         f"({report.join_rate:.1%}), {report.delivery_unresolved} unresolved, "
         f"{report.delivery_orphaned} orphaned (both quarantined, never dropped)"
+    )
+    print(
+        f"  placed via reissue lineage {report.delivery_via_lineage}, via the session's own "
+        f"bhavcopy {report.delivery_via_session}; master contradicts the session on "
+        f"{report.delivery_session_disagrees}"
     )
     if report.missing:
         shown = ", ".join(day.isoformat() for day in report.missing[:5])

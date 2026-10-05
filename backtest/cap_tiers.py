@@ -41,7 +41,7 @@ from typing import Final, Protocol, runtime_checkable
 
 import duckdb
 
-from dataplatform.ingest.xbrl.parser import is_isin_check_digit_valid
+from dataplatform.ingest.models import is_isin_check_digit_valid
 from dataplatform.logging import get_logger
 from dataplatform.query.pit import Dataset
 from dataplatform.store.l2 import open_connection, register_raw_view

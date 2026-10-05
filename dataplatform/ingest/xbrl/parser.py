@@ -62,7 +62,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Final
 from xml.etree import ElementTree as ET
 
-from dataplatform.ingest.models import ParseError
+from dataplatform.ingest.models import ParseError, is_isin_check_digit_valid
 from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
 from dataplatform.ingest.xbrl.models import (
     SHAREHOLDERS_EQUITY,
@@ -647,28 +647,6 @@ def _check_stated_isin(
             stated=same_issuer,
             note="same issuer code: a split changed the ISIN and the template kept the old one",
         )
-
-
-def is_isin_check_digit_valid(isin: str) -> bool:
-    """Whether the ISIN's last character is the ISO 6166 check digit of the rest.
-
-    Letters become their base-36 values (`A` = 10 … `Z` = 35), the digits are concatenated, and the
-    Luhn sum over the whole string must be divisible by ten. Assumes a twelve-character
-    upper-case ISIN; anything else is not an ISIN and is False. Never consults a master: this is
-    arithmetic on the string, so it can say "not any security's ISIN" but never "this security's".
-    """
-    if not re.fullmatch(r"[A-Z0-9]{12}", isin):
-        return False
-    digits = "".join(str(int(character, 36)) for character in isin)
-    total = 0
-    for position, character in enumerate(reversed(digits)):
-        value = int(character)
-        if position % 2:
-            value *= 2
-            if value > 9:
-                value -= 9
-        total += value
-    return total % 10 == 0
 
 
 def is_isin_typo_of(stated: str, expected: str) -> bool:

@@ -35,3 +35,17 @@ within a session.
 There is no ISIN column: a delivery row is joined to prices only after
 `dataplatform.ingest.nse.delivery.resolve` maps `(symbol, trade_date)` to an ISIN through the D2
 identity master (invariant #2).
+
+## 2020-07-13 — the third delivery-identity era (added 2026-10-05)
+
+| Session | File | Bytes | sha256 | Data rows |
+|---|---|---|---|---|
+| 2020-07-13 | `sec_bhavdata_full_13072020.csv` | 219,205 | `e927d5d328091a09fb76f9363b642ee2941a022bba5fc8906fa653971acda39c` | 1,993 |
+
+Copied byte-for-byte from the lake's L0 (`nse_sec_bhavdata_full/2020/07/`, fetched 2026-09-06; the
+checksum above is the L0 sidecar's). It pairs with `../nse_bhavcopy/legacy/cm13JUL2020bhav.csv.zip`,
+which makes the **legacy bhavcopy + `sec_bhavdata_full`** era (2019-10-01 .. 2024-07-05) testable
+offline beside the other two pairs: legacy + MTO (2011-06-22) and UDiFF + `sec_bhavdata_full`
+(2026-08-07). `tests/unit/test_delivery_identity_eras.py` joins all three against a master built
+from the real 2026-08-08 `EQUITY_L.csv` — which backdates today's ISIN to the listing date and
+lists no ETF — to pin the 2026-10-05 audit's two delivery-join defects (reissued ISINs, ETFs).

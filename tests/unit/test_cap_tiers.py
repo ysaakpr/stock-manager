@@ -51,7 +51,7 @@ from backtest.sweep import (
     run_digests,
 )
 from dataplatform.clock import FrozenClock
-from dataplatform.ingest.xbrl.parser import is_isin_check_digit_valid
+from dataplatform.ingest.models import is_isin_check_digit_valid
 from dataplatform.query.pit import Dataset, PitContext, PitError
 from dataplatform.store.paths import l1_partition_path
 from dataplatform.store.schemas import PRICES_RAW_DATASET, PRICES_RAW_SCHEMA

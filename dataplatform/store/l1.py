@@ -23,7 +23,10 @@ Three properties this module exists to guarantee, each mapped to an acceptance c
   has no ISIN and NSE symbols are recycled, so a delivery row is resolved to its ISIN via
   `IdentityMaster.resolve(symbol, trade_date)` — the only sanctioned symbol→ISIN path (invariant
   #2) — and then joined to prices on `(isin, series, trade_date)`. The price rows already carry
-  their ISIN natively (both bhavcopy eras publish it); the master is engaged for the delivery side.
+  their ISIN natively (both bhavcopy eras publish it); the master is engaged for the delivery side,
+  moved along `isin_lineage` to the ISIN in force that session, and backed — only for a symbol it
+  has never seen, an ETF or a delisted name — by the same session's bhavcopy statement of which
+  ISIN traded as `(symbol, series)` (`identity.SessionIdentity`).
 
 * **Nothing is dropped silently.** A delivery row whose symbol the master cannot resolve, or which
   resolves but matches no price row that session, is written to the `prices_raw_quarantine` dataset
@@ -39,7 +42,7 @@ the L0-driven entry point the backfill (M1.9) and daily pipeline (M1.10) call.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
@@ -50,6 +53,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from dataplatform.identity.master import Exchange, IdentityMaster
+from dataplatform.identity.session import SessionIdentity
 from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
 from dataplatform.ingest.models import BhavcopyParse, PriceRow, UnidentifiedRow
 from dataplatform.ingest.nse import bhavcopy, delivery
@@ -107,6 +111,13 @@ class PricesRawWriteReport:
     quarantine_path: Path | None
     #: Rows of the *other* exchange already in the partition, read back and written out unchanged.
     rows_preserved: int = 0
+    #: How the joined-or-orphaned delivery rows were placed (`delivery.DeliveryResolution`): moved
+    #: along a reissue edge, placed by the session's own bhavcopy statement, or placed by the
+    #: master on an ISIN that statement contradicts. Diagnostics — they do not enter the
+    #: reconciliation above.
+    delivery_via_lineage: int = 0
+    delivery_via_session: int = 0
+    delivery_session_disagrees: int = 0
 
     @property
     def quarantined(self) -> int:
@@ -150,9 +161,14 @@ def write_prices_raw(
             "the only legal symbol→ISIN path is the D2 master (invariant #2)"
         )
 
-    resolved, unresolved = _resolve_delivery(
-        delivery_batch, master=master, exchange=exchange, trade_date=trade_date
+    resolution = _resolve_delivery(
+        delivery_batch,
+        master=master,
+        exchange=exchange,
+        trade_date=trade_date,
+        price_rows=price_rows,
     )
+    resolved, unresolved = resolution.resolved, resolution.unresolved
     by_key = _delivery_index(resolved)
 
     out_rows = [_price_to_raw(row, exchange=exchange, deliv_index=by_key) for row in price_rows]
@@ -199,6 +215,9 @@ def write_prices_raw(
         delivery_orphaned=len(orphaned),
         quarantine_path=quarantine_path,
         rows_preserved=len(preserved),
+        delivery_via_lineage=resolution.via_lineage,
+        delivery_via_session=resolution.via_session,
+        delivery_session_disagrees=resolution.session_disagrees,
     )
     _LOG.info(
         "l1.prices_raw_written",
@@ -212,6 +231,9 @@ def write_prices_raw(
         delivery_joined=report.delivery_joined,
         delivery_unresolved=report.delivery_unresolved,
         delivery_orphaned=report.delivery_orphaned,
+        delivery_via_lineage=report.delivery_via_lineage,
+        delivery_via_session=report.delivery_via_session,
+        delivery_session_disagrees=report.delivery_session_disagrees,
         state="PUBLISHED",
     )
     return report
@@ -307,24 +329,27 @@ def _resolve_delivery(
     master: IdentityMaster | None,
     exchange: Exchange,
     trade_date: date,
-) -> tuple[tuple[ResolvedDeliveryRow, ...], tuple[DeliveryRow, ...]]:
-    """Resolve the delivery batch to ISINs through the master (invariant #2), or nothing to do.
+    price_rows: Sequence[PriceRow],
+) -> delivery.DeliveryResolution:
+    """Resolve the delivery batch to ISINs through the D2 sources (invariant #2), or nothing to do.
 
-    Delegates to `delivery.resolve`, which quarantines an unknown `(symbol, date)` into `unresolved`
-    and lets an *ambiguous* one raise from the master. Also guards that the delivery file's own
-    session matches the prices' session — a mismatched delivery file joined here would scatter one
-    date's delivery figures onto another's prices.
+    Delegates to `delivery.resolve`, which asks the master for the ISIN in force that session and,
+    only for a symbol the master has never seen, the session's own bhavcopy statement — built here
+    from `price_rows`, the same file's `(symbol, series, isin)` for this exchange and date. An
+    unknown `(symbol, date)` lands in `unresolved`; an *ambiguous* one raises from the master. Also
+    guards that the delivery file's own session matches the prices' session — a mismatched delivery
+    file joined here would scatter one date's delivery figures onto another's prices.
     """
     if not delivery_batch or master is None:
-        return (), tuple(delivery_batch)
+        return delivery.DeliveryResolution(resolved=(), unresolved=tuple(delivery_batch))
     stray = sorted({row.trade_date for row in delivery_batch if row.trade_date != trade_date})
     if stray:
         raise ValueError(
             f"delivery rows are for {', '.join(d.isoformat() for d in stray)} but the prices are "
             f"for {trade_date.isoformat()}; delivery joins onto prices within one session only"
         )
-    resolution = delivery.resolve(delivery_batch, master, exchange=exchange)
-    return resolution.resolved, resolution.unresolved
+    session = SessionIdentity.from_statements(price_rows, exchange=exchange, trade_date=trade_date)
+    return delivery.resolve(delivery_batch, master, exchange=exchange, session=session)
 
 
 def _delivery_index(
@@ -426,13 +451,40 @@ def _write_quarantine(
     data_root: Path | None,
     unidentified_reason: str = PriceQuarantineReason.ISIN_NOT_PUBLISHED,
 ) -> Path | None:
-    """Write the delivery rows that could not be placed to the quarantine dataset, or nothing.
+    """Replace `exchange`'s rows in the session's quarantine partition with what this write refused.
 
     Returns the quarantine partition path when anything was quarantined, else `None`. Its own
     dataset (`prices_raw_quarantine`), never a second file in the `prices_raw` partition, so a scan
     of `prices_raw` never reads a quarantined row as canonical.
+
+    A re-derivation that refuses *nothing* still owns the partition: until the 2026-10-05 audit this
+    returned early and left the previous derivation's rows in place, so a session the delivery fix
+    joined whole kept reporting its old `no_matching_price` rows forever — the quarantine counted
+    history, not the lake. Now `exchange`'s rows are always replaced (the file removed when nothing
+    is left), and every other exchange's rows ride through unchanged, exactly as `prices_raw` does.
     """
+    path = partition_path(Layer.L1, PRICES_RAW_QUARANTINE_DATASET, trade_date, data_root=data_root)
+    stored: list[dict[str, object]] = (
+        pq.read_table(path, schema=PRICES_RAW_QUARANTINE_SCHEMA).to_pylist()
+        if path.is_file()
+        else []
+    )
+    others = [record for record in stored if record["exchange"] != exchange.value]
+    cleared = len(stored) - len(others)
     if not unresolved and not orphaned and not unidentified:
+        if cleared:
+            if others:
+                _write_quarantine_table(others, path)
+            else:
+                path.unlink()
+            _LOG.info(
+                "l1.prices_raw_quarantine_cleared",
+                dataset=PRICES_RAW_QUARANTINE_DATASET,
+                exchange=exchange.value,
+                trade_date=trade_date.isoformat(),
+                cleared=cleared,
+                preserved=len(others),
+            )
         return None
     records = (
         [
@@ -480,12 +532,7 @@ def _write_quarantine(
             for row in unidentified
         ]
     )
-    records.sort(key=lambda rec: (rec["reason"], rec["symbol"], rec["series"]))
-    path = partition_path(Layer.L1, PRICES_RAW_QUARANTINE_DATASET, trade_date, data_root=data_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    table = pa.Table.from_pylist(records, schema=PRICES_RAW_QUARANTINE_SCHEMA)
-    enforce_schema(table, PRICES_RAW_QUARANTINE_SCHEMA, dataset=PRICES_RAW_QUARANTINE_DATASET)
-    _write_table(table, path)
+    _write_quarantine_table([*records, *others], path)
     _LOG.warning(
         "l1.prices_raw_quarantined",
         dataset=PRICES_RAW_QUARANTINE_DATASET,
@@ -501,6 +548,24 @@ def _write_quarantine(
         reason=unidentified_reason if unidentified else None,
     )
     return path
+
+
+def _write_quarantine_table(records: Sequence[Mapping[str, object]], path: Path) -> None:
+    """Write a quarantine partition whole, on a total key so re-derivation is byte-identical."""
+    ordered = sorted(
+        records,
+        key=lambda rec: (
+            str(rec["exchange"]),
+            str(rec["reason"]),
+            str(rec["symbol"]),
+            str(rec["series"]),
+            str(rec["isin"]),
+        ),
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pylist(list(ordered), schema=PRICES_RAW_QUARANTINE_SCHEMA)
+    enforce_schema(table, PRICES_RAW_QUARANTINE_SCHEMA, dataset=PRICES_RAW_QUARANTINE_DATASET)
+    _write_table(table, path)
 
 
 def _q(value: Decimal, quantum: Decimal) -> Decimal:

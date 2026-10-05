@@ -50,6 +50,7 @@ from xml.etree import ElementTree
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from dataplatform.identity.master import Exchange, IdentityMaster
+from dataplatform.identity.session import SessionIdentity
 from dataplatform.ingest.models import ParseError
 from dataplatform.logging import get_logger
 from dataplatform.store.l0 import L0Ref, L0Store
@@ -189,15 +190,26 @@ class ResolvedDeliveryRow(BaseModel):
 class DeliveryResolution:
     """The outcome of resolving a session's delivery rows to ISINs.
 
-    `unresolved` holds the rows whose `(symbol, date)` the master had never seen — quarantined and
-    counted rather than dropped, so a delivery file naming a security the identity master has not
-    ingested yet is a visible gap, not silent data loss (the M1.8 contract). An *ambiguous* symbol
-    is not quarantined here: `IdentityMaster.resolve` raises `AmbiguousSymbolError` and queues the
-    conflict, because "we know two contradictory ISINs" is a different fact from "we know none".
+    `unresolved` holds the rows whose `(symbol, date)` neither the master nor the session's own
+    statement could place — quarantined and counted rather than dropped, so a delivery file naming
+    a security nothing has identified is a visible gap, not silent data loss (the M1.8 contract).
+    An *ambiguous* symbol is not quarantined here: `IdentityMaster.resolve` raises
+    `AmbiguousSymbolError` and queues the conflict, because "we know two contradictory ISINs" is a
+    different fact from "we know none".
+
+    The three counters say *how* the resolved rows were placed, so a coverage change can be traced
+    to the identity source that caused it: `via_lineage` rows had the master's ISIN moved along a
+    reissue edge to the one in force that session; `via_session` rows the master did not know and
+    the session's bhavcopy did; `session_disagrees` rows the master would have placed on an ISIN
+    other than the one the session's bhavcopy states for that `(symbol, series)` — placed on the
+    bhavcopy's, and counted, because each one is a master defect worth reading.
     """
 
     resolved: tuple[ResolvedDeliveryRow, ...]
     unresolved: tuple[DeliveryRow, ...]
+    via_lineage: int = 0
+    via_session: int = 0
+    session_disagrees: int = 0
 
 
 def parse(
@@ -284,22 +296,50 @@ def resolve(
     master: IdentityMaster,
     *,
     exchange: Exchange = Exchange.NSE,
+    session: SessionIdentity | None = None,
 ) -> DeliveryResolution:
-    """Resolve a batch of delivery rows to ISINs through the D2 identity master.
+    """Resolve a batch of delivery rows to ISINs through the D2 identity sources.
 
-    What it does: for each row, looks up the ISIN that traded as `row.symbol` on `row.trade_date`
-    via `IdentityMaster.try_resolve` — the *only* sanctioned symbol→ISIN path (invariant #2) — and
-    returns the rows it could place alongside the ones it could not.
+    What it does: for each row, asks the master for the ISIN *in force* as `row.symbol` on
+    `row.trade_date` (`IdentityMaster.try_resolve_in_force` — the window's ISIN moved along any
+    reissue edge, so a pre-split session gets the pre-split ISIN its bhavcopy carries). Only when
+    the master has never heard of the symbol does it ask `session`, the same session's bhavcopy
+    statement of `(symbol, series) → ISIN` — which is how an ETF or a delisted security, absent
+    from the equity list the master is built from, gets placed.
+
+    Where both answer and disagree, the session statement is used and the disagreement counted
+    (`session_disagrees`) and logged. The master's windows are series-blind: `IFCI` resolves to
+    the equity INE039A01010 whatever the series, so the delivery row for IFCI's debenture series
+    `NE` — INE039A07777 in that session's own bhavcopy — would land on no price row. The exchange's
+    statement for that exact `(symbol, series, session)` is the more specific fact.
     What it assumes: `row.trade_date` is the session the symbol should be read as-of; a symbol is
     never resolved by name alone, because a recycled symbol resolves to different ISINs on
-    different dates.
-    What it never does: guess an ISIN. An unknown `(symbol, date)` is quarantined into
-    `unresolved` and counted; an ambiguous one raises `AmbiguousSymbolError` from the master.
+    different dates. `session`, when given, is that same session's statement on `exchange`.
+    What it never does: guess an ISIN, or read a session statement across sessions. An unknown
+    `(symbol, date)` is quarantined into `unresolved` and counted; an ambiguous one raises
+    `AmbiguousSymbolError` from the master.
     """
     resolved: list[ResolvedDeliveryRow] = []
     unresolved: list[DeliveryRow] = []
+    via_lineage = via_session = disagrees = 0
+    disagreeing: list[str] = []
     for row in rows:
-        isin = master.try_resolve(row.symbol, row.trade_date, exchange=exchange)
+        stated = (
+            None
+            if session is None
+            else session.try_resolve(row.symbol, row.series, row.trade_date, exchange=exchange)
+        )
+        windowed = master.try_resolve(row.symbol, row.trade_date, exchange=exchange)
+        if windowed is None:
+            isin = stated
+            via_session += isin is not None
+        else:
+            isin = master.isin_in_force(windowed, row.trade_date)
+            via_lineage += isin != windowed
+            if stated is not None and stated != isin:
+                disagrees += 1
+                disagreeing.append(f"{row.symbol}/{row.series}:{isin}!={stated}")
+                isin = stated
         if isin is None:
             unresolved.append(row)
             continue
@@ -321,7 +361,21 @@ def resolve(
             unresolved=len(unresolved),
             resolved=len(resolved),
         )
-    return DeliveryResolution(resolved=tuple(resolved), unresolved=tuple(unresolved))
+    if disagrees:
+        _LOG.warning(
+            "delivery.master_disagrees_with_session",
+            source=DELIVERY_SOURCE_ID,
+            exchange=exchange.value,
+            disagrees=disagrees,
+            sample=disagreeing[:10],
+        )
+    return DeliveryResolution(
+        resolved=tuple(resolved),
+        unresolved=tuple(unresolved),
+        via_lineage=via_lineage,
+        via_session=via_session,
+        session_disagrees=disagrees,
+    )
 
 
 #: A zip local-file header. The delivery source ships a bare CSV; exactly one payload in the lake
