@@ -610,6 +610,7 @@ def implied_splits(
                 open=b.open * (f := chain.price_factor_asof(b.trade_date)),
                 close=b.close * f,
                 volume=Decimal(b.volume) * chain.qty_factor_asof(b.trade_date),
+                raw_close=b.close,
             )
             for b in group
         ]

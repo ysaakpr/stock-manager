@@ -26,6 +26,8 @@ change in the share basis explains. Every one of these must hold, or nothing is 
   median of the preceding sessions' must move the same way, by at least a quarter of the multiple
   (and by half again at the least, for a sub-division).
   A demerger or a crash halves the price without multiplying the volume.
+* **Not a tick bounce.** Both raw closes are at least ₹1, and the level does not return within
+  five sessions: a penny name moving ₹0.05 ↔ ₹0.10 is "exactly 2x" with no change in the basis.
 * **Nothing recorded explains it.** No structural break (merger, demerger, scheme, DVR) and no
   price event on a *neighbouring* date within `guard_days`: the first is a real change in what the
   security is, the second a recorded split whose ex-date disagrees with L1 by a day or two — adding
@@ -106,6 +108,15 @@ _VOLUME_LOOKBACK: Final = 20
 #: evidence alone is nearest to a genuine halving, so an unchanged volume is not enough.
 _MIN_SURGE: Final = Decimal("1.5")
 
+#: The least raw price either side of a step may trade at. Below it the price moves in whole
+#: ticks — a ₹0.05 ↔ ₹0.10 bounce is exactly 2x every time, with no change in the share basis
+#: (measured: 70 such "splits" on six penny names before this floor).
+_MIN_RAW_PRICE: Final = Decimal(1)
+
+#: Sessions after the ex-day a genuine basis change must not revert in: a level that is back
+#: within the loose tolerance of the pre-step close this soon was a bad print or a tick bounce.
+_REVERSAL_LOOKAHEAD: Final = 5
+
 #: Dividends at least this fraction of the prior close are a recorded explanation for a step
 #: (Majesco's ₹974 on a ₹985 share, 2020-12-23); smaller ones explain nothing at a 2x scale.
 _LARGE_DIVIDEND: Final = Decimal("0.25")
@@ -117,12 +128,18 @@ class SessionBar:
 
     `open`/`close` are the raw prices times the recorded cumulative price factor; `volume` is the
     raw traded quantity times the recorded cumulative quantity factor. Zero volume is allowed.
+    `raw_close` is the untouched L1 close (it defaults to `close`), for the tick-size floor.
     """
 
     trade_date: date
     open: Decimal
     close: Decimal
     volume: Decimal
+    raw_close: Decimal | None = None
+
+    @property
+    def traded_close(self) -> Decimal:
+        return self.close if self.raw_close is None else self.raw_close
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +226,10 @@ def detect_implied_splits(
         if match is None:
             continue
         from_value, to_value = match
+        if min(prev.traded_close, cur.traded_close) < _MIN_RAW_PRICE:
+            continue
+        if _reverts(bars, i):
+            continue
         if any(abs((cur.trade_date - d).days) <= guard_days for d in blocked):
             continue
         if any(d != cur.trade_date and abs(cur.trade_date - d) <= guard for d in neighbouring):
@@ -242,6 +263,15 @@ def _match_multiple(close_ratio: Decimal, open_ratio: Decimal) -> tuple[Decimal,
             if near[0] <= tight and near[1] <= _LOOSE_TOLERANCE:
                 return pair
     return None
+
+
+def _reverts(bars: Sequence[SessionBar], i: int) -> bool:
+    """Whether a close in the next sessions after bar `i` is back at the old level."""
+    before = bars[i - 1].close
+    for later in bars[i + 1 : i + 1 + _REVERSAL_LOOKAHEAD]:
+        if abs(later.close / before - 1) <= _LOOSE_TOLERANCE:
+            return True
+    return False
 
 
 def _volume_ratio(bars: Sequence[SessionBar], i: int) -> Decimal | None:

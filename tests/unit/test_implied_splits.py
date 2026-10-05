@@ -130,6 +130,23 @@ def test_one_bad_print_cannot_make_a_split() -> None:
     assert detect_implied_splits(STOCK, bars) == ()
 
 
+def test_a_tick_bounce_on_a_penny_name_is_not_a_split() -> None:
+    # INE890I01035, 2016-10-03: 0.10 → 0.05, quantity 6k → 342k — exactly 2x, and exactly a tick.
+    bars = _flat_then(("0.05", "0.05"), level="0.10", step_vol=342_412)
+    assert detect_implied_splits(STOCK, bars) == ()
+
+
+def test_a_step_that_reverts_within_days_is_not_a_split() -> None:
+    bars = _flat_then(("50.00", "50.00"), level="500.00", step_vol=50_000)
+    back = SessionBar(
+        trade_date=bars[-1].trade_date + timedelta(days=1),
+        open=Decimal(498),
+        close=Decimal(499),
+        volume=Decimal(5_000),
+    )
+    assert detect_implied_splits(STOCK, [*bars, back]) == ()
+
+
 def test_a_step_across_a_long_gap_is_never_implied() -> None:
     # A suspension: months without a bar, then a tenth of the price. Genuine moves happen there
     # (DOLPHIN, UEL); the quality check classifies them, detection must not adjust them.

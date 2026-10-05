@@ -66,6 +66,17 @@ def test_a_recorded_structural_break_explains_a_step() -> None:
     assert _classify(_step(ratio="0.35"), (date(2020, 3, 2),)) is StepClass.UNEXPLAINED
 
 
+def test_a_recorded_rights_issue_or_large_dividend_is_recorded_unscaled() -> None:
+    [(_, cls)] = classify_steps(
+        [_step(ratio="0.3")],
+        structural_dates={},
+        unscaled_dates={STOCK: (date(2020, 1, 2),)},
+        threshold=Decimal(2),
+        max_gap_days=5,
+    )
+    assert cls is StepClass.RECORDED_UNSCALED
+
+
 def test_a_step_the_total_return_series_does_not_show_is_a_dividend() -> None:
     assert _classify(_step(ratio="0.0124", tr_ratio="1.01")) is StepClass.DIVIDEND
 

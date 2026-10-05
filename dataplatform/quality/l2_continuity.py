@@ -17,6 +17,10 @@ two defects the 2026-10-05 data-quality audit found there and nothing had flagge
 
 * `STRUCTURAL` — a recorded merger, demerger, scheme or DVR conversion within `guard_days`. A real
   change in what the security is; the level series keeps the gap by convention (§4.3 rule 3).
+* `RECORDED_UNSCALED` — a recorded event the price-adjusted series does not scale by convention:
+  a rights issue (no theoretical ex-rights factor yet — Sadhana Nitrochem's 8:1 at par,
+  2026-02-18) or a dividend of at least a quarter of the prior close (Strides' ₹500 special,
+  2013-12-19, where the total-return leg could not be built). Known, explained, not a defect here.
 * `DIVIDEND` — the total-return close does not step: a distribution, reinvested there (Majesco's
   ₹974 on 2020-12-23), absent from the price-adjusted series by convention.
 * `LONG_GAP` — the two bars are more than `max_gap_days` apart: a suspension, or months in the
@@ -68,6 +72,9 @@ CHECK_NAME: Final = "l2_continuity"
 #: The dataset findings are scoped to, so an ERROR gates L2 readers and not the whole market.
 _DATASET: Final = "prices_adjusted"
 
+#: A recorded dividend at least this fraction of the raw close before it explains a step.
+_LARGE_DIVIDEND: Final = Decimal("0.25")
+
 #: Recorded action types that explain a level step (the factor module's structural breaks).
 _STRUCTURAL_TYPES: Final = ("MERGER", "DEMERGER", "SCHEME_OF_ARRANGEMENT", "DVR_CONVERSION")
 
@@ -76,6 +83,7 @@ class StepClass(StrEnum):
     """Why an adjusted-close step is there — or that nothing says why."""
 
     STRUCTURAL = "STRUCTURAL"
+    RECORDED_UNSCALED = "RECORDED_UNSCALED"
     DIVIDEND = "DIVIDEND"
     LONG_GAP = "LONG_GAP"
     UNEXPLAINED = "UNEXPLAINED"
@@ -98,6 +106,7 @@ class AdjustedStep:
     ratio: Decimal
     tr_ratio: Decimal
     factor_changed: bool
+    prev_raw_close: Decimal | None = None
 
     @property
     def gap_days(self) -> int:
@@ -133,13 +142,15 @@ def classify_steps(
     steps: Iterable[AdjustedStep],
     *,
     structural_dates: Mapping[str, Iterable[date]],
+    unscaled_dates: Mapping[str, Iterable[date]] | None = None,
     threshold: Decimal,
     max_gap_days: int,
     guard_days: int = 7,
 ) -> tuple[tuple[AdjustedStep, StepClass], ...]:
     """Classify each step (module docstring, in that order of precedence); pure.
 
-    `structural_dates` maps an ISIN to the ex-dates of its recorded structural breaks.
+    `structural_dates` maps an ISIN to the ex-dates of its recorded structural breaks;
+    `unscaled_dates` to those of its recorded rights issues and large dividends.
     """
     guard = timedelta(days=guard_days)
     lower = 1 / threshold
@@ -148,6 +159,10 @@ def classify_steps(
         breaks = structural_dates.get(step.isin, ())
         if any(abs(step.trade_date - d) <= guard for d in breaks):
             cls = StepClass.STRUCTURAL
+        elif any(
+            abs(step.trade_date - d) <= guard for d in (unscaled_dates or {}).get(step.isin, ())
+        ):
+            cls = StepClass.RECORDED_UNSCALED
         elif lower <= step.tr_ratio <= threshold:
             cls = StepClass.DIVIDEND
         elif step.gap_days > max_gap_days:
@@ -265,6 +280,7 @@ def scan(
             ratio=_as_decimal(r[5]) / _as_decimal(r[4]),
             tr_ratio=_as_decimal(r[7]) / _as_decimal(r[6]),
             factor_changed=r[8] != r[9],
+            prev_raw_close=_as_decimal(r[4]) / _as_decimal(r[8]),
         )
         for r in rows
     ]
@@ -276,12 +292,35 @@ def scan(
             (list(_STRUCTURAL_TYPES), sorted({s.isin for s in steps})),
         ).fetchall():
             structural.setdefault(str(isin), []).append(_as_date(ex_date))
+    unscaled: dict[str, list[date]] = {}
+    if conn is not None and steps:
+        prior = {(s.isin, s.trade_date): s.prev_raw_close for s in steps}
+        for isin, ex_date, kind, amount in conn.execute(
+            "SELECT DISTINCT isin, ex_date, action_type, dividend_amount_inr "
+            "FROM corporate_actions WHERE reconciled AND action_type IN ('RIGHTS', 'DIVIDEND') "
+            "AND isin = ANY(%s)",
+            (sorted({s.isin for s in steps}),),
+        ).fetchall():
+            day = _as_date(ex_date)
+            if kind == "DIVIDEND":
+                near = [
+                    c
+                    for (i, d), c in prior.items()
+                    if i == isin and c is not None and abs((d - day).days) <= 7
+                ]
+                if amount is None or not near or Decimal(amount) < _LARGE_DIVIDEND * near[0]:
+                    continue
+            unscaled.setdefault(str(isin), []).append(day)
     report = L2ContinuityReport(
         threshold=threshold,
         max_gap_days=max_gap_days,
         partitions=len(partitions),
         steps=classify_steps(
-            steps, structural_dates=structural, threshold=threshold, max_gap_days=max_gap_days
+            steps,
+            structural_dates=structural,
+            unscaled_dates=unscaled,
+            threshold=threshold,
+            max_gap_days=max_gap_days,
         ),
         retired_partitions=retired,
     )
