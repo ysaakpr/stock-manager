@@ -695,14 +695,24 @@ def compose_lake_events(
     batched L1 preload as `rebuild_all` — so what this returns is what a fresh L2 build composes,
     without writing a byte. An ISIN with no bars is skipped, as `materialize_isin` skips it.
 
+    Only the ISINs that *can* come back non-empty are composed: those with a curated row, a
+    stitched lineage chain, or a session step in their chain-adjusted EQ series an implied split
+    could be read from (`_step_isins`). Every other ISIN's composition is provably empty, and
+    skipping it is what keeps this a pre-run read rather than a ten-minute pass over the lake.
+
     What it never does: write L0, L1, L2 or Postgres.
     """
     owns = con is None
     con = open_connection() if con is None else con
     out: list[ComposedEvents] = []
     try:
+        possible = (
+            _step_isins(conn, con, data_root=data_root)
+            | {a.isin for a in default_manual_actions().actions}
+            | set(history_for or {})
+        )
         candidates = sorted(
-            set(isins_with_eq_bars(con, data_root=data_root)) | set(history_for or {})
+            (set(isins_with_eq_bars(con, data_root=data_root)) | set(history_for or {})) & possible
         )
         live = [i for i in candidates if survivor_of is None or survivor_of(i) == i]
         for start in range(0, len(live), batch_size):
@@ -739,6 +749,60 @@ def compose_lake_events(
         implied_splits=sum(len(c.implied) for c in out),
     )
     return tuple(out)
+
+
+#: The least session-to-session level change `_step_isins` keeps. `corpactions.implied` matches
+#: nothing nearer than 2x less 3% (its smallest multiple at its tight tolerance), so a looser bound
+#: on a DOUBLE ratio can only keep more ISINs than the scan could find, never fewer.
+_STEP_PREFILTER: Final = 1.8
+
+
+def _step_isins(
+    conn: Connection, con: duckdb.DuckDBPyConnection, *, data_root: Path | None
+) -> frozenset[str]:
+    """ISINs whose EQ series, in their persisted chain's terms, has a step an implied split needs.
+
+    The adjusted ratio of two consecutive bars of one venue is the raw ratio times the price
+    factors ex-dated after the first and on or before the second, which is what this computes in
+    one DuckDB pass — on the close and on the open, as `detect_implied_splits` matches either. A
+    prefilter only: an ISIN it keeps is still composed exactly by `compose_events`.
+    """
+    files = _l1_partition_files(data_root=data_root)
+    if not files:
+        return frozenset()
+    factors = conn.execute(
+        "SELECT isin, ex_date, price_factor FROM adjustment_factors WHERE price_factor <> 1"
+    ).fetchall()
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE l2_step_factors (isin VARCHAR, ex_date DATE, lf DOUBLE)"
+    )
+    if factors:
+        con.executemany(
+            "INSERT INTO l2_step_factors VALUES (?, ?, ln(?))",
+            [(str(r[0]), r[1], float(r[2])) for r in factors],
+        )
+    rows = con.execute(
+        "WITH steps AS ("
+        "  SELECT isin, exchange, trade_date, close, open,"
+        "         lag(close) OVER w AS prev_close, lag(trade_date) OVER w AS prev_date"
+        "  FROM read_parquet($files) WHERE series = 'EQ' AND close > 0"
+        "  WINDOW w AS (PARTITION BY isin, exchange ORDER BY trade_date)"
+        "), adjusted AS ("
+        "  SELECT s.isin, s.prev_close / s.close * exp(coalesce(sum(f.lf), 0)) AS by_close,"
+        "         s.prev_close / NULLIF(s.open, 0) * exp(coalesce(sum(f.lf), 0)) AS by_open"
+        "  FROM steps s LEFT JOIN l2_step_factors f ON f.isin = s.isin"
+        "       AND f.ex_date > s.prev_date AND f.ex_date <= s.trade_date"
+        "  WHERE s.prev_close IS NOT NULL"
+        "  GROUP BY s.isin, s.exchange, s.trade_date, s.prev_date, s.prev_close, s.close, s.open"
+        ") SELECT DISTINCT isin FROM adjusted"
+        " WHERE by_close >= $hi OR by_close <= $lo OR by_open >= $hi OR by_open <= $lo",
+        {
+            "files": [str(f) for f in files],
+            "hi": _STEP_PREFILTER,
+            "lo": 1 / _STEP_PREFILTER,
+        },
+    ).fetchall()
+    return frozenset(str(r[0]) for r in rows)
 
 
 def curated_actions(

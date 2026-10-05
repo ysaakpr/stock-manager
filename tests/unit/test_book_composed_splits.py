@@ -365,3 +365,52 @@ def test_compose_lake_events_returns_what_the_materializer_composes(tmp_path: Pa
     [rescale] = _calendar((), (composed,)).between(None, date.max)
     assert isinstance(rescale, ShareRescale)
     assert (rescale.numerator, rescale.denominator) == (Decimal(100), Decimal(1))
+
+
+class _FactorStore:
+    """A stand-in Postgres whose only rows are the persisted price factors the prefilter reads."""
+
+    def __init__(self, factors: list[tuple[str, date, Decimal]]) -> None:
+        self._factors = factors
+        self._rows: list[tuple[object, ...]] = []
+
+    def execute(self, sql: str, params: object = None) -> _FactorStore:
+        self._rows = list(self._factors) if "FROM adjustment_factors WHERE" in sql else []
+        return self
+
+    def fetchall(self) -> list[tuple[object, ...]]:
+        return self._rows
+
+
+def test_the_prefilter_keeps_every_isin_whose_adjusted_series_steps(tmp_path: Path) -> None:
+    from dataplatform.identity.master import Exchange
+    from dataplatform.store.l1 import write_prices_raw
+    from dataplatform.store.l2 import _step_isins, open_connection
+    from tests.unit.test_implied_splits import _row
+
+    flat, recorded, phantom = "INE002A01018", "INE009A01021", "INE062A01020"
+    days = SESSIONS[:15]
+    for day in days:
+        after = day >= EX
+        write_prices_raw(
+            [
+                _row(flat, day, o="50", c="50", qty=10),
+                # A raw 2:1 the persisted chain already adjusts: no step left in L2's terms.
+                _row(
+                    recorded, day, o="100" if after else "200", c="100" if after else "200", qty=10
+                ),
+                # Flat in raw, but a persisted factor puts a 2x step into the adjusted series.
+                _row(phantom, day, o="80", c="80", qty=10),
+            ],
+            exchange=Exchange.NSE,
+            data_root=tmp_path,
+        )
+    store = _FactorStore([(recorded, EX, Decimal("0.5")), (phantom, EX, Decimal("0.5"))])
+    con = open_connection()
+    try:
+        kept = _step_isins(cast(Connection, store), con, data_root=tmp_path)
+    finally:
+        con.close()
+    # Inverted (the factor divided rather than multiplied), `recorded` would read a 4x step and
+    # be kept while `phantom` would still be — so the exact set pins the direction.
+    assert kept == frozenset({phantom})
