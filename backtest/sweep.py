@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Final
 
 from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
+from backtest.cap_tiers import CapTier, TierSleeve
 from backtest.cash_interest import (
     add_cash_interest_flag,
     cash_interest_unless,
@@ -158,6 +159,10 @@ class Arm:
     #: (``backtest.band_hits``). Swing arms only. Off by default, and absent from the spec when
     #: off, so no arm defined before it changes digest.
     band_hit_avoidance: bool = False
+    #: X2 cap tiers: buy the book tier by tier from liquidity-rank tiers that proxy AMFI cap tiers
+    #: (``backtest.cap_tiers``). Swing arms only. ``None`` by default, and absent from the spec when
+    #: ``None``, so no arm defined before it changes digest.
+    cap_tiers: tuple[TierSleeve, ...] | None = None
 
     def __post_init__(self) -> None:
         driving = [p for p in (self.swing, self.naive, self.v2) if p is not None]
@@ -165,6 +170,8 @@ class Arm:
             raise ValueError(f"{self.label}: an arm drives exactly one policy, got {len(driving)}")
         if self.band_hit_avoidance and self.swing is None:
             raise ValueError(f"{self.label}: band-hit avoidance is a swing-policy filter")
+        if self.cap_tiers is not None and self.swing is None:
+            raise ValueError(f"{self.label}: cap tiers split a swing-policy book")
 
 
 def _swing(**overrides: object) -> SwingCompositeParameters:
@@ -415,6 +422,48 @@ ARMS: tuple[Arm, ...] = (
     _H3,
 )
 
+#: The cap-tier arms (owner request 2026-10-05; ``backtest.cap_tier_campaign``). Kept out of
+#: ``ARMS`` on purpose: they are a separate study with their own campaign, and in ``ARMS`` they
+#: would join the round-1 trial set ``fold_campaign trial-sharpes`` runs by default and the M12
+#: table. The tiers are **liquidity-rank tiers that proxy AMFI cap tiers** (``backtest.cap_tiers``).
+#: Every setting is fixed here before any return was seen: the M10.7 signal, cadence, stop and
+#: re-underwrite unchanged, the sell band 3x each sleeve's basket as in M10.7, and no parameter of
+#: their own.
+MULTI_CAP = "Multi cap: 8 large + 8 mid + 8 small (liquidity tiers)"
+FOCUSED_MIDCAP = "Focused midcap: top 20 mid (liquidity tier)"
+FOCUSED_SMALLCAP = "Focused smallcap: top 20 small (liquidity tier)"
+CAP_TIER_ARMS: tuple[Arm, ...] = (
+    Arm(
+        label=MULTI_CAP,
+        family="cap tier",
+        reference=_M10_7,
+        note="M10.7 ranking; top 8 of each of the large, mid and small tiers (SEBI multi-cap: "
+        ">= 25 % per tier), each sleeve's band 3x its basket",
+        swing=_swing(top_n=24, sell_band=72),
+        cap_tiers=(
+            TierSleeve(CapTier.LARGE, top_n=8, sell_band=24),
+            TierSleeve(CapTier.MID, top_n=8, sell_band=24),
+            TierSleeve(CapTier.SMALL, top_n=8, sell_band=24),
+        ),
+    ),
+    Arm(
+        label=FOCUSED_MIDCAP,
+        family="cap tier",
+        reference=_M10_7,
+        note="M10.7 ranking; top 20 within the mid tier (ranks 101-250), band 60 within the tier",
+        swing=_swing(),
+        cap_tiers=(TierSleeve(CapTier.MID, top_n=20, sell_band=60),),
+    ),
+    Arm(
+        label=FOCUSED_SMALLCAP,
+        family="cap tier",
+        reference=_M10_7,
+        note="M10.7 ranking; top 20 within the small tier (ranks 251-500), band 60 within the tier",
+        swing=_swing(),
+        cap_tiers=(TierSleeve(CapTier.SMALL, top_n=20, sell_band=60),),
+    ),
+)
+
 #: The H2 arm, by object — what ``backtest.band_hits`` tests and callers reach for.
 BAND_HIT_ARM: Final = next(arm for arm in ARMS if arm.label == H2_BAND_HIT_AVOIDANCE)
 
@@ -563,6 +612,7 @@ def _arm_spec(
         adjusted=adjusted,
         universe=universe,
         band_hit_avoidance=arm.band_hit_avoidance,
+        cap_tiers=arm.cap_tiers,
     )
 
 
@@ -669,6 +719,7 @@ def run_sweep(
                 arm.swing is not None and arm.swing.weight_residual_momentum != _ZERO
                 for _, arm in pending
             ),
+            cap_tiers=any(arm.cap_tiers is not None for _, arm in pending),
         )
         out.start, out.terminal, out.sessions = (
             lake.first_session,
@@ -824,6 +875,7 @@ def _run_arm(
             universe=universe,
             lake=lake,  # type: ignore[arg-type]
             band_hit_avoidance=arm.band_hit_avoidance,
+            cap_tiers=arm.cap_tiers,
         )
     if arm.naive is not None:
         return run_naive_momentum(

@@ -118,6 +118,7 @@ from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
 from backtest.band_hits import BAND_HIT_BLOCK_RATIONALE, BandHitData, band_hit_blocked
+from backtest.cap_tiers import CapTier, CapTierData, TierSleeve
 from backtest.policies.momentum_v2 import RegimeReading
 from backtest.policies.sizing import account_order_ceiling
 from backtest.replay import SessionContext, SessionDecision
@@ -597,7 +598,15 @@ class SwingCompositePolicy:
     session it additionally re-scores the universe and applies the band and re-underwrite rules.
     """
 
-    __slots__ = ("_band_hits", "_data", "_order_caps", "_params", "_positions")
+    __slots__ = (
+        "_band_hits",
+        "_data",
+        "_order_caps",
+        "_params",
+        "_positions",
+        "_sleeves",
+        "_tiers",
+    )
 
     def __init__(
         self,
@@ -606,6 +615,8 @@ class SwingCompositePolicy:
         *,
         band_hits: BandHitData | None = None,
         order_caps: RiskRails | None = None,
+        tiers: CapTierData | None = None,
+        sleeves: Sequence[TierSleeve] | None = None,
     ) -> None:
         self._data = data
         self._params = params if params is not None else SwingCompositeParameters()
@@ -621,6 +632,27 @@ class SwingCompositePolicy:
         # ceiling, a name below its weight is topped up across rebalances instead. Not a field of
         # the parameters, for the same digest reason as ``band_hits``.
         self._order_caps = order_caps
+        # X2 cap tiers (backtest.cap_tiers): with a tier source and its sleeves, the book is bought
+        # tier by tier — each sleeve takes its top names by *within-tier* composite rank, and each
+        # holding is judged against its own tier's band. The composite itself is unchanged: it is
+        # still struck over the whole candidate set, so a tier arm ranks on exactly the scores the
+        # untiered arm does. Injected, not a parameter, for the same digest reason as above.
+        if (tiers is None) != (sleeves is None):
+            raise ValueError("a tiered book needs both a tier source and its sleeves")
+        self._tiers = tiers
+        self._sleeves: tuple[TierSleeve, ...] = tuple(sleeves or ())
+        if sleeves is not None:
+            if not self._sleeves:
+                raise ValueError("a tiered book needs at least one sleeve")
+            if len({sleeve.tier for sleeve in self._sleeves}) != len(self._sleeves):
+                raise ValueError("a tier may carry at most one sleeve")
+            if sum(sleeve.top_n for sleeve in self._sleeves) != self._params.top_n:
+                raise ValueError(
+                    f"the sleeves buy {sum(sleeve.top_n for sleeve in self._sleeves)} names but "
+                    f"top_n is {self._params.top_n}; they must agree"
+                )
+            if band_hits is not None:
+                raise ValueError("band-hit avoidance is not wired for a tiered book")
 
     def decide(self, ctx: SessionContext) -> SessionDecision:
         """Age the book and check stops every session; re-score and rotate on a decision session."""
@@ -774,6 +806,10 @@ class SwingCompositePolicy:
         ranked = sorted(candidates, key=lambda r: (-scores[r.isin], r.isin))
         rank_of = {record.isin: rank for rank, record in enumerate(ranked, start=1)}
         buyable = {record.isin for record in self._screen(ranked)}
+        sleeve_of: dict[str, TierSleeve] | None = None
+        if self._tiers is not None:
+            tier_of = {m.isin: m.tier for m in ctx.pit.admit(self._tiers.tiers(ctx.session))}
+            rank_of, sleeve_of, tiered_choice = self._tiered(ranked, buyable, tier_of)
         # X2 H2: no *new* buy of a name that hit a price band in the lookback. It narrows only what
         # may be bought, like the volatility screen, so a blocked holding keeps its rank and is
         # never sold for it; the next-ranked unblocked name takes the slot.
@@ -781,9 +817,11 @@ class SwingCompositePolicy:
         blocked = self._band_hit_blocked(ctx)
         buyable -= blocked
         chosen = [record for record in ranked if record.isin in buyable][: self._params.top_n]
+        if sleeve_of is not None:
+            chosen = tiered_choice
 
         already_selling = {order.isin for order, _ in stopped}
-        rule_sells = self._rule_sells(held, rank_of, already_selling)
+        rule_sells = self._rule_sells(held, rank_of, already_selling, sleeve_of)
         self._record_sell(rule_sells)
         sells = list(stopped) + rule_sells
         exiting = {order.isin for order, _ in sells}
@@ -795,11 +833,13 @@ class SwingCompositePolicy:
         if self._params.regime_filter and not self._risk_on(ctx):
             target = {}
             would_choose = []
-        buys, drift = self._buys(ctx, held, target, marks)
+        buys, drift = self._buys(ctx, held, target, marks, sleeve_of)
 
         orders = tuple(order for order, _ in (*sells, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
-        evidence = self._evidence(ctx.session, chosen, scores, by_isin, drift, len(candidates))
+        evidence = self._evidence(
+            ctx.session, chosen, scores, by_isin, drift, len(candidates), sleeve_of
+        )
         withheld = [
             isin
             for isin in would_choose[: self._params.top_n]
@@ -809,6 +849,39 @@ class SwingCompositePolicy:
             evidence, blocked_lines = self._band_hit_entries(ctx, held, withheld, evidence)
             entries += blocked_lines
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
+
+    def _tiered(
+        self,
+        ranked: Sequence[SwingRecord],
+        buyable: set[str],
+        tier_of: Mapping[str, CapTier],
+    ) -> tuple[dict[str, int], dict[str, TierSleeve], list[SwingRecord]]:
+        """Within-tier ranks, each ranked name's sleeve, and each sleeve's buys (X2 cap tiers).
+
+        A name's within-tier rank is its position, in the composite order, among the ranked names
+        of its own tier. A name in no sleeve's tier is left unranked — the exit rules read that as
+        "gone from this book's universe", exactly as they read a name that left the liquid set.
+        Each sleeve buys its ``top_n`` best buyable names; a tier with fewer buyable names leaves
+        its slots empty rather than handing them to another tier.
+        """
+        sleeves = {sleeve.tier: sleeve for sleeve in self._sleeves}
+        seen = dict.fromkeys(sleeves, 0)
+        picked = dict.fromkeys(sleeves, 0)
+        rank_of: dict[str, int] = {}
+        sleeve_of: dict[str, TierSleeve] = {}
+        chosen: list[SwingRecord] = []
+        for record in ranked:
+            tier = tier_of.get(record.isin)
+            if tier is None or tier not in sleeves:
+                continue
+            sleeve = sleeves[tier]
+            seen[tier] += 1
+            rank_of[record.isin] = seen[tier]
+            sleeve_of[record.isin] = sleeve
+            if record.isin in buyable and picked[tier] < sleeve.top_n:
+                picked[tier] += 1
+                chosen.append(record)
+        return rank_of, sleeve_of, chosen
 
     def _unscoreable_note(self, candidates: Sequence[SwingRecord]) -> str:
         coverage = ", ".join(
@@ -909,8 +982,13 @@ class SwingCompositePolicy:
         held: Mapping[str, Holding],
         rank_of: Mapping[str, int],
         already_selling: set[str],
+        sleeve_of: Mapping[str, TierSleeve] | None = None,
     ) -> list[tuple[OrderRequest, str]]:
-        """Band and re-underwrite exits, in ISIN order. Names inside ``min_hold`` are carried."""
+        """Band and re-underwrite exits, in ISIN order. Names inside ``min_hold`` are carried.
+
+        On a tiered book (``sleeve_of``) a rank is within the holding's tier and is judged against
+        that tier's sleeve; a holding no sleeve's tier contains is sold as gone from the universe.
+        """
         params = self._params
         sells: list[tuple[OrderRequest, str]] = []
         for isin in sorted(held):
@@ -924,17 +1002,28 @@ class SwingCompositePolicy:
             # set, or no longer computable) ranks worse than any surviving name.
             rank = rank_of.get(isin)
             quantity = held[isin].quantity
-            if rank is None:
-                reason = f"no longer in the scored universe; selling {quantity} shares"
-            elif rank > params.sell_band:
+            top_n, sell_band, rank_name = params.top_n, params.sell_band, "composite rank"
+            sleeve = sleeve_of.get(isin) if sleeve_of is not None else None
+            if sleeve is not None:
+                top_n, sell_band = sleeve.top_n, sleeve.sell_band
+                rank_name = f"{sleeve.tier.value}-tier composite rank"
+            if rank is None and sleeve_of is not None:
                 reason = (
-                    f"composite rank {rank} left the top-{params.sell_band} band "
-                    f"(bought into top-{params.top_n}); selling {quantity} shares"
+                    "no longer ranked in a liquidity-rank tier this book holds "
+                    f"({', '.join(s.tier.value for s in self._sleeves)}) or in the scored "
+                    f"universe; selling {quantity} shares"
                 )
-            elif age >= params.max_hold_sessions and rank > params.top_n:
+            elif rank is None:
+                reason = f"no longer in the scored universe; selling {quantity} shares"
+            elif rank > sell_band:
+                reason = (
+                    f"{rank_name} {rank} left the top-{sell_band} band "
+                    f"(bought into top-{top_n}); selling {quantity} shares"
+                )
+            elif age >= params.max_hold_sessions and rank > top_n:
                 reason = (
                     f"held {age} sessions (max {params.max_hold_sessions}) and rank {rank} no "
-                    f"longer re-qualifies for the top-{params.top_n}; selling {quantity} shares"
+                    f"longer re-qualifies for the top-{top_n}; selling {quantity} shares"
                 )
             else:
                 continue
@@ -949,6 +1038,7 @@ class SwingCompositePolicy:
         held: Mapping[str, Holding],
         target: Mapping[str, SwingRecord],
         marks: Mapping[str, Decimal],
+        sleeve_of: Mapping[str, TierSleeve] | None = None,
     ) -> tuple[list[tuple[OrderRequest, str]], Decimal]:
         """Whole-share buys toward equal weight over the target set, sized from currently-free cash.
 
@@ -978,7 +1068,7 @@ class SwingCompositePolicy:
         buys = [
             (
                 order.to_order_request(exchange=Exchange.NSE, tag="SWING"),
-                f"composite top-{self._params.top_n}: 52w-high proximity "
+                f"{self._basket_label(order.isin, sleeve_of)}: 52w-high proximity "
                 f"{target[order.isin].high_proximity}, delivery "
                 f"{target[order.isin].delivery_share}, 12-1 "
                 f"{target[order.isin].momentum_12_1:+}; buy {order.quantity} @ {order.price}",
@@ -986,6 +1076,12 @@ class SwingCompositePolicy:
             for order in allocation.orders
         ]
         return buys, allocation.tracking_drift
+
+    def _basket_label(self, isin: str, sleeve_of: Mapping[str, TierSleeve] | None) -> str:
+        if sleeve_of is None or isin not in sleeve_of:
+            return f"composite top-{self._params.top_n}"
+        sleeve = sleeve_of[isin]
+        return f"{sleeve.tier.value}-tier (liquidity rank) composite top-{sleeve.top_n}"
 
     # ── journal + evidence ───────────────────────────────────────────────────────────────────────
 
@@ -1032,6 +1128,7 @@ class SwingCompositePolicy:
         by_isin: Mapping[str, SwingRecord],
         tracking_drift: Decimal,
         universe_size: int,
+        sleeve_of: Mapping[str, TierSleeve] | None = None,
     ) -> EvidenceBundle:
         """The scored table the decision was made on, as one content-addressed bundle."""
         items = [
@@ -1053,6 +1150,10 @@ class SwingCompositePolicy:
                         {"residual_momentum": str(record.residual_momentum)}
                         if self._params.weight_residual_momentum != _ZERO
                         else {}
+                    ),
+                    # Only on a tiered arm, for the same reason.
+                    **(
+                        {"tier": sleeve_of[record.isin].tier.value} if sleeve_of is not None else {}
                     ),
                 },
             )
