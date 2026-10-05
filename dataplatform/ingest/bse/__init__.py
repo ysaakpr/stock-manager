@@ -14,10 +14,16 @@ turns a scrip code into an ISIN before any BSE row can be joined (invariant #2).
 
 from dataplatform.ingest.bse.bhavcopy import LEGACY_SOURCE_ID as BHAVCOPY_LEGACY_SOURCE_ID
 from dataplatform.ingest.bse.bhavcopy import UDIFF_SOURCE_ID as BHAVCOPY_UDIFF_SOURCE_ID
-from dataplatform.ingest.bse.bhavcopy import BseLegacyQuote, LegacyResolution
+from dataplatform.ingest.bse.bhavcopy import (
+    BseLegacyQuote,
+    LegacyParse,
+    LegacyResolution,
+    MalformedLine,
+)
 from dataplatform.ingest.bse.bhavcopy import parse as parse_bhavcopy
 from dataplatform.ingest.bse.bhavcopy import parse_l0 as parse_bhavcopy_l0
 from dataplatform.ingest.bse.bhavcopy import parse_legacy as parse_bhavcopy_legacy
+from dataplatform.ingest.bse.bhavcopy import parse_legacy_report as parse_bhavcopy_legacy_report
 from dataplatform.ingest.bse.bhavcopy import resolve_legacy as resolve_bhavcopy_legacy
 from dataplatform.ingest.bse.corp_actions import SOURCE_ID as CORP_ACTIONS_SOURCE_ID
 from dataplatform.ingest.bse.corp_actions import parse as parse_corp_actions
@@ -39,11 +45,14 @@ __all__ = [
     "BseLegacyQuote",
     "BseScrip",
     "BseScripIngestReport",
+    "LegacyParse",
     "LegacyResolution",
+    "MalformedLine",
     "ingest_scrip_master",
     "parse_bhavcopy",
     "parse_bhavcopy_l0",
     "parse_bhavcopy_legacy",
+    "parse_bhavcopy_legacy_report",
     "parse_corp_actions",
     "parse_corp_actions_l0",
     "parse_scrip_master",
