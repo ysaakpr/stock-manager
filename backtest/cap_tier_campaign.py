@@ -429,8 +429,8 @@ def _pct(value: Decimal | None) -> str:
     return "n/a" if value is None else f"{value:.2%}"
 
 
-def _crore(value: Decimal) -> str:
-    return f"₹{value / Decimal(10_000_000):,.2f} cr"
+def _lakh(value: Decimal) -> str:
+    return f"₹{value / Decimal(100_000):,.2f} L"
 
 
 def _floor(floor: Decimal) -> str:
@@ -490,6 +490,7 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
         "- After-tax XIRR is on realised gains (holdings at the end untaxed).",
         "- Benchmarks: published TRIs. Midcap 150 / Smallcap 250 launched 2016-04-01; earlier "
         "levels are NSE's back-computed series (base 1000 on 2005-04-01).",
+        "- Money in lakh (₹1 L = ₹100,000).",
         "- **₹1 cr floor: the cost model is unvalidated for small-cap impact cost** — every ₹1 cr "
         "number carries that caveat.",
         "- A name that stops printing is valued at its last printed close until the end (never "
@@ -526,7 +527,7 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
                     f"{_pct(row.after_tax) if row.after_tax is not None else row.after_tax_error} "
                     f"| {_pct(s.max_drawdown)} | {'n/a' if ratio is None else f'{ratio:.2f}'} "
                     f"| {_year(row.path.worst_year)} | {_days(row.path)} | {row.trades} "
-                    f"| {_crore(s.total_charges)} | {_blocks(s)} | {_pct(row.end_cash_share)} "
+                    f"| {_lakh(s.total_charges)} | {_blocks(s)} | {_pct(row.end_cash_share)} "
                     f"| {len(row.stuck)} ({sum(1 for x in row.stuck if x[3])} merger) |"
                 )
             for slug, label in BENCHMARK_SLUGS:
@@ -578,8 +579,8 @@ def _smallcap_section(
             lines.append(
                 f"| {_floor(floor).split(' (')[0]} | {arm.label} | "
                 f"{_pct(crash[0]) if crash else 'n/a'} | {_pct(crash[1]) if crash else 'n/a'} | "
-                f"{_pct(share)} of {_crore(total)} | "
-                + ", ".join(f"{isin} {_crore(v)}" for isin, v in top)
+                f"{_pct(share)} of {_lakh(total)} | "
+                + ", ".join(f"{isin} {_lakh(v)}" for isin, v in top)
                 + " |"
             )
     lines += [
@@ -595,12 +596,17 @@ def _smallcap_section(
             row = rows[(full.name, floor, label)]
             if not row.stuck:
                 continue
+            stuck_value = sum((value for _, _, value, _ in row.stuck), _ZERO)
+            share = stuck_value / row.summary.final_nav if row.summary.final_nav else _ZERO
             detail = "; ".join(
-                f"{isin} last print {last}, valued {_crore(value)}"
+                f"{isin} last print {last}, valued {_lakh(value)}"
                 + (" (MERGER in store)" if merger else "")
                 for isin, last, value, merger in row.stuck
             )
-            lines.append(f"- {_floor(floor).split(' (')[0]}, {label}: {detail}")
+            lines.append(
+                f"- {_floor(floor).split(' (')[0]}, {label}: {len(row.stuck)} names, "
+                f"{_lakh(stuck_value)} = {share:.2%} of the final NAV — {detail}"
+            )
     lines.append("")
     return lines
 
