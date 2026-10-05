@@ -100,3 +100,13 @@ Rules for a good case:
 4. **Raw closes are representative** EOD levels around the ex-date; the load-bearing invariant under
    test is `adjusted = raw × cumulative_factor` derived from the published terms, so internal
    consistency (literal = raw × factor) is what matters, checked against the engine's own output.
+
+## Price-implied splits (`test_golden_implied_splits.py`)
+
+Some share-basis changes have no published terms to start from: ETF unit splits are in neither
+exchange's equity CA feed, and splits before either feed's history (TATAMTRDVR, 2011) are in
+neither. `corpactions.implied` reads those off L1 and `store.l2` adjusts for them. Their golden
+file freezes the real NSE EQ bars around each ex-date and checks the L2 materializer's output
+against hand-computed literals (`3286.95 x 0.1 = 328.6950`), so an inverted factor fails it the
+same way it fails the published-terms cases. It is a separate harness because its input is bars,
+not terms; a new implied case is a new row block in that file.

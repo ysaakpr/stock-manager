@@ -14,12 +14,21 @@ here too — extending one would duplicate the survivor's stitched history. `--d
 what it would rebuild and how much of the newly exposed window the factor chain covers, and
 writes nothing.
 
+`--rebuild-all` rebuilds every partition from L1 + its factor chain — the pass that carries a
+change in how a partition is *built* (the price-implied splits of `corpactions.implied`) onto the
+partitions already on disk, which no other mode rewrites. `--prune-retired` only removes the
+partitions of lineage-retired ISINs; every writing mode (fill, `--extend`, `--rebuild-all`) also
+ends with that prune, because a retired ISIN's partition duplicates its survivor's stitched
+history with the reissue split unadjusted.
+
 Offline: reads L1 and Postgres, fetches nothing. `lineage_rebuild` runs the same fill as its last
 stage; this entry point is for a lake where only the fill is wanted.
 
     uv run python -m dataplatform.store.l2_fill
     uv run python -m dataplatform.store.l2_fill --extend --dry-run
     uv run python -m dataplatform.store.l2_fill --extend
+    uv run python -m dataplatform.store.l2_fill --rebuild-all
+    uv run python -m dataplatform.store.l2_fill --prune-retired
 """
 
 from __future__ import annotations
@@ -36,13 +45,23 @@ from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection, connect
 from dataplatform.store.l2 import (
     L2FillReport,
+    L2RebuildReport,
     L2TruncatedReport,
     materialize_missing,
     open_connection,
+    prune_retired,
+    rebuild_all,
     rebuild_truncated,
 )
 
-__all__ = ["ExtensionCoverage", "extend", "extension_coverage", "fill"]
+__all__ = [
+    "ExtensionCoverage",
+    "extend",
+    "extension_coverage",
+    "fill",
+    "prune",
+    "rebuild_everything",
+]
 
 _LOG = get_logger(__name__)
 
@@ -78,7 +97,34 @@ def fill() -> L2FillReport:
             )
         finally:
             con.close()
+    prune_retired(resolver.survivor_of, data_root=settings.data_root)
     return report
+
+
+def prune() -> tuple[str, ...]:
+    """Remove the configured lake's lineage-retired L2 partitions; return their ISINs."""
+    settings = get_settings()
+    with connect() as conn:
+        resolver = LineageStore(conn).load()
+    return prune_retired(resolver.survivor_of, data_root=settings.data_root)
+
+
+def rebuild_everything() -> L2RebuildReport:
+    """Rebuild every L2 partition of the configured lake and prune the retired ones."""
+    settings = get_settings()
+    with connect() as conn:
+        history, resolver = _history(conn)
+        con = open_connection()
+        try:
+            return rebuild_all(
+                conn,
+                con=con,
+                data_root=settings.data_root,
+                history_for=history,
+                survivor_of=resolver.survivor_of,
+            )
+        finally:
+            con.close()
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +200,8 @@ def extend(*, dry_run: bool) -> tuple[L2TruncatedReport, ExtensionCoverage]:
         finally:
             con.close()
         coverage = extension_coverage(conn, report.truncated)
+    if not dry_run:
+        prune_retired(resolver.survivor_of, data_root=settings.data_root)
     _LOG.info(
         "l2_fill.extension_coverage",
         dry_run=dry_run,
@@ -173,9 +221,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--dry-run", action="store_true", help="with --extend: report only, write nothing"
     )
+    parser.add_argument(
+        "--rebuild-all",
+        action="store_true",
+        help="rebuild every partition from L1 + factors (and implied splits); prune retired",
+    )
+    parser.add_argument(
+        "--prune-retired",
+        action="store_true",
+        help="only remove the partitions of lineage-retired ISINs",
+    )
     args = parser.parse_args(argv)
     if args.dry_run and not args.extend:
         parser.error("--dry-run applies to --extend")
+    if sum((args.extend, args.rebuild_all, args.prune_retired)) > 1:
+        parser.error("--extend, --rebuild-all and --prune-retired are separate modes")
+    if args.prune_retired:
+        pruned = prune()
+        print(f"{'pruned_retired':<24} {len(pruned)}")
+        return 0
+    if args.rebuild_all:
+        rebuilt = rebuild_everything()
+        print(f"{'candidates':<24} {rebuilt.candidates}")
+        print(f"{'skipped_retired':<24} {rebuilt.skipped_retired}")
+        print(f"{'pruned_retired':<24} {len(rebuilt.pruned_retired)}")
+        print(f"{'written':<24} {len(rebuilt.written)}")
+        print(f"{'rows_written':<24} {rebuilt.rows_written}")
+        print(f"{'implied_splits':<24} {len(rebuilt.implied_splits)}")
+        return 0
     if args.extend:
         report, coverage = extend(dry_run=args.dry_run)
         print(f"{'partitions':<32} {report.partitions}")
