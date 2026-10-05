@@ -125,6 +125,7 @@ __all__ = [
     "ingest_constituents",
     "ingest_tri",
     "ingest_tri_from_close",
+    "is_placeholder_constituent",
     "l0_close_filename",
     "l0_constituents_filename",
     "l0_tri_filename",
@@ -231,6 +232,23 @@ IndexValue = Annotated[Decimal, Field(ge=0, strict=True, allow_inf_nan=False)]
 Yield = Annotated[Decimal, Field(ge=0, le=100, strict=True, allow_inf_nan=False)]
 
 
+def is_placeholder_constituent(isin: str, symbol: str, company_name: str) -> bool:
+    """Whether an index-list row is an exchange placeholder rather than a real security.
+
+    NSE Indices carries a *dummy* constituent while a demerger is being processed — the parent's
+    weight is parked on a non-tradeable stand-in until the resulting company lists (the 2026-09
+    NIFTY 500 file names `Dummy HEG Ltd.`, `DUMMYHEG`, `DUM545A01024` on every date, which is how
+    the list reached 501 members). Such a row passes the ISIN *pattern* (`DU` reads as a country
+    code) but is no security: it has no prices, no listing window and no issuer. Recognised by any
+    of the three marks it carries — a `DUM` ISIN prefix, a `DUMMY` symbol, a `Dummy ` company name.
+    """
+    return (
+        isin.upper().startswith("DUM")
+        or symbol.upper().startswith("DUMMY")
+        or company_name.strip().lower().startswith("dummy ")
+    )
+
+
 class ImmutableSnapshotError(IngestError):
     """An attempt to overwrite a stored monthly snapshot with different membership (§4.1).
 
@@ -265,6 +283,17 @@ class ConstituentRow(BaseModel):
     company_name: str = Field(min_length=1, description="company name as listed, for display")
     industry: str = Field(min_length=1, description="index industry classification, as listed")
 
+    @model_validator(mode="after")
+    def _a_real_security(self) -> ConstituentRow:
+        # A placeholder must never *become* a row: the parser rejects it before construction, so
+        # one arriving here is a caller bypassing the parser, and that is refused, not admitted.
+        if is_placeholder_constituent(self.isin, self.symbol, self.company_name):
+            raise ValueError(
+                f"{self.isin} ({self.symbol}) is an index placeholder, not a security; it is never "
+                "an index member"
+            )
+        return self
+
 
 class ConstituentSnapshot(BaseModel):
     """One index's membership as of one date — the immutable monthly unit (§4.1).
@@ -289,6 +318,11 @@ class ConstituentSnapshot(BaseModel):
     source: str = Field(min_length=1, description="Source Register id the payload came from")
     l0_key: str | None = Field(
         default=None, description="`source/date/filename` of the L0 payload this was derived from"
+    )
+    rejected_placeholders: tuple[str, ...] = Field(
+        default=(),
+        description="ISINs of placeholder rows the source listed and the parser refused to admit; "
+        "carried for the coverage report, never persisted as members",
     )
 
     @model_validator(mode="after")
@@ -335,6 +369,12 @@ def parse_constituents(
     Raises `ParseError`, naming the file, for anything not this format: an HTML soft-404 (the
     site's Angular shell answers a bad path with markup and a 200), an empty body, a wrong header, a
     row with the wrong column count, a malformed ISIN, or a company listed twice.
+
+    A demerger placeholder row (`is_placeholder_constituent` — `Dummy HEG Ltd.`, `DUM545A01024`)
+    is rejected, not admitted: it is dropped from the membership, logged at error level as
+    `indices.constituent_placeholder_rejected` with the file and line, and named on the snapshot's
+    `rejected_placeholders` so the coverage report shows it. Refusing the whole file instead would
+    take NIFTY 500 dark for as long as a demerger is in flight, which is the larger harm.
     """
     text = _decode_csv(payload, filename=filename)
     reader = csv.reader(io.StringIO(text))
@@ -349,6 +389,7 @@ def parse_constituents(
         )
 
     rows: list[ConstituentRow] = []
+    rejected: list[str] = []
     for line_no, record in enumerate(reader, start=2):
         if not record or all(not cell.strip() for cell in record):
             continue  # a trailing blank line is not a row
@@ -359,6 +400,20 @@ def parse_constituents(
                 line=line_no,
             )
         company, industry, symbol, series, isin = (cell.strip() for cell in record)
+        if is_placeholder_constituent(isin, symbol, company):
+            rejected.append(isin)
+            _LOG.error(
+                "indices.constituent_placeholder_rejected",
+                source=CONSTITUENTS_SOURCE_ID,
+                index=index_slug,
+                as_of=as_of.isoformat(),
+                filename=filename,
+                line=line_no,
+                isin=isin,
+                symbol=symbol,
+                state="REJECTED",
+            )
+            continue
         try:
             rows.append(
                 ConstituentRow(
@@ -380,6 +435,7 @@ def parse_constituents(
             rows=tuple(sorted(rows, key=lambda row: row.isin)),
             source=CONSTITUENTS_SOURCE_ID,
             l0_key=l0_key,
+            rejected_placeholders=tuple(sorted(rejected)),
         )
     except ValidationError as exc:
         raise ParseError(str(exc), filename=filename) from exc
@@ -391,6 +447,7 @@ def parse_constituents(
         as_of=as_of.isoformat(),
         filename=filename,
         rows=len(snapshot.rows),
+        rejected_placeholders=len(rejected),
         state="VALIDATED",
     )
     return snapshot
@@ -576,6 +633,22 @@ def _constituents_of(path: Path) -> ConstituentSnapshot:
     records = pq.read_table(path, schema=_CONSTITUENTS_SCHEMA).to_pylist()
     if not records:
         raise ParseError("L1 snapshot file has no rows", filename=str(path))
+    # Snapshots written before the 2026-10-05 placeholder rejection carry the dummy row (NIFTY 500
+    # read as 501). L1 is not rewritten; the row is refused on the way out, loudly, so every reader
+    # and the immutability comparison see the same membership a fresh parse would produce.
+    placeholders = [
+        r for r in records if is_placeholder_constituent(r["isin"], r["symbol"], r["company_name"])
+    ]
+    for r in placeholders:
+        _LOG.warning(
+            "indices.constituent_placeholder_skipped_on_read",
+            source=str(r["source"]),
+            index=str(r["index_slug"]),
+            as_of=r["as_of"].isoformat(),
+            path=str(path),
+            isin=str(r["isin"]),
+            symbol=str(r["symbol"]),
+        )
     rows = tuple(
         ConstituentRow(
             isin=str(r["isin"]),
@@ -585,6 +658,7 @@ def _constituents_of(path: Path) -> ConstituentSnapshot:
             industry=str(r["industry"]),
         )
         for r in records
+        if r not in placeholders
     )
     head = records[0]
     return ConstituentSnapshot(
@@ -594,6 +668,7 @@ def _constituents_of(path: Path) -> ConstituentSnapshot:
         rows=tuple(sorted(rows, key=lambda row: row.isin)),
         source=str(head["source"]),
         l0_key=None if head["l0_key"] is None else str(head["l0_key"]),
+        rejected_placeholders=tuple(sorted(str(r["isin"]) for r in placeholders)),
     )
 
 
@@ -1520,6 +1595,7 @@ def ingest_constituents(
     data_root: Path | None = None,
     register: SourceRegister | None = None,
     state_source: str | None = None,
+    url_slug: str | None = None,
 ) -> ConstituentSnapshot:
     """Take one index snapshot from nothing to `PUBLISHED`: fetch → L0 → parse → L1 → sync.
 
@@ -1531,7 +1607,9 @@ def ingest_constituents(
     `state_source` is the id the *sync row* is keyed under; it defaults to the per-slug
     `constituents_state_source(index_slug)` so a sweep of many lists on one date does not collide on
     one shared sync row (see that helper). The *fetch* always uses the bare register id
-    `CONSTITUENTS_SOURCE_ID`, because the URL and crawl policy are per-endpoint.
+    `CONSTITUENTS_SOURCE_ID`, because the URL and crawl policy are per-endpoint. `url_slug` is the
+    slug the published filename carries when it differs from the lake slug (NIFTY PRIVATE BANK is
+    `ind_nifty_privatebanklist.csv`); the L0 name, the sync row and L1 all keep `index_slug`.
 
     A re-run of the same month is safe: `write_constituents_l1` is a no-op when the membership is
     unchanged and raises `ImmutableSnapshotError` if it would differ. Any failure is recorded on the
@@ -1539,7 +1617,7 @@ def ingest_constituents(
     sees the exception and `/status/sync` sees the state.
     """
     sync_source = state_source or constituents_state_source(index_slug)
-    url = constituents_url(index_slug, register)
+    url = constituents_url(index_slug if url_slug is None else url_slug, register)
     tracker.begin(sync_source, as_of)
     try:
         ref = fetcher.fetch(
