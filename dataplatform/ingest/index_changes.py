@@ -40,7 +40,7 @@ from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf.errors import DependencyError, PdfReadError
 
 from dataplatform.ingest.fetcher import Fetcher
 from dataplatform.ingest.models import ParseError
@@ -508,6 +508,9 @@ def parse_press_release_pdf(
     deferred: list[tuple[str, str, list[tuple[ChangeAction, str, str | None]]]] = []
     saw_action = False
     action_rows = 0  # rows read under the open action — an action with none is a detached table
+    last_sr = (
+        0  # the open table's last serial — a bare number that does not follow it is a page no.
+    )
 
     def flush_row() -> None:
         nonlocal section_problem
@@ -515,6 +518,11 @@ def parse_press_release_pdf(
             return
         body = " ".join(pending).strip()
         pending.clear()
+        if not body:
+            # A bare number that nothing followed: the page number at a page break, which can
+            # equal the next serial (ind_prs27042017.pdf: "3" after row 2). A row whose text the
+            # PDF really lost would leave the index off its fixed size, which the walk reports.
+            return
         if section is None or action is None:
             return
         effective = action_date or section_date
@@ -607,6 +615,7 @@ def parse_press_release_pdf(
             )
             action_date = stated
             in_table = False
+            last_sr = 0
             saw_action = section is not None
             continue
 
@@ -632,10 +641,16 @@ def parse_press_release_pdf(
                 continue
             row = _ROW.match(line)
             if re.fullmatch(r"\d{1,3}", line):
+                if int(line) != last_sr + 1:
+                    # A page number the text layer dropped mid-table (ind_prs16022017.pdf prints
+                    # "2" between rows 14 and 15). Taken for a serial it would be a nameless row.
+                    continue
                 flush_row()
+                last_sr = int(line)
                 pending.append("")  # the serial alone; the name wraps onto the next lines
             elif row is not None:
                 flush_row()
+                last_sr = int(row.group("sr"))
                 pending.append(row.group("body"))
             elif pending and _split_row(" ".join(pending))[1] is None and len(line) < 60:
                 pending.append(line)  # a long company name wrapped before its symbol
@@ -902,6 +917,12 @@ def _pdf_lines(payload: bytes, *, filename: str) -> list[str]:
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
     except (PdfReadError, ValueError, KeyError) as exc:
         raise ParseError(f"unreadable PDF: {exc}", filename=filename) from exc
+    except DependencyError as exc:
+        # ind_prs20062005_1.pdf is AES-encrypted (empty user password); pypdf needs the
+        # `cryptography` package to open it, which this platform does not carry.
+        raise ParseError(
+            f"encrypted PDF this platform cannot open: {exc}", filename=filename
+        ) from exc
     if len("".join(text.split())) < _MIN_TEXT_CHARS:
         # ind_prs23082021.pdf (the 2021-09 semi-annual review, 29 pages) draws every glyph as an
         # image: there is no text layer to read. Without OCR it is a hole, and it must say so.

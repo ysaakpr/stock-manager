@@ -9,11 +9,12 @@ object it was read from, the pages, the date and who transcribed it. This module
 validates it, and turns an entry into the same `PressReleaseParse` the PDF parser would have
 produced — so the history builder treats a transcribed release exactly like a parsed one.
 
-**Read versus derived.** The September 2021 PDF does not print all of its NIFTY 500 section (rows
-20+ of the exclusions and the whole inclusion table are absent). Those rows are *derived* from the
-release's own NIFTY 100, Midcap 150 and Smallcap 250 tables (NIFTY 500 is their disjoint union) and
-kept apart from the transcribed rows; `TranscribedRow.derived` marks them, and the history report
-lists every derived event. A test re-derives them from the component sections.
+**What the page does not print is not filled.** The September 2021 PDF stops its NIFTY 500 section
+after 19 exclusion rows (rows 20+ and the inclusion table are absent). That section is recorded as
+printed and flagged `truncated_in_source`; it yields no event. The flag names the text release that
+replaced the list (`superseded_by`: ind_prs15092021.pdf restated NIFTY 500, Midcap 150 and Smallcap
+250 in full), and the history builder reads NIFTY 500's change from that release instead — or stops
+the index's depth at this one if the superseding release is not in L0.
 
 What it never does: modify L0, run OCR, or apply a transcription to bytes it was not read from —
 `transcription_parse` refuses an L0 object whose sha256 differs from the one the entry pins.
@@ -65,24 +66,22 @@ class TranscriptionError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class TranscribedRow:
-    """One table row: Sr. No. (None for a derived row), company name and symbol as printed."""
+    """One table row: Sr. No., company name and symbol, as printed."""
 
-    sr: int | None
+    sr: int
     company: str
     symbol: str
-    derived: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class TranscribedSection:
-    """One index's section: its exclusions and inclusions, read and (when flagged) derived."""
+    """One index's section: its exclusions and inclusions as printed."""
 
     index_slug: str
     heading: str
     pages: tuple[int, ...]
     exclude: tuple[TranscribedRow, ...]
     include: tuple[TranscribedRow, ...]
-    derivation: str | None = None
 
     @property
     def balanced(self) -> bool:
@@ -98,6 +97,7 @@ class TranscriptionFlag:
     kind: str
     pages: tuple[int, ...]
     detail: str
+    superseded_by: str | None = None  # the release that replaced this section's list wholesale
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +121,13 @@ class ReleaseTranscription:
     crosscheck_sections: tuple[TranscribedSection, ...]
     flags: tuple[TranscriptionFlag, ...]
 
+    def truncated(self, index_slug: str) -> TranscriptionFlag | None:
+        """The `truncated_in_source` flag on `index_slug`'s section, if the page cut it short."""
+        for f in self.flags:
+            if f.index_slug == index_slug and f.kind == "truncated_in_source":
+                return f
+        return None
+
     def section(self, index_slug: str) -> TranscribedSection | None:
         """The tracked or cross-check section for `index_slug`, if the release has one."""
         for s in (*self.sections, *self.crosscheck_sections):
@@ -135,8 +142,9 @@ def load_release_transcriptions(
     """Load and validate the curated file, keyed by release filename.
 
     Raises `TranscriptionError` for anything that would make a transcription untrustworthy: missing
-    provenance, a Sr. No. sequence that skips or repeats, a symbol that is not one, a derived row
-    without a stated derivation, an untracked index in `sections`, or a page outside the PDF.
+    provenance, a Sr. No. sequence that skips or repeats, a symbol that is not one, an unbalanced
+    section that is not flagged `truncated_in_source` with the release that superseded it, an
+    untracked index in `sections`, or a page outside the PDF.
     """
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict) or raw.get("version") != 1:
@@ -154,7 +162,9 @@ def transcription_parse(transcription: ReleaseTranscription, ref: L0Ref) -> Pres
     """The `PressReleaseParse` a transcription stands for, bound to the L0 object it was read from.
 
     Raises `ParseError` when `ref` is not that object (another filename, or bytes whose sha256 is
-    not the pinned one): a transcription is evidence about one payload only.
+    not the pinned one): a transcription is evidence about one payload only. A section flagged
+    `truncated_in_source` yields no event — half a list applied would be a wrong set, not a short
+    one; the caller decides what its `superseded_by` release means for depth.
     """
     if ref.filename != transcription.release or ref.sha256 != transcription.sha256:
         raise ParseError(
@@ -164,6 +174,8 @@ def transcription_parse(transcription: ReleaseTranscription, ref: L0Ref) -> Pres
         )
     events: list[IndexChangeEvent] = []
     for section in transcription.sections:
+        if transcription.truncated(section.index_slug) is not None:
+            continue
         for action, rows in (
             (ChangeAction.EXCLUDE, section.exclude),
             (ChangeAction.INCLUDE, section.include),
@@ -234,13 +246,22 @@ def _transcription(entry: Any) -> ReleaseTranscription:
             kind=_str(f, "kind", where),
             pages=_check_pages(tuple(f.get("pages") or ()), page_count, where),
             detail=" ".join(_str(f, "detail", where).split()),
+            superseded_by=f.get("superseded_by"),
         )
         for f in entry.get("flags") or []
     )
+    for f in flags:
+        if f.kind == "truncated_in_source" and not f.superseded_by:
+            raise TranscriptionError(
+                f"{where}: {f.index_slug} is truncated in the source but names no `superseded_by`"
+            )
+    truncated = {f.index_slug for f in flags if f.kind == "truncated_in_source"}
     for s in sections:
-        derived = any(r.derived for r in (*s.exclude, *s.include))
-        if derived and not any(f.index_slug == s.index_slug for f in flags):
-            raise TranscriptionError(f"{where}: {s.index_slug} has derived rows but no flag")
+        if not s.balanced and s.index_slug not in truncated:
+            raise TranscriptionError(
+                f"{where}: {s.index_slug} has {len(s.exclude)} out and {len(s.include)} in; a "
+                "fixed-size index replaces like for like — misread, or flag it truncated"
+            )
     return ReleaseTranscription(
         release=release,
         l0_key=l0_key,
@@ -268,11 +289,8 @@ def _section(raw: Any, page_count: int, where: str, *, tracked: bool) -> Transcr
     elif slug in TRACKED_INDICES:
         raise TranscriptionError(f"{where}: {slug} is tracked; it belongs in `sections`")
     where = f"{where} {slug}"
-    derivation = raw.get("derivation")
-    exclude = _rows(raw.get("exclude") or [], where) + _derived(raw, "exclude_derived", where)
-    include = _rows(raw.get("include") or [], where) + _derived(raw, "include_derived", where)
-    if any(r.derived for r in (*exclude, *include)) and not derivation:
-        raise TranscriptionError(f"{where}: derived rows need a `derivation`")
+    exclude = _rows(raw.get("exclude") or [], where)
+    include = _rows(raw.get("include") or [], where)
     symbols = [r.symbol for r in (*exclude, *include)]
     if len(set(symbols)) != len(symbols):
         raise TranscriptionError(f"{where}: a symbol is both included and excluded, or repeated")
@@ -282,7 +300,6 @@ def _section(raw: Any, page_count: int, where: str, *, tracked: bool) -> Transcr
         pages=_check_pages(tuple(raw.get("pages") or ()), page_count, where),
         exclude=exclude,
         include=include,
-        derivation=None if derivation is None else " ".join(str(derivation).split()),
     )
 
 
@@ -295,18 +312,6 @@ def _rows(raw: list[Any], where: str) -> tuple[TranscribedRow, ...]:
         if sr != expected:
             raise TranscriptionError(f"{where}: Sr. No. {sr} where {expected} was expected")
         rows.append(TranscribedRow(int(sr), _company(company, where), _symbol(symbol, where)))
-    return tuple(rows)
-
-
-def _derived(raw: Mapping[str, Any], key: str, where: str) -> tuple[TranscribedRow, ...]:
-    rows: list[TranscribedRow] = []
-    for item in raw.get(key) or []:
-        if not isinstance(item, list) or len(item) != 2:
-            raise TranscriptionError(f"{where}: derived row {item!r} is not [company, symbol]")
-        company, symbol = item
-        rows.append(
-            TranscribedRow(None, _company(company, where), _symbol(symbol, where), derived=True)
-        )
     return tuple(rows)
 
 

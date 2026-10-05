@@ -141,7 +141,6 @@ class ResidualKind(StrEnum):
     ENTRY_BEFORE_FIRST_SESSION = "entry_before_first_session"  # member before it ever traded
     UNRESOLVED_SYMBOL = "unresolved_symbol"  # an event whose symbol named no ISIN at its date
     UNREADABLE_SECTION = "unreadable_section"  # a tracked section a release could not be read for
-    DERIVED_EVENTS = "derived_events"  # events a transcription derived rather than read (flagged)
     MISSING_RELEASE = "missing_release"  # a candidate release that is not in L0
     SNAPSHOT_MISMATCH = "snapshot_mismatch"  # reconstruction ≠ a stored daily snapshot
 
@@ -622,8 +621,9 @@ class _Voiding:
 
 
 #: Errata read from the releases themselves, keyed by the release that states them. Each one is a
-#: sentence of the exchange's, quoted, applied only when that release is in L0. Kept as data
-#: because it is one sentence in thirteen hundred releases; a second would earn a parser.
+#: sentence of the exchange's, quoted, applied only when that release is in L0, and it voids every
+#: event of the named releases outside `except_indices`. Kept as data because it is two sentences
+#: in fifteen hundred releases, each worded differently; a parser for them would be a guess.
 _VOIDINGS: Final[Mapping[str, _Voiding]] = {
     "ind_prs13052020.pdf": _Voiding(
         voided_releases=("ind_prs18022020.pdf", "ind_prs12032020.pdf", "ind_prs19032020.pdf"),
@@ -634,6 +634,18 @@ _VOIDINGS: Final[Mapping[str, _Voiding]] = {
             "dated February 18, March 12 and March 19, 2020 (except replacements in NIFTY 50 and "
             "NIFTY Bank index as they had been rebalanced effective March 19, 2020) shall stand "
             "null and void"
+        ),
+    ),
+    # The REIT/InvIT revocation re-issued the September 2021 review's lists for three tracked
+    # indices; the August lists (read from the curated transcription of the image-only PDF) stand
+    # replaced for those, and stand for NIFTY 50 (unchanged), Next 50, NIFTY 100 and NIFTY 200.
+    "ind_prs15092021.pdf": _Voiding(
+        voided_releases=("ind_prs23082021.pdf",),
+        effective=date(2021, 9, 30),
+        except_indices=("nifty50", "niftynext50", "nifty100", "nifty200"),
+        quote=(
+            "The earlier list of replacement of these indices published through a press release "
+            "on August 23, 2021 stands replaced with the list given hereunder"
         ),
     ),
 }
@@ -755,8 +767,8 @@ def build_membership_history(
     and the lineage derived from it); a test injects them.
 
     A release with no text layer is read from its curated transcription
-    (`index_transcription`, default: the reviewed file) when one pins that exact L0 object; its
-    derived (not read) rows are reported per index as `DERIVED_EVENTS`.
+    (`index_transcription`, default: the reviewed file) when one pins that exact L0 object; a
+    section the page cut short is read from the release that superseded it, or bounds the depth.
     """
     if transcriptions is None:
         transcriptions = load_release_transcriptions()
@@ -821,20 +833,23 @@ def build_membership_history(
             )
 
     horizon: dict[str, date] = dict.fromkeys(TRACKED_INDICES, global_horizon)
+    parsed_names = {p.release for p in parses}
     for transcription in transcribed:
-        for section in transcription.sections:
-            derived = [r for r in (*section.exclude, *section.include) if r.derived]
-            if derived:
-                residual_seed.append(
-                    Residual(
-                        section.index_slug,
-                        ResidualKind.DERIVED_EVENTS,
-                        transcription.effective,
-                        f"{len(derived)} of {len(section.exclude) + len(section.include)} events "
-                        f"derived, not read ({section.derivation})",
-                        release=transcription.release,
-                    )
+        for flag in transcription.flags:
+            if flag.kind != "truncated_in_source" or flag.superseded_by in parsed_names:
+                continue
+            # The page cut the list short and the release that replaced it is not readable here:
+            # the walk may not cross a change it only half knows.
+            horizon[flag.index_slug] = max(horizon[flag.index_slug], transcription.effective)
+            residual_seed.append(
+                Residual(
+                    flag.index_slug,
+                    ResidualKind.UNREADABLE_SECTION,
+                    transcription.effective,
+                    f"truncated in the source; superseding {flag.superseded_by} not in L0",
+                    release=transcription.release,
                 )
+            )
     release_by_name = {r.filename: r for r in candidates}
     unparsed_rows: list[tuple[str, str]] = []
     for parse in parses:

@@ -5,10 +5,11 @@ hold it to what the release itself must satisfy rather than to a second copy of 
 
 1. **Provenance.** The entry pins the L0 object by key and sha256, says who transcribed it and when,
    and `transcription_parse` refuses bytes that are not that object.
-2. **Internal consistency.** Every tracked section balances (a fixed-size index replaces like for
-   like); NIFTY 100's table equals NIFTY Next 50's (NIFTY 50 is stated unchanged); NIFTY 200's
-   equals the net of NIFTY 100's and Midcap 100's; and the NIFTY 500 rows the source does not print
-   are re-derived here from the three component sections, with the printed rows as their prefix.
+2. **Consistency, inside and out.** Every complete tracked section balances (a fixed-size index
+   replaces like for like); NIFTY 100's table equals NIFTY Next 50's (NIFTY 50 is stated
+   unchanged); NIFTY 200's equals the net of NIFTY 100's and Midcap 100's. Against the text release
+   that re-issued three of the lists three weeks later (ind_prs15092021.pdf, a frozen fixture),
+   every transcribed row agrees except exactly the changes that release announces.
 3. **The PIT boundary.** The walk applied to the transcribed Next 50 change switches the set on
    2021-09-30 — not on the "close of" date, not on the announcement — so shifting the effective date
    or letting the announcement leak the new set fails a named assertion.
@@ -28,7 +29,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from dataplatform.ingest.index_changes import TRACKED_INDICES, ChangeAction
+from dataplatform.ingest.index_changes import (
+    TRACKED_INDICES,
+    ChangeAction,
+    IndexChangeEvent,
+    parse_press_release_pdf,
+)
 from dataplatform.ingest.index_history import ResolvedEvent, reconstruct_index
 from dataplatform.ingest.index_transcription import (
     TRANSCRIPTIONS_PATH,
@@ -43,6 +49,9 @@ from dataplatform.ingest.models import ParseError
 from dataplatform.store.l0 import L0Ref
 
 RELEASE: Final = "ind_prs23082021.pdf"
+REVISION: Final = Path(
+    "tests/fixtures/nifty_index_press_releases/2021_replaced_lists/ind_prs15092021.pdf"
+)
 EFFECTIVE: Final = date(2021, 9, 30)
 ANNOUNCED: Final = date(2021, 8, 23)
 _LAKE: Final = Path("/home/ubuntu/stock-manager/data/L0")
@@ -51,6 +60,20 @@ _LAKE: Final = Path("/home/ubuntu/stock-manager/data/L0")
 @pytest.fixture(scope="module")
 def sept2021() -> ReleaseTranscription:
     return load_release_transcriptions()[RELEASE]
+
+
+@pytest.fixture(scope="module")
+def revision(repo_root: Path) -> tuple[IndexChangeEvent, ...]:
+    path = repo_root / REVISION
+    parsed = parse_press_release_pdf(
+        path.read_bytes(), filename=path.name, announced=date(2021, 9, 15)
+    )
+    assert parsed.unparsed == ()
+    return parsed.events
+
+
+def _symbols(events: tuple[IndexChangeEvent, ...], slug: str, action: ChangeAction) -> set[str]:
+    return {e.symbol or "" for e in events if e.index_slug == slug and e.action is action}
 
 
 def _section(t: ReleaseTranscription, slug: str) -> TranscribedSection:
@@ -126,16 +149,19 @@ def test_every_event_is_dated_by_the_release_not_by_the_transcription(
     per_index = Counter((e.index_slug, e.action) for e in parsed.events)
     assert per_index[("niftynext50", ChangeAction.INCLUDE)] == 5
     assert per_index[("niftysmallcap250", ChangeAction.EXCLUDE)] == 32
+    # The section the page cut short yields nothing: half a list applied is a wrong set.
+    assert not [e for e in parsed.events if e.index_slug == "nifty500"]
 
 
 # ── 2. internal consistency ────────────────────────────────────────────────────────────────────
 
 
-def test_every_tracked_section_balances(sept2021: ReleaseTranscription) -> None:
+def test_every_complete_tracked_section_balances(sept2021: ReleaseTranscription) -> None:
     slugs = {s.index_slug for s in sept2021.sections} | set(sept2021.unchanged)
     assert slugs == set(TRACKED_INDICES)
     for section in sept2021.sections:
-        assert section.balanced, section.index_slug
+        assert section.balanced or sept2021.truncated(section.index_slug), section.index_slug
+    assert [s.index_slug for s in sept2021.sections if not s.balanced] == ["nifty500"]
 
 
 def test_nifty_100_moves_exactly_as_next_50_does(sept2021: ReleaseTranscription) -> None:
@@ -152,27 +178,56 @@ def test_nifty_200_is_the_net_of_nifty_100_and_midcap_100(sept2021: ReleaseTrans
     assert {r.symbol for r in n200.include} == into
 
 
-def test_the_unprinted_nifty_500_rows_are_re_derived_not_remembered(
-    sept2021: ReleaseTranscription,
+def test_the_text_revision_agrees_with_every_row_it_does_not_change(
+    sept2021: ReleaseTranscription, revision: tuple[IndexChangeEvent, ...]
 ) -> None:
-    n500 = _section(sept2021, "nifty500")
-    out, into = _net(
-        _section(sept2021, "nifty100"),
-        _section(sept2021, "niftymidcap150"),
-        _section(sept2021, "niftysmallcap250"),
-    )
-    assert {r.symbol for r in n500.exclude} == out
-    assert {r.symbol for r in n500.include} == into
-    printed = [r for r in n500.exclude if not r.derived]
-    assert [r.sr for r in printed] == list(range(1, 20))
-    assert not any(r.derived for r in printed) and all(r.derived for r in n500.include)
-    # The printed rows are the head of the derived list in the source's alphabetical order.
-    names = {r.symbol: r.company for s in sept2021.sections for r in (*s.exclude, *s.include)}
-    in_order = sorted(out, key=lambda sym: names[sym].lower())
-    assert [r.symbol for r in printed] == in_order[:19]
-    assert any(
-        f.index_slug == "nifty500" and f.kind == "truncated_in_source" for f in sept2021.flags
-    )
+    """ind_prs15092021 restates Midcap 150 / Smallcap 250 after revoking the REIT inclusions.
+
+    Every transcribed row must reappear there except exactly what that revocation moves: EMBASSY,
+    MINDSPACE and BIRET not included; so GILLETTE and MOTILALOFS stay in Midcap 150 (and
+    MOTILALOFS does not enter Smallcap 250), and HIKAL and HGS enter Smallcap 250 instead.
+    A misread symbol anywhere in these 104 rows fails here.
+    """
+    expected_diff = {
+        ("niftymidcap150", ChangeAction.EXCLUDE): ({"GILLETTE", "MOTILALOFS"}, set()),
+        ("niftymidcap150", ChangeAction.INCLUDE): ({"EMBASSY", "MINDSPACE"}, set()),
+        ("niftysmallcap250", ChangeAction.EXCLUDE): (set(), set()),
+        ("niftysmallcap250", ChangeAction.INCLUDE): ({"BIRET", "MOTILALOFS"}, {"HGS", "HIKAL"}),
+    }
+    for (slug, action), (only_aug, only_sept) in expected_diff.items():
+        section = _section(sept2021, slug)
+        aug = {
+            r.symbol
+            for r in (section.exclude if action is ChangeAction.EXCLUDE else section.include)
+        }
+        sept = _symbols(revision, slug, action)
+        assert (aug - sept, sept - aug) == (only_aug, only_sept), (slug, action)
+
+
+def test_the_truncated_nifty_500_section_is_the_head_of_the_text_revision(
+    sept2021: ReleaseTranscription, revision: tuple[IndexChangeEvent, ...]
+) -> None:
+    """The 19 rows the scan prints are the revision's first 18 plus GILLETTE (kept, see above)."""
+    flag = sept2021.truncated("nifty500")
+    assert flag is not None and flag.superseded_by == REVISION.name
+    printed = [r.symbol for r in _section(sept2021, "nifty500").exclude]
+    assert len(printed) == 19 and not _section(sept2021, "nifty500").include
+    revised = [
+        e.symbol
+        for e in revision
+        if e.index_slug == "nifty500" and e.action is ChangeAction.EXCLUDE
+    ]
+    assert len(revised) == 22
+    assert [p for p in printed if p != "GILLETTE"] == revised[:18]
+    # And the revision's NIFTY 500 is the net of its own components (NIFTY 100 is unchanged).
+    out, into = _net(_section(sept2021, "nifty100"))
+    for slug in ("niftymidcap150", "niftysmallcap250"):
+        for action, bucket in ((ChangeAction.EXCLUDE, -1), (ChangeAction.INCLUDE, 1)):
+            for sym in _symbols(revision, slug, action):
+                (into if bucket > 0 else out).add(sym)
+    both = out & into
+    assert set(revised) == out - both
+    assert _symbols(revision, "nifty500", ChangeAction.INCLUDE) == into - both
 
 
 # ── malformed files are refused ────────────────────────────────────────────────────────────────
@@ -192,9 +247,15 @@ def test_a_skipped_serial_number_is_refused(tmp_path: Path) -> None:
         load_release_transcriptions(path)
 
 
-def test_derived_rows_without_a_derivation_are_refused(tmp_path: Path) -> None:
-    path = _mutated(tmp_path, "derivation: >-", "derivation_gone: >-")
-    with pytest.raises(TranscriptionError, match="derivation"):
+def test_a_truncated_section_must_name_what_superseded_it(tmp_path: Path) -> None:
+    path = _mutated(tmp_path, "superseded_by: ind_prs15092021.pdf", "superseded_by: ''")
+    with pytest.raises(TranscriptionError, match="superseded_by"):
+        load_release_transcriptions(path)
+
+
+def test_an_unbalanced_section_that_is_not_flagged_is_a_misread(tmp_path: Path) -> None:
+    path = _mutated(tmp_path, '          - [5, "United Breweries Ltd.", UBL]\n    ', "    ")
+    with pytest.raises(TranscriptionError, match="like for like"):
         load_release_transcriptions(path)
 
 

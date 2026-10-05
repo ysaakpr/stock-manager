@@ -17,10 +17,10 @@
 #     spellings ("AstraZenca", "Railtel Corporation Of India") — a typo fixed here would be a
 #     transcription that disagrees with its source.
 #   * `pages` are 1-based PDF page numbers. `quote`s are verbatim from the page named.
-#   * A section the source does not print completely is never filled from memory. Rows derived
-#     rather than read are kept apart (`exclude_derived`/`include_derived`), carry no Sr. No., name
-#     the `derivation` that produces them, and are re-derived by the tests from the transcribed
-#     component sections — so a reviewer can tell at a glance what was read and what was computed.
+#   * A section the source does not print completely is never filled — not from memory and not by
+#     derivation. It is recorded as printed, flagged `truncated_in_source`, and names the later
+#     text release that `superseded_by` replaced it; the builder emits no event for it, and cuts
+#     that index's depth at the release if the superseding one is not in L0.
 #   * `flags` lists everything that did not read cleanly. An ambiguous entry is flagged, not guessed.
 
 version: 1
@@ -93,42 +93,6 @@ transcriptions:
           - [17, "Raymond Ltd.", RAYMOND]
           - [18, "Responsive Industries Ltd.", RESPONIND]
           - [19, "Shoppers Stop Ltd.", SHOPERSTOP]
-        exclude_derived:
-          - ["Sundaram Clayton Ltd.", SUNCLAYLTD]
-          - ["Swan Energy Ltd.", SWANENERGY]
-          - ["Tata Investment Corporation Ltd.", TATAINVEST]
-          - ["VST Industries Ltd.", VSTIND]
-        include_derived:
-          - ["Anupam Rasayan India Ltd.", ANURAS]
-          - ["Brookfield India Real Estate Trust", BIRET]
-          - ["CG Power and Industrial Solutions Ltd.", CGPOWER]
-          - ["Embassy Office Parks REIT", EMBASSY]
-          - ["Equitas Small Finance Bank Ltd.", EQUITASBNK]
-          - ["Fertilisers and Chemicals Travancore Ltd.", FACT]
-          - ["Hathway Cable & Datacom Ltd.", HATHWAY]
-          - ["Home First Finance Company India Ltd.", HOMEFIRST]
-          - ["Indian Railway Finance Corporation Ltd.", IRFC]
-          - ["Indigo Paints Ltd.", INDIGOPNTS]
-          - ["Jubilant Ingrevia Ltd.", JUBLINGREA]
-          - ["Jubilant Pharmova Ltd.", JUBLPHARMA]
-          - ["Kalyan Jewellers India Ltd.", KALYANKJIL]
-          - ["Laxmi Organic Industries Ltd.", LXCHEM]
-          - ["Macrotech Developers Ltd.", LODHA]
-          - ["Mastek Ltd.", MASTEK]
-          - ["Mindspace Business Parks REIT", MINDSPACE]
-          - ["Nazara Technologies Ltd.", NAZARA]
-          - ["Poonawalla Fincorp Ltd.", POONAWALLA]
-          - ["Praj Industries Ltd.", PRAJIND]
-          - ["Railtel Corporation Of India Ltd.", RAILTEL]
-          - ["Tata Steel Long Products Ltd.", TATASTLLP]
-          - ["Tata Teleservices (Maharashtra) Ltd.", TTML]
-        derivation: >-
-          composition: NIFTY 500 = NIFTY 100 + NIFTY Midcap 150 + NIFTY Smallcap 250 (disjoint).
-          A company's net count of inclusions minus exclusions across those three sections of this
-          release is its NIFTY 500 change (+1 included, -1 excluded, 0 none). The identity holds on
-          all 87 change dates of the 2021-10-22 -> 2026-10-05 history (PR #37) and on every stored
-          snapshot; the 19 rows the source does print are exactly the first 19 derived exclusions in
-          the source's own alphabetical order.
       - index: nifty100
         heading: "3) NIFTY 100"
         pages: [5]
@@ -307,11 +271,18 @@ transcriptions:
       - index: nifty500
         kind: truncated_in_source
         pages: [4, 5]
+        superseded_by: ind_prs15092021.pdf
         detail: >-
           The NIFTY 500 section ("2) NIFTY 500", page 4) prints exclusion rows 1-19 (Akzo Nobel ...
           Shoppers Stop) at the foot of page 4; page 5 opens directly on "3) NIFTY 100". Exclusion
-          rows 20 onward and the whole "being included" table are not in the PDF — every image the
-          two pages draw was rasterised and nothing lies outside the page boxes. The missing rows
-          are not transcribed; they are derived (see the section's `derivation`) and kept apart as
-          `exclude_derived` / `include_derived`. A text copy of the release from the exchange would
-          replace the derivation with a reading.
+          rows 20 onward and the whole "being included" table are not in the PDF: every image the
+          two pages draw was rasterised and nothing lies outside the page boxes. Not filled in.
+          The exchange replaced this list wholesale on 2021-09-15 (ind_prs15092021.pdf, a text
+          release: "The earlier list of replacement of these indices published through a press
+          release on August 23, 2021 stands replaced with the list given hereunder"), which prints
+          NIFTY 500 in full (22 out, 22 in); the build reads NIFTY 500's 2021-09-30 change from it.
+    # Cross-verification against that text release (tests/unit/test_index_transcription.py): its
+    # NIFTY Midcap 150 and Smallcap 250 lists equal the ones transcribed above except for exactly
+    # what the revision states — the REIT inclusions (EMBASSY, MINDSPACE, BIRET) revoked, and so
+    # GILLETTE and MOTILALOFS kept in Midcap 150 and HIKAL and HGS entering Smallcap 250 instead.
+    # The 18 printed NIFTY 500 exclusions other than GILLETTE are the first 18 of its 22.
