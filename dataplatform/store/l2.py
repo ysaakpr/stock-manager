@@ -260,7 +260,8 @@ class L2TruncatedReport:
 class L2RebuildReport:
     """What one full `rebuild_all` pass did.
 
-    `candidates` is every ISIN with EQ bars in L1; each was either retired by a lineage edge
+    `candidates` is every ISIN with EQ bars in L1, every lineage survivor and every partition that
+    was on disk after the prune; each was either retired by a lineage edge
     (`skipped_retired`, its bars in the survivor's stitched partition) or rebuilt (`written`).
     `pruned_retired` are the retired ISINs whose stale partitions were removed from disk.
     """
@@ -1175,9 +1176,9 @@ def rebuild_all(
     the one pass that brings all of them to what a fresh build would write.
 
     What it does: prunes retired partitions (`prune_retired`), then for every non-retired ISIN with
-    EQ bars in L1 rebuilds its partition through `materialize_isin` over its lineage chain,
-    preloading L1 `batch_size` ISINs at a time so memory stays bounded. Byte-identical to a wipe
-    followed by a fresh build, and idempotent.
+    EQ bars in L1, every lineage survivor and every partition on disk, rebuilds its partition
+    through `materialize_isin` over its lineage chain, preloading L1 `batch_size` ISINs at a time
+    so memory stays bounded. Byte-identical to a wipe followed by a fresh build, and idempotent.
 
     What it never does: write L0, L1 or Postgres — it reads `adjustment_factors` and
     `corporate_actions` and writes only L2.
@@ -1186,7 +1187,16 @@ def rebuild_all(
     con = open_connection() if con is None else con
     try:
         pruned = () if survivor_of is None else prune_retired(survivor_of, data_root=data_root)
-        candidates = isins_with_eq_bars(con, data_root=data_root)
+        # Every ISIN a fresh build could write: its own EQ bars, a survivor whose EQ history is
+        # only its chain's (INE0OPA01027 trades BE alone; its EQ years are its predecessor's), and
+        # anything already on disk — which `materialize_isin` removes when nothing feeds it.
+        candidates = tuple(
+            sorted(
+                set(isins_with_eq_bars(con, data_root=data_root))
+                | set(history_for or {})
+                | materialized_isins(data_root=data_root)
+            )
+        )
         live = [i for i in candidates if survivor_of is None or survivor_of(i) == i]
         reports: list[L2WriteReport] = []
         for start in range(0, len(live), batch_size):

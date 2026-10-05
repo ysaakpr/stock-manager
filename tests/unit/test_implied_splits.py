@@ -392,6 +392,28 @@ def test_rebuild_all_matches_a_fresh_build_and_prunes(tmp_path: Path) -> None:
         assert path.read_bytes() == payload
 
 
+def test_rebuild_all_rebuilds_a_survivor_whose_eq_history_is_its_chain(tmp_path: Path) -> None:
+    # The survivor trades only in BE; its EQ years are the retired predecessor's.
+    day = date(2016, 9, 7)
+    write_prices_raw(
+        [
+            _row(RETIRED, day, o="100", c="100", qty=10),
+            _row(SURVIVOR, day, o="90", c="90", qty=10, series="BE"),
+        ],
+        exchange=Exchange.NSE,
+        data_root=tmp_path,
+    )
+    report = rebuild_all(
+        cast(Connection, _Store()),
+        data_root=tmp_path,
+        history_for={SURVIVOR: (RETIRED, SURVIVOR)},
+        survivor_of=_survivor_of,
+    )
+    assert [r.isin for r in report.written] == [SURVIVOR]
+    [bar] = read_adjusted(SURVIVOR, data_root=tmp_path)
+    assert bar.adj_close == Decimal(100)
+
+
 @pytest.mark.parametrize("batch_size", [1, 2, 500])
 def test_rebuild_all_does_not_depend_on_the_batch(tmp_path: Path, batch_size: int) -> None:
     _write_pair(tmp_path)
