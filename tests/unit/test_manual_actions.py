@@ -110,7 +110,7 @@ def _bc_actions() -> list[tuple[CuratedAction, TermSource]]:
         (row, s)
         for row in load_manual_actions().actions
         for s in row.sources
-        if s.member is not None and s.member.startswith("Bc")
+        if s.member is not None and s.member.lower().startswith("bc")
     ]
 
 
@@ -120,11 +120,20 @@ def _bc_actions() -> list[tuple[CuratedAction, TermSource]]:
 def test_every_ex_date_is_the_one_the_book_closure_line_states(
     row: CuratedAction, source: TermSource
 ) -> None:
-    """Bc columns: SERIES,SYMBOL,SECURITY,RECORD_DT,BC_STRT_DT,BC_END_DT,EX_DT,... (dd/mm/yyyy)."""
+    """Bc columns: SERIES,SYMBOL,SECURITY,RECORD_DT,BC_STRT_DT,BC_END_DT,EX_DT,...
+
+    Dates are dd/mm/yyyy up to 2025-10-01 and yyyy-mm-dd in the lowercase `bc<ddmmyyyy>` era after.
+    """
     [fields] = list(csv.reader([source.quote]))
-    assert datetime.strptime(fields[6].strip(), "%d/%m/%Y").date() == row.ex_date, row.isin
+    assert _bc_date(fields[6]) == row.ex_date, row.isin
     if row.record_date is not None:
-        assert datetime.strptime(fields[3].strip(), "%d/%m/%Y").date() == row.record_date, row.isin
+        assert _bc_date(fields[3]) == row.record_date, row.isin
+
+
+def _bc_date(text: str) -> date:
+    value = text.strip()
+    fmt = "%Y-%m-%d" if "-" in value else "%d/%m/%Y"
+    return datetime.strptime(value, fmt).date()
 
 
 def test_two_events_on_one_ex_date_compose_into_one_factor() -> None:

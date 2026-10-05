@@ -2,7 +2,9 @@
 
 The four stages the lineage touches, in the only order they can run:
 
-1. **Derive** the reissue edges from L1 contiguity and write `isin_lineage` (0009).
+1. **Derive** the reissue edges from L1 contiguity and write `isin_lineage` (0009): equity
+   reissues by issuer code (`lineage.derive_edges`), and fund unit splits by NSE symbol with the
+   split corroborated in L0 (`fund_lineage.derive_fund_edges`).
 2. **Replay** every stored `nse_corp_actions` L0 payload back through the parser *with* that
    lineage, so an action filed against a retired ISIN reaches the surviving security (0010)
    instead of being recorded unresolved.
@@ -35,6 +37,7 @@ from dataclasses import asdict, dataclass
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import get_settings
 from dataplatform.corpactions.reconcile import SingleSourcePolicy
+from dataplatform.identity.fund_lineage import derive_fund_edges
 from dataplatform.identity.lineage import (
     LineageStore,
     derive_edges,
@@ -68,6 +71,7 @@ class LineageRebuildReport:
     """What each stage of one rebuild did."""
 
     edges_derived: int
+    fund_edges_derived: int
     edges_written: int
     registered_intermediates: int
     edges_still_skipped: int
@@ -94,7 +98,11 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
 
     # ── 1. derive ────────────────────────────────────────────────────────────────────────────
     spans, sessions = read_equity_spans(data_root=data_root)
-    edges = derive_edges(spans, sessions, read_corroboration(data_root=data_root))
+    equity_edges = derive_edges(spans, sessions, read_corroboration(data_root=data_root))
+    # A fund edge's predecessor is an INF ISIN, which `derive_edges` never emits, so the two sets
+    # cannot claim the same predecessor and the table's one-successor-per-predecessor index holds.
+    fund_edges = derive_fund_edges(clock=clock, data_root=data_root)
+    edges = (*equity_edges, *fund_edges)
     presence = read_eq_presence({e.successor_isin for e in edges}, data_root=data_root)
 
     with connect() as conn:
@@ -109,6 +117,7 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         if derive_only:
             report = LineageRebuildReport(
                 edges_derived=lineage.derived,
+                fund_edges_derived=len(fund_edges),
                 edges_written=lineage.written,
                 registered_intermediates=len(lineage.registered_intermediates),
                 edges_still_skipped=lineage.still_skipped,
@@ -199,6 +208,7 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
     stitched = sum(1 for r in reports if r.isin in history)
     report = LineageRebuildReport(
         edges_derived=lineage.derived,
+        fund_edges_derived=len(fund_edges),
         edges_written=lineage.written,
         registered_intermediates=len(lineage.registered_intermediates),
         edges_still_skipped=lineage.still_skipped,

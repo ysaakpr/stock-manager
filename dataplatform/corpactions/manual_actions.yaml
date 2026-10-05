@@ -288,6 +288,29 @@ actions:
         line: 355
         quote: EQ,AXISNIFTY,AXISAMC - AXISNIFTY,24/07/2020, , ,23/07/2020, , ,FVSPLTFRM RS 100 TO RS 10
 
+  - isin: INF740KA1ZP2
+    company: DSP Gold ETF (GOLDADD)
+    filed_against_isin: INF740KA1SW3
+    action_type: SPLIT
+    from_value: 10
+    to_value: 1
+    ex_date: 2026-08-28
+    record_date: 2026-08-28
+    knowable_date: 2026-08-13
+    checked: 2026-10-05
+    note: >-
+      A unit split that also retired the ISIN: L1 NSE EQ INF740KA1SW3 closed 152.98 on 2026-08-27
+      and the units opened 15.48 / closed 15.36 under INF740KA1ZP2 on 2026-08-28, the 10x basis.
+      The implied scan refuses it on volume (2.21M units against a ~1.19M median, 1.86x where a
+      10:1 needs 2.5x), so once the fund lineage stitches the two ISINs this row is the only factor
+      for the step. Keyed to the survivor; until the edge is written its partition has no bar
+      before the ex-date and the row scales nothing.
+    sources:
+      - l0_key: nse_pr_bundle/2026/08/PR130826.zip
+        member: bc13082026.csv
+        line: 170
+        quote: EQ,GOLDADD,DSPAMC - DSPGOLD,2026-08-28,,,2026-08-28,,,FVSPLT FRM RS 10 TO RE 1
+
 explained_moves:
   - isin: INE111B01023
     company: Financial Technologies (India) Ltd (now 63 Moons)
