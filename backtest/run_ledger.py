@@ -190,7 +190,8 @@ def _actions_identity(source: BookActionSource | None) -> str:
     if isinstance(source, BookActionCalendar):
         counts = ",".join(f"{k}={v}" for k, v in source.counts().items())
         terms = source.merger_terms_identity()
-        suffix = "" if terms is None else f";{terms}"
+        added = source.added_identity()
+        suffix = "".join(f";{part}" for part in (terms, added) if part is not None)
         return f"calendar[{len(source)}]:{counts}{suffix}"
     return type(source).__name__
 

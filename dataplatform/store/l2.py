@@ -90,12 +90,15 @@ __all__ = [
     "PRICES_ADJUSTED_DATASET",
     "PRICES_ADJUSTED_SCHEMA",
     "AdjustedBar",
+    "ComposedEvents",
     "L2FillReport",
     "L2RebuildReport",
     "L2TruncatedReport",
     "L2WriteReport",
     "RawBar",
     "build_adjusted_bars",
+    "compose_events",
+    "compose_lake_events",
     "curated_actions",
     "implied_splits",
     "isins_with_eq_bars",
@@ -565,25 +568,18 @@ def materialize_isin(
         )
         return L2WriteReport(isin=isin, path=None, rows_written=0, from_date=None, to_date=None)
 
-    actions = tuple(actions)
-    manual = curated_actions(
+    composed = compose_events(
         isin,
-        actions,
-        tuple(a.as_action() for a in default_manual_actions().actions_for(isin))
-        if curated is None
-        else tuple(curated),
+        chain=chain,
+        actions=actions,
+        raw_bars=raw_bars,
+        curated=curated,
+        infer_splits=infer_splits,
     )
-    if manual:
-        chain = with_events(chain, manual)
-        actions = actions + manual
-    implied = implied_splits(isin, chain, actions, raw_bars) if infer_splits else ()
-    if implied:
-        extra = tuple(s.as_action() for s in implied)
-        chain = with_price_events(chain, extra)
-        actions = actions + extra
+    manual, implied = composed.curated, composed.implied
     # `build_adjusted_bars` emits rows already ordered by the total key `(exchange, trade_date)`, so
     # the partition is byte-identical across rebuilds regardless of the order L1 was read in.
-    bars = build_adjusted_bars(isin, chain, actions, raw_bars)
+    bars = build_adjusted_bars(isin, composed.chain, composed.actions, raw_bars)
     table = _bars_to_table(bars)
     path.parent.mkdir(parents=True, exist_ok=True)
     _write_table(table, path)
@@ -611,6 +607,138 @@ def materialize_isin(
         state="PUBLISHED",
     )
     return report
+
+
+@dataclass(frozen=True, slots=True)
+class ComposedEvents:
+    """One ISIN's corporate actions exactly as L2 adjusts by them.
+
+    `chain` is the factor chain the partition is written with; `actions` the recorded ones the
+    caller passed followed by `curated` (the sourced rows no feed carries that survived
+    `curated_actions`) and the `implied` splits L1 evidences. Built only by `compose_events`.
+    """
+
+    isin: str
+    chain: FactorChain
+    actions: tuple[CorporateAction, ...]
+    curated: tuple[CorporateAction, ...] = ()
+    implied: tuple[ImpliedSplit, ...] = ()
+
+    @property
+    def added(self) -> tuple[CorporateAction, ...]:
+        """What L2 composed on top of the recorded actions: the curated, then the implied."""
+        return self.curated + tuple(s.as_action() for s in self.implied)
+
+
+def compose_events(
+    isin: str,
+    *,
+    chain: FactorChain,
+    actions: Iterable[CorporateAction],
+    raw_bars: Sequence[RawBar],
+    curated: Sequence[CorporateAction] | None = None,
+    infer_splits: bool = True,
+) -> ComposedEvents:
+    """The one composition of recorded, curated and implied events that L2 adjusts by.
+
+    What it does: keeps the curated actions a feed has not since published (`curated_actions`;
+    `None` reads the repo's file), composes them into `chain` (`factors.with_events`: a split or
+    bonus scales history, a demerger or scheme only marks a structural break), then scans
+    `raw_bars` for the share-basis changes the composed chain still leaves unexplained
+    (`implied_splits`, when `infer_splits`) and composes those too. The curated ones go first so
+    the scan treats them as recorded and never adjusts the same step twice.
+
+    Every consumer that must agree with L2 reads its events here — the materializer for prices,
+    the backtest book (`backtest.book_actions`) for share counts — so the two can never disagree
+    on which split happened or by how much. Explained moves (`manual_actions.explained_moves`)
+    are not events and never reach this.
+
+    What it never does: read a file other than the curated YAML, write anything, or consult a
+    `knowable_date` — an implied split is knowable on its ex-date by construction
+    (`ImpliedSplit.as_action`), a curated row carries its own.
+    """
+    recorded = tuple(actions)
+    manual = curated_actions(
+        isin,
+        recorded,
+        tuple(a.as_action() for a in default_manual_actions().actions_for(isin))
+        if curated is None
+        else tuple(curated),
+    )
+    composed_actions = recorded
+    if manual:
+        chain = with_events(chain, manual)
+        composed_actions = composed_actions + manual
+    implied = implied_splits(isin, chain, composed_actions, raw_bars) if infer_splits else ()
+    if implied:
+        extra = tuple(s.as_action() for s in implied)
+        chain = with_price_events(chain, extra)
+        composed_actions = composed_actions + extra
+    return ComposedEvents(
+        isin=isin, chain=chain, actions=composed_actions, curated=manual, implied=implied
+    )
+
+
+def compose_lake_events(
+    conn: Connection,
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    data_root: Path | None = None,
+    history_for: Mapping[str, Sequence[str]] | None = None,
+    survivor_of: Callable[[str], str] | None = None,
+    batch_size: int = 500,
+) -> tuple[ComposedEvents, ...]:
+    """`compose_events` for every ISIN `rebuild_all` would build, keeping those L2 added to.
+
+    The same candidates (non-retired ISINs with EQ bars, every lineage survivor), the same inputs
+    (`load_factor_chain`, `load_reconciled_actions`, the bars of the lineage chain) and the same
+    batched L1 preload as `rebuild_all` — so what this returns is what a fresh L2 build composes,
+    without writing a byte. An ISIN with no bars is skipped, as `materialize_isin` skips it.
+
+    What it never does: write L0, L1, L2 or Postgres.
+    """
+    owns = con is None
+    con = open_connection() if con is None else con
+    out: list[ComposedEvents] = []
+    try:
+        candidates = sorted(
+            set(isins_with_eq_bars(con, data_root=data_root)) | set(history_for or {})
+        )
+        live = [i for i in candidates if survivor_of is None or survivor_of(i) == i]
+        for start in range(0, len(live), batch_size):
+            batch = live[start : start + batch_size]
+            wanted = set(batch)
+            if history_for is not None:
+                for isin in batch:
+                    wanted.update(history_for.get(isin, ()))
+            preload_raw_bars(con, wanted, data_root=data_root)
+            for isin in batch:
+                sources = (isin,) if history_for is None else history_for.get(isin, (isin,))
+                raw_bars = tuple(
+                    bar
+                    for source in sources
+                    for bar in read_raw_bars_from_l1(source, con=con, data_root=data_root)
+                )
+                if not raw_bars:
+                    continue
+                composed = compose_events(
+                    isin,
+                    chain=load_factor_chain(conn, isin),
+                    actions=load_reconciled_actions(conn, isin=isin),
+                    raw_bars=raw_bars,
+                )
+                if composed.added:
+                    out.append(composed)
+    finally:
+        if owns:
+            con.close()
+    _LOG.info(
+        "l2.lake_events_composed",
+        isins=len(out),
+        curated_actions=sum(len(c.curated) for c in out),
+        implied_splits=sum(len(c.implied) for c in out),
+    )
+    return tuple(out)
 
 
 def curated_actions(
