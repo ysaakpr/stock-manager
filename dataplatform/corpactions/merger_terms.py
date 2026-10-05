@@ -45,6 +45,7 @@ __all__ = [
     "TermSource",
     "UnsourcedMerger",
     "load_merger_terms",
+    "parse_term_sources",
 ]
 
 MERGER_TERMS_PATH: Final[Path] = Path(__file__).with_name("merger_terms.yaml")
@@ -165,7 +166,7 @@ def _swap(row: dict[str, Any]) -> ShareSwapTerm:
         shares_held=_positive(row, "shares_held"),
         record_date=_date(row, "record_date"),
         knowable_date=_date(row, "knowable_date"),
-        sources=_sources(row),
+        sources=parse_term_sources(row),
         note=row.get("note"),
     )
 
@@ -177,7 +178,7 @@ def _exit(row: dict[str, Any]) -> CashExitTerm:
         exit_price=_positive(row, "exit_price_inr"),
         effective_date=_date(row, "effective_date"),
         knowable_date=_date(row, "knowable_date"),
-        sources=_sources(row),
+        sources=parse_term_sources(row),
         note=row.get("note"),
     )
 
@@ -193,20 +194,25 @@ def _unsourced(row: dict[str, Any]) -> UnsourcedMerger:
     )
 
 
-def _sources(row: dict[str, Any]) -> tuple[TermSource, ...]:
+def parse_term_sources(row: dict[str, Any]) -> tuple[TermSource, ...]:
+    """A row's `sources`, validated: each needs `l0_key` and a verbatim `quote`; `line` is 1-based.
+
+    Shared with `manual_actions`, whose curated rows carry the same provenance shape.
+    """
+    who = row.get("old_isin") or row.get("isin")
     raw = row.get("sources")
     if not raw:
-        raise MergerTermsError(f"{row.get('old_isin')}: a sourced term needs at least one source")
+        raise MergerTermsError(f"{who}: a sourced term needs at least one source")
     out: list[TermSource] = []
     for entry in raw:
         key, quote = entry.get("l0_key"), entry.get("quote")
         if not key or not quote:
-            raise MergerTermsError(f"{row.get('old_isin')}: every source needs l0_key and quote")
+            raise MergerTermsError(f"{who}: every source needs l0_key and quote")
         line, line_end = entry.get("line"), entry.get("line_end")
         if line is not None and int(line) < 1:
-            raise MergerTermsError(f"{row.get('old_isin')}: line is 1-based, got {line}")
+            raise MergerTermsError(f"{who}: line is 1-based, got {line}")
         if line_end is not None and (line is None or int(line_end) < int(line)):
-            raise MergerTermsError(f"{row.get('old_isin')}: line_end {line_end} before line")
+            raise MergerTermsError(f"{who}: line_end {line_end} before line")
         out.append(
             TermSource(
                 l0_key=str(key),

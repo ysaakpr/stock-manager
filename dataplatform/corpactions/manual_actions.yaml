@@ -1,0 +1,362 @@
+# Curated, sourced corporate actions that neither CA feed carries, and the documented market moves
+# that are not corporate actions at all. Read by dataplatform.corpactions.manual_actions; price
+# events are composed into the factor chain by dataplatform.store.l2.materialize_isin, structural
+# breaks mark the chain, and explained moves are honoured by dataplatform.quality.l2_continuity.
+#
+# Rules for a row (enforced by the loader and tests/unit/test_manual_actions.py):
+#   * Every number and date is transcribed from the source quoted beside it. Nothing here is
+#     derived from prices, and nothing is remembered: an event no source states is not entered,
+#     and its step stays UNEXPLAINED.
+#   * `isin` is the ISIN whose L2 partition carries the step: the D2 lineage survivor when the
+#     ex-date bars sit under an ISIN a reissue retired, which `filed_against_isin` then names.
+#   * `knowable_date` is the dissemination date of the earliest L0 source stating both the terms
+#     and the ex-date, never the date this file was written. `checked` is when a human last
+#     verified the row against its sources and against L1.
+#   * SPLIT states face values `from_value` -> `to_value` (Rs 10 -> Rs 2 is a 1:5 sub-division);
+#     BONUS states `new_shares` for every `held_shares` held. Two events on one ex-date are two
+#     rows (the chain composes them). DEMERGER / SCHEME_OF_ARRANGEMENT carry no terms: they are
+#     structural breaks, never a price factor.
+#   * `sources[].l0_key` is the L0 object; `member`/`line` locate the text inside a PR bundle.
+#     `line` is 1-BASED (`sed -n '<line>p'` prints it). `...` in a quote is an elision; every
+#     fragment between them is verbatim on that line. The NSE book-closure file (Bc<ddmmyy>.csv)
+#     columns are SERIES,SYMBOL,SECURITY,RECORD_DT,BC_STRT_DT,BC_END_DT,EX_DT,ND_STRT_DT,
+#     ND_END_DT,PURPOSE.
+#   * `explained_moves` are steps that are genuine price moves. They get no factor — that would
+#     erase a real loss from every backtest — and match only their exact ISIN and session.
+
+actions:
+  - isin: INE018I01017
+    company: MindTree Ltd
+    action_type: BONUS
+    new_shares: 1
+    held_shares: 1
+    ex_date: 2016-03-09
+    record_date: 2016-03-10
+    knowable_date: 2016-03-01
+    checked: 2026-10-05
+    note: >-
+      L1 NSE EQ: 1,546.35 on 2016-03-08, opened 740.00 / closed 684.30 ex. After the 1:1 the
+      ex-day is -4.3% at the open and -11.5% at the close, a real move on top of the bonus; volume
+      1.35M -> 2.25M. Outside both feeds' history; the earlier 2014 bonus is implied from L1.
+    sources:
+      - l0_key: nse_pr_bundle/2016/03/PR010316.zip
+        member: Bc010316.csv
+        line: 15
+        quote: EQ,MINDTREE,MindTree Limited,10/03/2016, , ,09/03/2016, , ,BONUS 1:1
+      - l0_key: nse_pr_bundle/2016/02/PR290216.zip
+        member: An290216.txt
+        line: 4787
+        quote: has fixed Record Date as March 10, 2016 for the purpose of Bonus Shares
+
+  - isin: INE043K01029
+    company: BS Ltd
+    filed_against_isin: INE043K01011
+    action_type: BONUS
+    new_shares: 1
+    held_shares: 1
+    ex_date: 2013-09-30
+    record_date: 2013-10-01
+    knowable_date: 2013-09-23
+    checked: 2026-10-05
+    note: >-
+      L1 NSE EQ (INE043K01011): 272.25 on 2013-09-27, opened 154.00 / closed 122.75 ex — +13% at
+      the open and -9.8% at the close after the 1:1; volume 55k -> 179k.
+    sources:
+      - l0_key: nse_pr_bundle/2013/09/PR230913.zip
+        member: Bc230913.csv
+        line: 946
+        quote: EQ,BSLIMITED,BS LIMITED,01/10/2013, , ,30/09/2013, , ,BONUS 1:1
+
+  - isin: INE069A01017
+    company: Aditya Birla Nuvo Ltd
+    action_type: DEMERGER
+    ex_date: 2016-01-20
+    record_date: 2016-01-21
+    knowable_date: 2016-01-11
+    checked: 2026-10-05
+    note: >-
+      Demerger of the Madura fashion business into Pantaloons Fashion & Retail (26 PFRL for every
+      5 ABNL, i.e. 5.2 PFRL per ABNL share). L1 NSE EQ: 2,065.55 -> 882.15 ex; the 1,183 drop is
+      the value of 5.2 PFRL shares. A structural break: no price factor, the return is bridged.
+    sources:
+      - l0_key: nse_pr_bundle/2016/01/PR110116.zip
+        member: An110116.txt
+        line: 2111
+        quote: >-
+          has fixed Record Date as January 21, 2016 ... Pantaloons Fashion & Retail Limited in
+          the ratio of 26 (twenty six) equity shares of Pantaloons Fashion &
+          Retail Limited of the face value of Rs.10/- each credited as fully paid up for every 5
+          (five) equity shares
+      - l0_key: nse_pr_bundle/2016/01/PR120116.zip
+        member: Bc120116.csv
+        line: 27
+        quote: >-
+          EQ,ABIRLANUVO,Aditya Birla Nuvo Limited,21/01/2016, , ,20/01/2016, , ,SCHEME OF
+          ARRANGEMENT
+
+  - isin: INE096L01025
+    company: Kesar Terminals & Infrastructure Ltd
+    filed_against_isin: INE096L01017
+    action_type: SPLIT
+    from_value: 10
+    to_value: 5
+    ex_date: 2016-08-11
+    record_date: 2016-08-13
+    knowable_date: 2016-08-08
+    checked: 2026-10-05
+    note: >-
+      The 1:25 bonus on the same ex-date is already reconciled from the BSE feed; this is the
+      Rs 10 -> Rs 5 sub-division that came with it and no feed published. L1 NSE EQ
+      (INE096L01017): 542.90 -> 266.50 ex; with both events (25/26 x 1/2) the ex-day is +2.1%.
+    sources:
+      - l0_key: nse_pr_bundle/2016/08/PR080816.zip
+        member: Bc080816.csv
+        line: 616
+        quote: EQ,KTIL,Kesar Ter & Infra Ltd,13/08/2016, , ,11/08/2016, , ,BON-1:25/SPLIT RS10TORS.5
+
+  - isin: INE360C01024
+    company: DPSC Ltd
+    filed_against_isin: INE360C01016
+    action_type: BONUS
+    new_shares: 22
+    held_shares: 1
+    ex_date: 2011-12-15
+    record_date: 2011-12-16
+    knowable_date: 2011-12-07
+    checked: 2026-10-05
+    note: >-
+      With the Rs 10 -> Re 1 split on the same ex-date: 1/23 x 1/10 = 1/230. L1 NSE EQ
+      (INE360C01016): 2,623.55 -> 12.50 ex (a single-price session); 2,623.55 / 230 = 11.41, so
+      the ex-day is +9.6%, then the band-limited climb continues under INE360C01024.
+    sources:
+      - l0_key: nse_pr_bundle/2011/12/PR071211.zip
+        member: Bc071211.csv
+        line: 67
+        quote: EQ,DPSCLTD,DPSC Limited,16/12/2011, , ,15/12/2011, , ,BONUS 22:1/SPLT RS10TORE1
+
+  - isin: INE360C01024
+    company: DPSC Ltd
+    filed_against_isin: INE360C01016
+    action_type: SPLIT
+    from_value: 10
+    to_value: 1
+    ex_date: 2011-12-15
+    record_date: 2011-12-16
+    knowable_date: 2011-12-07
+    checked: 2026-10-05
+    sources:
+      - l0_key: nse_pr_bundle/2011/12/PR071211.zip
+        member: Bc071211.csv
+        line: 67
+        quote: EQ,DPSCLTD,DPSC Limited,16/12/2011, , ,15/12/2011, , ,BONUS 22:1/SPLT RS10TORE1
+
+  - isin: INE429C01035
+    company: Sintex Industries Ltd
+    action_type: DEMERGER
+    ex_date: 2017-05-25
+    record_date: 2017-05-26
+    knowable_date: 2017-05-18
+    checked: 2026-10-05
+    note: >-
+      Demerger of the custom-moulding and prefab undertakings into Sintex Plastics Technology
+      (1 SPTL for every 2 Sintex, twice over). L1 NSE EQ: 104.10 -> 25.85 ex. A structural
+      break: no price factor, the return is bridged.
+    sources:
+      - l0_key: nse_pr_bundle/2017/05/PR180517.zip
+        member: An180517.txt
+        line: 3240
+        quote: >-
+          has fixed Record Date as May 26, 2017 for the purpose of reckoning the names of the
+          equity shareholders of the Company who shall be eligible for allotment of fully paid up
+          equity shares of the face value of INR 1/- of Sintex Plastics Technology Ltd.
+      - l0_key: nse_pr_bundle/2017/05/PR180517.zip
+        member: Bc180517.csv
+        line: 60
+        quote: >-
+          EQ,SINTEX,Sintex Industries Ltd.,26/05/2017, , ,25/05/2017, , ,SCHEME OF ARRANGEMENT
+
+  - isin: INE510K01019
+    company: Shilpi Cable Technologies Ltd
+    action_type: BONUS
+    new_shares: 1
+    held_shares: 1
+    ex_date: 2014-09-16
+    record_date: 2014-09-17
+    knowable_date: 2014-09-09
+    checked: 2026-10-05
+    note: >-
+      L1 NSE EQ: 128.30 on 2014-09-15 (a 5%-band run), opened 66.40 / closed 60.95 ex — +3.5% at
+      the open, -5% (the lower band) at the close after the 1:1.
+    sources:
+      - l0_key: nse_pr_bundle/2014/09/PR090914.zip
+        member: Bc090914.csv
+        line: 1151
+        quote: EQ,SHILPI,Shilpi Cable Tech Ltd,17/09/2014, , ,16/09/2014, , ,BONUS 1:1
+
+  - isin: INE904G01038
+    company: Rasoya Proteins Ltd
+    filed_against_isin: INE904G01020
+    action_type: BONUS
+    new_shares: 2
+    held_shares: 1
+    ex_date: 2013-03-21
+    record_date: 2013-03-22
+    knowable_date: 2013-03-13
+    checked: 2026-10-05
+    note: >-
+      With the Rs 5 -> Re 1 split on the same ex-date: 1/3 x 1/5 = 1/15. L1 NSE EQ
+      (INE904G01020): 115.70 -> 8.45 ex; 115.70 / 15 = 7.71, so the ex-day is +9.6%; volume
+      397k -> 1.77M.
+    sources:
+      - l0_key: nse_pr_bundle/2013/03/PR130313.zip
+        member: Bc130313.csv
+        line: 60
+        quote: EQ,RASOYPR,Rasoya Proteins Ltd,22/03/2013, , ,21/03/2013, , ,BONUS 2:1/FVS RS.5TORE.1
+
+  - isin: INE904G01038
+    company: Rasoya Proteins Ltd
+    filed_against_isin: INE904G01020
+    action_type: SPLIT
+    from_value: 5
+    to_value: 1
+    ex_date: 2013-03-21
+    record_date: 2013-03-22
+    knowable_date: 2013-03-13
+    checked: 2026-10-05
+    sources:
+      - l0_key: nse_pr_bundle/2013/03/PR130313.zip
+        member: Bc130313.csv
+        line: 60
+        quote: EQ,RASOYPR,Rasoya Proteins Ltd,22/03/2013, , ,21/03/2013, , ,BONUS 2:1/FVS RS.5TORE.1
+
+  - isin: INE988E01036
+    company: JMT Auto Ltd (now Ramkrishna Casting Solutions)
+    filed_against_isin: INE988E01010
+    action_type: SPLIT
+    from_value: 10
+    to_value: 2
+    ex_date: 2015-06-25
+    record_date: 2015-06-26
+    knowable_date: 2015-06-04
+    checked: 2026-10-05
+    note: >-
+      L1 NSE EQ (INE988E01010): 145.65 -> 34.95 ex; 145.65 / 5 = 29.13, so the ex-day closed at
+      the +20% band, as did the next session under INE988E01028. Volume 11k -> 132k. The later
+      Rs 2 -> Re 1 split (2016-09-21) is in the NSE feed.
+    sources:
+      - l0_key: nse_pr_bundle/2015/06/PR040615.zip
+        member: Bc040615.csv
+        line: 299
+        quote: EQ,JMTAUTOLTD,JMT Auto Limited,26/06/2015, , ,25/06/2015, , ,FV SPLT FRM RS 10 TO RS 2
+
+  - isin: INF789F1AHR6
+    company: UTI S&P BSE Sensex Next 50 ETF (UTISXN50)
+    action_type: SPLIT
+    from_value: 10
+    to_value: 1
+    ex_date: 2021-02-17
+    record_date: 2021-02-19
+    knowable_date: 2021-02-09
+    checked: 2026-10-05
+    note: >-
+      A unit split: no equity CA feed lists one. L1 NSE EQ: 403.49 -> 48.42 ex (8.33x) on a
+      thin book that printed at the +20% band over 40.35; from 2021-02-19 the units trade under
+      INF789F1AUU3 at 42.24, 41.53, 40-42 — the 10x basis. The price detector rejects 8.33 as
+      no clean multiple, so the factor comes from here.
+    sources:
+      - l0_key: nse_pr_bundle/2021/02/PR090221.zip
+        member: Bc090221.csv
+        line: 116
+        quote: EQ,UTISXN50,UTIAMC - UTISXN50,19/02/2021, , ,17/02/2021, , ,FVSPLT FRM RS 10 TO RE 1
+
+  - isin: INF846K01ZL0
+    company: Axis Nifty ETF (AXISNIFTY)
+    action_type: SPLIT
+    from_value: 100
+    to_value: 10
+    ex_date: 2020-07-23
+    record_date: 2020-07-24
+    knowable_date: 2020-07-16
+    checked: 2026-10-05
+    note: >-
+      A unit split: no equity CA feed lists one. L1 NSE EQ: 1,139.80 -> 136.80 ex (8.33x),
+      exactly the +20% band over 113.98 on 4,195 units; from 2020-07-27 the units trade under
+      INF846K01W98 at 118.73, 116.92, 113-116 — the 10x basis.
+    sources:
+      - l0_key: nse_pr_bundle/2020/07/PR160720.zip
+        member: Bc160720.csv
+        line: 355
+        quote: EQ,AXISNIFTY,AXISAMC - AXISNIFTY,24/07/2020, , ,23/07/2020, , ,FVSPLTFRM RS 100 TO RS 10
+
+explained_moves:
+  - isin: INE111B01023
+    company: Financial Technologies (India) Ltd (now 63 Moons)
+    trade_date: 2013-08-01
+    kind: MARKET_MOVE
+    checked: 2026-10-05
+    reason: >-
+      NSEL (its subsidiary spot exchange) suspended one-day forward contracts on 2013-07-31; the
+      stock fell 65% on 2013-08-01 (539.85 -> 191.65) on 43x its volume and kept falling. The
+      ex-day open (485.90) is -10%, not a share-basis multiple, and no Bc row lists any action
+      for FINANTECH between 2013-06-02 and 2013-08-03 but a Rs 2 interim dividend.
+    sources:
+      - l0_key: nse_pr_bundle/2013/08/PR010813.zip
+        member: An010813.txt
+        line: 944
+        quote: >-
+          press release dated July 31, 2013 titled "Suspension of Trading and merging of
+          settlement cycles of all one day forward contracts other than e-series contracts".
+
+  - isin: INE247G01024
+    company: CORE Education & Technologies Ltd
+    trade_date: 2013-02-25
+    kind: MARKET_MOVE
+    checked: 2026-10-05
+    reason: >-
+      A crash, not an action: the session opened at 286.55 (-2.5%) and closed at 110.50 (-62%) on
+      19.7M shares against 14k the session before, then fell another 46% two sessions later. No
+      Bc row lists any action for COREEDUTEC between 2012-12-27 and 2013-02-27; the company's own
+      letter describes the fall.
+    sources:
+      - l0_key: nse_pr_bundle/2013/02/PR260213.zip
+        member: An260213.txt
+        line: 433
+        quote: >-
+          the Company's scrip witnessed unusually high volumes of trading along with a steep fall
+          in the share price on February 25, 2013.
+
+  - isin: INE483S01020
+    company: Infibeam Avenues Ltd (now AvenuesAI)
+    trade_date: 2018-09-28
+    kind: MARKET_MOVE
+    checked: 2026-10-05
+    reason: >-
+      A crash, not an action: 200.35 -> 58.45 (-71%) on 6x its volume, opening at 180.35 (-10%)
+      and trading down to 53.50 intraday — no share-basis multiple. The only Bc row
+      in the window is the AGM book closure with a Re 0.10 dividend (ex 2018-09-19); the company
+      issued a clarification on the move the same day.
+    sources:
+      - l0_key: nse_pr_bundle/2018/09/PR280918.zip
+        member: An280918.txt
+        line: 2836
+        quote: >-
+          Infibeam Avenues Limited has informed the Exchange regarding Voluntary Clarification on
+          current movements in Share Price
+
+  - isin: INE528G01035
+    company: Yes Bank Ltd
+    trade_date: 2020-03-06
+    kind: MARKET_MOVE
+    checked: 2026-10-05
+    reason: >-
+      The RBI superseded the board and placed the bank under moratorium on the evening of
+      2020-03-05; the stock fell 56% on 2020-03-06 (36.80 -> 16.15, intraday low 5.65) and
+      recovered to 21.25 the next session. No Bc row lists any action for YESBANK between
+      2020-01-06 and 2020-03-08. The 2020-03-16 reissue to INE528G01035 is a separate D2 edge.
+    sources:
+      - l0_key: nse_pr_bundle/2020/03/PR060320.zip
+        member: An060320.txt
+        line: 1440
+        quote: >-
+          Yes Bank Limited has informed the Exchange regarding 'Supersession of the Board of
+          Directors & Appointment of Administrator by Reserve
