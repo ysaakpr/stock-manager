@@ -135,6 +135,9 @@ def test_only_tracked_index_headings_alias(heading: str, slug: str | None) -> No
         ("Apr. 25, 2003", date(2003, 4, 25)),
         ("30th September 2026", date(2026, 9, 30)),
         ("Aug 10, 2026", date(2026, 8, 10)),
+        # ind_prs21012019.pdf: the text layer splits the day; only before a comma is it rejoined.
+        ("January 2 8, 2019 (close of January 25, 2019)", date(2019, 1, 28)),
+        ("May 3 2019", date(2019, 5, 3)),
         ("the close of trading", None),
     ],
 )
@@ -186,6 +189,35 @@ def test_a_revocation_table_withdraws_and_replaces(repo_root: Path) -> None:
     ireda = next(e for e in parsed.events if e.symbol == "IREDA")
     assert ireda.company_name == "Indian Renewable Energy Dev. Agency Ltd."
     assert ChangeAction.REVOKE_INCLUDE.revoked is ChangeAction.INCLUDE
+
+
+def test_a_day_split_by_the_text_layer_still_dates_the_release(repo_root: Path) -> None:
+    """2019-01-21: "effective from January 2 8, 2019" — unread, NIFTY 500 depth stopped here."""
+    parsed = _parse(repo_root, "2019_split_day", "ind_prs21012019.pdf", date(2019, 1, 21))
+    assert parsed.unparsed == ()
+    effective = date(2019, 1, 28)
+    assert _facts(parsed.events) == {
+        (slug, action, symbol, effective)
+        for slug in ("nifty500", "niftysmallcap250")
+        for action, symbol in (
+            ("exclude", "DENABANK"),
+            ("exclude", "VIJAYABANK"),
+            ("include", "CORPBANK"),
+            ("include", "CREDITACC"),
+        )
+    }
+
+
+def test_a_single_effective_date_stated_after_the_tables_dates_them(repo_root: Path) -> None:
+    """2018-08-01: the release states its one effective date below its tables, not above."""
+    parsed = _parse(repo_root, "2018_trailing_date", "ind_prs01082018.pdf", date(2018, 8, 1))
+    assert parsed.unparsed == ()
+    effective = date(2018, 8, 8)
+    assert _facts(parsed.events) == {
+        (slug, action, symbol, effective)
+        for slug in ("nifty500", "niftysmallcap250")
+        for action, symbol in (("exclude", "TECHNO"), ("include", "BDL"))
+    }
 
 
 def test_a_detached_layout_is_unparsed_not_misread(repo_root: Path) -> None:

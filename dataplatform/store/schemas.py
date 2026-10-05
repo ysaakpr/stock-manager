@@ -102,6 +102,13 @@ class PriceQuarantineReason:
     #: not be summed as if they were the same problem.
     ISIN_COLUMN_ABSENT: Final = "isin_column_absent"
 
+    #: A *line*, not a row: the BSE legacy bhavcopy published two records run together (a lost
+    #: line terminator — `EQ291221_CSV.ZIP` line 1773) and the split back into two could not be
+    #: proven unambiguous, so neither record is trusted. `symbol` holds the line's first field (the
+    #: scrip code as published) and `series` its group; the line itself stays in L0 and in the
+    #: `bhavcopy.legacy_line_quarantined` log event. See `bse.bhavcopy.split_merged_records`.
+    MERGED_RECORDS_UNSPLITTABLE: Final = "merged_records_unsplittable"
+
 
 class PricesRawRow(BaseModel):
     """One security's raw traded session on one exchange — the canonical `prices_raw` L1 row.

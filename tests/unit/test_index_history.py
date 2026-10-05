@@ -255,8 +255,15 @@ def test_the_march_2020_review_is_void_except_nifty_50() -> None:
         "ind_prs19032020.pdf",
     )
     kept = voided.model_copy(update={"index_slug": "nifty50"})
-    untouched = voided.model_copy(update={"effective": date(2020, 3, 19)})
-    assert _apply_voidings([voided, kept, untouched], ["ind_prs13052020.pdf"]) == [kept, untouched]
+    # The voiding names whole releases: a row of ind_prs19032020 the parser dated 2020-03-19 (its
+    # prose recounts a March 19 change) is void too — matched on the date, it put Yes Bank into
+    # NIFTY Midcap 150 beside its NIFTY 50 seat for 2017-2020.
+    misdated = voided.model_copy(update={"effective": date(2020, 3, 19)})
+    untouched = voided.model_copy(update={"release": "ind_prs16032020.pdf"})
+    assert _apply_voidings([voided, kept, misdated, untouched], ["ind_prs13052020.pdf"]) == [
+        kept,
+        untouched,
+    ]
     # Only once the voiding release itself is in L0.
     assert _apply_voidings([voided], []) == [voided]
 
@@ -361,3 +368,18 @@ def test_query_service_pit_universe_uses_the_history(tmp_path: Path) -> None:
     with QueryService(data_root=lake) as svc:
         universe = svc.pit_universe(date(2024, 3, 15), _calendar(), index_slugs=["nifty50"])
     assert universe.isins == frozenset({A, B, D})
+
+
+def test_the_september_2021_revision_replaces_three_of_the_august_lists() -> None:
+    """ind_prs15092021 restated NIFTY 500, Midcap 150 and Smallcap 250; other August lists stand."""
+    august = _raw(
+        "GILLETTE",
+        ChangeAction.EXCLUDE,
+        date(2021, 9, 30),
+        date(2021, 8, 23),
+        "ind_prs23082021.pdf",
+    )
+    midcap = august.model_copy(update={"index_slug": "niftymidcap150"})
+    next50 = august.model_copy(update={"index_slug": "niftynext50", "symbol": "ABBOTINDIA"})
+    assert _apply_voidings([august, midcap, next50], ["ind_prs15092021.pdf"]) == [next50]
+    assert _apply_voidings([august, midcap, next50], []) == [august, midcap, next50]

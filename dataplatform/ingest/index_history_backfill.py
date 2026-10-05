@@ -288,6 +288,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--fetch-only", action="store_true")
     parser.add_argument("--build-only", action="store_true", help="no network: rebuild from L0")
     parser.add_argument("--report", type=Path, default=None, help="write the depth report here")
+    parser.add_argument(
+        "--write-l1",
+        type=Path,
+        default=None,
+        metavar="ROOT",
+        help="also write the build's L1 datasets under ROOT/L1 (e.g. a /tmp root to inspect a "
+        "build without touching the lake); the lake itself is only ever read",
+    )
     args = parser.parse_args(argv)
 
     settings: Settings = get_settings()
@@ -327,6 +335,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     l0 = L0Store(clock=clock, data_root=settings.data_root)
     build = build_membership_history(l0=l0, as_of=as_of, data_root=settings.data_root)
     markdown = render_history_report(build)
+    if args.write_l1 is not None:
+        from dataplatform.ingest.index_history import write_membership_history
+
+        for path in write_membership_history(build, data_root=args.write_l1):
+            print(f"wrote {path}", file=sys.stderr)
     if args.report is not None:
         args.report.parent.mkdir(parents=True, exist_ok=True)
         args.report.write_text(markdown, encoding="utf-8")

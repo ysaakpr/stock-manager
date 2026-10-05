@@ -114,6 +114,7 @@ __all__ = [
     "price_adjusted_series",
     "return_series",
     "total_return_series",
+    "with_events",
     "with_price_events",
 ]
 
@@ -403,6 +404,22 @@ def with_price_events(chain: FactorChain, actions: Iterable[CorporateAction]) ->
     What it assumes: ``actions`` are price events for ``chain.isin``; anything else raises
     ``FactorError``. What it never does: drop or re-derive a row ``chain`` already had.
     """
+    return _compose(chain, actions, PRICE_EVENT_TYPES)
+
+
+def with_events(chain: FactorChain, actions: Iterable[CorporateAction]) -> FactorChain:
+    """``with_price_events`` that also accepts structural breaks, marking their ex-date's row.
+
+    The curated actions (``corpactions.manual_actions``) are both kinds: a split or bonus no feed
+    carried, which scales history like any other, and a demerger or scheme, which carries a unit
+    factor and the ``structural_break`` marker so ``return_series`` bridges it (§4.3 rule 3).
+    """
+    return _compose(chain, actions, PRICE_EVENT_TYPES | STRUCTURAL_BREAK_TYPES)
+
+
+def _compose(
+    chain: FactorChain, actions: Iterable[CorporateAction], allowed: frozenset[ActionType]
+) -> FactorChain:
     extra = list(actions)
     if not extra:
         return chain
@@ -413,9 +430,12 @@ def with_price_events(chain: FactorChain, actions: Iterable[CorporateAction]) ->
     for action in sorted(extra, key=lambda a: (a.ex_date, a.action_type.value)):
         if action.isin != chain.isin:
             raise FactorError(f"action for {action.isin} passed to the chain for {chain.isin}")
-        if action.action_type not in PRICE_EVENT_TYPES:
+        if action.action_type not in allowed:
             raise FactorError(f"{action.action_type} is not a price event")
         slot = per_date.setdefault(action.ex_date, _Accum())
+        if action.action_type in STRUCTURAL_BREAK_TYPES:
+            slot.structural_break = True
+            continue
         price_factor, qty_factor = _event_factors(action)
         slot.price_factor *= price_factor
         slot.qty_factor *= qty_factor

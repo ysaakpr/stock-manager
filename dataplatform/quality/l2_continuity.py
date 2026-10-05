@@ -15,12 +15,17 @@ two defects the 2026-10-05 data-quality audit found there and nothing had flagge
 
 **How a step is classified** (`StepClass`), in this order:
 
-* `STRUCTURAL` — a recorded merger, demerger, scheme or DVR conversion within `guard_days`. A real
+* `STRUCTURAL` — a recorded merger, demerger, scheme or DVR conversion within `guard_days` (from
+  the reconciled store, or a curated, sourced one in `corpactions.manual_actions`). A real
   change in what the security is; the level series keeps the gap by convention (§4.3 rule 3).
 * `RECORDED_UNSCALED` — a recorded event the price-adjusted series does not scale by convention:
   a rights issue (no theoretical ex-rights factor yet — Sadhana Nitrochem's 8:1 at par,
   2026-02-18) or a dividend of at least a quarter of the prior close (Strides' ₹500 special,
   2013-12-19, where the total-return leg could not be built). Known, explained, not a defect here.
+* `EXPLAINED_MOVE` — a genuine market move documented in the curated allowlist
+  (`corpactions.manual_actions`, `explained_moves`) for this exact ISIN and session, with its
+  reason and source: YES Bank on the 2020-03-06 moratorium, Financial Technologies on the NSEL
+  suspension. Never adjusted — a factor there would erase a real loss from every backtest.
 * `DIVIDEND` — the total-return close does not step: a distribution, reinvested there (Majesco's
   ₹974 on 2020-12-23), absent from the price-adjusted series by convention.
 * `LONG_GAP` — the two bars are more than `max_gap_days` apart: a suspension, or months in the
@@ -50,6 +55,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
+from dataplatform.corpactions.manual_actions import ManualActions, default_manual_actions
 from dataplatform.logging import get_logger
 from dataplatform.quality.sentinel import QualityFinding, finding_fingerprint
 from dataplatform.store.db import Connection
@@ -84,6 +90,7 @@ class StepClass(StrEnum):
 
     STRUCTURAL = "STRUCTURAL"
     RECORDED_UNSCALED = "RECORDED_UNSCALED"
+    EXPLAINED_MOVE = "EXPLAINED_MOVE"
     DIVIDEND = "DIVIDEND"
     LONG_GAP = "LONG_GAP"
     UNEXPLAINED = "UNEXPLAINED"
@@ -143,6 +150,7 @@ def classify_steps(
     *,
     structural_dates: Mapping[str, Iterable[date]],
     unscaled_dates: Mapping[str, Iterable[date]] | None = None,
+    explained_dates: Mapping[str, Iterable[date]] | None = None,
     threshold: Decimal,
     max_gap_days: int,
     guard_days: int = 7,
@@ -150,7 +158,9 @@ def classify_steps(
     """Classify each step (module docstring, in that order of precedence); pure.
 
     `structural_dates` maps an ISIN to the ex-dates of its recorded structural breaks;
-    `unscaled_dates` to those of its recorded rights issues and large dividends.
+    `unscaled_dates` to those of its recorded rights issues and large dividends;
+    `explained_dates` to the sessions the curated allowlist documents as market moves — matched
+    on the step's own session exactly, never within a guard window, so it cannot cover another.
     """
     guard = timedelta(days=guard_days)
     lower = 1 / threshold
@@ -163,6 +173,8 @@ def classify_steps(
             abs(step.trade_date - d) <= guard for d in (unscaled_dates or {}).get(step.isin, ())
         ):
             cls = StepClass.RECORDED_UNSCALED
+        elif step.trade_date in (explained_dates or {}).get(step.isin, ()):
+            cls = StepClass.EXPLAINED_MOVE
         elif lower <= step.tr_ratio <= threshold:
             cls = StepClass.DIVIDEND
         elif step.gap_days > max_gap_days:
@@ -229,12 +241,16 @@ def scan(
     data_root: Path | None = None,
     threshold: Decimal = Decimal(2),
     max_gap_days: int = 5,
+    curated: ManualActions | None = None,
 ) -> L2ContinuityReport:
     """Scan the materialized L2 for steps past `threshold`x and for retired-ISIN partitions.
 
     Read-only: one DuckDB window pass over every partition, and (when `conn` is given) one
-    Postgres read of the reconciled structural breaks — without it no step is `STRUCTURAL`.
+    Postgres read of the reconciled structural breaks — without it only a curated break makes a
+    step `STRUCTURAL`. `curated` (default: the repo's file) supplies the curated breaks and the
+    explained-move allowlist.
     """
+    curated = default_manual_actions() if curated is None else curated
     from dataplatform.store.l2 import (
         materialized_isins,
         open_connection,
@@ -284,7 +300,9 @@ def scan(
         )
         for r in rows
     ]
-    structural: dict[str, list[date]] = {}
+    structural: dict[str, list[date]] = {
+        isin: list(days) for isin, days in curated.structural_dates().items()
+    }
     if conn is not None and steps:
         for isin, ex_date in conn.execute(
             "SELECT DISTINCT isin, ex_date FROM corporate_actions "
@@ -319,6 +337,7 @@ def scan(
             steps,
             structural_dates=structural,
             unscaled_dates=unscaled,
+            explained_dates=curated.explained_dates(),
             threshold=threshold,
             max_gap_days=max_gap_days,
         ),
