@@ -26,9 +26,9 @@ import argparse
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
@@ -61,11 +61,17 @@ from dataplatform.status.sync_state import SyncStateStore
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Store
 
+if TYPE_CHECKING:  # imported lazily by the registry to avoid a scheduler→ingest import cycle
+    from dataplatform.scheduler.registry import JobContext
+
 __all__ = [
     "DEFAULT_MAX_RELEASES",
+    "REFRESH_MAX_RELEASES",
+    "REFRESH_WINDOW",
     "CampaignReport",
     "release_state_source",
     "run_press_release_campaign",
+    "run_press_release_refresh",
 ]
 
 _LOG = get_logger(__name__)
@@ -76,6 +82,16 @@ DEFAULT_MAX_RELEASES: Final = 175
 
 #: The host every request of this campaign goes to — the one lease `main` takes.
 HOST: Final = "niftyindices.com"
+
+#: The weekly refresh only looks back this far. NSE Indices announces a change days to weeks before
+#: it takes effect, so a week's new releases are always inside it — and a window, not "everything
+#: missing", is what keeps the scheduled job from turning into the owner-gated backfill of the ~250
+#: pre-2018 releases (AGENTIC_CONTEXT §3.3) the first time it runs.
+REFRESH_WINDOW: Final = timedelta(days=120)
+
+#: A hard ceiling on release PDFs per refresh run. A normal week brings 0-5; the semi-annual review
+#: week a handful more. Hitting the ceiling stops the run short rather than spending past it.
+REFRESH_MAX_RELEASES: Final = 25
 
 
 def release_state_source(release: PressRelease) -> str:
@@ -224,6 +240,43 @@ def run_press_release_campaign(
         oldest_contiguous=None if oldest_contiguous is None else oldest_contiguous.isoformat(),
     )
     return report
+
+
+def run_press_release_refresh(context: JobContext) -> None:
+    """The scheduler's `index_press_refresh` job body: this week's change releases, into L0.
+
+    What it does: under the `niftyindices.com` lease, runs `run_press_release_campaign` for the
+    job's own date (the injected clock, B10) — one listing capture, the seven anchor CSVs, and any
+    candidate release announced in the last `REFRESH_WINDOW` that L0 does not already hold, capped
+    at `REFRESH_MAX_RELEASES`. A re-run on the same day makes no request. Every release's fetch is a
+    `sync_state` row; a failed one makes the run FAILED, so `/status/jobs` shows it.
+    What it assumes: the database is migrated and the network reachable.
+    What it never does: rebuild L1 (`index_membership_history` is rebuilt from L0 deliberately, as a
+    new dated build), reach back past the window, or touch any host but niftyindices.com.
+    """
+    settings = context.settings
+    clock = context.clock
+    today = clock.today()
+    with (
+        leased_fetcher(
+            [HOST], clock=clock, command="index_press_refresh", settings=settings
+        ) as fetcher,
+        connection(settings) as conn,
+    ):
+        report = run_press_release_campaign(
+            fetcher=fetcher,
+            l0=L0Store(clock=clock, data_root=settings.data_root),
+            tracker=SyncStateStore(conn, clock=clock, calendar=trading_calendar()),
+            as_of=today,
+            max_releases=REFRESH_MAX_RELEASES,
+            since=today - REFRESH_WINDOW,
+        )
+        conn.commit()
+    if report.failed or report.budget_exhausted:
+        raise RuntimeError(
+            f"index_press_refresh {today}: {len(report.failed)} release(s) failed, "
+            f"{len(report.unfetched)} left unfetched at the {REFRESH_MAX_RELEASES}-release ceiling"
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
