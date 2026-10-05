@@ -43,11 +43,11 @@ from typing import Final
 from pydantic import ValidationError
 
 from dataplatform.ingest.models import (
-    ISIN_PATTERN,
     BhavcopyParse,
     ParseError,
     PriceRow,
     UnidentifiedRow,
+    is_keyable_isin,
 )
 from dataplatform.logging import get_logger
 from dataplatform.store.l0 import L0Ref, L0Store
@@ -189,17 +189,17 @@ PLACEHOLDER_ISINS: Final[frozenset[str]] = frozenset({"DUMMY", "NA", "-"})
 #: literal preserved and the session survives. This *strengthens* invariant #2 — there is now no
 #: value of the ISIN column that can produce a `PriceRow` without being a real ISIN.
 #:
+#: "Syntactically valid" includes the ISO 6166 check digit (`models.is_keyable_isin`). The
+#: 2026-10-05 audit found `IN9232101012` — `SPARC`, series `E1`, 2012-10-09..11 — keyed in L1: the
+#: right shape, and no security's ISIN, because its last digit is not the Luhn sum of the rest.
+#:
 #: What stays session-fatal is everything structural: an unrecognised header, a short or wide row, a
 #: price that is not a number, a file spanning two sessions. A malformed value in one row is a
 #: property of that instrument; a malformed *file* is a property of the download.
 def _isin_is_unusable(value: str) -> bool:
     """Whether the ISIN column's literal cannot serve as a join key. See the note above."""
-    return value.upper() in PLACEHOLDER_ISINS or _ISIN_LITERAL.match(value) is None
+    return value.upper() in PLACEHOLDER_ISINS or not is_keyable_isin(value)
 
-
-#: The canonical ISIN shape, shared with `PriceRow.isin` so the parser and the model cannot
-#: disagree about what an ISIN is.
-_ISIN_LITERAL: Final = re.compile(ISIN_PATTERN)
 
 #: The zip local-file-header magic. Used to tell "a zipped bhavcopy" from "the CSV inside one",
 #: because both are things a caller legitimately has: L0 holds the zip the source served, and a

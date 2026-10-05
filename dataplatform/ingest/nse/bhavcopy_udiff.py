@@ -56,7 +56,7 @@ from typing import Final
 
 from pydantic import ValidationError
 
-from dataplatform.ingest.models import ParseError, PriceRow
+from dataplatform.ingest.models import ParseError, PriceRow, is_keyable_isin
 from dataplatform.logging import get_logger
 from dataplatform.store.l0 import L0Ref, L0Store
 
@@ -299,6 +299,16 @@ def _row(record: list[str], *, line: int, filename: str) -> PriceRow:
                 line=line,
             )
 
+    # The model's pattern checks the shape; only the check digit tells a real ISIN from twelve
+    # well-formed characters that name no security. Session-fatal like every other bad field in
+    # this era — the UDiFF file has never published a placeholder, so one here is a corrupt file.
+    if not is_keyable_isin(field["ISIN"]):
+        raise ParseError(
+            f"ISIN is {field['ISIN']!r}, which is not a keyable isin (ISO 6166 shape and check "
+            "digit); a row keyed on it would name no security",
+            filename=filename,
+            line=line,
+        )
     try:
         return PriceRow(
             isin=field["ISIN"],

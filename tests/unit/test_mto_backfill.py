@@ -466,9 +466,13 @@ def test_the_bhavcopys_quarantine_rows_survive_the_delivery_write(lake: _Lake) -
     assert _quarantine(lake.root) == after
 
 
-def test_a_quarantine_row_the_write_would_not_rederive_stops_the_session(lake: _Lake) -> None:
-    """A row from another writer — here a BSE refusal in the shared partition — would vanish in the
-    whole-partition write. The session fails loudly and the partition is left byte-identical."""
+def test_another_exchange_s_quarantine_rows_survive_the_promotion(lake: _Lake) -> None:
+    """A BSE refusal in the shared partition is carried through the NSE delivery write unchanged.
+
+    This test used to assert the session *failed*, because the quarantine partition was written
+    whole from the NSE write alone and the BSE row would have vanished. The writer now replaces
+    only the writing exchange's rows (2026-10-05), so the guard has nothing to protect it from.
+    """
     foreign = {
         "symbol": "500325",
         "series": "A",
@@ -482,14 +486,11 @@ def test_a_quarantine_row_the_write_would_not_rederive_stops_the_session(lake: _
     path = _quarantine_path(lake.root)
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist([foreign], schema=PRICES_RAW_QUARANTINE_SCHEMA), path)
-    before = path.read_bytes()
 
     session = lake.promotion.promote([START]).sessions[0]
-    assert session.state == "FAILED"
-    assert "QuarantineClobberError" in (session.error or "")
-    assert "BSE:500325/A" in (session.error or "")
-    assert path.read_bytes() == before
-    assert lake.sync.rows[(NSE_DELIVERY, START)].state is SyncState.FAILED
+    assert session.state == "PUBLISHED", session.error
+    survivors = pq.read_table(path, schema=PRICES_RAW_QUARANTINE_SCHEMA).to_pylist()
+    assert foreign in survivors
 
 
 def test_a_relabelled_quarantine_row_is_not_counted_as_surviving(
