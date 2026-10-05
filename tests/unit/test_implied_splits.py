@@ -307,6 +307,72 @@ def test_the_detector_can_be_turned_off(tmp_path: Path) -> None:
     assert read_adjusted(GOLDBEES, data_root=tmp_path)[-2].adj_close == Decimal("3359.6000")
 
 
+# ── a feed CA arriving for a day the detector had implied: one adjustment, never two ──────────
+
+
+def _write_halving(root: Path) -> list[date]:
+    """A 2:1 sub-division in L1: twelve sessions at ₹1,000, then ₹500 on twice the quantity."""
+    bars = _flat_then(("500.00", "500.00"), level="1000.00", step_vol=12_000)
+    for bar in bars:
+        write_prices_raw(
+            [_row(STOCK, bar.trade_date, o=str(bar.open), c=str(bar.close), qty=int(bar.volume))],
+            exchange=Exchange.NSE,
+            data_root=root,
+        )
+    return [b.trade_date for b in bars]
+
+
+def _feed_split(ex: date) -> CorporateAction:
+    # ₹2 → ₹1: the 2:1 sub-division INE940H01022 and INE2FMX01012 took in September 2026.
+    return _action(
+        STOCK, ex, ActionType.SPLIT, FaceValueTerms(from_value=Decimal(2), to_value=Decimal(1))
+    )
+
+
+def test_a_recorded_split_on_the_step_day_leaves_nothing_to_imply() -> None:
+    """The detector reads bars in the recorded chain's terms, so the feed's split is no step."""
+    bars = _flat_then(("500.00", "500.00"), level="1000.00", step_vol=12_000)
+    split = _feed_split(bars[-1].trade_date)
+    chain = build_chain_for_isin(STOCK, [split])
+    in_chain_terms = [
+        SessionBar(
+            trade_date=b.trade_date,
+            open=b.open * chain.price_factor_asof(b.trade_date),
+            close=b.close * chain.price_factor_asof(b.trade_date),
+            volume=b.volume * chain.qty_factor_asof(b.trade_date),
+        )
+        for b in bars
+    ]
+    assert detect_implied_splits(STOCK, bars, []) != ()  # unrecorded, it is implied
+    assert detect_implied_splits(STOCK, in_chain_terms, [split]) == ()
+
+
+def test_a_feed_split_replaces_the_implied_one_and_is_not_applied_twice(tmp_path: Path) -> None:
+    """The ca_refresh path: before the CA lands the step is implied; after, it is recorded — and
+    the partition carries one 0.5 factor either way. Applied twice it would read 0.25 and the
+    pre-ex close 250, a fresh -50% "day" on the ex-date that `l2_continuity` would fail."""
+    days = _write_halving(tmp_path)
+    before = materialize_isin(
+        STOCK, chain=FactorChain(isin=STOCK, rows=()), actions=(), data_root=tmp_path
+    )
+    assert [s.ex_date for s in before.implied_splits] == [days[-1]]
+    implied_bars = read_adjusted(STOCK, data_root=tmp_path)
+
+    split = _feed_split(days[-1])
+    after = materialize_isin(
+        STOCK, chain=build_chain_for_isin(STOCK, [split]), actions=[split], data_root=tmp_path
+    )
+    assert after.implied_splits == ()
+    recorded_bars = read_adjusted(STOCK, data_root=tmp_path)
+    assert recorded_bars[-2].cum_price_factor == Decimal("0.5")
+    assert recorded_bars[-2].adj_close == Decimal("500.0000")
+    assert recorded_bars[-1].adj_close == Decimal("500.0000")
+    # Same adjusted series whichever way the event was known: the CA only changes its provenance.
+    assert [(b.trade_date, b.adj_close) for b in recorded_bars] == [
+        (b.trade_date, b.adj_close) for b in implied_bars
+    ]
+
+
 # ── retired partitions: pruned, never rebuilt ───────────────────────────────────────────────
 
 RETIRED = "INE296A01016"  # BAJFINANCE before its 2016 reissue

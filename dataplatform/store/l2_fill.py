@@ -21,6 +21,10 @@ partitions of lineage-retired ISINs; every writing mode (fill, `--extend`, `--re
 ends with that prune, because a retired ISIN's partition duplicates its survivor's stitched
 history with the reissue split unadjusted.
 
+`--rebuild-invalidated` drains the `l2_invalidation` queue on its own — the step after a
+corporate-action refresh (`ingest.ca_refresh`) recomputed some factor chains, rebuilding exactly
+those ISINs, each over its lineage chain, and nothing else.
+
 Offline: reads L1 and Postgres, fetches nothing. `lineage_rebuild` runs the same fill as its last
 stage; this entry point is for a lake where only the fill is wanted.
 
@@ -30,6 +34,7 @@ stage; this entry point is for a lake where only the fill is wanted.
     uv run python -m dataplatform.store.l2_fill --rebuild-all
     uv run python -m dataplatform.store.l2_fill --prune-retired
     uv run python -m dataplatform.store.l2_fill --rebuild INE018I01017 INF846K01ZL0
+    uv run python -m dataplatform.store.l2_fill --rebuild-invalidated
 """
 
 from __future__ import annotations
@@ -39,7 +44,9 @@ from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import date
+from pathlib import Path
 
+from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import get_settings
 from dataplatform.identity.lineage import LineageResolver, LineageStore
 from dataplatform.logging import get_logger
@@ -53,12 +60,15 @@ from dataplatform.store.l2 import (
     open_connection,
     prune_retired,
     rebuild_all,
+    rebuild_invalidated,
     rebuild_isins,
     rebuild_truncated,
 )
 
 __all__ = [
     "ExtensionCoverage",
+    "drain_invalidated",
+    "drain_invalidated_with",
     "extend",
     "extension_coverage",
     "fill",
@@ -111,6 +121,43 @@ def prune() -> tuple[str, ...]:
     with connect() as conn:
         resolver = LineageStore(conn).load()
     return prune_retired(resolver.survivor_of, data_root=settings.data_root)
+
+
+def drain_invalidated_with(
+    conn: Connection, *, clock: Clock, data_root: Path | None
+) -> tuple[L2WriteReport, ...]:
+    """Drain the `l2_invalidation` queue over `conn`, each ISIN over its D2 lineage chain.
+
+    What it does: `rebuild_invalidated` with the lineage history and survivor map every other
+    writing mode here uses, so a reissued name is rebuilt across its reissue and a retired ISIN is
+    resolved without being built. Rebuilds exactly the flagged ISINs.
+    What it assumes: the caller owns `conn`'s transaction and commits it.
+    What it never does: touch an ISIN with no open invalidation, or fetch.
+    """
+    history, resolver = _history(conn)
+    con = open_connection()
+    try:
+        return rebuild_invalidated(
+            conn,
+            clock=clock,
+            con=con,
+            data_root=data_root,
+            history_for=history,
+            survivor_of=resolver.survivor_of,
+        )
+    finally:
+        con.close()
+
+
+def drain_invalidated(clock: Clock | None = None) -> tuple[L2WriteReport, ...]:
+    """Drain the configured store's `l2_invalidation` queue against the configured lake; commit."""
+    settings = get_settings()
+    with connect() as conn:
+        reports = drain_invalidated_with(
+            conn, clock=SystemClock() if clock is None else clock, data_root=settings.data_root
+        )
+        conn.commit()
+    return reports
 
 
 def rebuild_everything() -> L2RebuildReport:
@@ -260,11 +307,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="only remove the partitions of lineage-retired ISINs",
     )
+    parser.add_argument(
+        "--rebuild-invalidated",
+        action="store_true",
+        help="only drain the l2_invalidation queue: rebuild the ISINs a CA recompute flagged",
+    )
     args = parser.parse_args(argv)
     if args.dry_run and not args.extend:
         parser.error("--dry-run applies to --extend")
-    if sum((args.extend, args.rebuild_all, args.prune_retired, bool(args.rebuild))) > 1:
-        parser.error("--extend, --rebuild-all, --rebuild and --prune-retired are separate modes")
+    modes = (
+        args.extend,
+        args.rebuild_all,
+        args.prune_retired,
+        bool(args.rebuild),
+        args.rebuild_invalidated,
+    )
+    if sum(modes) > 1:
+        parser.error(
+            "--extend, --rebuild-all, --rebuild, --prune-retired and --rebuild-invalidated are "
+            "separate modes"
+        )
+    if args.rebuild_invalidated:
+        drained = drain_invalidated()
+        print(f"{'rebuilt':<24} {len(drained)}")
+        print(f"{'rows_written':<24} {sum(r.rows_written for r in drained)}")
+        print(f"{'implied_splits':<24} {sum(len(r.implied_splits) for r in drained)}")
+        for drained_isin in drained:
+            for split in drained_isin.implied_splits:
+                print(f"{'  implied':<24} {split.isin} {split.ex_date.isoformat()}")
+        return 0
     if args.rebuild:
         written = rebuild_named(args.rebuild)
         for r in written:

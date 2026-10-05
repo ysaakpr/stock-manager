@@ -60,3 +60,32 @@ checkpoint.
 - Unclassifiable purpose strings → the M2.1 manual-entry queue (surfaced in the report count).
 - Unresolvable identities (a scrip/ISIN the master does not know) → the report's unresolved count;
   fix the identity data (D2), not the CA terms.
+
+## After the backfill: the scheduled refresh
+
+The backfill is a one-shot campaign; keeping the store current is `dataplatform/ingest/ca_refresh.py`,
+run by the scheduler:
+
+| Job | When (IST) | What |
+|---|---|---|
+| `ca_refresh` | Saturday 10:00 | NSE, last 35 days of ex-dates (1 request) + one BSE request per scrip whose NSE action has no BSE twin yet |
+| `bse_ca_sweep` | 06:00, first Sunday of the month | the same, plus every BSE scrip that traded in the last year (~6,700 requests) |
+
+Both reconcile under `ACCEPT` — the policy the lake was finalized with (`identity.lineage_rebuild`);
+reconcile is whole-set, so a `QUEUE` run here would un-reconcile every single-feed action already
+admitted — recompute only the ISINs whose reconciled actions changed, and drain `l2_invalidation`
+through `rebuild_invalidated`.
+
+The refresh keys its NSE unit `nse_corp_actions/refresh` on the **refresh date**, not the window
+start: the backfill's last chunk (`nse_corp_actions` 2026-09-01) is PUBLISHED, so re-running the
+backfill `--from 2026-09-01` resume-skips the window. To catch up by hand, use the refresh:
+
+```bash
+uv run python -m dataplatform.ingest.ca_refresh --from 2026-09-01 --skip-l2   # fetch, reconcile, recompute
+uv run python -m dataplatform.store.l2_fill --rebuild-invalidated              # rebuild what moved
+uv run python -m dataplatform.quality.l2_continuity                            # verify
+```
+
+Exit codes: `0` clean; `1` a unit FAILED or the fetch parked on a 403 spike (what landed is still
+finalized — re-run after the cause is cleared; PUBLISHED units are skipped); `2` an invalid window
+(over twelve months is the backfill's job).

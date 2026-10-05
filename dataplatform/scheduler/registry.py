@@ -32,6 +32,8 @@ from dataplatform.config import Settings
 from dataplatform.logging import get_logger
 
 __all__ = [
+    "BSE_CA_SWEEP",
+    "CA_REFRESH",
     "CONSTITUENTS_SNAPSHOT",
     "DAILY_SNAPSHOT",
     "EOD_PIPELINE",
@@ -44,6 +46,8 @@ __all__ = [
     "JobFn",
     "JobNotRegisteredError",
     "JobRegistry",
+    "bse_ca_sweep",
+    "ca_refresh",
     "constituents_snapshot",
     "daily_snapshot",
     "default_registry",
@@ -452,6 +456,71 @@ INDEX_PRESS_REFRESH = Job(
 )
 
 
+def ca_refresh(context: JobContext) -> None:
+    """The weekly corporate-action refresh (DQ): new actions in, changed chains and L2 rebuilt.
+
+    What it does: one NSE request over the last five weeks of ex-dates, one BSE request per scrip
+    whose NSE action has no BSE twin yet, then the backfill's reconcile under the lake's own ACCEPT
+    policy, a recompute of only the ISINs whose reconciled actions moved, and a drain of the
+    `l2_invalidation` queue that recompute raised — see `ca_refresh.refresh_corporate_actions`.
+    Until this job the CA store was a one-shot campaign that stopped at 2026-09-01, and two
+    September 2:1 splits reached L2 only through the price-implied detector.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: recompute an ISIN whose chain did not change, or re-run a refresh already
+    PUBLISHED for today. The import is deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.ca_refresh import run_ca_refresh
+
+    run_ca_refresh(context)
+
+
+#: The weekly CA refresh. 10:00 IST on Saturday — the week's ex-dates are all in, and it follows
+#: `identity_refresh` (07:00) so a name listed this week resolves. Weekly is enough for a factor
+#: chain: the implied-split detector already keeps an unrecorded split out of L2 in the meantime,
+#: and this job replaces that inference with the published record. Six sessions of lag budget.
+CA_REFRESH = Job(
+    name="ca_refresh",
+    cron="0 10 * * sat",
+    fn=ca_refresh,
+    timeout=timedelta(hours=1),
+    description="Weekly NSE CA refresh + BSE counterparts → recompute changed chains → rebuild L2",
+    covers=("nse_corp_actions",),
+    sync_sources=("nse_corp_actions",),
+    max_lag_sessions=6,
+)
+
+
+def bse_ca_sweep(context: JobContext) -> None:
+    """The monthly BSE corporate-action sweep: every BSE scrip that traded in the last year.
+
+    What it does: `ca_refresh`'s run, plus one request per BSE scrip with a price in the trailing
+    year — which is what reaches a BSE-only listing, whose actions the NSE feed never carries. The
+    finalize, the changed-only recompute and the L2 drain are the weekly job's.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: re-fetch a scrip already PUBLISHED for today. The import is deferred for the
+    same reason the others are.
+    """
+    from dataplatform.ingest.ca_refresh import run_bse_ca_sweep
+
+    run_bse_ca_sweep(context)
+
+
+#: The monthly BSE sweep. 06:00 IST on the first Sunday of the month (APScheduler ANDs the day and
+#: weekday fields): ~6,700 per-scrip requests at the host's spacing is most of a day's budget, so it
+#: runs where no session, no EOD pipeline and no snapshot competes for the BSE host, after the
+#: 03:00 L0 sweep. The lag budget spans the longest gap between first Sundays (35 days).
+BSE_CA_SWEEP = Job(
+    name="bse_ca_sweep",
+    cron="0 6 1-7 * sun",
+    fn=bse_ca_sweep,
+    timeout=timedelta(hours=10),
+    description="Monthly per-scrip BSE CA sweep of every traded scrip → recompute → rebuild L2",
+    covers=("bse_corp_actions",),
+    sync_sources=("bse_corp_actions",),
+    max_lag_sessions=27,
+)
+
+
 #: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
 #: audit's root cause was not one broken job but sources that were simply never scheduled — the
 #: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
@@ -462,12 +531,6 @@ UNSCHEDULED: dict[str, str] = {
         "Superseded from 2019-09-30 by nse_sec_bhavdata_full; the delivery source set fetches MTO "
         "only for older sessions, so there is nothing new to take daily."
     ),
-    "nse_corp_actions": (
-        "Refresh runs corp_actions_backfill, which writes corporate_actions and recomputes "
-        "adjustment_factors (L2-facing). Scheduling it waits on the sequenced L1/L2 rebuild after "
-        "the 2026-10-05 DQ fixes; staleness shows on /status/sources meanwhile."
-    ),
-    "bse_corp_actions": "Same as nse_corp_actions: per-scrip refresh feeds the factor recompute.",
     "nse_financial_results_index": (
         "fundamentals_backfill campaign (B1 NEEDS_GO: thousands of per-filing requests); no "
         "incremental daily job yet."
@@ -524,5 +587,7 @@ def default_registry() -> JobRegistry:
             IDENTITY_REFRESH,
             TRI_REFRESH,
             INDEX_PRESS_REFRESH,
+            CA_REFRESH,
+            BSE_CA_SWEEP,
         ]
     )
