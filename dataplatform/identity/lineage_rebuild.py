@@ -49,7 +49,12 @@ from dataplatform.ingest.nse import corp_actions as nse_ca
 from dataplatform.logging import get_logger
 from dataplatform.store.db import connect
 from dataplatform.store.l0 import L0Store
-from dataplatform.store.l2 import materialize_missing, open_connection, rebuild_invalidated
+from dataplatform.store.l2 import (
+    materialize_missing,
+    open_connection,
+    prune_retired,
+    rebuild_invalidated,
+)
 
 __all__ = ["LineageRebuildReport", "rebuild"]
 
@@ -166,7 +171,12 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         con = open_connection()
         try:
             reports = rebuild_invalidated(
-                conn, clock=clock, con=con, data_root=data_root, history_for=history
+                conn,
+                clock=clock,
+                con=con,
+                data_root=data_root,
+                history_for=history,
+                survivor_of=resolver.survivor_of,
             )
             # ── 5. fill L2 for the names no invalidation ever reached ────────────────────────
             # The queue rebuilds what a corporate action touched; a name with no action never
@@ -182,6 +192,9 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         finally:
             con.close()
         conn.commit()
+    # A partition a now-retired ISIN was built with before the lineage named it is a second,
+    # unadjusted copy of the survivor's history; the derived edges above are what retire it.
+    prune_retired(resolver.survivor_of, data_root=data_root)
 
     stitched = sum(1 for r in reports if r.isin in history)
     report = LineageRebuildReport(
