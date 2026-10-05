@@ -5172,8 +5172,13 @@ def run_swing_composite(
                 "band-hit avoidance asked for, but the shared lake was opened without band hits — "
                 "open_swing_lake(band_hits=True) must be told"
             )
+        # One rail policy for both: the gate enforces it, and the policy sizes its buys to it.
+        rails_in_force = rail_policy or ratified_backtest_rail_policy()
         policy = SwingCompositePolicy(
-            data, parameters, band_hits=lake.band_hits if band_hit_avoidance else None
+            data,
+            parameters,
+            band_hits=lake.band_hits if band_hit_avoidance else None,
+            order_caps=rails_in_force.rails,
         )
 
         engine = ReplayEngine(
@@ -5181,7 +5186,7 @@ def run_swing_composite(
             broker=broker,
             clock=clock,
             sessions=sessions,
-            rails=RailGate(rail_policy or ratified_backtest_rail_policy(), reader.closes_on),
+            rails=RailGate(rails_in_force, reader.closes_on),
         )
         started = time.perf_counter()
         result = engine.run()

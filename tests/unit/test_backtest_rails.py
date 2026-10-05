@@ -323,13 +323,13 @@ def test_a_held_name_with_no_close_is_sold_at_its_cost_basis(
     fallback the gate raised and killed the whole run.
     """
     seen: list[ProposedOrder] = []
-    real_guard = RailEngine.guard_order
+    real_guard = RailEngine.guard_exit
 
     def spy_guard(self: RailEngine, order: ProposedOrder, *args: Any, **kwargs: Any) -> Any:
         seen.append(order)
         return real_guard(self, order, *args, **kwargs)
 
-    monkeypatch.setattr(RailEngine, "guard_order", spy_guard)
+    monkeypatch.setattr(RailEngine, "guard_exit", spy_guard)
     orphan = NAMES[0]
     basis = Decimal("87.5")
     broker = _BasisBroker(Decimal("100000"), dict.fromkeys(NAMES[:10], 10), basis)

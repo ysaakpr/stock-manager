@@ -7,18 +7,24 @@ near them and none of them takes an override — a rail with a bypass is not a r
 
 `RailEngine` wires the pure checks to the decision journal (§0): a blocked order writes a
 `RAIL_BLOCK` line naming every breached rail, and a breached drawdown writes a forced-review
-`ESCALATE` line by the `RAILS` actor. A8 decides whether an order may be placed and records that
-decision; X1 does the placing. The rail engine has no broker on purpose — a second path to the
-market is the one thing invariant #6 forbids.
+`ESCALATE` line by the `RAILS` actor. A sell too large for the per-order caps is cleared by
+`RailEngine.guard_exit` as child orders that each fit them, every child through every rail — the
+caps bound what one order may open, never whether a held position can be left. A8 decides whether
+an order may be placed and records that decision; X1 does the placing. The rail engine has no
+broker on purpose — a second path to the market is the one thing invariant #6 forbids.
 """
 
 from analyst.rails.engine import (
     FORCED_REVIEW_EVENT,
+    ExitClearance,
     RailEngine,
     RailJournal,
     apply_order,
     assess_drawdown,
     check_order,
+    max_child_quantity,
+    order_value_ceiling,
+    slice_exit,
 )
 from analyst.rails.policies import (
     DrawdownStatus,
@@ -35,6 +41,7 @@ from analyst.rails.policies import (
 __all__ = [
     "FORCED_REVIEW_EVENT",
     "DrawdownStatus",
+    "ExitClearance",
     "HouseholdExposure",
     "Lot",
     "Portfolio",
@@ -48,4 +55,7 @@ __all__ = [
     "assess_drawdown",
     "check_order",
     "drawdown_of",
+    "max_child_quantity",
+    "order_value_ceiling",
+    "slice_exit",
 ]

@@ -60,6 +60,7 @@ __all__ = [
     "GateOutcome",
     "RailGate",
     "SectorMap",
+    "SlicedExit",
     "rail_blocks_by_rail",
     "ratified_backtest_rail_policy",
     "ratified_sector_map",
@@ -290,6 +291,20 @@ class GateOutcome:
     allowed: tuple[OrderRequest, ...]
     entries: tuple[JournalEntry, ...]
     refused: tuple[OrderRequest, ...] = ()
+    sliced: tuple[SlicedExit, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SlicedExit:
+    """A policy's sell that A8 cleared as several child orders, for the parent's journal line.
+
+    ``parent`` is the order the policy returned; ``payload`` is ``ExitClearance.payload`` — the
+    parent quantity and each child's — which the engine merges onto the policy's SELL line, so the
+    journal keeps one decision per exit and names every order it became.
+    """
+
+    parent: OrderRequest
+    payload: Mapping[str, str]
 
 
 class RailGate:
@@ -315,6 +330,11 @@ class RailGate:
     price. An allowed order is applied to the projected book before the next
     is checked, so twelve sells that would each be fine alone cannot together take the book under
     the minimum-holdings floor.
+
+    A sell goes through ``RailEngine.guard_exit``: one too large for the per-order caps is cut
+    into children that each fit them, every child is cleared through every rail, and the children
+    — not the parent — are what ``allowed`` returns, all to be placed this session. A buy is
+    cleared whole by ``guard_order``; the caps bind it unchanged.
 
     What it assumes: the broker has no order staged from an earlier session (the engine fills them
     before the policy decides), so the book it reads is the book the orders will act on.
@@ -356,6 +376,7 @@ class RailGate:
         spendable = broker.margins().available
         allowed: list[OrderRequest] = []
         refused: list[OrderRequest] = []
+        sliced: list[SlicedExit] = []
         for request in orders:
             proposed = self._propose(request, session, book)
             reason = _unexecutable(proposed, book, spendable)
@@ -372,6 +393,25 @@ class RailGate:
                 )
                 refused.append(request)
                 continue
+            if proposed.side is Side.SELL:
+                clearance = engine.guard_exit(
+                    proposed,
+                    book,
+                    self._policy.rails,
+                    trading_date=session,
+                    sleeve=sleeves.get(request.isin),
+                )
+                if not clearance.allowed:
+                    refused.append(request)
+                    continue
+                # A8's own book transition, child by child, so the next order is checked against
+                # what this exit leaves. A sale's proceeds stay unsettled: never spendable.
+                for child in clearance.allowed:
+                    book = apply_order(book, child)
+                    allowed.append(child.request)
+                if clearance.sliced:
+                    sliced.append(SlicedExit(parent=request, payload=clearance.payload()))
+                continue
             assessment = engine.guard_order(
                 proposed,
                 book,
@@ -384,11 +424,13 @@ class RailGate:
                 continue
             # A8's own book transition, so the next order is checked against what this one leaves.
             book = apply_order(book, proposed)
-            if proposed.side is Side.BUY:
-                spendable -= proposed.value  # a sale's proceeds stay unsettled: never spendable
+            spendable -= proposed.value
             allowed.append(request)
         return GateOutcome(
-            allowed=tuple(allowed), entries=tuple(sink.entries), refused=tuple(refused)
+            allowed=tuple(allowed),
+            entries=tuple(sink.entries),
+            refused=tuple(refused),
+            sliced=tuple(sliced),
         )
 
     def _price(self, isin: str, fallback: Decimal | None) -> Decimal | None:

@@ -96,9 +96,12 @@ class NoReferenceBarError(BrokerError, LookupError):
 class DuplicateStagedOrderError(BrokerError):
     """A second order was staged for a scrip that already has one staged for the same session.
 
-    The EOD model nets to one order per scrip per session — that is also what keeps the per-scrip,
-    per-day DP sell charge (`execution.costs`) correct without reaching into its internals. Modify
-    the standing order instead of stacking a second.
+    The EOD model nets to one order per scrip per session. The one exception is a sell staged
+    beside other sells of the same scrip: the child orders of an exit A8 sliced to fit its
+    per-order caps (`analyst.rails.slice_exit`). Those fill in the same session, are charged the
+    per-scrip, per-day DP sell charge once between them (`CostModel.charge_all`), and pay slippage
+    on their combined participation. A buy beside anything, or a sell beside a buy, is still
+    refused: modify the standing order instead of stacking a second.
     """
 
 
@@ -362,8 +365,9 @@ class SimBroker:
         """Stage `request` for the next trading session after today (`Clock.today`).
 
         Rejects a second staged order for the same scrip and session (`DuplicateStagedOrderError`):
-        the EOD model nets to one order per scrip, which also keeps the per-day DP sell charge
-        correct. The returned order is `STAGED`; it fills only when `execute_session` runs.
+        the EOD model nets to one order per scrip — except that sells may stand beside sells, which
+        is how a sliced exit's children reach the session together. The returned order is `STAGED`;
+        it fills only when `execute_session` runs.
         """
         decision_date = self._clock.today()
         target = self._market.next_session(decision_date)
@@ -372,6 +376,7 @@ class SimBroker:
                 existing.status is OrderStatus.STAGED
                 and existing.request.isin == request.isin
                 and existing.target_session == target
+                and not (existing.request.side is Side.SELL and request.side is Side.SELL)
             ):
                 raise DuplicateStagedOrderError(
                     f"{request.isin} already has a staged order ({existing.order_id}) for "
@@ -445,22 +450,62 @@ class SimBroker:
         slippage → shared cost model) and either `COMPLETE` with a `Fill` or `REJECTED` with a
         reason (no bar, no cash, nothing to deliver).
 
+        Several sells of one scrip (a sliced exit) are priced as the one order they are: slippage on
+        their combined participation, so slicing never flatters the impact model, and the DP
+        charge on the first of them alone, as the depository bills it.
+
         After the fills, sale proceeds that settle on the *next* session are released too: an EOD
         decision made tonight can only fill tomorrow, when that cash has been paid out. Proceeds
         from a sale filled in `session` are never usable by another fill in `session` (T+0).
         """
         self._settle_into(session)
+        due = [
+            order
+            for order in self._orders.values()
+            if order.status is OrderStatus.STAGED and order.target_session == session
+        ]
+        session_quantity: dict[tuple[str, Side], int] = {}
+        for order in due:
+            key = (order.request.isin, order.request.side)
+            session_quantity[key] = session_quantity.get(key, 0) + order.request.quantity
+        sold: dict[str, Trade] = {}
         filled: list[Order] = []
-        for order in list(self._orders.values()):
-            if order.status is not OrderStatus.STAGED or order.target_session != session:
-                continue
-            resolved = self._fill(order, session)
+        for order in due:
+            key = (order.request.isin, order.request.side)
+            resolved = self._fill(
+                order,
+                session,
+                session_quantity=session_quantity[key],
+                earlier_sell=sold.get(order.request.isin),
+            )
             self._orders[order.order_id] = resolved
             filled.append(resolved)
+            if resolved.fill is not None and resolved.fill.side is Side.SELL:
+                sold.setdefault(
+                    order.request.isin,
+                    Trade(
+                        isin=resolved.fill.isin,
+                        trade_date=session,
+                        side=Side.SELL,
+                        quantity=resolved.fill.quantity,
+                        price=resolved.fill.fill_price,
+                        exchange=resolved.fill.exchange,
+                    ),
+                )
         self._released_ahead = self._release_proceeds(session, inclusive=True)
         return tuple(filled)
 
-    def _fill(self, order: Order, session: date) -> Order:
+    def _fill(
+        self,
+        order: Order,
+        session: date,
+        *,
+        session_quantity: int,
+        earlier_sell: Trade | None,
+    ) -> Order:
+        """Fill one staged order. ``session_quantity`` is every share of this scrip and side due
+        this session (the order's own, unless it is one child of a sliced exit), and
+        ``earlier_sell`` the first sell of this scrip already filled this session, if any."""
         request = order.request
         try:
             bar = self._market.reference_bar(request.isin, session)
@@ -468,7 +513,7 @@ class SimBroker:
             return self._reject(order, f"no reference bar for {session.isoformat()}: {exc}")
 
         reference = self._policy.reference_price(bar, request.side)
-        turnover_at_reference = reference * request.quantity
+        turnover_at_reference = reference * session_quantity
         slippage_bps = self._policy.slippage.bps_for(
             order_turnover=turnover_at_reference, traded_value=bar.traded_value
         )
@@ -493,7 +538,12 @@ class SimBroker:
             price=fill_price,
             exchange=request.exchange,
         )
-        cost = self._costs.charge(trade)
+        # The DP charge is per scrip per sell day: a later child of the same exit pays none.
+        cost = (
+            self._costs.charge(trade)
+            if earlier_sell is None
+            else self._costs.charge_all((earlier_sell, trade))[-1]
+        )
 
         if request.side is Side.BUY and cost.net_amount > self._cash:
             return self._reject(
