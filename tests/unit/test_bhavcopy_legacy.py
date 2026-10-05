@@ -724,3 +724,25 @@ def test_a_structurally_broken_row_is_still_session_fatal() -> None:
 def _fixture_named(filename: str) -> Fixture:
     (fixture,) = [f for f in FIXTURE_FILES if f.filename == filename]
     return fixture
+
+
+def test_an_isin_with_a_wrong_check_digit_is_refused_like_any_unkeyable_literal() -> None:
+    """`IN9232101012` (SPARC, series E1, 2012-10-09..11) was keyed in L1 until the 2026-10-05 audit.
+
+    Twelve well-formed characters, so the shape test passed, but the ISO 6166 check digit is wrong:
+    no security has that ISIN, so nothing can ever join on it. Refused and quarantined with the
+    literal kept, exactly like `INE` and `DUMMY`; the session survives. The valid neighbour proves
+    the check is not simply refusing everything (it would, inverted).
+    """
+    body = HEADER + (
+        "\nACME,EQ,1,1,1,1,1,1,1,1,09-OCT-2012,1,INE002A01018,"
+        "\nSPARC,E1,1,1,1,1,1,1,1,1,09-OCT-2012,1,IN9232101012,"
+        "\nJUNK,EQ,1,1,1,1,1,1,1,1,09-OCT-2012,1,DUMMY,\n"
+    )
+    parsed = parse_text_report(body, filename="bad_check_digit.csv")
+
+    assert [row.isin for row in parsed.rows] == ["INE002A01018"]
+    assert [(r.symbol, r.stated_isin) for r in parsed.refused] == [
+        ("SPARC", "IN9232101012"),
+        ("JUNK", "DUMMY"),
+    ]
