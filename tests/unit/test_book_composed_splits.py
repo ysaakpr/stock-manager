@@ -196,10 +196,8 @@ def test_the_book_and_l2_scale_by_reciprocal_factors() -> None:
 def test_an_added_split_whose_ratio_disagrees_with_l2s_chain_is_refused() -> None:
     curated = _split(source=MANUAL_SOURCE)
     inverted_chain = build_chain_for_isin(A, [_split(source=MANUAL_SOURCE, ratio=(5, 10))])
-    composed = ComposedEvents(
-        isin=A, chain=inverted_chain, actions=(curated,), curated=(curated,)
-    )
-    with pytest.raises(BookError, match="L2 adjusts prices by x0.5"):
+    composed = ComposedEvents(isin=A, chain=inverted_chain, actions=(curated,), curated=(curated,))
+    with pytest.raises(BookError, match=r"L2 adjusts prices by x0\.5"):
         added_book_events((), (composed,))
 
 
