@@ -83,6 +83,36 @@ action here, never on ``knowable_date``, and neither reaches a signal. A store m
 table covers is replaced by it; one it does not is named at load (``book_actions.merger_skipped``),
 and a scheme the table lists as unsourced is counted when held, never guessed.
 
+**Curated and price-implied splits — the events L2 composes, applied to the count.** The feeds
+miss some share-basis changes: a 2013 bonus before their history, an ETF unit split no equity feed
+lists, a split filed under an ISIN a reissue retired. L2 composes two further sources into its
+factor chain for them — the sourced rows of ``dataplatform.corpactions.manual_actions`` and the
+splits ``dataplatform.corpactions.implied`` reads off L1 — so the *price* steps vanish; this module
+takes the very same composition (``dataplatform.store.l2.compose_events``, through
+``compose_lake_events``) so the *share count* steps with it. A position held across one gets the
+shares the depository credited, not a phantom 99 % loss. Only their SPLIT/BONUS rows scale shares;
+a curated DEMERGER or scheme is a structural break and becomes an :class:`UnmodelledAction`, and
+an explained move is not an event at all and never reaches here. Three guards hold at load
+(:func:`added_book_events`):
+
+* **One fact, one rescale.** For every ISIN and ex-date L2 added an event on, the product of the
+  book's feed ratios and added ratios must equal the composed chain's quantity factor there. The
+  one way they can part is a persisted ``adjustment_factors`` chain that lags the reconciled rows:
+  L2 then *implies* the feed's split back from L1 on its own ex-date, and applying both would
+  double the count. When the feed ratios alone already equal L2's factor, the added events are
+  dropped (``book_actions.added_event_superseded``). Any other disagreement raises — a book that
+  does not match its prices is red data, not a run.
+* **PIT.** A curated row's ``knowable_date`` and an implied split's (its own ex-date, the session
+  whose bar reveals it) must be on or before the ex-date: :class:`ShareRescale` refuses one that is
+  not, since applying it on the ex-date would act on a fact before anyone could know it. The book
+  then applies it on the ex-date, exactly as a feed's split. That the implied scan reads L1 bars
+  after the ex-date (its "level does not revert" test) changes nothing a policy can see: the
+  event reaches the account on its ex-date, as the exchange's own split does.
+* **Identity.** Their rows are counted apart in :meth:`BookActionCalendar.counts`
+  (``SPLIT:implied``, ``BONUS:curated``) and hashed by :meth:`BookActionCalendar.added_identity`,
+  so a run made with them never shares a digest with one made before them, nor with one whose
+  curated ratio was later corrected.
+
 **What is not, and why.** ``DEMERGER`` and ``SCHEME_OF_ARRANGEMENT`` rows in the store are all
 ``UnquantifiedTerms`` and none names the counterparty ISIN, so the book cannot apply them
 without inventing terms (the lineage table is not a merger map either: one issuer, linear chains).
@@ -118,7 +148,9 @@ from execution.sim_broker import SimBroker
 
 if TYPE_CHECKING:
     from dataplatform.corpactions import MergerTerms
+    from dataplatform.ingest.corp_actions import CorporateAction
     from dataplatform.store.db import Connection
+    from dataplatform.store.l2 import ComposedEvents
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
@@ -139,10 +171,12 @@ __all__ = [
     "CashExit",
     "IsinReissue",
     "RescaleKind",
+    "RescaleSource",
     "ShareRescale",
     "ShareSwap",
     "UnmodelledAction",
     "add_book_actions_flag",
+    "added_book_events",
     "book_corporate_actions",
     "corporate_actions_in_force",
     "current_book_actions",
@@ -159,6 +193,14 @@ __all__ = [
 # ── the actions, in the book's terms ─────────────────────────────────────────────────────────────
 
 
+class RescaleSource(StrEnum):
+    """Where a :class:`ShareRescale` came from: a feed's reconciled row, or what L2 added to it."""
+
+    FEED = "feed"
+    CURATED = "curated"
+    IMPLIED = "implied"
+
+
 class RescaleKind(StrEnum):
     """Which share-count action a :class:`ShareRescale` came from — for the log and the ledger."""
 
@@ -171,7 +213,9 @@ class ShareRescale:
     """Multiply the shares of ``isin`` by ``numerator / denominator`` on ``ex_date``; basis fixed.
 
     ``carried_from`` names a retired predecessor ISIN whose holding continues as ``isin`` from this
-    ex-date (an NSE reissue); it is carried 1:1 *before* the rescale.
+    ex-date (an NSE reissue); it is carried 1:1 *before* the rescale. ``source`` says whether a
+    feed published it or L2 added it (curated, implied); an added one carries the
+    ``knowable_date`` it was disseminated on, which must not be after the ex-date it applies on.
     """
 
     isin: str
@@ -180,6 +224,8 @@ class ShareRescale:
     numerator: Decimal
     denominator: Decimal
     carried_from: str | None = None
+    source: RescaleSource = RescaleSource.FEED
+    knowable_date: date | None = None
 
     def __post_init__(self) -> None:
         for name in ("numerator", "denominator"):
@@ -188,6 +234,18 @@ class ShareRescale:
                 raise TypeError(f"{name} must be a Decimal")
             if value <= _ZERO:
                 raise ValueError(f"{name} must be positive, got {value}")
+        if self.knowable_date is not None and self.knowable_date > self.ex_date:
+            raise ValueError(
+                f"{self.isin} {self.kind} on {self.ex_date.isoformat()} is knowable only from "
+                f"{self.knowable_date.isoformat()}; the book would apply it before it was known"
+            )
+
+    @property
+    def tally_key(self) -> str:
+        """``SPLIT``/``BONUS`` for a feed's row, ``SPLIT:implied`` etc. for one L2 added."""
+        if self.source is RescaleSource.FEED:
+            return self.kind.value
+        return f"{self.kind.value}:{self.source.value}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -398,7 +456,7 @@ class BookActionCalendar:
             if isinstance(action, UnmodelledAction):
                 tally[f"unmodelled:{action.action_type}"] += 1
             elif isinstance(action, ShareRescale):
-                tally[action.kind.value] += 1
+                tally[action.tally_key] += 1
             elif isinstance(action, IsinReissue):
                 tally["REISSUE" if action.explained else "REISSUE:unexplained"] += 1
             elif isinstance(action, ShareSwap):
@@ -426,6 +484,24 @@ class BookActionCalendar:
             return None
         digest = hashlib.sha256("\n".join(rows).encode()).hexdigest()[:16]
         return f"merger_terms[{len(rows)}]:{digest}"
+
+    def added_identity(self) -> str | None:
+        """A content hash of the rescales L2 added (curated, implied); ``None`` if there are none.
+
+        The run specification carries it beside :meth:`counts` for the reason
+        :meth:`merger_terms_identity` exists: a corrected curated ratio changes a run's result
+        without changing a count.
+        """
+        rows = sorted(
+            f"{a.source.value}|{a.isin}|{a.ex_date}|{a.kind.value}|{a.numerator}|"
+            f"{a.denominator}|{a.knowable_date}"
+            for a in self._actions
+            if isinstance(a, ShareRescale) and a.source is not RescaleSource.FEED
+        )
+        if not rows:
+            return None
+        digest = hashlib.sha256("\n".join(rows).encode()).hexdigest()[:16]
+        return f"added_rescales[{len(rows)}]:{digest}"
 
     def first_on_or_after(self, day: date) -> date | None:
         """The earliest ex-date on or after ``day`` (a debugging aid)."""
@@ -641,7 +717,7 @@ class BookActionApplier:
                 forfeit_fraction=True,
             )
         _check_agree(action.isin, sim, book)
-        self.applied[action.kind.value] += 1
+        self.applied[action.tally_key] += 1
         self.log.append(
             AppliedRescale(
                 isin=action.isin,
@@ -775,6 +851,7 @@ def load_book_actions(
     *,
     merger_terms: MergerTerms | None = None,
     first_priced: _FirstPriced | None = None,
+    composed: Iterable[ComposedEvents] = (),
 ) -> BookActionCalendar:
     """Every reconciled corporate action, in book terms, keyed by ``ex_date`` (never knowable_date).
 
@@ -787,11 +864,16 @@ def load_book_actions(
     replaces the store's unquantified merger rows for the names it covers. ``first_priced(isin,
     on)`` — the first session on or after ``on`` with a close for ``isin`` — defers a swap whose
     survivor had not yet listed on its record date; ``None`` applies every swap on its record date.
+
+    ``composed`` is what L2 composed on top of those rows (``store.l2.compose_lake_events``): the
+    curated and price-implied events it adjusts prices by, which :func:`added_book_events` checks
+    against the feed rows and turns into the same share-count changes. Empty: feed rows only.
     """
     from dataplatform.corpactions import load_merger_terms, load_reconciled_actions
     from dataplatform.identity import LineageStore
 
-    actions = load_reconciled_actions(conn)
+    recorded = load_reconciled_actions(conn)
+    actions = (*recorded, *added_book_events(recorded, composed))
     resolver = LineageStore(conn).load()
     terms = load_merger_terms() if merger_terms is None else merger_terms
     curated = merger_term_actions(
@@ -842,7 +924,7 @@ def _to_book_actions(
     ``covered`` names the ISINs the curated merger terms convert (:func:`merger_term_actions`):
     a store MERGER row on one of them is dropped in favour of the sourced term.
     """
-    from dataplatform.corpactions import DividendTerms, FaceValueTerms, RatioTerms
+    from dataplatform.corpactions import DividendTerms
 
     out: list[BookAction] = []
     skipped: Counter[str] = Counter()
@@ -852,24 +934,20 @@ def _to_book_actions(
         chain = chain_to(row.isin)
         live = _live_isin(row.isin, row.ex_date, chain, effective_date)
         terms = row.terms
-        if action_type == "SPLIT" and isinstance(terms, FaceValueTerms):
+        ratio = _rescale_ratio(row)
+        if ratio is not None:
+            source = _rescale_source(row)
             out.append(
                 ShareRescale(
                     isin=live,
                     ex_date=row.ex_date,
-                    kind=RescaleKind.SPLIT,
-                    numerator=terms.from_value,
-                    denominator=terms.to_value,
-                )
-            )
-        elif action_type == "BONUS" and isinstance(terms, RatioTerms):
-            out.append(
-                ShareRescale(
-                    isin=live,
-                    ex_date=row.ex_date,
-                    kind=RescaleKind.BONUS,
-                    numerator=terms.new_shares + terms.held_shares,
-                    denominator=terms.held_shares,
+                    kind=RescaleKind(action_type),
+                    numerator=ratio[0],
+                    denominator=ratio[1],
+                    source=source,
+                    knowable_date=None
+                    if source is RescaleSource.FEED
+                    else getattr(row, "knowable_date", None),
                 )
             )
         elif action_type == "DIVIDEND":
@@ -908,6 +986,118 @@ def _to_book_actions(
     if skipped:
         _log.info("book_actions.skipped", **dict(sorted(skipped.items())))
     return out
+
+
+def _rescale_ratio(row: _ActionRow) -> tuple[Decimal, Decimal] | None:
+    """A SPLIT's or BONUS's share multiple as ``(numerator, denominator)``; ``None`` for the rest.
+
+    SPLIT ``from → to`` face value: shares x ``from / to`` (₹10 → ₹2 is x5). BONUS ``new:held``:
+    shares x ``(new + held) / held`` (1:2 is x3/2). The reciprocal of the price factor
+    ``dataplatform.corpactions.factors`` derives from the same terms, which
+    :func:`added_book_events` re-checks against L2's chain wherever L2 added an event.
+    """
+    from dataplatform.corpactions import FaceValueTerms, RatioTerms
+
+    action_type = str(getattr(row.action_type, "value", row.action_type))
+    terms = row.terms
+    if action_type == "SPLIT" and isinstance(terms, FaceValueTerms):
+        return terms.from_value, terms.to_value
+    if action_type == "BONUS" and isinstance(terms, RatioTerms):
+        return terms.new_shares + terms.held_shares, terms.held_shares
+    return None
+
+
+def _rescale_source(row: _ActionRow) -> RescaleSource:
+    from dataplatform.corpactions import MANUAL_SOURCE
+    from dataplatform.corpactions.implied import IMPLIED_SOURCE
+
+    source = getattr(row, "source", None)
+    if source == MANUAL_SOURCE:
+        return RescaleSource.CURATED
+    if source == IMPLIED_SOURCE:
+        return RescaleSource.IMPLIED
+    return RescaleSource.FEED
+
+
+#: How far apart two Decimal products of the same ratios may land and still be one factor: the
+#: persisted chain's factors come back from a Postgres NUMERIC, a non-terminating ratio (a 1:3
+#: bonus's 4/3) rounded at its scale rather than Python's.
+_FACTOR_TOLERANCE = Decimal("1e-12")
+
+
+def _same_factor(a: Decimal, b: Decimal) -> bool:
+    return abs(a - b) <= _FACTOR_TOLERANCE * max(_ONE, abs(b))
+
+
+def added_book_events(
+    recorded: Iterable[_ActionRow], composed: Iterable[ComposedEvents]
+) -> tuple[CorporateAction, ...]:
+    """The events L2 added to the feed rows (curated, implied) that the book must apply too.
+
+    What it does: for each ISIN and each ex-date ``composed`` added a SPLIT/BONUS on, compares the
+    share multiple the book would apply — the product of the feed rows' ratios and the added ones'
+    — with the quantity factor of L2's composed chain on that date. Equal: the added events are
+    returned. Not equal, but the feed rows alone equal L2's factor: the persisted chain lagged the
+    feed, L2 implied the feed's own split back from L1, and the added events are dropped so the
+    one split is applied once (``book_actions.added_event_superseded``). Anything else raises
+    ``BookError``: the book would hold a count its prices contradict. A curated structural break
+    (DEMERGER, scheme) is returned as it is; it scales nothing and the book counts it when held.
+
+    What it assumes: ``recorded`` are the rows the book reads from the store
+    (``load_reconciled_actions``), keyed by the same ISIN as ``composed`` (the store's, the L2
+    partition's). What it never does: read a price, invent a ratio, or change a feed row.
+    """
+    feed: dict[tuple[str, date], Decimal] = {}
+    for row in recorded:
+        ratio = _rescale_ratio(row)
+        if ratio is not None:
+            key = (row.isin, row.ex_date)
+            feed[key] = feed.get(key, _ONE) * ratio[0] / ratio[1]
+    out: list[CorporateAction] = []
+    for events in composed:
+        l2_qty = {r.ex_date: r.qty_factor for r in events.chain.rows}
+        by_date: dict[date, list[CorporateAction]] = {}
+        for action in events.added:
+            by_date.setdefault(action.ex_date, []).append(action)
+        for ex_date, added in sorted(by_date.items()):
+            scaling: list[CorporateAction] = []
+            for action in added:
+                if action.action_type.value in ("SPLIT", "BONUS"):
+                    if _rescale_ratio(action) is None:
+                        raise BookError(
+                            f"{events.isin} {action.action_type.value} on {ex_date.isoformat()} "
+                            f"from {action.source} has no quantified terms"
+                        )
+                    scaling.append(action)
+                else:
+                    out.append(action)  # a structural break: no share multiple
+            if not scaling:
+                continue
+            from_feed = feed.get((events.isin, ex_date), _ONE)
+            added_qty = _ONE
+            for action in scaling:
+                numerator, denominator = _rescale_ratio(action) or (_ONE, _ONE)
+                added_qty = added_qty * numerator / denominator
+            in_l2 = l2_qty.get(ex_date, _ONE)
+            if _same_factor(from_feed * added_qty, in_l2):
+                out.extend(scaling)
+            elif from_feed != _ONE and _same_factor(from_feed, in_l2):
+                _log.warning(
+                    "book_actions.added_event_superseded",
+                    isin=events.isin,
+                    ex_date=ex_date.isoformat(),
+                    sources=sorted({a.source for a in scaling}),
+                    feed_multiple=str(from_feed),
+                    l2_multiple=str(in_l2),
+                    detail="the feed row already carries the split L2 composed; applied once",
+                )
+            else:
+                raise BookError(
+                    f"{events.isin} on {ex_date.isoformat()}: the book would multiply shares by "
+                    f"{from_feed * added_qty} (feed x{from_feed}, added x{added_qty}) but L2 "
+                    f"adjusts prices by x{in_l2}; recompute adjustment_factors before backtesting"
+                )
+    return tuple(out)
 
 
 class _ChainTo(Protocol):
@@ -1018,12 +1208,36 @@ def _live_isin(
 def load_store_book_actions() -> BookActionCalendar:
     """:func:`load_book_actions` over the configured Postgres (``dataplatform.store.db``).
 
-    A swap's survivor is checked for a close against the configured lake's L1 listing windows.
+    A swap's survivor is checked for a close against the configured lake's L1 listing windows, and
+    the curated and implied events come from the composition the configured lake's L2 is built
+    with (:func:`_l2_composed_events`).
     """
     from dataplatform.store.db import connect
 
     with connect() as conn:
-        return load_book_actions(conn, first_priced=_l1_first_priced())
+        return load_book_actions(
+            conn, first_priced=_l1_first_priced(), composed=_l2_composed_events(conn)
+        )
+
+
+def _l2_composed_events(conn: Connection) -> tuple[ComposedEvents, ...]:
+    """``store.l2.compose_lake_events`` over the configured lake, with the D2 lineage chains."""
+    from dataplatform.config import get_settings
+    from dataplatform.identity import LineageStore
+    from dataplatform.store.l2 import compose_lake_events
+
+    resolver = LineageStore(conn).load()
+    history = {
+        isin: tuple(chain)
+        for isin in resolver.survivors()
+        if len(chain := resolver.chain_to(isin)) > 1
+    }
+    return compose_lake_events(
+        conn,
+        data_root=get_settings().data_root,
+        history_for=history,
+        survivor_of=resolver.survivor_of,
+    )
 
 
 def _l1_first_priced() -> _FirstPriced:
