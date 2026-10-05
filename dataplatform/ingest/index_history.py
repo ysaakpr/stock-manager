@@ -67,6 +67,11 @@ from dataplatform.ingest.index_changes import (
     parse_press_release_l0,
     parse_press_release_listing,
 )
+from dataplatform.ingest.index_transcription import (
+    ReleaseTranscription,
+    load_release_transcriptions,
+    transcription_parse,
+)
 from dataplatform.ingest.indices import (
     CONSTITUENTS_DATASET,
     CONSTITUENTS_SOURCE_ID,
@@ -136,6 +141,7 @@ class ResidualKind(StrEnum):
     ENTRY_BEFORE_FIRST_SESSION = "entry_before_first_session"  # member before it ever traded
     UNRESOLVED_SYMBOL = "unresolved_symbol"  # an event whose symbol named no ISIN at its date
     UNREADABLE_SECTION = "unreadable_section"  # a tracked section a release could not be read for
+    DERIVED_EVENTS = "derived_events"  # events a transcription derived rather than read (flagged)
     MISSING_RELEASE = "missing_release"  # a candidate release that is not in L0
     SNAPSHOT_MISMATCH = "snapshot_mismatch"  # reconstruction ≠ a stored daily snapshot
 
@@ -219,6 +225,7 @@ class HistoryBuild:
     histories: Mapping[str, IndexHistory]
     events: tuple[ResolvedEvent, ...]
     unparsed: tuple[tuple[str, str], ...] = field(default=())
+    transcribed: tuple[str, ...] = field(default=())  # releases read from a curated transcription
 
 
 # ── identity evidence: symbol windows from the exchange's own files ────────────────────────────
@@ -635,19 +642,25 @@ _VOIDINGS: Final[Mapping[str, _Voiding]] = {
 def _apply_voidings(
     events: Sequence[IndexChangeEvent], present: Iterable[str]
 ) -> list[IndexChangeEvent]:
+    """Drop every event of a voided release, whatever date the parser read for it.
+
+    The voiding names whole releases ("replacements … announced vide press release dated February
+    18, March 12 and March 19, 2020 … shall stand null and void"), each of which was entirely the
+    March 27, 2020 rebalancing — so it is matched by release, not by (release, effective). Matching
+    on the date let ind_prs19032020's Midcap 150 rows through: its prose recounts a March 19 change
+    before its tables, and the parser dated the next section by it, which put Yes Bank into
+    NIFTY Midcap 150 for 2017-2020 alongside its NIFTY 50 seat.
+    """
     held = set(present)
-    voided: set[tuple[str, date]] = set()
-    excepted: dict[tuple[str, date], tuple[str, ...]] = {}
+    excepted: dict[str, tuple[str, ...]] = {}
     for release, voiding in _VOIDINGS.items():
         if release not in held:
             continue
         for target in voiding.voided_releases:
-            voided.add((target, voiding.effective))
-            excepted[(target, voiding.effective)] = voiding.except_indices
+            excepted[target] = voiding.except_indices
     kept: list[IndexChangeEvent] = []
     for ev in events:
-        key = (ev.release, ev.effective)
-        if key in voided and ev.index_slug not in excepted[key]:
+        if ev.release in excepted and ev.index_slug not in excepted[ev.release]:
             _LOG.info(
                 "index_history.event_voided",
                 source=PRESS_RELEASE_SOURCE_ID,
@@ -732,6 +745,7 @@ def build_membership_history(
     data_root: Path | None = None,
     evidence: SymbolEvidence | None = None,
     reissues: Sequence[tuple[str, str, date]] | None = None,
+    transcriptions: Mapping[str, ReleaseTranscription] | None = None,
 ) -> HistoryBuild:
     """Rebuild every tracked index's history from L0 (listing, anchors, releases) and L1 identity.
 
@@ -739,7 +753,13 @@ def build_membership_history(
     for `as_of`, and whichever candidate releases are in L0. It writes nothing — pass the result to
     `write_membership_history`. `evidence` and `reissues` default to the lake's (L1 `prices_raw`
     and the lineage derived from it); a test injects them.
+
+    A release with no text layer is read from its curated transcription
+    (`index_transcription`, default: the reviewed file) when one pins that exact L0 object; its
+    derived (not read) rows are reported per index as `DERIVED_EVENTS`.
     """
+    if transcriptions is None:
+        transcriptions = load_release_transcriptions()
     listing_ref = l0.ref_for(
         PRESS_RELEASE_SOURCE_ID, as_of, f"press_release_listing_{as_of:%Y%m%d}.html"
     )
@@ -755,6 +775,7 @@ def build_membership_history(
     parses: list[PressReleaseParse] = []
     missing: list[PressRelease] = []
     unreadable: list[tuple[PressRelease, str]] = []
+    transcribed: list[ReleaseTranscription] = []
     for release in candidates:
         if not l0.exists(PRESS_RELEASE_SOURCE_ID, release.announced, release.filename):
             missing.append(release)
@@ -763,7 +784,25 @@ def build_membership_history(
         try:
             parses.append(parse_press_release_l0(l0, ref, release))
         except ParseError as exc:
-            unreadable.append((release, str(exc)))
+            transcription = transcriptions.get(release.filename)
+            if transcription is None:
+                unreadable.append((release, str(exc)))
+                continue
+            try:
+                parses.append(transcription_parse(transcription, ref))
+            except ParseError as mismatch:
+                unreadable.append((release, f"{exc}; {mismatch}"))
+                continue
+            transcribed.append(transcription)
+            _LOG.info(
+                "index_history.release_transcribed",
+                source=PRESS_RELEASE_SOURCE_ID,
+                filename=release.filename,
+                announced=release.announced.isoformat(),
+                transcribed_by=transcription.transcribed_by,
+                transcribed_on=transcription.transcribed_on.isoformat(),
+                state="VALIDATED",
+            )
 
     # The global horizon: no reconstruction across a release we do not hold or cannot read at all.
     global_horizon = min(r.announced for r in candidates) if candidates else as_of
@@ -782,6 +821,20 @@ def build_membership_history(
             )
 
     horizon: dict[str, date] = dict.fromkeys(TRACKED_INDICES, global_horizon)
+    for transcription in transcribed:
+        for section in transcription.sections:
+            derived = [r for r in (*section.exclude, *section.include) if r.derived]
+            if derived:
+                residual_seed.append(
+                    Residual(
+                        section.index_slug,
+                        ResidualKind.DERIVED_EVENTS,
+                        transcription.effective,
+                        f"{len(derived)} of {len(section.exclude) + len(section.include)} events "
+                        f"derived, not read ({section.derivation})",
+                        release=transcription.release,
+                    )
+                )
     release_by_name = {r.filename: r for r in candidates}
     unparsed_rows: list[tuple[str, str]] = []
     for parse in parses:
@@ -901,6 +954,7 @@ def build_membership_history(
         histories=histories,
         events=tuple(resolved),
         unparsed=tuple(unparsed_rows) + tuple((r.filename, why) for r, why in unreadable),
+        transcribed=tuple(t.release for t in transcribed),
     )
 
 
@@ -1115,6 +1169,23 @@ def _clipped_on(history: IndexHistory, on_date: date) -> int:
     )
 
 
+def _second_lines_on(history: IndexHistory, on_date: date) -> int:
+    """Members effective on `on_date` that are a second share class of an issuer also in the index.
+
+    Tata Motors' 'A' Ordinary (DVR) shares (IN9155A01020) sat in NIFTY 100 and NIFTY 200 beside
+    the ordinary shares (INE155A01022) until 2020-06-26: the index carried 101/201 securities of
+    100/200 companies. An `IN9` ISIN (a DVR or partly-paid line) whose issuer code (ISIN characters
+    3-7) matches another member's is that case, and its excess is real, not a reconstruction error.
+    """
+    members = [
+        i.isin
+        for i in history.intervals
+        if i.effective_from <= on_date and (i.effective_to is None or on_date < i.effective_to)
+    ]
+    issuers = {isin[3:7] for isin in members if not isin.startswith("IN9")}
+    return sum(1 for isin in members if isin.startswith("IN9") and isin[3:7] in issuers)
+
+
 def render_history_report(build: HistoryBuild) -> str:
     """The depth and reconciliation report, generated from the build itself."""
     lines = [
@@ -1126,7 +1197,8 @@ def render_history_report(build: HistoryBuild) -> str:
         "A segment is the span between two consecutive change dates; its count is the members "
         "effective on its first day. *Explained* off-size segments are those where the excess is "
         "exactly the members clipped to their first appearance (a demerger spin-off's stand-in "
-        "window, which the index really carried).",
+        "window, which the index really carried) plus any second share class of an issuer already "
+        "in the index (Tata Motors DVR beside the ordinary shares, to 2020-06-26).",
         "",
         "| Index | Expected | Coverage start | Anchor | Events applied | Segments | "
         "Off-size (unexplained) | Max abs unexplained residual | Other residuals |",
@@ -1134,7 +1206,11 @@ def render_history_report(build: HistoryBuild) -> str:
     ]
     for slug, h in build.histories.items():
         off = [(d, c) for d, c in h.segments if c != h.expected_size]
-        unexplained = [(d, c) for d, c in off if c - _clipped_on(h, d) != h.expected_size]
+        unexplained = [
+            (d, c)
+            for d, c in off
+            if c - _clipped_on(h, d) - _second_lines_on(h, d) != h.expected_size
+        ]
         worst = max((abs(c - h.expected_size) for _, c in unexplained), default=0)
         other: defaultdict[str, int] = defaultdict(int)
         for r in h.residuals:
@@ -1150,11 +1226,14 @@ def render_history_report(build: HistoryBuild) -> str:
             "",
             f"## {slug}",
             "",
-            "| Segment start | Reconstructed | Residual | Clipped stand-ins |",
-            "| --- | --- | --- | --- |",
+            "| Segment start | Reconstructed | Residual | Clipped stand-ins | Second share class |",
+            "| --- | --- | --- | --- | --- |",
         ]
         for d, c in h.segments:
-            lines.append(f"| {d} | {c} | {c - h.expected_size:+d} | {_clipped_on(h, d) or ''} |")
+            lines.append(
+                f"| {d} | {c} | {c - h.expected_size:+d} | {_clipped_on(h, d) or ''} | "
+                f"{_second_lines_on(h, d) or ''} |"
+            )
         detail = [r for r in h.residuals if r.kind is not ResidualKind.COUNT]
         if detail:
             lines += ["", "Residuals:", ""]
@@ -1162,6 +1241,13 @@ def render_history_report(build: HistoryBuild) -> str:
                 lines.append(
                     f"- {r.on_date} `{r.kind.value}` {r.isin or ''} {r.release or ''} — {r.detail}"
                 )
+    if build.transcribed:
+        lines += ["", "## Releases read from a curated transcription", ""]
+        lines += [
+            f"- {name}: no text layer; read from `index_release_transcriptions.yaml` "
+            "(sha256-pinned to the L0 object)"
+            for name in build.transcribed
+        ]
     quarantined = [r for r in build.events if r.isin is None]
     if quarantined:
         lines += ["", "## Quarantined events (unresolved symbol)", ""]

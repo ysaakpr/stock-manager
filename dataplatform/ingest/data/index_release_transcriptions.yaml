@@ -1,0 +1,317 @@
+# Curated transcriptions of index-change releases that have no text layer — the input that lets
+# `dataplatform.ingest.index_history` reconstruct across them. Read by
+# `dataplatform.ingest.index_transcription`; checked by tests/unit/test_index_transcription.py.
+#
+# Why this file exists. `ind_prs23082021.pdf` (the September 2021 semi-annual review) draws every
+# word as a 1-bit image mask — no text layer — and the box has no OCR. Until it was read, PR #37's
+# history could not walk back past it (coverage started 2021-10-22 for every index). It was read
+# here by an agent looking at the rendered pages, one by one, and typed in. No OCR was used and
+# none was added: the page images were rasterised from the PDF's own mask images by a throwaway
+# renderer (no dependency), then read visually.
+#
+# Rules for an entry (enforced by the loader and the tests):
+#   * Provenance is the L0 object, pinned by `l0_key` and `sha256`. The builder applies a
+#     transcription only when the object in L0 hashes to that sha — a re-issued PDF is a new
+#     transcription, never a silent re-use of this one. L0 is never modified.
+#   * Every row is [Sr. No., Company Name, Symbol] exactly as printed, including the release's own
+#     spellings ("AstraZenca", "Railtel Corporation Of India") — a typo fixed here would be a
+#     transcription that disagrees with its source.
+#   * `pages` are 1-based PDF page numbers. `quote`s are verbatim from the page named.
+#   * A section the source does not print completely is never filled from memory. Rows derived
+#     rather than read are kept apart (`exclude_derived`/`include_derived`), carry no Sr. No., name
+#     the `derivation` that produces them, and are re-derived by the tests from the transcribed
+#     component sections — so a reviewer can tell at a glance what was read and what was computed.
+#   * `flags` lists everything that did not read cleanly. An ambiguous entry is flagged, not guessed.
+
+version: 1
+
+transcriptions:
+  - release: ind_prs23082021.pdf
+    l0_key: nifty_index_press_releases/2021/08/ind_prs23082021.pdf
+    sha256: c9b9feef248ca89f7d8c8f12009e3d5c409eb4d6c793eee061fb93bf0af1231e
+    page_count: 29
+    announced: 2021-08-23
+    title: Revision in criteria and replacements in Indices
+    transcribed_by: agent (Claude Opus 5.5, claude-opus-5-5) reading rendered page images
+    transcribed_on: 2026-10-05
+    method: >-
+      Each page's image-mask XObjects were rasterised at 2.5 px/pt with a pure-Python renderer and
+      read visually, page by page; no OCR. Pages 1-14 (every tracked-index section, and the
+      NIFTY Midcap 100 section used to cross-check NIFTY 200) were read at full resolution; pages
+      15-29 (sectoral and thematic indices, none tracked) were read for their headings and for the
+      closing "No changes" sentence on page 27.
+    effective:
+      date: 2021-09-30
+      page: 1
+      quote: >-
+        These changes shall become effective from September 30, 2021 (close of September 29,
+        2021).
+    unchanged:
+      - index: nifty50
+        page: 27
+        quote: >-
+          No changes are being made in NIFTY 50, NIFTY50 Equal Weight, NIFTY Auto, NIFTY Bank,
+          NIFTY Consumer Durables, NIFTY Financial Services, NIFTY Financial Services 25/50, NIFTY
+          PSU Bank, NIFTY India Consumption, NIFTY PSE, NIFTY Aditya Birla Group, NIFTY Mahindra
+          Group and NIFTY Tata Group indices.
+    sections:
+      - index: niftynext50
+        heading: "1) NIFTY Next 50"
+        pages: [3, 4]
+        exclude:
+          - [1, "Abbott India Ltd.", ABBOTINDIA]
+          - [2, "Alkem Laboratories Ltd.", ALKEM]
+          - [3, "MRF Ltd.", MRF]
+          - [4, "Petronet LNG Ltd.", PETRONET]
+          - [5, "United Breweries Ltd.", UBL]
+        include:
+          - [1, "Bank of Baroda", BANKBARODA]
+          - [2, "Cholamandalam Investment and Fin. Co. Ltd.", CHOLAFIN]
+          - [3, "Jindal Steel & Power Ltd.", JINDALSTEL]
+          - [4, "PI Industries Ltd.", PIIND]
+          - [5, "Steel Authority of India Ltd.", SAIL]
+      - index: nifty500
+        heading: "2) NIFTY 500"
+        pages: [4, 5]
+        exclude:
+          - [1, "Akzo Nobel India Ltd.", AKZOINDIA]
+          - [2, "Balmer Lawrie & Co. Ltd.", BALMLAWRIE]
+          - [3, "Bliss GVS Pharma Ltd.", BLISSGVS]
+          - [4, "Dish TV India Ltd.", DISHTV]
+          - [5, "Dishman Carbogen Amcis Ltd.", DCAL]
+          - [6, "Future Consumer Ltd.", FCONSUMER]
+          - [7, "Garden Reach Shipbuilders & Engineers Ltd.", GRSE]
+          - [8, "GE Power India Ltd.", GEPIL]
+          - [9, "Gillette India Ltd.", GILLETTE]
+          - [10, "Gulf Oil Lubricants India Ltd.", GULFOILLUB]
+          - [11, "Himadri Speciality Chemical Ltd.", HSCL]
+          - [12, "Huhtamaki India Ltd.", HUHTAMAKI]
+          - [13, "JTEKT India Ltd.", JTEKTINDIA]
+          - [14, "Maharashtra Scooters Ltd.", MAHSCOOTER]
+          - [15, "Maharashtra Seamless Ltd.", MAHSEAMLES]
+          - [16, "MAS Financial Services Ltd.", MASFIN]
+          - [17, "Raymond Ltd.", RAYMOND]
+          - [18, "Responsive Industries Ltd.", RESPONIND]
+          - [19, "Shoppers Stop Ltd.", SHOPERSTOP]
+        exclude_derived:
+          - ["Sundaram Clayton Ltd.", SUNCLAYLTD]
+          - ["Swan Energy Ltd.", SWANENERGY]
+          - ["Tata Investment Corporation Ltd.", TATAINVEST]
+          - ["VST Industries Ltd.", VSTIND]
+        include_derived:
+          - ["Anupam Rasayan India Ltd.", ANURAS]
+          - ["Brookfield India Real Estate Trust", BIRET]
+          - ["CG Power and Industrial Solutions Ltd.", CGPOWER]
+          - ["Embassy Office Parks REIT", EMBASSY]
+          - ["Equitas Small Finance Bank Ltd.", EQUITASBNK]
+          - ["Fertilisers and Chemicals Travancore Ltd.", FACT]
+          - ["Hathway Cable & Datacom Ltd.", HATHWAY]
+          - ["Home First Finance Company India Ltd.", HOMEFIRST]
+          - ["Indian Railway Finance Corporation Ltd.", IRFC]
+          - ["Indigo Paints Ltd.", INDIGOPNTS]
+          - ["Jubilant Ingrevia Ltd.", JUBLINGREA]
+          - ["Jubilant Pharmova Ltd.", JUBLPHARMA]
+          - ["Kalyan Jewellers India Ltd.", KALYANKJIL]
+          - ["Laxmi Organic Industries Ltd.", LXCHEM]
+          - ["Macrotech Developers Ltd.", LODHA]
+          - ["Mastek Ltd.", MASTEK]
+          - ["Mindspace Business Parks REIT", MINDSPACE]
+          - ["Nazara Technologies Ltd.", NAZARA]
+          - ["Poonawalla Fincorp Ltd.", POONAWALLA]
+          - ["Praj Industries Ltd.", PRAJIND]
+          - ["Railtel Corporation Of India Ltd.", RAILTEL]
+          - ["Tata Steel Long Products Ltd.", TATASTLLP]
+          - ["Tata Teleservices (Maharashtra) Ltd.", TTML]
+        derivation: >-
+          composition: NIFTY 500 = NIFTY 100 + NIFTY Midcap 150 + NIFTY Smallcap 250 (disjoint).
+          A company's net count of inclusions minus exclusions across those three sections of this
+          release is its NIFTY 500 change (+1 included, -1 excluded, 0 none). The identity holds on
+          all 87 change dates of the 2021-10-22 -> 2026-10-05 history (PR #37) and on every stored
+          snapshot; the 19 rows the source does print are exactly the first 19 derived exclusions in
+          the source's own alphabetical order.
+      - index: nifty100
+        heading: "3) NIFTY 100"
+        pages: [5]
+        exclude:
+          - [1, "Abbott India Ltd.", ABBOTINDIA]
+          - [2, "Alkem Laboratories Ltd.", ALKEM]
+          - [3, "MRF Ltd.", MRF]
+          - [4, "Petronet LNG Ltd.", PETRONET]
+          - [5, "United Breweries Ltd.", UBL]
+        include:
+          - [1, "Bank of Baroda", BANKBARODA]
+          - [2, "Cholamandalam Investment and Fin. Co. Ltd.", CHOLAFIN]
+          - [3, "Jindal Steel & Power Ltd.", JINDALSTEL]
+          - [4, "PI Industries Ltd.", PIIND]
+          - [5, "Steel Authority of India Ltd.", SAIL]
+      - index: niftymidcap150
+        heading: "4) NIFTY Midcap 150"
+        pages: [5, 6, 7]
+        exclude:
+          - [1, "Akzo Nobel India Ltd.", AKZOINDIA]
+          - [2, "AstraZenca Pharma India Ltd.", ASTRAZEN]
+          - [3, "Bank of Baroda", BANKBARODA]
+          - [4, "Bombay Burmah Trading Corporation Ltd.", BBTC]
+          - [5, "CESC Ltd.", CESC]
+          - [6, "Cholamandalam Investment and Fin. Co. Ltd.", CHOLAFIN]
+          - [7, "CreditAccess Grameen Ltd.", CREDITACC]
+          - [8, "Gillette India Ltd.", GILLETTE]
+          - [9, "Godrej Agrovet Ltd.", GODREJAGRO]
+          - [10, "IDBI Bank Ltd.", IDBI]
+          - [11, "IIFL Wealth Management Ltd.", IIFLWAM]
+          - [12, "Indiabulls Housing Finance Ltd.", IBULHSGFIN]
+          - [13, "Jindal Steel & Power Ltd.", JINDALSTEL]
+          - [14, "JM Financial Ltd.", JMFINANCIL]
+          - [15, "Motilal Oswal Financial Services Ltd.", MOTILALOFS]
+          - [16, "PI Industries Ltd.", PIIND]
+          - [17, "Procter & Gamble Health Ltd.", PGHL]
+          - [18, "SJVN Ltd.", SJVN]
+          - [19, "Steel Authority of India Ltd.", SAIL]
+          - [20, "V-Guard Industries Ltd.", VGUARD]
+        include:
+          - [1, "Abbott India Ltd.", ABBOTINDIA]
+          - [2, "Affle (India) Ltd.", AFFLE]
+          - [3, "Alkem Laboratories Ltd.", ALKEM]
+          - [4, "Alkyl Amines Chemicals Ltd.", ALKYLAMINE]
+          - [5, "APL Apollo Tubes Ltd.", APLAPOLLO]
+          - [6, "Blue Dart Express Ltd.", BLUEDART]
+          - [7, "Embassy Office Parks REIT", EMBASSY]
+          - [8, "Hindustan Copper Ltd.", HINDCOPPER]
+          - [9, "Indian Bank", INDIANB]
+          - [10, "Indian Railway Finance Corporation Ltd.", IRFC]
+          - [11, "Kajaria Ceramics Ltd.", KAJARIACER]
+          - [12, "Linde India Ltd.", LINDEINDIA]
+          - [13, "Macrotech Developers Ltd.", LODHA]
+          - [14, "Mindspace Business Parks REIT", MINDSPACE]
+          - [15, "MRF Ltd.", MRF]
+          - [16, "National Aluminium Co. Ltd.", NATIONALUM]
+          - [17, "Petronet LNG Ltd.", PETRONET]
+          - [18, "United Breweries Ltd.", UBL]
+          - [19, "Vaibhav Global Ltd.", VAIBHAVGBL]
+          - [20, "WABCO India Ltd.", WABCOINDIA]
+      - index: niftysmallcap250
+        heading: "5) NIFTY Smallcap 250"
+        pages: [7, 8, 9]
+        exclude:
+          - [1, "Affle (India) Ltd.", AFFLE]
+          - [2, "Alkyl Amines Chemicals Ltd.", ALKYLAMINE]
+          - [3, "APL Apollo Tubes Ltd.", APLAPOLLO]
+          - [4, "Balmer Lawrie & Co. Ltd.", BALMLAWRIE]
+          - [5, "Bliss GVS Pharma Ltd.", BLISSGVS]
+          - [6, "Blue Dart Express Ltd.", BLUEDART]
+          - [7, "Dish TV India Ltd.", DISHTV]
+          - [8, "Dishman Carbogen Amcis Ltd.", DCAL]
+          - [9, "Future Consumer Ltd.", FCONSUMER]
+          - [10, "Garden Reach Shipbuilders & Engineers Ltd.", GRSE]
+          - [11, "GE Power India Ltd.", GEPIL]
+          - [12, "Gulf Oil Lubricants India Ltd.", GULFOILLUB]
+          - [13, "Himadri Speciality Chemical Ltd.", HSCL]
+          - [14, "Hindustan Copper Ltd.", HINDCOPPER]
+          - [15, "Huhtamaki India Ltd.", HUHTAMAKI]
+          - [16, "Indian Bank", INDIANB]
+          - [17, "JTEKT India Ltd.", JTEKTINDIA]
+          - [18, "Kajaria Ceramics Ltd.", KAJARIACER]
+          - [19, "Linde India Ltd.", LINDEINDIA]
+          - [20, "Maharashtra Scooters Ltd.", MAHSCOOTER]
+          - [21, "Maharashtra Seamless Ltd.", MAHSEAMLES]
+          - [22, "MAS Financial Services Ltd.", MASFIN]
+          - [23, "National Aluminium Co. Ltd.", NATIONALUM]
+          - [24, "Raymond Ltd.", RAYMOND]
+          - [25, "Responsive Industries Ltd.", RESPONIND]
+          - [26, "Shoppers Stop Ltd.", SHOPERSTOP]
+          - [27, "Sundaram Clayton Ltd.", SUNCLAYLTD]
+          - [28, "Swan Energy Ltd.", SWANENERGY]
+          - [29, "Tata Investment Corporation Ltd.", TATAINVEST]
+          - [30, "Vaibhav Global Ltd.", VAIBHAVGBL]
+          - [31, "VST Industries Ltd.", VSTIND]
+          - [32, "WABCO India Ltd.", WABCOINDIA]
+        include:
+          - [1, "Anupam Rasayan India Ltd.", ANURAS]
+          - [2, "AstraZenca Pharma India Ltd.", ASTRAZEN]
+          - [3, "Bombay Burmah Trading Corporation Ltd.", BBTC]
+          - [4, "Brookfield India Real Estate Trust", BIRET]
+          - [5, "CESC Ltd.", CESC]
+          - [6, "CG Power and Industrial Solutions Ltd.", CGPOWER]
+          - [7, "CreditAccess Grameen Ltd.", CREDITACC]
+          - [8, "Equitas Small Finance Bank Ltd.", EQUITASBNK]
+          - [9, "Fertilisers and Chemicals Travancore Ltd.", FACT]
+          - [10, "Godrej Agrovet Ltd.", GODREJAGRO]
+          - [11, "Hathway Cable & Datacom Ltd.", HATHWAY]
+          - [12, "Home First Finance Company India Ltd.", HOMEFIRST]
+          - [13, "IDBI Bank Ltd.", IDBI]
+          - [14, "IIFL Wealth Management Ltd.", IIFLWAM]
+          - [15, "Indiabulls Housing Finance Ltd.", IBULHSGFIN]
+          - [16, "Indigo Paints Ltd.", INDIGOPNTS]
+          - [17, "JM Financial Ltd.", JMFINANCIL]
+          - [18, "Jubilant Ingrevia Ltd.", JUBLINGREA]
+          - [19, "Jubilant Pharmova Ltd.", JUBLPHARMA]
+          - [20, "Kalyan Jewellers India Ltd.", KALYANKJIL]
+          - [21, "Laxmi Organic Industries Ltd.", LXCHEM]
+          - [22, "Mastek Ltd.", MASTEK]
+          - [23, "Motilal Oswal Financial Services Ltd.", MOTILALOFS]
+          - [24, "Nazara Technologies Ltd.", NAZARA]
+          - [25, "Poonawalla Fincorp Ltd.", POONAWALLA]
+          - [26, "Praj Industries Ltd.", PRAJIND]
+          - [27, "Procter & Gamble Health Ltd.", PGHL]
+          - [28, "Railtel Corporation Of India Ltd.", RAILTEL]
+          - [29, "SJVN Ltd.", SJVN]
+          - [30, "Tata Steel Long Products Ltd.", TATASTLLP]
+          - [31, "Tata Teleservices (Maharashtra) Ltd.", TTML]
+          - [32, "V-Guard Industries Ltd.", VGUARD]
+      - index: nifty200
+        heading: "10) NIFTY 200"
+        pages: [14]
+        exclude:
+          - [1, "Abbott India Ltd.", ABBOTINDIA]
+          - [2, "Bombay Burmah Trading Corporation Ltd.", BBTC]
+          - [3, "CESC Ltd.", CESC]
+          - [4, "Godrej Agrovet Ltd.", GODREJAGRO]
+          - [5, "Indiabulls Housing Finance Ltd.", IBULHSGFIN]
+          - [6, "V-Guard Industries Ltd.", VGUARD]
+        include:
+          - [1, "Astral Ltd.", ASTRAL]
+          - [2, "Hindustan Copper Ltd.", HINDCOPPER]
+          - [3, "Indian Bank", INDIANB]
+          - [4, "Indian Railway Finance Corporation Ltd.", IRFC]
+          - [5, "National Aluminium Co. Ltd.", NATIONALUM]
+          - [6, "Tata Communications Ltd.", TATACOMM]
+    # Untracked sections transcribed only to cross-check a tracked one: NIFTY 200 = NIFTY 100 +
+    # NIFTY Midcap 100, so the NIFTY 200 table above must equal the net of these and NIFTY 100's.
+    crosscheck_sections:
+      - index: niftymidcap100
+        heading: "7) NIFTY Midcap 100"
+        pages: [10]
+        exclude:
+          - [1, "Bank of Baroda", BANKBARODA]
+          - [2, "Bombay Burmah Trading Corporation Ltd.", BBTC]
+          - [3, "CESC Ltd.", CESC]
+          - [4, "Cholamandalam Investment and Fin. Co.Ltd.", CHOLAFIN]
+          - [5, "Godrej Agrovet Ltd.", GODREJAGRO]
+          - [6, "Indiabulls Housing Finance Ltd.", IBULHSGFIN]
+          - [7, "Jindal Steel & Power Ltd.", JINDALSTEL]
+          - [8, "PI Industries Ltd.", PIIND]
+          - [9, "Steel Authority of India Ltd.", SAIL]
+          - [10, "V-Guard Industries Ltd.", VGUARD]
+        include:
+          - [1, "Alkem Laboratories Ltd.", ALKEM]
+          - [2, "Astral Ltd.", ASTRAL]
+          - [3, "Hindustan Copper Ltd.", HINDCOPPER]
+          - [4, "Indian Bank", INDIANB]
+          - [5, "Indian Railway Finance Corporation Ltd.", IRFC]
+          - [6, "MRF Ltd.", MRF]
+          - [7, "National Aluminium Co. Ltd.", NATIONALUM]
+          - [8, "Petronet LNG Ltd.", PETRONET]
+          - [9, "Tata Communications Ltd.", TATACOMM]
+          - [10, "United Breweries Ltd.", UBL]
+    flags:
+      - index: nifty500
+        kind: truncated_in_source
+        pages: [4, 5]
+        detail: >-
+          The NIFTY 500 section ("2) NIFTY 500", page 4) prints exclusion rows 1-19 (Akzo Nobel ...
+          Shoppers Stop) at the foot of page 4; page 5 opens directly on "3) NIFTY 100". Exclusion
+          rows 20 onward and the whole "being included" table are not in the PDF — every image the
+          two pages draw was rasterised and nothing lies outside the page boxes. The missing rows
+          are not transcribed; they are derived (see the section's `derivation`) and kept apart as
+          `exclude_derived` / `include_derived`. A text copy of the release from the exchange would
+          replace the derivation with a reading.

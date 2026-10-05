@@ -255,8 +255,15 @@ def test_the_march_2020_review_is_void_except_nifty_50() -> None:
         "ind_prs19032020.pdf",
     )
     kept = voided.model_copy(update={"index_slug": "nifty50"})
-    untouched = voided.model_copy(update={"effective": date(2020, 3, 19)})
-    assert _apply_voidings([voided, kept, untouched], ["ind_prs13052020.pdf"]) == [kept, untouched]
+    # The voiding names whole releases: a row of ind_prs19032020 the parser dated 2020-03-19 (its
+    # prose recounts a March 19 change) is void too — matched on the date, it put Yes Bank into
+    # NIFTY Midcap 150 beside its NIFTY 50 seat for 2017-2020.
+    misdated = voided.model_copy(update={"effective": date(2020, 3, 19)})
+    untouched = voided.model_copy(update={"release": "ind_prs16032020.pdf"})
+    assert _apply_voidings([voided, kept, misdated, untouched], ["ind_prs13052020.pdf"]) == [
+        kept,
+        untouched,
+    ]
     # Only once the voiding release itself is in L0.
     assert _apply_voidings([voided], []) == [voided]
 
