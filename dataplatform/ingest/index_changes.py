@@ -40,7 +40,7 @@ from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 from pypdf import PdfReader
-from pypdf.errors import PdfReadError
+from pypdf.errors import DependencyError, PdfReadError
 
 from dataplatform.ingest.fetcher import Fetcher
 from dataplatform.ingest.models import ParseError
@@ -144,8 +144,12 @@ _MONTH_RE: Final = (
     r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
 )
 #: "September 30, 2026" / "Sept. 30,2026" / "Apr. 25, 2003" / "30th September 2026" / "30-Sep-2026".
+#: A two-digit day the PDF's text layer split with a space before its comma ("January 2 8, 2019",
+#: ind_prs21012019.pdf) is read as one number — only before a comma, so "May 3 2019" stays day 3.
 _DATE_MDY: Final = re.compile(
-    _MONTH_RE + r"\.?\s*(?P<day>\d{1,2})(?:st|nd|rd|th)?\s*,?\s*(?P<year>(?:19|20)\d{2})", re.I
+    _MONTH_RE + r"\.?\s*(?P<day>\d\s\d(?=\s*,)|\d{1,2})(?:st|nd|rd|th)?\s*,?\s*"
+    r"(?P<year>(?:19|20)\d{2})",
+    re.I,
 )
 _DATE_DMY: Final = re.compile(
     r"(?P<day>\d{1,2})(?:st|nd|rd|th)?[\s\-]+" + _MONTH_RE + r"\.?[\s\-,]+(?P<year>(?:19|20)\d{2})",
@@ -415,7 +419,7 @@ def parse_date_phrase(text: str) -> date | None:
             return date(
                 int(match.group("year")),
                 _MONTHS[match.group("month").lower().rstrip(".")],
-                int(match.group("day")),
+                int(match.group("day").replace(" ", "")),
             )
         except (KeyError, ValueError):
             return None
@@ -498,8 +502,15 @@ def parse_press_release_pdf(
     pending: list[str] = []  # the row being accumulated (a long name wraps onto the next line)
     section_events: list[IndexChangeEvent] = []
     section_problem: str | None = None
+    section_undated: list[tuple[ChangeAction, str, str | None]] = []
+    # Sections whose rows came before any effective date; dated at the end if the release states
+    # exactly one (ind_prs01082018.pdf puts "These changes shall become effective from …" last).
+    deferred: list[tuple[str, str, list[tuple[ChangeAction, str, str | None]]]] = []
     saw_action = False
     action_rows = 0  # rows read under the open action — an action with none is a detached table
+    last_sr = (
+        0  # the open table's last serial — a bare number that does not follow it is a page no.
+    )
 
     def flush_row() -> None:
         nonlocal section_problem
@@ -507,17 +518,22 @@ def parse_press_release_pdf(
             return
         body = " ".join(pending).strip()
         pending.clear()
+        if not body:
+            # A bare number that nothing followed: the page number at a page break, which can
+            # equal the next serial (ind_prs27042017.pdf: "3" after row 2). A row whose text the
+            # PDF really lost would leave the index off its fixed size, which the walk reports.
+            return
         if section is None or action is None:
             return
         effective = action_date or section_date
-        if effective is None:
-            section_problem = section_problem or "no effective date stated for the section"
-            return
         name, symbol = _split_row(body)
         nonlocal action_rows
         action_rows += 1
         if not name:
             section_problem = section_problem or f"row without a company name: {body!r}"
+            return
+        if effective is None:
+            section_undated.append((action, name, symbol))
             return
         section_events.append(
             IndexChangeEvent(
@@ -544,18 +560,26 @@ def parse_press_release_pdf(
         action_rows = 0
 
     def close_section() -> None:
-        nonlocal section, section_events, section_problem, saw_action
+        nonlocal section, section_events, section_problem, saw_action, section_undated
         close_action()
         if section is not None:
-            if section_problem is None and saw_action and not section_events:
+            if (
+                section_problem is None
+                and saw_action
+                and not section_events
+                and not section_undated
+            ):
                 section_problem = "an include/exclude statement with no table rows"
             if section_problem is not None:
                 unparsed.append(f"{section_label}: {section_problem}")
             else:
                 events.extend(section_events)
+                if section_undated:
+                    deferred.append((section_label, section, section_undated))
         section = None
         section_events = []
         section_problem = None
+        section_undated = []
         saw_action = False
 
     for raw in lines:
@@ -591,6 +615,7 @@ def parse_press_release_pdf(
             )
             action_date = stated
             in_table = False
+            last_sr = 0
             saw_action = section is not None
             continue
 
@@ -616,10 +641,16 @@ def parse_press_release_pdf(
                 continue
             row = _ROW.match(line)
             if re.fullmatch(r"\d{1,3}", line):
+                if int(line) != last_sr + 1:
+                    # A page number the text layer dropped mid-table (ind_prs16022017.pdf prints
+                    # "2" between rows 14 and 15). Taken for a serial it would be a nameless row.
+                    continue
                 flush_row()
+                last_sr = int(line)
                 pending.append("")  # the serial alone; the name wraps onto the next lines
             elif row is not None:
                 flush_row()
+                last_sr = int(row.group("sr"))
                 pending.append(row.group("body"))
             elif pending and _split_row(" ".join(pending))[1] is None and len(line) < 60:
                 pending.append(line)  # a long company name wrapped before its symbol
@@ -630,6 +661,26 @@ def parse_press_release_pdf(
             continue
 
     close_section()
+    if deferred:
+        release_dates = _stated_effective_dates(lines)
+        for label, slug, rows in deferred:
+            if len(release_dates) != 1:
+                unparsed.append(f"{label}: no effective date stated for the section")
+                continue
+            (only,) = release_dates
+            events.extend(
+                IndexChangeEvent(
+                    index_slug=slug,
+                    action=row_action,
+                    company_name=name,
+                    symbol=symbol,
+                    effective=only,
+                    announced=announced,
+                    release=filename,
+                    l0_key=l0_key,
+                )
+                for row_action, name, symbol in rows
+            )
     events.extend(_index_list_events(lines, filename=filename, announced=announced, l0_key=l0_key))
     remark_events, remark_problems = _remark_table_events(
         lines, filename=filename, announced=announced, l0_key=l0_key
@@ -664,6 +715,13 @@ def parse_press_release_pdf(
             state="QUARANTINED",
         )
     return result
+
+
+def _stated_effective_dates(lines: list[str]) -> set[date]:
+    """Every distinct date the release introduces as an effective date, anywhere in its text."""
+    text = " ".join(" ".join(line.split()) for line in lines)
+    found = (parse_date_phrase(text[m.end() :]) for m in _EFFECTIVE_INTRO.finditer(text))
+    return {d for d in found if d is not None}
 
 
 #: The one-column table a spin-off exclusion lists its indices in ("Sr. No. Index Name").
@@ -859,6 +917,12 @@ def _pdf_lines(payload: bytes, *, filename: str) -> list[str]:
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
     except (PdfReadError, ValueError, KeyError) as exc:
         raise ParseError(f"unreadable PDF: {exc}", filename=filename) from exc
+    except DependencyError as exc:
+        # ind_prs20062005_1.pdf is AES-encrypted (empty user password); pypdf needs the
+        # `cryptography` package to open it, which this platform does not carry.
+        raise ParseError(
+            f"encrypted PDF this platform cannot open: {exc}", filename=filename
+        ) from exc
     if len("".join(text.split())) < _MIN_TEXT_CHARS:
         # ind_prs23082021.pdf (the 2021-09 semi-annual review, 29 pages) draws every glyph as an
         # image: there is no text layer to read. Without OCR it is a hole, and it must say so.

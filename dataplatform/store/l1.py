@@ -131,6 +131,7 @@ def write_prices_raw(
     exchange: Exchange = Exchange.NSE,
     delivery_rows: Iterable[DeliveryRow] = (),
     unidentified_rows: Iterable[UnidentifiedRow] = (),
+    unidentified_reason: str = PriceQuarantineReason.ISIN_NOT_PUBLISHED,
     master: IdentityMaster | None = None,
     data_root: Path | None = None,
 ) -> PricesRawWriteReport:
@@ -150,6 +151,10 @@ def write_prices_raw(
     What it never does: store an adjusted price, resolve a symbol by name alone, or drop a delivery
     row. Passing delivery rows without a `master` is a `ValueError`: there is no legal way to place
     them without the identity path.
+
+    `unidentified_rows` are quarantined under `unidentified_reason` — one reason per call, because
+    one source's parse refuses rows for one reason (the NSE placeholder ISIN, the BSE unsplittable
+    merged line).
 
     Returns a `PricesRawWriteReport` whose delivery counts reconcile to the input delivery count.
     """
@@ -201,6 +206,7 @@ def write_prices_raw(
         exchange=exchange,
         trade_date=trade_date,
         data_root=data_root,
+        unidentified_reason=unidentified_reason,
     )
 
     delivery_joined = len(used_keys)
