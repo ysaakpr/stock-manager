@@ -300,9 +300,14 @@ def scan(
         )
         for r in rows
     ]
-    structural: dict[str, list[date]] = {
-        isin: list(days) for isin, days in curated.structural_dates().items()
-    }
+    # A curated date is keyed to the ISIN it was filed under; once a lineage edge retires that
+    # ISIN its bars are scanned in the survivor's partition, so the date is looked up there.
+    structural: dict[str, list[date]] = {}
+    for isin, days in curated.structural_dates().items():
+        structural.setdefault(survivor_of(isin), []).extend(days)
+    explained: dict[str, list[date]] = {}
+    for isin, days in curated.explained_dates().items():
+        explained.setdefault(survivor_of(isin), []).extend(days)
     if conn is not None and steps:
         for isin, ex_date in conn.execute(
             "SELECT DISTINCT isin, ex_date FROM corporate_actions "
@@ -337,7 +342,7 @@ def scan(
             steps,
             structural_dates=structural,
             unscaled_dates=unscaled,
-            explained_dates=curated.explained_dates(),
+            explained_dates=explained,
             threshold=threshold,
             max_gap_days=max_gap_days,
         ),

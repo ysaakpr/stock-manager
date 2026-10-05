@@ -586,7 +586,8 @@ def test_status_jobs_shows_a_registered_job_nobody_ever_fired(
     assert by_name["eod_pipeline"].state == "NEVER_RAN"
     assert not body.healthy
     # The ledger of live sources nothing schedules is served alongside, reasons and all.
-    assert "nse_corp_actions" in body.unscheduled
+    assert "nse_mto" in body.unscheduled
+    assert "nse_corp_actions" not in body.unscheduled  # scheduled by ca_refresh
 
 
 def test_status_gaps_lists_only_the_incomplete_pairs_in_the_range(

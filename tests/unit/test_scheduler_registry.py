@@ -95,6 +95,8 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "identity_refresh",
         "tri_refresh",
         "index_press_refresh",
+        "ca_refresh",
+        "bse_ca_sweep",
     )
     assert registry.get("eod_pipeline").cron == "30 18 * * mon-fri"
     # 19:15, after the 18:30 EOD pipeline: the two share nsearchives.nseindia.com, and a host
@@ -106,6 +108,10 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     assert registry.get("tri_refresh").cron == "0 8 * * sat"
     # 09:00, after tri_refresh on the same niftyindices.com lease (refused, not queued, if held).
     assert registry.get("index_press_refresh").cron == "0 9 * * sat"
+    # 10:00, after identity_refresh (07:00) so a name listed this week resolves.
+    assert registry.get("ca_refresh").cron == "0 10 * * sat"
+    # First Sunday of the month (APScheduler ANDs the two day fields), after the 03:00 L0 sweep.
+    assert registry.get("bse_ca_sweep").cron == "0 6 1-7 * sun"
 
 
 def test_every_default_job_is_valid_and_describes_itself() -> None:

@@ -536,9 +536,10 @@ def materialize_isin(
     `adj = raw x cum_price_factor` holds row by row either way.
 
     `curated` are the sourced actions no feed carries (`corpactions.manual_actions`); `None` reads
-    the repo's curated file. They are composed in before the implied-split scan — a curated split
-    is a recorded event to it, so the same step is never adjusted twice — and one a feed has since
-    published (same ex-date and type) is skipped in the feed's favour (`curated_actions`).
+    the repo's curated file for `isin` *and every ISIN in `history_isins`*, each re-keyed to
+    `isin` (`_curated_for_chain`). They are composed in before the implied-split scan — a curated
+    split is a recorded event to it, so the same step is never adjusted twice — and one a feed has
+    since published (same ex-date and type) is skipped in the feed's favour (`curated_actions`).
     """
     if chain.isin != isin:
         raise ValueError(
@@ -573,7 +574,7 @@ def materialize_isin(
         chain=chain,
         actions=actions,
         raw_bars=raw_bars,
-        curated=curated,
+        curated=_curated_for_chain(isin, sources) if curated is None else curated,
         infer_splits=infer_splits,
     )
     manual, implied = composed.curated, composed.implied
@@ -607,6 +608,33 @@ def materialize_isin(
         state="PUBLISHED",
     )
     return report
+
+
+def _curated_for_chain(isin: str, sources: Sequence[str]) -> tuple[CorporateAction, ...]:
+    """The repo's curated actions for every ISIN whose bars feed `isin`'s partition, keyed to it.
+
+    A curated row is keyed to the ISIN whose partition carried its ex-date when it was written.
+    Once a lineage edge retires that ISIN its bars move into the survivor's stitched partition and
+    its own partition is pruned, so a lookup by the survivor alone would drop the row and leave its
+    step unadjusted (UTISXN50: curated on INF789F1AHR6, 2021-02-17, whose 8.33x print the implied
+    scan cannot match). Each row from a retired ISIN is re-keyed to `isin` with
+    `filed_against_isin` naming where it was filed, the shape a feed action resolved through the
+    lineage has; a row already keyed to `isin` is unchanged, so a partition with no history is
+    built exactly as before.
+    """
+    found: list[CorporateAction] = []
+    for source in dict.fromkeys((*sources, isin)):
+        for row in default_manual_actions().actions_for(source):
+            action = row.as_action()
+            if source != isin:
+                action = action.model_copy(
+                    update={
+                        "isin": isin,
+                        "filed_against_isin": action.filed_against_isin or source,
+                    }
+                )
+            found.append(action)
+    return tuple(sorted(found, key=lambda a: (a.ex_date, a.action_type.value)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -736,6 +764,7 @@ def compose_lake_events(
                     chain=load_factor_chain(conn, isin),
                     actions=load_reconciled_actions(conn, isin=isin),
                     raw_bars=raw_bars,
+                    curated=_curated_for_chain(isin, sources),
                 )
                 if composed.added:
                     out.append(composed)

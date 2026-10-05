@@ -88,6 +88,20 @@ def test_the_bhavcopy_family_is_scheduled_daily(source: str) -> None:
     assert daily, f"{source} has no weekday job"
 
 
+@pytest.mark.parametrize(
+    ("source", "job_name"),
+    [("nse_corp_actions", "ca_refresh"), ("bse_corp_actions", "bse_ca_sweep")],
+)
+def test_the_corporate_action_feeds_are_scheduled_with_a_lag_budget(
+    source: str, job_name: str
+) -> None:
+    """Held back from PR #35 until the lake rebuild; the store stopped at 2026-09-01 meanwhile."""
+    registry = default_registry()
+    assert source not in UNSCHEDULED
+    assert source in registry.get(job_name).covers
+    assert source in lag_budgets(registry)
+
+
 def test_the_eod_jobs_coverage_is_what_its_body_fetches() -> None:
     """`covers` is a claim; this holds it to the source sets the pipeline actually drives."""
     register = load_register()
