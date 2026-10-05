@@ -10,15 +10,25 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Final
 
+import pyarrow.parquet as pq
 import pytest
 
 from dataplatform.identity.master import Exchange, IdentityMaster, SymbolWindow
 from dataplatform.identity.session import SessionIdentity
-from dataplatform.ingest.models import PriceRow, is_isin_check_digit_valid, is_keyable_isin
+from dataplatform.ingest.models import (
+    PriceRow,
+    UnidentifiedRow,
+    is_isin_check_digit_valid,
+    is_keyable_isin,
+)
 from dataplatform.ingest.nse import delivery
 from dataplatform.ingest.nse.delivery import DeliveryRow
+from dataplatform.store.l1 import write_prices_raw
+from dataplatform.store.paths import Layer, partition_path
+from dataplatform.store.schemas import PRICES_RAW_QUARANTINE_DATASET
 
 #: A real chain: BAJFINANCE, reissued 2016-09-09 and again 2025-06-16 (`isin_lineage`).
 A: Final = "INE296A01016"
@@ -233,3 +243,74 @@ def test_real_isins_are_keyable(isin: str) -> None:
 )
 def test_junk_and_wrong_check_digits_are_not(literal: str) -> None:
     assert not is_keyable_isin(literal)
+
+
+# ── the quarantine follows the re-derivation ─────────────────────────────────────────────────
+
+
+def _quarantine(root: Path, day: date) -> list[tuple[str, str, str]]:
+    path = partition_path(Layer.L1, PRICES_RAW_QUARANTINE_DATASET, day, data_root=root)
+    if not path.is_file():
+        return []
+    return [
+        (str(r["exchange"]), str(r["symbol"]), str(r["reason"]))
+        for r in pq.read_table(path).to_pylist()
+    ]
+
+
+def test_a_re_derivation_that_refuses_nothing_clears_the_old_quarantine(tmp_path: Path) -> None:
+    """Before the fix the quarantine kept the last derivation's rows: a session joined whole
+    still reported `no_matching_price`. Other exchanges' rows in the shared partition survive."""
+    day = date(2020, 7, 13)
+    write_prices_raw(
+        [_price("X", "EQ", "INE019A01020", day)],
+        exchange=Exchange.BSE,
+        unidentified_rows=[
+            UnidentifiedRow(symbol="Y", series="A", trade_date=day, stated_isin="", line=2)
+        ],
+        data_root=tmp_path,
+    )
+    prices = [_price("BAJFINANCE", "EQ", B, day)]
+    rows = [_deliv("BAJFINANCE", "EQ", day)]
+    windows = (_window("BAJFINANCE", C),)
+
+    stale = write_prices_raw(
+        prices, delivery_rows=rows, master=IdentityMaster(windows), data_root=tmp_path
+    )
+    assert stale.delivery_orphaned == 0, "the session statement already places it"
+    assert _quarantine(tmp_path, day) == [("BSE", "Y", "isin_not_published")]
+
+    # An orphan, then a clean re-derivation: the NSE row must go, the BSE one must stay.
+    write_prices_raw(
+        prices,
+        delivery_rows=[_deliv("GHOST", "EQ", day)],
+        master=IdentityMaster(windows),
+        data_root=tmp_path,
+    )
+    assert ("NSE", "GHOST", "symbol_unresolved") in _quarantine(tmp_path, day)
+    assert ("BSE", "Y", "isin_not_published") in _quarantine(tmp_path, day)
+
+    clean = write_prices_raw(
+        prices,
+        delivery_rows=rows,
+        master=IdentityMaster(windows, reissues=CHAIN),
+        data_root=tmp_path,
+    )
+    assert clean.quarantine_path is None
+    assert _quarantine(tmp_path, day) == [("BSE", "Y", "isin_not_published")]
+
+
+def test_the_partition_file_is_removed_when_nothing_is_left(tmp_path: Path) -> None:
+    day = date(2020, 7, 13)
+    prices = [_price("BAJFINANCE", "EQ", B, day)]
+    master = IdentityMaster((_window("BAJFINANCE", C),), reissues=CHAIN)
+    write_prices_raw(
+        prices, delivery_rows=[_deliv("GHOST", "EQ", day)], master=master, data_root=tmp_path
+    )
+    assert _quarantine(tmp_path, day)
+
+    write_prices_raw(
+        prices, delivery_rows=[_deliv("BAJFINANCE", "EQ", day)], master=master, data_root=tmp_path
+    )
+    path = partition_path(Layer.L1, PRICES_RAW_QUARANTINE_DATASET, day, data_root=tmp_path)
+    assert not path.exists()

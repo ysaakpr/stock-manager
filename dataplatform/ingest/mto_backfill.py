@@ -30,10 +30,10 @@ partition unless the resolved L0 root is exactly it.
 `prices_raw_quarantine` partition holds the bhavcopy's placeholder-ISIN rows (W1) *and* the
 delivery rows that could not be placed, and `write_prices_raw` writes it in one piece from what it
 is handed. The write step here is `backfill.SOURCE_SETS[NSE_DELIVERY]`'s, which passes both sets
-in one call; `guard_quarantine` additionally proves, before each write, that every row already in
-the partition that is not a replaceable delivery row will be re-derived by it. A row the write
-would not reproduce — another exchange's, or one from a writer this driver does not know — stops
-that session loudly instead of disappearing.
+in one call; `guard_quarantine` additionally proves, before each write, that every NSE row already
+in the partition that is not a replaceable delivery row will be re-derived by it. A row the write
+would not reproduce — one from a writer this driver does not know — stops that session loudly
+instead of disappearing. Another exchange's rows are carried through the write unchanged.
 
 Resume is L0 plus the journal for acquisition (zero requests for a session already stored or
 already proved absent), and `sync_state` for promotion (a `PUBLISHED` session is skipped).
@@ -584,10 +584,12 @@ def guard_quarantine(
     if not path.is_file():
         return 0
     existing = pq.read_table(path, schema=PRICES_RAW_QUARANTINE_SCHEMA).to_pylist()
+    # Another exchange's rows ride through the write unchanged (`l1._write_quarantine` replaces
+    # only the writing exchange's rows), so only NSE's non-delivery rows are at risk.
     kept = [
         row
         for row in existing
-        if not (row["exchange"] == Exchange.NSE.value and row["reason"] in _DELIVERY_REASONS)
+        if row["exchange"] == Exchange.NSE.value and row["reason"] not in _DELIVERY_REASONS
     ]
     if not kept:
         return 0
