@@ -838,10 +838,35 @@ class SimBroker:
             _log.info("sim_broker.carry_over", from_isin=from_isin, to_isin=to_isin, moved=moved)
         return moved
 
+    def surrender(self, isin: str, *, ex_date: date) -> int:
+        """Remove every entitled share of `isin` from the book — a delisting's cash exit.
+
+        Settled holdings and every pending buy traded before `ex_date` go (cost and all); the
+        caller credits the exit consideration with `credit_corporate_cash`. Every order still
+        staged for `isin` is cancelled with the reason on it: the name no longer trades. Returns
+        the share count surrendered (0 when nothing was held).
+        """
+        surrendered = self.held_quantity(isin, bought_before=ex_date)
+        self._holdings.pop(isin, None)
+        self._positions = [
+            p for p in self._positions if not (p.isin == isin and p.traded < ex_date)
+        ]
+        for order in list(self._orders.values()):
+            if order.status is not OrderStatus.STAGED or order.request.isin != isin:
+                continue
+            self._orders[order.order_id] = replace(
+                order,
+                status=OrderStatus.CANCELLED,
+                reason="cancelled: the name was delisted and its shares surrendered for cash",
+            )
+        if surrendered:
+            _log.info("sim_broker.surrender", isin=isin, quantity=surrendered)
+        return surrendered
+
     def credit_corporate_cash(
         self, session: date, isin: str, amount: Decimal, description: str
     ) -> None:
-        """Credit `amount` of corporate-action cash (a dividend) to free cash, with a ledger row.
+        """Credit `amount` of corporate-action cash (dividend, exit) to free cash, with a ledger row
 
         Spendable at once, like the book's credit on the ex-date (`PortfolioBook.credit_dividend`
         says why the ex-date, not the payment date): a dividend is not a trade and has no T+N.

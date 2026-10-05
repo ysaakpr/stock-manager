@@ -1220,7 +1220,7 @@ class _AccountingBroker:
 
     @property
     def applied_actions(self) -> tuple[AppliedBookAction, ...]:
-        """Every dividend, split, bonus and ISIN carry this walk applied, in order."""
+        """Every dividend, split, bonus, ISIN carry, swap and exit this walk applied, in order."""
         return () if self._actions is None else tuple(self._actions.log)
 
     @property

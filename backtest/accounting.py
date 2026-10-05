@@ -426,7 +426,8 @@ class PortfolioBook:
         surviving_isin: str,
         shares_received: Decimal,
         shares_held: Decimal,
-    ) -> None:
+        forfeit_fraction: bool = False,
+    ) -> int:
         """A merger: the acquired entity's shares convert to the surviving entity's, basis carried.
 
         The holder of the *acquired* (amalgamating) company receives ``shares_received`` of the
@@ -441,7 +442,11 @@ class PortfolioBook:
         break, not a scaling, so nothing here touches a price — it moves a share count and its basis
         from the dead ISIN to the live one. Leaving the acquired holding parked on a dead line is
         how a naive book silently loses a position, which is exactly the failure this refuses.
-        Refuses a ratio that would leave a fractional holding.
+        Refuses a ratio that would leave a fractional holding, unless ``forfeit_fraction`` — the
+        walk's case, where the holding is whatever the strategy bought (see
+        :meth:`_rescale_quantity`): the fraction is floored away, and a holding floored to nothing
+        books its whole basis as a realized loss and leaves the survivor untouched. Returns the
+        surviving-entity shares the conversion added.
         """
         if acquired_isin == surviving_isin:
             raise CorporateActionError("a merger's surviving ISIN must differ from the acquired")
@@ -455,10 +460,23 @@ class PortfolioBook:
                 f"cannot apply merger: no position in acquired {acquired_isin}"
             )
 
-        converted_quantity = self._whole_shares(
-            acquired.quantity * shares_received / shares_held, "merger"
-        )
+        exact = acquired.quantity * shares_received / shares_held
+        if forfeit_fraction:
+            converted_quantity = int(exact.to_integral_value(rounding=ROUND_FLOOR))
+        else:
+            converted_quantity = self._whole_shares(exact, "merger")
         moved_basis = acquired.cost_basis
+        if converted_quantity == 0:
+            self._realized -= moved_basis
+            self._positions[acquired_isin] = BookPosition(acquired_isin, 0, _ZERO)
+            _log.info(
+                "book.merger",
+                acquired=acquired_isin,
+                surviving=surviving_isin,
+                converted_quantity=0,
+                basis_forfeited=str(moved_basis),
+            )
+            return 0
         surviving = self._positions.get(surviving_isin)
         if surviving is None or surviving.quantity == 0:
             new_quantity = converted_quantity
@@ -475,6 +493,35 @@ class PortfolioBook:
             converted_quantity=converted_quantity,
             basis_moved=str(moved_basis),
         )
+        return converted_quantity
+
+    def apply_cash_exit(self, when: date, isin: str, *, price: Decimal) -> Decimal:
+        """A delisting exit: every share of ``isin`` is surrendered at ``price``; return the cash.
+
+        The position closes like a sale with no charges — the proceeds are credited to cash and
+        ``proceeds - basis`` is realized — because that is what the residual shareholder who
+        tenders in the exit window receives. Refuses an exit on a name the book does not hold.
+        """
+        self._require_decimal("price", price)
+        if price <= _ZERO:
+            raise CorporateActionError(f"exit price must be positive, got {price}")
+        held = self._positions.get(isin)
+        if held is None or held.quantity == 0:
+            raise InsufficientSharesError(f"cannot apply cash exit: no position in {isin}")
+        proceeds = price * held.quantity
+        self._realized += proceeds - held.cost_basis
+        self._cash += proceeds
+        self._positions[isin] = BookPosition(isin, 0, _ZERO)
+        self._post_ledger(when, isin, "cash exit", debit=_ZERO, credit=proceeds)
+        _log.info(
+            "book.cash_exit",
+            isin=isin,
+            session=when.isoformat(),
+            quantity=held.quantity,
+            price=str(price),
+            proceeds=str(proceeds),
+        )
+        return proceeds
 
     def credit_dividend(self, when: date, isin: str, *, per_share: Decimal) -> Decimal:
         """Credit a cash dividend of ``per_share`` on every share of ``isin`` held; return the cash.

@@ -65,13 +65,31 @@ else, so a before/after book measurement still holds the signal fixed.
   share count did not change. A dividend stored under ``S`` but dated before the reissue is paid on
   the ISIN that was live on its ex-date.
 
-**What is not, and why.** ``MERGER``, ``DEMERGER`` and ``SCHEME_OF_ARRANGEMENT`` rows in the store
-are all ``UnquantifiedTerms`` and none names the counterparty ISIN, so the book cannot apply them
+**Mergers and delisting exits, from curated terms.** ``MERGER`` rows in the store are all
+``UnquantifiedTerms`` and none names the transferee, so the book reads the terms instead from the
+reviewed, sourced table ``dataplatform.corpactions.merger_terms`` (every ratio quoted from an L0
+document). A :class:`ShareSwap` converts the held old-ISIN shares into the survivor on the
+scheme's record date — or on the survivor's first priced session when that is later (Indiabulls
+Housing Finance first printed four months after its record date), so a holding is never parked on
+an ISIN with no close: ``floor(held x received / held_ratio)`` shares, the fraction forfeited as a
+split's is, the *whole* cost basis carried, and every lot keeping its own trade date (the tax
+ledger rebuilds it as a rescale of the old lots and a carry — Sec 47(vii) makes the swap no
+transfer and Sec 2(42A) counts the holding from the original purchase). Mechanically it is the
+rescale and the carry this module already performs for a reissue, in that order, so unsettled
+lots settle their converted count on their own T+N and staged orders follow the shares. A
+:class:`CashExit` surrenders the holding at the sourced exit price on the delisting date — the
+first day of the exit window — and books it as a sale. Both are keyed on dates, like every other
+action here, never on ``knowable_date``, and neither reaches a signal. A store merger row the
+table covers is replaced by it; one it does not is named at load (``book_actions.merger_skipped``),
+and a scheme the table lists as unsourced is counted when held, never guessed.
+
+**What is not, and why.** ``DEMERGER`` and ``SCHEME_OF_ARRANGEMENT`` rows in the store are all
+``UnquantifiedTerms`` and none names the counterparty ISIN, so the book cannot apply them
 without inventing terms (the lineage table is not a merger map either: one issuer, linear chains).
-Each merger row is named at load (``book_actions.merger_skipped``). ``RIGHTS`` is a subscription
-decision, and an un-exercised entitlement lapses. Each is counted and logged when the book holds
-the name on its ex-date (``book_actions.unmodelled``), never silently dropped. A dividend stated
-only as a percentage of face value is skipped for the same reason (none exist today).
+``RIGHTS`` is a subscription decision, and an un-exercised entitlement lapses. Each is counted and
+logged when the book holds the name on its ex-date (``book_actions.unmodelled``), never silently
+dropped. A dividend stated only as a percentage of face value is skipped for the same reason (none
+exist today).
 
 Fractional entitlements (a 3:2 bonus on an odd count) are floored and forfeited — the conservative
 side of the cash-in-lieu the store does not carry. Money is ``Decimal`` throughout; nothing here
@@ -99,6 +117,7 @@ from backtest.accounting import BookError, PortfolioBook
 from execution.sim_broker import SimBroker
 
 if TYPE_CHECKING:
+    from dataplatform.corpactions import MergerTerms
     from dataplatform.store.db import Connection
 
 _ZERO = Decimal("0")
@@ -109,15 +128,19 @@ _log = structlog.get_logger(__name__)
 __all__ = [
     "AppliedBookAction",
     "AppliedCarry",
+    "AppliedCashExit",
     "AppliedDividend",
+    "AppliedMerger",
     "AppliedRescale",
     "BookActionApplier",
     "BookActionCalendar",
     "BookActionSource",
     "CashDividend",
+    "CashExit",
     "IsinReissue",
     "RescaleKind",
     "ShareRescale",
+    "ShareSwap",
     "UnmodelledAction",
     "add_book_actions_flag",
     "book_corporate_actions",
@@ -127,6 +150,7 @@ __all__ = [
     "current_signal_split_factors_identity",
     "load_book_actions",
     "load_store_book_actions",
+    "merger_term_actions",
     "signal_split_factors",
     "store_book_actions_unless",
 ]
@@ -204,7 +228,52 @@ class IsinReissue:
     explained: bool
 
 
-BookAction = IsinReissue | ShareRescale | CashDividend | UnmodelledAction
+@dataclass(frozen=True, slots=True)
+class ShareSwap:
+    """On ``ex_date`` every share of ``isin`` becomes ``numerator / denominator`` of the survivor.
+
+    An amalgamation from the curated terms: ``numerator`` shares of ``surviving_isin`` (the ISIN
+    live on ``ex_date``) for every ``denominator`` of ``isin``, in the scheme's own old → new
+    order. ``ex_date`` is the record date, or the survivor's first priced session if later;
+    ``record_date`` and ``knowable_date`` are carried for the log and the run specification.
+    """
+
+    isin: str
+    ex_date: date
+    surviving_isin: str
+    numerator: Decimal
+    denominator: Decimal
+    record_date: date
+    knowable_date: date
+
+    def __post_init__(self) -> None:
+        if self.isin == self.surviving_isin:
+            raise ValueError(f"{self.isin}: a share swap's survivor must be another ISIN")
+        for name in ("numerator", "denominator"):
+            value = getattr(self, name)
+            if not isinstance(value, Decimal):
+                raise TypeError(f"{name} must be a Decimal")
+            if value <= _ZERO:
+                raise ValueError(f"{name} must be positive, got {value}")
+
+
+@dataclass(frozen=True, slots=True)
+class CashExit:
+    """On ``ex_date`` (the delisting) every share of ``isin`` is surrendered at ``price``."""
+
+    isin: str
+    ex_date: date
+    price: Decimal
+    knowable_date: date
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.price, Decimal):
+            raise TypeError("price must be a Decimal — money is never float (CLAUDE.md)")
+        if self.price <= _ZERO:
+            raise ValueError(f"exit price must be positive, got {self.price}")
+
+
+BookAction = IsinReissue | ShareRescale | CashDividend | ShareSwap | CashExit | UnmodelledAction
 
 #: How far before a lineage edge's effective date a SPLIT/BONUS may be ex and still explain the
 #: reissue. Measured over the store's 593 edges: the explaining action is ex on the effective date
@@ -251,13 +320,49 @@ class AppliedRescale:
     new_quantity: int
 
 
-AppliedBookAction = AppliedDividend | AppliedCarry | AppliedRescale
+@dataclass(frozen=True, slots=True)
+class AppliedMerger:
+    """A share swap applied on ``ex_date``: ``old_quantity`` of ``from_isin`` became
+    ``new_quantity`` of ``isin`` (floored; the fraction forfeited) at ``numerator : denominator``.
+    """
+
+    from_isin: str
+    isin: str
+    ex_date: date
+    numerator: Decimal
+    denominator: Decimal
+    old_quantity: int
+    new_quantity: int
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedCashExit:
+    """``quantity`` shares of ``isin`` surrendered at ``price`` on ``ex_date`` for ``amount``."""
+
+    isin: str
+    ex_date: date
+    quantity: int
+    price: Decimal
+    amount: Decimal
+
+
+AppliedBookAction = (
+    AppliedDividend | AppliedCarry | AppliedRescale | AppliedMerger | AppliedCashExit
+)
 
 #: Within one ex-date: reissue carries first (1:1, so no count changes, and a dividend or split
 #: dated the survivor's first session then finds the holding under the survivor), then dividends
-#: (paid on the pre-action count), then rescales, then the unmodelled notices. Then ISIN, for a
-#: stable order.
-_ORDER = {IsinReissue: 0, CashDividend: 1, ShareRescale: 2, UnmodelledAction: 3}
+#: (paid on the pre-action count), then rescales, then share swaps (a survivor's own split that
+#: day must not rescale shares that were not yet its own) and cash exits, then the unmodelled
+#: notices (which then see nothing held for a name a curated term converted). Then ISIN.
+_ORDER = {
+    IsinReissue: 0,
+    CashDividend: 1,
+    ShareRescale: 2,
+    ShareSwap: 3,
+    CashExit: 4,
+    UnmodelledAction: 5,
+}
 
 
 def _sort_key(action: BookAction) -> tuple[date, int, str]:
@@ -296,9 +401,31 @@ class BookActionCalendar:
                 tally[action.kind.value] += 1
             elif isinstance(action, IsinReissue):
                 tally["REISSUE" if action.explained else "REISSUE:unexplained"] += 1
+            elif isinstance(action, ShareSwap):
+                tally["MERGER:share_swap"] += 1
+            elif isinstance(action, CashExit):
+                tally["MERGER:cash_exit"] += 1
             else:
                 tally["DIVIDEND"] += 1
         return dict(sorted(tally.items()))
+
+    def merger_terms_identity(self) -> str | None:
+        """A content hash of the share swaps and cash exits — ``None`` when there are none.
+
+        The run specification carries it beside :meth:`counts`: a corrected ratio changes a run's
+        result without changing any count, so it must change the run's digest too.
+        """
+        rows = sorted(
+            f"swap|{a.isin}|{a.ex_date}|{a.surviving_isin}|{a.numerator}|{a.denominator}"
+            if isinstance(a, ShareSwap)
+            else f"exit|{a.isin}|{a.ex_date}|{a.price}"
+            for a in self._actions
+            if isinstance(a, ShareSwap | CashExit)
+        )
+        if not rows:
+            return None
+        digest = hashlib.sha256("\n".join(rows).encode()).hexdigest()[:16]
+        return f"merger_terms[{len(rows)}]:{digest}"
 
     def first_on_or_after(self, day: date) -> date | None:
         """The earliest ex-date on or after ``day`` (a debugging aid)."""
@@ -438,6 +565,10 @@ class BookActionApplier:
                 self._rescale(action, sim, book)
             elif isinstance(action, IsinReissue):
                 self._reissue(action, sim, book)
+            elif isinstance(action, ShareSwap):
+                self._swap(action, sim, book)
+            elif isinstance(action, CashExit):
+                self._exit(action, session, sim, book)
             else:
                 self._unmodelled(action, sim)
         self._last = session
@@ -523,6 +654,74 @@ class BookActionApplier:
             )
         )
 
+    def _swap(self, action: ShareSwap, sim: SimBroker, book: PortfolioBook) -> None:
+        """Rescale the old ISIN by the swap ratio, then carry it 1:1 into the survivor.
+
+        The two steps are the split and the reissue this applier already trusts, so pending lots
+        keep their trade dates and T+N, staged orders follow the shares, and both books are checked
+        share for share. Rescaling *before* the carry keeps the ratio off any survivor shares the
+        book already held.
+        """
+        if _entitled(action.isin, action.ex_date, sim) == 0:
+            return
+        old, new = sim.apply_share_rescale(
+            action.isin,
+            numerator=action.numerator,
+            denominator=action.denominator,
+            ex_date=action.ex_date,
+        )
+        sim.carry_over(action.isin, action.surviving_isin)
+        converted = book.apply_merger(
+            action.isin,
+            surviving_isin=action.surviving_isin,
+            shares_received=action.numerator,
+            shares_held=action.denominator,
+            forfeit_fraction=True,
+        )
+        if converted != new:
+            raise BookError(
+                f"share swap {action.isin} -> {action.surviving_isin}: SimBroker converted {new}, "
+                f"PortfolioBook {converted}"
+            )
+        _check_agree(action.isin, sim, book)
+        _check_agree(action.surviving_isin, sim, book)
+        self.applied["MERGER:share_swap"] += 1
+        self.log.append(
+            AppliedMerger(
+                from_isin=action.isin,
+                isin=action.surviving_isin,
+                ex_date=action.ex_date,
+                numerator=action.numerator,
+                denominator=action.denominator,
+                old_quantity=old,
+                new_quantity=new,
+            )
+        )
+        _log.info(
+            "book_actions.share_swap",
+            isin=action.isin,
+            surviving_isin=action.surviving_isin,
+            ex_date=action.ex_date.isoformat(),
+            record_date=action.record_date.isoformat(),
+            old_quantity=old,
+            new_quantity=new,
+        )
+
+    def _exit(self, action: CashExit, session: date, sim: SimBroker, book: PortfolioBook) -> None:
+        quantity = _entitled(action.isin, action.ex_date, sim)
+        if quantity == 0:
+            return
+        surrendered = sim.surrender(action.isin, ex_date=action.ex_date)
+        amount = book.apply_cash_exit(session, action.isin, price=action.price)
+        if surrendered != quantity:
+            raise BookError(f"cash exit {action.isin}: surrendered {surrendered} of {quantity}")
+        sim.credit_corporate_cash(
+            session, action.isin, amount, f"CASH EXIT {quantity} x {action.price}"
+        )
+        _check_agree(action.isin, sim, book)
+        self.applied["MERGER:cash_exit"] += 1
+        self.log.append(AppliedCashExit(action.isin, session, quantity, action.price, amount))
+
     def _unmodelled(self, action: UnmodelledAction, sim: SimBroker) -> None:
         if sim.held_quantity(action.isin) == 0:
             return
@@ -571,23 +770,44 @@ def _check_agree(isin: str, sim: SimBroker, book: PortfolioBook) -> None:
 # ── reading them out of the store ────────────────────────────────────────────────────────────────
 
 
-def load_book_actions(conn: Connection) -> BookActionCalendar:
+def load_book_actions(
+    conn: Connection,
+    *,
+    merger_terms: MergerTerms | None = None,
+    first_priced: _FirstPriced | None = None,
+) -> BookActionCalendar:
     """Every reconciled corporate action, in book terms, keyed by ``ex_date`` (never knowable_date).
 
     Reads through the corporate-action module's one door for trusted rows,
     ``dataplatform.corpactions.load_reconciled_actions`` (reconciled only, one row per event), and
     the ISIN lineage through ``dataplatform.identity.LineageStore``. See the module docstring for
     why ``knowable_date`` is deliberately not consulted here, and why that is confined to the book.
+
+    ``merger_terms`` (default: the curated file) adds the sourced share swaps and cash exits and
+    replaces the store's unquantified merger rows for the names it covers. ``first_priced(isin,
+    on)`` — the first session on or after ``on`` with a close for ``isin`` — defers a swap whose
+    survivor had not yet listed on its record date; ``None`` applies every swap on its record date.
     """
-    from dataplatform.corpactions import load_reconciled_actions
+    from dataplatform.corpactions import load_merger_terms, load_reconciled_actions
     from dataplatform.identity import LineageStore
 
     actions = load_reconciled_actions(conn)
     resolver = LineageStore(conn).load()
+    terms = load_merger_terms() if merger_terms is None else merger_terms
+    curated = merger_term_actions(
+        terms, resolver.chain_to, resolver.effective_date, first_priced=first_priced
+    )
     calendar = BookActionCalendar(
-        _to_book_actions(
-            actions, resolver.chain_to, resolver.effective_date, reissues=resolver.edges()
-        )
+        [
+            *_to_book_actions(
+                actions,
+                resolver.chain_to,
+                resolver.effective_date,
+                reissues=resolver.edges(),
+                covered=_covered(terms),
+            ),
+            *curated,
+        ]
     )
     _log.info("book_actions.loaded", total=len(calendar), **calendar.counts())
     return calendar
@@ -612,12 +832,15 @@ def _to_book_actions(
     effective_date: _EffectiveDate,
     *,
     reissues: Iterable[tuple[str, str, date]] = (),
+    covered: frozenset[str] = frozenset(),
 ) -> list[BookAction]:
     """Translate store rows into book actions, resolving each onto the ISIN held on its ex-date.
 
     ``reissues`` are the lineage's one-hop edges ``(predecessor, successor, effective_date)``; each
     becomes an :class:`IsinReissue` on its effective date, explained when a SPLIT/BONUS resolved
     onto either end of the edge is ex within :data:`_REISSUE_WINDOW_DAYS` on or before it.
+    ``covered`` names the ISINs the curated merger terms convert (:func:`merger_term_actions`):
+    a store MERGER row on one of them is dropped in favour of the sourced term.
     """
     from dataplatform.corpactions import DividendTerms, FaceValueTerms, RatioTerms
 
@@ -655,6 +878,9 @@ def _to_book_actions(
             else:
                 skipped["DIVIDEND:no_rupee_amount"] += 1
         elif action_type in ("MERGER", "DEMERGER", "SCHEME_OF_ARRANGEMENT", "RIGHTS"):
+            if action_type == "MERGER" and (live in covered or row.isin in covered):
+                skipped["MERGER:curated_terms"] += 1  # the sourced term converts the holding
+                continue
             if action_type == "MERGER":
                 # No stored merger names its surviving ISIN (and the lineage is not a merger map),
                 # so even a stated ratio has nowhere to go: named here, never guessed.
@@ -688,6 +914,84 @@ class _ChainTo(Protocol):
     def __call__(self, isin: str, /) -> tuple[str, ...]: ...
 
 
+class _FirstPriced(Protocol):
+    def __call__(self, isin: str, on: date, /) -> date | None: ...
+
+
+def _covered(terms: MergerTerms) -> frozenset[str]:
+    return frozenset(
+        [t.old_isin for t in terms.share_swaps] + [t.old_isin for t in terms.cash_exits]
+    )
+
+
+def merger_term_actions(
+    terms: MergerTerms,
+    chain_to: _ChainTo,
+    effective_date: _EffectiveDate,
+    *,
+    first_priced: _FirstPriced | None = None,
+) -> list[BookAction]:
+    """The curated merger terms as book actions: share swaps, cash exits, unsourced notices.
+
+    A swap's survivor is resolved to the member of its lineage chain live on the day the swap
+    applies — the record date, or the survivor's first priced session after it when
+    ``first_priced`` says the survivor had not yet listed. A survivor ``first_priced`` never sees
+    again is not applied (``book_actions.merger_no_survivor_price``): converting into a name with
+    no close would stall every NAV sample. An unsourced scheme with a record date becomes an
+    :class:`UnmodelledAction` (``MERGER:unsourced``), so a holding in it is counted, not guessed.
+    """
+    out: list[BookAction] = []
+    for swap in terms.share_swaps:
+        applies = swap.record_date
+        if first_priced is not None:
+            survivor_on_record = _live_isin(
+                swap.surviving_isin,
+                swap.record_date,
+                chain_to(swap.surviving_isin),
+                effective_date,
+            )
+            priced = first_priced(survivor_on_record, swap.record_date)
+            if priced is None:
+                _log.warning(
+                    "book_actions.merger_no_survivor_price",
+                    isin=swap.old_isin,
+                    surviving_isin=survivor_on_record,
+                    record_date=swap.record_date.isoformat(),
+                    detail="the survivor never prints after the record date; swap not applied",
+                )
+                continue
+            applies = max(applies, priced)
+        survivor = _live_isin(
+            swap.surviving_isin, applies, chain_to(swap.surviving_isin), effective_date
+        )
+        out.append(
+            ShareSwap(
+                isin=swap.old_isin,
+                ex_date=applies,
+                surviving_isin=survivor,
+                numerator=swap.shares_received,
+                denominator=swap.shares_held,
+                record_date=swap.record_date,
+                knowable_date=swap.knowable_date,
+            )
+        )
+    for cash in terms.cash_exits:
+        out.append(
+            CashExit(
+                isin=cash.old_isin,
+                ex_date=cash.effective_date,
+                price=cash.exit_price,
+                knowable_date=cash.knowable_date,
+            )
+        )
+    for unsourced in terms.unsourced:
+        if unsourced.record_date is not None:
+            out.append(
+                UnmodelledAction(unsourced.old_isin, unsourced.record_date, "MERGER:unsourced")
+            )
+    return out
+
+
 class _EffectiveDate(Protocol):
     def __call__(self, predecessor: str, /) -> date | None: ...
 
@@ -712,11 +1016,35 @@ def _live_isin(
 
 
 def load_store_book_actions() -> BookActionCalendar:
-    """:func:`load_book_actions` over the configured Postgres (``dataplatform.store.db``)."""
+    """:func:`load_book_actions` over the configured Postgres (``dataplatform.store.db``).
+
+    A swap's survivor is checked for a close against the configured lake's L1 listing windows.
+    """
     from dataplatform.store.db import connect
 
     with connect() as conn:
-        return load_book_actions(conn)
+        return load_book_actions(conn, first_priced=_l1_first_priced())
+
+
+def _l1_first_priced() -> _FirstPriced:
+    """``first_priced`` over L1: the survivor's first print if it lists later, else the date."""
+    from backtest.run import _L1Reader  # deferred: backtest.run imports this module
+
+    reader = _L1Reader()
+    try:
+        windows = {w.isin: w for w in reader.listing_windows()}
+    finally:
+        reader.close()
+
+    def first_priced(isin: str, on: date) -> date | None:
+        window = windows.get(isin)
+        if window is None:
+            return None
+        if window.delisted_on is not None and window.delisted_on <= on:
+            return None
+        return max(on, window.listed_from)
+
+    return first_priced
 
 
 # ── the CLI switch the three backtest entry points share ─────────────────────────────────────────
