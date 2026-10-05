@@ -1206,6 +1206,44 @@ sources:
     candidate_alternatives: []
     owner_task: M3.8
 
+  - id: nse_announcement_attachment
+    plan_row: "Corporate announcements"
+    description: >-
+      The document a single NSE corporate announcement links to (`attchmntFile` in the
+      nse_announcements feed) - record-date intimations, exit letters of offer, scheme
+      allotment notices. Used to source merger exchange ratios and delisting exit prices that
+      the feed's one-line text omits (backtest.merger_terms).
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/corporate/{filename}"
+    verified_url: "https://nsearchives.nseindia.com/corporate/GSKCONS_01042020122800_GSKRECORDDATE.pdf"
+    cadence: per_filing
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.corpactions.merger_terms, task: M3.8}
+    robots_notes: No directives on the archive host.
+    pit_notes: >-
+      Never construct these URLs - take them from the `attchmntFile` field of an
+      nse_announcements payload already in L0, whose `an_dt` is the dissemination time and so
+      the knowable date of whatever the document states.
+    status: VERIFIED
+    verified_at: 2026-10-05T13:16:00+05:30
+    last_http_status: 200
+    sample_bytes: 334945
+    content_type: application/pdf
+    sample_sha256: d50f668807250d26175f989068d89784ec083255eef4712984a5c90c3ccb53e9
+    parse_check: >-
+      PDF or ZIP of PDFs; read by hand once to transcribe the terms into the curated merger
+      table, never parsed at runtime.
+    fixture: {frozen: false, task: M3.8, path: "dataplatform/corpactions/merger_terms.yaml"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M3.8
+
   # §4.1 row 14 — news / geopolitical
   - id: gdelt_v2_event_files
     plan_row: "News / geopolitical"
