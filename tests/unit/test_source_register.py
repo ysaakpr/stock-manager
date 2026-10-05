@@ -38,7 +38,7 @@ from dataplatform.ingest.source_register import (
 #: the suite stays offline and deterministic (B10). Bump this when a task records a verification on
 #: a newer date (M6.1 did, on 2026-09-02: curated_rss; M11.1 on 2026-09-04: the macro probe;
 #: M3.9.b on 2026-09-08: nifty_tri_history, re-probed at D8's corrected path).
-LATEST_VERIFICATION: datetime = datetime(2026, 9, 8, 23, 59, 59, tzinfo=IST)
+LATEST_VERIFICATION: datetime = datetime(2026, 10, 5, 23, 59, 59, tzinfo=IST)
 
 
 @pytest.fixture(scope="module")

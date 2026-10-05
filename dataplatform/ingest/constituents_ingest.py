@@ -143,14 +143,23 @@ class SlugStatus(StrEnum):
 class IndexSpec:
     """One index list to ingest — its lake slug, its human name, and what kind of list it is.
 
-    What it assumes: `slug` is the niftyindices file slug (`ind_<slug>list.csv`, C.1) *and* the
-    lake identifier `membership_asof(slug, …)` reads back — they are deliberately the same string,
-    so there is one name for one index end to end.
+    What it assumes: `slug` is the lake identifier `membership_asof(slug, …)` reads back, and —
+    unless `url_slug` says otherwise — also the niftyindices file slug (`ind_<slug>list.csv`, C.1).
+    The two are the same string for every list but one: NIFTY PRIVATE BANK is published as
+    `ind_nifty_privatebanklist.csv`, and `ind_niftyprivatebanklist.csv` answers 200 with the site's
+    Angular shell — 18 L0 snapshots of HTML before the 2026-10-05 audit caught it. The lake slug
+    keeps its historical spelling so the stored sync rows and L0 names stay one series.
     """
 
     slug: str
     name: str
     category: IndexCategory
+    url_slug: str | None = None
+
+    @property
+    def file_slug(self) -> str:
+        """The slug the published CSV's filename carries — `url_slug`, else the lake slug."""
+        return self.slug if self.url_slug is None else self.url_slug
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +227,11 @@ class CoverageReport:
 DEFAULT_INDEX_SET: Final[tuple[IndexSpec, ...]] = (
     IndexSpec("nifty500", "NIFTY 500", IndexCategory.BROAD),
     IndexSpec("nifty50", "NIFTY 50", IndexCategory.BROAD),
+    IndexSpec("niftynext50", "NIFTY NEXT 50", IndexCategory.BROAD),
+    IndexSpec("nifty100", "NIFTY 100", IndexCategory.BROAD),
+    IndexSpec("nifty200", "NIFTY 200", IndexCategory.BROAD),
+    IndexSpec("niftymidcap150", "NIFTY MIDCAP 150", IndexCategory.BROAD),
+    IndexSpec("niftysmallcap250", "NIFTY SMALLCAP 250", IndexCategory.BROAD),
     IndexSpec("niftybank", "NIFTY BANK", IndexCategory.SECTORAL),
     IndexSpec("niftyit", "NIFTY IT", IndexCategory.SECTORAL),
     IndexSpec("niftyauto", "NIFTY AUTO", IndexCategory.SECTORAL),
@@ -227,7 +241,12 @@ DEFAULT_INDEX_SET: Final[tuple[IndexSpec, ...]] = (
     IndexSpec("niftyrealty", "NIFTY REALTY", IndexCategory.SECTORAL),
     IndexSpec("niftymedia", "NIFTY MEDIA", IndexCategory.SECTORAL),
     IndexSpec("niftypsubank", "NIFTY PSU BANK", IndexCategory.SECTORAL),
-    IndexSpec("niftyprivatebank", "NIFTY PRIVATE BANK", IndexCategory.SECTORAL),
+    IndexSpec(
+        "niftyprivatebank",
+        "NIFTY PRIVATE BANK",
+        IndexCategory.SECTORAL,
+        url_slug="nifty_privatebank",
+    ),
     IndexSpec("niftyfinance", "NIFTY FINANCIAL SERVICES", IndexCategory.SECTORAL),
     IndexSpec("niftyhealthcare", "NIFTY HEALTHCARE INDEX", IndexCategory.SECTORAL),
     IndexSpec("niftyconsumerdurables", "NIFTY CONSUMER DURABLES", IndexCategory.SECTORAL),
@@ -283,6 +302,7 @@ def run_constituents_ingest(
                 as_of=as_of,
                 data_root=data_root,
                 register=register,
+                url_slug=spec.file_slug,
             )
         except Exception as exc:  # one slug's failure parks it; the sweep goes on
             cause = _classify(exc)
