@@ -50,8 +50,10 @@ from datetime import date
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
+from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from backtest.policies.sizing import account_order_ceiling
 from backtest.replay import SessionContext, SessionDecision
 from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
@@ -205,13 +207,24 @@ class SectorRotationPolicy:
     a replay reproduces the decision exactly.
     """
 
-    __slots__ = ("_data", "_params")
+    __slots__ = ("_data", "_order_caps", "_params")
 
     def __init__(
-        self, data: SectorRotationData, params: SectorRotationParameters | None = None
+        self,
+        data: SectorRotationData,
+        params: SectorRotationParameters | None = None,
+        *,
+        order_caps: RiskRails | None = None,
     ) -> None:
         self._data = data
         self._params = params if params is not None else SectorRotationParameters()
+        # The rails A8 will clear this policy's orders against. With them, no buy is sized past the
+        # per-order ceiling (``backtest.policies.sizing.account_order_ceiling``): a buy the rail is
+        # bound to refuse leaves its cash idle, the next rebalance spreads the larger idle balance
+        # over the same names, and the book drifts to cash. Sized to the ceiling, the rest stays in
+        # cash and tops the name up at the next rebalance. Not a field of the parameters, so the
+        # parameters' repr is unchanged; the run spec records the sizing instead.
+        self._order_caps = order_caps
 
     def decide(self, ctx: SessionContext) -> SessionDecision:
         """Decide this session: a heartbeat off a rebalance, a full rebalance on one."""
@@ -256,7 +269,8 @@ class SectorRotationPolicy:
 
         held = {holding.isin: holding for holding in ctx.broker.holdings()}
         sells = self._sells(held, target)
-        buys, drift = self._buys(ctx, held, target, prices)
+        marks = {record.isin: record.price for record in candidates}
+        buys, drift = self._buys(ctx, held, target, prices, marks)
 
         orders = tuple(order for order, _ in (*sells, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
@@ -296,13 +310,15 @@ class SectorRotationPolicy:
         held: Mapping[str, Holding],
         target: Mapping[str, SectorRotationRecord],
         prices: Mapping[str, Decimal],
+        marks: Mapping[str, Decimal],
     ) -> tuple[list[tuple[OrderRequest, str]], Decimal]:
         """Whole-share buys toward the equal-weight target basket, sized from free cash.
 
         Budget is the cash *currently free* (``margins().available``) times ``buy_budget_fraction``
         — never sale proceeds staged this session, which have not settled. The allocation is the
         shared M4.7 greedy allocator, accounting for what is already held in the surviving names so
-        it tops up toward equal weight rather than double-buying.
+        it tops up toward equal weight rather than double-buying. With ``order_caps`` no buy is
+        sized past A8's per-order ceiling, the book valued at ``marks`` (this session's candidates).
         """
         if not target:
             return [], _ZERO
@@ -317,6 +333,7 @@ class SectorRotationPolicy:
             prices=prices,
             existing_value=existing_value,
             min_order_value=MIN_ORDER_VALUE_INR,
+            order_ceiling=account_order_ceiling(self._order_caps, ctx.broker, marks),
         )
         buys = [
             (

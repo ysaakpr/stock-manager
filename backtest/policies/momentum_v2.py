@@ -61,8 +61,10 @@ from datetime import date
 from decimal import ROUND_CEILING, Decimal
 from typing import Final, Protocol, runtime_checkable
 
+from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from backtest.policies.sizing import account_order_ceiling
 from backtest.replay import SessionContext, SessionDecision
 from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
@@ -291,11 +293,24 @@ class MomentumV2Policy:
     the decision exactly.
     """
 
-    __slots__ = ("_data", "_params", "_pending")
+    __slots__ = ("_data", "_order_caps", "_params", "_pending")
 
-    def __init__(self, data: MomentumV2Data, params: MomentumV2Parameters | None = None) -> None:
+    def __init__(
+        self,
+        data: MomentumV2Data,
+        params: MomentumV2Parameters | None = None,
+        *,
+        order_caps: RiskRails | None = None,
+    ) -> None:
         self._data = data
         self._params = params if params is not None else MomentumV2Parameters()
+        # The rails A8 will clear this policy's orders against. With them, no buy is sized past the
+        # per-order ceiling (``backtest.policies.sizing.account_order_ceiling``): a buy the rail is
+        # bound to refuse leaves its cash idle, the next rebalance spreads the larger idle balance
+        # over the same names, and the book drifts to cash. Sized to the ceiling, the rest stays in
+        # cash and tops the name up at the next rebalance. Not a field of the parameters, so the
+        # parameters' repr is unchanged; the run spec records the sizing instead.
+        self._order_caps = order_caps
         #: The basket weights decided at the last rebalance, awaiting the proceeds of its sells
         #: (``redeploy_next_session``). ``None`` when nothing is pending. Deterministic state: it is
         #: a pure function of the previous session's decision, so a replay reproduces it.
@@ -457,7 +472,8 @@ class MomentumV2Policy:
         staged this session, which have not settled — and the allocation accounts for existing
         holdings in the surviving names so it tops up toward the model rather than double-buying.
         Under a volatility target (``exposure < 1``) the budget is further capped so the basket's
-        value does not exceed ``exposure`` of the book's capital.
+        value does not exceed ``exposure`` of the book's capital. With ``order_caps`` no buy is
+        sized past A8's per-order ceiling, the book valued at the ranked candidates' prices.
         """
         if not target:
             return [], _ZERO
@@ -482,6 +498,9 @@ class MomentumV2Policy:
             prices=prices,
             existing_value=existing_value,
             min_order_value=MIN_ORDER_VALUE_INR,
+            order_ceiling=account_order_ceiling(
+                self._order_caps, ctx.broker, {**{r.isin: r.price for r in ranked}, **prices}
+            ),
         )
         buys = [
             (
@@ -608,6 +627,11 @@ class MomentumV2Policy:
             prices=prices,
             existing_value=existing_value,
             min_order_value=MIN_ORDER_VALUE_INR,
+            order_ceiling=account_order_ceiling(
+                self._order_caps,
+                ctx.broker,
+                {isin: record.price for isin, record in records.items()},
+            ),
         )
         if not allocation.orders:
             return self._redeploy_heartbeat(ctx, budget, reason="no affordable share reduces drift")

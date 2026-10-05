@@ -46,8 +46,10 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
+from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from backtest.policies.sizing import account_order_ceiling
 from backtest.replay import SessionContext, SessionDecision
 from backtest.sip import simulate_sip_instalment
 from dataplatform.query.pit import Dataset
@@ -209,13 +211,24 @@ class FundamentalsValuePolicy:
     the book only through ``ctx.broker`` (invariant #5), time only through ``ctx.clock`` (B10).
     """
 
-    __slots__ = ("_data", "_params")
+    __slots__ = ("_data", "_order_caps", "_params")
 
     def __init__(
-        self, data: FundamentalsSignalData, params: FundamentalsValueParameters | None = None
+        self,
+        data: FundamentalsSignalData,
+        params: FundamentalsValueParameters | None = None,
+        *,
+        order_caps: RiskRails | None = None,
     ) -> None:
         self._data = data
         self._params = params if params is not None else FundamentalsValueParameters()
+        # The rails A8 will clear this policy's orders against. With them, no buy is sized past the
+        # per-order ceiling (``backtest.policies.sizing.account_order_ceiling``): a buy the rail is
+        # bound to refuse leaves its cash idle, the next rebalance spreads the larger idle balance
+        # over the same names, and the book drifts to cash. Sized to the ceiling, the rest stays in
+        # cash and tops the name up at the next rebalance. Not a field of the parameters, so the
+        # parameters' repr is unchanged; the run spec records the sizing instead.
+        self._order_caps = order_caps
 
     def decide(self, ctx: SessionContext) -> SessionDecision:
         """A heartbeat off a rebalance, a full rebalance on one."""
@@ -256,7 +269,8 @@ class FundamentalsValuePolicy:
 
         held = {holding.isin: holding for holding in ctx.broker.holdings()}
         sells = self._sells(held, keep, band)
-        buys, drift = self._buys(ctx, held, target, prices)
+        marks = {record.isin: record.price for record in candidates}
+        buys, drift = self._buys(ctx, held, target, prices, marks)
         orders = tuple(order for order, _ in (*sells, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
         evidence = self._evidence(ctx.session, chosen, drift, universe=len(ranked))
@@ -285,6 +299,7 @@ class FundamentalsValuePolicy:
         held: Mapping[str, Holding],
         target: Mapping[str, FundamentalsRecord],
         prices: Mapping[str, Decimal],
+        marks: Mapping[str, Decimal],
     ) -> tuple[list[tuple[OrderRequest, str]], Decimal]:
         if not target:
             return [], _ZERO
@@ -294,7 +309,12 @@ class FundamentalsValuePolicy:
             isin: Decimal(held[isin].quantity) * prices[isin] for isin in target if isin in held
         }
         allocation = simulate_sip_instalment(
-            instalment=budget, targets=weights, prices=prices, existing_value=existing_value
+            instalment=budget,
+            targets=weights,
+            prices=prices,
+            existing_value=existing_value,
+            # With ``order_caps``, no buy past A8's per-order ceiling (the book at ``marks``).
+            order_ceiling=account_order_ceiling(self._order_caps, ctx.broker, marks),
         )
         buys = [
             (
