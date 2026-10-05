@@ -97,6 +97,16 @@ FIXTURE_FILES: Final = (
         present=Sample("RELIANCE", "EQ", 10551876, Decimal("51.87")),
         absent=Sample("AAREYDRUGS", "BE", None, None),
     ),
+    # The legacy-bhavcopy era's delivery file (2019-10 .. 2024-07), added with the 2026-10-05
+    # delivery-identity fixes so all three join eras have a real pair.
+    Fixture(
+        filename="sec_bhavdata_full_13072020.csv",
+        trade_date=date(2020, 7, 13),
+        data_rows=1993,
+        absent_rows=311,
+        present=Sample("RELIANCE", "EQ", 6448206, Decimal("20.07")),
+        absent=Sample("AARVEEDEN", "BE", None, None),
+    ),
 )
 
 

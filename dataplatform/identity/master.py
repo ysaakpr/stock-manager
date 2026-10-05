@@ -382,6 +382,7 @@ class IdentityMaster:
         *,
         securities: Iterable[Security] = (),
         listings: Iterable[Listing] = (),
+        reissues: Iterable[tuple[str, str, date]] = (),
         queue: ReconciliationQueue | None = None,
         source: str = "identity_master",
     ) -> None:
@@ -396,12 +397,25 @@ class IdentityMaster:
         self._by_isin = {key: tuple(value) for key, value in by_isin.items()}
         self._securities = {security.isin: security for security in securities}
         self._listings = {(listing.isin, listing.exchange): listing for listing in listings}
+        # `isin_lineage` edges, `(predecessor, successor, effective)`: the successor's first
+        # session. Indexed both ways because the ISIN in force on a date can lie on either side
+        # of the one a symbol window names (see `try_resolve_in_force`).
+        self._reissued_to: dict[str, tuple[str, date]] = {}
+        self._reissued_from: dict[str, list[tuple[str, date]]] = {}
+        for predecessor, successor, effective in sorted(reissues):
+            self._reissued_to[predecessor] = (successor, effective)
+            self._reissued_from.setdefault(successor, []).append((predecessor, effective))
 
     def __repr__(self) -> str:
         return (
             f"{type(self).__name__}(securities={len(self._securities)}, "
             f"windows={sum(len(w) for w in self._by_isin.values())})"
         )
+
+    @property
+    def reissue_count(self) -> int:
+        """How many ISIN reissue edges this master walks in `try_resolve_in_force`."""
+        return len(self._reissued_to)
 
     @property
     def queue(self) -> ReconciliationQueue:
@@ -472,6 +486,59 @@ class IdentityMaster:
                 )
             )
         return isins[0]
+
+    def try_resolve_in_force(
+        self, symbol: str, on_date: date, *, exchange: Exchange = Exchange.NSE
+    ) -> str | None:
+        """`try_resolve`, then moved along the ISIN lineage to the ISIN in force on `on_date`.
+
+        Why: `EQUITY_L.csv` lists a security under its *current* ISIN with its original listing
+        date, so the window it yields claims KOTAKBANK was INE237A01036 since 2003 — while every
+        bhavcopy before the 2026-01-14 reissue states INE237A01028. A caller that keys a dated
+        fact by the window's ISIN (the delivery join) then misses every pre-reissue session.
+        What it does: resolves the window's ISIN exactly as `try_resolve` does, then follows
+        reissue edges forward while the successor had already started trading on `on_date`, and
+        backward while this ISIN had not yet — so the answer is the one the exchange's own file
+        for that session carries.
+        What it assumes: the edges are `isin_lineage`'s (one successor per predecessor, effective
+        date = the successor's first session). With no edges loaded it is exactly `try_resolve`.
+        What it never does: cross an issuer the lineage does not link, or pick between two
+        predecessors that both post-date `on_date` — that would be a merge, which lineage is not;
+        it stops at the ISIN it has and logs the fork.
+        """
+        isin = self.try_resolve(symbol, on_date, exchange=exchange)
+        if isin is None or not (self._reissued_to or self._reissued_from):
+            return isin
+        return self.isin_in_force(isin, on_date)
+
+    def isin_in_force(self, isin: str, on_date: date) -> str:
+        """The ISIN of `isin`'s lineage that was trading on `on_date` — `isin` itself if unmoved.
+
+        The edge walk behind `try_resolve_in_force`, usable on an ISIN a caller already holds.
+        Bounded by the number of edges, so a cyclic lineage cannot loop.
+        """
+        current = isin
+        for _ in range(len(self._reissued_to) + 1):
+            ahead = self._reissued_to.get(current)
+            if ahead is None or ahead[1] > on_date:
+                break
+            current = ahead[0]
+        for _ in range(len(self._reissued_to) + 1):
+            behind = [
+                p for p, effective in self._reissued_from.get(current, ()) if effective > on_date
+            ]
+            if not behind:
+                break
+            if len(behind) > 1:
+                _log.warning(
+                    "identity.lineage_fork",
+                    isin=current,
+                    on_date=on_date.isoformat(),
+                    predecessors=sorted(behind),
+                )
+                break
+            current = behind[0]
+        return current
 
     def symbol_as_of(self, isin: str, on_date: date, *, exchange: Exchange = Exchange.NSE) -> str:
         """The symbol this ISIN traded under on `on_date` — the reverse direction.
@@ -690,11 +757,29 @@ class IdentityStore:
             self.load_windows(),
             securities=self.load_securities(),
             listings=self.load_listings(),
+            reissues=self.load_reissues(),
             queue=self if queue is None else queue,
             source="identity_store",
         )
-        _log.info("identity.master.loaded", securities=len(master.securities))
+        _log.info(
+            "identity.master.loaded",
+            securities=len(master.securities),
+            reissues=master.reissue_count,
+        )
         return master
+
+    def load_reissues(self) -> tuple[tuple[str, str, date], ...]:
+        """Every `isin_lineage` edge as `(predecessor, successor, effective_date)`.
+
+        Read here rather than through `lineage.LineageStore` because the master is what callers
+        hold, and the lineage module depends on this one — not the other way round. Derived and
+        MANUAL edges alike: both are statements of which ISIN traded when.
+        """
+        rows = self._conn.execute(
+            "SELECT predecessor_isin, successor_isin, effective_date FROM isin_lineage "
+            "ORDER BY predecessor_isin"
+        ).fetchall()
+        return tuple((str(p), str(s), effective) for p, s, effective in rows)
 
     def load_windows(self, isins: Sequence[str] | None = None) -> tuple[SymbolWindow, ...]:
         """Stored symbol windows, all of them or just those of the named ISINs."""
