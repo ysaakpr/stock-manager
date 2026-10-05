@@ -482,9 +482,8 @@ def test_every_existing_arm_keeps_its_run_id_byte_for_byte() -> None:
     ledger persisted under the snapshot-era screen is never resumed as today's reading.
     """
     pinned = json.loads(_DIGESTS.read_text())
-    window = {"start": date(2012, 7, 4), "end": date(2026, 8, 31)}
-    floors = (LOW_FLOOR, HIGH_FLOOR)
-    before = digests_without_index_membership(**window, arms=ARMS, floors=floors)
-    now = run_digests(**window, arms=ARMS, floors=floors)
+    start, end, floors = date(2012, 7, 4), date(2026, 8, 31), (LOW_FLOOR, HIGH_FLOOR)
+    before = digests_without_index_membership(start=start, end=end, arms=ARMS, floors=floors)
+    now = run_digests(start=start, end=end, arms=ARMS, floors=floors)
     assert {f"{label}|{floor}": digest for (label, floor), digest in before.items()} == pinned
     assert not set(now.values()) & set(pinned.values())
