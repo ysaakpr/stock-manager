@@ -21,6 +21,11 @@ operation `lineage_rebuild` and the XBRL `--rebuild-from-l0` perform, and like t
 `sync_state` row and drives no lifecycle. Bending the state machine to let a PUBLISHED row go round
 again would erase the one guarantee it exists to make.
 
+The consequence is that a session whose delivery arrived only through a rebuild has the data and no
+`sync_state` row, and the gap report calls it `NEVER_ATTEMPTED`. Recording it is
+`dataplatform.ingest.delivery_reconcile`'s job, run after this: it writes only rows that are absent,
+and only the states the lake proves.
+
 What it does, per session in the range: ask the *same* `SourceSet` the backfill uses
 (`SOURCE_SETS[NSE_DELIVERY]`) for this era's request, read that payload back out of L0, parse it
 with that era's parser, and hand the rows to that set's write step, which reads the session's stored
@@ -325,6 +330,10 @@ def _run(
         print(f"  first sessions with no L0 payload: {shown}", file=sys.stderr)
     if report.failures:
         print(f"  first failures: {report.failures[:5]}", file=sys.stderr)
+    print(
+        "  sync_state is not written by a rebuild; record it with "
+        "`python -m dataplatform.ingest.delivery_reconcile --from ... --to ... --dry-run|--apply`"
+    )
     return 1 if report.failed else 0
 
 
