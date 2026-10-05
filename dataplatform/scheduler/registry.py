@@ -35,6 +35,7 @@ __all__ = [
     "CONSTITUENTS_SNAPSHOT",
     "DAILY_SNAPSHOT",
     "EOD_PIPELINE",
+    "INDEX_PRESS_REFRESH",
     "JOB_NAME",
     "TRI_REFRESH",
     "UNSCHEDULED",
@@ -420,6 +421,37 @@ TRI_REFRESH = Job(
 )
 
 
+def index_press_refresh(context: JobContext) -> None:
+    """The weekly index-change announcement capture (DQ-5): new releases into L0, nothing else.
+
+    What it does: fetches the niftyindices.com press-release listing, the seven tracked indices'
+    anchor CSVs and every candidate change release of the last 120 days not yet in L0 — see
+    `index_history_backfill.run_press_release_refresh`. NSE Indices publishes its semi-annual
+    reviews and ad-hoc replacements there days to weeks before they take effect, so a weekly pass
+    misses nothing and leaves every release in L0 before its change is effective.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: rebuild the membership history in L1, or backfill pre-window releases (the
+    owner-gated campaign). The import is deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.index_history_backfill import run_press_release_refresh
+
+    run_press_release_refresh(context)
+
+
+#: The weekly announcement capture. 09:00 IST on Saturday — after `tri_refresh` (08:00, 15-minute
+#: budget) on the same host, because a host lease is refused rather than queued, and well before the
+#: 20:00 constituents snapshot there. No `sync_sources`: each release is its own sync row dated by
+#: its announcement, so a session-lag budget would measure nothing.
+INDEX_PRESS_REFRESH = Job(
+    name="index_press_refresh",
+    cron="0 9 * * sat",
+    fn=index_press_refresh,
+    timeout=timedelta(minutes=20),
+    description="Weekly capture of NSE Indices change announcements into L0 (DQ-5)",
+    covers=("nifty_index_press_releases",),
+)
+
+
 #: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
 #: audit's root cause was not one broken job but sources that were simply never scheduled — the
 #: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
@@ -488,5 +520,6 @@ def default_registry() -> JobRegistry:
             L0_VERIFY,
             IDENTITY_REFRESH,
             TRI_REFRESH,
+            INDEX_PRESS_REFRESH,
         ]
     )
