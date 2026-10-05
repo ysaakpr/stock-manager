@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 
+import pytest
+
+import backtest.cap_tier_campaign as campaign
 from backtest.cap_tier_campaign import (
     COMPARISON_LABELS,
+    CapTierCampaignError,
+    annualised_growth,
     cap_tier_plan,
     longest_drawdown,
     max_drawdown,
     name_contributions,
+    path_figures,
     worst_calendar_year,
 )
 from backtest.sweep import CAP_TIER_ARMS, HIGH_FLOOR, LOW_FLOOR
@@ -39,6 +45,45 @@ def test_the_plan_is_the_full_window_and_the_three_fold_tests_at_both_floors() -
     ]
     assert plan.units[0] == (0, LOW_FLOOR) and plan.units[1] == (0, HIGH_FLOOR)
     assert len(plan.units) == 8
+
+
+def test_annualised_growth_is_exact_decimal_not_a_float_round_trip() -> None:
+    # 1.21 over two years is exactly 10 % a year; through a float it is 0.10000000000000009.
+    rate = annualised_growth(D("1.21"), 730)
+    assert type(rate) is Decimal
+    assert rate == D("0.1")
+    # Doubling over two years: sqrt(2) - 1, to the helper's own 28 digits.
+    with localcontext() as ctx:
+        ctx.prec = 28
+        root_two = D(2).sqrt() - 1
+    assert annualised_growth(D(2), 730) == root_two
+    assert annualised_growth(D(2), 730).quantize(D("0.0001")) == D("0.4142")
+
+
+def test_annualised_growth_ignores_the_callers_decimal_context() -> None:
+    with localcontext() as ctx:
+        ctx.prec = 6
+        rate = annualised_growth(D(2), 730)
+    assert rate == annualised_growth(D(2), 730)
+    assert len(rate.as_tuple().digits) > 6
+
+
+def test_annualised_growth_refuses_a_span_with_no_rate() -> None:
+    with pytest.raises(CapTierCampaignError):
+        annualised_growth(D(2), 0)
+    with pytest.raises(CapTierCampaignError):
+        annualised_growth(D(-1), 365)
+
+
+def test_path_cagr_is_decimal_and_never_calls_float(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_float(*_: object) -> float:
+        raise AssertionError("a return was computed through float")
+
+    monkeypatch.setattr(campaign, "float", no_float, raising=False)
+    figures = path_figures(_path(("2020-01-01", 100), ("2020-06-01", 90), ("2021-12-31", 150)))
+    assert type(figures.cagr) is Decimal
+    # 1.5 over 730 days: 1.5 ** 0.5 - 1.
+    assert figures.cagr.quantize(D("0.0001")) == D("0.2247")
 
 
 def test_max_drawdown_is_peak_to_trough() -> None:
