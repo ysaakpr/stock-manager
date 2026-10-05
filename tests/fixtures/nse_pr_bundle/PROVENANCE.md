@@ -74,3 +74,19 @@ The eras were found by sniffing the member in all 4,124 bundles in L0, not by sa
 | `bh_empty/`      | 2021-05-17 | `PR170521.zip` | header and no rows |
 | `bh_no_flag/`    | 2026-09-04 | `PR040926.zip` | the 2025-10 lowercase era: four-cell header |
 | `bh_misserved/`  | 2018-01-02 | `PR020118.zip` | NSE serves the **2019-01-02** bundle under this name; `PrBundle` must refuse to date it. The original carries no readme, so the zip is the `bh` member alone |
+
+## Five more, for fund lineage (added 2026-10-05, `dq-etf-isin-lineage`)
+
+`fund_unit_splits/` — the `Bc` evidence `dataplatform.identity.fund_lineage` reads to accept (or
+refuse) an ETF's ISIN switch as a unit split. **Reduced from the authoritative lake**, not fetched:
+zero requests. Each zip holds that bundle's `Bc` member plus its readme, byte-for-byte;
+`manifest.json` records the original bundle's size and sha256 and the `Bc` member's own sha256,
+which `tests/unit/test_fund_lineage.py` re-hashes.
+
+| archive file | session | why |
+|---|---|---|
+| `PR111219.zip` | 2019-12-11 | first broadcast of the 2019-12-19 BeES unit splits (GOLDBEES, BANKBEES, …): ex-date on the old ISIN's last session |
+| `PR150221.zip` | 2021-02-15 | the 2021-02-17 HDFC/UTI splits (UTISXN50 among them): ex-date on the old ISIN's second-to-last session |
+| `PR160720.zip` | 2020-07-16 | AXISNIFTY's 2020-07-23 split is broadcast, but the units skipped 2020-07-24 — the gap rejects it |
+| `PR290124.zip` | 2024-01-29 | HDFCNIFIT's 2024-02-02 split is here; HDFCSENSEX, which switched ISIN the same day, is in no `Bc` file |
+| `PR210225.zip` | 2025-02-21 | HDFCLIQUID's `CHANGE IN ATTRIBUTE` on its switch — an event, but not a unit re-basing |
