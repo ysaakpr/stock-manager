@@ -624,12 +624,14 @@ def run_forecast_daily(
             nav_path.append(book.net_asset_value(last_close))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
+        # One rail policy for both: the gate enforces it, and the policy sizes its buys to it.
+        rails_in_force = ratified_backtest_rail_policy()
         engine = ReplayEngine(
-            policy=ForecastDailyPolicy(data, params),
+            policy=ForecastDailyPolicy(data, params, order_caps=rails_in_force.rails),
             broker=broker,
             clock=clock,
             sessions=sessions,
-            rails=RailGate(ratified_backtest_rail_policy(), reader.closes_on),
+            rails=RailGate(rails_in_force, reader.closes_on),
         )
         started = time.perf_counter()
         result = engine.run()

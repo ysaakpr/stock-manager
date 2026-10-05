@@ -70,7 +70,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, Final, NamedTuple
 
 from analyst.journal.models import Decision, JournalEntry
 from backtest.accounting import BenchmarkComparison, PortfolioBook
@@ -113,6 +113,7 @@ from backtest.policies.sector_rotation import (
     SectorRotationPolicy,
     SectorRotationRecord,
 )
+from backtest.policies.sizing import BUY_SIZING_IDENTITY
 from backtest.policies.swing_composite import (
     SwingCompositeParameters,
     SwingCompositePolicy,
@@ -1735,14 +1736,16 @@ def run_naive_momentum(
             nav_path.append((session, book.net_asset_value(last_close)))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
-        policy = NaiveMomentumPolicy(data, params)
+        # One rail policy for both: the gate enforces it, and the policy sizes its buys to it.
+        rails_in_force = rail_policy or ratified_backtest_rail_policy()
+        policy = NaiveMomentumPolicy(data, params, order_caps=rails_in_force.rails)
 
         engine = ReplayEngine(
             policy=policy,
             broker=broker,
             clock=clock,
             sessions=sessions,
-            rails=RailGate(rail_policy or ratified_backtest_rail_policy(), reader.closes_on),
+            rails=RailGate(rails_in_force, reader.closes_on),
         )
         started = time.perf_counter()
         result = engine.run()
@@ -1901,14 +1904,16 @@ def run_momentum_v2(
             nav_path.append((session, book.net_asset_value(last_close)))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
-        policy = MomentumV2Policy(data, v2_parameters)
+        # One rail policy for both: the gate enforces it, and the policy sizes its buys to it.
+        rails_in_force = rail_policy or ratified_backtest_rail_policy()
+        policy = MomentumV2Policy(data, v2_parameters, order_caps=rails_in_force.rails)
 
         engine = ReplayEngine(
             policy=policy,
             broker=broker,
             clock=clock,
             sessions=sessions,
-            rails=RailGate(rail_policy or ratified_backtest_rail_policy(), reader.closes_on),
+            rails=RailGate(rails_in_force, reader.closes_on),
         )
         started = time.perf_counter()
         result = engine.run()
@@ -1999,6 +2004,13 @@ def _terminal_prices(
     return prices
 
 
+#: The runners whose policy sizes its buys to A8's per-order ceiling
+#: (``backtest.policies.sizing``). Their specs carry a ``buy_sizing`` key, so a run sized that way
+#: never resumes one persisted before it was. Swing composite sized its buys first (PR #31) and kept
+#: its digests; adding the key to it now would move every swing digest already reported.
+_CEILING_SIZED_RUNNERS: Final = frozenset({"naive_momentum", "momentum_v2", "forecast_daily"})
+
+
 def backtest_spec(
     runner: str,
     *,
@@ -2026,6 +2038,8 @@ def backtest_spec(
     extra: dict[str, object] = (
         {"band_hit_avoidance": BAND_HIT_AVOIDANCE_IDENTITY} if band_hit_avoidance else {}
     )
+    if runner in _CEILING_SIZED_RUNNERS:
+        extra["buy_sizing"] = BUY_SIZING_IDENTITY
     return run_spec(
         runner,
         start=start,
@@ -2110,6 +2124,8 @@ def _persist_arm_ledger(
         parameters=parameters,
         benchmark=benchmark_slug,
         rail_policy=ratified_backtest_rail_policy().digest(),
+        # Every report arm's policy sizes its buys to the ceiling (``backtest.policies.sizing``).
+        buy_sizing=BUY_SIZING_IDENTITY,
     )
     ledger = broker.run_ledger(
         source=f"{runner} {label} {first_session.isoformat()}..{terminal.isoformat()}",
@@ -3241,12 +3257,14 @@ def _run_sector_arm(
         nav_path.append((session, book.net_asset_value(prices)))
 
     broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
+    # One rail policy for both: the gate enforces it, and the policy sizes its buys to it.
+    rails_in_force = ratified_backtest_rail_policy()
     engine = ReplayEngine(
-        policy=SectorRotationPolicy(data, params),
+        policy=SectorRotationPolicy(data, params, order_caps=rails_in_force.rails),
         broker=broker,
         clock=clock,
         sessions=sessions,
-        rails=RailGate(ratified_backtest_rail_policy(), reader.closes_on),
+        rails=RailGate(rails_in_force, reader.closes_on),
     )
     result = engine.run()
 
@@ -4127,6 +4145,7 @@ def _run_policy_arm(
     label: str,
     parameters: str,
     policy: Policy,
+    rail_policy: BacktestRailPolicy,
     rebalance_dates: Sequence[date],
     mean_universe: Decimal,
     reader: _L1Reader,
@@ -4141,7 +4160,8 @@ def _run_policy_arm(
 
     The same wiring as :func:`_run_sector_arm`, generalised over the policy so the fundamentals arms
     and the momentum arms in one report differ *only* in the policy object (invariant #4/#5: one
-    broker, one cost model, one accounting book).
+    broker, one cost model, one accounting book). ``rail_policy`` is the one the gate enforces and
+    the one ``policy`` was given as ``order_caps`` to size its buys to.
     """
     first_session, terminal = sessions[0], sessions[-1]
     clock = FrozenClock(first_session)
@@ -4167,7 +4187,7 @@ def _run_policy_arm(
         broker=broker,
         clock=clock,
         sessions=sessions,
-        rails=RailGate(ratified_backtest_rail_policy(), reader.closes_on),
+        rails=RailGate(rail_policy, reader.closes_on),
     )
     result = engine.run()
     terminal_prices = _terminal_prices(reader, book, sessions)
@@ -4272,6 +4292,8 @@ def run_fundamentals_report(
             "data_root": data_root,
             "risk_on_by_session": risk_on_by_session,
         }
+        # One rail policy for every arm: the gate enforces it, and each policy sizes its buys to it.
+        rails_in_force = ratified_backtest_rail_policy()
         arms: list[_FundamentalsArm] = []
         for signal in FundamentalsSignal:
             params = FundamentalsValueParameters(signal=signal, top_n=top_n)
@@ -4282,7 +4304,10 @@ def run_fundamentals_report(
                         f"signal={signal.value}, top_n={top_n}, sell_band=None, equal weight, "
                         f"max_staleness_days={params.max_staleness_days}, monthly"
                     ),
-                    policy=FundamentalsValuePolicy(fundamentals, params),
+                    policy=FundamentalsValuePolicy(
+                        fundamentals, params, order_caps=rails_in_force.rails
+                    ),
+                    rail_policy=rails_in_force,
                     rebalance_dates=fundamentals.rebalance_dates(),
                     mean_universe=fundamentals.mean_universe_size,
                     **common,  # type: ignore[arg-type]
@@ -4300,7 +4325,8 @@ def run_fundamentals_report(
                 _run_policy_arm(
                     label=label,
                     parameters=repr(m_params),
-                    policy=MomentumV2Policy(momentum, m_params),
+                    policy=MomentumV2Policy(momentum, m_params, order_caps=rails_in_force.rails),
+                    rail_policy=rails_in_force,
                     rebalance_dates=momentum.rebalance_dates(),
                     mean_universe=momentum.mean_universe_size,
                     **common,  # type: ignore[arg-type]

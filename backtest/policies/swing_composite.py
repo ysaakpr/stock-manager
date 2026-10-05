@@ -107,6 +107,7 @@ same start reproduces every decision exactly.
 
 from __future__ import annotations
 
+from collections import ChainMap
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from datetime import date
@@ -116,13 +117,13 @@ from typing import Protocol, runtime_checkable
 from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
-from analyst.rails import order_value_ceiling
 from backtest.band_hits import BAND_HIT_BLOCK_RATIONALE, BandHitData, band_hit_blocked
 from backtest.policies.momentum_v2 import RegimeReading
+from backtest.policies.sizing import account_order_ceiling
 from backtest.replay import SessionContext, SessionDecision
 from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
-from execution.broker import Exchange, Holding, OrderRequest, Position, Side
+from execution.broker import Exchange, Holding, OrderRequest, Side
 
 __all__ = [
     "DELIVERY_COVERAGE_THRESHOLD",
@@ -969,7 +970,10 @@ class SwingCompositePolicy:
             prices=prices,
             existing_value=existing_value,
             min_order_value=MIN_ORDER_VALUE_INR,
-            order_ceiling=self._order_ceiling(ctx, marks, prices),
+            # A lot is marked at its signal mark, else this session's target price, else cost.
+            order_ceiling=account_order_ceiling(
+                self._order_caps, ctx.broker, ChainMap(dict(marks), dict(prices))
+            ),
         )
         buys = [
             (
@@ -982,26 +986,6 @@ class SwingCompositePolicy:
             for order in allocation.orders
         ]
         return buys, allocation.tracking_drift
-
-    def _order_ceiling(
-        self,
-        ctx: SessionContext,
-        marks: Mapping[str, Decimal],
-        prices: Mapping[str, Decimal],
-    ) -> Decimal | None:
-        """A8's per-order ceiling for this account, or None when no rails were given.
-
-        The case is valued as the rail book values it: cash including unsettled proceeds, plus every
-        settled and pending lot at its mark (the signal price, else the broker's cost basis).
-        """
-        if self._order_caps is None:
-            return None
-        value = ctx.broker.margins().cash_value
-        lots: list[Holding | Position] = [*ctx.broker.holdings(), *ctx.broker.positions()]
-        for lot in lots:
-            price = marks.get(lot.isin, prices.get(lot.isin, lot.average_price))
-            value += price * lot.quantity
-        return order_value_ceiling(self._order_caps, value)
 
     # ── journal + evidence ───────────────────────────────────────────────────────────────────────
 
