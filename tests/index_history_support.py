@@ -8,10 +8,14 @@ the screen therefore needs a history on disk, written through the same
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
+from backtest.run import UniverseParameters
+from backtest.run_ledger import run_digest
+from backtest.sweep import _DEFAULT_OPENING_CASH, Arm, _arm_spec
 from dataplatform.ingest.index_history import (
     HistoryBuild,
     IndexHistory,
@@ -19,7 +23,7 @@ from dataplatform.ingest.index_history import (
     write_membership_history,
 )
 
-__all__ = ["stay", "write_index_history"]
+__all__ = ["digests_without_index_membership", "stay", "write_index_history"]
 
 
 def stay(
@@ -97,3 +101,29 @@ def write_index_history(
         ),
         data_root=data_root,
     )
+
+
+def digests_without_index_membership(
+    *, start: date, end: date, arms: Sequence[Arm], floors: Sequence[Decimal]
+) -> dict[tuple[str, Decimal], str]:
+    """``sweep.run_digests`` with the ``index_membership`` spec key removed.
+
+    The key deliberately moved every screened run's digest (``backtest.run``,
+    ``INDEX_MEMBERSHIP_IDENTITY``). A pin taken before it existed is checked against this, so the
+    pin still proves that *nothing else* in the specification moved.
+    """
+    out: dict[tuple[str, Decimal], str] = {}
+    for floor in floors:
+        universe = UniverseParameters(median_turnover_floor=floor)
+        for arm in arms:
+            spec = _arm_spec(
+                arm,
+                start=start,
+                end=end,
+                universe=universe,
+                opening_cash=_DEFAULT_OPENING_CASH,
+                adjusted=True,
+            )
+            spec.pop("index_membership")
+            out[(arm.label, floor)] = run_digest(spec)
+    return out

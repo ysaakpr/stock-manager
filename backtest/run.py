@@ -316,6 +316,11 @@ _REQUIRE_PUBLISHED_TRI: ContextVar[bool] = ContextVar(
 #: The index whose as-of membership defines the investable set. NIFTY 500 is the broadest published
 #: NSE index — a name outside it on a date is, by construction, off the investable map that day.
 _DEFAULT_INVESTABLE_INDEX = "nifty500"
+#: Where the investable screen's index membership comes from, recorded in every run spec that
+#: applies the screen. Its arrival changed what a run with the same parameters computes (the
+#: screen had been a no-op before the 2026-09 snapshots), so a campaign must never resume a ledger
+#: persisted under the old reading: the key changes the digest. Bump it when the reading changes.
+INDEX_MEMBERSHIP_IDENTITY: Final = "dq5_membership_history/v1:announced_and_effective:no_fallback"
 #: The liquidity floor: a name's *median daily traded value* over the look-back must clear this to
 #: count as investable. ₹1 crore (₹10,000,000) is a deliberately conservative microcap cut — on the
 #: real ten-year store it drops the illiquid ~35% tail (probed at build time) that a raw momentum
@@ -2109,6 +2114,9 @@ def backtest_spec(
     ``band_hit_avoidance`` (X2 H2) adds a key only when on, so every run specified without it
     keeps the digest it was persisted under — the frozen round-2 baseline included.
     ``cap_tiers`` (X2) adds a ``cap_tiers`` key the same way, naming the size measure and sleeves.
+    A run with a ``universe`` adds ``index_membership`` (:data:`INDEX_MEMBERSHIP_IDENTITY`): unlike
+    those two it is *meant* to move every screened run's digest, because the screen's reading
+    changed underneath the same parameters.
     """
     rails = rail_policy if rail_policy is not None else ratified_backtest_rail_policy()
     extra: dict[str, object] = (
@@ -2118,6 +2126,8 @@ def backtest_spec(
         extra["cap_tiers"] = describe_sleeves(cap_tiers)
     if runner in _CEILING_SIZED_RUNNERS:
         extra["buy_sizing"] = BUY_SIZING_IDENTITY
+    if universe is not None:
+        extra["index_membership"] = INDEX_MEMBERSHIP_IDENTITY
     return run_spec(
         runner,
         start=start,
@@ -2204,6 +2214,8 @@ def _persist_arm_ledger(
         rail_policy=ratified_backtest_rail_policy().digest(),
         # Every report arm's policy sizes its buys to the ceiling (``backtest.policies.sizing``).
         buy_sizing=BUY_SIZING_IDENTITY,
+        # ... and screens its universe through the point-in-time index membership history.
+        index_membership=INDEX_MEMBERSHIP_IDENTITY,
     )
     ledger = broker.run_ledger(
         source=f"{runner} {label} {first_session.isoformat()}..{terminal.isoformat()}",

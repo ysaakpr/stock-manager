@@ -36,12 +36,14 @@ import pytest
 from backtest.policies.naive_momentum import MomentumParameters
 from backtest.rails import UNKNOWN_SECTOR
 from backtest.run import (
+    INDEX_MEMBERSHIP_IDENTITY,
     IndexCoverageError,
     UniverseParameters,
     _InvestableUniverse,
     _L1MomentumData,
     _L1Reader,
     _L1SectorRotationData,
+    backtest_spec,
     run_naive_momentum,
 )
 from dataplatform.ingest.indices import ConstituentRow, ConstituentSnapshot, write_constituents_l1
@@ -358,3 +360,21 @@ def test_same_lake_and_history_replay_byte_identical(lake: Path) -> None:
     first, second = once(), once()
     assert first == second
     assert FUTURE.encode() in first[0]  # the run really traded the post-change basket
+
+
+def test_a_screened_run_spec_names_the_membership_source() -> None:
+    """A ledger persisted under the snapshot-era reading is never resumed for a screened run."""
+
+    def spec(universe: UniverseParameters | None) -> dict[str, str]:
+        return backtest_spec(
+            "naive_momentum",
+            start=_SESSIONS[0],
+            end=_SESSIONS[-1],
+            parameters=MomentumParameters(top_n=2),
+            opening_cash=Decimal("1000000"),
+            adjusted=False,
+            universe=universe,
+        )
+
+    assert spec(_params())["index_membership"] == INDEX_MEMBERSHIP_IDENTITY
+    assert "index_membership" not in spec(None)

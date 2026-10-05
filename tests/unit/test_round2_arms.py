@@ -21,6 +21,7 @@ from backtest.sweep import (
     H3_RESIDUAL_AND_BAND_HIT,
     run_digests,
 )
+from tests.index_history_support import digests_without_index_membership
 
 _H_LABELS = (H1_RESIDUAL_MOMENTUM, H2_BAND_HIT_AVOIDANCE, H3_RESIDUAL_AND_BAND_HIT)
 
@@ -59,12 +60,22 @@ def test_round2_plan_resolves_all_three_h_labels(tmp_path: Path) -> None:
 
 
 def test_the_baseline_arms_digests_are_byte_identical_to_main_59e8cf5() -> None:
+    """Nothing but the point-in-time index membership key moved the frozen baseline's digests.
+
+    That key moved them on purpose: the frozen ledgers were replayed under the snapshot-era screen
+    (a no-op before 2026-09), so they must never be resumed as if they were today's reading.
+    """
     baseline = tuple(arm for arm in ARMS if arm.label in fc.BASELINE_LABELS)
     assert {arm.label for arm in baseline} == set(fc.BASELINE_LABELS)
     for start, end in sorted({(s, e) for s, e, _ in _BASELINE_AT_59E8CF5}):
-        digests = run_digests(start=start, end=end, arms=baseline, floors=(fc.FLOOR,))
+        before = digests_without_index_membership(
+            start=start, end=end, arms=baseline, floors=(fc.FLOOR,)
+        )
+        now = run_digests(start=start, end=end, arms=baseline, floors=(fc.FLOOR,))
         for label in fc.BASELINE_LABELS:
-            assert digests[(label, fc.FLOOR)] == _BASELINE_AT_59E8CF5[(start, end, label)], label
+            pinned = _BASELINE_AT_59E8CF5[(start, end, label)]
+            assert before[(label, fc.FLOOR)] == pinned, label
+            assert now[(label, fc.FLOOR)] != pinned, label
 
 
 def test_the_three_h_arms_have_three_distinct_digests_none_a_baselines() -> None:
