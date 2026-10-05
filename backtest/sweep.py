@@ -106,7 +106,12 @@ __all__ = [
     "H1_RESIDUAL_MOMENTUM",
     "H2_BAND_HIT_AVOIDANCE",
     "H3_RESIDUAL_AND_BAND_HIT",
+    "MULTI_CAP_REDEPLOY",
+    "NAIVE_REDEPLOY",
+    "REDEPLOY_ARMS",
     "RETIRED_ARMS",
+    "SWING_REDEPLOY",
+    "SWING_REGIME_REDEPLOY",
     "Arm",
     "SweepResult",
     "SweepRow",
@@ -461,6 +466,50 @@ CAP_TIER_ARMS: tuple[Arm, ...] = (
         note="M10.7 ranking; top 20 within the small tier (ranks 251-500), band 60 within the tier",
         swing=_swing(),
         cap_tiers=(TierSleeve(CapTier.SMALL, top_n=20, sell_band=60),),
+    ),
+)
+
+#: The redeploy-on-settlement arms (idle-cash fix; ``redeploy_next_session`` on the swing and naive
+#: policies). Each is an existing arm with one change: once a rebalance's sale proceeds settle, the
+#: free cash is deployed into that rebalance's own target instead of waiting for the next one. Kept
+#: out of ``ARMS`` for the same reason as ``CAP_TIER_ARMS`` — in it they would silently join the
+#: round-1 trial set and the M12 table — and resolvable by label in ``backtest.fold_campaign``.
+#: Every arm here is a new trial: the trial count rises by ``len(REDEPLOY_ARMS)``.
+SWING_REDEPLOY = "Swing composite (M10.7) + redeploy"
+SWING_REGIME_REDEPLOY = "M10.7 + regime gate + redeploy"
+NAIVE_REDEPLOY = "Naive momentum (M4.10) + redeploy"
+MULTI_CAP_REDEPLOY = "Multi cap + redeploy"
+_REDEPLOY_NOTE = "settled proceeds of a rebalance's exits deployed into its target before the next"
+_MULTI_CAP_ARM = next(arm for arm in CAP_TIER_ARMS if arm.label == MULTI_CAP)
+REDEPLOY_ARMS: tuple[Arm, ...] = (
+    Arm(
+        label=SWING_REDEPLOY,
+        family="redeploy",
+        reference=_M10_7,
+        note=_REDEPLOY_NOTE,
+        swing=_swing(redeploy_next_session=True),
+    ),
+    Arm(
+        label=SWING_REGIME_REDEPLOY,
+        family="redeploy",
+        reference="M10.7 + regime gate",
+        note=_REDEPLOY_NOTE,
+        swing=_swing(regime_filter=True, redeploy_next_session=True),
+    ),
+    Arm(
+        label=NAIVE_REDEPLOY,
+        family="redeploy",
+        reference="Naive momentum (M4.10)",
+        note=_REDEPLOY_NOTE,
+        naive=MomentumParameters(top_n=20, redeploy_next_session=True),
+    ),
+    replace(
+        _MULTI_CAP_ARM,
+        label=MULTI_CAP_REDEPLOY,
+        family="redeploy",
+        reference=MULTI_CAP,
+        note=_REDEPLOY_NOTE,
+        swing=replace(_MULTI_CAP_ARM.swing, redeploy_next_session=True),  # type: ignore[type-var]
     ),
 )
 
