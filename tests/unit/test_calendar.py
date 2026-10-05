@@ -14,9 +14,12 @@ from passing — that change would silently drop twenty-one real trading days fr
 W0-6 extended coverage back to 2006-01-01 and the same three things are asserted over the added
 era, from its own frozen probe evidence (`ARCHIVE_PROBES` again — 2006-2015 dates are W0-6's,
 2016-2026 are C.2's). Two additions are specific to that task: `test_coverage_still_reaches_2006`
-is the tripwire against the window silently narrowing again, and
-`test_weekend_special_sessions_are_a_known_unexpressible_gap` pins the one thing this schema
-cannot say, so that fixing it has to come here and say so.
+is the tripwire against the window silently narrowing again.
+
+The 2026-10-05 data-quality audit closed the gap W0-6 pinned: weekend sessions that are not
+holidays (Budget days, DR drills, system cut-overs) are now declared under `special_sessions:` and
+classified SPECIAL. `WEEKEND_SESSIONS` is the evidence-backed list, and the tests below fail if a
+declared one stops owing data — or if an ordinary weekend starts to.
 
 Never touches the network (B8).
 """
@@ -143,13 +146,12 @@ ARCHIVE_PROBES: dict[date, bool] = {
     date(2014, 10, 15): False,  # Maharashtra Assembly polling — in no circular
 }
 
-#: Weekend dates NSE traded and published a bhavcopy for that are NOT Muhurat — Union Budget
-#: Saturdays and live sessions from the disaster-recovery site. All probed 200 on 2026-09-08.
-#: The schema cannot declare a session on a non-holiday weekend, so the calendar calls these
-#: WEEKEND and expects no data; `nse_holidays.yaml`'s `known_limitation` records why.
-WEEKEND_SESSIONS_NOT_EXPRESSIBLE: tuple[date, ...] = (
+#: Weekend dates NSE traded and published for that are NOT Muhurat — Union Budget days, live
+#: sessions from the disaster-recovery site, trading-system cut-overs. The ten pre-2016 bhavcopies
+#: are in L0 (self-dated, distinct closes); all sixteen carry a published NIFTY 50 TRI value.
+WEEKEND_SESSIONS: tuple[date, ...] = (
     date(2006, 4, 29),
-    date(2006, 6, 25),
+    date(2006, 6, 25),  # a Sunday
     date(2010, 2, 6),
     date(2012, 1, 7),
     date(2012, 3, 3),
@@ -158,10 +160,26 @@ WEEKEND_SESSIONS_NOT_EXPRESSIBLE: tuple[date, ...] = (
     date(2013, 5, 11),
     date(2014, 3, 22),
     date(2015, 2, 28),
-    # Inside the range the file already covered before W0-6.
     date(2020, 2, 1),
+    date(2024, 1, 20),
+    date(2024, 3, 2),
     date(2024, 5, 18),
     date(2025, 2, 1),
+    date(2026, 2, 1),  # a Sunday
+)
+
+#: Ordinary weekends next to the special ones — the inversion check. A calendar that treated
+#: every Saturday as a session, or every Budget-season weekend, would get these wrong.
+ORDINARY_WEEKENDS: tuple[date, ...] = (
+    date(2006, 4, 30),
+    date(2012, 1, 14),
+    date(2015, 3, 7),
+    date(2020, 2, 2),
+    date(2020, 2, 8),
+    date(2024, 1, 27),
+    date(2024, 5, 25),
+    date(2025, 2, 8),
+    date(2026, 1, 31),
 )
 
 
@@ -486,7 +504,7 @@ def test_day_kinds_partition_the_span(calendar: TradingCalendar) -> None:
     kinds = [kind for _, kind in calendar.days(SPAN_START, SPAN_END)]
     assert len(kinds) == (SPAN_END - SPAN_START).days + 1
     expecting = {kind for kind in DayKind if kind.expects_data}
-    assert expecting == {DayKind.SESSION, DayKind.MUHURAT}
+    assert expecting == {DayKind.SESSION, DayKind.MUHURAT, DayKind.SPECIAL}
     assert len(calendar.expected_data_dates(SPAN_START, SPAN_END)) == sum(
         kind.expects_data for kind in kinds
     )
@@ -669,20 +687,69 @@ def test_every_added_year_names_how_it_was_established(calendar: TradingCalendar
     assert calendar.source_for(2013) == "derived_bhavcopy_verified"
 
 
-def test_weekend_special_sessions_are_a_known_unexpressible_gap(calendar: TradingCalendar) -> None:
-    """Pins what this schema cannot say, so that fixing it has to come through here.
+# ── 2026-10-05 audit: declared weekend sessions ──────────────────────────────────────────────
 
-    Every date below traded and published a bhavcopy (probed 200, 2026-09-08), but none is a
-    declared holiday, so none can carry `special_session` and `SpecialSession` has no member for
-    it. The calendar therefore calls them WEEKEND and expects no data, and `reconcile` cannot see
-    the miss because nothing ever fetches them. If a later change adds that member, this test
-    fails — and `nse_holidays.yaml`'s `known_limitation` is the note to update alongside it.
-    """
-    for day in WEEKEND_SESSIONS_NOT_EXPRESSIBLE:
-        assert day.weekday() >= 5, day
-        assert calendar.classify(day) is DayKind.WEEKEND, day
-        assert not calendar.expects_data(day), day
-        assert calendar.holiday(day) is None, day
+
+@pytest.mark.parametrize("day", WEEKEND_SESSIONS, ids=str)
+def test_a_declared_weekend_session_owes_data(calendar: TradingCalendar, day: date) -> None:
+    """The audit's finding, inverted: each of these traded, so a file is owed and fetched."""
+    assert day.weekday() >= 5, day
+    assert calendar.classify(day) is DayKind.SPECIAL
+    assert calendar.expects_data(day)
+    assert day in calendar.expected_data_dates(day - timedelta(days=3), day + timedelta(days=3))
+    # Not a weekday session, and not a holiday: it is its own kind.
+    assert not calendar.is_session(day)
+    assert day not in calendar.expected_sessions(day, day)
+    assert calendar.holiday(day) is None
+
+
+@pytest.mark.parametrize("day", ORDINARY_WEEKENDS, ids=str)
+def test_an_ordinary_weekend_still_owes_nothing(calendar: TradingCalendar, day: date) -> None:
+    assert day.weekday() >= 5, day
+    assert calendar.classify(day) is DayKind.WEEKEND
+    assert not calendar.expects_data(day)
+    assert day not in calendar.expected_data_dates(day, day)
+
+
+def test_the_declared_set_is_exactly_the_evidenced_set(calendar: TradingCalendar) -> None:
+    """No weekend session added or dropped without this list (and its evidence) changing too."""
+    declared = calendar.special_sessions(calendar.coverage_start, calendar.coverage_end)
+    assert tuple(session.date for session in declared) == WEEKEND_SESSIONS
+
+
+def test_every_weekend_session_carries_observed_evidence(calendar: TradingCalendar) -> None:
+    """Never assumed: an attributed kind names who announced it, and every entry what was seen."""
+    for session in calendar.special_sessions(calendar.coverage_start, calendar.coverage_end):
+        assert session.evidence.strip(), session.date
+        assert session.name.strip(), session.date
+        assert session.kind is not SpecialSession.MUHURAT, session.date
+        if session.kind is not SpecialSession.UNATTRIBUTED:
+            assert session.announced_by, session.date
+
+
+def test_budget_weekends_are_budget_sessions(calendar: TradingCalendar) -> None:
+    budget = {
+        s.date
+        for s in calendar.special_sessions(calendar.coverage_start, calendar.coverage_end)
+        if s.kind is SpecialSession.BUDGET
+    }
+    assert budget == {
+        date(2015, 2, 28),
+        date(2020, 2, 1),
+        date(2025, 2, 1),
+        date(2026, 2, 1),
+    }
+
+
+def test_reconcile_names_a_missing_weekend_session(calendar: TradingCalendar) -> None:
+    """What the gap report could not do before: a special Saturday with no file is a miss."""
+    start, end = date(2024, 5, 13), date(2024, 5, 19)
+    weekdays = calendar.expected_sessions(start, end)
+    result = calendar.reconcile(weekdays, start, end)
+    assert result.missing == (date(2024, 5, 18),)
+    assert not result.unexpected
+    # ...and once fetched, the same date is explained instead of flagged as unexpected.
+    assert calendar.reconcile([*weekdays, date(2024, 5, 18)], start, end).ok
 
 
 def test_day_kinds_partition_the_added_era(calendar: TradingCalendar) -> None:
@@ -762,3 +829,57 @@ def test_loader_rejects_an_unknown_special_session(raw: dict[str, Any], tmp_path
 def test_loader_reports_a_missing_file_by_path(tmp_path: Path) -> None:
     with pytest.raises(CalendarDataError, match="cannot read"):
         load(tmp_path / "absent.yaml")
+
+
+def _with_special(raw: dict[str, Any], **entry: Any) -> dict[str, Any]:
+    doc = copy.deepcopy(raw)
+    doc["special_sessions"] = [
+        {"name": "test", "kind": "BUDGET", "evidence": "a priced file", **entry}
+    ]
+    return doc
+
+
+def test_loader_rejects_a_weekend_session_on_a_weekday(raw: dict[str, Any], tmp_path: Path) -> None:
+    with pytest.raises(CalendarDataError, match="Wednesday"):
+        load(_write(tmp_path, _with_special(raw, date=date(2020, 2, 5))))
+
+
+def test_loader_rejects_a_weekend_session_on_a_holiday(raw: dict[str, Any], tmp_path: Path) -> None:
+    # 2026-02-15 Mahashivratri is a Sunday the exchange's own master lists.
+    with pytest.raises(CalendarDataError, match="also listed as a holiday"):
+        load(_write(tmp_path, _with_special(raw, date=date(2026, 2, 15))))
+
+
+def test_loader_rejects_a_duplicate_weekend_session(raw: dict[str, Any], tmp_path: Path) -> None:
+    doc = _with_special(raw, date=date(2020, 2, 1))
+    doc["special_sessions"].append(copy.deepcopy(doc["special_sessions"][0]))
+    with pytest.raises(CalendarDataError, match="twice"):
+        load(_write(tmp_path, doc))
+
+
+def test_loader_rejects_a_weekend_session_outside_coverage(
+    raw: dict[str, Any], tmp_path: Path
+) -> None:
+    with pytest.raises(CalendarDataError, match="outside coverage"):
+        load(_write(tmp_path, _with_special(raw, date=date(2005, 2, 26))))
+
+
+def test_loader_rejects_muhurat_as_a_weekend_session(raw: dict[str, Any], tmp_path: Path) -> None:
+    with pytest.raises(CalendarDataError, match="Diwali holiday entry"):
+        load(_write(tmp_path, _with_special(raw, date=date(2020, 2, 1), kind="MUHURAT")))
+
+
+def test_loader_rejects_a_weekend_session_without_evidence(
+    raw: dict[str, Any], tmp_path: Path
+) -> None:
+    with pytest.raises(CalendarDataError, match="evidence"):
+        load(_write(tmp_path, _with_special(raw, date=date(2020, 2, 1), evidence="")))
+
+
+def test_loader_rejects_a_non_muhurat_kind_on_a_holiday(
+    raw: dict[str, Any], tmp_path: Path
+) -> None:
+    doc = copy.deepcopy(raw)
+    doc["years"][0]["holidays"][0]["special_session"] = "BUDGET"
+    with pytest.raises(CalendarDataError, match="only MUHURAT"):
+        load(_write(tmp_path, doc))

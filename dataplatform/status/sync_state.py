@@ -375,8 +375,9 @@ def expected_gap_kind(logical_date: date, *, calendar: TradingCalendar) -> DayKi
     What it assumes: the calendar covers the date — outside its coverage it raises
     `CalendarCoverageError` rather than guessing, because "probably not a trading day" is how a
     real miss gets filed as a holiday.
-    What it never does: return a kind that expects data. A `SESSION` or `MUHURAT` date reaching
-    here is a fetch that failed, and it is refused so it stays in the gap report where it belongs.
+    What it never does: return a kind that expects data. A `SESSION`, `MUHURAT` or `SPECIAL` date
+    reaching here is a fetch that failed, and it is refused so it stays in the gap report where it
+    belongs.
     """
     kind = calendar.classify(logical_date)
     if kind.expects_data:
