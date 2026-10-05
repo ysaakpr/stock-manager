@@ -182,22 +182,32 @@ def test_the_plan_is_the_calendars_sessions() -> None:
     assert plan.basis == "calendar+prices_raw"
 
 
-def test_a_priced_session_the_calendar_omits_is_planned() -> None:
-    """2012-01-07 was a special Saturday session: W1 holds its bhavcopy, the calendar lists no
-    session. Delivery for it is planned from the price evidence; a priced date outside the range
-    is not."""
+def test_the_special_saturdays_are_planned_from_the_calendar_itself() -> None:
+    """2012-01-07 was a special Saturday session. The calendar now declares it, so delivery for it
+    is planned without any price evidence at all."""
     saturday = date(2012, 1, 7)
+    plan = mb.plan_sessions(date(2012, 1, 2), date(2012, 1, 9), calendar=trading_calendar())
+    assert saturday in plan.dates
+    assert date(2012, 1, 8) not in plan.dates
+    assert "0 priced session(s) outside the calendar added" in plan.note
+
+
+def test_a_priced_session_the_calendar_omits_is_planned() -> None:
+    """The backstop: a priced date the calendar does not list is planned and named in the note, so
+    the calendar can be corrected; a priced date outside the range is not. 2012-01-08 is a Sunday
+    the calendar calls WEEKEND, standing in for a session it has yet to learn about."""
+    sunday = date(2012, 1, 8)
     calendar = trading_calendar()
-    assert saturday not in calendar.expected_data_dates(date(2012, 1, 2), date(2012, 1, 9))
+    assert sunday not in calendar.expected_data_dates(date(2012, 1, 2), date(2012, 1, 9))
     plan = mb.plan_sessions(
         date(2012, 1, 2),
         date(2012, 1, 9),
         calendar=calendar,
-        priced=(saturday, date(2012, 1, 14)),
+        priced=(sunday, date(2012, 1, 14)),
     )
-    assert saturday in plan.dates
+    assert sunday in plan.dates
     assert date(2012, 1, 14) not in plan.dates
-    assert "1 priced session(s) outside the calendar added (2012-01-07)" in plan.note
+    assert "1 priced session(s) outside the calendar added (2012-01-08)" in plan.note
 
 
 def test_price_sessions_are_read_off_the_lake(lake: _Lake) -> None:
@@ -456,9 +466,13 @@ def test_the_bhavcopys_quarantine_rows_survive_the_delivery_write(lake: _Lake) -
     assert _quarantine(lake.root) == after
 
 
-def test_a_quarantine_row_the_write_would_not_rederive_stops_the_session(lake: _Lake) -> None:
-    """A row from another writer — here a BSE refusal in the shared partition — would vanish in the
-    whole-partition write. The session fails loudly and the partition is left byte-identical."""
+def test_another_exchange_s_quarantine_rows_survive_the_promotion(lake: _Lake) -> None:
+    """A BSE refusal in the shared partition is carried through the NSE delivery write unchanged.
+
+    This test used to assert the session *failed*, because the quarantine partition was written
+    whole from the NSE write alone and the BSE row would have vanished. The writer now replaces
+    only the writing exchange's rows (2026-10-05), so the guard has nothing to protect it from.
+    """
     foreign = {
         "symbol": "500325",
         "series": "A",
@@ -472,14 +486,11 @@ def test_a_quarantine_row_the_write_would_not_rederive_stops_the_session(lake: _
     path = _quarantine_path(lake.root)
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(pa.Table.from_pylist([foreign], schema=PRICES_RAW_QUARANTINE_SCHEMA), path)
-    before = path.read_bytes()
 
     session = lake.promotion.promote([START]).sessions[0]
-    assert session.state == "FAILED"
-    assert "QuarantineClobberError" in (session.error or "")
-    assert "BSE:500325/A" in (session.error or "")
-    assert path.read_bytes() == before
-    assert lake.sync.rows[(NSE_DELIVERY, START)].state is SyncState.FAILED
+    assert session.state == "PUBLISHED", session.error
+    survivors = pq.read_table(path, schema=PRICES_RAW_QUARANTINE_SCHEMA).to_pylist()
+    assert foreign in survivors
 
 
 def test_a_relabelled_quarantine_row_is_not_counted_as_surviving(

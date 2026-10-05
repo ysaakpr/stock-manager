@@ -10,8 +10,11 @@ at one session plus a short self-heal window. So "run it again" is always safe: 
 session is never re-fetched, and the archive is built at most once.
 
 - **Job name:** `eod_pipeline`  ·  **Schedule:** `30 18 * * mon-fri` (18:30 Asia/Kolkata)
-- **Daily NSE sources today:** `nse_bhavcopy` (cash bhavcopy, both eras). More join as their source
-  sets land in later milestones.
+- **Daily sources:** `nse_bhavcopy` (cash bhavcopy), `nse_delivery` (`sec_bhavdata_full`) and
+  `bse_bhavcopy` (BSE UDiFF), each to `PUBLISHED`; plus the NSE PR bundle (`nse_pr_bundle`) captured
+  to L0 only, one session behind. Until 2026-10-05 this list was `nse_bhavcopy` alone.
+- **Fired by:** the scheduler process, `ops/systemd/scheduler.service` (below). Nothing else fires
+  it — `daily-snapshot.timer` runs only `daily_snapshot`.
 - **Lookback (self-heal window):** 7 days.
 - **Archive lake / download root:** `DATA_ROOT` (the same lake `/archives` serves from).
 
@@ -20,8 +23,9 @@ session is never re-fetched, and the archive is built at most once.
 1. Picks the **latest trading session** on or before today from the C.2 calendar (a Monday run
    processes Friday; a holiday is stepped over). A date the calendar does not cover fails loud —
    extend `nse_holidays.yaml` rather than let the job guess a session.
-2. **Self-heal first.** Every date left `FAILED(retryable)` within the lookback window is
-   re-attempted before today's session. A non-retryable `FAILED` (e.g. a genuine 404) is left
+2. **Self-heal first.** Every date left `FAILED(retryable)` within the lookback window — and every
+   session the calendar expected that has **no row at all** (the trace of a missed run) — is
+   attempted before today's session. A non-retryable `FAILED` (e.g. a genuine 404) is left
    alone — re-driving it forever is the hot loop the `retryable` flag exists to prevent.
 3. Drives the target session for each daily NSE source to `PUBLISHED`, committing after each one
    (that commit is the checkpoint).
@@ -32,6 +36,50 @@ session is never re-fetched, and the archive is built at most once.
    a true no-op.
 6. **Alerts** CRITICAL on any source left FAILED, then reports the job FAILED so `run-once` exits
    non-zero and the failure is visible. The FAILED row stays retryable for the next run to heal.
+
+## Keeping it scheduled
+
+The jobs in `dataplatform/scheduler/registry.py` are a schedule only while a process fires them.
+On this host that process is the systemd user service:
+
+```bash
+ops/systemd/install-scheduler.sh            # install/refresh; disables daily-snapshot.timer
+systemctl --user restart scheduler.service  # after every merge to main — code is read at start
+systemctl --user status scheduler.service
+```
+
+`GET /status/jobs` is the check: every registered job with its newest run, newest success and a
+state — `NEVER_RAN` (no `job_run` row: nothing is firing it), `FAILING`, `OVERDUE` (no success
+since a fire that should have finished), `RUNNING` or `OK` — plus `unscheduled`, the registry's
+ledger of live register sources no job covers and why. `GET /status/sources` marks a scheduled
+source `overdue` (and not `healthy`) once it is more sessions behind than its job's budget.
+
+**The 2026-10-05 incident, for the record.** `eod_pipeline` had zero `job_run` rows ever: the only
+unit installed was the snapshot timer, so the bhavcopy family stopped at the last manual campaign
+(NSE 2026-09-01, BSE and PR 2026-09-04) and `/status/sources` still said `healthy: true`. Both
+surfaces above now go red for that state, and `tests/unit/test_scheduler_coverage.py` fails the
+gate for a live register source that no job covers and the ledger does not explain.
+
+## Catching up a gap without touching L1
+
+When L1/L2 must not move yet (a rebuild is pending), acquire into L0 only, then derive later:
+
+```bash
+# 1. acquire (network; takes the host lease; skips keys L0 already holds; never overwrites)
+uv run python -m dataplatform.ingest.l0_acquire --source nse_bhavcopy --source nse_delivery \
+    --source bse_bhavcopy --from <first-missed> --to <last-session> \
+    --tri nifty50 --tri niftyit --tri niftycpse --end <today>
+uv run python -m dataplatform.ingest.pr_bundle_campaign acquire --from <first-missed> --to <last-session>
+
+# 2. derive, when the rebuild is sequenced (zero requests: BackfillRunner reuses stored payloads)
+uv run python -m dataplatform.ingest.backfill --source nse_bhavcopy --from <first-missed> --to <last-session>
+uv run python -m dataplatform.ingest.backfill --source nse_delivery --from <first-missed> --to <last-session>
+uv run python -m dataplatform.ingest.backfill --source bse_bhavcopy --from <first-missed> --to <last-session>
+uv run python -m dataplatform.ingest.tri_backfill --from-l0
+```
+
+`nse_delivery` must run after `nse_bhavcopy`: it rebuilds each partition from the stored bhavcopy.
+The PR bundle has no L1 step (symbol-keyed, no ISIN — `pr_bundle_campaign`'s docstring).
 
 ## Running it by hand
 

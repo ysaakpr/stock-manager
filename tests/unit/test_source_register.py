@@ -38,7 +38,8 @@ from dataplatform.ingest.source_register import (
 #: the suite stays offline and deterministic (B10). Bump this when a task records a verification on
 #: a newer date (M6.1 did, on 2026-09-02: curated_rss; M11.1 on 2026-09-04: the macro probe;
 #: M3.9.b on 2026-09-08: nifty_tri_history, re-probed at D8's corrected path).
-# 2026-10-05: nse_announcement_attachment, verified by the merger-terms fetch (11 documents).
+# 2026-10-05: nse_announcement_attachment, verified by the merger-terms fetch (11 documents);
+# nifty_index_press_releases, verified by M10.2 the same day.
 LATEST_VERIFICATION: datetime = datetime(2026, 10, 5, 23, 59, 59, tzinfo=IST)
 
 

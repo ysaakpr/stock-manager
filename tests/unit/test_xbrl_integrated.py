@@ -31,7 +31,7 @@ from pathlib import Path
 
 import pytest
 
-from dataplatform.ingest.models import ParseError
+from dataplatform.ingest.models import ParseError, is_isin_check_digit_valid
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.ingest.xbrl import integrated, parser
 from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
@@ -348,11 +348,11 @@ def test_the_check_digit_accepts_real_isins_and_refuses_a_single_wrong_character
     single wrong character fails (the swap of two adjacent digits is the one error it can miss,
     which is why `is_isin_typo_of` tests for that separately)."""
     for real in ("INE002A01018", "INE009A01021", "INE467B01029", "INE093I01010", "US0378331005"):
-        assert parser.is_isin_check_digit_valid(real), real
-    assert not parser.is_isin_check_digit_valid("INE002A01017")
-    assert not parser.is_isin_check_digit_valid("INEOFS801015")  # MSUMI's, O for 0
-    assert not parser.is_isin_check_digit_valid("INE002A0101")  # not twelve characters
-    assert not parser.is_isin_check_digit_valid("ine002a01018")  # not upper-case: not an ISIN
+        assert is_isin_check_digit_valid(real), real
+    assert not is_isin_check_digit_valid("INE002A01017")
+    assert not is_isin_check_digit_valid("INEOFS801015")  # MSUMI's, O for 0
+    assert not is_isin_check_digit_valid("INE002A0101")  # not twelve characters
+    assert not is_isin_check_digit_valid("ine002a01018")  # not upper-case: not an ISIN
     # The same ISIN is never a typo of itself, and a real other ISIN is never a typo.
     assert not parser.is_isin_typo_of("INE002A01018", "INE002A01018")
     assert not parser.is_isin_typo_of("INE009A01021", "INE002A01018")

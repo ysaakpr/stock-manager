@@ -70,6 +70,7 @@ from dataplatform.identity.primary import (
     select_primary,
     select_primary_map,
 )
+from dataplatform.identity.session import SessionIdentity, SessionStatement
 
 __all__ = [
     "CORROBORATING_TYPES",
@@ -106,6 +107,8 @@ __all__ = [
     "ReconciliationQueue",
     "RegistrationPlan",
     "Security",
+    "SessionIdentity",
+    "SessionStatement",
     "SkipReason",
     "SymbolWindow",
     "UnknownIsinError",

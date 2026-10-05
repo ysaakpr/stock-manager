@@ -35,7 +35,10 @@ __all__ = [
     "CONSTITUENTS_SNAPSHOT",
     "DAILY_SNAPSHOT",
     "EOD_PIPELINE",
+    "INDEX_PRESS_REFRESH",
     "JOB_NAME",
+    "TRI_REFRESH",
+    "UNSCHEDULED",
     "Job",
     "JobContext",
     "JobFn",
@@ -45,6 +48,8 @@ __all__ = [
     "daily_snapshot",
     "default_registry",
     "eod_pipeline",
+    "lag_budgets",
+    "tri_refresh",
 ]
 
 #: Job names are lower snake_case and never start with an underscore, which is what keeps them
@@ -87,6 +92,14 @@ class Job:
     What it assumes: `fn` is safe to run concurrently with *other* jobs — the runner's advisory
     lock only serialises a job against itself.
     What it never does: run anything. Constructing a `Job` has no side effect beyond validation.
+
+    `covers` names the Source Register rows this job keeps current, and is what
+    `test_scheduler_registry` holds against the register: a live source that no job covers and
+    `UNSCHEDULED` does not explain fails the gate. `sync_sources` names the `sync_state` sources
+    whose lag this job answers for, and `max_lag_sessions` how many sessions behind one may fall
+    before `/status/sources` stops calling it healthy — the 2026-10-05 audit found the bhavcopy
+    family 21 sessions behind and reported `healthy: true`, because health looked at failures and
+    never at lag.
     """
 
     name: str
@@ -94,6 +107,9 @@ class Job:
     fn: JobFn
     timeout: timedelta
     description: str = ""
+    covers: tuple[str, ...] = ()
+    sync_sources: tuple[str, ...] = ()
+    max_lag_sessions: int = 1
 
     def __post_init__(self) -> None:
         if not JOB_NAME.match(self.name):
@@ -104,6 +120,8 @@ class Job:
             )
         if self.timeout <= timedelta(0):
             raise ValueError(f"job {self.name!r} needs a positive timeout, got {self.timeout!r}")
+        if self.max_lag_sessions < 0:
+            raise ValueError(f"job {self.name!r} needs a non-negative max_lag_sessions")
         self.trigger()  # validate the cron now, not on the morning it was supposed to fire
 
     def trigger(self, timezone: ZoneInfo | None = None) -> Any:
@@ -207,6 +225,9 @@ EOD_PIPELINE = Job(
     fn=eod_pipeline,
     timeout=timedelta(minutes=45),
     description="Daily EOD ingest → validate → normalize → publish → archive (M1.10)",
+    # `eod.DAILY_NSE_SOURCES`' current-era register ids, plus the PR bundle it captures to L0.
+    covers=("nse_bhavcopy_udiff", "nse_sec_bhavdata_full", "bse_bhavcopy_udiff", "nse_pr_bundle"),
+    sync_sources=("nse_bhavcopy", "nse_delivery", "bse_bhavcopy"),
 )
 
 
@@ -240,6 +261,9 @@ CONSTITUENTS_SNAPSHOT = Job(
     fn=constituents_snapshot,
     timeout=timedelta(minutes=30),
     description="Weekly dated snapshot of index constituents — forward sector history (M10.2)",
+    covers=("nifty_index_constituents",),
+    sync_sources=("nifty_index_constituents",),
+    max_lag_sessions=6,
 )
 
 
@@ -265,6 +289,17 @@ def daily_snapshot(context: JobContext) -> None:
     run_daily_snapshot_job(context)
 
 
+_SNAPSHOT_SOURCES: tuple[str, ...] = (
+    "nse_industry_classification",
+    "bse_scrip_master",
+    "nse_price_bands",
+    "nse_asm_list",
+    "nse_gsm_list",
+    "nse_esm_list",
+    "nse_equity_list",
+    "nse_symbol_changes",
+)
+
 #: The daily snapshot (OPS). 19:15 IST Monday to Friday — after the 15:30 close and after the
 #: surveillance lists and price bands for the next session are published, and comfortably clear of
 #: the 18:30 EOD pipeline so the two are not competing for the same host budget. Trading days only:
@@ -276,6 +311,9 @@ DAILY_SNAPSHOT = Job(
     fn=daily_snapshot,
     timeout=timedelta(minutes=30),
     description="Daily capture of every snapshot-only source — the deadline job (OPS)",
+    # `daily_snapshot.DEFAULT_SNAPSHOT_SET`, whose sync_state source is the register id itself.
+    covers=_SNAPSHOT_SOURCES,
+    sync_sources=_SNAPSHOT_SOURCES,
 )
 
 
@@ -347,7 +385,128 @@ IDENTITY_REFRESH = Job(
     fn=identity_refresh,
     timeout=timedelta(minutes=15),
     description="Weekly NSE identity-master refresh: fetch to L0, re-derive from L0 (M1.7)",
+    covers=("nse_equity_list", "nse_symbol_changes"),
 )
+
+
+def tri_refresh(context: JobContext) -> None:
+    """The weekly benchmark-TRI refresh (2026-10-05 audit): every default index brought current.
+
+    What it does: one whole-history POST per index whose published L1 series no longer reaches the
+    last session before today, and nothing for an index already current — see
+    `tri_backfill.run_tri_refresh`. Until this job the TRI was a one-shot campaign whose resume
+    check looked only at the series' *start*, so NIFTY 50, IT and CPSE froze at the day they were
+    first fetched.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: touch a host other than niftyindices.com. The import is deferred for the
+    same reason the others are.
+    """
+    from dataplatform.ingest.tri_backfill import run_tri_refresh
+
+    run_tri_refresh(context)
+
+
+#: The weekly TRI refresh. 08:00 IST on Saturday — the week's last level has been disseminated,
+#: and one ~1 MB payload per index per week keeps L0 growth honest for a series a backtest reads at
+#: weekly-or-coarser resolution. Weekly rather than daily is why its lag budget is six sessions.
+TRI_REFRESH = Job(
+    name="tri_refresh",
+    cron="0 8 * * sat",
+    fn=tri_refresh,
+    timeout=timedelta(minutes=15),
+    description="Weekly benchmark TRI refresh for the default index set (M3.9.b)",
+    covers=("nifty_tri_history",),
+    sync_sources=("nifty_tri_history",),
+    max_lag_sessions=6,
+)
+
+
+def index_press_refresh(context: JobContext) -> None:
+    """The weekly index-change announcement capture (DQ-5): new releases into L0, nothing else.
+
+    What it does: fetches the niftyindices.com press-release listing, the seven tracked indices'
+    anchor CSVs and every candidate change release of the last 120 days not yet in L0 — see
+    `index_history_backfill.run_press_release_refresh`. NSE Indices publishes its semi-annual
+    reviews and ad-hoc replacements there days to weeks before they take effect, so a weekly pass
+    misses nothing and leaves every release in L0 before its change is effective.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: rebuild the membership history in L1, or backfill pre-window releases (the
+    owner-gated campaign). The import is deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.index_history_backfill import run_press_release_refresh
+
+    run_press_release_refresh(context)
+
+
+#: The weekly announcement capture. 09:00 IST on Saturday — after `tri_refresh` (08:00, 15-minute
+#: budget) on the same host, because a host lease is refused rather than queued, and well before the
+#: 20:00 constituents snapshot there. No `sync_sources`: each release is its own sync row dated by
+#: its announcement, so a session-lag budget would measure nothing.
+INDEX_PRESS_REFRESH = Job(
+    name="index_press_refresh",
+    cron="0 9 * * sat",
+    fn=index_press_refresh,
+    timeout=timedelta(minutes=20),
+    description="Weekly capture of NSE Indices change announcements into L0 (DQ-5)",
+    covers=("nifty_index_press_releases",),
+)
+
+
+#: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
+#: audit's root cause was not one broken job but sources that were simply never scheduled — the
+#: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
+#: reviewer can check; `test_scheduler_registry` fails for a live row in neither place, and
+#: `/status/jobs` serves this ledger so the gap is visible where operators look.
+UNSCHEDULED: dict[str, str] = {
+    "nse_mto": (
+        "Superseded from 2019-09-30 by nse_sec_bhavdata_full; the delivery source set fetches MTO "
+        "only for older sessions, so there is nothing new to take daily."
+    ),
+    "nse_corp_actions": (
+        "Refresh runs corp_actions_backfill, which writes corporate_actions and recomputes "
+        "adjustment_factors (L2-facing). Scheduling it waits on the sequenced L1/L2 rebuild after "
+        "the 2026-10-05 DQ fixes; staleness shows on /status/sources meanwhile."
+    ),
+    "bse_corp_actions": "Same as nse_corp_actions: per-scrip refresh feeds the factor recompute.",
+    "nse_financial_results_index": (
+        "fundamentals_backfill campaign (B1 NEEDS_GO: thousands of per-filing requests); no "
+        "incremental daily job yet."
+    ),
+    "nse_integrated_filing_index": "Same as nse_financial_results_index.",
+    "nse_xbrl_filing": "Same as nse_financial_results_index.",
+    "nifty_index_close_snapshot": (
+        "Input to the computed TRI fallback only; the published TRI is live (tri_refresh)."
+    ),
+    "nse_fii_dii_flows": "Parser exists; no job wired yet (no consumer in the decision path).",
+    "nse_bulk_deals": "Parser exists; no job wired yet (no consumer in the decision path).",
+    "nse_block_deals": "Parser exists; no job wired yet (no consumer in the decision path).",
+    "nse_fo_bhavcopy": "Parser exists; no job wired yet (F&O aggregates are backfill-only).",
+    "nse_announcements": "Announcement polling has no scheduled driver yet.",
+    "bse_announcements": "Announcement polling has no scheduled driver yet.",
+    "nse_announcement_attachment": (
+        "Per-filing documents fetched on demand by the merger-terms campaign (M3.8); no job yet."
+    ),
+    "nse_shareholding_pattern": "Quarterly; campaign-driven, no scheduled job yet.",
+    "gdelt_v2_event_files": "News pipeline is not wired into a job yet.",
+    "gdelt_doc_api": "Register status FAILED; nothing to schedule until it verifies.",
+    "curated_rss": "News pipeline is not wired into a job yet.",
+    "worldbank_indicator_api": "Annual macro series; fetched by hand when a vintage lands.",
+    "alfred_series_vintage": "Register status FAILED; nothing to schedule until it verifies.",
+    "screener_company_fundamentals": "Register status BLOCKED_CREDENTIAL.",
+}
+
+
+def lag_budgets(registry: JobRegistry) -> dict[str, int]:
+    """`sync_state` source → the sessions it may fall behind, from every job that answers for it.
+
+    Two jobs answering for one source is legal (a weekly and a daily refresh, say); the tighter
+    budget wins, because the source is owed by whichever is due sooner.
+    """
+    budgets: dict[str, int] = {}
+    for job in registry:
+        for source in job.sync_sources:
+            budgets[source] = min(budgets.get(source, job.max_lag_sessions), job.max_lag_sessions)
+    return budgets
 
 
 def default_registry() -> JobRegistry:
@@ -357,5 +516,13 @@ def default_registry() -> JobRegistry:
     test that registers an extra job, must not be able to mutate what the next one sees.
     """
     return JobRegistry(
-        [EOD_PIPELINE, DAILY_SNAPSHOT, CONSTITUENTS_SNAPSHOT, L0_VERIFY, IDENTITY_REFRESH]
+        [
+            EOD_PIPELINE,
+            DAILY_SNAPSHOT,
+            CONSTITUENTS_SNAPSHOT,
+            L0_VERIFY,
+            IDENTITY_REFRESH,
+            TRI_REFRESH,
+            INDEX_PRESS_REFRESH,
+        ]
     )

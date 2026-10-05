@@ -30,10 +30,10 @@ partition unless the resolved L0 root is exactly it.
 `prices_raw_quarantine` partition holds the bhavcopy's placeholder-ISIN rows (W1) *and* the
 delivery rows that could not be placed, and `write_prices_raw` writes it in one piece from what it
 is handed. The write step here is `backfill.SOURCE_SETS[NSE_DELIVERY]`'s, which passes both sets
-in one call; `guard_quarantine` additionally proves, before each write, that every row already in
-the partition that is not a replaceable delivery row will be re-derived by it. A row the write
-would not reproduce — another exchange's, or one from a writer this driver does not know — stops
-that session loudly instead of disappearing.
+in one call; `guard_quarantine` additionally proves, before each write, that every NSE row already
+in the partition that is not a replaceable delivery row will be re-derived by it. A row the write
+would not reproduce — one from a writer this driver does not know — stops that session loudly
+instead of disappearing. Another exchange's rows are carried through the write unchanged.
 
 Resume is L0 plus the journal for acquisition (zero requests for a session already stored or
 already proved absent), and `sync_state` for promotion (a `PUBLISHED` session is skipped).
@@ -261,9 +261,10 @@ def plan_sessions(
 
     What it does: refuses a range outside `[CAMPAIGN_FLOOR, MTO_ERA_END)`, asks the calendar, and
     unions in the in-range `priced` sessions. The union is not a widening: a W1 price partition is
-    the exchange's own bhavcopy for that day, and the seven special Saturday sessions of 2012-2015
-    (2012-01-07 … 2015-02-28) are sessions the calendar does not list and W1 holds prices for — a
-    calendar-only plan would leave them without delivery for no reason but the plan.
+    the exchange's own bhavcopy for that day. It was added for the seven special Saturday sessions
+    of 2012-2015 (2012-01-07 … 2015-02-28), which the calendar did not then list; the calendar now
+    declares them (`special_sessions:`, DayKind.SPECIAL), so the union is a backstop that names any
+    priced date the calendar still misses — in the plan's note, so the calendar gets corrected.
     What it assumes: the calendar covers the range. Unlike W1 there is no weekday fallback — W1's
     campaign *was* the calendar's evidence, and a range the calendar cannot vouch for is one this
     driver has no business spending requests on. `CalendarCoverageError` propagates.
@@ -584,10 +585,12 @@ def guard_quarantine(
     if not path.is_file():
         return 0
     existing = pq.read_table(path, schema=PRICES_RAW_QUARANTINE_SCHEMA).to_pylist()
+    # Another exchange's rows ride through the write unchanged (`l1._write_quarantine` replaces
+    # only the writing exchange's rows), so only NSE's non-delivery rows are at risk.
     kept = [
         row
         for row in existing
-        if not (row["exchange"] == Exchange.NSE.value and row["reason"] in _DELIVERY_REASONS)
+        if row["exchange"] == Exchange.NSE.value and row["reason"] not in _DELIVERY_REASONS
     ]
     if not kept:
         return 0

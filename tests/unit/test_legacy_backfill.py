@@ -226,7 +226,9 @@ def test_the_real_calendar_covers_the_deep_range_and_the_plan_comes_from_it() ->
     plan = lb.plan_sessions(DEEP_START, DEEP_END, calendar=trading_calendar())
 
     assert plan.basis == "calendar"
-    assert len(plan) == 2636, "the calendar's expected sessions across the deep range"
+    # 2,636 weekday sessions and Muhurat dates, plus the ten declared weekend sessions of
+    # 2006-04-29 .. 2015-02-28 that W1's own campaign proved and the calendar now lists.
+    assert len(plan) == 2636 + 10, "the calendar's expected data dates across the deep range"
     assert plan.dates[0] == DEEP_START
     assert plan.dates[-1] == DEEP_END
     assert HOLIDAY_SESSION not in plan.dates, "a declared holiday owes no file and costs no request"

@@ -266,7 +266,9 @@ def test_the_campaign_range_plans_from_the_calendar_and_counts_4124_sessions() -
     plan = campaign.plan_sessions(CAMPAIGN_START, CAMPAIGN_END, calendar=trading_calendar())
 
     assert plan.basis == "calendar"
-    assert len(plan) == 4124
+    # 4,124 was signed off before the calendar declared weekend sessions; the 14 that fall inside
+    # the archive's life (eight 2010-2015, six 2020-2026) are bundles the plan was never asking for.
+    assert len(plan) == 4124 + 14
     assert plan.dates[0] == CAMPAIGN_START
     assert plan.dates[-1] == CAMPAIGN_END
     assert date(2013, 1, 26) not in plan.dates, "Republic Day owes no bundle and costs no request"

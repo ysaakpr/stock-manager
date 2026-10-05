@@ -95,18 +95,16 @@ provenance:
     The full cross-check against real bhavcopy availability for all ~2,700 weekdays is M1's
     backfill job: `TradingCalendar.reconcile` is the function it calls.
 
-    **A gap this schema cannot express, found by W0-6 and left open deliberately.** NSE holds
-    occasional non-Muhurat weekend sessions — Union Budget Saturdays, and live sessions run from
-    the disaster-recovery site — and they publish a bhavcopy. Ten exist in 2006-2015 and every
-    one was probed: 2006-04-29, 2006-06-25, 2010-02-06, 2012-01-07, 2012-03-03, 2012-04-28,
-    2012-09-08, 2013-05-11, 2014-03-22 and 2015-02-28 all returned 200. The same is true inside
-    the range this file already covered: 2020-02-01, 2024-05-18 and 2025-02-01 return 200 too.
-    Such a date is not a holiday, so it cannot carry `special_session`, and `SpecialSession` has
-    no member for it — so the calendar calls it WEEKEND and expects no data. `reconcile` cannot
-    see the miss either, because nothing ever fetches those dates, so they never reach `observed`.
-    Fixing it needs a new `SpecialSession` member and a way to declare a session on a non-holiday
-    weekend, which is a change to calendar.py and outside W0-6's scope. Until then these sessions
-    are silently absent from L0 — for the range already covered as much as for the new one.
+    **Weekend sessions that are not holidays** — Union Budget days, live drills from the
+    disaster-recovery site, trading-system cut-overs — are declared under `special_sessions:` at
+    the end of this file (added 2026-10-05 after the data-quality audit of that date; until then
+    the schema could not express them, the calendar called them WEEKEND, and nothing fetched them).
+    Each entry carries observed `evidence` — never an announcement alone — and, where one was
+    found, the circular or contemporaneous report that `announced_by` names. The set was derived
+    the way the memo on validated derivations asks: every weekend date carrying a NIFTY 50 TRI
+    value in 2006-2026 (16, after the 20 Muhurat dates are set aside) was cross-checked against
+    the bhavcopy archive, and the two agree on all sixteen. The TRI series has no weekend value
+    that the archive contradicts, so no weekend TRI date in coverage is treated as a data error.
 
 years:
 
@@ -565,3 +563,91 @@ years:
       - { date: 2026-11-10, name: "Diwali-Balipratipada" }
       - { date: 2026-11-24, name: "Prakash Gurpurb Sri Guru Nanak Dev" }
       - { date: 2026-12-25, name: "Christmas" }
+
+# Sessions the exchange held on a Saturday or Sunday that is not a declared holiday. Classified
+# SPECIAL: not a weekday session, but a date that owes a file. `evidence` is what was *observed*
+# (a self-dated priced file, a published index value); `announced_by` is why the session was held,
+# where a source naming it was found. UNATTRIBUTED means the files prove the session and no
+# source naming its reason has been located — the date is no less real for it.
+#
+# Pre-2016 file evidence: each bhavcopy is dated inside its own rows (TIMESTAMP), and its closes
+# differ from the preceding session's on > 90% of common symbols — not a re-served stale file.
+# TRI values are NIFTY 50 total-return closes from niftyindices.com's TRI history (L0
+# nifty_tri_history), each distinct from both neighbouring sessions.
+special_sessions:
+  - date: 2006-04-29
+    name: "Special Saturday session"
+    kind: UNATTRIBUTED
+    evidence: "L0 nse_bhavcopy_legacy cm29APR2006bhav.csv.zip: 923 rows, TIMESTAMP 29-APR-2006, close differs from 2006-04-28 on 898/916; NIFTY 50 TRI 4213.88"
+  - date: 2006-06-25
+    name: "Special Sunday session"
+    kind: UNATTRIBUTED
+    evidence: "L0 nse_bhavcopy_legacy cm25JUN2006bhav.csv.zip: 876 rows, TIMESTAMP 25-JUN-2006, close differs from 2006-06-23 on 849/875; NIFTY 50 TRI 3625.04"
+  - date: 2010-02-06
+    name: "Special live session (CM trading-system capacity upgrade)"
+    kind: SYSTEM_UPGRADE
+    evidence: "L0 nse_bhavcopy_legacy cm06FEB2010bhav.csv.zip: 1,299 rows, TIMESTAMP 06-FEB-2010, close differs from 2010-02-05 on 1,271/1,298; NIFTY 50 TRI 5908.36"
+    announced_by: "NSE special live session 11:00-12:30 for the horizontally scalable CM trading architecture (contemporaneous press, taxguru.in/?p=20592)"
+  - date: 2012-01-07
+    name: "Special live session (F&O system infrastructure upgrade)"
+    kind: SYSTEM_UPGRADE
+    evidence: "L0 nse_bhavcopy_legacy cm07JAN2012bhav.csv.zip: 1,362 rows, 805,429 trades, TIMESTAMP 07-JAN-2012; L0 nse_mto MTO_07012012.DAT; NIFTY 50 TRI 6023.77"
+    announced_by: "CSE notice of 2012-01-05 relaying NSE/BSE special live session on account of F&O system upgrade (cse-india.com Notice050112_1.htm); Business Standard 2012-01-05"
+  - date: 2012-03-03
+    name: "Special live session (BSE DR-site test; NSE traded alongside)"
+    kind: LIVE_DR
+    evidence: "L0 nse_bhavcopy_legacy cm03MAR2012bhav.csv.zip: 1,394 rows, 815,615 trades, TIMESTAMP 03-MAR-2012; L0 nse_mto MTO_03032012.DAT; NIFTY 50 TRI 6805.53"
+    announced_by: "90-minute special session 11:15-12:45 (Business Today, stock-markets-special-session-mar-3-2012)"
+  - date: 2012-04-28
+    name: "Special live session from the DR site"
+    kind: LIVE_DR
+    evidence: "L0 nse_bhavcopy_legacy cm28APR2012bhav.csv.zip: 1,338 rows, 610,385 trades, TIMESTAMP 28-APR-2012; L0 nse_mto MTO_28042012.DAT; NIFTY 50 TRI 6618.61"
+    announced_by: "CSE notice of 2012-04-26 relaying NSE/BSE special LIVE session from their DR sites (cse-india.com Notice260412.htm)"
+  - date: 2012-09-08
+    name: "Special Saturday session"
+    kind: UNATTRIBUTED
+    evidence: "L0 nse_bhavcopy_legacy cm08SEP2012bhav.csv.zip: 1,388 rows, 686,736 trades, TIMESTAMP 08-SEP-2012; L0 nse_mto MTO_08092012.DAT; NIFTY 50 TRI 6877.73"
+  - date: 2013-05-11
+    name: "Special Saturday session"
+    kind: UNATTRIBUTED
+    evidence: "L0 nse_bhavcopy_legacy cm11MAY2013bhav.csv.zip: 1,267 rows, 631,480 trades, TIMESTAMP 11-MAY-2013; L0 nse_mto MTO_11052013.DAT; NIFTY 50 TRI 7866.90"
+  - date: 2014-03-22
+    name: "Special live session from the BCP site"
+    kind: LIVE_DR
+    evidence: "L0 nse_bhavcopy_legacy cm22MAR2014bhav.csv.zip: 1,375 rows, 790,328 trades, TIMESTAMP 22-MAR-2014; L0 nse_mto MTO_22032014.DAT; NIFTY 50 TRI 8464.28"
+    announced_by: "CSE notice of 2014-03-20 relaying NSE special LIVE session from its BCP site (cse-india.com Notice200314_4.htm); Business Standard 2014-03-22"
+  - date: 2015-02-28
+    name: "Union Budget (Saturday)"
+    kind: BUDGET
+    evidence: "L0 nse_bhavcopy_legacy cm28FEB2015bhav.csv.zip: 1,534 rows, 7,512,365 trades (a full session), TIMESTAMP 28-FEB-2015; L0 nse_mto MTO_28022015.DAT; NIFTY 50 TRI 11723.28"
+    announced_by: "Union Budget 2015-16 presented Saturday 2015-02-28; exchanges open for normal trading"
+  - date: 2020-02-01
+    name: "Union Budget (Saturday)"
+    kind: BUDGET
+    evidence: "NIFTY 50 TRI 16369.00 (prior session 16790.45); nsearchives served cm01FEB2020bhav.csv.zip HTTP 200 (W0-6 probe, 2026-09-08)"
+    announced_by: "Union Budget 2020-21 presented Saturday 2020-02-01; NSE/BSE normal-hours session"
+  - date: 2024-01-20
+    name: "Special live session with intraday DR switch-over (made a full session)"
+    kind: LIVE_DR
+    evidence: "NIFTY 50 TRI 31712.86 (prior session 31787.24)"
+    announced_by: "NSE circular of 2023-12-28 (special live session with switch-over to the DR site); later extended to a full trading day as 2024-01-22 was declared a holiday"
+  - date: 2024-03-02
+    name: "Special live session with intraday DR switch-over"
+    kind: LIVE_DR
+    evidence: "NIFTY 50 TRI 32942.63 (prior session 32884.29)"
+    announced_by: "NSE circular MSD60300 (nsearchives.nseindia.com/content/circulars/MSD60300.pdf); Zerodha bulletin 371327"
+  - date: 2024-05-18
+    name: "Special live session with intraday DR switch-over"
+    kind: LIVE_DR
+    evidence: "NIFTY 50 TRI 33190.97 (prior session 33138.02); nsearchives served cm18MAY2024bhav.csv.zip HTTP 200 (W0-6 probe, 2026-09-08)"
+    announced_by: "NSE circular MSD60942 (nsearchives.nseindia.com/content/circulars/MSD60942.pdf); Zerodha bulletin 377895"
+  - date: 2025-02-01
+    name: "Union Budget (Saturday)"
+    kind: BUDGET
+    evidence: "NIFTY 50 TRI 34958.89 (prior session 34998.01); nsearchives answered HTTP 200 for the date (W0-6 probe, 2026-09-08)"
+    announced_by: "Union Budget 2025-26 presented Saturday 2025-02-01; NSE/BSE normal-hours session"
+  - date: 2026-02-01
+    name: "Union Budget (Sunday)"
+    kind: BUDGET
+    evidence: "NIFTY 50 TRI 37392.92 (prior session 38138.83)"
+    announced_by: "NSE circular 04/2026 of 2026-01-16, CMTR72349 (nsearchives.nseindia.com/content/circulars/CMTR72349.pdf): live session 09:15-15:30"

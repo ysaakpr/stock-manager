@@ -310,6 +310,41 @@ def test_second_run_refetches_nothing_and_is_a_no_op(
     assert _urls_fetched(second) == []
 
 
+def test_a_payload_already_in_l0_is_derived_without_a_request(
+    settings: Settings,
+    conn: Connection,
+    clock: FrozenClock,
+    register: SourceRegister,
+    store: SyncStateStore,
+) -> None:
+    """An L0-only catch-up (`l0_acquire`) is derived into L1 later at zero request cost.
+
+    The bytes are put in L0 first, as the acquisition driver would, and the runner is handed a
+    transport that knows no URL at all: any fetch is an `UnrecordedRequestError` and a FAILED
+    session. Every session must still reach PUBLISHED with its L1 partition written.
+    """
+    l0 = L0Store(clock=clock, data_root=settings.data_root)
+    for request in _requests(register):
+        l0.put(
+            request.fetch_source,
+            request.trade_date,
+            request.filename,
+            FIXTURE_FILES[request.trade_date].read_bytes(),
+        )
+
+    silent = RecordedTransport({})
+    report = _runner(silent, settings=settings, conn=conn, clock=clock, register=register).run(
+        _requests(register)
+    )
+
+    assert report.published == len(FIXTURE_DATES) and report.failed == 0
+    assert silent.requests == []
+    for day in FIXTURE_DATES:
+        record = store.get(NSE_BHAVCOPY, day)
+        assert record is not None and record.state is SyncState.PUBLISHED
+        assert len(read_prices_raw(day, data_root=settings.data_root)) > 0
+
+
 # ── acceptance 3: kill mid-run, resume without re-fetch and without gaps ──────────────────────
 
 

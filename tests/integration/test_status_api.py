@@ -40,6 +40,7 @@ from dataplatform.status.models import (
     ArchivesOut,
     GapsOut,
     HealthOut,
+    JobsOut,
     QualityOut,
     SchedulerState,
     ServiceStatus,
@@ -558,6 +559,34 @@ def test_status_sources_computes_last_success_lag_and_failure_streak(
     assert entry.failure_streak == 1
     assert entry.last_error == "HTTP 500"
     assert entry.healthy is False
+
+
+def test_status_jobs_shows_a_registered_job_nobody_ever_fired(
+    client: TestClient, conn: Connection
+) -> None:
+    """The 2026-10-05 audit's state, served: the snapshot timer ran, the EOD pipeline never did.
+
+    `job_run` held only `daily_snapshot` rows, `/health` was fine, and nothing anywhere said that
+    `eod_pipeline` had no row at all. `/status/jobs` lists the registry, not the rows, so the
+    never-fired job is NEVER_RAN and the whole surface is unhealthy.
+    """
+    fired = datetime(2026, 8, 7, 19, 15, 1, tzinfo=IST)  # Friday's 19:15 snapshot fire
+    conn.execute(
+        "INSERT INTO job_run (run_id, job_name, state, instance, started_at, finished_at, error) "
+        "VALUES (gen_random_uuid(), 'daily_snapshot', 'SUCCEEDED', 'test:1', %s, %s, NULL)",
+        (fired, fired + timedelta(minutes=2)),
+    )
+
+    response = client.get("/status/jobs")
+    assert response.status_code == 200
+    body = JobsOut.model_validate(response.json())
+    by_name = {job.name: job for job in body.jobs}
+
+    assert by_name["daily_snapshot"].state == "OK"
+    assert by_name["eod_pipeline"].state == "NEVER_RAN"
+    assert not body.healthy
+    # The ledger of live sources nothing schedules is served alongside, reasons and all.
+    assert "nse_corp_actions" in body.unscheduled
 
 
 def test_status_gaps_lists_only_the_incomplete_pairs_in_the_range(

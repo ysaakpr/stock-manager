@@ -669,3 +669,20 @@ def test_a_corrupted_l0_payload_never_becomes_rows(tmp_path: Path) -> None:
 
     with pytest.raises(Exception, match="hashes to"):
         parse_l0(store, ref)
+
+
+def test_an_isin_with_a_wrong_check_digit_fails_the_file_loudly() -> None:
+    """The shape is right, the check digit is not: no security has `INE002A01017`.
+
+    The UDiFF era has never published a placeholder, so an unkeyable ISIN here is a corrupt file,
+    session-fatal like every other bad field in this parser — named, with its line.
+    """
+    good = a_valid_record()
+    assert parse(a_file(good), filename="ok.csv")[0].isin == "INE002A01018"
+
+    with pytest.raises(ParseError) as caught:
+        parse(a_file(good, a_valid_record(ISIN="INE002A01017")), filename="typo.csv")
+
+    assert caught.value.line == 3
+    assert "INE002A01017" in str(caught.value)
+    assert "check digit" in str(caught.value)

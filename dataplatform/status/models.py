@@ -26,6 +26,7 @@ from enum import StrEnum
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from dataplatform.quality.gaps import GapEntry, GapReason, GapReport
+from dataplatform.scheduler.health import JobHealth, JobHealthState
 from dataplatform.status.sync_state import GreenStatus, SourceStatus, SyncRecord, SyncState
 
 #: `datetime.date` under a second name. Several models here carry a field called `date` — the
@@ -42,6 +43,8 @@ __all__ = [
     "GapReasonCountOut",
     "GapsOut",
     "HealthOut",
+    "JobHealthOut",
+    "JobsOut",
     "QualityFlagOut",
     "QualityOut",
     "QualitySeverity",
@@ -99,7 +102,7 @@ class SyncStatusOut(BaseModel):
 
     date: date
     day_kind: str | None = Field(
-        description="SESSION | MUHURAT | WEEKEND | HOLIDAY from the C.2 calendar; "
+        description="SESSION | MUHURAT | SPECIAL | WEEKEND | HOLIDAY from the C.2 calendar; "
         "null outside its coverage"
     )
     expects_data: bool | None = Field(
@@ -160,6 +163,11 @@ class SourceStatusOut(BaseModel):
     last_failure_date: date | None
     last_error: str | None
     last_failure_retryable: bool | None
+    max_lag_sessions: int | None = Field(
+        description="The scheduled job's lag budget for this source; null when no job keeps it "
+        "current"
+    )
+    overdue: bool = Field(description="More sessions behind than its scheduled budget")
     healthy: bool
     counts: dict[SyncState, int]
 
@@ -177,6 +185,8 @@ class SourceStatusOut(BaseModel):
             last_failure_date=status.last_failure_date,
             last_error=status.last_error,
             last_failure_retryable=status.last_failure_retryable,
+            max_lag_sessions=status.max_lag_sessions,
+            overdue=status.overdue,
             healthy=status.healthy,
             counts=dict(status.counts),
         )
@@ -189,6 +199,54 @@ class SourcesOut(BaseModel):
 
     as_of: date = Field(description="The trading date lag is measured against (injected clock)")
     sources: list[SourceStatusOut]
+
+
+# ── /status/jobs ────────────────────────────────────────────────────────────────────────────
+
+
+class JobHealthOut(BaseModel):
+    """One registered job's line in `GET /status/jobs`, read off `job_run` (never assumed)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    cron: str
+    state: JobHealthState
+    healthy: bool
+    due_since: datetime | None = Field(
+        description="The newest fire whose budget has elapsed — the run a success must postdate"
+    )
+    last_state: str | None
+    last_started_at: datetime | None
+    last_success_at: datetime | None
+    last_error: str | None
+
+    @classmethod
+    def of(cls, health: JobHealth) -> JobHealthOut:
+        return cls(
+            name=health.name,
+            cron=health.cron,
+            state=health.state,
+            healthy=health.healthy,
+            due_since=health.due_since,
+            last_state=health.runs.last_state,
+            last_started_at=health.runs.last_started_at,
+            last_success_at=health.runs.last_success_at,
+            last_error=health.runs.last_error,
+        )
+
+
+class JobsOut(BaseModel):
+    """`GET /status/jobs` — every registered job, and every live source no job keeps current."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    as_of: datetime
+    healthy: bool = Field(description="Every registered job is OK or RUNNING")
+    jobs: list[JobHealthOut]
+    unscheduled: dict[str, str] = Field(
+        description="Source Register ids no registered job covers, with the recorded reason"
+    )
 
 
 # ── /health ─────────────────────────────────────────────────────────────────────────────────
@@ -287,7 +345,9 @@ class GapEntryOut(BaseModel):
     date: date
     reason: GapReason
     explained: bool = Field(description="False means somebody owes an answer for this day")
-    day_kind: str = Field(description="SESSION | MUHURAT | WEEKEND | HOLIDAY from the C.2 calendar")
+    day_kind: str = Field(
+        description="SESSION | MUHURAT | SPECIAL | WEEKEND | HOLIDAY from the C.2 calendar"
+    )
     detail: str = Field(description="One line naming the reason concretely, for an operator")
     state: SyncState | None = Field(description="Null when the pair has no sync_state row at all")
     attempts: int

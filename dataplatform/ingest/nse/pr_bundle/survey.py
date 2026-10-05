@@ -244,11 +244,13 @@ class YearRow:
     muhurat: int
     bundles: int
     members: Mapping[str, int]
+    weekend: int = 0
+    """Declared non-holiday weekend sessions (Budget days, DR drills) — `DayKind.SPECIAL`."""
 
     @property
     def expected(self) -> int:
-        """Dates the calendar says a bundle should exist for — sessions plus Muhurat."""
-        return self.sessions + self.muhurat
+        """Dates the calendar says a bundle should exist for — sessions, Muhurat and weekend."""
+        return self.sessions + self.muhurat + self.weekend
 
 
 # ── the three parsed members ─────────────────────────────────────────────────────────────────
@@ -835,6 +837,7 @@ def _year_rows(
                 year=year,
                 sessions=by_kind[DayKind.SESSION],
                 muhurat=by_kind[DayKind.MUHURAT],
+                weekend=by_kind[DayKind.SPECIAL],
                 bundles=bundles_by_year[year],
                 members={
                     name: counts[year] for name, counts in per_family_year.items() if counts[year]
@@ -1254,13 +1257,14 @@ def _render_duplicates(survey: CorpusSurvey) -> list[str]:
 
 def _render_availability(survey: CorpusSurvey) -> list[str]:
     names = survey.member_names
-    header = "| year | sessions | muhurat | bundles | " + " | ".join(names) + " |"
-    ruler = "|---:" * (4 + len(names)) + "|"
+    header = "| year | sessions | muhurat | weekend | bundles | " + " | ".join(names) + " |"
+    ruler = "|---:" * (5 + len(names)) + "|"
     lines = [
         "## 1. Per-year availability",
         "",
-        "`sessions` and `muhurat` are the shipped `nse_holidays.yaml` calendar's expectation for "
-        "the year; `bundles` is what L0 holds, enumerated from the payload filenames. Every other "
+        "`sessions`, `muhurat` and `weekend` (declared non-holiday weekend sessions) are the "
+        "shipped `nse_holidays.yaml` calendar's expectation for the year; `bundles` is what L0 "
+        "holds, enumerated from the payload filenames. Every other "
         "column counts the bundles of that year carrying that member family.",
         "",
         header,
@@ -1268,13 +1272,17 @@ def _render_availability(survey: CorpusSurvey) -> list[str]:
     ]
     for row in survey.years:
         cells = " | ".join(str(row.members.get(name, 0)) for name in names)
-        lines.append(f"| {row.year} | {row.sessions} | {row.muhurat} | {row.bundles} | {cells} |")
+        lines.append(
+            f"| {row.year} | {row.sessions} | {row.muhurat} | {row.weekend} | {row.bundles} "
+            f"| {cells} |"
+        )
     totals = " | ".join(
         str(sum(row.members.get(name, 0) for row in survey.years)) for name in names
     )
     lines += [
         f"| **total** | **{sum(row.sessions for row in survey.years)}** | "
         f"**{sum(row.muhurat for row in survey.years)}** | "
+        f"**{sum(row.weekend for row in survey.years)}** | "
         f"**{sum(row.bundles for row in survey.years)}** | {totals} |",
         "",
         "### First and last appearance per member family",

@@ -32,6 +32,7 @@ published it (invariant #3); adjustment factors live in D3 and are applied on re
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -48,12 +49,50 @@ __all__ = [
     "PriceRow",
     "Quantity",
     "UnidentifiedRow",
+    "is_isin_check_digit_valid",
+    "is_keyable_isin",
 ]
 
 #: An ISIN as ISO 6166 defines it: two-letter country code, nine alphanumerics, one check digit.
 #: Indian equities are `INE…`/`INF…`/`IN9…`, but the pattern stays general — a Singapore-domiciled
 #: line on an Indian exchange is a real thing and is not this parser's business to reject.
 ISIN_PATTERN: Final = r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$"
+
+_ISIN_LITERAL: Final = re.compile(ISIN_PATTERN)
+
+
+def is_isin_check_digit_valid(isin: str) -> bool:
+    """Whether the ISIN's last character is the ISO 6166 check digit of the rest.
+
+    Letters become their base-36 values (`A` = 10 … `Z` = 35), the digits are concatenated, and the
+    Luhn sum over the whole string must be divisible by ten. Assumes a twelve-character
+    upper-case ISIN; anything else is not an ISIN and is False. Never consults a master: this is
+    arithmetic on the string, so it can say "not any security's ISIN" but never "this security's".
+    """
+    if not re.fullmatch(r"[A-Z0-9]{12}", isin):
+        return False
+    digits = "".join(str(int(character, 36)) for character in isin)
+    total = 0
+    for position, character in enumerate(reversed(digits)):
+        value = int(character)
+        if position % 2:
+            value *= 2
+            if value > 9:
+                value -= 9
+        total += value
+    return total % 10 == 0
+
+
+def is_keyable_isin(value: str) -> bool:
+    """Whether a source's ISIN literal can be a join key: the ISO 6166 shape *and* its check digit.
+
+    The shape alone let `IN9232101012` (NSE `SPARC`, series `E1`, 2012-10-09..11) into L1 as a
+    key — twelve well-formed characters that are no security's ISIN, because the check digit is
+    wrong. A key that names nobody is worse than no key: it can never join, and nothing downstream
+    can tell it from a real security with a short history. Never consults a master.
+    """
+    return _ISIN_LITERAL.match(value) is not None and is_isin_check_digit_valid(value)
+
 
 #: A price or a rupee amount. `strict` keeps floats out by construction; `ge=0` and
 #: `allow_inf_nan=False` keep a mis-parsed field from becoming a plausible-looking number.

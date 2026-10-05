@@ -34,13 +34,13 @@ import argparse
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
-from dataplatform.ingest.calendar import trading_calendar
+from dataplatform.ingest.calendar import TradingCalendar, trading_calendar
 from dataplatform.ingest.fetcher import Fetcher, leased_fetcher
 from dataplatform.ingest.indices import (
     TRI_METHOD_PUBLISHED,
@@ -59,6 +59,9 @@ from dataplatform.logging import get_logger
 from dataplatform.status.sync_state import SyncStateStore
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Ref, L0Store
+
+if TYPE_CHECKING:  # imported lazily by the registry to avoid a scheduler→ingest import cycle
+    from dataplatform.scheduler.registry import JobContext
 
 _LOG = get_logger(__name__)
 
@@ -131,17 +134,40 @@ class IndexOutcome:
         )
 
 
-def already_published(spec: IndexSpec, start: date, data_root: Path | None) -> bool:
-    """Whether L1 already holds a *published* series for this index reaching back to `start`.
+def already_published(
+    spec: IndexSpec, start: date, data_root: Path | None, *, through: date | None = None
+) -> bool:
+    """Whether L1 already holds a *published* series for this index covering `[start, through]`.
 
     Resume is read off the artefact rather than off the sync row, for the same reason M10.1's
     constituents sweep does: the artefact is what downstream reads, and a sync row that says
     PUBLISHED while the partition is missing is precisely the disagreement a resume check should
     not trust. `method=TRI_METHOD_PUBLISHED` is explicit — a computed-fallback series on disk is
     not a reason to skip fetching the real one.
+
+    Both ends are checked. Until the 2026-10-05 audit only the start was, so a series published
+    once was "already published" for every later window too and no run ever advanced it — NIFTY 50,
+    IT and CPSE all stood at 2026-09-07 while the market moved on. `through` is the last session
+    the series must reach; `None` checks the start alone (the `--from-l0` and test callers).
     """
     series = read_tri_series(spec.slug, date.max, method=TRI_METHOD_PUBLISHED, data_root=data_root)
-    return series is not None and series.points[0].as_of <= start
+    if series is None or series.points[0].as_of > start:
+        return False
+    return through is None or series.points[-1].as_of >= through
+
+
+def last_session_before(end: date, calendar: TradingCalendar) -> date | None:
+    """The newest session strictly before `end` — the level a fetch dated `end` must already carry.
+
+    Strictly before, because session D's level is disseminated after D's close: a run on D's
+    evening may honestly not see D yet, and demanding it would re-fetch the whole history every
+    night for one missing point. `None` when no session precedes `end` inside coverage.
+    """
+    start = max(calendar.coverage_start, end - timedelta(days=31))
+    if end <= start:
+        return None
+    sessions = calendar.expected_data_dates(start, end - timedelta(days=1))
+    return sessions[-1] if sessions else None
 
 
 def run_tri_backfill(
@@ -155,6 +181,7 @@ def run_tri_backfill(
     data_root: Path | None = None,
     register: SourceRegister | None = None,
     commit: Callable[[], None] | None = None,
+    calendar: TradingCalendar | None = None,
 ) -> tuple[IndexOutcome, ...]:
     """Backfill each index's published TRI over `[start, end]`, committing after each.
 
@@ -164,14 +191,15 @@ def run_tri_backfill(
     struck against whatever did land. A driver that wanted to park one index and continue would be
     a different decision from a different task.
     """
+    through = last_session_before(end, trading_calendar() if calendar is None else calendar)
     outcomes: list[IndexOutcome] = []
     for spec in indices:
-        if already_published(spec, start, data_root):
+        if already_published(spec, start, data_root, through=through):
             _LOG.info(
                 "tri_backfill.skipped",
                 source=TRI_SOURCE_ID,
                 index=spec.slug,
-                reason="L1 already holds a published series reaching this window's start",
+                reason="L1 already holds a published series spanning this window",
                 state="PUBLISHED",
             )
             outcomes.append(
@@ -202,6 +230,42 @@ def run_tri_backfill(
             )
         )
     return tuple(outcomes)
+
+
+def run_tri_refresh(context: JobContext) -> None:
+    """The scheduler's `tri_refresh` job body: bring every default index's TRI up to date.
+
+    What it does: under the `niftyindices.com` lease, re-runs `run_tri_backfill` over
+    `DEFAULT_INDEX_SET` with the window ending on the job's own date (the injected clock, B10). An
+    index whose L1 series already reaches the last session before today is skipped without a
+    request, so a re-run on the same day is a no-op; one that is behind costs one POST. A failure is
+    recorded on that index's sync row and re-raised, so the run is FAILED and `/status/sources`
+    shows the row — never a log line nobody reads.
+    What it assumes: the database is migrated and the network reachable.
+    What it never does: decide the date for itself, or touch any host but the TRI endpoint's.
+    """
+    settings = context.settings
+    clock = context.clock
+    register = load_register()
+    calendar = trading_calendar()
+    with (
+        leased_fetcher(
+            [TRI_HOST], clock=clock, command="tri_refresh", settings=settings, register=register
+        ) as fetcher,
+        connection(settings) as conn,
+    ):
+        outcomes = run_tri_backfill(
+            fetcher=fetcher,
+            l0=L0Store(clock=clock, data_root=settings.data_root),
+            tracker=SyncStateStore(conn, clock=clock, calendar=calendar),
+            end=clock.today(),
+            data_root=settings.data_root,
+            register=register,
+            commit=conn.commit,
+            calendar=calendar,
+        )
+    for outcome in outcomes:
+        _LOG.info("tri_refresh.index", source=TRI_SOURCE_ID, line=outcome.line)
 
 
 class NoStoredPayloadError(Exception):
