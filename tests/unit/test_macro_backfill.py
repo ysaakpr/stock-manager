@@ -28,12 +28,19 @@ from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
 from dataplatform.ingest.calendar import trading_calendar
 from dataplatform.ingest.fetcher import Fetcher, RecordedResponse, RecordedTransport
+from dataplatform.ingest.macro import (
+    Frequency,
+    IndexAliasTable,
+    MacroFact,
+    MacroRelease,
+    Unit,
+    load_index_aliases,
+)
 from dataplatform.ingest.macro import backfill as mb
-from dataplatform.ingest.macro import load_index_aliases
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.status.sync_state import SyncState
 from dataplatform.store.l0 import L0Store
-from dataplatform.store.macro_series import read_l1, read_pit
+from dataplatform.store.macro_series import read_l1, read_pit, write_release
 
 FIXTURES: Final = Path(__file__).parents[1] / "fixtures" / "nifty_index_close"
 FILES: Final = {
@@ -331,3 +338,99 @@ def test_a_refused_session_stays_retryable_and_rederives_from_l0(tmp_path: Path)
     assert sync.get(mb.SOURCE_ID, plan[0].session).retryable is True  # type: ignore[union-attr]
     again = _runner(RecordedTransport({}), tmp_path, sync).run(plan)
     assert again.requests == 0 and again.refused == 1  # re-derived from L0, refused again
+
+
+# ── M11.3: measuring and re-deriving from L0 alone ───────────────────────────────────────────────
+
+
+def _without_cnx_midcap() -> IndexAliasTable:
+    """The shipped table minus one alias: the shape of the table before a widening."""
+    full = load_index_aliases()
+    return full.model_copy(
+        update={"aliases": tuple(a for a in full.aliases if a.published != "CNX Midcap")}
+    )
+
+
+def test_survey_l0_counts_unknown_names_from_l0_alone(tmp_path: Path) -> None:
+    """Before/after measurement of an alias table: no sync_state, no request, no write."""
+    plan = _plan(*FILES, MISSING)
+    _runner(_transport(plan), tmp_path, _FakeSync()).run(plan)  # L0 now holds the four payloads
+    l0 = L0Store(clock=CLOCK, data_root=tmp_path)
+    before = mb.survey_l0(plan, l0=l0, table=_without_cnx_midcap())
+    after = mb.survey_l0(plan, l0=l0, table=load_index_aliases())
+
+    by_date = {line.session: line for line in before}
+    assert by_date[MISSING].outcome is mb.Outcome.PENDING  # never fetched, so absent from L0
+    assert [u.name for u in mb.unmapped_names(before)] == ["CNX Midcap"]
+    assert mb.unmapped_names(after) == []
+    assert sum(line.outcome is mb.Outcome.PUBLISHED for line in after) == 4
+
+
+def test_rederive_moves_facts_to_the_widened_series_and_leaves_no_old_id(tmp_path: Path) -> None:
+    """A re-derivation after the table widened: same values, new series_id, nothing left behind
+    under the old one, and another source's row in the same partition untouched."""
+    session = date(2015, 11, 6)
+    plan = _plan(session, date(2015, 11, 10))
+    old = _without_cnx_midcap()
+    _runner(_transport(plan), tmp_path, _FakeSync(), table=old).run(plan)
+    other = MacroFact(
+        series_id="IN.FBIL.USD_INR.REFERENCE",
+        period_end=session,
+        release_date=session,
+        frequency=Frequency.DAILY,
+        unit=Unit.RATIO,
+        value=Decimal("65.6"),
+        source="fbil_reference_rates",
+    )
+    write_release(
+        MacroRelease(release_date=session, source=other.source, facts=(other,)), data_root=tmp_path
+    )
+    stale = {f.series_id: f for f in read_l1(session, data_root=tmp_path)}
+    assert "IN.NSE.CNX_MIDCAP.CLOSE" in stale
+
+    l0 = L0Store(clock=CLOCK, data_root=tmp_path)
+    done = mb.rederive(
+        [*plan, *_plan(MISSING)], l0=l0, table=load_index_aliases(), data_root=tmp_path
+    )
+    assert (done.sessions, done.missing, done.refused) == (2, 1, [])
+
+    fresh = {f.series_id: f for f in read_l1(session, data_root=tmp_path)}
+    assert not any(sid.startswith("IN.NSE.CNX_MIDCAP.") for sid in fresh)
+    assert fresh["IN.NSE.NIFTY_MIDCAP_100.CLOSE"].value == stale["IN.NSE.CNX_MIDCAP.CLOSE"].value
+    assert fresh["IN.FBIL.USD_INR.REFERENCE"] == other
+    # without replace_source the old id would survive the merge — the reason the flag exists
+    assert len(fresh) == len(stale)
+
+
+def test_rederive_refuses_a_payload_dated_to_another_session(tmp_path: Path) -> None:
+    plan = _plan(date(2015, 11, 6))
+    wrong = RecordedResponse(body=FILES[date(2015, 11, 10)].read_bytes())
+    _runner(_transport(plan, **{plan[0].url: wrong}), tmp_path, _FakeSync()).run(plan)
+    done = mb.rederive(
+        plan,
+        l0=L0Store(clock=CLOCK, data_root=tmp_path),
+        table=load_index_aliases(),
+        data_root=tmp_path,
+    )
+    assert done.sessions == 0 and len(done.refused) == 1
+    with pytest.raises(FileNotFoundError):
+        read_l1(date(2015, 11, 6), data_root=tmp_path)
+
+
+def test_main_unknown_names_and_rederive_make_no_request(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plan = _plan(*FILES)
+    _runner(_transport(plan), tmp_path, _FakeSync()).run(plan)
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path))
+    monkeypatch.setattr(mb, "get_settings", lambda: Settings(data_root=tmp_path))
+
+    def no_live(*_a: Any, **_k: Any) -> int:
+        raise AssertionError("an offline mode reached the networked runner")
+
+    monkeypatch.setattr(mb, "_run_live", no_live)
+    span = ["--from", "2012-10-01", "--to", "2026-09-01"]
+    assert mb.main([*span, "--unknown-names"]) == 0
+    assert "4 sessions read from L0 (0 requests); 0 published names" in capsys.readouterr().out
+    assert mb.main([*span, "--rederive"]) == 0
+    assert "4 sessions rewritten" in capsys.readouterr().out
