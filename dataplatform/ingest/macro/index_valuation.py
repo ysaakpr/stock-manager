@@ -54,6 +54,7 @@ __all__ = [
     "canonical_index",
     "load_index_aliases",
     "parse_index_valuation",
+    "published_index_names",
 ]
 
 _LOG = get_logger(__name__)
@@ -105,6 +106,16 @@ class IndexAliasTable(BaseModel):
         """
         return self._by_key.get(_alias_key(published), published.strip())
 
+    def knows(self, published: str) -> bool:
+        """Whether the table has any evidence about `published` — as a published or canonical name.
+
+        A name it does not know still resolves (to itself), so this is not a validity check. It is
+        the question the backfill's coverage report asks: which names did the archive publish that
+        the name history has never seen, the input to widening it.
+        """
+        key = _alias_key(published)
+        return key in self._by_key or key in {_alias_key(a.canonical) for a in self.aliases}
+
     @property
     def _by_key(self) -> dict[str, str]:
         return {_alias_key(a.published): a.canonical.strip() for a in self.aliases}
@@ -149,6 +160,7 @@ def parse_index_valuation(
     filename: str,
     table: IndexAliasTable | None = None,
     l0_key: str | None = None,
+    source: str = CLOSE_SNAPSHOT_SOURCE_ID,
 ) -> MacroRelease:
     """Parse one `ind_close_all_<DDMMYYYY>.csv` into a release of index valuation facts.
 
@@ -160,6 +172,9 @@ def parse_index_valuation(
     What it never does: turn a blank or `-` value into `0` (an index that states no P/E is not an
     index on zero earnings — the fact is simply absent), read a name through a rename rule instead
     of the evidence table, or accept a body that is markup wearing a 200.
+
+    `source` is the register id the bytes were fetched under: the niftyindices row by default, or
+    the NSE archive host's `nse_index_close_snapshot` (byte-identical payload, its own host row).
 
     Raises `ParseError`, naming the file and line, for an empty or HTML body, a header missing a
     required column, a malformed date or number, or a file whose rows disagree on the session.
@@ -217,7 +232,7 @@ def parse_index_valuation(
                     frequency=Frequency.DAILY,
                     unit=unit,
                     value=value,
-                    source=CLOSE_SNAPSHOT_SOURCE_ID,
+                    source=source,
                     l0_key=l0_key,
                 )
             )
@@ -227,7 +242,7 @@ def parse_index_valuation(
 
     _LOG.info(
         "macro.index_valuation_parsed",
-        source=CLOSE_SNAPSHOT_SOURCE_ID,
+        source=source,
         filename=filename,
         session=session.isoformat(),
         indices=indices,
@@ -236,10 +251,28 @@ def parse_index_valuation(
     )
     return MacroRelease(
         release_date=session,
-        source=CLOSE_SNAPSHOT_SOURCE_ID,
+        source=source,
         facts=tuple(facts),
         l0_key=l0_key,
     )
+
+
+def published_index_names(payload: bytes, *, filename: str) -> tuple[str, ...]:
+    """Every index name one close-all file publishes, exactly as published, in file order.
+
+    The names `parse_index_valuation` resolves away: a `series_id` is upper-cased and
+    separator-safe, so the published spelling cannot be read back from the facts. A coverage report
+    that lists names the alias table has never seen needs the spelling the archive used.
+    Raises `ParseError` for the same bodies `parse_index_valuation` refuses.
+    """
+    reader = csv.DictReader(io.StringIO(_decode(payload, filename=filename)))
+    if reader.fieldnames is None:
+        raise ParseError("no header row", filename=filename)
+    fields = {name.strip(): name for name in reader.fieldnames}
+    if _COL_NAME not in fields:
+        raise ParseError(f"header is missing {_COL_NAME!r}", filename=filename)
+    names = ((record.get(fields[_COL_NAME]) or "").strip() for record in reader)
+    return tuple(name for name in names if name)
 
 
 def _decode(payload: bytes, *, filename: str) -> str:
