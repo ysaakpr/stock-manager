@@ -118,7 +118,9 @@ render, exited with `CapTierCampaignError`), so promotion ran at 15:46:
 
   **The §1 `l2_invalidation` side effect is still pending, deliberately.** The 3,452 queued ISINs
   were **not** drained. A drain now builds each partition over its full L1 history, which includes
-  2006–2011. That would extend 1,506 of them and carry five of the seven uncurated pre-2011 steps
-  into L2, turning `l2_continuity` red. Drain only after M13.4 curates them. Note that the
-  Saturday `ca_refresh` drains the queue itself (`l1-widen-2026-10-06.md` §7).
+  2006–2011. That would write 1,126 of them with pre-2011 history (corrected from an earlier
+  1,506; see `l1-widen-2026-10-06.md` §7 for the count). Five of the seven uncurated pre-2011
+  steps would reach L2 with them, turning `l2_continuity` red. Drain only after M13.4 curates them
+  or M13.8 (in flight) stops the drain from extending history. Note that the weekly `ca_refresh`
+  and the monthly `bse_ca_sweep` both drain the queue themselves (`l1-widen-2026-10-06.md` §7).
 

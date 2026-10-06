@@ -90,7 +90,7 @@ the archive.
 192 published names are not in the alias table:
 
 - **Stopped appearing: 47.**
-  - 25 were last seen on 2015-11-06, the CNX → Nifty rename event. These are the names M11.1 left
+  - 26 were last seen on 2015-11-06, the CNX → Nifty rename event. These are the names M11.1 left
     unmapped on purpose.
   - The 9 names "last seen 2017-07-03" at the park were artefacts of the park and are gone (0 now).
   - The rest are genuine earlier or later disappearances worth researching. For example, `S&P CNX
