@@ -531,7 +531,7 @@ def _row(
             period_end=_period_end(record, index=index, filename=filename),
             filing_date=_filing_date(record, index=index, filename=filename),
             promoter_holding_pct=_pct(record, _KEY_PROMOTER, index=index, filename=filename),
-            promoter_pledge_pct=_pledge(record, index=index, filename=filename),
+            promoter_pledge_pct=_pledge(record, era=era, index=index, filename=filename),
             public_pct=_pct(record, _KEY_PUBLIC[era], index=index, filename=filename),
             fii_pct=_optional_pct(record, _KEY_FII, index=index, filename=filename),
             dii_pct=_optional_pct(record, _KEY_DII, index=index, filename=filename),
@@ -620,17 +620,28 @@ def _optional_pct(
     return _pct(record, key, index=index, filename=filename)
 
 
-def _pledge(record: Mapping[str, Any], *, index: int, filename: str) -> Decimal | None:
-    """The promoter pledge: `None` only when the record does not state one (D17).
+def _pledge(
+    record: Mapping[str, Any], *, era: FormatEra, index: int, filename: str
+) -> Decimal | None:
+    """The promoter pledge: `None` only in an era that does not state one (D17).
 
-    Stricter than `_optional_pct` on purpose. An absent key or a JSON `null` is a payload that
-    carries no pledge, and BC3 is reported not applicable. A *present* value — blank included — is
-    a pledge the source tried to state, so it must parse as a 0-100 decimal or fail the parse: a
-    blank or garbled pledge read as "absent" would turn a broken field into a quiet
-    `not_applicable` and hide exactly the breach BC3 exists to catch.
+    Era-aware. `json_v1` is the format that carries `pledgeShares_prcnt`, so there it stays
+    required, as M3.6 specified: a v1 record without one — absent or `null` — is a broken record,
+    and reading it as "not applicable" would quietly retire BC3 on a format that does state it. In
+    `master_2026_10` the pledge lives in the per-filing XBRL, so an absent key or a JSON `null` is
+    a record that carries none and BC3 is reported not applicable.
+
+    In either era a *present* value — blank included — is a pledge the source tried to state, so it
+    must parse as a 0-100 decimal or fail the parse: a blank or garbled pledge read as "absent"
+    would turn a broken field into a quiet `not_applicable` and hide the breach BC3 exists to catch.
     """
-    if record.get(_KEY_PLEDGE) is None:
+    if era is FormatEra.MASTER_2026_10 and record.get(_KEY_PLEDGE) is None:
         return None
+    if record.get(_KEY_PLEDGE, "") is None:
+        raise ParseError(
+            f"record {index}: {_KEY_PLEDGE!r} is null; the {era.value} format states a pledge",
+            filename=filename,
+        )
     return _pct(record, _KEY_PLEDGE, index=index, filename=filename)
 
 
@@ -833,9 +844,24 @@ def _partitions_through(on_date: date, *, data_root: Path | None) -> Iterator[Pa
                 yield path
 
 
+#: Columns added to `_L1_SCHEMA` after the first partitions could have been written (M13.3), with
+#: the value a partition that predates them means: no employee-trust figure, an original filing.
+_ADDED_COLUMNS: Final[Mapping[str, Any]] = {"employee_trusts_pct": None, "revised": False}
+
+
 def _rows_of(path: Path) -> tuple[ShareholdingRow, ...]:
-    """Parse one L1 partition file into rows, enforcing the declared schema on read."""
-    records = pq.read_table(path, schema=_L1_SCHEMA).to_pylist()
+    """Parse one L1 partition file into rows, enforcing the declared schema on read.
+
+    A partition written before M13.3 lacks the columns `_ADDED_COLUMNS` names; they are filled with
+    their pre-M13.3 meaning and the table is then cast to `_L1_SCHEMA`, so every other column is
+    still checked exactly as before. Any other missing column fails the read.
+    """
+    table = pq.read_table(path)
+    for name, default in _ADDED_COLUMNS.items():
+        if name not in table.column_names:
+            field = _L1_SCHEMA.field(name)
+            table = table.append_column(field, pa.array([default] * table.num_rows, field.type))
+    records = table.select(_L1_SCHEMA.names).cast(_L1_SCHEMA).to_pylist()
     return tuple(
         ShareholdingRow(
             isin=str(record["isin"]),
@@ -892,7 +918,10 @@ def quality_findings(snapshot: ShareholdingSnapshot) -> tuple[QualityFinding, ..
     * no ISIN → WARN under `NO_ISIN_CHECK`, with the symbol and name for the human who chases it.
 
     Each finding is dated by the filing date (the date the fact became knowable) and fingerprinted
-    by (check, ISIN or symbol, filing date), so re-deriving the same polls raises nothing new.
+    by (check, BC3 status, quarter, ISIN or symbol, filing date), so re-deriving the same polls
+    raises nothing new, while a breach found after a not_applicable flag is a new finding rather
+    than a duplicate of it, and two quarters filed on one date are two findings. An open
+    not_applicable flag is not auto-resolved when a later poll evaluates BC3; it stays for a human.
     What it never does: write anything, or emit a finding for a CLEAR row.
     """
     findings: list[QualityFinding] = []
@@ -920,7 +949,14 @@ def quality_findings(snapshot: ShareholdingSnapshot) -> tuple[QualityFinding, ..
                 observed_value=row.promoter_pledge_pct,
                 threshold=PLEDGE_BREACH_PCT,
                 detail=detail,
-                fingerprint=finding_fingerprint(BC3_CHECK, row.isin, row.filing_date),
+                # Status and quarter are in the key: `persist_findings` dedupes on (check_name,
+                # fingerprint) whatever the severity, so a key without the status would let an open
+                # INFO not_applicable flag swallow a later WARN breach for the same filing.
+                fingerprint=finding_fingerprint(
+                    f"{BC3_CHECK}/{status.value}/{row.period_end.isoformat()}",
+                    row.isin,
+                    row.filing_date,
+                ),
             )
         )
     for skipped in snapshot.skipped_no_isin:
@@ -939,7 +975,9 @@ def quality_findings(snapshot: ShareholdingSnapshot) -> tuple[QualityFinding, ..
                     "reason": "the source published this filing with no ISIN; it is not in L1",
                 },
                 fingerprint=finding_fingerprint(
-                    f"{NO_ISIN_CHECK}/{label}", None, skipped.filing_date
+                    f"{NO_ISIN_CHECK}/{label}/{skipped.period_end.isoformat()}",
+                    None,
+                    skipped.filing_date,
                 ),
             )
         )

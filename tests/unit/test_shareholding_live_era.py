@@ -45,6 +45,7 @@ from dataplatform.ingest.shareholding import (
     read_pit,
     write_l1,
 )
+from dataplatform.quality.sentinel import QualityFinding
 
 LIVE: Final = Path(
     "tests/fixtures/nse_shareholding/master_2026_10/corporate-share-holdings-master_20261006.json"
@@ -285,3 +286,46 @@ def test_quality_findings_are_deterministic(live_bytes: bytes) -> None:
     first = quality_findings(parse(live_bytes, filename=LIVE.name, l0_key=LIVE_KEY))
     second = quality_findings(parse(live_bytes, filename=LIVE.name, l0_key=LIVE_KEY))
     assert first == second
+
+
+# ── a later breach is never swallowed by an earlier not_applicable flag (review B1) ───────────
+
+
+class DedupingSink:
+    """`persist_findings`' dedupe, modelled: an open flag with the same (check_name, fingerprint)
+    is skipped regardless of severity (`dataplatform/quality/sentinel.py`)."""
+
+    def __init__(self) -> None:
+        self.open: dict[tuple[str, str], QualityFinding] = {}
+
+    def persist(self, findings: tuple[QualityFinding, ...]) -> None:
+        for finding in findings:
+            self.open.setdefault((finding.check_name, finding.fingerprint), finding)
+
+
+def test_a_breach_after_a_not_applicable_flag_still_reaches_the_status_surface(
+    live: ShareholdingSnapshot,
+) -> None:
+    """IMFA's pledge-less row is flagged INFO; a later poll stating a 60% pledge for the same
+    company, quarter and filing date must still land a WARN, not be deduped into the INFO."""
+    sink = DedupingSink()
+    sink.persist(quality_findings(live))
+    later = parse(_body(_live_record(pledgeShares_prcnt="60.00")), filename="later.json")
+    sink.persist(quality_findings(later))
+
+    imfa = [f for f in sink.open.values() if f.isin == IMFA and f.check_name == BC3_CHECK]
+    assert {f.severity for f in imfa} == {"INFO", "WARN"}
+    warn = next(f for f in imfa if f.severity == "WARN")
+    assert warn.detail["bc3_status"] == "breach"
+    assert warn.observed_value == Decimal("60.00")
+
+
+def test_two_quarters_filed_on_one_date_are_two_flags() -> None:
+    """The fingerprint carries the quarter: two periods filed together must not collapse."""
+    body = _body(
+        _live_record(pledgeShares_prcnt="70"),
+        _live_record(date="30-JUN-2026", pledgeShares_prcnt="80"),
+    )
+    findings = quality_findings(parse(body, filename="x.json"))
+    assert len(findings) == 2
+    assert len({f.fingerprint for f in findings}) == 2

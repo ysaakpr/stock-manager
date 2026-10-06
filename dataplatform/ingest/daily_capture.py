@@ -84,7 +84,7 @@ from dataplatform.logging import configure_logging, get_logger
 from dataplatform.quality.sentinel import QualityFinding, persist_findings
 from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store import fo_aggregates
-from dataplatform.store.db import Connection, connection
+from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Ref, L0Store
 
 if TYPE_CHECKING:  # imported lazily by the registry to avoid a scheduler→ingest import cycle
@@ -240,9 +240,11 @@ class CaptureContext:
     commit: Callable[[], None] = lambda: None
     data_root: Path | None = None
     scrip_index: Callable[[], Mapping[str, str]] | None = None
-    #: Where D7 findings a capture raises go. Production lands them in `quality_flag` on the same
-    #: connection as `sync_state`, so they commit with the publish (`_production`).
-    raise_findings: Callable[[Sequence[QualityFinding]], None] = lambda _findings: None
+    #: Where D7 findings a capture raises go. Production inserts them into `quality_flag` on the
+    #: same connection as `sync_state` (`_production`), so they commit with whatever that
+    #: connection commits next: the publish when the capture lands, or the FAILED row when a later
+    #: step fails after the L1 write that raised them — the rows they describe are in L1 either way.
+    raise_findings: Callable[[Sequence[QualityFinding]], object] = lambda _findings: None
 
     def bse_scrip_index(self) -> Mapping[str, str]:
         """The BSE scrip→ISIN map, from the injected one or built from the D2 master."""
@@ -1311,10 +1313,6 @@ def _alert_failures(ctx: CaptureContext, report: CaptureReport) -> int:
     return sent
 
 
-def _persist_findings(conn: Connection, findings: Sequence[QualityFinding], clock: Clock) -> None:
-    persist_findings(conn, findings, clock=clock)
-
-
 @contextmanager
 def _production(context: JobContext) -> Iterator[CaptureContext]:
     """The real wiring: the declared lake, Postgres sync state, leased fetchers, the D2 master."""
@@ -1360,7 +1358,7 @@ def _production(context: JobContext) -> Iterator[CaptureContext]:
             master=master,
             commit=conn.commit,
             data_root=settings.data_root,
-            raise_findings=lambda findings: _persist_findings(conn, findings, clock),
+            raise_findings=partial(persist_findings, conn, clock=clock),
         )
         conn.commit()
 
