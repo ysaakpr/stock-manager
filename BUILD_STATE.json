@@ -320,14 +320,16 @@
     },
     "M10.4": {
       "attempts": 1,
-      "finished": "2026-09-03T14:41:57+00:00",
+      "commit": "32640d6",
+      "finished": "2026-10-06T15:45:28+00:00",
       "first_started": "2026-09-03T14:22:04+00:00",
       "human_cleared": true,
       "last_started": "2026-09-03T14:22:04+00:00",
-      "note": "cleared: Fix M7.3 properly (option A): rebuilt the XBRL path against 15 real captured NSE filings \u2014 parser rewritten around the format's actual column model (the index entry's (fromDate,toDate) selects the results column), ISIN from the index with a symbol cross-check, real segment axis, both taxonomy vocabularies. All four reported defects fixed plus two more found (hyphenated Un-Audited; read_latest collapsing a Q4 into a full year). M10.4's runner needed no logic change beyond skipping announcements with no XBRL document. See ops/gates/M7-xbrl-rebuild.md. The backfill execution itself remains NEEDS_GO under B1.",
-      "previous_state": "PARKED",
+      "note": "Owed fetch complete; pit_fundamentals current to 2026-10-05; acceptance met per PR #72.",
+      "previous_state": "PENDING",
       "reason": "Correct M7.3's XBRL path (built on fabricated fixtures) so real NSE filings ingest, before the M10.4 fundamentals backfill can land real facts?",
-      "state": "PENDING"
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_fundamentals_backfill.py -q\n(exit 0)\n...................................                                      [100%]"
     },
     "M10.5": {
       "attempts": 0,
@@ -364,6 +366,15 @@
       "previous_state": "PENDING",
       "state": "DONE",
       "verify_output": "$ uv run python -m dataplatform.ingest.source_register validate && uv run pytest tests/unit/test_macro_series.py -q\n(exit 0)\nsource register OK \u2014 27 entries over 17 \u00a74.1 rows (23 VERIFIED, 3 FAILED, 1 BLOCKED_CREDENTIAL); 14 hosts with a robots record; swept 2026-08-08 in 47 requests\n  open: nifty_tri_history [FAILED] -> M3.9\n  open: gdelt_doc_api [FAILED] -> M6.1\n  open: screener_company_fundamentals [BLOCKED_CREDENTIAL] -> M7.1\n  open: alfred_series_vintage [FAILED] -> M11.1\n.........................                                                [100%]\n\n$ uv run ruff format --check dataplatform/ingest/macro/index_valuation.py dataplatform/ingest/macro/models.py dataplatform/store/macro_series.py tests/unit/test_macro_series.py\n(exit 0)\n4 files already formatted\n\n$ uv run ruff check dataplatform/ingest/macro/index_valuation.py dataplatform/ingest/macro/models.py dataplatform/store/macro_series.py tests/unit/test_macro_series.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/macro/index_valuation.py dataplatform/ingest/macro/models.py dataplatform/store/macro_series.py tests/unit/test_macro_series.py\n(exit 0)\nSuccess: no issues found in 4 source files"
+    },
+    "M11.2": {
+      "attempts": 0,
+      "commit": "32640d6",
+      "finished": "2026-10-06T15:44:56+00:00",
+      "note": "Campaign complete: 3,453 sessions published, 0 pending; acceptance met per PR #72. 3 sessions (2023-04-06/10/11) refused on a month-first date format, logged in ops/BACKLOG.md.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_macro_backfill.py -q\n(exit 0)\n.............                                                            [100%]"
     },
     "M12.1": {
       "attempts": 0,
@@ -1175,7 +1186,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-10-06T13:40:27+00:00",
+  "updated_at": "2026-10-06T15:45:28+00:00",
   "version": 1,
   "wave": 1
 }
