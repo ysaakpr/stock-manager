@@ -793,7 +793,11 @@ UNSCHEDULED: dict[str, str] = {
 
 @lru_cache(maxsize=1)
 def _declined_source_ids() -> frozenset[str]:
-    """The checked-in register's DECLINED source ids, read once per process."""
+    """The checked-in register's DECLINED source ids, read once per process.
+
+    Cached for the life of the process: a change to `source_register.yaml` (declining or
+    un-declining a source) reaches a running scheduler only after it is restarted.
+    """
     return frozenset(declined_sources())
 
 

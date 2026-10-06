@@ -21,7 +21,9 @@ from typing import Any, Final
 
 import pytest
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
+from analyst.monitor.interlock import CORE_DATASETS, StatusApiGate
 from dataplatform.clock import IST, Clock, FrozenClock
 from dataplatform.ingest.calendar import DayKind
 from dataplatform.ingest.source_register import Declined, load
@@ -117,6 +119,43 @@ def test_asking_only_about_declined_datasets_is_the_vacuous_green_bug(
 ) -> None:
     with pytest.raises(ValueError, match="DECLINED"):
         evaluate_green(SESSION, [SCREENER], {}, day_kind=DayKind.SESSION, declined=declined.keys())
+
+
+def test_asking_about_a_declined_dataset_is_logged_as_a_warning(
+    declined: dict[str, Declined],
+) -> None:
+    with capture_logs() as entries:
+        evaluate_green(
+            SESSION,
+            ["nse_eod", SCREENER],
+            {"nse_eod": _published("nse_eod")},
+            day_kind=DayKind.SESSION,
+            declined=declined.keys(),
+        )
+    warnings = [e for e in entries if e["event"] == "sync_state.declined_dataset_requested"]
+    assert len(warnings) == 1
+    assert warnings[0]["log_level"] == "warning"
+    assert warnings[0]["declined"] == [SCREENER]
+
+
+def test_no_warning_when_nothing_declined_is_requested(declined: dict[str, Declined]) -> None:
+    with capture_logs() as entries:
+        evaluate_green(
+            SESSION,
+            ["nse_eod"],
+            {"nse_eod": _published("nse_eod")},
+            day_kind=DayKind.SESSION,
+            declined=declined.keys(),
+        )
+    assert not [e for e in entries if e["event"] == "sync_state.declined_dataset_requested"]
+
+
+def test_the_trading_interlock_depends_on_no_declined_source(
+    declined: dict[str, Declined],
+) -> None:
+    """The decline exemption must never be what lets the real interlock go green."""
+    assert not set(CORE_DATASETS) & declined.keys()
+    assert not set(StatusApiGate().datasets) & declined.keys()
 
 
 def test_the_green_payload_names_what_it_set_aside(declined: dict[str, Declined]) -> None:

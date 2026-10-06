@@ -451,6 +451,15 @@ def evaluate_green(
     requested = tuple(dict.fromkeys(datasets))
     set_aside = tuple(name for name in requested if name in declined)
     wanted = tuple(name for name in requested if name not in declined)
+    if set_aside:
+        # A decision path asking about a declined source is a configuration smell: it can never
+        # be PUBLISHED. Set aside rather than held red, but said out loud every time.
+        _log.warning(
+            "sync_state.declined_dataset_requested",
+            date=logical_date.isoformat(),
+            declined=list(set_aside),
+            judged=list(wanted),
+        )
     if not wanted:
         raise ValueError(
             "is_green needs the datasets the decision depends on; an empty list would make every "
@@ -1038,7 +1047,11 @@ class SyncStateStore:
 
 @lru_cache(maxsize=1)
 def _checked_in_declined() -> Mapping[str, Declined]:
-    """The checked-in register's DECLINED sources, read once per process."""
+    """The checked-in register's DECLINED sources, read once per process.
+
+    Cached for the life of the process: a change to `source_register.yaml` (declining or
+    un-declining a source) reaches a running status API or scheduler only after it is restarted.
+    """
     return declined_sources()
 
 
