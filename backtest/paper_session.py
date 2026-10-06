@@ -804,7 +804,7 @@ def owed_session(world: PaperWorld, now: datetime) -> date | None:
     """The session the job owes a decision for at ``now`` — an explicit date, never "today".
 
     The latest trading session whose EOD is due: from :data:`EOD_DUE_AT` IST that is today (when
-    today is a session), before it the latest session before today. So the 20:30 run decides
+    today is a session), before it the latest session before today. So the 21:00 run decides
     today, and a retry at 00:30 decides yesterday's — the session that failed — not the new day,
     whose market has not even opened. ``None`` only if no session lies in the lookback.
     """

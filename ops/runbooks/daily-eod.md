@@ -132,7 +132,9 @@ never edited or deleted (invariant #1); every L1 value is re-derivable from it.
 
 ## The daily paper session (M13.1)
 
-`paper_session` is registered for **20:30 IST, Monday to Friday**, after the EOD pipeline above. It
+`paper_session` is registered for **21:00 IST, Monday to Friday** — after the EOD pipeline above and
+after the last `tri_evening` attempt (M13.7, PR #73: 19:50 IST with a 20:50 retry; NSE Indices was
+measured publishing the day's TRI by 20:47 IST), so a rebalance can read the session's own TRI. It
 decides one session of the D13-ratified momentum v2 book (`PAPER_RATIFIED_2026_09_06`: 12-1
 ranking, top-20 with a top-30 sell band, 200-session regime filter, inverse-vol weights, redeploy
 next session) in **paper mode only**: the order path is the backtest's own `ReplayEngine` →
@@ -141,39 +143,46 @@ next session) in **paper mode only**: the order path is the backtest's own `Repl
 (the M9 reports' capital), ratified rails. Code: `backtest/paper_session.py`; ledger:
 `paper_session` (migration 0012).
 
-### It is disabled until the regime filter has a same-evening input
+### It is disabled until PR #73 (`tri_evening`) is merged
 
 The job is a logged no-op unless `PAPER_SESSION_ENABLED=true` (default `false`). The ratified
 regime filter reads the **published NIFTY 50 TRI level for the session itself** and refuses a stale
-one (`backtest.run._RegimeSource`). Nothing lands that level the same evening:
+one (`backtest.run._RegimeSource`). Before M13.7 nothing landed that level the same evening:
 
 - `tri_refresh` runs weekly (Saturday 08:00) and fetches only up to the session *before* the day it
-  runs, so on every weekday the session's level is missing at 20:30;
+  runs, so on every weekday the session's level was missing by the evening;
 - the NSE close-all snapshot (`nse_index_close_snapshot`, `ind_close_all_DDMMYYYY.csv`) is **not the
-  same series**: its "Nifty 50" is the *price* index. Compared read-only over all 3,159 sessions
-  both hold (2012-10-01 → 2026-10-01): **0 of 3,159 match within 0.01** against the published TRI
-  (max abs diff 12,760.43, on 2025-06-27) and 0 of 3,159 against the net TRI (max 8,931.87); the
-  TRI/price ratio drifts from 1.28 to 1.52 — reinvested dividends. It is also not captured the same
-  evening (the 2026-10-05 file was fetched by the M11.2 campaign at 13:33 IST the next day; the
-  source is in the registry's `UNSCHEDULED` ledger).
+  same series** and is not substituted: its "Nifty 50" is the *price* index. Compared read-only over
+  all 3,159 sessions both hold (2012-10-01 → 2026-10-01): **0 of 3,159 match within 0.01** against
+  the published TRI (max abs diff 12,760.43, on 2025-06-27) and 0 of 3,159 against the net TRI (max
+  8,931.87); the TRI/price ratio drifts from 1.28 to 1.52 — reinvested dividends.
 
-Enabled today, every rebalance would be journaled `SKIPPED_DATA_RED` ("no level for <date>") and
-the book would never invest. **To enable it, one of these is needed first:**
+**M13.7 (PR #73) closes the gap**: a weekday `tri_evening` job lands day D's published NIFTY 50 TRI
+at 19:50 IST, retrying at 20:50 IST, and this job runs at 21:00, after both. Enabled before PR #73
+is merged, every rebalance would be journaled `SKIPPED_DATA_RED` ("no level for <date>") and the
+book would never invest — so keep it off until then.
 
-1. **A same-evening published TRI** — a weekday-evening refresh of the published NIFTY 50 TRI that
-   fetches the session itself (after niftyindices.com has disseminated it), i.e. a change to
-   `tri_refresh`'s cadence and target, verified to land before the paper job's run time (move the
-   paper cron later if it lands after 20:30); or
-2. **An owner ratification to read the price index instead** — a different regime series than the
-   one D13's evidence was struck on, so the momentum v2 backtest must be re-run on it first, and
-   the close-all snapshot must be captured daily before the paper job runs.
+**To enable it, once PR #73 is merged** (and this PR — migrate first, then restart):
 
-Then set `PAPER_SESSION_ENABLED=true` in `.env` and restart the scheduler (below).
+```bash
+cd /home/ubuntu/stock-manager            # the scheduler's checkout, on the merged main
+make migrate                             # applies 0012_paper_session (and any pending migration)
+grep -q '^PAPER_SESSION_ENABLED=' .env \
+  && sed -i 's/^PAPER_SESSION_ENABLED=.*/PAPER_SESSION_ENABLED=true/' .env \
+  || echo 'PAPER_SESSION_ENABLED=true' >> .env
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status scheduler
+```
+
+The first 21:00 run after that opens the book (the first session it decides rebalances). To check
+`tri_evening` landed the session's level before relying on it, `GET /status/jobs` should show
+`tri_evening` `OK` for the day; if it did not land, the paper run journals one `SKIPPED_DATA_RED`
+naming the missing level and the rebalance moves to the next green session.
 
 ### What one run does
 
 It decides an **explicit date**, the *owed session*: the latest trading session whose EOD is due by
-the run's clock — today's from 18:30 IST, otherwise the previous session. The 20:30 run decides
+the run's clock — today's from 18:30 IST, otherwise the previous session. The 21:00 run decides
 today; a retry at 00:30 decides the session that failed the evening before, never the new calendar
 day. Then, in order — each step can end the run:
 

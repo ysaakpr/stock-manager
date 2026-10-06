@@ -573,7 +573,10 @@ def test_a_late_action_on_a_name_the_book_never_held_is_recorded_silently() -> N
 @pytest.mark.parametrize(
     ("now", "owed"),
     [
-        (datetime(2026, 10, 5, 20, 30, tzinfo=IST), OCT_SECOND),  # the evening run: today
+        (datetime(2026, 10, 5, 21, 0, tzinfo=IST), OCT_SECOND),  # the scheduled 21:00 run: today
+        (datetime(2026, 10, 6, 21, 0, tzinfo=IST), OCT_THIRD),  # the next evening's run: its day
+        (datetime(2026, 10, 1, 21, 0, tzinfo=IST), OCT_FIRST),  # the evening before a holiday
+        (datetime(2026, 10, 5, 20, 30, tzinfo=IST), OCT_SECOND),  # any time after 18:30: today
         (datetime(2026, 10, 6, 0, 30, tzinfo=IST), OCT_SECOND),  # a retry after midnight
         (datetime(2026, 10, 6, 18, 29, tzinfo=IST), OCT_SECOND),  # before today's EOD is due
         (datetime(2026, 10, 3, 9, 0, tzinfo=IST), OCT_FIRST),  # Saturday, after the holiday
@@ -655,7 +658,7 @@ def test_the_job_is_disabled_by_default_and_touches_nothing(
 def test_a_retry_after_midnight_decides_the_session_that_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """N1: the 20:30 run failed; the 00:30 retry decides that session, not the new day."""
+    """N1: the 21:00 run failed; the 00:30 retry decides that session, not the new day."""
     world, store, journal = FixtureWorld(), InMemoryPaperSessionStore(), RecordingJournal()
     install_job_seams(monkeypatch.setattr, world=world, store=store, journal=journal)
 
