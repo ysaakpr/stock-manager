@@ -96,6 +96,7 @@ from dataplatform.ingest.models import ISIN_PATTERN, IngestError, ParseError
 from dataplatform.ingest.source_register import Source, SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.logging import get_logger
+from dataplatform.retry import RetryPendingError
 from dataplatform.status.sync_state import SyncRecord
 from dataplatform.store.l0 import L0Ref, L0Store
 from dataplatform.store.paths import Layer, l1_partition_path, layer_root, partition_date_of
@@ -262,7 +263,7 @@ class ImmutableSnapshotError(IngestError):
     """
 
 
-class TriNotYetPublishedError(IngestError):
+class TriNotYetPublishedError(IngestError, RetryPendingError):
     """The endpoint answered, validly, but without the session the caller required (M13.7).
 
     The same-evening refresh asks for session D on D's evening, and before NSE Indices disseminates
@@ -270,6 +271,9 @@ class TriNotYetPublishedError(IngestError):
     failure and not a success: the sync row for D parks `FAILED` with `retryable=True` (this is an
     `IngestError`, not a `ParseError`, so `_retryable` says so) and L1 is left untouched, because a
     row reading `PUBLISHED` for D over a series that ends at D-1 would be a false receipt.
+
+    It is a `RetryPendingError`: on the evening fires before `tri_evening`'s last one, the run is
+    FAILED but does not page, because the next fire is the remedy. The last fire still pages.
     """
 
 

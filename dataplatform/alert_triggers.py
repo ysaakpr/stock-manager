@@ -31,16 +31,16 @@ the next tick pages about that.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from functools import partial
 from typing import TYPE_CHECKING, Final
 
 from dataplatform.alerts import Alerter, AlertOutcome, Severity, build_alerter
-from dataplatform.clock import Clock
+from dataplatform.clock import IST, Clock
 from dataplatform.config import Settings
 from dataplatform.ingest.calendar import TradingCalendar, trading_calendar
 from dataplatform.ingest.calendar import load as load_calendar
@@ -49,7 +49,7 @@ from dataplatform.status import SourceStatus, SyncStateStore
 from dataplatform.store.db import Connection, connection
 
 if TYPE_CHECKING:  # the scheduler imports this module lazily; keep the edge one-way at runtime
-    from dataplatform.scheduler.registry import JobContext
+    from dataplatform.scheduler.registry import JobContext, JobRegistry
 
 __all__ = [
     "CALENDAR_KEY",
@@ -58,6 +58,7 @@ __all__ = [
     "ConditionLedger",
     "FinishedAttempt",
     "OpenQualityCheck",
+    "RetryDeadline",
     "TickReport",
     "Trigger",
     "TriggerEvaluationError",
@@ -70,6 +71,7 @@ __all__ = [
     "read_red_quality_checks",
     "reconcile",
     "redact",
+    "registry_retry_deadline",
     "run_failure_alerts",
     "run_failure_alerts_job",
     "tick",
@@ -269,24 +271,71 @@ class FinishedAttempt:
     """A job's newest attempt that reached an outcome — the shape `read_last_attempts` returns.
 
     `state` is `job_run.state`: FAILED, SUCCEEDED or TIMED_OUT. RUNNING and SKIPPED_LOCKED are
-    excluded at the read, because neither is an outcome.
+    excluded at the read, because neither is an outcome. `retry_pending` is `job_run.retry_pending`
+    (0014): the run raised a `RetryPendingError`, decided by the runner from the exception's type.
     """
 
     job_name: str
     state: str
     started_at: datetime
     error: str | None
+    retry_pending: bool = False
+
+
+#: When a retry-pending failure stops being "a later fire will retry" and becomes a page: given
+#: the job and the failed run's start, the instant by which the job's next fire *the same day*
+#: should have finished, or None when no later fire is due that day (the failed run was the last).
+RetryDeadline = Callable[[str, datetime], datetime | None]
+
+
+def registry_retry_deadline(registry: JobRegistry) -> RetryDeadline:
+    """The production `RetryDeadline`: each job's own cron, read in exchange time.
+
+    What it does: finds the job's first fire strictly after the failed run started; if that fire
+    falls on the same IST date, the deadline is that fire plus the job's timeout (the budget the
+    retry has to finish in — while it is RUNNING it is not a finished attempt, so the failed run is
+    still the newest). Otherwise None.
+    What it assumes: the run's `started_at` is its fire time give or take seconds, so "strictly
+    after" is one second past it (cron has one-minute resolution).
+    What it never does: look at the error text, or treat a job missing from `registry` as pending.
+    """
+
+    def deadline(job_name: str, started_at: datetime) -> datetime | None:
+        if job_name not in registry.names():
+            return None
+        job = registry.get(job_name)
+        after = started_at.astimezone(IST) + timedelta(seconds=1)
+        next_fire: datetime | None = job.trigger(IST).get_next_fire_time(None, after)
+        if next_fire is None or next_fire.astimezone(IST).date() != after.date():
+            return None
+        return next_fire + job.timeout
+
+    return deadline
 
 
 #: The one `job_run.state` that means "the job raised" (`runner._execute`).
 _RAISED: Final = "FAILED"
 
 
-def failed_job_conditions(attempts: Iterable[FinishedAttempt]) -> list[AlertCondition]:
+def failed_job_conditions(
+    attempts: Iterable[FinishedAttempt],
+    *,
+    now: datetime | None = None,
+    retry_deadline: RetryDeadline | None = None,
+    already_open: Collection[str] = (),
+) -> list[AlertCondition]:
     """One CRITICAL condition per job whose newest finished attempt was FAILED.
 
     A job that fails three nights running without a success between is one condition: the key is
     the job, not the run, so the onset pages and the repeats do not.
+
+    The one exception is a retry-pending failure (`FinishedAttempt.retry_pending`) while a later
+    fire of the same job is still due today — `now` before `retry_deadline`'s answer. That is not
+    an onset: `tri_evening`'s 19:50 fire fails most evenings because the TRI publishes near 20:47,
+    and paging it would page every weekday. It does not *resolve* anything either: if the key is
+    `already_open` (an earlier, real failure paged), the condition is kept so the open alert stays
+    open. A retry-pending failure of the day's last fire, one whose retry did not finish by the
+    deadline, or any failure when `retry_deadline` or `now` is not given, pages as before.
 
     What clears it: a newer SUCCEEDED attempt — or a newer TIMED_OUT one. TIMED_OUT is the runner's
     "returned normally but overran its budget": the job did *not* raise, so the condition this
@@ -297,11 +346,19 @@ def failed_job_conditions(attempts: Iterable[FinishedAttempt]) -> list[AlertCond
     for attempt in attempts:
         if attempt.state != _RAISED:
             continue
+        key = f"job:{attempt.job_name}:failed"
+        if key not in already_open and _retry_still_due(attempt, now, retry_deadline):
+            log.info(
+                "alert_trigger.retry_pending",
+                job=attempt.job_name,
+                started_at=attempt.started_at.isoformat(),
+            )
+            continue
         error = "none recorded" if attempt.error is None else redact(attempt.error)
         conditions.append(
             AlertCondition(
                 trigger=Trigger.JOB_FAILED,
-                dedup_key=f"job:{attempt.job_name}:failed",
+                dedup_key=key,
                 severity=Severity.CRITICAL,
                 title=f"scheduled job {attempt.job_name} raised",
                 body=(
@@ -314,6 +371,16 @@ def failed_job_conditions(attempts: Iterable[FinishedAttempt]) -> list[AlertCond
             )
         )
     return conditions
+
+
+def _retry_still_due(
+    attempt: FinishedAttempt, now: datetime | None, retry_deadline: RetryDeadline | None
+) -> bool:
+    """True only for a retry-pending failure whose same-day retry can still land it."""
+    if not attempt.retry_pending or now is None or retry_deadline is None:
+        return False
+    deadline = retry_deadline(attempt.job_name, attempt.started_at)
+    return deadline is not None and now < deadline
 
 
 # ── the reads ────────────────────────────────────────────────────────────────────────────────
@@ -331,7 +398,7 @@ _RED_QUALITY_SQL: Final = """
 #: Which outcomes are failures is decided in Python (`failed_job_conditions`), where a unit test
 #: can see it.
 _LAST_ATTEMPTS_SQL: Final = """
-    SELECT DISTINCT ON (job_name) job_name, state, started_at, error
+    SELECT DISTINCT ON (job_name) job_name, state, started_at, error, retry_pending
     FROM job_run
     WHERE state NOT IN ('RUNNING', 'SKIPPED_LOCKED') AND job_name = ANY(%s)
     ORDER BY job_name, started_at DESC
@@ -360,6 +427,7 @@ def read_last_attempts(conn: Connection, job_names: Sequence[str]) -> list[Finis
             state=str(row[1]),
             started_at=row[2],
             error=None if row[3] is None else str(row[3]),
+            retry_pending=bool(row[4]),
         )
         for row in conn.execute(_LAST_ATTEMPTS_SQL, (list(job_names),)).fetchall()
     ]
@@ -611,6 +679,7 @@ def run_failure_alerts(
     alerter: Alerter,
     job_names: Sequence[str],
     calendar_loader: Callable[[], TradingCalendar] | None = None,
+    retry_deadline: RetryDeadline | None = None,
 ) -> TickReport:
     """Evaluate all four triggers once against the database and page what changed.
 
@@ -621,6 +690,8 @@ def run_failure_alerts(
       the other three.
     - The streak trigger builds its `SyncStateStore` on the cached `trading_calendar()` inside its
       evaluator, for the same reason.
+    - The failed-job trigger holds a retry-pending failure while `retry_deadline` says a later fire
+      the same day is still due (None: every failure pages; production passes the registry's).
     What it assumes: `conn` is autocommit and migrated through 0013; `clock` is the run's (B10).
     What it never does: raise for a failed trigger (`run_failure_alerts_job` turns errors into a
     FAILED run), or read the wall clock.
@@ -633,6 +704,14 @@ def run_failure_alerts(
         store = SyncStateStore(conn, clock=clock, calendar=trading_calendar())
         return failed_streak_conditions(store.source_statuses(), threshold=threshold)
 
+    def failed_jobs() -> list[AlertCondition]:
+        return failed_job_conditions(
+            read_last_attempts(conn, job_names),
+            now=clock.now(),
+            retry_deadline=retry_deadline,
+            already_open=ConditionLedger(conn).open_keys(Trigger.JOB_FAILED),
+        )
+
     def expiry() -> list[AlertCondition]:
         coverage_end = (
             load_calendar if calendar_loader is None else calendar_loader
@@ -643,7 +722,7 @@ def run_failure_alerts(
         (Trigger.INGEST_FAILED_STREAK, streaks),
         (Trigger.QUALITY_RED, lambda: quality_red_conditions(read_red_quality_checks(conn))),
         (Trigger.CALENDAR_EXPIRY, expiry),
-        (Trigger.JOB_FAILED, lambda: failed_job_conditions(read_last_attempts(conn, job_names))),
+        (Trigger.JOB_FAILED, failed_jobs),
     ]
     return tick(evaluators, ledger=ConditionLedger(conn), alerter=alerter, at=clock.now())
 
@@ -662,13 +741,15 @@ def run_failure_alerts_job(context: JobContext) -> None:
     from dataplatform.scheduler.registry import default_registry
 
     alerter = build_alerter(context.settings, clock=context.clock)
+    registry = default_registry()
     with connection(context.settings, autocommit=True) as conn:
         report = run_failure_alerts(
             conn,
             settings=context.settings,
             clock=context.clock,
             alerter=alerter,
-            job_names=default_registry().names(),
+            job_names=registry.names(),
+            retry_deadline=registry_retry_deadline(registry),
         )
     if not report.ok:
         raise TriggerEvaluationError("; ".join(report.errors))

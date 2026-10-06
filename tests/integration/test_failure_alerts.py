@@ -25,6 +25,7 @@ from dataplatform.alert_triggers import (
     CALENDAR_KEY,
     TickReport,
     TriggerEvaluationError,
+    registry_retry_deadline,
     run_failure_alerts,
     run_failure_alerts_job,
 )
@@ -121,13 +122,20 @@ def _flag(conn: Connection, severity: str = "ERROR") -> None:
     )
 
 
-def _job_run(conn: Connection, state: str, started: datetime, job: str = "eod_pipeline") -> None:
+def _job_run(
+    conn: Connection,
+    state: str,
+    started: datetime,
+    job: str = "eod_pipeline",
+    *,
+    retry_pending: bool = False,
+) -> None:
     finished = None if state == "RUNNING" else started + timedelta(minutes=1)
     error = "EodPipelineError: postgresql://u:hunter2@db/x refused" if state == "FAILED" else None
     conn.execute(
-        "INSERT INTO job_run (run_id, job_name, state, instance, started_at, finished_at, error) "
-        "VALUES (%s, %s, %s, 'test:1', %s, %s, %s)",
-        (uuid4(), job, state, started, finished, error),
+        "INSERT INTO job_run (run_id, job_name, state, instance, started_at, finished_at, error, "
+        "retry_pending) VALUES (%s, %s, %s, 'test:1', %s, %s, %s, %s)",
+        (uuid4(), job, state, started, finished, error, retry_pending),
     )
 
 
@@ -296,3 +304,33 @@ def test_a_malformed_holiday_file_still_lets_the_other_triggers_page(
     with pytest.raises(TriggerEvaluationError, match="calendar_expiry: not evaluated"):
         run_failure_alerts_job(_context(scratch_settings, BROKEN_NOW))
     assert _open_keys(committed) == {STREAK_KEY, QUALITY_KEY, JOB_KEY}
+
+
+def test_tri_evening_pages_only_when_its_last_fire_fails(
+    conn: Connection, scratch_settings: Settings
+) -> None:
+    """#73 and #65 together, against real rows: the 19:50 not-yet-published failure is held by the
+    production deadline (the registry's own cron), and the 21:30 one pages once."""
+    evening = datetime(2026, 11, 3, tzinfo=IST)  # a Tuesday inside calendar coverage
+    deadline = registry_retry_deadline(default_registry())
+
+    def tick_at(hour: int, minute: int) -> RecordingAlerter:
+        clock = FrozenClock(evening.replace(hour=hour, minute=minute))
+        alerter = RecordingAlerter(clock)
+        report = run_failure_alerts(
+            conn,
+            settings=scratch_settings,
+            clock=clock,
+            alerter=alerter,
+            job_names=["tri_evening"],
+            retry_deadline=deadline,
+        )
+        assert report.ok, report.errors
+        return alerter
+
+    _job_run(conn, "FAILED", evening.replace(hour=19, minute=50), "tri_evening", retry_pending=True)
+    assert [key for key in tick_at(20, 0).keys if "tri_evening" in key] == []
+
+    _job_run(conn, "FAILED", evening.replace(hour=21, minute=30), "tri_evening", retry_pending=True)
+    paged = [key for key in tick_at(21, 45).keys if "tri_evening" in key]
+    assert paged == ["job:tri_evening:failed"]

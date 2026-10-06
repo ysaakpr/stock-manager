@@ -22,6 +22,7 @@ from dataplatform.alert_triggers import (
     ConditionLedger,
     FinishedAttempt,
     OpenQualityCheck,
+    RetryDeadline,
     TickReport,
     Trigger,
     calendar_expiry_conditions,
@@ -30,11 +31,16 @@ from dataplatform.alert_triggers import (
     quality_red_conditions,
     reconcile,
     redact,
+    registry_retry_deadline,
     tick,
 )
 from dataplatform.alerts import AlertOutcome, BaseAlerter, Severity
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.ingest.calendar import CalendarDataError, trading_calendar
+from dataplatform.ingest.indices import TriNotYetPublishedError
+from dataplatform.ingest.models import IngestError
+from dataplatform.retry import RetryPendingError
+from dataplatform.scheduler.registry import TRI_EVENING, JobRegistry
 from dataplatform.status import SourceStatus, SyncState
 
 NOW = datetime(2026, 11, 2, 9, 0, tzinfo=IST)
@@ -223,6 +229,123 @@ def test_only_the_jobs_that_raised_are_conditions() -> None:
         FinishedAttempt("tri_refresh", "TIMED_OUT", NOW, "ran for 999s"),
     ]
     assert [c.dedup_key for c in failed_job_conditions(attempts)] == ["job:daily_snapshot:failed"]
+
+
+# ── (d) a retry-pending failure while a later fire is due today (#73 and #65) ────────────────
+#
+# `tri_evening` fires at 19:50, 20:50 and 21:30 IST; NSE Indices publishes the TRI near 20:47, so
+# the 19:50 fire usually raises `TriNotYetPublishedError`. These use the real job and its real
+# cron through `registry_retry_deadline`, so moving the fires moves what these prove.
+
+EVENING = date(2026, 10, 6)  # a Tuesday
+
+
+def _ist(hour: int, minute: int) -> datetime:
+    return datetime(EVENING.year, EVENING.month, EVENING.day, hour, minute, tzinfo=IST)
+
+
+def _tri_deadline() -> RetryDeadline:
+    return registry_retry_deadline(JobRegistry([TRI_EVENING]))
+
+
+def _tri_failure(started: datetime, *, retry_pending: bool = True) -> FinishedAttempt:
+    error = "TriNotYetPublishedError: nifty50 stops at 2026-10-05" if retry_pending else "boom"
+    return FinishedAttempt("tri_evening", "FAILED", started, error, retry_pending=retry_pending)
+
+
+def test_the_tri_not_yet_published_error_is_marked_retry_pending_by_type() -> None:
+    """The marker is the class, so the runner's `isinstance` sees it; no message is read."""
+    assert issubclass(TriNotYetPublishedError, RetryPendingError)
+    assert issubclass(TriNotYetPublishedError, IngestError)
+
+
+def test_a_not_yet_published_failure_at_1950_pages_nothing() -> None:
+    attempts = [_tri_failure(_ist(19, 50))]
+    conditions = failed_job_conditions(attempts, now=_ist(19, 55), retry_deadline=_tri_deadline())
+    assert conditions == []
+
+
+def test_a_not_yet_published_failure_of_the_last_fire_at_2130_pages() -> None:
+    attempts = [_tri_failure(_ist(21, 30))]
+    (condition,) = failed_job_conditions(attempts, now=_ist(21, 45), retry_deadline=_tri_deadline())
+    assert condition.dedup_key == "job:tri_evening:failed"
+    assert condition.severity is Severity.CRITICAL
+
+
+def test_any_other_failure_at_1950_pages() -> None:
+    attempts = [_tri_failure(_ist(19, 50), retry_pending=False)]
+    (condition,) = failed_job_conditions(attempts, now=_ist(19, 55), retry_deadline=_tri_deadline())
+    assert condition.dedup_key == "job:tri_evening:failed"
+
+
+def test_the_hold_ends_when_the_later_fire_should_have_finished() -> None:
+    """Inverted-condition guard: the 19:50 failure is held only until the 20:50 fire's budget is
+    spent. Still the newest finished attempt after that (the retry never ran or never finished)
+    means it pages. Fails if the `now < deadline` comparison is flipped or dropped."""
+    attempts = [_tri_failure(_ist(19, 50))]
+    deadline = _tri_deadline()
+    assert deadline("tri_evening", _ist(19, 50)) == _ist(21, 0)  # 20:50 fire + 10-minute budget
+    assert failed_job_conditions(attempts, now=_ist(20, 59), retry_deadline=deadline) == []
+    (late,) = failed_job_conditions(attempts, now=_ist(21, 0), retry_deadline=deadline)
+    assert late.dedup_key == "job:tri_evening:failed"
+
+
+def test_the_last_fire_has_no_same_day_retry() -> None:
+    """Fails if 'later fire' leaks into tomorrow's 19:50: the last fire must page tonight."""
+    deadline = _tri_deadline()
+    assert deadline("tri_evening", _ist(20, 50)) == _ist(21, 40)
+    assert deadline("tri_evening", _ist(21, 30)) is None
+    assert deadline("job_not_in_the_registry", _ist(19, 50)) is None
+
+
+def test_a_pending_failure_does_not_resolve_an_alert_already_open() -> None:
+    """A real failure paged earlier; a retry-pending one now must keep it open (no false
+    'resolved' page), while still not being an onset of its own."""
+    attempts = [_tri_failure(_ist(19, 50))]
+    (kept,) = failed_job_conditions(
+        attempts,
+        now=_ist(19, 55),
+        retry_deadline=_tri_deadline(),
+        already_open={"job:tri_evening:failed"},
+    )
+    assert kept.dedup_key == "job:tri_evening:failed"
+
+
+def test_without_a_deadline_every_failure_pages() -> None:
+    """The default keeps #65's behaviour: no schedule, no hold."""
+    (condition,) = failed_job_conditions([_tri_failure(_ist(19, 50))], now=_ist(19, 55))
+    assert condition.dedup_key == "job:tri_evening:failed"
+
+
+def test_a_held_failure_then_a_failed_last_fire_pages_once() -> None:
+    """Through `reconcile`: the 19:50 hold is silent, the 21:30 failure is one onset, and a repeat
+    tick sends nothing more — #65's dedup is unchanged."""
+    clock = FrozenClock(_ist(19, 55))
+    alerter = RecordingAlerter(clock)
+    ledger = MemoryLedger()
+    deadline = _tri_deadline()
+
+    def run(attempt: FinishedAttempt, at: datetime) -> None:
+        conditions = failed_job_conditions(
+            [attempt],
+            now=at,
+            retry_deadline=deadline,
+            already_open=ledger.open_keys(Trigger.JOB_FAILED),
+        )
+        reconcile(
+            Trigger.JOB_FAILED,
+            conditions,
+            ledger=ledger,
+            alerter=alerter,
+            at=at,
+            report=TickReport(),
+        )
+
+    run(_tri_failure(_ist(19, 50)), _ist(19, 55))
+    assert alerter.sent == []
+    run(_tri_failure(_ist(21, 30)), _ist(21, 45))
+    run(_tri_failure(_ist(21, 30)), _ist(22, 0))
+    assert [sent[3] for sent in alerter.sent] == ["job:tri_evening:failed"]
 
 
 # ── no secret in an alert body ───────────────────────────────────────────────────────────────

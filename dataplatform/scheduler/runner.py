@@ -43,6 +43,7 @@ from psycopg.types.json import Json
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger, log_context
+from dataplatform.retry import RetryPendingError
 from dataplatform.scheduler.registry import Job, JobContext, JobRegistry, default_registry
 from dataplatform.store.db import Connection, connection
 
@@ -104,6 +105,9 @@ class JobRun:
     started_at: datetime
     finished_at: datetime | None = None
     error: str | None = None
+    #: The job raised a `RetryPendingError`: its input is not available yet. Recorded so the
+    #: failure-alert trigger can hold the page while a later fire the same day can still land it.
+    retry_pending: bool = False
 
     @property
     def succeeded(self) -> bool:
@@ -217,7 +221,7 @@ class SchedulerRunner:
                 self._write_beat(conn, JobState.RUNNING, at=started_at, job=job.name, run_id=run_id)
                 log.info("job.start", cron=job.cron, timeout_s=job.timeout.total_seconds())
 
-                state, error = self._execute(job, run_id)
+                state, error, retry_pending = self._execute(job, run_id)
                 finished_at = self.clock.now()
                 run = JobRun(
                     run_id=run_id,
@@ -227,6 +231,7 @@ class SchedulerRunner:
                     started_at=started_at,
                     finished_at=finished_at,
                     error=error,
+                    retry_pending=retry_pending,
                 )
                 self._finish_run(conn, run)
                 self._write_beat(conn, run.state, at=finished_at, job=job.name, run_id=run_id)
@@ -247,8 +252,9 @@ class SchedulerRunner:
         log.debug("scheduler.beat", beat_at=at.isoformat())
         return Heartbeat(name=self.scheduler_id, beat_at=at, state=ALIVE, instance=self.instance)
 
-    def _execute(self, job: Job, run_id: UUID) -> tuple[JobState, str | None]:
-        """Call the job function, converting its outcome into a state and an error string.
+    def _execute(self, job: Job, run_id: UUID) -> tuple[JobState, str | None, bool]:
+        """Call the job function, converting its outcome into a state, an error string and whether
+        the failure was a `RetryPendingError` (decided by type, never by the message).
 
         Elapsed time is measured with `time.monotonic()` rather than the injected clock: this is
         an interval, not a date (see `dataplatform/clock.py`), and it must stay honest under a
@@ -270,7 +276,11 @@ class SchedulerRunner:
                 error=str(error),
                 exc_info=True,
             )
-            return JobState.FAILED, f"{type(error).__name__}: {error}"
+            return (
+                JobState.FAILED,
+                f"{type(error).__name__}: {error}",
+                isinstance(error, RetryPendingError),
+            )
 
         elapsed = time.monotonic() - started
         if elapsed > budget:
@@ -278,9 +288,10 @@ class SchedulerRunner:
             return (
                 JobState.TIMED_OUT,
                 f"ran for {elapsed:.3f}s against a {budget:.3f}s budget",
+                False,
             )
         log.info("job.succeeded", elapsed_s=round(elapsed, 3))
-        return JobState.SUCCEEDED, None
+        return JobState.SUCCEEDED, None, False
 
     # ── recording ───────────────────────────────────────────────────────────────────────────
 
@@ -301,8 +312,9 @@ class SchedulerRunner:
 
     def _finish_run(self, conn: Connection, run: JobRun) -> None:
         conn.execute(
-            "UPDATE job_run SET state = %s, finished_at = %s, error = %s WHERE run_id = %s",
-            (run.state.value, run.finished_at, run.error, run.run_id),
+            "UPDATE job_run SET state = %s, finished_at = %s, error = %s, retry_pending = %s "
+            "WHERE run_id = %s",
+            (run.state.value, run.finished_at, run.error, run.retry_pending, run.run_id),
         )
 
     def _write_beat(
