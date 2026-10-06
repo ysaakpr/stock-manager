@@ -379,11 +379,14 @@ NSE_DAILY_CAPTURE = Job(
 
 
 def shareholding_poll(context: JobContext) -> None:
-    """The weekly poll of NSE's shareholding master (ops-daily-capture).
+    """The daily poll of NSE's shareholding master (ops-daily-capture).
 
-    What it does: one request for the master — every company's latest shareholding filing, with
-    its quarter end and its filing date — into L0, merged into the filing-date L1 partitions. The
-    endpoint shows the latest state only. See `daily_capture.run_shareholding_poll`.
+    What it does: one request for the master into L0, then the filing-date L1 partitions merged
+    with what it carries. The endpoint has no date parameter and lists the filings of the *current*
+    quarter-end only — measured 2026-10-06: 32 records, every one for 30-Sep-2026, broadcast
+    01..06-Oct; the register's 2026-08-08 sample held 2,284 for the June quarter — so the previous
+    quarter's list is gone the day the next quarter's first filing lands. See
+    `daily_capture.run_shareholding_poll`.
     What it assumes: the injected clock and settings are the run's (B10).
     What it never does: re-date a filing or drop one an earlier poll landed.
     """
@@ -392,21 +395,21 @@ def shareholding_poll(context: JobContext) -> None:
     run_shareholding_poll_job(context)
 
 
-#: The weekly shareholding poll. 12:00 IST on Saturday — after `ca_refresh` (10:00, one-hour
-#: budget) has released `www.nseindia.com`. Weekly cannot miss a quarter: the master replaces a
-#: company's row only when that company files its *next* quarter, about 90 days on, so each filing
-#: is on the endpoint for ~13 polls. What weekly can miss is a revision filed and superseded inside
-#: one week — recorded in the gate note as the accepted cost of a 2.4 MB payload a week instead of
-#: a day. Six sessions of lag budget, as for every weekly job.
+#: The daily shareholding poll. 18:05 IST every day — the half hour before `eod_pipeline` (18:30)
+#: when nothing else holds `www.nseindia.com`, inside the campaign quiet window so no campaign can
+#: hold it either. Daily because the quarter rolls over without notice: a weekly poll could miss
+#: the late filings and revisions of a quarter's last week, which no later poll can recover. The
+#: payload peaks near 2.4 MB at the end of a filing season. Two sessions of lag budget: a missed day
+#: is recovered by the next one while the quarter lasts, so one miss is late, not lost.
 SHAREHOLDING_POLL = Job(
     name="shareholding_poll",
-    cron="0 12 * * sat",
+    cron="5 18 * * *",
     fn=shareholding_poll,
     timeout=timedelta(minutes=15),
-    description="Weekly NSE shareholding-master poll → L0, merged into filing-date L1 partitions",
+    description="Daily NSE shareholding-master poll → L0, merged into filing-date L1 partitions",
     covers=_SHAREHOLDING_SOURCES,
     sync_sources=_SHAREHOLDING_SOURCES,
-    max_lag_sessions=6,
+    max_lag_sessions=2,
 )
 
 

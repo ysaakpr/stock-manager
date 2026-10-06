@@ -8,7 +8,7 @@ nine, in four jobs (`dataplatform.scheduler.registry`):
 
 * `nse_daily_capture` — FII/DII flows, bulk deals, block deals (perishable) and the current
   session's F&O bhavcopy (dated, but the historical backfill is a separate campaign's).
-* `shareholding_poll` — the latest-state shareholding master, weekly.
+* `shareholding_poll` — the shareholding master (current quarter-end's filings only), daily.
 * `announcements_capture` — NSE and BSE announcements for the previous calendar day, complete.
 * `news_capture` — the ratified curated RSS feeds and a bounded GDELT export sample.
 
@@ -27,9 +27,10 @@ for one-shot use and, run daily, each breaks in a way only a second day shows.
   each module's writer replaces it whole — so writing BSE after NSE, or the second GDELT slot after
   the first, erased the earlier rows. Here each date's partition is re-derived from every payload
   L0 holds for it, so the write is whole and the order does not matter.
-* **Shareholding partitions** are by filing date, and the master shows each company's latest filing
-  only, so a later poll writing a filing date's partition from its own rows would drop a company
-  that has since filed again. Here a poll merges into what the partition already holds.
+* **Shareholding partitions** are by filing date, and the master lists only the current quarter's
+  filings, so a later poll writing a filing date's partition from its own rows would drop whatever
+  has since left the list (a revision, or the whole previous quarter). Here a poll merges into what
+  the partition already holds.
 
 Two rules apply to every source, and both are the daily snapshot's (`daily_snapshot.py`):
 
@@ -776,8 +777,8 @@ def capture_shareholding(
     What it does: one request (none when the poll date is PUBLISHED, or its payload is already in
     L0), then for every filing date the payload carries, rewrites that partition as the union of
     what it already held and what this poll says — this poll winning for a company/quarter both
-    name. The master shows each company's *latest* filing only, so a partition rewritten from one
-    poll's rows would silently drop every company that has filed again since.
+    name. The master lists the current quarter-end's filings only, so a partition rewritten from
+    one poll's rows would silently drop every filing that has since left the list.
     What it never does: move a row to a different filing date. Partitioning by filing date is the
     point-in-time contract (`shareholding.read_pit`); a merge that re-dated a row would break it.
     """
