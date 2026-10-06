@@ -466,9 +466,9 @@ class RailGate:
         price = self._price(request.isin, None)
         if price is None and request.side is Side.SELL:
             # A held name with no close yet is valued as ``_book`` values it: its broker cost
-            # basis. A face-value split's successor ISIN can trade only in series BE for a while,
-            # which the EQ-only reader never sees; refusing to value the exit would kill the run
-            # over a holding the rails already carry at that price.
+            # basis. The backtest's marks carry a held name's BE/BZ close when it left EQ, so this
+            # is reached only by a holding that has printed in no series yet; refusing to value
+            # the exit would kill the run over a holding the rails already carry at that price.
             held = next((lot for lot in book.lots if lot.isin == request.isin), None)
             if held is not None:
                 price = held.price
