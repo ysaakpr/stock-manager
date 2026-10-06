@@ -33,7 +33,7 @@ Nothing here reads a clock, fetches, or writes.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from functools import cache
@@ -74,9 +74,24 @@ class PriceQuarantine:
                 raise TypeError(f"{isin}: first session must be a date, got {type(day).__name__}")
 
     @classmethod
-    def from_manual_actions(cls, curated: ManualActions) -> PriceQuarantine:
-        """The quarantine the curated file's unsourced steps call for (D22)."""
-        return cls(first_sessions=dict(curated.unsourced_windows()))
+    def from_manual_actions(
+        cls, curated: ManualActions, *, survivor_of: Callable[[str], str] | None = None
+    ) -> PriceQuarantine:
+        """The quarantine the curated file's unsourced steps call for (D22).
+
+        With `survivor_of` (a D2 `LineageResolver.survivor_of`), each window is applied to the
+        ISIN's survivor too: its L2 partition holds the retired ISIN's stitched pre-step bars
+        under the survivor's ISIN. Where two windows land on one survivor the later one wins, the
+        conservative side. Without a resolver, `store.l2.materialize_isin` refuses to stitch a
+        quarantined ISIN into a survivor the file does not name, so the gap cannot arise silently.
+        """
+        windows = dict(curated.unsourced_windows())
+        if survivor_of is not None:
+            for isin, first in list(windows.items()):
+                survivor = survivor_of(isin)
+                if survivor != isin:
+                    windows[survivor] = max(first, windows.get(survivor, first))
+        return cls(first_sessions=windows)
 
     def admits(self, isin: str, trade_date: date) -> bool:
         """False only for a quarantined ISIN's bar dated before its step session."""

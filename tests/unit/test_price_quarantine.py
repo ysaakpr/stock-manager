@@ -249,3 +249,54 @@ def test_the_quarantined_raw_view_drops_the_pre_step_bars(lake: Path) -> None:
         "SELECT trade_date FROM raw_q WHERE isin = $isin ORDER BY 1", {"isin": EIH}
     ).fetchall()
     assert [d for (d,) in days] == [STEP, AFTER]
+
+
+# ── lineage: a quarantined ISIN retired into a survivor ────────────────────────────────────────
+
+SURVIVOR = "INE230A01031"  # a hypothetical reissue of EIH's ISIN
+
+
+def test_with_a_resolver_the_quarantine_follows_the_isin_into_its_survivor() -> None:
+    curated = load_manual_actions()
+    rekeyed = PriceQuarantine.from_manual_actions(
+        curated, survivor_of=lambda isin: SURVIVOR if isin == EIH else isin
+    )
+    # the survivor's stitched partition holds EIH's pre-step bars under SURVIVOR
+    assert not rekeyed.admits(SURVIVOR, BEFORE)
+    assert rekeyed.admits(SURVIVOR, STEP)
+    assert not rekeyed.admits(EIH, BEFORE)  # and the retired ISIN stays covered in L1
+    # without the resolver the survivor is not named — which is why the build refuses below
+    assert PriceQuarantine.from_manual_actions(curated).admits(SURVIVOR, BEFORE)
+
+
+def test_two_windows_on_one_survivor_keep_the_later_step() -> None:
+    curated = load_manual_actions()  # EIH 2006-09-12, JM Financial 2008-09-08
+    both = PriceQuarantine.from_manual_actions(
+        curated,
+        survivor_of=lambda isin: SURVIVOR if isin in {EIH, "INE780C01023"} else isin,
+    )
+    assert both.first_sessions[SURVIVOR] == date(2008, 9, 8)
+
+
+def test_stitching_a_quarantined_isin_into_an_unnamed_survivor_fails_loud(lake: Path) -> None:
+    from dataplatform.store.l2 import QuarantineLineageError
+
+    with pytest.raises(QuarantineLineageError, match=f"re-key .* to the survivor {SURVIVOR}"):
+        materialize_isin(
+            SURVIVOR,
+            chain=FactorChain(isin=SURVIVOR, rows=()),
+            actions=(),
+            data_root=lake,
+            history_isins=(EIH, SURVIVOR),
+        )
+    # the quarantined ISIN's own partition, and an unrelated stitch, still build
+    materialize_isin(
+        EIH, chain=FactorChain(isin=EIH, rows=()), actions=(), data_root=lake, history_isins=(EIH,)
+    )
+    materialize_isin(
+        CONTROL,
+        chain=FactorChain(isin=CONTROL, rows=()),
+        actions=(),
+        data_root=lake,
+        history_isins=("INE002A01026", CONTROL),
+    )

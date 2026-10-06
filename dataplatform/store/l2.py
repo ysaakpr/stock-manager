@@ -95,6 +95,7 @@ __all__ = [
     "L2RebuildReport",
     "L2TruncatedReport",
     "L2WriteReport",
+    "QuarantineLineageError",
     "RawBar",
     "build_adjusted_bars",
     "compose_events",
@@ -552,6 +553,7 @@ def materialize_isin(
     # `isin` on the way out, so the partition is the survivor's however many ISINs fed it — and
     # the spans do not overlap, so the per-(exchange, date) uniqueness the adjuster needs holds.
     sources = (isin,) if history_isins is None else tuple(history_isins)
+    _refuse_an_unkeyed_quarantine(isin, sources)
     raw_bars = tuple(
         bar
         for source in sources
@@ -608,6 +610,34 @@ def materialize_isin(
         state="PUBLISHED",
     )
     return report
+
+
+class QuarantineLineageError(ValueError):
+    """A quarantined ISIN's bars would be stitched under a survivor the quarantine does not name."""
+
+
+def _refuse_an_unkeyed_quarantine(isin: str, sources: Sequence[str]) -> None:
+    """Fail loud before a quarantined predecessor's bars enter a survivor no quarantine names.
+
+    The D22 quarantine (`ManualActions.unsourced_windows`, applied by
+    `dataplatform.query.PriceQuarantine`) is keyed by ISIN, and the decision path reads L2
+    without a lineage resolver. If a lineage edge retires a quarantined ISIN, its pre-step bars
+    land in the survivor's stitched partition under the survivor's ISIN, where a quarantine
+    keyed to the retired ISIN never looks, and the phantom step would reach every decision.
+    Rather than build that partition, raise and name the fix: key the curated row to the
+    survivor, which is the file's own rule for a row whose step sits in a stitched partition.
+    """
+    windows = default_manual_actions().unsourced_windows()
+    if isin in windows:
+        return
+    stray = sorted(s for s in sources if s != isin and s in windows)
+    if stray:
+        raise QuarantineLineageError(
+            f"{isin}'s stitched history includes quarantined {', '.join(stray)} "
+            f"(unsourced step before {', '.join(windows[s].isoformat() for s in stray)}); "
+            f"re-key that manual_actions.yaml explained_moves row to the survivor {isin} so "
+            f"the D22 quarantine covers its partition"
+        )
 
 
 def _curated_for_chain(isin: str, sources: Sequence[str]) -> tuple[CorporateAction, ...]:
