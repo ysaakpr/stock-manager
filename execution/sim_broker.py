@@ -41,7 +41,7 @@ from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 from enum import StrEnum
-from typing import Protocol
+from typing import Any, Protocol
 
 import structlog
 
@@ -57,6 +57,7 @@ from execution.broker import (
     OrderNotModifiableError,
     OrderRequest,
     OrderStatus,
+    OrderType,
     Position,
     Side,
     UnknownOrderError,
@@ -82,6 +83,7 @@ __all__ = [
     "ReferencePrice",
     "SessionMarket",
     "SimBroker",
+    "SimBrokerState",
     "SlippageModel",
 ]
 
@@ -298,6 +300,138 @@ class _Lot:
     @property
     def average_price(self) -> Decimal:
         return self.cost / self.quantity
+
+
+# ── the book as a value: what a forward runner persists between processes ─────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class SimBrokerState:
+    """Everything a `SimBroker` needs to carry on exactly where it stopped, as plain values.
+
+    The replay engine keeps one broker in memory for a whole walk; a forward runner that lives one
+    session per process (the daily paper session, M13.1) cannot, so it persists this after each
+    session and `SimBroker.restore`s it before the next. It holds the settled cash, the proceeds
+    released ahead for the next session, every settled lot, every pending buy and unsettled sale
+    with its trade date and cycle, the orders still `STAGED`, and the two id counters — so ids,
+    settlement and fills continue as if the process had never stopped.
+
+    The cash *ledger* is deliberately not part of it: it only grows, every line of it is a past
+    fact already recorded where it happened, and nothing the broker does next reads it. A restored
+    broker's ledger starts empty and continues the sequence numbers.
+
+    `to_document` renders it the one canonical way (Decimals as exact strings, dates ISO, lists in
+    a fixed order), so two equal states serialise to equal bytes and `from_document` round-trips.
+    """
+
+    cash: Decimal
+    released_ahead: Decimal
+    current_session: date | None
+    holdings: tuple[tuple[str, Exchange, int, Decimal], ...]
+    pending: tuple[tuple[str, date, int, Exchange, int, Decimal], ...]
+    receivables: tuple[tuple[str, date, int, Decimal], ...]
+    staged: tuple[Order, ...]
+    next_order_seq: int
+    next_ledger_seq: int
+
+    def to_document(self) -> dict[str, Any]:
+        """A JSON-safe document; money and quantities as exact strings."""
+        return {
+            "cash": str(self.cash),
+            "released_ahead": str(self.released_ahead),
+            "current_session": (
+                None if self.current_session is None else self.current_session.isoformat()
+            ),
+            "holdings": [
+                {"isin": isin, "exchange": exchange.value, "quantity": str(qty), "cost": str(cost)}
+                for isin, exchange, qty, cost in self.holdings
+            ],
+            "pending": [
+                {
+                    "isin": isin,
+                    "traded": traded.isoformat(),
+                    "lag": str(lag),
+                    "exchange": exchange.value,
+                    "quantity": str(qty),
+                    "cost": str(cost),
+                }
+                for isin, traded, lag, exchange, qty, cost in self.pending
+            ],
+            "receivables": [
+                {"isin": isin, "traded": traded.isoformat(), "lag": str(lag), "amount": str(amount)}
+                for isin, traded, lag, amount in self.receivables
+            ],
+            "staged": [_staged_document(order) for order in self.staged],
+            "next_order_seq": str(self.next_order_seq),
+            "next_ledger_seq": str(self.next_ledger_seq),
+        }
+
+    @classmethod
+    def from_document(cls, document: Any) -> SimBrokerState:
+        """The state a `to_document` rendering describes."""
+        current = document["current_session"]
+        return cls(
+            cash=Decimal(document["cash"]),
+            released_ahead=Decimal(document["released_ahead"]),
+            current_session=None if current is None else date.fromisoformat(current),
+            holdings=tuple(
+                (h["isin"], Exchange(h["exchange"]), int(h["quantity"]), Decimal(h["cost"]))
+                for h in document["holdings"]
+            ),
+            pending=tuple(
+                (
+                    p["isin"],
+                    date.fromisoformat(p["traded"]),
+                    int(p["lag"]),
+                    Exchange(p["exchange"]),
+                    int(p["quantity"]),
+                    Decimal(p["cost"]),
+                )
+                for p in document["pending"]
+            ),
+            receivables=tuple(
+                (r["isin"], date.fromisoformat(r["traded"]), int(r["lag"]), Decimal(r["amount"]))
+                for r in document["receivables"]
+            ),
+            staged=tuple(_staged_from(o) for o in document["staged"]),
+            next_order_seq=int(document["next_order_seq"]),
+            next_ledger_seq=int(document["next_ledger_seq"]),
+        )
+
+
+def _staged_document(order: Order) -> dict[str, str | None]:
+    request = order.request
+    return {
+        "order_id": order.order_id,
+        "decision_date": order.decision_date.isoformat(),
+        "target_session": order.target_session.isoformat(),
+        "isin": request.isin,
+        "side": request.side.value,
+        "quantity": str(request.quantity),
+        "exchange": request.exchange.value,
+        "order_type": request.order_type.value,
+        "limit_price": None if request.limit_price is None else str(request.limit_price),
+        "tag": request.tag,
+    }
+
+
+def _staged_from(document: Any) -> Order:
+    limit = document["limit_price"]
+    return Order(
+        order_id=document["order_id"],
+        request=OrderRequest(
+            isin=document["isin"],
+            side=Side(document["side"]),
+            quantity=int(document["quantity"]),
+            exchange=Exchange(document["exchange"]),
+            order_type=OrderType(document["order_type"]),
+            limit_price=None if limit is None else Decimal(limit),
+            tag=document["tag"],
+        ),
+        status=OrderStatus.STAGED,
+        decision_date=date.fromisoformat(document["decision_date"]),
+        target_session=date.fromisoformat(document["target_session"]),
+    )
 
 
 # ── the simulator ────────────────────────────────────────────────────────────────────────────
@@ -930,6 +1064,75 @@ class SimBroker:
             rounding = ROUND_FLOOR if request.side is Side.BUY else ROUND_CEILING
             limit = (limit * denominator / numerator).quantize(_TICK, rounding=rounding)
         return replace(order, request=replace(request, quantity=quantity, limit_price=limit))
+
+    # ── persistence between processes (a forward runner; see `SimBrokerState`) ──────────────────
+
+    def export_state(self) -> SimBrokerState:
+        """This broker's state as a value — what `restore` needs to continue it exactly."""
+        return SimBrokerState(
+            cash=self._cash,
+            released_ahead=self._released_ahead,
+            current_session=self._current_session,
+            holdings=tuple(
+                (isin, lot.exchange, lot.quantity, lot.cost)
+                for isin, lot in sorted(self._holdings.items())
+            ),
+            pending=tuple(
+                (p.isin, p.traded, p.lag, p.lot.exchange, p.lot.quantity, p.lot.cost)
+                for p in self._positions
+            ),
+            receivables=tuple((r.isin, r.traded, r.lag, r.amount) for r in self._receivables),
+            staged=tuple(
+                order for order in self._orders.values() if order.status is OrderStatus.STAGED
+            ),
+            next_order_seq=self._next_order_seq,
+            next_ledger_seq=self._next_ledger_seq,
+        )
+
+    @classmethod
+    def restore(
+        cls,
+        state: SimBrokerState,
+        *,
+        clock: Clock,
+        cost_model: CostModel,
+        market: SessionMarket,
+        policy: FillPolicy | None = None,
+        settlement: SettlementSchedule | None = None,
+    ) -> SimBroker:
+        """A broker that continues from `state` — same lots, receivables, staged orders and ids.
+
+        What it assumes: `market`, `cost_model`, `policy` and `settlement` are the ones the state
+        was produced under; they are configuration, not state. What it never does: invent a fill
+        or a ledger line — the restored ledger is empty and continues the sequence.
+        """
+        broker = cls(
+            clock=clock,
+            cost_model=cost_model,
+            market=market,
+            opening_cash=_ZERO,
+            policy=policy,
+            settlement=settlement,
+        )
+        broker._cash = state.cash
+        broker._released_ahead = state.released_ahead
+        broker._current_session = state.current_session
+        broker._holdings = {
+            isin: _Lot(exchange, quantity, cost)
+            for isin, exchange, quantity, cost in state.holdings
+        }
+        broker._positions = [
+            _PendingLot(isin, traded, lag, _Lot(exchange, quantity, cost))
+            for isin, traded, lag, exchange, quantity, cost in state.pending
+        ]
+        broker._receivables = [
+            _Receivable(isin, traded, lag, amount)
+            for isin, traded, lag, amount in state.receivables
+        ]
+        broker._orders = {order.order_id: order for order in state.staged}
+        broker._next_order_seq = state.next_order_seq
+        broker._next_ledger_seq = state.next_ledger_seq
+        return broker
 
     # ── Broker: account views ────────────────────────────────────────────────────────────────
 

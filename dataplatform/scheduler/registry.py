@@ -48,6 +48,7 @@ __all__ = [
     "MACRO_RELEASE_CAPTURE",
     "NEWS_CAPTURE",
     "NSE_DAILY_CAPTURE",
+    "PAPER_SESSION",
     "SHAREHOLDING_POLL",
     "TRI_EVENING",
     "TRI_REFRESH",
@@ -70,6 +71,7 @@ __all__ = [
     "macro_release_capture",
     "news_capture",
     "nse_daily_capture",
+    "paper_session",
     "shareholding_poll",
     "tri_evening",
     "tri_refresh",
@@ -830,6 +832,46 @@ FAILURE_ALERTS = Job(
     description="Page FAILED streaks, red quality, failed jobs and calendar expiry once (M13.2)",
 )
 
+
+def paper_session(context: JobContext) -> None:
+    """The daily paper-trading session (M13.1): one session of the D13-ratified momentum v2 book.
+
+    What it does: decides today's session of the paper book through the same replay-engine →
+    rails → `SimBroker` path its backtests ran on, journals every decision including the no-ops,
+    and records the session in `paper_session` — or, when the data is red, journals
+    `SKIPPED_DATA_RED` and places nothing. Idempotent per trading date; a holiday is a no-op.
+    What it assumes: the injected clock and settings are the run's (B10), the database is migrated
+    through 0012, and the owed session's EOD pipeline has run — the interlock checks it published.
+    Off unless `Settings.paper_session_enabled`: the ratified regime filter has no same-evening
+    source for the session's published NIFTY 50 TRI yet (ops/runbooks/daily-eod.md).
+    What it never does: touch a real broker — the session builds a `SimBroker` and nothing else,
+    and `execution.kite_broker` is not imported on this path. The import is deferred like the
+    others', so loading the registry does not pull in the backtest stack.
+    """
+    from backtest.paper_session import run_paper_session_job
+
+    run_paper_session_job(context)
+
+
+#: The paper session (M13.1). 21:45 IST Monday to Friday — after the 18:30 EOD pipeline (the
+#: session's prices) and after the last `tri_evening` attempt (M13.7, PR #73: 19:50, 20:50 and
+#: 21:30; NSE Indices' 20:47 publication time rests on one sample, hence the third fire), so a
+#: rebalance reads the session's own published NIFTY 50 TRI level or the journal names it missing.
+#: It reads the lake and Postgres only and fetches nothing, so it holds no host lease. Holidays are
+#: skipped inside the job against the holiday calendar. Registered but a no-op until
+#: PAPER_SESSION_ENABLED is set (see `paper_session`).
+PAPER_SESSION = Job(
+    name="paper_session",
+    cron="45 21 * * mon-fri",
+    fn=paper_session,
+    timeout=timedelta(minutes=30),
+    description=(
+        "Daily paper-trading session of the D13-ratified momentum v2 book (M13.1); "
+        "a no-op until PAPER_SESSION_ENABLED=true"
+    ),
+)
+
+
 #: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
 #: audit's root cause was not one broken job but sources that were simply never scheduled — the
 #: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
@@ -915,6 +957,7 @@ def default_registry() -> JobRegistry:
             ANNOUNCEMENTS_CAPTURE,
             NEWS_CAPTURE,
             FAILURE_ALERTS,
+            PAPER_SESSION,
         ],
         declined=_declined_source_ids(),
     )

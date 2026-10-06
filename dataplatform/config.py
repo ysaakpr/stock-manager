@@ -186,6 +186,15 @@ class Settings(BaseSettings):
         description="most open quality flags GET /status/quality returns in one response",
     )
 
+    # ── the daily paper session (M13.1) ────────────────────────────────────────────────────────
+    paper_session_enabled: bool = Field(
+        default=False,
+        description=(
+            "run the scheduler's paper_session job; off until the regime filter has a same-evening "
+            "source for the session's published NIFTY 50 TRI (ops/runbooks/daily-eod.md)"
+        ),
+    )
+
     # ── provider selectors (B4: no credential exists, so both default to a stub) ──────────────
     llm_provider: LlmProvider = Field(
         default=LlmProvider.STUB, description="stub | anthropic | claude_cli"

@@ -131,6 +131,7 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "announcements_capture",
         "news_capture",
         "failure_alerts",
+        "paper_session",
     )
     assert registry.get("eod_pipeline").cron == "30 18 * * mon-fri"
     # 19:15, after the 18:30 EOD pipeline: the two share nsearchives.nseindia.com, and a host
@@ -156,6 +157,9 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     assert registry.get("macro_release_capture").cron == "0 10 * * sun"
     # No network and a few reads, so a short cadence bounds how long a failure goes unpaged.
     assert registry.get("failure_alerts").cron == "*/15 * * * *"
+    # 21:45, after the EOD pipeline and the last tri_evening attempt (21:30): a rebalance reads the
+    # session's own published TRI level.
+    assert registry.get("paper_session").cron == "45 21 * * mon-fri"
 
 
 def test_every_default_job_is_valid_and_describes_itself() -> None:
