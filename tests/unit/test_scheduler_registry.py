@@ -123,9 +123,9 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     assert registry.get("fbil_reference_rates").cron == "0 16 * * mon-fri"
     # Sunday, when no niftyindices.com job holds that lease (the Saturday ones do).
     assert registry.get("macro_release_capture").cron == "0 10 * * sun"
-    # 21:00, after the EOD pipeline and the last tri_evening attempt (20:50): a rebalance reads the
+    # 21:45, after the EOD pipeline and the last tri_evening attempt (21:30): a rebalance reads the
     # session's own published TRI level.
-    assert registry.get("paper_session").cron == "0 21 * * mon-fri"
+    assert registry.get("paper_session").cron == "45 21 * * mon-fri"
 
 
 def test_every_default_job_is_valid_and_describes_itself() -> None:

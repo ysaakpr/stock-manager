@@ -41,6 +41,7 @@ from backtest.paper_session import (
     LATE_ACTION_EVENT,
     PAPER_BOOK_ID,
     PAPER_MODE,
+    REGIME_TRI_INPUT,
     ActionStatus,
     InMemoryPaperSessionStore,
     PaperBookDivergenceError,
@@ -374,9 +375,41 @@ def test_a_rebalance_without_the_regime_index_level_is_red_not_a_crash() -> None
     result = desk.run(OCT_FIRST)
 
     assert result.verdict is RunVerdict.SKIPPED_DATA_RED
-    assert "decision input unavailable" in result.reason
     assert desk.store.get("paper_fixture_book", OCT_FIRST) is not None
     assert all(entry.decision is Decision.SKIPPED_DATA_RED for entry in desk.journal.entries)
+
+
+def test_a_missing_tri_level_is_named_in_the_journaled_red_reason() -> None:
+    """The red day says which input is missing — the session's NIFTY 50 TRI, from tri_evening."""
+    desk = _Desk.fresh(world=FixtureWorld(no_regime={OCT_FIRST}))
+    result = desk.run(OCT_FIRST)
+
+    (entry,) = desk.journal.entries
+    assert entry.rationale is not None
+    assert "no published NIFTY 50 TRI level for 2026-10-01" in entry.rationale
+    assert REGIME_TRI_INPUT in entry.rationale
+    assert entry.payload["missing_input"] == REGIME_TRI_INPUT == "nifty_tri_history/nifty50"
+    assert result.reason == entry.rationale
+    # Never read past the gap: the regime was asked for, the ranking was not.
+    assert ("regime", OCT_FIRST) in desk.world.reads
+    assert ("signal", OCT_FIRST) not in desk.world.reads
+
+
+def test_a_missing_tri_level_never_reds_a_session_that_is_not_a_rebalance() -> None:
+    """Only a rebalance reads the regime, so a late TRI on an ordinary day changes nothing."""
+    desk = _Desk.fresh(world=FixtureWorld(no_regime={OCT_SECOND, OCT_THIRD}))
+    assert desk.run(OCT_FIRST).verdict is RunVerdict.DECIDED  # the month's rebalance
+    for day in (OCT_SECOND, OCT_THIRD):
+        result = desk.run(day)
+        assert result.verdict is RunVerdict.DECIDED
+        assert "missing_input" not in {key for e in result.entries for key in e.payload}
+
+
+def test_other_red_reasons_carry_no_missing_input() -> None:
+    desk = _Desk.fresh()
+    desk.run(OCT_FIRST, gate=_red_on(OCT_FIRST))
+    (entry,) = desk.journal.entries
+    assert "missing_input" not in entry.payload
 
 
 def test_a_red_first_session_moves_the_rebalance_to_the_next_green_one() -> None:
@@ -573,9 +606,10 @@ def test_a_late_action_on_a_name_the_book_never_held_is_recorded_silently() -> N
 @pytest.mark.parametrize(
     ("now", "owed"),
     [
-        (datetime(2026, 10, 5, 21, 0, tzinfo=IST), OCT_SECOND),  # the scheduled 21:00 run: today
-        (datetime(2026, 10, 6, 21, 0, tzinfo=IST), OCT_THIRD),  # the next evening's run: its day
-        (datetime(2026, 10, 1, 21, 0, tzinfo=IST), OCT_FIRST),  # the evening before a holiday
+        (datetime(2026, 10, 5, 21, 45, tzinfo=IST), OCT_SECOND),  # the scheduled 21:45 run: today
+        (datetime(2026, 10, 6, 21, 45, tzinfo=IST), OCT_THIRD),  # the next evening's run: its day
+        (datetime(2026, 10, 1, 21, 45, tzinfo=IST), OCT_FIRST),  # the evening before a holiday
+        (datetime(2026, 10, 5, 23, 59, tzinfo=IST), OCT_SECOND),  # a late retry the same night
         (datetime(2026, 10, 5, 20, 30, tzinfo=IST), OCT_SECOND),  # any time after 18:30: today
         (datetime(2026, 10, 6, 0, 30, tzinfo=IST), OCT_SECOND),  # a retry after midnight
         (datetime(2026, 10, 6, 18, 29, tzinfo=IST), OCT_SECOND),  # before today's EOD is due
@@ -658,7 +692,7 @@ def test_the_job_is_disabled_by_default_and_touches_nothing(
 def test_a_retry_after_midnight_decides_the_session_that_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """N1: the 21:00 run failed; the 00:30 retry decides that session, not the new day."""
+    """N1: the 21:45 run failed; the 00:30 retry decides that session, not the new day."""
     world, store, journal = FixtureWorld(), InMemoryPaperSessionStore(), RecordingJournal()
     install_job_seams(monkeypatch.setattr, world=world, store=store, journal=journal)
 

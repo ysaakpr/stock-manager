@@ -166,6 +166,7 @@ __all__ = [
     "PAPER_DATASETS",
     "PAPER_MODE",
     "PAPER_OPENING_CASH",
+    "REGIME_TRI_INPUT",
     "ActionStatus",
     "BookedAction",
     "InMemoryPaperSessionStore",
@@ -211,6 +212,10 @@ PAPER_OPENING_CASH: Final = Decimal("1000000")
 #: instead — on their ex-date when known in time, otherwise as an explicit late action (module
 #: docstring, step 5).
 PAPER_DATASETS: Final[tuple[str, ...]] = ("nse_bhavcopy",)
+
+#: The regime filter's input on a rebalance: the session's published NIFTY 50 TRI level, as
+#: ``tri_evening`` (M13.7) files it. Named in a red day's reason and ``payload.missing_input``.
+REGIME_TRI_INPUT: Final = "nifty_tri_history/nifty50"
 
 #: Stamped on every journal entry and in the payload, so a paper decision is never mistaken for a
 #: real-money one and every entry names the book it belongs to.
@@ -804,7 +809,7 @@ def owed_session(world: PaperWorld, now: datetime) -> date | None:
     """The session the job owes a decision for at ``now`` — an explicit date, never "today".
 
     The latest trading session whose EOD is due: from :data:`EOD_DUE_AT` IST that is today (when
-    today is a session), before it the latest session before today. So the 21:00 run decides
+    today is a session), before it the latest session before today. So the 21:45 run decides
     today, and a retry at 00:30 decides yesterday's — the session that failed — not the new day,
     whose market has not even opened. ``None`` only if no session lies in the lookback.
     """
@@ -1333,6 +1338,16 @@ class _Capturing:
 _MISSING_INPUT: Final = (RegimeSourceError, IndexCoverageError)
 
 
+@dataclass(frozen=True, slots=True)
+class _InputGap:
+    """Why this session's decision inputs are not all there, and which input is missing."""
+
+    reason: str
+    #: The ``sync_state``-style id of the missing input, when it is one — journaled as
+    #: ``payload.missing_input`` so a red day can be grouped by cause without parsing prose.
+    missing: str | None = None
+
+
 def _input_gap(
     data: MomentumV2Data,
     policy: MomentumV2Policy,
@@ -1340,22 +1355,32 @@ def _input_gap(
     trading_date: date,
     *,
     rebalance: bool,
-) -> str | None:
+) -> _InputGap | None:
     """Why the decision cannot be made on this session's inputs, or ``None`` when it can.
 
     Reads exactly what the policy is about to read, before it reads it: a rebalance with the regime
-    filter needs the session's regime reading, and a rebalance or a redeploy needs a non-empty
+    filter needs the session's published NIFTY 50 TRI level (landed by ``tri_evening``, M13.7) —
+    checked only on a rebalance, the one day the regime is read, so a TRI that is late on an
+    ordinary day never turns that day red — and a rebalance or a redeploy needs a non-empty
     candidate set. An empty set on a rebalance would sell the whole book on missing data, so it is
     red rather than a decision.
     """
-    try:
-        if rebalance and parameters.regime_filter:
+    if rebalance and parameters.regime_filter:
+        try:
             data.regime(trading_date)
+        except RegimeSourceError as error:
+            return _InputGap(
+                f"regime input missing: no published NIFTY 50 TRI level for "
+                f"{trading_date.isoformat()} ({REGIME_TRI_INPUT}, landed same-evening by "
+                f"tri_evening, M13.7); the rebalance waits for a session that has it. {error}",
+                REGIME_TRI_INPUT,
+            )
+    try:
         needs_signal = rebalance or policy.pending is not None
         if needs_signal and not data.signal(trading_date).records:
-            return f"no momentum candidates for {trading_date.isoformat()}"
+            return _InputGap(f"no momentum candidates for {trading_date.isoformat()}")
     except _MISSING_INPUT as error:
-        return f"decision input unavailable: {error}"
+        return _InputGap(f"decision input unavailable: {error}")
     return None
 
 
@@ -1463,7 +1488,17 @@ def run_paper_session(
     policy.resume(last.pending if last is not None else None)
     gap = _input_gap(data, policy, spec.parameters, trading_date, rebalance=rebalance)
     if gap is not None:
-        return _skip(spec, trading_date, gap, existing, store, journal, session_clock, clock)
+        return _skip(
+            spec,
+            trading_date,
+            gap.reason,
+            existing,
+            store,
+            journal,
+            session_clock,
+            clock,
+            missing=gap.missing,
+        )
 
     held = _Held()
     sim = _restore_book(spec, world, last, trading_date, session_clock, held)
@@ -1597,8 +1632,14 @@ def _skip(
     journal: JournalSink,
     session_clock: FrozenClock,
     clock: Clock,
+    *,
+    missing: str | None = None,
 ) -> PaperSessionResult:
-    """Journal one ``SKIPPED_DATA_RED`` for the date (once) and place nothing (invariant #10)."""
+    """Journal one ``SKIPPED_DATA_RED`` for the date (once) and place nothing (invariant #10).
+
+    ``missing`` names the input that made the day red, when it is one input (the session's TRI
+    level on a rebalance); it is journaled as ``payload.missing_input``.
+    """
     log = _LOG.bind(book=spec.book_id, trading_date=trading_date.isoformat(), mode=PAPER_MODE)
     if existing is not None:
         log.warning("paper_session.still_red", reason=reason, first_reason=existing.reason)
@@ -1609,7 +1650,11 @@ def _skip(
         actor=Actor.SYSTEM,
         decision=Decision.SKIPPED_DATA_RED,
         rationale=reason,
-        payload={**_tag(spec), "datasets": ",".join(spec.datasets)},
+        payload={
+            **_tag(spec),
+            "datasets": ",".join(spec.datasets),
+            **({"missing_input": missing} if missing is not None else {}),
+        },
     )
     journal.append(entry)
     record = PaperSessionRecord(

@@ -132,9 +132,10 @@ never edited or deleted (invariant #1); every L1 value is re-derivable from it.
 
 ## The daily paper session (M13.1)
 
-`paper_session` is registered for **21:00 IST, Monday to Friday** — after the EOD pipeline above and
-after the last `tri_evening` attempt (M13.7, PR #73: 19:50 IST with a 20:50 retry; NSE Indices was
-measured publishing the day's TRI by 20:47 IST), so a rebalance can read the session's own TRI. It
+`paper_session` is registered for **21:45 IST, Monday to Friday** — after the EOD pipeline above and
+after the last `tri_evening` attempt (M13.7, PR #73: 19:50, 20:50 and 21:30 IST; NSE Indices was
+measured publishing the day's TRI by 20:47 IST, on a single sample — hence the third fire), so a
+rebalance can read the session's own TRI. It
 decides one session of the D13-ratified momentum v2 book (`PAPER_RATIFIED_2026_09_06`: 12-1
 ranking, top-20 with a top-30 sell band, 200-session regime filter, inverse-vol weights, redeploy
 next session) in **paper mode only**: the order path is the backtest's own `ReplayEngine` →
@@ -158,7 +159,7 @@ one (`backtest.run._RegimeSource`). Before M13.7 nothing landed that level the s
   8,931.87); the TRI/price ratio drifts from 1.28 to 1.52 — reinvested dividends.
 
 **M13.7 (PR #73) closes the gap**: a weekday `tri_evening` job lands day D's published NIFTY 50 TRI
-at 19:50 IST, retrying at 20:50 IST, and this job runs at 21:00, after both. Enabled before PR #73
+at 19:50 IST, retrying at 20:50 and 21:30 IST, and this job runs at 21:45, after all three. Enabled before PR #73
 is merged, every rebalance would be journaled `SKIPPED_DATA_RED` ("no level for <date>") and the
 book would never invest — so keep it off until then.
 
@@ -174,15 +175,17 @@ XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler
 XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status scheduler
 ```
 
-The first 21:00 run after that opens the book (the first session it decides rebalances). To check
+The first 21:45 run after that opens the book (the first session it decides rebalances). To check
 `tri_evening` landed the session's level before relying on it, `GET /status/jobs` should show
 `tri_evening` `OK` for the day; if it did not land, the paper run journals one `SKIPPED_DATA_RED`
-naming the missing level and the rebalance moves to the next green session.
+whose rationale reads "regime input missing: no published NIFTY 50 TRI level for <date>" and whose
+`payload.missing_input` is `nifty_tri_history/nifty50`, and the rebalance moves to the next green
+session. Only a rebalance day reads the regime, so a late TRI never turns an ordinary day red.
 
 ### What one run does
 
 It decides an **explicit date**, the *owed session*: the latest trading session whose EOD is due by
-the run's clock — today's from 18:30 IST, otherwise the previous session. The 21:00 run decides
+the run's clock — today's from 18:30 IST, otherwise the previous session. The 21:45 run decides
 today; a retry at 00:30 decides the session that failed the evening before, never the new calendar
 day. Then, in order — each step can end the run:
 
@@ -274,9 +277,11 @@ rolled back) and the next run retries the owed session.
 
 ### When it is red or fails
 
-- **Red on rebalance days: "no level for <date>" from the published `nifty50` series.** The reason
-  the job ships disabled (above). The book stays in what it last held and the journal shows one
-  `SKIPPED_DATA_RED` per day naming the cause.
+- **Red on rebalance days: "regime input missing: no published NIFTY 50 TRI level for <date>"**
+  (`payload.missing_input = nifty_tri_history/nifty50`): `tri_evening` did not land the session's
+  level by 21:30 (before PR #73 is merged, every rebalance day — the reason the job ships disabled,
+  above). The book stays in what it last held, the journal shows one `SKIPPED_DATA_RED` per day
+  naming the missing level, and the rebalance is retried on the next session.
 - **`PaperBookDivergenceError`.** The persisted `book_state` of the latest decided session no longer
   reproduces the `book_digest` written with it in the same transaction — the row was altered or the
   state serialisation changed. A late corporate action cannot cause this (it is booked forward).

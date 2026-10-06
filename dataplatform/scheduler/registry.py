@@ -765,16 +765,16 @@ def paper_session(context: JobContext) -> None:
     run_paper_session_job(context)
 
 
-#: The paper session (M13.1). 21:00 IST Monday to Friday — after the 18:30 EOD pipeline (the
-#: session's prices) and after the last `tri_evening` attempt (M13.7, PR #73: 19:50 with a 20:50
-#: retry; NSE Indices was measured publishing the day's TRI by 20:47), so a rebalance reads the
-#: session's own published NIFTY 50 TRI level or the interlock says why not. It reads the lake and
-#: Postgres only and fetches nothing, so it holds no host lease. Holidays are
+#: The paper session (M13.1). 21:45 IST Monday to Friday — after the 18:30 EOD pipeline (the
+#: session's prices) and after the last `tri_evening` attempt (M13.7, PR #73: 19:50, 20:50 and
+#: 21:30; NSE Indices' 20:47 publication time rests on one sample, hence the third fire), so a
+#: rebalance reads the session's own published NIFTY 50 TRI level or the journal names it missing.
+#: It reads the lake and Postgres only and fetches nothing, so it holds no host lease. Holidays are
 #: skipped inside the job against the holiday calendar. Registered but a no-op until
 #: PAPER_SESSION_ENABLED is set (see `paper_session`).
 PAPER_SESSION = Job(
     name="paper_session",
-    cron="0 21 * * mon-fri",
+    cron="45 21 * * mon-fri",
     fn=paper_session,
     timeout=timedelta(minutes=30),
     description=(
