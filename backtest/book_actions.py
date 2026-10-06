@@ -145,6 +145,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 import structlog
@@ -1269,23 +1270,30 @@ def _live_isin(
     return best
 
 
-def load_store_book_actions() -> BookActionCalendar:
+def load_store_book_actions(*, data_root: Path | None = None) -> BookActionCalendar:
     """:func:`load_book_actions` over the configured Postgres (``dataplatform.store.db``).
 
-    A swap's survivor is checked for a close against the configured lake's L1 listing windows, and
-    the curated and implied events come from the composition the configured lake's L2 is built
-    with (:func:`_l2_composed_events`).
+    A swap's survivor is checked for a close against the lake's L1 listing windows, and the
+    curated and implied events come from the composition the lake's L2 is built with
+    (:func:`_l2_composed_events`). The lake is ``data_root``, or the configured one when it is
+    ``None``. A caller with a ``--data-root`` must pass it: the configured default is the
+    checkout's own ``data/``, which in a fresh git worktree does not exist, and an empty lake
+    reads as no listing windows at all rather than failing as a missing one.
     """
     from dataplatform.store.db import connect
 
     with connect() as conn:
         return load_book_actions(
-            conn, first_priced=_l1_first_priced(), composed=_l2_composed_events(conn)
+            conn,
+            first_priced=_l1_first_priced(data_root),
+            composed=_l2_composed_events(conn, data_root),
         )
 
 
-def _l2_composed_events(conn: Connection) -> tuple[ComposedEvents, ...]:
-    """``store.l2.compose_lake_events`` over the configured lake, with the D2 lineage chains."""
+def _l2_composed_events(
+    conn: Connection, data_root: Path | None = None
+) -> tuple[ComposedEvents, ...]:
+    """``store.l2.compose_lake_events`` over the lake, with the D2 lineage chains."""
     from dataplatform.config import get_settings
     from dataplatform.identity import LineageStore
     from dataplatform.store.l2 import compose_lake_events
@@ -1298,17 +1306,17 @@ def _l2_composed_events(conn: Connection) -> tuple[ComposedEvents, ...]:
     }
     return compose_lake_events(
         conn,
-        data_root=get_settings().data_root,
+        data_root=get_settings().data_root if data_root is None else data_root,
         history_for=history,
         survivor_of=resolver.survivor_of,
     )
 
 
-def _l1_first_priced() -> _FirstPriced:
+def _l1_first_priced(data_root: Path | None = None) -> _FirstPriced:
     """``first_priced`` over L1: the survivor's first print if it lists later, else the date."""
     from backtest.run import _L1Reader  # deferred: backtest.run imports this module
 
-    reader = _L1Reader()
+    reader = _L1Reader(data_root=data_root)
     try:
         windows = {w.isin: w for w in reader.listing_windows()}
     finally:

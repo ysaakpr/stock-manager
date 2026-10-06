@@ -52,7 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack
@@ -93,10 +93,14 @@ from backtest.run import (
 )
 from backtest.run_ledger import (
     RunSummary,
+    SchemeCashCredit,
+    _actions_identity,
     _replayed_quantities,
     load_run,
     persist_run_ledgers,
     refuse_lake_location,
+    summary_path,
+    unrecorded_scheme_cash,
 )
 from backtest.sweep import (
     _DEFAULT_OPENING_CASH,
@@ -120,6 +124,7 @@ from backtest.tax import (
     load_tax_schedule,
 )
 from backtest.windows import Window, load_windows
+from dataplatform.corpactions import MergerTerms, load_merger_terms
 from dataplatform.ingest.indices import TRI_METHOD_PUBLISHED, read_tri_series
 from dataplatform.logging import get_logger
 from execution.broker import Side
@@ -130,6 +135,7 @@ __all__ = [
     "CRASH_WINDOW",
     "MERGER_IN_STORE",
     "MERGER_TERMS_UNSOURCED",
+    "RECORDED_STORE_FIELDS",
     "STORE_SPEC_FIELDS",
     "CapTierPlan",
     "PathFigures",
@@ -143,6 +149,7 @@ __all__ = [
     "merger_flags",
     "name_contributions",
     "path_figures",
+    "recorded_stores",
     "saved_run_digests",
     "stuck_holdings",
     "worst_calendar_year",
@@ -183,6 +190,8 @@ MERGER_TERMS_UNSOURCED: Final = "merger, terms unsourced"
 #: the strategy it ran: corporate actions in the book, the signal's split factors, the index
 #: membership history. ``render --match-saved-runs`` sets them aside to find a run on disk.
 STORE_SPEC_FIELDS: Final = frozenset({"book_actions", "signal_split_factors", "index_membership"})
+#: The store identities a report names for the runs it renders, in the order it names them.
+RECORDED_STORE_FIELDS: Final = ("book_actions", "signal_split_factors")
 
 
 class CapTierCampaignError(RuntimeError):
@@ -249,7 +258,9 @@ def _contexts(stack: ExitStack, actions: BookActionSource | None) -> None:
 
 
 def _actions(plan: CapTierPlan) -> BookActionCalendar | None:
-    return load_store_book_actions() if plan.book_actions else None
+    # The plan's lake, not the configured default: from a git worktree the default is the
+    # worktree's own (absent) data/, and the store's listing-window read then binds to nothing.
+    return load_store_book_actions(data_root=plan.data_root) if plan.book_actions else None
 
 
 def run_unit(plan: CapTierPlan, window_index: int, floor: Decimal) -> UnitOutcome:
@@ -357,6 +368,17 @@ def saved_run_digests(
             raise CapTierCampaignError(f"run {digest[:12]} has a summary but no ledger on disk")
         stores.add(loaded[0].spec.get("book_actions", "none"))
     return out, tuple(sorted(stores))
+
+
+def recorded_stores(out_dir: Path, digests: Sequence[str]) -> dict[str, Counter[str]]:
+    """Per :data:`RECORDED_STORE_FIELDS` field, how many of the runs ``digests`` recorded each
+    identity — read from the saved summaries, never from today's store."""
+    out: dict[str, Counter[str]] = {field: Counter() for field in RECORDED_STORE_FIELDS}
+    for digest in digests:
+        spec = json.loads(summary_path(out_dir, digest).read_text(encoding="utf-8"))["spec"]
+        for field in RECORDED_STORE_FIELDS:
+            out[field][str(spec.get(field, "none"))] += 1
+    return out
 
 
 # ── path figures ─────────────────────────────────────────────────────────────────────────────────
@@ -480,14 +502,21 @@ def _canonical(ledger: RunLedger) -> dict[str, str]:
     return {isin: root(isin) for isin in names}
 
 
-def name_contributions(ledger: RunLedger) -> dict[str, Decimal]:
-    """Each name's profit in rupees: sells + dividends + terminal value - buys, net of charges.
+def name_contributions(
+    ledger: RunLedger, scheme_cash: Sequence[SchemeCashCredit] = ()
+) -> dict[str, Decimal]:
+    """Each name's profit in rupees: sells + dividends + scheme cash + terminal value - buys, net
+    of charges.
 
     A reissued ISIN is folded into its survivor, so a split that changed the ISIN is one name.
+    ``scheme_cash`` is a swap's cash leg the ledger does not record
+    (``backtest.run_ledger.unrecorded_scheme_cash``); it is the old name's, folded the same way.
     Cash interest is no name's and is left out.
     """
     key = _canonical(ledger)
     out: dict[str, Decimal] = defaultdict(lambda: _ZERO)
+    for credit in scheme_cash:
+        out[key.get(credit.isin, credit.isin)] += credit.amount
     for trade in ledger.trades:
         sign = -1 if trade.side is Side.BUY else 1
         out[key.get(trade.isin, trade.isin)] += sign * trade.net_amount
@@ -600,14 +629,22 @@ def _crash(points: Sequence[tuple[date, Decimal]]) -> tuple[Decimal, Decimal] | 
 
 def _row(
     out_dir: Path,
-    arm: str,
+    arm_spec: Arm,
     digest: str,
     *,
     fmv: GrandfatheringPrices,
     last_prints: Mapping[str, date],
     mergers: Mapping[str, str],
-    decisions: Sequence[date],
+    terms: MergerTerms,
 ) -> RunRow:
+    """One run's row, from its saved summary, ledger and NAV.
+
+    Decision sessions are the saved NAV's dates (the runner samples every session of the window).
+    Cash is rebuilt from the ledger plus the scheme cash it does not record, and must land on the
+    run's own terminal cash — terminal NAV less the holdings at their terminal marks — to the
+    paisa, or the row is refused. Reads no store; ``last_prints`` and ``fmv`` are the lake's.
+    """
+    arm = arm_spec.label
     loaded = load_run(out_dir, digest)
     if loaded is None:
         raise CapTierCampaignError(f"{arm}: run {digest[:12]} is not on disk — run it first")
@@ -630,6 +667,17 @@ def _row(
     stuck = stuck_holdings(
         values, last_prints=last_prints, terminal_date=ledger.terminal_date, mergers=mergers
     )
+    scheme_cash = unrecorded_scheme_cash(ledger, terms)
+    idle = idle_cash(
+        ledger, nav, rails=policy.rails, credits=[(c.received, c.amount) for c in scheme_cash]
+    )
+    if idle.end_cash != cash:
+        raise CapTierCampaignError(
+            f"{arm}: run {digest[:12]}: cash rebuilt from the saved ledger ends at "
+            f"{idle.end_cash}, but its terminal NAV less holdings is {cash} — the ledger does not "
+            "account for all of the run's cash, so no cash figure from it is printed"
+        )
+    decisions = decision_sessions(arm_spec, [when for when, _ in nav])
     return RunRow(
         arm=arm,
         summary=summary,
@@ -639,9 +687,9 @@ def _row(
         trades=len(ledger.trades),
         end_cash_share=cash / ledger.terminal_nav if ledger.terminal_nav else _ZERO,
         stuck=stuck,
-        contributions=name_contributions(ledger),
+        contributions=name_contributions(ledger, scheme_cash),
         crash=_crash(nav),
-        idle=idle_cash(ledger, nav, rails=policy.rails),
+        idle=idle,
         buy_free=longest_buy_free_span(
             decisions, [t.trade_date for t in ledger.trades if t.side is Side.BUY]
         ),
@@ -688,16 +736,29 @@ def _benchmark_path(
     return [(p.as_of, p.tri_value) for p in series.points if window.start <= p.as_of <= window.end]
 
 
-def _header(plan: CapTierPlan, *, commit: str, stores: Sequence[str] | None) -> list[str]:
+def _header(
+    plan: CapTierPlan,
+    *,
+    commit: str,
+    stores: Sequence[str] | None,
+    rendered_at: str | None = None,
+    recorded: Mapping[str, Mapping[str, int]] | None = None,
+    today_store: str | None = None,
+    flags_evaluated: bool = True,
+) -> list[str]:
     """The report's opening: provenance, investor, and how each column is measured.
 
-    ``stores`` is the corporate-action identities the runs recorded when they were found by
-    :func:`saved_run_digests`, ``None`` when they were found by digest.
+    ``commit`` is the commit the runs were made at, ``rendered_at`` the one rendering them when it
+    differs. ``stores`` is the corporate-action identities the runs recorded when they were found
+    by :func:`saved_run_digests`, ``None`` when they were found by digest; ``recorded`` the count
+    of runs per identity (:func:`recorded_stores`) and ``today_store`` today's. When the merger
+    flags could not be read at the runs' own store (``flags_evaluated`` false) the header says so.
     """
+    rendered = f" (rendered at `{rendered_at}`)" if rendered_at and rendered_at != commit else ""
     return [
         "# Cap-tier strategies vs the current strategies (X2, 2026-10-05)",
         "",
-        f"- Runs: `{plan.out_dir}`, made at commit `{commit}`, lake `{plan.data_root}`.",
+        f"- Runs: `{plan.out_dir}`, made at commit `{commit}`{rendered}, lake `{plan.data_root}`.",
         f"- {universe_line(plan.universe)}.",
         "- Tiers are **liquidity-rank tiers that proxy AMFI cap tiers** (126-session median "
         "close x quantity, ranks 1-100 / 101-250 / 251-500): "
@@ -730,37 +791,103 @@ def _header(plan: CapTierPlan, *, commit: str, stores: Sequence[str] | None) -> 
         "in for them. *XIRR from first buy* is **informational only**: measured from the "
         "decision session before the first buy. It does not replace the pre-tax XIRR headline, "
         "because the investor's money was in the run from the window's start.",
+        "- **Every strategy figure comes from the saved run** (summary, fill ledger, NAV): XIRR, "
+        "drawdowns, worst year, trades, costs, rail blocks, end cash, idle cash, decision "
+        "sessions (the NAV's dates), contributions and the crash. Two columns need the lake and "
+        "read today's L1 raw prices, which no corporate action changes: the last NSE EQ print "
+        "behind *stuck at end*, and the 31-01-2018 FMV behind after-tax XIRR. Benchmarks are "
+        "read from the lake's published TRIs.",
+        "- A share swap's cash leg (Cairn India's four ₹10 Vedanta preference shares per share, "
+        "2017-04-27) is cash the book credited but the saved ledger does not record. It is "
+        "rebuilt from the ledger's own swap and the curated terms "
+        "(`backtest.run_ledger.unrecorded_scheme_cash`), and every run's rebuilt cash must land "
+        "on its saved terminal cash to the paisa. It counts in idle cash and in the old name's "
+        "profit; it is not taxed (a known gap, `backtest.book_actions`).",
         *(
-            [
-                "- Runs matched to arms by strategy specification, store-derived fields ("
-                + ", ".join(sorted(STORE_SPEC_FIELDS))
-                + ") set aside; the runs recorded corporate actions "
-                + "; ".join(f"`{s}`" for s in stores)
-                + ". Merger flags and last prints are read from today's store and lake."
-            ]
+            _store_lines(stores, recorded, today_store, flags_evaluated)
             if stores is not None
             else []
+        ),
+        *(
+            []
+            if flags_evaluated
+            else [
+                "- **Merger flags not evaluated**: the store the flags are read from has moved "
+                "since the runs (today "
+                f"`{today_store}`), and the runs' store cannot be rebuilt, so *stuck at end* "
+                "counts the holdings without saying which an unconverted merger explains."
+            ]
         ),
         "",
     ]
 
 
-def render(plan: CapTierPlan, *, commit: str, match_saved_runs: bool = False) -> str:
+def _store_lines(
+    stores: Sequence[str],
+    recorded: Mapping[str, Mapping[str, int]] | None,
+    today_store: str | None,
+    flags_evaluated: bool,
+) -> list[str]:
+    """The header lines for runs found by :func:`saved_run_digests`: how, and at which stores."""
+    set_aside = ", ".join(sorted(STORE_SPEC_FIELDS))
+    lines = [
+        "- **Saved runs matched by strategy specification with store fields set aside** ("
+        f"{set_aside}): each arm x window x floor matched exactly one run on disk. The runs "
+        "recorded corporate actions " + "; ".join(f"`{s}`" for s in stores) + "."
+    ]
+    for field, counts in (recorded or {}).items():
+        if len(counts) > 1:
+            lines.append(
+                f"- The saved runs span {len(counts)} `{field}` identities: "
+                + "; ".join(f"`{identity}` ({n} runs)" for identity, n in sorted(counts.items()))
+                + "."
+            )
+    if today_store is not None:
+        same = "the same as" if flags_evaluated else "not"
+        lines.append(f"- Today's store is `{today_store}`, {same} the runs'.")
+    return lines
+
+
+def render(
+    plan: CapTierPlan,
+    *,
+    commit: str,
+    match_saved_runs: bool = False,
+    rendered_at: str | None = None,
+) -> str:
+    """The report over the runs on disk. Replays nothing and writes nothing.
+
+    Every strategy figure is the saved run's (:func:`_row`). Today's store is read for two things
+    only: to find the runs by digest (or, with ``match_saved_runs``, to build each arm's strategy
+    specification) and for the merger flags — which are printed only when the runs recorded
+    today's store identity, since a moved store would flag holdings the runs' store did not.
+    """
     actions = _actions(plan)
     stores: tuple[str, ...] | None = None
     if match_saved_runs:
         digests, stores = saved_run_digests(plan, actions)
     else:
         digests = _digests(plan, actions)
-    mergers = merger_flags(actions)
+    recorded = recorded_stores(plan.out_dir, sorted(set(digests.values())))
+    today_store = _actions_identity(actions)
+    flags_evaluated = set(recorded["book_actions"]) == {today_store}
+    mergers = merger_flags(actions) if flags_evaluated else {}
     reader = _L1Reader(data_root=plan.data_root)
     try:
         last_prints = {w.name: reader.last_prints(w.end) for w in plan.windows}
-        sessions = {w.name: reader.trading_sessions(w.start, w.end) for w in plan.windows}
     finally:
         reader.close()
     _service, fmv = l1_grandfathering(plan.data_root)
-    lines = _header(plan, commit=commit, stores=stores)
+    terms = load_merger_terms()
+    lines = _header(
+        plan,
+        commit=commit,
+        stores=stores,
+        rendered_at=rendered_at,
+        recorded=recorded,
+        today_store=today_store,
+        flags_evaluated=flags_evaluated,
+    )
     rows: dict[tuple[str, Decimal, str], RunRow] = {}
     for window in plan.windows:
         bench = {slug: _benchmark_path(slug, window, plan.data_root) for slug, _ in BENCHMARK_SLUGS}
@@ -777,12 +904,12 @@ def render(plan: CapTierPlan, *, commit: str, match_saved_runs: bool = False) ->
                 digest = digests[(arm.label, window.name, floor)]
                 row = _row(
                     plan.out_dir,
-                    arm.label,
+                    arm,
                     digest,
                     fmv=fmv,
                     last_prints=last_prints[window.name],
                     mergers=mergers,
-                    decisions=decision_sessions(arm, sessions[window.name]),
+                    terms=terms,
                 )
                 rows[(window.name, floor, arm.label)] = row
                 s = row.summary
@@ -793,7 +920,7 @@ def render(plan: CapTierPlan, *, commit: str, match_saved_runs: bool = False) ->
                     f"| {_pct(s.max_drawdown)} | {'n/a' if ratio is None else f'{ratio:.2f}'} "
                     f"| {_year(row.path.worst_year)} | {_days(row.path)} | {row.trades} "
                     f"| {_lakh(s.total_charges)} | {_blocks(s)} | {_pct(row.end_cash_share)} "
-                    f"| {_stuck_cell(row.stuck)} |"
+                    f"| {_stuck_cell(row.stuck, flags_evaluated)} |"
                 )
             for slug, label in BENCHMARK_SLUGS:
                 points = bench[slug]
@@ -815,7 +942,9 @@ def render(plan: CapTierPlan, *, commit: str, match_saved_runs: bool = False) ->
     return "\n".join(lines) + "\n"
 
 
-def _stuck_cell(stuck: Sequence[StuckHolding]) -> str:
+def _stuck_cell(stuck: Sequence[StuckHolding], flags_evaluated: bool = True) -> str:
+    if not flags_evaluated:
+        return f"{len(stuck)} (merger flags not evaluated)"
     in_store = sum(1 for x in stuck if x.merger == MERGER_IN_STORE)
     unsourced = sum(1 for x in stuck if x.merger == MERGER_TERMS_UNSOURCED)
     return f"{len(stuck)} ({in_store} merger in store, {unsourced} merger terms unsourced)"
@@ -983,6 +1112,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="render: find runs by strategy spec, store-derived fields set aside",
     )
+    parser.add_argument(
+        "--report-out",
+        type=Path,
+        default=None,
+        help="render: write cap-tiers.md under this directory instead of OUT/reports",
+    )
     args = parser.parse_args(argv)
     data_root = args.data_root.resolve()
     out_dir = refuse_lake_location(args.out.resolve(), data_root)
@@ -1011,8 +1146,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         for outcome in outcomes:
             print(outcome)
         return 1 if any(o.failed for o in outcomes) else 0
-    report = render(plan, commit=commit, match_saved_runs=args.match_saved_runs)
-    path = out_dir / "reports" / "cap-tiers.md"
+    manifest = out_dir / "manifest.json"
+    run_commit = (
+        str(json.loads(manifest.read_text(encoding="utf-8"))["commit"])
+        if manifest.is_file()
+        else commit
+    )
+    report = render(
+        plan, commit=run_commit, match_saved_runs=args.match_saved_runs, rendered_at=commit
+    )
+    report_dir = (
+        out_dir / "reports"
+        if args.report_out is None
+        else refuse_lake_location(args.report_out.resolve(), data_root)
+    )
+    path = report_dir / "cap-tiers.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(report, encoding="utf-8")
     print(path)

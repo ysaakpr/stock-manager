@@ -90,6 +90,8 @@ class IdleCash:
     mean_other_share: Decimal
     buys: int
     ceiling_buys: int
+    #: The rebuilt cash on the last NAV session, for the caller to check against the run's own.
+    end_cash: Decimal = _ZERO
 
     @property
     def waiting_share_of_cash(self) -> Decimal | None:
@@ -143,13 +145,20 @@ def ceiling_buys(
 
 
 def idle_cash(
-    ledger: RunLedger, nav: Sequence[tuple[date, Decimal]], *, rails: RiskRails
+    ledger: RunLedger,
+    nav: Sequence[tuple[date, Decimal]],
+    *,
+    rails: RiskRails,
+    credits: Sequence[tuple[date, Decimal]] = (),
 ) -> IdleCash:
     """Rebuild a run's daily cash from its ledger and split it by cause (module docstring).
 
-    Assumes ``nav`` is the run's own pre-tax NAV path, ascending, every value positive. Raises
-    ``IdleCashError`` when the rebuilt cash goes negative or ends above the terminal NAV. Either
-    means the ledger and the path are not one run, and a split of them would be fiction.
+    Assumes ``nav`` is the run's own pre-tax NAV path, ascending, every value positive.
+    ``credits`` are cash the book received that the ledger does not record (a swap's scheme cash,
+    ``backtest.run_ledger.unrecorded_scheme_cash``), each ``(date, rupees)``; like a dividend they
+    are leftover cash, never sale proceeds. Raises ``IdleCashError`` when the rebuilt cash goes
+    negative or ends above the terminal NAV. Either means the ledger and the path are not one run,
+    and a split of them would be fiction. ``end_cash`` lets the caller make the exact check.
     """
     if not nav:
         raise IdleCashError("no NAV sessions to measure cash on")
@@ -165,6 +174,7 @@ def idle_cash(
         )
     events += [(d.received, d.amount, False, -1) for d in ledger.dividends]
     events += [(i.received, i.amount, False, -1) for i in ledger.interest]
+    events += [(when, amount, False, -1) for when, amount in credits]
     events.sort(key=lambda event: event[0])
 
     cash = waiting = _ZERO
@@ -212,6 +222,7 @@ def idle_cash(
         mean_other_share=total_other / count,
         buys=sum(1 for t in ledger.trades if t.side is Side.BUY),
         ceiling_buys=len(at_ceiling),
+        end_cash=cash,
     )
 
 
