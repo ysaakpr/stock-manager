@@ -76,6 +76,42 @@ knowing:
 - A stored series from 2021 does not satisfy a run asking back to 1990. Widen the window and it
   re-fetches; the L0 payload for the new window is a different file, so nothing is overwritten.
 
+## Same-evening refresh: `tri_evening` (M13.7)
+
+The Saturday `tri_refresh` keeps the series weekly. The paper session decides session D on D's
+evening, and its regime filter needs D's published NIFTY 50 TRI that night. `tri_evening` is the
+weekday job that lands it.
+
+**When D is published.** These are measured facts, not documented ones:
+
+| fetch (IST) | session D | newest row returned |
+|---|---|---|
+| 2026-09-08 09:41 | 09-07 is the previous session | 07-Sep: D is out by the next morning |
+| 2026-10-05 16:08 | 10-05 | 01-Oct (02-Oct holiday): D is **not** out 38 min after the close |
+| 2026-10-06 20:47 | 10-06 | 06-Oct (34608.14): D **is** out the same evening |
+
+The first two come from L0 sidecar `fetched_at`s. The third is a deliberate one-request probe
+through `leased_fetcher`. Each record's `RequestNumber` is .NET ticks of the request instant in
+UTC, so it says when the request was made, not when the level was published. The earliest
+publication time inside 16:08–20:47 has not been measured.
+
+**Schedule.** The job fires at `50 19,20 * * mon-fri`. 19:50 is the first attempt, after
+`daily_snapshot`'s niftyindices.com lease (19:15 + 30-minute budget). 20:50 is the retry after the
+measured 20:47 point. Each fire lands the latest session on or before today for the three default
+indices: one short POST each (about 1 KB), with the window starting at the stored series' last
+level or 14 days back, whichever is earlier. An index already at D makes no request, so the second
+fire is a no-op once the first landed.
+
+**Before dissemination.** The answer is kept in L0, and the name carries the attempt instant
+(`tri_nifty50_<start>_<D>_at<YYYYMMDD>T<HHMMSS>.json`), so the 20:50 retry cannot collide with it.
+The `nifty_tri_history/<slug>` row for D parks `FAILED` with `retryable=True`, L1 is left alone and
+the run is FAILED. Retry by hand with `uv run python -m dataplatform.scheduler run-once tri_evening`.
+
+**The paper job's cron.** PR #69 registers `PAPER_SESSION` at `30 20 * * mon-fri`. That fire comes
+before the last `tri_evening` attempt, and before the only publication point measured. Move it to
+**`0 21 * * mon-fri`** (21:00 IST), after the 20:50 retry. The paper job decides "the latest owed
+session", so a 21:00 run still decides D.
+
 ## Moving the lake
 
 `data/L0` is the immutable record and L1 is a derivation of it, never copied between lakes
