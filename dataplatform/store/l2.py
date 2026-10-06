@@ -1118,6 +1118,7 @@ def rebuild_invalidated(
     data_root: Path | None = None,
     history_for: Mapping[str, Sequence[str]] | None = None,
     survivor_of: Callable[[str], str] | None = None,
+    floor_existing: bool = True,
 ) -> tuple[L2WriteReport, ...]:
     """Drain the `l2_invalidation` queue and rebuild exactly the flagged ISINs' L2 partitions.
 
@@ -1147,6 +1148,14 @@ def rebuild_invalidated(
     names over their full L1 would surface uncurated pre-2011 steps and turn `l2_continuity` red.
     Reaching back is `l2_fill --extend`'s job alone (`rebuild_truncated`). An ISIN with no
     partition yet is built as the first-time fill builds it (`materialize_missing`: no floor).
+    A partition on disk with no rows raises `ValueError`: there is no floor to read off it, and
+    guessing one either way would be a silent extension or a silent truncation.
+
+    `floor_existing=False` drops the floor for every ISIN and rebuilds over the full L1 history
+    of its lineage chain. That is for `identity.lineage_rebuild` alone: a reissue edge it has just
+    derived must stitch the predecessor's whole history into the survivor, and the survivor's
+    current partition (built before the edge existed) starts at the reissue. The scheduled drains
+    (`ca_refresh`, `bse_ca_sweep`, `l2_fill --rebuild-invalidated`) keep the default.
     """
     isins = [
         str(r[0])
@@ -1168,7 +1177,7 @@ def rebuild_invalidated(
             for isin in isins:
                 wanted.update(history_for.get(isin, ()))
         preload_raw_bars(con, wanted, data_root=data_root)
-        floors = _l2_first_dates(con, isins, data_root=data_root)
+        floors = _l2_first_dates(con, isins, data_root=data_root) if floor_existing else {}
         for isin in isins:
             if survivor_of is not None and survivor_of(isin) != isin:
                 removed = _remove_partition(
@@ -1191,12 +1200,18 @@ def rebuild_invalidated(
             chain = load_factor_chain(conn, isin)
             actions = load_reconciled_actions(conn, isin=isin)
             floor = floors.get(isin)
+            if not floor_existing:
+                policy = "unfloored"
+            elif floor is not None:
+                policy = "existing_partition_start"
+            else:
+                policy = "first_time_fill"
             _LOG.info(
                 "l2.rebuild_floor",
                 dataset=PRICES_ADJUSTED_DATASET,
                 isin=isin,
                 history_floor=None if floor is None else floor.isoformat(),
-                policy="existing_partition_start" if floor is not None else "first_time_fill",
+                policy=policy,
             )
             reports.append(
                 materialize_isin(
@@ -1630,23 +1645,33 @@ def _l2_first_dates(
 ) -> dict[str, date]:
     """The first trade date of each listed ISIN's `prices_adjusted` partition, where one exists.
 
-    Reads only those ISINs' partition files, one pass. An ISIN with no partition (or an empty one)
-    is absent from the result — the caller's signal that there is no floor to keep.
+    Reads only those ISINs' partition files, one pass. An ISIN with no partition is absent from
+    the result — the caller's signal that there is no floor to keep. A partition file that exists
+    but holds no rows raises `ValueError`: `materialize_isin` never writes one (an empty build
+    removes the file), so it is a damaged lake, and reading it as "no partition" would turn the
+    next drain into a silent extension over the whole L1 history.
     """
-    files = [
-        path
+    files = {
+        isin: path
         for isin in sorted(set(isins))
         if (
             path := l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=data_root)
         ).is_file()
-    ]
+    }
     if not files:
         return {}
     rows = con.execute(
         "SELECT isin, min(trade_date) FROM read_parquet($files) GROUP BY isin",
-        {"files": [str(f) for f in files]},
+        {"files": [str(f) for f in files.values()]},
     ).fetchall()
-    return {str(r[0]): r[1] for r in rows if r[1] is not None}
+    firsts = {str(r[0]): r[1] for r in rows if r[1] is not None}
+    empty = sorted(set(files) - set(firsts))
+    if empty:
+        raise ValueError(
+            "L2 partitions with no rows have no floor to keep; rebuild or remove them by hand: "
+            + ", ".join(f"{isin} ({files[isin]})" for isin in empty)
+        )
+    return firsts
 
 
 def _price_point(bar: RawBar) -> PricePoint:
