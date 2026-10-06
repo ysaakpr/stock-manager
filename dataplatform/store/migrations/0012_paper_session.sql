@@ -64,18 +64,31 @@ COMMENT ON COLUMN paper_session.actions IS
     'of the economic terms. An action is booked once per book, on the first decided session it is '
     'known; a changed-terms action on a held name is ESCALATED, never re-booked.';
 
--- An owner's acknowledgement that an ESCALATED corporate action has been dealt with. While a book
--- has an escalated action with no row here, the paper session refuses to trade it (journaled
--- SKIPPED_DATA_RED, invariant #10). Insert-only: a resolution is a record of a human decision.
+-- An owner's acknowledgement that an ESCALATED corporate action has been dealt with — for one
+-- set of terms. An escalation is (action_key, terms): the same action corrected again later is a
+-- new escalation with new terms, and blocks the book again until it is resolved in its turn. While
+-- a book has an escalated (key, terms) with no row here, the paper session refuses to trade it
+-- (journaled SKIPPED_DATA_RED, invariant #10). Append-only: a resolution is a record of a human
+-- decision, so it is never edited or withdrawn in place (invariant #12).
 CREATE TABLE paper_session_resolution (
     book_id      text        NOT NULL CHECK (book_id ~ '^[a-z][a-z0-9_]{2,63}$'),
     action_key   text        NOT NULL,
+    terms        text        NOT NULL CHECK (terms ~ '^[0-9a-f]{16}$'),
     resolved_by  text        NOT NULL CHECK (length(trim(resolved_by)) > 0),
     note         text        NOT NULL CHECK (length(trim(note)) > 0),
     resolved_at  timestamptz NOT NULL,
-    PRIMARY KEY (book_id, action_key)
+    PRIMARY KEY (book_id, action_key, terms)
 );
 
 COMMENT ON TABLE paper_session_resolution IS
-    'X1 · M13.1 paper trading. One row per escalated corporate action the owner has resolved; the '
-    'paper session trades a book again only once every escalation on it has a row here.';
+    'X1 · M13.1 paper trading. One row per escalated corporate action (key and terms) the owner '
+    'has resolved; the paper session trades a book again only once every escalation on it has a '
+    'row here. Append-only.';
+
+CREATE TRIGGER paper_session_resolution_append_only
+    BEFORE UPDATE OR DELETE ON paper_session_resolution
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_mutation();
+CREATE TRIGGER paper_session_resolution_no_truncate
+    BEFORE TRUNCATE ON paper_session_resolution
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_mutation();
+REVOKE UPDATE, DELETE ON paper_session_resolution FROM PUBLIC;

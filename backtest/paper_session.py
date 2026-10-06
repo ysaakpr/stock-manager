@@ -101,6 +101,7 @@ from backtest.book_actions import (
     CashDividend,
     CashExit,
     IsinReissue,
+    RescaleSource,
     ShareRescale,
     ShareSwap,
 )
@@ -157,6 +158,7 @@ if TYPE_CHECKING:
     from dataplatform.scheduler.registry import JobContext
 
 __all__ = [
+    "AMBIGUOUS_ACTION_EVENT",
     "CHANGED_ACTION_EVENT",
     "EOD_DUE_AT",
     "LATE_ACTION_EVENT",
@@ -228,6 +230,8 @@ _OWED_LOOKBACK_DAYS = 10
 LATE_ACTION_EVENT: Final = "LATE_CORPORATE_ACTION"
 #: The payload ``event`` on an already-seen action whose terms have since changed.
 CHANGED_ACTION_EVENT: Final = "CHANGED_CORPORATE_ACTION"
+#: The payload ``event`` on a rescale that matches a booked one's ratio with neither side implied.
+AMBIGUOUS_ACTION_EVENT: Final = "AMBIGUOUS_CORPORATE_ACTION"
 
 
 # ── errors ───────────────────────────────────────────────────────────────────────────────────────
@@ -330,14 +334,19 @@ class BookedAction:
 
     ``key`` is the action's *identity* (:func:`action_identity`) — what it is, never its terms —
     and ``terms`` a digest of its economic terms (:func:`action_terms`), so a corrected record is
-    recognised as the same action with different terms rather than a new one. ``held`` says the
-    book held the name when the action was seen, i.e. the action did (or would have) moved it.
+    recognised as the same action with different terms rather than a new one. One key may carry
+    several terms (two dividends on one ex-date are one identity); each (key, terms) is booked
+    once. ``held`` says the book held the name when the action was seen, i.e. the action did (or
+    would have) moved it.
     """
 
     key: str
     terms: str
     held: bool
     status: ActionStatus
+    #: Where a rescale came from (``feed``/``curated``/``implied``); empty for other kinds. The
+    #: twin rule needs it: two same-ratio rescales are one event only if one side was implied.
+    source: str = ""
 
     def to_document(self) -> dict[str, str]:
         return {
@@ -345,6 +354,7 @@ class BookedAction:
             "terms": self.terms,
             "held": "true" if self.held else "false",
             "status": self.status.value,
+            "source": self.source,
         }
 
     @classmethod
@@ -354,6 +364,7 @@ class BookedAction:
             terms=document["terms"],
             held=document["held"] == "true",
             status=ActionStatus(document["status"]),
+            source=document.get("source", ""),
         )
 
 
@@ -533,8 +544,12 @@ class PaperSessionStore(Protocol):
     def latest_completed(self, book_id: str, *, before: date) -> PaperSessionRecord | None:
         """The latest ``COMPLETED`` record strictly before ``before``, in full, or ``None``."""
 
-    def resolutions(self, book_id: str) -> frozenset[str]:
-        """The action keys the owner has marked resolved (``paper_session_resolution``)."""
+    def resolutions(self, book_id: str) -> frozenset[tuple[str, str]]:
+        """The (action key, terms) escalations the owner resolved (``paper_session_resolution``).
+
+        Per terms, not per key: resolving one correction of an action does not pre-approve the
+        next one.
+        """
 
     def record(self, record: PaperSessionRecord, *, recorded_at: datetime) -> None:
         """Write a record. A COMPLETED date is final; only a red record may be superseded."""
@@ -547,7 +562,7 @@ class InMemoryPaperSessionStore:
 
     def __init__(self) -> None:
         self._rows: dict[tuple[str, date], PaperSessionRecord] = {}
-        self._resolved: set[tuple[str, str]] = set()
+        self._resolved: set[tuple[str, str, str]] = set()
 
     def get(self, book_id: str, trading_date: date) -> PaperSessionRecord | None:
         return self._rows.get((book_id, trading_date))
@@ -568,16 +583,16 @@ class InMemoryPaperSessionStore:
         ]
         return completed[-1] if completed else None
 
-    def resolutions(self, book_id: str) -> frozenset[str]:
-        return frozenset(key for book, key in self._resolved if book == book_id)
+    def resolutions(self, book_id: str) -> frozenset[tuple[str, str]]:
+        return frozenset((key, terms) for book, key, terms in self._resolved if book == book_id)
 
     def records(self, book_id: str) -> tuple[PaperSessionRecord, ...]:
         """Every full record of the book, oldest first — for a test to inspect or copy."""
         return tuple(self._before(book_id, date.max))
 
-    def resolve(self, book_id: str, key: str) -> None:
+    def resolve(self, book_id: str, key: str, terms: str) -> None:
         """What the owner's ``INSERT INTO paper_session_resolution`` does (runbook)."""
-        self._resolved.add((book_id, key))
+        self._resolved.add((book_id, key, terms))
 
     def record(self, record: PaperSessionRecord, *, recorded_at: datetime) -> None:
         key = (record.book_id, record.trading_date)
@@ -642,11 +657,12 @@ class PostgresPaperSessionStore:
         ).fetchone()
         return None if row is None else _record_of(row)
 
-    def resolutions(self, book_id: str) -> frozenset[str]:
+    def resolutions(self, book_id: str) -> frozenset[tuple[str, str]]:
         rows = self._conn.execute(
-            "SELECT action_key FROM paper_session_resolution WHERE book_id = %s", (book_id,)
+            "SELECT action_key, terms FROM paper_session_resolution WHERE book_id = %s",
+            (book_id,),
         ).fetchall()
-        return frozenset(row[0] for row in rows)
+        return frozenset((row[0], row[1]) for row in rows)
 
     def record(self, record: PaperSessionRecord, *, recorded_at: datetime) -> None:
         row = self._conn.execute(
@@ -1007,28 +1023,40 @@ def _rescale_family(action: BookAction) -> str | None:
     return None
 
 
+def _source_of(action: BookAction) -> str:
+    return action.source.value if isinstance(action, ShareRescale) else ""
+
+
 @dataclass(slots=True)
 class _ActionIndex:
-    """Every corporate action this book has seen, latest entry per identity, from the summaries."""
+    """Every corporate action this book has seen, from the summaries: all terms per identity."""
 
-    seen: dict[str, BookedAction]
-    #: kind-free rescale identity -> the terms of each rescale booked under it.
-    rescales: dict[str, set[str]]
+    #: identity -> every set of terms seen under it (booked, recorded or escalated).
+    terms: dict[str, set[str]]
+    #: identity -> whether the book held the name when any of its terms was seen.
+    held: dict[str, bool]
+    #: (identity, terms) the book escalated rather than booked.
+    escalations: set[tuple[str, str]]
+    #: kind-free rescale identity -> (terms, source) of each rescale seen under it.
+    rescales: dict[str, list[tuple[str, str]]]
 
     @classmethod
     def of(cls, summaries: Sequence[PaperSessionSummary]) -> _ActionIndex:
-        seen: dict[str, BookedAction] = {}
-        rescales: dict[str, set[str]] = {}
+        index = cls({}, {}, set(), {})
         for summary in summaries:
             for booked in summary.actions:
-                seen[booked.key] = booked
+                index.terms.setdefault(booked.key, set()).add(booked.terms)
+                index.held[booked.key] = index.held.get(booked.key, False) or booked.held
+                if booked.status is ActionStatus.ESCALATED:
+                    index.escalations.add((booked.key, booked.terms))
                 if booked.key.startswith("RESCALE:"):
                     family = booked.key.rsplit(":", 1)[0]
-                    rescales.setdefault(family, set()).add(booked.terms)
-        return cls(seen, rescales)
+                    index.rescales.setdefault(family, []).append((booked.terms, booked.source))
+        return index
 
-    def escalated(self) -> list[str]:
-        return sorted(k for k, b in self.seen.items() if b.status is ActionStatus.ESCALATED)
+    def unresolved(self, resolved: frozenset[tuple[str, str]]) -> list[str]:
+        """Every escalated (key, terms) the owner has not resolved, as ``key@terms``."""
+        return sorted(f"{key}@{terms}" for key, terms in self.escalations - resolved)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1037,35 +1065,59 @@ class _Sorted:
 
     on_time: tuple[BookAction, ...]
     late: tuple[BookAction, ...]
-    changed: tuple[tuple[BookAction, BookedAction], ...]
-    #: Seen before with these terms (or an implied rescale's feed twin): nothing to do.
+    #: Seen identity, unseen terms: a correction. (action, whether the book held the name.)
+    changed: tuple[tuple[BookAction, bool], ...]
+    #: A new rescale identity whose ratio matches one already seen under the other kind, with
+    #: neither side implied: two feed records of one split, or a split and a bonus — not decidable.
+    ambiguous: tuple[BookAction, ...]
+    #: Seen before with these terms (or an implied rescale's twin): nothing to do.
     unchanged: int
+
+
+_IMPLIED = RescaleSource.IMPLIED.value
 
 
 def _sort_actions(
     actions: Iterable[BookAction], index: _ActionIndex, last_decided: date
 ) -> _Sorted:
+    """Sort the session's known actions against everything the book has seen.
+
+    An identity seen before is unchanged when its terms are among the terms seen under it, and a
+    correction otherwise. A new identity is booked — every distinct set of terms under it, so two
+    dividends a company declares for one ex-date are both credited — unless it is a rescale whose
+    ratio the book already saw under the other kind on that name and ex-date: then it is the same
+    event when one of the two was implied (L2's inferred row and the feed's), and undecidable when
+    neither was.
+    """
     on_time: list[BookAction] = []
     late: list[BookAction] = []
-    changed: list[tuple[BookAction, BookedAction]] = []
+    changed: list[tuple[BookAction, bool]] = []
+    ambiguous: list[BookAction] = []
     unchanged = 0
+    batch: set[tuple[str, str]] = set()
     for action in actions:
         key, terms = action_identity(action), action_terms(action)
-        prior = index.seen.get(key)
-        if prior is not None:
-            if prior.terms == terms:
+        seen = index.terms.get(key)
+        if seen is not None:
+            if terms in seen:
                 unchanged += 1
             else:
-                changed.append((action, prior))
+                changed.append((action, index.held.get(key, False)))
             continue
         family = _rescale_family(action)
-        if family is not None and terms in index.rescales.get(family, set()):
-            # The same ratio already booked on this name and ex-date under the other kind: an
-            # implied rescale re-reported by the feed. Booking it would rescale the book twice.
-            unchanged += 1
+        twins = [src for t, src in index.rescales.get(family, []) if t == terms] if family else []
+        if twins:
+            if _IMPLIED in twins or _source_of(action) == _IMPLIED:
+                unchanged += 1
+            else:
+                ambiguous.append(action)
             continue
+        if (key, terms) in batch:
+            unchanged += 1  # the very same record twice in one read
+            continue
+        batch.add((key, terms))
         (late if action.ex_date <= last_decided else on_time).append(action)
-    return _Sorted(tuple(on_time), tuple(late), tuple(changed), unchanged)
+    return _Sorted(tuple(on_time), tuple(late), tuple(changed), tuple(ambiguous), unchanged)
 
 
 def _held_in(state: SimBrokerState, isin: str) -> int:
@@ -1104,38 +1156,53 @@ def _action_entry(
 
 
 def _changed_terms(
-    changed: Sequence[tuple[BookAction, BookedAction]],
+    changed: Sequence[tuple[BookAction, bool]],
+    ambiguous: Sequence[BookAction],
+    sim: SimBroker,
     trading_date: date,
     spec: PaperBookSpec,
     clock: Clock,
 ) -> tuple[list[JournalEntry], list[BookedAction]]:
-    """A seen action whose terms have since changed: never re-credited, never re-booked.
+    """Actions the book must not book mechanically: corrections, and unpaired rescale twins.
 
-    The book already acted on the old terms (or had nothing to act on). If it held the name, the
-    difference is a correction the owner must judge — journaled ``ESCALATE``, which blocks the book
-    until resolved; if it did not, the new terms change nothing and are recorded silently.
+    A correction (a seen identity with terms never seen under it): the book already acted on the
+    earlier terms, or had nothing to act on. If it held the name, the difference is for the owner
+    to judge — journaled ``ESCALATE`` and never credited or rescaled again, and the book is blocked
+    until that (key, terms) is resolved; if it did not, the new terms are recorded silently. An
+    ambiguous rescale is handled the same way on whether the book holds the name now.
     """
     entries: list[JournalEntry] = []
     seen: list[BookedAction] = []
-    for action, prior in changed:
-        terms = action_terms(action)
-        if not prior.held:
-            seen.append(BookedAction(prior.key, terms, held=False, status=prior.status))
+    flagged = [(action, held, CHANGED_ACTION_EVENT) for action, held in changed] + [
+        (action, sim.held_quantity(action.isin) > 0, AMBIGUOUS_ACTION_EVENT) for action in ambiguous
+    ]
+    for action, held, event in flagged:
+        key, terms = action_identity(action), action_terms(action)
+        source = _source_of(action)
+        if not held:
+            seen.append(BookedAction(key, terms, False, ActionStatus.BOOKED, source))
             continue
+        why = (
+            f"{key} was already booked with other terms; the store now also reports terms "
+            f"{terms} ({_terms_of(action)})"
+            if event == CHANGED_ACTION_EVENT
+            else f"{key} matches the ratio of a rescale already booked on this name and ex-date "
+            "under the other kind, and neither record is implied, so it is either the same split "
+            "reported twice or a second action"
+        )
         entries.append(
             _action_entry(
                 action,
                 Decision.ESCALATE,
-                f"not re-booked: {prior.key} was already booked with terms {prior.terms}; the "
-                f"store now reports terms {terms} ({_terms_of(action)}). The book is not credited "
-                "or rescaled again — owner review, and the book trades no more until resolved",
-                {"event": CHANGED_ACTION_EVENT, "action": prior.key, "terms": terms},
+                f"not booked: {why}. The book is not credited or rescaled for it — owner review, "
+                "and the book trades no more until this (key, terms) is resolved",
+                {"event": event, "action": key, "terms": terms},
                 trading_date,
                 spec,
                 clock,
             )
         )
-        seen.append(BookedAction(prior.key, terms, held=True, status=ActionStatus.ESCALATED))
+        seen.append(BookedAction(key, terms, True, ActionStatus.ESCALATED, source))
     return entries, seen
 
 
@@ -1164,7 +1231,7 @@ def _book_late(
         entering = store.latest_completed(spec.book_id, before=action.ex_date)
         entitled = 0 if entering is None else _held_in(entering.broker_state(), action.isin)
         if entering is None or entitled == 0:
-            seen.append(BookedAction(key, terms, held=False, status=ActionStatus.BOOKED))
+            seen.append(BookedAction(key, terms, False, ActionStatus.BOOKED, _source_of(action)))
             continue
         traded_since = any(
             action.isin in summary.traded
@@ -1220,7 +1287,7 @@ def _book_late(
         entries.append(
             _action_entry(action, decision, rationale, payload, trading_date, spec, clock)
         )
-        seen.append(BookedAction(key, terms, held=True, status=status))
+        seen.append(BookedAction(key, terms, True, status, _source_of(action)))
     return entries, seen
 
 
@@ -1368,7 +1435,8 @@ def run_paper_session(
     summaries = store.summaries(spec.book_id, before=trading_date)
     decided = [s for s in summaries if s.outcome is SessionOutcome.COMPLETED]
     index = _ActionIndex.of(summaries)
-    unresolved = [key for key in index.escalated() if key not in store.resolutions(spec.book_id)]
+    resolved = store.resolutions(spec.book_id)
+    unresolved = index.unresolved(resolved)
     if unresolved:
         # An escalated corporate action means the book's state is in question; trading on it would
         # be trading on data the owner has not accepted — the same rule as red data (#10).
@@ -1409,7 +1477,7 @@ def run_paper_session(
         known = list(source.between(decided[0].trading_date, trading_date))
     sorted_ = _sort_actions(known, index, last.trading_date if last is not None else trading_date)
     changed_entries, changed_seen = _changed_terms(
-        sorted_.changed, trading_date, spec, session_clock
+        sorted_.changed, sorted_.ambiguous, sim, trading_date, spec, session_clock
     )
     late_entries, late_seen = _book_late(
         sorted_.late, sim, store, summaries, trading_date, spec, session_clock
@@ -1420,6 +1488,7 @@ def run_paper_session(
             action_terms(action),
             held=sim.held_quantity(action.isin, bought_before=action.ex_date) > 0,
             status=ActionStatus.BOOKED,
+            source=_source_of(action),
         )
         for action in sorted_.on_time
     ]
@@ -1486,6 +1555,7 @@ def run_paper_session(
         corporate_actions=len(on_time),
         late_corporate_actions=len(late),
         changed_corporate_actions=len(sorted_.changed),
+        ambiguous_corporate_actions=len(sorted_.ambiguous),
         unchanged_corporate_actions=sorted_.unchanged,
         redeploy_pending=record.pending is not None,
         cash=str(result.book.cash),

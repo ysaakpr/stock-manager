@@ -36,6 +36,7 @@ from backtest.book_actions import (
     ShareRescale,
 )
 from backtest.paper_session import (
+    AMBIGUOUS_ACTION_EVENT,
     CHANGED_ACTION_EVENT,
     LATE_ACTION_EVENT,
     PAPER_BOOK_ID,
@@ -738,14 +739,14 @@ def test_after_an_escalation_the_book_is_red_until_the_owner_resolves_it() -> No
     desk.world.actions[:] = [CashDividend(isin=isin, ex_date=OCT_FOURTH, per_share=Decimal("6"))]
     escalated = desk.run(date(2026, 10, 8))
     assert escalated.record is not None
-    (key,) = [a.key for a in escalated.record.actions if a.status is ActionStatus.ESCALATED]
+    (flagged,) = [a for a in escalated.record.actions if a.status is ActionStatus.ESCALATED]
 
     blocked = desk.run(date(2026, 10, 9))
     assert blocked.verdict is RunVerdict.SKIPPED_DATA_RED
-    assert key in blocked.reason and "unresolved" in blocked.reason
+    assert f"{flagged.key}@{flagged.terms}" in blocked.reason and "unresolved" in blocked.reason
     assert _decisions(blocked.entries) == [Decision.SKIPPED_DATA_RED]
 
-    desk.store.resolve("paper_fixture_book", key)
+    desk.store.resolve("paper_fixture_book", flagged.key, flagged.terms)
     resumed = desk.run(date(2026, 10, 12))
     assert resumed.verdict is RunVerdict.DECIDED
     # Resolved means accepted as it stands: the changed terms are not escalated again.
@@ -856,3 +857,132 @@ def test_an_explicit_date_before_the_latest_decided_session_is_refused(
         trading_date=OCT_SECOND,
     )
     assert again is not None and again.verdict is RunVerdict.ALREADY_DECIDED
+
+
+# ── R2: a resolution covers one set of terms; distinct terms under one identity are all booked ──
+
+
+def test_a_second_correction_after_a_resolution_blocks_the_book_again() -> None:
+    """₹5 booked → corrected to ₹6 (escalated, resolved) → corrected to ₹7: red again."""
+    desk = _Desk.fresh()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    isin = _held_isin(desk)
+
+    def dividend(per_share: str) -> CashDividend:
+        return CashDividend(isin=isin, ex_date=OCT_FOURTH, per_share=Decimal(per_share))
+
+    desk.world.actions.append(dividend("5"))
+    desk.run(OCT_FOURTH)
+    desk.world.actions[:] = [dividend("6")]
+    first_fix = desk.run(date(2026, 10, 8))
+    assert first_fix.record is not None
+    (six,) = [a for a in first_fix.record.actions if a.status is ActionStatus.ESCALATED]
+    desk.store.resolve("paper_fixture_book", six.key, six.terms)
+    assert desk.run(date(2026, 10, 9)).verdict is RunVerdict.DECIDED
+
+    desk.world.actions[:] = [dividend("7")]
+    second_fix = desk.run(date(2026, 10, 12))
+    assert second_fix.verdict is RunVerdict.DECIDED  # the session that sees it still decides
+    assert second_fix.record is not None
+    (seven,) = [a for a in second_fix.record.actions if a.status is ActionStatus.ESCALATED]
+    assert seven.key == six.key and seven.terms != six.terms
+    assert [e.payload["event"] for e in second_fix.entries if e.decision is Decision.ESCALATE] == [
+        CHANGED_ACTION_EVENT
+    ]
+
+    again = desk.run(date(2026, 10, 13))
+    assert again.verdict is RunVerdict.SKIPPED_DATA_RED
+    assert f"{seven.key}@{seven.terms}" in again.reason
+    # Never credited for either correction: no ledger line for the name after the original ₹5.
+    credits = [
+        line
+        for run in (first_fix, second_fix)
+        if run.record is not None and run.record.book_state is not None
+        for line in run.record.book_state["session_ledger"]
+        if line["isin"] == isin
+    ]
+    assert credits == []
+
+
+def test_two_dividends_on_one_ex_date_are_both_credited_and_never_escalated() -> None:
+    """An interim and a special dividend on one ex-date share an identity, not their terms."""
+    desk = _Desk.fresh()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    isin = _held_isin(desk)
+    held = _held_quantity(desk.store.get("paper_fixture_book", OCT_THIRD), isin)
+    desk.world.actions.extend(
+        [
+            CashDividend(isin=isin, ex_date=OCT_FOURTH, per_share=Decimal("5")),
+            CashDividend(isin=isin, ex_date=OCT_FOURTH, per_share=Decimal("2")),
+        ]
+    )
+    fourth = desk.run(OCT_FOURTH)
+
+    assert fourth.record is not None and fourth.record.book_state is not None
+    credited = sorted(
+        Decimal(line["credit"])
+        for line in fourth.record.book_state["session_ledger"]
+        if line["isin"] == isin and line["description"].startswith("DIVIDEND")
+    )
+    assert credited == [Decimal("2") * held, Decimal("5") * held]
+    assert len({a.key for a in fourth.record.actions}) == 1 and len(fourth.record.actions) == 2
+    for day in (date(2026, 10, 8), date(2026, 10, 9), date(2026, 10, 12)):
+        later = desk.run(day)
+        assert later.verdict is RunVerdict.DECIDED
+        assert not [e for e in later.entries if e.decision is Decision.ESCALATE]
+        assert later.record is not None and later.record.actions == ()
+
+
+# ── item 1: rescale twins only when one side is implied ──────────────────────────────────────────
+
+
+def _split(isin: str, kind: RescaleKind, source: RescaleSource, num: str, den: str) -> ShareRescale:
+    return ShareRescale(
+        isin=isin,
+        ex_date=OCT_FOURTH,
+        kind=kind,
+        numerator=Decimal(num),
+        denominator=Decimal(den),
+        source=source,
+    )
+
+
+@pytest.mark.parametrize(
+    ("first_source", "second_source"),
+    [(RescaleSource.FEED, RescaleSource.IMPLIED), (RescaleSource.IMPLIED, RescaleSource.FEED)],
+)
+def test_a_same_ratio_rescale_is_a_twin_when_either_side_is_implied(
+    first_source: RescaleSource, second_source: RescaleSource
+) -> None:
+    desk = _Desk.fresh()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    isin = _held_isin(desk)
+    before = _held_quantity(desk.store.get("paper_fixture_book", OCT_THIRD), isin)
+    desk.world.actions.append(_split(isin, RescaleKind.SPLIT, first_source, "2", "1"))
+    desk.run(OCT_FOURTH)
+    desk.world.actions[:] = [_split(isin, RescaleKind.BONUS, second_source, "2", "1")]
+    fifth = desk.run(date(2026, 10, 8))
+
+    assert not [e for e in fifth.entries if e.decision is Decision.ESCALATE]
+    assert _held_quantity(fifth.record, isin) == 2 * before
+    assert fifth.record is not None and fifth.record.actions == ()
+
+
+def test_two_feed_rescales_of_one_ratio_under_different_kinds_are_escalated_not_twinned() -> None:
+    desk = _Desk.fresh()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    isin = _held_isin(desk)
+    before = _held_quantity(desk.store.get("paper_fixture_book", OCT_THIRD), isin)
+    desk.world.actions.append(_split(isin, RescaleKind.SPLIT, RescaleSource.FEED, "2", "1"))
+    desk.run(OCT_FOURTH)
+    desk.world.actions.append(_split(isin, RescaleKind.BONUS, RescaleSource.FEED, "2", "1"))
+    fifth = desk.run(date(2026, 10, 8))
+
+    escalations = [e for e in fifth.entries if e.decision is Decision.ESCALATE]
+    assert [e.payload["event"] for e in escalations] == [AMBIGUOUS_ACTION_EVENT]
+    assert _held_quantity(fifth.record, isin) == 2 * before, "not rescaled a second time"
+    assert desk.run(date(2026, 10, 9)).verdict is RunVerdict.SKIPPED_DATA_RED

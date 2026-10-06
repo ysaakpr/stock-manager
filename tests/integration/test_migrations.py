@@ -57,6 +57,11 @@ EXPECTED_TABLES = frozenset(
 #: Tables the plan declares append-only (invariant #12) and the task requires to reject mutation.
 APPEND_ONLY_TABLES = ("decision_journal", "policy_set")
 
+#: Append-only tables keyed without an ``id``/``recorded_at``, so the row-level probes above do not
+#: fit them; each one's own suite proves the guard (paper_session_resolution:
+#: tests/integration/test_paper_session_job.py). Listed here so the guard-set check stays exact.
+OTHER_APPEND_ONLY_TABLES = ("paper_session_resolution",)
+
 #: Column types that can never hold money. `money` is PostgreSQL's own type and is excluded too:
 #: its output depends on the server's lc_monetary, so the same row reads differently on two hosts.
 NON_MONEY_TYPES = frozenset({"double precision", "real", "money"})
@@ -310,7 +315,7 @@ def test_only_the_append_only_tables_carry_the_guard(conn: Connection) -> None:
         "SELECT DISTINCT tgrelid::regclass::text FROM pg_trigger "
         "WHERE NOT tgisinternal AND tgfoid = 'reject_mutation'::regproc"
     ).fetchall()
-    assert {str(name) for (name,) in rows} == set(APPEND_ONLY_TABLES)
+    assert {str(name) for (name,) in rows} == {*APPEND_ONLY_TABLES, *OTHER_APPEND_ONLY_TABLES}
 
 
 # ── acceptance 3: no money column is float or double precision ──────────────────────────────
