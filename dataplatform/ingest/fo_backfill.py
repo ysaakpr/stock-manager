@@ -258,7 +258,9 @@ class FoBackfillRunner:
                 )
             aggregates = build_aggregates(rows, master=self._master)
         except (ParseError, L0Error, ValueError) as exc:
-            self._fail(unit, str(exc), retryable=False, report=report, counter="refused")
+            # Retryable: the bytes are in L0, so a re-run after a parser fix re-derives the
+            # session without a request. Only a 404 closes a session.
+            self._fail(unit, str(exc), retryable=True, report=report, counter="refused")
             return
 
         try:

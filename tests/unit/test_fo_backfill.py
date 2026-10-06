@@ -172,3 +172,39 @@ def test_403_spike_parks_with_enumerated_cause(tmp_path: Path) -> None:
     report = _runner(forbidden, tmp_path, sync).run(plan)
     assert report.parked and report.park_reason is fob.ParkReason.FORBIDDEN_SPIKE
     assert sync.get(fob.FO_SOURCE_ID, plan[-1].session) is None
+
+
+#: Four rows copied verbatim from the first real UDiFF F&O file fetched (2024-07-08, L0 payload
+#: `nse_fo_bhavcopy/2024/07/BhavCopy_NSE_FO_0_0_0_20240708_F_0000.csv.zip`), one per instrument
+#: code. The real file writes `STO`/`STF`/`IDO`/`IDF`; the synthetic M3.7 fixture wrote the legacy
+#: `OPTSTK`/`FUTSTK`/`OPTIDX`/`FUTIDX`, which is why the parser refused every real session.
+REAL_EXCERPT: Final = (
+    "TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,XpryDt,"
+    "FininstrmActlXpryDt,StrkPric,OptnTp,FinInstrmNm,OpnPric,HghPric,LwPric,ClsPric,LastPric,"
+    "PrvsClsgPric,UndrlygPric,SttlmPric,OpnIntrst,ChngInOpnIntrst,TtlTradgVol,TtlTrfVal,"
+    "TtlNbOfTxsExctd,SsnId,NewBrdLotQty,Rmks,Rsvd1,Rsvd2,Rsvd3,Rsvd4\n"
+    "2024-07-08,2024-07-08,FO,NSE,STO,151808,,RELIANCE,,2024-09-26,2024-09-26,3440.00,PE,"
+    "RELIANCE24SEP3440PE,0.00,0.00,0.00,378.30,0.00,378.30,3201.80,275.85,0,0,0,0.00,0,F1,250,"
+    ",,,,\n"
+    "2024-07-08,2024-07-08,FO,NSE,STF,63806,,RELIANCE,,2024-07-25,2024-07-25,,,RELIANCE24JULFUT,"
+    "3190.00,3224.30,3172.00,3208.10,3206.15,3187.35,3201.80,3208.10,28804250,-1499500,39175,"
+    "31353890650.00,32467,F1,250,,,,,\n"
+    "2024-07-08,2024-07-08,FO,NSE,IDO,56755,,NIFTY,,2024-08-29,2024-08-29,23350.00,PE,"
+    "NIFTY24AUG23350PE,141.35,148.40,138.00,147.30,147.30,132.85,24320.55,181.40,5075,25,6,"
+    "3524092.50,4,F1,25,,,,,\n"
+    "2024-07-08,2024-07-08,FO,NSE,IDF,35000,,NIFTY,,2024-09-26,2024-09-26,,,NIFTY24SEPFUT,"
+    "24630.00,24640.00,24534.10,24620.85,24618.00,24624.45,24320.55,24620.85,188450,12750,2551,"
+    "1568144165.00,1651,F1,25,,,,,\n"
+)
+
+
+def test_the_real_udiff_instrument_codes_parse() -> None:
+    from dataplatform.ingest.nse.fo_bhavcopy import FoInstrumentType, parse_text
+
+    rows = parse_text(REAL_EXCERPT, filename="BhavCopy_NSE_FO_0_0_0_20240708_F_0000.csv")
+    assert [row.instrument_type for row in rows] == [
+        FoInstrumentType.OPTSTK,
+        FoInstrumentType.FUTSTK,
+        FoInstrumentType.OPTIDX,
+        FoInstrumentType.FUTIDX,
+    ]
