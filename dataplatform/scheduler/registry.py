@@ -18,9 +18,10 @@ and must not go and get them itself (B10, invariant #11).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import lru_cache
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -29,6 +30,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 from dataplatform.clock import Clock
 from dataplatform.config import Settings
+from dataplatform.ingest.source_register import declined_sources
 from dataplatform.logging import get_logger
 
 __all__ = [
@@ -162,13 +164,16 @@ class JobRegistry:
     What it does: holds jobs, rejects a duplicate name, and fails loud on an unknown one.
     What it assumes: it is built once at startup and not mutated afterwards.
     What it never does: create a job implicitly. A name that is not in here cannot be run, which
-    is the property that makes `run-once` safe to expose to an agent.
+    is the property that makes `run-once` safe to expose to an agent. Nor does it accept a job that
+    covers or answers for a source in `declined` — a source the register DECLINED on policy grounds
+    (HUMAN_DECISIONS D12/D19) is never scheduled.
     """
 
-    __slots__ = ("_jobs",)
+    __slots__ = ("_declined", "_jobs")
 
-    def __init__(self, jobs: Iterable[Job] = ()) -> None:
+    def __init__(self, jobs: Iterable[Job] = (), *, declined: Collection[str] = ()) -> None:
         self._jobs: dict[str, Job] = {}
+        self._declined = frozenset(declined)
         for job in jobs:
             self.register(job)
 
@@ -193,6 +198,12 @@ class JobRegistry:
         """
         if job.name in self._jobs:
             raise ValueError(f"job {job.name!r} is already registered")
+        refused = sorted(self._declined & {*job.covers, *job.sync_sources})
+        if refused:
+            raise ValueError(
+                f"job {job.name!r} would schedule {', '.join(refused)}, DECLINED on policy grounds "
+                "in the Source Register; a declined source is never scheduled"
+            )
         self._jobs[job.name] = job
         return job
 
@@ -805,8 +816,19 @@ UNSCHEDULED: dict[str, str] = {
         "Register status FAILED (TLS needs unsafe legacy renegotiation); not worked around."
     ),
     "rbi_dbie": "Register status FAILED (certificate hostname mismatch); not worked around.",
-    "screener_company_fundamentals": "Register status BLOCKED_CREDENTIAL.",
 }
+# A DECLINED register row (screener_company_fundamentals, D12/D19) is not listed here: it is not
+# a gap awaiting a job but a decision never to fetch, and `default_registry` refuses to schedule it.
+
+
+@lru_cache(maxsize=1)
+def _declined_source_ids() -> frozenset[str]:
+    """The checked-in register's DECLINED source ids, read once per process.
+
+    Cached for the life of the process: a change to `source_register.yaml` (declining or
+    un-declining a source) reaches a running scheduler only after it is restarted.
+    """
+    return frozenset(declined_sources())
 
 
 def lag_budgets(registry: JobRegistry) -> dict[str, int]:
@@ -846,5 +868,6 @@ def default_registry() -> JobRegistry:
             ANNOUNCEMENTS_CAPTURE,
             NEWS_CAPTURE,
             FAILURE_ALERTS,
-        ]
+        ],
+        declined=_declined_source_ids(),
     )

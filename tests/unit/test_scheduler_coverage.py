@@ -9,7 +9,8 @@ a source 21 sessions stale `healthy`. Each test below fails if one of those come
 * a job's declared coverage drifting from what its body actually fetches;
 * a job with no `job_run` row reported as anything but NEVER_RAN, or a job whose newest success
   predates its newest due fire reported as anything but OVERDUE;
-* a scheduled source behind its lag budget reported `healthy`.
+* a scheduled source behind its lag budget reported `healthy`;
+* a source the register DECLINED on policy grounds (D12/D19) scheduled by any job.
 
 Offline: no database, no network, no scheduler started.
 """
@@ -40,6 +41,7 @@ from dataplatform.scheduler.registry import (
     SHAREHOLDING_POLL,
     UNSCHEDULED,
     Job,
+    JobRegistry,
     default_registry,
     lag_budgets,
 )
@@ -54,8 +56,12 @@ def _live_register_ids() -> set[str]:
     return {
         source.id
         for source in load_register().sources
-        if source.era.end is None and source.cadence != "backfill_only"
+        if source.era.end is None and source.cadence != "backfill_only" and not source.is_declined
     }
+
+
+def _declined_ids() -> set[str]:
+    return set(load_register().declined())
 
 
 def _covered() -> set[str]:
@@ -81,6 +87,39 @@ def test_coverage_and_the_ledger_name_real_sources_and_do_not_overlap() -> None:
     assert not both, f"scheduled *and* listed unscheduled: {sorted(both)}"
     for source, reason in UNSCHEDULED.items():
         assert reason.strip(), f"{source} is unscheduled with no reason recorded"
+
+
+def test_a_declined_source_is_neither_scheduled_nor_listed_as_a_gap() -> None:
+    """D12/D19: declined is a decision, not a job waiting to be written."""
+    declined = _declined_ids()
+    assert "screener_company_fundamentals" in declined
+    registry = default_registry()
+    scheduled = {s for job in registry for s in (*job.covers, *job.sync_sources)}
+    assert not declined & scheduled, sorted(declined & scheduled)
+    assert not declined & set(UNSCHEDULED), sorted(declined & set(UNSCHEDULED))
+    assert not declined & set(lag_budgets(registry))
+
+
+def _job_for(source: str) -> Job:
+    return Job(
+        name="probe_job",
+        cron="0 19 * * mon-fri",
+        fn=lambda ctx: None,
+        timeout=timedelta(minutes=1),
+        covers=(source,),
+        sync_sources=(source,),
+    )
+
+
+def test_the_registry_refuses_a_job_that_would_fetch_a_declined_source() -> None:
+    with pytest.raises(ValueError, match="DECLINED"):
+        JobRegistry([_job_for("screener_company_fundamentals")], declined=_declined_ids())
+
+
+def test_the_decline_refusal_is_not_inverted() -> None:
+    """A non-declined source is scheduled normally under the same declined set."""
+    registry = JobRegistry([_job_for("nse_bhavcopy_udiff")], declined=_declined_ids())
+    assert "probe_job" in registry
 
 
 @pytest.mark.parametrize(

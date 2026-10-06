@@ -1580,14 +1580,14 @@ sources:
     needs_session_cookie: false
     parser: {id: dataplatform.ingest.screener, task: M7.1}
     robots_notes: >-
-      Per-company pages are permitted. The Excel export path /company/{SYMBOL}/export/ is not
-      robots-disallowed but is not anonymously reachable (see failure_note). Never touch
-      /user/*, ?q=, ?sort=, ?limit=, ?page= or /company/source/quarter/* — per-company cadence
-      only, 5 s spacing.
+      Per-company pages are permitted, but the §4.1 primary — the Excel export — is not: its real
+      form action is POST /user/company/export/{id}/, and /user/* is robots-disallowed in the
+      host record above (robots.txt fetched 200 at 2026-08-08T18:08:22+05:30). Never touch
+      /user/*, ?q=, ?sort=, ?limit=, ?page= or /company/source/quarter/*.
     pit_notes: >-
       NOT point-in-time. Screener shows restated figures with no as-of date, so this feed may
       never reach a backtest or a decision — monitoring surface only.
-    status: BLOCKED_CREDENTIAL
+    status: DECLINED
     verified_at: 2026-08-08T18:13:07+05:30
     last_http_status: 404
     sample_bytes: 11441
@@ -1596,18 +1596,29 @@ sources:
     parse_check: null
     fixture: {frozen: false, task: M7.1, path: null}
     failure_note: >-
-      The §4.1 primary — the Excel export — is not available to an anonymous client:
-      GET https://www.screener.in/company/RELIANCE/export/ returns HTTP 404 with an 11,441 B
-      HTML page. Screener gates the export behind a logged-in account, and creating an account
-      or accepting third-party terms is reserved to the human (AGENTIC_CONTEXT §3.7); no
-      credential exists (B4). Not escalated as a blocker because a working substitute was
-      verified in the same sweep: the robots-permitted company page fetched 200 /
-      227,493 B / text/html at 2026-08-08T18:11:25+05:30 and carries the same statements.
+      Declined on policy grounds, not blocked on a credential. The C.1 sweep's anonymous
+      GET https://www.screener.in/company/RELIANCE/export/ returned HTTP 404 with an 11,441 B HTML
+      page; the D9(b) register sweep then found that URL was itself a guess and the real export
+      is POST /user/company/export/{id}/, under the robots-disallowed /user/* (D12). Supplying a
+      Screener session cookie would not make it acceptable — AGENTIC_CONTEXT §8 forbids it — so
+      the row is DECLINED (D19 taking D12 option 1) rather than BLOCKED_CREDENTIAL, whose label
+      pointed at exactly that forbidden step.
     candidate_alternatives:
-      - "Parse the robots-permitted HTML company page (verified 200, 227,493 B) — no account,
-         no terms acceptance, same restated data. Recommended default for M7.1."
-      - "If the export is genuinely needed, the owner supplies a Screener session cookie; that
-         is a §3.7 human decision and M7.1 should park on it rather than self-serve."
+      - "The robots-permitted HTML company page (fetched 200 / 227,493 B / text/html at
+         2026-08-08T18:11:25+05:30) carries the same restated statements. Taking it would be a
+         new owner decision recorded as its own register row; this declined row does not
+         license it."
+      - "Point-in-time fundamentals from the exchanges' own XBRL filings
+         (nse_financial_results_index, nse_xbrl_filing), which are what decisions read anyway."
+    declined:
+      reason: >-
+        The source's data path (the Excel export, POST /user/company/export/{id}/) sits under
+        /user/*, which www.screener.in's robots.txt disallows. A credential would not change that,
+        so the source is declined rather than left waiting for one.
+      decision: "HUMAN_DECISIONS D12 (option 1), taken by D19 on 2026-10-06"
+      decided_on: 2026-10-06
+      declined_url: "https://www.screener.in/user/company/export/{id}/"
+      robots_rule: "/user/*"
     owner_task: M7.1
 
   # §4.1 row 16 — fundamentals (point-in-time)

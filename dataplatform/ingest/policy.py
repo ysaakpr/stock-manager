@@ -54,6 +54,7 @@ __all__ = [
     "RobotsDisallowedError",
     "RobotsPolicy",
     "Sleeper",
+    "SourceDeclinedError",
     "UnknownSourceError",
     "resolve_policy",
     "robots_for",
@@ -87,6 +88,12 @@ class PolicyError(RuntimeError):
 
 class UnknownSourceError(PolicyError):
     """No entry with this id in the Source Register — the register is the list of what we fetch."""
+
+
+class SourceDeclinedError(PolicyError):
+    """The source is `DECLINED` in the register: we chose, on policy grounds, never to fetch it
+    (HUMAN_DECISIONS D12/D19). Not retryable and not overridable — undoing it is a new decision
+    recorded in the register, never a flag at the call site."""
 
 
 class MissingHostPolicyError(PolicyError):
@@ -227,6 +234,10 @@ def resolve_policy(
     Spacing is the slowest of three numbers — §4.1's floor, the configured interval, and the
     host's own recorded minimum — because each is a claim about a lower bound and the binding one
     is whichever is largest. The rest comes straight from the row.
+
+    Raises `SourceDeclinedError` for a `DECLINED` row: this is the one place every fetch path
+    (the fetcher, the per-source crawlers) obtains its policy, so refusing here means a declined
+    source cannot be fetched by any of them.
     """
     settings = get_settings() if settings is None else settings
     source = next((entry for entry in register.sources if entry.id == source_id), None)
@@ -234,6 +245,11 @@ def resolve_policy(
         raise UnknownSourceError(
             f"no source {source_id!r} in the Source Register; known ids: "
             f"{', '.join(sorted(entry.id for entry in register.sources))}"
+        )
+    if source.is_declined:
+        raise SourceDeclinedError(
+            f"source {source_id} is DECLINED on policy grounds ({source.decline().decision}); "
+            "it is never fetched"
         )
     record = register.host_policy(source.host)
     if record is None:

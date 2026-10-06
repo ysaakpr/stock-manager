@@ -50,6 +50,7 @@ from dataplatform.scheduler.registry import UNSCHEDULED, default_registry, lag_b
 from dataplatform.status.models import (
     ArchivesOut,
     DatabaseHealthOut,
+    DeclinedOut,
     GapsOut,
     HealthOut,
     JobHealthOut,
@@ -301,16 +302,22 @@ def status_sources(store: SyncStoreDep, clock: ClockDep) -> SourcesOut:
     fetched has nothing true to say about its lag, and an invented line for it would be exactly
     the fabricated status this API must never serve. A source a registered job keeps current is
     `overdue`, and not `healthy`, once it is more sessions behind than that job's budget.
+
+    A source the Source Register DECLINED on policy grounds (D12/D19) is listed under `declined`
+    whether or not it has rows, and its line, if any, carries the record and is never red.
     """
     budgets = lag_budgets(default_registry())
     return SourcesOut(
         as_of=clock.today(),
         sources=[SourceStatusOut.of(status) for status in store.source_statuses(budgets)],
+        declined={source: DeclinedOut.of(record) for source, record in store.declined.items()},
     )
 
 
 @app.get("/status/jobs", summary="Every registered job: on schedule, overdue, failing or never run")
-def status_jobs(conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> JobsOut:
+def status_jobs(
+    conn: ConnDep, store: SyncStoreDep, clock: ClockDep, settings: SettingsDep
+) -> JobsOut:
     """Each registered job against its own cron, and the live sources no job keeps current.
 
     What it does: reads `job_run` for every job in the production registry and reports NEVER_RAN,
@@ -326,6 +333,7 @@ def status_jobs(conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> JobsOu
         healthy=all(job.healthy for job in jobs),
         jobs=[JobHealthOut.of(job) for job in jobs],
         unscheduled=dict(UNSCHEDULED),
+        declined={source: DeclinedOut.of(record) for source, record in store.declined.items()},
     )
 
 
