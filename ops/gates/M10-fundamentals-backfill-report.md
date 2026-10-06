@@ -1,8 +1,16 @@
 # M10.4 — Fundamentals backfill: build + live-verification report
 
-**Status: PARKED on an upstream (M7.3) dependency defect.** The runner is built and unit-verified;
-the live campaign cannot land real facts until the M7.3 XBRL path is corrected to match the real NSE
-feed. Details below.
+**Status (updated 2026-10-06): superseded, the campaign is complete and current to 2026-10-05.**
+- The PARKED status below was lifted by [`M10-fundamentals-backfill-live.md`](M10-fundamentals-backfill-live.md),
+  after the M7.3 fix and the full 10-year campaign.
+- The owed integrated-feed fetch, 2026-09-01 → 2026-10-05, ran on 2026-10-06 at 20:51–20:57 IST.
+  It published 198 filings with 0 failed. See
+  [`M10-fundamentals-backfill-owed-2026-10-06.md`](M10-fundamentals-backfill-owed-2026-10-06.md).
+- The original build report follows unchanged.
+
+*Original status:* PARKED on an upstream (M7.3) dependency defect. The runner is built and
+unit-verified; the live campaign cannot land real facts until the M7.3 XBRL path is corrected to
+match the real NSE feed. Details below.
 
 ## What was built
 

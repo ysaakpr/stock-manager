@@ -1,9 +1,11 @@
 # M10.4: what the fundamentals store is still owed (2026-10-06)
 
-**Authority:** owner go 2026-10-06 (chat). **Status: NOT RUN today.** This note works out what is owed
-and gives the exact command. The fetch was held back because the PIT write would land while the
-backtest chain at `a4a4003` (`cap_tier_campaign`, which reads `pit_fundamentals`) was still running.
-A store that changes under a running measurement makes that measurement unreproducible.
+**Authority:** owner go 2026-10-06 (chat). **Status: RUN, 2026-10-06 20:51 → 20:57 IST. The
+owed integrated-feed fetch is done (§ "Result" at the end).** It was held back during the day because
+the PIT write would have landed while the backtest chain at `a4a4003` (`cap_tier_campaign`, which
+reads `pit_fundamentals`) was still running. A store that changes under a running measurement makes
+that measurement unreproducible. Below, the "lake as it stands" and "what is owed" sections are the
+state *before* the run.
 
 ## The lake as it stands (`sync_state`, primary lake)
 
@@ -50,3 +52,42 @@ Planned with `--dry-run`: 12 index chunks. The runner now holds the leases for b
 example by a daily job on the site host), it exits 4 and names the holder. It has no
 `--stop-before`, so send SIGINT before 18:00 IST if it is still running. It stops after the current
 unit and resumes per filing.
+
+## Result (2026-10-06, all times IST)
+
+**Preconditions, checked just before the start:**
+
+- No `fold_campaign` or `cap_tier_campaign` process was running.
+- No other backfill or campaign driver was running, and no host lease was held.
+- No `job_run` row was RUNNING.
+- The run was outside 18:00–20:30. It started after the 20:00 `nse_daily_capture` had SUCCEEDED and
+  after M11.2's archive run (20:30–20:43) had released `nsearchives`, so the two campaigns never
+  overlapped.
+
+It ran the command above unchanged, from the main checkout at `22b616a`, **20:51:01 → 20:57:16**.
+
+| | |
+|---|---|
+| Index chunks | **12 / 12 published**, 0 failed. The new units are keyed `2026-09-30/p01..06` and `2026-10-05/p01..06`, so they do not collide with the earlier `2026-09-06/pNN`. |
+| Filings discovered (all in universe) | 246 |
+| Filings published | **198**. Another 48 were already PUBLISHED (the 09-01..09-05 overlap). 59 payloads were reused from L0. |
+| Filings failed | **0** |
+| Facts written | **2,468** over **119** ISINs |
+| Share counts refused (EPS contradicts paid-up capital) | 17 |
+| Symbols D2 could not resolve | 90 records, 36 distinct symbols (listed in the report: recent listings and renames, D2 territory) |
+| Requests | 151 (12 index pages + 139 XBRL documents). Not parked. |
+| 403 | One, on the `www.nseindia.com/` homepage warm-up handshake (`fetch.handshake_forbidden`, the known cookie-warm behaviour). Every API and archive request after it answered 200. |
+
+**Store after the run:**
+
+- `nse_xbrl_filing` PUBLISHED: 102,650 → **102,848**, latest filing date **2026-10-05**.
+- The 2,956 FAILED rows are unchanged, as planned (see "What is owed" §3).
+- `nse_integrated_filing_index`: 126 pages PUBLISHED.
+- `pit_fundamentals`: 1,352,030 facts over 2,291 ISINs, filing dates up to 2026-10-05.
+
+**Logs:** `~/campaign/fundamentals-integrated-2026-10-06.log`; coverage report
+`~/campaign/fundamentals-integrated-2026-10-06.md`.
+
+**Next owed:** the September-quarter filing season, which starts mid-October. Re-run the same
+command with `--from 2026-10-01 --to <date>`. Published units cost no request.
+
