@@ -132,15 +132,50 @@ never edited or deleted (invariant #1); every L1 value is re-derivable from it.
 
 ## The daily paper session (M13.1)
 
-`paper_session` runs at **20:30 IST, Monday to Friday**, after the EOD pipeline above. It decides
-one session of the D13-ratified momentum v2 book (`PAPER_RATIFIED_2026_09_06`: 12-1 ranking, top-20
-with a top-30 sell band, 200-session regime filter, inverse-vol weights, redeploy next session) in
-**paper mode only**: the order path is the backtest's own `ReplayEngine` → `RailGate` (A8) →
-`SimBroker`, and nothing on it can build or accept a real broker. Book id
-`momentum_v2_paper_2026_09_06`, opening capital ₹10 lakh (the M9 reports' capital), ratified rails.
-Code: `backtest/paper_session.py`; ledger: `paper_session` (migration 0012).
+`paper_session` is registered for **20:30 IST, Monday to Friday**, after the EOD pipeline above. It
+decides one session of the D13-ratified momentum v2 book (`PAPER_RATIFIED_2026_09_06`: 12-1
+ranking, top-20 with a top-30 sell band, 200-session regime filter, inverse-vol weights, redeploy
+next session) in **paper mode only**: the order path is the backtest's own `ReplayEngine` →
+`RailGate` (A8) → `SimBroker`, and nothing on it can build or accept a real broker
+(`BROKER_PROVIDER` is never read). Book id `momentum_v2_paper_2026_09_06`, opening capital ₹10 lakh
+(the M9 reports' capital), ratified rails. Code: `backtest/paper_session.py`; ledger:
+`paper_session` (migration 0012).
 
-What one run does, in order — each step can end the run:
+### It is disabled until the regime filter has a same-evening input
+
+The job is a logged no-op unless `PAPER_SESSION_ENABLED=true` (default `false`). The ratified
+regime filter reads the **published NIFTY 50 TRI level for the session itself** and refuses a stale
+one (`backtest.run._RegimeSource`). Nothing lands that level the same evening:
+
+- `tri_refresh` runs weekly (Saturday 08:00) and fetches only up to the session *before* the day it
+  runs, so on every weekday the session's level is missing at 20:30;
+- the NSE close-all snapshot (`nse_index_close_snapshot`, `ind_close_all_DDMMYYYY.csv`) is **not the
+  same series**: its "Nifty 50" is the *price* index. Compared read-only over all 3,159 sessions
+  both hold (2012-10-01 → 2026-10-01): **0 of 3,159 match within 0.01** against the published TRI
+  (max abs diff 12,760.43, on 2025-06-27) and 0 of 3,159 against the net TRI (max 8,931.87); the
+  TRI/price ratio drifts from 1.28 to 1.52 — reinvested dividends. It is also not captured the same
+  evening (the 2026-10-05 file was fetched by the M11.2 campaign at 13:33 IST the next day; the
+  source is in the registry's `UNSCHEDULED` ledger).
+
+Enabled today, every rebalance would be journaled `SKIPPED_DATA_RED` ("no level for <date>") and
+the book would never invest. **To enable it, one of these is needed first:**
+
+1. **A same-evening published TRI** — a weekday-evening refresh of the published NIFTY 50 TRI that
+   fetches the session itself (after niftyindices.com has disseminated it), i.e. a change to
+   `tri_refresh`'s cadence and target, verified to land before the paper job's run time (move the
+   paper cron later if it lands after 20:30); or
+2. **An owner ratification to read the price index instead** — a different regime series than the
+   one D13's evidence was struck on, so the momentum v2 backtest must be re-run on it first, and
+   the close-all snapshot must be captured daily before the paper job runs.
+
+Then set `PAPER_SESSION_ENABLED=true` in `.env` and restart the scheduler (below).
+
+### What one run does
+
+It decides an **explicit date**, the *owed session*: the latest trading session whose EOD is due by
+the run's clock — today's from 18:30 IST, otherwise the previous session. The 20:30 run decides
+today; a retry at 00:30 decides the session that failed the evening before, never the new calendar
+day. Then, in order — each step can end the run:
 
 1. **Holiday?** Not a session per `dataplatform/ingest/data/nse_holidays.yaml` → nothing written.
 2. **Already decided?** A `COMPLETED` row for the date → no-op. Reruns never trade twice.
@@ -149,30 +184,41 @@ What one run does, in order — each step can end the run:
    no investable-universe coverage → one `SKIPPED_DATA_RED` journal entry (actor `SYSTEM`), a red
    `paper_session` row, **no order**. A rerun that is still red writes nothing more; a rerun after
    the data heals decides the date normally (the skip stays in the journal — it is append-only).
-4. **Rebuild the book** from the `paper_session` rows: every calendar session since the first
-   decided one is replayed through `SimBroker` (corporate actions, settlement, fills), the recorded
-   orders are placed again, and the rebuilt book must match each session's recorded `book_digest`.
-5. **Decide** the session and journal every entry (BUY/SELL, RAIL_BLOCK, or the day's HEARTBEAT),
+   Only `nse_bhavcopy` is required: the corporate-action feed refreshes weekly, so requiring it
+   would make most sessions red — actions are booked when they become known instead (step 5).
+4. **Restore the book** from the latest `COMPLETED` row's `book_state` (the paper `SimBroker`'s whole
+   state, Decimal-exact) and check it reproduces that row's `book_digest`. Nothing is replayed, so a
+   run costs the same on day 1,000 as on day 2. An order staged for a session the book did not
+   decide (red, or the job did not run) **lapses unfilled** — the paper book never fills on bars
+   the interlock refused; a real broker would have filled it (owner decision D24).
+5. **Book corporate actions known now**, each once per book: an action whose ex-date is after the
+   last decided session is applied before the session's fills, as in a backtest; one whose ex-date
+   the book has already decided past — the store learnt it late — is booked **on this session**
+   with an explicit journal entry (`HOLD`, `payload.event = LATE_CORPORATE_ACTION`, entitlement =
+   the book entering the ex-date). A late split/bonus on a name traded since its ex-date, or any
+   other late kind on a held name, is journaled `ESCALATE` for the owner instead of guessed.
+6. **Decide** the session and journal every entry (BUY/SELL, RAIL_BLOCK, or the day's HEARTBEAT),
    each tagged `payload.mode = PAPER`, `payload.paper_book = <book id>`; record the session
-   `COMPLETED`. Journal entries and the ledger row commit in one transaction.
+   `COMPLETED` with the new `book_state`. Journal entries and the ledger row commit in one
+   transaction.
 
-**Rebalance timing.** A rebalance is due on the first session of the month *the book decides*:
-the first session it ever decides, and thereafter the first green session of each month. A red
-first-of-month moves the rebalance to the next green session rather than skipping the month.
-Orders staged for a session the book did not decide (red, or the job did not run) **lapse
-unfilled** — the paper book never fills on bars the interlock refused. This is a known divergence
-from a real broker, which would have filled them; it is the conservative choice.
+**Journal timestamps.** An entry's `ts` is **midnight IST of the session it decides**, not the
+wall-clock time: the engine freezes its clock on the session date, as in every backtest, so the
+decision replays byte-for-byte. When the row actually landed is `recorded_at`.
+
+**Rebalance timing** (D24). A rebalance is due on the first session of the month *the book
+decides*: the first session it ever decides, and thereafter the first green session of each month.
+A red first-of-month moves the rebalance to the next green session rather than skipping the month.
 
 ### Installing and restarting
 
-The job is registered in `dataplatform/scheduler/registry.py`; the running scheduler reads the
-registry at start, so after merging, restart the user service (do not restart it mid-run of another
-job — check `GET /status/jobs` first):
+Apply the migration first, then restart the user service so it reads the new registry (do not
+restart it mid-run of another job — check `GET /status/jobs` first):
 
 ```bash
+make migrate     # applies 0012_paper_session if it is not yet applied
 XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler
 XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status scheduler
-make migrate     # once, if 0012_paper_session is not yet applied
 ```
 
 ### Running it by hand
@@ -181,48 +227,47 @@ make migrate     # once, if 0012_paper_session is not yet applied
 uv run python -m dataplatform.scheduler run-once paper_session
 ```
 
-It decides **today** (the clock's date in IST) and is safe to repeat: a decided date is a no-op and
-a still-red date writes nothing new. It reads the lake and Postgres only — no network.
+It decides the owed session at the moment it runs (see above) and is safe to repeat: a decided date
+is a no-op and a still-red date writes nothing new. It reads the lake and Postgres only — no
+network. With `PAPER_SESSION_ENABLED` off it logs `paper_session.disabled` and does nothing.
 
 ### Checking it
 
 ```sql
 -- the ledger: one row per decided or refused session
 SELECT trading_date, outcome, reason, rebalanced, jsonb_array_length(orders) AS orders,
-       pending IS NOT NULL AS redeploy_pending
+       jsonb_array_length(actions) AS corporate_actions, pending IS NOT NULL AS redeploy_pending,
+       book_state->'broker'->>'cash' AS cash
 FROM paper_session WHERE book_id = 'momentum_v2_paper_2026_09_06' ORDER BY trading_date DESC;
 
--- the decisions behind it
-SELECT trading_date, decision, isin, sleeve, rationale
+-- the decisions behind it, late corporate actions included
+SELECT trading_date, decision, isin, sleeve, rationale, payload->>'event' AS event
 FROM decision_journal
 WHERE payload->>'paper_book' = 'momentum_v2_paper_2026_09_06'
 ORDER BY trading_date DESC, id;
 ```
 
 `GET /status/jobs` shows the job's last run; a `FAILED` run left nothing behind (the transaction
-rolled back) and the next run retries the date.
+rolled back) and the next run retries the owed session.
 
 ### When it is red or fails
 
-- **Red every rebalance day: "no level for <date>" from the published `nifty50` series.** The
-  regime filter reads the published NIFTY 50 level *for the session itself* and never a stale one
-  (`backtest.run._RegimeSource`). `tri_refresh` runs weekly (Saturday 08:00) and only fetches up to
-  the session *before* the day it runs, so on its current cadence the session's level is never in
-  the lake by 20:30 the same day, and every rebalance attempt is red until it is. The book stays in
-  whatever it last held (cash, at inception) and the journal shows one `SKIPPED_DATA_RED` per day
-  naming the cause. The fix is a same-evening TRI refresh for the session (a change to
-  `tri_refresh`'s cadence and target) — an owner/orchestrator decision, not something this job
-  works around.
-- **`PaperBookDivergenceError`.** The rebuilt book no longer matches the digest recorded when a
-  past session was decided: an input the rebuild reads (a raw bar a fill was priced on, a
-  reconciled corporate action) changed since. The job refuses to trade on a history different
-  from the journaled one. Do not delete or edit `paper_session` rows; find which input moved
-  (the error names the session), and escalate — re-basing a paper book is an owner decision.
+- **Red on rebalance days: "no level for <date>" from the published `nifty50` series.** The reason
+  the job ships disabled (above). The book stays in what it last held and the journal shows one
+  `SKIPPED_DATA_RED` per day naming the cause.
+- **`PaperBookDivergenceError`.** The persisted `book_state` of the latest decided session no longer
+  reproduces the `book_digest` written with it in the same transaction — the row was altered or the
+  state serialisation changed. A late corporate action cannot cause this (it is booked forward).
+  Do not delete or edit `paper_session` rows; escalate — re-basing a paper book is an owner
+  decision.
+- **`ESCALATE` with `LATE_CORPORATE_ACTION`.** A corporate action arrived after its ex-date on a
+  name the book has traded since, or of a kind that cannot be booked mechanically. It is recorded
+  as booked (not retried); the owner decides whether the paper book needs a correcting entry.
 - **`CalendarCoverageError` / no session after a date.** The holiday file covers through
   2026-12-31; the job needs the next year's holidays before the last December session. Extend
   `dataplatform/ingest/data/nse_holidays.yaml`.
 - **Any other exception.** The run is `FAILED` in `job_run` with nothing written; read the error,
-  fix, and `run-once paper_session` (same date: idempotent).
+  fix, and `run-once paper_session` before 18:30 IST of the next session (it decides the owed one).
 
 **Never** point this job at a real broker. Real money for this configuration is a separate
 ratification (AGENTIC_CONTEXT §3.2) and a separate job; `tests/unit/test_paper_session_paper_only.py`
