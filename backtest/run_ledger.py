@@ -38,7 +38,7 @@ from datetime import date
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from backtest.book_actions import (
     AppliedBookAction,
@@ -75,9 +75,13 @@ from dataplatform.logging import get_logger
 from dataplatform.store.paths import Layer, layer_root
 from execution.broker import Fill, Side
 
+if TYPE_CHECKING:
+    from dataplatform.corpactions import MergerTerms
+
 __all__ = [
     "RunOutputLocationError",
     "RunSummary",
+    "SchemeCashCredit",
     "add_ledger_dir_flag",
     "build_run_ledger",
     "current_ledger_dir",
@@ -90,6 +94,7 @@ __all__ = [
     "run_digest",
     "run_spec",
     "summary_path",
+    "unrecorded_scheme_cash",
 ]
 
 _LOG = get_logger(__name__)
@@ -326,6 +331,69 @@ def _replayed_quantities(ledger: RunLedger) -> dict[str, int]:
             sign = 1 if item.side is Side.BUY else -1
             held[item.isin] = held.get(item.isin, 0) + sign * item.quantity
     return {isin: qty for isin, qty in held.items() if qty}
+
+
+@dataclass(frozen=True, slots=True)
+class SchemeCashCredit:
+    """A swap's non-share leg as the book credited it: ``amount`` rupees on ``received`` for the
+    shares of ``isin`` converted into ``surviving_isin`` (``backtest.book_actions``)."""
+
+    isin: str
+    surviving_isin: str
+    received: date
+    amount: Decimal
+
+
+def unrecorded_scheme_cash(ledger: RunLedger, terms: MergerTerms) -> tuple[SchemeCashCredit, ...]:
+    """The scheme cash the book credited during the run but :func:`build_run_ledger` left out.
+
+    :func:`_tax_events` drops ``AppliedSchemeCash`` (its tax treatment is a known gap), so a saved
+    ledger records a swap's share events and not its cash leg — Cairn India's four ₹10 Vedanta
+    preference shares per share, 2017. Rebuilding the run's cash from the ledger alone then comes
+    up short by that credit from the swap date onwards. This finds every share swap in the ledger
+    (a ``SplitEvent`` of the old ISIN and a ``ReissueEvent`` into the survivor on one date, the
+    pair ``AppliedMerger`` writes), takes the old holding from the ledger's own replay, and prices
+    it at the curated scheme's ``cash_per_share_held`` — the figure the book credited.
+
+    Assumes ``terms`` is the curated table the run was made with. It cannot know that, so a caller
+    must check the result against a figure the run saved (the terminal cash: terminal NAV less the
+    holdings at their terminal marks) and refuse a mismatch. Never reads the store or the lake.
+    """
+    per_share = {
+        (term.old_isin, term.surviving_isin): term.cash_per_share_held
+        for term in terms.share_swaps
+        if term.cash_per_share_held > 0
+    }
+    if not per_share:
+        return ()
+    splits = {(e.isin, e.ex_date) for e in ledger.corporate_events if isinstance(e, SplitEvent)}
+    swaps = {
+        (e.from_isin, e.ex_date): e.isin
+        for e in ledger.corporate_events
+        if isinstance(e, ReissueEvent) and (e.from_isin, e.ex_date) in splits
+    }
+    held: dict[str, int] = {}
+    out: list[SchemeCashCredit] = []
+    timeline: list[tuple[date, int, int, object]] = [
+        (e.ex_date, 0, i, e) for i, e in enumerate(ledger.corporate_events)
+    ]
+    timeline += [(t.trade_date, 1, i, t) for i, t in enumerate(ledger.trades)]
+    # The same walk as _replayed_quantities, which reconciles to the closing book share for share.
+    for _, _, _, item in sorted(timeline, key=lambda row: row[:3]):
+        if isinstance(item, ReissueEvent):
+            held[item.isin] = held.get(item.isin, 0) + held.pop(item.from_isin, 0)
+        elif isinstance(item, SplitEvent | BonusEvent):
+            old = held.get(item.isin, 0)
+            survivor = swaps.get((item.isin, item.ex_date))
+            rate = per_share.get((item.isin, survivor)) if survivor is not None else None
+            if isinstance(item, SplitEvent) and survivor is not None and rate and old:
+                out.append(SchemeCashCredit(item.isin, survivor, item.ex_date, rate * old))
+            if old and item.resulting_quantity is not None:
+                held[item.isin] = item.resulting_quantity
+        elif isinstance(item, TaxTrade):
+            sign = 1 if item.side is Side.BUY else -1
+            held[item.isin] = held.get(item.isin, 0) + sign * item.quantity
+    return tuple(out)
 
 
 def build_run_ledger(
