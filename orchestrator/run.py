@@ -189,7 +189,7 @@ def _stop_report(graph: Graph, st: BuildState, wave: int) -> None:
         print('\n  Unblock with:  ./orch answer <task-id> --decision "..."')
         print("  Then resume:   ./orch run")
     elif external:
-        print("\n  Resume once they land:  ./orch run")
+        print("\n  Once they land: ./orch set <task-id> DONE for each, then resume: ./orch run")
     else:
         print(f"{GREEN}Nothing is blocked and nothing is ready — the graph is complete.{OFF}")
 

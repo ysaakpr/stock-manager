@@ -119,8 +119,11 @@ class BuildState:
                 rec.setdefault("first_started", rec["last_started"])
             elif state == "EXTERNAL":
                 # Not an attempt by this runner, so `attempts` is left alone: a task handed
-                # back later still gets its full MAX_ATTEMPTS here.
-                rec["external_since"] = _now()
+                # back later still gets its full MAX_ATTEMPTS here. Re-asserting a held claim
+                # (a failed DONE, `orch answer`) keeps the original claim time.
+                if previous != "EXTERNAL":
+                    rec["external_since"] = _now()
+                rec.setdefault("external_since", _now())
             elif state in TERMINAL or state == "FAILED":
                 rec["finished"] = _now()
 

@@ -19,6 +19,8 @@ import pytest
 import yaml
 
 from orchestrator import __main__ as cli
+from orchestrator import escalate as esc_mod
+from orchestrator import run as run_mod
 from orchestrator import state as state_mod
 from orchestrator.graph import MAX_ATTEMPTS, Graph, runnable
 from orchestrator.state import BuildState
@@ -244,3 +246,67 @@ def test_cli_status_lists_external(
     assert cli.main(["status"]) == 0
     out = capsys.readouterr().out
     assert "built outside the orchestrator (1)" in out
+
+
+def test_failed_done_keeps_the_external_claim(
+    cli_env: tuple[Graph, BuildState],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    graph, st = cli_env
+    assert cli.main(["set", "A", "EXTERNAL"]) == 0
+    since = st.record("A")["external_since"]
+    monkeypatch.setattr(cli, "_run", lambda cmd, timeout=0: (1, "verify broke"))
+
+    assert cli.main(["set", "A", "DONE"]) == 1
+    rec = st.record("A")
+    assert rec["state"] == "EXTERNAL"
+    assert rec["reason"] == "verify failed with exit 1"
+    assert "verify broke" in rec["verify_output"]
+    assert rec["external_since"] == since
+    assert rec["attempts"] == 0
+    assert "claim is held" in capsys.readouterr().out
+    assert "A" not in _ready_ids(graph, st)
+    assert st.release_stale(list(graph.tasks)) == []
+
+
+def test_failed_done_on_a_non_external_task_still_records_failed(
+    cli_env: tuple[Graph, BuildState], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, st = cli_env
+    monkeypatch.setattr(cli, "_run", lambda cmd, timeout=0: (1, "verify broke"))
+    assert cli.main(["set", "A", "DONE"]) == 1
+    assert st.states()["A"] == "FAILED"
+
+
+def test_reasserting_external_keeps_the_claim_time(st: BuildState) -> None:
+    pinned = "2026-01-01T00:00:00+00:00"
+    st.set("A", "EXTERNAL", external_since=pinned)
+    assert st.set("A", "EXTERNAL")["external_since"] == pinned
+    # Handing the task back and claiming it again is a new claim.
+    st.set("A", "PENDING")
+    assert st.set("A", "EXTERNAL")["external_since"] != pinned
+
+
+def test_answer_on_external_keeps_the_claim(
+    cli_env: tuple[Graph, BuildState], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    graph, st = cli_env
+    monkeypatch.setattr(esc_mod, "answer", lambda task_id, decision: False)
+    st.set("H", "EXTERNAL", external_since="2026-01-01T00:00:00+00:00")
+    assert cli.main(["answer", "H", "--decision", "go"]) == 0
+    rec = st.record("H")
+    assert rec["state"] == "EXTERNAL"
+    assert rec["human_cleared"] is True
+    assert rec["external_since"] == "2026-01-01T00:00:00+00:00"
+    assert "H" not in _ready_ids(graph, st, cleared={"H"})
+
+
+def test_stop_report_says_to_close_external_claims(
+    graph: Graph, st: BuildState, capsys: pytest.CaptureFixture[str]
+) -> None:
+    st.set("A", "EXTERNAL")
+    run_mod._stop_report(graph, st, 0)
+    out = capsys.readouterr().out
+    assert "./orch set <task-id> DONE" in out
+    assert "graph is complete" not in out

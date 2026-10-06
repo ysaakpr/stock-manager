@@ -207,6 +207,7 @@ def cmd_set(args: argparse.Namespace) -> int:
         return 0
 
     # DONE is the one state the agent does not get to assert. We verify it ourselves.
+    previous = st.record(args.task_id).get("state", "PENDING")
     checks: list[tuple[str, str]] = []
     if task.verify:
         checks.append(("verify", task.verify))
@@ -223,18 +224,20 @@ def cmd_set(args: argparse.Namespace) -> int:
         code, out = _run(cmd)
         transcript.append(f"$ {cmd}\n(exit {code})\n{out.strip()[-4000:]}")
         if code != 0:
+            # A failed DONE on an EXTERNAL task must not drop the claim: FAILED with spare
+            # attempts is runnable, and the next `orch run` would start a duplicate builder.
+            held = previous == "EXTERNAL"
             st.set(
                 args.task_id,
-                "FAILED",
+                "EXTERNAL" if held else "FAILED",
                 reason=f"{label} failed with exit {code}",
                 verify_output="\n\n".join(transcript),
                 note=args.note,
             )
             print(f"\n{RED}{args.task_id} NOT done — {label} exited {code}{OFF}")
             print(out.strip()[-4000:])
-            print(
-                f"\n{YELLOW}Recorded FAILED. Fix the cause (not the test) and set DONE again.{OFF}"
-            )
+            recorded = "Still EXTERNAL — the claim is held" if held else "Recorded FAILED"
+            print(f"\n{YELLOW}{recorded}. Fix the cause (not the test) and set DONE again.{OFF}")
             return 1
 
     commit = None
