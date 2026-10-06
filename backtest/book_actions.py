@@ -78,7 +78,13 @@ transfer and Sec 2(42A) counts the holding from the original purchase). Mechanic
 rescale and the carry this module already performs for a reissue, in that order, so unsettled
 lots settle their converted count on their own T+N and staged orders follow the shares. A
 :class:`CashExit` surrenders the holding at the sourced exit price on the delisting date — the
-first day of the exit window — and books it as a sale. Both are keyed on dates, like every other
+first day of the exit window — and books it as a sale. A swap whose scheme also pays a non-share
+leg (Cairn India's four Vedanta redeemable preference shares per share) carries it as
+``cash_per_share``: ``old shares x cash_per_share`` rupees credited on the swap date, at the
+leg's sourced face value, with no basis apportioned to it (``AppliedSchemeCash``). The tax
+ledger does not yet tax that leg — it carries the swap's share events only, so a run's tax
+report understates by the gain on it; the applier logs every credit so a report can name it.
+Both are keyed on dates, like every other
 action here, never on ``knowable_date``, and neither reaches a signal. A store merger row the
 table covers is replaced by it; one it does not is named at load (``book_actions.merger_skipped``),
 and a scheme the table lists as unsourced is counted when held, never guessed.
@@ -164,6 +170,7 @@ __all__ = [
     "AppliedDividend",
     "AppliedMerger",
     "AppliedRescale",
+    "AppliedSchemeCash",
     "BookActionApplier",
     "BookActionCalendar",
     "BookActionSource",
@@ -294,6 +301,8 @@ class ShareSwap:
     live on ``ex_date``) for every ``denominator`` of ``isin``, in the scheme's own old → new
     order. ``ex_date`` is the record date, or the survivor's first priced session if later;
     ``record_date`` and ``knowable_date`` are carried for the log and the run specification.
+    ``cash_per_share`` is the scheme's non-share leg in rupees per old share (zero for a pure
+    share swap), credited on ``ex_date`` alongside the conversion.
     """
 
     isin: str
@@ -303,6 +312,7 @@ class ShareSwap:
     denominator: Decimal
     record_date: date
     knowable_date: date
+    cash_per_share: Decimal = _ZERO
 
     def __post_init__(self) -> None:
         if self.isin == self.surviving_isin:
@@ -313,6 +323,10 @@ class ShareSwap:
                 raise TypeError(f"{name} must be a Decimal")
             if value <= _ZERO:
                 raise ValueError(f"{name} must be positive, got {value}")
+        if not isinstance(self.cash_per_share, Decimal):
+            raise TypeError("cash_per_share must be a Decimal — money is never float (CLAUDE.md)")
+        if self.cash_per_share < _ZERO:
+            raise ValueError(f"cash_per_share must not be negative, got {self.cash_per_share}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,8 +418,27 @@ class AppliedCashExit:
     amount: Decimal
 
 
+@dataclass(frozen=True, slots=True)
+class AppliedSchemeCash:
+    """The non-share leg of a swap: ``quantity`` old shares of ``isin`` (converted into
+    ``surviving_isin``) paid ``per_share`` rupees each — ``amount`` — on ``ex_date``.
+    """
+
+    isin: str
+    surviving_isin: str
+    ex_date: date
+    quantity: int
+    per_share: Decimal
+    amount: Decimal
+
+
 AppliedBookAction = (
-    AppliedDividend | AppliedCarry | AppliedRescale | AppliedMerger | AppliedCashExit
+    AppliedDividend
+    | AppliedCarry
+    | AppliedRescale
+    | AppliedMerger
+    | AppliedCashExit
+    | AppliedSchemeCash
 )
 
 #: Within one ex-date: reissue carries first (1:1, so no count changes, and a dividend or split
@@ -475,6 +508,7 @@ class BookActionCalendar:
         """
         rows = sorted(
             f"swap|{a.isin}|{a.ex_date}|{a.surviving_isin}|{a.numerator}|{a.denominator}"
+            + (f"|cash={a.cash_per_share}" if a.cash_per_share else "")
             if isinstance(a, ShareSwap)
             else f"exit|{a.isin}|{a.ex_date}|{a.price}"
             for a in self._actions
@@ -642,7 +676,7 @@ class BookActionApplier:
             elif isinstance(action, IsinReissue):
                 self._reissue(action, sim, book)
             elif isinstance(action, ShareSwap):
-                self._swap(action, sim, book)
+                self._swap(action, session, sim, book)
             elif isinstance(action, CashExit):
                 self._exit(action, session, sim, book)
             else:
@@ -730,13 +764,14 @@ class BookActionApplier:
             )
         )
 
-    def _swap(self, action: ShareSwap, sim: SimBroker, book: PortfolioBook) -> None:
+    def _swap(self, action: ShareSwap, session: date, sim: SimBroker, book: PortfolioBook) -> None:
         """Rescale the old ISIN by the swap ratio, then carry it 1:1 into the survivor.
 
         The two steps are the split and the reissue this applier already trusts, so pending lots
         keep their trade dates and T+N, staged orders follow the shares, and both books are checked
         share for share. Rescaling *before* the carry keeps the ratio off any survivor shares the
-        book already held.
+        book already held. A non-share leg is credited on the *pre-conversion* count — every old
+        share is entitled to it, including the fraction a floored conversion forfeits.
         """
         if _entitled(action.isin, action.ex_date, sim) == 0:
             return
@@ -762,6 +797,27 @@ class BookActionApplier:
         _check_agree(action.isin, sim, book)
         _check_agree(action.surviving_isin, sim, book)
         self.applied["MERGER:share_swap"] += 1
+        if action.cash_per_share > _ZERO:
+            amount = action.cash_per_share * old
+            book.credit_scheme_cash(session, action.isin, amount)
+            sim.credit_corporate_cash(
+                session,
+                action.isin,
+                amount,
+                f"SCHEME CASH {old} x {action.cash_per_share} ({action.isin} -> "
+                f"{action.surviving_isin})",
+            )
+            self.applied["MERGER:scheme_cash"] += 1
+            self.log.append(
+                AppliedSchemeCash(
+                    isin=action.isin,
+                    surviving_isin=action.surviving_isin,
+                    ex_date=action.ex_date,
+                    quantity=old,
+                    per_share=action.cash_per_share,
+                    amount=amount,
+                )
+            )
         self.log.append(
             AppliedMerger(
                 from_isin=action.isin,
@@ -1125,10 +1181,12 @@ def merger_term_actions(
 
     A swap's survivor is resolved to the member of its lineage chain live on the day the swap
     applies — the record date, or the survivor's first priced session after it when
-    ``first_priced`` says the survivor had not yet listed. A survivor ``first_priced`` never sees
-    again is not applied (``book_actions.merger_no_survivor_price``): converting into a name with
-    no close would stall every NAV sample. An unsourced scheme with a record date becomes an
-    :class:`UnmodelledAction` (``MERGER:unsourced``), so a holding in it is counted, not guessed.
+    ``first_priced`` says the survivor had not yet listed. When the chain member live on the record
+    date never prints again, the named survivor's own first print is used instead. A survivor
+    ``first_priced`` never sees again is not applied (``book_actions.merger_no_survivor_price``):
+    converting into a name with no close would stall every NAV sample. An unsourced scheme with a
+    record date becomes an :class:`UnmodelledAction` (``MERGER:unsourced``), so a holding in it is
+    counted, not guessed.
     """
     out: list[BookAction] = []
     for swap in terms.share_swaps:
@@ -1141,6 +1199,11 @@ def merger_term_actions(
                 effective_date,
             )
             priced = first_priced(survivor_on_record, swap.record_date)
+            if priced is None and survivor_on_record != swap.surviving_isin:
+                # The lineage named a predecessor live on the record date that never prints again
+                # (Piramal Finance: a derived edge from the pre-listing ISIN). The scheme's shares
+                # are the named survivor's, so its own first print is where the holding lands.
+                priced = first_priced(swap.surviving_isin, swap.record_date)
             if priced is None:
                 _log.warning(
                     "book_actions.merger_no_survivor_price",
@@ -1163,6 +1226,7 @@ def merger_term_actions(
                 denominator=swap.shares_held,
                 record_date=swap.record_date,
                 knowable_date=swap.knowable_date,
+                cash_per_share=swap.cash_per_share_held,
             )
         )
     for cash in terms.cash_exits:

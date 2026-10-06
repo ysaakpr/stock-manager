@@ -19,6 +19,12 @@ stating it, never the day it was transcribed. Nothing on the decision path reads
 backtest *book* applies a conversion on its record date as mechanical accounting, exactly as it
 applies a split (``backtest.book_actions``), and a decision only ever sees the account it leaves.
 
+**Non-share legs.** Some schemes pay part of the consideration in a security the book cannot
+hold — Cairn India's four Vedanta redeemable preference shares, Piramal Enterprises' NCRPS. Such a
+leg is a :class:`SchemeCashLeg`: the units received per share held and a *sourced* face or
+redemption value, which the book credits as cash on the swap date. A leg whose value no source
+states is not modelled; the scheme then stays under ``unsourced``.
+
 What this module never does: fetch, infer a ratio, or fill a missing term. A scheme whose terms
 no source states is listed under ``unsourced`` with the reason, and stays unapplied.
 """
@@ -41,6 +47,7 @@ __all__ = [
     "CashExitTerm",
     "MergerTerms",
     "MergerTermsError",
+    "SchemeCashLeg",
     "ShareSwapTerm",
     "TermSource",
     "UnsourcedMerger",
@@ -63,6 +70,8 @@ class TermSource:
     ``line`` is the **1-based** line of ``member`` the quote reproduces (``sed -n '<line>p'``);
     ``line_end`` (inclusive, 1-based) is set only when the source hard-wraps the quoted sentence
     across lines. ``...`` in ``quote`` marks an elision; every fragment between them is verbatim.
+    ``scanned`` marks a document with no text layer, transcribed from the page image: its quote
+    cannot be checked against extracted text, only read.
     """
 
     l0_key: str
@@ -71,6 +80,29 @@ class TermSource:
     line: int | None = None
     line_end: int | None = None
     url: str | None = None
+    scanned: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SchemeCashLeg:
+    """A non-share leg of a swap: ``units_received`` of ``instrument`` per ``units_held`` old
+    shares, each worth ``value_inr`` — the face or redemption value a source states.
+
+    The book cannot hold the instrument (a redeemable preference share with no price series), so
+    it credits ``value_inr x units_received / units_held`` rupees per old share on the swap date.
+    """
+
+    instrument: str
+    units_received: Decimal
+    units_held: Decimal
+    value_inr: Decimal
+    value_basis: str
+    sources: tuple[TermSource, ...]
+
+    @property
+    def cash_per_share_held(self) -> Decimal:
+        """Rupees credited for every old share held."""
+        return self.value_inr * self.units_received / self.units_held
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +123,12 @@ class ShareSwapTerm:
     knowable_date: date
     sources: tuple[TermSource, ...]
     note: str | None = None
+    cash_legs: tuple[SchemeCashLeg, ...] = ()
+
+    @property
+    def cash_per_share_held(self) -> Decimal:
+        """Rupees of non-share consideration per old share held — zero for a pure share swap."""
+        return sum((leg.cash_per_share_held for leg in self.cash_legs), Decimal(0))
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +206,20 @@ def _swap(row: dict[str, Any]) -> ShareSwapTerm:
         knowable_date=_date(row, "knowable_date"),
         sources=parse_term_sources(row),
         note=row.get("note"),
+        cash_legs=tuple(_cash_leg(old, leg) for leg in row.get("cash_legs") or ()),
+    )
+
+
+def _cash_leg(old_isin: str, leg: dict[str, Any]) -> SchemeCashLeg:
+    """One non-share leg; ``value_inr`` must be a sourced, positive rupee value (never a float)."""
+    where = {**leg, "old_isin": old_isin}
+    return SchemeCashLeg(
+        instrument=_text(where, "instrument"),
+        units_received=_positive(where, "units_received"),
+        units_held=_positive(where, "units_held"),
+        value_inr=_positive(where, "value_inr"),
+        value_basis=_text(where, "value_basis"),
+        sources=parse_term_sources(where),
     )
 
 
@@ -221,6 +273,7 @@ def parse_term_sources(row: dict[str, Any]) -> tuple[TermSource, ...]:
                 line=None if line is None else int(line),
                 line_end=None if line_end is None else int(line_end),
                 url=entry.get("url"),
+                scanned=bool(entry.get("scanned", False)),
             )
         )
     return tuple(out)
