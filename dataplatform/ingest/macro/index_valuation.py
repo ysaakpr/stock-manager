@@ -237,6 +237,15 @@ def parse_index_valuation(
                 )
             )
 
+    facts, withheld = _withhold_ambiguous(facts)
+    if withheld:
+        _LOG.warning(
+            "macro.index_valuation_withheld",
+            source=source,
+            filename=filename,
+            subjects=", ".join(withheld),
+            reason="one index name published on several rows with different values",
+        )
     if session is None or not facts:
         raise ParseError("no index rows in close-all snapshot", filename=filename)
 
@@ -254,7 +263,35 @@ def parse_index_valuation(
         source=source,
         facts=tuple(facts),
         l0_key=l0_key,
+        withheld=withheld,
     )
+
+
+def _withhold_ambiguous(facts: list[MacroFact]) -> tuple[list[MacroFact], tuple[str, ...]]:
+    """Drop every fact of a subject the file publishes twice with different values.
+
+    The archive does this: the 2013-02-08 file lists `CNX Alpha Index` on two rows, the second
+    carrying what the day before was `CNX High Beta`'s level. Which row is the real index cannot be
+    told from the file, so neither is kept — choosing one would put a different index's history
+    under a name with no evidence it belongs there. A repeated row with identical values is kept
+    once. Returns the kept facts (file order) and the withheld `series_id` subjects, sorted.
+    """
+    by_id: dict[str, list[MacroFact]] = {}
+    for fact in facts:
+        by_id.setdefault(fact.series_id, []).append(fact)
+    ambiguous = {
+        sid.rsplit(".", 1)[0]
+        for sid, group in by_id.items()
+        if len({fact.value for fact in group}) > 1
+    }
+    kept: list[MacroFact] = []
+    seen: set[str] = set()
+    for fact in facts:
+        if fact.series_id.rsplit(".", 1)[0] in ambiguous or fact.series_id in seen:
+            continue
+        seen.add(fact.series_id)
+        kept.append(fact)
+    return kept, tuple(sorted(ambiguous))
 
 
 def published_index_names(payload: bytes, *, filename: str) -> tuple[str, ...]:

@@ -282,3 +282,21 @@ def test_coverage_is_per_session_and_unmapped_names_are_listed_separately(tmp_pa
     csv_path = tmp_path / "cov.csv"
     mb.write_coverage_csv(coverage, csv_path)
     assert len(csv_path.read_text().splitlines()) == len(plan) + 1
+
+
+def test_a_name_published_twice_with_different_values_is_withheld_not_guessed() -> None:
+    """The real 2013-02-08 file lists `CNX Alpha Index` twice; the second row is High Beta's."""
+    from dataplatform.ingest.macro import parse_index_valuation
+
+    header = FILES[date(2012, 10, 1)].read_text().splitlines()[0]
+    body = "\n".join(
+        [
+            header,
+            "CNX Low Volatility,08-02-2013,-,-,-,4563.87,-31.06,-0.68,1,1,19.87,3.48,1.46",
+            "CNX Alpha Index,08-02-2013,-,-,-,4713.18,-36.65,-0.77,1,1,23.07,3.6,0.65",
+            "CNX Alpha Index,08-02-2013,-,-,-,1572.9,-21.94,-1.38,1,1,22.39,0.96,1.18",
+        ]
+    ).encode()
+    release = parse_index_valuation(body, filename="ind_close_all_08022013.csv")
+    assert release.withheld == ("IN.NSE.CNX_ALPHA_INDEX",)
+    assert {f.series_id.rsplit(".", 1)[0] for f in release.facts} == {"IN.NSE.CNX_LOW_VOLATILITY"}

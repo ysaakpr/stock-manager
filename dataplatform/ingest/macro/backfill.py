@@ -384,6 +384,17 @@ class MacroBackfillRunner:
             self._sync.mark_normalized(SOURCE_ID, unit.session)
             self._sync.mark_published(SOURCE_ID, unit.session)
             self._commit()
+        except ValueError as exc:
+            # The store refused the release (a value conflicting with what the partition already
+            # holds). One session's refusal must reach the report, not end a 3,000-session run.
+            self._fail(
+                unit,
+                f"store refused: {exc}",
+                retryable=False,
+                report=report,
+                outcome=Outcome.REFUSED,
+            )
+            return
         except Exception:
             self._rollback()
             raise
@@ -508,7 +519,13 @@ def survey(
                     Outcome.PUBLISHED,
                     indices=len(names),
                     facts=len(release.facts),
-                    unmapped=tuple(n for n in names if not table.knows(n)),
+                    unmapped=tuple(dict.fromkeys(n for n in names if not table.knows(n))),
+                    detail=(
+                        f"withheld, published twice with different values: "
+                        f"{', '.join(release.withheld)}"
+                        if release.withheld
+                        else ""
+                    ),
                 )
             )
         elif state is SyncState.FAILED:
@@ -606,6 +623,10 @@ def render_report(
             f"- Reason: `{report.park_reason.value if report.park_reason else 'UNKNOWN'}`",
             f"- Detail: {report.park_detail or '(none recorded)'}",
         ]
+    partial = [line for line in published if line.detail]
+    if partial:
+        lines += ["", "## Published sessions with subjects withheld", ""]
+        lines += [f"- {p.session.isoformat()}: {p.detail}" for p in partial]
     gaps = [line for line in coverage if line.outcome not in (Outcome.PUBLISHED, Outcome.PENDING)]
     if gaps:
         lines += ["", "## Sessions not published, with cause", ""]
