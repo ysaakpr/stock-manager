@@ -39,7 +39,7 @@ CREATE TABLE paper_session (
 );
 
 COMMENT ON TABLE paper_session IS
-    'M13.1 · One row per paper book per trading date the daily paper session finished with. '
+    'X1 · M13.1 paper trading. One row per paper book per trading date the daily paper session finished with. '
     'COMPLETED: decided, with the orders placed on SimBroker and the policy state carried to the '
     'next session. SKIPPED_DATA_RED: the interlock refused the day (invariant #10). The paper book '
     'is rebuilt from these rows each run; it is never routed to a real broker.';
