@@ -29,8 +29,9 @@ links 06-21 to 06-20, and so on back to 2006. Each step is admitted only when al
    2-digit serial + check digit, and the serial counts re-issues: `…0101x` is the issuer's first
    equity ISIN and has never been re-issued, so no step back in time can cross its creation (every
    `isin_lineage` edge in the store goes from a lower serial to a higher one). For such an ISIN an
-   adjustment break is admitted when it is downward, small-gapped and corroborated by a stored
-   corporate action of the issuer in the step. For a re-issued ISIN (serial ≥ 02) a break may *be*
+   adjustment break is admitted when it is downward and small-gapped — the exchange adjusted *this*
+   security's previous close, and the ISIN cannot have changed — and rule 5 does not apply to it.
+   For a re-issued ISIN (serial ≥ 02) a break may *be*
    the re-issue, so the walk stops at it unless a stored action shows a bonus/rights/dividend on
    that ex-date and no split or face-value change; it also stops at any stored split/face-value
    change of the issuer, link or no link. Rows within `reissue_settlement` sessions after such a
@@ -43,7 +44,7 @@ links 06-21 to 06-20, and so on back to 2006. Each step is admitted only when al
    exactly as an adjustment break is.
 
 Measured on the ISIN era with the ISINs hidden (`pre_isin_promote validate`, anchors at 2013-01-01,
-2014-07-01 and 2016-01-01): 0 wrong of 550,363 / 992,280 / 1,414,788 admitted rows. Without rule 5
+2014-07-01 and 2016-01-01): 0 wrong of 551,459 / 995,306 / 1,422,131 admitted rows. Without rule 5
 the same run admitted 707 / 3,239 / 7,560 wrong rows; without the settlement margin, 39 / 60 / 111.
 
 A row reached by two chains naming different ISINs is admitted by neither. Every row not admitted

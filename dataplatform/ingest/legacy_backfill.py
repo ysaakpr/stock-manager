@@ -29,8 +29,11 @@ the only join key (invariant #2), so its rows cannot enter `prices_raw`. They ar
 still stored — L0 is the immutable record, storage is cheap, and this is the one chance to never
 re-fetch — and then enumerated into `prices_raw_quarantine`, which drops nothing. The per-year count
 of those unresolved rows is published by `promote`, because that number is the honest bound on how
-far back this platform can claim to reach. No symbol→ISIN mapping is offered: the only resolver
-available is a current-day listing, and every company delisted before today is absent from it.
+far back this platform can claim to reach. No symbol→ISIN mapping is offered *here*: the only
+resolver available then was a current-day listing, and every company delisted before today is
+absent from it. The later re-derivation `dataplatform.ingest.pre_isin_promote` (l1-widen) admits
+the E1 rows the exchange's own PREVCLOSE chain proves (`dataplatform.identity.pre_isin`) and keeps
+the rest quarantined under `isin_column_absent:<reason>` — it, not this, owns those partitions now.
 
 Resume is L0 plus the journal, not `sync_state`: a payload already under its key is skipped without
 a request, and so is a date the journal already records a 404 for. A second run over an

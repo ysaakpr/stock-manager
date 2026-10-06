@@ -242,8 +242,21 @@ def build_session(
                 tally["nse_lot_name"] += 1
                 put(_from_udiff(udiff, Exchange.NSE))
     deliv_ref = _ref(l0, NSE_DELIVERY, day, register)
+    vwaps: tuple[delivery.SessionVwapRow, ...] = ()
     if deliv_ref is not None and deliv_ref.source == delivery.DELIVERY_SOURCE_ID:
-        for vwap in delivery.parse_vwap_l0(l0, deliv_ref):
+        try:
+            vwaps = delivery.parse_vwap_l0(l0, deliv_ref)
+        except ParseError as exc:
+            # One source refused (the archive served 2021-11-03's file for 2021-11-04): its VWAPs
+            # are not written, and the session's other attributes still are. Counted and logged.
+            tally["vwap_payload_refused"] += 1
+            _LOG.warning(
+                "session_attributes.vwap_refused",
+                source=delivery.DELIVERY_SOURCE_ID,
+                date=day.isoformat(),
+                error=str(exc),
+            )
+        for vwap in vwaps:
             if vwap.avg_price is None:
                 tally["vwap_absent"] += 1
                 continue
