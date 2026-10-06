@@ -237,3 +237,30 @@ def test_an_undated_bundle_is_reported_and_writes_nothing(tmp_path: Path) -> Non
     report = rebuild_from_l0(start=session, end=session, l0=store, master=None, data_root=tmp_path)
     assert (report.bundles, report.built, len(report.undated)) == (1, 0, 1)
     assert not (tmp_path / "L1").exists() or not any((tmp_path / "L1").rglob("*.parquet"))
+
+
+def test_a_derived_isin_before_the_isin_era_is_not_a_session_statement(tmp_path: Path) -> None:
+    """Before 2011-06-22 the bhavcopy prints no ISIN, so a `prices_raw` row then is our derivation.
+
+    Building a `SessionIdentity` from it would label a derived ISIN as the exchange's statement.
+    """
+    from dataplatform.ingest.pr_bundle_l1 import ISIN_BHAVCOPY_START, load_session_identity
+
+    early = date(2010, 1, 4)
+    path = l1_partition_path("prices_raw", early, data_root=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect()
+    con.execute(
+        "CREATE TABLE t AS SELECT 'INE002A01018' AS isin, 'NSE' AS exchange, "
+        "'RELIANCE' AS symbol, 'EQ' AS series, DATE '2010-01-04' AS trade_date"
+    )
+    con.execute(f"COPY t TO '{path}' (FORMAT PARQUET)")
+    con.close()
+    store = L0Store(clock=FrozenClock(early), data_root=tmp_path)
+    assert early < ISIN_BHAVCOPY_START
+    assert load_session_identity(early, l0=store, data_root=tmp_path) is None
+    # The same row on an ISIN-era session is a statement.
+    _prices_raw(tmp_path, [("RELIANCE", "EQ", "INE002A01018")])
+    stated = load_session_identity(SESSION, l0=store, data_root=tmp_path)
+    assert stated is not None
+    assert stated.try_resolve("RELIANCE", "EQ", SESSION, exchange=Exchange.NSE) == "INE002A01018"

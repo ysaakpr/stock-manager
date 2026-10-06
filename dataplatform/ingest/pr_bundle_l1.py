@@ -22,8 +22,9 @@ enumerated reason (`QuarantineReason`). **A row is never dropped**: per session 
 
 1. `identity.SessionIdentity` — the exchange's own statement of which ISIN traded as
    `(symbol, series)` *on that session*, built from that session's NSE bhavcopy: the L1
-   `prices_raw` partition when one exists (2011-06-22 onward), else the L0 `nse_bhavcopy_legacy`
-   payload for the date (2010-01-04 .. 2011-06-21, which L0 holds and L1 does not). A
+   `prices_raw` partition, else the L0 `nse_bhavcopy_legacy` payload for the date. Only from
+   `ISIN_BHAVCOPY_START` (2011-06-22): before it the bhavcopy prints no ISIN, so there is no
+   exchange statement to read, whatever ISIN a derived `prices_raw` row may carry. A
    `(symbol, series)` the file stated twice is refused by `SessionIdentity`, never picked.
 2. Only where the session says nothing, `IdentityMaster.try_resolve_in_force(symbol, session)` —
    the as-of symbol windows moved along `isin_lineage`. A master ambiguity is quarantined as
@@ -93,6 +94,7 @@ __all__ = [
     "INDEX_EOD_DATASET",
     "INDEX_EOD_SCHEMA",
     "INDEX_IDS",
+    "ISIN_BHAVCOPY_START",
     "MASTER_SERIES",
     "PR_DATASETS",
     "QUARANTINE_DATASET",
@@ -122,6 +124,15 @@ QUARANTINE_DATASET: Final = "pr_bundle_quarantine"
 
 #: The bhavcopy source whose L0 payload stands in for `prices_raw` before L1 begins (2011-06-22).
 _LEGACY_BHAVCOPY_SOURCE: Final = "nse_bhavcopy_legacy"
+
+#: The first session whose NSE bhavcopy prints an ISIN. Before it the archive's file is
+#: `SYMBOL,SERIES,…,TIMESTAMP` with no ISIN column (measured on every 2010-2011 payload in L0), so
+#: any ISIN a `prices_raw` row carries for an earlier date was assigned by this platform's own
+#: resolution — not the exchange's statement, and not something `SessionIdentity` may be built
+#: from. On 2026-10-06 such partitions appeared mid-build (another task backfilling 2006-2011),
+#: which is how this boundary was found; earlier sessions therefore resolve through the master
+#: alone, labelled `identity_master`.
+ISIN_BHAVCOPY_START: Final = date(2011, 6, 22)
 
 _Q4: Final = Decimal("0.0001")
 
@@ -311,8 +322,12 @@ def load_session_identity(
 ) -> SessionIdentity | None:
     """The session's NSE bhavcopy statement, from L1 `prices_raw` or else the L0 legacy payload.
 
-    `None` when neither holds the session. What it never does: read another session's file.
+    `None` when neither holds the session, and always `None` before `ISIN_BHAVCOPY_START`.
+    What it never does: read another session's file, or treat an ISIN this platform derived as
+    one the exchange stated.
     """
+    if session < ISIN_BHAVCOPY_START:
+        return None
     path = l1_partition_path("prices_raw", session, data_root=data_root)
     statements: list[SessionStatementRow] = []
     if path.exists():
