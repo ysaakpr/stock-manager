@@ -17,7 +17,7 @@ Offline: no database, no network, no scheduler started.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Final
 
@@ -248,9 +248,16 @@ def test_the_evening_tri_fires_each_weekday_clear_of_the_snapshots_niftyindices_
     """
     week = MONDAY_EVENING.replace(hour=0)
     fires = [fire for fire, _ in _windows(TRI_EVENING, week, week + timedelta(days=7))]
-    assert [(fire.strftime("%a"), fire.hour, fire.minute) for fire in fires] == [
-        (day, hour, 50) for day in ("Mon", "Tue", "Wed", "Thu", "Fri") for hour in (19, 20)
+    assert [f"{fire:%a %H:%M}" for fire in fires] == [
+        f"{day} {time}"
+        for day in ("Mon", "Tue", "Wed", "Thu", "Fri")
+        for time in ("19:50", "20:50", "21:30")
     ]
+    # Every attempt, budget included, is over before the paper session decides D at 21:45.
+    assert all(
+        end.time() <= time(21, 45)
+        for _, end in _windows(TRI_EVENING, week, week + timedelta(days=7))
+    )
     snapshot = _windows(DAILY_SNAPSHOT, week, week + timedelta(days=7))
     for fire, end in _windows(TRI_EVENING, week, week + timedelta(days=7)):
         for theirs_start, theirs_end in snapshot:

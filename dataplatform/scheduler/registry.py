@@ -25,6 +25,7 @@ from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 
 from dataplatform.clock import Clock
@@ -145,15 +146,21 @@ class Job:
     def trigger(self, timezone: ZoneInfo | None = None) -> Any:
         """This job's cron expression as an APScheduler trigger, in `timezone`.
 
-        Raises `ValueError` naming the job when the expression is not a valid 5-field crontab —
+        `cron` is one 5-field crontab, or several joined by `;` when one expression cannot say the
+        schedule (19:50, 20:50 and 21:30 share no minute), which fire as their union through
+        `OrTrigger`. One job either way, so one lock, one health line and one run history.
+
+        Raises `ValueError` naming the job when any expression is not a valid 5-field crontab —
         the whole reason this is called from `__post_init__`.
         """
+        expressions = [part.strip() for part in self.cron.split(";")]
         try:
-            return CronTrigger.from_crontab(self.cron, timezone=timezone)
+            triggers = [CronTrigger.from_crontab(part, timezone=timezone) for part in expressions]
         except ValueError as error:
             raise ValueError(
                 f"job {self.name!r} has an invalid cron expression {self.cron!r}: {error}"
             ) from error
+        return triggers[0] if len(triggers) == 1 else OrTrigger(triggers)
 
 
 class JobRegistry:
@@ -603,16 +610,18 @@ def tri_evening(context: JobContext) -> None:
     run_tri_evening_job(context)
 
 
-#: The same-evening TRI refresh. 19:50 and 20:50 IST Monday to Friday. NSE Indices disseminates
-#: session D's TRI on D's evening — measured: D absent at 16:08 IST (2026-10-05), D present at
-#: 20:47 IST (2026-10-06) — but the earliest time inside that bracket is unmeasured, so 19:50 is the
-#: first attempt and 20:50, after the measured point, the retry; a fire after a landed session is
-#: a no-op that makes no request. 19:50 also clears `daily_snapshot` (19:15, 30-minute budget),
-#: which leases niftyindices.com too. The Saturday `tri_refresh` is unchanged and still the
-#: backstop; this job's one-session budget is the tighter one `lag_budgets` keeps.
+#: The same-evening TRI refresh. 19:50, 20:50 and 21:30 IST Monday to Friday. NSE Indices
+#: disseminates session D's TRI on D's evening — measured: D absent at 16:08 IST (2026-10-05), D
+#: present at 20:47 IST (2026-10-06) — but the earliest time inside that bracket is unmeasured, so
+#: 19:50 is the first attempt, 20:50 (after the measured point) the retry and 21:30 the last
+#: chance before the paper session decides D at 21:45; a fire after a landed session is a no-op
+#: that makes no request. `tri_evening.first_landed` records which fire landed each session.
+#: 19:50 also clears `daily_snapshot` (19:15, 30-minute budget), which leases niftyindices.com
+#: too. The Saturday `tri_refresh` is unchanged and still the backstop; this job's one-session
+#: budget is the tighter one `lag_budgets` keeps.
 TRI_EVENING = Job(
     name="tri_evening",
-    cron="50 19,20 * * mon-fri",
+    cron="50 19,20 * * mon-fri; 30 21 * * mon-fri",
     fn=tri_evening,
     timeout=timedelta(minutes=10),
     description="Weekday same-evening benchmark TRI for the latest session (M13.7)",
