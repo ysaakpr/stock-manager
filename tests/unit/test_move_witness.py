@@ -23,6 +23,7 @@ from dataplatform.quality.rules.move_witness import (
     MOVE_WITNESS_CHECK,
     MoveWitnessRule,
     applicable_witnesses,
+    best_strength,
     witness_strength,
 )
 from dataplatform.quality.rules.unexplained_move import UNEXPLAINED_MOVE_CHECK
@@ -86,12 +87,17 @@ def test_a_band_hit_counts_only_on_its_own_side() -> None:
     [
         ("corp_ind:XB", "strong"),
         ("corp_ind:XR", "strong"),
-        ("corp_ind:XO", "strong"),
+        ("corp_ind:XO", "other"),
+        ("corp_ind:XDO", "other"),
         ("corp_ind:XDBO", "strong"),
         ("corp_ind:XD", "weak"),
         ("corp_ind:XI", "weak"),
         ("band_hit:H", "band"),
-        ("ca_broadcast", "strong"),
+        ("ca_broadcast:SPLIT", "strong"),
+        ("ca_broadcast:BONUS", "strong"),
+        ("ca_broadcast:BUYBACK", "other"),
+        ("ca_broadcast:DIVIDEND", "weak"),
+        ("ca_broadcast:OTHER", "weak"),
     ],
 )
 def test_witness_strength(witness: str, strength: str) -> None:
@@ -101,6 +107,14 @@ def test_witness_strength(witness: str, strength: str) -> None:
 def test_an_unknown_witness_raises() -> None:
     with pytest.raises(ValueError, match="unknown move witness"):
         witness_strength("rumour:yes")
+    with pytest.raises(ValueError, match="unknown move witness"):
+        witness_strength("band_hit:X")
+
+
+def test_best_strength_orders_strong_band_other_weak() -> None:
+    assert best_strength(["corp_ind:XD", "band_hit:H"]) == "band"
+    assert best_strength(["corp_ind:XO", "corp_ind:XD"]) == "other"
+    assert best_strength(["band_hit:H", "ca_broadcast:SPLIT"]) == "strong"
 
 
 def test_threshold_is_a_construction_argument() -> None:
@@ -123,7 +137,12 @@ def test_read_move_witnesses_reads_all_three_datasets_point_in_time(tmp_path: Pa
     marks = pa.schema([("isin", pa.string()), ("session", pa.date32()), ("corp_ind", pa.string())])
     hits = pa.schema([("isin", pa.string()), ("session", pa.date32()), ("side", pa.string())])
     bc = pa.schema(
-        [("isin", pa.string()), ("knowable_date", pa.date32()), ("ex_date", pa.date32())]
+        [
+            ("isin", pa.string()),
+            ("knowable_date", pa.date32()),
+            ("ex_date", pa.date32()),
+            ("purpose", pa.string()),
+        ]
     )
     _write(
         tmp_path,
@@ -144,14 +163,40 @@ def test_read_move_witnesses_reads_all_three_datasets_point_in_time(tmp_path: Pa
         date(2015, 6, 1),
         bc,
         [
-            {"isin": INFY, "knowable_date": date(2015, 6, 1), "ex_date": SESSION},
+            {
+                "isin": INFY,
+                "knowable_date": date(2015, 6, 1),
+                "ex_date": SESSION,
+                "purpose": "BONUS 1:1 AND DIVIDEND RS 29.50",
+            },
             # broadcast after its own ex-date: not knowable when the move happened
-            {"isin": "INE467B01029", "knowable_date": date(2015, 6, 20), "ex_date": SESSION},
+            {
+                "isin": "INE467B01029",
+                "knowable_date": date(2015, 6, 20),
+                "ex_date": SESSION,
+                "purpose": "SPLIT",
+            },
         ],
     )
     found = read_move_witnesses(SESSION, SESSION, data_root=tmp_path)
-    assert found == {(INFY, SESSION): ("band_hit:L", "ca_broadcast", "corp_ind:XDBO")}
+    assert found == {
+        (INFY, SESSION): (
+            "band_hit:L",
+            "ca_broadcast:BONUS",
+            "ca_broadcast:DIVIDEND",
+            "corp_ind:XDBO",
+        )
+    }
 
 
 def test_read_move_witnesses_on_an_unbuilt_lake_is_empty(tmp_path: Path) -> None:
     assert read_move_witnesses(SESSION, SESSION, data_root=tmp_path) == {}
+
+
+def test_nses_abbreviated_face_value_split_is_tagged_a_split() -> None:
+    """`FVSPLT`/`FV SPLT` was untagged before 2026-10-06, so a split ex-date read as `OTHER`."""
+    from dataplatform.ingest.nse.pr_bundle.survey import purpose_tags
+
+    assert "SPLIT" in purpose_tags("FVSPLT FRM RS 10 TO RE 1")
+    assert "SPLIT" in purpose_tags("FV SPLT FRM RS 10 TO RS 2")
+    assert witness_strength("ca_broadcast:SPLIT") == "strong"

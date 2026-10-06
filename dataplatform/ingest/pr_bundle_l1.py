@@ -282,9 +282,15 @@ INDEX_IDS: Final[Mapping[str, str]] = {
 
 def index_id_for(index_name: str) -> str:
     """The stable id of a published index name: the rename lineage above, else the name itself
-    upper-cased with whitespace collapsed."""
-    key = " ".join(index_name.upper().split())
-    return INDEX_IDS.get(key, key)
+    with whitespace collapsed — **case kept**.
+
+    Case is not folded for an unmapped name because NSE has reused a name in another case for a
+    different series: `Nifty Midcap 100` (2015-11-09..2016-03-31) closed at 18,757.00, and
+    `NIFTY MIDCAP 100` (from 2018-01-02, after the free-float methodology change) opened against a
+    previous close of 12,752.60. Folding them would splice two indices into one series.
+    """
+    collapsed = " ".join(index_name.split())
+    return INDEX_IDS.get(collapsed.upper(), collapsed)
 
 
 # ── identity ─────────────────────────────────────────────────────────────────────────────────

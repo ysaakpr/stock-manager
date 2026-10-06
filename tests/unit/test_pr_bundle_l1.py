@@ -209,7 +209,9 @@ def test_index_rows_carry_a_stable_id_across_renames(built: Path) -> None:
     assert rows["India VIX"]["index_id"] == "INDIA VIX"
     assert index_id_for("S&P CNX Nifty") == index_id_for("CNX Nifty") == "NIFTY 50"
     assert index_id_for("CNX Nifty Junior") == "NIFTY NEXT 50"
-    assert index_id_for("Nifty  Midcap 50") == "NIFTY MIDCAP 50"
+    assert index_id_for("Nifty  Midcap 50") == "Nifty Midcap 50"
+    # Two different series NSE published under one name in two cases must stay two ids.
+    assert index_id_for("Nifty Midcap 100") != index_id_for("NIFTY MIDCAP 100")
 
 
 def test_a_member_absent_from_the_bundle_removes_its_partition(built: Path) -> None:

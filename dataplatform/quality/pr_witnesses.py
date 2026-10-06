@@ -6,7 +6,8 @@ PR-bundle datasets (`dataplatform.ingest.pr_bundle_l1`):
 
 * `pr_security_marks.corp_ind` → `corp_ind:<code>`
 * `pr_band_hits.side`          → `band_hit:H` / `band_hit:L`
-* `pr_ca_broadcasts.ex_date`   → `ca_broadcast` on the ex-date session
+* `pr_ca_broadcasts.ex_date`   → `ca_broadcast:<TAG>` on the ex-date session, one per coarse
+                                 purpose tag (`pr_bundle.survey.purpose_tags`; `OTHER` if none)
 
 `measure` is the read-only study the 2026-10-06 inventory quotes: every NSE close-to-close move
 in `prices_raw` beyond the sentinel's threshold, minus those a `corporate_actions` ex-date
@@ -32,12 +33,13 @@ from pathlib import Path
 
 import duckdb
 
+from dataplatform.ingest.nse.pr_bundle.survey import purpose_tags
 from dataplatform.ingest.pr_bundle_l1 import (
     BAND_HITS_DATASET,
     CA_BROADCASTS_DATASET,
     SECURITY_MARKS_DATASET,
 )
-from dataplatform.quality.rules.move_witness import MoveWitnessRule, witness_strength
+from dataplatform.quality.rules.move_witness import MoveWitnessRule, best_strength
 from dataplatform.quality.rules.unexplained_move import (
     DEFAULT_MOVE_THRESHOLD,
     UnexplainedMoveRule,
@@ -75,7 +77,7 @@ def read_move_witnesses(
             ),
             (
                 CA_BROADCASTS_DATASET,
-                "SELECT DISTINCT isin, ex_date, 'ca_broadcast' FROM read_parquet($g) "
+                "SELECT DISTINCT isin, ex_date, purpose FROM read_parquet($g) "
                 "WHERE ex_date BETWEEN $s AND $e AND knowable_date <= ex_date",
             ),
         )
@@ -85,10 +87,14 @@ def read_move_witnesses(
             ):
                 continue  # dataset not built: no witnesses, rather than a DuckDB glob error
             glob = _glob(dataset, data_root)
-            for isin, session, witness in con.execute(
+            for isin, session, value in con.execute(
                 sql, {"g": glob, "s": start, "e": end}
             ).fetchall():
-                found[(str(isin), session)].add(str(witness))
+                if dataset == CA_BROADCASTS_DATASET:
+                    tags = purpose_tags(str(value)) or ("OTHER",)
+                    found[(str(isin), session)].update(f"ca_broadcast:{tag}" for tag in tags)
+                else:
+                    found[(str(isin), session)].add(str(value))
     finally:
         con.close()
     return {key: tuple(sorted(value)) for key, value in found.items()}
@@ -118,14 +124,14 @@ def measure(
         ).fetchall()
     finally:
         con.close()
-    series_of: dict[tuple[str, date], str] = {}
+    series_of: dict[tuple[str, date], set[str]] = defaultdict(set)
     moves: list[CloseToCloseMove] = []
     ca_explained = 0
     for isin, session, series, prev_close, close in rows:
         if session in ca_ex_dates.get(str(isin), set()):
             ca_explained += 1
             continue
-        series_of[(str(isin), session)] = str(series)
+        series_of[(str(isin), session)].add(str(series))
         moves.append(
             CloseToCloseMove(
                 isin=str(isin),
@@ -145,28 +151,19 @@ def measure(
     for finding in flagged:
         assert finding.isin is not None
         by_year[finding.logical_date.year]["flagged"] += 1
-        by_series[series_of[(finding.isin, finding.logical_date)]] += 1
+        by_series.update(series_of[(finding.isin, finding.logical_date)])
     kinds: Counter[str] = Counter()
     strength: Counter[str] = Counter()
     eq_annotated: Counter[str] = Counter()
     for finding in annotated:
         assert finding.isin is not None
         found = [str(w) for w in finding.detail["witnesses"]]  # type: ignore[attr-defined]
-        best = (
-            "strong"
-            if any(witness_strength(w) == "strong" for w in found)
-            else "band"
-            if any(witness_strength(w) == "band" for w in found)
-            else "weak"
-        )
+        best = best_strength(found)
         strength[best] += 1
         by_year[finding.logical_date.year][f"witness_{best}"] += 1
-        if series_of[(finding.isin, finding.logical_date)] == "EQ":
+        if "EQ" in series_of[(finding.isin, finding.logical_date)]:
             eq_annotated[best] += 1
-        for w in found:
-            kinds[
-                w.split(":")[0] + (":" + w.split(":")[1] if w.startswith("corp_ind") else "")
-            ] += 1
+        kinds.update(found)
     return {
         "range": [start.isoformat(), end.isoformat()],
         "threshold": str(threshold),
