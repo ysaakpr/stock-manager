@@ -44,6 +44,7 @@ from dataplatform.ingest.shareholding import (
     PLEDGE_BREACH_PCT,
     SHAREHOLDING_DATASET,
     SOURCE_ID,
+    Bc3Status,
     ShareholdingRow,
     ShareholdingSnapshot,
     SyncTracker,
@@ -351,8 +352,8 @@ def test_bc3_flags_exactly_the_company_over_the_pledge_threshold(
 ) -> None:
     """§5.3 BC3: promoter pledge >50% is an integrity break. Only the pledged company qualifies."""
     assert {row.isin for row in parsed.breaching()} == {PLEDGED}
-    assert _row(parsed, PLEDGED).breaches_bc3 is True
-    assert _row(parsed, RELIANCE).breaches_bc3 is False
+    assert _row(parsed, PLEDGED).bc3_status is Bc3Status.BREACH
+    assert _row(parsed, RELIANCE).bc3_status is Bc3Status.CLEAR
 
 
 def test_the_bc3_threshold_is_a_strict_boundary() -> None:
@@ -360,8 +361,8 @@ def test_the_bc3_threshold_is_a_strict_boundary() -> None:
     assert Decimal("50") == PLEDGE_BREACH_PCT
     at = parse(_record(pledgeShares_prcnt="50.00"), filename="x.json").rows[0]
     over = parse(_record(pledgeShares_prcnt="50.01"), filename="x.json").rows[0]
-    assert at.breaches_bc3 is False
-    assert over.breaches_bc3 is True
+    assert at.bc3_status is Bc3Status.CLEAR
+    assert over.bc3_status is Bc3Status.BREACH
 
 
 def test_a_pledge_outside_0_to_100_is_rejected() -> None:
@@ -434,8 +435,16 @@ def test_the_bc3_break_is_invisible_until_its_filing_is_knowable(
     """A monitor scanning as of 11-May sees no breach; as of 12-May it sees exactly one."""
     write_l1(parsed, data_root=tmp_path)
 
-    before = [row for row in read_pit(date(2026, 5, 11), data_root=tmp_path) if row.breaches_bc3]
-    on = [row for row in read_pit(date(2026, 5, 12), data_root=tmp_path) if row.breaches_bc3]
+    before = [
+        row
+        for row in read_pit(date(2026, 5, 11), data_root=tmp_path)
+        if row.bc3_status is Bc3Status.BREACH
+    ]
+    on = [
+        row
+        for row in read_pit(date(2026, 5, 12), data_root=tmp_path)
+        if row.bc3_status is Bc3Status.BREACH
+    ]
 
     assert before == []
     assert [row.isin for row in on] == [PLEDGED]

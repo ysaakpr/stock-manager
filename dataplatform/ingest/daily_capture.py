@@ -50,9 +50,11 @@ resolve through the D2 master and quarantine what it does not know.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import math
+import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -63,8 +65,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 from dataplatform.alerts import Alerter, AlertOutcome, Severity, build_alerter
-from dataplatform.clock import Clock
-from dataplatform.config import Settings
+from dataplatform.clock import Clock, SystemClock
+from dataplatform.config import Settings, get_settings
 from dataplatform.identity.master import IdentityMaster, IdentityStore
 from dataplatform.ingest import announcements as ann
 from dataplatform.ingest import gdelt, rss, shareholding
@@ -78,10 +80,11 @@ from dataplatform.ingest.news import NewsBatch, write_l1_merged
 from dataplatform.ingest.nse import deals, fii_dii, fo_bhavcopy
 from dataplatform.ingest.source_register import Source, SourceRegister, Status
 from dataplatform.ingest.source_register import load as load_register
-from dataplatform.logging import get_logger
+from dataplatform.logging import configure_logging, get_logger
+from dataplatform.quality.sentinel import QualityFinding, persist_findings
 from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store import fo_aggregates
-from dataplatform.store.db import connection
+from dataplatform.store.db import Connection, connection
 from dataplatform.store.l0 import L0Ref, L0Store
 
 if TYPE_CHECKING:  # imported lazily by the registry to avoid a scheduler→ingest import cycle
@@ -107,7 +110,9 @@ __all__ = [
     "capture_fo_bhavcopy",
     "capture_news",
     "capture_shareholding",
+    "main",
     "owed_session",
+    "rederive_shareholding",
     "run_announcements_capture",
     "run_announcements_capture_job",
     "run_news_capture",
@@ -235,6 +240,9 @@ class CaptureContext:
     commit: Callable[[], None] = lambda: None
     data_root: Path | None = None
     scrip_index: Callable[[], Mapping[str, str]] | None = None
+    #: Where D7 findings a capture raises go. Production lands them in `quality_flag` on the same
+    #: connection as `sync_state`, so they commit with the publish (`_production`).
+    raise_findings: Callable[[Sequence[QualityFinding]], None] = lambda _findings: None
 
     def bse_scrip_index(self) -> Mapping[str, str]:
         """The BSE scrip→ISIN map, from the injected one or built from the D2 master."""
@@ -799,30 +807,61 @@ def capture_shareholding(
     except Exception as exc:
         return _fail(ctx, source, poll_date, f"{type(exc).__name__}: {exc}", requests=requests)
     return _land(
-        ctx, source, poll_date, ref, lambda: _merge_shareholding(ctx, snapshot), requests=requests
+        ctx, source, poll_date, ref, lambda: _write_shareholding(ctx, snapshot), requests=requests
     )
 
 
-def _merge_shareholding(ctx: CaptureContext, snapshot: shareholding.ShareholdingSnapshot) -> int:
-    by_filing: dict[date, dict[tuple[str, date], shareholding.ShareholdingRow]] = {}
-    for row in snapshot.rows:
-        by_filing.setdefault(row.filing_date, {})[(row.isin, row.period_end)] = row
-    for filing_date, fresh in sorted(by_filing.items()):
-        try:
-            held = shareholding.read_l1(filing_date, data_root=ctx.data_root)
-        except FileNotFoundError:
-            held = ()
-        merged = {(row.isin, row.period_end): row for row in held}
-        merged.update(fresh)
-        shareholding.write_l1(
-            shareholding.ShareholdingSnapshot(
-                source=snapshot.source,
-                l0_key=snapshot.l0_key,
-                rows=tuple(sorted(merged.values(), key=lambda row: (row.isin, row.period_end))),
-            ),
-            data_root=ctx.data_root,
-        )
+def _write_shareholding(ctx: CaptureContext, snapshot: shareholding.ShareholdingSnapshot) -> int:
+    """Merge a poll into L1 and raise its BC3 / no-ISIN findings (D17: never silent)."""
+    shareholding.merge_l1(snapshot, data_root=ctx.data_root)
+    ctx.raise_findings(shareholding.quality_findings(snapshot))
     return len(snapshot.rows)
+
+
+def rederive_shareholding(
+    ctx: CaptureContext, *, start: date | None = None, end: date | None = None
+) -> CaptureReport:
+    """Re-derive L1 `shareholding` from every master payload L0 holds — zero requests.
+
+    What it does: walks the source's L0 payloads in poll order and, for each, parses it and merges
+    it into the filing-date partitions exactly as the live poll would, raising the same findings.
+    A poll date not yet PUBLISHED is driven to PUBLISHED through `_land`; one already PUBLISHED has
+    its rows merged again (idempotent) and stays PUBLISHED. A payload that does not parse fails its
+    own date and the walk goes on.
+    What it never does: open a socket — it has no fetcher — or modify L0.
+    """
+    report = CaptureReport(job="shareholding_rederive")
+    source = shareholding.SOURCE_ID
+    for ref in ctx.l0.iter_refs(source, start=start, end=end):
+        day = ref.logical_date
+        try:
+            snapshot = shareholding.parse_l0(ctx.l0, ref)
+        except Exception as exc:
+            report.outcomes.append(_fail(ctx, source, day, f"{type(exc).__name__}: {exc}"))
+            continue
+        if not _published(ctx, source, day):
+            report.outcomes.append(
+                _land(
+                    ctx, source, day, ref, partial(_write_shareholding, ctx, snapshot), requests=0
+                )
+            )
+            continue
+        try:
+            rows = _write_shareholding(ctx, snapshot)
+        except Exception as exc:
+            report.outcomes.append(_fail(ctx, source, day, f"{type(exc).__name__}: {exc}"))
+            continue
+        ctx.commit()
+        report.outcomes.append(
+            CaptureOutcome(
+                source,
+                day,
+                CaptureStatus.ALREADY_PUBLISHED,
+                rows=rows,
+                detail=f"L1 re-derived from {ref.key}",
+            )
+        )
+    return report
 
 
 def run_shareholding_poll(ctx: CaptureContext) -> CaptureReport:
@@ -1272,6 +1311,10 @@ def _alert_failures(ctx: CaptureContext, report: CaptureReport) -> int:
     return sent
 
 
+def _persist_findings(conn: Connection, findings: Sequence[QualityFinding], clock: Clock) -> None:
+    persist_findings(conn, findings, clock=clock)
+
+
 @contextmanager
 def _production(context: JobContext) -> Iterator[CaptureContext]:
     """The real wiring: the declared lake, Postgres sync state, leased fetchers, the D2 master."""
@@ -1317,6 +1360,7 @@ def _production(context: JobContext) -> Iterator[CaptureContext]:
             master=master,
             commit=conn.commit,
             data_root=settings.data_root,
+            raise_findings=lambda findings: _persist_findings(conn, findings, clock),
         )
         conn.commit()
 
@@ -1358,3 +1402,49 @@ def run_announcements_capture_job(context: JobContext) -> None:
 def run_news_capture_job(context: JobContext) -> None:
     """Scheduler body for `news_capture`."""
     _run_job(context, run_news_capture)
+
+
+# ── CLI: offline re-derivation ────────────────────────────────────────────────────────────────
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """`python -m dataplatform.ingest.daily_capture rederive-shareholding [--from D] [--to D]`.
+
+    Rebuilds L1 `shareholding` from the master payloads already in L0, against the configured lake
+    and Postgres, with no fetcher at all. Exit 0 when every payload landed, 1 when any failed (each
+    failure is on its `sync_state` row).
+    """
+    parser = argparse.ArgumentParser(
+        prog="python -m dataplatform.ingest.daily_capture",
+        description="Offline re-derivation of daily-capture datasets from L0 (zero requests).",
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    rederive = commands.add_parser(
+        "rederive-shareholding", help="rebuild L1 shareholding from every L0 master payload"
+    )
+    rederive.add_argument("--from", dest="start", type=date.fromisoformat, default=None)
+    rederive.add_argument("--to", dest="end", type=date.fromisoformat, default=None)
+    args = parser.parse_args(argv)
+    configure_logging()
+
+    from uuid import uuid4
+
+    from dataplatform.scheduler.registry import JobContext
+
+    settings = get_settings()
+    context = JobContext(
+        job_name="shareholding_rederive",
+        run_id=uuid4(),
+        clock=SystemClock(settings.tzinfo),
+        settings=settings,
+    )
+    with _production(context) as ctx:
+        report = rederive_shareholding(ctx, start=args.start, end=args.end)
+    print(report.summary())
+    for outcome in report.failed:
+        print(f"FAILED {outcome.source} {outcome.logical_date}: {outcome.detail}", file=sys.stderr)
+    return 1 if report.failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
