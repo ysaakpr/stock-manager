@@ -15,6 +15,9 @@ package opens the bundle (`bundle.py`), and parses the four members W2 targets:
               unfetchable while three years of it sat in the lake.
 * `mcap.py` — daily issue size, market cap and last-trade-date. ~2024-07 onward.
 * `bh.py`   — the securities that hit a daily price band, 2010-01-04 onward (X2, for H2).
+* `pd.py`   — the price-detail report: every NSE index's OHLC and 52-week range (India VIX
+              included), and per security the `CORP_IND` ex-marker, the NIFTY 50 flag and the
+              published 52-week range. 2010-01-04 onward, one header shape throughout.
 
 and one module that consumes a reader rather than being one:
 
@@ -23,12 +26,15 @@ and one module that consumes a reader rather than being one:
               counts, the reconstitution events the series makes observable, calendar contiguity,
               and the dated sectoral assignments.
 
-Every other member is registered by name in `MemberKind` and parsed by nothing yet.
+Every other member is registered by name in `MemberKind` and parsed by nothing yet; the
+2026-10-06 inventory (`ops/gates/pr-bundle-inventory-2026-10-06.md`) says which are redundant.
+`dataplatform.ingest.pr_bundle_l1` promotes `bh`, `pd` and `bc` to ISIN-keyed L1 datasets.
 
 **Nothing in this package reads a clock.** A corporate action's knowable date comes from the
 bundle it was published in, never from ingest time — see `PrBundle.publication_date`.
 
-**Nothing in this package resolves a symbol to an ISIN.** Every member here is symbol-keyed and
+**Nothing in this package resolves a symbol to an ISIN** (`pr_bundle_l1` does, through the identity
+module). Every member here is symbol-keyed and
 ISIN is the only join key (invariant #2), so no row this package produces can be joined to
 `security_master` yet. Doing it through a present-day listing would be survivorship-biased; it is
 W4 identity work, gated on a point-in-time symbol master.
@@ -98,6 +104,14 @@ from dataplatform.ingest.nse.pr_bundle.membership import (
     render_census,
     traded_universe,
 )
+from dataplatform.ingest.nse.pr_bundle.pd import (
+    PD_COLUMNS,
+    PdFile,
+    PdIndexRow,
+    PdSecurityRow,
+    parse_pd,
+    parse_pd_bundle,
+)
 
 __all__ = [
     "ARCHIVE_START",
@@ -113,6 +127,7 @@ __all__ = [
     "MCAP_COLUMNS",
     "MCAP_ERA_START",
     "NOMINAL_SIZES",
+    "PD_COLUMNS",
     "PR_BUNDLE_SOURCE_ID",
     "SECTORAL_INDICES",
     "URL_TEMPLATE",
@@ -132,6 +147,9 @@ __all__ = [
     "MemberKind",
     "MembershipCensus",
     "MembershipChange",
+    "PdFile",
+    "PdIndexRow",
+    "PdSecurityRow",
     "PrBundle",
     "RecoveredBundle",
     "SectorMove",
@@ -148,6 +166,8 @@ __all__ = [
     "parse_ix_bundle",
     "parse_mcap",
     "parse_mcap_bundle",
+    "parse_pd",
+    "parse_pd_bundle",
     "render_census",
     "traded_universe",
     "url_for",

@@ -1,0 +1,119 @@
+{
+  "era": "trailing_header_cell",
+  "session": "2010-05-14",
+  "archive_filename": "PR140510.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR140510.zip",
+  "why_this_era": "the one file whose header carries a 17th, empty cell; every row is 16 cells",
+  "reduced_from_l0": true,
+  "original_bytes": 277820,
+  "original_sha256": "88cad42d449bafe5b0b0de113c0650ddb8991c9a978c44cc3792a871e0cb83c7",
+  "original_members": [
+    {
+      "name": "fo14052010.csv",
+      "bytes": 70041
+    },
+    {
+      "name": "fo14052010.doc",
+      "bytes": 293888
+    },
+    {
+      "name": "Gl140510.csv",
+      "bytes": 5634
+    },
+    {
+      "name": "help.txt",
+      "bytes": 3510
+    },
+    {
+      "name": "HL140510.csv",
+      "bytes": 1213
+    },
+    {
+      "name": "Ix140510.csv",
+      "bytes": 48936
+    },
+    {
+      "name": "NPD140510.txt",
+      "bytes": 3546
+    },
+    {
+      "name": "nuver.txt",
+      "bytes": 2670
+    },
+    {
+      "name": "op14052010.csv",
+      "bytes": 264485
+    },
+    {
+      "name": "Pd140510.csv",
+      "bytes": 150590
+    },
+    {
+      "name": "Pr140510.csv",
+      "bytes": 135878
+    },
+    {
+      "name": "rdm.doc",
+      "bytes": 31744
+    },
+    {
+      "name": "Rdm_help.txt",
+      "bytes": 705
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 3092
+    },
+    {
+      "name": "RPD140510.csv",
+      "bytes": 203
+    },
+    {
+      "name": "Rtt140510.csv",
+      "bytes": 55
+    },
+    {
+      "name": "Tt140510.csv",
+      "bytes": 2228
+    },
+    {
+      "name": "cd14052010.doc",
+      "bytes": 51712
+    },
+    {
+      "name": "cf14052010.csv",
+      "bytes": 2040
+    },
+    {
+      "name": "An140510.txt",
+      "bytes": 71876
+    },
+    {
+      "name": "Bc140510.csv",
+      "bytes": 15958
+    },
+    {
+      "name": "bh14052010.csv",
+      "bytes": 2045
+    },
+    {
+      "name": "Bm140510.txt",
+      "bytes": 14191
+    },
+    {
+      "name": "etf140510.csv",
+      "bytes": 3604
+    },
+    {
+      "name": "ffix140510.csv",
+      "bytes": 41581
+    }
+  ],
+  "members_kept_in_fixture": [
+    "Pd140510.csv",
+    "Readme.txt"
+  ],
+  "member": "Pd140510.csv",
+  "member_bytes": 150590,
+  "member_sha256": "c288721ca5de8daf834b2b997ead8c56735b3be23022fcf85137c8c6f214cf8d"
+}

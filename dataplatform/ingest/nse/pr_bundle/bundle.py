@@ -135,9 +135,10 @@ class MemberKind(StrEnum):
     BM = "bm"
     """Board meetings (text)."""
     BH = "bh"
-    """Price-band hits."""
+    """Price-band hits. Parsed by `bh.py` (2026-09-29)."""
     PD = "pd"
-    """52-week high/low, price detail."""
+    """Price detail: every index's OHLC + 52-week range, and per security `CORP_IND`, the
+    NIFTY 50 flag and the published 52-week range. Parsed by `pd.py` (2026-10-06)."""
     PR = "pr"
     """The headline daily price report the bundle is named for."""
     GL = "gl"

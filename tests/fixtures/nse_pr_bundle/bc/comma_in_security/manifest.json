@@ -1,0 +1,119 @@
+{
+  "era": "comma_in_security",
+  "session": "2010-08-30",
+  "archive_filename": "PR300810.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR300810.zip",
+  "why_this_era": "unquoted comma inside SECURITY (ICIBK1107 'Regular Income Bond, Opti...'), 11 cells",
+  "reduced_from_l0": true,
+  "original_bytes": 315848,
+  "original_sha256": "0e46542dc6261517c6c7d5e577827dde3f034e96fc2f61c9587963a40c30973b",
+  "original_members": [
+    {
+      "name": "cf30082010.csv",
+      "bytes": 1897
+    },
+    {
+      "name": "etf300810.csv",
+      "bytes": 3946
+    },
+    {
+      "name": "ffix300810.csv",
+      "bytes": 42749
+    },
+    {
+      "name": "fo30082010.csv",
+      "bytes": 70554
+    },
+    {
+      "name": "fo30082010.doc",
+      "bytes": 320000
+    },
+    {
+      "name": "Gl300810.csv",
+      "bytes": 6719
+    },
+    {
+      "name": "help.txt",
+      "bytes": 3510
+    },
+    {
+      "name": "HL300810.csv",
+      "bytes": 1638
+    },
+    {
+      "name": "Ix300810.csv",
+      "bytes": 51734
+    },
+    {
+      "name": "NPD300810.txt",
+      "bytes": 3357
+    },
+    {
+      "name": "nuver.txt",
+      "bytes": 2670
+    },
+    {
+      "name": "op30082010.csv",
+      "bytes": 256467
+    },
+    {
+      "name": "Pd300810.csv",
+      "bytes": 255095
+    },
+    {
+      "name": "Pr300810.csv",
+      "bytes": 238266
+    },
+    {
+      "name": "rdm.doc",
+      "bytes": 33280
+    },
+    {
+      "name": "Rdm_help.txt",
+      "bytes": 705
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 3092
+    },
+    {
+      "name": "RPD300810.csv",
+      "bytes": 203
+    },
+    {
+      "name": "Rtt300810.csv",
+      "bytes": 55
+    },
+    {
+      "name": "Tt300810.csv",
+      "bytes": 2220
+    },
+    {
+      "name": "An300810.txt",
+      "bytes": 61377
+    },
+    {
+      "name": "Bc300810.csv",
+      "bytes": 91502
+    },
+    {
+      "name": "bh30082010.csv",
+      "bytes": 1972
+    },
+    {
+      "name": "Bm300810.txt",
+      "bytes": 5648
+    },
+    {
+      "name": "cd30082010.doc",
+      "bytes": 50688
+    }
+  ],
+  "members_kept_in_fixture": [
+    "Readme.txt",
+    "Bc300810.csv"
+  ],
+  "member": "Bc300810.csv",
+  "member_bytes": 91502,
+  "member_sha256": "8a84cf27e638d80bc796991a7201a217b608a9abbf513023a26c15d85f6b00f2"
+}

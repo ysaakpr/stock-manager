@@ -1,0 +1,71 @@
+{
+  "era": "published_empty",
+  "session": "2022-01-10",
+  "archive_filename": "PR100122.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR100122.zip",
+  "why_this_era": "the Bc member is 0 bytes as published: no actions broadcast that session",
+  "reduced_from_l0": true,
+  "original_bytes": 321646,
+  "original_sha256": "7ee1329dd9890377d4489d400085712cc65dfe1e62ceed00544a4effab116b9f",
+  "original_members": [
+    {
+      "name": "An100122.txt",
+      "bytes": 511898
+    },
+    {
+      "name": "Bc100122.csv",
+      "bytes": 0
+    },
+    {
+      "name": "bh100122.csv",
+      "bytes": 16070
+    },
+    {
+      "name": "Bm100122.txt",
+      "bytes": 9027
+    },
+    {
+      "name": "corpbond100122.csv",
+      "bytes": 26306
+    },
+    {
+      "name": "etf100122.csv",
+      "bytes": 22064
+    },
+    {
+      "name": "Gl100122.csv",
+      "bytes": 8711
+    },
+    {
+      "name": "HL100122.csv",
+      "bytes": 5167
+    },
+    {
+      "name": "Pd100122.csv",
+      "bytes": 404697
+    },
+    {
+      "name": "Pr100122.csv",
+      "bytes": 378899
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 2008
+    },
+    {
+      "name": "sme100122.csv",
+      "bytes": 13967
+    },
+    {
+      "name": "Tt100122.csv",
+      "bytes": 2218
+    }
+  ],
+  "members_kept_in_fixture": [
+    "Bc100122.csv",
+    "Readme.txt"
+  ],
+  "member": "Bc100122.csv",
+  "member_bytes": 0,
+  "member_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

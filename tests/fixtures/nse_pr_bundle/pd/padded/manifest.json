@@ -1,0 +1,87 @@
+{
+  "era": "padded",
+  "session": "2015-06-15",
+  "archive_filename": "PR150615.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR150615.zip",
+  "why_this_era": "space-padded numbers, integral counts, CNX-era index names (2013-03-04..2015-11-06)",
+  "reduced_from_l0": true,
+  "original_bytes": 342438,
+  "original_sha256": "ec7ce538ba586688dd6152128436333b2afb5a7f04cdcf773e4e72ae8f461f2d",
+  "original_members": [
+    {
+      "name": "An150615.txt",
+      "bytes": 520829
+    },
+    {
+      "name": "Bc150615.csv",
+      "bytes": 49511
+    },
+    {
+      "name": "bh150615.csv",
+      "bytes": 4455
+    },
+    {
+      "name": "Bm150615.txt",
+      "bytes": 1864
+    },
+    {
+      "name": "corpbond150615.csv",
+      "bytes": 12732
+    },
+    {
+      "name": "etf150615.csv",
+      "bytes": 6796
+    },
+    {
+      "name": "fo15062015.zip",
+      "bytes": 110857
+    },
+    {
+      "name": "Gl150615.csv",
+      "bytes": 6758
+    },
+    {
+      "name": "HL150615.csv",
+      "bytes": 1593
+    },
+    {
+      "name": "nuver.txt",
+      "bytes": 1812
+    },
+    {
+      "name": "Pd150615.csv",
+      "bytes": 277256
+    },
+    {
+      "name": "Pr150615.csv",
+      "bytes": 259146
+    },
+    {
+      "name": "rdm.docx",
+      "bytes": 15814
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 3070
+    },
+    {
+      "name": "sme150615.csv",
+      "bytes": 385
+    },
+    {
+      "name": "Tt150615.csv",
+      "bytes": 2167
+    },
+    {
+      "name": "cd15062015.zip",
+      "bytes": 5954
+    }
+  ],
+  "members_kept_in_fixture": [
+    "Pd150615.csv",
+    "Readme.txt"
+  ],
+  "member": "Pd150615.csv",
+  "member_bytes": 277256,
+  "member_sha256": "afd23edce02ac951044f7bc95b2b0d552ea716a856819731246faf59908e8fe9"
+}

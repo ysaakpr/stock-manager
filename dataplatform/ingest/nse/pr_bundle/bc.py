@@ -78,6 +78,11 @@ _EMPTY_MARKERS: Final[frozenset[str]] = frozenset({"", "-", "--", "n/a", "na", "
 #: `DD/MM/YYYY`, every era up to and including 2025-10-01.
 _SLASH_RE: Final[re.Pattern[str]] = re.compile(r"^(\d{1,2})/(\d{1,2})/(\d{4})$")
 
+#: `DD-MM-YYYY`, measured once: `Bc290416.csv` (2016-04-29) writes `RECORD_DT` as `03-05-2016`
+#: on its first row while every other row of the file and the corpus uses slashes. Day-first like
+#: the slash shape, so it is the same date written with a different separator.
+_DAY_DASH_RE: Final[re.Pattern[str]] = re.compile(r"^(\d{1,2})-(\d{1,2})-(\d{4})$")
+
 #: `YYYY-MM-DD`, the shape from the ~2025-10 cutover onward. Both are accepted on every date
 #: rather than dispatched on an era: the boundary is bracketed to a month, and sniffing the value
 #: in front of us is both narrower and impossible to get wrong by a day.
@@ -142,8 +147,14 @@ def parse_bc(
     filename: str,
     knowable_date: date,
     l0_key: str | None = None,
+    published_empty: bool = False,
 ) -> tuple[BcRow, ...]:
     """Parse one `Bc` member into rows stamped with the bundle's publication date.
+
+    `published_empty` is for a member read out of an opened bundle: there a 0-byte `Bc` is NSE
+    broadcasting no actions that session (`Bc100122.csv`, 2022-01-10, measured), not a soft-404,
+    because the zip around it already proved the payload is the archive's. A bare payload keeps
+    the refusal — an empty HTTP body is the classic error page.
 
     `knowable_date` is required and has exactly one legal source: `PrBundle.publication_date`,
     which is derived from the payload. It is a parameter rather than a clock read so that this
@@ -155,9 +166,23 @@ def parse_bc(
     count, a row with no symbol or purpose, or a date field that is neither shape. A blank line is
     skipped — the source pads with them — and nothing else is skipped silently.
     """
+    if published_empty and not payload.strip():
+        _LOG.info(
+            "pr_bundle_bc.parsed",
+            source=PR_BUNDLE_SOURCE_ID,
+            filename=filename,
+            knowable_date=knowable_date.isoformat(),
+            rows=0,
+            state="VALIDATED",
+            note="member published empty",
+        )
+        return ()
     text = _decode(payload, filename=filename)
     reader = csv.reader(StringIO(text))
-    rows = list(reader)
+    try:
+        rows = list(reader)
+    except csv.Error as exc:
+        raise ParseError(f"not readable as CSV: {exc}", filename=filename) from exc
     if not rows:
         raise ParseError("file is empty", filename=filename)
 
@@ -199,6 +224,7 @@ def parse_bc_bundle(bundle: PrBundle, *, l0_key: str | None = None) -> tuple[BcR
         filename=_member_name(bundle),
         knowable_date=bundle.publication_date,
         l0_key=l0_key,
+        published_empty=True,
     )
 
 
@@ -239,6 +265,8 @@ def _row(
     l0_key: str | None,
 ) -> BcRow:
     """One published line → one `BcRow`, or a `ParseError` naming the line."""
+    if len(raw) > len(BC_COLUMNS):
+        raw = _rejoin_unquoted_comma(raw, filename=filename, line=line)
     if len(raw) != len(BC_COLUMNS):
         raise ParseError(
             f"expected {len(BC_COLUMNS)} columns, got {len(raw)}: {raw!r}",
@@ -269,6 +297,53 @@ def _row(
     )
 
 
+#: The six date columns sit between `SECURITY` and `PURPOSE`, the two free-text cells.
+_DATE_SLICE: Final = slice(3, 9)
+
+
+def _rejoin_unquoted_comma(raw: Sequence[str], *, filename: str, line: int) -> list[str]:
+    """Undo an unquoted comma inside `SECURITY` or `PURPOSE`, or raise if it is not that.
+
+    NSE writes this file without quoting, so a comma in a free-text cell splits it: measured on
+    eleven members — `Regular Income Bond, Opti…` (`ICIBK1107`, 2010-08-30..09-07) in
+    `SECURITY`, and `INT DIV-RS 5, SPL DIV-RS …` (`TCS`, 2019-10-11..15) and `DIV - RS 2, 50 PER
+    SH` (`SURYAROSNI`, 2024-08-21) in `PURPOSE`. The two free-text cells are the first-but-two and
+    the last, with six date cells between them, so the split is located by asking which rejoin
+    leaves six cells that all read as dates: exactly one must, or the row is refused. The rejoined
+    text keeps the comma — `purpose` stays byte-for-byte what NSE wrote.
+    """
+    extra = len(raw) - len(BC_COLUMNS)
+    in_security = [*raw[:2], ",".join(raw[2 : 3 + extra]), *raw[3 + extra :]]
+    in_purpose = [*raw[:9], ",".join(raw[9:])]
+    readable = [c for c in (in_security, in_purpose) if _all_dates(c[_DATE_SLICE])]
+    if len(readable) != 1:
+        raise ParseError(
+            f"expected {len(BC_COLUMNS)} columns, got {len(raw)}, and the extra comma is not "
+            f"unambiguously inside SECURITY or PURPOSE: {list(raw)!r}",
+            filename=filename,
+            line=line,
+        )
+    _LOG.info(
+        "pr_bundle_bc.unquoted_comma_rejoined",
+        source=PR_BUNDLE_SOURCE_ID,
+        filename=filename,
+        line=line,
+        field="SECURITY" if readable[0] is in_security else "PURPOSE",
+    )
+    return readable[0]
+
+
+def _all_dates(cells: Sequence[str]) -> bool:
+    """Whether every cell is blank or one of the accepted date shapes."""
+    for cell in cells:
+        value = cell.strip()
+        if value.lower() in _EMPTY_MARKERS:
+            continue
+        if not (_SLASH_RE.match(value) or _DAY_DASH_RE.match(value) or _DASH_RE.match(value)):
+            return False
+    return True
+
+
 def _parse_date(text: str, *, field: str, filename: str, line: int) -> date | None:
     """`DD/MM/YYYY` or `YYYY-MM-DD` → a date; `None` for the era's empty markers.
 
@@ -281,7 +356,7 @@ def _parse_date(text: str, *, field: str, filename: str, line: int) -> date | No
     value = text.strip()
     if value.lower() in _EMPTY_MARKERS:
         return None
-    slash = _SLASH_RE.match(value)
+    slash = _SLASH_RE.match(value) or _DAY_DASH_RE.match(value)
     if slash is not None:
         return _build(
             int(slash.group(3)),
@@ -304,7 +379,7 @@ def _parse_date(text: str, *, field: str, filename: str, line: int) -> date | No
             line=line,
         )
     raise ParseError(
-        f"{field} is {value!r}, which is neither DD/MM/YYYY nor YYYY-MM-DD",
+        f"{field} is {value!r}, which is neither DD/MM/YYYY (or DD-MM-YYYY) nor YYYY-MM-DD",
         filename=filename,
         line=line,
     )
