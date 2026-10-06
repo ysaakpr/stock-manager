@@ -1587,12 +1587,16 @@ tasks:
     there is no per-call bill, so cost is the CLI-reported token counts priced at the model's list
     rate, and the report says it is priced that way rather than invoiced.
     The live test is opt-in behind a registered `live` pytest marker, like `network`: `make check`
-    never reaches a model.
-  deliverables: [ops/gates/M6-live-drill.md]
+    never reaches a model. A live run has a hard call budget of at most 25 model calls; the drill
+    counts every call it makes and aborts with a non-zero exit, before the 26th call, rather
+    than continue past it. The budget is a constant in the test, not an environment knob.
+  deliverables: [ops/gates/M6-live-drill.md, pyproject.toml, tests/integration/test_fire_drill.py, tests/integration/conftest.py]
   acceptance:
     - "fire drill passes against the real model (API or ClaudeCliLLM, named in the report) with the verdict and reasoning captured verbatim"
     - "measured real cost per T1 and per T2 decision recorded, stating whether it is invoiced or token-count x list price"
     - "a written judgment on output quality with specific examples, not a pass/fail tick"
+    - "a bare `uv run pytest` / `make check` deselects every `live` test, and a test pins that (it fails if a live test would run without `-m live`)"
+    - "a live run makes at most 25 model calls; past the budget the drill aborts non-zero, and a stubbed test pins the abort"
   verify: "uv run pytest tests/integration/test_fire_drill.py -q -m live"
 
 - id: M6.9
@@ -2282,7 +2286,9 @@ tasks:
 - id: M13.1
   title: Daily paper-trading session job for the D13 configuration
   milestone: M13
-  module: A1
+  # The scheduler has no D/A module of its own; M0.6 (scheduler skeleton) is "—", and the
+  # deliverable is the scheduler registry.
+  module: "—"
   autonomy: AUTO
   deps: [M0.6, M5.13, M5.15, M9.5]
   spec: |
@@ -2320,7 +2326,8 @@ tasks:
         2027 circular is due in December and `expected_sessions` hard-fails past coverage.
     One severity/dedup-key convention across the three, stated in the module docstring. The clock is
     injected; no trigger reads `datetime.now()`. A trigger that cannot evaluate (store unreachable)
-    alerts on that, never passes silently.
+    alerts on that, never passes silently. If it needs schema (e.g. persisted dedup state), its
+    migration is `0013` — the number reserved for this task.
   deliverables: [dataplatform/alerts.py, tests/unit/test_alerts.py, tests/unit/test_alert_triggers.py]
   acceptance:
     - "a FAILED streak, a red quality flag and a calendar ending within 60 days each produce exactly one Alerter.send; the healthy case produces none"
@@ -2342,7 +2349,8 @@ tasks:
     Per D17 (2026-10-06) pledge is optional: a filing without it parses, stores pledge as absent (never 0),
     and BC3 reports an explicit `not_applicable` status for it instead of evaluating or passing silently.
     Where pledge is present it stays a first-class queryable field. Both dates (period_end, filing_date)
-    are still carried and neither is inferred from the other.
+    are still carried and neither is inferred from the other. If it needs schema, its migration is
+    `0014` — the number reserved for this task.
   deliverables: [dataplatform/ingest/shareholding.py, tests/unit/test_shareholding.py, "tests/fixtures/nse_shareholding/"]
   acceptance:
     - "the re-frozen fixture is a real L0 payload, with its L0 reference recorded beside it"
@@ -2366,6 +2374,7 @@ tasks:
     Separately, §4: the TDCLOINDI `CS` (consolidation) marker matches 0 of 34 stored actions. Find out
     why — the action feed never carries consolidations, they are stored under another type, or the
     witness's type mapping is wrong — and fix whichever it is, with a test that fails if reversed.
+    If it needs schema, its migration is `0015` — the number reserved for this task.
   deliverables: [dataplatform/corpactions/manual_actions.yaml, tests/unit/test_manual_actions.py, tests/unit/test_ex_marker_witness.py]
   acceptance:
     - "each of the seven steps is curated with a cited source, or named as unsourced with the reason"
