@@ -7,7 +7,8 @@ chain, the price-adjusted / return / total-return series derived from it, and th
 recompute-and-invalidate seam (M2.4); the curated, sourced merger and cash-exit terms the
 store's feeds cannot carry (``merger_terms``); and the curated, sourced splits, bonuses and
 structural breaks no feed carries, with the documented market moves that are not actions
-(``manual_actions``).
+(``manual_actions``), whose unsourced share-basis steps (``ManualActions.unsourced_windows``) the
+query layer quarantines (D22).
 """
 
 from dataplatform.corpactions.factors import (
@@ -26,10 +27,13 @@ from dataplatform.corpactions.factors import (
 from dataplatform.corpactions.manual_actions import (
     MANUAL_ACTIONS_PATH,
     MANUAL_SOURCE,
+    MARKET_MOVE,
+    UNSOURCED_KINDS,
     CuratedAction,
     ExplainedMove,
     ManualActions,
     ManualActionsError,
+    default_manual_actions,
     load_manual_actions,
 )
 from dataplatform.corpactions.merger_terms import (
@@ -101,9 +105,11 @@ __all__ = [
     "DEFAULT_EX_DATE_TOLERANCE_DAYS",
     "MANUAL_ACTIONS_PATH",
     "MANUAL_SOURCE",
+    "MARKET_MOVE",
     "MERGER_TERMS_PATH",
     "TERMS_ADAPTER",
     "TERMS_BY_ACTION",
+    "UNSOURCED_KINDS",
     "ActionType",
     "AdjustedPoint",
     "CashExitTerm",
@@ -151,6 +157,7 @@ __all__ = [
     "build_factor_chain",
     "classify",
     "collapse_reconciled_rows",
+    "default_manual_actions",
     "describe",
     "eligible_for_factor_chain",
     "load_manual_actions",

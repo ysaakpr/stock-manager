@@ -150,6 +150,7 @@ from dataplatform.ingest.indices import (
 )
 from dataplatform.ingest.xbrl import Nature
 from dataplatform.logging import get_logger
+from dataplatform.query import PriceQuarantine, default_price_quarantine
 from dataplatform.query.fundamentals_metrics import CONCEPTS_USED, compute_metrics
 from dataplatform.query.pit import Dataset
 from dataplatform.query.service import QueryService
@@ -162,8 +163,6 @@ from dataplatform.query.universe import (
 )
 from dataplatform.store.l2 import (
     open_connection,
-    register_adjusted_view,
-    register_raw_view,
 )
 from dataplatform.store.paths import Layer, l1_partition_path, layer_root
 from dataplatform.store.pit_fundamentals import PIT_FUNDAMENTALS_DATASET
@@ -421,10 +420,17 @@ class _L1Reader:
     #: not either: a main-board name does not migrate there without leaving through a delisting.
     _RESTRICTED_SCOPE = f"exchange = 'NSE' AND series IN {_RESTRICTED_SERIES!r}"
 
-    def __init__(self, *, data_root: Path | None = None) -> None:
+    def __init__(
+        self, *, data_root: Path | None = None, quarantine: PriceQuarantine | None = None
+    ) -> None:
         self._data_root = data_root
         self._con = open_connection()
-        register_raw_view(self._con, view=self._VIEW, data_root=data_root)
+        # D22: a quarantined ISIN's bars before its unsourced basis step never reach the universe,
+        # the signal, a fill or a mark — the view for the aggregate reads, the predicate for the
+        # per-session partition reads (`dataplatform.query.price_quarantine`).
+        quarantine = quarantine if quarantine is not None else default_price_quarantine()
+        quarantine.register_raw_view(self._con, view=self._VIEW, data_root=data_root)
+        self._admits = quarantine.sql_admits()
         self._closes: dict[date, dict[str, Decimal]] = {}
         self._refbars: dict[date, dict[str, ReferenceBar]] = {}
         self._restricted: dict[date, dict[str, tuple[str, Decimal, ReferenceBar | None]]] = {}
@@ -517,7 +523,8 @@ class _L1Reader:
             self._closes[session] = {}
             return {}
         rows = self._con.execute(
-            f"SELECT isin, close FROM read_parquet($path) WHERE {self._SCOPE} AND close > 0",
+            f"SELECT isin, close FROM read_parquet($path) "
+            f"WHERE {self._SCOPE} AND close > 0 AND {self._admits}",
             {"path": path},
         ).fetchall()
         closes = {str(isin): Decimal(close) for isin, close in rows}
@@ -544,7 +551,7 @@ class _L1Reader:
         rows = self._con.execute(
             f"SELECT isin, open, total_traded_qty, total_traded_value FROM read_parquet($path) "
             f"WHERE {self._SCOPE} AND open > 0 AND total_traded_qty > 0 "
-            f"AND total_traded_value > 0",
+            f"AND total_traded_value > 0 AND {self._admits}",
             {"path": path},
         ).fetchall()
         bars: dict[str, ReferenceBar] = {}
@@ -583,7 +590,7 @@ class _L1Reader:
         rows = self._con.execute(
             f"SELECT isin, series, close, open, total_traded_qty, total_traded_value "
             f"FROM read_parquet($path) WHERE {self._RESTRICTED_SCOPE} AND close > 0 "
-            f"ORDER BY isin, series",
+            f"AND {self._admits} ORDER BY isin, series",
             {"path": path},
         ).fetchall()
         out: dict[str, tuple[str, Decimal, ReferenceBar | None]] = {}
@@ -627,7 +634,7 @@ class _L1Reader:
             return []
         rows = self._con.execute(
             f"SELECT isin FROM read_parquet($path) "
-            f"WHERE {self._SCOPE} AND close > 0 AND total_traded_value > 0 "
+            f"WHERE {self._SCOPE} AND close > 0 AND total_traded_value > 0 AND {self._admits} "
             f"ORDER BY total_traded_value DESC, isin LIMIT $n",
             {"path": path, "n": size},
         ).fetchall()
@@ -4935,10 +4942,11 @@ class _SwingFeatures:
         split_factors: Sequence[ShareRescale] | None = None,
     ) -> None:
         self._con = open_connection()
-        register_raw_view(self._con, view="l1_swing_raw", data_root=data_root)
+        quarantine = default_price_quarantine()  # D22: no pre-step bar of an unsourced step
+        quarantine.register_raw_view(self._con, view="l1_swing_raw", data_root=data_root)
         self._have_factors = False
         if adjusted:
-            register_adjusted_view(self._con, view="l2_swing_adj", data_root=data_root)
+            quarantine.register_adjusted_view(self._con, view="l2_swing_adj", data_root=data_root)
             self._have_factors = _register_split_factors(
                 self._con, "swing_split_factors", split_factors
             )

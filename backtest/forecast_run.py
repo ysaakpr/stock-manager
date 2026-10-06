@@ -115,8 +115,9 @@ from backtest.run import (
 from backtest.run_ledger import add_ledger_dir_flag, ledger_dir_unless
 from dataplatform.clock import FrozenClock
 from dataplatform.logging import get_logger
+from dataplatform.query import default_price_quarantine
 from dataplatform.query.pit import Dataset
-from dataplatform.store.l2 import open_connection, register_adjusted_view, register_raw_view
+from dataplatform.store.l2 import open_connection
 from execution.costs import CostModel, load_rate_card
 from execution.sim_broker import SimBroker
 
@@ -178,10 +179,11 @@ class _FeatureCursor:
         self, *, horizon: int, data_root: Path | None, start: date, end: date, adjusted: bool = True
     ) -> None:
         self._con = open_connection()
-        register_raw_view(self._con, view="l1_fc_raw", data_root=data_root)
+        quarantine = default_price_quarantine()  # D22: no pre-step bar of an unsourced step
+        quarantine.register_raw_view(self._con, view="l1_fc_raw", data_root=data_root)
         have_factors = False
         if adjusted:
-            register_adjusted_view(self._con, view="l2_fc_adj", data_root=data_root)
+            quarantine.register_adjusted_view(self._con, view="l2_fc_adj", data_root=data_root)
             # X2: the same one-basis rule across the 2016-09-02 L2 seam the swing features use.
             have_factors = _register_split_factors(
                 self._con, "fc_split_factors", current_signal_split_factors()
