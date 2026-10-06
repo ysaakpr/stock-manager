@@ -21,8 +21,11 @@
 #     fragment between them is verbatim on that line. The NSE book-closure file (Bc<ddmmyy>.csv)
 #     columns are SERIES,SYMBOL,SECURITY,RECORD_DT,BC_STRT_DT,BC_END_DT,EX_DT,ND_STRT_DT,
 #     ND_END_DT,PURPOSE.
-#   * `explained_moves` are steps that are genuine price moves. They get no factor — that would
-#     erase a real loss from every backtest — and match only their exact ISIN and session.
+#   * `explained_moves` with kind MARKET_MOVE are steps that are genuine price moves. They get no
+#     factor — that would erase a real loss from every backtest — and match only their exact ISIN
+#     and session. The UNSOURCED_* kinds at the end of the list are share-basis steps whose terms
+#     no source states: no factor, a WARN from the continuity check, and their pre-step bars
+#     quarantined from every backtest and decision (D22).
 
 actions:
   - isin: INE018I01017
@@ -502,18 +505,21 @@ explained_moves:
         line: 78
         quote: Increase in Volumes and speculation in the shares of the Company
 
-  # ── UNSOURCED_ACTION: a share-basis step whose terms no L0 object states ─────────────────────
-  # L1 shows a corporate-action-shaped step and an exchange record shows an event that day, but
-  # nothing in L0 states the terms (the NSE PR bundle starts 2010-01; BSE's corporate-action
-  # payload lists these events with a blank purpose or not at all). A factor would need a ratio
-  # this file may not infer, so none is applied: the step stays in the adjusted level series and
-  # is only acknowledged here, so the D7 check stays usable. Replace the row with a curated action
-  # the day a source stating the terms reaches L0.
+  # ── Unsourced share-basis steps: terms no L0 object states ──────────────────────────────────
+  # L1 shows a corporate-action-shaped step, but nothing in L0 states the terms (the NSE PR
+  # bundle starts 2010-01; BSE's corporate-action payload lists these events with a blank purpose
+  # or not at all). A factor would need a ratio this file may not infer, so none is applied and
+  # the step stays in the adjusted level series. It is NOT a return: the continuity check classes
+  # it UNSOURCED with a WARN finding, and the query layer quarantines the ISIN's bars before the
+  # step (D22), so no backtest or decision holds or signals across it. Two kinds, by evidence:
+  #   UNSOURCED_ACTION      an exchange record shows the event happened (EIH, JM Financial)
+  #   UNSOURCED_PRICE_STEP  only the exchange's own price file shows the step (Shah Alloys)
+  # Replace a row with a curated action the day a source stating the terms reaches L0.
 
   - isin: INE640C01011
     company: Shah Alloys Ltd
     trade_date: 2006-02-13
-    kind: UNSOURCED_ACTION
+    kind: UNSOURCED_PRICE_STEP
     checked: 2026-10-06
     reason: >-
       L1 NSE EQ: 347.85 -> 169.35 (x0.487); the session opened at 176.00, half the prior close,

@@ -21,10 +21,16 @@ Two kinds of row:
   2013 NSEL crisis at Financial Technologies, YES Bank's 2020 moratorium). These get no factor:
   inventing one would erase a real loss from every backtest. They are an explicit allowlist the
   continuity check honours on the exact ISIN and session only, each with its reason and source.
-  Kind `UNSOURCED_ACTION` is the other case the allowlist holds: a step an exchange record shows
-  is a corporate action (EIH's 2006 ex-date lists a second, blank-purpose event beside its bonus)
-  whose terms no L0 object states. It gets no factor either, because that would mean inventing a
-  ratio; it is acknowledged, not fixed, and is the row to replace when a source arrives.
+* **Unsourced steps** — rows in the same list whose kind is not `MARKET_MOVE`: a share-basis step
+  whose terms no L0 object states. `UNSOURCED_ACTION` is one an exchange record shows to be a
+  corporate action (EIH's 2006 ex-date lists a second, blank-purpose event beside its bonus);
+  `UNSOURCED_PRICE_STEP` is one only the exchange's own bhavcopy evidences (Shah Alloys opened
+  at half its prior close, and no corporate-action record of 2006 survives in L0). Neither gets
+  a factor: that would mean inventing a ratio. Unlike a market move, the step is *not* a
+  return, so the level series is wrong across it. The continuity check therefore classes it
+  `UNSOURCED` with a WARN finding rather than calling it explained, and the query layer
+  quarantines the ISIN's bars before the step (`unsourced_windows`, D22) so no backtest or
+  decision holds or signals across it. It is the row to replace when a source arrives.
 
 **Why a reviewed file and not rows in ``corporate_actions``** — the same reason as
 `merger_terms`: the table's rows are produced by parsers from L0 and reconciled across two
@@ -44,7 +50,7 @@ states stays out of the file, and its step stays UNEXPLAINED until one does.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -70,6 +76,8 @@ if TYPE_CHECKING:
 __all__ = [
     "MANUAL_ACTIONS_PATH",
     "MANUAL_SOURCE",
+    "MARKET_MOVE",
+    "UNSOURCED_KINDS",
     "CuratedAction",
     "ExplainedMove",
     "ManualActions",
@@ -87,11 +95,17 @@ MANUAL_SOURCE: Final = "manual_curated"
 _PRICE_EVENTS: Final = frozenset({ActionType.SPLIT, ActionType.BONUS})
 _BREAKS: Final = frozenset({ActionType.DEMERGER, ActionType.SCHEME_OF_ARRANGEMENT})
 
-#: What an explained move may be classified as; a closed set on purpose. `MARKET_MOVE` is a real
-#: change in price. `UNSOURCED_ACTION` is a share-basis step that an exchange record shows happened
-#: but whose terms no L0 object states: no factor is applied (this file never infers a ratio), so
-#: the step stays in the level series and is only acknowledged until a source arrives.
-_MOVE_KINDS: Final = frozenset({"MARKET_MOVE", "UNSOURCED_ACTION"})
+#: The one explained-move kind that is a real change in price, and so needs no quarantine.
+MARKET_MOVE: Final = "MARKET_MOVE"
+
+#: Share-basis steps whose terms no L0 object states (see the module docstring). No factor is
+#: applied (this file never infers a ratio); the step is reported and its pre-step bars quarantined.
+#: `UNSOURCED_ACTION`: an exchange record shows the event. `UNSOURCED_PRICE_STEP`: only the
+#: exchange's price file does.
+UNSOURCED_KINDS: Final = frozenset({"UNSOURCED_ACTION", "UNSOURCED_PRICE_STEP"})
+
+#: What an explained move may be classified as; a closed set on purpose.
+_MOVE_KINDS: Final = frozenset({MARKET_MOVE}) | UNSOURCED_KINDS
 
 _ISIN: Final = re.compile(ISIN_PATTERN)
 
@@ -146,7 +160,7 @@ class CuratedAction:
 
 @dataclass(frozen=True, slots=True)
 class ExplainedMove:
-    """A step on `trade_date` that is a real move in the security's price, not a missing action."""
+    """A documented step on `trade_date`: a real move (`MARKET_MOVE`) or an unsourced basis step."""
 
     isin: str
     company: str
@@ -155,6 +169,11 @@ class ExplainedMove:
     reason: str
     checked: date
     sources: tuple[TermSource, ...]
+
+    @property
+    def is_unsourced(self) -> bool:
+        """A share-basis step with unstated terms, not a real move (`UNSOURCED_KINDS`)."""
+        return self.kind in UNSOURCED_KINDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,10 +203,28 @@ class ManualActions:
         return {k: tuple(v) for k, v in out.items()}
 
     def explained_dates(self) -> dict[str, tuple[date, ...]]:
-        """ISIN → the sessions whose step is a documented market move."""
+        """ISIN → the sessions whose step is a documented market move (never an unsourced step)."""
+        return self._move_dates(lambda move: not move.is_unsourced)
+
+    def unsourced_dates(self) -> dict[str, tuple[date, ...]]:
+        """ISIN → the sessions of its unsourced share-basis steps (`UNSOURCED_KINDS`)."""
+        return self._move_dates(lambda move: move.is_unsourced)
+
+    def unsourced_windows(self) -> dict[str, date]:
+        """ISIN → its first admissible session: the latest unsourced step's own session (D22).
+
+        Every bar of the ISIN dated *before* this session sits on the far side of a share-basis
+        step no factor removes, so a reader that admits it can hold or signal across a phantom
+        return. The step session itself is admitted: it is the first bar of the basis the ISIN
+        trades on from then on. The query layer (`dataplatform.query.PriceQuarantine`) applies it.
+        """
+        return {isin: max(days) for isin, days in self.unsourced_dates().items()}
+
+    def _move_dates(self, keep: Callable[[ExplainedMove], bool]) -> dict[str, tuple[date, ...]]:
         out: dict[str, list[date]] = {}
         for move in self.explained_moves:
-            out.setdefault(move.isin, []).append(move.trade_date)
+            if keep(move):
+                out.setdefault(move.isin, []).append(move.trade_date)
         return {k: tuple(v) for k, v in out.items()}
 
 

@@ -84,7 +84,7 @@ def test_every_row_is_sourced_checked_and_knowable_no_later_than_its_ex_date() -
         assert row.as_action().source == MANUAL_SOURCE
     for move in curated.explained_moves:
         assert move.sources and move.reason, move.isin
-        assert move.kind in {"MARKET_MOVE", "UNSOURCED_ACTION"}, move.isin
+        assert move.kind in {"MARKET_MOVE", "UNSOURCED_ACTION", "UNSOURCED_PRICE_STEP"}, move.isin
 
 
 def _sources() -> list[tuple[str, TermSource]]:
@@ -290,6 +290,92 @@ def test_an_explained_move_covers_its_own_session_and_no_other() -> None:
     }
 
 
+def test_an_unsourced_step_is_its_own_class_not_an_explained_move() -> None:
+    day = date(2006, 9, 12)
+    classified = {
+        step.trade_date: cls
+        for step, cls in classify_steps(
+            [_step(day), _step(day + timedelta(days=3))],
+            structural_dates={},
+            explained_dates={},
+            unsourced_dates={STOCK: (day,)},
+            threshold=Decimal(2),
+            max_gap_days=5,
+        )
+    }
+    # exact session only, like an explained move — and never classed as one
+    assert classified == {
+        day: StepClass.UNSOURCED,
+        day + timedelta(days=3): StepClass.UNEXPLAINED,
+    }
+
+
+def test_an_unsourced_step_passes_the_check_but_raises_a_warn_finding() -> None:
+    from dataplatform.quality.l2_continuity import L2ContinuityReport, findings
+
+    day = date(2006, 9, 12)
+    report = L2ContinuityReport(
+        threshold=Decimal(2),
+        max_gap_days=5,
+        partitions=1,
+        steps=((_step(day), StepClass.UNSOURCED),),
+        retired_partitions=(),
+    )
+    assert report.passed and report.unsourced == (_step(day),)
+    [finding] = findings(report, logical_date=day)
+    assert finding.severity == "WARN"
+    assert finding.isin == STOCK and finding.logical_date == day
+    assert finding.detail["kind"] == "unsourced_action_step"
+    # an explained move raises nothing: the WARN is what tells the two apart on the status API
+    explained = L2ContinuityReport(
+        threshold=Decimal(2),
+        max_gap_days=5,
+        partitions=1,
+        steps=((_step(day), StepClass.EXPLAINED_MOVE),),
+        retired_partitions=(),
+    )
+    assert findings(explained, logical_date=day) == ()
+
+
+def test_the_cli_prints_each_unsourced_step(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from dataplatform.quality import l2_continuity
+
+    day = date(2006, 9, 12)
+    report = l2_continuity.L2ContinuityReport(
+        threshold=Decimal(2),
+        max_gap_days=5,
+        partitions=1,
+        steps=((_step(day), StepClass.UNSOURCED),),
+        retired_partitions=(),
+    )
+    monkeypatch.setattr(l2_continuity, "scan", lambda *_a, **_k: report)
+    monkeypatch.setattr("dataplatform.store.db.connect", _NullConnection)
+    monkeypatch.setattr("dataplatform.identity.lineage.LineageStore", lambda _conn: _NullLineage())
+    assert l2_continuity.main([]) == 0
+    out = capsys.readouterr().out
+    assert f"UNSOURCED {STOCK} NSE 2006-09-11 -> 2006-09-12" in out
+    assert "quarantined before 2006-09-12" in out
+    assert "unsourced              1" in out
+
+
+class _NullConnection:
+    def __enter__(self) -> _NullConnection:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+
+class _NullLineage:
+    def load(self) -> _NullLineage:
+        return self
+
+    def survivor_of(self, isin: str) -> str:
+        return isin
+
+
 def test_the_check_reads_curated_breaks_and_moves_without_postgres(tmp_path: Path) -> None:
     from dataplatform.quality.l2_continuity import scan
 
@@ -306,13 +392,17 @@ def test_the_check_reads_curated_breaks_and_moves_without_postgres(tmp_path: Pat
     assert set(real.explained_dates()) == {
         "INE043A01012",
         "INE111B01023",
-        "INE230A01023",
         "INE247G01024",
         "INE483S01020",
         "INE528G01035",
-        "INE640C01011",
-        "INE780C01023",
     }
+    # the unsourced basis steps are not explained moves: their own class, and a quarantine
+    assert real.unsourced_windows() == {
+        "INE230A01023": date(2006, 9, 12),
+        "INE640C01011": date(2006, 2, 13),
+        "INE780C01023": date(2008, 9, 8),
+    }
+    assert not set(real.unsourced_dates()) & set(real.explained_dates())
 
 
 def test_a_targeted_rebuild_refuses_a_retired_isin_and_names_its_survivor() -> None:

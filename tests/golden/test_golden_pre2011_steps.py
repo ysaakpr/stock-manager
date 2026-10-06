@@ -10,9 +10,9 @@ from L1 (NSE EQ, verbatim) and read the rows from the repo file, so the file is 
     INE966H01019  2010-04-15  x0.244     Zee News DEMERGER (Bc310310.csv:54)  STRUCTURAL
     INE133B01019  2010-05-13  x0.441     Kesar Ent DEMERGER (Bc060510.csv:89) STRUCTURAL
     INE043A01012  2011-06-20  x0.378     GTL MARKET_MOVE (Pd200611.csv:567)   EXPLAINED_MOVE
-    INE640C01011  2006-02-13  x0.487     Shah Alloys UNSOURCED_ACTION         EXPLAINED_MOVE
-    INE230A01023  2006-09-12  x0.223 *   EIH UNSOURCED_ACTION                 EXPLAINED_MOVE
-    INE780C01023  2008-09-08  x0.120 *   JM Financial UNSOURCED_ACTION        EXPLAINED_MOVE
+    INE640C01011  2006-02-13  x0.487     Shah Alloys UNSOURCED_PRICE_STEP     UNSOURCED (WARN)
+    INE230A01023  2006-09-12  x0.223 *   EIH UNSOURCED_ACTION                 UNSOURCED (WARN)
+    INE780C01023  2008-09-08  x0.120 *   JM Financial UNSOURCED_ACTION        UNSOURCED (WARN)
 
     * after the bonus the BSE feed already carries (EIH 1:2, JM Financial 3:2), which is applied.
 
@@ -23,7 +23,7 @@ CMC is the one price factor. ``price_factor = 1/2`` before 2011-06-08:
     2011-06-08 (ex)     1223.80 x 1   = 1223.8000   (ex-day -1.45% after the bonus)
 
 Invert the factor (x2) and 2011-06-07 reads 4,967.20 and the step grows to 4.06x: the inversion
-guard below builds exactly that and asserts the continuity check fails. The UNSOURCED_ACTION rows
+guard below builds exactly that and asserts the continuity check fails. The UNSOURCED_* rows
 apply no factor at all — EIH's 2006-09-11 stays at the feed bonus's 812.10 x 2/3 = 541.4000 — which
 is what "no ratio invented" means here. Offline: L1 is written under `tmp_path`.
 """
@@ -42,7 +42,7 @@ from dataplatform.corpactions.taxonomy import ActionType, FaceValueTerms, RatioT
 from dataplatform.identity.master import Exchange
 from dataplatform.ingest.corp_actions import CorporateAction
 from dataplatform.ingest.models import PriceRow
-from dataplatform.quality.l2_continuity import StepClass, scan
+from dataplatform.quality.l2_continuity import StepClass, findings, scan
 from dataplatform.store.l1 import write_prices_raw
 from dataplatform.store.l2 import materialize_isin, read_adjusted
 
@@ -92,9 +92,9 @@ _STEPS: dict[str, tuple[date, StepClass | None]] = {
     ZEENEWS: (date(2010, 4, 15), StepClass.STRUCTURAL),
     KESARENT: (date(2010, 5, 13), StepClass.STRUCTURAL),
     GTL: (date(2011, 6, 20), StepClass.EXPLAINED_MOVE),
-    SHAHALLOYS: (date(2006, 2, 13), StepClass.EXPLAINED_MOVE),
-    EIH: (date(2006, 9, 12), StepClass.EXPLAINED_MOVE),
-    JMFIN: (date(2008, 9, 8), StepClass.EXPLAINED_MOVE),
+    SHAHALLOYS: (date(2006, 2, 13), StepClass.UNSOURCED),
+    EIH: (date(2006, 9, 12), StepClass.UNSOURCED),
+    JMFIN: (date(2008, 9, 8), StepClass.UNSOURCED),
 }
 
 
@@ -236,5 +236,17 @@ def test_an_acknowledged_step_scales_nothing(
 
 def test_the_unsourced_rows_are_the_three_without_stated_terms() -> None:
     kinds = {m.isin: m.kind for m in load_manual_actions().explained_moves}
-    assert {i for i, k in kinds.items() if k == "UNSOURCED_ACTION"} == {SHAHALLOYS, EIH, JMFIN}
+    assert {i for i, k in kinds.items() if k == "UNSOURCED_ACTION"} == {EIH, JMFIN}
+    assert kinds[SHAHALLOYS] == "UNSOURCED_PRICE_STEP"  # price-only evidence: its own code
     assert kinds[GTL] == "MARKET_MOVE"
+
+
+@pytest.mark.parametrize("isin", [SHAHALLOYS, EIH, JMFIN])
+def test_each_unsourced_step_raises_a_warn_finding_on_its_session(lake: Path, isin: str) -> None:
+    day, _ = _STEPS[isin]
+    _build(lake, isin)
+    report = scan(None, survivor_of=lambda i: i, data_root=lake)
+    warns = [f for f in findings(report, logical_date=day) if f.isin == isin]
+    assert [(f.severity, f.logical_date, f.detail["kind"]) for f in warns] == [
+        ("WARN", day, "unsourced_action_step")
+    ]

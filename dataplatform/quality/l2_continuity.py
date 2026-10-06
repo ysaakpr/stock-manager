@@ -26,6 +26,12 @@ two defects the 2026-10-05 data-quality audit found there and nothing had flagge
   (`corpactions.manual_actions`, `explained_moves`) for this exact ISIN and session, with its
   reason and source: YES Bank on the 2020-03-06 moratorium, Financial Technologies on the NSEL
   suspension. Never adjusted — a factor there would erase a real loss from every backtest.
+* `UNSOURCED` — a share-basis step the curated file records but cannot adjust, because no L0
+  object states its terms (`explained_moves` of an `UNSOURCED_*` kind: EIH 2006-09-12, JM
+  Financial 2008-09-08, Shah Alloys 2006-02-13). Matched on the exact ISIN and session. It does
+  not fail the check (the step is known and documented), but it is *not* explained: the level
+  series is wrong across it, so `findings` raises a WARN for each one, and the query layer
+  quarantines the ISIN's bars before it (D22). Never adjusted — that would invent a ratio.
 * `DIVIDEND` — the total-return close does not step: a distribution, reinvested there (Majesco's
   ₹974 on 2020-12-23), absent from the price-adjusted series by convention.
 * `LONG_GAP` — the two bars are more than `max_gap_days` apart: a suspension, or months in the
@@ -91,6 +97,7 @@ class StepClass(StrEnum):
     STRUCTURAL = "STRUCTURAL"
     RECORDED_UNSCALED = "RECORDED_UNSCALED"
     EXPLAINED_MOVE = "EXPLAINED_MOVE"
+    UNSOURCED = "UNSOURCED"
     DIVIDEND = "DIVIDEND"
     LONG_GAP = "LONG_GAP"
     UNEXPLAINED = "UNEXPLAINED"
@@ -124,7 +131,8 @@ class AdjustedStep:
 class L2ContinuityReport:
     """Every step past the threshold, classified, and the retired partitions on disk.
 
-    `passed` is the check: no `UNEXPLAINED` step and no retired partition.
+    `passed` is the check: no `UNEXPLAINED` step and no retired partition. An `UNSOURCED` step
+    keeps it passing and is reported as a WARN finding instead.
     """
 
     threshold: Decimal
@@ -141,6 +149,10 @@ class L2ContinuityReport:
         return self.of_class(StepClass.UNEXPLAINED)
 
     @property
+    def unsourced(self) -> tuple[AdjustedStep, ...]:
+        return self.of_class(StepClass.UNSOURCED)
+
+    @property
     def passed(self) -> bool:
         return not self.unexplained and not self.retired_partitions
 
@@ -151,6 +163,7 @@ def classify_steps(
     structural_dates: Mapping[str, Iterable[date]],
     unscaled_dates: Mapping[str, Iterable[date]] | None = None,
     explained_dates: Mapping[str, Iterable[date]] | None = None,
+    unsourced_dates: Mapping[str, Iterable[date]] | None = None,
     threshold: Decimal,
     max_gap_days: int,
     guard_days: int = 7,
@@ -160,7 +173,8 @@ def classify_steps(
     `structural_dates` maps an ISIN to the ex-dates of its recorded structural breaks;
     `unscaled_dates` to those of its recorded rights issues and large dividends;
     `explained_dates` to the sessions the curated allowlist documents as market moves — matched
-    on the step's own session exactly, never within a guard window, so it cannot cover another.
+    on the step's own session exactly, never within a guard window, so it cannot cover another;
+    `unsourced_dates` to the curated unsourced share-basis steps, matched the same exact way.
     """
     guard = timedelta(days=guard_days)
     lower = 1 / threshold
@@ -173,6 +187,8 @@ def classify_steps(
             abs(step.trade_date - d) <= guard for d in (unscaled_dates or {}).get(step.isin, ())
         ):
             cls = StepClass.RECORDED_UNSCALED
+        elif step.trade_date in (unsourced_dates or {}).get(step.isin, ()):
+            cls = StepClass.UNSOURCED
         elif step.trade_date in (explained_dates or {}).get(step.isin, ()):
             cls = StepClass.EXPLAINED_MOVE
         elif lower <= step.tr_ratio <= threshold:
@@ -186,11 +202,14 @@ def classify_steps(
 
 
 def findings(report: L2ContinuityReport, *, logical_date: date) -> tuple[QualityFinding, ...]:
-    """One ERROR finding per unexplained step and per retired partition, for `persist_findings`.
+    """ERROR per unexplained step and retired partition, WARN per unsourced step.
 
     ERROR on purpose: an unadjusted split in L2 is a wrong return the backtest and every signal
-    will trade on (invariant #10). A step's finding is dated by the step's own session, so a
-    re-scan finds the flag it raised before rather than stacking another.
+    will trade on (invariant #10). An `UNSOURCED` step is that same wrong return, but known and
+    quarantined in the query layer (D22), so it is a WARN (kind `unsourced_action_step`): visible
+    on the status API until a source lets it be adjusted, without turning the check red. A step's
+    finding is dated by the step's own session, so a re-scan finds the flag it raised before
+    rather than stacking another.
     """
     out: list[QualityFinding] = []
     for step in report.unexplained:
@@ -213,6 +232,29 @@ def findings(report: L2ContinuityReport, *, logical_date: date) -> tuple[Quality
                 },
                 fingerprint=finding_fingerprint(
                     f"{CHECK_NAME}:{step.exchange}", step.isin, step.trade_date
+                ),
+            )
+        )
+    for step in report.unsourced:
+        out.append(
+            QualityFinding(
+                logical_date=step.trade_date,
+                check_name=CHECK_NAME,
+                severity="WARN",
+                isin=step.isin,
+                source=_DATASET,
+                observed_value=step.ratio,
+                threshold=report.threshold,
+                detail={
+                    "kind": "unsourced_action_step",
+                    "exchange": step.exchange,
+                    "prev_date": step.prev_date.isoformat(),
+                    "prev_adj_close": str(step.prev_close),
+                    "adj_close": str(step.close),
+                    "quarantined_before": step.trade_date.isoformat(),
+                },
+                fingerprint=finding_fingerprint(
+                    f"{CHECK_NAME}:unsourced:{step.exchange}", step.isin, step.trade_date
                 ),
             )
         )
@@ -308,6 +350,9 @@ def scan(
     explained: dict[str, list[date]] = {}
     for isin, days in curated.explained_dates().items():
         explained.setdefault(survivor_of(isin), []).extend(days)
+    unsourced: dict[str, list[date]] = {}
+    for isin, days in curated.unsourced_dates().items():
+        unsourced.setdefault(survivor_of(isin), []).extend(days)
     if conn is not None and steps:
         for isin, ex_date in conn.execute(
             "SELECT DISTINCT isin, ex_date FROM corporate_actions "
@@ -343,6 +388,7 @@ def scan(
             structural_dates=structural,
             unscaled_dates=unscaled,
             explained_dates=explained,
+            unsourced_dates=unsourced,
             threshold=threshold,
             max_gap_days=max_gap_days,
         ),
@@ -355,7 +401,8 @@ def scan(
         steps=len(report.steps),
         **{c.value.lower(): len(report.of_class(c)) for c in StepClass},
         retired_partitions=len(report.retired_partitions),
-        state="GREEN" if report.passed else "RED",
+        # WARN, not GREEN, while an unsourced step stands: passing, but a known wrong level series.
+        state="RED" if not report.passed else ("WARN" if report.unsourced else "GREEN"),
     )
     return report
 
@@ -373,7 +420,7 @@ def _as_decimal(value: object) -> Decimal:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """CLI: print the classified counts and every unexplained step; exit 1 when the check fails."""
+    """CLI: print the counts, every unexplained and unsourced step; exit 1 when the check fails."""
     from dataplatform.clock import SystemClock
     from dataplatform.config import get_settings
     from dataplatform.identity.lineage import LineageStore
@@ -407,6 +454,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"UNEXPLAINED {step.isin} {step.exchange} {step.prev_date} -> {step.trade_date} "
             f"{step.prev_close} -> {step.close} (x{step.ratio:.4f})"
+        )
+    for step in report.unsourced:
+        print(
+            f"UNSOURCED {step.isin} {step.exchange} {step.prev_date} -> {step.trade_date} "
+            f"{step.prev_close} -> {step.close} (x{step.ratio:.4f}) "
+            f"quarantined before {step.trade_date}"
         )
     for isin in report.retired_partitions:
         print(f"RETIRED {isin}")
