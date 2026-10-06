@@ -70,6 +70,7 @@ import argparse
 import signal
 import sys
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from enum import StrEnum
@@ -89,7 +90,9 @@ from dataplatform.ingest.fetcher import (
     Fetcher,
     ForbiddenSpikeError,
     build_fetcher,
+    leased_fetcher,
 )
+from dataplatform.ingest.lease import HostBusyError
 from dataplatform.ingest.models import ParseError
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
@@ -151,6 +154,9 @@ DEFAULT_CHUNK_MONTHS: Final = 3
 #: `--chunk-months` is an operator's choice — a twelve-month chunk in the lake already carries
 #: 9,287 — and an unbounded buffer would make that choice a memory failure rather than a slow run.
 MAX_BUFFERED_FILINGS: Final = 5_000
+
+#: The hosts a fetching run talks to: index feeds on the site, XBRL documents on the archive.
+LEASED_HOSTS: Final = ("www.nseindia.com", "nsearchives.nseindia.com")
 
 
 class Period(StrEnum):
@@ -1318,7 +1324,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     `--dry-run` prints and counts the discovery plan without a socket or a database. Without it, the
     runner fetches: it reads the price-window ISINs from L1, resolves them through the D2 master,
     drives the discovery plan, and ingests each chunk's in-universe filings. Exit code is 0 on a
-    clean or gracefully stopped run, and 3 when the run parked on a 403 spike, so an orchestrator
+    clean or gracefully stopped run, 3 when the run parked on a 403 spike, and 4 when another
+    driver holds one of the hosts' leases, so an orchestrator
     can tell "done" from "needs a human".
     """
     ap = argparse.ArgumentParser(prog="fundamentals-backfill", description=__doc__)
@@ -1370,21 +1377,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     calendar = trading_calendar()
     register = load_register()
 
-    return _run_live(
-        from_date=args.from_date,
-        to_date=args.to_date,
-        limit=args.limit,
-        max_filings=args.max_filings,
-        chunk_months=args.chunk_months,
-        dry_run=args.dry_run,
-        report_path=args.report,
-        rebuild_from_l0=args.rebuild_from_l0,
-        feed=IndexFeed(args.feed),
-        settings=settings,
-        clock=clock,
-        calendar=calendar,
-        register=register,
-    )
+    try:
+        return _run_live(
+            from_date=args.from_date,
+            to_date=args.to_date,
+            limit=args.limit,
+            max_filings=args.max_filings,
+            chunk_months=args.chunk_months,
+            dry_run=args.dry_run,
+            report_path=args.report,
+            rebuild_from_l0=args.rebuild_from_l0,
+            feed=IndexFeed(args.feed),
+            settings=settings,
+            clock=clock,
+            calendar=calendar,
+            register=register,
+        )
+    except HostBusyError as busy:
+        print(f"fundamentals backfill refused to start: {busy}", file=sys.stderr)
+        return 4
 
 
 def _run_live(
@@ -1419,7 +1430,7 @@ def _run_live(
         _print_plan(plan)
         return 0
 
-    with connection(settings) as conn:
+    with connection(settings) as conn, ExitStack() as stack:
         master = IdentityStore(conn, clock=clock).load_master()
         try:
             price_isins = isins_in_price_window(
@@ -1432,7 +1443,22 @@ def _run_live(
 
         stop_state = {"stop": False}
         _install_sigint(stop_state)
-        fetcher = build_fetcher(clock=clock, settings=settings, register=register)
+        # A fetching run holds both hosts' request budgets for its lifetime, so it cannot run
+        # beside another driver on either (lease.py, audit finding N7). A rebuild makes no request
+        # and takes no lease — it must be runnable while a campaign holds the hosts.
+        fetcher = (
+            build_fetcher(clock=clock, settings=settings, register=register)
+            if rebuild_from_l0
+            else stack.enter_context(
+                leased_fetcher(
+                    LEASED_HOSTS,
+                    clock=clock,
+                    command="dataplatform.ingest.fundamentals_backfill",
+                    settings=settings,
+                    register=register,
+                )
+            )
+        )
         l0 = L0Store(clock=clock, data_root=settings.data_root)
         sync = SyncStateStore(conn, clock=clock, calendar=calendar)
         runner = FundamentalsBackfillRunner(
