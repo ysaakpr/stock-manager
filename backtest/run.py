@@ -462,6 +462,20 @@ class _L1Reader:
             )
         return tuple(sorted(windows, key=lambda window: window.isin))
 
+    def last_prints(self, upto: date) -> dict[str, date]:
+        """Each NSE-equity ISIN's last priced session on or before ``upto``.
+
+        Bounded by ``upto`` so a name that stopped printing inside a window is seen as stopped there
+        even if it printed again later: :meth:`listing_windows` spans the whole lake and cannot say
+        that. A name with no print on or before ``upto`` is absent. Never reads past ``upto``.
+        """
+        rows = self._con.execute(
+            f"SELECT isin, max(trade_date) FROM {self._VIEW} "
+            f"WHERE {self._SCOPE} AND close > 0 AND trade_date <= $upto GROUP BY isin",
+            {"upto": upto},
+        ).fetchall()
+        return {str(isin): last for isin, last in rows}
+
     def closes_on(self, session: date) -> dict[str, Decimal]:
         """The equity close for every priced name on ``session`` (cached)."""
         cached = self._closes.get(session)
