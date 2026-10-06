@@ -20,6 +20,7 @@ from dataplatform.config import Settings
 from dataplatform.ingest import fo_backfill as fob
 from dataplatform.ingest.calendar import trading_calendar
 from dataplatform.ingest.fetcher import Fetcher, RecordedResponse, RecordedTransport
+from dataplatform.ingest.nse.fo_bhavcopy import FO_SOURCE_ID
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.status.sync_state import SyncState
 from dataplatform.store.fo_aggregates import read_l1, read_l2
@@ -155,7 +156,7 @@ def test_backfill_lands_l1_and_l2_and_a_rerun_redoes_nothing(tmp_path: Path) -> 
 def test_a_payload_in_l0_is_reparsed_not_refetched(tmp_path: Path) -> None:
     plan = _plan(SESSION)
     L0Store(clock=CLOCK, data_root=tmp_path).put(
-        fob.FO_SOURCE_ID, SESSION, plan[0].filename, FIXTURE.read_bytes()
+        FO_SOURCE_ID, SESSION, plan[0].filename, FIXTURE.read_bytes()
     )
     report = _runner(RecordedTransport({}), tmp_path, _FakeSync()).run(plan)
     assert report.published == 1 and report.requests == 0 and report.l0_reused == 1
@@ -171,7 +172,7 @@ def test_403_spike_parks_with_enumerated_cause(tmp_path: Path) -> None:
     sync = _FakeSync()
     report = _runner(forbidden, tmp_path, sync).run(plan)
     assert report.parked and report.park_reason is fob.ParkReason.FORBIDDEN_SPIKE
-    assert sync.get(fob.FO_SOURCE_ID, plan[-1].session) is None
+    assert sync.get(FO_SOURCE_ID, plan[-1].session) is None
 
 
 #: Four rows copied verbatim from the first real UDiFF F&O file fetched (2024-07-08, L0 payload
