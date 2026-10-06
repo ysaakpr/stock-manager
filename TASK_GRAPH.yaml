@@ -23,6 +23,7 @@ milestones:
   M11: {title: Macro backdrop — PIT economic + market-state series, depends: [M4]}
   M12: {title: Strategy search — short-horizon families and the risk-adjusted comparison,
         depends: [M9, M10]}
+  M13: {title: "Run of 2026-10-06 — paper operations, alert triggers, data repairs", depends: [M5, M9, M10]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -1572,23 +1573,27 @@ tasks:
   title: Live-model fire drill and T1/T2 quality review
   milestone: M6
   module: A5
-  autonomy: NEEDS_SECRET
+  # Was NEEDS_SECRET (B4: no Anthropic API key). D16 (2026-10-06) accepts ClaudeCliLLM as the real
+  # model, so the credential this task waited on is no longer the blocker.
+  autonomy: AUTO
   deps: [M6.7]
   spec: |
-    Re-run the fire drill and a sample of T1/T2 reviews against the real Anthropic API, then assess output
+    Re-run the fire drill and a sample of T1/T2 reviews against a real model, then assess output
     QUALITY (not just plumbing): are verdicts defensible, are proposed actions sane, is the reasoning
     grounded in the evidence bundle? Record real token costs per decision tier.
-    Blocked by B4 — no Anthropic credential exists.
+    "Real model" means either the Anthropic API or `analyst.llm.claude_cli.ClaudeCliLLM` (`claude -p`
+    on this machine's subscription login) — D16, 2026-10-06, since no ANTHROPIC_API_KEY exists here.
+    Both satisfy the same `LLM` interface StubLLM does; the report names which one ran. Under the CLI
+    there is no per-call bill, so cost is the CLI-reported token counts priced at the model's list
+    rate, and the report says it is priced that way rather than invoiced.
+    The live test is opt-in behind a registered `live` pytest marker, like `network`: `make check`
+    never reaches a model.
   deliverables: [ops/gates/M6-live-drill.md]
   acceptance:
-    - "fire drill passes against the real model with the verdict and reasoning captured verbatim"
-    - "measured real cost per T1 and per T2 decision recorded"
+    - "fire drill passes against the real model (API or ClaudeCliLLM, named in the report) with the verdict and reasoning captured verbatim"
+    - "measured real cost per T1 and per T2 decision recorded, stating whether it is invoiced or token-count x list price"
     - "a written judgment on output quality with specific examples, not a pass/fail tick"
   verify: "uv run pytest tests/integration/test_fire_drill.py -q -m live"
-  escalation:
-    question: "Provide an Anthropic API key (env var, not a file) to exercise T1/T2 against the real model?"
-    why_blocked: "B4: no credential exists. StubLLM proves the plumbing but cannot evaluate judgment quality or real cost."
-    unblocks: [M6.9]
 
 - id: M6.9
   title: "GATE M6 — Monitoring depth audit"
@@ -2140,6 +2145,26 @@ tasks:
     why_blocked: "B1: a fetch campaign over ~200 requests to one source is owner-authorized, not agent-initiated."
     unblocks: [M11.3]
   verify: "uv run pytest tests/unit/test_macro_backfill.py -q"
+
+- id: M11.3
+  title: Widen the index-name alias table from the macro backfill's unknown-names list
+  milestone: M11
+  module: D1
+  autonomy: AUTO
+  deps: [M11.2]
+  spec: |
+    M11.2's report lists every published index name the alias table does not know. Each is either a
+    renamed index (map it onto its existing series_id, with the rename date and the evidence that
+    shows it — two dated files straddling the switch) or a genuinely new index (its own series_id).
+    An unmapped name stays its own series; a mapping is never a guess from string similarity.
+    No fetch: the inputs are the backfill's L0 and its report. Re-derive macro_series from L0 after
+    the table changes and report the unknown-names count before and after.
+  deliverables: [dataplatform/ingest/macro/, tests/unit/test_macro_series.py, ops/gates/M11-index-valuation-backfill.md]
+  acceptance:
+    - "every name on M11.2's unknown list is either aliased with a dated, cited rename or recorded as its own series"
+    - "a test pins each new alias: the old and new name resolve to one series_id across the rename date"
+    - "the re-derivation from L0 makes no network request and the before/after unknown count is reported"
+  verify: "uv run pytest tests/unit/test_macro_series.py tests/unit/test_macro_backfill.py -q"
 # ─────────────────────────────────────────────────────────────────────────────
 # M12 — Strategy search (short-horizon families + the risk-adjusted comparison)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2247,3 +2272,141 @@ tasks:
        answered no"
     - "every arm that beats the bar on the six-year window but not the decade is named as such"
   verify: "test -s ops/gates/M12-strategy-verdict.md"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M13 — Run of 2026-10-06: paper operations, alert triggers, data repairs
+# Opened under the owner's delegation of 2026-10-06 (HUMAN_DECISIONS D14-D21). Kite and real
+# money (M8.3, M8.4) are out of scope.
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: M13.1
+  title: Daily paper-trading session job for the D13 configuration
+  milestone: M13
+  module: A1
+  autonomy: AUTO
+  deps: [M0.6, M5.13, M5.15, M9.5]
+  spec: |
+    D13 ratified `backtest.policies.momentum_v2.PAPER_RATIFIED_2026_09_06` for paper mode; D15 (2026-10-06)
+    is the go for the job that runs it. Register a daily analyst-session job in the scheduler
+    (`dataplatform/scheduler/registry.py`) that, after the EOD pipeline, runs one analyst session on
+    that configuration against `SimBroker`.
+    Paper only. Paper and real differ only by the injected `Broker` (invariant #5): no `if paper:`
+    branch, and nothing here constructs a `KiteBroker`. The session reads `/status/sync` first; red
+    data journals `SKIPPED_DATA_RED` and trades nothing (invariant #10). Every run journals, including
+    a no-op heartbeat (invariant #9). The clock is injected. If it needs schema, its migration is
+    `0012` — the number reserved for this task.
+  deliverables: [dataplatform/scheduler/registry.py, tests/unit/test_scheduler_registry.py, tests/unit/test_paper_session_job.py]
+  acceptance:
+    - "the scheduler registers the paper session job and the registry test pins its schedule and order after EOD"
+    - "a session on a red-data date journals SKIPPED_DATA_RED and places no order; a test fails if the check is skipped"
+    - "a session with nothing to do journals a heartbeat"
+    - "the job constructs SimBroker and can never construct KiteBroker; a test pins it"
+    - "the session runs PAPER_RATIFIED_2026_09_06 unchanged"
+  verify: "uv run pytest tests/unit/test_scheduler_registry.py tests/unit/test_paper_session_job.py -q"
+
+- id: M13.2
+  title: Alert triggers — FAILED-ingest streak, red quality, holiday calendar near expiry
+  milestone: M13
+  module: D5
+  autonomy: AUTO
+  deps: [C.2, C.3, M1.3, M2.8]
+  spec: |
+    C.3 built the `Alerter` channel (`dataplatform/alerts.py`) and nothing calls it (ops/BACKLOG.md, C.3).
+    Add the triggers, each producing one `Alerter.send` with a stable dedup_key so a streak is one alert,
+    not one per day:
+      * an ingestion source whose `sync_state` has a FAILED streak;
+      * quality red on a core dataset (the same signal `is_green` gates trading on);
+      * the holiday calendar (`nse_holidays.yaml`) ending within 60 days of the clock's today — the
+        2027 circular is due in December and `expected_sessions` hard-fails past coverage.
+    One severity/dedup-key convention across the three, stated in the module docstring. The clock is
+    injected; no trigger reads `datetime.now()`. A trigger that cannot evaluate (store unreachable)
+    alerts on that, never passes silently.
+  deliverables: [dataplatform/alerts.py, tests/unit/test_alerts.py, tests/unit/test_alert_triggers.py]
+  acceptance:
+    - "a FAILED streak, a red quality flag and a calendar ending within 60 days each produce exactly one Alerter.send; the healthy case produces none"
+    - "repeating the condition on the next run is suppressed by the dedup_key"
+    - "the 60-day boundary is pinned on both sides by tests (59 alerts, 61 does not, or the stated convention)"
+    - "a trigger that cannot read its input alerts instead of returning quietly"
+  verify: "uv run pytest tests/unit/test_alerts.py tests/unit/test_alert_triggers.py -q"
+
+- id: M13.3
+  title: Rebuild the NSE shareholding-pattern parser for the live payload
+  milestone: M13
+  module: D1
+  autonomy: AUTO
+  deps: [M3.6]
+  spec: |
+    The live shareholding payload no longer carries pledge in the shape `dataplatform/ingest/shareholding.py`
+    expects. Rebuild the parser against the payload as it is today, and re-freeze the fixture from a real
+    payload already in L0 (B8) — no synthetic "shaped like" fixture, and no fetch if L0 holds one.
+    Per D17 (2026-10-06) pledge is optional: a filing without it parses, stores pledge as absent (never 0),
+    and BC3 reports an explicit `not_applicable` status for it instead of evaluating or passing silently.
+    Where pledge is present it stays a first-class queryable field. Both dates (period_end, filing_date)
+    are still carried and neither is inferred from the other.
+  deliverables: [dataplatform/ingest/shareholding.py, tests/unit/test_shareholding.py, "tests/fixtures/nse_shareholding/"]
+  acceptance:
+    - "the re-frozen fixture is a real L0 payload, with its L0 reference recorded beside it"
+    - "a filing without pledge parses with pledge absent (None), never 0"
+    - "BC3 on a holding without pledge reports not_applicable; with pledge >50% it still breaks"
+    - "a PIT query before filing_date still cannot see the row"
+  verify: "uv run pytest tests/unit/test_shareholding.py -q"
+
+- id: M13.4
+  title: Curate the seven pre-2011 split/bonus steps; investigate the CS markers that match 0/34
+  milestone: M13
+  module: D3
+  autonomy: AUTO
+  deps: [M2.4, M2.8, M9.1, M9.2]
+  spec: |
+    `ops/gates/l1-widen-2026-10-06.md` §5: extending L2 back to 2006 exposes seven unexplained
+    continuity steps, all unrecorded pre-2011 splits or bonuses (the ISIN/date/ratio table there).
+    Curate each in `dataplatform/corpactions/manual_actions.yaml` with a cited source for its terms,
+    so `quality.l2_continuity` returns to zero unexplained steps on the extended lake. A step whose
+    terms cannot be sourced is left uncurated and named — never fitted from the price ratio alone.
+    Separately, §4: the TDCLOINDI `CS` (consolidation) marker matches 0 of 34 stored actions. Find out
+    why — the action feed never carries consolidations, they are stored under another type, or the
+    witness's type mapping is wrong — and fix whichever it is, with a test that fails if reversed.
+  deliverables: [dataplatform/corpactions/manual_actions.yaml, tests/unit/test_manual_actions.py, tests/unit/test_ex_marker_witness.py]
+  acceptance:
+    - "each of the seven steps is curated with a cited source, or named as unsourced with the reason"
+    - "a test pins every curated action's ratio and ex-date"
+    - "the CS 0/34 cause is stated, fixed, and pinned by a test that fails if the fix is reversed"
+    - "no L0 is touched and no network fetch is made"
+  verify: "uv run pytest tests/unit/test_manual_actions.py tests/unit/test_ex_marker_witness.py tests/unit/test_l2_continuity.py -q"
+
+- id: M13.5
+  title: Bring orchestrator/ under make check
+  milestone: M13
+  module: "—"
+  autonomy: AUTO
+  deps: [M0.1]
+  spec: |
+    `orchestrator/` is excluded from the gate (pyproject `extend-exclude`, mypy `files`; ops/BACKLOG.md
+    M0.1). Remove the exclusion, fix what ruff format, ruff check and mypy --strict then report, and keep
+    `./orch` working on its own ephemeral environment (stdlib + PyYAML). Behaviour does not change; this
+    is the gate, not a refactor.
+  deliverables: [pyproject.toml, "orchestrator/"]
+  acceptance:
+    - "orchestrator/ is no longer excluded from ruff or mypy and make check is green"
+    - "./orch validate and ./orch status behave as before"
+  verify: "uv run ruff format --check orchestrator && uv run ruff check orchestrator && uv run mypy orchestrator && ./orch validate"
+
+- id: M13.6
+  title: Source register — a 'declined on policy' status (D12)
+  milestone: M13
+  module: D1
+  autonomy: AUTO
+  deps: [C.1]
+  spec: |
+    D12 found that the register's status enum (`VERIFIED | FAILED | BLOCKED_CREDENTIAL`) cannot say
+    "we are declining this source on policy grounds", so `screener_company_fundamentals` — blocked by
+    robots.txt, not by a credential — wears a label that points at the forbidden action. D19
+    (2026-10-06) takes D12's recommended option 1: add the status. Extend the enum, the validator and
+    every reader or report that switches on status; relabel the screener row with its robots evidence.
+    A declined row is permanent: a re-probe sweep skips it rather than re-examining it.
+  deliverables: [dataplatform/ingest/source_register.py, dataplatform/ingest/source_register.yaml, tests/unit/test_source_register.py]
+  acceptance:
+    - "the register accepts the new status and the screener row carries it with its robots evidence"
+    - "every switch on status handles the new value; a test fails if one does not"
+    - "a re-probe sweep does not select a declined row"
+  verify: "uv run python -m dataplatform.ingest.source_register validate && uv run pytest tests/unit/test_source_register.py -q"
