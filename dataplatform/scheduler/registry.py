@@ -38,6 +38,7 @@ __all__ = [
     "CONSTITUENTS_SNAPSHOT",
     "DAILY_SNAPSHOT",
     "EOD_PIPELINE",
+    "FAILURE_ALERTS",
     "FBIL_REFERENCE_RATES",
     "INDEX_PRESS_REFRESH",
     "JOB_NAME",
@@ -59,6 +60,7 @@ __all__ = [
     "daily_snapshot",
     "default_registry",
     "eod_pipeline",
+    "failure_alerts",
     "fbil_reference_rates",
     "lag_budgets",
     "macro_release_capture",
@@ -743,6 +745,34 @@ MACRO_RELEASE_CAPTURE = Job(
 )
 
 
+def failure_alerts(context: JobContext) -> None:
+    """The failure-alert tick (M13.2): page each condition onset once, and its resolution.
+
+    What it does: evaluates four conditions nobody else turns into an alert — an ingestion source
+    FAILED for `alert_failure_streak_threshold` consecutive sessions, a quality check with open
+    ERROR flags, the holiday calendar ending within `alert_calendar_lead_days`, and a registered
+    job whose newest finished run raised — and diffs them against `alert_condition`, so an onset
+    pages once and a repeat pages nothing. See `alert_triggers.run_failure_alerts`.
+    What it assumes: the injected clock and settings are the run's (B10), migrated through 0013.
+    What it never does: fetch anything, or put a credential in an alert body (`redact`). The
+    import is deferred for the same reason the others are.
+    """
+    from dataplatform.alert_triggers import run_failure_alerts_job
+
+    run_failure_alerts_job(context)
+
+
+#: Every 15 minutes, every day: a few small reads and no network, so the cadence costs nothing and
+#: bounds how long a failure goes unpaged. No `covers` and no `sync_sources` — it keeps no source
+#: current; it watches the jobs that do.
+FAILURE_ALERTS = Job(
+    name="failure_alerts",
+    cron="*/15 * * * *",
+    fn=failure_alerts,
+    timeout=timedelta(minutes=5),
+    description="Page FAILED streaks, red quality, failed jobs and calendar expiry once (M13.2)",
+)
+
 #: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
 #: audit's root cause was not one broken job but sources that were simply never scheduled — the
 #: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
@@ -815,5 +845,6 @@ def default_registry() -> JobRegistry:
             SHAREHOLDING_POLL,
             ANNOUNCEMENTS_CAPTURE,
             NEWS_CAPTURE,
+            FAILURE_ALERTS,
         ]
     )
