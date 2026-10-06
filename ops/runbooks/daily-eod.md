@@ -129,3 +129,101 @@ transport.
 Running twice for the same session changes nothing: no re-fetch (the row is `PUBLISHED`), no L1
 rewrite, and no second bundle (L0 is immutable, so the bundle would be byte-identical anyway). L0 is
 never edited or deleted (invariant #1); every L1 value is re-derivable from it.
+
+## The daily paper session (M13.1)
+
+`paper_session` runs at **20:30 IST, Monday to Friday**, after the EOD pipeline above. It decides
+one session of the D13-ratified momentum v2 book (`PAPER_RATIFIED_2026_09_06`: 12-1 ranking, top-20
+with a top-30 sell band, 200-session regime filter, inverse-vol weights, redeploy next session) in
+**paper mode only**: the order path is the backtest's own `ReplayEngine` → `RailGate` (A8) →
+`SimBroker`, and nothing on it can build or accept a real broker. Book id
+`momentum_v2_paper_2026_09_06`, opening capital ₹10 lakh (the M9 reports' capital), ratified rails.
+Code: `backtest/paper_session.py`; ledger: `paper_session` (migration 0012).
+
+What one run does, in order — each step can end the run:
+
+1. **Holiday?** Not a session per `dataplatform/ingest/data/nse_holidays.yaml` → nothing written.
+2. **Already decided?** A `COMPLETED` row for the date → no-op. Reruns never trade twice.
+3. **Data red?** `nse_bhavcopy` not `PUBLISHED`/quality-green for the date, the status read failing,
+   no L1 NSE prices for the date, or — on a rebalance — no published NIFTY 50 level for the date or
+   no investable-universe coverage → one `SKIPPED_DATA_RED` journal entry (actor `SYSTEM`), a red
+   `paper_session` row, **no order**. A rerun that is still red writes nothing more; a rerun after
+   the data heals decides the date normally (the skip stays in the journal — it is append-only).
+4. **Rebuild the book** from the `paper_session` rows: every calendar session since the first
+   decided one is replayed through `SimBroker` (corporate actions, settlement, fills), the recorded
+   orders are placed again, and the rebuilt book must match each session's recorded `book_digest`.
+5. **Decide** the session and journal every entry (BUY/SELL, RAIL_BLOCK, or the day's HEARTBEAT),
+   each tagged `payload.mode = PAPER`, `payload.paper_book = <book id>`; record the session
+   `COMPLETED`. Journal entries and the ledger row commit in one transaction.
+
+**Rebalance timing.** A rebalance is due on the first session of the month *the book decides*:
+the first session it ever decides, and thereafter the first green session of each month. A red
+first-of-month moves the rebalance to the next green session rather than skipping the month.
+Orders staged for a session the book did not decide (red, or the job did not run) **lapse
+unfilled** — the paper book never fills on bars the interlock refused. This is a known divergence
+from a real broker, which would have filled them; it is the conservative choice.
+
+### Installing and restarting
+
+The job is registered in `dataplatform/scheduler/registry.py`; the running scheduler reads the
+registry at start, so after merging, restart the user service (do not restart it mid-run of another
+job — check `GET /status/jobs` first):
+
+```bash
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status scheduler
+make migrate     # once, if 0012_paper_session is not yet applied
+```
+
+### Running it by hand
+
+```bash
+uv run python -m dataplatform.scheduler run-once paper_session
+```
+
+It decides **today** (the clock's date in IST) and is safe to repeat: a decided date is a no-op and
+a still-red date writes nothing new. It reads the lake and Postgres only — no network.
+
+### Checking it
+
+```sql
+-- the ledger: one row per decided or refused session
+SELECT trading_date, outcome, reason, rebalanced, jsonb_array_length(orders) AS orders,
+       pending IS NOT NULL AS redeploy_pending
+FROM paper_session WHERE book_id = 'momentum_v2_paper_2026_09_06' ORDER BY trading_date DESC;
+
+-- the decisions behind it
+SELECT trading_date, decision, isin, sleeve, rationale
+FROM decision_journal
+WHERE payload->>'paper_book' = 'momentum_v2_paper_2026_09_06'
+ORDER BY trading_date DESC, id;
+```
+
+`GET /status/jobs` shows the job's last run; a `FAILED` run left nothing behind (the transaction
+rolled back) and the next run retries the date.
+
+### When it is red or fails
+
+- **Red every rebalance day: "no level for <date>" from the published `nifty50` series.** The
+  regime filter reads the published NIFTY 50 level *for the session itself* and never a stale one
+  (`backtest.run._RegimeSource`). `tri_refresh` runs weekly (Saturday 08:00) and only fetches up to
+  the session *before* the day it runs, so on its current cadence the session's level is never in
+  the lake by 20:30 the same day, and every rebalance attempt is red until it is. The book stays in
+  whatever it last held (cash, at inception) and the journal shows one `SKIPPED_DATA_RED` per day
+  naming the cause. The fix is a same-evening TRI refresh for the session (a change to
+  `tri_refresh`'s cadence and target) — an owner/orchestrator decision, not something this job
+  works around.
+- **`PaperBookDivergenceError`.** The rebuilt book no longer matches the digest recorded when a
+  past session was decided: an input the rebuild reads (a raw bar a fill was priced on, a
+  reconciled corporate action) changed since. The job refuses to trade on a history different
+  from the journaled one. Do not delete or edit `paper_session` rows; find which input moved
+  (the error names the session), and escalate — re-basing a paper book is an owner decision.
+- **`CalendarCoverageError` / no session after a date.** The holiday file covers through
+  2026-12-31; the job needs the next year's holidays before the last December session. Extend
+  `dataplatform/ingest/data/nse_holidays.yaml`.
+- **Any other exception.** The run is `FAILED` in `job_run` with nothing written; read the error,
+  fix, and `run-once paper_session` (same date: idempotent).
+
+**Never** point this job at a real broker. Real money for this configuration is a separate
+ratification (AGENTIC_CONTEXT §3.2) and a separate job; `tests/unit/test_paper_session_paper_only.py`
+fails if this one could reach `KiteBroker`.
