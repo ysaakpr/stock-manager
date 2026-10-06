@@ -40,6 +40,7 @@ from backtest.duration import (
     holding_period_math,
     render_duration_report,
 )
+from backtest.run_ledger import RunSummary
 from backtest.sweep import (
     DURATION_ARMS,
     HIGH_FLOOR,
@@ -840,3 +841,87 @@ def test_the_report_names_the_universe_it_screened() -> None:
     )
     report = render_duration_report(sweep, floors=[LOW_FLOOR])
     assert "Investable universe: `turnover_floor`" in report
+
+
+# ── the bar section's "highest", and rows resumed from a persisted summary ──────────────────────
+
+
+def test_the_bar_section_names_the_highest_xirr_on_any_floor_not_the_top_ranked_arm() -> None:
+    """The top of the ₹1 crore ranking is the best *ratio*; the bar asks about *return*.
+
+    Here the low floor's top-ranked arm earns 15 % on a small drawdown, while a riskier arm on the
+    high floor earns 19 %. "How close did anything get to 25 %" is answered by the 19 %.
+    """
+    window = Window(label="Only", start=date(2018, 1, 1), end=date(2023, 12, 31))
+    rows = [
+        _row(_REFERENCE, xirr="0.15", drawdown="0.10"),
+        _row(_FAST, xirr="0.17", drawdown="0.40"),
+        _row(_REFERENCE, xirr="0.12", drawdown="0.20", floor=HIGH_FLOOR),
+        _row(_FAST, xirr="0.19", drawdown="0.45", floor=HIGH_FLOOR),
+    ]
+    sweep = MultiWindowSweep(
+        windows=[
+            WindowSweep(
+                window=window,
+                result=_result(rows, start=date(2018, 1, 1), terminal=date(2023, 12, 29)),
+            )
+        ]
+    )
+    report = render_duration_report(sweep, floors=[LOW_FLOOR, HIGH_FLOOR])
+    assert f"the highest XIRR was 19.00% ({_FAST}" in report
+    assert "₹10 crore/day)" in report
+    assert "the highest XIRR was 15.00%" not in report
+
+
+def _summary_row(label: str, *, replay_digest: str) -> SweepRow:
+    """A row as a resumed campaign builds it: a persisted summary, no ``run``."""
+    summary = RunSummary(
+        digest="s" * 64,
+        spec={},
+        policy="swing_composite",
+        start=date(2018, 1, 1),
+        terminal=date(2023, 12, 29),
+        sessions=1480,
+        xirr=Decimal("0.16"),
+        max_drawdown=Decimal("0.20"),
+        excess=Decimal("0.05"),
+        benchmark_xirr=Decimal("0.11"),
+        benchmark_name="Nifty 50",
+        total_charges=Decimal("123456"),
+        final_nav=Decimal("2000000"),
+        round_trips=900,
+        median_hold_days=43,
+        replay_digest=replay_digest,
+    )
+    return SweepRow(
+        arm=_ARMS[label],
+        floor=LOW_FLOOR,
+        summary=summary,
+        round_trips=summary.round_trips,
+        median_hold_days=summary.median_hold_days,
+    )
+
+
+def test_a_row_resumed_from_its_summary_renders_cost_digest_and_arithmetic() -> None:
+    """No ``run`` on a resumed row: the cost, the digest and the turnover maths read the summary."""
+    row = _summary_row(_REFERENCE, replay_digest="r" * 64)
+    assert row.run is None
+
+    maths = holding_period_math(row, years=Decimal("6"))
+    assert maths is not None
+    assert maths.realised_cost_per_trip == Decimal("123456") / Decimal(900)
+
+    window = Window(label="Only", start=date(2018, 1, 1), end=date(2023, 12, 31))
+    sweep = MultiWindowSweep(
+        windows=[
+            WindowSweep(
+                window=window,
+                result=_result([row], start=date(2018, 1, 1), terminal=date(2023, 12, 29)),
+            )
+        ]
+    )
+    report = render_duration_report(sweep, floors=[LOW_FLOOR])
+    assert "₹123,456" in report
+    assert f"`{'r' * 64}`" in report
+    assert "not recorded (resumed from a persisted summary)" in report
+    assert "failed" not in report.split("## Run digests")[1]

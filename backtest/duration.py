@@ -226,7 +226,6 @@ def holding_period_math(row: SweepRow, *, years: Decimal) -> HoldingPeriodMath |
     """
     if not row.ok or row.round_trips <= 0 or years <= _ZERO:
         return None
-    assert row.run is not None
     top_n = _top_n(row.arm)
     turns_per_year = Decimal(row.round_trips) / years
     book_turns_per_year = turns_per_year / Decimal(top_n)
@@ -242,7 +241,7 @@ def holding_period_math(row: SweepRow, *, years: Decimal) -> HoldingPeriodMath |
         book_turns_per_year=book_turns_per_year,
         net_excess_per_book_turn=net,
         gross_excess_per_book_turn=net + MODELLED_ROUND_TRIP,
-        realised_cost_per_trip=row.run.total_charges / Decimal(row.round_trips),
+        realised_cost_per_trip=row.total_charges / Decimal(row.round_trips),
     )
 
 
@@ -331,12 +330,11 @@ def _ranked_table(result: SweepResult, floor: Decimal) -> list[str]:
                 f"{_cell(row.error or 'no error recorded')} |"
             )
             continue
-        assert row.run is not None
         drawdown = _drawdown_cell(row)
         lines.append(
             f"| {position} | {row.arm.label} | {duration} | {_pct(row.xirr)} | "
             f"{drawdown} | {_ratio_cell(row)} | {row.round_trips} | "
-            f"{row.median_hold_days}d | {_rupees(row.run.total_charges)} | {_pct(row.excess)} |"
+            f"{row.median_hold_days}d | {_rupees(row.total_charges)} | {_pct(row.excess)} |"
         )
     return lines
 
@@ -422,7 +420,12 @@ def _window_section(
     """Everything about one window, in one place — so nothing invites reading across two."""
     result, window = entry.result, entry.window
     best = next((row for row in result.ranked(floors[0]) if row.ok), None)
-    universe = best.run.mean_universe if best is not None and best.run is not None else _ZERO
+    # A resumed row is backed by its persisted summary, which does not keep the universe size.
+    universe = (
+        str(best.run.mean_universe)
+        if best is not None and best.run is not None
+        else "not recorded (resumed from a persisted summary)"
+    )
     baseline_passes = independent_passes(arms, floors)
     lines = [
         f"## Window — {window.label}: {result.start.isoformat()} → {result.terminal.isoformat()}",
@@ -597,9 +600,14 @@ def _bar_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> list[str
                     + f", at {_duration_of(row.arm)}."
                 )
             continue
-        best = next((row for row in result.ranked(floors[0]) if row.ok), None)
+        # The question is "how close did anything get to the bar", so the answer is the highest
+        # XIRR on any floor run — not the top of one floor's return-per-drawdown ranking, which is
+        # a different arm whenever the riskier arm earned more.
+        ran = [row for floor in floors for row in result.ranked(floor) if row.ok]
+        best = max(ran, key=lambda row: row.xirr, default=None)
         top = (
-            f"the best was {_pct(best.xirr)} ({best.arm.label}, {_duration_of(best.arm)})"
+            f"the highest XIRR was {_pct(best.xirr)} ({best.arm.label}, "
+            f"{_duration_of(best.arm)}, {_floor_label(best.floor)})"
             if best is not None
             else "no arm produced a result"
         )
@@ -797,12 +805,24 @@ def _digest_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> list[
             lines.append(f"**{_floor_label(floor)}**")
             lines.append("")
             for row in entry.result.ranked(floor):
-                if not row.ok or row.run is None:
+                digest = _replay_digest(row)
+                if digest is None:
                     lines.append(f"- **{row.arm.label}:** failed — {row.error}")
                     continue
-                lines.append(f"- **{row.arm.label}:** `{row.run.result.digest()}`")
+                lines.append(f"- **{row.arm.label}:** `{digest}`")
             lines.append("")
     return lines
+
+
+def _replay_digest(row: SweepRow) -> str | None:
+    """The journal-and-book digest of ``row``'s replay, from its run or its persisted summary.
+
+    A resumed row carries no ``run``; its summary's ``replay_digest`` was written from the same
+    ``result.digest()`` at the time of the replay, so the two are the same number.
+    """
+    if row.run is not None:
+        return row.run.result.digest()
+    return row.summary.replay_digest if row.summary is not None else None
 
 
 def _subset_notices(sweep: MultiWindowSweep, arms: Sequence[Arm]) -> list[str]:
