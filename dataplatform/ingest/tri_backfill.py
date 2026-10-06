@@ -25,6 +25,10 @@ cheaper one, because a re-fetch would mint fresh receipts and the endpoint's per
 `RequestNumber` means the same logical history returns as different bytes. It writes no sync row;
 `rebuild_tri_from_l0` says why.
 
+`run_tri_evening` (M13.7) is the same pipeline on a short window, owed every weekday evening: NSE
+Indices disseminates session D's TRI on D's evening, so the paper session's regime filter can read
+D's published level the night it decides D rather than the next Saturday.
+
 Runbook: `ops/runbooks/benchmark-tri.md`.
 """
 
@@ -34,7 +38,7 @@ import argparse
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -53,6 +57,7 @@ from dataplatform.ingest.indices import (
     read_tri_series,
     write_tri_l1,
 )
+from dataplatform.ingest.models import IngestError
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.logging import get_logger
@@ -98,6 +103,12 @@ OPT_IN_INDEX_SET: Final[tuple[IndexSpec, ...]] = (
     IndexSpec(name="NIFTY MIDCAP 150", slug="niftymidcap150"),
     IndexSpec(name="NIFTY SMALLCAP 250", slug="niftysmallcap250"),
 )
+
+#: How far behind session D the same-evening window starts, at the latest. The window always
+#: reaches back to the stored series' last level as well, so a run after missed evenings closes the
+#: gap itself; this floor only keeps a few sessions of overlap with what is already in L1, which is
+#: cheap (seven NIFTY 50 rows were 1,000 bytes on 2026-10-06) and lets a restated recent level land.
+EVENING_OVERLAP_DAYS: Final = 14
 
 #: The default window's lower bound: below every NIFTY index's launch, so the endpoint returns
 #: whatever depth it actually has rather than whatever we guessed. D8's own probe recorded
@@ -268,6 +279,149 @@ def run_tri_refresh(context: JobContext) -> None:
         _LOG.info("tri_refresh.index", source=TRI_SOURCE_ID, line=outcome.line)
 
 
+def latest_session_through(today: date, calendar: TradingCalendar) -> date | None:
+    """The newest session on or before `today` — the level the same-evening refresh owes.
+
+    Unlike `last_session_before`, today counts: the evening job runs after D's close and after NSE
+    Indices has disseminated D (measured: 2026-10-05's level absent at 16:08 IST on the 5th,
+    2026-10-06's present at 20:47 IST on the 6th). On a weekday holiday this is the previous
+    session, which the previous evening already landed, so the run is a no-op. `None` when no
+    session falls inside coverage.
+    """
+    start = max(calendar.coverage_start, today - timedelta(days=31))
+    if today < start:
+        return None
+    sessions = calendar.expected_data_dates(start, today)
+    return sessions[-1] if sessions else None
+
+
+def evening_window_start(spec: IndexSpec, through: date, data_root: Path | None) -> date:
+    """Where the same-evening request for `spec` starts: overlapping L1, never leaving a hole.
+
+    The earlier of the stored published series' last level and `through - EVENING_OVERLAP_DAYS`,
+    so the window always touches what L1 already holds. An index with no published series at all
+    gets the whole-history window, because a short window would land a fragment with nothing
+    behind it and `already_published` would then call that fragment the benchmark.
+    """
+    series = read_tri_series(spec.slug, date.max, method=TRI_METHOD_PUBLISHED, data_root=data_root)
+    if series is None:
+        return EARLIEST_REQUESTED
+    return min(series.points[-1].as_of, through - timedelta(days=EVENING_OVERLAP_DAYS))
+
+
+def run_tri_evening(
+    *,
+    fetcher: Fetcher,
+    l0: L0Store,
+    tracker: SyncTracker,
+    today: date,
+    attempt_at: datetime,
+    indices: Sequence[IndexSpec] = DEFAULT_INDEX_SET,
+    data_root: Path | None = None,
+    register: SourceRegister | None = None,
+    commit: Callable[[], None] | None = None,
+    calendar: TradingCalendar | None = None,
+) -> tuple[IndexOutcome, ...]:
+    """Land each index's published TRI through the latest session on or before `today` (M13.7).
+
+    What it does: for each index whose L1 series does not yet reach that session D, one POST over
+    a short window ending at D (`evening_window_start`), through `ingest_tri` and so through
+    L0 → parse → L1 → `sync_state`, with the sync row dated D. An index already at D is skipped
+    without a request, so a second fire the same evening is a no-op once the first landed.
+    What it assumes: D's level is disseminated by the time this runs. When it is not, the payload is
+    still kept in L0 (filed under `attempt_at`, so a retry later that evening cannot collide with
+    it), the row parks `FAILED` retryable, and `TriNotYetPublishedError` propagates — the run is
+    FAILED and `/status` says so.
+    What it never does: write L1 from a payload that does not reach D, stamp a knowable date from
+    `attempt_at` (it names the L0 file and nothing else), or continue past a failed index — a
+    benchmark that half-landed is not a partial success (`run_tri_backfill` says why).
+    """
+    through = latest_session_through(today, trading_calendar() if calendar is None else calendar)
+    if through is None:
+        raise IngestError(f"no trading session on or before {today} inside calendar coverage")
+    outcomes: list[IndexOutcome] = []
+    for spec in indices:
+        # The end alone: `already_published` also demands the series *start* by the requested
+        # window's start, and no real series begins by 1990, so it would never skip here.
+        stored = read_tri_series(
+            spec.slug, date.max, method=TRI_METHOD_PUBLISHED, data_root=data_root
+        )
+        if stored is not None and stored.points[-1].as_of >= through:
+            _LOG.info(
+                "tri_evening.skipped",
+                source=TRI_SOURCE_ID,
+                index=spec.slug,
+                session=through.isoformat(),
+                reason="L1 already holds the published level for this session",
+                state="PUBLISHED",
+            )
+            outcomes.append(
+                IndexOutcome(spec=spec, points=0, earliest=None, latest=None, skipped=True)
+            )
+            continue
+
+        start = evening_window_start(spec, through, data_root)
+        series = ingest_tri(
+            fetcher=fetcher,
+            l0=l0,
+            tracker=tracker,
+            index_name=spec.name,
+            index_slug=spec.slug,
+            start=start,
+            end=through,
+            data_root=data_root,
+            register=register,
+            attempt=attempt_at,
+            require_through=through,
+        )
+        if commit is not None:
+            commit()
+        outcomes.append(
+            IndexOutcome(
+                spec=spec,
+                points=len(series.points),
+                earliest=series.points[0].as_of,
+                latest=series.points[-1].as_of,
+                skipped=False,
+            )
+        )
+    return tuple(outcomes)
+
+
+def run_tri_evening_job(context: JobContext) -> None:
+    """The scheduler's `tri_evening` job body: today's session's TRI, the same evening (M13.7).
+
+    What it does: under the `niftyindices.com` lease, `run_tri_evening` over `DEFAULT_INDEX_SET`
+    for the job's own date (the injected clock, B10), committing after each index.
+    What it assumes: the database is migrated and the network reachable.
+    What it never does: touch any host but the TRI endpoint's, or change what the Saturday
+    `tri_refresh` does — the two write the same L1 partitions from the same published levels.
+    """
+    settings = context.settings
+    clock = context.clock
+    register = load_register()
+    calendar = trading_calendar()
+    with (
+        leased_fetcher(
+            [TRI_HOST], clock=clock, command="tri_evening", settings=settings, register=register
+        ) as fetcher,
+        connection(settings) as conn,
+    ):
+        outcomes = run_tri_evening(
+            fetcher=fetcher,
+            l0=L0Store(clock=clock, data_root=settings.data_root),
+            tracker=SyncStateStore(conn, clock=clock, calendar=calendar),
+            today=clock.today(),
+            attempt_at=clock.now(),
+            data_root=settings.data_root,
+            register=register,
+            commit=conn.commit,
+            calendar=calendar,
+        )
+    for outcome in outcomes:
+        _LOG.info("tri_evening.index", source=TRI_SOURCE_ID, line=outcome.line)
+
+
 class NoStoredPayloadError(Exception):
     """A `--from-l0` rebuild was asked for an index whose payload is not in this lake's L0."""
 
@@ -281,9 +435,13 @@ def stored_tri_payloads(l0: L0Store, indices: Sequence[IndexSpec]) -> dict[str, 
     a lake may hold indices this run was not asked about — but a filename that is not an L0 TRI
     name at all raises, rather than being skipped as if it were not there.
 
-    `L0Store.iter_refs` yields in (date, filename) order and that order is preserved here, so a
-    caller replaying several windows for one index writes the oldest first and the newest wins
-    every date they overlap on.
+    Each index's payloads come back in **fetch order** (`fetched_at`, the receipt's immutable
+    first-seen instant), so a caller replaying them writes in the order the live runs did and the
+    latest answer wins every date they overlap on. `L0Store.iter_refs` order (month, then filename)
+    stood in for that until M13.7, when it stopped being the same thing: the same-evening refresh
+    files short windows (`tri_nifty50_20260922_20261006_at…`) beside the weekly whole-history ones
+    (`tri_nifty50_19900401_20261010`), which sort by window start, not by when they were fetched.
+    The sort is stable, so payloads fetched at one instant keep the filename order.
     """
     wanted = {spec.slug for spec in indices}
     by_slug: dict[str, list[L0Ref]] = {slug: [] for slug in wanted}
@@ -291,7 +449,9 @@ def stored_tri_payloads(l0: L0Store, indices: Sequence[IndexSpec]) -> dict[str, 
         slug, _start, _end = parse_l0_tri_filename(ref.filename)
         if slug in wanted:
             by_slug[slug].append(ref)
-    return {slug: tuple(refs) for slug, refs in by_slug.items()}
+    return {
+        slug: tuple(sorted(refs, key=lambda ref: ref.fetched_at)) for slug, refs in by_slug.items()
+    }
 
 
 def rebuild_tri_from_l0(
