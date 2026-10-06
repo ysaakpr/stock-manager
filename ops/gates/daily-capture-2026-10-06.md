@@ -37,20 +37,20 @@ Rules every capture follows, and why the modules' own `ingest_*` functions are n
 
 ## Per source
 
-| Source | Cadence | Captured today (run-once against the primary lake, 13:44–13:46 IST) | Unrecoverable history |
+| Source | Cadence | Captured today (run-once against the primary lake, 13:44–15:45 IST) | Unrecoverable history |
 |---|---|---|---|
 | `nse_fii_dii_flows` | nightly 20:00, retry 23:00 | **2026-10-05** — 2 rows (FII, DII), L0 218 B, L1 `fii_dii_flows/date=2026-10-05`, PUBLISHED | Everything before 2026-10-05. The endpoint has no date parameter (M3.4 measured depth = 1 session). NSDL/CDSL monthly FPI series is the only route to the past (FPI-only, unprobed). |
-| `nse_bulk_deals` | nightly 20:00, retry 23:00 | **not captured at 13:44** — `nsearchives.nseindia.com` lease held by `dataplatform.ingest.macro.backfill` (pid 3865034, `--stop-before 17:50`); 2026-10-05 FAILED(HostBusyError, retryable). Re-run after the lease frees: see the addendum. | Every session before the first capture. Rolling current-session file, no archive. |
-| `nse_block_deals` | as bulk | as bulk | as bulk |
-| `nse_fo_bhavcopy` | nightly 20:00, retry 23:00, current session only | as bulk (same host). No backfill from this job — the 2024-07-08 → history campaign is another agent's. | None: the archive file is dated and permanent; a missed night is a delay for the backfill to close. |
+| `nse_bulk_deals` | nightly 20:00, retry 23:00 | 13:44: archive host leased by the macro backfill → 2026-10-05 FAILED(HostBusyError). 15:45 retry, lease free: **2026-10-05** — 180 deals, 76 resolved to ISIN, **104 quarantined** (symbols the D2 master does not know — mostly SME names, not checked one by one), L1 `deals/date=2026-10-05`, PUBLISHED | Every session before 2026-10-05. Rolling current-session file, no archive. |
+| `nse_block_deals` | as bulk | 15:45: the live quiet-day file is `NO RECORDS,,,,,,`, not header-only; the parser rejected it (fixed in this PR). The file has no date, and by 15:45 the 14:05 block window of 2026-10-06 had passed, so it cannot be attributed to 10-05: **2026-10-05 stays FAILED**, bytes kept in L0 | Every session before the first capture, including 2026-10-05. |
+| `nse_fo_bhavcopy` | nightly 20:00, retry 23:00, current session only | 2026-10-05 was already PUBLISHED by the F&O backfill campaign by 15:45, so 0 requests from this job. No backfill from this job. | None: the archive file is dated and permanent; a missed night is a delay for the backfill to close. |
 | `nse_shareholding_pattern` | daily 18:05 | **L0 captured** (2026-10-06, 30,615 B, 32 filings, all for quarter end 30-Sep-2026, broadcast 01..06-Oct). **L1 BLOCKED**: sync FAILED `ParseError: no 'pledgeShares_prcnt' field`. | The June-2026 quarter's list (2,284 filings in the register's 2026-08-08 sample) is gone: the master lists the *current* quarter-end only and rolled on 2026-10-01. The atlas notes a `from_date/to_date` form of this URL; it is not register-verified and was not probed. |
 | `nse_announcements` | nightly 00:30, previous day, 7-day self-heal | **2026-09-29 .. 2026-10-05**, 7 days PUBLISHED: 958 / 1,217 / 805 / 116 / 168 / 23 / 480 rows (3,767 in all); L0 15 KB–861 KB per day; L1 `announcements/date=…` | None — date-parameterised; older days are a campaign's call, not this job's. |
 | `bse_announcements` | as NSE, paged by `Table1.ROWCNT`, ≤100 pages | **BLOCKED**: `api.bseindia.com` answered **403** for 2026-09-29 and 2026-09-30, the third 403 tripped the fetcher's spike stop; all 7 days FAILED. Not retried, not worked around. | None if the block lifts within a week (the job re-drives the last 7 days); older days would need a separate decision. |
 | `curated_rss` | 4×/day | RBI press releases: 10 items, 59,871 B, PUBLISHED as `curated_rss/rbi_press_releases-1344`; L1 `news/date=2026-10-06` | RBI items that rolled off the 10-item feed before today. |
 | `gdelt_v2_event_files` | 4×/day, one slot per poll, export file only | slot `20261006081500` — 151 events, 55,883 B, MD5 cross-checked against its manifest, PUBLISHED; same L1 `news` partition | All of GDELT before today — deliberately (no backfill without a separate decision; plan §5). |
 
-L1 written: `fii_dii_flows`, `announcements`, `news` (and `deals`, `fo_contracts` once the archive
-host is free). Nothing in `prices_raw` or L2 was touched; the F&O L2 `fo_aggregates` is derived and
+L1 written: `fii_dii_flows`, `announcements`, `news`, `deals`. `fo_contracts` for 2026-10-05 came from the backfill campaign, not from this job.
+Nothing in `prices_raw` or L2 was touched; the F&O L2 `fo_aggregates` is derived and
 is left to the L2 rebuild (`fo_aggregates.rebuild_l2_from_l1`), not written nightly.
 
 ## Decisions
@@ -66,6 +66,7 @@ is left to the L2 rebuild (`fo_aggregates.rebuild_l2_from_l1`), not written nigh
   what it is worth. Each slot is its own `sync_state` unit (`gdelt_v2_event_files/<slot>`).
 * **RSS: only feeds that are `active` *and* whose register row is VERIFIED** — today that is RBI
   alone. Business Standard (403 WAF), ET Markets and PIB stay unfetched; no host was added.
+* **A quiet deals day is `NO RECORDS,,,,,,`** on the live file, not a header-only one; `deals.parse` now reads both as zero deals.
 * **Announcements capture the previous calendar day after midnight**, so each day is complete, and
   weekends are captured (filings happen then too). A BSE page with no rows is a quiet day only when
   the exchange was shut; on a session it is the register's empty-success gotcha and fails.

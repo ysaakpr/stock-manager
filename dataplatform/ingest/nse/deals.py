@@ -363,6 +363,10 @@ def parse_text(text: str, *, source: str, filename: str) -> tuple[DealRow, ...]:
         if not record or not any(field.strip() for field in record):
             # A trailing newline, not a row.
             continue
+        if _is_no_records_marker(record):
+            # NSE's quiet-day file: one `NO RECORDS,,,,,,` line under the header (observed live on
+            # 2026-10-06 for block.csv). Zero deals, the same fact as a header-only file.
+            continue
         rows.append(
             _row(
                 record,
@@ -434,6 +438,19 @@ def resolve(
 
 
 # ── internals ────────────────────────────────────────────────────────────────────────────────
+
+
+def _is_no_records_marker(record: list[str]) -> bool:
+    """Whether a row is the exchange's `NO RECORDS` placeholder: that text, every other field blank.
+
+    Matched exactly rather than by prefix, so a security that ever traded under a name starting
+    with those words could not be swallowed as a quiet day.
+    """
+    return (
+        bool(record)
+        and record[0].strip().upper() == "NO RECORDS"
+        and not any(field.strip() for field in record[1:])
+    )
 
 
 def _known_source(source: str, *, filename: str) -> str:
