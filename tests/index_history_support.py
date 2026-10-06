@@ -110,7 +110,9 @@ def digests_without_index_membership(
 
     The key deliberately moved every screened run's digest (``backtest.run``,
     ``INDEX_MEMBERSHIP_IDENTITY``). A pin taken before it existed is checked against this, so the
-    pin still proves that *nothing else* in the specification moved.
+    pin still proves that *nothing else* in the specification moved. The ``holding_marks`` key
+    (``HOLDING_MARKS_IDENTITY``, held names marked and sold in BE/BZ once they leave EQ) moved every
+    digest the same deliberate way, and is removed for the same reason.
     """
     out: dict[tuple[str, Decimal], str] = {}
     for floor in floors:
@@ -125,5 +127,6 @@ def digests_without_index_membership(
                 adjusted=True,
             )
             spec.pop("index_membership")
+            spec.pop("holding_marks")
             out[(arm.label, floor)] = run_digest(spec)
     return out

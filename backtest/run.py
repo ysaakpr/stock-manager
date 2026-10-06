@@ -73,7 +73,7 @@ from pathlib import Path
 from typing import Any, Final, NamedTuple
 
 from analyst.journal.models import Decision, JournalEntry
-from backtest.accounting import BenchmarkComparison, PortfolioBook
+from backtest.accounting import BenchmarkComparison, BookPosition, PortfolioBook
 from backtest.band_hits import (
     BAND_HIT_AVOIDANCE_IDENTITY,
     BAND_HIT_LOOKBACK_SESSIONS,
@@ -185,6 +185,14 @@ _LOG = get_logger(__name__)
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
+
+#: NSE's trade-for-trade series: where a still-trading name goes when NSE moves it off EQ. Read only
+#: to value and exit a name the book already holds (``_L1Reader._RESTRICTED_SCOPE``).
+_RESTRICTED_SERIES: Final = ("BE", "BZ")
+#: Recorded in every run spec: how a held name that left EQ is marked and sold. A run before it
+#: marked such a holding at its last EQ close and could not sell it, so a campaign must never resume
+#: a ledger persisted under that reading — the key changes the digest. Bump it if the rule changes.
+HOLDING_MARKS_IDENTITY: Final = "held_names_any_equity_series/v1:EQ_then_BE_BZ:buys_EQ_only"
 
 #: A-priori defaults, stated so the "no tuning" claim (M4.10 acceptance #3) is checkable.
 _DEFAULT_OPENING_CASH = Decimal("1000000")  # ₹10 lakh nominal capital
@@ -390,6 +398,14 @@ class _L1Reader:
     #: silently, because a wrong-venue bar is a *valid* bar. Pinned by
     #: ``tests/unit/test_backtest_venue.py``.
     _SCOPE = "exchange = 'NSE' AND series = 'EQ'"
+    #: The one read outside :data:`_SCOPE`, and only ever for a name the book already holds
+    #: (:class:`_HoldingMarks`, :class:`_L1Market`): NSE's trade-for-trade series. When NSE moves a
+    #: still-trading name off EQ into BE or BZ the name keeps printing, under the same ISIN, in that
+    #: series — and a holder can still sell it there. Reading EQ alone marked such a holding at its
+    #: last EQ close for as long as it stayed out and refused its exit outright. BL is not here: it
+    #: is the block-deal window, a negotiated price rather than a session close. SM/ST/SZ (SME) are
+    #: not either: a main-board name does not migrate there without leaving through a delisting.
+    _RESTRICTED_SCOPE = f"exchange = 'NSE' AND series IN {_RESTRICTED_SERIES!r}"
 
     def __init__(self, *, data_root: Path | None = None) -> None:
         self._data_root = data_root
@@ -397,6 +413,7 @@ class _L1Reader:
         register_raw_view(self._con, view=self._VIEW, data_root=data_root)
         self._closes: dict[date, dict[str, Decimal]] = {}
         self._refbars: dict[date, dict[str, ReferenceBar]] = {}
+        self._restricted: dict[date, dict[str, tuple[str, Decimal, ReferenceBar | None]]] = {}
         self._turnover: dict[tuple[date, date], dict[str, Decimal]] = {}
 
     def _partition(self, session: date) -> str:
@@ -532,6 +549,63 @@ class _L1Reader:
         self._refbars[session] = bars
         return bars
 
+    def _restricted_on(self, session: date) -> dict[str, tuple[str, Decimal, ReferenceBar | None]]:
+        """Every BE/BZ print on ``session``: ISIN -> (series, close, fill bar or None) (cached).
+
+        Reads ``session``'s own partition and nothing else, so a mark or a fill struck from it is
+        knowable on that session. The bar is ``None`` when the row cannot be filled against (no
+        open, quantity or turnover) — the close still marks the holding. An ISIN printing in both
+        series on one session takes BE's row (the order is fixed, so a replay is deterministic).
+        The bar is stamped ``exit_only``: :class:`~execution.sim_broker.SimBroker` sells on it and
+        refuses to buy on it.
+        """
+        cached = self._restricted.get(session)
+        if cached is not None:
+            return cached
+        path = self._partition(session)
+        if not Path(path).exists():
+            self._restricted[session] = {}
+            return {}
+        rows = self._con.execute(
+            f"SELECT isin, series, close, open, total_traded_qty, total_traded_value "
+            f"FROM read_parquet($path) WHERE {self._RESTRICTED_SCOPE} AND close > 0 "
+            f"ORDER BY isin, series",
+            {"path": path},
+        ).fetchall()
+        out: dict[str, tuple[str, Decimal, ReferenceBar | None]] = {}
+        for isin, series, close, open_, qty, turnover in rows:
+            if str(isin) in out:
+                continue
+            bar: ReferenceBar | None = None
+            if open_ is not None and open_ > 0 and qty and qty > 0 and turnover and turnover > 0:
+                turnover_d = Decimal(turnover)
+                bar = ReferenceBar(
+                    isin=str(isin),
+                    session=session,
+                    exchange=Exchange.NSE,
+                    open=Decimal(open_),
+                    vwap=turnover_d / Decimal(qty),
+                    traded_value=turnover_d,
+                    exit_only=True,
+                )
+            out[str(isin)] = (str(series), Decimal(close), bar)
+        self._restricted[session] = out
+        return out
+
+    def restricted_close(self, isin: str, session: date) -> tuple[str, Decimal] | None:
+        """``isin``'s BE/BZ close on ``session`` as ``(series, close)``; None if it did not print.
+
+        For valuing a name the book already holds and nothing else: no signal, universe or sizing
+        read may call it, because the investable segment is EQ (:data:`_SCOPE`).
+        """
+        row = self._restricted_on(session).get(isin)
+        return None if row is None else (row[0], row[1])
+
+    def restricted_bar(self, isin: str, session: date) -> ReferenceBar | None:
+        """``isin``'s exit-only BE/BZ fill bar on ``session``, or None — for a held name's sell."""
+        row = self._restricted_on(session).get(isin)
+        return None if row is None else row[2]
+
     def most_liquid_on(self, session: date, size: int) -> list[str]:
         """The ``size`` most-liquid equity ISINs on ``session`` by turnover (benchmark basket)."""
         path = self._partition(session)
@@ -581,11 +655,23 @@ class _L1Market:
     ``next_session`` walks the market's own full calendar (which outruns the replay window, so an
     order staged on the last replayed session still has a next session to target). ``reference_bar``
     serves the raw open/vwap/turnover the fill model needs, read from L1 and cached per session.
+
+    A name with no EQ bar on the session is served its BE/BZ bar **only if ``held`` says the book
+    holds it** — the exit a trade-for-trade holder really has. That bar is ``exit_only``, so the
+    broker also refuses a buy on it (adding to a held name included): the fallback can price an
+    exit, never widen what is bought. Without ``held`` the market is EQ-only, as it always was.
     """
 
-    def __init__(self, reader: _L1Reader, calendar: Sequence[date]) -> None:
+    def __init__(
+        self,
+        reader: _L1Reader,
+        calendar: Sequence[date],
+        *,
+        held: Callable[[], Iterable[str]] | None = None,
+    ) -> None:
         self._reader = reader
         self._calendar = list(calendar)
+        self._held = held
 
     def next_session(self, after: date) -> date:
         index = bisect_right(self._calendar, after)
@@ -595,9 +681,83 @@ class _L1Market:
 
     def reference_bar(self, isin: str, session: date) -> ReferenceBar:
         bar = self._reader.reference_bars_on(session).get(isin)
+        if bar is None and self._held is not None and isin in set(self._held()):
+            bar = self._reader.restricted_bar(isin, session)
+            if bar is not None:
+                _LOG.info(
+                    "backtest.restricted_series_bar",
+                    isin=isin,
+                    session=session.isoformat(),
+                    series=(self._reader.restricted_close(isin, session) or ("?",))[0],
+                )
         if bar is None:
             raise NoReferenceBarError(f"no reference bar for {isin} on {session.isoformat()}")
         return bar
+
+
+def _held_by(book: PortfolioBook) -> Callable[[], list[str]]:
+    """The ISINs ``book`` holds right now — asked at call time, so it tracks every fill."""
+
+    def held() -> list[str]:
+        return [position.isin for position in book.positions()]
+
+    return held
+
+
+class _HoldingMarks:
+    """The session's closes, with a held name that left EQ marked at its own BE/BZ close.
+
+    ``__call__(session)`` is a :data:`SignalCloses`-shaped source for everything that values the
+    book — the NAV sampler, the rail gate, a policy's stop marks: the EQ cross-section, plus, for
+    each ISIN ``held`` names that did not print in EQ that session, the same ISIN's BE/BZ close if
+    it printed there. Only held names are overlaid, so no consumer can see a restricted-series name
+    it does not already own: the investable universe stays EQ. Reads ``session``'s partition only.
+
+    ``nav_prices`` is the sampler's mark for every open position: that session's close, else its
+    last close seen, else its average cost — the fallback the sector and fundamentals arms already
+    used — so the equity curve has a row on every session, including one where a held name printed
+    nowhere (a face-value split's successor before its first print). ``restricted_marks`` counts
+    the distinct (session, ISIN) marks taken from a restricted series, for the run report.
+    """
+
+    def __init__(self, reader: _L1Reader, held: Callable[[], Iterable[str]]) -> None:
+        self._reader = reader
+        self._held = held
+        self._last: dict[str, Decimal] = {}
+        self._restricted_seen: set[tuple[date, str]] = set()
+
+    @property
+    def restricted_marks(self) -> int:
+        return len(self._restricted_seen)
+
+    def __call__(self, session: date) -> Mapping[str, Decimal]:
+        closes = self._reader.closes_on(session)
+        extra: dict[str, Decimal] = {}
+        for isin in sorted(set(self._held())):
+            if isin in closes:
+                continue
+            found = self._reader.restricted_close(isin, session)
+            if found is None:
+                continue
+            series, close = found
+            extra[isin] = close
+            if (session, isin) not in self._restricted_seen:
+                self._restricted_seen.add((session, isin))
+                _LOG.info(
+                    "backtest.restricted_series_mark",
+                    isin=isin,
+                    session=session.isoformat(),
+                    series=series,
+                    close=str(close),
+                )
+        if not extra:
+            return closes
+        return {**closes, **extra}
+
+    def nav_prices(self, session: date, positions: Iterable[BookPosition]) -> dict[str, Decimal]:
+        """A mark for every position in ``positions`` on ``session`` — never a missing one."""
+        self._last.update(self(session))
+        return {pos.isin: self._last.get(pos.isin, pos.average_price) for pos in positions}
 
 
 # ── signal closes: raw L1, or L2 back-adjusted through the query layer ────────────────────────────
@@ -1801,15 +1961,16 @@ def run_naive_momentum(
             lookback_sessions=calendar,
         )
         clock = FrozenClock(first_session)
+        book = PortfolioBook()
+        marks = _HoldingMarks(reader, _held_by(book))
         sim = SimBroker(
             clock=clock,
             # Maharashtra: the account's registered state, needed for state-wise stamp duty. Home
             # state of the exchanges; an a-priori modelling choice, not a tuned parameter.
             cost_model=CostModel(load_rate_card(), account_state=_ACCOUNT_STATE),
-            market=_L1Market(reader, calendar),
+            market=_L1Market(reader, calendar, held=_held_by(book)),
             opening_cash=opening_cash,
         )
-        book = PortfolioBook()
         book.deposit(first_session, opening_cash)  # the one external cashflow: the opening capital
 
         # M12.2: sample the NAV every session so this policy reports a real max drawdown. It did
@@ -1817,16 +1978,12 @@ def run_naive_momentum(
         # and swing runners but never back into this one, so every naive-momentum row ever printed
         # carried a 0.00% drawdown. That reads as "never fell" rather than "never measured", and a
         # comparison ranked on return per unit of drawdown would put the baseline last on an
-        # artefact. Same sampler, same skip-rather-than-guess rule as the others.
-        last_close: dict[str, Decimal] = {}
+        # artefact. Same sampler as the others: a row every session (``_HoldingMarks``).
         nav_path: list[tuple[date, Decimal]] = []
 
         def sample_nav(session: date) -> None:
-            last_close.update(reader.closes_on(session))
-            positions = book.positions()
-            if any(position.isin not in last_close for position in positions):
-                return  # a held name with no close seen yet — skip rather than guess
-            nav_path.append((session, book.net_asset_value(last_close)))
+            prices = marks.nav_prices(session, book.positions())
+            nav_path.append((session, book.net_asset_value(prices)))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         # One rail policy for both: the gate enforces it, and the policy sizes its buys to it.
@@ -1838,7 +1995,7 @@ def run_naive_momentum(
             broker=broker,
             clock=clock,
             sessions=sessions,
-            rails=RailGate(rails_in_force, reader.closes_on),
+            rails=RailGate(rails_in_force, marks),
         )
         started = time.perf_counter()
         result = engine.run()
@@ -1974,27 +2131,24 @@ def run_momentum_v2(
             lookback_sessions=calendar,
         )
         clock = FrozenClock(first_session)
+        book = PortfolioBook()
+        marks = _HoldingMarks(reader, _held_by(book))
         sim = SimBroker(
             clock=clock,
             cost_model=CostModel(load_rate_card(), account_state=_ACCOUNT_STATE),
-            market=_L1Market(reader, calendar),
+            market=_L1Market(reader, calendar, held=_held_by(book)),
             opening_cash=opening_cash,
         )
-        book = PortfolioBook()
         book.deposit(first_session, opening_cash)
 
         # NAV path for the max-drawdown metric: after each session's fills, mark the whole book at
         # each held name's last-known close (a name that did not print that day is carried at its
         # previous close, never guessed or zeroed), so the path is a real point-in-time NAV series.
-        last_close: dict[str, Decimal] = {}
         nav_path: list[tuple[date, Decimal]] = []
 
         def sample_nav(session: date) -> None:
-            last_close.update(reader.closes_on(session))
-            positions = book.positions()
-            if any(position.isin not in last_close for position in positions):
-                return  # a held name with no close seen yet — skip this sample rather than guess
-            nav_path.append((session, book.net_asset_value(last_close)))
+            prices = marks.nav_prices(session, book.positions())
+            nav_path.append((session, book.net_asset_value(prices)))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         # One rail policy for both: the gate enforces it, and the policy sizes its buys to it.
@@ -2006,7 +2160,7 @@ def run_momentum_v2(
             broker=broker,
             clock=clock,
             sessions=sessions,
-            rails=RailGate(rails_in_force, reader.closes_on),
+            rails=RailGate(rails_in_force, marks),
         )
         started = time.perf_counter()
         result = engine.run()
@@ -2076,8 +2230,9 @@ def _terminal_prices(
 
     Walks the run's own trading calendar backwards from the terminal session, taking each held
     name's most recent close (a PIT step price — a name that did not print on the terminal date is
-    marked at its last real print, never guessed or written to zero). Reuses the per-date close
-    cache, so it costs at most a few extra partition reads.
+    marked at its last real print, never guessed or written to zero) — in EQ, or, for a held name
+    NSE moved to trade-for-trade, in BE/BZ on a session it printed nowhere in EQ. Reuses the
+    per-date close cache, so it costs at most a few extra partition reads.
     """
     wanted = {position.isin for position in book.positions()}
     prices: dict[str, Decimal] = {}
@@ -2087,6 +2242,10 @@ def _terminal_prices(
         closes = reader.closes_on(session)
         for isin in tuple(wanted):
             price = closes.get(isin)
+            if price is None:
+                # A held name NSE moved off EQ is marked at the close it printed in BE/BZ.
+                restricted = reader.restricted_close(isin, session)
+                price = None if restricted is None else restricted[1]
             if price is not None:
                 prices[isin] = price
                 wanted.discard(isin)
@@ -2130,7 +2289,9 @@ def backtest_spec(
     ``cap_tiers`` (X2) adds a ``cap_tiers`` key the same way, naming the size measure and sleeves.
     A run with a ``universe`` adds ``index_membership`` (:data:`INDEX_MEMBERSHIP_IDENTITY`): unlike
     those two it is *meant* to move every screened run's digest, because the screen's reading
-    changed underneath the same parameters.
+    changed underneath the same parameters. Every run adds ``holding_marks``
+    (:data:`HOLDING_MARKS_IDENTITY`) for the same reason: how a held name that left EQ is marked and
+    sold changed, and no campaign may resume a ledger struck under the frozen-EQ-mark reading.
     """
     rails = rail_policy if rail_policy is not None else ratified_backtest_rail_policy()
     extra: dict[str, object] = (
@@ -2154,6 +2315,7 @@ def backtest_spec(
         benchmark=benchmark_slug,
         rail_policy=rails.digest(),
         signal_l1_isins_only=signal_l1_isins_only,
+        holding_marks=HOLDING_MARKS_IDENTITY,
         **extra,
     )
 
@@ -2230,6 +2392,7 @@ def _persist_arm_ledger(
         buy_sizing=BUY_SIZING_IDENTITY,
         # ... and screens its universe through the point-in-time index membership history.
         index_membership=INDEX_MEMBERSHIP_IDENTITY,
+        holding_marks=HOLDING_MARKS_IDENTITY,
     )
     ledger = broker.run_ledger(
         source=f"{runner} {label} {first_session.isoformat()}..{terminal.isoformat()}",
@@ -3339,23 +3502,20 @@ def _run_sector_arm(
     """
     first_session, terminal = sessions[0], sessions[-1]
     clock = FrozenClock(first_session)
+    book = PortfolioBook()
+    marks = _HoldingMarks(reader, _held_by(book))
     sim = SimBroker(
         clock=clock,
         cost_model=CostModel(load_rate_card(), account_state=_ACCOUNT_STATE),
-        market=_L1Market(reader, calendar),
+        market=_L1Market(reader, calendar, held=_held_by(book)),
         opening_cash=opening_cash,
     )
-    book = PortfolioBook()
     book.deposit(first_session, opening_cash)
 
-    last_close: dict[str, Decimal] = {}
     nav_path: list[tuple[date, Decimal]] = []
 
     def sample_nav(session: date) -> None:
-        last_close.update(reader.closes_on(session))
-        # Mark every held name at its last-known close, falling back to its average cost for a name
-        # that has not printed yet, so the path has a value on every session (never guessed high).
-        prices = {pos.isin: last_close.get(pos.isin, pos.average_price) for pos in book.positions()}
+        prices = marks.nav_prices(session, book.positions())
         nav_path.append((session, book.net_asset_value(prices)))
 
     broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
@@ -3366,7 +3526,7 @@ def _run_sector_arm(
         broker=broker,
         clock=clock,
         sessions=sessions,
-        rails=RailGate(rails_in_force, reader.closes_on),
+        rails=RailGate(rails_in_force, marks),
     )
     result = engine.run()
 
@@ -4261,20 +4421,19 @@ def _run_policy_arm(
     """
     first_session, terminal = sessions[0], sessions[-1]
     clock = FrozenClock(first_session)
+    book = PortfolioBook()
+    marks = _HoldingMarks(reader, _held_by(book))
     sim = SimBroker(
         clock=clock,
         cost_model=CostModel(load_rate_card(), account_state=_ACCOUNT_STATE),
-        market=_L1Market(reader, calendar),
+        market=_L1Market(reader, calendar, held=_held_by(book)),
         opening_cash=opening_cash,
     )
-    book = PortfolioBook()
     book.deposit(first_session, opening_cash)
-    last_close: dict[str, Decimal] = {}
     nav_path: list[tuple[date, Decimal]] = []
 
     def sample_nav(session: date) -> None:
-        last_close.update(reader.closes_on(session))
-        prices = {pos.isin: last_close.get(pos.isin, pos.average_price) for pos in book.positions()}
+        prices = marks.nav_prices(session, book.positions())
         nav_path.append((session, book.net_asset_value(prices)))
 
     broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
@@ -4283,7 +4442,7 @@ def _run_policy_arm(
         broker=broker,
         clock=clock,
         sessions=sessions,
-        rails=RailGate(rail_policy, reader.closes_on),
+        rails=RailGate(rail_policy, marks),
     )
     result = engine.run()
     terminal_prices = _terminal_prices(reader, book, sessions)
@@ -4985,8 +5144,10 @@ class _L1SwingData:
         interval: int,
         universe_filter: _InvestableUniverse | None = None,
         regime_source: _RegimeSource,
+        marks: SignalCloses | None = None,
     ) -> None:
         self._reader = reader
+        self._marks = marks if marks is not None else reader.closes_on
         self._features = features
         self._universe_filter = universe_filter
         self._regime_source = regime_source
@@ -5007,8 +5168,12 @@ class _L1SwingData:
         )
 
     def marks(self, as_of: date) -> Dataset[SwingRecord]:
-        """This session's raw closes as minimal records — what the trailing stop reads."""
-        closes = self._reader.closes_on(as_of)
+        """This session's raw closes as minimal records — what the trailing stop reads.
+
+        Served by the run's :class:`_HoldingMarks` when it passes one, so a held name NSE moved to
+        BE/BZ is stopped out on the close it really printed rather than held on a frozen EQ one.
+        """
+        closes = self._marks(as_of)
         records = tuple(
             SwingRecord(
                 isin=isin,
@@ -5275,6 +5440,8 @@ def run_swing_composite(
                     f"the shared lake carries no liquidity screen for a floor of {floor} — "
                     "open_swing_lake must be told every floor the sweep will run on"
                 )
+        book = PortfolioBook()
+        marks = _HoldingMarks(reader, _held_by(book))
         data = _L1SwingData(
             reader,
             sessions,
@@ -5282,26 +5449,22 @@ def run_swing_composite(
             interval=parameters.rebalance_interval_sessions,
             universe_filter=universe_filter,
             regime_source=lake.regime_source,
+            marks=marks,
         )
         clock = FrozenClock(first_session)
         sim = SimBroker(
             clock=clock,
             cost_model=CostModel(load_rate_card(), account_state=_ACCOUNT_STATE),
-            market=_L1Market(reader, calendar),
+            market=_L1Market(reader, calendar, held=_held_by(book)),
             opening_cash=opening_cash,
         )
-        book = PortfolioBook()
         book.deposit(first_session, opening_cash)
 
-        last_close: dict[str, Decimal] = {}
         nav_path: list[tuple[date, Decimal]] = []
 
         def sample_nav(session: date) -> None:
-            last_close.update(reader.closes_on(session))
-            positions = book.positions()
-            if any(position.isin not in last_close for position in positions):
-                return  # a held name with no close seen yet — skip rather than guess
-            nav_path.append((session, book.net_asset_value(last_close)))
+            prices = marks.nav_prices(session, book.positions())
+            nav_path.append((session, book.net_asset_value(prices)))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         if band_hit_avoidance and lake.band_hits is None:
@@ -5334,7 +5497,7 @@ def run_swing_composite(
             broker=broker,
             clock=clock,
             sessions=sessions,
-            rails=RailGate(rails_in_force, reader.closes_on),
+            rails=RailGate(rails_in_force, marks),
         )
         started = time.perf_counter()
         result = engine.run()
