@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import json
 import socket
+from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Final
 
 import pytest
+from structlog.testing import capture_logs
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
@@ -41,13 +43,14 @@ from dataplatform.ingest.source_register import load as load_register
 from dataplatform.ingest.tri_backfill import (
     EARLIEST_REQUESTED,
     EVENING_OVERLAP_DAYS,
+    EveningTracker,
     evening_window_start,
     latest_session_through,
     run_tri_backfill,
     run_tri_evening,
     stored_tri_payloads,
 )
-from dataplatform.status.sync_state import SyncState
+from dataplatform.status.sync_state import SyncRecord, SyncState
 from dataplatform.store.l0 import L0Store
 from tests.conftest import SettingsLoader
 from tests.unit.test_indices import RecordingTracker
@@ -60,6 +63,27 @@ D_ABSENT: Final = FIXTURES / "tri_nifty50_20260921_20261005_at20261005T160846.js
 
 TUESDAY: Final = date(2026, 10, 6)
 MONDAY: Final = date(2026, 10, 5)
+
+
+class EveningRecordingTracker(RecordingTracker):
+    """`RecordingTracker` plus the two reads `run_tri_evening` heals with, in memory."""
+
+    def get(self, source: str, logical_date: date) -> SyncRecord | None:
+        return self.rows.get((source, logical_date))
+
+    def rows_in_range(
+        self, from_date: date, to_date: date, *, sources: Sequence[str] | None = None
+    ) -> tuple[SyncRecord, ...]:
+        return tuple(
+            row
+            for (source, day), row in sorted(self.rows.items(), key=lambda item: item[0][1])
+            if from_date <= day <= to_date and (sources is None or source in sources)
+        )
+
+
+def _the_double_satisfies_the_protocol(tracker: EveningRecordingTracker) -> EveningTracker:
+    """`mypy --strict` fails here if the double stops fitting what the job drives."""
+    return tracker
 
 
 @pytest.fixture(autouse=True)
@@ -144,7 +168,7 @@ def test_session_d_lands_in_l0_l1_and_sync_the_same_evening(
     clock, fetcher, l0, transport = _evening(
         [D_PRESENT], at=at, settings=settings, register=register, data_root=tmp_path
     )
-    tracker = RecordingTracker(clock)
+    tracker = EveningRecordingTracker(clock)
 
     (outcome,) = run_tri_evening(
         fetcher=fetcher,
@@ -194,7 +218,7 @@ def test_a_fetch_before_dissemination_parks_retryable_and_leaves_l1_alone(
     clock, fetcher, l0, transport = _evening(
         [D_ABSENT], at=at, settings=settings, register=register, data_root=tmp_path
     )
-    tracker = RecordingTracker(clock)
+    tracker = EveningRecordingTracker(clock)
     commits: list[SyncState] = []
 
     with pytest.raises(TriNotYetPublishedError, match="2026-10-05 is not yet published"):
@@ -242,7 +266,7 @@ def test_a_retry_the_same_evening_lands_without_colliding_in_l0(
     clock, fetcher, l0, transport = _evening(
         [D_ABSENT, D_PRESENT], at=first, settings=settings, register=register, data_root=tmp_path
     )
-    tracker = RecordingTracker(clock)
+    tracker = EveningRecordingTracker(clock)
     kwargs: dict[str, Any] = {
         "fetcher": fetcher,
         "l0": l0,
@@ -283,7 +307,7 @@ def test_a_fire_after_the_session_landed_makes_no_request(
     kwargs: dict[str, Any] = {
         "fetcher": fetcher,
         "l0": l0,
-        "tracker": RecordingTracker(clock),
+        "tracker": EveningRecordingTracker(clock),
         "today": TUESDAY,
         "indices": (NIFTY50,),
         "data_root": tmp_path,
@@ -369,3 +393,95 @@ def test_a_rebuild_replays_payloads_in_fetch_order_not_filename_order(tmp_path: 
         evening.filename,
         weekly.filename,
     ]
+
+
+# ── after a landing: the first-landed record, and missed evenings healed ─────────────────────
+
+
+def test_a_missed_evening_is_healed_by_the_next_landing(
+    settings: Settings, register: SourceRegister, tmp_path: Path
+) -> None:
+    """Monday never saw its level; Tuesday's payload carries it, so Monday's row is closed.
+
+    Inverted — healing removed — Monday stays FAILED and every gap scan reports it forever, though
+    L1 holds its level. A non-retryable failure and a row for a date the payload does not carry
+    (02-Oct, a holiday) are left exactly as they were.
+    """
+    _seed(settings, register, tmp_path)
+    monday_at = datetime(2026, 10, 5, 21, 30, tzinfo=IST)
+    clock, fetcher, l0, _ = _evening(
+        [D_ABSENT], at=monday_at, settings=settings, register=register, data_root=tmp_path
+    )
+    tracker = EveningRecordingTracker(clock)
+    source = tri_state_source("nifty50")
+    with pytest.raises(TriNotYetPublishedError):
+        run_tri_evening(
+            fetcher=fetcher,
+            l0=l0,
+            tracker=tracker,
+            today=MONDAY,
+            attempt_at=monday_at,
+            indices=(NIFTY50,),
+            data_root=tmp_path,
+            calendar=trading_calendar(),
+        )
+    for day, retryable in ((date(2026, 10, 1), False), (date(2026, 10, 2), True)):
+        tracker.begin(source, day)
+        tracker.mark_failed(source, day, "planted for the test", retryable=retryable)
+
+    tuesday_at = datetime(2026, 10, 6, 19, 50, tzinfo=IST)
+    _, fetcher, l0, _ = _evening(
+        [D_PRESENT], at=tuesday_at, settings=settings, register=register, data_root=tmp_path
+    )
+    with capture_logs() as events:
+        run_tri_evening(
+            fetcher=fetcher,
+            l0=l0,
+            tracker=tracker,
+            today=TUESDAY,
+            attempt_at=tuesday_at,
+            indices=(NIFTY50,),
+            data_root=tmp_path,
+            calendar=trading_calendar(),
+        )
+
+    tuesday = tracker.rows[(source, TUESDAY)]
+    monday = tracker.rows[(source, MONDAY)]
+    assert monday.state is SyncState.PUBLISHED
+    assert monday.attempts == 2  # the missed evening, then the heal — through PENDING
+    # The receipt is the payload that actually carries Monday's level: Tuesday's.
+    assert (monday.checksum, monday.l0_path) == (tuesday.checksum, tuesday.l0_path)
+    assert tracker.rows[(source, date(2026, 10, 1))].state is SyncState.FAILED
+    assert tracker.rows[(source, date(2026, 10, 2))].state is SyncState.FAILED
+
+    healed = [event for event in events if event["event"] == "tri_evening.healed"]
+    assert [(event["index"], event["session"]) for event in healed] == [("nifty50", "2026-10-05")]
+
+
+def test_the_first_landing_logs_its_ist_instant_once(
+    settings: Settings, register: SourceRegister, tmp_path: Path
+) -> None:
+    """The record that tunes the first fire: which attempt landed D, at what IST time."""
+    _seed(settings, register, tmp_path)
+    first = datetime(2026, 10, 6, 14, 20, tzinfo=IST).astimezone(tz=None)  # any zone in, IST out
+    clock, fetcher, l0, _ = _evening(
+        [D_PRESENT], at=first, settings=settings, register=register, data_root=tmp_path
+    )
+    kwargs: dict[str, Any] = {
+        "fetcher": fetcher,
+        "l0": l0,
+        "tracker": EveningRecordingTracker(clock),
+        "today": TUESDAY,
+        "indices": (NIFTY50,),
+        "data_root": tmp_path,
+        "calendar": trading_calendar(),
+    }
+    with capture_logs() as events:
+        run_tri_evening(**kwargs, attempt_at=first)
+        run_tri_evening(**kwargs, attempt_at=first + timedelta(hours=1))
+
+    landed = [event for event in events if event["event"] == "tri_evening.first_landed"]
+    assert len(landed) == 1
+    assert landed[0]["session"] == "2026-10-06"
+    assert landed[0]["landed_at_ist"] == "2026-10-06T14:20:00+05:30"
+    assert landed[0]["attempts"] == 1

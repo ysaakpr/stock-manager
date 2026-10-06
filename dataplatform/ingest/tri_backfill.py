@@ -40,9 +40,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
-from dataplatform.clock import Clock, SystemClock
+from dataplatform.clock import IST, Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.ingest.calendar import TradingCalendar, trading_calendar
 from dataplatform.ingest.fetcher import Fetcher, leased_fetcher
@@ -55,13 +55,14 @@ from dataplatform.ingest.indices import (
     parse_l0_tri_filename,
     parse_tri_l0,
     read_tri_series,
+    tri_state_source,
     write_tri_l1,
 )
 from dataplatform.ingest.models import IngestError
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.logging import get_logger
-from dataplatform.status.sync_state import SyncStateStore
+from dataplatform.status.sync_state import SyncRecord, SyncState, SyncStateStore
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Ref, L0Store
 
@@ -109,6 +110,11 @@ OPT_IN_INDEX_SET: Final[tuple[IndexSpec, ...]] = (
 #: gap itself; this floor only keeps a few sessions of overlap with what is already in L1, which is
 #: cheap (seven NIFTY 50 rows were 1,000 bytes on 2026-10-06) and lets a restated recent level land.
 EVENING_OVERLAP_DAYS: Final = 14
+
+#: How far back the session lookups search the calendar for the newest session. A month is wider
+#: than any run of consecutive NSE closures, so a `None` answer means "outside calendar coverage",
+#: never "the market was shut for longer than we looked".
+SESSION_LOOKBACK_DAYS: Final = 31
 
 #: The default window's lower bound: below every NIFTY index's launch, so the endpoint returns
 #: whatever depth it actually has rather than whatever we guessed. D8's own probe recorded
@@ -174,7 +180,7 @@ def last_session_before(end: date, calendar: TradingCalendar) -> date | None:
     evening may honestly not see D yet, and demanding it would re-fetch the whole history every
     night for one missing point. `None` when no session precedes `end` inside coverage.
     """
-    start = max(calendar.coverage_start, end - timedelta(days=31))
+    start = max(calendar.coverage_start, end - timedelta(days=SESSION_LOOKBACK_DAYS))
     if end <= start:
         return None
     sessions = calendar.expected_data_dates(start, end - timedelta(days=1))
@@ -288,7 +294,7 @@ def latest_session_through(today: date, calendar: TradingCalendar) -> date | Non
     session, which the previous evening already landed, so the run is a no-op. `None` when no
     session falls inside coverage.
     """
-    start = max(calendar.coverage_start, today - timedelta(days=31))
+    start = max(calendar.coverage_start, today - timedelta(days=SESSION_LOOKBACK_DAYS))
     if today < start:
         return None
     sessions = calendar.expected_data_dates(start, today)
@@ -309,11 +315,70 @@ def evening_window_start(spec: IndexSpec, through: date, data_root: Path | None)
     return min(series.points[-1].as_of, through - timedelta(days=EVENING_OVERLAP_DAYS))
 
 
+class EveningTracker(SyncTracker, Protocol):
+    """The sync-state slice `run_tri_evening` drives: `SyncTracker` and the reads healing needs.
+
+    `SyncStateStore` satisfies it structurally; an offline test drives it with an in-memory double.
+    """
+
+    def get(self, source: str, logical_date: date) -> SyncRecord | None: ...
+
+    def rows_in_range(
+        self, from_date: date, to_date: date, *, sources: Sequence[str] | None = None
+    ) -> tuple[SyncRecord, ...]: ...
+
+
+def heal_missed_sessions(
+    tracker: EveningTracker, spec: IndexSpec, series: TriSeries, *, start: date, through: date
+) -> tuple[date, ...]:
+    """Close earlier retryable FAILED evening rows whose session tonight's payload carries.
+
+    What it does: an evening that never saw its session (published late, host down, box off) leaves
+    `nifty_tri_history/<slug>` FAILED for that date, and the gap scans would report it forever even
+    after a later evening's window brought the level in. For every such row dated inside tonight's
+    window `[start, through)` whose session is a point of the landed `series`, it walks the row
+    through the ordinary §4.4 path — `PENDING → FETCHED → VALIDATED → NORMALIZED → PUBLISHED` — with
+    tonight's payload (D's own checksum and L0 key) as the receipt, because those are the bytes that
+    actually carry the healed session's level. One `tri_evening.healed` event per row.
+    What it assumes: D's row is already PUBLISHED with its receipt (call it after `ingest_tri`).
+    What it never does: touch a non-retryable failure (a dead end on purpose), a row whose session
+    the payload does not carry, or a date outside the window — a Saturday `tri_refresh` row is dated
+    by its run, not a session, and stays that job's business.
+    """
+    source = tri_state_source(spec.slug)
+    receipt = tracker.get(source, through)
+    if receipt is None or receipt.state is not SyncState.PUBLISHED or receipt.checksum is None:
+        raise IngestError(f"{source} {through}: heal called before the session was published")
+    carried = {point.as_of for point in series.points}
+    healed: list[date] = []
+    for row in tracker.rows_in_range(start, through - timedelta(days=1), sources=[source]):
+        session = row.logical_date
+        if row.state is not SyncState.FAILED or not row.retryable or session not in carried:
+            continue
+        tracker.begin(source, session)
+        tracker.mark_fetched(source, session, checksum=receipt.checksum, l0_path=receipt.l0_path)
+        tracker.mark_validated(source, session)
+        tracker.mark_normalized(source, session)
+        tracker.mark_published(source, session)
+        _LOG.info(
+            "tri_evening.healed",
+            source=source,
+            index=spec.slug,
+            session=session.isoformat(),
+            landed_with=through.isoformat(),
+            l0_key=receipt.l0_path,
+            previous_error=row.last_error,
+            state="PUBLISHED",
+        )
+        healed.append(session)
+    return tuple(healed)
+
+
 def run_tri_evening(
     *,
     fetcher: Fetcher,
     l0: L0Store,
-    tracker: SyncTracker,
+    tracker: EveningTracker,
     today: date,
     attempt_at: datetime,
     indices: Sequence[IndexSpec] = DEFAULT_INDEX_SET,
@@ -327,7 +392,9 @@ def run_tri_evening(
     What it does: for each index whose L1 series does not yet reach that session D, one POST over
     a short window ending at D (`evening_window_start`), through `ingest_tri` and so through
     L0 → parse → L1 → `sync_state`, with the sync row dated D. An index already at D is skipped
-    without a request, so a second fire the same evening is a no-op once the first landed.
+    without a request, so a second fire the same evening is a no-op once the first landed. After a
+    landing it logs `tri_evening.first_landed` (the IST instant, for tuning the first fire) and
+    heals earlier missed evenings the payload now covers (`heal_missed_sessions`).
     What it assumes: D's level is disseminated by the time this runs. When it is not, the payload is
     still kept in L0 (filed under `attempt_at`, so a retry later that evening cannot collide with
     it), the row parks `FAILED` retryable and is committed, and `TriNotYetPublishedError`
@@ -382,6 +449,19 @@ def run_tri_evening(
             if commit is not None:
                 commit()
             raise
+        landed = tracker.get(tri_state_source(spec.slug), through)
+        # One event per (index, session), and only here: a later fire finds L1 at D and skips, so
+        # this is the first landing by construction. Read after two weeks to tune the first fire.
+        _LOG.info(
+            "tri_evening.first_landed",
+            source=TRI_SOURCE_ID,
+            index=spec.slug,
+            session=through.isoformat(),
+            landed_at_ist=attempt_at.astimezone(IST).isoformat(),
+            attempts=None if landed is None else landed.attempts,
+            state="PUBLISHED",
+        )
+        heal_missed_sessions(tracker, spec, series, start=start, through=through)
         if commit is not None:
             commit()
         outcomes.append(
