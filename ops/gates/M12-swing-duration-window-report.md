@@ -616,7 +616,7 @@ On the verification window — unseen when it was chosen — it earned **15.80%*
 
 ## Appendix (2026-10-06): Excess re-struck against the published NIFTY 50 TRI
 
-*Arithmetic over the tables above, by the method of ops/gates/M9-benchmark-restrike-2026-09-08.md: each excess is the arm's XIRR less the window's published-TRI leg, and *Net / book turn* is that excess over the arm's book turns a year (round trips ÷ years ÷ 20), exactly as `holding_period_math` computes it. The as-published column is recomputed the same way and matches the tables above. Ranks are the original XIRR/DD ranks. No strategy was re-run.*
+*Arithmetic over the tables above, by the method of ops/gates/M9-benchmark-restrike-2026-09-08.md: each excess is the arm's XIRR less the window's published-TRI leg, and *Net / book turn* is that excess over the arm's book turns a year (round trips ÷ years ÷ 20), exactly as `holding_period_math` computes it. The as-published *Net / book turn* column is copied from the body's holding-period tables, not recomputed (recomputing it from the rounded excess drifts by up to 0.01 pp); the re-struck column is computed from the rounded excess, so it carries the same ±0.01 pp. Ranks are the original XIRR/DD ranks. No strategy was re-run.*
 
 #### Decade — ₹1 crore/day
 
@@ -656,7 +656,7 @@ Benchmark: proxy 8.56% as reported, published NIFTY 50 TRI **11.92%** (the proxy
 | 10 | M10.7 @ monthly / 63-session hold | 10.76% | 2.20% | **-1.16%** | 0.64% | **-0.34%** | **flips +→−** |
 | 11 | M10.7 @ weekly / 21-session hold | 12.09% | 3.53% | **0.17%** | 0.44% | **0.02%** |  |
 | 12 | M10.7 @ monthly / 126-session hold | 9.74% | 1.18% | **-2.18%** | 0.37% | **-0.68%** | **flips +→−** |
-| 13 | Naive momentum (M4.10) | 10.98% | 2.42% | **-0.94%** | 0.75% | **-0.29%** | **flips +→−** |
+| 13 | Naive momentum (M4.10) | 10.98% | 2.42% | **-0.94%** | 0.74% | **-0.29%** | **flips +→−** |
 
 #### Six-year — ₹1 crore/day
 
@@ -726,9 +726,9 @@ Benchmark: proxy 5.13% as reported, published NIFTY 50 TRI **15.65%** (the proxy
 | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | 1 | M10.7, band 1.5x top_n | 12.12% | 6.99% | **-3.53%** | 1.85% | **-0.93%** | **flips +→−** |
 | 2 | Swing composite (M10.7) | 11.59% | 6.46% | **-4.06%** | 2.19% | **-1.37%** | **flips +→−** |
-| 3 | M10.7, band 5x top_n | 10.40% | 5.27% | **-5.25%** | 1.78% | **-1.78%** | **flips +→−** |
+| 3 | M10.7, band 5x top_n | 10.40% | 5.27% | **-5.25%** | 1.79% | **-1.78%** | **flips +→−** |
 | 4 | M10.7 @ fortnightly / 21-session hold | 10.31% | 5.18% | **-5.34%** | 1.29% | **-1.33%** | **flips +→−** |
-| 5 | M10.7 @ fortnightly / 42-session hold | 9.99% | 4.86% | **-5.66%** | 1.44% | **-1.68%** | **flips +→−** |
+| 5 | M10.7 @ fortnightly / 42-session hold | 9.99% | 4.86% | **-5.66%** | 1.45% | **-1.68%** | **flips +→−** |
 | 6 | Momentum v2, all on (M9.5) | 7.85% | 2.72% | **-7.80%** | 0.86% | **-2.46%** | **flips +→−** |
 | 7 | M10.7 @ quarterly / 126-session hold | 7.58% | 2.45% | **-8.07%** | 2.11% | **-6.95%** | **flips +→−** |
 | 8 | M10.7 @ weekly / 10-session hold, 2-session floor | 9.33% | 4.20% | **-6.32%** | 0.68% | **-1.03%** | **flips +→−** |
@@ -770,7 +770,7 @@ Benchmark: proxy 11.58% as reported, published NIFTY 50 TRI **8.39%** (the proxy
 | 4 | Swing composite (M10.7) | 16.59% | 5.01% | **8.20%** | 0.77% | **1.25%** |  |
 | 5 | M10.7 @ fortnightly / 42-session hold | 15.99% | 4.41% | **7.60%** | 0.62% | **1.07%** |  |
 | 6 | M10.7, band 5x top_n | 15.99% | 4.41% | **7.60%** | 0.73% | **1.26%** |  |
-| 7 | M10.7 @ monthly / 126-session hold | 16.36% | 4.78% | **7.97%** | 1.19% | **1.98%** |  |
+| 7 | M10.7 @ monthly / 126-session hold | 16.36% | 4.78% | **7.97%** | 1.18% | **1.98%** |  |
 | 8 | Momentum v2, all on (M9.5) | 15.79% | 4.21% | **7.40%** | 0.64% | **1.12%** |  |
 | 9 | M10.7 @ weekly / 21-session hold | 15.39% | 3.81% | **7.00%** | 0.36% | **0.65%** |  |
 | 10 | M10.7, band 1.5x top_n | 13.02% | 1.44% | **4.63%** | 0.18% | **0.56%** |  |
