@@ -103,7 +103,27 @@ claimed as IN_PROGRESS gets a duplicate builder the next time the runner starts.
 
 An EXTERNAL task is never released at startup, never in the ready set (even after `orch answer`), and does
 not satisfy its dependents until it is DONE. Claiming it spends none of its attempts. `./orch status` and the
-runner's stop report list EXTERNAL tasks so a claim nobody closed stays visible.
+runner's stop report list EXTERNAL tasks so a claim nobody closed stays visible. A `./orch set <id> DONE`
+whose verification fails leaves the task EXTERNAL with the failure recorded — the claim is still held; fix
+the cause and set DONE again.
+
+**Rollout.** EXTERNAL exists only from M13.5 on. Do not set it until M13.5 is merged *and* any `./orch run`
+already running has been restarted: a runner started on the older code holds the older state machine, so it
+does not know to skip an EXTERNAL row. Run `./orch set` from a checkout that has M13.5 too — older code
+rejects the state outright.
+
+**After merge, once.** Tasks already being built outside the orchestrator were claimed as IN_PROGRESS
+before EXTERNAL existed — M13.1–M13.4 at the time of M13.5 — and the next runner start would release them
+to FAILED and rebuild them. Convert each claim that is still live, after checking the outside builder is
+still working on it:
+
+```bash
+./orch status                                  # confirm which of M13.1–M13.4 are still IN_PROGRESS
+for t in M13.1 M13.2 M13.3 M13.4; do ./orch set "$t" EXTERNAL --note "polly worker"; done
+```
+
+Skip any that is already DONE (`orch` refuses to move a task out of DONE anyway). Do this before the next
+`./orch run`.
 
 ## What it will never do on its own
 
