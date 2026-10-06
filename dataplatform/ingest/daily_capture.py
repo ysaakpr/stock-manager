@@ -450,7 +450,19 @@ def capture_fii_dii(ctx: CaptureContext, fetcher: Fetcher, *, owed: date) -> Cap
         return _fail(ctx, source, owed, f"{type(exc).__name__}: {exc}", requests=1)
     served = day.trade_date
     if served == now.date() and now.time() < CAPTURE_CUTOFF:
-        return _provisional(source, served, ref, requests=1)
+        provisional = _provisional(source, served, ref, requests=1)
+        if served > owed:
+            # The endpoint has already moved past the owed session, so that copy is gone.
+            return _fail(
+                ctx,
+                source,
+                owed,
+                f"the endpoint has moved on to {served.isoformat()} (provisional); "
+                f"{owed.isoformat()} was never captured and cannot be re-fetched",
+                retryable=False,
+                requests=1,
+            )
+        return provisional
 
     outcome = _land(
         ctx,
