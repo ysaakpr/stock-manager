@@ -392,6 +392,38 @@
       "state": "DONE",
       "verify_output": "$ test -s ops/gates/M12-strategy-verdict.md\n(exit 0)\n"
     },
+    "M13.1": {
+      "attempts": 1,
+      "first_started": "2026-10-06T13:40:25+00:00",
+      "last_started": "2026-10-06T13:40:25+00:00",
+      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
+      "previous_state": "PENDING",
+      "state": "IN_PROGRESS"
+    },
+    "M13.2": {
+      "attempts": 1,
+      "first_started": "2026-10-06T13:40:26+00:00",
+      "last_started": "2026-10-06T13:40:26+00:00",
+      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
+      "previous_state": "PENDING",
+      "state": "IN_PROGRESS"
+    },
+    "M13.3": {
+      "attempts": 1,
+      "first_started": "2026-10-06T13:40:26+00:00",
+      "last_started": "2026-10-06T13:40:26+00:00",
+      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
+      "previous_state": "PENDING",
+      "state": "IN_PROGRESS"
+    },
+    "M13.4": {
+      "attempts": 1,
+      "first_started": "2026-10-06T13:40:27+00:00",
+      "last_started": "2026-10-06T13:40:27+00:00",
+      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
+      "previous_state": "PENDING",
+      "state": "IN_PROGRESS"
+    },
     "M2.1": {
       "attempts": 1,
       "commit": "1941253",
@@ -1143,7 +1175,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-10-06T13:17:09+00:00",
+  "updated_at": "2026-10-06T13:40:27+00:00",
   "version": 1,
   "wave": 1
 }
