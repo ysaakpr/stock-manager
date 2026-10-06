@@ -30,7 +30,7 @@ fields keep, applied to a signed score that is not money but is still worth not 
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -53,6 +53,7 @@ __all__ = [
     "dedupe",
     "read_l1",
     "write_l1",
+    "write_l1_merged",
 ]
 
 _LOG = get_logger(__name__)
@@ -209,7 +210,62 @@ def write_l1(batch: NewsBatch, *, data_root: Path | None = None) -> Path:
     No adjusted or derived values here — a news row is what the source stated — and the batch's
     `l0_key` rides on every row so each is traceable to the payload it came from.
     """
-    path = l1_partition_path(NEWS_DATASET, batch.logical_date, data_root=data_root)
+    return _write_partition(
+        batch.logical_date,
+        [(row, batch.l0_key) for row in batch.rows],
+        source=batch.source,
+        l0_key=batch.l0_key,
+        data_root=data_root,
+    )
+
+
+def write_l1_merged(
+    logical_date: date, batches: Sequence[NewsBatch], *, data_root: Path | None = None
+) -> Path:
+    """Write every batch filed under one logical date into that date's single L1 partition.
+
+    What it does: the partition is one file per date, and a day's news comes from several payloads
+    — the curated RSS polls and the GDELT slots the daily capture takes (`daily_capture`). Writing
+    them one batch at a time would leave only the last one, so this writes them together: rows in
+    batch order, exact repeats across batches dropped (`dedupe` — an RSS poll overlaps the one
+    before it), and each surviving row stamped with the `l0_key` of the first payload that carried
+    it, so lineage stays per row (invariant #1).
+    What it assumes: every batch's `logical_date` is `logical_date`; a stray one raises.
+    What it never does: write a partial day — the caller re-derives the whole date from L0.
+    """
+    keyed: list[tuple[NewsRow, str | None]] = []
+    seen: set[tuple[str, str, datetime]] = set()
+    for batch in batches:
+        if batch.logical_date != logical_date:
+            raise ValueError(
+                f"batch from {batch.l0_key} files under {batch.logical_date.isoformat()}, not "
+                f"{logical_date.isoformat()}"
+            )
+        for row in batch.rows:
+            key = (row.source, row.url, row.ts)
+            if key in seen:
+                continue
+            seen.add(key)
+            keyed.append((row, batch.l0_key))
+    return _write_partition(
+        logical_date,
+        keyed,
+        source=",".join(sorted({batch.source for batch in batches})) or NEWS_DATASET,
+        l0_key=None,
+        data_root=data_root,
+    )
+
+
+def _write_partition(
+    logical_date: date,
+    rows: Sequence[tuple[NewsRow, str | None]],
+    *,
+    source: str,
+    l0_key: str | None,
+    data_root: Path | None,
+) -> Path:
+    """The one writer behind both entry points: schema-enforced, staged, renamed into place."""
+    path = l1_partition_path(NEWS_DATASET, logical_date, data_root=data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     table = pa.Table.from_pylist(
         [
@@ -220,10 +276,10 @@ def write_l1(batch: NewsBatch, *, data_root: Path | None = None) -> Path:
                 "url": row.url,
                 "entities": list(row.entities),
                 "tone": None if row.tone is None else str(row.tone),
-                "logical_date": batch.logical_date,
-                "l0_key": batch.l0_key,
+                "logical_date": logical_date,
+                "l0_key": row_key,
             }
-            for row in batch.rows
+            for row, row_key in rows
         ],
         schema=_L1_SCHEMA,
     )
@@ -232,12 +288,12 @@ def write_l1(batch: NewsBatch, *, data_root: Path | None = None) -> Path:
     staging.replace(path)
     _LOG.info(
         "news.l1_written",
-        source=batch.source,
-        logical_date=batch.logical_date.isoformat(),
+        source=source,
+        logical_date=logical_date.isoformat(),
         dataset=NEWS_DATASET,
         path=str(path),
-        rows=len(batch.rows),
-        l0_key=batch.l0_key,
+        rows=len(rows),
+        l0_key=l0_key,
         state="NORMALIZED",
     )
     return path

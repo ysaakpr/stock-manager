@@ -32,6 +32,7 @@ from dataplatform.config import Settings
 from dataplatform.logging import get_logger
 
 __all__ = [
+    "ANNOUNCEMENTS_CAPTURE",
     "BSE_CA_SWEEP",
     "CA_REFRESH",
     "CONSTITUENTS_SNAPSHOT",
@@ -41,6 +42,9 @@ __all__ = [
     "INDEX_PRESS_REFRESH",
     "JOB_NAME",
     "MACRO_RELEASE_CAPTURE",
+    "NEWS_CAPTURE",
+    "NSE_DAILY_CAPTURE",
+    "SHAREHOLDING_POLL",
     "TRI_REFRESH",
     "UNSCHEDULED",
     "Job",
@@ -48,6 +52,7 @@ __all__ = [
     "JobFn",
     "JobNotRegisteredError",
     "JobRegistry",
+    "announcements_capture",
     "bse_ca_sweep",
     "ca_refresh",
     "constituents_snapshot",
@@ -57,6 +62,9 @@ __all__ = [
     "fbil_reference_rates",
     "lag_budgets",
     "macro_release_capture",
+    "news_capture",
+    "nse_daily_capture",
+    "shareholding_poll",
     "tri_refresh",
 ]
 
@@ -322,6 +330,153 @@ DAILY_SNAPSHOT = Job(
     # `daily_snapshot.DEFAULT_SNAPSHOT_SET`, whose sync_state source is the register id itself.
     covers=_SNAPSHOT_SOURCES,
     sync_sources=_SNAPSHOT_SOURCES,
+)
+
+
+#: What the four capture jobs keep current — kept in step with `daily_capture`'s own tuples by
+#: `tests/unit/test_scheduler_coverage.py`, and spelled out here so this module does not import the
+#: ingest stack at load time.
+_NSE_DAILY_CAPTURE_SOURCES: tuple[str, ...] = (
+    "nse_fii_dii_flows",
+    "nse_bulk_deals",
+    "nse_block_deals",
+    "nse_fo_bhavcopy",
+)
+_SHAREHOLDING_SOURCES: tuple[str, ...] = ("nse_shareholding_pattern",)
+_ANNOUNCEMENT_SOURCES: tuple[str, ...] = ("nse_announcements", "bse_announcements")
+_NEWS_SOURCES: tuple[str, ...] = ("curated_rss", "gdelt_v2_event_files")
+
+
+def nse_daily_capture(context: JobContext) -> None:
+    """The nightly capture of the perishable NSE end-of-day sources (ops-daily-capture).
+
+    What it does: lands tonight's FII/DII flows, bulk deals and block deals — endpoints that serve
+    the latest session only, so a night this does not run is history destroyed — and the current
+    session's F&O bhavcopy, each into L0 and L1 with a `sync_state` row per (source, session).
+    Each host is leased on its own, so a campaign holding the archive host costs the deals and F&O
+    for the night and never the flows. See `daily_capture.run_nse_daily_capture`.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: backfill F&O (the historical campaign owns every earlier session), publish
+    an intraday copy, or file one session's payload under another session's date. The import is
+    deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.daily_capture import run_nse_daily_capture_job
+
+    run_nse_daily_capture_job(context)
+
+
+#: The nightly NSE capture. 20:00 and 23:00 IST Monday to Friday — after `daily_snapshot` (19:15,
+#: 30-minute budget) has released `www.nseindia.com` and the archive host, and after the evening
+#: publication of flows and deals (`daily_capture.CAPTURE_CUTOFF`, 19:30). The 23:00 fire is the
+#: same-night retry for an endpoint that published late: it makes no request for a source already
+#: PUBLISHED, and it is the last chance, because by the next evening the latest-only endpoints
+#: have rolled. The timezone comes from `Settings`, never the host's.
+NSE_DAILY_CAPTURE = Job(
+    name="nse_daily_capture",
+    cron="0 20,23 * * mon-fri",
+    fn=nse_daily_capture,
+    timeout=timedelta(minutes=30),
+    description="Nightly FII/DII flows, bulk/block deals, current-session F&O → L0 + L1",
+    covers=_NSE_DAILY_CAPTURE_SOURCES,
+    sync_sources=_NSE_DAILY_CAPTURE_SOURCES,
+)
+
+
+def shareholding_poll(context: JobContext) -> None:
+    """The daily poll of NSE's shareholding master (ops-daily-capture).
+
+    What it does: one request for the master into L0, then the filing-date L1 partitions merged
+    with what it carries. The endpoint has no date parameter and lists the filings of the *current*
+    quarter-end only — measured 2026-10-06: 32 records, every one for 30-Sep-2026, broadcast
+    01..06-Oct; the register's 2026-08-08 sample held 2,284 for the June quarter — so the previous
+    quarter's list is gone the day the next quarter's first filing lands. See
+    `daily_capture.run_shareholding_poll`.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: re-date a filing or drop one an earlier poll landed.
+    """
+    from dataplatform.ingest.daily_capture import run_shareholding_poll_job
+
+    run_shareholding_poll_job(context)
+
+
+#: The daily shareholding poll. 18:05 IST every day — the half hour before `eod_pipeline` (18:30)
+#: when nothing else holds `www.nseindia.com`, inside the campaign quiet window so no campaign can
+#: hold it either. Daily because the quarter rolls over without notice: a weekly poll could miss
+#: the late filings and revisions of a quarter's last week, which no later poll can recover. The
+#: payload peaks near 2.4 MB at the end of a filing season. Two sessions of lag budget: a missed day
+#: is recovered by the next one while the quarter lasts, so one miss is late, not lost.
+SHAREHOLDING_POLL = Job(
+    name="shareholding_poll",
+    cron="5 18 * * *",
+    fn=shareholding_poll,
+    timeout=timedelta(minutes=15),
+    description="Daily NSE shareholding-master poll → L0, merged into filing-date L1 partitions",
+    covers=_SHAREHOLDING_SOURCES,
+    sync_sources=_SHAREHOLDING_SOURCES,
+    max_lag_sessions=2,
+)
+
+
+def announcements_capture(context: JobContext) -> None:
+    """The nightly NSE + BSE corporate-announcement capture (ops-daily-capture).
+
+    What it does: lands the previous calendar day — complete, since it runs after midnight — from
+    both exchanges into one L1 partition, BSE paged by its own row count and resolved scrip→ISIN
+    through the D2 master; and re-drives any day of the last week not yet PUBLISHED. See
+    `daily_capture.run_announcements_capture`.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: backfill past its seven-day window (the merger-terms campaign fetches
+    per-symbol history on demand), or let one exchange's write erase the other's rows.
+    """
+    from dataplatform.ingest.daily_capture import run_announcements_capture_job
+
+    run_announcements_capture_job(context)
+
+
+#: The nightly announcement capture. 00:30 IST every day — announcements are filed on weekends
+#: too, the day before is complete, and no other job holds `www.nseindia.com` or `api.bseindia.com`
+#: then (the monthly BSE sweep starts at 06:00 on its Sunday). Two sessions of lag budget: the
+#: logical date is a calendar day, so between midnight and this fire yesterday is owed but not due.
+ANNOUNCEMENTS_CAPTURE = Job(
+    name="announcements_capture",
+    cron="30 0 * * *",
+    fn=announcements_capture,
+    timeout=timedelta(minutes=45),
+    description="Nightly NSE + BSE announcements for the previous day → L0 + L1 (7-day self-heal)",
+    covers=_ANNOUNCEMENT_SOURCES,
+    sync_sources=_ANNOUNCEMENT_SOURCES,
+    max_lag_sessions=2,
+)
+
+
+def news_capture(context: JobContext) -> None:
+    """The six-hourly news poll: the ratified curated RSS feeds and one GDELT export slot.
+
+    What it does: each active feed whose register row is VERIFIED, once, and the GDELT slot the
+    manifest names, into L0; then today's L1 `news` partition re-derived from every news payload of
+    the day. See `daily_capture.run_news_capture`.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: backfill GDELT, add a feed the register has not verified, or fetch the
+    mentions/GKG files.
+    """
+    from dataplatform.ingest.daily_capture import run_news_capture_job
+
+    run_news_capture_job(context)
+
+
+#: The news poll. 00:15, 06:15, 12:15 and 18:15 IST — no NSE or BSE host is touched, so it does
+#: not compete with any exchange job. Four GDELT slots a day, export files only (~75-100 kB each):
+#: GDELT is evidence-only and measured near-empty of India-finance content, so a six-hourly sample
+#: of global attention is what it is worth, at about 1/24 of the 96-slot firehose. Four RBI polls
+#: cover its ten-item feed with room to spare.
+NEWS_CAPTURE = Job(
+    name="news_capture",
+    cron="15 0,6,12,18 * * *",
+    fn=news_capture,
+    timeout=timedelta(minutes=15),
+    description="Six-hourly curated RSS + one GDELT export slot → L0 + L1 news",
+    covers=_NEWS_SOURCES,
+    sync_sources=_NEWS_SOURCES,
 )
 
 
@@ -607,19 +762,10 @@ UNSCHEDULED: dict[str, str] = {
     "nifty_index_close_snapshot": (
         "Input to the computed TRI fallback only; the published TRI is live (tri_refresh)."
     ),
-    "nse_fii_dii_flows": "Parser exists; no job wired yet (no consumer in the decision path).",
-    "nse_bulk_deals": "Parser exists; no job wired yet (no consumer in the decision path).",
-    "nse_block_deals": "Parser exists; no job wired yet (no consumer in the decision path).",
-    "nse_fo_bhavcopy": "Parser exists; no job wired yet (F&O aggregates are backfill-only).",
-    "nse_announcements": "Announcement polling has no scheduled driver yet.",
-    "bse_announcements": "Announcement polling has no scheduled driver yet.",
     "nse_announcement_attachment": (
         "Per-filing documents fetched on demand by the merger-terms campaign (M3.8); no job yet."
     ),
-    "nse_shareholding_pattern": "Quarterly; campaign-driven, no scheduled job yet.",
-    "gdelt_v2_event_files": "News pipeline is not wired into a job yet.",
     "gdelt_doc_api": "Register status FAILED; nothing to schedule until it verifies.",
-    "curated_rss": "News pipeline is not wired into a job yet.",
     "alfred_series_vintage": "Register status FAILED; nothing to schedule until it verifies.",
     "mospi_api": (
         "Register status FAILED (TLS needs unsafe legacy renegotiation); not worked around."
@@ -661,5 +807,9 @@ def default_registry() -> JobRegistry:
             BSE_CA_SWEEP,
             FBIL_REFERENCE_RATES,
             MACRO_RELEASE_CAPTURE,
+            NSE_DAILY_CAPTURE,
+            SHAREHOLDING_POLL,
+            ANNOUNCEMENTS_CAPTURE,
+            NEWS_CAPTURE,
         ]
     )
