@@ -20,6 +20,13 @@
 #     `line` is 1-BASED (`sed -n '<line>p'` prints it); `line_end` (inclusive) is set only where
 #     the source hard-wraps the quoted sentence across lines. `...` in a quote is an elision;
 #     every fragment between them is verbatim on those lines (tests/unit/test_merger_terms.py).
+#   * A source with no `member` is a document (PDF, or a ZIP of PDFs); its quote is checked against
+#     the document's text layer (tests/unit/test_merger_terms_round2.py) unless `scanned: true`
+#     marks a page image transcribed by reading it.
+#   * `cash_legs` (share swaps only): a non-share leg of the consideration - units of an instrument
+#     the book cannot hold, per old share, at the face or redemption value a source states. The
+#     book credits it as cash on the swap date. A leg with no sourced value leaves the scheme
+#     unsourced.
 
 share_swaps:
   - old_isin: INE894F01025
@@ -156,6 +163,7 @@ share_swaps:
     sources:
       - l0_key: nse_announcement_attachment/2019/06/listcontract1_21062019110958_INDUSINDBK_045.pdf
         url: https://nsearchives.nseindia.com/corporate/listcontract1_21062019110958_INDUSINDBK_045.pdf
+        scanned: true
         quote: >-
           Thursday, July 4, 2019 has also been fixed as the Record Date ... 639 (six hundred and
           thirty nine) equity shares of the Bank ... for every 1,000 (one thousand) equity shares
