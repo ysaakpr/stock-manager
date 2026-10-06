@@ -208,6 +208,10 @@ class MacroRelease(BaseModel):
     source: str = Field(min_length=1)
     facts: tuple[MacroFact, ...] = Field(min_length=1)
     l0_key: str | None = None
+    withheld: tuple[str, ...] = Field(
+        default=(),
+        description="subjects the publication stated ambiguously and the parser declined to store",
+    )
 
     @model_validator(mode="after")
     def _facts_agree(self) -> MacroRelease:

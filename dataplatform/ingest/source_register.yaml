@@ -1068,6 +1068,61 @@ sources:
     candidate_alternatives: []
     owner_task: M3.9.b
 
+  - id: nse_index_close_snapshot
+    plan_row: "Macro / economic backdrop"
+    description: >-
+      The NSE archive host's copy of the daily close-all snapshot (ind_close_all_<DDMMYYYY>.csv):
+      closing level, P/E, P/B and Div Yield for every NIFTY index on one session. The same bytes as
+      nifty_index_close_snapshot (byte-identical, verified 2026-08-08), registered separately
+      because a URL on another host needs that host's own row and crawl policy. This is the host
+      M11.1 measured the archive depth on, and the one the M11.2 valuation backfill fetches.
+    host: nsearchives.nseindia.com
+    method: GET
+    url_template: "https://nsearchives.nseindia.com/content/indices/ind_close_all_{DDMMYYYY}.csv"
+    verified_url: "https://nsearchives.nseindia.com/content/indices/ind_close_all_07082026.csv"
+    cadence: daily
+    era: {start: 2012-10-01, end: null}
+    fallback:
+      - nifty_index_close_snapshot
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.macro.index_valuation, task: M11.1}
+    robots_notes: No directives on the archive host; /content/indices/ is not disallowed.
+    pit_notes: >-
+      Immutable once published. Published the evening of the session it reports, so a valuation
+      fact's release_date is the file's own Index Date — never the fetch date.
+    status: VERIFIED
+    verified_at: 2026-08-08T18:15:03+05:30
+    last_http_status: 200
+    sample_bytes: 17122
+    content_type: text/csv
+    sample_sha256: 2338d57ae47cd5a1848f6d6432ee18b467636540764c62d25581be1d4f0e1985
+    parse_check: >-
+      Byte-identical to nifty_index_close_snapshot's sample of the same session: CSV, 13 columns,
+      header "Index Name,Index Date,Open Index Value,High Index Value,Low Index Value,Closing Index
+      Value,Points Change,Change(%),Volume,Turnover (Rs. Cr.),P/E,P/B,Div Yield".
+    fixture: {frozen: true, task: M11.1, path: "tests/fixtures/nifty_index_close/"}
+    history:
+      measured_at: 2026-09-04T12:29:00+05:30
+      measured_by: M11.1
+      method: >-
+        Dated-URL probe on this host at >=2.6 s spacing, bisecting the archive epoch
+        (ops/gates/M11-macro-source-probe.md). 2012-07-01 and 2011-04-01 answer 404; 2012-10-01
+        answers 200 with 30 index rows.
+      earliest_available: 2012-10-01
+      latest_available: 2026-09-01
+      accrues_forward: true
+      note: >-
+        One 13-column header throughout, but one date era: files from 2014-06-26 into 2015-06
+        write Index Date as DD/MM/YYYY (measured by the M11.2 backfill, which corrects M11.1's
+        "no format eras"). Twelve calendar sessions 2013-2016 answer 404. Naming eras exist too —
+        see nifty_index_close_snapshot and dataplatform/ingest/macro/index_aliases.yaml.
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M11.1
+
   # §4.1 row 9 — FII/DII flows
   - id: nse_fii_dii_flows
     plan_row: "FII/DII daily flows"

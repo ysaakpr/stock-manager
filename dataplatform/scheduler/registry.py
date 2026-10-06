@@ -762,6 +762,10 @@ UNSCHEDULED: dict[str, str] = {
     "nifty_index_close_snapshot": (
         "Input to the computed TRI fallback only; the published TRI is live (tri_refresh)."
     ),
+    "nse_index_close_snapshot": (
+        "History via the M11.2 valuation backfill campaign; the daily valuation job is not wired "
+        "yet (no consumer in the decision path)."
+    ),
     "nse_announcement_attachment": (
         "Per-filing documents fetched on demand by the merger-terms campaign (M3.8); no job yet."
     ),

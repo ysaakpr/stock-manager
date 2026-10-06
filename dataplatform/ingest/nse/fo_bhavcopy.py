@@ -122,6 +122,14 @@ _INDEX_TYPES: Final = frozenset(
     {FoInstrumentType.FUTIDX, FoInstrumentType.FUTIVX, FoInstrumentType.OPTIDX}
 )
 
+#: The three-letter `FinInstrmTp` codes the real UDiFF F&O file uses, and the instrument each names.
+_UDIFF_INSTRUMENT_CODES: Final = {
+    "STO": FoInstrumentType.OPTSTK,
+    "STF": FoInstrumentType.FUTSTK,
+    "IDO": FoInstrumentType.OPTIDX,
+    "IDF": FoInstrumentType.FUTIDX,
+}
+
 #: `OptnTp` values that mean "this row is not an option" - blank in the UDiFF file, and `XX` in the
 #: legacy convention some tooling still emits. Either is accepted on a futures row, refused on an
 #: option row.
@@ -395,7 +403,16 @@ def _row(record: list[str], *, line: int, filename: str) -> FoContractRow:
 
 
 def _instrument_type(value: str, *, line: int, filename: str) -> FoInstrumentType:
-    """Map `FinInstrmTp` to the enum, refusing an F&O type this parser does not know."""
+    """Map `FinInstrmTp` to the enum, refusing an F&O type this parser does not know.
+
+    The real UDiFF files write ISO 10962-style three-letter codes (`STO`, `STF`, `IDO`, `IDF`),
+    not the legacy bhavcopy's `OPTSTK`/`FUTSTK`/`OPTIDX`/`FUTIDX` the synthetic M3.7 fixture used —
+    measured on the first real files fetched (2024-07-08 → 12, M3.7 history backfill). Both
+    spellings name the same four instruments, so both map to one enum; anything else still stops.
+    """
+    alias = _UDIFF_INSTRUMENT_CODES.get(value)
+    if alias is not None:
+        return alias
     try:
         return FoInstrumentType(value)
     except ValueError as exc:
