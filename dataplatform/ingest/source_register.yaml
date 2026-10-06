@@ -1292,7 +1292,7 @@ sources:
     parse_check: >-
       JSON array, 2,284 records; keys include isin, name, date, broadcastDate, cgTimeStamp,
       pr_and_prgrp, employeeTrusts, publicShareholdingNotes, promoterDematNotes, industry.
-    fixture: {frozen: false, task: M3.6, path: "tests/fixtures/nse_shareholding/"}
+    fixture: {frozen: true, task: M3.6, path: "tests/fixtures/nse_shareholding/"}
     failure_note: null
     candidate_alternatives: []
     owner_task: M3.6

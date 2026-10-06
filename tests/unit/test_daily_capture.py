@@ -21,7 +21,8 @@ from __future__ import annotations
 import json
 import socket
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
+from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -47,6 +48,7 @@ from dataplatform.ingest.lease import HostBusyError, LeaseHolder
 from dataplatform.ingest.news import NEWS_DATASET
 from dataplatform.ingest.nse import deals, fii_dii
 from dataplatform.ingest.source_register import load as load_register
+from dataplatform.quality.sentinel import QualityFinding
 from dataplatform.status.sync_state import SyncState
 from dataplatform.store import fo_aggregates
 from dataplatform.store.l0 import L0Store
@@ -426,6 +428,67 @@ def test_a_later_poll_merges_into_the_filing_date_partitions(
     kept = shareholding.read_l1(date(2026, 4, 18), data_root=tmp_path)
     assert [row.isin for row in kept] == ["INE467B01029"]
     assert len(shareholding.read_pit(date(2026, 8, 15), data_root=tmp_path)) == 5
+
+
+LIVE_MASTER: Final = _fixture(
+    "nse_shareholding/master_2026_10/corporate-share-holdings-master_20261006.json"
+)
+
+
+def test_a_live_era_poll_lands_and_raises_bc3_not_applicable(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """D17 on the live path: the poll publishes, and every pledge-less row reaches the D7 sink."""
+    now = _ist(2026, 10, 6, 13, 45)
+    h = _harness(settings, tmp_path, now)
+    raised: list[QualityFinding] = []
+    script = {
+        WARM: RecordedResponse(status_code=403),
+        MASTER_URL: RecordedResponse(body=LIVE_MASTER),
+    }
+    ctx = replace(h.at(now, script), raise_findings=raised.extend)
+    outcome = dc.capture_shareholding(ctx, _fetcher(h), poll_date=date(2026, 10, 6))
+
+    assert outcome.status is CaptureStatus.CAPTURED and outcome.rows == 30
+    assert h.state(shareholding.SOURCE_ID, date(2026, 10, 6)) is SyncState.PUBLISHED
+    bc3 = [f for f in raised if f.check_name == shareholding.BC3_CHECK]
+    assert len(bc3) == 30
+    assert {f.detail["bc3_status"] for f in bc3} == {"not_applicable"}
+    assert len([f for f in raised if f.check_name == shareholding.NO_ISIN_CHECK]) == 2
+
+
+def test_rederive_rebuilds_l1_from_l0_with_no_fetcher(settings: Settings, tmp_path: Path) -> None:
+    """The post-merge recovery path: L0 already holds the poll, so nothing is requested.
+
+    The context's fetcher factory raises if it is ever entered, and the module's socket guard is
+    still on — a re-derivation that reached for the network fails here twice over.
+    """
+    now = _ist(2026, 10, 7, 9, 0)
+    h = _harness(settings, tmp_path, now)
+    poll = date(2026, 10, 6)
+    h.l0.put(shareholding.SOURCE_ID, poll, shareholding.l0_filename(poll), LIVE_MASTER)
+
+    def no_fetchers(hosts: Sequence[str], command: str) -> AbstractContextManager[Fetcher]:
+        raise AssertionError(f"rederive asked for a fetcher for {hosts}")
+
+    raised: list[QualityFinding] = []
+    ctx = replace(h.at(now, {}), fetchers=no_fetchers, raise_findings=raised.extend)
+    # The live poll on 2026-10-06 failed on the old parser; the row is FAILED, retryable.
+    h.tracker.begin(shareholding.SOURCE_ID, poll)
+    h.tracker.mark_failed(shareholding.SOURCE_ID, poll, "ParseError: no 'public_prcnt' field")
+
+    report = dc.rederive_shareholding(ctx)
+    assert [o.status for o in report.outcomes] == [CaptureStatus.CAPTURED]
+    assert report.requests == 0
+    assert h.state(shareholding.SOURCE_ID, poll) is SyncState.PUBLISHED
+    assert len(shareholding.read_l1(poll, data_root=tmp_path)) == 14
+    assert len(shareholding.read_pit(poll, data_root=tmp_path)) == 30
+    assert len(raised) == 32
+
+    # A second pass merges the same rows again, leaves the date PUBLISHED, and fails nothing.
+    again = dc.rederive_shareholding(ctx)
+    assert [o.status for o in again.outcomes] == [CaptureStatus.ALREADY_PUBLISHED]
+    assert len(shareholding.read_pit(poll, data_root=tmp_path)) == 30
 
 
 # ── announcements: two exchanges, one partition ───────────────────────────────────────────────
