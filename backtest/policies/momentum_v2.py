@@ -316,6 +316,25 @@ class MomentumV2Policy:
         #: a pure function of the previous session's decision, so a replay reproduces it.
         self._pending: dict[str, Decimal] | None = None
 
+    @property
+    def pending(self) -> Mapping[str, Decimal] | None:
+        """The basket a rebalance chose and the next session will redeploy into, or ``None``.
+
+        The policy's only state between sessions. A replay holds it in memory for the whole walk; a
+        forward runner that lives one session per process (the daily paper job, M13.1) reads it
+        after a session and hands it back through :meth:`resume` before the next one.
+        """
+        return None if self._pending is None else dict(self._pending)
+
+    def resume(self, pending: Mapping[str, Decimal] | None) -> None:
+        """Restore the state :attr:`pending` reported at the end of the previous decided session.
+
+        What it assumes: ``pending`` is exactly what this policy reported after the last session it
+        decided for this book, so resuming and then deciding is the same decision an uninterrupted
+        replay would make. What it never does: invent a target — ``None`` clears it.
+        """
+        self._pending = None if pending is None else dict(pending)
+
     def decide(self, ctx: SessionContext) -> SessionDecision:
         """Decide this session: a heartbeat off a rebalance, a full rebalance on one.
 

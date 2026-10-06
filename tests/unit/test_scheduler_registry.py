@@ -103,6 +103,7 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "shareholding_poll",
         "announcements_capture",
         "news_capture",
+        "paper_session",
     )
     assert registry.get("eod_pipeline").cron == "30 18 * * mon-fri"
     # 19:15, after the 18:30 EOD pipeline: the two share nsearchives.nseindia.com, and a host
@@ -122,6 +123,8 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     assert registry.get("fbil_reference_rates").cron == "0 16 * * mon-fri"
     # Sunday, when no niftyindices.com job holds that lease (the Saturday ones do).
     assert registry.get("macro_release_capture").cron == "0 10 * * sun"
+    # 20:30, after the 18:30 EOD pipeline's 45-minute budget: the session trades on its prices.
+    assert registry.get("paper_session").cron == "30 20 * * mon-fri"
 
 
 def test_every_default_job_is_valid_and_describes_itself() -> None:

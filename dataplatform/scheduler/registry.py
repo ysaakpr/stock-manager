@@ -44,6 +44,7 @@ __all__ = [
     "MACRO_RELEASE_CAPTURE",
     "NEWS_CAPTURE",
     "NSE_DAILY_CAPTURE",
+    "PAPER_SESSION",
     "SHAREHOLDING_POLL",
     "TRI_REFRESH",
     "UNSCHEDULED",
@@ -64,6 +65,7 @@ __all__ = [
     "macro_release_capture",
     "news_capture",
     "nse_daily_capture",
+    "paper_session",
     "shareholding_poll",
     "tri_refresh",
 ]
@@ -743,6 +745,37 @@ MACRO_RELEASE_CAPTURE = Job(
 )
 
 
+def paper_session(context: JobContext) -> None:
+    """The daily paper-trading session (M13.1): one session of the D13-ratified momentum v2 book.
+
+    What it does: decides today's session of the paper book through the same replay-engine →
+    rails → `SimBroker` path its backtests ran on, journals every decision including the no-ops,
+    and records the session in `paper_session` — or, when the data is red, journals
+    `SKIPPED_DATA_RED` and places nothing. Idempotent per trading date; a holiday is a no-op.
+    What it assumes: the injected clock and settings are the run's (B10), the database is migrated
+    through 0012, and today's EOD pipeline has run — the status interlock checks that it published.
+    What it never does: touch a real broker — the session builds a `SimBroker` and nothing else,
+    and `execution.kite_broker` is not imported on this path. The import is deferred like the
+    others', so loading the registry does not pull in the backtest stack.
+    """
+    from backtest.paper_session import run_paper_session_job
+
+    run_paper_session_job(context)
+
+
+#: The paper session (M13.1). 20:30 IST Monday to Friday — after the 18:30 EOD pipeline's 45-minute
+#: budget has run out, so the session's prices have published or the interlock says why not. It
+#: reads the lake and Postgres only and fetches nothing, so it holds no host lease. Holidays are
+#: skipped inside the job against the holiday calendar.
+PAPER_SESSION = Job(
+    name="paper_session",
+    cron="30 20 * * mon-fri",
+    fn=paper_session,
+    timeout=timedelta(minutes=30),
+    description="Daily paper-trading session of the D13-ratified momentum v2 book (M13.1)",
+)
+
+
 #: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
 #: audit's root cause was not one broken job but sources that were simply never scheduled — the
 #: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
@@ -815,5 +848,6 @@ def default_registry() -> JobRegistry:
             SHAREHOLDING_POLL,
             ANNOUNCEMENTS_CAPTURE,
             NEWS_CAPTURE,
+            PAPER_SESSION,
         ]
     )
