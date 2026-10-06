@@ -40,7 +40,7 @@ from backtest.paper_session import (
     run_paper_session,
 )
 from backtest.policies.momentum_v2 import MomentumV2Parameters, MomentumV2Policy
-from backtest.rails import RailGate
+from backtest.rails import BACKTEST_CASE_ID, RailGate
 from backtest.replay import ReplayEngine
 from backtest.run import _ACCOUNT_STATE, _AccountingBroker, _held_by
 from dataplatform.clock import IST, FrozenClock
@@ -237,7 +237,13 @@ def test_a_book_decided_a_day_at_a_time_equals_one_replay_over_the_same_days() -
         for run in paper
         for entry in run.entries
     ]
-    assert untagged == list(replay.journal)
+    # The one deliberate difference: the paper journal files a caseless rail block under no case
+    # rather than the backtest's placeholder, which the live journal's foreign key refuses.
+    replayed = [
+        entry.model_copy(update={"case_id": None}) if entry.case_id == BACKTEST_CASE_ID else entry
+        for entry in replay.journal
+    ]
+    assert untagged == replayed
     assert paper[-1].book_bytes() == replay.book.canonical_bytes()
     # The fixture really exercised the carried state: October's rebalance sold, the next session
     # redeployed the proceeds, and that redeploy happened in a different process from the sells.
@@ -246,6 +252,27 @@ def test_a_book_decided_a_day_at_a_time_equals_one_replay_over_the_same_days() -
     rebalance = october[OCT_FIRST].record
     assert rebalance is not None and rebalance.pending is not None
     assert Decision.BUY in _decisions(october[OCT_SECOND].entries)
+
+
+def test_a_rail_block_is_journaled_under_no_case_never_the_backtest_placeholder() -> None:
+    """A8 refusing a paper buy lands as RAIL_BLOCK — and must fit the live journal's case FK."""
+    tight = fixture_spec()
+    tight = replace(
+        tight,
+        rail_policy=replace(
+            tight.rail_policy,
+            rails=tight.rail_policy.rails.model_copy(update={"max_sector_pct": Decimal("20")}),
+        ),
+    )
+    desk = _Desk.fresh(spec=tight)
+    result = desk.run(OCT_FIRST)
+
+    blocks = [entry for entry in result.entries if entry.decision is Decision.RAIL_BLOCK]
+    assert blocks, "the 20 % sector cap must refuse some of the fixture's buys"
+    assert all(entry.case_id is None for entry in result.entries)
+    assert all(entry.payload["paper_book"] == "paper_fixture_book" for entry in blocks)
+    assert result.record is not None
+    assert len(result.record.orders) == len(ISINS) - len(blocks), "refused orders never placed"
 
 
 # ── red data ─────────────────────────────────────────────────────────────────────────────────────

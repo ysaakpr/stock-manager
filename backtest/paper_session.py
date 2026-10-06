@@ -79,7 +79,12 @@ from backtest.policies.momentum_v2 import (
     MomentumV2Record,
     RegimeReading,
 )
-from backtest.rails import BacktestRailPolicy, RailGate, ratified_backtest_rail_policy
+from backtest.rails import (
+    BACKTEST_CASE_ID,
+    BacktestRailPolicy,
+    RailGate,
+    ratified_backtest_rail_policy,
+)
 from backtest.replay import (
     BookSnapshot,
     ReplayEngine,
@@ -977,7 +982,15 @@ def _tag(spec: PaperBookSpec) -> dict[str, str]:
 
 
 def _tagged(entry: JournalEntry, spec: PaperBookSpec) -> JournalEntry:
-    return entry.model_copy(update={"payload": {**entry.payload, **_tag(spec)}})
+    """``entry`` as the paper book journals it: tagged with the book and the mode.
+
+    The rail gate files a caseless order's block under ``BACKTEST_CASE_ID``, a placeholder that
+    names no ``case_`` row — fine in an offline replay, refused by the live journal's foreign key.
+    The paper book is not a case (D13 ratified a sleeve configuration, not a §5.1 case), so here
+    the placeholder becomes what it stands for, *no case*, and the book is named in the payload.
+    """
+    case_id = None if entry.case_id == BACKTEST_CASE_ID else entry.case_id
+    return entry.model_copy(update={"case_id": case_id, "payload": {**entry.payload, **_tag(spec)}})
 
 
 # ── the production world: the holiday calendar and the lake ──────────────────────────────────────
@@ -1122,7 +1135,7 @@ def run_paper_session_job(
     path), or commit a half-written session — an exception rolls the whole session back and the
     runner records the run FAILED.
     """
-    from analyst.journal import Journal
+    from analyst.journal import EVIDENCE_DIRNAME, EvidenceStore, Journal
     from dataplatform.store.db import connection
 
     spec = ratified_paper_book()
@@ -1138,7 +1151,11 @@ def run_paper_session_job(
             spec=spec,
             world=world,
             store=PostgresPaperSessionStore(conn),
-            journal=Journal(conn, clock=context.clock),
+            journal=Journal(
+                conn,
+                clock=context.clock,
+                evidence=EvidenceStore(context.settings.data_root / EVIDENCE_DIRNAME),
+            ),
             gate=StatusGate(datasets=spec.datasets, settings=context.settings, clock=context.clock),
             clock=context.clock,
         )
