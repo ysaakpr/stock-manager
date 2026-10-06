@@ -116,6 +116,10 @@ class ReferenceBar:
     session's total turnover (₹), the liquidity that slippage is scaled against. All `Decimal`.
     A raw (unadjusted) execution price is correct here: a fill happens at the price that actually
     traded, not an adjusted one — adjusted series are for analysis (invariant #3), never execution.
+
+    `exit_only` marks a bar from a segment the account may leave but not enter — an NSE name moved
+    off the rolling-settlement EQ segment into trade-for-trade (BE/BZ) still trades there, so a
+    holder can sell at that bar, but the investable segment is EQ and a buy on it is refused.
     """
 
     isin: str
@@ -124,6 +128,7 @@ class ReferenceBar:
     open: Decimal
     vwap: Decimal
     traded_value: Decimal
+    exit_only: bool = False
 
     def __post_init__(self) -> None:
         for name in ("open", "vwap", "traded_value"):
@@ -511,6 +516,13 @@ class SimBroker:
             bar = self._market.reference_bar(request.isin, session)
         except NoReferenceBarError as exc:
             return self._reject(order, f"no reference bar for {session.isoformat()}: {exc}")
+
+        if bar.exit_only and request.side is Side.BUY:
+            return self._reject(
+                order,
+                f"{request.isin} trades only in an exit-only segment on {session.isoformat()}: "
+                "a held name may be sold there, never bought",
+            )
 
         reference = self._policy.reference_price(bar, request.side)
         turnover_at_reference = reference * session_quantity

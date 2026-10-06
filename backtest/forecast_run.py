@@ -94,6 +94,8 @@ from backtest.run import (
     _decision_counts,
     _exact_price,
     _finish_backtest,
+    _held_by,
+    _HoldingMarks,
     _InvestableUniverse,
     _L1Market,
     _L1Reader,
@@ -605,23 +607,20 @@ def run_forecast_daily(
         )
 
         clock = FrozenClock(first_session)
+        book = PortfolioBook()
+        marks = _HoldingMarks(reader, _held_by(book))
         sim = SimBroker(
             clock=clock,
             cost_model=CostModel(load_rate_card(), account_state=_ACCOUNT_STATE),
-            market=_L1Market(reader, calendar),
+            market=_L1Market(reader, calendar, held=_held_by(book)),
             opening_cash=opening_cash,
         )
-        book = PortfolioBook()
         book.deposit(first_session, opening_cash)
 
-        last_close: dict[str, Decimal] = {}
         nav_path: list[Decimal] = []
 
         def sample_nav(session: date) -> None:
-            last_close.update(reader.closes_on(session))
-            if any(position.isin not in last_close for position in book.positions()):
-                return
-            nav_path.append(book.net_asset_value(last_close))
+            nav_path.append(book.net_asset_value(marks.nav_prices(session, book.positions())))
 
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         # One rail policy for both: the gate enforces it, and the policy sizes its buys to it.
@@ -631,7 +630,7 @@ def run_forecast_daily(
             broker=broker,
             clock=clock,
             sessions=sessions,
-            rails=RailGate(rails_in_force, reader.closes_on),
+            rails=RailGate(rails_in_force, marks),
         )
         started = time.perf_counter()
         result = engine.run()
