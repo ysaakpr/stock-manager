@@ -35,17 +35,34 @@ if the logic were reversed (the CLAUDE.md rule for anything touching a decision 
 Needs the docker postgres (`make up`); skips loudly if it is unreachable, as `test_journal.py`,
 `test_evidence_pack.py` and `test_paper_run_10_sessions.py` do. Time is frozen and injected (B10);
 money is `Decimal`; identity is ISIN (invariant #2).
+
+**M6.8 — the same drill against a real model.** The tests marked `live` re-run this drill, a sample
+of T1 reviews and one T2 deep review through `ClaudeCliLLM` (`claude -p` on this machine's
+subscription, HUMAN_DECISIONS D16) instead of `StubLLM`. They are opt-in: `tests/integration/
+conftest.py` deselects them unless the run says `-m live`, so `make check` never reaches a model,
+and `test_a_bare_run_deselects_every_live_test` pins that. Every live call goes through
+`BudgetedLLM`, which aborts the whole pytest session non-zero *before* call `LIVE_CALL_BUDGET + 1`
+is made (`test_the_live_call_budget_aborts_before_the_26th_call` pins it under a stub). The live
+tests assert only what the system must guarantee whatever the model says — schema-valid verdicts,
+every action through `validate_action`, cost on the journal line — plus the few judgements a
+defensible reviewer cannot get wrong; the quality read is ops/gates/M6-live-drill.md, written from
+the verbatim transcript the session writes into pytest's basetemp. Paper and fixtures only: no
+broker, no order, no network beyond the CLI's own call.
 """
 
 from __future__ import annotations
 
+import json
 import os
-from collections.abc import Iterator
-from dataclasses import dataclass
+import subprocess
+import sys
+import time
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import psycopg
 import pytest
@@ -67,7 +84,18 @@ from analyst.journal import (
     generate_pack,
     render_markdown,
 )
-from analyst.llm import StubLLM, Usage, prompt_digest
+from analyst.llm import (
+    DEFAULT_MAX_TOKENS,
+    LLM,
+    LLMResponse,
+    Message,
+    Role,
+    StubLLM,
+    ToolSpec,
+    Usage,
+    prompt_digest,
+)
+from analyst.llm.claude_cli import ClaudeCliLLM
 from analyst.llm.stub import StubReply
 from analyst.monitor import (
     BuiltBundle,
@@ -76,6 +104,8 @@ from analyst.monitor import (
     InMemoryEscalationQueue,
     KeywordWatch,
     PriceFact,
+    T0Check,
+    T0Flag,
     T0Holding,
     T0Inputs,
     T0Monitor,
@@ -87,6 +117,7 @@ from analyst.monitor import (
     build_messages,
 )
 from analyst.monitor.t1 import SYSTEM_PROMPT, T1_MODEL
+from analyst.monitor.t2 import T2Reviewer
 from analyst.monitor.verdicts import (
     BreakConditionVerdict,
     ProposedAction,
@@ -104,9 +135,11 @@ from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
 from dataplatform.ingest.announcements import AnnouncementRow
 from dataplatform.ingest.indices import TriPoint, TriSeries
+from dataplatform.logging import get_logger
 from dataplatform.query import AnnouncementIndex, KeywordQuery
 from dataplatform.store.db import connect, connection, with_dbname
 from dataplatform.store.migrate import migrate
+from tests.unit import test_t2 as t2_fixture
 
 pytestmark = pytest.mark.integration
 
@@ -302,7 +335,7 @@ class DrillResult:
     t1_result: T1Result
 
 
-def _reviewer(llm: StubLLM, journal: Journal, clock: FrozenClock) -> T1Reviewer:
+def _reviewer(llm: LLM, journal: Journal, clock: FrozenClock) -> T1Reviewer:
     metered = MeteredLLM(llm, pricer=TokenPricer(load_price_card()), ledger=None, clock=clock)
     return T1Reviewer(metered, journal, clock=clock, model=T1_MODEL, max_attempts=2)
 
@@ -323,15 +356,24 @@ def _stub_for(built: BuiltBundle, reply: str) -> StubLLM:
 
 
 def run_drill(
-    journal: Journal, case_id: str, *, clock: FrozenClock, verdict_json: str
+    journal: Journal,
+    case_id: str,
+    *,
+    clock: FrozenClock,
+    verdict_json: str | None = None,
+    llm: LLM | None = None,
 ) -> DrillResult:
     """Run the whole fire drill against one journal: T0 sweep → escalation → T1 review.
 
     Writes a SIP park instalment first (so the case has a cashflow the evidence pack's return can be
     struck on), then runs the real T0 monitor over the injected disclosure, takes the queued
-    escalation, builds its evidence bundle, and reviews it under a StubLLM returning `verdict_json`.
+    escalation, builds its evidence bundle, and reviews it — under a StubLLM returning
+    `verdict_json`, or under `llm` (the M6.8 live run). Exactly one of the two is given, so the
+    stub and the live drill differ in the model and nothing else.
     The caller owns the transaction; nothing here commits.
     """
+    if (verdict_json is None) == (llm is None):
+        raise ValueError("run_drill takes exactly one of verdict_json (stub) or llm (live)")
     # A SIP instalment parked the same session — the A7 park payload the pack's return reads.
     journal.append(
         JournalEntry(
@@ -372,7 +414,10 @@ def run_drill(
             actor=Actor.T1,
         )
     )
-    reviewer = _reviewer(_stub_for(built, verdict_json), journal, clock)
+    if llm is None:
+        assert verdict_json is not None
+        llm = _stub_for(built, verdict_json)
+    reviewer = _reviewer(llm, journal, clock)
     t1_result = reviewer.review(
         T1Request(built=built, thesis=make_thesis(case_id), exit_menu=full_exit_menu())
     )
@@ -464,7 +509,12 @@ def evidence_root(tmp_path: Path) -> Path:
 
 
 def _committed_drill(
-    scratch: Settings, evidence_root: Path, case_id: str, *, verdict_json: str
+    scratch: Settings,
+    evidence_root: Path,
+    case_id: str,
+    *,
+    verdict_json: str | None = None,
+    llm: LLM | None = None,
 ) -> DrillResult:
     """Run the drill for a fresh case and commit it, returning the run's result."""
     with connection(scratch) as conn:
@@ -472,7 +522,9 @@ def _committed_drill(
         journal = Journal(
             conn, clock=FrozenClock(RUN_AT), evidence=EvidenceStore(root=evidence_root)
         )
-        result = run_drill(journal, case_id, clock=FrozenClock(RUN_AT), verdict_json=verdict_json)
+        result = run_drill(
+            journal, case_id, clock=FrozenClock(RUN_AT), verdict_json=verdict_json, llm=llm
+        )
         conn.commit()
     return result
 
@@ -675,6 +727,477 @@ def dataclass_replace_decision(window: JournalFilter, decision: Decision) -> Jou
     from dataclasses import replace
 
     return replace(window, decision=decision)
+
+
+# ── M6.8: the live-model drill (opt-in with `-m live`; deselected by a bare run) ─────────────────
+
+#: The hard ceiling on real-model calls in one live run. A constant in the test, not an environment
+#: knob (M6.8 spec): raising it is a reviewed code change, never a shell variable.
+LIVE_CALL_BUDGET: Final = 25
+
+#: The pytest exit status when the budget stops a run. Outside pytest's own 0-5 so a wrapper script
+#: can tell "the drill tried to overspend" from "a test failed".
+LIVE_BUDGET_EXIT_CODE: Final = 6
+
+#: Where the verbatim transcript of a live run lands, under pytest's basetemp. The gate report
+#: (ops/gates/M6-live-drill.md) is written from this file; it carries model output and token counts
+#: only — the CLI holds its own credential and nothing here ever sees it.
+LIVE_TRANSCRIPT: Final = "m6_8_live_transcript.json"
+
+_LIVE_LOG = get_logger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class LiveCall:
+    """One real-model call as the transcript records it — what was asked of whom, what came back."""
+
+    number: int
+    scenario: str
+    prompt_digest: str
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cache_write_tokens: int
+    cache_read_tokens: int
+    latency_ms: int
+    stop_reason: str
+    text: str
+
+
+@dataclass
+class BudgetedLLM:
+    """An `LLM` that counts every call and aborts the pytest session before it overspends.
+
+    What it does: forwards each call to `inner` and records it (verbatim text, tokens, latency) for
+    the transcript; before call `LIVE_CALL_BUDGET + 1` it calls `pytest.exit` with a non-zero status
+    instead, so the whole run stops rather than one test failing and the next one calling again.
+    What it assumes: one instance per pytest session (the `live_llm` fixture), so the count is the
+    run's count.
+    What it never does: take a budget argument. The ceiling is `LIVE_CALL_BUDGET`, full stop. A call
+    is counted *before* it is made, so a call that raised still spent its slot.
+    """
+
+    inner: LLM
+    scenario: str = "unlabelled"
+    attempted: int = 0
+    calls: list[LiveCall] = field(default_factory=list)
+    results: list[dict[str, Any]] = field(default_factory=list)
+
+    def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        tools: Sequence[ToolSpec] = (),
+        system: str | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> LLMResponse:
+        if self.attempted >= LIVE_CALL_BUDGET:
+            pytest.exit(
+                f"live call budget of {LIVE_CALL_BUDGET} exhausted: refusing call "
+                f"{self.attempted + 1} ({self.scenario})",
+                returncode=LIVE_BUDGET_EXIT_CODE,
+            )
+        self.attempted += 1
+        started = time.perf_counter()
+        response = self.inner.complete(
+            messages, model=model, tools=tools, system=system, max_tokens=max_tokens
+        )
+        latency_ms = round((time.perf_counter() - started) * 1000)
+        call = LiveCall(
+            number=self.attempted,
+            scenario=self.scenario,
+            prompt_digest=prompt_digest(messages, model=model, system=system),
+            model=response.model,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            cache_write_tokens=response.usage.cache_write_tokens,
+            cache_read_tokens=response.usage.cache_read_tokens,
+            latency_ms=latency_ms,
+            stop_reason=response.stop_reason.value,
+            text=response.text,
+        )
+        self.calls.append(call)
+        _LIVE_LOG.info(
+            "live.call",
+            number=call.number,
+            budget=LIVE_CALL_BUDGET,
+            scenario=call.scenario,
+            model=call.model,
+            input_tokens=call.input_tokens,
+            output_tokens=call.output_tokens,
+            cache_write_tokens=call.cache_write_tokens,
+            latency_ms=latency_ms,
+        )
+        return response
+
+
+def _t1_record(scenario: str, result: T1Result) -> dict[str, Any]:
+    """A T1 outcome as the transcript keeps it — every field the quality review reads."""
+    verdict = result.verdict
+    return {
+        "tier": "T1",
+        "scenario": scenario,
+        "outcome": result.outcome.value,
+        "verdicts": (
+            [] if verdict is None else [v.model_dump(mode="json") for v in verdict.verdicts]
+        ),
+        "proposed_action": (
+            None if verdict is None else verdict.proposed_action.model_dump(mode="json")
+        ),
+        "summary": None if verdict is None else verdict.summary,
+        "validated_action": (
+            None if result.proposed_action_kind is None else result.proposed_action_kind.value
+        ),
+        "exit_strategy": result.exit_strategy,
+        "exit_triggered": result.exit_triggered,
+        "rejection": result.rejection,
+        "attempts": result.attempts,
+        "model": result.model,
+        "tokens_in": result.token_spend.tokens_in,
+        "tokens_out": result.token_spend.tokens_out,
+        "cost_inr": str(result.token_spend.cost_inr),
+    }
+
+
+@pytest.fixture(scope="session")
+def live_llm(tmp_path_factory: pytest.TempPathFactory) -> Iterator[BudgetedLLM]:
+    """The session's one real model, budgeted; writes the verbatim transcript at teardown.
+
+    `ClaudeCliLLM()` raises `LLMCredentialError` when the CLI is absent — deliberately not caught:
+    an operator who asked for `-m live` and got a skip would read it as a pass.
+    """
+    budgeted = BudgetedLLM(inner=ClaudeCliLLM())
+    yield budgeted
+    path = tmp_path_factory.getbasetemp() / LIVE_TRANSCRIPT
+    path.write_text(
+        json.dumps(
+            {
+                "provider": "claude_cli",
+                "budget": LIVE_CALL_BUDGET,
+                "calls_made": budgeted.attempted,
+                "calls": [
+                    {name: getattr(call, name) for name in LiveCall.__slots__}
+                    for call in budgeted.calls
+                ],
+                "results": budgeted.results,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    _LIVE_LOG.info("live.transcript", path=str(path), calls_made=budgeted.attempted)
+
+
+def _live_t1_review(
+    scratch: Settings,
+    evidence_root: Path,
+    live: BudgetedLLM,
+    case_id: str,
+    *,
+    flag_condition: str,
+    flag_subject: str,
+    disclosure: AnnouncementRow,
+) -> T1Result:
+    """One T1 review of a hand-built flag + disclosure through the real model, committed.
+
+    The drill proper goes through T0; these samples build the flag directly so each can put a
+    specific piece of evidence in front of the reviewer — including the disclosure body, which the
+    drill's own bundle does not carry (it hands T1 the flag line only).
+    """
+    flag = T0Flag(
+        check=T0Check.ANNOUNCEMENT,
+        isin=ISIN,
+        case_id=case_id,
+        summary=f"break condition {flag_condition} keyword hit on 1 announcement: {flag_subject}",
+        detail={"break_condition_id": flag_condition, "hits": "1"},
+        break_condition_id=flag_condition,
+    )
+    clock = FrozenClock(RUN_AT)
+    with connection(scratch) as conn:
+        _insert_case(conn, case_id)
+        journal = Journal(conn, clock=clock, evidence=EvidenceStore(root=evidence_root))
+        built = BundleBuilder().build(
+            BundleRequest(
+                case_id=case_id,
+                isin=ISIN,
+                trading_date=DRILL_DATE,
+                flag=flag,
+                thesis=make_thesis(case_id),
+                prices=price_facts(),
+                announcements=(disclosure,),
+                actor=Actor.T1,
+            )
+        )
+        result = _reviewer(live, journal, clock).review(
+            T1Request(built=built, thesis=make_thesis(case_id), exit_menu=full_exit_menu())
+        )
+        conn.commit()
+    return result
+
+
+def _verdict_of(result: T1Result, condition: str) -> Verdict:
+    assert result.verdict is not None, f"no verdict parsed: {result.rejection}"
+    (verdict,) = [v.verdict for v in result.verdict.verdicts if v.id == condition]
+    return verdict
+
+
+# — the pins that run in `make check` (no model, no database) —
+
+
+def test_the_live_call_budget_aborts_before_the_26th_call() -> None:
+    """Under a stub: 25 calls go through, the 26th aborts the session non-zero and never reaches it.
+
+    The inversion of the budget: if the check were off by one, or counted after the call, the
+    inner model would see a 26th call and `len(inner.calls)` would say so.
+    """
+    assert LIVE_CALL_BUDGET == 25
+    inner = StubLLM()
+    budgeted = BudgetedLLM(inner=inner)
+    messages = (Message(role=Role.USER, content="budget probe"),)
+    for _ in range(LIVE_CALL_BUDGET):
+        budgeted.complete(messages, model=T1_MODEL)
+    assert len(inner.calls) == LIVE_CALL_BUDGET
+
+    with pytest.raises(pytest.exit.Exception) as aborted:
+        budgeted.complete(messages, model=T1_MODEL)
+    assert aborted.value.returncode == LIVE_BUDGET_EXIT_CODE
+    assert aborted.value.returncode != 0
+    assert len(inner.calls) == LIVE_CALL_BUDGET  # the 26th never reached the model
+    assert budgeted.attempted == LIVE_CALL_BUDGET
+
+
+def _collected(repo_root: Path, *args: str) -> tuple[list[str], str]:
+    """The node ids a `pytest --collect-only` of this file would run, plus its raw output.
+
+    No `-q` here: `addopts` already passes one, and a second collapses the listing to per-file
+    counts, which would hide exactly the node ids this check reads.
+    """
+    finished = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "--collect-only",
+            "-p",
+            "no:cacheprovider",
+            str(Path(__file__).relative_to(repo_root)),
+            *args,
+        ],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert finished.returncode == 0, finished.stdout + finished.stderr
+    ids = [line for line in finished.stdout.splitlines() if "::" in line]
+    return ids, finished.stdout
+
+
+def test_a_bare_run_deselects_every_live_test(repo_root: Path) -> None:
+    """A bare `pytest` (what `make check` runs) collects no live test; `-m live` collects only them.
+
+    Fails if the conftest gate is removed, inverted, or the marker is dropped from a live test —
+    each of which would let `make check` spend the model budget.
+    """
+    bare, bare_out = _collected(repo_root)
+    assert bare, bare_out
+    assert not [node for node in bare if "::test_live_" in node], bare_out
+    assert "deselected" in bare_out
+
+    opted, opted_out = _collected(repo_root, "-m", "live")
+    assert opted, opted_out
+    assert all("::test_live_" in node for node in opted), opted_out
+    assert any("test_live_fire_drill" in node for node in opted), opted_out
+
+    negated, negated_out = _collected(repo_root, "-m", "not live")
+    assert not [node for node in negated if "::test_live_" in node], negated_out
+
+
+# — the live run itself (`uv run pytest tests/integration/test_fire_drill.py -q -m live`) —
+
+
+@pytest.mark.live
+@pytest.mark.parametrize("run", ["a", "b"])
+def test_live_fire_drill_escalates_and_journals_an_in_policy_action(
+    scratch: Settings, evidence_root: Path, live_llm: BudgetedLLM, run: str
+) -> None:
+    """The M6.7 drill, same fixtures, real model — twice, so stability is observed, not assumed."""
+    case_id = f"firedrill-live-{run}"
+    live_llm.scenario = f"t1-fire-drill-{run}"
+    result = _committed_drill(scratch, evidence_root, case_id, llm=live_llm)
+    live_llm.results.append(_t1_record(live_llm.scenario, result.t1_result))
+
+    assert result.t0_outcome is T0Outcome.ESCALATED
+    t1 = result.t1_result
+    assert t1.verdict is not None, t1.rejection
+    assert {v.id for v in t1.verdict.verdicts} == {"BC1", "BC3"}
+    assert _verdict_of(t1, "BC3") is Verdict.BROKEN
+    assert t1.outcome is T1Outcome.BROKEN
+    assert t1.exit_triggered is True
+    assert t1.rejection is None
+
+    with connection(scratch) as conn:
+        journal = Journal(
+            conn, clock=FrozenClock(RUN_AT), evidence=EvidenceStore(root=evidence_root)
+        )
+        window = JournalFilter(case_id=case_id, start=WINDOW_START, end=WINDOW_END)
+        (t1_entry,) = [
+            e
+            for e in journal.entries(dataclass_replace_decision(window, Decision.ESCALATE))
+            if e.actor is Actor.T1
+        ]
+        assert t1_entry.tokens is not None and t1_entry.tokens.cost_inr > Decimal("0")
+        assert journal.count(dataclass_replace_decision(window, Decision.SELL)) == 0
+
+
+@pytest.mark.live
+def test_live_t1_breaks_on_the_disclosure_text(
+    scratch: Settings, evidence_root: Path, live_llm: BudgetedLLM
+) -> None:
+    """With the resignation letter itself in the bundle, BC3 must read BROKEN and exit in policy."""
+    live_llm.scenario = "t1-resignation-with-text"
+    result = _live_t1_review(
+        scratch,
+        evidence_root,
+        live_llm,
+        "t1-live-resignation",
+        flag_condition="BC3",
+        flag_subject="Resignation of Auditor",
+        disclosure=AnnouncementRow(
+            ts=DISCLOSED_AT,
+            source="nse_announcements",
+            isin=ISIN,
+            subject="Resignation of Statutory Auditor",
+            category="Auditor",
+            body=(
+                "The statutory auditor has resigned with immediate effect, mid-term, citing "
+                "inability to obtain sufficient appropriate audit evidence on related-party "
+                "transactions with a promoter-group entity for the quarter ended 30 June 2026."
+            ),
+            source_ref="M6-8-LIVE-1",
+        ),
+    )
+    live_llm.results.append(_t1_record(live_llm.scenario, result))
+    assert _verdict_of(result, "BC3") is Verdict.BROKEN
+    assert result.exit_triggered is True
+    assert result.rejection is None
+
+
+@pytest.mark.live
+def test_live_t1_does_not_exit_on_a_routine_auditor_rotation(
+    scratch: Settings, evidence_root: Path, live_llm: BudgetedLLM
+) -> None:
+    """A keyword false positive: a statutory rotation at term end is not a resignation."""
+    live_llm.scenario = "t1-auditor-rotation"
+    result = _live_t1_review(
+        scratch,
+        evidence_root,
+        live_llm,
+        "t1-live-rotation",
+        flag_condition="BC3",
+        flag_subject="Change in Statutory Auditor",
+        disclosure=AnnouncementRow(
+            ts=DISCLOSED_AT,
+            source="nse_announcements",
+            isin=ISIN,
+            subject="Change in Statutory Auditor",
+            category="Auditor",
+            body=(
+                "The ten-year term of the statutory auditor concluded at the AGM held on 6 August "
+                "2026 under the mandatory rotation in Section 139(2) of the Companies Act, 2013. "
+                "Shareholders appointed the successor firm for five years. The outgoing auditor "
+                "issued an unmodified opinion on the FY26 accounts and reported no concerns."
+            ),
+            source_ref="M6-8-LIVE-2",
+        ),
+    )
+    live_llm.results.append(_t1_record(live_llm.scenario, result))
+    assert _verdict_of(result, "BC3") is not Verdict.BROKEN
+    assert result.exit_triggered is False
+
+
+@pytest.mark.live
+def test_live_t1_does_not_break_on_one_down_quarter(
+    scratch: Settings, evidence_root: Path, live_llm: BudgetedLLM
+) -> None:
+    """BC1 needs two consecutive down quarters; one dip after an up quarter is not a break."""
+    live_llm.scenario = "t1-one-down-quarter"
+    result = _live_t1_review(
+        scratch,
+        evidence_root,
+        live_llm,
+        "t1-live-quarter",
+        flag_condition="BC1",
+        flag_subject="Financial Results",
+        disclosure=AnnouncementRow(
+            ts=DISCLOSED_AT,
+            source="nse_announcements",
+            isin=ISIN,
+            subject="Unaudited Financial Results for the quarter ended 30 June 2026",
+            category="Financial Results",
+            body=(
+                "Industrial automation segment revenue was Rs 412 crore, down 4.2% from Rs 430 "
+                "crore in the quarter ended 31 March 2026, which was itself up 6.2% on the "
+                "December quarter. Management attributes the dip to two project handovers moving "
+                "into Q2. Order book Rs 2,950 crore, up 9% quarter on quarter."
+            ),
+            source_ref="M6-8-LIVE-3",
+        ),
+    )
+    live_llm.results.append(_t1_record(live_llm.scenario, result))
+    assert _verdict_of(result, "BC1") is not Verdict.BROKEN
+    assert result.exit_triggered is False
+
+
+@pytest.mark.live
+def test_live_t2_deep_review_covers_the_case_inside_the_dial(
+    scratch: Settings, evidence_root: Path, live_llm: BudgetedLLM
+) -> None:
+    """The M6.5 deep-review fixture through the real model: parsed, complete, tilts inside core."""
+    live_llm.scenario = "t2-monthly-deep-review"
+    request = t2_fixture.make_request()
+    clock = FrozenClock(t2_fixture.DECIDED_AT)
+    with connection(scratch) as conn:
+        _insert_case(conn, request.case_id)
+        journal = Journal(conn, clock=clock, evidence=EvidenceStore(root=evidence_root))
+        metered = MeteredLLM(
+            live_llm, pricer=TokenPricer(load_price_card()), ledger=None, clock=clock
+        )
+        report = T2Reviewer(metered, journal, clock=clock, max_attempts=2).review(request)
+        conn.commit()
+
+    live_llm.results.append(
+        {
+            "tier": "T2",
+            "scenario": live_llm.scenario,
+            "health": report.health.value,
+            "assessments": [
+                {"isin": a.isin, "verdict": a.verdict.value, "assessment": a.assessment}
+                for a in report.thesis_assessments
+            ],
+            "cycle_read": report.cycle_read,
+            "theme_development": report.theme_development,
+            "steering_tilts": list(report.steering.core_tilts),
+            "steering_rationale": report.steering.rationale,
+            "proposals": [
+                f"{p.kind}: tactical {p.from_tactical_pct}% -> {p.to_tactical_pct}% ({p.rationale})"
+                for p in report.proposals
+            ],
+            "escalated": report.escalated,
+            "rejection": report.rejection,
+            "attempts": report.attempts,
+            "model": report.model,
+            "tokens_in": report.token_spend.tokens_in,
+            "tokens_out": report.token_spend.tokens_out,
+            "cost_inr": str(report.token_spend.cost_inr),
+        }
+    )
+    assert report.rejection is None, report.rejection
+    assert {a.isin for a in report.thesis_assessments} == {t2_fixture.CORE_A, t2_fixture.CORE_B}
+    held_core = {lot.isin for lot in request.portfolio.lots} - request.tactical_isins
+    assert set(report.steering.core_tilts) <= held_core
+    assert report.token_spend.cost_inr > Decimal("0")
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience for a direct run
