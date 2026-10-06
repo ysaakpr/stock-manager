@@ -599,6 +599,15 @@ def _text_of(payload: bytes, *, filename: str) -> str:
                 "the payload in L0 is the evidence, do not re-fetch over it",
                 filename=filename,
             ) from exc
+    elif payload.lstrip()[:15].lower().startswith((b"<!doctype html", b"<html")):
+        # BSE's answer for a date it has no file for: HTTP 200 and its Angular shell (measured
+        # 2026-10-06 across 2006 and on Republic Day 2010). Named, because "unexpected header
+        # '<!DOCTYPE HTML>'" reads like a format change when it is an absence.
+        raise ParseError(
+            "the payload is BSE's HTML page, not a bhavcopy — the soft-404 BSE serves (HTTP 200) "
+            "for a date it published no file for; the session has no data at this source",
+            filename=filename,
+        )
     else:
         body = payload
 

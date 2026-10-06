@@ -470,7 +470,7 @@ def test_the_2006_legacy_file_is_the_same_format_and_parses_whole() -> None:
 def test_the_html_shell_bse_serves_for_a_missing_date_is_refused() -> None:
     """2006-01-03 answered 200 with BSE's Angular page; it must never parse to an empty session."""
     shell = (LEGACY_2006_DIR / "EQ030106_soft404.html").read_bytes()
-    with pytest.raises(ParseError, match="unexpected header"):
+    with pytest.raises(ParseError, match="soft-404 BSE serves"):
         bhavcopy.parse_legacy_report(
             shell, filename="EQ030106_CSV.ZIP", trade_date=date(2006, 1, 3)
         )
