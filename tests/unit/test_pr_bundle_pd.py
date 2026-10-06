@@ -158,3 +158,9 @@ def test_a_banner_names_the_section_of_the_rows_below_it() -> None:
     assert parsed.security_rows[0].section == "TRADE FOR TRADE STOCKS"
     assert parsed.security_rows[0].nifty50_flag is False
     assert parsed.security_rows[0].corp_ind is None
+
+
+def test_a_row_with_no_symbol_and_no_close_but_other_numbers_raises() -> None:
+    """Skipping it as a banner would silently drop a priced row."""
+    with pytest.raises(ParseError, match="no symbol and no close"):
+        _parse(HEADER + "\n , , ,SOMETHING,10,10,11,9, ,1000,100,N, ,5,12,8\n")

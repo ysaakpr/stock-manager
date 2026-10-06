@@ -101,6 +101,21 @@ _CORP_IND_RE: Final[re.Pattern[str]] = re.compile(r"^X[DBRIO]{1,4}$")
 
 _WS: Final[re.Pattern[str]] = re.compile(r"\s+")
 
+#: The numeric columns. A banner or furniture row has every one of them blank; one that does not
+#: is a row this reader cannot classify, and it raises rather than being skipped as decoration.
+_NUMERIC: Final[tuple[str, ...]] = (
+    "PREV_CL_PR",
+    "OPEN_PRICE",
+    "HIGH_PRICE",
+    "LOW_PRICE",
+    "CLOSE_PRICE",
+    "NET_TRDVAL",
+    "NET_TRDQTY",
+    "TRADES",
+    "HI_52_WK",
+    "LO_52_WK",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class PdIndexRow:
@@ -200,6 +215,13 @@ def parse_pd(payload: bytes, *, filename: str, publication_date: date) -> PdFile
             cell("CLOSE_PRICE"),
         )
         if not symbol and not close:
+            stray = [c for c in _NUMERIC if c != "CLOSE_PRICE" and cell(c)]
+            if stray:
+                raise ParseError(
+                    f"a row with no symbol and no close still carries {stray!r}: {raw!r}",
+                    filename=filename,
+                    line=line_no,
+                )
             if name:
                 banners.append(name)
                 section = name
