@@ -95,22 +95,56 @@ through `leased_fetcher`. Each record's `RequestNumber` is .NET ticks of the req
 UTC, so it says when the request was made, not when the level was published. The earliest
 publication time inside 16:08–20:47 has not been measured.
 
-**Schedule.** The job fires at `50 19,20 * * mon-fri`. 19:50 is the first attempt, after
-`daily_snapshot`'s niftyindices.com lease (19:15 + 30-minute budget). 20:50 is the retry after the
-measured 20:47 point. Each fire lands the latest session on or before today for the three default
-indices: one short POST each (about 1 KB), with the window starting at the stored series' last
-level or 14 days back, whichever is earlier. An index already at D makes no request, so the second
-fire is a no-op once the first landed.
+**Schedule.** The job fires at `50 19,20 * * mon-fri; 30 21 * * mon-fri` (19:50, 20:50 and 21:30
+IST, Monday to Friday). A `;` joins crontabs whose union no single expression can say, and it is
+still one job.
+- 19:50 is the first attempt, after `daily_snapshot`'s niftyindices.com lease (19:15 + 30-minute
+  budget).
+- 20:50 is the retry after the measured 20:47 point.
+- 21:30 is the last attempt. Its 10-minute budget ends before the paper session decides D at 21:45.
+
+Each fire lands the latest session on or before today for the three default indices: one short
+POST each (about 1 KB), with the window starting at the stored series' last level or 14 days back,
+whichever is earlier. An index already at D makes no request, so later fires are no-ops once one
+has landed.
+
+**Tune the first fire after two weeks.** Each landing logs `tri_evening.first_landed` once per
+index and session, with `landed_at_ist` and `attempts` (1 means the 19:50 fire landed it). About
+two weeks after this ships, read those events from the scheduler's log. The scheduler runs as
+the systemd user unit `scheduler.service`, so
+`XDG_RUNTIME_DIR=/run/user/$(id -u) journalctl --user -u scheduler.service --since -14d | grep tri_evening.first_landed`
+should find them. If 19:50 lands every
+session, the later fires are only insurance. If it rarely lands, move the first fire later rather
+than letting it fail most evenings.
 
 **Before dissemination.** The answer is kept in L0, and the name carries the attempt instant
-(`tri_nifty50_<start>_<D>_at<YYYYMMDD>T<HHMMSS>.json`), so the 20:50 retry cannot collide with it.
-The `nifty_tri_history/<slug>` row for D parks `FAILED` with `retryable=True`, L1 is left alone and
-the run is FAILED. Retry by hand with `uv run python -m dataplatform.scheduler run-once tri_evening`.
+(`tri_nifty50_<start>_<D>_at<YYYYMMDD>T<HHMMSS>.json`), so a later fire cannot collide with it. The
+`nifty_tri_history/<slug>` row for D parks `FAILED` with `retryable=True` and is committed, so it
+shows on `/status/sync`. L1 is left alone and the run is FAILED.
 
-**The paper job's cron.** PR #69 registers `PAPER_SESSION` at `30 20 * * mon-fri`. That fire comes
-before the last `tri_evening` attempt, and before the only publication point measured. Move it to
-**`0 21 * * mon-fri`** (21:00 IST), after the 20:50 retry. The paper job decides "the latest owed
-session", so a 21:00 run still decides D.
+**Running it by hand: only after the close.** `uv run python -m dataplatform.scheduler run-once
+tri_evening` owes the latest session on or before today, and that includes today. Run during
+market hours, it asks for a level that cannot exist yet: it spends a request and leaves a FAILED
+row and a FAILED run behind. Run it after the close, and in practice after the evening
+dissemination (20:47 IST is the measured point).
+
+**A missed evening heals itself.** When an evening lands session D, every earlier retryable FAILED
+`nifty_tri_history/<slug>` row inside that window whose session the payload carries is walked
+`PENDING → FETCHED → VALIDATED → NORMALIZED → PUBLISHED`. Its receipt is D's payload, the bytes that
+actually carry the missed level, and each healed row logs one `tri_evening.healed` event. Gap scans
+therefore stop reporting a session whose level L1 already holds. Two kinds of row stay as they
+are: a non-retryable failure (a dead end on purpose), and a row for a date the payload does not
+carry.
+
+**Lag budget is now 1 session.** `tri_evening` answers for `nifty_tri_history` with
+`max_lag_sessions=1`, and `lag_budgets` keeps the tighter of that and `tri_refresh`'s 6. So
+`/status/sources` shows the source overdue after **one** missed evening, not after a missed
+week. A single missed evening heals at the next landing; an overdue that persists means the job,
+the host or the endpoint needs looking at.
+
+**The paper job's cron.** PR #69 is moving `PAPER_SESSION` to **21:45 IST** (`45 21 * * mon-fri`),
+after the last `tri_evening` attempt. The paper job decides "the latest owed session", so a 21:45
+run still decides D.
 
 ## Moving the lake
 
