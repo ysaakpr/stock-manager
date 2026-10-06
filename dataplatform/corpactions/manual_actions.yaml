@@ -21,8 +21,11 @@
 #     fragment between them is verbatim on that line. The NSE book-closure file (Bc<ddmmyy>.csv)
 #     columns are SERIES,SYMBOL,SECURITY,RECORD_DT,BC_STRT_DT,BC_END_DT,EX_DT,ND_STRT_DT,
 #     ND_END_DT,PURPOSE.
-#   * `explained_moves` are steps that are genuine price moves. They get no factor — that would
-#     erase a real loss from every backtest — and match only their exact ISIN and session.
+#   * `explained_moves` with kind MARKET_MOVE are steps that are genuine price moves. They get no
+#     factor — that would erase a real loss from every backtest — and match only their exact ISIN
+#     and session. The UNSOURCED_* kinds at the end of the list are share-basis steps whose terms
+#     no source states: no factor, a WARN from the continuity check, and their pre-step bars
+#     quarantined from every backtest and decision (D22).
 
 actions:
   - isin: INE018I01017
@@ -311,6 +314,95 @@ actions:
         line: 170
         quote: EQ,GOLDADD,DSPAMC - DSPGOLD,2026-08-28,,,2026-08-28,,,FVSPLT FRM RS 10 TO RE 1
 
+  # ── pre-2011 steps the 2006-2011 L2 extension exposes (gate l1-widen-2026-10-06 §5) ──────────
+  # The ex-day row of the NSE PR bundle's Pd<ddmmyy>.csv carries the exchange's own CORP_IND flag
+  # (XDB ex-dividend-and-bonus, XO ex-other); its columns are MKT,SERIES,SYMBOL,SECURITY,
+  # PREV_CL_PR,OPEN_PRICE,HIGH_PRICE,LOW_PRICE,CLOSE_PRICE,NET_TRDVAL,NET_TRDQTY,IND_SEC,CORP_IND,...
+
+  - isin: INE314A01017
+    company: CMC Ltd
+    action_type: BONUS
+    new_shares: 1
+    held_shares: 1
+    ex_date: 2011-06-08
+    knowable_date: 2011-06-03
+    checked: 2026-10-06
+    note: >-
+      L1 NSE EQ: 2,483.60 on 2011-06-07, opened 1,250.00 / closed 1,223.80 ex. After the 1:1 the
+      ex-day is -1.5% (the Rs 20 dividend on the same ex-date is 0.8% of it); the Pd row flags
+      the session XDB. Before the PR bundle's Bc file states it, the 2011-06-01 announcement
+      names the bonus without its ratio, so knowable_date is the first Bc listing.
+    sources:
+      - l0_key: nse_pr_bundle/2011/06/PR030611.zip
+        member: Bc030611.csv
+        line: 366
+        quote: EQ,CMC,CMC Ltd., ,10/06/2011,10/06/2011,08/06/2011, , ,DIVIDEND-RS.20/BONUS 1:1
+      - l0_key: nse_pr_bundle/2011/06/PR080611.zip
+        member: Pd080611.csv
+        line: 344
+        quote: N,EQ,CMC,CMC LTD, 2483.60, 1250.00, ... 1223.80, ... ,N,XDB,
+
+  - isin: INE966H01019
+    company: Zee News Ltd (now Zee Media Corporation)
+    action_type: DEMERGER
+    ex_date: 2010-04-15
+    record_date: 2010-04-16
+    knowable_date: 2010-03-31
+    checked: 2026-10-06
+    note: >-
+      Demerger of the regional general-entertainment channels into Zee Entertainment, which
+      allotted 50,476,622 ZEEL shares to ZNL holders of record 2010-04-16 (An210410.txt:92).
+      L1 NSE EQ: 75.35 -> 18.35 ex (opened 38.90, low 11.30) on 132M shares; the Pd row flags it
+      XO. The BSE feed has it as an unreconciled SCHEME_OF_ARRANGEMENT, which the continuity check
+      does not read. A structural break: no price factor, the return is bridged.
+    sources:
+      - l0_key: nse_pr_bundle/2010/03/PR310310.zip
+        member: An310310.txt
+        line: 122
+        quote: >-
+          has fixed April 16, 2010 as the Record date for determination of Members of the Company
+          who would become eligible for issuance of equity shares by Zee Entertainment Enterprises
+          Ltd., pursuant to the Scheme of Arrangement, for Demerger of Regional General
+          Entertainment Channel Business Undertaking
+      - l0_key: nse_pr_bundle/2010/03/PR310310.zip
+        member: Bc310310.csv
+        line: 54
+        quote: EQ,ZEENEWS,Zee News Limited,16/04/2010, , ,15/04/2010, , ,SCHEME OF ARRANGEMENT
+      - l0_key: nse_pr_bundle/2010/04/PR150410.zip
+        member: Pd150410.csv
+        line: 1288
+        quote: N,EQ,ZEENEWS,ZEE NEWS LIMITED,75.35,38.9,38.9,11.3,18.35, ... ,N,XO,
+
+  - isin: INE133B01019
+    company: Kesar Enterprises Ltd
+    action_type: DEMERGER
+    ex_date: 2010-05-13
+    record_date: 2010-05-14
+    knowable_date: 2010-05-06
+    checked: 2026-10-06
+    note: >-
+      Demerger of the storage undertaking into Kesar Terminals & Infrastructure (7 KTIL for every
+      10 KEL). KTIL first traded 2010-12-22, so no price values the leg on the ex-date. L1 NSE EQ:
+      129.70 -> 57.25 ex (opened 84.40) on 16x the volume; the Pd row flags it XO. A structural
+      break: no price factor, the return is bridged.
+    sources:
+      - l0_key: nse_pr_bundle/2010/05/PR060510.zip
+        member: An060510.txt
+        line: 68
+        quote: >-
+          has fixed May 14, 2010 as record date ... who shall be entitled to receive 7 Equity
+          Shares Rs.10/- each of Kesar Terminals & Infrastructure Ltd. ... for every 10 Equity
+          Shares of Rs.10/- each held by the shareholders of KEL pursuant to the Scheme of
+          Arrangement for Demerger
+      - l0_key: nse_pr_bundle/2010/05/PR060510.zip
+        member: Bc060510.csv
+        line: 89
+        quote: EQ,KESARENT,KESAR ENTERPRISES LTD,14/05/2010, , ,13/05/2010, , ,SCHEME OF ARRANGEMENT
+      - l0_key: nse_pr_bundle/2010/05/PR130510.zip
+        member: Pd130510.csv
+        line: 684
+        quote: N,EQ,KESARENT,KESAR ENTERPRISES LTD.,129.7,84.4,84.4,49,57.25, ... ,N,XO,
+
 explained_moves:
   - isin: INE111B01023
     company: Financial Technologies (India) Ltd (now 63 Moons)
@@ -383,3 +475,104 @@ explained_moves:
         quote: >-
           Yes Bank Limited has informed the Exchange regarding 'Supersession of the Board of
           Directors & Appointment of Administrator by Reserve
+
+  - isin: INE043A01012
+    company: GTL Ltd
+    trade_date: 2011-06-20
+    kind: MARKET_MOVE
+    checked: 2026-10-06
+    reason: >-
+      A crash, not an action: the session opened at 307.85 (-9%) against a 338.30 close, traded
+      down to 124.15 and closed 127.95 (-62%) on 51.2M shares against 1.19M the session before.
+      The Pd row's CORP_IND is blank, no Bc row lists any GTL action in 2011-05..07, and the
+      index file carries the same 97,267,833 issued shares before and after the step, so the
+      share basis did not move. The company's own letter on the volumes followed on 2011-06-27.
+    sources:
+      - l0_key: nse_pr_bundle/2011/06/PR200611.zip
+        member: Pd200611.csv
+        line: 567
+        quote: N,EQ,GTL,GTL LTD, 338.30, 307.85, 328.80, 124.15, 127.95, ... ,51153620,N, ,
+      - l0_key: nse_pr_bundle/2011/06/PR170611.zip
+        member: ffix170611.csv
+        line: 609
+        quote: CNX 500,GTL,EQ,GTL LTD,97267833,0.474655, 338.30,
+      - l0_key: nse_pr_bundle/2011/06/PR200611.zip
+        member: ffix200611.csv
+        line: 609
+        quote: CNX 500,GTL,EQ,GTL LTD,97267833,0.474655, 127.95,
+      - l0_key: nse_pr_bundle/2011/06/PR270611.zip
+        member: An270611.txt
+        line: 78
+        quote: Increase in Volumes and speculation in the shares of the Company
+
+  # ── Unsourced share-basis steps: terms no L0 object states ──────────────────────────────────
+  # L1 shows a corporate-action-shaped step, but nothing in L0 states the terms (the NSE PR
+  # bundle starts 2010-01; BSE's corporate-action payload lists these events with a blank purpose
+  # or not at all). A factor would need a ratio this file may not infer, so none is applied and
+  # the step stays in the adjusted level series. It is NOT a return: the continuity check classes
+  # it UNSOURCED with a WARN finding, and the query layer quarantines the ISIN's bars before the
+  # step (D22), so no backtest or decision holds or signals across it. Two kinds, by evidence:
+  #   UNSOURCED_ACTION      an exchange record shows the event happened (EIH, JM Financial)
+  #   UNSOURCED_PRICE_STEP  only the exchange's own price file shows the step (Shah Alloys)
+  # Replace a row with a curated action the day a source stating the terms reaches L0.
+
+  - isin: INE640C01011
+    company: Shah Alloys Ltd
+    trade_date: 2006-02-13
+    kind: UNSOURCED_PRICE_STEP
+    checked: 2026-10-06
+    reason: >-
+      L1 NSE EQ: 347.85 -> 169.35 (x0.487); the session opened at 176.00, half the prior close,
+      which a market move does not do. The ISIN is a first issue (serial 01) and kept, which
+      fits a bonus rather than a split, but no L0 object states one: BSE's payload for scrip
+      513436 starts in 2007, the PR bundle in 2010, and BSE's 2006-02 bhavcopy is not in L0.
+      Unadjusted in L2: the -51% step is not a return.
+    sources:
+      - l0_key: nse_bhavcopy_legacy/2006/02/cm13FEB2006bhav.csv.zip
+        member: cm13FEB2006bhav.csv
+        line: 696
+        quote: SHAHALLOYS,EQ,176,177,161.5,169.35,170,347.85,16975,2862707.45,13-FEB-2006,
+
+  - isin: INE230A01023
+    company: EIH Ltd
+    trade_date: 2006-09-12
+    kind: UNSOURCED_ACTION
+    checked: 2026-10-06
+    reason: >-
+      Two events on one ex-date. BSE's payload lists the 1:2 bonus (in the store, applied) and a
+      second event with the same ex-date, record date and no-delivery window but a blank
+      purpose. L1 NSE EQ: 812.10 -> 120.85 (x0.149); after the bonus the step is x0.223, the
+      shape of a face-value sub-division, but no L0 object states the face values. Unadjusted
+      in L2: the residual -78% step is not a return.
+    sources:
+      - l0_key: bse_corp_actions/2016/09/defaultdata_500840.json
+        line: 1
+        quote: >-
+          "Ex_date":"12 Sep 2006","Purpose":"Bonus issue 1:2","RD_Date":"19 Sep 2006", ...
+          "Ex_date":"12 Sep 2006","Purpose":"","RD_Date":"19 Sep 2006"
+      - l0_key: nse_bhavcopy_legacy/2006/09/cm12SEP2006bhav.csv.zip
+        member: cm12SEP2006bhav.csv
+        line: 212
+        quote: EIHOTEL,EQ,124.7,124.7,111,120.85,121.4,812.1,3148158,374651348.25,12-SEP-2006,
+
+  - isin: INE780C01023
+    company: JM Financial Ltd
+    trade_date: 2008-09-08
+    kind: UNSOURCED_ACTION
+    checked: 2026-10-06
+    reason: >-
+      Two events on one ex-date. BSE's payload lists the 3:2 bonus (in the store, applied) and a
+      second event with the same ex-date, record date and no-delivery window but a blank
+      purpose. L1 NSE EQ: 1,402.20 -> 67.35 (x0.048); after the bonus the step is x0.120, the
+      shape of a face-value sub-division, but no L0 object states the face values. Unadjusted
+      in L2: the residual -88% step is not a return.
+    sources:
+      - l0_key: bse_corp_actions/2016/09/defaultdata_523405.json
+        line: 1
+        quote: >-
+          "Ex_date":"08 Sep 2008","Purpose":"Bonus issue 3:2","RD_Date":"15 Sep 2008", ...
+          "Ex_date":"08 Sep 2008","Purpose":"","RD_Date":"15 Sep 2008"
+      - l0_key: nse_bhavcopy_legacy/2008/09/cm08SEP2008bhav.csv.zip
+        member: cm08SEP2008bhav.csv
+        line: 586
+        quote: JMFINANCIL,EQ,66,67.35,61.9,67.35,67.35,1402.2,166230,10786898.45,8-SEP-2008,

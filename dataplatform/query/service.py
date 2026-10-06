@@ -24,6 +24,12 @@ a decision" boundary (invariant #7): only sessions on or before the query date c
 Consumers that already hold the day's primary map (M3.2 computes it once per session) pass it in and
 skip the liquidity scan entirely; otherwise the service derives it from L1.
 
+**The unsourced-step quarantine (D22) applies to both shapes.** A bar the curated file's
+`PriceQuarantine` withholds — a quarantined ISIN's bar dated before its unadjustable share-basis
+step — is never returned, so no consumer can hold or rank a name across a phantom return
+(`price_quarantine`). It is on by default and is the repo file's; a caller may pass a different
+one (a test's), never none.
+
 Offline and clockless by construction: DuckDB reads local Parquet and nothing fetches; the query
 date is an argument, never a wall clock (B10). Money is `Decimal` throughout — the adjusted values
 come straight off L2's `decimal128` columns.
@@ -52,6 +58,7 @@ from dataplatform.identity.primary import (
 )
 from dataplatform.logging import get_logger
 from dataplatform.query.errors import QueryError
+from dataplatform.query.price_quarantine import PriceQuarantine, default_price_quarantine
 from dataplatform.query.screen import Filter, PitFundamentals, run_screen
 from dataplatform.query.shapes import (
     AdjustedPoint,
@@ -122,16 +129,19 @@ class QueryService:
         data_root: Path | None = None,
         con: duckdb.DuckDBPyConnection | None = None,
         primary_rule: PrimaryRule | None = None,
+        quarantine: PriceQuarantine | None = None,
     ) -> None:
         """Open (or adopt) a DuckDB connection and register views over L1 and L2.
 
         `data_root` overrides the configured lake root (tests point it at a scratch tree). `con`
         lets a caller share one connection across query and materialize; when omitted it owns a
         fresh in-memory connection and closes it on exit. `primary_rule` is the liquidity rule used
-        when a primary must be derived (defaults to M3.2's `PrimaryRule()`).
+        when a primary must be derived (defaults to M3.2's `PrimaryRule()`). `quarantine` defaults
+        to the repo's unsourced-step quarantine (D22).
         """
         self._data_root = data_root
         self._rule = primary_rule or PrimaryRule()
+        self._quarantine = quarantine if quarantine is not None else default_price_quarantine()
         self._owns_con = con is None
         self._con = open_connection() if con is None else con
         register_adjusted_view(self._con, view=_ADJUSTED_VIEW, data_root=data_root)
@@ -294,6 +304,7 @@ class QueryService:
             for bar in bars
             if (request.start is None or bar.trade_date >= request.start)
             and (request.end is None or bar.trade_date <= request.end)
+            and self._quarantine.admits(bar.isin, bar.trade_date)
         )
 
     def _read_cross_section_bars(self, trade_date: date) -> tuple[AdjustedBar, ...]:
@@ -306,7 +317,8 @@ class QueryService:
             f"ORDER BY isin, exchange",
             {"trade_date": trade_date},
         ).fetchall()
-        return tuple(_bar_from_row(row) for row in rows)
+        bars = (_bar_from_row(row) for row in rows)
+        return tuple(bar for bar in bars if self._quarantine.admits(bar.isin, bar.trade_date))
 
     def _series_as_of(self, request: AdjustedSeriesRequest, bars: Sequence[AdjustedBar]) -> date:
         """The date the ISIN's primary is decided as of for a series query.

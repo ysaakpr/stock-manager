@@ -18,6 +18,7 @@ from dataplatform.query.announcement_search import (
 )
 from dataplatform.query.errors import QueryError
 from dataplatform.query.pit import Dataset, PitContext, PitError
+from dataplatform.query.price_quarantine import PriceQuarantine, default_price_quarantine
 from dataplatform.query.quarantine import (
     PIT_FUNDAMENTALS_VIEW,
     RESTATED_FUNDAMENTALS_VIEW,
@@ -90,6 +91,7 @@ __all__ = [
     "PitError",
     "PitFundamentals",
     "PitUniverse",
+    "PriceQuarantine",
     "ProvenancedFundamental",
     "QuarantineError",
     "QueryContext",
@@ -104,6 +106,7 @@ __all__ = [
     "backtest_catalog",
     "between",
     "build_from_l1",
+    "default_price_quarantine",
     "eq",
     "fundamental",
     "ge",
