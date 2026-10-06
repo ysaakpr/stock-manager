@@ -40,7 +40,8 @@ from dataplatform.ingest.source_register import (
 #: M3.9.b on 2026-09-08: nifty_tri_history, re-probed at D8's corrected path).
 # 2026-10-05: nse_announcement_attachment, verified by the merger-terms fetch (11 documents);
 # nifty_index_press_releases, verified by M10.2 the same day.
-LATEST_VERIFICATION: datetime = datetime(2026, 10, 5, 23, 59, 59, tzinfo=IST)
+# 2026-10-06: the macro-probes rows (FBIL, RBI rates and archive, WPI, GST, India VIX spot).
+LATEST_VERIFICATION: datetime = datetime(2026, 10, 6, 23, 59, 59, tzinfo=IST)
 
 
 @pytest.fixture(scope="module")

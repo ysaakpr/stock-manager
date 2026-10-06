@@ -97,6 +97,8 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "index_press_refresh",
         "ca_refresh",
         "bse_ca_sweep",
+        "fbil_reference_rates",
+        "macro_release_capture",
     )
     assert registry.get("eod_pipeline").cron == "30 18 * * mon-fri"
     # 19:15, after the 18:30 EOD pipeline: the two share nsearchives.nseindia.com, and a host
@@ -112,6 +114,10 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     assert registry.get("ca_refresh").cron == "0 10 * * sat"
     # First Sunday of the month (APScheduler ANDs the two day fields), after the 03:00 L0 sweep.
     assert registry.get("bse_ca_sweep").cron == "0 6 1-7 * sun"
+    # FBIL publishes at 13:00; no NSE host, so no campaign window to avoid.
+    assert registry.get("fbil_reference_rates").cron == "0 16 * * mon-fri"
+    # Sunday, when no niftyindices.com job holds that lease (the Saturday ones do).
+    assert registry.get("macro_release_capture").cron == "0 10 * * sun"
 
 
 def test_every_default_job_is_valid_and_describes_itself() -> None:

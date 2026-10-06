@@ -37,8 +37,10 @@ __all__ = [
     "CONSTITUENTS_SNAPSHOT",
     "DAILY_SNAPSHOT",
     "EOD_PIPELINE",
+    "FBIL_REFERENCE_RATES",
     "INDEX_PRESS_REFRESH",
     "JOB_NAME",
+    "MACRO_RELEASE_CAPTURE",
     "TRI_REFRESH",
     "UNSCHEDULED",
     "Job",
@@ -52,7 +54,9 @@ __all__ = [
     "daily_snapshot",
     "default_registry",
     "eod_pipeline",
+    "fbil_reference_rates",
     "lag_budgets",
+    "macro_release_capture",
     "tri_refresh",
 ]
 
@@ -521,6 +525,69 @@ BSE_CA_SWEEP = Job(
 )
 
 
+def fbil_reference_rates(context: JobContext) -> None:
+    """The daily FBIL reference-rate capture (macro-probes): USD/INR and the other INR benchmarks.
+
+    What it does: one request for FBIL's archive over the trailing three weeks — wide enough for
+    the public site's few-session lag — into L0, then one `macro_series` release per publication
+    date (`macro.capture.run_fbil_capture`). A window already in L0 costs no request.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: date a rate by the fetch; the benchmark's own `displayTime` dates it. The
+    import is deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.macro.capture import run_fbil_capture
+
+    run_fbil_capture(context)
+
+
+#: 16:00 IST on weekdays — after FBIL's 13:00 publication; no NSE host, so clear of every campaign
+#: window by construction.
+FBIL_REFERENCE_RATES = Job(
+    name="fbil_reference_rates",
+    cron="0 16 * * mon-fri",
+    fn=fbil_reference_rates,
+    timeout=timedelta(minutes=10),
+    description="Daily FBIL INR reference rates (trailing 3 weeks) → macro_series (macro-probes)",
+    covers=("fbil_reference_rates",),
+)
+
+
+def macro_release_capture(context: JobContext) -> None:
+    """The weekly macro forward capture (macro-probes, Tier B of the 2026-09-07 macro plan).
+
+    What it does: World Bank indicators (dated by the envelope's `lastupdated`), the RBI's "Current
+    Rates" panel, the OEA's WPI file, GSTN's collection workbook and the trailing month of India
+    VIX spot, each under its own host lease, each written to `macro_series` — current-vintage
+    tables only where a value is new or revised (`macro.capture.run_macro_release_capture`). One
+    step failing is logged and the others still run; the job then raises naming every failure.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: back-date a current-vintage figure: the Tier B series are knowable from
+    the capture on, which is the whole point of starting them now. The import is deferred.
+    """
+    from dataplatform.ingest.macro.capture import run_macro_release_capture
+
+    run_macro_release_capture(context)
+
+
+#: 10:00 IST on Sunday — no session, after the 03:00 L0 sweep, and on a day no niftyindices.com job
+#: holds that host's lease (the Saturday jobs do). No `sync_sources`: Tier B releases are monthly or
+#: irregular, so a session-lag budget would measure nothing.
+MACRO_RELEASE_CAPTURE = Job(
+    name="macro_release_capture",
+    cron="0 10 * * sun",
+    fn=macro_release_capture,
+    timeout=timedelta(minutes=20),
+    description="Weekly macro forward capture: World Bank, RBI rates, WPI, GST, India VIX",
+    covers=(
+        "worldbank_indicator_api",
+        "rbi_current_rates",
+        "oea_wpi_monthly_index",
+        "gstn_tax_collection",
+        "nifty_india_vix_history",
+    ),
+)
+
+
 #: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
 #: audit's root cause was not one broken job but sources that were simply never scheduled — the
 #: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
@@ -553,8 +620,11 @@ UNSCHEDULED: dict[str, str] = {
     "gdelt_v2_event_files": "News pipeline is not wired into a job yet.",
     "gdelt_doc_api": "Register status FAILED; nothing to schedule until it verifies.",
     "curated_rss": "News pipeline is not wired into a job yet.",
-    "worldbank_indicator_api": "Annual macro series; fetched by hand when a vintage lands.",
     "alfred_series_vintage": "Register status FAILED; nothing to schedule until it verifies.",
+    "mospi_api": (
+        "Register status FAILED (TLS needs unsafe legacy renegotiation); not worked around."
+    ),
+    "rbi_dbie": "Register status FAILED (certificate hostname mismatch); not worked around.",
     "screener_company_fundamentals": "Register status BLOCKED_CREDENTIAL.",
 }
 
@@ -589,5 +659,7 @@ def default_registry() -> JobRegistry:
             INDEX_PRESS_REFRESH,
             CA_REFRESH,
             BSE_CA_SWEEP,
+            FBIL_REFERENCE_RATES,
+            MACRO_RELEASE_CAPTURE,
         ]
     )

@@ -166,6 +166,10 @@ hosts:
       (/pressreleases_rss.xml) is a syndication surface intended for readers and returns 200 to a
       browser UA; we fetch that one path at EOD cadence, spaced, and do not crawl the site. If the
       feed itself begins refusing us, the 403 hard stop applies — no evasion (AGENTIC_CONTEXT §8).
+      Re-checked 2026-10-06 (still 418, 626 B "Unauthorised Access"). Two more named pages are
+      read under the same terms, never crawled: /Home.aspx once a week (its "Current Rates" panel,
+      rbi_current_rates) and /scripts/ReferenceRateArchive.aspx (rbi_reference_rate_archive, probed
+      only; its backfill is a separate decision).
     disallow: []
     min_spacing_seconds: 3.0
 
@@ -198,25 +202,120 @@ hosts:
 
   - host: fred.stlouisfed.org
     robots_url: https://fred.stlouisfed.org/robots.txt
-    checked_at: 2026-09-04T12:16:00+05:30
+    checked_at: 2026-10-06T13:27:13+05:30
     robots_http_status: 0
     robots_served: false
     permits: >-
-      Unknown — the host is unreachable from this machine (TLS connects, then zero bytes and a
-      read timeout; see the alfred_series_vintage failure_note). Robots was never obtained, so no
-      crawl of this host is authorised by this record. Re-probe before any use.
+      Unknown — the host is unreachable from both networks tried (the laptop, 2026-09-04, and the
+      campaign server, 2026-10-06: TLS connects to an Akamai edge, then zero bytes and a read
+      timeout; see the alfred_series_vintage failure_note). Robots was never obtained, so no crawl
+      of this host is authorised by this record.
     disallow: []
     min_spacing_seconds: 5.0
 
   - host: alfred.stlouisfed.org
     robots_url: https://alfred.stlouisfed.org/robots.txt
-    checked_at: 2026-09-04T12:16:00+05:30
+    checked_at: 2026-10-06T13:26:29+05:30
     robots_http_status: 0
     robots_served: false
     permits: >-
-      Unknown — same unreachability as its sibling fred.stlouisfed.org (TLS connects, zero bytes,
-      read timeout; `robots_http_status: 0` means the request was made and no HTTP response
-      arrived). Robots was never obtained, so no crawl of this host is authorised by this record.
+      Unknown — same unreachability as its sibling fred.stlouisfed.org, now on two networks (TLS
+      verifies against a valid DigiCert certificate for this name, then nothing arrives;
+      `robots_http_status: 0` means the request was made and no HTTP response arrived). Robots was
+      never obtained, so no crawl of this host is authorised by this record.
+    disallow: []
+    min_spacing_seconds: 5.0
+
+  # ── macro-probes (2026-10-06): hosts probed for the macro / backdrop row ────────────────────
+  - host: www.fbil.org.in
+    robots_url: https://www.fbil.org.in/robots.txt
+    checked_at: 2026-10-06T13:31:44+05:30
+    robots_http_status: 404
+    robots_served: false
+    permits: >-
+      No robots.txt: /robots.txt answers a Tomcat "HTTP Status 404 – Not Found" page (431 B), which
+      is not a policy document. No directives exist. The site is an Angular app over a keyless JSON
+      API (/wasdm/...); we call only the reference-rate archive path the site's own anonymous
+      "Reference Rate" card calls, once per day, spaced.
+    disallow: []
+    min_spacing_seconds: 3.0
+
+  - host: eaindustry.nic.in
+    robots_url: https://eaindustry.nic.in/robots.txt
+    checked_at: 2026-10-06T13:35:47+05:30
+    robots_http_status: 404
+    robots_served: false
+    permits: >-
+      No robots.txt: /robots.txt answers the site's own 404 page (4,849 B HTML), not a policy. No
+      directives exist. We fetch the WPI download page and the one monthly file it links, weekly.
+    disallow: []
+    min_spacing_seconds: 3.0
+
+  - host: www.gst.gov.in
+    robots_url: https://www.gst.gov.in/robots.txt
+    checked_at: 2026-10-06T13:38:47+05:30
+    robots_http_status: 404
+    robots_served: false
+    permits: >-
+      No robots.txt: /robots.txt answers the portal's "Not Found" page (6,687 B HTML). No
+      directives exist. Only the public /download/gststatistics listing was read, once, to find the
+      statistics files; they are hosted on tutorial.gst.gov.in and fetched there.
+    disallow: []
+    min_spacing_seconds: 3.0
+
+  - host: tutorial.gst.gov.in
+    robots_url: https://tutorial.gst.gov.in/robots.txt
+    checked_at: 2026-10-06T13:39:33+05:30
+    robots_http_status: 200
+    robots_served: true
+    permits: "User-agent: * / Allow: / — a real 75 B policy that permits everything."
+    disallow: []
+    min_spacing_seconds: 3.0
+
+  - host: esankhyiki.mospi.gov.in
+    robots_url: https://esankhyiki.mospi.gov.in/robots.txt
+    checked_at: 2026-10-06T13:35:38+05:30
+    robots_http_status: 200
+    robots_served: true
+    permits: >-
+      "User-agent: * / Allow: /" (319 B), plus a sitemap and an agent-discovery manifest. The portal
+      is a React app whose data comes from api.mospi.gov.in — see that host.
+    disallow: []
+    min_spacing_seconds: 3.0
+
+  - host: api.mospi.gov.in
+    robots_url: https://api.mospi.gov.in/robots.txt
+    checked_at: 2026-10-06T13:37:39+05:30
+    robots_http_status: 0
+    robots_served: false
+    permits: >-
+      Unknown — no TLS session can be established without enabling unsafe legacy renegotiation
+      (OpenSSL: UNSAFE_LEGACY_RENEGOTIATION_DISABLED), which is not done here: weakening TLS to
+      reach a source is the same class of workaround as disabling verification. No crawl of this
+      host is authorised by this record.
+    disallow: []
+    min_spacing_seconds: 5.0
+
+  - host: cpi.mospi.gov.in
+    robots_url: https://cpi.mospi.gov.in/robots.txt
+    checked_at: 2026-10-06T13:34:55+05:30
+    robots_http_status: 0
+    robots_served: false
+    permits: >-
+      Unknown — connect timeout from the laptop (2026-09-04) and from the campaign server
+      (2026-10-06, 40 s, the bare host root). No crawl of this host is authorised by this record.
+    disallow: []
+    min_spacing_seconds: 5.0
+
+  - host: dbie.rbi.org.in
+    robots_url: https://dbie.rbi.org.in/robots.txt
+    checked_at: 2026-10-06T13:35:44+05:30
+    robots_http_status: 0
+    robots_served: false
+    permits: >-
+      Unknown — the certificate presented is not valid for this hostname (verified failure on
+      2026-09-04 and again 2026-10-06). Verification is not disabled and the name is not worked
+      around, so no crawl of this host is authorised by this record.
     disallow: []
     min_spacing_seconds: 5.0
 
@@ -1722,8 +1821,8 @@ sources:
       so a backfill could reconstruct genuine release dates rather than fabricate them. Untested
       against a real response.
     status: FAILED
-    verified_at: 2026-09-04T12:16:00+05:30
-    last_http_status: 0  # requested five times; no HTTP response ever arrived
+    verified_at: 2026-10-06T13:28:00+05:30  # re-probed from the campaign server
+    last_http_status: 0  # requested ten times on two networks; no HTTP response ever arrived
     sample_bytes: null
     content_type: null
     sample_sha256: null
@@ -1738,14 +1837,379 @@ sources:
       api.worldbank.org on the same network in the same sweep returned 200, so this is specific to
       this host and not general egress. TLS establishes and then no bytes arrive, which is the
       signature of a network-path block rather than an application refusal — there was no status
-      code, no body, and nothing to evade. **Do not mark this VERIFIED or permanently FAILED on
-      this evidence**; it needs one re-probe from a different network before either.
+      code, no body, and nothing to evade.
+      **Re-probed from the campaign server (a different network: AWS), 2026-10-06 — same result.**
+      Five requests (macro-probes gate note): alfred /robots.txt, fred /robots.txt, the verified_url
+      CSV and the fred root each read-timed out at 40 s with zero bytes (httpx, HTTP/1.1); a curl
+      -v of the alfred root shows DNS → 23.38.63.56 (an Akamai edge, CNAME
+      e13502.b.akamaiedge.net / kona-prod.stlouisfed.org), a full TLS 1.3 handshake with a valid
+      DigiCert certificate for alfred.stlouisfed.org, then no HTTP response before the 20 s cap.
+      The control (api.worldbank.org, same minute) answered 200. Two networks, both cloud-or-ISP
+      ranges, both silently dropped after TLS: an edge that holds the connection open and answers
+      nothing is a bot-management decision about these networks, and it is not worked around (no
+      other UA, no proxy, no other route). FAILED stands; nothing is scheduled.
     candidate_alternatives:
-      - "Re-probe from the Ubuntu campaign server — a different network path settles it in one request."
+      - "FRED's API (api.stlouisfed.org) is keyed — a free key is an account, owner-reserved (§3.7)."
+      - "Re-probe from a residential network (the owner's), which the edge may treat differently."
       - "FRED's keyless CSV surface (fred.stlouisfed.org/graph/fredgraph.csv?id=...) shares the
          host and failed identically; it is the same probe, not a second option."
       - "MoSPI's own release archive carries genuine Indian release dates, but www.mospi.gov.in
          serves no robots policy (soft-404) and cpi.mospi.gov.in did not answer at all."
+    owner_task: M11.1
+
+  # ── §4.1 row 17 (PROPOSED) continued — macro-probes, 2026-10-06 ────────────────────────────
+  #
+  # Every request behind these rows is listed in ops/gates/macro-probes-2026-10-06.md (host,
+  # status, size, parse). Tier A' (dated, never revised): fbil_reference_rates,
+  # nifty_india_vix_history, rbi_reference_rate_archive. Tier B (current vintage, forward capture
+  # only — backtestable from the first capture, never before): rbi_current_rates,
+  # oea_wpi_monthly_index, gstn_tax_collection. Not reachable without a workaround: mospi_api,
+  # rbi_dbie.
+  - id: fbil_reference_rates
+    plan_row: "Macro / economic backdrop"
+    description: >-
+      FBIL's official daily INR reference rates (USD, GBP, EUR, JPY per 100, AED, IDR per 10,000,
+      and RUB) — the administered benchmark FBIL took over from the RBI on 2018-07-10. Keyless JSON
+      archive behind the site's own anonymous "Reference Rate" card.
+    host: www.fbil.org.in
+    method: GET
+    url_template: "https://www.fbil.org.in/wasdm/refrates/fetchfiltered?fromDate={YYYY-MM-DD}&toDate={YYYY-MM-DD}&authenticated=false"
+    verified_url: "https://www.fbil.org.in/wasdm/refrates/fetchfiltered?fromDate=2018-07-09&toDate=2018-07-13&authenticated=false"
+    cadence: daily
+    era: {start: 2018-07-10, end: null}
+    fallback: ["rbi_reference_rate_archive (USD/INR before 2018-07-10)"]
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.fbil.org.in/"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.macro.fbil, task: M11.1}
+    robots_notes: No robots.txt (Tomcat 404 page). Only the archive path the site's card calls.
+    pit_notes: >-
+      Grade A. Each row carries processRunDate and displayTime — the session and the instant FBIL
+      published the benchmark (13:30 IST on the 2018 rows, 13:00 on 2026's). An administered
+      benchmark is fixed once and never revised, so period_end = release_date = the publication
+      date and revision_seq is 0. The free website lags publication by a few sessions (on
+      2026-10-06 its newest row was 2026-09-29), but the rate itself was public that day — the
+      RBI's home page quotes the same day's FBIL rates "as at 1.00pm" — so the lag delays the
+      capture, not the knowable date; the daily job asks for a trailing 21 days to cover it.
+    status: VERIFIED
+    verified_at: 2026-10-06T13:32:59+05:30
+    last_http_status: 200
+    sample_bytes: 2185
+    content_type: application/json
+    sample_sha256: fec2722433268fcbd1293fcbe2a60e9e5fab058c5a52c95a4ccdf11d86afa34f
+    parse_check: >-
+      Bare JSON array of {processRunDate "YYYY-MM-DD 00:00:00", subProdName "INR / 1 USD",
+      displayTime "YYYY-MM-DD HH:MM:SS", rate <number>, comments ""}. The 2018-07-09..13 window
+      returns 16 rows over 4 sessions from 2018-07-10 (the epoch; nothing on the 9th), USD 68.7942
+      on the first day. The no-date /refrates/fetch call returns the newest two sessions (14 rows,
+      2026-09-28/29, USD 96.0321). Frozen at tests/fixtures/macro/fbil/.
+    fixture: {frozen: true, task: M11.1, path: "tests/fixtures/macro/fbil/"}
+    history:
+      measured_at: 2026-10-06T13:32:59+05:30
+      measured_by: macro-probes
+      method: Two windows (2018-07-09..13 and the no-date latest call); full backfill run after.
+      earliest_available: 2018-07-10
+      accrues_forward: true
+      note: >-
+        Dated archive from the benchmark's first day, addressable by any window. The backfill is
+        ~9 one-year requests; see the gate note for what it landed.
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M11.1
+
+  - id: rbi_reference_rate_archive
+    plan_row: "Macro / economic backdrop"
+    description: >-
+      The RBI's own Reference Rate Archive — USD/INR (and GBP, EUR, JPY, AED, IDR) as the RBI
+      published them before FBIL took the benchmark over. An ASP.NET form: one GET for the page,
+      one postback per date range.
+    host: www.rbi.org.in
+    method: POST
+    url_template: "https://www.rbi.org.in/scripts/ReferenceRateArchive.aspx"
+    verified_url: "https://www.rbi.org.in/scripts/ReferenceRateArchive.aspx"
+    cadence: backfill_only
+    era: {start: null, end: 2018-07-10}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.rbi.org.in/scripts/ReferenceRateArchive.aspx"
+    needs_session_cookie: false
+    parser: {id: null, task: null}
+    robots_notes: >-
+      www.rbi.org.in serves no robots policy (418). One named page, read only for this probe.
+    pit_notes: >-
+      Grade A if captured: a reference rate published once per session and never revised; the
+      session is its release date. The archive stops at the hand-over — the last regular row is
+      2018-07-09, the next day is FBIL's first (one stray 24/07/2018 row also appears and would
+      need explaining before any use).
+    status: VERIFIED
+    verified_at: 2026-10-06T13:34:15+05:30
+    last_http_status: 200
+    sample_bytes: 84362
+    content_type: text/html; charset=utf-8
+    sample_sha256: 8b4eccb8ab34e85542333666e32244f2254b5008f9b229fe11f59bd543573c25
+    parse_check: >-
+      GET returns the form (79,834 B) with __VIEWSTATE / __VIEWSTATEGENERATOR / __EVENTVALIDATION,
+      currency checkboxes (chkUSD …) and DD/MM/YYYY txtFromDate/txtToDate. A postback with chkUSD
+      and 01/01/2004..31/01/2004 returns an HTML table "Date | USD (INR / 1 USD)", 21 rows,
+      30/01/2004 45.3100 … 01/01/2004 45.6100; 02/01/2012..31/01/2012 gives 21 rows (53.2975 →
+      49.6825); 01/07/2018..31/07/2018 gives 2018-07-02..09 plus a lone 24/07/2018 69.0530.
+      Not parsed into L1 and nothing captured: the archive-only fetch path needs a form-postback
+      capture the Fetcher does not have yet, and its depth before 2004 is unmeasured.
+    fixture: {frozen: false, task: null, path: null}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M11.1
+
+  - id: rbi_current_rates
+    plan_row: "Macro / economic backdrop"
+    description: >-
+      The "Current Rates" panel on the RBI home page — policy repo rate, SDF, MSF, bank rate, fixed
+      reverse repo, CRR and SLR, as in force on the day of capture.
+    host: www.rbi.org.in
+    method: GET
+    url_template: "https://www.rbi.org.in/Home.aspx"
+    verified_url: "https://www.rbi.org.in/Home.aspx"
+    cadence: weekly
+    era: {start: 2026-10-06, end: null}
+    fallback: ["curated_rss (rbi press releases announce each MPC decision, as headlines)"]
+    required_headers:
+      User-Agent: browser
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.macro.rbi_rates, task: M11.1}
+    robots_notes: www.rbi.org.in serves no robots policy (418). One named page, weekly, no crawl.
+    pit_notes: >-
+      Tier B, forward only. The panel states the rates in force with no effective date, so a fact
+      is a dated observation of state: period_end = release_date = the capture date, frequency
+      EVENT, never back-dated to the MPC meeting (which the page does not state). The capture date
+      is conservative — the rate was public no later than the day it was seen. No free dated
+      history exists (dbie.rbi.org.in fails TLS), so era.start is the first capture.
+    status: VERIFIED
+    verified_at: 2026-10-06T13:38:05+05:30
+    last_http_status: 200
+    sample_bytes: 150447
+    content_type: text/html; charset=utf-8
+    sample_sha256: f1587026465837c59401010307eb2cd0d7594bc1a9f8aed54da66ab5ff7e9166
+    parse_check: >-
+      "Current Rates" panel text: Policy Repo Rate : 5.25%, Standing Deposit Facility Rate : 5.00%,
+      Marginal Standing Facility Rate : 5.50%, Bank Rate : 5.50%, Fixed Reverse Repo Rate : 3.35%,
+      CRR : 3.00%, SLR : 18.00%; then FBIL rates "As at 1.00pm of October 06, 2026" (not read
+      here). All seven parse. Frozen at tests/fixtures/macro/rbi_home/.
+    fixture: {frozen: true, task: M11.1, path: "tests/fixtures/macro/rbi_home/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M11.1
+
+  - id: oea_wpi_monthly_index
+    plan_row: "Macro / economic backdrop"
+    description: >-
+      Wholesale Price Index (base 2022-23), Office of the Economic Adviser, DPIIT — one xlsx per
+      monthly release, every month since Apr-23 a column. The download page names the current file.
+    host: eaindustry.nic.in
+    method: GET
+    url_template: "https://eaindustry.nic.in/indx_download_2223/wpi_monthly_index_{YYYYMM}.xlsx"
+    verified_url: "https://eaindustry.nic.in/indx_download_2223/wpi_monthly_index_202609.xlsx"
+    cadence: weekly
+    era: {start: 2026-10-06, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.macro.wpi, task: M11.1}
+    robots_notes: No robots.txt (site 404 page). The download page and the file it links, weekly.
+    pit_notes: >-
+      Tier B, forward only. YYYYMM in the filename is the release month (202609 carries Apr-23 …
+      Aug-26); the latest two months are provisional and are revised in a later file in place.
+      Facts carry release_date = the capture date (no release day is stated in the file; the
+      capture is never earlier than publication), and a capture writes only months that are new or
+      whose value changed, so provisional and final prints coexist as separate records.
+    status: VERIFIED
+    verified_at: 2026-10-06T13:39:30+05:30
+    last_http_status: 200
+    sample_bytes: 323839
+    content_type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+    sample_sha256: aea8e605c2a2e761423e490528b382f6feae4504e62190f8cbd87f18bd2d75be
+    parse_check: >-
+      One sheet, 1,138 rows: header Level | Commodity Name | Commodity Code | Commodity Weight |
+      Apr-23 … Aug-26 (41 months). Headline rows: ALL 1000000000 (Apr-23 99, Aug-26 110.8), the
+      three major groups 11/12/13…, and FOOD INDEX (no code). 205 headline facts parse. The
+      download page (20,270 B) links exactly one wpi_monthly_index_<YYYYMM>.xlsx. Frozen at
+      tests/fixtures/macro/wpi/.
+    fixture: {frozen: true, task: M11.1, path: "tests/fixtures/macro/wpi/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M11.1
+
+  - id: gstn_tax_collection
+    plan_row: "Macro / economic backdrop"
+    description: >-
+      GSTN's gross and net GST collection statement, one sheet per month (Apr-24 onward), crore
+      rupees — linked from www.gst.gov.in/download/gststatistics.
+    host: tutorial.gst.gov.in
+    method: GET
+    url_template: "https://tutorial.gst.gov.in/offlineutilities/gst_statistics/Gross_Net_Tax_collection.xlsx"
+    verified_url: "https://tutorial.gst.gov.in/offlineutilities/gst_statistics/Gross_Net_Tax_collection.xlsx"
+    cadence: weekly
+    era: {start: 2026-10-06, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.macro.gst, task: M11.1}
+    robots_notes: "User-agent: * / Allow: /. One fixed file, weekly."
+    pit_notes: >-
+      Tier B, forward only. One file, replaced in place each month, figures labelled provisional,
+      no release date stated. Facts carry release_date = the capture date and a capture writes only
+      months new or changed since the store last knew them, so a revision is a second record.
+    status: VERIFIED
+    verified_at: 2026-10-06T13:39:36+05:30
+    last_http_status: 200
+    sample_bytes: 192489
+    content_type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+    sample_sha256: 9ce073771b89fc367b0beaccf25becef73704cc9d27a4e333488b1701a6de1d0
+    parse_check: >-
+      29 sheets Apr-24 … Aug-26 (one spelt Mar_26), hand-laid-out: some add a "Daily" column, some
+      date the header with an Excel serial. Keyed on the column-A labels "Total Gross GST Revenue" /
+      "Total Net GST Revenue" and the column left of the first "% Growth" header: 58 facts, e.g.
+      Apr-24 gross 210,267.06 cr, Aug-26 gross 199,852.74 / net 168,057.35. Frozen at
+      tests/fixtures/macro/gst/.
+    fixture: {frozen: true, task: M11.1, path: "tests/fixtures/macro/gst/"}
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M11.1
+
+  - id: nifty_india_vix_history
+    plan_row: "Macro / economic backdrop"
+    description: >-
+      India VIX *spot* daily OHLC from NSE Indices' historical-data endpoint — the index itself,
+      where nse_fo_bhavcopy's FUTIVX is a future on it.
+    host: niftyindices.com
+    method: POST
+    url_template: "https://niftyindices.com/BackPage/getHistoricaldatatabletoString"
+    verified_url: "https://niftyindices.com/BackPage/getHistoricaldatatabletoString"
+    cadence: weekly
+    era: {start: null, end: null}
+    fallback: ["nifty_index_close_snapshot (its 'India VIX' row, present from 2013-10..2014-10 on)"]
+    required_headers:
+      User-Agent: browser
+      Content-Type: "application/json; charset=utf-8"
+      Referer: "https://niftyindices.com/reports/historical-data"
+    needs_session_cookie: false
+    parser: {id: dataplatform.ingest.macro.india_vix, task: M11.1}
+    robots_notes: Allow / with two disallowed report paths, neither of which is /BackPage/.
+    pit_notes: >-
+      Grade A: a session's level is disseminated at its close and not revised — period_end =
+      release_date = the session. The close lands as IN.NSE.INDIA_VIX.CLOSE, the same series id
+      index_valuation gives the close-all snapshot's "India VIX" row; a disagreement between the
+      two NSE files on one session is refused at write, not tie-broken.
+    status: VERIFIED
+    verified_at: 2026-10-06T13:30:49+05:30
+    last_http_status: 200
+    sample_bytes: 1436
+    content_type: text/html; charset=utf-8
+    sample_sha256: 42f795df36fa7c1cb901d362ce3db099faab8fc409d613ffe2581d20efd949f5
+    parse_check: >-
+      Body {"cinfo": "{'name':'INDIA VIX','startDate':'01-Sep-2026','endDate':'10-Sep-2026',
+      'indexName':'INDIA VIX'}"} → bare JSON array, newest first, of {RequestNumber, INDEX_NAME
+      "India VIX", HistoricalDate "10 Sep 2026", OPEN "11.92", HIGH, LOW, CLOSE "11.80"} (text/html
+      content type even on success, so only the shape discriminates a block page). Depth probe:
+      01-Mar-2008, 01-Jan-2010 and 01-Oct-2014 windows return [] (2 B); 02-Mar-2020..06-Mar-2020
+      returns 5 rows (INDEX_NAME "INDIA VIX"). Frozen at tests/fixtures/macro/india_vix/.
+    fixture: {frozen: true, task: M11.1, path: "tests/fixtures/macro/india_vix/"}
+    history:
+      measured_at: 2026-10-06T13:31:26+05:30
+      measured_by: macro-probes
+      method: Four narrow windows (2008-03, 2010-01, 2014-10, 2020-03) plus 2026-09.
+      latest_available: 2026-09-10
+      accrues_forward: true
+      note: >-
+        Depth begins between 2014-10 (empty) and 2020-03 (rows). The whole-history backfill is
+        ONE POST and is left for the coordinator to queue behind the niftyindices.com lease —
+        command and count in ops/gates/macro-probes-2026-10-06.md. The weekly job fetches the
+        trailing 31 days.
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M11.1
+
+  - id: mospi_api
+    plan_row: "Macro / economic backdrop"
+    description: >-
+      MoSPI's statistics API behind the eSankhyiki portal (CPI, IIP, national accounts / GDP, WPI
+      mirror, an RBI indicator mirror) — the only machine-readable surface for CPI, IIP and GDP.
+    host: api.mospi.gov.in
+    method: GET
+    url_template: "https://api.mospi.gov.in/api/esankhyiki/{product}/{endpoint}"
+    verified_url: "https://api.mospi.gov.in/api/esankhyiki/cpi/getCpiBaseYear"
+    cadence: monthly
+    era: {start: null, end: null}
+    fallback: ["worldbank_indicator_api (annual CPI inflation and GDP growth, current vintage)"]
+    required_headers:
+      User-Agent: browser
+    needs_session_cookie: false
+    parser: {id: null, task: null}
+    robots_notes: Never obtained — no TLS session (see failure_note). No crawl is authorised.
+    pit_notes: >-
+      Would be Tier B (current vintage; MoSPI revises IIP and GDP routinely). Untested against a
+      real response.
+    status: FAILED
+    verified_at: 2026-10-06T13:37:47+05:30
+    last_http_status: 0  # three requests; the TLS handshake is refused before any HTTP
+    sample_bytes: null
+    content_type: null
+    sample_sha256: null
+    parse_check: null
+    fixture: {frozen: false, task: null, path: null}
+    failure_note: >-
+      The API host requires *unsafe legacy TLS renegotiation*: every request (robots.txt,
+      /api/esankhyiki/cpi/getCpiBaseYear, /api/cpi/getCPIIndex) fails in the handshake with
+      OpenSSL's UNSAFE_LEGACY_RENEGOTIATION_DISABLED. Turning that option on is weakening TLS to
+      reach a source — the same class of workaround as disabling verification — and is not done.
+      The other MoSPI surfaces do not substitute: www.mospi.gov.in answers every path (robots.txt,
+      /press-release) with the same 2,644 B JavaScript shell (soft 404; the content is fetched from
+      this API client-side), cpi.mospi.gov.in connect-times-out (40 s, from both networks), and
+      esankhyiki.mospi.gov.in is a React shell over this same API (its llms.txt and ARD manifest
+      point agents at an MCP server, mcp.mospi.gov.in, which was not contacted).
+    candidate_alternatives:
+      - "Re-probe when MoSPI's API host supports RFC 5746 secure renegotiation (a server fix)."
+      - "MoSPI's MCP server (mcp.mospi.gov.in) — unprobed; it is an AI-integration surface, and
+         whether it is a sanctioned bulk data path is a question for its terms, not an assumption."
+      - "worldbank_indicator_api for an annual, current-vintage CPI/GDP backdrop (not a vintage)."
+    owner_task: M11.1
+
+  - id: rbi_dbie
+    plan_row: "Macro / economic backdrop"
+    description: >-
+      The RBI's Database on the Indian Economy — policy rates, money supply, FX reserves and the
+      full RBI macro set with history.
+    host: dbie.rbi.org.in
+    method: GET
+    url_template: "https://dbie.rbi.org.in/"
+    verified_url: "https://dbie.rbi.org.in/"
+    cadence: monthly
+    era: {start: null, end: null}
+    fallback: ["rbi_current_rates (forward-only policy rates and reserve ratios)"]
+    required_headers:
+      User-Agent: browser
+    needs_session_cookie: false
+    parser: {id: null, task: null}
+    robots_notes: Never obtained — no verified TLS session. No crawl is authorised.
+    pit_notes: Untested against a real response.
+    status: FAILED
+    verified_at: 2026-10-06T13:35:44+05:30
+    last_http_status: 0  # TLS verification fails before any HTTP
+    sample_bytes: null
+    content_type: null
+    sample_sha256: null
+    parse_check: null
+    fixture: {frozen: false, task: null, path: null}
+    failure_note: >-
+      "certificate verify failed: Hostname mismatch, certificate is not valid for
+      'dbie.rbi.org.in'" — on 2026-09-04 (laptop) and again 2026-10-06 (campaign server). Not
+      worked around: an unverifiable TLS identity is not a source this platform ingests from.
+    candidate_alternatives:
+      - "rbi_current_rates — the home page's rate panel, captured forward weekly."
+      - "Re-probe after the RBI fixes the certificate; one request settles it."
     owner_task: M11.1
 
   # ── §4.1 row 18 (PROPOSED, EXECUTION_PLAN §12) — market-structure snapshots ─────────────────
