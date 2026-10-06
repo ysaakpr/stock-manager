@@ -568,6 +568,22 @@ class PortfolioBook:
         self._interest += amount
         self._post_ledger(when, "", "interest", debit=_ZERO, credit=amount)
 
+    def credit_scheme_cash(self, when: date, isin: str, amount: Decimal) -> None:
+        """Credit the non-share leg of an amalgamation (``backtest.book_actions``) to free cash.
+
+        A scheme that pays part of its consideration in a security the book cannot hold (Cairn
+        India's Vedanta redeemable preference shares) is carried as cash at that security's sourced
+        face value. No basis is apportioned to it: the whole cost of the old holding moves to the
+        survivor's shares (:meth:`apply_merger`), so the cash is realized in full. Total P&L is the
+        same either way; only its split between realized and unrealized depends on the choice.
+        ``isin`` is the *old* (amalgamated) ISIN, for the ledger row.
+        """
+        amount = self._require_positive_money("scheme cash", amount)
+        self._cash += amount
+        self._realized += amount
+        self._post_ledger(when, isin, "scheme cash", debit=_ZERO, credit=amount)
+        _log.info("book.scheme_cash", isin=isin, session=when.isoformat(), amount=str(amount))
+
     def _rescale_quantity(
         self,
         isin: str,

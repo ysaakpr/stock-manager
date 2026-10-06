@@ -46,6 +46,7 @@ from backtest.book_actions import (
     AppliedCashExit,
     AppliedDividend,
     AppliedMerger,
+    AppliedSchemeCash,
     BookActionCalendar,
     BookActionSource,
     RescaleKind,
@@ -259,7 +260,8 @@ def _tax_events(
     A share swap is a rescale of the old ISIN's lots followed by a carry into the survivor: each
     lot keeps its acquisition date and its cost, which is the amalgamation rule (Sec 47(vii): not
     a transfer; Sec 2(42A) Expl. 1(b)(c): held from the original purchase). A cash exit is a sale
-    of every lot at the exit price, with no charges and no STT — the tender is off-market.
+    of every lot at the exit price, with no charges and no STT — the tender is off-market. A
+    swap's non-share leg (``AppliedSchemeCash``) is not a tax event here (see the branch below).
     """
     dividends: list[DividendCredit] = []
     events: list[CorporateEvent] = []
@@ -289,6 +291,12 @@ def _tax_events(
                     stt_known=True,
                 )
             )
+        elif isinstance(action, AppliedSchemeCash):
+            # The non-share leg of a swap (a preference share carried as cash at its face value).
+            # Not taxed here yet: the tax lots carry no cost apportionment between a scheme's
+            # equity and its preference leg, and booking the cash as a sale with no cost would
+            # tax the whole face value. A known gap, named in book_actions' module docstring.
+            continue
         elif action.kind is RescaleKind.SPLIT:
             numerator, denominator = _ratio(action.numerator, action.denominator)
             events.append(
