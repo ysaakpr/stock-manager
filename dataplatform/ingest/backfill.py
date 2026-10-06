@@ -360,9 +360,13 @@ def _write_bse_legacy(parsed: LegacyParse, ctx: WriteContext) -> object:
     return write_prices_raw(
         list(resolution.resolved),
         exchange=Exchange.BSE,
-        unidentified_rows=[_quarantine_row(line, trade_date) for line in parsed.quarantined],
-        unidentified_reason=PriceQuarantineReason.MERGED_RECORDS_UNSPLITTABLE,
-        scrip_unresolved_rows=_unresolved_rows(parsed.quotes, resolution.unresolved),
+        reasoned_rows=[
+            *((_quarantine_row(line, trade_date), line.reason) for line in parsed.quarantined),
+            *(
+                (row, PriceQuarantineReason.SCRIP_UNRESOLVED)
+                for row in _unresolved_rows(parsed.quotes, resolution.unresolved)
+            ),
+        ],
         data_root=ctx.data_root,
     )
 

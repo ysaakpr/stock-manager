@@ -115,6 +115,12 @@ class PriceQuarantineReason:
     #: Until 2026-10-06 these rows were counted in a log line and dropped (catalog B1 defect (b)).
     SCRIP_UNRESOLVED: Final = "scrip_unresolved"
 
+    #: A BSE legacy line with a blank `PREVCLOSE` — an instrument's first session, which has no
+    #: previous close to state (`EQ060112_CSV.ZIP` line 1090, a new IDFC bond; REL BANK ETF on
+    #: listing day). `prev_close` is required in `prices_raw`, so the line is enumerated here
+    #: rather than failing its whole session (ten sessions in January 2012 did) or inventing one.
+    PREV_CLOSE_ABSENT: Final = "prev_close_absent"
+
 
 class PricesRawRow(BaseModel):
     """One security's raw traded session on one exchange — the canonical `prices_raw` L1 row.
