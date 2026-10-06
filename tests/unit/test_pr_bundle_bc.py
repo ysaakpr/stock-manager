@@ -213,3 +213,54 @@ def test_a_short_row_raises() -> None:
     payload = f"{header}\nEQ,FOO,Foo Ltd\n".encode()
     with pytest.raises(ParseError, match="expected 10 columns, got 3"):
         parse_bc(payload, filename="Bc010120.csv", knowable_date=date(2020, 1, 1))
+
+
+# ── the four shapes the full corpus found and the 39-request sample did not (2026-10-06) ────
+
+BC_FIXTURES: Final = FIXTURES / "bc"
+
+
+def _bc_fixture(era: str, archive: str) -> PrBundle:
+    return PrBundle((BC_FIXTURES / era / archive).read_bytes(), filename=archive)
+
+
+def test_an_unquoted_comma_in_security_is_rejoined_and_the_dates_still_read() -> None:
+    with _bc_fixture("comma_in_security", "PR300810.zip") as bundle:
+        rows = parse_bc_bundle(bundle)
+    assert len(rows) == 920
+    bond = next(r for r in rows if r.symbol == "ICIBK1107" and r.series == "N1")
+    assert bond.security_name == "Regular Income Bond, Opti"
+    assert bond.purpose == "INTEREST PAYMENT"
+    assert (bond.record_date, bond.ex_date) == (date(2010, 9, 27), date(2010, 9, 24))
+
+
+def test_an_unquoted_comma_in_purpose_is_rejoined_with_the_comma_kept() -> None:
+    with _bc_fixture("comma_in_purpose", "PR111019.zip") as bundle:
+        rows = parse_bc_bundle(bundle)
+    tcs = next(r for r in rows if r.symbol == "TCS" and r.series == "EQ")
+    assert tcs.purpose == "INT DIV-RS 5, SPL DIV-RS"
+    assert tcs.ex_date == date(2019, 10, 17)
+
+
+def test_a_day_first_dashed_date_reads_as_the_same_day_first_date() -> None:
+    with _bc_fixture("day_dash_date", "PR290416.zip") as bundle:
+        rows = parse_bc_bundle(bundle)
+    dishman = rows[0]
+    assert (dishman.symbol, dishman.purpose) == ("DISHMAN", "BONUS 1:1")
+    assert dishman.record_date == date(2016, 5, 3)  # '03-05-2016', day first like the slashes
+    assert dishman.ex_date == date(2016, 5, 2)
+
+
+def test_a_member_published_empty_is_no_actions_but_a_bare_empty_body_still_raises() -> None:
+    with _bc_fixture("published_empty", "PR100122.zip") as bundle:
+        assert parse_bc_bundle(bundle) == ()
+    with pytest.raises(ParseError, match="empty response body"):
+        parse_bc(b"", filename="Bc100122.csv", knowable_date=date(2022, 1, 10))
+
+
+def test_an_extra_comma_that_fits_neither_free_text_cell_raises() -> None:
+    header = ",".join(BC_COLUMNS)
+    # The extra cell sits among the dates, so neither rejoin leaves six date-shaped cells.
+    payload = f"{header}\nEQ,FOO,Foo Ltd, ,oops,01/01/2020, ,01/01/2020, , ,DIVIDEND\n".encode()
+    with pytest.raises(ParseError, match="not unambiguously inside SECURITY or PURPOSE"):
+        parse_bc(payload, filename="Bc010120.csv", knowable_date=date(2020, 1, 1))

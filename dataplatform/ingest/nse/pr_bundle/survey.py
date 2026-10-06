@@ -121,7 +121,9 @@ PURPOSE_TAGS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
     # which is a split.
     ("DIVIDEND", ("DIVIDEND", "DIVD", "DIV-", "DIV/", "DIV.", "DIV ")),
     ("BONUS", ("BONUS",)),
-    ("SPLIT", ("SPLIT", "SUB-DIVISION", "SUB DIVISION", "SUBDIVISION", "STOCK SPLIT")),
+    # NSE abbreviates a face-value split `FVSPLT` / `FV SPLT` — the commonest untagged purpose on
+    # the ex-date of a >20% move (measured 2026-10-06); `SPLIT` does not match it.
+    ("SPLIT", ("SPLIT", "SPLT", "SUB-DIVISION", "SUB DIVISION", "SUBDIVISION", "STOCK SPLIT")),
     ("RIGHTS", ("RIGHTS", "RIGHT ISSUE")),
     ("AGM", ("ANNUAL GENERAL MEETING", "AGM")),
     ("EGM", ("EXTRA ORDINARY GENERAL MEETING", "EXTRAORDINARY GENERAL MEETING", "EGM")),

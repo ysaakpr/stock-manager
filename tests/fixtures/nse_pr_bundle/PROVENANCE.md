@@ -90,3 +90,24 @@ which `tests/unit/test_fund_lineage.py` re-hashes.
 | `PR160720.zip` | 2020-07-16 | AXISNIFTY's 2020-07-23 split is broadcast, but the units skipped 2020-07-24 — the gap rejects it |
 | `PR290124.zip` | 2024-01-29 | HDFCNIFIT's 2024-02-02 split is here; HDFCSENSEX, which switched ISIN the same day, is in no `Bc` file |
 | `PR210225.zip` | 2025-02-21 | HDFCLIQUID's `CHANGE IN ATTRIBUTE` on its switch — an event, but not a unit re-basing |
+
+## Eight more, for the `pd` and `bc` members (added 2026-10-06, `pr-bundle-parse`)
+
+Laid out `<member>/<era>/` and **reduced from the authoritative lake**, zero requests: each zip
+holds the one member plus the bundle's readme, byte-for-byte, and `manifest.json` records the
+member's sha256 (re-hashed by `tests/unit/test_pr_bundle_pd.py`) and the original bundle's full
+member list. The eras come from a sweep of every `Pd` member in L0 on 2026-10-06.
+
+| fixture dir | session | archive | why this session |
+|---|---|---|---|
+| `pd/unpadded/`             | 2010-01-04 | `PR040110.zip` | 2010-01-04..2010-07-16: unpadded numbers, counts printed `NNN.00`, `S&P CNX` names, India Vix on a blank-`MKT` index row |
+| `pd/trailing_header_cell/` | 2010-05-14 | `PR140510.zip` | the one file (of 4,156) whose header carries a 17th, empty cell |
+| `pd/padded/`               | 2015-06-15 | `PR150615.zip` | 2010-07-19..2025-10-10: space-padded numbers, integral counts; `CNX`-era names; three `CORP_IND` marks incl. `XDBO` |
+| `pd/lowercase/`            | 2026-09-04 | `PR040926.zip` | 2025-10-13 onward: `pd` + `DDMMYYYY`, `Nifty`-era names, 139 index rows, `MKT` `G`/`O` sections |
+| `bc/comma_in_security/`    | 2010-08-30 | `PR300810.zip` | unquoted comma inside `SECURITY` (`ICIBK1107`, `Regular Income Bond, Opti`) |
+| `bc/comma_in_purpose/`     | 2019-10-11 | `PR111019.zip` | unquoted comma inside `PURPOSE` (`TCS`, `INT DIV-RS 5, SPL DIV-RS`) |
+| `bc/day_dash_date/`        | 2016-04-29 | `PR290416.zip` | `RECORD_DT` written `03-05-2016` on one row |
+| `bc/published_empty/`      | 2022-01-10 | `PR100122.zip` | the `Bc` member is 0 bytes as published |
+
+`tests/unit/test_pr_bundle_l1.py` assembles one 2026-09-04 bundle from `lowercase/` (`bc`),
+`bh_no_flag/` (`bh`) and `pd/lowercase/` (`pd`) — all three are that session's own bytes.

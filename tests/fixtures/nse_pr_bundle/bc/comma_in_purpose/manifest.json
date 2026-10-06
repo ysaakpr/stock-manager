@@ -1,0 +1,71 @@
+{
+  "era": "comma_in_purpose",
+  "session": "2019-10-11",
+  "archive_filename": "PR111019.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR111019.zip",
+  "why_this_era": "unquoted comma inside PURPOSE (TCS 'INT DIV-RS 5, SPL DIV-RS ...'), 11 cells",
+  "reduced_from_l0": true,
+  "original_bytes": 291712,
+  "original_sha256": "082620422bf76cc9e525e302b34f005d36d8b6415cc0058a5d6ca344963337ee",
+  "original_members": [
+    {
+      "name": "An111019.txt",
+      "bytes": 769077
+    },
+    {
+      "name": "Bc111019.csv",
+      "bytes": 20975
+    },
+    {
+      "name": "bh111019.csv",
+      "bytes": 12215
+    },
+    {
+      "name": "Bm111019.txt",
+      "bytes": 7355
+    },
+    {
+      "name": "corpbond111019.csv",
+      "bytes": 26922
+    },
+    {
+      "name": "etf111019.csv",
+      "bytes": 13652
+    },
+    {
+      "name": "Gl111019.csv",
+      "bytes": 9192
+    },
+    {
+      "name": "HL111019.csv",
+      "bytes": 4912
+    },
+    {
+      "name": "Pd111019.csv",
+      "bytes": 349842
+    },
+    {
+      "name": "Pr111019.csv",
+      "bytes": 327296
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 2008
+    },
+    {
+      "name": "sme111019.csv",
+      "bytes": 12110
+    },
+    {
+      "name": "Tt111019.csv",
+      "bytes": 2203
+    }
+  ],
+  "members_kept_in_fixture": [
+    "Bc111019.csv",
+    "Readme.txt"
+  ],
+  "member": "Bc111019.csv",
+  "member_bytes": 20975,
+  "member_sha256": "3f37b99710f5978d57115d001e94ea3052b75a76f4a2e33330950cf01a247754"
+}
