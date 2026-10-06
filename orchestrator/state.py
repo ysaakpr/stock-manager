@@ -57,7 +57,8 @@ class BuildState:
     def _read(self) -> dict[str, Any]:
         if not self.path.exists():
             return {"version": 1, "updated_at": _now(), "wave": 0, "tasks": {}}
-        return json.loads(self.path.read_text())
+        doc: dict[str, Any] = json.loads(self.path.read_text())
+        return doc
 
     def _write(self, doc: dict[str, Any]) -> None:
         doc["updated_at"] = _now()
@@ -66,10 +67,10 @@ class BuildState:
             with os.fdopen(fd, "w") as fh:
                 json.dump(doc, fh, indent=2, sort_keys=True)
                 fh.write("\n")
-            os.replace(tmp, self.path)
+            Path(tmp).replace(self.path)
         except BaseException:
             with contextlib.suppress(FileNotFoundError):
-                os.unlink(tmp)
+                Path(tmp).unlink()
             raise
 
     def load(self) -> dict[str, Any]:
@@ -87,7 +88,8 @@ class BuildState:
         return {tid: int(rec.get("attempts", 0)) for tid, rec in doc["tasks"].items()}
 
     def record(self, task_id: str) -> dict[str, Any]:
-        return self.load()["tasks"].get(task_id, {"state": "PENDING", "attempts": 0})
+        rec: dict[str, Any] = self.load()["tasks"].get(task_id, {"state": "PENDING", "attempts": 0})
+        return rec
 
     # ── transitions ──────────────────────────────────────────────────────────
 
@@ -96,7 +98,9 @@ class BuildState:
             raise ValueError(f"invalid state {state!r}; expected one of {sorted(VALID)}")
         with _locked():
             doc = self._read()
-            rec = doc["tasks"].setdefault(task_id, {"state": "PENDING", "attempts": 0})
+            rec: dict[str, Any] = doc["tasks"].setdefault(
+                task_id, {"state": "PENDING", "attempts": 0}
+            )
             previous = rec.get("state", "PENDING")
 
             if previous == "DONE" and state not in ("DONE", "SPLIT"):
@@ -114,7 +118,7 @@ class BuildState:
             elif state in TERMINAL or state == "FAILED":
                 rec["finished"] = _now()
 
-            if "verify_output" in fields and fields["verify_output"]:
+            if fields.get("verify_output"):
                 out = str(fields["verify_output"])
                 if len(out) > VERIFY_OUTPUT_LIMIT:
                     fields["verify_output"] = out[:VERIFY_OUTPUT_LIMIT] + "\n…[truncated]"

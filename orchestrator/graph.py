@@ -105,23 +105,23 @@ class Graph:
 
     def _cycles(self) -> list[list[str]]:
         """Depth-first cycle detection. Returns each cycle found as a node path."""
-        WHITE, GREY, BLACK = 0, 1, 2
-        color = dict.fromkeys(self.tasks, WHITE)
+        white, grey, black = 0, 1, 2
+        color = dict.fromkeys(self.tasks, white)
         found: list[list[str]] = []
 
         def walk(node: str, path: list[str]) -> None:
-            color[node] = GREY
+            color[node] = grey
             for dep in self.tasks[node].deps:
                 if dep not in self.tasks:
                     continue
-                if color[dep] == GREY:
+                if color[dep] == grey:
                     found.append([*path, node, dep])
-                elif color[dep] == WHITE:
+                elif color[dep] == white:
                     walk(dep, [*path, node])
-            color[node] = BLACK
+            color[node] = black
 
         for node in self.tasks:
-            if color[node] == WHITE:
+            if color[node] == white:
                 walk(node, [])
         return found
 

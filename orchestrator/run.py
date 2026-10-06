@@ -11,6 +11,7 @@ Stops for exactly two reasons (AGENTIC_CONTEXT.md §1):
 
 from __future__ import annotations
 
+import functools
 import shutil
 import subprocess
 import sys
@@ -54,19 +55,25 @@ def _log(msg: str) -> None:
     print(f"{GREY}[{_stamp()}]{OFF} {msg}", flush=True)
 
 
+def _text(stream: str | bytes | None) -> str:
+    if stream is None:
+        return ""
+    return stream.decode(errors="replace") if isinstance(stream, bytes) else stream
+
+
 def _spawn(prompt: str, log_path: Path, permission_mode: str, model: str | None) -> tuple[int, str]:
     cmd = ["claude", "-p", prompt, "--permission-mode", permission_mode]
     if model:
         cmd += ["--model", model]
     log_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        proc = subprocess.run(
-            cmd, cwd=REPO, capture_output=True, text=True, timeout=AGENT_TIMEOUT
-        )
+        proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=AGENT_TIMEOUT)
         output = proc.stdout + proc.stderr
         code = proc.returncode
     except subprocess.TimeoutExpired as exc:
-        output = f"agent timed out after {AGENT_TIMEOUT}s\n{exc.stdout or ''}{exc.stderr or ''}"
+        # TimeoutExpired carries bytes even under text=True, so decode rather than log b'...'.
+        partial = "".join(_text(s) for s in (exc.stdout, exc.stderr))
+        output = f"agent timed out after {AGENT_TIMEOUT}s\n{partial}"
         code = 124
     log_path.write_text(output)
     return code, output
@@ -113,7 +120,7 @@ def _execute(
 
     code, output = _spawn(for_task(task, graph), log_path, permission_mode, model)
     elapsed = int(time.monotonic() - started)
-    state = st.record(task.id).get("state", "IN_PROGRESS")
+    state = str(st.record(task.id).get("state", "IN_PROGRESS"))
 
     if state == "IN_PROGRESS":
         # The agent finished without recording an outcome. Treat as a failure rather than
@@ -124,7 +131,7 @@ def _execute(
             st.set(task.id, "FAILED", reason="context exceeded; splitting")
             split_log = LOG_ROOT / f"wave-{wave:02d}" / f"{task.id}.split.log"
             _spawn(splitter(task), split_log, permission_mode, model)
-            return st.record(task.id).get("state", "FAILED")
+            return str(st.record(task.id).get("state", "FAILED"))
         st.set(
             task.id,
             "FAILED",
@@ -134,7 +141,8 @@ def _execute(
         state = "FAILED"
 
     marks = {"DONE": f"{GREEN}✓{OFF}", "FAILED": f"{RED}✗{OFF}", "PARKED": f"{YELLOW}⏸{OFF}"}
-    _log(f"{marks.get(state, '·')} {task.id} → {state} ({elapsed}s, log: {log_path.relative_to(REPO)})")
+    log_rel = log_path.relative_to(REPO)
+    _log(f"{marks.get(state, '·')} {task.id} → {state} ({elapsed}s, log: {log_rel})")
     return state
 
 
@@ -196,7 +204,9 @@ def run_loop(
         return 2
 
     if not shutil.which("claude") and not dry_run:
-        print(f"{RED}`claude` CLI not on PATH — the runner spawns it per task.{OFF}", file=sys.stderr)
+        print(
+            f"{RED}`claude` CLI not on PATH — the runner spawns it per task.{OFF}", file=sys.stderr
+        )
         return 2
 
     released = st.release_stale(list(graph.tasks))
@@ -229,12 +239,15 @@ def run_loop(
             return 0
 
         with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            list(
-                pool.map(
-                    lambda t: _execute(t, graph, st, wave, permission_mode, model),
-                    ready,
-                )
+            execute = functools.partial(
+                _execute,
+                graph=graph,
+                st=st,
+                wave=wave,
+                permission_mode=permission_mode,
+                model=model,
             )
+            list(pool.map(execute, ready))
 
     _log(f"{YELLOW}hit --max-waves {max_waves}{OFF}")
     _stop_report(graph, st, wave)

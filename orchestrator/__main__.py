@@ -1,16 +1,16 @@
 """orch — the build orchestrator CLI.
 
-    ./orch validate            structural check on TASK_GRAPH.yaml
-    ./orch status              per-milestone progress + what is parked and why
-    ./orch ready               exactly what the next wave would pick up
-    ./orch why <id>            why a task is not running
-    ./orch prompt <id>         print the agent brief for a task
-    ./orch set <id> <STATE>    record an outcome (DONE re-verifies before it is accepted)
-    ./orch escalate <id> ...   park a task and file a human decision
-    ./orch answer <id> ...     record your decision and return the task to the queue
-    ./orch split <id> ...      replace a too-large task with children
-    ./orch gate <M>            re-run every verification in a milestone
-    ./orch run                 the unattended wave loop
+./orch validate            structural check on TASK_GRAPH.yaml
+./orch status              per-milestone progress + what is parked and why
+./orch ready               exactly what the next wave would pick up
+./orch why <id>            why a task is not running
+./orch prompt <id>         print the agent brief for a task
+./orch set <id> <STATE>    record an outcome (DONE re-verifies before it is accepted)
+./orch escalate <id> ...   park a task and file a human decision
+./orch answer <id> ...     record your decision and return the task to the queue
+./orch split <id> ...      replace a too-large task with children
+./orch gate <M>            re-run every verification in a milestone
+./orch run                 the unattended wave loop
 """
 
 from __future__ import annotations
@@ -71,11 +71,9 @@ def _scoped_paths(task: object) -> list[str]:
     when the tree is quiet.
     """
     out: set[str] = set()
-    for raw in getattr(task, "deliverables", ()):  # type: ignore[arg-type]
+    for raw in getattr(task, "deliverables", ()):
         spec = str(raw).rstrip("/")
-        matches = (
-            list(REPO.glob(spec)) if any(c in spec for c in "*?[") else [REPO / spec]
-        )
+        matches = list(REPO.glob(spec)) if any(c in spec for c in "*?[") else [REPO / spec]
         for match in matches:
             if not match.exists():
                 continue
@@ -140,13 +138,15 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print(f"  … {len(ready) - 20} more")
 
     parked = [tid for tid, s in states.items() if s == "PARKED"]
-    stuck = [tid for tid, s in states.items() if s == "FAILED" and attempts.get(tid, 0) >= MAX_ATTEMPTS]
+    stuck = [
+        tid for tid, s in states.items() if s == "FAILED" and attempts.get(tid, 0) >= MAX_ATTEMPTS
+    ]
     if parked or stuck:
         print(f"\n{YELLOW}blocked on you ({len(parked) + len(stuck)}){OFF}")
         for tid in sorted(parked + stuck):
             task = graph.tasks.get(tid)
             print(f"  {tid:8} {task.title if task else ''}")
-        print("  → see HUMAN_DECISIONS.md, then: ./orch answer <id> --decision \"...\"")
+        print('  → see HUMAN_DECISIONS.md, then: ./orch answer <id> --decision "..."')
     return 0
 
 
@@ -239,9 +239,7 @@ def cmd_set(args: argparse.Namespace) -> int:
     )
     print(f"{GREEN}{args.task_id} → DONE{OFF} ({len(checks)} check(s) passed)")
     unblocked = [
-        d
-        for d in graph.dependents(args.task_id)
-        if graph.deps_done(graph.tasks[d], st.states())
+        d for d in graph.dependents(args.task_id) if graph.deps_done(graph.tasks[d], st.states())
     ]
     if unblocked:
         print(f"unblocked: {', '.join(unblocked)}")
@@ -276,8 +274,10 @@ def cmd_escalate(args: argparse.Namespace) -> int:
         unblocks=args.unblocks or (", ".join(graph.dependents(args.task_id)) if task else ""),
     )
     st.set(args.task_id, "PARKED", reason=args.question)
-    print(f"{YELLOW}{args.task_id} → PARKED{OFF}"
-          f"{' (decision filed)' if filed else ' (an open decision already exists)'}")
+    print(
+        f"{YELLOW}{args.task_id} → PARKED{OFF}"
+        f"{' (decision filed)' if filed else ' (an open decision already exists)'}"
+    )
     return 0
 
 
