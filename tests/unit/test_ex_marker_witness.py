@@ -161,3 +161,31 @@ def test_the_first_session_never_matches_backwards() -> None:
     actions = [ActionRecord("INE000A01011", date(2020, 3, 9), "SPLIT")]
     sessions = {"INE000A01011": [date(2020, 3, 2), date(2020, 3, 10)]}
     assert compare(marker, actions, sessions=sessions).marker_to_action["CS"] == {"unmatched": 1}
+
+
+def test_the_reverse_probe_needs_a_trading_gap_that_spans_the_ex_date() -> None:
+    """An action on a scrip not yet trading on BSE is not probed on whatever it printed first."""
+    ex = date(2020, 3, 2)
+    marker = [MarkerRecord("INE000A01011", date(2020, 3, 9), "SS")]
+    actions = [ActionRecord("INE000A01011", ex, "SPLIT")]
+    first_listed_after = {"INE000A01011": [date(2020, 3, 9), date(2020, 3, 10)]}
+    report = compare(marker, actions, sessions=first_listed_after)
+    assert report.action_to_marker["SPLIT"] == {"no_bse_row_that_day": 1}
+    assert report.marker_to_action["SS"] == {"unmatched": 1}
+    # the same rows behind a suspension that spans the ex-date: probed, and witnessed
+    suspended = {"INE000A01011": [date(2020, 2, 28), date(2020, 3, 9)]}
+    report = compare(marker, actions, sessions=suspended)
+    assert report.action_to_marker["SPLIT"] == {"witnessed": 1}
+    assert report.marker_to_action["SS"] == {"first_session": 1}
+
+
+def test_a_gap_whose_earlier_end_is_past_the_cap_does_not_span_the_ex_date() -> None:
+    ex = date(2020, 6, 1)
+    dormant = {"INE000A01011": [ex - timedelta(days=MAX_SUSPENSION_DAYS + 1), date(2020, 6, 20)]}
+    report = compare(
+        [MarkerRecord("INE000A01011", date(2020, 6, 20), "CS")],
+        [ActionRecord("INE000A01011", ex, "SPLIT")],
+        sessions=dormant,
+    )
+    assert report.marker_to_action["CS"] == {"unmatched": 1}
+    assert report.action_to_marker["SPLIT"] == {"no_bse_row_that_day": 1}

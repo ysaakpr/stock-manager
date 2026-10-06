@@ -14,8 +14,10 @@ the other not is a lead worth reading. This module measures both directions:
   (`first_session`), within `near_days` calendar days (`near`), only of another type
   (`type_mismatch`), or none at all (`unmatched`);
 * **action → marker**: of the stored actions of a marked type whose ISIN has a BSE price row on the
-  ex-date — or, when it had none, on its first BSE session after it — how many carry the matching
-  marker on that row (`witnessed`).
+  ex-date — or, when it had none and the ex-date fell inside a trading gap, on the session that
+  ended the gap — how many carry the matching marker on that row (`witnessed`). An action whose
+  ISIN had no BSE session in the gap's span before the ex-date (not yet listed there, or dormant
+  past the cap) is `no_bse_row_that_day`, never probed on whatever it printed later.
 
 **Why `first_session`.** BSE prints the marker on the row where the new basis first trades, and a
 consolidation suspends the scrip until the consolidated shares are credited. BSE's
@@ -23,8 +25,9 @@ corporate-action feed dates the event at the ex-date, the last day of the old ba
 VEERHEALTH the stored action is 2016-11-29, the last old-basis bar 2016-11-28, and the `CS` row
 2017-01-13. No bar exists in between, so the two dates name the same boundary. A same-day
 comparison scored all 34 `CS` markers of 2016-09..2024-07 `unmatched` on that alone. A match is
-`first_session` only when the ISIN has *no* BSE row from the ex-date up to the marker, which needs
-the scrip's sessions (`sessions=`), and only within `MAX_SUSPENSION_DAYS`.
+`first_session` only when the ex-date falls inside one of the ISIN's BSE trading gaps: a session
+before it, *no* BSE row from the ex-date up to the marker, and both ends of the gap within
+`MAX_SUSPENSION_DAYS` of the ex-date. That needs the scrip's sessions (`sessions=`).
 
 What it never does: write a factor, a corporate action or a `quality_flag`. A disagreement here is
 reported, not acted on — the marker is a witness, not an authority, and letting it move an
@@ -166,11 +169,11 @@ def compare(
 ) -> WitnessReport:
     """Score markers against actions and actions against markers. Pure; reads nothing.
 
-    `sessions` maps an ISIN to its BSE trading sessions. With it, a marker on the first session
-    after an ex-date the scrip did not trade (a suspension) is `first_session`, and an action with
-    no BSE row on its ex-date is probed on that first session; its sessions also count as
-    `traded`. Without it, only same-day rows are compared, which is the behaviour that scored
-    every consolidation unmatched.
+    `sessions` maps an ISIN to its BSE trading sessions. With it, a marker on the session that ends
+    a trading gap spanning an ex-date (a suspension) is `first_session`, and an action with no BSE
+    row on its ex-date is probed on that session if, and only if, such a gap spans it; its
+    sessions also count as `traded`. Without it, only same-day rows are compared, which is the
+    behaviour that scored every consolidation unmatched.
     """
     first_after = _FirstSession(sessions or {})
     by_isin: dict[str, list[ActionRecord]] = defaultdict(list)
@@ -231,7 +234,13 @@ def compare(
 
 
 class _FirstSession:
-    """`(isin, day)` → the ISIN's first BSE session on or after `day`, within the suspension cap."""
+    """`(isin, day)` → the session ending the ISIN's BSE trading gap that spans `day`, or None.
+
+    The gap spans `day` when the ISIN printed a session before `day` and its next session is on
+    or after it, both within `MAX_SUSPENSION_DAYS`. With no earlier session (the scrip was not yet
+    trading on BSE, or had been dark past the cap) there is no gap to span, and a later first
+    print is that scrip's start, not the ex-date's session.
+    """
 
     def __init__(self, sessions: Mapping[str, Sequence[date]]) -> None:
         self._sessions = {isin: sorted(days) for isin, days in sessions.items()}
@@ -239,9 +248,12 @@ class _FirstSession:
     def __call__(self, isin: str, day: date) -> date | None:
         days = self._sessions.get(isin, ())
         i = bisect_left(days, day)
-        if i == len(days) or (days[i] - day).days > MAX_SUSPENSION_DAYS:
+        if i == 0 or i == len(days):
             return None
-        return days[i]
+        before, after = days[i - 1], days[i]
+        if (day - before).days > MAX_SUSPENSION_DAYS or (after - day).days > MAX_SUSPENSION_DAYS:
+            return None
+        return after
 
 
 def _bse_sessions(
@@ -289,7 +301,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         cur = conn.execute(
             "SELECT isin, ex_date, action_type, filed_against_isin FROM corporate_actions "
             "WHERE ex_date BETWEEN %s AND %s",
-            (args.start - timedelta(days=7), args.end + timedelta(days=7)),
+            # an action up to the suspension cap before the window can own a marker inside it
+            (args.start - timedelta(days=MAX_SUSPENSION_DAYS), args.end + timedelta(days=7)),
         )
         actions = [
             ActionRecord(str(r[0]), r[1], str(r[2]), str(r[3]) if r[3] else None)
