@@ -61,9 +61,12 @@ __all__ = [
     "DeliveryResolution",
     "DeliveryRow",
     "ResolvedDeliveryRow",
+    "SessionVwapRow",
     "parse",
     "parse_l0",
     "parse_text",
+    "parse_vwap",
+    "parse_vwap_l0",
     "resolve",
 ]
 
@@ -168,6 +171,25 @@ class DeliveryRow(BaseModel):
     )
 
 
+class SessionVwapRow(BaseModel):
+    """One security's session VWAP (`AVG_PRICE`) from `sec_bhavdata_full`, before it has an ISIN.
+
+    What it does: carry the file's own volume-weighted average price for `(symbol, series, date)`
+    — raw traded data, verified `= TOTTRDVAL / TOTTRDQTY` within ±0.02 (catalogue §A3), not an
+    adjusted price.
+    What it never does: hold an ISIN (the file has none), or turn the `-` marker into a price.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    symbol: str = Field(min_length=1)
+    series: str = Field(min_length=1)
+    trade_date: date
+    avg_price: Annotated[Decimal, Field(ge=0, strict=True, allow_inf_nan=False)] | None = Field(
+        description="AVG_PRICE, rupees per share; None when the file wrote '-'"
+    )
+
+
 class ResolvedDeliveryRow(BaseModel):
     """A `DeliveryRow` after its symbol has become an ISIN through the D2 identity master.
 
@@ -266,6 +288,43 @@ def parse_l0(store: L0Store, ref: L0Ref) -> tuple[DeliveryRow, ...]:
     agree with — the archive does not always serve the date it is asked for.
     """
     return parse(store.get(ref), filename=ref.filename, trade_date=ref.logical_date)
+
+
+def parse_vwap(
+    payload: bytes, *, filename: str, trade_date: date | None = None
+) -> tuple[SessionVwapRow, ...]:
+    """The `AVG_PRICE` column of one `sec_bhavdata_full` file, under `parse`'s exact checks.
+
+    The whole file is first parsed by `parse` — header, widths, every delivery field, one session,
+    unique keys, and the asked-for session — so a payload this returns VWAPs for is one the
+    delivery path would accept too. The `AVG_PRICE` column is then read off the same rows.
+    """
+    parse(payload, filename=filename, trade_date=trade_date)
+    text = _text_of(payload, filename=filename)
+    reader = csv.reader(io.StringIO(text))
+    next(reader, None)
+    out: list[SessionVwapRow] = []
+    for record in reader:
+        if not record or not any(field.strip() for field in record):
+            continue
+        field = dict(zip(DELIVERY_COLUMNS, (value.strip() for value in record), strict=True))
+        line = reader.line_num
+        out.append(
+            SessionVwapRow(
+                symbol=field["SYMBOL"],
+                series=field["SERIES"],
+                trade_date=_date(field["DATE1"], column="DATE1", line=line, filename=filename),
+                avg_price=_optional_decimal(
+                    field["AVG_PRICE"], column="AVG_PRICE", line=line, filename=filename
+                ),
+            )
+        )
+    return tuple(out)
+
+
+def parse_vwap_l0(store: L0Store, ref: L0Ref) -> tuple[SessionVwapRow, ...]:
+    """`parse_vwap` over a stored payload, checked against the session the ref was fetched as."""
+    return parse_vwap(store.get(ref), filename=ref.filename, trade_date=ref.logical_date)
 
 
 def parse_text(text: str, *, filename: str) -> tuple[DeliveryRow, ...]:

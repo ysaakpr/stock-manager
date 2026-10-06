@@ -40,6 +40,8 @@ __all__ = [
     "PRICES_RAW_QUARANTINE_DATASET",
     "PRICES_RAW_QUARANTINE_SCHEMA",
     "PRICES_RAW_SCHEMA",
+    "SESSION_ATTRIBUTES_DATASET",
+    "SESSION_ATTRIBUTES_SCHEMA",
     "PriceQuarantineReason",
     "PricesRawQuarantineRow",
     "PricesRawRow",
@@ -223,6 +225,35 @@ PRICES_RAW_QUARANTINE_SCHEMA: Final = pa.schema(
         pa.field("deliv_qty", pa.int64(), nullable=True),
         pa.field("deliv_pct", pa.decimal128(12, 4), nullable=True),
         pa.field("reason", pa.string(), nullable=False),
+    ]
+)
+
+
+#: L1 sibling of `prices_raw` — `data/L1/price_session_attributes/date=YYYY-MM-DD/part.parquet`.
+#:
+#: Per-session facts the bhavcopies and the delivery file publish *about* a price row that are not
+#: prices to adjust: the session VWAP (`sec_bhavdata_full.AVG_PRICE`, 2019-10-01 on), the board lot
+#: and long instrument name (UDiFF `NewBrdLotQty` / `FinInstrmNm`, 2024-07-08 on, both exchanges),
+#: and BSE's ex-event marker (`TDCLOINDI`, legacy era 2016-09 .. 2024-07-05). A sibling and not new
+#: `prices_raw` columns, decided in l1-widen (2026-10-06): each attribute exists in one era only,
+#: so in `prices_raw` they would be NULL on most of 6M rows, and adding columns to `prices_raw`
+#: means rewriting all ~4,600 partitions (every reader opens them with one positional schema) while
+#: backtests read them. Keyed like `prices_raw` — `(exchange, isin, series, symbol, trade_date)` —
+#: and a row exists only where at least one attribute was published. VWAP is raw traded data, the
+#: marker is a label: nothing here is adjusted, and `assert_raw_only` checks the names.
+SESSION_ATTRIBUTES_DATASET: Final = "price_session_attributes"
+
+SESSION_ATTRIBUTES_SCHEMA: Final = pa.schema(
+    [
+        pa.field("isin", pa.string(), nullable=False),
+        pa.field("exchange", pa.string(), nullable=False),
+        pa.field("symbol", pa.string(), nullable=False),
+        pa.field("series", pa.string(), nullable=False),
+        pa.field("trade_date", pa.date32(), nullable=False),
+        pa.field("vwap", pa.decimal128(20, 4), nullable=True),
+        pa.field("board_lot", pa.int64(), nullable=True),
+        pa.field("instrument_name", pa.string(), nullable=True),
+        pa.field("ex_marker", pa.string(), nullable=True),
     ]
 )
 

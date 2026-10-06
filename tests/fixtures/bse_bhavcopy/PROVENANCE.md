@@ -72,3 +72,13 @@ this to be the only wrong-width line. The parser splits it back into the two rec
 (`bse.bhavcopy.split_merged_records`); the tests derive the ambiguous variants (non-empty
 `TDCLOINDI` in the seam, a non-numeric field in either half, the same scrip on both sides) from this
 excerpt in memory, so the fixture stays the real bytes.
+
+## `legacy/EQ250517_CSV.ZIP` — a whole real session with ex-markers (2017-05-25)
+
+**Real bytes, not constructed.** A byte-for-byte copy of the L0 payload
+`bse_bhavcopy_legacy/2017/05/EQ250517_CSV.ZIP` (sha256
+`be03e5905a0e766cecb6826da1aeb37d27ac9f5ea36547c62fc9007fa1fec33f`, 93,863 bytes, fetched
+2026-09-06). Chosen (l1-widen, 2026-10-06) by sweeping every 2017-2019 legacy session for the most
+distinct `TDCLOINDI` values: this one carries five — `XD` ×4, `SA`, `XB`, `SS`, `CS` — on otherwise
+ordinary rows, so the ex-marker the parser now keeps (`BseLegacyQuote.close_indicator`) is tested on
+the exchange's own publication rather than on a constructed value.

@@ -210,6 +210,11 @@ class BseLegacyQuote:
     total_trades: int
     total_traded_qty: int
     total_traded_value: Decimal
+    #: `TDCLOINDI` verbatim — BSE's ex-event marker on the price row (`XD`, `XB`, `SS`, `SA`,
+    #: `XR`, `CS`), `""` on an ordinary session. Never a factor: an independent witness to the
+    #: corporate-action feed (`dataplatform.quality.ex_marker_witness`), carried into L1 by
+    #: `dataplatform.ingest.session_attributes`.
+    close_indicator: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -744,6 +749,7 @@ def _legacy_row(record: list[str], *, line: int, filename: str, trade_date: date
         total_traded_value=_decimal(
             field["NET_TURNOV"], column="NET_TURNOV", line=line, filename=filename
         ),
+        close_indicator=field["TDCLOINDI"],
     )
 
 
