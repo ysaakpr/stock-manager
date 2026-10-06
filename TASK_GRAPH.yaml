@@ -668,7 +668,9 @@ tasks:
     Cache the pulled reference series as checked-in fixtures so the comparison is reproducible offline
     afterwards. Where yfinance is known to handle a case badly (demergers especially), document the
     discrepancy and treat reference B as authoritative rather than bending our output to match.
-  deliverables: [tests/golden/test_yfinance_reference.py, "tests/golden/fixtures/yfinance/", "tests/golden/DISCREPANCIES.md"]
+  # As landed (ops/gates/M2.md): the fixtures live under tests/fixtures/yfinance/ with a PROVENANCE.md,
+  # and the discrepancy table is in-module (`DISCREPANCIES`) plus tests/golden/README.md.
+  deliverables: [tests/golden/test_yfinance_reference.py, "tests/fixtures/yfinance/", tests/fixtures/yfinance/PROVENANCE.md, tests/golden/README.md]
   acceptance:
     - "each golden case is compared against a cached yfinance series with a stated tolerance"
     - "offline runs use cached fixtures; the live pull is opt-in via a pytest marker"
@@ -2205,7 +2207,8 @@ tasks:
     Each arm runs on two liquidity floors — the inherited Rs 1 crore median-turnover floor for
     discovery and a Rs 10 crore floor for what a real book could reach — because M10.7 measured the
     edge as concentrated in the thinner half of the investable set.
-  deliverables: [backtest/sweep.py, tests/unit/test_sweep.py, ops/gates/M12-strategy-sweep-report.md]
+  # As landed: one report per window rather than a single sweep report.
+  deliverables: [backtest/sweep.py, tests/unit/test_sweep.py, ops/gates/M12-strategy-sweep-decade.md, ops/gates/M12-strategy-sweep-sixyear.md]
   acceptance:
     - "one windowed lake pass serves every arm; a second pass is a defect the test catches"
     - "at least twenty distinct strategy arms, each differing from a named reference by one stated
