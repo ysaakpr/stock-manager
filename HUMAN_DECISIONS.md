@@ -465,7 +465,7 @@ manually scanned and are clean.
 
 ### D12 — The source register cannot say "we are declining this source on policy grounds" → **ANSWERED (polly, under the owner's delegation of 2026-10-06): option 1 — see D19.**
 
-**Raised:** 2026-08-10, from the D9(b) register sweep. **Status: OPEN.** Cited by
+**Raised:** 2026-08-10, from the D9(b) register sweep. **Status: ANSWERED 2026-10-06 (delegated, via D19).** Cited by
 `source_register.yaml` (`screener_company_fundamentals`) and by `M3.9.b`.
 
 **The finding.** `screener_company_fundamentals` is recorded `BLOCKED_CREDENTIAL`. The sweep found
@@ -514,6 +514,8 @@ configuration daily is not yet built: paper mode today is the M5.13 harness with
 and the scheduler registers no analyst session job; building it is the next decision.
 
 ### D14 — Start the BSE bhavcopy campaign on the server, beside M10.4 → **ANSWERED (owner, 2026-09-06): go.**
+
+*Not to be confused with **D14 (2026-10-06)** below — a separate, delegated decision that reused the number.*
 
 The owner asked for the BSE fetch to start on the server in parallel with the Integrated Filing
 campaign. That is the B1 go for M3.1's full BSE history run ("joins M1.13's go"): 536 sessions of
