@@ -200,6 +200,14 @@ class Settings(BaseSettings):
         default=360,
         description="repeat alerts on one dedup_key are suppressed for this long; 0 disables",
     )
+    alert_failure_streak_threshold: Annotated[int, Field(ge=1)] = Field(
+        default=3,
+        description="consecutive FAILED sessions of one source before failure_alerts pages",
+    )
+    alert_calendar_lead_days: Annotated[int, Field(ge=0)] = Field(
+        default=60,
+        description="failure_alerts pages once the holiday calendar's coverage ends this close",
+    )
     alert_smtp_host: str | None = Field(
         default=None, description="required only when ALERT_PROVIDER=email"
     )
