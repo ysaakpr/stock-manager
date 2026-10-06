@@ -27,10 +27,11 @@ quality-green, so both halves are checked here rather than left for the caller t
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from enum import StrEnum
+from functools import lru_cache
 from typing import Any, Final
 
 from dataplatform.clock import Clock, SystemClock
@@ -41,6 +42,7 @@ from dataplatform.ingest.calendar import (
     TradingCalendar,
     trading_calendar,
 )
+from dataplatform.ingest.source_register import Declined, declined_sources
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection, connection
 
@@ -406,6 +408,9 @@ class GreenStatus:
     not_published: tuple[tuple[str, SyncState], ...]
     open_error_flags: int
     day_kind: DayKind | None
+    #: Requested datasets left out of the verdict because the register DECLINED them (D12/D19):
+    #: never fetched, so never PUBLISHED, so counting them would hold the interlock red forever.
+    declined: tuple[str, ...] = ()
 
     def __bool__(self) -> bool:
         """`if is_green(...)` reads the way the interlock is described in §4.4."""
@@ -419,6 +424,7 @@ def evaluate_green(
     *,
     day_kind: DayKind | None,
     open_error_flags: int = 0,
+    declined: Collection[str] = (),
 ) -> GreenStatus:
     """Decide whether `logical_date` is safe to trade on, from already-gathered facts.
 
@@ -435,12 +441,21 @@ def evaluate_green(
     Fails closed at every step: an unknown date is not green, and neither is a date whose datasets
     were never asked for. Passing no datasets is a caller bug, not an empty conjunction that
     trivially returns green.
+
+    A dataset in `declined` — DECLINED on policy grounds in the Source Register — is set aside
+    before step 3 and named in `GreenStatus.declined`: it is never fetched, so it can never be
+    PUBLISHED, and it must not hold the interlock red. Only declined ids are set aside; every
+    other dataset is judged exactly as before. If nothing but declined datasets was asked for,
+    that is the empty-list bug again and raises.
     """
-    wanted = tuple(dict.fromkeys(datasets))
+    requested = tuple(dict.fromkeys(datasets))
+    set_aside = tuple(name for name in requested if name in declined)
+    wanted = tuple(name for name in requested if name not in declined)
     if not wanted:
         raise ValueError(
             "is_green needs the datasets the decision depends on; an empty list would make every "
             "date green by vacuous truth, which is the exact failure invariant #10 forbids"
+            + (f" (every one requested is DECLINED: {', '.join(set_aside)})" if set_aside else "")
         )
 
     published = tuple(
@@ -464,6 +479,7 @@ def evaluate_green(
             not_published=not_published,
             open_error_flags=open_error_flags,
             day_kind=day_kind,
+            declined=set_aside,
         )
 
     if day_kind is None:
@@ -520,6 +536,9 @@ class SourceStatus:
     last_failure_retryable: bool | None
     counts: Mapping[SyncState, int]
     max_lag_sessions: int | None = None
+    #: Set when the register DECLINED this source on policy grounds (D12/D19). Its rows are
+    #: history from before the decision; it is not owed anything, so it is never overdue or red.
+    declined: Declined | None = None
 
     @property
     def overdue(self) -> bool:
@@ -529,13 +548,20 @@ class SourceStatus:
         2026-10-05 audit's failure was a status surface that said "healthy" about a source three
         weeks stale, and "we cannot tell" must never round up to "healthy" again.
         """
-        if self.max_lag_sessions is None:
+        if self.max_lag_sessions is None or self.declined is not None:
             return False
         return self.lag_sessions is None or self.lag_sessions > self.max_lag_sessions
 
     @property
     def healthy(self) -> bool:
-        """A success, no failure streak, nothing stuck mid-pipeline, and not behind its schedule."""
+        """A success, no failure streak, nothing stuck mid-pipeline, and not behind its schedule.
+
+        A declined source is never reported unhealthy: nothing is owed by a source we chose not
+        to take, and a red line for it would be noise an operator learns to ignore. `declined`
+        says why it is exempt; the counts and streak still report its old rows truthfully.
+        """
+        if self.declined is not None:
+            return True
         in_flight = sum(
             self.counts.get(state, 0)
             for state in (SyncState.FETCHED, SyncState.VALIDATED, SyncState.NORMALIZED)
@@ -636,10 +662,19 @@ class SyncStateStore:
         *,
         clock: Clock | None = None,
         calendar: TradingCalendar | None = None,
+        declined: Mapping[str, Declined] | None = None,
     ) -> None:
         self._conn = conn
         self._clock = SystemClock() if clock is None else clock
         self._calendar = trading_calendar() if calendar is None else calendar
+        self._declined: Mapping[str, Declined] | None = declined
+
+    @property
+    def declined(self) -> Mapping[str, Declined]:
+        """Source id → decline record: the register's DECLINED sources, unless injected."""
+        if self._declined is None:
+            self._declined = _checked_in_declined()
+        return self._declined
 
     @property
     def calendar(self) -> TradingCalendar:
@@ -916,13 +951,16 @@ class SyncStateStore:
             for record in self.rows_for_date(logical_date)
             if record.source in set(wanted)
         }
-        flags = self.open_error_flags(logical_date, wanted) if wanted else 0
+        # A declined source's quality flags are set aside with the source itself (D12/D19).
+        judged = tuple(name for name in wanted if name not in self.declined)
+        flags = self.open_error_flags(logical_date, judged) if judged else 0
         status = evaluate_green(
             logical_date,
             wanted,
             records,
             day_kind=self.day_kind(logical_date),
             open_error_flags=flags,
+            declined=self.declined.keys(),
         )
         _log.info(
             "sync_state.is_green",
@@ -930,6 +968,7 @@ class SyncStateStore:
             green=status.green,
             reason=status.reason,
             datasets=list(wanted),
+            declined=list(status.declined),
         )
         return status
 
@@ -947,7 +986,11 @@ class SyncStateStore:
         budgets = {} if lag_budgets is None else lag_budgets
         rows = self._conn.execute(_SOURCE_STATUS_SQL).fetchall()
         return tuple(
-            self._source_status(row, as_of=as_of, budget=budgets.get(str(row[0]))) for row in rows
+            replace(
+                self._source_status(row, as_of=as_of, budget=budgets.get(str(row[0]))),
+                declined=self.declined.get(str(row[0])),
+            )
+            for row in rows
         )
 
     def _source_status(
@@ -991,6 +1034,12 @@ class SyncStateStore:
             return len(self._calendar.expected_data_dates(last_success + timedelta(days=1), as_of))
         except CalendarCoverageError:
             return None
+
+
+@lru_cache(maxsize=1)
+def _checked_in_declined() -> Mapping[str, Declined]:
+    """The checked-in register's DECLINED sources, read once per process."""
+    return declined_sources()
 
 
 def _source_predicate(sources: Sequence[str] | None) -> tuple[str, tuple[object, ...]]:
