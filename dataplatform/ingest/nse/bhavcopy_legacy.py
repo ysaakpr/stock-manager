@@ -45,6 +45,7 @@ from pydantic import ValidationError
 from dataplatform.ingest.models import (
     BhavcopyParse,
     ParseError,
+    PreIsinPriceRow,
     PriceRow,
     UnidentifiedRow,
     is_keyable_isin,
@@ -62,6 +63,8 @@ __all__ = [
     "parse_l0",
     "parse_pre_isin",
     "parse_pre_isin_l0",
+    "parse_pre_isin_prices",
+    "parse_pre_isin_prices_l0",
     "parse_text",
 ]
 
@@ -363,6 +366,47 @@ def parse_pre_isin_l0(store: L0Store, ref: L0Ref) -> tuple[UnidentifiedRow, ...]
     return parse_pre_isin(store.get(ref), filename=ref.filename)
 
 
+def parse_pre_isin_prices(payload: bytes, *, filename: str) -> tuple[PreIsinPriceRow, ...]:
+    """Read a pre-ISIN (E1) bhavcopy *with its prices*, for the identity resolver.
+
+    What it does: the same structural checks as `parse_pre_isin` (exact E1 header, every row the
+    header's width, every numeric field a plain literal, one session per file), returning one
+    `PreIsinPriceRow` per data row in file order.
+    What it assumes: the caller is `dataplatform.identity.pre_isin` or a writer that only promotes a
+    row the resolver admitted — the rows themselves still have no identity.
+    What it never does: attach an ISIN, or return a `PriceRow`. `parse_pre_isin` is unchanged and
+    remains the enumerator the W1 promotion uses.
+    """
+    text = _text_of(payload, filename=filename)
+    reader = csv.reader(io.StringIO(text))
+    width = _pre_isin_header_width(next(reader, None), filename=filename)
+
+    rows: list[PreIsinPriceRow] = []
+    for record in reader:
+        if not record or not any(value.strip() for value in record):
+            continue
+        rows.append(
+            _pre_isin_price_row(record, line=reader.line_num, width=width, filename=filename)
+        )
+    if not rows:
+        raise ParseError(
+            "no data rows after the header; a session's bhavcopy always has some", filename=filename
+        )
+    sessions = {row.trade_date for row in rows}
+    if len(sessions) > 1:
+        raise ParseError(
+            "rows span more than one session: "
+            f"{', '.join(sorted(day.isoformat() for day in sessions))}",
+            filename=filename,
+        )
+    return tuple(rows)
+
+
+def parse_pre_isin_prices_l0(store: L0Store, ref: L0Ref) -> tuple[PreIsinPriceRow, ...]:
+    """`parse_pre_isin_prices` over a stored L0 payload, re-verifying its checksum on the way in."""
+    return parse_pre_isin_prices(store.get(ref), filename=ref.filename)
+
+
 # ── internals ────────────────────────────────────────────────────────────────────────────────
 
 
@@ -623,6 +667,41 @@ def _pre_isin_row(record: list[str], *, line: int, width: int, filename: str) ->
     except ValidationError as exc:
         raise ParseError(
             f"row is not a valid unidentified row: {exc.errors(include_url=False)}",
+            filename=filename,
+            line=line,
+        ) from exc
+
+
+def _pre_isin_price_row(
+    record: list[str], *, line: int, width: int, filename: str
+) -> PreIsinPriceRow:
+    """One E1 CSV record as a `PreIsinPriceRow`; the same validation as `_pre_isin_row`."""
+    identity = _pre_isin_row(record, line=line, width=width, filename=filename)
+    field = dict(zip(PRE_ISIN_COLUMNS, (value.strip() for value in record), strict=False))
+
+    def dec(column: str) -> Decimal:
+        return _decimal(field[column], column=column, line=line, filename=filename)
+
+    try:
+        return PreIsinPriceRow(
+            symbol=identity.symbol,
+            series=identity.series,
+            trade_date=identity.trade_date,
+            open=dec("OPEN"),
+            high=dec("HIGH"),
+            low=dec("LOW"),
+            close=dec("CLOSE"),
+            last=dec("LAST"),
+            prev_close=dec("PREVCLOSE"),
+            total_traded_qty=_integer(
+                field["TOTTRDQTY"], column="TOTTRDQTY", line=line, filename=filename
+            ),
+            total_traded_value=dec("TOTTRDVAL"),
+            line=line,
+        )
+    except ValidationError as exc:
+        raise ParseError(
+            f"row is not a valid pre-ISIN price row: {exc.errors(include_url=False)}",
             filename=filename,
             line=line,
         ) from exc

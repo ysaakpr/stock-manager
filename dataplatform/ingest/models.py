@@ -45,6 +45,7 @@ __all__ = [
     "BhavcopyParse",
     "IngestError",
     "ParseError",
+    "PreIsinPriceRow",
     "Price",
     "PriceRow",
     "Quantity",
@@ -160,7 +161,12 @@ class PriceRow(BaseModel):
 
     total_traded_qty: Quantity = Field(description="shares traded in the session (TOTTRDQTY)")
     total_traded_value: Price = Field(description="turnover in rupees (TOTTRDVAL)")
-    total_trades: Quantity = Field(description="number of trades executed (TOTALTRADES)")
+    total_trades: Quantity | None = Field(
+        description=(
+            "number of trades executed (TOTALTRADES); None only for a pre-2011-06-22 row the "
+            "pre-ISIN resolver admitted — that era did not publish the column, and absence is not 0"
+        ),
+    )
 
 
 class UnidentifiedRow(BaseModel):
@@ -181,6 +187,35 @@ class UnidentifiedRow(BaseModel):
     series: str = Field(min_length=1, description="NSE series, verbatim")
     trade_date: date = Field(description="the exchange session this row is about (Asia/Kolkata)")
     stated_isin: str = Field(description="the literal the ISIN column held, e.g. 'DUMMY'")
+    line: int = Field(ge=1, description="1-based line in the source file, for the operator")
+
+
+class PreIsinPriceRow(BaseModel):
+    """One E1 (pre-2011-06-22) NSE bhavcopy row with its prices kept — and still no identity.
+
+    What it does: carry everything the eleven-column pre-ISIN bhavcopy states about one
+    `(symbol, series)` on one session, so the identity resolver (`dataplatform.identity.pre_isin`)
+    can test the exchange's own `PREVCLOSE` chain and, where the evidence admits it, a resolved row
+    can be written to `prices_raw` without re-reading L0.
+    What it assumes: the parser has validated the file's structure.
+    What it never does: carry an ISIN. The era published none; an ISIN is attached only by the
+    resolver, and only to a row it can prove, by building a `PriceRow`. There is no
+    `total_trades` either — `TOTALTRADES` did not exist yet, and absence is not zero.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    symbol: str = Field(min_length=1, description="exchange ticker on `trade_date`, as published")
+    series: str = Field(min_length=1, description="NSE series, verbatim")
+    trade_date: date = Field(description="the exchange session this row is about (Asia/Kolkata)")
+    open: Price
+    high: Price
+    low: Price
+    close: Price = Field(description="closing price as the exchange published it, unadjusted")
+    last: Price
+    prev_close: Price = Field(description="the exchange's previous close — CA-adjusted on ex-dates")
+    total_traded_qty: Quantity
+    total_traded_value: Price = Field(description="turnover in rupees (TOTTRDVAL)")
     line: int = Field(ge=1, description="1-based line in the source file, for the operator")
 
 

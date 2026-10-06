@@ -392,7 +392,7 @@ class QueryService:
                 trade_date=row[2],
                 turnover=Decimal(row[3]),
                 volume=int(row[4]),
-                trades=int(row[5]),
+                trades=int(row[5]) if row[5] is not None else None,
             )
             for row in rows
         )

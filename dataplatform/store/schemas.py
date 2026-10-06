@@ -102,6 +102,13 @@ class PriceQuarantineReason:
     #: not be summed as if they were the same problem.
     ISIN_COLUMN_ABSENT: Final = "isin_column_absent"
 
+    #: Prefix of the reasons `dataplatform.ingest.pre_isin_promote` writes for an E1 row the
+    #: pre-ISIN resolver did *not* admit: `isin_column_absent:<PreIsinReason>`, e.g.
+    #: `isin_column_absent:chain_gap`. Same family as `ISIN_COLUMN_ABSENT` (a `LIKE
+    #: 'isin_column_absent%'` still counts every pre-ISIN refusal) with the resolver's enumerated
+    #: reason kept, so the quarantine says *why* a row stayed out, not only *that* it did.
+    ISIN_COLUMN_ABSENT_PREFIX: Final = "isin_column_absent:"
+
     #: A *line*, not a row: the BSE legacy bhavcopy published two records run together (a lost
     #: line terminator — `EQ291221_CSV.ZIP` line 1773) and the split back into two could not be
     #: proven unambiguous, so neither record is trusted. `symbol` holds the line's first field (the
@@ -142,7 +149,9 @@ class PricesRawRow(BaseModel):
 
     total_traded_qty: Quantity = Field(description="shares traded in the session")
     total_traded_value: Price = Field(description="turnover in rupees")
-    total_trades: Quantity = Field(description="number of trades executed")
+    total_trades: Quantity | None = Field(
+        description="number of trades executed; None where the era did not publish it (pre-2011)"
+    )
 
     deliv_qty: int | None = Field(
         default=None, ge=0, description="shares taken to delivery; None when the file wrote '-'"
@@ -192,7 +201,10 @@ PRICES_RAW_SCHEMA: Final = pa.schema(
         pa.field("prev_close", pa.decimal128(20, 4), nullable=False),
         pa.field("total_traded_qty", pa.int64(), nullable=False),
         pa.field("total_traded_value", pa.decimal128(28, 4), nullable=False),
-        pa.field("total_trades", pa.int64(), nullable=False),
+        # Nullable since l1-widen (2026-10-06): the pre-ISIN NSE bhavcopy (before 2011-06-22)
+        # had no TOTALTRADES column, and a resolved row from it states no trade count. Every
+        # partition written before this has no nulls, so the widening needs no rewrite.
+        pa.field("total_trades", pa.int64(), nullable=True),
         pa.field("deliv_qty", pa.int64(), nullable=True),
         pa.field("deliv_pct", pa.decimal128(12, 4), nullable=True),
     ]
