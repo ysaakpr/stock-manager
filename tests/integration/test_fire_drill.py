@@ -54,8 +54,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import textwrap
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
@@ -1012,6 +1014,65 @@ def test_a_bare_run_deselects_every_live_test(repo_root: Path) -> None:
 
     negated, negated_out = _collected(repo_root, "-m", "not live")
     assert not [node for node in negated if "::test_live_" in node], negated_out
+
+
+_SNEAKY_LIVE_TESTS: Final = """
+    import pytest
+
+    @pytest.fixture
+    def live_llm():
+        return object()
+
+    @pytest.fixture
+    def via_helper(live_llm):
+        return live_llm
+
+    @pytest.mark.live
+    def test_marked(live_llm):
+        pass
+
+    {mark}
+    def test_reaches_the_model_through_a_helper(via_helper):
+        pass
+"""
+
+
+def test_every_test_using_the_live_fixture_must_carry_the_live_mark(
+    repo_root: Path, tmp_path: Path
+) -> None:
+    """A test that reaches `live_llm` without `@pytest.mark.live` is refused at collection.
+
+    Name-based deselection alone would miss a test that is not called `test_live_*`, or one that
+    gets the model through an intermediate fixture. The conftest guard reads each test's whole
+    fixture closure instead. This proves it in a throwaway project that carries a copy of the real
+    conftest: the unmarked indirect user is a usage error, and once it is marked, a bare run
+    collects and deselects both tests. Because the guard runs on every collection, this module's
+    own live tests are held to the same rule in every `make check`.
+    """
+    shutil.copy(repo_root / "tests" / "integration" / "conftest.py", tmp_path / "conftest.py")
+    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers =\n    live: real model\n")
+    test_file = tmp_path / "test_sneaky.py"
+
+    def collect() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-p", "no:cacheprovider"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    test_file.write_text(textwrap.dedent(_SNEAKY_LIVE_TESTS.format(mark="")))
+    refused = collect()
+    output = refused.stdout + refused.stderr
+    assert refused.returncode == pytest.ExitCode.USAGE_ERROR, output
+    assert "test_reaches_the_model_through_a_helper" in output
+
+    test_file.write_text(textwrap.dedent(_SNEAKY_LIVE_TESTS.format(mark="@pytest.mark.live")))
+    accepted = collect()
+    output = accepted.stdout + accepted.stderr
+    assert accepted.returncode == pytest.ExitCode.NO_TESTS_COLLECTED, output
+    assert "2 deselected" in output
 
 
 # — the live run itself (`uv run pytest tests/integration/test_fire_drill.py -q -m live`) —
