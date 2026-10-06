@@ -362,8 +362,34 @@ def _write_bse_legacy(parsed: LegacyParse, ctx: WriteContext) -> object:
         exchange=Exchange.BSE,
         unidentified_rows=[_quarantine_row(line, trade_date) for line in parsed.quarantined],
         unidentified_reason=PriceQuarantineReason.MERGED_RECORDS_UNSPLITTABLE,
+        scrip_unresolved_rows=_unresolved_rows(parsed.quotes, resolution.unresolved),
         data_root=ctx.data_root,
     )
+
+
+def _unresolved_rows(
+    quotes: Sequence[bse_bhavcopy.BseLegacyQuote],
+    unresolved: Sequence[bse_bhavcopy.BseLegacyQuote],
+) -> list[UnidentifiedRow]:
+    """The quotes the scrip master could not resolve, as quarantine rows — counted, never dropped.
+
+    Until 2026-10-06 `resolve_legacy`'s `unresolved` was logged (first 20 codes) and discarded
+    here, so a decade of BSE rows vanished without a count (RAW_DATA_CATALOG B1, defect (b)). The
+    pre-2016 deep backfill makes that loss far larger — delisted scrips carry `NA` for an ISIN —
+    so it is enumerated. `line` is the quote's 1-based ordinal + 1 for the header: the file line
+    exactly, except after a merged line the parser split in two.
+    """
+    ordinal = {id(quote): index for index, quote in enumerate(quotes, start=2)}
+    return [
+        UnidentifiedRow(
+            symbol=quote.scrip_code,
+            series=quote.group or "?",
+            trade_date=quote.trade_date,
+            stated_isin="",
+            line=ordinal[id(quote)],
+        )
+        for quote in unresolved
+    ]
 
 
 # ── nse_delivery source set ──────────────────────────────────────────────────────────────────

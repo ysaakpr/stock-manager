@@ -229,7 +229,7 @@ def test_split_merged_records_refuses_a_line_of_another_width() -> None:
 # ── the backfill lands it: split quotes in prices_raw, quarantined line in the quarantine ──────
 
 
-def _master() -> IdentityMaster:
+def _master(known: tuple[str, ...] = SCRIPS_IN_ORDER) -> IdentityMaster:
     scrips = [
         BseScrip(
             scrip_code=code,
@@ -240,19 +240,19 @@ def _master() -> IdentityMaster:
             group="X",
             face_value_inr=Decimal(10),
         )
-        for code in SCRIPS_IN_ORDER
+        for code in known
     ]
     derived = scrip_master.derive_master(scrips, snapshot_date=SESSION)
     return IdentityMaster(derived.windows, securities=derived.securities, listings=derived.listings)
 
 
-def _write(text: str, tmp_path: Path) -> LegacyParse:
+def _write(text: str, tmp_path: Path, known: tuple[str, ...] = SCRIPS_IN_ORDER) -> LegacyParse:
     l0 = L0Store(clock=FrozenClock(SESSION), data_root=tmp_path)
     ref = l0.put(bhavcopy.LEGACY_SOURCE_ID, SESSION, FILENAME, text.encode("utf-8"))
     source_set = backfill.SOURCE_SETS[backfill.BSE_BHAVCOPY_LEGACY]
     parsed: LegacyParse = source_set.parse(l0, ref)
     ctx = backfill.WriteContext(
-        l0=l0, data_root=tmp_path, master=_master(), register=source_register.load()
+        l0=l0, data_root=tmp_path, master=_master(known), register=source_register.load()
     )
     source_set.write(parsed, ctx)
     return parsed
@@ -289,3 +289,23 @@ def test_backfill_quarantines_an_unsplittable_line_with_its_reason(
     assert record["exchange"] == "BSE"
     assert record["trade_date"] == SESSION
     assert record["isin"] is None
+
+
+def test_backfill_quarantines_a_scrip_the_master_cannot_resolve(text: str, tmp_path: Path) -> None:
+    """An unresolved scrip code is enumerated in the quarantine, not counted in a log and dropped.
+
+    Fails on the pre-2026-10-06 writer, which discarded `resolve_legacy`'s `unresolved` (catalog
+    B1 defect (b)) and so left no quarantine partition at all for this session.
+    """
+    _write(text, tmp_path, known=("531352", "531358", "531360"))
+
+    rows = read_prices_raw(SESSION, data_root=tmp_path)
+    assert sorted(str(row["isin"]) for row in rows) == sorted(
+        [_isin(531352), _isin(531358), _isin(531360)]
+    )
+    quarantine = partition_path(
+        Layer.L1, PRICES_RAW_QUARANTINE_DATASET, SESSION, data_root=tmp_path
+    )
+    [record] = pq.read_table(quarantine).to_pylist()
+    assert record["reason"] == "scrip_unresolved"
+    assert (record["symbol"], record["exchange"], record["isin"]) == ("531359", "BSE", None)

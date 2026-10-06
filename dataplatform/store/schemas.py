@@ -109,6 +109,12 @@ class PriceQuarantineReason:
     #: `bhavcopy.legacy_line_quarantined` log event. See `bse.bhavcopy.split_merged_records`.
     MERGED_RECORDS_UNSPLITTABLE: Final = "merged_records_unsplittable"
 
+    #: A BSE legacy price row whose `SC_CODE` the scrip master does not map to an ISIN — mostly
+    #: debt, gsec and ETF counters the master excludes, plus delisted scrips BSE lists with `NA`
+    #: (RAW_DATA_CATALOG B1). `symbol` holds the scrip code as published and `series` its group.
+    #: Until 2026-10-06 these rows were counted in a log line and dropped (catalog B1 defect (b)).
+    SCRIP_UNRESOLVED: Final = "scrip_unresolved"
+
 
 class PricesRawRow(BaseModel):
     """One security's raw traded session on one exchange — the canonical `prices_raw` L1 row.
