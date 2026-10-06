@@ -24,6 +24,7 @@ from typing import Final
 import pytest
 
 from dataplatform.clock import IST
+from dataplatform.ingest import daily_capture
 from dataplatform.ingest.backfill import SOURCE_SETS
 from dataplatform.ingest.daily_snapshot import DEFAULT_SNAPSHOT_SET
 from dataplatform.ingest.eod import DAILY_NSE_SOURCES
@@ -31,9 +32,14 @@ from dataplatform.ingest.source_register import load as load_register
 from dataplatform.scheduler import SchedulerRunner, build_scheduler
 from dataplatform.scheduler.health import JobHealthState, LastRuns, assess, last_due_fire
 from dataplatform.scheduler.registry import (
+    ANNOUNCEMENTS_CAPTURE,
     DAILY_SNAPSHOT,
     EOD_PIPELINE,
+    NEWS_CAPTURE,
+    NSE_DAILY_CAPTURE,
+    SHAREHOLDING_POLL,
     UNSCHEDULED,
+    Job,
     default_registry,
     lag_budgets,
 )
@@ -116,6 +122,119 @@ def test_the_eod_jobs_coverage_is_what_its_body_fetches() -> None:
 
 def test_the_snapshot_jobs_coverage_is_its_snapshot_set() -> None:
     assert set(DAILY_SNAPSHOT.covers) == {spec.source_id for spec in DEFAULT_SNAPSHOT_SET}
+
+
+# ── the capture jobs (ops-daily-capture, 2026-10-06) ─────────────────────────────────────────
+
+#: Register rows that serve only the latest session: a weekday without a capture is a day of
+#: history nothing can recover (their `pit_notes`). Named outright, like the bhavcopy family.
+PERISHABLE: Final = ("nse_fii_dii_flows", "nse_bulk_deals", "nse_block_deals")
+
+#: The nine VERIFIED rows that had a parser and had never landed a byte, as of 2026-10-06.
+NEVER_FETCHED: Final = (
+    "nse_fii_dii_flows",
+    "nse_bulk_deals",
+    "nse_block_deals",
+    "nse_shareholding_pattern",
+    "nse_fo_bhavcopy",
+    "nse_announcements",
+    "bse_announcements",
+    "curated_rss",
+    "gdelt_v2_event_files",
+)
+
+
+@pytest.mark.parametrize(
+    ("job", "sources"),
+    [
+        (NSE_DAILY_CAPTURE, daily_capture.NSE_DAILY_SOURCES),
+        (SHAREHOLDING_POLL, daily_capture.SHAREHOLDING_SOURCES),
+        (ANNOUNCEMENTS_CAPTURE, daily_capture.ANNOUNCEMENT_SOURCES),
+        (NEWS_CAPTURE, daily_capture.NEWS_SOURCES),
+    ],
+    ids=lambda value: value.name if isinstance(value, Job) else "",
+)
+def test_each_capture_jobs_coverage_is_what_its_body_drives(
+    job: Job, sources: tuple[str, ...]
+) -> None:
+    """`covers` is a claim; the body's own source tuple is what it actually fetches."""
+    assert job.covers == sources
+    assert job.sync_sources == sources
+
+
+@pytest.mark.parametrize("source", NEVER_FETCHED)
+def test_the_never_fetched_sources_are_scheduled_with_a_lag_budget(source: str) -> None:
+    budgets = lag_budgets(default_registry())
+    assert source not in UNSCHEDULED
+    assert source in _covered()
+    assert source in budgets
+
+
+@pytest.mark.parametrize("source", PERISHABLE)
+def test_a_perishable_source_is_captured_every_weekday_on_a_one_session_budget(
+    source: str,
+) -> None:
+    jobs = [job for job in default_registry() if source in job.covers]
+    assert any(job.cron.endswith("mon-fri") for job in jobs), f"{source} has no weekday job"
+    assert lag_budgets(default_registry())[source] == 1
+
+
+def _hosts_of(job: Job) -> set[str]:
+    register = {row.id: row for row in load_register().sources}
+    return {register[source].host for source in job.covers if source in register}
+
+
+def _windows(job: Job, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    trigger = job.trigger(IST)
+    windows: list[tuple[datetime, datetime]] = []
+    previous: datetime | None = None
+    cursor = start
+    while True:
+        fire = trigger.get_next_fire_time(previous, cursor)
+        if fire is None or fire > end:
+            return windows
+        windows.append((fire, fire + job.timeout))
+        previous, cursor = fire, fire + timedelta(seconds=1)
+
+
+@pytest.mark.parametrize(
+    "job",
+    [NSE_DAILY_CAPTURE, SHAREHOLDING_POLL, ANNOUNCEMENTS_CAPTURE, NEWS_CAPTURE],
+    ids=lambda job: job.name,
+)
+def test_a_capture_job_never_runs_while_another_job_holds_one_of_its_hosts(job: Job) -> None:
+    """A host lease is refused, not queued: an overlap is a capture that silently does not happen.
+
+    Checked over five weeks from a Monday, so the monthly first-Sunday BSE sweep is in the span.
+    Hosts come from the register rows each job `covers`.
+    """
+    start = datetime(2026, 10, 5, 0, 0, tzinfo=IST)
+    end = start + timedelta(weeks=5)
+    mine = _windows(job, start, end)
+    for other in default_registry():
+        if other.name == job.name or not (_hosts_of(job) & _hosts_of(other)):
+            continue
+        for theirs_start, theirs_end in _windows(other, start - timedelta(days=1), end):
+            for my_start, my_end in mine:
+                assert my_end <= theirs_start or theirs_end <= my_start, (
+                    f"{job.name} {my_start:%a %H:%M} overlaps {other.name} "
+                    f"{theirs_start:%a %H:%M}-{theirs_end:%H:%M} on "
+                    f"{sorted(_hosts_of(job) & _hosts_of(other))}"
+                )
+
+
+def test_the_nse_capture_fires_after_the_evening_publication_and_retries_the_same_night() -> None:
+    """20:00 owes tonight's session; 23:00 is the last same-night chance before the files roll."""
+    fires = [
+        fire
+        for fire, _ in _windows(
+            NSE_DAILY_CAPTURE,
+            MONDAY_EVENING.replace(hour=0),
+            MONDAY_EVENING.replace(hour=23, minute=59),
+        )
+    ]
+    assert [fire.hour for fire in fires] == [20, 23]
+    assert all(fire.time() >= daily_capture.CAPTURE_CUTOFF for fire in fires)
 
 
 def test_the_scheduler_fires_every_registered_job(load_settings: SettingsLoader) -> None:

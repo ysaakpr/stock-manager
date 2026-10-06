@@ -97,6 +97,10 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "index_press_refresh",
         "ca_refresh",
         "bse_ca_sweep",
+        "nse_daily_capture",
+        "shareholding_poll",
+        "announcements_capture",
+        "news_capture",
     )
     assert registry.get("eod_pipeline").cron == "30 18 * * mon-fri"
     # 19:15, after the 18:30 EOD pipeline: the two share nsearchives.nseindia.com, and a host
