@@ -19,13 +19,21 @@ proxy's validation is ``ops/studies/cap-tier-size-measure-2026-10-05.md``).
     floor, pre-tax XIRR, after-tax XIRR on realised gains (resident, 30 % slab, no surcharge, tax
     paid at FY end), max drawdown, return / drawdown, worst calendar year, longest drawdown in days
     to recover, trades, total costs, rail blocks by rail, end cash share and holdings stuck in names
-    that stopped printing; the NIFTY 50, Midcap 150 and Smallcap 250 TRIs on the same windows; and
-    for the smallcap arm the top-5 names' share of profit and the 2018-01 → 2020-03 small-cap crash.
+    whose last NSE EQ print is before the window's end (each flagged when an unconverted merger —
+    one with no sourced terms — explains it); the NIFTY 50, Midcap 150 and Smallcap 250 TRIs on the
+    same windows; and for the smallcap arm the top-5 names' share of profit and the 2018-01 →
+    2020-03 small-cap crash.
     Per window x floor it also splits each arm's idle cash by cause, from the saved ledger and NAV
     (``backtest.idle_cash``): mean cash share of NAV, waiting proceeds, ceiling-bound and other
     leftover, and buys at the per-order ceiling. It flags any arm whose longest buy-free span runs
     past ``EMPTY_TIER_DECISIONS`` decision sessions, with its XIRR from its first buy as an
     informational figure beside the headline.
+
+``render --match-saved-runs`` finds each arm's run on disk by its strategy specification with the
+    store- and lake-derived fields (:data:`STORE_SPEC_FIELDS`) set aside, so runs made against an
+    earlier store can still be rendered once corporate actions or the index history have moved
+    their digests. Each arm must match exactly one saved run; the report names the store the runs
+    recorded.
 
 What this module never does: tune a parameter (every arm is fixed in ``backtest.sweep``), write
 under the lake, read a wall clock into a result, or value a name that stopped printing at anything
@@ -42,7 +50,7 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from decimal import Decimal, localcontext
 from multiprocessing import get_context
 from pathlib import Path
@@ -69,7 +77,7 @@ from backtest.idle_cash import (
 )
 from backtest.nav import nav_file, read_nav
 from backtest.rails import ratified_backtest_rail_policy
-from backtest.run import _first_session_of_each_month, _L1Reader
+from backtest.run import UniverseParameters, _first_session_of_each_month, _L1Reader
 from backtest.run_ledger import (
     RunSummary,
     _replayed_quantities,
@@ -78,12 +86,14 @@ from backtest.run_ledger import (
     refuse_lake_location,
 )
 from backtest.sweep import (
+    _DEFAULT_OPENING_CASH,
     ARMS,
     CAP_TIER_ARMS,
     FOCUSED_SMALLCAP,
     HIGH_FLOOR,
     LOW_FLOOR,
     Arm,
+    _arm_spec,
     l1_grandfathering,
     run_digests,
     run_sweep,
@@ -105,16 +115,23 @@ __all__ = [
     "BENCHMARK_SLUGS",
     "COMPARISON_LABELS",
     "CRASH_WINDOW",
+    "MERGER_IN_STORE",
+    "MERGER_TERMS_UNSOURCED",
+    "STORE_SPEC_FIELDS",
     "CapTierPlan",
     "PathFigures",
+    "StuckHolding",
     "annualised_growth",
     "cap_tier_plan",
     "decision_sessions",
     "longest_drawdown",
     "main",
     "max_drawdown",
+    "merger_flags",
     "name_contributions",
     "path_figures",
+    "saved_run_digests",
+    "stuck_holdings",
     "worst_calendar_year",
 ]
 
@@ -143,6 +160,16 @@ _ZERO = Decimal(0)
 #: figure is the same whatever context the caller runs in.
 _CAGR_PRECISION: Final = 28
 _ONE = Decimal(1)
+#: A held name's merger is a store ``MERGER`` row the curated terms do not cover: no surviving
+#: ISIN, so the book leaves the holding where it is (``backtest.book_actions``).
+MERGER_IN_STORE: Final = "merger in store, unconverted"
+#: A held name's merger is a scheme the curated table lists as unsourced (``MERGER:unsourced``): the
+#: scheme is known, no source states its terms, so the book leaves the holding where it is.
+MERGER_TERMS_UNSOURCED: Final = "merger, terms unsourced"
+#: The specification fields that record the store and lake a run was made against rather than
+#: the strategy it ran: corporate actions in the book, the signal's split factors, the index
+#: membership history. ``render --match-saved-runs`` sets them aside to find a run on disk.
+STORE_SPEC_FIELDS: Final = frozenset({"book_actions", "signal_split_factors", "index_membership"})
 
 
 class CapTierCampaignError(RuntimeError):
@@ -249,6 +276,56 @@ def _digests(
             for (label, floor), digest in digests.items():
                 out[(label, window.name, floor)] = digest
     return out
+
+
+def _strategy_identity(spec: Mapping[str, str]) -> str:
+    kept = {k: v for k, v in spec.items() if k not in STORE_SPEC_FIELDS}
+    return json.dumps(kept, sort_keys=True, separators=(",", ":"))
+
+
+def saved_run_digests(
+    plan: CapTierPlan, actions: BookActionSource | None
+) -> tuple[dict[tuple[str, str, Decimal], str], tuple[str, ...]]:
+    """``(arm, window, floor) -> digest`` of the runs on disk, matched by strategy specification.
+
+    Each arm's specification is built as :func:`_digests` builds it, then compared with every saved
+    run's with :data:`STORE_SPEC_FIELDS` set aside. Fails loud unless each arm matches exactly one
+    saved run. Also returns the distinct ``book_actions`` identities the matched runs recorded, for
+    the report to name. Never replays and never writes; a digest it returns is one already on disk.
+    """
+    saved: dict[str, list[str]] = defaultdict(list)
+    for path in sorted((plan.out_dir / "runs").glob("*.json")):
+        document = json.loads(path.read_text(encoding="utf-8"))
+        saved[_strategy_identity(document["spec"])].append(document["digest"])
+    out: dict[tuple[str, str, Decimal], str] = {}
+    stores: set[str] = set()
+    with ExitStack() as stack:
+        _contexts(stack, actions)
+        for window in plan.windows:
+            for floor in _FLOORS:
+                universe = UniverseParameters(median_turnover_floor=floor)
+                for arm in plan.arms:
+                    spec = _arm_spec(
+                        arm,
+                        start=window.start,
+                        end=window.end,
+                        universe=universe,
+                        opening_cash=_DEFAULT_OPENING_CASH,
+                        adjusted=True,
+                    )
+                    found = saved.get(_strategy_identity(spec), [])
+                    if len(found) != 1:
+                        raise CapTierCampaignError(
+                            f"{arm.label}, {window.name}, floor {floor}: {len(found)} saved runs "
+                            f"match its strategy specification under {plan.out_dir}, not one"
+                        )
+                    out[(arm.label, window.name, floor)] = found[0]
+    for digest in out.values():
+        loaded = load_run(plan.out_dir, digest)
+        if loaded is None:
+            raise CapTierCampaignError(f"run {digest[:12]} has a summary but no ledger on disk")
+        stores.add(loaded[0].spec.get("book_actions", "none"))
+    return out, tuple(sorted(stores))
 
 
 # ── path figures ─────────────────────────────────────────────────────────────────────────────────
@@ -394,6 +471,63 @@ def name_contributions(ledger: RunLedger) -> dict[str, Decimal]:
 
 
 @dataclass(frozen=True, slots=True)
+class StuckHolding:
+    """A name held at a run's end whose last NSE EQ print in the window is before that end."""
+
+    isin: str
+    last_print: date
+    #: Its last printed close x the shares held: the book's terminal mark, never written down.
+    value: Decimal
+    #: :data:`MERGER_IN_STORE`, :data:`MERGER_TERMS_UNSOURCED`, or ``None`` when no unconverted
+    #: merger is on record for the name.
+    merger: str | None
+
+
+def merger_flags(actions: BookActionSource | None) -> dict[str, str]:
+    """Each ISIN with a merger the book leaves unconverted, to the flag the report prints for it.
+
+    Two kinds, both unconverted: a store ``MERGER`` row the curated terms do not cover
+    (:data:`MERGER_IN_STORE`), and a scheme the curated table lists as unsourced
+    (``MERGER:unsourced``, :data:`MERGER_TERMS_UNSOURCED`), which wins when both are on record. A
+    merger with sourced terms converts the holding (PR #41) and so leaves nothing to flag. Reads
+    the whole calendar: a name stuck at a window's end may merge after it.
+    """
+    flags: dict[str, str] = {}
+    for action in actions.between(None, date.max) if actions is not None else ():
+        if not isinstance(action, UnmodelledAction):
+            continue
+        if action.action_type == "MERGER:unsourced":
+            flags[action.isin] = MERGER_TERMS_UNSOURCED
+        elif action.action_type == "MERGER":
+            flags.setdefault(action.isin, MERGER_IN_STORE)
+    return flags
+
+
+def stuck_holdings(
+    values: Mapping[str, Decimal],
+    *,
+    last_prints: Mapping[str, date],
+    terminal_date: date,
+    mergers: Mapping[str, str],
+) -> tuple[StuckHolding, ...]:
+    """The holdings in ``values`` whose last print is before ``terminal_date``, by ISIN.
+
+    ``last_prints`` must be bounded by the run's window (:meth:`backtest.run._L1Reader.last_prints`
+    at the window's end): a lake-wide last print hides a name that stopped inside the window and
+    printed again after it. A held name with no print at all fails loud — it cannot have been
+    bought — rather than being passed as live.
+    """
+    out: list[StuckHolding] = []
+    for isin in sorted(values):
+        last = last_prints.get(isin)
+        if last is None:
+            raise CapTierCampaignError(f"{isin} held at {terminal_date} with no print before it")
+        if last < terminal_date:
+            out.append(StuckHolding(isin, last, values[isin], mergers.get(isin)))
+    return tuple(out)
+
+
+@dataclass(frozen=True, slots=True)
 class RunRow:
     arm: str
     summary: RunSummary
@@ -402,7 +536,7 @@ class RunRow:
     after_tax_error: str | None
     trades: int
     end_cash_share: Decimal
-    stuck: tuple[tuple[str, date, Decimal, bool], ...]  # isin, last print, value, merger in store
+    stuck: tuple[StuckHolding, ...]
     contributions: Mapping[str, Decimal]
     crash: tuple[Decimal, Decimal] | None  # return, max drawdown inside CRASH_WINDOW
     idle: IdleCash
@@ -439,8 +573,8 @@ def _row(
     digest: str,
     *,
     fmv: GrandfatheringPrices,
-    last_print: Mapping[str, date],
-    mergers: frozenset[str],
+    last_prints: Mapping[str, date],
+    mergers: Mapping[str, str],
     decisions: Sequence[date],
 ) -> RunRow:
     loaded = load_run(out_dir, digest)
@@ -462,10 +596,8 @@ def _row(
     held = _replayed_quantities(ledger)
     values = {isin: ledger.terminal_prices[isin] * qty for isin, qty in held.items()}
     cash = ledger.terminal_nav - sum(values.values(), _ZERO)
-    stuck = tuple(
-        (isin, last_print[isin], values[isin], isin in mergers)
-        for isin in sorted(held)
-        if last_print.get(isin, ledger.terminal_date) < ledger.terminal_date
+    stuck = stuck_holdings(
+        values, last_prints=last_prints, terminal_date=ledger.terminal_date, mergers=mergers
     )
     return RunRow(
         arm=arm,
@@ -525,25 +657,13 @@ def _benchmark_path(
     return [(p.as_of, p.tri_value) for p in series.points if window.start <= p.as_of <= window.end]
 
 
-def render(plan: CapTierPlan, *, commit: str) -> str:
-    actions = _actions(plan)
-    digests = _digests(plan, actions)
-    mergers = frozenset(
-        a.isin
-        for a in (actions.between(None, date.max) if actions is not None else ())
-        if isinstance(a, UnmodelledAction) and a.action_type == "MERGER"
-    )
-    reader = _L1Reader(data_root=plan.data_root)
-    try:
-        last_print = {
-            w.isin: w.delisted_on - timedelta(days=1) if w.delisted_on is not None else date.max
-            for w in reader.listing_windows()
-        }
-        sessions = {w.name: reader.trading_sessions(w.start, w.end) for w in plan.windows}
-    finally:
-        reader.close()
-    _service, fmv = l1_grandfathering(plan.data_root)
-    lines = [
+def _header(plan: CapTierPlan, *, commit: str, stores: Sequence[str] | None) -> list[str]:
+    """The report's opening: provenance, investor, and how each column is measured.
+
+    ``stores`` is the corporate-action identities the runs recorded when they were found by
+    :func:`saved_run_digests`, ``None`` when they were found by digest.
+    """
+    return [
         "# Cap-tier strategies vs the current strategies (X2, 2026-10-05)",
         "",
         f"- Runs: `{plan.out_dir}`, made at commit `{commit}`, lake `{plan.data_root}`.",
@@ -558,8 +678,13 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
         "- Money in lakh (₹1 L = ₹100,000).",
         "- **₹1 cr floor: the cost model is unvalidated for small-cap impact cost** — every ₹1 cr "
         "number carries that caveat.",
-        "- A name that stops printing is valued at its last printed close until the end (never "
-        "written down, never credited a merger consideration): see 'stuck' below.",
+        "- A name that stops printing is valued at its last printed close until the end, never "
+        "written down. A merger or cash exit with sourced terms "
+        "(`dataplatform.corpactions.merger_terms`, PR #41) converts the holding into the "
+        "survivor's shares or the exit cash on its date; a merger with no sourced terms is not "
+        "converted. *Stuck at end*: held at the run's end with the last NSE EQ print before the "
+        "window's end, each flagged '" + MERGER_IN_STORE + "' or '" + MERGER_TERMS_UNSOURCED + "' "
+        "when such a merger is on record; listed in the last section.",
         "- **Idle cash** (each window's second table) is rebuilt from the saved ledger and NAV "
         "(`backtest.idle_cash`). It is the mean over NAV sessions of cash / NAV, split into "
         "*waiting proceeds* (sale cash since the last buy session; a buy never spends its own "
@@ -573,8 +698,37 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
         "in for them. *XIRR from first buy* is **informational only**: measured from the "
         "decision session before the first buy. It does not replace the pre-tax XIRR headline, "
         "because the investor's money was in the run from the window's start.",
+        *(
+            [
+                "- Runs matched to arms by strategy specification, store-derived fields ("
+                + ", ".join(sorted(STORE_SPEC_FIELDS))
+                + ") set aside; the runs recorded corporate actions "
+                + "; ".join(f"`{s}`" for s in stores)
+                + ". Merger flags and last prints are read from today's store and lake."
+            ]
+            if stores is not None
+            else []
+        ),
         "",
     ]
+
+
+def render(plan: CapTierPlan, *, commit: str, match_saved_runs: bool = False) -> str:
+    actions = _actions(plan)
+    stores: tuple[str, ...] | None = None
+    if match_saved_runs:
+        digests, stores = saved_run_digests(plan, actions)
+    else:
+        digests = _digests(plan, actions)
+    mergers = merger_flags(actions)
+    reader = _L1Reader(data_root=plan.data_root)
+    try:
+        last_prints = {w.name: reader.last_prints(w.end) for w in plan.windows}
+        sessions = {w.name: reader.trading_sessions(w.start, w.end) for w in plan.windows}
+    finally:
+        reader.close()
+    _service, fmv = l1_grandfathering(plan.data_root)
+    lines = _header(plan, commit=commit, stores=stores)
     rows: dict[tuple[str, Decimal, str], RunRow] = {}
     for window in plan.windows:
         bench = {slug: _benchmark_path(slug, window, plan.data_root) for slug, _ in BENCHMARK_SLUGS}
@@ -594,7 +748,7 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
                     arm.label,
                     digest,
                     fmv=fmv,
-                    last_print=last_print,
+                    last_prints=last_prints[window.name],
                     mergers=mergers,
                     decisions=decision_sessions(arm, sessions[window.name]),
                 )
@@ -607,7 +761,7 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
                     f"| {_pct(s.max_drawdown)} | {'n/a' if ratio is None else f'{ratio:.2f}'} "
                     f"| {_year(row.path.worst_year)} | {_days(row.path)} | {row.trades} "
                     f"| {_lakh(s.total_charges)} | {_blocks(s)} | {_pct(row.end_cash_share)} "
-                    f"| {len(row.stuck)} ({sum(1 for x in row.stuck if x[3])} merger) |"
+                    f"| {_stuck_cell(row.stuck)} |"
                 )
             for slug, label in BENCHMARK_SLUGS:
                 points = bench[slug]
@@ -625,7 +779,14 @@ def render(plan: CapTierPlan, *, commit: str) -> str:
             lines += _idle_cash_table([rows[(window.name, floor, a.label)] for a in plan.arms])
     lines += _empty_tier_section(rows, plan)
     lines += _smallcap_section(rows, plan)
+    lines += _stuck_section(rows, plan)
     return "\n".join(lines) + "\n"
+
+
+def _stuck_cell(stuck: Sequence[StuckHolding]) -> str:
+    in_store = sum(1 for x in stuck if x.merger == MERGER_IN_STORE)
+    unsourced = sum(1 for x in stuck if x.merger == MERGER_TERMS_UNSOURCED)
+    return f"{len(stuck)} ({in_store} merger in store, {unsourced} merger terms unsourced)"
 
 
 def _span(span: BuyFreeSpan | None) -> str:
@@ -698,7 +859,7 @@ def _smallcap_section(
     rows: Mapping[tuple[str, Decimal, str], RunRow], plan: CapTierPlan
 ) -> list[str]:
     lines = [
-        "## Focused smallcap: concentration, the 2018-2020 crash, names that stopped printing",
+        "## Focused smallcap: concentration and the 2018-2020 crash",
         "",
     ]
     full = plan.windows[0]
@@ -730,30 +891,41 @@ def _smallcap_section(
                 + ", ".join(f"{isin} {_lakh(v)}" for isin, v in top)
                 + " |"
             )
-    lines += [
+    lines.append("")
+    return lines
+
+
+def _stuck_section(rows: Mapping[tuple[str, Decimal, str], RunRow], plan: CapTierPlan) -> list[str]:
+    lines = [
+        "## Holdings stuck in names that stopped printing before the window's end",
         "",
-        "**Holdings stuck in names that stopped printing (full window, at the end):**",
+        "Every window, at its end: held, with the last NSE EQ print before the window's last "
+        "session, valued at that print's close.",
         "",
     ]
-    for floor in _FLOORS:
-        for label in (
-            FOCUSED_SMALLCAP,
-            *(a.label for a in plan.arms if a.label != FOCUSED_SMALLCAP),
-        ):
-            row = rows[(full.name, floor, label)]
-            if not row.stuck:
-                continue
-            stuck_value = sum((value for _, _, value, _ in row.stuck), _ZERO)
-            share = stuck_value / row.summary.final_nav if row.summary.final_nav else _ZERO
-            detail = "; ".join(
-                f"{isin} last print {last}, valued {_lakh(value)}"
-                + (" (MERGER in store)" if merger else "")
-                for isin, last, value, merger in row.stuck
-            )
-            lines.append(
-                f"- {_floor(floor).split(' (')[0]}, {label}: {len(row.stuck)} names, "
-                f"{_lakh(stuck_value)} = {share:.2%} of the final NAV — {detail}"
-            )
+    for window in plan.windows:
+        for floor in _FLOORS:
+            for label in (
+                FOCUSED_SMALLCAP,
+                *(a.label for a in plan.arms if a.label != FOCUSED_SMALLCAP),
+            ):
+                row = rows[(window.name, floor, label)]
+                if not row.stuck:
+                    continue
+                stuck_value = sum((x.value for x in row.stuck), _ZERO)
+                share = stuck_value / row.summary.final_nav if row.summary.final_nav else _ZERO
+                detail = "; ".join(
+                    f"{x.isin} last print {x.last_print}, valued {_lakh(x.value)}"
+                    + (f" ({x.merger})" if x.merger else "")
+                    for x in row.stuck
+                )
+                lines.append(
+                    f"- {window.name}, {_floor(floor).split(' (')[0]}, {label}: "
+                    f"{len(row.stuck)} names, {_lakh(stuck_value)} = {share:.2%} of the final "
+                    f"NAV — {detail}"
+                )
+    if len(lines) == 5:
+        lines.append("None.")
     lines.append("")
     return lines
 
@@ -767,6 +939,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--match-saved-runs",
+        action="store_true",
+        help="render: find runs by strategy spec, store-derived fields set aside",
+    )
     args = parser.parse_args(argv)
     data_root = args.data_root.resolve()
     out_dir = refuse_lake_location(args.out.resolve(), data_root)
@@ -794,7 +971,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for outcome in outcomes:
             print(outcome)
         return 1 if any(o.failed for o in outcomes) else 0
-    report = render(plan, commit=commit)
+    report = render(plan, commit=commit, match_saved_runs=args.match_saved_runs)
     path = out_dir / "reports" / "cap-tiers.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(report, encoding="utf-8")
