@@ -72,7 +72,6 @@ identity is the ISIN.
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
@@ -100,7 +99,10 @@ from backtest.book_actions import (
     BookActionCalendar,
     BookActionSource,
     CashDividend,
+    CashExit,
+    IsinReissue,
     ShareRescale,
+    ShareSwap,
 )
 from backtest.policies.momentum_v2 import (
     PAPER_RATIFIED_2026_09_06,
@@ -155,12 +157,15 @@ if TYPE_CHECKING:
     from dataplatform.scheduler.registry import JobContext
 
 __all__ = [
+    "CHANGED_ACTION_EVENT",
     "EOD_DUE_AT",
     "LATE_ACTION_EVENT",
     "PAPER_BOOK_ID",
     "PAPER_DATASETS",
     "PAPER_MODE",
     "PAPER_OPENING_CASH",
+    "ActionStatus",
+    "BookedAction",
     "InMemoryPaperSessionStore",
     "JournalSink",
     "L1PaperWorld",
@@ -171,12 +176,14 @@ __all__ = [
     "PaperSessionRecord",
     "PaperSessionResult",
     "PaperSessionStore",
+    "PaperSessionSummary",
     "PaperWorld",
     "PostgresPaperSessionStore",
     "RecordingJournal",
     "RunVerdict",
     "SessionOutcome",
-    "action_key",
+    "action_identity",
+    "action_terms",
     "owed_session",
     "ratified_paper_book",
     "require_paper_broker",
@@ -219,6 +226,8 @@ _CALENDAR_HEADROOM = timedelta(days=45)
 _OWED_LOOKBACK_DAYS = 10
 #: The payload ``event`` on a late corporate action's journal entry.
 LATE_ACTION_EVENT: Final = "LATE_CORPORATE_ACTION"
+#: The payload ``event`` on an already-seen action whose terms have since changed.
+CHANGED_ACTION_EVENT: Final = "CHANGED_CORPORATE_ACTION"
 
 
 # ── errors ───────────────────────────────────────────────────────────────────────────────────────
@@ -304,6 +313,50 @@ def ratified_paper_book() -> PaperBookSpec:
     )
 
 
+class ActionStatus(StrEnum):
+    """What the book did with a corporate action it has seen (``paper_session.actions``)."""
+
+    BOOKED = "BOOKED"
+    """Applied to the book — or nothing to apply, because the book did not hold the name."""
+
+    ESCALATED = "ESCALATED"
+    """Not applied: booking it mechanically was not safe. Blocks the book until the owner records
+    a resolution (``paper_session_resolution``), as red data blocks it (invariant #10)."""
+
+
+@dataclass(frozen=True, slots=True)
+class BookedAction:
+    """One corporate action as this book has seen it: identity, terms, effect, outcome.
+
+    ``key`` is the action's *identity* (:func:`action_identity`) — what it is, never its terms —
+    and ``terms`` a digest of its economic terms (:func:`action_terms`), so a corrected record is
+    recognised as the same action with different terms rather than a new one. ``held`` says the
+    book held the name when the action was seen, i.e. the action did (or would have) moved it.
+    """
+
+    key: str
+    terms: str
+    held: bool
+    status: ActionStatus
+
+    def to_document(self) -> dict[str, str]:
+        return {
+            "key": self.key,
+            "terms": self.terms,
+            "held": "true" if self.held else "false",
+            "status": self.status.value,
+        }
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, str]) -> BookedAction:
+        return cls(
+            key=document["key"],
+            terms=document["terms"],
+            held=document["held"] == "true",
+            status=ActionStatus(document["status"]),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class PaperSessionRecord:
     """One ``paper_session`` row: what a session concluded and what the next one resumes from.
@@ -312,8 +365,8 @@ class PaperSessionRecord:
     order; ``pending`` the momentum policy's redeploy target carried to the next session;
     ``book_state`` the broker's whole state after the session (``{"broker": SimBrokerState
     document, "session_ledger": [...]}``) and ``book_digest`` the sha256 of its broker part;
-    ``actions`` the identity keys of the corporate actions this session booked. A red record holds
-    none of them.
+    ``actions`` the corporate actions this session saw for the first time, or saw with changed
+    terms. A red record holds none of them.
     """
 
     book_id: str
@@ -326,7 +379,7 @@ class PaperSessionRecord:
     pending: Mapping[str, Decimal] | None = None
     book_state: Mapping[str, Any] | None = None
     book_digest: str | None = None
-    actions: tuple[str, ...] = ()
+    actions: tuple[BookedAction, ...] = ()
 
     def __post_init__(self) -> None:
         if self.outcome is SessionOutcome.SKIPPED_DATA_RED and (
@@ -349,6 +402,16 @@ class PaperSessionRecord:
             raise PaperSessionError(f"{self.trading_date.isoformat()} recorded no book state")
         return SimBrokerState.from_document(self.book_state["broker"])
 
+    def summary(self) -> PaperSessionSummary:
+        """This record without its book state — what the per-run index reads."""
+        return PaperSessionSummary(
+            trading_date=self.trading_date,
+            outcome=self.outcome,
+            rebalanced=self.rebalanced,
+            traded=frozenset(order.isin for order in self.orders),
+            actions=self.actions,
+        )
+
     def orders_document(self) -> list[dict[str, str | None]]:
         """``orders`` as JSON-safe strings — Decimals never travel as JSON numbers."""
         return [_order_document(order) for order in self.orders]
@@ -358,6 +421,10 @@ class PaperSessionRecord:
         if self.pending is None:
             return None
         return {isin: str(weight) for isin, weight in sorted(self.pending.items())}
+
+    def actions_document(self) -> list[dict[str, str]]:
+        """``actions`` as JSON-safe strings."""
+        return [action.to_document() for action in self.actions]
 
     @classmethod
     def from_documents(
@@ -373,7 +440,7 @@ class PaperSessionRecord:
         pending: Mapping[str, str] | None,
         book_state: Mapping[str, Any] | None,
         book_digest: str | None,
-        actions: Sequence[str],
+        actions: Sequence[Mapping[str, str]],
     ) -> PaperSessionRecord:
         """The record a stored row describes (the inverse of the ``*_document`` methods)."""
         return cls(
@@ -391,8 +458,25 @@ class PaperSessionRecord:
             ),
             book_state=book_state,
             book_digest=book_digest,
-            actions=tuple(actions),
+            actions=tuple(BookedAction.from_document(action) for action in actions),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSessionSummary:
+    """A ``paper_session`` row without its book state: what each run indexes over the history.
+
+    A run needs the full state of one session only (the latest decided one, or the one entering a
+    late action's ex-date); for every other row it needs only the date, the outcome, whether it
+    rebalanced, which names it traded and which corporate actions it saw — so that is all the
+    store reads for them.
+    """
+
+    trading_date: date
+    outcome: SessionOutcome
+    rebalanced: bool
+    traded: frozenset[str]
+    actions: tuple[BookedAction, ...]
 
 
 def _order_document(order: OrderRequest) -> dict[str, str | None]:
@@ -434,13 +518,23 @@ def _state_digest(state: SimBrokerState) -> str:
 
 
 class PaperSessionStore(Protocol):
-    """Where a paper book's session records live — Postgres in production, a dict in a test."""
+    """Where a paper book's session records live — Postgres in production, a dict in a test.
+
+    Reads are shaped so a run loads one full book state (two for a late corporate action), never
+    every row's: ``summaries`` for the index, ``latest_completed`` for the snapshot.
+    """
 
     def get(self, book_id: str, trading_date: date) -> PaperSessionRecord | None:
-        """The record for one date, or ``None``."""
+        """The full record for one date, or ``None``."""
 
-    def history(self, book_id: str, *, before: date) -> tuple[PaperSessionRecord, ...]:
-        """Every record strictly before ``before``, oldest first."""
+    def summaries(self, book_id: str, *, before: date) -> tuple[PaperSessionSummary, ...]:
+        """Every record strictly before ``before``, without book state, oldest first."""
+
+    def latest_completed(self, book_id: str, *, before: date) -> PaperSessionRecord | None:
+        """The latest ``COMPLETED`` record strictly before ``before``, in full, or ``None``."""
+
+    def resolutions(self, book_id: str) -> frozenset[str]:
+        """The action keys the owner has marked resolved (``paper_session_resolution``)."""
 
     def record(self, record: PaperSessionRecord, *, recorded_at: datetime) -> None:
         """Write a record. A COMPLETED date is final; only a red record may be superseded."""
@@ -449,18 +543,41 @@ class PaperSessionStore(Protocol):
 class InMemoryPaperSessionStore:
     """A ``PaperSessionStore`` over a dict — the same contract as the Postgres one, no database."""
 
-    __slots__ = ("_rows",)
+    __slots__ = ("_resolved", "_rows")
 
     def __init__(self) -> None:
         self._rows: dict[tuple[str, date], PaperSessionRecord] = {}
+        self._resolved: set[tuple[str, str]] = set()
 
     def get(self, book_id: str, trading_date: date) -> PaperSessionRecord | None:
         return self._rows.get((book_id, trading_date))
 
-    def history(self, book_id: str, *, before: date) -> tuple[PaperSessionRecord, ...]:
-        return tuple(
+    def _before(self, book_id: str, before: date) -> list[PaperSessionRecord]:
+        return [
             self._rows[key] for key in sorted(self._rows) if key[0] == book_id and key[1] < before
-        )
+        ]
+
+    def summaries(self, book_id: str, *, before: date) -> tuple[PaperSessionSummary, ...]:
+        return tuple(record.summary() for record in self._before(book_id, before))
+
+    def latest_completed(self, book_id: str, *, before: date) -> PaperSessionRecord | None:
+        completed = [
+            record
+            for record in self._before(book_id, before)
+            if record.outcome is SessionOutcome.COMPLETED
+        ]
+        return completed[-1] if completed else None
+
+    def resolutions(self, book_id: str) -> frozenset[str]:
+        return frozenset(key for book, key in self._resolved if book == book_id)
+
+    def records(self, book_id: str) -> tuple[PaperSessionRecord, ...]:
+        """Every full record of the book, oldest first — for a test to inspect or copy."""
+        return tuple(self._before(book_id, date.max))
+
+    def resolve(self, book_id: str, key: str) -> None:
+        """What the owner's ``INSERT INTO paper_session_resolution`` does (runbook)."""
+        self._resolved.add((book_id, key))
 
     def record(self, record: PaperSessionRecord, *, recorded_at: datetime) -> None:
         key = (record.book_id, record.trading_date)
@@ -499,13 +616,37 @@ class PostgresPaperSessionStore:
         ).fetchone()
         return None if row is None else _record_of(row)
 
-    def history(self, book_id: str, *, before: date) -> tuple[PaperSessionRecord, ...]:
+    def summaries(self, book_id: str, *, before: date) -> tuple[PaperSessionSummary, ...]:
         rows = self._conn.execute(
-            f"SELECT {_COLUMNS} FROM paper_session WHERE book_id = %s AND trading_date < %s "
-            "ORDER BY trading_date",
+            "SELECT trading_date, outcome, rebalanced, "
+            "ARRAY(SELECT DISTINCT o->>'isin' FROM jsonb_array_elements(orders) AS o), actions "
+            "FROM paper_session WHERE book_id = %s AND trading_date < %s ORDER BY trading_date",
             (book_id, before),
         ).fetchall()
-        return tuple(_record_of(row) for row in rows)
+        return tuple(
+            PaperSessionSummary(
+                trading_date=trading_date,
+                outcome=SessionOutcome(outcome),
+                rebalanced=rebalanced,
+                traded=frozenset(traded),
+                actions=tuple(BookedAction.from_document(action) for action in actions),
+            )
+            for trading_date, outcome, rebalanced, traded, actions in rows
+        )
+
+    def latest_completed(self, book_id: str, *, before: date) -> PaperSessionRecord | None:
+        row = self._conn.execute(
+            f"SELECT {_COLUMNS} FROM paper_session WHERE book_id = %s AND trading_date < %s "
+            "AND outcome = 'COMPLETED' ORDER BY trading_date DESC LIMIT 1",
+            (book_id, before),
+        ).fetchone()
+        return None if row is None else _record_of(row)
+
+    def resolutions(self, book_id: str) -> frozenset[str]:
+        rows = self._conn.execute(
+            "SELECT action_key FROM paper_session_resolution WHERE book_id = %s", (book_id,)
+        ).fetchall()
+        return frozenset(row[0] for row in rows)
 
     def record(self, record: PaperSessionRecord, *, recorded_at: datetime) -> None:
         row = self._conn.execute(
@@ -531,7 +672,7 @@ class PostgresPaperSessionStore:
                 record.journal_digest,
                 None if record.book_state is None else Json(dict(record.book_state)),
                 record.book_digest,
-                Json(list(record.actions)),
+                Json(record.actions_document()),
                 recorded_at,
             ),
         ).fetchone()
@@ -796,10 +937,135 @@ def _mirror(sim: SimBroker) -> PortfolioBook:
 # ── corporate actions: booked once, on the first session they are known ──────────────────────────
 
 
-def action_key(action: BookAction) -> str:
-    """A stable identity for a book action — its type, ex-date, ISIN and a digest of its terms."""
-    terms = hashlib.sha256(repr(action).encode()).hexdigest()[:16]
-    return f"{type(action).__name__}:{action.ex_date.isoformat()}:{action.isin}:{terms}"
+def action_identity(action: BookAction) -> str:
+    """What a corporate action *is* — stable across corrections, re-sourcing and code changes.
+
+    Built from fields that name the event and nothing else: the kind of action (a fixed tag, not
+    the class name), its ISIN and ex-date,
+    and for a share rescale its kind (a split and a bonus on one ex-date are two events). Never
+    its terms (a corrected ratio or amount is the same event with different terms — see
+    :func:`action_terms`), never its provenance (an ``IMPLIED`` split replaced by its ``FEED`` row
+    is the same split) and never the dataclass as a whole, so a field added to the class later
+    cannot re-key every action the book has seen and book it a second time.
+    """
+    base = f"{_tag_of(action)}:{action.isin}:{action.ex_date.isoformat()}"
+    if isinstance(action, ShareRescale):
+        return f"{base}:{action.kind.value}"
+    return base
+
+
+def _tag_of(action: BookAction) -> str:
+    """A fixed name per kind of action — not the class name, which a subclass or rename changes."""
+    if isinstance(action, CashDividend):
+        return "DIVIDEND"
+    if isinstance(action, ShareRescale):
+        return "RESCALE"
+    if isinstance(action, IsinReissue):
+        return "REISSUE"
+    if isinstance(action, ShareSwap):
+        return "SWAP"
+    if isinstance(action, CashExit):
+        return "EXIT"
+    return "UNMODELLED"
+
+
+def _terms_of(action: BookAction) -> dict[str, str]:
+    """The economic terms of an action, by an explicit allow-list per type (see action_terms)."""
+    if isinstance(action, CashDividend):
+        return {"per_share": str(action.per_share.normalize())}
+    if isinstance(action, ShareRescale):
+        # The ratio, not the pair: 2:1 and 10:5 are one split, whoever reported it.
+        return {"ratio": str((action.numerator / action.denominator).normalize())}
+    if isinstance(action, IsinReissue):
+        return {"from_isin": action.from_isin, "explained": str(action.explained)}
+    if isinstance(action, ShareSwap):
+        return {
+            "surviving_isin": action.surviving_isin,
+            "ratio": str((action.numerator / action.denominator).normalize()),
+            "cash_per_share": str(action.cash_per_share.normalize()),
+        }
+    if isinstance(action, CashExit):
+        return {"price": str(action.price.normalize())}
+    return {"action_type": action.action_type}
+
+
+def action_terms(action: BookAction) -> str:
+    """A digest of what an action does to a book — the amount, the ratio, the counterparty.
+
+    An explicit allow-list per type rather than the whole record: provenance (``source``,
+    ``carried_from``), knowability (``knowable_date``, ``record_date``) and any field a later
+    version adds are not terms, so they can neither make a re-sourced action look corrected nor a
+    corrected one look new. Decimals are normalised, so ``2`` and ``2.0`` agree.
+    """
+    return digest_of(canonical_bytes(_terms_of(action)))[:16]
+
+
+def _rescale_family(action: BookAction) -> str | None:
+    """The kind-free identity of a rescale: an implied SPLIT re-reported as a BONUS is one event."""
+    if isinstance(action, ShareRescale):
+        return f"RESCALE:{action.isin}:{action.ex_date.isoformat()}"
+    return None
+
+
+@dataclass(slots=True)
+class _ActionIndex:
+    """Every corporate action this book has seen, latest entry per identity, from the summaries."""
+
+    seen: dict[str, BookedAction]
+    #: kind-free rescale identity -> the terms of each rescale booked under it.
+    rescales: dict[str, set[str]]
+
+    @classmethod
+    def of(cls, summaries: Sequence[PaperSessionSummary]) -> _ActionIndex:
+        seen: dict[str, BookedAction] = {}
+        rescales: dict[str, set[str]] = {}
+        for summary in summaries:
+            for booked in summary.actions:
+                seen[booked.key] = booked
+                if booked.key.startswith("RESCALE:"):
+                    family = booked.key.rsplit(":", 1)[0]
+                    rescales.setdefault(family, set()).add(booked.terms)
+        return cls(seen, rescales)
+
+    def escalated(self) -> list[str]:
+        return sorted(k for k, b in self.seen.items() if b.status is ActionStatus.ESCALATED)
+
+
+@dataclass(frozen=True, slots=True)
+class _Sorted:
+    """The known actions of one session, sorted by what the book must do with each."""
+
+    on_time: tuple[BookAction, ...]
+    late: tuple[BookAction, ...]
+    changed: tuple[tuple[BookAction, BookedAction], ...]
+    #: Seen before with these terms (or an implied rescale's feed twin): nothing to do.
+    unchanged: int
+
+
+def _sort_actions(
+    actions: Iterable[BookAction], index: _ActionIndex, last_decided: date
+) -> _Sorted:
+    on_time: list[BookAction] = []
+    late: list[BookAction] = []
+    changed: list[tuple[BookAction, BookedAction]] = []
+    unchanged = 0
+    for action in actions:
+        key, terms = action_identity(action), action_terms(action)
+        prior = index.seen.get(key)
+        if prior is not None:
+            if prior.terms == terms:
+                unchanged += 1
+            else:
+                changed.append((action, prior))
+            continue
+        family = _rescale_family(action)
+        if family is not None and terms in index.rescales.get(family, set()):
+            # The same ratio already booked on this name and ex-date under the other kind: an
+            # implied rescale re-reported by the feed. Booking it would rescale the book twice.
+            unchanged += 1
+            continue
+        (late if action.ex_date <= last_decided else on_time).append(action)
+    return _Sorted(tuple(on_time), tuple(late), tuple(changed), unchanged)
 
 
 def _held_in(state: SimBrokerState, isin: str) -> int:
@@ -809,14 +1075,79 @@ def _held_in(state: SimBrokerState, isin: str) -> int:
     return settled + pending
 
 
-def _book_late(
-    late: Sequence[BookAction],
-    sim: SimBroker,
-    completed: Sequence[PaperSessionRecord],
+def _action_entry(
+    action: BookAction,
+    decision: Decision,
+    rationale: str,
+    payload: Mapping[str, str],
     trading_date: date,
     spec: PaperBookSpec,
     clock: Clock,
-) -> list[JournalEntry]:
+) -> JournalEntry:
+    _LOG.warning(
+        "paper_session.corporate_action",
+        book=spec.book_id,
+        action=action_identity(action),
+        decision=decision.value,
+        payload_event=payload.get("event", ""),
+    )
+    return JournalEntry(
+        ts=clock.now(),
+        trading_date=trading_date,
+        actor=Actor.SYSTEM,
+        decision=decision,
+        isin=action.isin,
+        sleeve=spec.parameters.sleeve,
+        rationale=rationale,
+        payload={**payload, **_tag(spec)},
+    )
+
+
+def _changed_terms(
+    changed: Sequence[tuple[BookAction, BookedAction]],
+    trading_date: date,
+    spec: PaperBookSpec,
+    clock: Clock,
+) -> tuple[list[JournalEntry], list[BookedAction]]:
+    """A seen action whose terms have since changed: never re-credited, never re-booked.
+
+    The book already acted on the old terms (or had nothing to act on). If it held the name, the
+    difference is a correction the owner must judge — journaled ``ESCALATE``, which blocks the book
+    until resolved; if it did not, the new terms change nothing and are recorded silently.
+    """
+    entries: list[JournalEntry] = []
+    seen: list[BookedAction] = []
+    for action, prior in changed:
+        terms = action_terms(action)
+        if not prior.held:
+            seen.append(BookedAction(prior.key, terms, held=False, status=prior.status))
+            continue
+        entries.append(
+            _action_entry(
+                action,
+                Decision.ESCALATE,
+                f"not re-booked: {prior.key} was already booked with terms {prior.terms}; the "
+                f"store now reports terms {terms} ({_terms_of(action)}). The book is not credited "
+                "or rescaled again — owner review, and the book trades no more until resolved",
+                {"event": CHANGED_ACTION_EVENT, "action": prior.key, "terms": terms},
+                trading_date,
+                spec,
+                clock,
+            )
+        )
+        seen.append(BookedAction(prior.key, terms, held=True, status=ActionStatus.ESCALATED))
+    return entries, seen
+
+
+def _book_late(
+    late: Sequence[BookAction],
+    sim: SimBroker,
+    store: PaperSessionStore,
+    summaries: Sequence[PaperSessionSummary],
+    trading_date: date,
+    spec: PaperBookSpec,
+    clock: Clock,
+) -> tuple[list[JournalEntry], list[BookedAction]]:
     """Book corporate actions learnt after the book decided past their ex-date, on this session.
 
     Entitlement is the book as it stood entering the ex-date — the state the last decided session
@@ -827,18 +1158,18 @@ def _book_late(
     and the action is escalated to the owner instead. Each one is journaled; none rewrites the past.
     """
     entries: list[JournalEntry] = []
+    seen: list[BookedAction] = []
     for action in late:
-        before = [r for r in completed if r.trading_date < action.ex_date]
-        if not before:
-            continue
-        entitled = _held_in(before[-1].broker_state(), action.isin)
-        if entitled == 0:
+        key, terms = action_identity(action), action_terms(action)
+        entering = store.latest_completed(spec.book_id, before=action.ex_date)
+        entitled = 0 if entering is None else _held_in(entering.broker_state(), action.isin)
+        if entering is None or entitled == 0:
+            seen.append(BookedAction(key, terms, held=False, status=ActionStatus.BOOKED))
             continue
         traded_since = any(
-            order.isin == action.isin
-            for record in completed
-            if record.trading_date >= before[-1].trading_date
-            for order in record.orders
+            action.isin in summary.traded
+            for summary in summaries
+            if summary.trading_date >= entering.trading_date
         )
         what = (
             f"{type(action).__name__} on {action.isin} ex {action.ex_date.isoformat()}, learnt "
@@ -846,12 +1177,12 @@ def _book_late(
         )
         payload = {
             "event": LATE_ACTION_EVENT,
-            "action": action_key(action),
+            "action": key,
+            "terms": terms,
             "ex_date": action.ex_date.isoformat(),
             "entitled": str(entitled),
-            "paper_book": spec.book_id,
-            "mode": PAPER_MODE,
         }
+        status = ActionStatus.BOOKED
         if isinstance(action, CashDividend):
             amount = action.per_share * entitled
             sim.credit_corporate_cash(
@@ -860,10 +1191,8 @@ def _book_late(
                 amount,
                 f"LATE DIVIDEND {entitled} x {action.per_share} ex {action.ex_date.isoformat()}",
             )
-            decision, rationale = (
-                Decision.HOLD,
-                f"booked late: {what}; credited {entitled} x {action.per_share} = {amount}",
-            )
+            decision = Decision.HOLD
+            rationale = f"booked late: {what}; credited {entitled} x {action.per_share} = {amount}"
             payload["amount"] = str(amount)
         elif (
             isinstance(action, ShareRescale)
@@ -876,37 +1205,23 @@ def _book_late(
                 denominator=action.denominator,
                 ex_date=trading_date,
             )
-            decision, rationale = (
-                Decision.HOLD,
+            decision = Decision.HOLD
+            rationale = (
                 f"booked late: {what}; {action.kind.value} {action.numerator}:"
-                f"{action.denominator} rescaled {old} shares to {new}",
+                f"{action.denominator} rescaled {old} shares to {new}"
             )
         else:
-            decision, rationale = (
-                Decision.ESCALATE,
+            decision, status = Decision.ESCALATE, ActionStatus.ESCALATED
+            rationale = (
                 f"not booked: {what}; the book has traded the name since or the action is not a "
-                "dividend or a split/bonus, so it cannot be booked mechanically — owner review",
+                "dividend or a split/bonus, so it cannot be booked mechanically — owner review, "
+                "and the book trades no more until resolved"
             )
-        _LOG.warning(
-            "paper_session.late_corporate_action",
-            book=spec.book_id,
-            action=action_key(action),
-            decision=decision.value,
-            entitled=entitled,
-        )
         entries.append(
-            JournalEntry(
-                ts=clock.now(),
-                trading_date=trading_date,
-                actor=Actor.SYSTEM,
-                decision=decision,
-                isin=action.isin,
-                sleeve=spec.parameters.sleeve,
-                rationale=rationale,
-                payload=payload,
-            )
+            _action_entry(action, decision, rationale, payload, trading_date, spec, clock)
         )
-    return entries
+        seen.append(BookedAction(key, terms, held=True, status=status))
+    return entries, seen
 
 
 # ── the policy, as the paper book drives it ──────────────────────────────────────────────────────
@@ -1035,6 +1350,14 @@ def run_paper_session(
             trading_date, RunVerdict.ALREADY_DECIDED, "already decided", record=existing
         )
 
+    newest = store.latest_completed(spec.book_id, before=date.max)
+    if newest is not None and trading_date < newest.trading_date:
+        raise PaperSessionError(
+            f"{trading_date.isoformat()} is before {newest.trading_date.isoformat()}, the book's "
+            "latest decided session; a paper book decides forward only (deciding an earlier date "
+            "would fork it from a stale snapshot)"
+        )
+
     # Frozen on the session date: every entry this session journals is stamped midnight IST of the
     # session, as in every replay (module docstring, "Journal timestamps").
     session_clock = FrozenClock(trading_date)
@@ -1042,14 +1365,26 @@ def run_paper_session(
     if red is not None:
         return _skip(spec, trading_date, red, existing, store, journal, session_clock, clock)
 
-    history = store.history(spec.book_id, before=trading_date)
-    completed = [record for record in history if record.outcome is SessionOutcome.COMPLETED]
-    last = completed[-1] if completed else None
+    summaries = store.summaries(spec.book_id, before=trading_date)
+    decided = [s for s in summaries if s.outcome is SessionOutcome.COMPLETED]
+    index = _ActionIndex.of(summaries)
+    unresolved = [key for key in index.escalated() if key not in store.resolutions(spec.book_id)]
+    if unresolved:
+        # An escalated corporate action means the book's state is in question; trading on it would
+        # be trading on data the owner has not accepted — the same rule as red data (#10).
+        reason = (
+            "unresolved corporate-action escalation(s) on a held name: "
+            + ", ".join(unresolved)
+            + "; resolve per ops/runbooks/daily-eod.md before the book trades again"
+        )
+        return _skip(spec, trading_date, reason, existing, store, journal, session_clock, clock)
+
+    last = store.latest_completed(spec.book_id, before=trading_date)
     rebalance = not any(
-        record.rebalanced
-        and (record.trading_date.year, record.trading_date.month)
+        summary.rebalanced
+        and (summary.trading_date.year, summary.trading_date.month)
         == (trading_date.year, trading_date.month)
-        for record in completed
+        for summary in decided
     )
     data = world.momentum_data(trading_date, spec.parameters)
     policy = MomentumV2Policy(
@@ -1065,17 +1400,31 @@ def run_paper_session(
     held = _Held()
     sim = _restore_book(spec, world, last, trading_date, session_clock, held)
 
-    # Corporate actions known now and not yet booked by this book. Nothing on or before the day the
-    # book opened can concern it (it held nothing until that session's orders filled).
-    booked = {key for record in history for key in record.actions}
+    # Corporate actions known now. Nothing on or before the day the book opened can concern it (it
+    # held nothing until that session's orders filled). Each is sorted against what the book has
+    # already seen: new and on time, new and late, seen with the same terms, seen with new terms.
     source = world.corporate_actions()
-    due: list[BookAction] = []
+    known: list[BookAction] = []
     if last is not None and source is not None:
-        inception = completed[0].trading_date
-        due = [a for a in source.between(inception, trading_date) if action_key(a) not in booked]
-    late = [a for a in due if last is not None and a.ex_date <= last.trading_date]
-    on_time = [a for a in due if a not in late]
-    late_entries = _book_late(late, sim, completed, trading_date, spec, session_clock)
+        known = list(source.between(decided[0].trading_date, trading_date))
+    sorted_ = _sort_actions(known, index, last.trading_date if last is not None else trading_date)
+    changed_entries, changed_seen = _changed_terms(
+        sorted_.changed, trading_date, spec, session_clock
+    )
+    late_entries, late_seen = _book_late(
+        sorted_.late, sim, store, summaries, trading_date, spec, session_clock
+    )
+    on_time_seen = [
+        BookedAction(
+            action_identity(action),
+            action_terms(action),
+            held=sim.held_quantity(action.isin, bought_before=action.ex_date) > 0,
+            status=ActionStatus.BOOKED,
+        )
+        for action in sorted_.on_time
+    ]
+    on_time = list(sorted_.on_time)
+    late = sorted_.late
 
     broker = _PaperBroker(
         sim, _mirror(sim), clock=session_clock, corporate_actions=BookActionCalendar(on_time)
@@ -1091,7 +1440,11 @@ def run_paper_session(
     if capturing.evidence is None:  # pragma: no cover - the engine always asks the policy once
         raise PaperSessionError("the engine finished a session without asking the policy")
 
-    entries = (*late_entries, *(_tagged(entry, spec) for entry in result.journal))
+    entries = (
+        *changed_entries,
+        *late_entries,
+        *(_tagged(entry, spec) for entry in result.journal),
+    )
     journal.snapshot(capturing.evidence)
     for entry in entries:
         journal.append(entry)
@@ -1121,7 +1474,7 @@ def run_paper_session(
             ],
         },
         book_digest=_state_digest(state),
-        actions=tuple(action_key(action) for action in due),
+        actions=(*changed_seen, *late_seen, *on_time_seen),
     )
     store.record(record, recorded_at=clock.now())
     log.info(
@@ -1132,6 +1485,8 @@ def run_paper_session(
         orders=len(record.orders),
         corporate_actions=len(on_time),
         late_corporate_actions=len(late),
+        changed_corporate_actions=len(sorted_.changed),
+        unchanged_corporate_actions=sorted_.unchanged,
         redeploy_pending=record.pending is not None,
         cash=str(result.book.cash),
         holdings=len(result.book.holdings),
@@ -1361,7 +1716,8 @@ def run_paper_session_job(
     What it does: unless ``Settings.paper_session_enabled`` is off (the default — module
     docstring), opens one Postgres transaction, runs :func:`run_paper_session` for
     ``trading_date`` — by default :func:`owed_session` at the context's clock, an explicit date,
-    never the calendar day — with the ratified spec, the status interlock over the job's own
+    never the calendar day; an explicit one may be neither after the owed session nor before the
+    book's latest decided session — with the ratified spec, the status interlock over the job's own
     database, the L1 world, the real append-only journal and ``paper_session``, and commits.
     What it assumes: the database is migrated through 0012 and the EOD pipeline has run for the
     owed session. ``world`` is injectable for a test; production passes nothing.
@@ -1386,14 +1742,19 @@ def run_paper_session_job(
             l1 = L1PaperWorld(data_root=settings.data_root, settings=settings)
             stack.callback(l1.close)
             world = l1
-        owed = (
-            trading_date if trading_date is not None else owed_session(world, context.clock.now())
-        )
-        if owed is None:
+        due = owed_session(world, context.clock.now())
+        if due is None:
             raise PaperSessionError(
                 f"no trading session in the {_OWED_LOOKBACK_DAYS} days to "
                 f"{context.clock.now().isoformat()}; the holiday calendar is wrong"
             )
+        if trading_date is not None and trading_date > due:
+            raise PaperSessionError(
+                f"{trading_date.isoformat()} is after the owed session {due.isoformat()}: its EOD "
+                "is not due yet, so deciding it would trade on data that does not exist"
+            )
+        # A date before the book's latest decided session is refused by run_paper_session itself.
+        owed = trading_date if trading_date is not None else due
         conn = stack.enter_context(connection(settings))
         result = run_paper_session(
             trading_date=owed,

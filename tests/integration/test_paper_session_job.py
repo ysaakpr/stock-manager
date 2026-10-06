@@ -181,3 +181,34 @@ def test_the_table_refuses_a_red_row_that_claims_orders(scratch: Settings) -> No
             "('paper_check_book', '2026-10-07', 'SKIPPED_DATA_RED', 'red', false, "
             "'[{\"isin\": \"INE001A01173\"}]'::jsonb, 'x', now())"
         )
+
+
+def test_the_owner_resolution_table_is_what_the_store_reads(scratch: Settings) -> None:
+    """Item 2's way out: the runbook's INSERT is exactly what unblocks an escalated book."""
+    with connection(scratch) as conn:
+        store = PostgresPaperSessionStore(conn)
+        assert store.resolutions(PAPER_BOOK_ID) == frozenset()
+        conn.execute(
+            "INSERT INTO paper_session_resolution (book_id, action_key, resolved_by, note, "
+            "resolved_at) VALUES (%s, %s, 'owner', 'correction accepted as booked', now())",
+            (PAPER_BOOK_ID, "DIVIDEND:INE001A01173:2026-10-07"),
+        )
+        assert store.resolutions(PAPER_BOOK_ID) == frozenset({"DIVIDEND:INE001A01173:2026-10-07"})
+        with pytest.raises(psycopg.errors.CheckViolation):
+            conn.execute(
+                "INSERT INTO paper_session_resolution (book_id, action_key, resolved_by, note, "
+                "resolved_at) VALUES (%s, 'x', 'owner', '  ', now())",
+                (PAPER_BOOK_ID,),
+            )
+        conn.rollback()
+
+
+def test_the_summaries_read_no_book_state_and_carry_the_traded_names(scratch: Settings) -> None:
+    with connection(scratch) as conn:
+        store = PostgresPaperSessionStore(conn)
+        summaries = store.summaries(PAPER_BOOK_ID, before=date(2026, 12, 31))
+        decided = store.get(PAPER_BOOK_ID, OCT_FIRST)
+    assert decided is not None
+    (first,) = [s for s in summaries if s.trading_date == OCT_FIRST]
+    assert first.traded == frozenset(order.isin for order in decided.orders)
+    assert not hasattr(first, "book_state")

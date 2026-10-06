@@ -59,5 +59,23 @@ COMMENT ON COLUMN paper_session.book_state IS
 COMMENT ON COLUMN paper_session.book_digest IS
     'sha256 of book_state''s broker part, canonical bytes; a restore must reproduce it exactly.';
 COMMENT ON COLUMN paper_session.actions IS
-    'The corporate actions this session booked (identity keys), on time or late. An action is '
-    'booked once per book: on the first decided session at which it is known.';
+    'The corporate actions this session saw first, or saw with changed terms: {key, terms, held, '
+    'status}. key is the identity (type:isin:ex_date[:kind]) and never changes; terms is a digest '
+    'of the economic terms. An action is booked once per book, on the first decided session it is '
+    'known; a changed-terms action on a held name is ESCALATED, never re-booked.';
+
+-- An owner's acknowledgement that an ESCALATED corporate action has been dealt with. While a book
+-- has an escalated action with no row here, the paper session refuses to trade it (journaled
+-- SKIPPED_DATA_RED, invariant #10). Insert-only: a resolution is a record of a human decision.
+CREATE TABLE paper_session_resolution (
+    book_id      text        NOT NULL CHECK (book_id ~ '^[a-z][a-z0-9_]{2,63}$'),
+    action_key   text        NOT NULL,
+    resolved_by  text        NOT NULL CHECK (length(trim(resolved_by)) > 0),
+    note         text        NOT NULL CHECK (length(trim(note)) > 0),
+    resolved_at  timestamptz NOT NULL,
+    PRIMARY KEY (book_id, action_key)
+);
+
+COMMENT ON TABLE paper_session_resolution IS
+    'X1 · M13.1 paper trading. One row per escalated corporate action the owner has resolved; the '
+    'paper session trades a book again only once every escalation on it has a row here.';

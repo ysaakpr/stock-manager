@@ -28,18 +28,29 @@ import pytest
 
 from analyst.journal.models import Decision, JournalEntry
 from backtest.accounting import PortfolioBook
-from backtest.book_actions import BookActionCalendar, CashDividend
+from backtest.book_actions import (
+    BookActionCalendar,
+    CashDividend,
+    RescaleKind,
+    RescaleSource,
+    ShareRescale,
+)
 from backtest.paper_session import (
+    CHANGED_ACTION_EVENT,
     LATE_ACTION_EVENT,
     PAPER_BOOK_ID,
     PAPER_MODE,
+    ActionStatus,
     InMemoryPaperSessionStore,
     PaperBookDivergenceError,
+    PaperSessionError,
     PaperSessionRecord,
     PaperSessionResult,
     RecordingJournal,
     RunVerdict,
     SessionOutcome,
+    action_identity,
+    action_terms,
     owed_session,
     run_paper_session,
     run_paper_session_job,
@@ -440,7 +451,7 @@ def test_a_persisted_book_that_no_longer_matches_its_digest_fails_loud() -> None
     desk.run(OCT_FIRST)
     desk.run(OCT_SECOND)
     tampered = InMemoryPaperSessionStore()
-    for record in desk.store.history("paper_fixture_book", before=OCT_THIRD):
+    for record in desk.store.records("paper_fixture_book"):
         if record.trading_date == OCT_SECOND and record.book_state is not None:
             broker = {**record.book_state["broker"], "cash": "99999999"}
             record = replace(record, book_state={**record.book_state, "broker": broker})
@@ -606,7 +617,7 @@ def test_a_record_round_trips_through_its_documents() -> None:
         pending=record.pending_document(),
         book_state=record.book_state,
         book_digest=record.book_digest,
-        actions=record.actions,
+        actions=record.actions_document(),
     )
     assert restored == record
 
@@ -670,3 +681,178 @@ def test_the_job_decides_an_explicit_date_when_given_one(monkeypatch: pytest.Mon
         trading_date=OCT_FIRST,
     )
     assert result is not None and result.trading_date == OCT_FIRST
+
+
+# ── R1: a corrected or re-sourced corporate action is never booked twice ─────────────────────────
+
+
+def _cash(record: PaperSessionRecord | None) -> Decimal:
+    assert record is not None and record.book_state is not None
+    return Decimal(record.book_state["broker"]["cash"])
+
+
+def _held_quantity(record: PaperSessionRecord | None, isin: str) -> int:
+    assert record is not None and record.book_state is not None
+    broker = record.book_state["broker"]
+    return sum(
+        int(lot["quantity"])
+        for key in ("holdings", "pending")
+        for lot in broker[key]
+        if lot["isin"] == isin
+    )
+
+
+def test_a_dividend_whose_terms_change_after_booking_is_escalated_and_never_recredited() -> None:
+    desk = _Desk.fresh()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    isin = _held_isin(desk)
+    desk.world.actions.append(CashDividend(isin=isin, ex_date=OCT_FOURTH, per_share=Decimal("5")))
+    fourth = desk.run(OCT_FOURTH)
+    assert fourth.record is not None
+    (booked,) = fourth.record.actions
+    assert booked.status is ActionStatus.BOOKED and booked.held
+
+    # The store corrects the amount: same dividend, new terms.
+    desk.world.actions[:] = [CashDividend(isin=isin, ex_date=OCT_FOURTH, per_share=Decimal("6"))]
+    fifth = desk.run(date(2026, 10, 8))
+
+    assert fifth.verdict is RunVerdict.DECIDED
+    escalations = [e for e in fifth.entries if e.payload.get("event") == CHANGED_ACTION_EVENT]
+    assert [e.decision for e in escalations] == [Decision.ESCALATE]
+    assert escalations[0].payload["action"] == booked.key
+    # Never credited again: no ledger line for the name today, cash moved only by the session.
+    assert fifth.record is not None and fifth.record.book_state is not None
+    assert not [line for line in fifth.record.book_state["session_ledger"] if line["isin"] == isin]
+    assert _cash(fifth.record) == _cash(fourth.record)
+
+
+def test_after_an_escalation_the_book_is_red_until_the_owner_resolves_it() -> None:
+    """Item 2: an escalated action on a held name stops the book, as red data does (#10)."""
+    desk = _Desk.fresh()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    isin = _held_isin(desk)
+    desk.world.actions.append(CashDividend(isin=isin, ex_date=OCT_FOURTH, per_share=Decimal("5")))
+    desk.run(OCT_FOURTH)
+    desk.world.actions[:] = [CashDividend(isin=isin, ex_date=OCT_FOURTH, per_share=Decimal("6"))]
+    escalated = desk.run(date(2026, 10, 8))
+    assert escalated.record is not None
+    (key,) = [a.key for a in escalated.record.actions if a.status is ActionStatus.ESCALATED]
+
+    blocked = desk.run(date(2026, 10, 9))
+    assert blocked.verdict is RunVerdict.SKIPPED_DATA_RED
+    assert key in blocked.reason and "unresolved" in blocked.reason
+    assert _decisions(blocked.entries) == [Decision.SKIPPED_DATA_RED]
+
+    desk.store.resolve("paper_fixture_book", key)
+    resumed = desk.run(date(2026, 10, 12))
+    assert resumed.verdict is RunVerdict.DECIDED
+    # Resolved means accepted as it stands: the changed terms are not escalated again.
+    assert not [e for e in resumed.entries if e.decision is Decision.ESCALATE]
+
+
+@pytest.mark.parametrize("feed_kind", [RescaleKind.SPLIT, RescaleKind.BONUS])
+def test_an_implied_split_followed_by_its_feed_record_is_neither_rebooked_nor_escalated(
+    feed_kind: RescaleKind,
+) -> None:
+    desk = _Desk.fresh()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    isin = _held_isin(desk)
+    before = _held_quantity(desk.store.get("paper_fixture_book", OCT_THIRD), isin)
+    desk.world.actions.append(
+        ShareRescale(
+            isin=isin,
+            ex_date=OCT_FOURTH,
+            kind=RescaleKind.SPLIT,
+            numerator=Decimal("2"),
+            denominator=Decimal("1"),
+            source=RescaleSource.IMPLIED,
+        )
+    )
+    fourth = desk.run(OCT_FOURTH)
+    assert _held_quantity(fourth.record, isin) == 2 * before
+
+    # The feed reports the same split (as 4:2, possibly filed as a bonus); L2 drops its implied row.
+    desk.world.actions[:] = [
+        ShareRescale(
+            isin=isin,
+            ex_date=OCT_FOURTH,
+            kind=feed_kind,
+            numerator=Decimal("4"),
+            denominator=Decimal("2"),
+            source=RescaleSource.FEED,
+        )
+    ]
+    fifth = desk.run(date(2026, 10, 8))
+
+    assert fifth.verdict is RunVerdict.DECIDED
+    assert not [e for e in fifth.entries if e.decision is Decision.ESCALATE]
+    assert not [e for e in fifth.entries if "event" in e.payload]
+    assert _held_quantity(fifth.record, isin) == 2 * before
+    assert fifth.record is not None and fifth.record.actions == ()
+
+
+def test_a_field_added_to_an_action_class_does_not_change_its_identity_or_terms() -> None:
+    """A later version of the class with an extra field is the same action — no re-booking."""
+
+    @dataclass(frozen=True)
+    class DividendWithTds(CashDividend):
+        tds_rate: Decimal = Decimal("0.10")
+
+    old = CashDividend(isin=ISINS[0], ex_date=OCT_FOURTH, per_share=Decimal("5"))
+    new = DividendWithTds(isin=ISINS[0], ex_date=OCT_FOURTH, per_share=Decimal("5.0"))
+    assert action_identity(new) == action_identity(old)
+    assert action_terms(new) == action_terms(old)
+    # Provenance is not terms either.
+    implied = ShareRescale(
+        isin=ISINS[0],
+        ex_date=OCT_FOURTH,
+        kind=RescaleKind.SPLIT,
+        numerator=Decimal("2"),
+        denominator=Decimal("1"),
+        source=RescaleSource.IMPLIED,
+    )
+    feed = replace(implied, source=RescaleSource.FEED, knowable_date=OCT_FOURTH)
+    assert (action_identity(feed), action_terms(feed)) == (
+        action_identity(implied),
+        action_terms(implied),
+    )
+
+
+# ── item 1: an explicit date is bounded by the book's history and the owed session ───────────────
+
+
+def test_an_explicit_date_after_the_owed_session_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world, store, journal = FixtureWorld(), InMemoryPaperSessionStore(), RecordingJournal()
+    install_job_seams(monkeypatch.setattr, world=world, store=store, journal=journal)
+    with pytest.raises(PaperSessionError, match="after the owed session"):
+        run_paper_session_job(
+            _context(datetime(2026, 10, 6, 0, 30, tzinfo=IST), enabled=True),
+            trading_date=OCT_THIRD,  # 6 Oct's EOD is not due at 00:30 on 6 Oct
+        )
+    assert journal.entries == []
+
+
+def test_an_explicit_date_before_the_latest_decided_session_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world, store, journal = FixtureWorld(), InMemoryPaperSessionStore(), RecordingJournal()
+    install_job_seams(monkeypatch.setattr, world=world, store=store, journal=journal)
+    run_paper_session_job(
+        _context(datetime(2026, 10, 5, 20, 30, tzinfo=IST), enabled=True)
+    )  # decides 5 Oct
+    with pytest.raises(PaperSessionError, match="decides forward only"):
+        run_paper_session_job(
+            _context(datetime(2026, 10, 5, 21, 0, tzinfo=IST), enabled=True),
+            trading_date=OCT_FIRST,
+        )
+    # The latest decided date itself is allowed: it is the idempotent no-op.
+    again = run_paper_session_job(
+        _context(datetime(2026, 10, 5, 21, 0, tzinfo=IST), enabled=True),
+        trading_date=OCT_SECOND,
+    )
+    assert again is not None and again.verdict is RunVerdict.ALREADY_DECIDED
