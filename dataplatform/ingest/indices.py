@@ -70,7 +70,7 @@ import itertools
 import json
 import re
 from collections.abc import Iterator, Mapping, Sequence
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Annotated, Any, Final, Protocol
@@ -115,6 +115,7 @@ __all__ = [
     "ImmutableSnapshotError",
     "IndexCloseRow",
     "SyncTracker",
+    "TriNotYetPublishedError",
     "TriPoint",
     "TriSeries",
     "close_snapshot_url",
@@ -220,7 +221,9 @@ _TRI_NAME_SAFE: Final = re.compile(r"[A-Z0-9 &.\-]+")
 #: The shape `l0_tri_filename` writes, read back by `parse_l0_tri_filename`. The slug group is
 #: non-greedy so the two trailing date groups win the digits: a slug may contain `_`, and a greedy
 #: group would swallow the window's start date into the index name.
-_L0_TRI_FILENAME: Final = re.compile(r"tri_(?P<slug>.+?)_(?P<start>\d{8})_(?P<end>\d{8})\.json")
+_L0_TRI_FILENAME: Final = re.compile(
+    r"tri_(?P<slug>.+?)_(?P<start>\d{8})_(?P<end>\d{8})(?:_at(?P<at>\d{8}T\d{6}))?\.json"
+)
 
 #: A price/index value or a rupee amount: strict `Decimal` (no float can be constructed into one),
 #: non-negative and finite, so a mis-parsed field cannot become a plausible-looking benchmark value.
@@ -256,6 +259,17 @@ class ImmutableSnapshotError(IngestError):
     recorded — that is what makes a PIT universe trustworthy. Re-deriving the same month from the
     same bytes is fine and is a no-op; changing it is this error, surfaced rather than silently
     written, because a silently mutated snapshot is a survivorship leak that no later test can see.
+    """
+
+
+class TriNotYetPublishedError(IngestError):
+    """The endpoint answered, validly, but without the session the caller required (M13.7).
+
+    The same-evening refresh asks for session D on D's evening, and before NSE Indices disseminates
+    D the endpoint returns a well-formed series that simply stops at D-1. That is not a parse
+    failure and not a success: the sync row for D parks `FAILED` with `retryable=True` (this is an
+    `IngestError`, not a `ParseError`, so `_retryable` says so) and L1 is left untouched, because a
+    row reading `PUBLISHED` for D over a series that ends at D-1 would be a false receipt.
     """
 
 
@@ -1497,7 +1511,9 @@ def tri_request_body(index_name: str, start: date, end: date) -> bytes:
     return json.dumps({"cinfo": cinfo}).encode("utf-8")
 
 
-def l0_tri_filename(index_slug: str, start: date, end: date) -> str:
+def l0_tri_filename(
+    index_slug: str, start: date, end: date, *, attempt: datetime | None = None
+) -> str:
     """The L0 filename for one TRI fetch — the URL carries neither index nor window.
 
     The endpoint is one path for every index and every date range, so `Fetcher.fetch`'s default
@@ -1505,8 +1521,15 @@ def l0_tri_filename(index_slug: str, start: date, end: date) -> str:
     fetch in a month would collide with the first (`L0Store.put`, by design). Both the index and
     the window go in the name here, so a re-fetch of the *same* window is an idempotent no-op and a
     different window is a different payload.
+
+    `attempt` (M13.7) appends `_at<YYYYMMDD>T<HHMMSS>` — the fetch instant — for a caller that may
+    legitimately ask the same window twice and get two different answers: the same-evening refresh
+    asks for session D before and after NSE Indices disseminates it. Both answers are true raw
+    records and L0 keeps both; without the suffix the second would collide with the first, and the
+    endpoint's per-request `RequestNumber` makes even an unchanged history different bytes.
     """
-    return f"tri_{index_slug}_{start:%Y%m%d}_{end:%Y%m%d}.json"
+    suffix = "" if attempt is None else f"_at{attempt:%Y%m%dT%H%M%S}"
+    return f"tri_{index_slug}_{start:%Y%m%d}_{end:%Y%m%d}{suffix}.json"
 
 
 def parse_l0_tri_filename(filename: str) -> tuple[str, date, date]:
@@ -1525,7 +1548,8 @@ def parse_l0_tri_filename(filename: str) -> tuple[str, date, date]:
     if match is None:
         raise ParseError(
             "not an L0 TRI filename; expected the "
-            "'tri_<slug>_<YYYYMMDD>_<YYYYMMDD>.json' shape `l0_tri_filename` writes",
+            "'tri_<slug>_<YYYYMMDD>_<YYYYMMDD>[_at<YYYYMMDD>T<HHMMSS>].json' shape "
+            "`l0_tri_filename` writes",
             filename=filename,
         )
     try:
@@ -1672,6 +1696,8 @@ def ingest_tri(
     data_root: Path | None = None,
     register: SourceRegister | None = None,
     state_source: str | None = None,
+    attempt: datetime | None = None,
+    require_through: date | None = None,
 ) -> TriSeries:
     """Take one index's published TRI from nothing to `PUBLISHED`: fetch → L0 → parse → L1 → sync.
 
@@ -1694,6 +1720,11 @@ def ingest_tri(
     and `write_tri_l1` rewrites each partition whole from the same values. Any failure is recorded
     on the sync row — `retryable` set from what actually went wrong — then re-raised, so the caller
     sees the exception and `/status/sync` sees the state.
+
+    `attempt` stamps the L0 filename with the fetch instant (`l0_tri_filename`). `require_through`
+    is the session the series must reach: a payload that stops short raises
+    `TriNotYetPublishedError` after the fetch and before L1 is touched, so the row parks retryable
+    instead of reaching `PUBLISHED` for a level that was not there.
     """
     sync_source = state_source or tri_state_source(index_slug)
     url = tri_url(register)
@@ -1703,12 +1734,18 @@ def ingest_tri(
             TRI_SOURCE_ID,
             url,
             end,
-            filename=l0_tri_filename(index_slug, start, end),
+            filename=l0_tri_filename(index_slug, start, end, attempt=attempt),
             payload=tri_request_body(index_name, start, end),
         )
         tracker.mark_fetched(sync_source, end, checksum=ref.sha256, l0_path=ref.key)
 
         series = parse_tri_l0(l0, ref, index_name=index_name, index_slug=index_slug)
+        latest = series.points[-1].as_of
+        if require_through is not None and latest < require_through:
+            raise TriNotYetPublishedError(
+                f"{index_name}: the endpoint's series ends {latest}, session {require_through} is "
+                "not yet published; retry after NSE Indices disseminates it"
+            )
         tracker.mark_validated(sync_source, end)
 
         write_tri_l1(series, data_root=data_root)

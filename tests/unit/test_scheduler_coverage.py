@@ -18,7 +18,7 @@ Offline: no database, no network, no scheduler started.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Final
 
@@ -39,6 +39,8 @@ from dataplatform.scheduler.registry import (
     NEWS_CAPTURE,
     NSE_DAILY_CAPTURE,
     SHAREHOLDING_POLL,
+    TRI_EVENING,
+    TRI_REFRESH,
     UNSCHEDULED,
     Job,
     JobRegistry,
@@ -238,7 +240,7 @@ def _windows(job: Job, start: datetime, end: datetime) -> list[tuple[datetime, d
 
 @pytest.mark.parametrize(
     "job",
-    [NSE_DAILY_CAPTURE, SHAREHOLDING_POLL, ANNOUNCEMENTS_CAPTURE, NEWS_CAPTURE],
+    [NSE_DAILY_CAPTURE, SHAREHOLDING_POLL, ANNOUNCEMENTS_CAPTURE, NEWS_CAPTURE, TRI_EVENING],
     ids=lambda job: job.name,
 )
 def test_a_capture_job_never_runs_while_another_job_holds_one_of_its_hosts(job: Job) -> None:
@@ -274,6 +276,34 @@ def test_the_nse_capture_fires_after_the_evening_publication_and_retries_the_sam
     ]
     assert [fire.hour for fire in fires] == [20, 23]
     assert all(fire.time() >= daily_capture.CAPTURE_CUTOFF for fire in fires)
+
+
+def test_the_evening_tri_fires_each_weekday_clear_of_the_snapshots_niftyindices_lease() -> None:
+    """M13.7: D's TRI the evening of D, never while `daily_snapshot` holds niftyindices.com.
+
+    `daily_snapshot` leases niftyindices.com for the constituent files without listing that source
+    in `covers`, so the generic overlap check above cannot see the clash; this one names it. A
+    weekend fire would owe nothing new (the Saturday `tri_refresh` is the backstop, unchanged).
+    """
+    week = MONDAY_EVENING.replace(hour=0)
+    fires = [fire for fire, _ in _windows(TRI_EVENING, week, week + timedelta(days=7))]
+    assert [f"{fire:%a %H:%M}" for fire in fires] == [
+        f"{day} {time}"
+        for day in ("Mon", "Tue", "Wed", "Thu", "Fri")
+        for time in ("19:50", "20:50", "21:30")
+    ]
+    # Every attempt, budget included, is over before the paper session decides D at 21:45.
+    assert all(
+        end.time() <= time(21, 45)
+        for _, end in _windows(TRI_EVENING, week, week + timedelta(days=7))
+    )
+    snapshot = _windows(DAILY_SNAPSHOT, week, week + timedelta(days=7))
+    for fire, end in _windows(TRI_EVENING, week, week + timedelta(days=7)):
+        for theirs_start, theirs_end in snapshot:
+            assert end <= theirs_start or theirs_end <= fire, f"{fire:%a %H:%M} overlaps"
+    assert TRI_REFRESH.cron == "0 8 * * sat"
+    # The weekday job owes the source daily, so its one-session budget is the one that binds.
+    assert lag_budgets(default_registry())["nifty_tri_history"] == 1
 
 
 def test_the_scheduler_fires_every_registered_job(load_settings: SettingsLoader) -> None:
