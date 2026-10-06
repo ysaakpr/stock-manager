@@ -330,8 +330,8 @@ def run_tri_evening(
     without a request, so a second fire the same evening is a no-op once the first landed.
     What it assumes: D's level is disseminated by the time this runs. When it is not, the payload is
     still kept in L0 (filed under `attempt_at`, so a retry later that evening cannot collide with
-    it), the row parks `FAILED` retryable, and `TriNotYetPublishedError` propagates — the run is
-    FAILED and `/status` says so.
+    it), the row parks `FAILED` retryable and is committed, and `TriNotYetPublishedError`
+    propagates — the run is FAILED and `/status` says so.
     What it never does: write L1 from a payload that does not reach D, stamp a knowable date from
     `attempt_at` (it names the L0 file and nothing else), or continue past a failed index — a
     benchmark that half-landed is not a partial success (`run_tri_backfill` says why).
@@ -361,19 +361,27 @@ def run_tri_evening(
             continue
 
         start = evening_window_start(spec, through, data_root)
-        series = ingest_tri(
-            fetcher=fetcher,
-            l0=l0,
-            tracker=tracker,
-            index_name=spec.name,
-            index_slug=spec.slug,
-            start=start,
-            end=through,
-            data_root=data_root,
-            register=register,
-            attempt=attempt_at,
-            require_through=through,
-        )
+        try:
+            series = ingest_tri(
+                fetcher=fetcher,
+                l0=l0,
+                tracker=tracker,
+                index_name=spec.name,
+                index_slug=spec.slug,
+                start=start,
+                end=through,
+                data_root=data_root,
+                register=register,
+                attempt=attempt_at,
+                require_through=through,
+            )
+        except Exception:
+            # `ingest_tri` has recorded the FAILED row; the store never commits and `connection`
+            # does not commit on the way out of an exception, so without this the row that tells
+            # `/status/sync` "D not yet published" would roll back with the run.
+            if commit is not None:
+                commit()
+            raise
         if commit is not None:
             commit()
         outcomes.append(

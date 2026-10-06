@@ -195,6 +195,7 @@ def test_a_fetch_before_dissemination_parks_retryable_and_leaves_l1_alone(
         [D_ABSENT], at=at, settings=settings, register=register, data_root=tmp_path
     )
     tracker = RecordingTracker(clock)
+    commits: list[SyncState] = []
 
     with pytest.raises(TriNotYetPublishedError, match="2026-10-05 is not yet published"):
         run_tri_evening(
@@ -205,8 +206,14 @@ def test_a_fetch_before_dissemination_parks_retryable_and_leaves_l1_alone(
             attempt_at=at,
             indices=(NIFTY50,),
             data_root=tmp_path,
+            commit=lambda: commits.append(
+                tracker.rows[(tri_state_source("nifty50"), MONDAY)].state
+            ),
             calendar=trading_calendar(),
         )
+
+    # The FAILED row is committed before the error propagates, or it would roll back with the run.
+    assert commits == [SyncState.FAILED]
 
     row = tracker.rows[(tri_state_source("nifty50"), MONDAY)]
     assert row.state is SyncState.FAILED
