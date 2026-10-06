@@ -178,7 +178,8 @@ XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status scheduler
 The first 21:45 run after that opens the book (the first session it decides rebalances). To check
 `tri_evening` landed the session's level before relying on it, `GET /status/jobs` should show
 `tri_evening` `OK` for the day; if it did not land, the paper run journals one `SKIPPED_DATA_RED`
-whose rationale reads "regime input missing: no published NIFTY 50 TRI level for <date>" and whose
+whose rationale reads "regime input unavailable (nifty_tri_history/nifty50, …) for <date>: <the
+regime source's own error, e.g. no level for the date>" and whose
 `payload.missing_input` is `nifty_tri_history/nifty50`, and the rebalance moves to the next green
 session. Only a rebalance day reads the regime, so a late TRI never turns an ordinary day red.
 
@@ -277,9 +278,10 @@ rolled back) and the next run retries the owed session.
 
 ### When it is red or fails
 
-- **Red on rebalance days: "regime input missing: no published NIFTY 50 TRI level for <date>"**
-  (`payload.missing_input = nifty_tri_history/nifty50`): `tri_evening` did not land the session's
-  level by 21:30 (before PR #73 is merged, every rebalance day — the reason the job ships disabled,
+- **Red on rebalance days: "regime input unavailable (nifty_tri_history/nifty50, …) for <date>:
+  …"** (`payload.missing_input = nifty_tri_history/nifty50`): the regime source could not give the
+  session's reading — most often `tri_evening` did not land the session's level by 21:30; the
+  quoted error says which (before PR #73 is merged, every rebalance day — the reason the job ships disabled,
   above). The book stays in what it last held, the journal shows one `SKIPPED_DATA_RED` per day
   naming the missing level, and the rebalance is retried on the next session.
 - **`PaperBookDivergenceError`.** The persisted `book_state` of the latest decided session no longer

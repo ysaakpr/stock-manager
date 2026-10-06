@@ -1132,6 +1132,18 @@ def _held_in(state: SimBrokerState, isin: str) -> int:
     return settled + pending
 
 
+def _entitled_entering(store: PaperSessionStore, spec: PaperBookSpec, action: BookAction) -> int:
+    """Shares of the action's name the book held entering its ex-date — the entitlement.
+
+    The state the last decided session before the ex-date persisted: orders staged then fill on or
+    after the ex-date (or lapse), so they are not entitled. Not what the book holds *now* — a name
+    sold since the ex-date was still entitled to the action, and whether the book held it then is
+    what decides if a late, changed or ambiguous action concerns the book at all.
+    """
+    entering = store.latest_completed(spec.book_id, before=action.ex_date)
+    return 0 if entering is None else _held_in(entering.broker_state(), action.isin)
+
+
 def _action_entry(
     action: BookAction,
     decision: Decision,
@@ -1163,7 +1175,7 @@ def _action_entry(
 def _changed_terms(
     changed: Sequence[tuple[BookAction, bool]],
     ambiguous: Sequence[BookAction],
-    sim: SimBroker,
+    store: PaperSessionStore,
     trading_date: date,
     spec: PaperBookSpec,
     clock: Clock,
@@ -1174,12 +1186,19 @@ def _changed_terms(
     earlier terms, or had nothing to act on. If it held the name, the difference is for the owner
     to judge — journaled ``ESCALATE`` and never credited or rescaled again, and the book is blocked
     until that (key, terms) is resolved; if it did not, the new terms are recorded silently. An
-    ambiguous rescale is handled the same way on whether the book holds the name now.
+    ambiguous rescale is handled the same way. "Held" is the entitlement entering the ex-date
+    (:func:`_entitled_entering`), never what the book holds now: a name sold since the ex-date was
+    still moved by the action. A correction is also escalated when the book recorded the name as
+    held when it first booked the action.
     """
     entries: list[JournalEntry] = []
     seen: list[BookedAction] = []
-    flagged = [(action, held, CHANGED_ACTION_EVENT) for action, held in changed] + [
-        (action, sim.held_quantity(action.isin) > 0, AMBIGUOUS_ACTION_EVENT) for action in ambiguous
+    flagged = [
+        (action, booked_held or _entitled_entering(store, spec, action) > 0, CHANGED_ACTION_EVENT)
+        for action, booked_held in changed
+    ] + [
+        (action, _entitled_entering(store, spec, action) > 0, AMBIGUOUS_ACTION_EVENT)
+        for action in ambiguous
     ]
     for action, held, event in flagged:
         key, terms = action_identity(action), action_terms(action)
@@ -1234,7 +1253,7 @@ def _book_late(
     for action in late:
         key, terms = action_identity(action), action_terms(action)
         entering = store.latest_completed(spec.book_id, before=action.ex_date)
-        entitled = 0 if entering is None else _held_in(entering.broker_state(), action.isin)
+        entitled = _entitled_entering(store, spec, action)
         if entering is None or entitled == 0:
             seen.append(BookedAction(key, terms, False, ActionStatus.BOOKED, _source_of(action)))
             continue
@@ -1369,10 +1388,14 @@ def _input_gap(
         try:
             data.regime(trading_date)
         except RegimeSourceError as error:
+            # Any RegimeSourceError lands here — a missing level, a series too short for the
+            # moving average, no series at all — so the reason quotes the source's own words
+            # rather than asserting which one it was.
             return _InputGap(
-                f"regime input missing: no published NIFTY 50 TRI level for "
-                f"{trading_date.isoformat()} ({REGIME_TRI_INPUT}, landed same-evening by "
-                f"tri_evening, M13.7); the rebalance waits for a session that has it. {error}",
+                f"regime input unavailable ({REGIME_TRI_INPUT}, the session's published NIFTY 50 "
+                f"TRI, landed same-evening by tri_evening, M13.7) for "
+                f"{trading_date.isoformat()}: {error}; the rebalance waits for a session that "
+                "has it",
                 REGIME_TRI_INPUT,
             )
     try:
@@ -1512,7 +1535,7 @@ def run_paper_session(
         known = list(source.between(decided[0].trading_date, trading_date))
     sorted_ = _sort_actions(known, index, last.trading_date if last is not None else trading_date)
     changed_entries, changed_seen = _changed_terms(
-        sorted_.changed, sorted_.ambiguous, sim, trading_date, spec, session_clock
+        sorted_.changed, sorted_.ambiguous, store, trading_date, spec, session_clock
     )
     late_entries, late_seen = _book_late(
         sorted_.late, sim, store, summaries, trading_date, spec, session_clock

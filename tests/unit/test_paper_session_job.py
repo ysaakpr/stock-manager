@@ -386,7 +386,9 @@ def test_a_missing_tri_level_is_named_in_the_journaled_red_reason() -> None:
 
     (entry,) = desk.journal.entries
     assert entry.rationale is not None
-    assert "no published NIFTY 50 TRI level for 2026-10-01" in entry.rationale
+    assert entry.rationale.startswith(f"regime input unavailable ({REGIME_TRI_INPUT}")
+    assert "for 2026-10-01" in entry.rationale
+    assert "has no level for 2026-10-01" in entry.rationale  # the source's own words, quoted
     assert REGIME_TRI_INPUT in entry.rationale
     assert entry.payload["missing_input"] == REGIME_TRI_INPUT == "nifty_tri_history/nifty50"
     assert result.reason == entry.rationale
@@ -1023,3 +1025,56 @@ def test_two_feed_rescales_of_one_ratio_under_different_kinds_are_escalated_not_
     assert [e.payload["event"] for e in escalations] == [AMBIGUOUS_ACTION_EVENT]
     assert _held_quantity(fifth.record, isin) == 2 * before, "not rescaled a second time"
     assert desk.run(date(2026, 10, 9)).verdict is RunVerdict.SKIPPED_DATA_RED
+
+
+# ── "held" is the entitlement entering the ex-date, not today's book ─────────────────────────────
+
+_SEPT_30 = date(2026, 9, 30)
+
+
+def _sold_since_ex_date(first: ShareRescale | CashDividend) -> _Desk:
+    """A book that held ISINS[0] entering 30 Sep (and booked ``first`` then) and sold it in October.
+
+    The turnover book holds the September leaders; October's ranking reversal drops ISINS[0] out of
+    the band, sold on the 1st and filled on the 5th, so on the 6th the book no longer holds it.
+    """
+    desk = _Desk.fresh(spec=fixture_spec(_TURNOVER))
+    desk.world.actions.append(first)
+    for day in calendar_sessions(date(2026, 9, 28), OCT_SECOND):
+        assert desk.run(day).verdict is RunVerdict.DECIDED
+    entering = desk.store.get("paper_fixture_book", date(2026, 9, 29))
+    assert _held_quantity(entering, ISINS[0]) > 0, "held entering the ex-date"
+    assert _held_quantity(desk.store.get("paper_fixture_book", OCT_SECOND), ISINS[0]) == 0, (
+        "sold since"
+    )
+    return desk
+
+
+def test_an_ambiguous_rescale_on_a_name_sold_since_its_ex_date_is_escalated() -> None:
+    """Held at the ex-date, sold since: the twin still concerns the book, so it is escalated."""
+    split = _split(ISINS[0], RescaleKind.SPLIT, RescaleSource.FEED, "2", "1")
+    desk = _sold_since_ex_date(replace(split, ex_date=_SEPT_30))
+    desk.world.actions.append(
+        replace(_split(ISINS[0], RescaleKind.BONUS, RescaleSource.FEED, "2", "1"), ex_date=_SEPT_30)
+    )
+    sixth = desk.run(OCT_THIRD)
+
+    escalations = [e for e in sixth.entries if e.decision is Decision.ESCALATE]
+    assert [e.payload["event"] for e in escalations] == [AMBIGUOUS_ACTION_EVENT]
+    assert escalations[0].isin == ISINS[0]
+    assert desk.run(OCT_FOURTH).verdict is RunVerdict.SKIPPED_DATA_RED
+
+
+def test_a_changed_dividend_on_a_name_sold_since_its_ex_date_is_escalated() -> None:
+    desk = _sold_since_ex_date(
+        CashDividend(isin=ISINS[0], ex_date=_SEPT_30, per_share=Decimal("3"))
+    )
+    desk.world.actions[:] = [CashDividend(isin=ISINS[0], ex_date=_SEPT_30, per_share=Decimal("4"))]
+    sixth = desk.run(OCT_THIRD)
+
+    escalations = [e for e in sixth.entries if e.decision is Decision.ESCALATE]
+    assert [e.payload["event"] for e in escalations] == [CHANGED_ACTION_EVENT]
+    assert sixth.record is not None and sixth.record.book_state is not None
+    assert not [
+        line for line in sixth.record.book_state["session_ledger"] if line["isin"] == ISINS[0]
+    ], "never re-credited"
