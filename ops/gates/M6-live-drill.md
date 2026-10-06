@@ -23,13 +23,25 @@ exit=0   real 1m12.6s
 - **Calls made: 6 / 25.** Every review parsed on its first attempt, so the worst case of 12 calls
   (6 reviews × `max_attempts=2`) was not approached. `BudgetedLLM` counts each call before making
   it, and calls `pytest.exit(returncode=6)` instead of making call 26.
+- **What one "call" is:** one `claude -p` invocation. The CLI runs with `--max-turns 2`, because a
+  `--json-schema` request needs a turn of its own, so a single invocation may contain up to two
+  internal model turns. The 25-call budget therefore bounds invocations, not model turns: the worst
+  case is 50 turns. T1 and T2 do not request `--json-schema`, and the token counts above are the
+  CLI's totals across whatever turns an invocation took.
 - **One extra call outside the drill:** before the run, a single probe call (`"Reply with the
   single word: ok"`) checked which model id the CLI reports, because an id missing from
   `accounting/model_prices.yaml` would have raised `UnknownModelError` mid-drill. It reported
   `claude-opus-5`, which is priced. Counting the probe, the task used **7 model calls in total**.
+  The probe went straight to `ClaudeCliLLM`, so the budget did not count it. **Any future probe
+  must go through `BudgetedLLM`, inside the `-m live` session**, so that every real-model call is
+  counted against the same ceiling.
 - **Transcript:** the session writes every response verbatim, with token counts and latency, to
   `<pytest basetemp>/m6_8_live_transcript.json`. The verdicts quoted below come from that file.
   It contains no credential: the CLI holds its own login and the test never sees it.
+  **This run's transcript was pruned before it could be committed.** pytest keeps only the three
+  most recent basetemp directories, and later runs (this task's `make check` and other agents' test
+  runs) rotated out the directory it was in. The quotes and token figures below were copied from it
+  while it existed. A future live run should copy the file to `ops/gates/evidence/` straight away.
 
 What `make check` sees: `tests/integration/conftest.py` deselects every `live` test unless the run
 says `-m live`, so a bare run of this file reports `7/13 tests collected (6 deselected)` and makes no model
@@ -183,15 +195,18 @@ Three things in these numbers are artefacts of the CLI rather than of the review
 - **All input is billed as a cache write (1.25× the input rate), and nothing was ever read back**
   (`cache_read = 0` on all six calls, inside 72 seconds). The CLI writes its prefix to the cache on
   every call and never reuses it across invocations.
-- **Output runs to 470–1,020 tokens for a JSON answer of about 250.** The rest is the model's
-  reasoning, which is billed as output. The two drill runs, whose bundle lacks the disclosure body,
+- **Output runs to 470–1,020 tokens for a JSON answer of about 250.** The CLI does not break the
+  difference down. It is consistent with adaptive thinking billed as output, but some of it may be
+  a second internal turn within the same invocation (see "What one 'call' is" above). The
+  transcript cannot tell the two apart. The two drill runs, whose bundle lacks the disclosure body,
   used about twice as much output as the bundles that carried it.
 
 ## Failures
 
 **No test failures, retries, malformed answers, refusals or policy rejections.** Six calls, all
 first-attempt, `stop_reason: end_turn` on every one. The findings below are about the system around
-the model, not about the run. None of them blocks this task.
+the model, not about the run. None of them blocks this task. F1, F3 and F4, and the
+T2 brief's 3-of-50 candidate list, are now rows in `ops/BACKLOG.md`.
 
 - **F1. The drill's T1 bundle carries the flag line but not the disclosure.** `run_drill` builds the
   `BundleRequest` without `announcements=`. The model therefore decided the drill from *"break
@@ -228,7 +243,8 @@ the model, not about the run. None of them blocks this task.
 
 **Overall: M6's first and third boxes now hold against a real model, not only the stub. Its second
 box is unchanged by this run and keeps the scheduling caveat.** Live-model quality, which M6.9 left
-open, is now assessed: T1 is fit for paper mode, and T2 is usable but needs human reading of its
+open, is now assessed: T1 verdicts were defensible on the sampled bundles; fitness in paper mode
+depends on F1 (bundles must carry the disclosure body). T2 is usable but needs human reading of its
 per-thesis claims (see the INE002A01009 example above). M6.8's acceptance:
 
 - fire drill passes on the real model, which is named (`ClaudeCliLLM`), with the verdict captured
