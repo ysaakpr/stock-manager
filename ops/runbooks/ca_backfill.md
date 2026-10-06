@@ -86,6 +86,21 @@ uv run python -m dataplatform.store.l2_fill --rebuild-invalidated              #
 uv run python -m dataplatform.quality.l2_continuity                            # verify
 ```
 
+### The drain never extends history (M13.8)
+
+L1 reaches back to 2006 while L2 partitions start at 2011-06-22. The drain (`rebuild_invalidated`,
+run by both jobs above and by `l2_fill --rebuild-invalidated`) rebuilds a queued ISIN that already
+has a partition **from that partition's first date** and drops every L1 bar before it, its lineage
+predecessors' included. Each rebuild logs `l2.rebuild_floor` with `history_floor` and `policy`:
+
+- `existing_partition_start`: the partition's first date was kept as the floor.
+- `first_time_fill`: there was no partition yet, so the ISIN is built over its whole L1 history,
+  exactly as `l2_fill` (no flags, `materialize_missing`) would build it.
+
+Reaching back into older L1 is only ever done on purpose, with `l2_fill --extend --dry-run` first
+and then `l2_fill --extend`, followed by `l2_continuity`. A partition whose first date moved
+earlier after a Saturday refresh, with no `--extend` run in between, is a regression of this rule.
+
 Exit codes: `0` clean; `1` a unit FAILED or the fetch parked on a 403 spike (what landed is still
 finalized — re-run after the cause is cleared; PUBLISHED units are skipped); `2` an invalid window
 (over twelve months is the backfill's job).

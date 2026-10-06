@@ -11,7 +11,9 @@ The four stages the lineage touches, in the only order they can run:
 3. **Reconcile and recompute**, the same finalize the CA backfill runs, turning the newly landed
    actions into `adjustment_factors` rows and `l2_invalidation` flags.
 4. **Rebuild L2** for the invalidated ISINs, each over its whole lineage chain, so the adjusted
-   series spans the reissue instead of starting at it.
+   series spans the reissue instead of starting at it. This is the one drain that runs with
+   `floor_existing=False`: a survivor's partition built before its edge existed starts at the
+   reissue, and keeping that start as a floor would drop the very history the edge stitches in.
 5. **Fill L2** for every ISIN L1 has EQ bars for and no stage ever built — the names with no
    corporate action at all, which the invalidation queue never reaches (`materialize_missing`).
 
@@ -172,6 +174,8 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         conn.commit()
 
         # ── 4. rebuild L2, each ISIN over its whole chain ────────────────────────────────────
+        # Unfloored, unlike the scheduled drains: a newly derived edge must reach back into the
+        # predecessor's history, which lies before the survivor's current partition start.
         history = {
             isin: chain
             for isin in {e.successor_isin for e in edges}
@@ -186,6 +190,7 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
                 data_root=data_root,
                 history_for=history,
                 survivor_of=resolver.survivor_of,
+                floor_existing=False,
             )
             # ── 5. fill L2 for the names no invalidation ever reached ────────────────────────
             # The queue rebuilds what a corporate action touched; a name with no action never
