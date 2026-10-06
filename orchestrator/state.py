@@ -27,8 +27,10 @@ LOCK_PATH = REPO / ".build_state.lock"
 # FAILED   attempt failed; retryable until MAX_ATTEMPTS
 # PARKED   waiting on a human (see HUMAN_DECISIONS.md)
 # SPLIT    replaced by child tasks
+# EXTERNAL being built outside the orchestrator (a polly worker, a human); never released,
+#          never runnable, and left only by an explicit `orch set` (DONE still re-verifies)
 TERMINAL = {"DONE", "PARKED", "SPLIT"}
-VALID = {"PENDING", "IN_PROGRESS", "DONE", "FAILED", "PARKED", "SPLIT"}
+VALID = {"PENDING", "IN_PROGRESS", "DONE", "FAILED", "PARKED", "SPLIT", "EXTERNAL"}
 
 VERIFY_OUTPUT_LIMIT = 4000
 
@@ -115,6 +117,10 @@ class BuildState:
                 rec["attempts"] = int(rec.get("attempts", 0)) + 1
                 rec["last_started"] = _now()
                 rec.setdefault("first_started", rec["last_started"])
+            elif state == "EXTERNAL":
+                # Not an attempt by this runner, so `attempts` is left alone: a task handed
+                # back later still gets its full MAX_ATTEMPTS here.
+                rec["external_since"] = _now()
             elif state in TERMINAL or state == "FAILED":
                 rec["finished"] = _now()
 
@@ -141,6 +147,8 @@ class BuildState:
 
         An abandoned IN_PROGRESS row is invisible to `ready()` forever, which looks
         exactly like a deadlock, so the runner clears its own leftovers on startup.
+        Only IN_PROGRESS is touched: an EXTERNAL row is someone else's live claim, and
+        releasing it would hand the task to a second, duplicate builder.
         """
         released = []
         with _locked():

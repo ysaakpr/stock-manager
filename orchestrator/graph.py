@@ -166,7 +166,7 @@ class Graph:
             if not task.is_autonomous:
                 continue
             state = states.get(tid, "PENDING")
-            if state in ("DONE", "SPLIT", "PARKED", "IN_PROGRESS"):
+            if state in ("DONE", "SPLIT", "PARKED", "IN_PROGRESS", "EXTERNAL"):
                 continue
             if state == "FAILED" and attempts.get(tid, 0) >= MAX_ATTEMPTS:
                 continue
@@ -195,6 +195,8 @@ class Graph:
             return f"{task_id}: PARKED — see HUMAN_DECISIONS.md"
         if state == "IN_PROGRESS":
             return f"{task_id}: an agent is working on it"
+        if state == "EXTERNAL":
+            return f"{task_id}: EXTERNAL — being built outside the orchestrator"
         if state == "FAILED" and attempts.get(task_id, 0) >= MAX_ATTEMPTS:
             return f"{task_id}: FAILED {attempts[task_id]}x — auto-parked, needs a human look"
         pending = [d for d in task.deps if states.get(d) not in ("DONE", "SPLIT")]
@@ -235,7 +237,8 @@ def runnable(
     has explicitly cleared with `orch answer`.
 
     A cleared NEEDS_GO / NEEDS_SECRET / HUMAN_GATE task becomes ordinary work; that is the
-    whole mechanism by which a human decision unblocks the build.
+    whole mechanism by which a human decision unblocks the build. An EXTERNAL task is never
+    returned, cleared or not: someone outside the orchestrator is building it.
     """
     cleared = cleared or set()
     out = graph.ready(states, attempts)

@@ -6,6 +6,8 @@
 ./orch why <id>            why a task is not running
 ./orch prompt <id>         print the agent brief for a task
 ./orch set <id> <STATE>    record an outcome (DONE re-verifies before it is accepted)
+./orch set <id> EXTERNAL   claim a task built outside the orchestrator; never released
+                           or re-run by `orch run` until set to DONE (or PENDING) again
 ./orch escalate <id> ...   park a task and file a human decision
 ./orch answer <id> ...     record your decision and return the task to the queue
 ./orch split <id> ...      replace a too-large task with children
@@ -44,6 +46,7 @@ COLOR = {
     "IN_PROGRESS": BOLD,
     "PENDING": GREY,
     "SPLIT": GREY,
+    "EXTERNAL": BOLD,
 }
 
 
@@ -136,6 +139,14 @@ def cmd_status(_args: argparse.Namespace) -> int:
         print(f"  {t.id:8} {t.title}")
     if len(ready) > 20:
         print(f"  … {len(ready) - 20} more")
+
+    external = sorted(tid for tid, s in states.items() if s == "EXTERNAL")
+    if external:
+        print(f"\n{BOLD}built outside the orchestrator ({len(external)}){OFF}")
+        for tid in external:
+            task = graph.tasks.get(tid)
+            print(f"  {tid:8} {task.title if task else ''}")
+        print("  → ./orch set <id> DONE when it lands")
 
     parked = [tid for tid, s in states.items() if s == "PARKED"]
     stuck = [
@@ -395,7 +406,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="orch", description=__doc__ or "")
+    parser = argparse.ArgumentParser(
+        prog="orch",
+        description=__doc__ or "",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("validate").set_defaults(fn=cmd_validate)
@@ -413,9 +428,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("task_id")
     p.set_defaults(fn=cmd_prompt)
 
-    p = sub.add_parser("set")
+    p = sub.add_parser(
+        "set",
+        help="record a task's state",
+        description=(
+            "Record a task's state. DONE re-runs the task's verify (and, for AUTO tasks, "
+            "format/lint/types on its deliverables) before it is accepted. EXTERNAL marks a "
+            "task as being built outside the orchestrator (e.g. by a polly worker): `orch run` "
+            "neither releases it at startup nor schedules it, so it never gets a duplicate "
+            "builder. Leave EXTERNAL with `orch set <id> DONE` when the work lands, or "
+            "`orch set <id> PENDING` to hand it back to the orchestrator."
+        ),
+    )
     p.add_argument("task_id")
-    p.add_argument("state", choices=["DONE", "FAILED", "PARKED", "IN_PROGRESS", "SPLIT", "PENDING"])
+    p.add_argument(
+        "state",
+        choices=["DONE", "FAILED", "PARKED", "IN_PROGRESS", "SPLIT", "PENDING", "EXTERNAL"],
+    )
     p.add_argument("--note")
     p.add_argument("--reason")
     p.add_argument("--skip-check", action="store_true", help="skip `make check` (needs a reason)")

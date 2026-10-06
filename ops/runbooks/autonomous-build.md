@@ -88,6 +88,23 @@ difference is that it advances while the session is open.
 Each wave claims its tasks with `orch set <id> IN_PROGRESS` before working, so the in-session and detached
 runners cannot hand the same task to two agents. Do not run both at once anyway.
 
+## Tasks built outside the orchestrator
+
+A task someone else is building — a polly worker in its own worktree, or you by hand — must be claimed as
+**EXTERNAL**, not IN_PROGRESS. `./orch run` (and `./orch release`) treats every IN_PROGRESS row as a
+leftover from a crashed runner and moves it to FAILED, which makes it runnable again: an outside builder
+claimed as IN_PROGRESS gets a duplicate builder the next time the runner starts.
+
+```bash
+./orch set M13.5 EXTERNAL --note "polly worker, branch polly/orch-gate"   # claim it
+./orch set M13.5 DONE                    # when the work lands: verify re-runs as usual
+./orch set M13.5 PENDING                 # or hand it back to the orchestrator
+```
+
+An EXTERNAL task is never released at startup, never in the ready set (even after `orch answer`), and does
+not satisfy its dependents until it is DONE. Claiming it spends none of its attempts. `./orch status` and the
+runner's stop report list EXTERNAL tasks so a claim nobody closed stays visible.
+
 ## What it will never do on its own
 
 Place a broker order. Ratify a policy for real money. Run a bulk fetch campaign without your go. Spend

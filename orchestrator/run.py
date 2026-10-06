@@ -176,12 +176,20 @@ def _stop_report(graph: Graph, st: BuildState, wave: int) -> None:
             print(f"  {t.id:8} {t.title}")
             print(f"           {GREY}{st.record(t.id).get('reason', '')}{OFF}")
             print(f"           ./orch why {t.id}")
+    external = [t for t in graph.tasks.values() if states.get(t.id) == "EXTERNAL"]
+    if external:
+        print(f"\n{BOLD}Being built outside the orchestrator ({len(external)}){OFF}")
+        for t in external:
+            print(f"  {t.id:8} {t.title}")
+        print("  Close with:    ./orch set <task-id> DONE")
     if waiting:
         print(f"\n{GREY}Downstream of the above ({len(waiting)} tasks){OFF}")
 
     if parked or stuck:
         print('\n  Unblock with:  ./orch answer <task-id> --decision "..."')
         print("  Then resume:   ./orch run")
+    elif external:
+        print("\n  Resume once they land:  ./orch run")
     else:
         print(f"{GREEN}Nothing is blocked and nothing is ready — the graph is complete.{OFF}")
 
