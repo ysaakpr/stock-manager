@@ -1181,10 +1181,12 @@ def merger_term_actions(
 
     A swap's survivor is resolved to the member of its lineage chain live on the day the swap
     applies — the record date, or the survivor's first priced session after it when
-    ``first_priced`` says the survivor had not yet listed. A survivor ``first_priced`` never sees
-    again is not applied (``book_actions.merger_no_survivor_price``): converting into a name with
-    no close would stall every NAV sample. An unsourced scheme with a record date becomes an
-    :class:`UnmodelledAction` (``MERGER:unsourced``), so a holding in it is counted, not guessed.
+    ``first_priced`` says the survivor had not yet listed. When the chain member live on the record
+    date never prints again, the named survivor's own first print is used instead. A survivor
+    ``first_priced`` never sees again is not applied (``book_actions.merger_no_survivor_price``):
+    converting into a name with no close would stall every NAV sample. An unsourced scheme with a
+    record date becomes an :class:`UnmodelledAction` (``MERGER:unsourced``), so a holding in it is
+    counted, not guessed.
     """
     out: list[BookAction] = []
     for swap in terms.share_swaps:
@@ -1197,6 +1199,11 @@ def merger_term_actions(
                 effective_date,
             )
             priced = first_priced(survivor_on_record, swap.record_date)
+            if priced is None and survivor_on_record != swap.surviving_isin:
+                # The lineage named a predecessor live on the record date that never prints again
+                # (Piramal Finance: a derived edge from the pre-listing ISIN). The scheme's shares
+                # are the named survivor's, so its own first print is where the holding lands.
+                priced = first_priced(swap.surviving_isin, swap.record_date)
             if priced is None:
                 _log.warning(
                     "book_actions.merger_no_survivor_price",

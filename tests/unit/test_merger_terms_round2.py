@@ -170,6 +170,36 @@ def test_the_round_2_exit_surrenders_at_the_exit_price() -> None:
     assert walk.cash[T4] - walk.cash[T3] == 10 * Decimal("480")
 
 
+def test_a_survivor_whose_live_predecessor_never_prints_lands_on_its_own_first_print() -> None:
+    """Piramal Finance: lineage names a pre-listing ISIN live on the record date that never prints.
+
+    Without the fallback the swap is dropped (``merger_no_survivor_price``) and the holding stays
+    stuck; with it, the holding converts into the named survivor on its first priced session.
+    """
+    old, survivor, unlisted = "INE140A01024", "INE202B01038", "INE202B01012"
+    record, listed = date(2025, 9, 23), date(2025, 11, 21)
+
+    def chain(isin: str) -> tuple[str, ...]:
+        return (unlisted, survivor) if isin == survivor else (isin,)
+
+    def edge(isin: str) -> date | None:
+        return date(2025, 11, 7) if isin == unlisted else None
+
+    def first_priced(isin: str, on: date) -> date | None:
+        return max(on, listed) if isin == survivor else None  # the predecessor never prints
+
+    terms = load_merger_terms()
+    swaps = [
+        a
+        for a in merger_term_actions(terms, chain, edge, first_priced=first_priced)
+        if isinstance(a, ShareSwap) and a.isin == old
+    ]
+    assert len(swaps) == 1, "the swap was dropped"
+    (swap,) = swaps
+    assert (swap.ex_date, swap.surviving_isin, swap.record_date) == (listed, survivor, record)
+    assert swap.cash_per_share == Decimal("67")
+
+
 # ── the non-share leg ──────────────────────────────────────────────────────────────────────────
 
 
