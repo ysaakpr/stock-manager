@@ -514,6 +514,7 @@ def materialize_isin(
     history_isins: Sequence[str] | None = None,
     infer_splits: bool = True,
     curated: Sequence[CorporateAction] | None = None,
+    history_floor: date | None = None,
 ) -> L2WriteReport:
     """Materialize one ISIN's L2 adjusted partition from L1 + its factor chain.
 
@@ -540,6 +541,13 @@ def materialize_isin(
     `isin` (`_curated_for_chain`). They are composed in before the implied-split scan — a curated
     split is a recorded event to it, so the same step is never adjusted twice — and one a feed has
     since published (same ex-date and type) is skipped in the feed's favour (`curated_actions`).
+
+    `history_floor` is the first trade date the partition may carry: bars before it — from `isin`
+    and from every ISIN in `history_isins` alike — are dropped before anything is composed or
+    adjusted, so the partition is what a build over an L1 that started at the floor would write.
+    `None` (the default) materializes the whole L1 history, which is what the first-time fill,
+    `--extend` and `--rebuild-all` do. `rebuild_invalidated` passes an existing partition's first
+    date, so draining the queue never extends a series into history no one curated.
     """
     if chain.isin != isin:
         raise ValueError(
@@ -556,6 +564,7 @@ def materialize_isin(
         bar
         for source in sources
         for bar in read_raw_bars_from_l1(source, con=con, data_root=data_root)
+        if history_floor is None or bar.trade_date >= history_floor
     )
     path = l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=data_root)
     if not raw_bars:
@@ -564,6 +573,7 @@ def materialize_isin(
             "l2.prices_adjusted_empty",
             dataset=PRICES_ADJUSTED_DATASET,
             isin=isin,
+            history_floor=None if history_floor is None else history_floor.isoformat(),
             stale_removed=removed,
             state="EMPTY",
         )
@@ -603,6 +613,7 @@ def materialize_isin(
         rows=report.rows_written,
         from_date=report.from_date.isoformat() if report.from_date else None,
         to_date=report.to_date.isoformat() if report.to_date else None,
+        history_floor=None if history_floor is None else history_floor.isoformat(),
         implied_splits=len(implied),
         curated_actions=len(manual),
         state="PUBLISHED",
@@ -1129,6 +1140,13 @@ def rebuild_invalidated(
     resolved without being built — its bars are the survivor's — and any partition it still has is
     removed: building it would put one company in L2 twice, the second copy unadjusted (on
     2026-10-05, 60 such partitions, BAJFINANCE's INE296A01016 a -90% "day" on its split).
+
+    The drain never extends a series (M13.8). An ISIN that already has a partition is rebuilt from
+    that partition's first date (`history_floor`), whatever L1 now holds before it: L1 reaches back
+    to 2006 while L2 starts at 2011-06-22, and a weekly `ca_refresh` that rebuilt ~1,100 queued
+    names over their full L1 would surface uncurated pre-2011 steps and turn `l2_continuity` red.
+    Reaching back is `l2_fill --extend`'s job alone (`rebuild_truncated`). An ISIN with no
+    partition yet is built as the first-time fill builds it (`materialize_missing`: no floor).
     """
     isins = [
         str(r[0])
@@ -1150,6 +1168,7 @@ def rebuild_invalidated(
             for isin in isins:
                 wanted.update(history_for.get(isin, ()))
         preload_raw_bars(con, wanted, data_root=data_root)
+        floors = _l2_first_dates(con, isins, data_root=data_root)
         for isin in isins:
             if survivor_of is not None and survivor_of(isin) != isin:
                 removed = _remove_partition(
@@ -1171,6 +1190,14 @@ def rebuild_invalidated(
                 continue
             chain = load_factor_chain(conn, isin)
             actions = load_reconciled_actions(conn, isin=isin)
+            floor = floors.get(isin)
+            _LOG.info(
+                "l2.rebuild_floor",
+                dataset=PRICES_ADJUSTED_DATASET,
+                isin=isin,
+                history_floor=None if floor is None else floor.isoformat(),
+                policy="existing_partition_start" if floor is not None else "first_time_fill",
+            )
             reports.append(
                 materialize_isin(
                     isin,
@@ -1179,6 +1206,7 @@ def rebuild_invalidated(
                     con=con,
                     data_root=data_root,
                     history_isins=None if history_for is None else history_for.get(isin),
+                    history_floor=floor,
                 )
             )
             conn.execute(
@@ -1595,6 +1623,30 @@ def rebuild_isins(
 def _isin_of_partition(path: Path) -> str:
     """The ISIN an L2 partition file belongs to, read back off its `isin=<ISIN>` directory."""
     return path.parent.name.removeprefix("isin=")
+
+
+def _l2_first_dates(
+    con: duckdb.DuckDBPyConnection, isins: Iterable[str], *, data_root: Path | None
+) -> dict[str, date]:
+    """The first trade date of each listed ISIN's `prices_adjusted` partition, where one exists.
+
+    Reads only those ISINs' partition files, one pass. An ISIN with no partition (or an empty one)
+    is absent from the result — the caller's signal that there is no floor to keep.
+    """
+    files = [
+        path
+        for isin in sorted(set(isins))
+        if (
+            path := l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=data_root)
+        ).is_file()
+    ]
+    if not files:
+        return {}
+    rows = con.execute(
+        "SELECT isin, min(trade_date) FROM read_parquet($files) GROUP BY isin",
+        {"files": [str(f) for f in files]},
+    ).fetchall()
+    return {str(r[0]): r[1] for r in rows if r[1] is not None}
 
 
 def _price_point(bar: RawBar) -> PricePoint:
