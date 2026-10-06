@@ -75,7 +75,7 @@ MARKER_ACTIONS: Final[Mapping[str, frozenset[str]]] = {
 }
 
 #: The longest trading gap after an ex-date whose first session still counts as the ex-date's
-#: own session. On the 2016-09..2024-07 `CS` markers the first session came 3-65 days after
+#: own session. On the 2016-09..2024-07 `CS` markers the first session came 16-63 days after
 #: the stored ex-date, so this leaves room; it stops a scrip that resumes years later from
 #: matching an old action.
 MAX_SUSPENSION_DAYS: Final = 120
