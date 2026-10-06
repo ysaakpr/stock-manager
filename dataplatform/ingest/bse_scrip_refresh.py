@@ -43,7 +43,12 @@ from dataplatform.logging import get_logger
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Ref, L0Store
 
-__all__ = ["SCRIP_STATUSES", "BseScripRefreshReport", "refresh_bse_scrip_master"]
+__all__ = [
+    "SCRIP_STATUSES",
+    "STATUS_TOKEN",
+    "BseScripRefreshReport",
+    "refresh_bse_scrip_master",
+]
 
 _LOG = get_logger(__name__)
 
@@ -54,8 +59,9 @@ _HOST: Final = "api.bseindia.com"
 SCRIP_STATUSES: Final = ("Active", "Suspended", "Delisted")
 
 #: The register's URL carries `status={Active|Suspended|Delisted}` as documentation of the choice,
-#: not as a substitution token. This is the token actually replaced.
-_STATUS_TOKEN: Final = "{Active|Suspended|Delisted}"
+#: not as a substitution token. This is the token actually replaced — here, and by the daily
+#: snapshot (`daily_snapshot.py`), which captures the Active list alone.
+STATUS_TOKEN: Final = "{Active|Suspended|Delisted}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,12 +96,12 @@ def _url_for(register: SourceRegister, status: str) -> str:
     entry = next((e for e in register.sources if e.id == SOURCE_ID), None)
     if entry is None:
         raise KeyError(f"source register has no row for {SOURCE_ID!r}")
-    if _STATUS_TOKEN not in entry.url_template:
+    if STATUS_TOKEN not in entry.url_template:
         raise ValueError(
-            f"{SOURCE_ID} url_template no longer carries {_STATUS_TOKEN!r}; the register changed "
+            f"{SOURCE_ID} url_template no longer carries {STATUS_TOKEN!r}; the register changed "
             f"shape and this driver would silently fetch one status three times"
         )
-    return entry.url_template.replace(_STATUS_TOKEN, status)
+    return entry.url_template.replace(STATUS_TOKEN, status)
 
 
 def _land_in_l0(
