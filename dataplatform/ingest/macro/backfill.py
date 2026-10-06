@@ -631,24 +631,36 @@ def render_report(
     if gaps:
         lines += ["", "## Sessions not published, with cause", ""]
         lines += [f"- {g.session.isoformat()} {g.outcome.value}: {g.detail}" for g in gaps]
+    ended = [u for u in names if u.last_seen != last_published]
+    live = [u for u in names if u.last_seen == last_published]
     lines += [
         "",
         f"## Published index names the alias table does not know ({len(names)})",
         "",
-        "First and last session each appeared on. A name whose last session is before the latest",
-        "published session stopped appearing: retired, or renamed into a name below or in the",
-        "table. Mapping one is a research task with evidence, never a guess.",
+        "The alias table carries only names with rename evidence, so a name it does not know is",
+        "not an error: it resolves to itself. The list that matters is the first one — names that",
+        "stopped appearing before the latest published session, each either retired or renamed",
+        "into a later name. Mapping one is a research task with evidence, never a guess.",
         "",
-        "| Name | First seen | Last seen | Sessions | Still published |",
-        "|---|---|---|---|---|",
-    ]
-    lines += [
-        f"| {u.name} | {u.first_seen.isoformat()} | {u.last_seen.isoformat()} | {u.sessions} | "
-        f"{'yes' if u.last_seen == last_published else 'no'} |"
-        for u in names
+        f"### Stopped appearing ({len(ended)}) — the input to widening the name history",
+        "",
+        *_name_table(ended),
+        "",
+        f"### Still published, never renamed on the evidence so far ({len(live)})",
+        "",
+        *_name_table(live),
     ]
     lines.append("")
     return "\n".join(lines)
+
+
+def _name_table(names: Sequence[UnmappedName]) -> list[str]:
+    rows = ["| Name | First seen | Last seen | Sessions |", "|---|---|---|---|"]
+    rows += [
+        f"| {u.name} | {u.first_seen.isoformat()} | {u.last_seen.isoformat()} | {u.sessions} |"
+        for u in names
+    ]
+    return rows
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────────────────
