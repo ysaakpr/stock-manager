@@ -329,6 +329,20 @@ _DEFAULT_INVESTABLE_INDEX = "nifty500"
 #: screen had been a no-op before the 2026-09 snapshots), so a campaign must never resume a ledger
 #: persisted under the old reading: the key changes the digest. Bump it when the reading changes.
 INDEX_MEMBERSHIP_IDENTITY: Final = "dq5_membership_history/v1:announced_and_effective:no_fallback"
+#: The investable universes a run may be asked for, by name (owner decision 2026-10-06, option A).
+#: ``nifty500`` is the default and the only universe screened on point-in-time index membership;
+#: ``turnover_floor`` is the pre-PR-#47 universe — every NSE EQ name above the liquidity floor, no
+#: index screen — kept for windows the membership history does not reach (it starts 2016-10-24).
+#: Two named experiments, never a fallback from one to the other: a ``nifty500`` run on an uncovered
+#: date still raises :class:`IndexCoverageError`.
+UNIVERSE_NIFTY500: Final = "nifty500"
+UNIVERSE_TURNOVER_FLOOR: Final = "turnover_floor"
+UNIVERSE_CHOICES: Final = (UNIVERSE_NIFTY500, UNIVERSE_TURNOVER_FLOOR)
+DEFAULT_UNIVERSE: Final = UNIVERSE_NIFTY500
+#: Recorded in the spec of every ``turnover_floor`` run (and only those) under
+#: ``investable_universe``, beside its ``index_slug=None`` parameters: the universe is named in the
+#: digest itself, so a turnover-floor ledger can never be resumed or ranked as a NIFTY 500 one.
+TURNOVER_FLOOR_UNIVERSE_IDENTITY: Final = "turnover_floor/v1:nse_eq_above_floor:no_index_screen"
 #: The liquidity floor: a name's *median daily traded value* over the look-back must clear this to
 #: count as investable. ₹1 crore (₹10,000,000) is a deliberately conservative microcap cut — on the
 #: real ten-year store it drops the illiquid ~35% tail (probed at build time) that a raw momentum
@@ -863,11 +877,15 @@ class UniverseParameters:
       floor. This is the microcap cut that kills the fake momentum a raw rank can pick off
       names that barely trade (ops/BACKLOG.md, M4.10).
 
+    ``index_slug=None`` is the ``turnover_floor`` universe (:data:`UNIVERSE_TURNOVER_FLOOR`): no
+    index screen at all, only the liquidity floor. It is asked for by name through
+    :meth:`for_universe`, never reached by falling back from an index that does not cover a date.
+
     All three are fixed by construction and echoed verbatim in the report, so the "no tuning" line
     stays checkable.
     """
 
-    index_slug: str = _DEFAULT_INVESTABLE_INDEX
+    index_slug: str | None = _DEFAULT_INVESTABLE_INDEX
     median_turnover_floor: Decimal = _DEFAULT_TURNOVER_FLOOR
     liquidity_lookback_days: int = _DEFAULT_LIQUIDITY_LOOKBACK_DAYS
 
@@ -882,6 +900,25 @@ class UniverseParameters:
             raise ValueError(
                 f"liquidity_lookback_days must be positive, got {self.liquidity_lookback_days}"
             )
+
+    @classmethod
+    def for_universe(cls, universe: str, *, median_turnover_floor: Decimal) -> UniverseParameters:
+        """The parameters of the named investable universe (one of :data:`UNIVERSE_CHOICES`).
+
+        ``nifty500`` builds exactly the default parameters (so its specs and digests are the ones
+        every run had before the choice existed); ``turnover_floor`` drops the index screen.
+        Raises ``ValueError`` on any other name — an unknown universe is never guessed.
+        """
+        if universe == UNIVERSE_NIFTY500:
+            return cls(median_turnover_floor=median_turnover_floor)
+        if universe == UNIVERSE_TURNOVER_FLOOR:
+            return cls(index_slug=None, median_turnover_floor=median_turnover_floor)
+        raise ValueError(f"unknown universe {universe!r}; one of: {', '.join(UNIVERSE_CHOICES)}")
+
+    @property
+    def universe(self) -> str:
+        """The universe's name: ``turnover_floor`` with no index screen, else the index slug."""
+        return UNIVERSE_TURNOVER_FLOOR if self.index_slug is None else self.index_slug
 
 
 class _InvestableUniverse:
@@ -910,6 +947,10 @@ class _InvestableUniverse:
     unscreened or empty set is a different universe. An opt-in flag would let such a run land in
     a ranked campaign table beside clean ones, with the bias visible only in a manifest field; a
     raised :class:`IndexCoverageError` names the index, the date and the coverage start instead.
+
+    **The ``turnover_floor`` universe** (``index_slug=None``) applies the liquidity floor alone. It
+    is a different, separately named experiment — chosen up front, recorded in the run spec under
+    its own key — not this class answering an uncovered date some other way.
     """
 
     def __init__(
@@ -926,14 +967,22 @@ class _InvestableUniverse:
         self._liquid: dict[date, frozenset[str]] = {}
         self._coverage: tuple[date | None] | None = None
 
+    @property
+    def params(self) -> UniverseParameters:
+        """The universe parameters this screen applies."""
+        return self._params
+
     def coverage_start(self) -> date | None:
         """The first date the stored membership history answers for; ``None`` with no history.
 
         Read once from the history's newest build, never hard-coded, so a history extended back
         widens what a run may cover without a change here.
         """
+        slug = self._params.index_slug
+        if slug is None:
+            raise BacktestError("the turnover_floor universe has no index membership history")
         if self._coverage is None:
-            history = read_membership_history(self._params.index_slug, data_root=self._data_root)
+            history = read_membership_history(slug, data_root=self._data_root)
             self._coverage = (None if history is None else history.coverage_start,)
         return self._coverage[0]
 
@@ -947,6 +996,8 @@ class _InvestableUniverse:
         if as_of in self._members:
             return self._members[as_of]
         slug = self._params.index_slug
+        if slug is None:
+            raise BacktestError("the turnover_floor universe has no index membership screen")
         coverage = self.coverage_start()
         if coverage is None or as_of < coverage:
             raise IndexCoverageError(slug, as_of, coverage)
@@ -968,8 +1019,14 @@ class _InvestableUniverse:
         return liquid
 
     def constrain(self, as_of: date, candidates: Iterable[str]) -> set[str]:
-        """Candidates surviving both screens as of ``as_of`` (index membership ∩ liquidity)."""
-        return set(candidates) & self.liquid_asof(as_of) & self.members_asof(as_of)
+        """Candidates surviving both screens as of ``as_of`` (index membership ∩ liquidity).
+
+        The ``turnover_floor`` universe (``index_slug=None``) has the liquidity screen only.
+        """
+        liquid = set(candidates) & self.liquid_asof(as_of)
+        if self._params.index_slug is None:
+            return liquid
+        return liquid & self.members_asof(as_of)
 
 
 # ── data source: the PIT momentum signal the policy reads ─────────────────────────────────────────
@@ -2289,7 +2346,10 @@ def backtest_spec(
     ``cap_tiers`` (X2) adds a ``cap_tiers`` key the same way, naming the size measure and sleeves.
     A run with a ``universe`` adds ``index_membership`` (:data:`INDEX_MEMBERSHIP_IDENTITY`): unlike
     those two it is *meant* to move every screened run's digest, because the screen's reading
-    changed underneath the same parameters. Every run adds ``holding_marks``
+    changed underneath the same parameters. A ``turnover_floor`` universe (``index_slug=None``)
+    adds no ``index_membership`` — it reads no membership — and adds ``investable_universe``
+    (:data:`TURNOVER_FLOOR_UNIVERSE_IDENTITY`) instead, so the default universe's specs are
+    untouched and the two can never share a digest. Every run adds ``holding_marks``
     (:data:`HOLDING_MARKS_IDENTITY`) for the same reason: how a held name that left EQ is marked and
     sold changed, and no campaign may resume a ledger struck under the frozen-EQ-mark reading.
     """
@@ -2302,7 +2362,10 @@ def backtest_spec(
     if runner in _CEILING_SIZED_RUNNERS:
         extra["buy_sizing"] = BUY_SIZING_IDENTITY
     if universe is not None:
-        extra["index_membership"] = INDEX_MEMBERSHIP_IDENTITY
+        if universe.index_slug is None:
+            extra["investable_universe"] = TURNOVER_FLOOR_UNIVERSE_IDENTITY
+        else:
+            extra["index_membership"] = INDEX_MEMBERSHIP_IDENTITY
     return run_spec(
         runner,
         start=start,
@@ -5234,7 +5297,8 @@ class SwingLake:
     ``universe_filters`` is keyed by the liquidity floor in rupees, because that is the one universe
     knob the sweep varies (M10.7 measured the edge as concentrated in the thinner half of the
     investable set, so a reachability row means re-running on a higher floor). One filter per floor,
-    shared by every arm on that floor, and its per-date caches warm across arms.
+    shared by every arm on that floor, and its per-date caches warm across arms. Every filter
+    screens the one named universe the lake was opened for; a run asking for another is refused.
 
     Owns its DuckDB connection and reader: ``close`` releases both, and no run closes them — a run
     handed a lake must not shut down state its siblings still need.
@@ -5277,8 +5341,12 @@ def open_swing_lake(
     band_hits: bool = False,
     residual_momentum: bool = False,
     cap_tiers: bool = False,
+    universe: str = DEFAULT_UNIVERSE,
 ) -> SwingLake:
     """Build the shared lake state for a swing sweep over ``[start, end]`` (M12.2).
+
+    ``universe`` names the investable universe every floor's screen applies (one of
+    :data:`UNIVERSE_CHOICES`; ``nifty500`` by default).
 
     Assumes ``floors`` lists every median-turnover floor the sweep will run on; a run asking for a
     floor that is not here is a programming error, not a fallback. Never loads features — the caller
@@ -5341,7 +5409,7 @@ def open_swing_lake(
             universe_filters={
                 floor: _InvestableUniverse(
                     reader,
-                    UniverseParameters(median_turnover_floor=floor),
+                    UniverseParameters.for_universe(universe, median_turnover_floor=floor),
                     data_root=data_root,
                 )
                 for floor in floors
@@ -5412,6 +5480,7 @@ def run_swing_composite(
             band_hits=band_hit_avoidance,
             residual_momentum=parameters.weight_residual_momentum != _ZERO,
             cap_tiers=cap_tiers is not None,
+            universe=DEFAULT_UNIVERSE if universe is None else universe.universe,
         )
     elif parameters.weight_residual_momentum != _ZERO and not lake.features.residual_momentum:
         raise BacktestError(
@@ -5439,6 +5508,11 @@ def run_swing_composite(
                 raise BacktestError(
                     f"the shared lake carries no liquidity screen for a floor of {floor} — "
                     "open_swing_lake must be told every floor the sweep will run on"
+                )
+            if universe_filter.params != universe:
+                raise BacktestError(
+                    f"the shared lake screens {universe_filter.params!r} but this run asked for "
+                    f"{universe!r} — one sweep never mixes two universes"
                 )
         book = PortfolioBook()
         marks = _HoldingMarks(reader, _held_by(book))

@@ -115,7 +115,13 @@ from backtest.nav import (
     read_nav,
     write_nav,
 )
-from backtest.run import _L1Reader, describe_benchmark
+from backtest.run import (
+    DEFAULT_UNIVERSE,
+    UNIVERSE_CHOICES,
+    UNIVERSE_TURNOVER_FLOOR,
+    _L1Reader,
+    describe_benchmark,
+)
 from backtest.run_ledger import (
     RunSummary,
     ledger_path,
@@ -171,6 +177,7 @@ __all__ = [
     "round2_plan",
     "run_figures",
     "run_fold_units",
+    "universe_line",
     "verify_frozen",
     "write_trial_sharpes",
 ]
@@ -233,6 +240,10 @@ class FoldRunPlan:
     #: split factors, exactly as the sweep CLI's default puts them. On for every real run; tests
     #: switch it off, which turns both off (the run spec then says so, under its own digest).
     book_actions: bool = True
+    #: The investable universe every run screens (``backtest.run.UNIVERSE_CHOICES``). ``nifty500``
+    #: is the default and refuses a window before its membership history; ``turnover_floor`` is the
+    #: pre-PR-#47 universe, named in every run spec and in the frozen record so the two never mix.
+    universe: str = DEFAULT_UNIVERSE
 
     @property
     def units(self) -> tuple[int, ...]:
@@ -248,6 +259,12 @@ class Pinned:
     commit: str
     data_root: str
     lake_last_session: date
+
+
+def _universe(name: str) -> str:
+    if name not in UNIVERSE_CHOICES:
+        raise FoldCampaignError(f"unknown universe {name!r}; one of: {', '.join(UNIVERSE_CHOICES)}")
+    return name
 
 
 def _resolve(labels: Sequence[str]) -> tuple[Arm, ...]:
@@ -293,7 +310,12 @@ def _windows(
 
 
 def baseline_plan(
-    out_dir: Path, folds: FoldPlan, *, data_root: Path | None, book_actions: bool = True
+    out_dir: Path,
+    folds: FoldPlan,
+    *,
+    data_root: Path | None,
+    book_actions: bool = True,
+    universe: str = DEFAULT_UNIVERSE,
 ) -> FoldRunPlan:
     """The baseline-folds plan: the two baseline arms on every test and selection window, and on
     the continuous window over the test windows' union (the headline run)."""
@@ -303,6 +325,7 @@ def baseline_plan(
         windows=_windows(folds, selection=True, continuous=True),
         data_root=data_root,
         book_actions=book_actions,
+        universe=_universe(universe),
     )
 
 
@@ -314,6 +337,7 @@ def round2_plan(
     data_root: Path | None,
     book_actions: bool = True,
     continuous: bool = True,
+    universe: str = DEFAULT_UNIVERSE,
 ) -> FoldRunPlan:
     """The round2-signals plan: the named H-arms on the fold test windows, plus (``continuous``)
     the one continuous run over their union that the report's headline is struck from.
@@ -335,6 +359,7 @@ def round2_plan(
         windows=_windows(folds, selection=False, continuous=continuous),
         data_root=data_root,
         book_actions=book_actions,
+        universe=_universe(universe),
     )
 
 
@@ -368,6 +393,7 @@ def run_fold_unit(plan: FoldRunPlan, index: int) -> UnitOutcome:
             arms=plan.arms,
             floors=(FLOOR,),
             data_root=plan.data_root,
+            universe_name=plan.universe,
         )
     failed = sum(1 for row in result.rows if not row.ok)
     name = f"{target.fold}-{target.role}"
@@ -402,7 +428,11 @@ def _digests(
         _contexts(stack, plan, actions)
         for target in plan.windows:
             digests = run_digests(
-                start=target.window.start, end=target.window.end, arms=plan.arms, floors=(FLOOR,)
+                start=target.window.start,
+                end=target.window.end,
+                arms=plan.arms,
+                floors=(FLOOR,),
+                universe_name=plan.universe,
             )
             for arm in plan.arms:
                 out[(arm.label, target.fold, target.role)] = digests[(arm.label, FLOOR)]
@@ -420,9 +450,15 @@ def _run_files(out_dir: Path, digest: str) -> dict[str, Path]:
 # ── the frozen record ──────────────────────────────────────────────────────────────────────────
 
 
-def _pin_document(pinned: Pinned) -> dict[str, Any]:
+def _pin_document(pinned: Pinned, universe: str) -> dict[str, Any]:
+    """The conditions a frozen record, trial-sharpes file or resume manifest is made under.
+
+    ``universe`` is always recorded: a record without it predates the choice and is refused by
+    every check (it was struck before the ``nifty500`` screen read point-in-time membership).
+    """
     return {
         "version": 1,
+        "universe": universe,
         "commit": pinned.commit,
         "data_root": pinned.data_root,
         "lake_last_session": pinned.lake_last_session.isoformat(),
@@ -466,7 +502,7 @@ def freeze_baseline(
             f"cannot freeze: {len(missing)} baseline run(s) incomplete: {'; '.join(missing[:6])}"
         )
     document = {
-        **_pin_document(pinned),
+        **_pin_document(pinned, plan.universe),
         "book_corporate_actions": plan.book_actions,
         "arms": [arm.label for arm in plan.arms],
         "runs": runs,
@@ -491,13 +527,16 @@ def verify_frozen(
     actions: BookActionSource | None,
     *,
     book_actions: bool = True,
+    universe: str = DEFAULT_UNIVERSE,
 ) -> dict[str, Any]:
     """The frozen record in ``baseline_dir``, or ``FoldCampaignError`` naming why it is unusable.
 
     Refuses: no record; a record made on another lake, other folds, another pre-registration,
-    another floor or interest schedule; any baseline digest the current code no longer gives the
-    same run; any recorded file missing or with a different hash. The commit is *not* required to
-    match — H-arm code lands after the freeze — the digests are what must.
+    another floor or interest schedule, or another investable universe (a round-2 run on
+    ``universe`` is only ever judged against a baseline frozen on the same one); any baseline
+    digest the current code no longer gives the same run; any recorded file missing or with a
+    different hash. The commit is *not* required to match — H-arm code lands after the freeze —
+    the digests are what must.
     """
     path = baseline_dir / FROZEN_NAME
     if not path.is_file():
@@ -505,7 +544,13 @@ def verify_frozen(
             f"no frozen baseline at {path}: run `baseline-folds --out {baseline_dir}` first"
         )
     frozen = json.loads(path.read_text(encoding="utf-8"))
-    current = _pin_document(pinned)
+    current = _pin_document(pinned, universe)
+    if frozen.get("universe") != universe:
+        raise FoldCampaignError(
+            f"the frozen baseline in {baseline_dir} was made on the "
+            f"{frozen.get('universe', '(unrecorded)')!r} universe, not {universe!r}: a round-2 run "
+            "is never judged against a baseline on another universe"
+        )
     differs = sorted(k for k in current if k != "commit" and frozen.get(k) != current[k])
     if frozen.get("book_corporate_actions") != book_actions:
         differs.append("book_corporate_actions")
@@ -513,7 +558,9 @@ def verify_frozen(
         raise FoldCampaignError(
             f"the frozen baseline was made under different conditions ({', '.join(differs)})"
         )
-    plan = baseline_plan(baseline_dir, folds, data_root=None, book_actions=book_actions)
+    plan = baseline_plan(
+        baseline_dir, folds, data_root=None, book_actions=book_actions, universe=universe
+    )
     expected = _digests(plan, actions)
     recorded = {(r["arm"], r["fold"], r["role"]): r for r in frozen["runs"]}
     problems: list[str] = []
@@ -765,8 +812,22 @@ def _floor_label() -> str:
     return f"₹{FLOOR / Decimal('10000000'):.0f} crore/day"
 
 
-def _assumptions() -> list[str]:
+def universe_line(universe: str) -> str:
+    """The report-header line naming the investable universe a campaign's runs screened."""
+    if universe == UNIVERSE_TURNOVER_FLOOR:
+        return (
+            f"Universe: **`{universe}`** — every NSE EQ name above the liquidity floor, no index "
+            "screen (the pre-PR-#47 universe; not point-in-time NIFTY 500 membership)"
+        )
+    return (
+        f"Universe: **`{universe}`** — point-in-time index membership (DQ-5 history) ∩ the "
+        "liquidity floor"
+    )
+
+
+def _assumptions(universe: str) -> list[str]:
     return [
+        universe_line(universe),
         describe_cash_interest(True),
         "Investor: resident individual, 30% slab, no surcharge, tax paid at FY end "
         "(pre-registration §2); after-tax XIRR on realised gains.",
@@ -785,7 +846,7 @@ def render_baseline_report(
         f"`{FROZEN_NAME}` before any H-arm was run (pre-registration §2).*",
         "",
         f"- Floor: **{_floor_label()}**",
-        *(f"- {line}" for line in _assumptions()),
+        *(f"- {line}" for line in _assumptions(plan.universe)),
         "",
         *headline_lines([(arm.label, plan.out_dir) for arm in plan.arms], digests, folds, fmv=fmv),
         "",
@@ -870,7 +931,7 @@ def write_trial_sharpes(
             }
         )
     document = {
-        **_pin_document(pinned),
+        **_pin_document(pinned, plan.universe),
         "book_corporate_actions": plan.book_actions,
         "folds": [f.name for f in folds.folds],
         "trials": trials,
@@ -882,17 +943,23 @@ def write_trial_sharpes(
 
 
 def load_trial_sharpes(
-    path: Path, pinned: Pinned, folds: FoldPlan, *, book_actions: bool = True
+    path: Path,
+    pinned: Pinned,
+    folds: FoldPlan,
+    *,
+    book_actions: bool = True,
+    universe: str = DEFAULT_UNIVERSE,
 ) -> TrialSharpeSet:
     """The trial Sharpes in a ``trial-sharpes`` file, refused unless struck on these folds.
 
     Refuses a file made on another lake, other folds, another pre-registration, floor or interest
-    schedule (the commit may differ, as for the frozen baseline), or with a non-finite Sharpe.
+    schedule or investable universe (the commit may differ, as for the frozen baseline), or with a
+    non-finite Sharpe.
     """
     if not path.is_file():
         raise FoldCampaignError(f"no trial-sharpes file at {path}")
     document = json.loads(path.read_text(encoding="utf-8"))
-    current = _pin_document(pinned)
+    current = _pin_document(pinned, universe)
     differs = sorted(k for k in current if k != "commit" and document.get(k) != current[k])
     if document.get("book_corporate_actions") != book_actions:
         differs.append("book_corporate_actions")
@@ -933,7 +1000,13 @@ def render_round2(
         raise FoldCampaignError(
             f"--baseline must name a frozen baseline arm ({', '.join(BASELINE_LABELS)})"
         )
-    frozen = baseline_plan(baseline_dir, folds, data_root=None, book_actions=plan.book_actions)
+    frozen = baseline_plan(
+        baseline_dir,
+        folds,
+        data_root=None,
+        book_actions=plan.book_actions,
+        universe=plan.universe,
+    )
     base_digests = _digests(frozen, actions)
     cand_digests = _digests(plan, actions)
     baselines = [
@@ -970,7 +1043,7 @@ def render_round2(
         trials=trials,
         sharpe_variance=variance,
         floor_label=_floor_label(),
-        assumptions=_assumptions(),
+        assumptions=_assumptions(plan.universe),
         command=command,
         headline=headline,
     )
@@ -1031,6 +1104,14 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     for p in (base, h, render, t):
         p.add_argument("--data-root", type=Path, default=None)
+        p.add_argument(
+            "--universe",
+            choices=UNIVERSE_CHOICES,
+            default=DEFAULT_UNIVERSE,
+            help="investable universe: nifty500 (point-in-time NIFTY 500 membership, the default; "
+            "refuses a window before its history) or turnover_floor (every NSE EQ name above the "
+            "liquidity floor, no index screen). Recorded in every run spec and the frozen record",
+        )
     for p in (base, h, t):
         p.add_argument(
             "--workers", type=int, required=True, help=f"worker processes, 1..{MAX_WORKERS}"
@@ -1061,8 +1142,8 @@ def _pinned(data_root: Path | None, folds: FoldPlan) -> Pinned:
     )
 
 
-def _resume_manifest(pinned: Pinned, command: str) -> dict[str, Any]:
-    return {**_pin_document(pinned), "command": command}
+def _resume_manifest(pinned: Pinned, command: str, universe: str) -> dict[str, Any]:
+    return {**_pin_document(pinned, universe), "command": command}
 
 
 def _labels(arms: str) -> list[str]:
@@ -1096,14 +1177,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         pinned = _pinned(args.data_root, folds)
         out_dir = refuse_lake_location(args.out, args.data_root)
-        check_manifest(out_dir, _resume_manifest(pinned, args.command))
+        universe = args.universe
+        check_manifest(out_dir, _resume_manifest(pinned, args.command, universe))
         actions = load_store_book_actions()
         if args.command == "baseline-folds":
-            plan = baseline_plan(out_dir, folds, data_root=args.data_root)
+            plan = baseline_plan(out_dir, folds, data_root=args.data_root, universe=universe)
             if args.smoke:
-                plan = FoldRunPlan(
-                    out_dir, plan.arms[:1], plan.windows[:1], args.data_root, plan.book_actions
-                )
+                plan = replace(plan, arms=plan.arms[:1], windows=plan.windows[:1])
             if _print_outcomes(run_fold_units(plan, workers=args.workers)):
                 raise FoldCampaignError("a baseline run failed; nothing frozen (re-run to retry)")
             if args.smoke:
@@ -1118,7 +1198,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 text = render_baseline_report(plan, folds, actions, service_fmv[1])
         elif args.command == "trial-sharpes":
             labels = _labels(args.arms) if args.arms else list(round1_labels())
-            plan = round2_plan(out_dir, folds, labels, data_root=args.data_root, continuous=False)
+            plan = round2_plan(
+                out_dir,
+                folds,
+                labels,
+                data_root=args.data_root,
+                continuous=False,
+                universe=universe,
+            )
             if _print_outcomes(run_fold_units(plan, workers=args.workers)):
                 raise FoldCampaignError("a trial run failed; no trial Sharpes written (re-run)")
             service_fmv = l1_grandfathering(args.data_root)
@@ -1138,9 +1225,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             if args.baseline not in BASELINE_LABELS:
                 raise FoldCampaignError(f"--baseline must be one of: {', '.join(BASELINE_LABELS)}")
-            verify_frozen(baseline_dir, pinned, folds, actions)
+            verify_frozen(baseline_dir, pinned, folds, actions, universe=universe)
             trial_sharpes = (
-                load_trial_sharpes(args.trial_sharpes, pinned, folds)
+                load_trial_sharpes(args.trial_sharpes, pinned, folds, universe=universe)
                 if args.trial_sharpes is not None
                 else None
             )
@@ -1151,17 +1238,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise FoldCampaignError("render-round2 --out must be a new directory")
                 check_manifest(
                     runs_dir,
-                    _resume_manifest(pinned, "round2-signals"),
+                    _resume_manifest(pinned, "round2-signals", universe),
                     runs_from_commit=args.runs_from_commit,
                 )
-                plan = round2_plan(runs_dir, folds, labels, data_root=args.data_root)
+                plan = round2_plan(
+                    runs_dir, folds, labels, data_root=args.data_root, universe=universe
+                )
                 absent = _absent_runs(plan, actions)
                 if absent:
                     raise FoldCampaignError(
                         "render-round2 replays nothing; not on disk: " + "; ".join(absent[:6])
                     )
             else:
-                plan = round2_plan(out_dir, folds, labels, data_root=args.data_root)
+                plan = round2_plan(
+                    out_dir, folds, labels, data_root=args.data_root, universe=universe
+                )
                 if _print_outcomes(run_fold_units(plan, workers=args.workers)):
                     raise FoldCampaignError("an H-arm run failed; no decision rendered (re-run)")
             name, service_fmv = "round2-decision.md", l1_grandfathering(args.data_root)
