@@ -1,0 +1,72 @@
+{
+  "era": "lowercase",
+  "session": "2026-09-04",
+  "archive_filename": "PR040926.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR040926.zip",
+  "fetched_at": "2026-09-08",
+  "original_bytes": 665049,
+  "original_sha256": "1edd9171e7b97fa8ccb1bf1f3da7ff8a119d3fec15dfbfe74180c5526ea74b0b",
+  "original_members": [
+    {
+      "name": "an04092026.txt",
+      "bytes": 414637
+    },
+    {
+      "name": "bc04092026.csv",
+      "bytes": 27222
+    },
+    {
+      "name": "bh04092026.csv",
+      "bytes": 10217
+    },
+    {
+      "name": "bm04092026.txt",
+      "bytes": 3760
+    },
+    {
+      "name": "corpbond04092026.csv",
+      "bytes": 21045
+    },
+    {
+      "name": "etf04092026.csv",
+      "bytes": 68937
+    },
+    {
+      "name": "gl04092026.csv",
+      "bytes": 187627
+    },
+    {
+      "name": "hl04092026.csv",
+      "bytes": 5644
+    },
+    {
+      "name": "mcap04092026.csv",
+      "bytes": 481688
+    },
+    {
+      "name": "pd04092026.csv",
+      "bytes": 666814
+    },
+    {
+      "name": "pr04092026.csv",
+      "bytes": 624606
+    },
+    {
+      "name": "readme.txt",
+      "bytes": 2490
+    },
+    {
+      "name": "sme04092026.csv",
+      "bytes": 81205
+    },
+    {
+      "name": "tt04092026.csv",
+      "bytes": 2215
+    }
+  ],
+  "members_kept_in_fixture": [
+    "bc04092026.csv",
+    "mcap04092026.csv",
+    "readme.txt"
+  ]
+}

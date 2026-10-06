@@ -1,23 +1,23 @@
-"""M9.4 — the backtest benchmarked against M3.9's computed TRI (X2, §5.2).
+"""M9.4 + W0-4 — the backtest benchmarked against the NIFTY total-return series (X2, §5.2).
 
-Every acceptance criterion of the task is a test here:
+M9.4's three acceptance criteria are each a test here: the benchmark is a ``TriSeries`` from the
+M3.9 pipeline rather than the ad-hoc L1 proxy; the report states which series it actually was; and
+the comparison runs through the existing ``compare_to_benchmarks`` path unchanged.
 
-  1. the backtest benchmark is the M3.9 ``TriSeries`` (computed TRI), not the ad-hoc L1 proxy
-     (``test_benchmark_is_m39_computed_tri``, ``test_computed_tri_differs_from_l1_proxy``)
-  2. the report states the benchmark provenance (computed, not licensed) and re-states excess
-     return on it (``test_report_states_provenance_and_excess``)
-  3. the comparison runs through the existing ``compare_to_benchmarks`` path unchanged
-     (``test_benchmark_xirr_is_the_unchanged_compare_path``)
+W0-4 adds the half M9.4 could not have: **the published series is preferred over the estimate.**
+M9.4 shipped when the source register recorded `nifty_tri_history` FAILED against a stale URL path,
+so no published TRI could exist in any lake and `_resolve_benchmark` took a fallback on every run
+— quietly, at log level *info*. The tests in the last two sections are the ones that would have
+caught that: the resolution order, the warning on each fallback, the report flag, and the strict
+mode that refuses to produce a number rather than produce a misattributed one.
 
-The lake is built through the *real* seams: raw ``prices_raw`` L1 partitions under ``tmp_path``,
-and a real M3.9 computed TRI ingested through ``ingest_tri_from_close`` — the same
-``compute_tri`` → ``write_tri_l1`` path production uses — so ``read_tri_series`` inside the backtest
-reads the same on-disk contract. No postgres, no network, deterministic.
+The lake is built through the *real* seams: raw ``prices_raw`` L1 partitions under ``tmp_path``, a
+computed TRI ingested through ``ingest_tri_from_close``, and a published TRI written through
+``write_tri_l1`` — the same on-disk contract production writes, so ``read_tri_series`` inside the
+backtest reads exactly what it reads live. No postgres, no network, deterministic.
 
 The fixture is a four-name rising market at monthly rebalances; the 2024-01 rebalance has a
-complete twelve-month look-back, so the policy trades and the portfolio XIRR is well defined. The
-computed TRI is a NIFTY-50 index level rising over the window, seeded to a published close of
-20000 with a 1.5 % dividend yield — §4.1's estimate, not the licensed feed.
+complete twelve-month look-back, so the policy trades and the portfolio XIRR is well defined.
 """
 
 from __future__ import annotations
@@ -30,21 +30,29 @@ from typing import Final
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from structlog.testing import capture_logs
 
 from backtest.accounting import PortfolioBook
 from backtest.policies.naive_momentum import MomentumParameters
 from backtest.run import (
     _BENCHMARK_COMPUTED_TRI,
     _BENCHMARK_L1_PROXY,
+    _BENCHMARK_PUBLISHED_TRI,
     BacktestResult,
+    BenchmarkSourceError,
     render_benchmark_report,
+    require_published_benchmark,
     run_benchmark_report,
     run_naive_momentum,
 )
 from dataplatform.ingest.indices import (
+    TRI_METHOD_PUBLISHED,
     IndexCloseRow,
+    TriPoint,
+    TriSeries,
     ingest_tri_from_close,
     read_tri_series,
+    write_tri_l1,
 )
 from dataplatform.store.paths import l1_partition_path
 from dataplatform.store.schemas import PRICES_RAW_DATASET, PRICES_RAW_SCHEMA
@@ -100,6 +108,11 @@ _VOLUME: Final = 100_000  # every name trades liquidly
 _TRI_SEED_CLOSE: Final = Decimal("20000")
 _TRI_STEP: Final = Decimal("1.02")
 _TRI_YIELD: Final = Decimal("1.5")  # a 1.5 % dividend yield — the estimated dividend leg
+
+#: The *published* series' level path. Distinct from the computed one on purpose (see
+#: `_published_series`): with both in the lake, the benchmark XIRR alone says which one won.
+_PUBLISHED_SEED: Final = Decimal("30000")
+_PUBLISHED_STEP: Final = Decimal("1.03")
 
 
 def _close_of(isin: str, session: date) -> Decimal:
@@ -172,6 +185,50 @@ def lake_with_tri(tmp_path: Path) -> Path:
     """An L1 lake of four names *and* an ingested M3.9 computed TRI for the whole window."""
     # A distinct subdirectory so a test that also builds the no-TRI lake does not share this store.
     return _build_lake(tmp_path / "with_tri", with_tri=True)
+
+
+def _published_series() -> TriSeries:
+    """A *published* TRI for the window — the exchange's own series, not §4.1's estimate.
+
+    Deliberately a different level path from ``_index_closes``' computed series (it steps 3 %, not
+    2 % plus a dividend leg) so a test can tell which of the two a run resolved to by looking at
+    the benchmark XIRR alone.
+    """
+    points: list[TriPoint] = []
+    level = _PUBLISHED_SEED
+    for session in _SESSIONS:
+        points.append(
+            TriPoint(
+                index_slug=BENCH_SLUG,
+                index_name=BENCH_NAME,
+                as_of=session,
+                tri_value=level.quantize(_PRICE_Q),
+                method=TRI_METHOD_PUBLISHED,
+            )
+        )
+        level = level * _PUBLISHED_STEP
+    return TriSeries(
+        index_slug=BENCH_SLUG,
+        index_name=BENCH_NAME,
+        method=TRI_METHOD_PUBLISHED,
+        points=tuple(points),
+    )
+
+
+@pytest.fixture
+def lake_with_published_tri(tmp_path: Path) -> Path:
+    """A lake holding **both** series — the case the preference order exists to decide."""
+    root = _build_lake(tmp_path / "with_published", with_tri=True)
+    write_tri_l1(_published_series(), data_root=root)
+    return root
+
+
+@pytest.fixture
+def lake_with_published_tri_only(tmp_path: Path) -> Path:
+    """A lake holding the published series and no estimate."""
+    root = _build_lake(tmp_path / "published_only", with_tri=False)
+    write_tri_l1(_published_series(), data_root=root)
+    return root
 
 
 @pytest.fixture
@@ -265,16 +322,22 @@ def test_benchmark_xirr_is_the_unchanged_compare_path(lake_with_tri: Path) -> No
 
 
 def test_report_states_provenance_and_excess(lake_with_tri: Path) -> None:
-    """The M9.4 report names the computed TRI, denies the licensed feed, and re-states excess."""
+    """With only the estimate in the lake, the report says so — and warns, in the heading.
+
+    This test used to assert the report claimed the published endpoint was "session-gated and
+    FAILED at C.1". That claim was false — the register carried a stale URL path — so the
+    assertion is now that the report names the estimate as an estimate and refuses to call the
+    excess excess-over-NIFTY-TRI.
+    """
     run = _run(lake_with_tri)
     report = render_benchmark_report(run, benchmark_slug=BENCH_SLUG)
 
-    assert "M9.4" in report
-    # Provenance: computed, and explicitly not the licensed feed.
-    assert "computed" in report.lower()
+    assert "COMPUTED TRI ESTIMATE" in report
     assert "computed_price_plus_div" in report
-    assert "not the licensed" in report.lower() or "not the exchange" in report.lower()
-    assert "FAILED at C.1" in report
+    assert "not the published" in report.lower()
+    assert "do not quote it as excess over nifty-tri" in report.lower()
+    # The remedy is named, so a reader knows the real series is one command away.
+    assert "dataplatform.ingest.tri_backfill" in report
     # Excess return re-stated on this benchmark.
     from backtest.run import _pct  # the run's own percentage formatter
 
@@ -284,30 +347,183 @@ def test_report_states_provenance_and_excess(lake_with_tri: Path) -> None:
 
 
 def test_report_states_fallback_when_no_computed_tri(lake_without_tri: Path) -> None:
-    """Over a store with no computed TRI the report states the L1-proxy fallback plainly.
+    """Over a store with neither series the report says the proxy is not a TRI at all.
 
-    The honesty requirement cuts both ways: when the computed TRI is absent the report must say the
-    proxy stood in and that the computed-TRI wiring is proven on the fixture — never present the
-    proxy as the licensed or the computed series.
+    The honesty requirement cuts every way: the proxy must never be presented as a total-return
+    index, and the old label — "NIFTY-TRI (broad-market TRI proxy from L1)" — did exactly that at
+    a glance.
     """
     run = _run(lake_without_tri)
     report = render_benchmark_report(run, benchmark_slug=BENCH_SLUG)
 
-    assert "L1 proxy" in report or "L1** proxy" in report or "**L1** proxy" in report
-    assert "not the licensed" in report.lower()
-    assert "test_backtest_benchmark.py" in report
+    assert "L1 PROXY — not a total-return index" in report
+    assert "not a total-return index at all" in report.lower()
+    assert "may be labelled excess over nifty-tri" in report.lower()
+    assert "NIFTY-TRI (broad-market TRI proxy" not in report
 
 
-def test_run_benchmark_report_end_to_end(lake_with_tri: Path) -> None:
-    """The one-call report entrypoint runs the backtest and renders the computed-TRI report."""
+# ── W0-4: the published series is preferred, the fallbacks are loud ───────────────────────────
+
+
+def test_the_published_tri_is_preferred_over_the_estimate(lake_with_published_tri: Path) -> None:
+    """With both series on disk the run takes the **published** one. Invert this and it fails.
+
+    This is the test M9.4 could not have had. Because the register recorded the endpoint FAILED
+    against a stale path, no lake could hold a published series, so the preference was untestable
+    and the estimate won by default in every M9/M10/M12 run.
+    """
+    run = _run(lake_with_published_tri)
+
+    assert run.benchmark_source == _BENCHMARK_PUBLISHED_TRI
+    assert run.benchmark_is_published_tri is True
+    assert run.benchmark_is_computed_tri is False
+    assert run.benchmark_is_proxy is False
+    assert run.benchmark_method == TRI_METHOD_PUBLISHED
+    assert run.benchmark_provenance == "published TRI"
+
+
+def test_preferring_the_published_series_changes_the_benchmark_number(
+    lake_with_published_tri: Path, lake_with_tri: Path
+) -> None:
+    """The preference is not cosmetic: it moves the benchmark XIRR, and so the excess.
+
+    Same prices, same policy, same portfolio — the two lakes differ only in whether the published
+    series is present alongside the estimate. If `_resolve_benchmark` read the estimate in both
+    cases (the pre-W0-4 behaviour), the two benchmark XIRRs would be identical and this fails.
+    """
+    published = _run(lake_with_published_tri)
+    estimate = _run(lake_with_tri)
+
+    assert published.comparison.portfolio_xirr == estimate.comparison.portfolio_xirr
+    assert published.comparison.benchmark_xirr != estimate.comparison.benchmark_xirr
+
+
+def test_the_published_report_claims_no_caveat_it_does_not_need(
+    lake_with_published_tri: Path,
+) -> None:
+    """When the benchmark *is* the published TRI the report says so, without the warnings."""
+    run = _run(lake_with_published_tri)
+    report = render_benchmark_report(run, benchmark_slug=BENCH_SLUG)
+
+    assert "published TRI" in report
+    assert "COMPUTED TRI ESTIMATE" not in report
+    assert "L1 PROXY" not in report
+    assert "excess over the real benchmark" in report.lower()
+    # Still not alpha — the report must not overclaim in the other direction either.
+    assert "not alpha" in report.lower() or "still not alpha" in report.lower()
+
+
+def test_the_estimate_fallback_logs_a_warning(lake_with_tri: Path) -> None:
+    """Falling back to the estimate is a WARNING, not an info line.
+
+    It logged at *info* from M9.4 until 2026-09-08 — one line among the thousands an EOD run
+    emits, which is a large part of why nobody noticed the benchmark had never once been the real
+    series. `structlog.testing.capture_logs` is used rather than `caplog` because the platform
+    logs through structlog's own `WriteLoggerFactory`, which never reaches stdlib logging.
+    """
+    with capture_logs() as entries:
+        run = _run(lake_with_tri)
+    assert run.benchmark_is_computed_tri is True
+    fallbacks = [e for e in entries if e["event"] == "backtest.benchmark_fallback"]
+    assert len(fallbacks) == 1
+    assert fallbacks[0]["log_level"] == "warning"
+    assert fallbacks[0]["source"] == _BENCHMARK_COMPUTED_TRI
+    assert "not the exchange's published TRI" in fallbacks[0]["consequence"]
+    # And it never claims the published series was resolved.
+    assert not [e for e in entries if e.get("source") == _BENCHMARK_PUBLISHED_TRI]
+
+
+def test_the_proxy_fallback_logs_a_warning(lake_without_tri: Path) -> None:
+    """The proxy fallback — the one every M9/M10/M12 run actually took — warns and says why."""
+    with capture_logs() as entries:
+        run = _run(lake_without_tri)
+    assert run.benchmark_is_proxy is True
+    fallbacks = [e for e in entries if e["event"] == "backtest.benchmark_fallback"]
+    assert len(fallbacks) == 1
+    assert fallbacks[0]["log_level"] == "warning"
+    assert fallbacks[0]["source"] == _BENCHMARK_L1_PROXY
+    assert "not a total-return index of any kind" in fallbacks[0]["consequence"]
+
+
+def test_the_published_series_resolves_without_a_warning(lake_with_published_tri: Path) -> None:
+    """No fallback, no warning — so a warning in a log is a real signal, not background noise."""
+    with capture_logs() as entries:
+        run = _run(lake_with_published_tri)
+    assert run.benchmark_is_published_tri is True
+    assert not [e for e in entries if e["event"] == "backtest.benchmark_fallback"]
+    sourced = [e for e in entries if e["event"] == "backtest.benchmark_source"]
+    assert len(sourced) == 1
+    assert sourced[0]["source"] == _BENCHMARK_PUBLISHED_TRI
+
+
+# ── W0-4: strict mode refuses to produce a misattributed number ───────────────────────────────
+
+
+def test_strict_mode_raises_when_only_the_estimate_is_available(lake_with_tri: Path) -> None:
+    """Under `require_published_benchmark` the estimate is not an acceptable stand-in."""
+    with require_published_benchmark(), pytest.raises(BenchmarkSourceError) as raised:
+        _run(lake_with_tri)
+    message = str(raised.value)
+    assert "published total-return series is required" in message
+    assert "no published TRI in the store" in message
+    assert "tri_backfill" in message  # the remedy, named in the error
+
+
+def test_strict_mode_raises_when_nothing_is_available(lake_without_tri: Path) -> None:
+    with require_published_benchmark(), pytest.raises(BenchmarkSourceError):
+        _run(lake_without_tri)
+
+
+def test_strict_mode_runs_when_the_published_series_covers_the_window(
+    lake_with_published_tri_only: Path,
+) -> None:
+    """Strict mode is not a blanket refusal — with the real series present the run proceeds."""
+    with require_published_benchmark():
+        run = _run(lake_with_published_tri_only)
+    assert run.benchmark_is_published_tri is True
+
+
+def test_strict_mode_raises_when_the_published_series_starts_too_late(tmp_path: Path) -> None:
+    """A published series that misses the first cashflow is not coverage, and says which date.
+
+    Valuing a deposit needs an index level in force on its date; a series starting later would
+    silently value the opening cashflow at its own first level, flattering or penalising the
+    benchmark by however far the index had already moved.
+    """
+    root = _build_lake(tmp_path / "late", with_tri=False)
+    late = _published_series()
+    write_tri_l1(
+        TriSeries(
+            index_slug=BENCH_SLUG,
+            index_name=BENCH_NAME,
+            method=TRI_METHOD_PUBLISHED,
+            points=late.points[6:],
+        ),
+        data_root=root,
+    )
+    with require_published_benchmark(), pytest.raises(BenchmarkSourceError) as raised:
+        _run(root)
+    assert "after the run's first cashflow" in str(raised.value)
+
+
+def test_strictness_does_not_leak_out_of_its_block(lake_without_tri: Path) -> None:
+    """The ContextVar is reset on exit, so one strict run cannot make the next one strict."""
+    with require_published_benchmark(), pytest.raises(BenchmarkSourceError):
+        _run(lake_without_tri)
+    run = _run(lake_without_tri)
+    assert run.benchmark_is_proxy is True
+
+
+def test_run_benchmark_report_end_to_end(lake_with_published_tri_only: Path) -> None:
+    """The one-call report entrypoint runs the backtest and renders the published-TRI report."""
     report = run_benchmark_report(
         start=_SESSIONS[0],
         end=_SESSIONS[-1],
         parameters=MomentumParameters(top_n=2),
-        data_root=lake_with_tri,
+        data_root=lake_with_published_tri_only,
         adjusted=False,
         benchmark_slug=BENCH_SLUG,
     )
-    assert "M9.4" in report
-    assert "computed_price_plus_div" in report
+    assert "published TRI" in report
+    assert TRI_METHOD_PUBLISHED in report
     assert "Excess over benchmark" in report

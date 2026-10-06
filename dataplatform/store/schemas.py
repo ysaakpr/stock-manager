@@ -40,6 +40,8 @@ __all__ = [
     "PRICES_RAW_QUARANTINE_DATASET",
     "PRICES_RAW_QUARANTINE_SCHEMA",
     "PRICES_RAW_SCHEMA",
+    "SESSION_ATTRIBUTES_DATASET",
+    "SESSION_ATTRIBUTES_SCHEMA",
     "PriceQuarantineReason",
     "PricesRawQuarantineRow",
     "PricesRawRow",
@@ -95,6 +97,39 @@ class PriceQuarantineReason:
     #: happened to 2021-02-16 until the 2026-09-06 audit.
     ISIN_NOT_PUBLISHED: Final = "isin_not_published"
 
+    #: A price row from a format era that had **no ISIN column at all** — the NSE bhavcopy before
+    #: 2011-06-22 (`eras.ERAS`, era E1). Distinct from `ISIN_NOT_PUBLISHED` on purpose: there the
+    #: exchange stated an instrument has no ISIN, here it never stated any instrument's, so the
+    #: fix is different (identity lineage work, not a per-instrument exception) and the counts must
+    #: not be summed as if they were the same problem.
+    ISIN_COLUMN_ABSENT: Final = "isin_column_absent"
+
+    #: Prefix of the reasons `dataplatform.ingest.pre_isin_promote` writes for an E1 row the
+    #: pre-ISIN resolver did *not* admit: `isin_column_absent:<PreIsinReason>`, e.g.
+    #: `isin_column_absent:chain_gap`. Same family as `ISIN_COLUMN_ABSENT` (a `LIKE
+    #: 'isin_column_absent%'` still counts every pre-ISIN refusal) with the resolver's enumerated
+    #: reason kept, so the quarantine says *why* a row stayed out, not only *that* it did.
+    ISIN_COLUMN_ABSENT_PREFIX: Final = "isin_column_absent:"
+
+    #: A *line*, not a row: the BSE legacy bhavcopy published two records run together (a lost
+    #: line terminator — `EQ291221_CSV.ZIP` line 1773) and the split back into two could not be
+    #: proven unambiguous, so neither record is trusted. `symbol` holds the line's first field (the
+    #: scrip code as published) and `series` its group; the line itself stays in L0 and in the
+    #: `bhavcopy.legacy_line_quarantined` log event. See `bse.bhavcopy.split_merged_records`.
+    MERGED_RECORDS_UNSPLITTABLE: Final = "merged_records_unsplittable"
+
+    #: A BSE legacy price row whose `SC_CODE` the scrip master does not map to an ISIN — mostly
+    #: debt, gsec and ETF counters the master excludes, plus delisted scrips BSE lists with `NA`
+    #: (RAW_DATA_CATALOG B1). `symbol` holds the scrip code as published and `series` its group.
+    #: Until 2026-10-06 these rows were counted in a log line and dropped (catalog B1 defect (b)).
+    SCRIP_UNRESOLVED: Final = "scrip_unresolved"
+
+    #: A BSE legacy line with a blank `PREVCLOSE` — an instrument's first session, which has no
+    #: previous close to state (`EQ060112_CSV.ZIP` line 1090, a new IDFC bond; REL BANK ETF on
+    #: listing day). `prev_close` is required in `prices_raw`, so the line is enumerated here
+    #: rather than failing its whole session (ten sessions in January 2012 did) or inventing one.
+    PREV_CLOSE_ABSENT: Final = "prev_close_absent"
+
 
 class PricesRawRow(BaseModel):
     """One security's raw traded session on one exchange — the canonical `prices_raw` L1 row.
@@ -128,7 +163,9 @@ class PricesRawRow(BaseModel):
 
     total_traded_qty: Quantity = Field(description="shares traded in the session")
     total_traded_value: Price = Field(description="turnover in rupees")
-    total_trades: Quantity = Field(description="number of trades executed")
+    total_trades: Quantity | None = Field(
+        description="number of trades executed; None where the era did not publish it (pre-2011)"
+    )
 
     deliv_qty: int | None = Field(
         default=None, ge=0, description="shares taken to delivery; None when the file wrote '-'"
@@ -178,7 +215,10 @@ PRICES_RAW_SCHEMA: Final = pa.schema(
         pa.field("prev_close", pa.decimal128(20, 4), nullable=False),
         pa.field("total_traded_qty", pa.int64(), nullable=False),
         pa.field("total_traded_value", pa.decimal128(28, 4), nullable=False),
-        pa.field("total_trades", pa.int64(), nullable=False),
+        # Nullable since l1-widen (2026-10-06): the pre-ISIN NSE bhavcopy (before 2011-06-22)
+        # had no TOTALTRADES column, and a resolved row from it states no trade count. Every
+        # partition written before this has no nulls, so the widening needs no rewrite.
+        pa.field("total_trades", pa.int64(), nullable=True),
         pa.field("deliv_qty", pa.int64(), nullable=True),
         pa.field("deliv_pct", pa.decimal128(12, 4), nullable=True),
     ]
@@ -197,6 +237,35 @@ PRICES_RAW_QUARANTINE_SCHEMA: Final = pa.schema(
         pa.field("deliv_qty", pa.int64(), nullable=True),
         pa.field("deliv_pct", pa.decimal128(12, 4), nullable=True),
         pa.field("reason", pa.string(), nullable=False),
+    ]
+)
+
+
+#: L1 sibling of `prices_raw` — `data/L1/price_session_attributes/date=YYYY-MM-DD/part.parquet`.
+#:
+#: Per-session facts the bhavcopies and the delivery file publish *about* a price row that are not
+#: prices to adjust: the session VWAP (`sec_bhavdata_full.AVG_PRICE`, 2019-10-01 on), the board lot
+#: and long instrument name (UDiFF `NewBrdLotQty` / `FinInstrmNm`, 2024-07-08 on, both exchanges),
+#: and BSE's ex-event marker (`TDCLOINDI`, legacy era 2016-09 .. 2024-07-05). A sibling and not new
+#: `prices_raw` columns, decided in l1-widen (2026-10-06): each attribute exists in one era only,
+#: so in `prices_raw` they would be NULL on most of 6M rows, and adding columns to `prices_raw`
+#: means rewriting all ~4,600 partitions (every reader opens them with one positional schema) while
+#: backtests read them. Keyed like `prices_raw` — `(exchange, isin, series, symbol, trade_date)` —
+#: and a row exists only where at least one attribute was published. VWAP is raw traded data, the
+#: marker is a label: nothing here is adjusted, and `assert_raw_only` checks the names.
+SESSION_ATTRIBUTES_DATASET: Final = "price_session_attributes"
+
+SESSION_ATTRIBUTES_SCHEMA: Final = pa.schema(
+    [
+        pa.field("isin", pa.string(), nullable=False),
+        pa.field("exchange", pa.string(), nullable=False),
+        pa.field("symbol", pa.string(), nullable=False),
+        pa.field("series", pa.string(), nullable=False),
+        pa.field("trade_date", pa.date32(), nullable=False),
+        pa.field("vwap", pa.decimal128(20, 4), nullable=True),
+        pa.field("board_lot", pa.int64(), nullable=True),
+        pa.field("instrument_name", pa.string(), nullable=True),
+        pa.field("ex_marker", pa.string(), nullable=True),
     ]
 )
 

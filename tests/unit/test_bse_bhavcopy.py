@@ -447,6 +447,35 @@ def test_backfill_request_builds_the_udiff_url() -> None:
     assert request.filename == "BhavCopy_BSE_CM_0_0_0_20260807_F_0000.CSV"
 
 
+LEGACY_2006_DIR: Final = FIXTURES / "bse_bhavcopy" / "legacy-2006"
+
+
+def test_the_2006_legacy_file_is_the_same_format_and_parses_whole() -> None:
+    """Frozen 2026-10-06 from the deep-backfill probe: `EQ030406_CSV.ZIP` (2006-04-03).
+
+    The pre-2016 archive is one format with the 2016-2024 one — same 14-column header — so it
+    is the same era for the parser; this pins that the reader takes a 2006 file as it stands.
+    """
+    payload = (LEGACY_2006_DIR / "EQ030406_CSV.ZIP").read_bytes()
+    parsed = bhavcopy.parse_legacy_report(
+        payload, filename="EQ030406_CSV.ZIP", trade_date=date(2006, 4, 3)
+    )
+    assert len(parsed.quotes) == 2564
+    assert parsed.quarantined == ()
+    first = parsed.quotes[0]
+    assert (first.scrip_code, first.group, first.close) == ("526921", "B", Decimal("46.70"))
+    assert {q.trade_date for q in parsed.quotes} == {date(2006, 4, 3)}
+
+
+def test_the_html_shell_bse_serves_for_a_missing_date_is_refused() -> None:
+    """2006-01-03 answered 200 with BSE's Angular page; it must never parse to an empty session."""
+    shell = (LEGACY_2006_DIR / "EQ030106_soft404.html").read_bytes()
+    with pytest.raises(ParseError, match="soft-404 BSE serves"):
+        bhavcopy.parse_legacy_report(
+            shell, filename="EQ030106_CSV.ZIP", trade_date=date(2006, 1, 3)
+        )
+
+
 def test_backfill_refuses_a_legacy_bse_date() -> None:
     register = source_register.load()
     with pytest.raises(ValueError, match="before the BSE UDiFF cutover"):

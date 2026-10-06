@@ -158,12 +158,16 @@ class SentinelInput:
     maps ISIN → the fractional daily price band (e.g. `0.05` for a 5% band), used to recognise a
     move that merely rode the exchange's own limit. `exchange_closes` carries each exchange's raw
     close for an ISIN/session so the cross-exchange rule can compare NSE against BSE.
+    `move_witnesses` maps `(isin, session)` → the PR bundle's same-session witnesses of an
+    event on that security (`move_witness.MoveWitness` strings: a `CORP_IND` ex-marker, a band
+    hit and its side, a broadcast ex-date); the witness rule reads it, the move rule does not.
     """
 
     moves: tuple[CloseToCloseMove, ...] = ()
     corporate_actions: tuple[CorporateAction, ...] = ()
     circuit_bands: Mapping[str, Decimal] = field(default_factory=dict)
     exchange_closes: tuple[ExchangeClose, ...] = ()
+    move_witnesses: Mapping[tuple[str, date], tuple[str, ...]] = field(default_factory=dict)
 
 
 def finding_fingerprint(check_name: str, isin: str | None, logical_date: date) -> str:

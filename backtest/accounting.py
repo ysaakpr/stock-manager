@@ -21,6 +21,11 @@ entity and moves a fraction of the parent's cost basis into it: value is redistr
 ISINs, never destroyed. Getting either wrong is how a paper portfolio shows a phantom gain or loses
 a holding outright, so both are modelled explicitly and tested against exactly those failures.
 
+**Cash dividends** are credited to free cash on the ex-date, per share held at the close before it
+(:meth:`PortfolioBook.credit_dividend`). They are portfolio income, not an external flow: they raise
+NAV exactly as far as the ex-date price drop lowers it, and they never enter the XIRR stream as a
+pay-out. The walk that feeds this book its actions is ``backtest.book_actions``.
+
 **XIRR and benchmarks.** External cashflows — the investor's SIP instalments in, any withdrawals
 out — plus the terminal mark-to-market value form the stream whose XIRR (``backtest/xirr.py``) is
 the portfolio's money-weighted return. The same external stream, replayed into a benchmark total-
@@ -34,7 +39,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 
 import structlog
 
@@ -157,7 +162,8 @@ class PortfolioBook:
     is a forward walk, and it does not re-sort history. Dates come from the events (a ``Fill`` knows
     its session), never from a clock the book reads (invariant #11).
 
-    What it never does: let a corporate action change the total value of the book, cover a buy the
+    What it never does: let a corporate action change the total value of the book (the one stated
+    exception is a forfeited fractional entitlement, see ``_rescale_quantity``), cover a buy the
     cash cannot pay for, or mark a holding at a price it was not given.
     """
 
@@ -169,6 +175,8 @@ class PortfolioBook:
         self._cash: Decimal = opening_cash
         self._positions: dict[str, BookPosition] = {}
         self._realized: Decimal = _ZERO
+        self._dividends: Decimal = _ZERO
+        self._interest: Decimal = _ZERO
         self._ledger: list[LedgerEntry] = []
         #: External cashflows in XIRR sign convention: pay-in negative, pay-out positive.
         self._external: list[Cashflow] = []
@@ -185,6 +193,16 @@ class PortfolioBook:
     def realized_pnl(self) -> Decimal:
         """Cumulative realized P&L booked on sells so far, net of sell-side charges."""
         return self._realized
+
+    @property
+    def dividend_income(self) -> Decimal:
+        """Cumulative cash dividends credited so far (gross — no TDS is modelled here)."""
+        return self._dividends
+
+    @property
+    def interest_income(self) -> Decimal:
+        """Cumulative interest on idle cash credited so far (gross; ``backtest.cash_interest``)."""
+        return self._interest
 
     def positions(self) -> tuple[BookPosition, ...]:
         """Open positions with a non-zero share count, ordered by ISIN for a stable read."""
@@ -206,6 +224,11 @@ class PortfolioBook:
         return tuple(self._ledger)
 
     # -- external cashflows (the SIP stream) -----------------------------------------------------
+
+    @property
+    def external_flows(self) -> tuple[Cashflow, ...]:
+        """Every deposit (negative) and withdrawal (positive), in order — the XIRR stream."""
+        return tuple(self._external)
 
     def deposit(self, when: date, amount: Decimal) -> None:
         """Record cash paid into the account (a SIP instalment). Increases free cash.
@@ -283,24 +306,42 @@ class PortfolioBook:
 
     # -- corporate actions in the book -----------------------------------------------------------
 
-    def apply_split(self, isin: str, *, from_face_value: Decimal, to_face_value: Decimal) -> None:
+    def apply_split(
+        self,
+        isin: str,
+        *,
+        from_face_value: Decimal,
+        to_face_value: Decimal,
+        forfeit_fraction: bool = False,
+    ) -> None:
         """A stock split: face value ``from → to`` multiplies the share count, basis unchanged.
 
         The quantity multiple is ``from / to`` (a ₹10→₹2 split gives 5x), exactly the arithmetic
         the adjustment engine uses (``dataplatform.corpactions.factors``). Total cost basis is
         untouched, so the per-share basis divides by the same factor and the position's *value* does
         not move — the invariant a split most often breaks. Refuses a ratio that would leave a
-        fractional holding.
+        fractional holding, unless ``forfeit_fraction`` (see :meth:`_rescale_quantity`).
         """
         self._require_decimal("from_face_value", from_face_value)
         self._require_decimal("to_face_value", to_face_value)
         if from_face_value <= _ZERO or to_face_value <= _ZERO:
             raise CorporateActionError("split face values must be positive")
         self._rescale_quantity(
-            isin, numerator=from_face_value, denominator=to_face_value, event="split"
+            isin,
+            numerator=from_face_value,
+            denominator=to_face_value,
+            event="split",
+            forfeit_fraction=forfeit_fraction,
         )
 
-    def apply_bonus(self, isin: str, *, new_shares: Decimal, held_shares: Decimal) -> None:
+    def apply_bonus(
+        self,
+        isin: str,
+        *,
+        new_shares: Decimal,
+        held_shares: Decimal,
+        forfeit_fraction: bool = False,
+    ) -> None:
         """A bonus issue ``new:held``: adds free shares, basis unchanged, value preserved.
 
         A ``1:1`` bonus leaves a holder of 1 share with 2, so the quantity multiple is
@@ -313,7 +354,11 @@ class PortfolioBook:
         if new_shares <= _ZERO or held_shares <= _ZERO:
             raise CorporateActionError("bonus ratio terms must be positive")
         self._rescale_quantity(
-            isin, numerator=new_shares + held_shares, denominator=held_shares, event="bonus"
+            isin,
+            numerator=new_shares + held_shares,
+            denominator=held_shares,
+            event="bonus",
+            forfeit_fraction=forfeit_fraction,
         )
 
     def apply_demerger(
@@ -381,7 +426,8 @@ class PortfolioBook:
         surviving_isin: str,
         shares_received: Decimal,
         shares_held: Decimal,
-    ) -> None:
+        forfeit_fraction: bool = False,
+    ) -> int:
         """A merger: the acquired entity's shares convert to the surviving entity's, basis carried.
 
         The holder of the *acquired* (amalgamating) company receives ``shares_received`` of the
@@ -396,7 +442,11 @@ class PortfolioBook:
         break, not a scaling, so nothing here touches a price — it moves a share count and its basis
         from the dead ISIN to the live one. Leaving the acquired holding parked on a dead line is
         how a naive book silently loses a position, which is exactly the failure this refuses.
-        Refuses a ratio that would leave a fractional holding.
+        Refuses a ratio that would leave a fractional holding, unless ``forfeit_fraction`` — the
+        walk's case, where the holding is whatever the strategy bought (see
+        :meth:`_rescale_quantity`): the fraction is floored away, and a holding floored to nothing
+        books its whole basis as a realized loss and leaves the survivor untouched. Returns the
+        surviving-entity shares the conversion added.
         """
         if acquired_isin == surviving_isin:
             raise CorporateActionError("a merger's surviving ISIN must differ from the acquired")
@@ -410,10 +460,23 @@ class PortfolioBook:
                 f"cannot apply merger: no position in acquired {acquired_isin}"
             )
 
-        converted_quantity = self._whole_shares(
-            acquired.quantity * shares_received / shares_held, "merger"
-        )
+        exact = acquired.quantity * shares_received / shares_held
+        if forfeit_fraction:
+            converted_quantity = int(exact.to_integral_value(rounding=ROUND_FLOOR))
+        else:
+            converted_quantity = self._whole_shares(exact, "merger")
         moved_basis = acquired.cost_basis
+        if converted_quantity == 0:
+            self._realized -= moved_basis
+            self._positions[acquired_isin] = BookPosition(acquired_isin, 0, _ZERO)
+            _log.info(
+                "book.merger",
+                acquired=acquired_isin,
+                surviving=surviving_isin,
+                converted_quantity=0,
+                basis_forfeited=str(moved_basis),
+            )
+            return 0
         surviving = self._positions.get(surviving_isin)
         if surviving is None or surviving.quantity == 0:
             new_quantity = converted_quantity
@@ -430,9 +493,105 @@ class PortfolioBook:
             converted_quantity=converted_quantity,
             basis_moved=str(moved_basis),
         )
+        return converted_quantity
+
+    def apply_cash_exit(self, when: date, isin: str, *, price: Decimal) -> Decimal:
+        """A delisting exit: every share of ``isin`` is surrendered at ``price``; return the cash.
+
+        The position closes like a sale with no charges — the proceeds are credited to cash and
+        ``proceeds - basis`` is realized — because that is what the residual shareholder who
+        tenders in the exit window receives. Refuses an exit on a name the book does not hold.
+        """
+        self._require_decimal("price", price)
+        if price <= _ZERO:
+            raise CorporateActionError(f"exit price must be positive, got {price}")
+        held = self._positions.get(isin)
+        if held is None or held.quantity == 0:
+            raise InsufficientSharesError(f"cannot apply cash exit: no position in {isin}")
+        proceeds = price * held.quantity
+        self._realized += proceeds - held.cost_basis
+        self._cash += proceeds
+        self._positions[isin] = BookPosition(isin, 0, _ZERO)
+        self._post_ledger(when, isin, "cash exit", debit=_ZERO, credit=proceeds)
+        _log.info(
+            "book.cash_exit",
+            isin=isin,
+            session=when.isoformat(),
+            quantity=held.quantity,
+            price=str(price),
+            proceeds=str(proceeds),
+        )
+        return proceeds
+
+    def credit_dividend(self, when: date, isin: str, *, per_share: Decimal) -> Decimal:
+        """Credit a cash dividend of ``per_share`` on every share of ``isin`` held; return the cash.
+
+        Called on the ex-date, before that session's fills: the shares held then are exactly the
+        ones bought before the ex-date and not yet sold, which is the entitlement the exchange's
+        record date fixes. Crediting on the ex-date rather than the payment date (up to 30 days
+        later, and not in the store) is what keeps NAV continuous — the price drops by the dividend
+        on the ex-date and the cash arrives the same day — at the cost of making the cash available
+        to reinvest a few weeks early. Gross: dividend TDS is a tax, and taxes are post-processed.
+
+        Income, not an external flow: it raises cash and :attr:`dividend_income`, never the XIRR
+        stream. Refuses a dividend on a name the book does not hold — an entitlement with no
+        holding is a wiring bug, not a zero.
+        """
+        self._require_decimal("per_share", per_share)
+        if per_share <= _ZERO:
+            raise CorporateActionError(f"dividend per share must be positive, got {per_share}")
+        held = self._positions.get(isin)
+        if held is None or held.quantity == 0:
+            raise InsufficientSharesError(f"cannot credit dividend: no position in {isin}")
+        amount = per_share * held.quantity
+        self._cash += amount
+        self._dividends += amount
+        self._post_ledger(when, isin, "dividend", debit=_ZERO, credit=amount)
+        _log.info(
+            "book.dividend",
+            isin=isin,
+            session=when.isoformat(),
+            quantity=held.quantity,
+            per_share=str(per_share),
+            amount=str(amount),
+        )
+        return amount
+
+    def credit_interest(self, when: date, amount: Decimal) -> None:
+        """Credit ``amount`` of interest on idle cash (``backtest.cash_interest``) to free cash.
+
+        Income, not an external flow, exactly as a dividend is: it raises cash and
+        :attr:`interest_income`, never the XIRR stream. Gross — its tax is post-processed.
+        """
+        amount = self._require_positive_money("interest", amount)
+        self._cash += amount
+        self._interest += amount
+        self._post_ledger(when, "", "interest", debit=_ZERO, credit=amount)
+
+    def credit_scheme_cash(self, when: date, isin: str, amount: Decimal) -> None:
+        """Credit the non-share leg of an amalgamation (``backtest.book_actions``) to free cash.
+
+        A scheme that pays part of its consideration in a security the book cannot hold (Cairn
+        India's Vedanta redeemable preference shares) is carried as cash at that security's sourced
+        face value. No basis is apportioned to it: the whole cost of the old holding moves to the
+        survivor's shares (:meth:`apply_merger`), so the cash is realized in full. Total P&L is the
+        same either way; only its split between realized and unrealized depends on the choice.
+        ``isin`` is the *old* (amalgamated) ISIN, for the ledger row.
+        """
+        amount = self._require_positive_money("scheme cash", amount)
+        self._cash += amount
+        self._realized += amount
+        self._post_ledger(when, isin, "scheme cash", debit=_ZERO, credit=amount)
+        _log.info("book.scheme_cash", isin=isin, session=when.isoformat(), amount=str(amount))
 
     def _rescale_quantity(
-        self, isin: str, *, numerator: Decimal, denominator: Decimal, event: str
+        self,
+        isin: str,
+        *,
+        numerator: Decimal,
+        denominator: Decimal,
+        event: str,
+        forfeit_fraction: bool = False,
     ) -> None:
         """Scale a position's share count by ``numerator / denominator``, cost basis fixed.
 
@@ -442,18 +601,35 @@ class PortfolioBook:
         ``399.999…``, which ``_whole_shares`` then rightly refuses: a valid corporate action
         rejected by a rounding artefact. The property suite (``tests/property/test_book_property``)
         is what caught that.
+
+        ``forfeit_fraction`` is for the walk, where the holding is whatever the strategy bought
+        and a 3:2 bonus on an odd count is a real event, not a wiring error. The fractional
+        entitlement is floored away and its value forfeited: the exchange sells aggregated
+        fractions and pays cash in lieu, a sum the store does not carry, so the book takes the
+        conservative side — never more shares than the arithmetic gives. The basis stays whole on
+        the shares that remain; a holding floored to zero books its whole basis as a realized loss
+        rather than letting it vanish from the P&L.
         """
         held = self._positions.get(isin)
         if held is None or held.quantity == 0:
             raise InsufficientSharesError(f"cannot apply {event}: no position in {isin}")
-        new_quantity = self._whole_shares(held.quantity * numerator / denominator, event)
-        self._positions[isin] = BookPosition(isin, new_quantity, held.cost_basis)
+        exact = held.quantity * numerator / denominator
+        if forfeit_fraction:
+            new_quantity = int(exact.to_integral_value(rounding=ROUND_FLOOR))
+        else:
+            new_quantity = self._whole_shares(exact, event)
+        basis = held.cost_basis
+        if new_quantity == 0:
+            self._realized -= basis
+            basis = _ZERO
+        self._positions[isin] = BookPosition(isin, new_quantity, basis)
         _log.info(
             "book.corporate_action",
             ca_event=event,
             isin=isin,
             old_quantity=held.quantity,
             new_quantity=new_quantity,
+            forfeited=str(exact - new_quantity),
         )
 
     # -- valuation --------------------------------------------------------------------------------

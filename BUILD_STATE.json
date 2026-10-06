@@ -473,7 +473,7 @@
       "finished": "2026-09-02T15:10:20+00:00",
       "first_started": "2026-09-02T14:32:51+00:00",
       "last_started": "2026-09-02T15:04:05+00:00",
-      "note": "Gate M3 GREEN: all 3 EXECUTION_PLAN \u00a79 boxes PASS on independent evidence. Box1 cross-exchange rule live+registered in D7 sentinel (test_cross_exchange green, thin-BSE-volume handled). Box2 flows queryable where sources permit - PASS as written but honest depth is ~nil/forward-only (FII/DII 1 session, no date param; bulk/block rolling current file); register records measured depth, does not claim 10y. Box3 announcements searchable within 1hr - PASS, the earlier-run circular import (M2.4 D1<->D3 cycle) is fixed by M3.8 8d03ef1, test_announcements green, indexing in-job so immediate. gate M3 all 9 verify green; 284 M3 unit tests pass; M3 deliverable paths ruff+mypy clean. Caveats recorded in ops/gates/M3.md: M3.7 F&O reconciles on a synthetic fixture (real zip not frozen); M3.9 TRI direct feed session-gated FAILED, computed fallback seeded to published close. Out-of-scope pre-existing M2.7 clock-guard failure (tests/golden/test_yfinance_reference.py:473) already in BACKLOG - not held against M3.",
+      "note": "Gate M3 GREEN: all 3 EXECUTION_PLAN \u00a79 boxes PASS on independent evidence. Box1 cross-exchange rule live+registered in D7 sentinel (test_cross_exchange green, thin-BSE-volume handled). Box2 flows queryable where sources permit - PASS as written but honest depth is ~nil/forward-only (FII/DII 1 session, no date param; bulk/block rolling current file); register records measured depth, does not claim 10y. Box3 announcements searchable within 1hr - PASS, the earlier-run circular import (M2.4 D1<->D3 cycle) is fixed by M3.8 8d03ef1, test_announcements green, indexing in-job so immediate. gate M3 all 9 verify green; 284 M3 unit tests pass; M3 deliverable paths ruff+mypy clean. Caveats recorded in ops/gates/M3.md: M3.7 F&O reconciles on a synthetic fixture (real zip not frozen); M3.9 TRI direct feed session-gated FAILED, computed fallback seeded to published close. Out-of-scope pre-existing M2.7 clock-guard failure (tests/golden/test_yfinance_reference.py:473) already in BACKLOG - not held against M3. CORRECTION 2026-09-08 (M3.9.b/W0): the clause \"M3.9 TRI direct feed session-gated FAILED\" was true of the register row this audit read, not of the source. D8 (2026-08-10) showed the row carried a stale URL path; POST /BackPage/getTotalReturnIndexString serves the published TRI ungated. The caveat therefore understated the finding: M3's row-8 box was passed on a computed estimate while the real series was one request away.",
       "previous_state": "IN_PROGRESS",
       "reason": "box 3 failed: announcements not searchable \u2014 pytest tests/unit/test_announcements.py errors on collection (exit 2) via a committed circular import (corp_actions<->corpactions, root M2.4 74b4cf3); also aborts the whole tests/unit run. Boxes 1 (cross-exchange checker) and 2 (flows queryable, depth honestly ~nil at source/daily-forward only) pass. M3.8 marked FAILED. Report: ops/gates/M3.md",
       "state": "DONE",
@@ -558,16 +558,27 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_announcements.py -q\n(exit 0)\n...........................                                              [100%]\n\n$ uv run ruff format --check dataplatform/ingest/announcements.py dataplatform/query/announcement_search.py tests/unit/test_announcements.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check dataplatform/ingest/announcements.py dataplatform/query/announcement_search.py tests/unit/test_announcements.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/announcements.py dataplatform/query/announcement_search.py tests/unit/test_announcements.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
-    "M3.9": {
+    "M3.9.a": {
       "attempts": 1,
       "commit": "3b24ae7",
       "finished": "2026-09-02T08:29:19+00:00",
       "first_started": "2026-09-02T08:09:07+00:00",
       "last_started": "2026-09-02T08:09:07+00:00",
-      "note": "Immutable monthly index-constituent snapshots (index_constituents dataset) with PIT membership_asof; TRI via \u00a74.1 computed fallback (nifty_tri_history is session-gated/FAILED) seeded to published close, native getTotalReturnIndexString parser kept ready. 29 tests green.",
+      "note": "Immutable monthly index-constituent snapshots (index_constituents dataset) with PIT membership_asof. 29 tests green. This is the constituents half of the task M3.9 used to be; D8 (2026-08-10) split it so no one task owns two source rows. Its own acceptance \u2014 immutable dated snapshot, membership_asof returning the snapshot in force \u2014 was met by this commit and is unaffected by the split.",
       "previous_state": "IN_PROGRESS",
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_indices.py -q\n(exit 0)\n.............................                                            [100%]\n\n$ uv run ruff format --check dataplatform/ingest/indices.py tests/unit/test_indices.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/indices.py tests/unit/test_indices.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/indices.py tests/unit/test_indices.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M3.9.b": {
+      "attempts": 0,
+      "commit": null,
+      "finished": null,
+      "first_started": null,
+      "last_started": null,
+      "note": "NOT DONE, and recorded so. The TRI half of the old M3.9. M3.9's third acceptance criterion (\"NIFTY-TRI series ingested and spot-checked against a published value\") was closed at commit 3b24ae7 with \u00a74.1's *computed* fallback, on the premise \u2014 taken from the source register \u2014 that nifty_tri_history was session-gated/FAILED. D8 (2026-08-10) disproved that premise by probing the real endpoint: the register carried a stale URL path (Backpage.aspx/getTotalReturnIndexString, which answers 200 with the site's home page); POST /BackPage/getTotalReturnIndexString returns a whole index's published TRI history in one request, no session cookie, no Referer, no key. The published series was therefore never ingested and no spot-check against a published level was ever performed. Consequence, recorded rather than left to be rediscovered: backtest/run.py's _resolve_benchmark had no published TRI to find, so every benchmark/excess-return figure in every M9/M10/M12 report \u2014 the M12.3 verdict on the >25% bar included \u2014 was struck against the dividend-estimated proxy. This entry is opened by the W0 branch that corrects the register (C.1) and builds the ingest.",
+      "previous_state": null,
+      "state": "PENDING",
+      "verify_output": null
     },
     "M4.1": {
       "attempts": 3,

@@ -1,0 +1,22 @@
+# The round-2 walk-forward folds (X2). Loaded by backtest/folds.py; the one place these dates live.
+#
+# Binding: ops/studies/preregistration-signals-2026-09-29.md §2. Expanding window, every selection
+# window anchored at 2012-07-04 (the first full-lookback session, backtest/windows.yaml `full`),
+# each test window opening on the first NSE session after its selection window closes. Changing a
+# date here after the first evaluation run is a new trial, not an edit — and
+# tests/unit/test_folds.py pins every date to the pre-registration.
+
+version: 1
+
+anchor: "2012-07-04"
+
+folds:
+  F1:
+    selection: {start: "2012-07-04", end: "2016-08-31"}
+    test: {start: "2016-09-01", end: "2019-08-30"}
+  F2:
+    selection: {start: "2012-07-04", end: "2019-08-30"}
+    test: {start: "2019-09-02", end: "2022-08-31"}
+  F3:
+    selection: {start: "2012-07-04", end: "2022-08-31"}
+    test: {start: "2022-09-01", end: "2026-08-31"}

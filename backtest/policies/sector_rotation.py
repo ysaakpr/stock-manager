@@ -31,11 +31,12 @@ survivorship bias — it silently assumes a name was in the industry (and the in
 guard against that is structural, not a convention: every candidate carries the ``knowable_date`` on
 which its sector *and* its momentum became knowable, and the policy reads the candidate set only
 through ``ctx.pit.admit``, so a record whose sector was resolved from a snapshot dated after the
-session trips ``PitError`` rather than reaching a decision. The production data source resolves each
-name's sector through ``membership_asof`` — the snapshot *in force on the decision date*, never
-today's list — and stamps that snapshot's own capture date as the ``knowable_date`` (M3.9/M10.1). A
-static current-day map used before M10.2's forward history has accrued is survivorship-biased by
-construction; that limitation is stated in the report, and this policy does not paper over it.
+session trips ``PitError`` rather than reaching a decision. The production data source takes *who
+is in the universe* from the point-in-time index membership history (effective on the decision date
+and announced by it, never today's list) and fails a date before the history's coverage; the sector
+map is only a label on those members, and a member it does not name is pooled under the rails'
+``UNKNOWN_SECTOR`` rather than dropped. The label itself is a static current-day classification —
+a limitation the report states, and this policy does not paper over.
 
 What it never does: read a wall clock (time is ``ctx.clock`` — B10), key on a symbol (ISIN only —
 invariant #2), hold a cost model (the injected broker owns the one shared model — invariant #4/#5),
@@ -50,10 +51,12 @@ from datetime import date
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
+from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from backtest.policies.sizing import account_order_ceiling
 from backtest.replay import SessionContext, SessionDecision
-from backtest.sip import simulate_sip_instalment
+from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, Holding, OrderRequest, Side
 
@@ -180,8 +183,8 @@ class SectorRotationData(Protocol):
       ``ctx.pit`` and the guard proves there is no membership or price leak.
 
     A test supplies an in-memory implementation; the ten-year run supplies one backed by L1 prices
-    and the M3.9/M10.1 constituent snapshots (``membership_asof``) through the query layer. Either
-    way the policy never reaches past this surface.
+    and the point-in-time index membership history (``index_membership_asof``) through the query
+    layer. Either way the policy never reaches past this surface.
     """
 
     def is_rebalance(self, session: date) -> bool:
@@ -205,13 +208,24 @@ class SectorRotationPolicy:
     a replay reproduces the decision exactly.
     """
 
-    __slots__ = ("_data", "_params")
+    __slots__ = ("_data", "_order_caps", "_params")
 
     def __init__(
-        self, data: SectorRotationData, params: SectorRotationParameters | None = None
+        self,
+        data: SectorRotationData,
+        params: SectorRotationParameters | None = None,
+        *,
+        order_caps: RiskRails | None = None,
     ) -> None:
         self._data = data
         self._params = params if params is not None else SectorRotationParameters()
+        # The rails A8 will clear this policy's orders against. With them, no buy is sized past the
+        # per-order ceiling (``backtest.policies.sizing.account_order_ceiling``): a buy the rail is
+        # bound to refuse leaves its cash idle, the next rebalance spreads the larger idle balance
+        # over the same names, and the book drifts to cash. Sized to the ceiling, the rest stays in
+        # cash and tops the name up at the next rebalance. Not a field of the parameters, so the
+        # parameters' repr is unchanged; the run spec records the sizing instead.
+        self._order_caps = order_caps
 
     def decide(self, ctx: SessionContext) -> SessionDecision:
         """Decide this session: a heartbeat off a rebalance, a full rebalance on one."""
@@ -256,7 +270,8 @@ class SectorRotationPolicy:
 
         held = {holding.isin: holding for holding in ctx.broker.holdings()}
         sells = self._sells(held, target)
-        buys, drift = self._buys(ctx, held, target, prices)
+        marks = {record.isin: record.price for record in candidates}
+        buys, drift = self._buys(ctx, held, target, prices, marks)
 
         orders = tuple(order for order, _ in (*sells, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
@@ -296,13 +311,15 @@ class SectorRotationPolicy:
         held: Mapping[str, Holding],
         target: Mapping[str, SectorRotationRecord],
         prices: Mapping[str, Decimal],
+        marks: Mapping[str, Decimal],
     ) -> tuple[list[tuple[OrderRequest, str]], Decimal]:
         """Whole-share buys toward the equal-weight target basket, sized from free cash.
 
         Budget is the cash *currently free* (``margins().available``) times ``buy_budget_fraction``
         — never sale proceeds staged this session, which have not settled. The allocation is the
         shared M4.7 greedy allocator, accounting for what is already held in the surviving names so
-        it tops up toward equal weight rather than double-buying.
+        it tops up toward equal weight rather than double-buying. With ``order_caps`` no buy is
+        sized past A8's per-order ceiling, the book valued at ``marks`` (this session's candidates).
         """
         if not target:
             return [], _ZERO
@@ -316,6 +333,8 @@ class SectorRotationPolicy:
             targets=weights,
             prices=prices,
             existing_value=existing_value,
+            min_order_value=MIN_ORDER_VALUE_INR,
+            order_ceiling=account_order_ceiling(self._order_caps, ctx.broker, marks),
         )
         buys = [
             (

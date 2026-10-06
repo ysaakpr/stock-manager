@@ -89,14 +89,39 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     registry = default_registry()
     assert registry.names() == (
         "eod_pipeline",
+        "daily_snapshot",
         "constituents_snapshot",
         "l0_verify",
         "identity_refresh",
+        "tri_refresh",
+        "index_press_refresh",
+        "ca_refresh",
+        "bse_ca_sweep",
+        "fbil_reference_rates",
+        "macro_release_capture",
+        "nse_daily_capture",
+        "shareholding_poll",
+        "announcements_capture",
+        "news_capture",
     )
     assert registry.get("eod_pipeline").cron == "30 18 * * mon-fri"
+    # 19:15, after the 18:30 EOD pipeline: the two share nsearchives.nseindia.com, and a host
+    # lease is refused rather than queued, so an overlap would be a skipped snapshot.
+    assert registry.get("daily_snapshot").cron == "15 19 * * mon-fri"
     assert registry.get("constituents_snapshot").cron == "0 20 * * sat"
     assert registry.get("l0_verify").cron == "0 3 * * sun"
     assert registry.get("identity_refresh").cron == "0 7 * * sat"
+    assert registry.get("tri_refresh").cron == "0 8 * * sat"
+    # 09:00, after tri_refresh on the same niftyindices.com lease (refused, not queued, if held).
+    assert registry.get("index_press_refresh").cron == "0 9 * * sat"
+    # 10:00, after identity_refresh (07:00) so a name listed this week resolves.
+    assert registry.get("ca_refresh").cron == "0 10 * * sat"
+    # First Sunday of the month (APScheduler ANDs the two day fields), after the 03:00 L0 sweep.
+    assert registry.get("bse_ca_sweep").cron == "0 6 1-7 * sun"
+    # FBIL publishes at 13:00; no NSE host, so no campaign window to avoid.
+    assert registry.get("fbil_reference_rates").cron == "0 16 * * mon-fri"
+    # Sunday, when no niftyindices.com job holds that lease (the Saturday ones do).
+    assert registry.get("macro_release_capture").cron == "0 10 * * sun"
 
 
 def test_every_default_job_is_valid_and_describes_itself() -> None:

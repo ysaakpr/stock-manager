@@ -1,0 +1,87 @@
+{
+  "era": "day_dash_date",
+  "session": "2016-04-29",
+  "archive_filename": "PR290416.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR290416.zip",
+  "why_this_era": "RECORD_DT written DD-MM-YYYY ('03-05-2016') on one row; slashes everywhere else",
+  "reduced_from_l0": true,
+  "original_bytes": 367607,
+  "original_sha256": "7d48b714eb38810694fbd5471c4b89aa195875131dfdf34d636e44df78990b83",
+  "original_members": [
+    {
+      "name": "An290416.txt",
+      "bytes": 852933
+    },
+    {
+      "name": "Bc290416.csv",
+      "bytes": 5215
+    },
+    {
+      "name": "bh290416.csv",
+      "bytes": 3274
+    },
+    {
+      "name": "Bm290416.txt",
+      "bytes": 7166
+    },
+    {
+      "name": "cd29042016.zip",
+      "bytes": 6361
+    },
+    {
+      "name": "corpbond290416.csv",
+      "bytes": 13806
+    },
+    {
+      "name": "etf290416.csv",
+      "bytes": 8124
+    },
+    {
+      "name": "fo29042016.zip",
+      "bytes": 119508
+    },
+    {
+      "name": "Gl290416.csv",
+      "bytes": 6478
+    },
+    {
+      "name": "HL290416.csv",
+      "bytes": 954
+    },
+    {
+      "name": "nuver.txt",
+      "bytes": 1812
+    },
+    {
+      "name": "Pd290416.csv",
+      "bytes": 291889
+    },
+    {
+      "name": "Pr290416.csv",
+      "bytes": 272941
+    },
+    {
+      "name": "rdm.doc",
+      "bytes": 31744
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 3070
+    },
+    {
+      "name": "sme290416.csv",
+      "bytes": 717
+    },
+    {
+      "name": "Tt290416.csv",
+      "bytes": 2204
+    }
+  ],
+  "members_kept_in_fixture": [
+    "Bc290416.csv",
+    "Readme.txt"
+  ],
+  "member": "Bc290416.csv",
+  "member_bytes": 5215,
+  "member_sha256": "225ef9a6858ac16098406a86615b0d5eaab4fc04e0eda20c382a5330542b1ac8"
+}

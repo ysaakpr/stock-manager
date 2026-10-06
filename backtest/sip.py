@@ -50,9 +50,20 @@ _WEIGHT_SUM_TOLERANCE = Decimal("0.0001")
 
 _ISIN_PATTERN = r"[A-Z]{2}[A-Z0-9]{9}[0-9]"
 
+#: The smallest buy a backtest policy places, in rupees — fixed a priori, not fitted (X2). The one
+#: flat charge in the cost model is the DP charge on every sell day per scrip: ₹5.50 depository +
+#: ₹8.00 broker = ₹13.50, plus 18 % GST = ₹15.93. Every other charge is proportional, and on a
+#: delivery round trip they come to roughly 0.25 % (STT 0.1 % a leg, stamp 0.015 %, exchange and
+#: SEBI fees, GST on those). At ₹5,000 the DP charge is 0.32 % of the eventual sale — the same order
+#: as the proportional costs, so the flat fee no longer dominates the lot — whereas a ₹7 lot (the
+#: case that motivated this) pays more to sell than it returns. ₹5,000 is the round number at which
+#: the flat fee stops being the largest cost line; it was not tuned against any backtest result.
+MIN_ORDER_VALUE_INR = Decimal("5000")
+
 _log = structlog.get_logger(__name__)
 
 __all__ = [
+    "MIN_ORDER_VALUE_INR",
     "SipAllocation",
     "SipError",
     "SipOrder",
@@ -167,6 +178,8 @@ def simulate_sip_instalment(
     prices: Mapping[str, Decimal],
     carried_in: Decimal = _ZERO,
     existing_value: Mapping[str, Decimal] | None = None,
+    min_order_value: Decimal = _ZERO,
+    order_ceiling: Decimal | None = None,
 ) -> SipAllocation:
     """Allocate one SIP instalment into whole-share buys, carrying the unspendable remainder on.
 
@@ -179,12 +192,24 @@ def simulate_sip_instalment(
     tolerance), every target name has a positive price in ``prices``, and every money figure is a
     ``Decimal``. ``existing_value`` (ISIN → current mark-to-market value) lets the allocation
     account for what is already held so drift is on the whole book; omit it for a fresh SIP.
+    ``min_order_value`` drops every order whose cost is below it once the greedy walk is done; the
+    cash it would have spent stays in ``residual_cash`` rather than being poured into another name,
+    because redistributing it would buy the model's weights wrong to avoid holding cash. Zero (the
+    default) keeps every order; backtest policies pass :data:`MIN_ORDER_VALUE_INR`.
+    ``order_ceiling`` is the most one order may cost — A8's per-order ceiling
+    (``analyst.rails.order_value_ceiling``). The walk never takes a name's order past it, so no
+    order is proposed that the rail is bound to refuse; the cash it could not place stays in
+    ``residual_cash`` for the next instalment's top-up rather than being poured into other names.
+    ``None`` (the default) sets no ceiling.
 
     Never: invents fractional shares, spends more than ``instalment + carried_in``, reads a clock,
     or keys on anything but the ISIN.
     """
     instalment = _require_nonneg_money("instalment", instalment)
     carried_in = _require_nonneg_money("carried_in", carried_in)
+    min_order_value = _require_nonneg_money("min_order_value", min_order_value)
+    if order_ceiling is not None:
+        order_ceiling = _require_nonneg_money("order_ceiling", order_ceiling)
     weights = _validated_weights(targets)
     unit_prices = _validated_prices(weights, prices)
     base_value = _validated_existing(existing_value)
@@ -225,6 +250,8 @@ def simulate_sip_instalment(
         for isin in isins:  # sorted → first strictly-better wins, so ties break to the lowest ISIN
             if unit_prices[isin] > remaining:
                 continue
+            if order_ceiling is not None and unit_prices[isin] * (bought[isin] + 1) > order_ceiling:
+                continue  # one more share would take this order past the rail's per-order ceiling
             candidate = drift_after(isin)
             if candidate < best_drift:
                 best_drift = candidate
@@ -233,6 +260,16 @@ def simulate_sip_instalment(
             break  # no affordable purchase reduces drift — carry the rest forward
         bought[best_isin] += 1
         remaining -= unit_prices[best_isin]
+
+    # Uneconomic lots are dropped after the walk, not skipped during it: the walk decides the
+    # model's shape, and the floor only refuses to pay a flat sell charge on a lot too small to
+    # carry it. Their cash stays cash.
+    dropped = 0
+    for isin in isins:
+        if bought[isin] > 0 and unit_prices[isin] * bought[isin] < min_order_value:
+            remaining += unit_prices[isin] * bought[isin]
+            bought[isin] = 0
+            dropped += 1
 
     orders = tuple(
         SipOrder(isin=isin, quantity=bought[isin], price=unit_prices[isin])
@@ -248,6 +285,8 @@ def simulate_sip_instalment(
         deployed=str(instalment + carried_in - remaining),
         residual_cash=str(remaining),
         names_bought=len(orders),
+        below_min_order_value=dropped,
+        order_ceiling=None if order_ceiling is None else str(order_ceiling),
         tracking_drift=str(sum((abs(d.drift) for d in drifts), _ZERO)),
     )
     return SipAllocation(

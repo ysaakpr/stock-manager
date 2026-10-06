@@ -4,7 +4,10 @@ Public surface so far: the normalized action taxonomy, its structured terms mode
 purpose-string normalizer and the manual-entry queue an unparseable string lands in (M2.1); the
 cross-exchange reconciliation engine and its `/status/quality` queue (M2.3); the adjustment factor
 chain, the price-adjusted / return / total-return series derived from it, and the retroactive
-recompute-and-invalidate seam (M2.4).
+recompute-and-invalidate seam (M2.4); the curated, sourced merger and cash-exit terms the
+store's feeds cannot carry (``merger_terms``); and the curated, sourced splits, bonuses and
+structural breaks no feed carries, with the documented market moves that are not actions
+(``manual_actions``).
 """
 
 from dataplatform.corpactions.factors import (
@@ -19,6 +22,26 @@ from dataplatform.corpactions.factors import (
     price_adjusted_series,
     return_series,
     total_return_series,
+)
+from dataplatform.corpactions.manual_actions import (
+    MANUAL_ACTIONS_PATH,
+    MANUAL_SOURCE,
+    CuratedAction,
+    ExplainedMove,
+    ManualActions,
+    ManualActionsError,
+    load_manual_actions,
+)
+from dataplatform.corpactions.merger_terms import (
+    MERGER_TERMS_PATH,
+    CashExitTerm,
+    MergerTerms,
+    MergerTermsError,
+    SchemeCashLeg,
+    ShareSwapTerm,
+    TermSource,
+    UnsourcedMerger,
+    load_merger_terms,
 )
 from dataplatform.corpactions.parse_terms import (
     CorporateActionNormalizer,
@@ -76,21 +99,31 @@ from dataplatform.corpactions.taxonomy import (
 __all__ = [
     "CA_RECONCILIATION_CHECK",
     "DEFAULT_EX_DATE_TOLERANCE_DAYS",
+    "MANUAL_ACTIONS_PATH",
+    "MANUAL_SOURCE",
+    "MERGER_TERMS_PATH",
     "TERMS_ADAPTER",
     "TERMS_BY_ACTION",
     "ActionType",
     "AdjustedPoint",
+    "CashExitTerm",
     "CorporateActionNormalizer",
+    "CuratedAction",
     "DividendKind",
     "DividendTerms",
     "ExchangeRatioTerms",
+    "ExplainedMove",
     "FaceValueTerms",
     "FactorChain",
     "FactorError",
     "FactorRow",
+    "ManualActions",
+    "ManualActionsError",
     "ManualEntryQueue",
     "ManualQueueEntry",
     "ManualQueueReason",
+    "MergerTerms",
+    "MergerTermsError",
     "NameChangeTerms",
     "ParseOutcome",
     "ParsedAction",
@@ -107,15 +140,21 @@ __all__ = [
     "ReconciliationResult",
     "ReturnPoint",
     "RightsTerms",
+    "SchemeCashLeg",
+    "ShareSwapTerm",
     "SingleSourcePolicy",
+    "TermSource",
     "Terms",
     "UnquantifiedTerms",
+    "UnsourcedMerger",
     "build_chain_for_isin",
     "build_factor_chain",
     "classify",
     "collapse_reconciled_rows",
     "describe",
     "eligible_for_factor_chain",
+    "load_manual_actions",
+    "load_merger_terms",
     "load_reconciled_actions",
     "parse_purpose",
     "persist_reconciliation",

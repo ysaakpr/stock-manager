@@ -1,0 +1,119 @@
+{
+  "era": "ffix_seventeen_index",
+  "session": "2011-01-31",
+  "archive_filename": "PR310111.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR310111.zip",
+  "why_this_era": "the seven sectoral indices arrive; all 17 INDEX_FLG values present in one file",
+  "reduced_from_l0": true,
+  "original_bytes": 319287,
+  "original_sha256": "8bb92e000b7c37ca80f266e151a23b85679c50f0193c0580a09171eaefdd2ec9",
+  "original_members": [
+    {
+      "name": "fo31012011.doc",
+      "bytes": 337408
+    },
+    {
+      "name": "Gl310111.csv",
+      "bytes": 6761
+    },
+    {
+      "name": "help.txt",
+      "bytes": 3510
+    },
+    {
+      "name": "HL310111.csv",
+      "bytes": 4269
+    },
+    {
+      "name": "NPD310111.txt",
+      "bytes": 3235
+    },
+    {
+      "name": "nuver.txt",
+      "bytes": 2670
+    },
+    {
+      "name": "op31012011.csv",
+      "bytes": 292948
+    },
+    {
+      "name": "Pd310111.csv",
+      "bytes": 262838
+    },
+    {
+      "name": "Pr310111.csv",
+      "bytes": 245533
+    },
+    {
+      "name": "rdm.doc",
+      "bytes": 34304
+    },
+    {
+      "name": "Rdm_help.txt",
+      "bytes": 705
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 3092
+    },
+    {
+      "name": "RPD310111.csv",
+      "bytes": 203
+    },
+    {
+      "name": "Rtt310111.csv",
+      "bytes": 55
+    },
+    {
+      "name": "Tt310111.csv",
+      "bytes": 2201
+    },
+    {
+      "name": "An310111.txt",
+      "bytes": 63186
+    },
+    {
+      "name": "Bc310111.csv",
+      "bytes": 12977
+    },
+    {
+      "name": "bh31012011.csv",
+      "bytes": 2854
+    },
+    {
+      "name": "Bm310111.txt",
+      "bytes": 25929
+    },
+    {
+      "name": "cd31012011.doc",
+      "bytes": 52736
+    },
+    {
+      "name": "cf31012011.csv",
+      "bytes": 1865
+    },
+    {
+      "name": "co31012011.csv",
+      "bytes": 2268
+    },
+    {
+      "name": "etf310111.csv",
+      "bytes": 4488
+    },
+    {
+      "name": "ffix310111.csv",
+      "bytes": 111504
+    },
+    {
+      "name": "fo31012011.csv",
+      "bytes": 78478
+    }
+  ],
+  "members_kept_in_fixture": [
+    "ffix310111.csv",
+    "Readme.txt"
+  ],
+  "ffix_member": "ffix310111.csv",
+  "ffix_member_bytes": 111504,
+  "ffix_member_sha256": "8932cba961e382ccffa2890984a5479e67f9dd56db3c10da1d96ac379d5f2ab4"
+}

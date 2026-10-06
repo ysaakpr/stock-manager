@@ -36,7 +36,9 @@ from dataplatform.identity.ingest import (
     NSE_SYMBOL_CHANGES_SOURCE,
     SYMBOL_CHANGES_FILENAME,
     L0PayloadMissingError,
+    equity_list_filename,
     read_snapshot_from_l0,
+    symbol_changes_filename,
 )
 from dataplatform.ingest.fetcher import (
     Fetcher,
@@ -110,7 +112,7 @@ def test_both_identity_files_have_a_source_register_row() -> None:
 def test_both_rows_name_the_same_host_so_one_lease_covers_them() -> None:
     by_id = {entry.id: entry for entry in load_register().sources}
 
-    hosts = {by_id[source].host for source, _ in IDENTITY_SOURCES}
+    hosts = {by_id[source].host for source in IDENTITY_SOURCES}
 
     assert hosts == {"nsearchives.nseindia.com"}
 
@@ -124,9 +126,14 @@ def test_a_refresh_lands_both_files_in_l0(lake: L0Store) -> None:
     refs, reused = fetch_identity_files(fetcher, SNAPSHOT, l0=lake)
 
     assert reused == ()
-    assert [ref.filename for ref in refs] == [EQUITY_LIST_FILENAME, SYMBOL_CHANGES_FILENAME]
-    assert lake.exists(NSE_EQUITY_LIST_SOURCE, SNAPSHOT, EQUITY_LIST_FILENAME)
-    assert lake.exists(NSE_SYMBOL_CHANGES_SOURCE, SNAPSHOT, SYMBOL_CHANGES_FILENAME)
+    # Dated L0 keys, not the source's own undated filenames: L0 partitions by month, so
+    # `EQUITY_L.csv` twice in one September would be one key and the second put would raise.
+    assert [ref.filename for ref in refs] == [
+        equity_list_filename(SNAPSHOT),
+        symbol_changes_filename(SNAPSHOT),
+    ]
+    assert lake.exists(NSE_EQUITY_LIST_SOURCE, SNAPSHOT, equity_list_filename(SNAPSHOT))
+    assert lake.exists(NSE_SYMBOL_CHANGES_SOURCE, SNAPSHOT, symbol_changes_filename(SNAPSHOT))
     assert len(transport.requests) == 2
 
 
@@ -182,9 +189,38 @@ def test_a_missing_rename_file_is_refused_even_when_the_equity_list_is_there(
     lake.put(
         NSE_EQUITY_LIST_SOURCE,
         SNAPSHOT,
-        EQUITY_LIST_FILENAME,
+        equity_list_filename(SNAPSHOT),
         (FIXTURES / EQUITY_LIST_FILENAME).read_bytes(),
     )
 
     with pytest.raises(L0PayloadMissingError, match=NSE_SYMBOL_CHANGES_SOURCE):
         read_snapshot_from_l0(SNAPSHOT, store=lake)
+
+
+def test_two_captures_in_one_month_are_two_keys_not_one(lake: L0Store) -> None:
+    """The bug the dated filenames fix: L0 partitions by month, so an undated name is one key.
+
+    `EQUITY_LIST_FILENAME` was the L0 filename until this test existed, and this job had never
+    run — so nobody had discovered that the *second* capture inside any one month would raise
+    `L0ImmutabilityError` against the first (different bytes, same
+    `L0/nse_equity_list/2026/09/EQUITY_L.csv` key). That is the exact opposite of the register
+    row's `pit_notes`: *"keep every weekly snapshot forever and never overwrite; symbol changes
+    and delistings are only reconstructible from the accumulated series."* A delisted company
+    vanishes from this file the day it dies, so the accumulated series is the only record it was
+    ever listed at all.
+    """
+    first, second = date(2026, 9, 8), date(2026, 9, 15)
+    equity = (FIXTURES / EQUITY_LIST_FILENAME).read_bytes()
+
+    lake.put(NSE_EQUITY_LIST_SOURCE, first, equity_list_filename(first), equity)
+    lake.put(NSE_EQUITY_LIST_SOURCE, second, equity_list_filename(second), equity + b"\nDRIFTED,,")
+
+    assert equity_list_filename(first) != equity_list_filename(second)
+    assert lake.exists(NSE_EQUITY_LIST_SOURCE, first, equity_list_filename(first))
+    assert lake.exists(NSE_EQUITY_LIST_SOURCE, second, equity_list_filename(second))
+
+
+def test_the_dated_filename_keeps_the_sources_own_extension_and_stem() -> None:
+    """L0 is what the source served; the date is the only thing added to its name."""
+    assert equity_list_filename(date(2026, 9, 8)) == "EQUITY_L_20260908.csv"
+    assert symbol_changes_filename(date(2026, 9, 8)) == "symbolchange_20260908.csv"

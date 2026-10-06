@@ -55,11 +55,13 @@ from datetime import date
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
+from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
 from backtest.forecast import HORIZON_3M
+from backtest.policies.sizing import account_order_ceiling
 from backtest.replay import SessionContext, SessionDecision
-from backtest.sip import simulate_sip_instalment
+from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, Holding, OrderRequest, Side
 
@@ -239,9 +241,22 @@ class ForecastDailyPolicy:
     holding goes, so a replay from a fixed start reproduces it exactly.
     """
 
-    def __init__(self, data: ForecastSignalData, parameters: ForecastDailyParameters) -> None:
+    def __init__(
+        self,
+        data: ForecastSignalData,
+        parameters: ForecastDailyParameters,
+        *,
+        order_caps: RiskRails | None = None,
+    ) -> None:
         self._data = data
         self._params = parameters
+        # The rails A8 will clear this policy's orders against. With them, no buy is sized past the
+        # per-order ceiling (``backtest.policies.sizing.account_order_ceiling``): a buy the rail is
+        # bound to refuse leaves its cash idle, the next rebalance spreads the larger idle balance
+        # over the same names, and the book drifts to cash. Sized to the ceiling, the rest stays in
+        # cash and tops the name up at the next rebalance. Not a field of the parameters, so the
+        # parameters' repr is unchanged; the run spec records the sizing instead.
+        self._order_caps = order_caps
         self._entered: dict[str, date] = {}
         self._peak: dict[str, Decimal] = {}
 
@@ -257,7 +272,9 @@ class ForecastDailyPolicy:
         actions = self._sell_actions(ctx.session, held, by_isin, marks, has_view=bool(candidates))
         budget = self._params.max_trades_per_session - sum(1 for a in actions if not a.exempt)
         selling = {action.isin for action in actions}
-        buys = self._buy_actions(ctx, held, by_isin, selling, budget, self._held_value(held, marks))
+        buys = self._buy_actions(
+            ctx, held, by_isin, selling, budget, self._held_value(held, marks), marks
+        )
 
         orders = tuple(
             OrderRequest(
@@ -441,6 +458,7 @@ class ForecastDailyPolicy:
         selling: frozenset[str] | set[str],
         budget: int,
         held_value: Decimal,
+        marks: Mapping[str, Decimal],
     ) -> tuple[_Action, ...]:
         """Whole-share buys into the best-projected names the budget and free cash allow.
 
@@ -449,12 +467,17 @@ class ForecastDailyPolicy:
         free cash on the day's two picks would build a two-name portfolio at ~50 % each and call it
         a twenty-name one — the returns of a concentrated book reported as a diversified strategy's.
         So the instalment is ``min(free cash x margin, per-name target x names chosen)`` where the
-        target is ``(free cash + marked holdings) / top_n``, and the book fills toward ``top_n``
+        target is ``(cash + marked holdings) / top_n`` — cash including proceeds still in
+        settlement, which are the book's even though they cannot be spent yet — and the book fills
+        toward ``top_n``
         over the sessions the budget allows rather than in one session.
 
         Sized from currently *free* cash — sells staged this session fill T+1 and their proceeds
         have not settled, so a buy never depends on them. Room is what the book has left toward
         ``top_n`` after this session's releases.
+
+        With ``order_caps`` no buy is sized past A8's per-order ceiling (the book at ``marks``): a
+        name the ceiling holds below its target keeps the rest of its slice in cash for later picks.
         """
         if budget <= 0:
             return ()
@@ -472,18 +495,25 @@ class ForecastDailyPolicy:
         chosen = wanted[: min(room, budget)]
         if not chosen:
             return ()
-        free = ctx.broker.margins().available
+        margins = ctx.broker.margins()
+        free = margins.available
         deployable = free * self._params.buy_budget_fraction
         if deployable <= _ZERO:
             return ()
-        per_name = (free + held_value) / Decimal(self._params.top_n)
+        # The book is valued with proceeds still in settlement; only the spend is limited to free.
+        per_name = (margins.cash_value + held_value) / Decimal(self._params.top_n)
         budget_cash = min(deployable, per_name * Decimal(len(chosen)))
         if budget_cash <= _ZERO:
             return ()
         weights = _equal_weights([record.isin for record in chosen])
         prices = {record.isin: record.price for record in chosen}
         allocation = simulate_sip_instalment(
-            instalment=budget_cash, targets=weights, prices=prices, existing_value={}
+            instalment=budget_cash,
+            targets=weights,
+            prices=prices,
+            existing_value={},
+            min_order_value=MIN_ORDER_VALUE_INR,
+            order_ceiling=account_order_ceiling(self._order_caps, ctx.broker, marks),
         )
         return tuple(
             _Action(

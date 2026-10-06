@@ -32,17 +32,19 @@ returns the same decision — the determinism the replay harness (§8.3.3) is bu
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date
 from decimal import Decimal
 from typing import Protocol, runtime_checkable
 
+from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from backtest.policies.sizing import account_order_ceiling
 from backtest.replay import SessionContext, SessionDecision
-from backtest.sip import simulate_sip_instalment
+from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
-from execution.broker import Exchange, Holding, OrderRequest, Side
+from execution.broker import Exchange, Holding, OrderRequest, Position, Side
 
 __all__ = [
     "MomentumData",
@@ -85,7 +87,13 @@ class MomentumRecord:
             raise ValueError(f"price must be positive, got {self.price}")
 
 
-@dataclass(frozen=True, slots=True)
+#: Parameters added after run digests were first persisted, each with the default at which it is
+#: left out of ``repr`` — the run ledger keys a run on ``repr(parameters)``, so every run that does
+#: not use a newer knob keeps the digest it was persisted under.
+_DIGEST_OPTIONAL_PARAMETERS: dict[str, object] = {"redeploy_next_session": False}
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class MomentumParameters:
     """The strategy's a-priori knobs — chosen once, stated, never tuned (M4.10 acceptance #3).
 
@@ -95,6 +103,10 @@ class MomentumParameters:
       sized against; it is a mechanical execution margin, **not** a return-tuning parameter.
     * ``sleeve`` — the journal sleeve every trade is tagged with (§5.5). A backtest momentum book is
       the rotation/tactical sleeve.
+    * ``redeploy_next_session`` (off) — once a rebalance's sale proceeds have *settled*, deploy the
+      free cash into that rebalance's own top-N instead of letting it wait a month for the next one
+      (see :meth:`NaiveMomentumPolicy._redeploy`). Off by default and absent from ``repr`` when off,
+      so the M4.10 policy and every digest persisted under it are unchanged.
 
     All fixed by construction; the run reports them verbatim so the "no tuning" claim is checkable.
     """
@@ -102,6 +114,16 @@ class MomentumParameters:
     top_n: int = 20
     buy_budget_fraction: Decimal = Decimal("0.98")
     sleeve: Sleeve = Sleeve.TACTICAL
+    redeploy_next_session: bool = False
+
+    def __repr__(self) -> str:
+        shown = (
+            f"{f.name}={getattr(self, f.name)!r}"
+            for f in fields(self)
+            if f.name not in _DIGEST_OPTIONAL_PARAMETERS
+            or getattr(self, f.name) != _DIGEST_OPTIONAL_PARAMETERS[f.name]
+        )
+        return f"{type(self).__qualname__}({', '.join(shown)})"
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -139,6 +161,15 @@ class MomentumData(Protocol):
         """The PIT candidate set as of ``as_of``, as a guardable dataset."""
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingTarget:
+    """A rebalance's top-N and the prices it was sized at, awaiting its proceeds' settlement."""
+
+    decided_on: date
+    target: dict[str, MomentumRecord]
+    marks: dict[str, Decimal]
+
+
 class NaiveMomentumPolicy:
     """Top-N trailing-return momentum, rebalanced monthly — the M4.10 engine-validation strategy.
 
@@ -152,21 +183,46 @@ class NaiveMomentumPolicy:
     broker's reported book, with ties broken by ISIN, so a replay reproduces the decision exactly.
     """
 
-    __slots__ = ("_data", "_params")
+    __slots__ = ("_data", "_order_caps", "_params", "_pending")
 
-    def __init__(self, data: MomentumData, params: MomentumParameters | None = None) -> None:
+    def __init__(
+        self,
+        data: MomentumData,
+        params: MomentumParameters | None = None,
+        *,
+        order_caps: RiskRails | None = None,
+    ) -> None:
         self._data = data
         self._params = params if params is not None else MomentumParameters()
+        # The rails A8 will clear this policy's orders against. With them, no buy is sized past the
+        # per-order ceiling (``backtest.policies.sizing.account_order_ceiling``): a buy the rail is
+        # bound to refuse leaves its cash idle, the next rebalance spreads the larger idle balance
+        # over the same names, and the book drifts to cash. Sized to the ceiling, the rest stays in
+        # cash and tops the name up at the next rebalance. Not a field of the parameters, so the
+        # parameters' repr is unchanged; the run spec records the sizing instead.
+        self._order_caps = order_caps
+        #: The last rebalance's target, while its sale proceeds settle (``redeploy_next_session``).
+        #: ``None`` when nothing is pending; a pure function of earlier decisions and the book.
+        self._pending: _PendingTarget | None = None
 
     def decide(self, ctx: SessionContext) -> SessionDecision:
-        """Decide this session: a heartbeat off a rebalance, a full rebalance on one."""
-        if not self._data.is_rebalance(ctx.session):
-            return self._heartbeat(ctx)
-        return self._rebalance(ctx)
+        """Decide this session: a heartbeat off a rebalance, a full rebalance on one.
+
+        With ``redeploy_next_session`` on, a session after a rebalance that sold something is a
+        *deployment* session once the sale proceeds have settled (:meth:`_redeploy`).
+        """
+        if self._data.is_rebalance(ctx.session):
+            self._pending = None  # a new rebalance supersedes whatever the last one left pending
+            return self._rebalance(ctx)
+        if self._pending is not None:
+            return self._redeploy(ctx, self._pending)
+        return self._heartbeat(ctx)
 
     # ── the two branches ─────────────────────────────────────────────────────────────────────────
 
-    def _heartbeat(self, ctx: SessionContext) -> SessionDecision:
+    def _heartbeat(
+        self, ctx: SessionContext, note: str = "no rebalance due this session"
+    ) -> SessionDecision:
         """A no-order session: return the heartbeat evidence the engine stamps (inv. #9)."""
         holdings = ctx.broker.holdings()
         evidence = EvidenceBundle(
@@ -178,7 +234,7 @@ class NaiveMomentumPolicy:
                     source="book",
                     label="held_names",
                     value=Decimal(len(holdings)),
-                    text="no rebalance due this session",
+                    text=note,
                 ),
             ),
         )
@@ -197,11 +253,84 @@ class NaiveMomentumPolicy:
 
         held = {holding.isin: holding for holding in ctx.broker.holdings()}
         sells = self._sells(held, target)
-        buys, drifts_note = self._buys(ctx, held, target, prices)
+        marks = {record.isin: record.price for record in candidates}
+        buys, drifts_note = self._buys(
+            ctx, {isin: h.quantity for isin, h in held.items()}, target, prices, marks
+        )
+        if self._params.redeploy_next_session and target and sells:
+            # Only a rebalance that sold something leaves proceeds to deploy once they settle.
+            self._pending = _PendingTarget(
+                decided_on=ctx.session, target=dict(target), marks=dict(marks)
+            )
 
         orders = tuple(order for order, _ in (*sells, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
         evidence = self._evidence(ctx.session, chosen, drifts_note)
+        return SessionDecision(evidence=evidence, orders=orders, entries=entries)
+
+    def _redeploy(self, ctx: SessionContext, pending: _PendingTarget) -> SessionDecision:
+        """Deploy settled cash into the last rebalance's top-N, once its sale proceeds have settled.
+
+        The rebalance's sells fill the next session and pay out on that fill's settlement cycle
+        (T+2 before 2023-01-27, T+1 after). While any proceeds are still in settlement this is a
+        heartbeat that says so: nothing is bought on cash the account does not hold, and the budget
+        is ``available`` (settled cash) exactly as on a rebalance. The first session with nothing
+        in settlement sizes buys toward the stored top-N through the same :meth:`_buys` path, rail
+        ceiling included, and the pending target is spent; the next rebalance supersedes it anyway.
+
+        Decides by the stored target only: the signal is not read again, so the sizing prices and
+        the ceiling's marks are the rebalance's own (this source serves prices only with the
+        signal). The fill is at the next session's reference price, as every fill is. Counts the
+        rebalance's own buys still in settlement as held, so they are topped up, not bought twice.
+        """
+        margins = ctx.broker.margins()
+        if margins.unsettled_proceeds > _ZERO:
+            return self._heartbeat(
+                ctx,
+                f"redeploy pending: {margins.unsettled_proceeds} of sale proceeds still settling "
+                f"from the {pending.decided_on.isoformat()} rebalance; nothing bought",
+            )
+        self._pending = None
+        quantities: dict[str, int] = {}
+        lots: list[Holding | Position] = [*ctx.broker.holdings(), *ctx.broker.positions()]
+        for lot in lots:
+            quantities[lot.isin] = quantities.get(lot.isin, 0) + lot.quantity
+        prices = {isin: record.price for isin, record in pending.target.items()}
+        buys, drift = self._buys(
+            ctx,
+            quantities,
+            pending.target,
+            prices,
+            pending.marks,
+            note=f"redeploy settled proceeds of the {pending.decided_on.isoformat()} rebalance",
+        )
+        if not buys:
+            return self._heartbeat(
+                ctx,
+                f"redeploy session for the {pending.decided_on.isoformat()} rebalance: nothing "
+                "affordable reduces drift",
+            )
+        orders = tuple(order for order, _ in buys)
+        entries = tuple(self._entry(ctx, order, note) for order, note in buys)
+        evidence = EvidenceBundle(
+            trading_date=ctx.session,
+            actor=Actor.T0,
+            items=(
+                EvidenceItem(
+                    kind=EvidenceKind.POSITION,
+                    source="book",
+                    label="redeploy_budget",
+                    as_of=ctx.session,
+                    value=margins.available * self._params.buy_budget_fraction,
+                    detail={
+                        "rebalance": pending.decided_on.isoformat(),
+                        "names_bought": str(len(buys)),
+                        "tracking_drift": str(drift),
+                    },
+                    text="settled proceeds of the last rebalance's sells, deployed into its top-N",
+                ),
+            ),
+        )
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
 
     # ── sells: liquidate settled holdings that fell out of the target set ─────────────────────────
@@ -230,9 +359,12 @@ class NaiveMomentumPolicy:
     def _buys(
         self,
         ctx: SessionContext,
-        held: Mapping[str, Holding],
+        held: Mapping[str, int],
         target: Mapping[str, MomentumRecord],
         prices: Mapping[str, Decimal],
+        marks: Mapping[str, Decimal],
+        *,
+        note: str | None = None,
     ) -> tuple[list[tuple[OrderRequest, str]], Decimal]:
         """Whole-share buys toward equal weight, sized from free cash; return them and total drift.
 
@@ -240,7 +372,9 @@ class NaiveMomentumPolicy:
         — never sale proceeds staged this session, which have not settled — so a buy is never
         rejected for cash it does not yet have. The allocation is the shared M4.7 greedy allocator,
         accounting for what is already held in the surviving names so it tops up toward equal weight
-        rather than double-buying.
+        rather than double-buying. With ``order_caps`` no buy is sized past A8's per-order ceiling,
+        the book valued at ``marks`` (this session's candidate prices). ``held`` is the share count
+        already owned per ISIN; ``note`` prefixes each rationale.
         """
         if not target:
             return [], _ZERO
@@ -249,18 +383,21 @@ class NaiveMomentumPolicy:
         # What is already held in names that survive into the target, marked at the current price —
         # so drift is measured on the whole book, not just this instalment (M4.7).
         existing_value = {
-            isin: Decimal(held[isin].quantity) * prices[isin] for isin in target if isin in held
+            isin: Decimal(held[isin]) * prices[isin] for isin in target if isin in held
         }
         allocation = simulate_sip_instalment(
             instalment=budget,
             targets=weights,
             prices=prices,
             existing_value=existing_value,
+            min_order_value=MIN_ORDER_VALUE_INR,
+            order_ceiling=account_order_ceiling(self._order_caps, ctx.broker, marks),
         )
         buys = [
             (
                 order.to_order_request(exchange=Exchange.NSE, tag="MOMENTUM"),
-                f"top-{self._params.top_n} momentum {target[order.isin].momentum:+} 12m; "
+                (f"{note}; " if note is not None else "")
+                + f"top-{self._params.top_n} momentum {target[order.isin].momentum:+} 12m; "
                 f"buy {order.quantity} @ {order.price}",
             )
             for order in allocation.orders

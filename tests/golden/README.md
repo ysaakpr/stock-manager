@@ -100,3 +100,25 @@ Rules for a good case:
 4. **Raw closes are representative** EOD levels around the ex-date; the load-bearing invariant under
    test is `adjusted = raw × cumulative_factor` derived from the published terms, so internal
    consistency (literal = raw × factor) is what matters, checked against the engine's own output.
+
+## Price-implied splits (`test_golden_implied_splits.py`)
+
+Some share-basis changes have no published terms to start from: ETF unit splits are in neither
+exchange's equity CA feed, and splits before either feed's history (TATAMTRDVR, 2011) are in
+neither. `corpactions.implied` reads those off L1 and `store.l2` adjusts for them. Their golden
+file freezes the real NSE EQ bars around each ex-date and checks the L2 materializer's output
+against hand-computed literals (`3286.95 x 0.1 = 328.6950`), so an inverted factor fails it the
+same way it fails the published-terms cases. It is a separate harness because its input is bars,
+not terms; a new implied case is a new row block in that file.
+
+## Curated corporate actions (`test_golden_curated_actions.py`)
+
+Some events have published terms but reach neither feed, and the price detector rightly refuses
+them: a bonus on a day the market also moved, two events on one ex-date, an ETF unit split whose
+ex-day printed at the +20% band. Their terms are transcribed by hand, with the L0 line that states
+each, into `dataplatform/corpactions/manual_actions.yaml`; genuine market moves (no factor, ever)
+go in its `explained_moves` allowlist. The golden file freezes real NSE EQ bars around four of
+them — a plain bonus, a bonus and split on one day, a curated split beside a feed's bonus, an ETF
+unit split — and checks the L2 materializer's output, read from the repo file, against
+hand-computed literals. A new curated event is a row in the YAML; a new golden case is a row block
+in that file.

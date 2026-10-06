@@ -51,6 +51,12 @@ PLAN_ROWS: Final[tuple[str, ...]] = (
     # Proposed amendment (M11.1, EXECUTION_PLAN §12) — awaiting owner ratification. The daily
     # market-state and economic backdrop the analyst reasons against; §4.1 v1.0 has no such row.
     "Macro / economic backdrop",
+    # Proposed amendment (OPS daily snapshotter, EXECUTION_PLAN §12) — awaiting owner
+    # ratification. The daily market-structure state of a security: which industry the exchange
+    # assigns it to, what price band it trades in, and which surveillance framework it sits under.
+    # §4.1 v1.0 has no such row, so none of these could be registered — and every one of them is
+    # snapshot-only with no archive anywhere, so an unregistered day is a day gone for good.
+    "Market-structure snapshots",
 )
 
 
@@ -77,12 +83,26 @@ class Era(BaseModel):
 
 
 class Parser(BaseModel):
-    """The module that will read this source, and the task that writes it."""
+    """The module that will read this source, and the task that writes it.
+
+    Both are `None` for an **archive-only** entry: a source captured into L0 for its own sake,
+    with no L1 parser yet written. That is a real and deliberate state for the snapshot-only
+    market-structure feeds — their history is destroyed at one day per day, so capturing the
+    bytes cannot wait for a parser to be designed, and recording "no parser yet" is honest where
+    naming a module that does not exist would not be. `archive_only` is the predicate to read;
+    the register validator requires the pair to be all-or-nothing so a half-filled row cannot
+    pass as either.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    id: str
-    task: str
+    id: str | None = None
+    task: str | None = None
+
+    @property
+    def archive_only(self) -> bool:
+        """True when no parser is named — the payload is captured for L0's sake alone."""
+        return self.id is None and self.task is None
 
 
 class Fixture(BaseModel):
@@ -254,6 +274,11 @@ def _acceptance_problems(reg: SourceRegister) -> Iterator[str]:
             yield f"{source.id}: unsuccessful fetch with no explicit failure note"
         if source.status is not Status.VERIFIED and not source.candidate_alternatives:
             yield f"{source.id}: status {source.status} with no candidate alternative recorded"
+        if (source.parser.id is None) != (source.parser.task is None):
+            yield (
+                f"{source.id}: parser is half-filled (id={source.parser.id!r}, "
+                f"task={source.parser.task!r}) — name both, or neither for an archive-only entry"
+            )
 
     # Criterion 2 — VERIFIED is a claim about a real successful fetch, and nothing else.
     for source in reg.sources:

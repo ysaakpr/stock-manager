@@ -64,10 +64,16 @@ class LogFormat(StrEnum):
 
 
 class LlmProvider(StrEnum):
-    """Which LLM implementation the analyst wires. `STUB` needs no credential (B4)."""
+    """Which LLM implementation the analyst wires. `STUB` needs no credential (B4).
+
+    `CLAUDE_CLI` needs no credential *in this repo* either: it shells out to the Claude CLI, which
+    holds its own login. That is the difference from `ANTHROPIC`, which wants `ANTHROPIC_API_KEY`
+    and bills per token — the CLI route runs on a subscription and reports an estimated cost.
+    """
 
     STUB = "stub"
     ANTHROPIC = "anthropic"
+    CLAUDE_CLI = "claude_cli"
 
 
 class BrokerProvider(StrEnum):
@@ -138,6 +144,13 @@ class Settings(BaseSettings):
         default=Path("data"),
         description="root of the L0/L1/L2 lake; a relative path is anchored at the repo root",
     )
+    snapshot_expect_lake_root: Path | None = Field(
+        default=None,
+        description=(
+            "absolute L0 root the daily snapshotter asserts before its first request; unset "
+            "disables the check"
+        ),
+    )
 
     # ── crawl policy (§4.1: 2-3 s spacing, backoff, hard stop on a 403 spike) ─────────────────
     http_user_agent: str = Field(
@@ -174,7 +187,9 @@ class Settings(BaseSettings):
     )
 
     # ── provider selectors (B4: no credential exists, so both default to a stub) ──────────────
-    llm_provider: LlmProvider = Field(default=LlmProvider.STUB, description="stub | anthropic")
+    llm_provider: LlmProvider = Field(
+        default=LlmProvider.STUB, description="stub | anthropic | claude_cli"
+    )
     broker_provider: BrokerProvider = Field(default=BrokerProvider.STUB, description="stub | kite")
 
     # ── alerting (§8.1: FAILED streaks, red quality, reconciliation breaks) ───────────────────

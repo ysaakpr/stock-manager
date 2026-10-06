@@ -55,6 +55,7 @@ from pydantic import ValidationError
 from dataplatform.ingest.models import ParseError, PriceRow
 from dataplatform.logging import get_logger
 from dataplatform.store.l0 import L0Ref, L0Store
+from dataplatform.store.schemas import PriceQuarantineReason
 
 __all__ = [
     "CUTOVER",
@@ -64,15 +65,20 @@ __all__ = [
     "UDIFF_SOURCE_ID",
     "BseLegacyQuote",
     "Era",
+    "LegacyParse",
     "LegacyResolution",
+    "MalformedLine",
     "era_of",
     "parse",
     "parse_l0",
     "parse_legacy",
+    "parse_legacy_report",
     "parse_legacy_text",
+    "parse_legacy_text_report",
     "parse_udiff",
     "parse_udiff_text",
     "resolve_legacy",
+    "split_merged_records",
 ]
 
 _LOG = get_logger(__name__)
@@ -204,6 +210,11 @@ class BseLegacyQuote:
     total_trades: int
     total_traded_qty: int
     total_traded_value: Decimal
+    #: `TDCLOINDI` verbatim — BSE's ex-event marker on the price row (`XD`, `XB`, `SS`, `SA`,
+    #: `XR`, `CS`), `""` on an ordinary session. Never a factor: an independent witness to the
+    #: corporate-action feed (`dataplatform.quality.ex_marker_witness`), carried into L1 by
+    #: `dataplatform.ingest.session_attributes`.
+    close_indicator: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -218,6 +229,45 @@ class LegacyResolution:
 
     resolved: tuple[PriceRow, ...]
     unresolved: tuple[BseLegacyQuote, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class MalformedLine:
+    """A legacy-file line the parser could not turn into quotes, kept whole with the reason why.
+
+    What it is: the quarantine record for a line that is not one record — today only the
+    run-together pair `split_merged_records` exists for, when the split cannot be proven. `text`
+    is the line's fields re-joined on commas (the legacy file is unquoted, so that is the line as
+    published), `scrip_code` and `group` are its first and third fields verbatim — possibly
+    malformed, which is the point — and `detail` is the first check that failed.
+    What it never is: a quote. Nothing on the line reaches `prices_raw`; the L0 payload keeps the
+    bytes, and the L1 writer lands this in `prices_raw_quarantine` under `reason`.
+    """
+
+    line: int
+    text: str
+    scrip_code: str
+    group: str
+    reason: str
+    detail: str
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyParse:
+    """One legacy session's parse: the quotes, and the lines that could not become quotes.
+
+    Every data line of the payload is accounted for: it is one quote, or two quotes recovered from
+    a merged line (`split_lines` names those lines), or one entry in `quarantined`. `len()` is the
+    count a log line should report — quotes plus quarantined lines — so a quarantine never makes a
+    session look smaller than the file it came from.
+    """
+
+    quotes: tuple[BseLegacyQuote, ...]
+    quarantined: tuple[MalformedLine, ...] = ()
+    split_lines: tuple[int, ...] = ()
+
+    def __len__(self) -> int:
+        return len(self.quotes) + len(self.quarantined)
 
 
 def era_of(trade_date: date) -> Era:
@@ -318,8 +368,21 @@ def parse_legacy(payload: bytes, *, filename: str, trade_date: date) -> tuple[Bs
     the file is for, which the `EQ{DDMMYY}` filename encodes and which is `L0Ref.logical_date` on
     the real path. The quotes have no ISIN yet — feed them to `resolve_legacy` with the master.
 
+    Two records run together on one line are split back apart when that is provably unambiguous
+    (`split_merged_records`); when it is not, the line is quarantined and logged, never fatal. A
+    caller that can persist the quarantine uses `parse_legacy_report`; this one returns the quotes.
+
     Raises `ParseError` for a UDiFF-era date, a corrupt archive, an unrecognised header, a short or
-    wide row, and a malformed field.
+    wide row (other than the merged-pair width), and a malformed field.
+    """
+    return parse_legacy_report(payload, filename=filename, trade_date=trade_date).quotes
+
+
+def parse_legacy_report(payload: bytes, *, filename: str, trade_date: date) -> LegacyParse:
+    """`parse_legacy`, keeping the quarantined lines and the lines that were split.
+
+    The backfill writer uses this so a quarantined line lands in `prices_raw_quarantine` rather
+    than only in a log line.
     """
     if era_of(trade_date) == "udiff":
         raise ParseError(
@@ -328,37 +391,157 @@ def parse_legacy(payload: bytes, *, filename: str, trade_date: date) -> tuple[Bs
             filename=filename,
         )
     text = _text_of(payload, filename=filename)
-    quotes = parse_legacy_text(text, filename=filename, trade_date=trade_date)
+    parsed = parse_legacy_text_report(text, filename=filename, trade_date=trade_date)
     _LOG.info(
         "bhavcopy.parsed",
         source=LEGACY_SOURCE_ID,
         era="legacy",
         filename=filename,
         trade_date=trade_date.isoformat(),
-        rows=len(quotes),
+        rows=len(parsed.quotes),
+        split_lines=len(parsed.split_lines),
+        quarantined=len(parsed.quarantined),
         state="NORMALIZED",
     )
-    return quotes
+    return parsed
 
 
 def parse_legacy_text(text: str, *, filename: str, trade_date: date) -> tuple[BseLegacyQuote, ...]:
     """Parse the decoded legacy CSV body into scrip-keyed quotes for `trade_date`."""
+    return parse_legacy_text_report(text, filename=filename, trade_date=trade_date).quotes
+
+
+def parse_legacy_text_report(text: str, *, filename: str, trade_date: date) -> LegacyParse:
+    """Parse the decoded legacy CSV body, splitting or quarantining merged-record lines."""
     reader = csv.reader(io.StringIO(text))
     _check_legacy_header(next(reader, None), filename=filename)
 
     quotes: list[BseLegacyQuote] = []
+    quarantined: list[MalformedLine] = []
+    split_lines: list[int] = []
     for record in reader:
         if not record or not any(field.strip() for field in record):
             continue
-        quotes.append(
-            _legacy_row(record, line=reader.line_num, filename=filename, trade_date=trade_date)
-        )
+        line = reader.line_num
+        if len(record) == len(LEGACY_COLUMNS) and not record[_PREVCLOSE_INDEX].strip():
+            # An instrument's first session states no previous close. One line, not the file:
+            # quarantined with its reason, the way an unsplittable merged line is.
+            absent = MalformedLine(
+                line=line,
+                text=",".join(record),
+                scrip_code=record[0].strip(),
+                group=record[2].strip(),
+                reason=PriceQuarantineReason.PREV_CLOSE_ABSENT,
+                detail="PREVCLOSE is blank — a first session has no previous close to state",
+            )
+            quarantined.append(absent)
+            _LOG.warning(
+                "bhavcopy.legacy_line_quarantined",
+                source=LEGACY_SOURCE_ID,
+                filename=filename,
+                trade_date=trade_date.isoformat(),
+                line=line,
+                reason=absent.reason,
+                detail=absent.detail,
+                text=absent.text,
+                state="QUARANTINED",
+            )
+            continue
+        if len(record) != _MERGED_WIDTH:
+            quotes.append(_legacy_row(record, line=line, filename=filename, trade_date=trade_date))
+            continue
+        outcome = split_merged_records(record, line=line, filename=filename, trade_date=trade_date)
+        if isinstance(outcome, MalformedLine):
+            quarantined.append(outcome)
+            _LOG.warning(
+                "bhavcopy.legacy_line_quarantined",
+                source=LEGACY_SOURCE_ID,
+                filename=filename,
+                trade_date=trade_date.isoformat(),
+                line=line,
+                reason=outcome.reason,
+                detail=outcome.detail,
+                text=outcome.text,
+                state="QUARANTINED",
+            )
+        else:
+            quotes.extend(outcome)
+            split_lines.append(line)
+            _LOG.warning(
+                "bhavcopy.legacy_records_split",
+                source=LEGACY_SOURCE_ID,
+                filename=filename,
+                trade_date=trade_date.isoformat(),
+                line=line,
+                scrip_codes=[quote.scrip_code for quote in outcome],
+                state="VALIDATED",
+            )
 
     if not quotes:
         raise ParseError(
             "no data rows after the header; a session's bhavcopy always has some", filename=filename
         )
-    return tuple(quotes)
+    return LegacyParse(
+        quotes=tuple(quotes), quarantined=tuple(quarantined), split_lines=tuple(split_lines)
+    )
+
+
+#: The width of two legacy records whose line terminator was lost. Every legacy row ends in
+#: `TDCLOINDI`, which is empty on all but ~0.07% of rows, so losing the CRLF after an empty one
+#: glues that empty field to the next row's `SC_CODE`: 13 + 14 = 27 fields. BSE published exactly
+#: one such line in 1,943 legacy sessions (`EQ291221_CSV.ZIP`, line 1773, scrips 531358/531359).
+_MERGED_WIDTH: Final = 2 * len(LEGACY_COLUMNS) - 1
+
+#: Where `PREVCLOSE` sits in a legacy record.
+_PREVCLOSE_INDEX: Final = LEGACY_COLUMNS.index("PREVCLOSE")
+
+
+def split_merged_records(
+    record: Sequence[str], *, line: int, filename: str, trade_date: date
+) -> tuple[BseLegacyQuote, BseLegacyQuote] | MalformedLine:
+    """Split a line holding two run-together legacy records back into two quotes, or say why not.
+
+    What it does: treats a `_MERGED_WIDTH`-field line as record one's first 13 fields, then record
+    two's 14 — record one's empty `TDCLOINDI` is the empty string the lost terminator swallowed.
+    It accepts the split only when it is unambiguous: field 14 must be a bare scrip code (a
+    non-empty `TDCLOINDI` such as `XD` would have fused into `XD531359` and fails that), the two
+    scrip codes must differ, and both halves must pass every check a normal row passes.
+    What it assumes: the caller only hands it lines of exactly `_MERGED_WIDTH` fields.
+    What it never does: guess. Any failed check returns a `MalformedLine` with reason
+    `MERGED_RECORDS_UNSPLITTABLE` and the failure in `detail`, and neither half becomes a quote —
+    half a line that is provably wrong is not trusted to be the right half.
+    """
+    width = len(LEGACY_COLUMNS)
+    if len(record) != _MERGED_WIDTH:
+        raise ValueError(f"expected a {_MERGED_WIDTH}-field line, got {len(record)}")
+
+    def quarantine(detail: str) -> MalformedLine:
+        return MalformedLine(
+            line=line,
+            text=",".join(record),
+            scrip_code=record[0].strip(),
+            group=record[2].strip(),
+            reason=PriceQuarantineReason.MERGED_RECORDS_UNSPLITTABLE,
+            detail=detail,
+        )
+
+    first = [*record[: width - 1], ""]
+    second = list(record[width - 1 :])
+    seam = second[0].strip()
+    if not _SCRIP_CODE.match(seam):
+        return quarantine(
+            f"field {width} is {seam!r}, not a bare scrip code; the first record's TDCLOINDI and "
+            "the second record's SC_CODE cannot be told apart"
+        )
+    if first[0].strip() == seam:
+        return quarantine(f"both halves carry scrip {seam}; that is not two records")
+    try:
+        return (
+            _legacy_row(first, line=line, filename=filename, trade_date=trade_date),
+            _legacy_row(second, line=line, filename=filename, trade_date=trade_date),
+        )
+    except ParseError as exc:
+        return quarantine(f"a half fails the row checks: {exc}")
 
 
 def resolve_legacy(
@@ -388,7 +571,10 @@ def resolve_legacy(
             resolved.append(
                 PriceRow(
                     isin=isin,
-                    symbol=quote.scrip_name,
+                    # BSE left SC_NAME blank on a handful of rows (531364 on 2011-05-05, 526225 on
+                    # 2013-10-31). The symbol is a label, never a key (ISIN is), so the scrip code
+                    # as published stands in rather than the whole session failing over it.
+                    symbol=quote.scrip_name or quote.scrip_code,
                     series=quote.group,
                     trade_date=quote.trade_date,
                     open=quote.open,
@@ -435,6 +621,7 @@ def _text_of(payload: bytes, *, filename: str) -> str:
         try:
             with zipfile.ZipFile(io.BytesIO(payload)) as archive:
                 members = archive.namelist()
+                members = _bhavcopy_member(members, filename=filename)
                 if len(members) != 1:
                     raise ParseError(
                         f"expected exactly one member in the archive, found {len(members)}: "
@@ -448,6 +635,15 @@ def _text_of(payload: bytes, *, filename: str) -> str:
                 "the payload in L0 is the evidence, do not re-fetch over it",
                 filename=filename,
             ) from exc
+    elif payload.lstrip()[:15].lower().startswith((b"<!doctype html", b"<html")):
+        # BSE's answer for a date it has no file for: HTTP 200 and its Angular shell (measured
+        # 2026-10-06 across 2006 and on Republic Day 2010). Named, because "unexpected header
+        # '<!DOCTYPE HTML>'" reads like a format change when it is an absence.
+        raise ParseError(
+            "the payload is BSE's HTML page, not a bhavcopy — the soft-404 BSE serves (HTTP 200) "
+            "for a date it published no file for; the session has no data at this source",
+            filename=filename,
+        )
     else:
         body = payload
 
@@ -457,6 +653,35 @@ def _text_of(payload: bytes, *, filename: str) -> str:
         raise ParseError(
             f"payload is not UTF-8 text at byte {exc.start} ({exc.reason})", filename=filename
         ) from exc
+
+
+def _bhavcopy_member(members: list[str], *, filename: str) -> list[str]:
+    """The archive's members, narrowed to the bhavcopy itself when BSE packed strays beside it.
+
+    Three legacy archives carry a second member next to `EQ{DDMMYY}.CSV`: a nested zip
+    (`EQ020611_CSV.ZIP`), a `.dbf` (`EQ131011_CSV.ZIP`) and an archiver's advert `.url`
+    (`EQ260314_CSV.ZIP`). When exactly one member is named as the archive promises —
+    `EQ020611_CSV.ZIP` holds `EQ020611.CSV` — that member is the file and the strays are logged.
+    Any other shape is returned untouched for the caller to refuse: picking "the first CSV" is how a
+    format change becomes a day of quietly wrong data.
+    """
+    if len(members) <= 1:
+        return members
+    stem = filename.rsplit("/", 1)[-1].upper()
+    if not stem.endswith("_CSV.ZIP"):
+        return members
+    expected = stem.removesuffix("_CSV.ZIP") + ".CSV"
+    named = [member for member in members if member.upper() == expected]
+    if len(named) != 1:
+        return members
+    _LOG.warning(
+        "bhavcopy.archive_strays_ignored",
+        source=LEGACY_SOURCE_ID,
+        filename=filename,
+        member=named[0],
+        ignored=[member for member in members if member != named[0]],
+    )
+    return named
 
 
 def _check_udiff_header(header: list[str] | None, *, filename: str) -> None:
@@ -593,6 +818,7 @@ def _legacy_row(record: list[str], *, line: int, filename: str, trade_date: date
         total_traded_value=_decimal(
             field["NET_TURNOV"], column="NET_TURNOV", line=line, filename=filename
         ),
+        close_indicator=field["TDCLOINDI"],
     )
 
 

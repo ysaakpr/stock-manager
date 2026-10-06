@@ -32,6 +32,7 @@ published it (invariant #3); adjustment factors live in D3 and are applied on re
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -44,16 +45,55 @@ __all__ = [
     "BhavcopyParse",
     "IngestError",
     "ParseError",
+    "PreIsinPriceRow",
     "Price",
     "PriceRow",
     "Quantity",
     "UnidentifiedRow",
+    "is_isin_check_digit_valid",
+    "is_keyable_isin",
 ]
 
 #: An ISIN as ISO 6166 defines it: two-letter country code, nine alphanumerics, one check digit.
 #: Indian equities are `INE…`/`INF…`/`IN9…`, but the pattern stays general — a Singapore-domiciled
 #: line on an Indian exchange is a real thing and is not this parser's business to reject.
 ISIN_PATTERN: Final = r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$"
+
+_ISIN_LITERAL: Final = re.compile(ISIN_PATTERN)
+
+
+def is_isin_check_digit_valid(isin: str) -> bool:
+    """Whether the ISIN's last character is the ISO 6166 check digit of the rest.
+
+    Letters become their base-36 values (`A` = 10 … `Z` = 35), the digits are concatenated, and the
+    Luhn sum over the whole string must be divisible by ten. Assumes a twelve-character
+    upper-case ISIN; anything else is not an ISIN and is False. Never consults a master: this is
+    arithmetic on the string, so it can say "not any security's ISIN" but never "this security's".
+    """
+    if not re.fullmatch(r"[A-Z0-9]{12}", isin):
+        return False
+    digits = "".join(str(int(character, 36)) for character in isin)
+    total = 0
+    for position, character in enumerate(reversed(digits)):
+        value = int(character)
+        if position % 2:
+            value *= 2
+            if value > 9:
+                value -= 9
+        total += value
+    return total % 10 == 0
+
+
+def is_keyable_isin(value: str) -> bool:
+    """Whether a source's ISIN literal can be a join key: the ISO 6166 shape *and* its check digit.
+
+    The shape alone let `IN9232101012` (NSE `SPARC`, series `E1`, 2012-10-09..11) into L1 as a
+    key — twelve well-formed characters that are no security's ISIN, because the check digit is
+    wrong. A key that names nobody is worse than no key: it can never join, and nothing downstream
+    can tell it from a real security with a short history. Never consults a master.
+    """
+    return _ISIN_LITERAL.match(value) is not None and is_isin_check_digit_valid(value)
+
 
 #: A price or a rupee amount. `strict` keeps floats out by construction; `ge=0` and
 #: `allow_inf_nan=False` keep a mis-parsed field from becoming a plausible-looking number.
@@ -121,7 +161,12 @@ class PriceRow(BaseModel):
 
     total_traded_qty: Quantity = Field(description="shares traded in the session (TOTTRDQTY)")
     total_traded_value: Price = Field(description="turnover in rupees (TOTTRDVAL)")
-    total_trades: Quantity = Field(description="number of trades executed (TOTALTRADES)")
+    total_trades: Quantity | None = Field(
+        description=(
+            "number of trades executed (TOTALTRADES); None only for a pre-2011-06-22 row the "
+            "pre-ISIN resolver admitted — that era did not publish the column, and absence is not 0"
+        ),
+    )
 
 
 class UnidentifiedRow(BaseModel):
@@ -142,6 +187,35 @@ class UnidentifiedRow(BaseModel):
     series: str = Field(min_length=1, description="NSE series, verbatim")
     trade_date: date = Field(description="the exchange session this row is about (Asia/Kolkata)")
     stated_isin: str = Field(description="the literal the ISIN column held, e.g. 'DUMMY'")
+    line: int = Field(ge=1, description="1-based line in the source file, for the operator")
+
+
+class PreIsinPriceRow(BaseModel):
+    """One E1 (pre-2011-06-22) NSE bhavcopy row with its prices kept — and still no identity.
+
+    What it does: carry everything the eleven-column pre-ISIN bhavcopy states about one
+    `(symbol, series)` on one session, so the identity resolver (`dataplatform.identity.pre_isin`)
+    can test the exchange's own `PREVCLOSE` chain and, where the evidence admits it, a resolved row
+    can be written to `prices_raw` without re-reading L0.
+    What it assumes: the parser has validated the file's structure.
+    What it never does: carry an ISIN. The era published none; an ISIN is attached only by the
+    resolver, and only to a row it can prove, by building a `PriceRow`. There is no
+    `total_trades` either — `TOTALTRADES` did not exist yet, and absence is not zero.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    symbol: str = Field(min_length=1, description="exchange ticker on `trade_date`, as published")
+    series: str = Field(min_length=1, description="NSE series, verbatim")
+    trade_date: date = Field(description="the exchange session this row is about (Asia/Kolkata)")
+    open: Price
+    high: Price
+    low: Price
+    close: Price = Field(description="closing price as the exchange published it, unadjusted")
+    last: Price
+    prev_close: Price = Field(description="the exchange's previous close — CA-adjusted on ex-dates")
+    total_traded_qty: Quantity
+    total_traded_value: Price = Field(description="turnover in rupees (TOTTRDVAL)")
     line: int = Field(ge=1, description="1-based line in the source file, for the operator")
 
 

@@ -1,0 +1,72 @@
+[
+  {
+    "archive_filename": "PR111219.zip",
+    "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR111219.zip",
+    "why": "first broadcast of the 2019-12-19 Nippon (ex-Goldman) BeES unit splits: GOLDBEES, BANKBEES, NIFTYBEES, PSUBNKBEES, HNGSNGBEES, NETFNV20",
+    "reduced_from_l0": true,
+    "original_bytes": 310554,
+    "original_sha256": "f710d180122cb65bced792c164342fe358136ed713031f8a966570de381e11a9",
+    "kept_members": [
+      "Bc111219.csv",
+      "Readme.txt"
+    ],
+    "bc_member": "Bc111219.csv",
+    "bc_member_sha256": "30912cfa5b20958031dd9f496af2d761a1d3234fc450165ee7b38a59318fc2fc"
+  },
+  {
+    "archive_filename": "PR150221.zip",
+    "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR150221.zip",
+    "why": "the 2021-02-17 HDFC and UTI ETF unit splits, whose old ISINs printed two post-split sessions (ex-date = the old ISIN's second-to-last session); UTISXN50 among them",
+    "reduced_from_l0": true,
+    "original_bytes": 348029,
+    "original_sha256": "312ae68951ea716da932d9640e57588c9d5ce2698d12007701ef6c1fc36238bc",
+    "kept_members": [
+      "Bc150221.csv",
+      "Readme.txt"
+    ],
+    "bc_member": "Bc150221.csv",
+    "bc_member_sha256": "ad539287f9220919653c352daea91728a2c32500fc3b810a2fab91b41a6436c5"
+  },
+  {
+    "archive_filename": "PR160720.zip",
+    "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR160720.zip",
+    "why": "AXISNIFTY / AXISGOLD 2020-07-23 unit splits: an event is present, but the units did not trade on 2020-07-24, so the switch has a one-session gap",
+    "reduced_from_l0": true,
+    "original_bytes": 297417,
+    "original_sha256": "12f627dabbaa71ea699fe8e3438d72b529fc75c917a66a58d961bcce21c7da5a",
+    "kept_members": [
+      "Bc160720.csv",
+      "Readme.txt"
+    ],
+    "bc_member": "Bc160720.csv",
+    "bc_member_sha256": "92c85c01be7a4ce1f5243497830a24e45bc8af1f0439af7a11f7e8baa2054828"
+  },
+  {
+    "archive_filename": "PR290124.zip",
+    "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR290124.zip",
+    "why": "HDFCNIFIT / HDFCPVTBAN 2024-02-02 unit splits are broadcast; HDFCSENSEX and HDFCNIFBAN, which switched ISIN the same day, are in no Bc file",
+    "reduced_from_l0": true,
+    "original_bytes": 350305,
+    "original_sha256": "423ed5a4cb5a9c6c73e2ff3c8867f792514af11d71bb457852194b68199fbff6",
+    "kept_members": [
+      "Bc290124.csv",
+      "Readme.txt"
+    ],
+    "bc_member": "Bc290124.csv",
+    "bc_member_sha256": "960f08e798a5b2f75a9159675672849c6d65bbdc03842f38ed9b856b4d98f549"
+  },
+  {
+    "archive_filename": "PR210225.zip",
+    "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR210225.zip",
+    "why": "HDFCLIQUID 2025-02-28 CHANGE IN ATTRIBUTE: an event on the switch that does not re-base the units",
+    "reduced_from_l0": true,
+    "original_bytes": 484631,
+    "original_sha256": "b88ad22b68fb1af0d56721ca06f43b88907fac5a3fa2ada0a9b195e6f6ad04ae",
+    "kept_members": [
+      "Bc210225.csv",
+      "Readme.txt"
+    ],
+    "bc_member": "Bc210225.csv",
+    "bc_member_sha256": "ba2ac8fbb523f8e029bc8bc110b8b28cd3c0b5860f36de477aac41d0a3e64e61"
+  }
+]

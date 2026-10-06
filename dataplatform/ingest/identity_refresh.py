@@ -36,11 +36,10 @@ from typing import Final
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.identity.ingest import (
-    EQUITY_LIST_FILENAME,
     NSE_EQUITY_LIST_SOURCE,
     NSE_SYMBOL_CHANGES_SOURCE,
-    SYMBOL_CHANGES_FILENAME,
     IdentityIngestReport,
+    identity_l0_files,
     ingest_snapshot,
     read_snapshot_from_l0,
 )
@@ -55,11 +54,10 @@ __all__ = ["IDENTITY_SOURCES", "IdentityRefreshReport", "fetch_identity_files", 
 
 _LOG = get_logger(__name__)
 
-#: The two register ids this refresh fetches, and the L0 filename each lands under.
-IDENTITY_SOURCES: Final[tuple[tuple[str, str], ...]] = (
-    (NSE_EQUITY_LIST_SOURCE, EQUITY_LIST_FILENAME),
-    (NSE_SYMBOL_CHANGES_SOURCE, SYMBOL_CHANGES_FILENAME),
-)
+#: The two register ids this refresh fetches. The L0 *filename* each lands under is a function of
+#: the capture date (`identity_l0_files`), not a constant — L0 partitions by month, so an undated
+#: filename would make two captures in one month collide on one key.
+IDENTITY_SOURCES: Final[tuple[str, ...]] = (NSE_EQUITY_LIST_SOURCE, NSE_SYMBOL_CHANGES_SOURCE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +102,7 @@ def fetch_identity_files(
     by_id = {entry.id: entry for entry in loaded.sources}
     refs: list[L0Ref] = []
     reused: list[str] = []
-    for source, filename in IDENTITY_SOURCES:
+    for source, filename in identity_l0_files(snapshot_date):
         entry = by_id.get(source)
         if entry is None:
             raise KeyError(f"source register has no row for {source!r}")
@@ -151,7 +149,7 @@ def refresh_identity(
 
     if fetcher is None:
         with leased_fetcher(
-            [_host_of(source) for source, _ in IDENTITY_SOURCES],
+            [_host_of(source) for source in IDENTITY_SOURCES],
             clock=resolved_clock,
             command="identity refresh",
             settings=resolved_settings,

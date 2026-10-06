@@ -35,6 +35,7 @@ from backtest.duration import (
     _duration_of,
     _inventory,
     _overlapping_pairs,
+    _parse_args,
     arms_that_ran,
     holding_period_math,
     render_duration_report,
@@ -820,3 +821,22 @@ def test_the_multiplicity_bullet_does_not_promise_walk_forward_columns_that_are_
     )
     assert "walk-forward columns are the only out-of-sample figures" in with_split
     assert "No figure in this report is out-of-sample" not in with_split
+
+
+def test_the_campaign_screens_the_turnover_floor_universe_unless_told_otherwise() -> None:
+    """The PIT NIFTY 500 screen refuses every date before 2016-10-24, and two of the mandated
+    windows open on 2016-09-01 — so the sweep's ``nifty500`` default cannot be this CLI's default.
+    """
+    assert _parse_args([]).universe == "turnover_floor"
+    assert _parse_args(["--universe", "nifty500"]).universe == "nifty500"
+    with pytest.raises(SystemExit):
+        _parse_args(["--universe", "nifty-everything"])
+
+
+def test_the_report_names_the_universe_it_screened() -> None:
+    window = Window(label="Only", start=date(2018, 1, 1), end=date(2019, 12, 31))
+    sweep = MultiWindowSweep(
+        windows=[WindowSweep(window=window, result=SweepResult())], universe="turnover_floor"
+    )
+    report = render_duration_report(sweep, floors=[LOW_FLOOR])
+    assert "Investable universe: `turnover_floor`" in report

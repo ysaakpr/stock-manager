@@ -49,6 +49,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from backtest.policies.swing_composite import SwingCompositeParameters
+from backtest.run import UNIVERSE_CHOICES, UNIVERSE_TURNOVER_FLOOR
 from backtest.sweep import (
     DURATION_ARMS,
     HIGH_FLOOR,
@@ -905,6 +906,8 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
         "XIRR divided by max drawdown — an owner decision (2026-09-07), because ranked on return "
         "alone the winner is whichever arm carried the most risk.*",
         "",
+        f"*Investable universe: `{sweep.universe}`, on every window and every floor.*",
+        "",
     ]
     if subset:
         lines += [
@@ -1088,6 +1091,15 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default="low,high",
         help="which liquidity floors to run: low (₹1cr), high (₹10cr), or both (default)",
     )
+    parser.add_argument(
+        "--universe",
+        choices=UNIVERSE_CHOICES,
+        default=UNIVERSE_TURNOVER_FLOOR,
+        help="the investable universe every run screens (default turnover_floor). Not nifty500 by "
+        "default, unlike the sweep: the PIT NIFTY 500 screen refuses any date before its "
+        "2016-10-24 history, so it cannot run the decade or the selection window, and "
+        "turnover_floor is what every run in the committed report effectively screened",
+    )
     parser.add_argument("--data-root", type=Path, default=None)
     return parser.parse_args(argv)
 
@@ -1204,7 +1216,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     try:
         sweep = run_multi_window_sweep(
-            windows=windows, arms=arms, floors=floors, data_root=args.data_root
+            windows=windows,
+            arms=arms,
+            floors=floors,
+            data_root=args.data_root,
+            universe_name=args.universe,
         )
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)

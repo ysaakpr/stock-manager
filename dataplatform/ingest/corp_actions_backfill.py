@@ -47,7 +47,7 @@ from __future__ import annotations
 import argparse
 import signal
 import sys
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from enum import StrEnum
@@ -60,6 +60,7 @@ from dataplatform.config import Settings, get_settings
 from dataplatform.corpactions.recompute import RecomputeResult, recompute_isins
 from dataplatform.corpactions.reconcile import (
     SingleSourcePolicy,
+    load_reconciled_actions,
     persist_reconciliation,
     reconcile,
 )
@@ -106,6 +107,7 @@ __all__ = [
     "finalize_reconcile_and_recompute",
     "isins_in_price_window",
     "main",
+    "reconciled_fingerprints",
     "render_report",
 ]
 
@@ -615,12 +617,38 @@ class CaBackfillRunner:
 # ── finalize: reconcile the two feeds, then recompute the factor chain ─────────────────────────
 
 
+#: One ISIN's reconciled actions reduced to what a factor chain or an L2 series is built from —
+#: ex-date, type and terms, never the source or the lineage columns, which can change without the
+#: chain changing (a collapsed event keeps whichever feed's row sorts first).
+ReconciledFingerprint = tuple[tuple[str, str, str], ...]
+
+
+def reconciled_fingerprints(conn: Connection) -> dict[str, ReconciledFingerprint]:
+    """Every ISIN's reconciled actions as a comparable fingerprint, through the factor chain's door.
+
+    Read before and after a refresh, the two maps say exactly which ISINs' chains a refresh moved,
+    so `finalize_reconcile_and_recompute(changed_since=...)` rewrites and invalidates those and no
+    others. An ISIN absent from the map has no reconciled action.
+    """
+    by_isin: dict[str, list[tuple[str, str, str]]] = {}
+    for action in load_reconciled_actions(conn):
+        by_isin.setdefault(action.isin, []).append(
+            (
+                action.ex_date.isoformat(),
+                action.action_type.value,
+                action.terms.model_dump_json(),
+            )
+        )
+    return {isin: tuple(sorted(rows)) for isin, rows in by_isin.items()}
+
+
 def finalize_reconcile_and_recompute(
     conn: Connection,
     *,
     clock: Clock,
     commit: Callable[[], None] = lambda: None,
     single_source_policy: SingleSourcePolicy = SingleSourcePolicy.QUEUE,
+    changed_since: Mapping[str, ReconciledFingerprint] | None = None,
 ) -> FinalizeCounts:
     """Reconcile every stored CA across the two feeds, then recompute each agreed ISIN's chain.
 
@@ -635,6 +663,13 @@ def finalize_reconcile_and_recompute(
     chain marked `cross_verified=False` — needed when the store carries only one exchange's CA feed,
     where every action is single-source and `QUEUE` would produce no factors at all.
 
+    `changed_since` is a `reconciled_fingerprints` map taken before new actions landed. Given it,
+    only the ISINs whose reconciled set now differs from it are recomputed — the scheduled refresh's
+    mode, where re-deriving every chain would raise an `l2_invalidation` for every name with a
+    dividend and turn a weekly refresh into a full-market L2 rebuild. An ISIN that lost its last
+    reconciled action is included, so its stale chain is cleared rather than left standing. Omitted,
+    every reconciled ISIN is recomputed, as the backfill and the lineage rebuild want.
+
     The caller's `commit` is the durable checkpoint; the reconcile marks and the factor rewrite land
     in one transaction, as every D3 writer intends.
     """
@@ -643,6 +678,13 @@ def finalize_reconcile_and_recompute(
     persist = persist_reconciliation(conn, result, clock=clock)
 
     reconciled_isins = {action.isin for action in result.reconciled}
+    if changed_since is not None:
+        after = reconciled_fingerprints(conn)
+        reconciled_isins = {
+            isin
+            for isin in set(after) | set(changed_since)
+            if after.get(isin) != changed_since.get(isin)
+        }
     recomputes: tuple[RecomputeResult, ...] = recompute_isins(
         conn, reconciled_isins, clock=clock, reason="M9.1 corporate-action backfill"
     )

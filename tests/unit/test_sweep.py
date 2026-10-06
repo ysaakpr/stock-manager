@@ -17,7 +17,7 @@ under test is the ordering and the rendering, never the replay.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import fields
+from dataclasses import fields, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
@@ -25,13 +25,17 @@ from typing import Any, cast
 
 import pytest
 
+from analyst.rails import Portfolio, ProposedOrder, RailId, check_order
 from backtest.policies.swing_composite import SwingCompositeParameters
+from backtest.rails import ratified_backtest_rail_policy
 from backtest.run import BacktestError, _SwingFeatures
 from backtest.sweep import (
+    _DEFAULT_OPENING_CASH,
     ARMS,
     DURATION_ARMS,
     HIGH_FLOOR,
     LOW_FLOOR,
+    RETIRED_ARMS,
     Arm,
     SweepResult,
     SweepRow,
@@ -41,12 +45,18 @@ from backtest.sweep import (
     independent_passes,
     render_sweep_report,
     run_multi_window_sweep,
+    run_sweep,
+    tax_cells,
 )
+from backtest.tax import InvestorProfile, PaymentTiming
+from execution.broker import OrderRequest, Side
 
 _SESSION = date(2020, 1, 1)
 
 
-def _stub_run(*, xirr: str, drawdown: str, excess: str = "0.02") -> Any:
+def _stub_run(
+    *, xirr: str, drawdown: str, excess: str = "0.02", benchmark_source: str = "published_tri"
+) -> Any:
     """A stand-in for ``BacktestResult`` carrying only what a row reads off it."""
     return SimpleNamespace(
         comparison=SimpleNamespace(
@@ -56,14 +66,43 @@ def _stub_run(*, xirr: str, drawdown: str, excess: str = "0.02") -> Any:
         ),
         max_drawdown=Decimal(drawdown),
         total_charges=Decimal("100000"),
-        benchmark_index_name="NIFTY-TRI L1 proxy",
+        benchmark_index_name="Nifty 50",
+        benchmark_source=benchmark_source,
         mean_universe=Decimal("908.9"),
         # The replay result a row reaches through for turnover and for the determinism digest.
         result=SimpleNamespace(journal=(), digest=lambda: "0" * 64),
+        digest="0" * 64,
     )
 
 
-def _row(label: str, *, xirr: str, drawdown: str, floor: Decimal = LOW_FLOOR) -> SweepRow:
+_PROFILE = InvestorProfile(
+    residency="resident_individual",
+    slab_rate=Decimal("0.30"),
+    cg_surcharge_rate=Decimal("0.15"),
+    dividend_surcharge_rate=Decimal("0.15"),
+    payment_timing=PaymentTiming.FY_END,
+)
+
+
+def _stub_after_tax(xirr: str) -> Any:
+    """A stand-in for ``AfterTaxResult``: 3 points of tax drag off the pre-tax XIRR."""
+    taxed = Decimal(xirr) - Decimal("0.03")
+    return SimpleNamespace(
+        after_tax_xirr_realised=taxed,
+        after_tax_xirr_liquidated=taxed - Decimal("0.01"),
+        total_tax=Decimal("250000"),
+        total_tax_liquidated=Decimal("400000"),
+    )
+
+
+def _row(
+    label: str,
+    *,
+    xirr: str,
+    drawdown: str,
+    floor: Decimal = LOW_FLOOR,
+    benchmark_source: str = "published_tri",
+) -> SweepRow:
     arm = Arm(
         label=label,
         family="test",
@@ -74,9 +113,10 @@ def _row(label: str, *, xirr: str, drawdown: str, floor: Decimal = LOW_FLOOR) ->
     return SweepRow(
         arm=arm,
         floor=floor,
-        run=cast(Any, _stub_run(xirr=xirr, drawdown=drawdown)),
+        run=cast(Any, _stub_run(xirr=xirr, drawdown=drawdown, benchmark_source=benchmark_source)),
         round_trips=10,
         median_hold_days=30,
+        after_tax=cast(Any, _stub_after_tax(xirr)),
     )
 
 
@@ -114,6 +154,49 @@ def test_every_arm_states_a_change() -> None:
     for arm in ARMS:
         assert arm.note.strip(), arm.label
         assert arm.family.strip(), arm.label
+
+
+def test_every_swing_arm_s_basket_is_one_the_ratified_rails_admit() -> None:
+    """A top-N whose equal-weight entry the rails block never trades — that was the top-5 arm (X2).
+
+    Checked against the rails themselves, not loosened to fit: an equal-weight buy of 1/N of the
+    case must clear the position cap and the per-order % cap, one lot of the opening budget must
+    clear the rupee order cap, and N must reach the minimum-holdings floor so the book it builds
+    is one A8 lets it rotate. Re-add "top-5" (or any N below 9 at ₹10 lakh) and this fails.
+    """
+    rails = ratified_backtest_rail_policy().rails
+    for arm in ARMS:
+        if arm.swing is None:
+            continue
+        n = Decimal(arm.swing.top_n)
+        assert Decimal(100) / n <= rails.max_position_pct, arm.label
+        assert Decimal(100) / n <= rails.max_order_pct_of_case, arm.label
+        lot = _DEFAULT_OPENING_CASH * arm.swing.buy_budget_fraction / n
+        assert lot <= rails.max_order_value_inr, arm.label
+        assert arm.swing.top_n >= rails.min_holdings, arm.label
+
+
+def test_the_retired_top_5_arm_is_gone_with_its_reason_stated() -> None:
+    labels = {arm.label for arm in ARMS}
+    for label, reason in RETIRED_ARMS:
+        assert label not in labels
+        assert reason.strip(), label
+    assert "Short composite, top-5" in {label for label, _ in RETIRED_ARMS}
+
+
+def test_the_rails_block_a_top_5_entry_which_is_why_the_arm_never_traded() -> None:
+    """The diagnosis, reproduced: the first equal-weight top-5 buy is 19.6 % of a fresh case."""
+    rails = ratified_backtest_rail_policy().rails
+    book = Portfolio(case_id="sweep", lots=(), cash=_DEFAULT_OPENING_CASH)
+    lot_value = _DEFAULT_OPENING_CASH * Decimal("0.98") / 5
+    order = ProposedOrder(
+        request=OrderRequest(isin="INE002A01018", side=Side.BUY, quantity=int(lot_value / 100)),
+        price=Decimal("100"),
+        sector="UNKNOWN",
+    )
+    breached = {breach.rail for breach in check_order(order, book, rails).breaches}
+    assert RailId.MAX_POSITION in breached
+    assert RailId.MAX_ORDER_PCT in breached
 
 
 def test_an_arm_must_drive_exactly_one_policy() -> None:
@@ -178,7 +261,7 @@ def test_a_failed_arm_keeps_its_row_and_is_ranked_last() -> None:
     """Dropping a failing arm is how a sweep reports a survivor bias it created itself."""
     good = _row("good", xirr="0.15", drawdown="0.30")
     broken = SweepRow(arm=good.arm, floor=LOW_FLOOR, error="no sessions in window")
-    result = SweepResult(rows=[broken, good])
+    result = SweepResult(rows=[broken, good], profile=_PROFILE)
     ranked = result.ranked(LOW_FLOOR)
     assert len(ranked) == 2
     assert ranked[0].ok and not ranked[-1].ok
@@ -198,12 +281,39 @@ def test_the_report_states_both_floors_and_what_each_arm_changed() -> None:
         start=_SESSION,
         terminal=date(2026, 8, 31),
         sessions=2470,
+        profile=_PROFILE,
     )
     report = render_sweep_report(result, floors=[LOW_FLOOR, HIGH_FLOOR])
     assert "₹1 crore/day" in report
     assert "₹10 crore/day" in report
     assert "What each arm changed" in report
     assert "cannot be asked to prove" in report
+    # A removed arm is named with its reason, so an older table's missing row is explained.
+    assert "## Arms removed from the sweep" in report
+    assert "| Short composite, top-5 |" in report
+
+
+def _report_on(source: str) -> str:
+    result = SweepResult(
+        rows=[_row("a", xirr="0.20", drawdown="0.25", benchmark_source=source)],
+        start=_SESSION,
+        terminal=date(2026, 8, 31),
+        sessions=2470,
+        benchmark_name="Nifty 50",
+        profile=_PROFILE,
+    )
+    return render_sweep_report(result, floors=[LOW_FLOOR])
+
+
+def test_the_report_names_the_benchmark_from_the_rows_recorded_source() -> None:
+    """The stale "price-return L1 proxy" caveat is read from the source, never hard-coded."""
+    published = _report_on("published_tri")
+    assert "price-return L1 proxy" not in published
+    assert "Excess is against the exchange's published TRI" in published
+    assert "published Nifty 50 TRI" in published
+    proxy = _report_on("l1_proxy")
+    assert "Excess is against a price-return L1 proxy" in proxy
+    assert "published TRI" not in proxy
 
 
 # ── one windowed pass over the lake ──────────────────────────────────────────────────────────────
@@ -228,6 +338,7 @@ def _features_with(connection: _RecordingConnection) -> _SwingFeatures:
     features = _SwingFeatures.__new__(_SwingFeatures)
     features._con = cast(Any, connection)
     features._adjusted = True
+    features._have_factors = False
     features._by_date = {}
     features._imputed = 0
     features._rows = 0
@@ -299,6 +410,7 @@ def test_the_verdict_names_its_choice_before_any_verification_figure() -> None:
         ],
         start=date(2021, 9, 1),
         terminal=date(2026, 8, 31),
+        profile=_PROFILE,
     )
     walk = WalkForward(selection=selection, verification=verification, selected="winner")
     report = render_verdict(
@@ -308,6 +420,9 @@ def test_the_verdict_names_its_choice_before_any_verification_figure() -> None:
         verification_window=(date(2021, 9, 1), date(2026, 8, 31)),
     )
     assert report.index("**Chosen: winner**") < report.index("Selection rank against verification")
+    # The benchmark caveat is read from the rows' source: published TRI, not a stale proxy line.
+    assert "price-return benchmark proxy" not in report
+    assert "the benchmark series (published" in report
     # The decay is visible: chosen first on selection, second on verification.
     assert walk.rank_of(selection, "winner", LOW_FLOOR) == 1
     assert walk.rank_of(verification, "winner", LOW_FLOOR) == 2
@@ -323,7 +438,7 @@ def test_the_verdict_says_no_when_no_arm_cleared_the_bar() -> None:
     """
     from backtest.verdict import WalkForward, render_verdict
 
-    thin = SweepResult(rows=[_row("modest", xirr="0.14", drawdown="0.20")])
+    thin = SweepResult(rows=[_row("modest", xirr="0.14", drawdown="0.20")], profile=_PROFILE)
     walk = WalkForward(selection=thin, verification=thin, selected="modest")
     report = render_verdict(
         walk,
@@ -339,7 +454,7 @@ def test_the_verdict_says_no_when_no_arm_cleared_the_bar() -> None:
 def test_the_verdict_attaches_window_floor_and_drawdown_when_the_bar_is_cleared() -> None:
     from backtest.verdict import WalkForward, render_verdict
 
-    rich = SweepResult(rows=[_row("strong", xirr="0.31", drawdown="0.28")])
+    rich = SweepResult(rows=[_row("strong", xirr="0.31", drawdown="0.28")], profile=_PROFILE)
     walk = WalkForward(selection=rich, verification=rich, selected="strong")
     report = render_verdict(
         walk,
@@ -480,7 +595,8 @@ def test_the_default_duration_arm_is_untouched_m10_7() -> None:
 
 def test_the_m12_2_arm_list_is_not_disturbed_by_the_duration_grid() -> None:
     """M12.2's sweep is a signal comparison with a campaign running against it; it does not move."""
-    assert len(ARMS) == 23
+    duration_only = {arm.label for arm in DURATION_ARMS if arm.family == "duration"}
+    assert not duration_only & {arm.label for arm in ARMS}
     assert not any(arm.family == "duration" for arm in ARMS)
 
 
@@ -832,6 +948,26 @@ def test_the_baselines_do_not_share_the_lake(monkeypatch: pytest.MonkeyPatch) ->
     assert independent_passes(DURATION_ARMS, floors) == 4  # 2 baselines x 2 floors
 
 
+def test_every_window_screens_the_one_universe_it_was_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No window may fall back to the sweep's default universe while another screens a named one."""
+    seen: list[str] = []
+    real_run_sweep = run_sweep
+
+    def recording_run_sweep(**kwargs: Any) -> SweepResult:
+        seen.append(kwargs["universe_name"])
+        return real_run_sweep(**kwargs)
+
+    _install_stub_lake(monkeypatch)
+    monkeypatch.setattr("backtest.sweep.run_sweep", recording_run_sweep)
+    sweep = run_multi_window_sweep(
+        windows=_WINDOWS, arms=DURATION_ARMS, floors=(LOW_FLOOR,), universe_name="turnover_floor"
+    )
+    assert seen == ["turnover_floor"] * len(_WINDOWS)
+    assert sweep.universe == "turnover_floor"
+
+
 def test_independent_passes_counts_only_the_arms_that_build_their_own_lake() -> None:
     """The number the report prints, so it can never be a hardcoded claim again."""
     swing_only = tuple(arm for arm in DURATION_ARMS if arm.swing is not None)
@@ -839,3 +975,21 @@ def test_independent_passes_counts_only_the_arms_that_build_their_own_lake() -> 
     assert independent_passes(DURATION_ARMS, (LOW_FLOOR,)) == 2
     assert independent_passes(DURATION_ARMS, (LOW_FLOOR, HIGH_FLOOR)) == 4
     assert independent_passes((), (LOW_FLOOR,)) == 0
+
+
+def test_a_withheld_after_tax_xirr_renders_as_n_a_with_its_reason() -> None:
+    """No solvable after-tax rate reads as n/a and why — never a crash, never the pre-tax rate."""
+    reason = "no after-tax XIRR (realised gains): XIRR did not converge"
+    withheld = SimpleNamespace(
+        after_tax_xirr_realised=None,
+        realised_xirr_error=reason,
+        after_tax_xirr_liquidated=None,
+        liquidation_error="no after-tax XIRR (deemed liquidation): x",
+        total_tax=Decimal("250000"),
+    )
+    row = replace(_row("Withheld", xirr="0.15", drawdown="0.30"), after_tax=cast(Any, withheld))
+    realised, liquidated, tax = tax_cells(row)
+    assert realised == f"n/a ({reason})"
+    assert liquidated.startswith("n/a (no after-tax XIRR (deemed liquidation)")
+    assert "15.00" not in realised
+    assert tax.endswith("/ n/a")

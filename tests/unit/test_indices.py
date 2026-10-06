@@ -11,13 +11,11 @@ implementation would quietly violate:
    against L1 with two monthly snapshots whose membership differs: a date between them sees the
    earlier one, a date after sees the later one, and a date before the first sees nothing — never
    today's list, which is what kills survivorship bias in M4's PIT universe (invariant #7).
-3. **A NIFTY-TRI series is ingested and spot-checked against a published value.** The direct TRI
-   endpoint is session-gated (register `nifty_tri_history` FAILED), so §4.1's computed fallback is
-   what runs: the series is seeded to the published closing index value (the spot-checked published
-   number), and a positive dividend yield makes it exceed the price return by the accrued amount —
-   an inverted dividend sign fails these tests. The native `getTotalReturnIndexString` parser is
-   also
-   exercised, so a real published series ingests unchanged once the gate opens.
+3. **§4.1's computed TRI fallback behaves as an estimate should.** The *published* series is
+   `nifty_tri_history` and it is M3.9.b's — parser, PIT boundary and the spot-check against
+   published levels live in `tests/unit/test_benchmark_tri.py`. What stays here is the fallback:
+   the series is seeded to the published closing index value, and a positive dividend yield makes
+   it exceed the price return by the accrued amount — an inverted dividend sign fails these tests.
 
 Money assertions are written so inverting the logic fails them: index values and yields stay
 `Decimal`, never `float`; a missing yield is `None`, never `0`; and the TRI seed equals a published
@@ -44,6 +42,7 @@ from dataplatform.ingest.fetcher import (
     ScriptedOutcome,
 )
 from dataplatform.ingest.indices import (
+    ConstituentRow,
     ConstituentSnapshot,
     ImmutableSnapshotError,
     IndexCloseRow,
@@ -54,11 +53,11 @@ from dataplatform.ingest.indices import (
     extend_tri,
     ingest_constituents,
     ingest_tri_from_close,
+    is_placeholder_constituent,
     l0_constituents_filename,
     membership_asof,
     parse_close_snapshot,
     parse_constituents,
-    parse_tri_native,
     read_constituents_l1,
     read_tri_series,
     tri_url,
@@ -78,7 +77,6 @@ NIFTYIT_AUG: Final = FIXTURES / "constituents/ind_niftyitlist_20260801.csv"
 CLOSE_03: Final = FIXTURES / "close/ind_close_all_03082026.csv"
 CLOSE_04: Final = FIXTURES / "close/ind_close_all_04082026.csv"
 CLOSE_05: Final = FIXTURES / "close/ind_close_all_05082026.csv"
-TRI_NATIVE: Final = FIXTURES / "tri/getTotalReturnIndexString_nifty50_20260803_20260805.json"
 
 JUL: Final = date(2026, 7, 1)
 AUG: Final = date(2026, 8, 1)
@@ -545,33 +543,6 @@ def test_tri_series_before_the_first_point_is_none(repo_root: Path, tmp_path: Pa
     assert read_tri_series("nifty50", date(2026, 8, 2), data_root=tmp_path) is None
 
 
-# ── the native TRI parser: ready for when the session gate opens ───────────────────────────────
-
-
-def test_native_tri_parser_preserves_the_published_value_exactly(repo_root: Path) -> None:
-    """A `getTotalReturnIndexString` response ingests, and its published value round-trips exactly.
-
-    This is the primary source (and the one we want); it is session-gated today, so it is not the
-    source of the spot-checked value above, but the parser is proven ready so a real series ingests
-    unchanged once the gate opens. The published TRI value is preserved as an exact `Decimal`.
-    """
-    series = parse_tri_native((repo_root / TRI_NATIVE).read_bytes(), filename=TRI_NATIVE.name)
-    assert series.method == "published"
-    assert series.index_name == "Nifty 50 TR"
-    assert [p.as_of for p in series.points] == [
-        date(2026, 8, 3),
-        date(2026, 8, 4),
-        date(2026, 8, 5),
-    ]
-    assert series.points[0].tri_value == Decimal("34500.1234")  # exact, no float corruption
-
-
-def test_native_tri_parser_rejects_the_html_the_gate_returns(repo_root: Path) -> None:
-    """The register warns: the gate answers with the site's HTML and a 200 — never a TRI series."""
-    with pytest.raises(ParseError, match="markup, not JSON"):
-        parse_tri_native(b"<!DOCTYPE html><html>login</html>", filename="gate.html")
-
-
 # ── URL helpers read the register, not a second copy in code (C.1) ─────────────────────────────
 
 
@@ -579,9 +550,99 @@ def test_urls_come_from_the_register(register: SourceRegister) -> None:
     assert constituents_url("nifty50", register).endswith("ind_nifty50list.csv")
     assert constituents_url("niftyit", register).endswith("ind_niftyitlist.csv")
     assert close_snapshot_url(date(2026, 8, 3), register).endswith("ind_close_all_03082026.csv")
-    assert "Backpage.aspx" in tri_url(register)
+    assert tri_url(register).endswith("/BackPage/getTotalReturnIndexString")
 
 
 def test_l0_filename_carries_the_snapshot_date(register: SourceRegister) -> None:
     """The URL has no date, so the L0 name must, or two months collide (`L0Store.put`)."""
     assert l0_constituents_filename("nifty50", AUG) == "ind_nifty50list_20260801.csv"
+
+
+# ── placeholder rows: a demerger stand-in is never an index member (audit 2026-10-05) ───────────
+
+_WITH_DUMMY: Final = (
+    b"Company Name,Industry,Symbol,Series,ISIN Code\n"
+    b"Reliance Industries Ltd.,Oil Gas & Consumable Fuels,RELIANCE,EQ,INE002A01018\n"
+    b"Dummy HEG Ltd.,Metals & Mining,DUMMYHEG,EQ,DUM545A01024\n"
+    b"Kotak Mahindra Bank Ltd.,Financial Services,KOTAKBANK,EQ,INE237A01028\n"
+)
+
+
+def test_a_placeholder_row_is_rejected_at_parse_time() -> None:
+    """NIFTY 500 read as 501 because `DUM545A01024` passed the ISIN pattern; it must not."""
+    snap = parse_constituents(
+        _WITH_DUMMY, index_slug="nifty500", index_name="NIFTY 500", as_of=JUL, filename="d.csv"
+    )
+    assert snap.members == frozenset({RELIANCE, KOTAKBANK})
+    assert "DUM545A01024" not in snap.members
+    assert snap.rejected_placeholders == ("DUM545A01024",)
+
+
+def test_a_placeholder_cannot_be_constructed_as_a_row() -> None:
+    """Bypassing the parser does not admit it either — the row model refuses it."""
+    with pytest.raises(ValueError, match="placeholder"):
+        ConstituentRow(
+            isin="DUM545A01024",
+            symbol="DUMMYHEG",
+            series="EQ",
+            company_name="Dummy HEG Ltd.",
+            industry="Metals & Mining",
+        )
+
+
+@pytest.mark.parametrize(
+    ("isin", "symbol", "company"),
+    [
+        ("DUM545A01024", "HEGX", "HEG Ltd."),  # the ISIN alone marks it
+        ("INE545A01024", "DUMMYHEG", "HEG Ltd."),  # the symbol alone marks it
+        ("INE545A01024", "HEGX", "Dummy HEG Ltd."),  # the name alone marks it
+    ],
+)
+def test_each_placeholder_mark_is_recognised(isin: str, symbol: str, company: str) -> None:
+    assert is_placeholder_constituent(isin, symbol, company)
+
+
+def test_a_real_security_is_not_a_placeholder() -> None:
+    assert not is_placeholder_constituent(RELIANCE, "RELIANCE", "Reliance Industries Ltd.")
+
+
+def test_a_stored_snapshot_with_a_placeholder_reads_back_without_it(tmp_path: Path) -> None:
+    """L1 written before the fix holds the dummy row; it is refused on read, L1 untouched."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from dataplatform.store.paths import l1_partition_path
+
+    path = l1_partition_path(
+        "index_constituents", JUL, filename="nifty500.parquet", data_root=tmp_path
+    )
+    path.parent.mkdir(parents=True)
+    rows = [
+        ("Reliance Industries Ltd.", "RELIANCE", RELIANCE),
+        ("Dummy HEG Ltd.", "DUMMYHEG", "DUM545A01024"),
+    ]
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "index_slug": "nifty500",
+                    "index_name": "NIFTY 500",
+                    "as_of": JUL,
+                    "isin": isin,
+                    "symbol": symbol,
+                    "series": "EQ",
+                    "company_name": name,
+                    "industry": "X",
+                    "source": "nifty_index_constituents",
+                    "l0_key": None,
+                }
+                for name, symbol, isin in rows
+            ]
+        ),
+        path,
+    )
+    before = path.read_bytes()
+    back = read_constituents_l1("nifty500", JUL, data_root=tmp_path)
+    assert back.members == frozenset({RELIANCE})
+    assert back.rejected_placeholders == ("DUM545A01024",)
+    assert path.read_bytes() == before

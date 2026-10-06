@@ -1,0 +1,115 @@
+{
+  "era": "bh_sr",
+  "session": "2010-01-04",
+  "archive_filename": "PR040110.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR040110.zip",
+  "why_this_era": "the first bundle: SR header, CRLF, DDMMYYYY member name, rows of four and five cells under a five-cell header",
+  "reduced_from_l0": true,
+  "original_bytes": 255693,
+  "original_sha256": "b0b4498e70c644b4c46c836d5d6f94796739cba80b1bac4730ad0f67f5a9c6e8",
+  "original_members": [
+    {
+      "name": "Pr040110.csv",
+      "bytes": 129934
+    },
+    {
+      "name": "rdm.doc",
+      "bytes": 31744
+    },
+    {
+      "name": "Rdm_help.txt",
+      "bytes": 705
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 3092
+    },
+    {
+      "name": "RPD040110.csv",
+      "bytes": 203
+    },
+    {
+      "name": "Rtt040110.csv",
+      "bytes": 55
+    },
+    {
+      "name": "Tt040110.csv",
+      "bytes": 2192
+    },
+    {
+      "name": "cd04012010.doc",
+      "bytes": 36352
+    },
+    {
+      "name": "cf04012010.csv",
+      "bytes": 1135
+    },
+    {
+      "name": "An040110.txt",
+      "bytes": 111173
+    },
+    {
+      "name": "Bc040110.csv",
+      "bytes": 2797
+    },
+    {
+      "name": "bh04012010.csv",
+      "bytes": 6266
+    },
+    {
+      "name": "Bm040110.txt",
+      "bytes": 9041
+    },
+    {
+      "name": "ffix040110.csv",
+      "bytes": 21319
+    },
+    {
+      "name": "fo04012010.csv",
+      "bytes": 58242
+    },
+    {
+      "name": "fo04012010.doc",
+      "bytes": 288256
+    },
+    {
+      "name": "Gl040110.csv",
+      "bytes": 6035
+    },
+    {
+      "name": "help.txt",
+      "bytes": 3510
+    },
+    {
+      "name": "HL040110.csv",
+      "bytes": 1581
+    },
+    {
+      "name": "Ix040110.csv",
+      "bytes": 67525
+    },
+    {
+      "name": "NPD040110.txt",
+      "bytes": 3733
+    },
+    {
+      "name": "nuver.txt",
+      "bytes": 2670
+    },
+    {
+      "name": "op04012010.csv",
+      "bytes": 219542
+    },
+    {
+      "name": "Pd040110.csv",
+      "bytes": 145367
+    }
+  ],
+  "members_kept_in_fixture": [
+    "Readme.txt",
+    "bh04012010.csv"
+  ],
+  "bh_member": "bh04012010.csv",
+  "bh_member_bytes": 6266,
+  "bh_member_sha256": "9cff04f53d951f657f631cdda9a5c814a8c0d8435df5dbc46b349f1588213c0a"
+}

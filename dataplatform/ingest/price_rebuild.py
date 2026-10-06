@@ -21,6 +21,11 @@ operation `lineage_rebuild` and the XBRL `--rebuild-from-l0` perform, and like t
 `sync_state` row and drives no lifecycle. Bending the state machine to let a PUBLISHED row go round
 again would erase the one guarantee it exists to make.
 
+The consequence is that a session whose delivery arrived only through a rebuild has the data and no
+`sync_state` row, and the gap report calls it `NEVER_ATTEMPTED`. Recording it is
+`dataplatform.ingest.delivery_reconcile`'s job, run after this: it writes only rows that are absent,
+and only the states the lake proves.
+
 What it does, per session in the range: ask the *same* `SourceSet` the backfill uses
 (`SOURCE_SETS[NSE_DELIVERY]`) for this era's request, read that payload back out of L0, parse it
 with that era's parser, and hand the rows to that set's write step, which reads the session's stored
@@ -98,6 +103,9 @@ class PriceRebuildReport:
     delivery_joined: int = 0
     delivery_unresolved: int = 0
     delivery_orphaned: int = 0
+    delivery_via_lineage: int = 0
+    delivery_via_session: int = 0
+    delivery_session_disagrees: int = 0
     missing: list[date] = field(default_factory=list)
     failures: list[tuple[date, str]] = field(default_factory=list)
 
@@ -114,6 +122,9 @@ class PriceRebuildReport:
         self.delivery_joined += write_report.delivery_joined
         self.delivery_unresolved += write_report.delivery_unresolved
         self.delivery_orphaned += write_report.delivery_orphaned
+        self.delivery_via_lineage += write_report.delivery_via_lineage
+        self.delivery_via_session += write_report.delivery_via_session
+        self.delivery_session_disagrees += write_report.delivery_session_disagrees
 
 
 class PriceRebuilder:
@@ -160,6 +171,9 @@ class PriceRebuilder:
             delivery_joined=report.delivery_joined,
             delivery_unresolved=report.delivery_unresolved,
             delivery_orphaned=report.delivery_orphaned,
+            delivery_via_lineage=report.delivery_via_lineage,
+            delivery_via_session=report.delivery_via_session,
+            delivery_session_disagrees=report.delivery_session_disagrees,
         )
         return report
 
@@ -212,13 +226,14 @@ class PriceRebuilder:
 
 
 def plan_sessions(start: date, end: date, *, calendar: TradingCalendar | None = None) -> list[date]:
-    """Every trading session in `[start, end]`, ascending — the rebuild's work list.
+    """Every date in `[start, end]` the exchange published for, ascending — the rebuild's work list.
 
-    Uses the same trading calendar the backfill plans against, so the rebuild asks for exactly the
-    dates the ingest path fetched and never invents a session the exchange did not hold.
+    Uses the same calendar question the backfill plans against (`expected_data_dates`), so the
+    rebuild asks for exactly the dates the ingest path fetched — Muhurat and declared weekend
+    sessions included — and never invents a session the exchange did not hold.
     """
     cal = calendar if calendar is not None else trading_calendar()
-    return list(cal.expected_sessions(start, end))
+    return list(cal.expected_data_dates(start, end))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -305,11 +320,20 @@ def _run(
         f"({report.join_rate:.1%}), {report.delivery_unresolved} unresolved, "
         f"{report.delivery_orphaned} orphaned (both quarantined, never dropped)"
     )
+    print(
+        f"  placed via reissue lineage {report.delivery_via_lineage}, via the session's own "
+        f"bhavcopy {report.delivery_via_session}; master contradicts the session on "
+        f"{report.delivery_session_disagrees}"
+    )
     if report.missing:
         shown = ", ".join(day.isoformat() for day in report.missing[:5])
         print(f"  first sessions with no L0 payload: {shown}", file=sys.stderr)
     if report.failures:
         print(f"  first failures: {report.failures[:5]}", file=sys.stderr)
+    print(
+        "  sync_state is not written by a rebuild; record it with "
+        "`python -m dataplatform.ingest.delivery_reconcile --from ... --to ... --dry-run|--apply`"
+    )
     return 1 if report.failed else 0
 
 

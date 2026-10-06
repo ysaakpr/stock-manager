@@ -428,3 +428,60 @@ def test_coverage_report_is_a_frozen_value() -> None:
         report.outcomes = ()  # type: ignore[misc]
     assert report.as_of == AS_OF
     assert SlugStatus.PUBLISHED  # the status enum is importable and used
+
+
+# ── NIFTY PRIVATE BANK: the published filename is not the lake slug (audit 2026-10-05) ──────────
+
+#: The real list, fetched 2026-10-05 from `ind_nifty_privatebanklist.csv`.
+PRIVATEBANK_FIXTURE: Final = FIXTURES / "ind_niftyprivatebanklist_20261005.csv"
+#: What `ind_niftyprivatebanklist.csv` really answers: the site's shell, with a 200.
+ANGULAR_SHELL: Final = b' <!DOCTYPE html> <html> <head> <meta charset="utf-8" /></head></html>'
+
+
+def test_private_bank_is_fetched_from_its_published_filename(
+    build: Any, tracker: RecordingTracker, tmp_path: Path, repo_root: Path
+) -> None:
+    """18 L0 snapshots were HTML because the lake slug was used as the file slug; never again."""
+    spec = next(s for s in DEFAULT_INDEX_SET if s.slug == "niftyprivatebank")
+    right = "https://niftyindices.com/IndexConstituent/ind_nifty_privatebanklist.csv"
+    wrong = "https://niftyindices.com/IndexConstituent/ind_niftyprivatebanklist.csv"
+    assert constituents_url(spec.file_slug) == right
+    fetcher, l0, transport = build(
+        {
+            right: RecordedResponse(
+                body=(repo_root / PRIVATEBANK_FIXTURE).read_bytes(),
+                headers={"content-type": "application/octet-stream"},
+            ),
+            wrong: RecordedResponse(
+                body=ANGULAR_SHELL, headers={"content-type": "text/html; charset=utf-8"}
+            ),
+        }
+    )
+    report = run_constituents_ingest(
+        fetcher=fetcher, l0=l0, tracker=tracker, as_of=AS_OF, specs=(spec,), data_root=tmp_path
+    )
+    assert [o.status for o in report.outcomes] == [SlugStatus.PUBLISHED]
+    assert [request.url for request in transport.requests] == [right]
+    snapshot = membership_asof("niftyprivatebank", AS_OF, data_root=tmp_path)
+    assert snapshot is not None
+    assert len(snapshot.members) == 10
+    assert {"INE238A01034", "INE040A01034", "INE090A01021"} <= snapshot.members  # Axis/HDFC/ICICI
+
+
+def test_the_lake_slug_url_for_private_bank_parks_as_gated(
+    build: Any, tracker: RecordingTracker, tmp_path: Path
+) -> None:
+    """The old spelling is the soft-404 it always was — gated, never a membership."""
+    spec = IndexSpec("niftyprivatebank", "NIFTY PRIVATE BANK", IndexCategory.SECTORAL)
+    fetcher, l0, _ = build(
+        {
+            constituents_url("niftyprivatebank"): RecordedResponse(
+                body=ANGULAR_SHELL, headers={"content-type": "text/html; charset=utf-8"}
+            )
+        }
+    )
+    report = run_constituents_ingest(
+        fetcher=fetcher, l0=l0, tracker=tracker, as_of=AS_OF, specs=(spec,), data_root=tmp_path
+    )
+    assert [o.cause for o in report.parked] == [ParkCause.GATED]
+    assert membership_asof("niftyprivatebank", AS_OF, data_root=tmp_path) is None

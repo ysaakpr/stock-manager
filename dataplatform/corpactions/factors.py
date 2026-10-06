@@ -114,6 +114,8 @@ __all__ = [
     "price_adjusted_series",
     "return_series",
     "total_return_series",
+    "with_events",
+    "with_price_events",
 ]
 
 _LOG = get_logger(__name__)
@@ -388,6 +390,68 @@ def build_chain_for_isin(isin: str, actions: Iterable[CorporateAction]) -> Facto
     if stray:
         raise FactorError(f"actions for {sorted(stray)} passed to chain for {isin}")
     return build_factor_chain(relevant)
+
+
+def with_price_events(chain: FactorChain, actions: Iterable[CorporateAction]) -> FactorChain:
+    """``chain`` with further SPLIT/BONUS events composed in and its cumulative factors re-folded.
+
+    What it does: multiplies each action's own factor into the row for its ex-date — creating the
+    row when the chain has none there, exactly as ``build_factor_chain`` composes same-day actions —
+    and recomputes every cumulative factor, since an added event re-scales every earlier row. The
+    price-implied splits the L2 materializer reads off L1 reach the chain this way, so the
+    arithmetic stays in this module.
+
+    What it assumes: ``actions`` are price events for ``chain.isin``; anything else raises
+    ``FactorError``. What it never does: drop or re-derive a row ``chain`` already had.
+    """
+    return _compose(chain, actions, PRICE_EVENT_TYPES)
+
+
+def with_events(chain: FactorChain, actions: Iterable[CorporateAction]) -> FactorChain:
+    """``with_price_events`` that also accepts structural breaks, marking their ex-date's row.
+
+    The curated actions (``corpactions.manual_actions``) are both kinds: a split or bonus no feed
+    carried, which scales history like any other, and a demerger or scheme, which carries a unit
+    factor and the ``structural_break`` marker so ``return_series`` bridges it (§4.3 rule 3).
+    """
+    return _compose(chain, actions, PRICE_EVENT_TYPES | STRUCTURAL_BREAK_TYPES)
+
+
+def _compose(
+    chain: FactorChain, actions: Iterable[CorporateAction], allowed: frozenset[ActionType]
+) -> FactorChain:
+    extra = list(actions)
+    if not extra:
+        return chain
+    per_date: dict[date, _Accum] = {
+        row.ex_date: _Accum(row.price_factor, row.qty_factor, row.structural_break)
+        for row in chain.rows
+    }
+    for action in sorted(extra, key=lambda a: (a.ex_date, a.action_type.value)):
+        if action.isin != chain.isin:
+            raise FactorError(f"action for {action.isin} passed to the chain for {chain.isin}")
+        if action.action_type not in allowed:
+            raise FactorError(f"{action.action_type} is not a price event")
+        slot = per_date.setdefault(action.ex_date, _Accum())
+        if action.action_type in STRUCTURAL_BREAK_TYPES:
+            slot.structural_break = True
+            continue
+        price_factor, qty_factor = _event_factors(action)
+        slot.price_factor *= price_factor
+        slot.qty_factor *= qty_factor
+    partial = [
+        FactorRow(
+            isin=chain.isin,
+            ex_date=ex_date,
+            price_factor=slot.price_factor,
+            qty_factor=slot.qty_factor,
+            cum_price_factor=slot.price_factor,
+            cum_qty_factor=slot.qty_factor,
+            structural_break=slot.structural_break,
+        )
+        for ex_date, slot in sorted(per_date.items())
+    ]
+    return FactorChain(isin=chain.isin, rows=tuple(_with_cumulative(partial)))
 
 
 def _with_cumulative(partial: Sequence[FactorRow]) -> list[FactorRow]:

@@ -223,6 +223,24 @@ def test_a_muhurat_session_owes_a_file_even_though_it_is_a_holiday() -> None:
     assert not report.fully_explained
 
 
+def test_a_weekend_special_session_with_no_file_is_flagged() -> None:
+    """Saturday 2025-02-01 (Union Budget) traded. Missing, it is a real miss — never WEEKEND."""
+    budget = date(2025, 2, 1)
+    report = report_over(budget, budget)
+
+    assert [entry.reason for entry in report.entries] == [GapReason.NEVER_ATTEMPTED]
+    assert report.entries[0].day_kind is DayKind.SPECIAL
+    assert not report.fully_explained
+
+
+def test_an_ordinary_saturday_beside_it_is_still_explained() -> None:
+    """The inversion: the Saturday after the Budget owes nothing."""
+    report = report_over(date(2025, 2, 8), date(2025, 2, 8))
+
+    assert [entry.reason for entry in report.entries] == [GapReason.WEEKEND]
+    assert report.fully_explained
+
+
 def test_a_session_outside_the_sources_era_is_explained_not_missing() -> None:
     """The legacy bhavcopy stopped serving after the UDiFF cutover; it owes nothing after it."""
     entry = classify_pair(
@@ -257,7 +275,7 @@ def test_a_broken_row_is_reported_even_for_a_source_that_owes_no_session_files()
 def test_a_range_outside_the_calendar_coverage_raises_rather_than_guessing() -> None:
     """A year the holiday file does not cover would otherwise become ~250 phantom missing days."""
     with pytest.raises(CalendarCoverageError):
-        report_over(date(2011, 6, 1), date(2011, 6, 30))
+        report_over(date(2001, 6, 1), date(2001, 6, 30))
 
 
 def test_an_inverted_range_is_refused() -> None:
@@ -821,7 +839,7 @@ def test_a_unit_row_dated_outside_the_calendar_is_reported_rather_than_dropped()
     path where a real row exists for a day nothing can classify. Silently skipping it would be
     the drop this module exists to prevent.
     """
-    outside = date(2011, 3, 4)
+    outside = date(2001, 3, 4)
     row = record(SyncState.PUBLISHED, source="nse_xbrl_filing/IFOLD", logical_date=outside)
     report = build_report(
         SESSION,

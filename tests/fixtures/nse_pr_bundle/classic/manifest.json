@@ -1,0 +1,103 @@
+{
+  "era": "classic",
+  "session": "2013-01-02",
+  "archive_filename": "PR020113.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR020113.zip",
+  "fetched_at": "2026-09-08",
+  "original_bytes": 300955,
+  "original_sha256": "634bf652b617a7681074d07d61a38eb83e6647ff343de22f156453547ba465d2",
+  "original_members": [
+    {
+      "name": "An020113.txt",
+      "bytes": 173515
+    },
+    {
+      "name": "Bc020113.csv",
+      "bytes": 9742
+    },
+    {
+      "name": "bh020113.csv",
+      "bytes": 5283
+    },
+    {
+      "name": "Bm020113.txt",
+      "bytes": 3675
+    },
+    {
+      "name": "cd02012013.zip",
+      "bytes": 6054
+    },
+    {
+      "name": "corpbond020113.csv",
+      "bytes": 10462
+    },
+    {
+      "name": "etf020113.csv",
+      "bytes": 5939
+    },
+    {
+      "name": "ffix020113.csv",
+      "bytes": 111501
+    },
+    {
+      "name": "fo02012013.zip",
+      "bytes": 78474
+    },
+    {
+      "name": "Gl020113.csv",
+      "bytes": 6374
+    },
+    {
+      "name": "HL020113.csv",
+      "bytes": 1255
+    },
+    {
+      "name": "NPD020113.txt",
+      "bytes": 5742
+    },
+    {
+      "name": "nuver.txt",
+      "bytes": 2584
+    },
+    {
+      "name": "Pd020113.csv",
+      "bytes": 286608
+    },
+    {
+      "name": "Pr020113.csv",
+      "bytes": 267784
+    },
+    {
+      "name": "rdm.docx",
+      "bytes": 13339
+    },
+    {
+      "name": "Rdm_help.txt",
+      "bytes": 705
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 3092
+    },
+    {
+      "name": "RPD020113.csv",
+      "bytes": 203
+    },
+    {
+      "name": "Rtt020113.csv",
+      "bytes": 55
+    },
+    {
+      "name": "sme020113.csv",
+      "bytes": 304
+    },
+    {
+      "name": "Tt020113.csv",
+      "bytes": 2184
+    }
+  ],
+  "members_kept_in_fixture": [
+    "Bc020113.csv",
+    "Readme.txt"
+  ]
+}

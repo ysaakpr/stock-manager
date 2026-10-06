@@ -12,6 +12,11 @@ Three things are under test here:
    with today's card would make every backtest a claim about a market that did not exist.
 3. **Invariant #4** — one cost model. The guard at the bottom greps the repo: no second module may
    define a cost rate or compute a charge, and no other YAML may hold a rate table.
+4. **The pre-GST era** (W0-7). The card used to start at 2017-07-01, so a full-span backtest over
+   the existing lake raised on its first fill. Ten schedules now reach back to 2006-01-01, and the
+   section near the bottom asserts both the arithmetic of two representative eras and that each
+   boundary is on its statutory day — the test that fails if an era is off by one, or if a rate
+   silently reverts to the modern one.
 
 Nothing here touches the network or the clock; the trade date is an input.
 """
@@ -306,8 +311,9 @@ def test_a_schedule_starts_on_its_effective_date(
 
 
 def test_a_trade_before_the_card_starts_raises_rather_than_guessing(model: CostModel) -> None:
-    with pytest.raises(NoRateScheduleError, match="2017-06-30"):
-        model.charge(buy(date(2017, 6, 30)))
+    """Still a refusal, just a decade earlier: W0-7 moved the start to 2006-01-01."""
+    with pytest.raises(NoRateScheduleError, match="2005-12-31"):
+        model.charge(buy(date(2005, 12, 31)))
 
 
 def test_the_state_era_refuses_to_price_without_an_account_state(model: CostModel) -> None:
@@ -426,6 +432,284 @@ def test_every_schedule_records_where_its_rates_came_from(card: RateCard) -> Non
     for schedule in card.schedules:
         assert schedule.sources, schedule.id
         assert schedule.notes.strip(), schedule.id
+
+
+# ── 2b. W0-7: the pre-GST era, back to 2006 ──────────────────────────────────────────────────
+#
+# Two representative dates, one per regime shape:
+#
+#   2016-09-01 — `krishi-kalyan-cess`. The date the existing L0 lake starts, and the reason this
+#     block exists: before it, the first fill of a full-span backtest raised. STT 0.1% both legs,
+#     service tax 15%, NSE 0.00325%, SEBI ₹20/crore, KA stamp 0.01% on both legs, DP ₹13.50.
+#   2008-06-01 — `service-tax-12-36`. The other STT level (0.125%, both legs) and the longest
+#     pre-GST service-tax era (12.36%), with SEBI still at ₹10/crore.
+#
+# `gst` in the pre-2017 schedules holds the era's effective *service tax* rate; the breakdown field
+# is still called `goods_and_services_tax` because the model does not branch on the name.
+
+IN_2016: Final[date] = date(2016, 9, 1)
+IN_2008: Final[date] = date(2008, 6, 1)
+
+# Buy 500 @ ₹100 = ₹50,000.
+#   STT     0.1%       x 50,000 = 50.00              → ₹50
+#   NSE txn 0.00325%   x 50,000 =  1.625             → ₹1.63
+#   SEBI    ₹20/crore  x 50,000 =  0.10              → ₹0.10
+#   ST      15%        x (0 + 1.63) = 0.2445         → ₹0.24
+#   Stamp   0.01% (KA) x 50,000 =  5.00              → ₹5
+#   Total ₹56.97
+EXPECTED_BUY_2016: Final[dict[str, Decimal]] = {
+    "brokerage": Decimal("0.00"),
+    "securities_transaction_tax": Decimal("50"),
+    "exchange_transaction_charge": Decimal("1.63"),
+    "sebi_turnover_fee": Decimal("0.10"),
+    "goods_and_services_tax": Decimal("0.24"),
+    "stamp_duty": Decimal("5"),
+    "depository_charge": Decimal("0"),
+}
+
+# Sell 500 @ ₹105 = ₹52,500.
+#   STT     0.1%       x 52,500 = 52.50              → ₹53
+#   NSE txn 0.00325%   x 52,500 =  1.70625           → ₹1.71
+#   SEBI    ₹20/crore  x 52,500 =  0.105             → ₹0.11
+#   ST      15%        x (0 + 1.71) = 0.2565         → ₹0.26
+#   Stamp   0.01% (KA) x 52,500 =  5.25              → ₹5   (both legs, pre-2020)
+#   DP      13.50 x 1.15 = 15.525                    → ₹15.53
+#   Total ₹75.61
+EXPECTED_SELL_2016: Final[dict[str, Decimal]] = {
+    "brokerage": Decimal("0.00"),
+    "securities_transaction_tax": Decimal("53"),
+    "exchange_transaction_charge": Decimal("1.71"),
+    "sebi_turnover_fee": Decimal("0.11"),
+    "goods_and_services_tax": Decimal("0.26"),
+    "stamp_duty": Decimal("5"),
+    "depository_charge": Decimal("15.53"),
+}
+
+# Buy 500 @ ₹100 = ₹50,000.
+#   STT     0.125%     x 50,000 = 62.50              → ₹63  (half up)
+#   NSE txn 0.00325%   x 50,000 =  1.625             → ₹1.63
+#   SEBI    ₹10/crore  x 50,000 =  0.05              → ₹0.05
+#   ST      12.36%     x (0 + 1.63) = 0.201468       → ₹0.20
+#   Stamp   0.01% (KA) x 50,000 =  5.00              → ₹5
+#   Total ₹69.88
+EXPECTED_BUY_2008: Final[dict[str, Decimal]] = {
+    "brokerage": Decimal("0.00"),
+    "securities_transaction_tax": Decimal("63"),
+    "exchange_transaction_charge": Decimal("1.63"),
+    "sebi_turnover_fee": Decimal("0.05"),
+    "goods_and_services_tax": Decimal("0.20"),
+    "stamp_duty": Decimal("5"),
+    "depository_charge": Decimal("0"),
+}
+
+# Sell 500 @ ₹105 = ₹52,500.
+#   STT     0.125%     x 52,500 = 65.625             → ₹66
+#   NSE txn 0.00325%   x 52,500 =  1.70625           → ₹1.71
+#   SEBI    ₹10/crore  x 52,500 =  0.0525            → ₹0.05
+#   ST      12.36%     x (0 + 1.71) = 0.211356       → ₹0.21
+#   Stamp   0.01% (KA) x 52,500 =  5.25              → ₹5
+#   DP      13.50 x 1.1236 = 15.1686                 → ₹15.17
+#   Total ₹88.14
+EXPECTED_SELL_2008: Final[dict[str, Decimal]] = {
+    "brokerage": Decimal("0.00"),
+    "securities_transaction_tax": Decimal("66"),
+    "exchange_transaction_charge": Decimal("1.71"),
+    "sebi_turnover_fee": Decimal("0.05"),
+    "goods_and_services_tax": Decimal("0.21"),
+    "stamp_duty": Decimal("5"),
+    "depository_charge": Decimal("15.17"),
+}
+
+
+def test_the_first_session_of_the_lake_is_priceable(model_2018: CostModel) -> None:
+    """The whole point of W0-7: 2016-09-01 used to raise, and the lake starts there."""
+    charged = model_2018.charge(buy(IN_2016))
+    assert charged.schedule_id == "krishi-kalyan-cess"
+    assert lines(charged) == EXPECTED_BUY_2016
+    assert charged.total == Decimal("56.97")
+
+
+def test_a_2016_sell_prices_at_the_last_pre_gst_rates(model_2018: CostModel) -> None:
+    charged = model_2018.charge(sell(IN_2016))
+    assert charged.schedule_id == "krishi-kalyan-cess"
+    assert lines(charged) == EXPECTED_SELL_2016
+    assert charged.total == Decimal("75.61")
+
+
+def test_a_2008_buy_pays_the_higher_stt_and_the_service_tax_of_the_day(
+    model_2018: CostModel,
+) -> None:
+    charged = model_2018.charge(buy(IN_2008))
+    assert charged.schedule_id == "service-tax-12-36"
+    assert lines(charged) == EXPECTED_BUY_2008
+    assert charged.total == Decimal("69.88")
+
+
+def test_a_2008_sell_pays_the_higher_stt_and_the_service_tax_of_the_day(
+    model_2018: CostModel,
+) -> None:
+    charged = model_2018.charge(sell(IN_2008))
+    assert charged.schedule_id == "service-tax-12-36"
+    assert lines(charged) == EXPECTED_SELL_2008
+    assert charged.total == Decimal("88.14")
+
+
+@pytest.mark.parametrize("on", [IN_2008, IN_2016])
+def test_a_same_day_round_trip_prices_in_the_new_eras(model_2018: CostModel, on: date) -> None:
+    """The nearest thing to an "intraday fill" this card can express, and it must not raise.
+
+    `card.scope` is delivery equity only — intraday has its own STT rate and its own transaction
+    charges, and both are deliberately absent, so there is no product dimension on `Trade` to set.
+    A buy and a sell of the same scrip on the same date is therefore what an intraday fill looks
+    like here, and `charge_all` is the path that gets the DP charge right: once per scrip per day,
+    on the sell.
+    """
+    legs = model_2018.charge_all([buy(on), sell(on)])
+    assert [leg.schedule_id for leg in legs] == [model_2018.rate_card.schedule_for(on).id] * 2
+    assert legs[0].depository_charge == Decimal("0")
+    assert legs[1].depository_charge > Decimal("0")
+    assert sum(leg.total for leg in legs) > Decimal("0")
+
+
+#: Every boundary in the pre-GST block, with the day before it. Each pair is a statutory date and
+#: the last day of the schedule it ended, so an era shifted by one day fails here.
+ERA_BOUNDARIES: Final[tuple[tuple[date, str], ...]] = (
+    (date(2006, 1, 1), "service-tax-10-2"),
+    (date(2006, 4, 17), "service-tax-10-2"),
+    (date(2006, 4, 18), "service-tax-12-24"),
+    (date(2006, 5, 31), "service-tax-12-24"),
+    (date(2006, 6, 1), "stt-0-125-both-legs"),
+    (date(2007, 5, 10), "stt-0-125-both-legs"),
+    (date(2007, 5, 11), "service-tax-12-36"),
+    (date(2009, 2, 23), "service-tax-12-36"),
+    (date(2009, 2, 24), "service-tax-10-3"),
+    (date(2012, 3, 31), "service-tax-10-3"),
+    (date(2012, 4, 1), "service-tax-12-36-restored"),
+    (date(2012, 6, 30), "service-tax-12-36-restored"),
+    (date(2012, 7, 1), "stt-delivery-cut-to-0-1"),
+    (date(2015, 5, 31), "stt-delivery-cut-to-0-1"),
+    (date(2015, 6, 1), "service-tax-14"),
+    (date(2015, 11, 14), "service-tax-14"),
+    (date(2015, 11, 15), "swachh-bharat-cess"),
+    (date(2016, 5, 31), "swachh-bharat-cess"),
+    (date(2016, 6, 1), "krishi-kalyan-cess"),
+    (date(2017, 6, 30), "krishi-kalyan-cess"),
+    (date(2017, 7, 1), "gst-era-state-stamp"),
+)
+
+
+@pytest.mark.parametrize(("trade_date", "schedule_id"), ERA_BOUNDARIES)
+def test_each_pre_gst_era_starts_on_its_statutory_day(
+    model_2018: CostModel, trade_date: date, schedule_id: str
+) -> None:
+    assert model_2018.charge(buy(trade_date)).schedule_id == schedule_id
+
+
+@pytest.mark.parametrize(
+    ("last_day", "first_day", "before", "after"),
+    [
+        # Finance Act 2006: 0.1% -> 0.125%, both legs, from 2006-06-01.
+        (date(2006, 5, 31), date(2006, 6, 1), Decimal("0.001"), Decimal("0.00125")),
+        # Finance Act 2012: 0.125% -> 0.1%, both legs, from 2012-07-01.
+        (date(2012, 6, 30), date(2012, 7, 1), Decimal("0.00125"), Decimal("0.001")),
+    ],
+)
+def test_the_stt_rate_moves_on_the_exact_finance_act_date_and_on_both_legs(
+    card: RateCard, last_day: date, first_day: date, before: Decimal, after: Decimal
+) -> None:
+    """Off by a day here and a whole trading day is priced at the wrong STT — ₹12.50 a leg.
+
+    Both legs are asserted on purpose. Delivery STT has always been symmetric; a card that put a
+    delivery change on the sell side alone would still pass a sell-only test.
+    """
+    for on, want in ((last_day, before), (first_day, after)):
+        schedule = card.schedule_for(on)
+        assert schedule.stt.buy_rate == want, (on, "buy")
+        assert schedule.stt.sell_rate == want, (on, "sell")
+
+
+#: The effective service-tax rate of each pre-GST schedule, from the cited notification history.
+#: None of these may be 18% — that is the GST rate, and it does not exist before 2017-07-01.
+PRE_GST_TAX_RATES: Final[dict[str, Decimal]] = {
+    "service-tax-10-2": Decimal("0.102"),
+    "service-tax-12-24": Decimal("0.1224"),
+    "stt-0-125-both-legs": Decimal("0.1224"),
+    "service-tax-12-36": Decimal("0.1236"),
+    "service-tax-10-3": Decimal("0.103"),
+    "service-tax-12-36-restored": Decimal("0.1236"),
+    "stt-delivery-cut-to-0-1": Decimal("0.1236"),
+    "service-tax-14": Decimal("0.14"),
+    "swachh-bharat-cess": Decimal("0.145"),
+    "krishi-kalyan-cess": Decimal("0.15"),
+}
+
+GST_ARRIVES: Final[date] = date(2017, 7, 1)
+
+
+def test_no_pre_gst_schedule_is_taxed_at_the_gst_rate(card: RateCard) -> None:
+    """The failure this guards: a new era pasted in and its tax rate left at the modern 18%."""
+    pre_gst = [s for s in card.schedules if s.effective_from < GST_ARRIVES]
+    assert {s.id for s in pre_gst} == set(PRE_GST_TAX_RATES)
+    for schedule in pre_gst:
+        assert schedule.gst.rate == PRE_GST_TAX_RATES[schedule.id], schedule.id
+        assert schedule.gst.rate != Decimal("0.18"), schedule.id
+
+
+def test_the_service_tax_base_never_includes_the_sebi_fee(card: RateCard) -> None:
+    """Every dated broker card of the era says "on (brokerage + transaction charges)"."""
+    for schedule in card.schedules:
+        if schedule.effective_from < GST_ARRIVES:
+            assert [c.value for c in schedule.gst.applies_to] == [
+                "brokerage",
+                "exchange_transaction",
+            ], schedule.id
+
+
+def test_every_pre_gst_schedule_charges_state_stamp_duty_on_both_legs(card: RateCard) -> None:
+    """The regime is data, not a branch: the state era ran unbroken from 2006 to 2020-07-01."""
+    for schedule in card.schedules:
+        if schedule.effective_from < GST_ARRIVES:
+            assert schedule.stamp_duty.regime.value == "state", schedule.id
+            assert [s.value for s in schedule.stamp_duty.sides] == ["BUY", "SELL"], schedule.id
+            assert schedule.stamp_duty.uniform_rate is None, schedule.id
+            assert set(schedule.stamp_duty.state_rates) == {"KA", "MH"}, schedule.id
+
+
+def test_only_karnataka_and_maharashtra_are_encoded_and_anything_else_refuses(
+    card: RateCard,
+) -> None:
+    """A known limit, asserted so it stays loud: an unlisted state raises, never defaults.
+
+    The card encodes KA and MH only. Capped states (Telangana, Haryana) and every other state are
+    absent, and `backtest/run.py` hard-codes `account_state='MH'`, so a long-horizon backtest is
+    implicitly a Maharashtra account. Both are reported limits, not silent ones.
+    """
+    for on in (IN_2008, IN_2016, date(2018, 4, 2)):
+        with pytest.raises(UnknownStampDutyStateError, match="TN"):
+            CostModel(rate_card=card, account_state="TN").charge(buy(on))
+
+
+def test_the_card_now_covers_the_whole_lake_and_a_pre_2016_backfill(model_2018: CostModel) -> None:
+    """Spot dates across every added era, plus the lake's first and last sessions."""
+    for on in (
+        date(2006, 1, 2),
+        date(2008, 6, 2),
+        date(2011, 6, 22),  # the first NSE bhavcopy carrying an ISIN
+        date(2013, 1, 2),
+        date(2016, 9, 1),  # L1 prices_raw starts here
+        date(2026, 9, 4),  # and ends here
+    ):
+        charged = model_2018.charge(buy(on))
+        assert charged.total > Decimal("0"), on
+
+
+def test_every_new_schedule_says_it_is_reconstructed_and_cites_its_sources(card: RateCard) -> None:
+    """A long-horizon result has to carry the accuracy caveat with it."""
+    for schedule in card.schedules:
+        if schedule.effective_from < GST_ARRIVES:
+            assert schedule.provenance.value == "reconstructed", schedule.id
+            assert schedule.sources, schedule.id
+            assert schedule.notes.strip(), schedule.id
 
 
 # ── 3. invariant #4: exactly one cost implementation ─────────────────────────────────────────

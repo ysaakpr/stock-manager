@@ -698,3 +698,13 @@ def test_parse_text_is_the_same_as_parse_on_decoded_bytes() -> None:
     from_bytes = parse(payload, source=BLOCK_SOURCE_ID, filename="block.csv")
     from_text = parse_text(payload.decode("utf-8"), source=BLOCK_SOURCE_ID, filename="block.csv")
     assert from_bytes == from_text
+
+
+def test_the_no_records_placeholder_is_a_quiet_day() -> None:
+    """The live quiet-day block file (2026-10-06): the header, then `NO RECORDS,,,,,,`."""
+    from dataplatform.ingest.nse.deals import BLOCK_SOURCE_ID, parse
+
+    header = "Date,Symbol,Security Name,Client Name,Buy/Sell,Quantity Traded,"
+    header += "Trade Price / Wght. Avg. Price"
+    payload = f"{header}\nNO RECORDS,,,,,,\n".encode()
+    assert parse(payload, source=BLOCK_SOURCE_ID, filename="block.csv") == ()

@@ -62,7 +62,11 @@ from dataplatform.corpactions.factors import (
     FactorError,
     FactorRow,
     total_return_series,
+    with_events,
+    with_price_events,
 )
+from dataplatform.corpactions.implied import ImpliedSplit, SessionBar, detect_implied_splits
+from dataplatform.corpactions.manual_actions import default_manual_actions
 from dataplatform.corpactions.reconcile import load_reconciled_actions
 from dataplatform.ingest.models import ISIN_PATTERN
 from dataplatform.logging import get_logger
@@ -86,10 +90,17 @@ __all__ = [
     "PRICES_ADJUSTED_DATASET",
     "PRICES_ADJUSTED_SCHEMA",
     "AdjustedBar",
+    "ComposedEvents",
     "L2FillReport",
+    "L2RebuildReport",
+    "L2TruncatedReport",
     "L2WriteReport",
     "RawBar",
     "build_adjusted_bars",
+    "compose_events",
+    "compose_lake_events",
+    "curated_actions",
+    "implied_splits",
     "isins_with_eq_bars",
     "load_factor_chain",
     "materialize_isin",
@@ -98,9 +109,13 @@ __all__ = [
     "materialized_isins",
     "open_connection",
     "preload_raw_bars",
+    "prune_retired",
     "read_adjusted",
     "read_raw_bars_from_l1",
+    "rebuild_all",
     "rebuild_invalidated",
+    "rebuild_isins",
+    "rebuild_truncated",
     "register_adjusted_view",
     "register_raw_view",
     "wipe_adjusted",
@@ -196,7 +211,10 @@ class L2WriteReport:
 
     `path` is the written partition, or `None` when the ISIN had no L1 history to adjust (in which
     case any stale partition was removed, so a rebuild is still identical: absent). `from_date`/
-    `to_date` bound the series written; both are `None` for an empty ISIN.
+    `to_date` bound the series written; both are `None` for an empty ISIN. `implied_splits` are
+    the share-basis changes read off L1 that no feed published (`corpactions.implied`), each
+    carried into the partition's `cum_price_factor`; `curated` are the hand-transcribed, sourced
+    actions (`corpactions.manual_actions`) composed in the same way.
     """
 
     isin: str
@@ -204,6 +222,8 @@ class L2WriteReport:
     rows_written: int
     from_date: date | None
     to_date: date | None
+    implied_splits: tuple[ImpliedSplit, ...] = ()
+    curated: tuple[CorporateAction, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +243,54 @@ class L2FillReport:
     @property
     def rows_written(self) -> int:
         return sum(r.rows_written for r in self.written)
+
+
+@dataclass(frozen=True, slots=True)
+class L2TruncatedReport:
+    """What one `rebuild_truncated` pass found and (unless a dry run) rebuilt.
+
+    `truncated` maps each ISIN whose partition starts after its L1 EQ history to
+    `(L2 first date, L1 first date)` — the evidence, kept whether or not anything was written.
+    `skipped_retired` counts the partitions on disk that belong to an ISIN a lineage edge retired:
+    never judged, never rebuilt (their history is the survivor's). `written` is empty on a dry run.
+    """
+
+    partitions: int
+    truncated: Mapping[str, tuple[date, date]]
+    skipped_retired: int
+    written: tuple[L2WriteReport, ...]
+
+    @property
+    def rows_written(self) -> int:
+        return sum(r.rows_written for r in self.written)
+
+
+@dataclass(frozen=True, slots=True)
+class L2RebuildReport:
+    """What one full `rebuild_all` pass did.
+
+    `candidates` is every ISIN with EQ bars in L1, every lineage survivor and every partition that
+    was on disk after the prune; each was either retired by a lineage edge
+    (`skipped_retired`, its bars in the survivor's stitched partition) or rebuilt (`written`).
+    `pruned_retired` are the retired ISINs whose stale partitions were removed from disk.
+    """
+
+    candidates: int
+    skipped_retired: int
+    written: tuple[L2WriteReport, ...]
+    pruned_retired: tuple[str, ...]
+
+    @property
+    def rows_written(self) -> int:
+        return sum(r.rows_written for r in self.written)
+
+    @property
+    def implied_splits(self) -> tuple[ImpliedSplit, ...]:
+        return tuple(s for r in self.written for s in r.implied_splits)
+
+    @property
+    def curated(self) -> tuple[CorporateAction, ...]:
+        return tuple(a for r in self.written for a in r.curated)
 
 
 def open_connection() -> duckdb.DuckDBPyConnection:
@@ -444,6 +512,8 @@ def materialize_isin(
     con: duckdb.DuckDBPyConnection | None = None,
     data_root: Path | None = None,
     history_isins: Sequence[str] | None = None,
+    infer_splits: bool = True,
+    curated: Sequence[CorporateAction] | None = None,
 ) -> L2WriteReport:
     """Materialize one ISIN's L2 adjusted partition from L1 + its factor chain.
 
@@ -458,6 +528,18 @@ def materialize_isin(
     `history_isins` is the ISIN's lineage chain oldest-first (`LineageResolver.chain_to`), for a
     security whose earlier history sits under ISINs a reissue retired. Omit it and only `isin`'s
     own bars are read, which is right for the ~90% of names that were never reissued.
+
+    `infer_splits` composes into the chain the share-basis changes L1 shows and no feed published
+    (`implied_splits`: ETF unit splits, pre-2016 equity splits neither feed's history reaches), so
+    the partition carries no unadjusted step for them. Each is logged with its evidence and listed
+    on the report; the partition's `cum_price_factor` is the factor actually applied, so
+    `adj = raw x cum_price_factor` holds row by row either way.
+
+    `curated` are the sourced actions no feed carries (`corpactions.manual_actions`); `None` reads
+    the repo's curated file for `isin` *and every ISIN in `history_isins`*, each re-keyed to
+    `isin` (`_curated_for_chain`). They are composed in before the implied-split scan — a curated
+    split is a recorded event to it, so the same step is never adjusted twice — and one a feed has
+    since published (same ex-date and type) is skipped in the feed's favour (`curated_actions`).
     """
     if chain.isin != isin:
         raise ValueError(
@@ -487,9 +569,18 @@ def materialize_isin(
         )
         return L2WriteReport(isin=isin, path=None, rows_written=0, from_date=None, to_date=None)
 
+    composed = compose_events(
+        isin,
+        chain=chain,
+        actions=actions,
+        raw_bars=raw_bars,
+        curated=_curated_for_chain(isin, sources) if curated is None else curated,
+        infer_splits=infer_splits,
+    )
+    manual, implied = composed.curated, composed.implied
     # `build_adjusted_bars` emits rows already ordered by the total key `(exchange, trade_date)`, so
     # the partition is byte-identical across rebuilds regardless of the order L1 was read in.
-    bars = build_adjusted_bars(isin, chain, actions, raw_bars)
+    bars = build_adjusted_bars(isin, composed.chain, composed.actions, raw_bars)
     table = _bars_to_table(bars)
     path.parent.mkdir(parents=True, exist_ok=True)
     _write_table(table, path)
@@ -501,6 +592,8 @@ def materialize_isin(
         rows_written=len(bars),
         from_date=min(dates),
         to_date=max(dates),
+        implied_splits=implied,
+        curated=manual,
     )
     _LOG.info(
         "l2.prices_adjusted_written",
@@ -510,9 +603,334 @@ def materialize_isin(
         rows=report.rows_written,
         from_date=report.from_date.isoformat() if report.from_date else None,
         to_date=report.to_date.isoformat() if report.to_date else None,
+        implied_splits=len(implied),
+        curated_actions=len(manual),
         state="PUBLISHED",
     )
     return report
+
+
+def _curated_for_chain(isin: str, sources: Sequence[str]) -> tuple[CorporateAction, ...]:
+    """The repo's curated actions for every ISIN whose bars feed `isin`'s partition, keyed to it.
+
+    A curated row is keyed to the ISIN whose partition carried its ex-date when it was written.
+    Once a lineage edge retires that ISIN its bars move into the survivor's stitched partition and
+    its own partition is pruned, so a lookup by the survivor alone would drop the row and leave its
+    step unadjusted (UTISXN50: curated on INF789F1AHR6, 2021-02-17, whose 8.33x print the implied
+    scan cannot match). Each row from a retired ISIN is re-keyed to `isin` with
+    `filed_against_isin` naming where it was filed, the shape a feed action resolved through the
+    lineage has; a row already keyed to `isin` is unchanged, so a partition with no history is
+    built exactly as before.
+    """
+    found: list[CorporateAction] = []
+    for source in dict.fromkeys((*sources, isin)):
+        for row in default_manual_actions().actions_for(source):
+            action = row.as_action()
+            if source != isin:
+                action = action.model_copy(
+                    update={
+                        "isin": isin,
+                        "filed_against_isin": action.filed_against_isin or source,
+                    }
+                )
+            found.append(action)
+    return tuple(sorted(found, key=lambda a: (a.ex_date, a.action_type.value)))
+
+
+@dataclass(frozen=True, slots=True)
+class ComposedEvents:
+    """One ISIN's corporate actions exactly as L2 adjusts by them.
+
+    `chain` is the factor chain the partition is written with; `actions` the recorded ones the
+    caller passed followed by `curated` (the sourced rows no feed carries that survived
+    `curated_actions`) and the `implied` splits L1 evidences. Built only by `compose_events`.
+    """
+
+    isin: str
+    chain: FactorChain
+    actions: tuple[CorporateAction, ...]
+    curated: tuple[CorporateAction, ...] = ()
+    implied: tuple[ImpliedSplit, ...] = ()
+
+    @property
+    def added(self) -> tuple[CorporateAction, ...]:
+        """What L2 composed on top of the recorded actions: the curated, then the implied."""
+        return self.curated + tuple(s.as_action() for s in self.implied)
+
+
+def compose_events(
+    isin: str,
+    *,
+    chain: FactorChain,
+    actions: Iterable[CorporateAction],
+    raw_bars: Sequence[RawBar],
+    curated: Sequence[CorporateAction] | None = None,
+    infer_splits: bool = True,
+) -> ComposedEvents:
+    """The one composition of recorded, curated and implied events that L2 adjusts by.
+
+    What it does: keeps the curated actions a feed has not since published (`curated_actions`;
+    `None` reads the repo's file), composes them into `chain` (`factors.with_events`: a split or
+    bonus scales history, a demerger or scheme only marks a structural break), then scans
+    `raw_bars` for the share-basis changes the composed chain still leaves unexplained
+    (`implied_splits`, when `infer_splits`) and composes those too. The curated ones go first so
+    the scan treats them as recorded and never adjusts the same step twice.
+
+    Every consumer that must agree with L2 reads its events here — the materializer for prices,
+    the backtest book (`backtest.book_actions`) for share counts — so the two can never disagree
+    on which split happened or by how much. Explained moves (`manual_actions.explained_moves`)
+    are not events and never reach this.
+
+    What it never does: read a file other than the curated YAML, write anything, or consult a
+    `knowable_date` — an implied split is knowable on its ex-date by construction
+    (`ImpliedSplit.as_action`), a curated row carries its own.
+    """
+    recorded = tuple(actions)
+    manual = curated_actions(
+        isin,
+        recorded,
+        tuple(a.as_action() for a in default_manual_actions().actions_for(isin))
+        if curated is None
+        else tuple(curated),
+    )
+    composed_actions = recorded
+    if manual:
+        chain = with_events(chain, manual)
+        composed_actions = composed_actions + manual
+    implied = implied_splits(isin, chain, composed_actions, raw_bars) if infer_splits else ()
+    if implied:
+        extra = tuple(s.as_action() for s in implied)
+        chain = with_price_events(chain, extra)
+        composed_actions = composed_actions + extra
+    return ComposedEvents(
+        isin=isin, chain=chain, actions=composed_actions, curated=manual, implied=implied
+    )
+
+
+def compose_lake_events(
+    conn: Connection,
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    data_root: Path | None = None,
+    history_for: Mapping[str, Sequence[str]] | None = None,
+    survivor_of: Callable[[str], str] | None = None,
+    batch_size: int = 500,
+) -> tuple[ComposedEvents, ...]:
+    """`compose_events` for every ISIN `rebuild_all` would build, keeping those L2 added to.
+
+    The same candidates (non-retired ISINs with EQ bars, every lineage survivor), the same inputs
+    (`load_factor_chain`, `load_reconciled_actions`, the bars of the lineage chain) and the same
+    batched L1 preload as `rebuild_all` — so what this returns is what a fresh L2 build composes,
+    without writing a byte. An ISIN with no bars is skipped, as `materialize_isin` skips it.
+
+    Only the ISINs that *can* come back non-empty are composed: those with a curated row, a
+    stitched lineage chain, or a session step in their chain-adjusted EQ series an implied split
+    could be read from (`_step_isins`). Every other ISIN's composition is provably empty, and
+    skipping it is what keeps this a pre-run read rather than a ten-minute pass over the lake.
+
+    What it never does: write L0, L1, L2 or Postgres.
+    """
+    owns = con is None
+    con = open_connection() if con is None else con
+    out: list[ComposedEvents] = []
+    try:
+        possible = (
+            _step_isins(conn, con, data_root=data_root)
+            | {a.isin for a in default_manual_actions().actions}
+            | set(history_for or {})
+        )
+        candidates = sorted(
+            (set(isins_with_eq_bars(con, data_root=data_root)) | set(history_for or {})) & possible
+        )
+        live = [i for i in candidates if survivor_of is None or survivor_of(i) == i]
+        for start in range(0, len(live), batch_size):
+            batch = live[start : start + batch_size]
+            wanted = set(batch)
+            if history_for is not None:
+                for isin in batch:
+                    wanted.update(history_for.get(isin, ()))
+            preload_raw_bars(con, wanted, data_root=data_root)
+            for isin in batch:
+                sources = (isin,) if history_for is None else history_for.get(isin, (isin,))
+                raw_bars = tuple(
+                    bar
+                    for source in sources
+                    for bar in read_raw_bars_from_l1(source, con=con, data_root=data_root)
+                )
+                if not raw_bars:
+                    continue
+                composed = compose_events(
+                    isin,
+                    chain=load_factor_chain(conn, isin),
+                    actions=load_reconciled_actions(conn, isin=isin),
+                    raw_bars=raw_bars,
+                    curated=_curated_for_chain(isin, sources),
+                )
+                if composed.added:
+                    out.append(composed)
+    finally:
+        if owns:
+            con.close()
+    _LOG.info(
+        "l2.lake_events_composed",
+        isins=len(out),
+        curated_actions=sum(len(c.curated) for c in out),
+        implied_splits=sum(len(c.implied) for c in out),
+    )
+    return tuple(out)
+
+
+#: The least session-to-session level change `_step_isins` keeps. `corpactions.implied` matches
+#: nothing nearer than 2x less 3% (its smallest multiple at its tight tolerance), so a looser bound
+#: on a DOUBLE ratio can only keep more ISINs than the scan could find, never fewer.
+_STEP_PREFILTER: Final = 1.8
+
+
+def _step_isins(
+    conn: Connection, con: duckdb.DuckDBPyConnection, *, data_root: Path | None
+) -> frozenset[str]:
+    """ISINs whose EQ series, in their persisted chain's terms, has a step an implied split needs.
+
+    The adjusted ratio of two consecutive bars of one venue is the raw ratio times the price
+    factors ex-dated after the first and on or before the second, which is what this computes in
+    one DuckDB pass — on the close and on the open, as `detect_implied_splits` matches either. A
+    prefilter only: an ISIN it keeps is still composed exactly by `compose_events`.
+    """
+    files = _l1_partition_files(data_root=data_root)
+    if not files:
+        return frozenset()
+    factors = conn.execute(
+        "SELECT isin, ex_date, price_factor FROM adjustment_factors WHERE price_factor <> 1"
+    ).fetchall()
+    con.execute(
+        "CREATE OR REPLACE TEMP TABLE l2_step_factors (isin VARCHAR, ex_date DATE, lf DOUBLE)"
+    )
+    if factors:
+        con.executemany(
+            "INSERT INTO l2_step_factors VALUES (?, ?, ln(?))",
+            [(str(r[0]), r[1], float(r[2])) for r in factors],
+        )
+    rows = con.execute(
+        "WITH steps AS ("
+        "  SELECT isin, exchange, trade_date, close, open,"
+        "         lag(close) OVER w AS prev_close, lag(trade_date) OVER w AS prev_date"
+        "  FROM read_parquet($files) WHERE series = 'EQ' AND close > 0"
+        "  WINDOW w AS (PARTITION BY isin, exchange ORDER BY trade_date)"
+        "), adjusted AS ("
+        "  SELECT s.isin, s.prev_close / s.close * exp(coalesce(sum(f.lf), 0)) AS by_close,"
+        "         s.prev_close / NULLIF(s.open, 0) * exp(coalesce(sum(f.lf), 0)) AS by_open"
+        "  FROM steps s LEFT JOIN l2_step_factors f ON f.isin = s.isin"
+        "       AND f.ex_date > s.prev_date AND f.ex_date <= s.trade_date"
+        "  WHERE s.prev_close IS NOT NULL"
+        "  GROUP BY s.isin, s.exchange, s.trade_date, s.prev_date, s.prev_close, s.close, s.open"
+        ") SELECT DISTINCT isin FROM adjusted"
+        " WHERE by_close >= $hi OR by_close <= $lo OR by_open >= $hi OR by_open <= $lo",
+        {
+            "files": [str(f) for f in files],
+            "hi": _STEP_PREFILTER,
+            "lo": 1 / _STEP_PREFILTER,
+        },
+    ).fetchall()
+    return frozenset(str(r[0]) for r in rows)
+
+
+def curated_actions(
+    isin: str,
+    recorded: Iterable[CorporateAction],
+    curated: Sequence[CorporateAction],
+) -> tuple[CorporateAction, ...]:
+    """The curated actions for `isin` that the recorded ones do not already state.
+
+    What it does: drops any curated action whose `(ex_date, action_type)` a recorded (feed) action
+    shares — once a feed publishes the event, the feed's row is the one that counts, and composing
+    both would apply it twice — logging each one it drops, and each one it keeps.
+
+    What it never does: read a file or a database (the caller passes the curated rows), or drop a
+    recorded action.
+    """
+    have = {(a.ex_date, a.action_type) for a in recorded}
+    kept: list[CorporateAction] = []
+    for action in curated:
+        if action.isin != isin:
+            raise ValueError(f"curated action for {action.isin} passed for {isin}")
+        if (action.ex_date, action.action_type) in have:
+            _LOG.warning(
+                "l2.curated_action_superseded",
+                isin=isin,
+                ex_date=action.ex_date.isoformat(),
+                action_type=action.action_type.value,
+                state="SKIPPED",
+            )
+            continue
+        _LOG.info(
+            "l2.curated_action",
+            isin=isin,
+            ex_date=action.ex_date.isoformat(),
+            action_type=action.action_type.value,
+            l0_key=action.l0_key,
+        )
+        kept.append(action)
+    return tuple(kept)
+
+
+def implied_splits(
+    isin: str,
+    chain: FactorChain,
+    actions: Iterable[CorporateAction],
+    raw_bars: Sequence[RawBar],
+) -> tuple[ImpliedSplit, ...]:
+    """The share-basis changes in `raw_bars` that `chain` and `actions` leave unexplained.
+
+    What it does: puts each venue's bars into the recorded chain's terms (so a recorded split is
+    no step) and runs `corpactions.implied.detect_implied_splits` over them. An event two venues
+    both show is kept once; two venues that disagree on the multiple for one date cancel it — a
+    venue disagreement is a question for a human, not a factor. Logs each event it keeps.
+
+    What it never does: write anything, or read anything but its arguments.
+    """
+    recorded = tuple(actions)
+    found: dict[date, list[ImpliedSplit]] = {}
+    for exchange, group in groupby(
+        sorted(raw_bars, key=lambda b: (b.exchange, b.trade_date)), key=lambda b: b.exchange
+    ):
+        sessions = [
+            SessionBar(
+                trade_date=b.trade_date,
+                open=b.open * (f := chain.price_factor_asof(b.trade_date)),
+                close=b.close * f,
+                volume=Decimal(b.volume) * chain.qty_factor_asof(b.trade_date),
+                raw_close=b.close,
+            )
+            for b in group
+        ]
+        for event in detect_implied_splits(isin, sessions, recorded):
+            found.setdefault(event.ex_date, []).append(event)
+            _LOG.info(
+                "l2.implied_split",
+                isin=isin,
+                exchange=exchange,
+                ex_date=event.ex_date.isoformat(),
+                from_value=str(event.from_value),
+                to_value=str(event.to_value),
+                close_ratio=str(round(event.close_ratio, 4)),
+                open_ratio=str(round(event.open_ratio, 4)),
+                volume_ratio=None
+                if event.volume_ratio is None
+                else str(round(event.volume_ratio, 2)),
+            )
+    kept: list[ImpliedSplit] = []
+    for ex_date, events in sorted(found.items()):
+        if len({e.price_factor for e in events}) > 1:
+            _LOG.warning(
+                "l2.implied_split_venue_disagreement",
+                isin=isin,
+                ex_date=ex_date.isoformat(),
+                factors=sorted(str(e.price_factor) for e in events),
+                state="SKIPPED",
+            )
+            continue
+        kept.append(events[0])
+    return tuple(kept)
 
 
 def materialize_isins(
@@ -688,6 +1106,7 @@ def rebuild_invalidated(
     con: duckdb.DuckDBPyConnection | None = None,
     data_root: Path | None = None,
     history_for: Mapping[str, Sequence[str]] | None = None,
+    survivor_of: Callable[[str], str] | None = None,
 ) -> tuple[L2WriteReport, ...]:
     """Drain the `l2_invalidation` queue and rebuild exactly the flagged ISINs' L2 partitions.
 
@@ -705,6 +1124,11 @@ def rebuild_invalidated(
     `history_for` maps an ISIN to its D2 lineage chain, so a security whose earlier history sits
     under ISINs a reissue retired is rebuilt over the whole chain rather than the stub since the
     reissue. Omit it and every ISIN is rebuilt from its own bars alone, as before.
+
+    `survivor_of` (the D2 lineage) marks the ISINs a reissue retired. A flagged retired ISIN is
+    resolved without being built — its bars are the survivor's — and any partition it still has is
+    removed: building it would put one company in L2 twice, the second copy unadjusted (on
+    2026-10-05, 60 such partitions, BAJFINANCE's INE296A01016 a -90% "day" on its split).
     """
     isins = [
         str(r[0])
@@ -727,6 +1151,24 @@ def rebuild_invalidated(
                 wanted.update(history_for.get(isin, ()))
         preload_raw_bars(con, wanted, data_root=data_root)
         for isin in isins:
+            if survivor_of is not None and survivor_of(isin) != isin:
+                removed = _remove_partition(
+                    l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=data_root)
+                )
+                _LOG.info(
+                    "l2.retired_invalidation_resolved",
+                    dataset=PRICES_ADJUSTED_DATASET,
+                    isin=isin,
+                    survivor=survivor_of(isin),
+                    stale_removed=removed,
+                    state="SKIPPED",
+                )
+                conn.execute(
+                    "UPDATE l2_invalidation SET resolved = true, resolved_at = %s "
+                    "WHERE isin = %s AND NOT resolved",
+                    (now, isin),
+                )
+                continue
             chain = load_factor_chain(conn, isin)
             actions = load_reconciled_actions(conn, isin=isin)
             reports.append(
@@ -811,9 +1253,10 @@ def materialize_missing(
     (`LineageResolver.survivor_of`, `chain_to`); without them every ISIN is built from its own
     bars, which is right for a lake with no reissues.
 
-    What it never does: invent a factor. An ISIN whose corporate actions never reached the factor
-    chain (single-source, unquantified, unresolved identity) is materialized unadjusted, exactly
-    as the queue would have left it — the fill changes which names L2 covers, not what a factor is.
+    What it never does: invent a factor from a recorded action. An ISIN whose corporate actions
+    never reached the factor chain (single-source, unquantified, unresolved identity) is
+    materialized without them, exactly as the queue would have left it — only a share-basis change
+    L1 itself evidences (`implied_splits`, the same in every build path) is composed in.
     """
     owns = con is None
     con = open_connection() if con is None else con
@@ -867,6 +1310,283 @@ def materialize_missing(
         state="PUBLISHED",
     )
     return report
+
+
+def rebuild_truncated(
+    conn: Connection,
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    data_root: Path | None = None,
+    history_for: Mapping[str, Sequence[str]] | None = None,
+    survivor_of: Callable[[str], str] | None = None,
+    dry_run: bool = False,
+) -> L2TruncatedReport:
+    """Rebuild every L2 partition whose adjusted series starts later than the L1 history under it.
+
+    Why this exists: L1 grew *backwards* (W1 put 2011-06-22 → 2016-09-01 prices into `prices_raw`)
+    and neither door that writes L2 notices. `rebuild_invalidated` builds what a corporate-action
+    recompute flagged, and `materialize_missing` builds only ISINs with no partition — so every
+    existing partition kept starting at 2016-09-02 over an L1 that reaches five years further.
+
+    What it does: one columnar pass each over L1 (first EQ date per ISIN) and L2 (first date per
+    partition); a partition is truncated when the earliest EQ bar of any ISIN in its lineage chain
+    (`history_for`, oldest-first; the ISIN alone otherwise) predates the partition's first row.
+    Each truncated ISIN is rebuilt through `materialize_isin` from L1 + its persisted factor chain
+    — the same unit, the same bytes a fresh build would write. Idempotent: after one pass nothing
+    is truncated, so a second pass writes nothing. A partition whose ISIN a lineage edge retired
+    (`survivor_of(isin) != isin`) is skipped and counted, as `materialize_missing` skips it: its
+    chain is only itself, so extending it would duplicate the pre-reissue history the survivor's
+    stitched partition already carries — one company twice to any direct L2 reader.
+    What it assumes: the factor chain is already what it should be (`adjustment_factors` holds
+    ex-dates back to 2000 from the ISIN-keyed BSE actions); this reads it and never extends it.
+    What it never does: create a partition that does not exist (that is `materialize_missing`),
+    touch a partition that is not truncated or is retired, or invent a factor for an unreconciled
+    action. Nor does it delete a retired partition already on disk — it only stops growing one.
+    """
+    owns = con is None
+    con = open_connection() if con is None else con
+    try:
+        l2_files = _l2_partition_files(data_root=data_root)
+        l1_files = _l1_partition_files(data_root=data_root)
+        truncated: dict[str, tuple[date, date]] = {}
+        retired = 0
+        if l2_files and l1_files:
+            l2_first = dict(
+                con.execute(
+                    "SELECT isin, min(trade_date) FROM read_parquet($files) GROUP BY isin",
+                    {"files": [str(f) for f in l2_files]},
+                ).fetchall()
+            )
+            l1_first = dict(
+                con.execute(
+                    "SELECT isin, min(trade_date) FROM read_parquet($files) "
+                    "WHERE series = 'EQ' GROUP BY isin",
+                    {"files": [str(f) for f in l1_files]},
+                ).fetchall()
+            )
+            for isin, starts in sorted(l2_first.items()):
+                if survivor_of is not None and survivor_of(isin) != isin:
+                    retired += 1
+                    continue
+                chain = (isin,) if history_for is None else history_for.get(isin, (isin,))
+                earliest = [l1_first[i] for i in chain if i in l1_first]
+                if earliest and min(earliest) < starts:
+                    truncated[str(isin)] = (starts, min(earliest))
+        reports: list[L2WriteReport] = []
+        if truncated and not dry_run:
+            wanted = set(truncated)
+            if history_for is not None:
+                for isin in truncated:
+                    wanted.update(history_for.get(isin, ()))
+            preload_raw_bars(con, wanted, data_root=data_root)
+            for isin in truncated:
+                reports.append(
+                    materialize_isin(
+                        isin,
+                        chain=load_factor_chain(conn, isin),
+                        actions=load_reconciled_actions(conn, isin=isin),
+                        con=con,
+                        data_root=data_root,
+                        history_isins=None if history_for is None else history_for.get(isin),
+                    )
+                )
+    finally:
+        if owns:
+            con.close()
+    report = L2TruncatedReport(
+        partitions=len(l2_files),
+        truncated=truncated,
+        skipped_retired=retired,
+        written=tuple(reports),
+    )
+    _LOG.info(
+        "l2.truncated_rebuilt",
+        dataset=PRICES_ADJUSTED_DATASET,
+        partitions=report.partitions,
+        truncated=len(report.truncated),
+        skipped_retired=report.skipped_retired,
+        written=len(report.written),
+        rows=report.rows_written,
+        dry_run=dry_run,
+        state="PLANNED" if dry_run else "PUBLISHED",
+    )
+    return report
+
+
+def prune_retired(
+    survivor_of: Callable[[str], str], *, data_root: Path | None = None
+) -> tuple[str, ...]:
+    """Remove every L2 partition whose ISIN a lineage edge retired; return those ISINs, sorted.
+
+    Why this exists: a retired ISIN's bars belong to its survivor's stitched partition, and both
+    first-time fill and `--extend` already skip it — but neither removed one already on disk. The
+    ones there were built from the ISIN's own bars before the lineage named it retired, so they
+    duplicate the survivor's history and, worse, carry the reissue split unadjusted: the exchange
+    prints the ex-date session under the old ISIN and moves to the new one the next day, so the
+    old ISIN's last bar is in post-split terms with no factor behind it (BAJFINANCE INE296A01016,
+    2016-09-07 11,393.30 → 2016-09-08 1,162.80). Measured on the server lake 2026-10-05: 60.
+
+    L2 is derived (invariant #3), so removal is always safe and the survivor's partition is
+    untouched; L0 and L1 are never read or written here. Idempotent: a second call removes nothing.
+    """
+    pruned: list[str] = []
+    for path in _l2_partition_files(data_root=data_root):
+        isin = _isin_of_partition(path)
+        if survivor_of(isin) == isin:
+            continue
+        _remove_partition(path)
+        pruned.append(isin)
+        _LOG.info(
+            "l2.retired_partition_pruned",
+            dataset=PRICES_ADJUSTED_DATASET,
+            isin=isin,
+            survivor=survivor_of(isin),
+            state="REMOVED",
+        )
+    _LOG.info("l2.retired_pruned", dataset=PRICES_ADJUSTED_DATASET, pruned=len(pruned))
+    return tuple(sorted(pruned))
+
+
+def rebuild_all(
+    conn: Connection,
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    data_root: Path | None = None,
+    history_for: Mapping[str, Sequence[str]] | None = None,
+    survivor_of: Callable[[str], str] | None = None,
+    batch_size: int = 500,
+) -> L2RebuildReport:
+    """Rebuild every L2 partition from L1 + its factor chain, and prune the retired ones.
+
+    Why this exists: the other doors each rewrite a subset — the queue what a recompute flagged,
+    the fill what is absent, `--extend` what starts late — so a change in how a partition is
+    *built* (here: price-implied splits) reaches none of the partitions already on disk. This is
+    the one pass that brings all of them to what a fresh build would write.
+
+    What it does: prunes retired partitions (`prune_retired`), then for every non-retired ISIN with
+    EQ bars in L1, every lineage survivor and every partition on disk, rebuilds its partition
+    through `materialize_isin` over its lineage chain, preloading L1 `batch_size` ISINs at a time
+    so memory stays bounded. Byte-identical to a wipe followed by a fresh build, and idempotent.
+
+    What it never does: write L0, L1 or Postgres — it reads `adjustment_factors` and
+    `corporate_actions` and writes only L2.
+    """
+    owns = con is None
+    con = open_connection() if con is None else con
+    try:
+        pruned = () if survivor_of is None else prune_retired(survivor_of, data_root=data_root)
+        # Every ISIN a fresh build could write: its own EQ bars, a survivor whose EQ history is
+        # only its chain's (INE0OPA01027 trades BE alone; its EQ years are its predecessor's), and
+        # anything already on disk — which `materialize_isin` removes when nothing feeds it.
+        candidates = tuple(
+            sorted(
+                set(isins_with_eq_bars(con, data_root=data_root))
+                | set(history_for or {})
+                | materialized_isins(data_root=data_root)
+            )
+        )
+        live = [i for i in candidates if survivor_of is None or survivor_of(i) == i]
+        reports: list[L2WriteReport] = []
+        for start in range(0, len(live), batch_size):
+            batch = live[start : start + batch_size]
+            wanted = set(batch)
+            if history_for is not None:
+                for isin in batch:
+                    wanted.update(history_for.get(isin, ()))
+            preload_raw_bars(con, wanted, data_root=data_root)
+            for isin in batch:
+                reports.append(
+                    materialize_isin(
+                        isin,
+                        chain=load_factor_chain(conn, isin),
+                        actions=load_reconciled_actions(conn, isin=isin),
+                        con=con,
+                        data_root=data_root,
+                        history_isins=None if history_for is None else history_for.get(isin),
+                    )
+                )
+    finally:
+        if owns:
+            con.close()
+    report = L2RebuildReport(
+        candidates=len(candidates),
+        skipped_retired=len(candidates) - len(live),
+        written=tuple(reports),
+        pruned_retired=pruned,
+    )
+    _LOG.info(
+        "l2.rebuilt_all",
+        dataset=PRICES_ADJUSTED_DATASET,
+        candidates=report.candidates,
+        skipped_retired=report.skipped_retired,
+        written=len(report.written),
+        rows=report.rows_written,
+        implied_splits=len(report.implied_splits),
+        curated_actions=len(report.curated),
+        pruned_retired=len(report.pruned_retired),
+        state="PUBLISHED",
+    )
+    return report
+
+
+def rebuild_isins(
+    conn: Connection,
+    isins: Sequence[str],
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    data_root: Path | None = None,
+    history_for: Mapping[str, Sequence[str]] | None = None,
+    survivor_of: Callable[[str], str] | None = None,
+) -> tuple[L2WriteReport, ...]:
+    """Rebuild exactly the named ISINs' partitions, as `rebuild_all` would write them.
+
+    For a change that reaches a known handful of ISINs — a curated action added to
+    `corpactions.manual_actions` — without a twelve-minute pass over every partition. Each ISIN is
+    rebuilt through `materialize_isin` over its lineage chain, byte-identical to what
+    `rebuild_all` writes for it; no other partition is touched.
+
+    What it never does: build a lineage-retired ISIN (its bars are its survivor's — name the
+    survivor instead; it raises `ValueError` rather than guess), or write L0, L1 or Postgres.
+    """
+    wanted = tuple(dict.fromkeys(isins))
+    if survivor_of is not None:
+        retired = [i for i in wanted if survivor_of(i) != i]
+        if retired:
+            raise ValueError(
+                "lineage-retired ISINs have no partition of their own; rebuild their survivors: "
+                + ", ".join(f"{i} -> {survivor_of(i)}" for i in retired)
+            )
+    owns = con is None
+    con = open_connection() if con is None else con
+    try:
+        load = set(wanted)
+        if history_for is not None:
+            for isin in wanted:
+                load.update(history_for.get(isin, ()))
+        preload_raw_bars(con, load, data_root=data_root)
+        reports = tuple(
+            materialize_isin(
+                isin,
+                chain=load_factor_chain(conn, isin),
+                actions=load_reconciled_actions(conn, isin=isin),
+                con=con,
+                data_root=data_root,
+                history_isins=None if history_for is None else history_for.get(isin),
+            )
+            for isin in wanted
+        )
+    finally:
+        if owns:
+            con.close()
+    _LOG.info(
+        "l2.rebuilt_isins",
+        dataset=PRICES_ADJUSTED_DATASET,
+        isins=len(reports),
+        rows=sum(r.rows_written for r in reports),
+        curated_actions=sum(len(r.curated) for r in reports),
+        state="PUBLISHED",
+    )
+    return reports
 
 
 # ── internals ────────────────────────────────────────────────────────────────────────────────

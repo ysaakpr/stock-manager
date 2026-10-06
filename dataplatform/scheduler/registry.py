@@ -32,17 +32,40 @@ from dataplatform.config import Settings
 from dataplatform.logging import get_logger
 
 __all__ = [
+    "ANNOUNCEMENTS_CAPTURE",
+    "BSE_CA_SWEEP",
+    "CA_REFRESH",
     "CONSTITUENTS_SNAPSHOT",
+    "DAILY_SNAPSHOT",
     "EOD_PIPELINE",
+    "FBIL_REFERENCE_RATES",
+    "INDEX_PRESS_REFRESH",
     "JOB_NAME",
+    "MACRO_RELEASE_CAPTURE",
+    "NEWS_CAPTURE",
+    "NSE_DAILY_CAPTURE",
+    "SHAREHOLDING_POLL",
+    "TRI_REFRESH",
+    "UNSCHEDULED",
     "Job",
     "JobContext",
     "JobFn",
     "JobNotRegisteredError",
     "JobRegistry",
+    "announcements_capture",
+    "bse_ca_sweep",
+    "ca_refresh",
     "constituents_snapshot",
+    "daily_snapshot",
     "default_registry",
     "eod_pipeline",
+    "fbil_reference_rates",
+    "lag_budgets",
+    "macro_release_capture",
+    "news_capture",
+    "nse_daily_capture",
+    "shareholding_poll",
+    "tri_refresh",
 ]
 
 #: Job names are lower snake_case and never start with an underscore, which is what keeps them
@@ -85,6 +108,14 @@ class Job:
     What it assumes: `fn` is safe to run concurrently with *other* jobs — the runner's advisory
     lock only serialises a job against itself.
     What it never does: run anything. Constructing a `Job` has no side effect beyond validation.
+
+    `covers` names the Source Register rows this job keeps current, and is what
+    `test_scheduler_registry` holds against the register: a live source that no job covers and
+    `UNSCHEDULED` does not explain fails the gate. `sync_sources` names the `sync_state` sources
+    whose lag this job answers for, and `max_lag_sessions` how many sessions behind one may fall
+    before `/status/sources` stops calling it healthy — the 2026-10-05 audit found the bhavcopy
+    family 21 sessions behind and reported `healthy: true`, because health looked at failures and
+    never at lag.
     """
 
     name: str
@@ -92,6 +123,9 @@ class Job:
     fn: JobFn
     timeout: timedelta
     description: str = ""
+    covers: tuple[str, ...] = ()
+    sync_sources: tuple[str, ...] = ()
+    max_lag_sessions: int = 1
 
     def __post_init__(self) -> None:
         if not JOB_NAME.match(self.name):
@@ -102,6 +136,8 @@ class Job:
             )
         if self.timeout <= timedelta(0):
             raise ValueError(f"job {self.name!r} needs a positive timeout, got {self.timeout!r}")
+        if self.max_lag_sessions < 0:
+            raise ValueError(f"job {self.name!r} needs a non-negative max_lag_sessions")
         self.trigger()  # validate the cron now, not on the morning it was supposed to fire
 
     def trigger(self, timezone: ZoneInfo | None = None) -> Any:
@@ -205,6 +241,9 @@ EOD_PIPELINE = Job(
     fn=eod_pipeline,
     timeout=timedelta(minutes=45),
     description="Daily EOD ingest → validate → normalize → publish → archive (M1.10)",
+    # `eod.DAILY_NSE_SOURCES`' current-era register ids, plus the PR bundle it captures to L0.
+    covers=("nse_bhavcopy_udiff", "nse_sec_bhavdata_full", "bse_bhavcopy_udiff", "nse_pr_bundle"),
+    sync_sources=("nse_bhavcopy", "nse_delivery", "bse_bhavcopy"),
 )
 
 
@@ -238,6 +277,206 @@ CONSTITUENTS_SNAPSHOT = Job(
     fn=constituents_snapshot,
     timeout=timedelta(minutes=30),
     description="Weekly dated snapshot of index constituents — forward sector history (M10.2)",
+    covers=("nifty_index_constituents",),
+    sync_sources=("nifty_index_constituents",),
+    max_lag_sessions=6,
+)
+
+
+def daily_snapshot(context: JobContext) -> None:
+    """The daily market-structure snapshot (OPS): the only job here with a real deadline.
+
+    What it does: captures every snapshot-only source into L0 under today's date — the NSE and BSE
+    industry classifications, the price bands, the ASM/GSM/ESM surveillance lists, `EQUITY_L.csv`,
+    `symbolchange.csv` and the index constituent lists. None of these has a past: each endpoint
+    serves only its current snapshot, so every day this does not run is a day of history destroyed
+    that no later effort can recover. Idempotent per (source, date) — a second run the same day
+    makes zero requests. A source that fails, returns a malformed body, or answers 200 with another
+    session's file is journaled to `sync_state`, alerted, and left behind while the sweep goes on.
+    What it assumes: the injected clock and settings are the run's (B10), the database is migrated,
+    and the network is reachable — the real wiring is built inside `run_daily_snapshot_job`.
+    What it never does: fetch into a lake the operator did not declare
+    (`snapshot_expect_lake_root`, asserted before the first request), capture on a day the exchange
+    was shut (those are filed `GAP`), or file a payload whose own date is not today's as today's
+    data. The import is deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.daily_snapshot import run_daily_snapshot_job
+
+    run_daily_snapshot_job(context)
+
+
+_SNAPSHOT_SOURCES: tuple[str, ...] = (
+    "nse_industry_classification",
+    "bse_scrip_master",
+    "nse_price_bands",
+    "nse_asm_list",
+    "nse_gsm_list",
+    "nse_esm_list",
+    "nse_equity_list",
+    "nse_symbol_changes",
+)
+
+#: The daily snapshot (OPS). 19:15 IST Monday to Friday — after the 15:30 close and after the
+#: surveillance lists and price bands for the next session are published, and comfortably clear of
+#: the 18:30 EOD pipeline so the two are not competing for the same host budget. Trading days only:
+#: the sweep files `GAP` for a closed day, so a *missed* day stays distinguishable from a day
+#: nothing was owed on. The timezone comes from `Settings`, never the host's.
+DAILY_SNAPSHOT = Job(
+    name="daily_snapshot",
+    cron="15 19 * * mon-fri",
+    fn=daily_snapshot,
+    timeout=timedelta(minutes=30),
+    description="Daily capture of every snapshot-only source — the deadline job (OPS)",
+    # `daily_snapshot.DEFAULT_SNAPSHOT_SET`, whose sync_state source is the register id itself.
+    covers=_SNAPSHOT_SOURCES,
+    sync_sources=_SNAPSHOT_SOURCES,
+)
+
+
+#: What the four capture jobs keep current — kept in step with `daily_capture`'s own tuples by
+#: `tests/unit/test_scheduler_coverage.py`, and spelled out here so this module does not import the
+#: ingest stack at load time.
+_NSE_DAILY_CAPTURE_SOURCES: tuple[str, ...] = (
+    "nse_fii_dii_flows",
+    "nse_bulk_deals",
+    "nse_block_deals",
+    "nse_fo_bhavcopy",
+)
+_SHAREHOLDING_SOURCES: tuple[str, ...] = ("nse_shareholding_pattern",)
+_ANNOUNCEMENT_SOURCES: tuple[str, ...] = ("nse_announcements", "bse_announcements")
+_NEWS_SOURCES: tuple[str, ...] = ("curated_rss", "gdelt_v2_event_files")
+
+
+def nse_daily_capture(context: JobContext) -> None:
+    """The nightly capture of the perishable NSE end-of-day sources (ops-daily-capture).
+
+    What it does: lands tonight's FII/DII flows, bulk deals and block deals — endpoints that serve
+    the latest session only, so a night this does not run is history destroyed — and the current
+    session's F&O bhavcopy, each into L0 and L1 with a `sync_state` row per (source, session).
+    Each host is leased on its own, so a campaign holding the archive host costs the deals and F&O
+    for the night and never the flows. See `daily_capture.run_nse_daily_capture`.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: backfill F&O (the historical campaign owns every earlier session), publish
+    an intraday copy, or file one session's payload under another session's date. The import is
+    deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.daily_capture import run_nse_daily_capture_job
+
+    run_nse_daily_capture_job(context)
+
+
+#: The nightly NSE capture. 20:00 and 23:00 IST Monday to Friday — after `daily_snapshot` (19:15,
+#: 30-minute budget) has released `www.nseindia.com` and the archive host, and after the evening
+#: publication of flows and deals (`daily_capture.CAPTURE_CUTOFF`, 19:30). The 23:00 fire is the
+#: same-night retry for an endpoint that published late: it makes no request for a source already
+#: PUBLISHED, and it is the last chance, because by the next evening the latest-only endpoints
+#: have rolled. The timezone comes from `Settings`, never the host's.
+NSE_DAILY_CAPTURE = Job(
+    name="nse_daily_capture",
+    cron="0 20,23 * * mon-fri",
+    fn=nse_daily_capture,
+    timeout=timedelta(minutes=30),
+    description="Nightly FII/DII flows, bulk/block deals, current-session F&O → L0 + L1",
+    covers=_NSE_DAILY_CAPTURE_SOURCES,
+    sync_sources=_NSE_DAILY_CAPTURE_SOURCES,
+)
+
+
+def shareholding_poll(context: JobContext) -> None:
+    """The daily poll of NSE's shareholding master (ops-daily-capture).
+
+    What it does: one request for the master into L0, then the filing-date L1 partitions merged
+    with what it carries. The endpoint has no date parameter and lists the filings of the *current*
+    quarter-end only — measured 2026-10-06: 32 records, every one for 30-Sep-2026, broadcast
+    01..06-Oct; the register's 2026-08-08 sample held 2,284 for the June quarter — so the previous
+    quarter's list is gone the day the next quarter's first filing lands. See
+    `daily_capture.run_shareholding_poll`.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: re-date a filing or drop one an earlier poll landed.
+    """
+    from dataplatform.ingest.daily_capture import run_shareholding_poll_job
+
+    run_shareholding_poll_job(context)
+
+
+#: The daily shareholding poll. 18:05 IST every day — the half hour before `eod_pipeline` (18:30)
+#: when nothing else holds `www.nseindia.com`, inside the campaign quiet window so no campaign can
+#: hold it either. Daily because the quarter rolls over without notice: a weekly poll could miss
+#: the late filings and revisions of a quarter's last week, which no later poll can recover. The
+#: payload peaks near 2.4 MB at the end of a filing season. Two sessions of lag budget: a missed day
+#: is recovered by the next one while the quarter lasts, so one miss is late, not lost.
+SHAREHOLDING_POLL = Job(
+    name="shareholding_poll",
+    cron="5 18 * * *",
+    fn=shareholding_poll,
+    timeout=timedelta(minutes=15),
+    description="Daily NSE shareholding-master poll → L0, merged into filing-date L1 partitions",
+    covers=_SHAREHOLDING_SOURCES,
+    sync_sources=_SHAREHOLDING_SOURCES,
+    max_lag_sessions=2,
+)
+
+
+def announcements_capture(context: JobContext) -> None:
+    """The nightly NSE + BSE corporate-announcement capture (ops-daily-capture).
+
+    What it does: lands the previous calendar day — complete, since it runs after midnight — from
+    both exchanges into one L1 partition, BSE paged by its own row count and resolved scrip→ISIN
+    through the D2 master; and re-drives any day of the last week not yet PUBLISHED. See
+    `daily_capture.run_announcements_capture`.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: backfill past its seven-day window (the merger-terms campaign fetches
+    per-symbol history on demand), or let one exchange's write erase the other's rows.
+    """
+    from dataplatform.ingest.daily_capture import run_announcements_capture_job
+
+    run_announcements_capture_job(context)
+
+
+#: The nightly announcement capture. 00:30 IST every day — announcements are filed on weekends
+#: too, the day before is complete, and no other job holds `www.nseindia.com` or `api.bseindia.com`
+#: then (the monthly BSE sweep starts at 06:00 on its Sunday). Two sessions of lag budget: the
+#: logical date is a calendar day, so between midnight and this fire yesterday is owed but not due.
+ANNOUNCEMENTS_CAPTURE = Job(
+    name="announcements_capture",
+    cron="30 0 * * *",
+    fn=announcements_capture,
+    timeout=timedelta(minutes=45),
+    description="Nightly NSE + BSE announcements for the previous day → L0 + L1 (7-day self-heal)",
+    covers=_ANNOUNCEMENT_SOURCES,
+    sync_sources=_ANNOUNCEMENT_SOURCES,
+    max_lag_sessions=2,
+)
+
+
+def news_capture(context: JobContext) -> None:
+    """The six-hourly news poll: the ratified curated RSS feeds and one GDELT export slot.
+
+    What it does: each active feed whose register row is VERIFIED, once, and the GDELT slot the
+    manifest names, into L0; then today's L1 `news` partition re-derived from every news payload of
+    the day. See `daily_capture.run_news_capture`.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: backfill GDELT, add a feed the register has not verified, or fetch the
+    mentions/GKG files.
+    """
+    from dataplatform.ingest.daily_capture import run_news_capture_job
+
+    run_news_capture_job(context)
+
+
+#: The news poll. 00:15, 06:15, 12:15 and 18:15 IST — no NSE or BSE host is touched, so it does
+#: not compete with any exchange job. Four GDELT slots a day, export files only (~75-100 kB each):
+#: GDELT is evidence-only and measured near-empty of India-finance content, so a six-hourly sample
+#: of global attention is what it is worth, at about 1/24 of the 96-slot firehose. Four RBI polls
+#: cover its ten-item feed with room to spare.
+NEWS_CAPTURE = Job(
+    name="news_capture",
+    cron="15 0,6,12,18 * * *",
+    fn=news_capture,
+    timeout=timedelta(minutes=15),
+    description="Six-hourly curated RSS + one GDELT export slot → L0 + L1 news",
+    covers=_NEWS_SOURCES,
+    sync_sources=_NEWS_SOURCES,
 )
 
 
@@ -309,7 +548,248 @@ IDENTITY_REFRESH = Job(
     fn=identity_refresh,
     timeout=timedelta(minutes=15),
     description="Weekly NSE identity-master refresh: fetch to L0, re-derive from L0 (M1.7)",
+    covers=("nse_equity_list", "nse_symbol_changes"),
 )
+
+
+def tri_refresh(context: JobContext) -> None:
+    """The weekly benchmark-TRI refresh (2026-10-05 audit): every default index brought current.
+
+    What it does: one whole-history POST per index whose published L1 series no longer reaches the
+    last session before today, and nothing for an index already current — see
+    `tri_backfill.run_tri_refresh`. Until this job the TRI was a one-shot campaign whose resume
+    check looked only at the series' *start*, so NIFTY 50, IT and CPSE froze at the day they were
+    first fetched.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: touch a host other than niftyindices.com. The import is deferred for the
+    same reason the others are.
+    """
+    from dataplatform.ingest.tri_backfill import run_tri_refresh
+
+    run_tri_refresh(context)
+
+
+#: The weekly TRI refresh. 08:00 IST on Saturday — the week's last level has been disseminated,
+#: and one ~1 MB payload per index per week keeps L0 growth honest for a series a backtest reads at
+#: weekly-or-coarser resolution. Weekly rather than daily is why its lag budget is six sessions.
+TRI_REFRESH = Job(
+    name="tri_refresh",
+    cron="0 8 * * sat",
+    fn=tri_refresh,
+    timeout=timedelta(minutes=15),
+    description="Weekly benchmark TRI refresh for the default index set (M3.9.b)",
+    covers=("nifty_tri_history",),
+    sync_sources=("nifty_tri_history",),
+    max_lag_sessions=6,
+)
+
+
+def index_press_refresh(context: JobContext) -> None:
+    """The weekly index-change announcement capture (DQ-5): new releases into L0, nothing else.
+
+    What it does: fetches the niftyindices.com press-release listing, the seven tracked indices'
+    anchor CSVs and every candidate change release of the last 120 days not yet in L0 — see
+    `index_history_backfill.run_press_release_refresh`. NSE Indices publishes its semi-annual
+    reviews and ad-hoc replacements there days to weeks before they take effect, so a weekly pass
+    misses nothing and leaves every release in L0 before its change is effective.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: rebuild the membership history in L1, or backfill pre-window releases (the
+    owner-gated campaign). The import is deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.index_history_backfill import run_press_release_refresh
+
+    run_press_release_refresh(context)
+
+
+#: The weekly announcement capture. 09:00 IST on Saturday — after `tri_refresh` (08:00, 15-minute
+#: budget) on the same host, because a host lease is refused rather than queued, and well before the
+#: 20:00 constituents snapshot there. No `sync_sources`: each release is its own sync row dated by
+#: its announcement, so a session-lag budget would measure nothing.
+INDEX_PRESS_REFRESH = Job(
+    name="index_press_refresh",
+    cron="0 9 * * sat",
+    fn=index_press_refresh,
+    timeout=timedelta(minutes=20),
+    description="Weekly capture of NSE Indices change announcements into L0 (DQ-5)",
+    covers=("nifty_index_press_releases",),
+)
+
+
+def ca_refresh(context: JobContext) -> None:
+    """The weekly corporate-action refresh (DQ): new actions in, changed chains and L2 rebuilt.
+
+    What it does: one NSE request over the last five weeks of ex-dates, one BSE request per scrip
+    whose NSE action has no BSE twin yet, then the backfill's reconcile under the lake's own ACCEPT
+    policy, a recompute of only the ISINs whose reconciled actions moved, and a drain of the
+    `l2_invalidation` queue that recompute raised — see `ca_refresh.refresh_corporate_actions`.
+    Until this job the CA store was a one-shot campaign that stopped at 2026-09-01, and two
+    September 2:1 splits reached L2 only through the price-implied detector.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: recompute an ISIN whose chain did not change, or re-run a refresh already
+    PUBLISHED for today. The import is deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.ca_refresh import run_ca_refresh
+
+    run_ca_refresh(context)
+
+
+#: The weekly CA refresh. 10:00 IST on Saturday — the week's ex-dates are all in, and it follows
+#: `identity_refresh` (07:00) so a name listed this week resolves. Weekly is enough for a factor
+#: chain: the implied-split detector already keeps an unrecorded split out of L2 in the meantime,
+#: and this job replaces that inference with the published record. Six sessions of lag budget.
+CA_REFRESH = Job(
+    name="ca_refresh",
+    cron="0 10 * * sat",
+    fn=ca_refresh,
+    timeout=timedelta(hours=1),
+    description="Weekly NSE CA refresh + BSE counterparts → recompute changed chains → rebuild L2",
+    covers=("nse_corp_actions",),
+    sync_sources=("nse_corp_actions",),
+    max_lag_sessions=6,
+)
+
+
+def bse_ca_sweep(context: JobContext) -> None:
+    """The monthly BSE corporate-action sweep: every BSE scrip that traded in the last year.
+
+    What it does: `ca_refresh`'s run, plus one request per BSE scrip with a price in the trailing
+    year — which is what reaches a BSE-only listing, whose actions the NSE feed never carries. The
+    finalize, the changed-only recompute and the L2 drain are the weekly job's.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: re-fetch a scrip already PUBLISHED for today. The import is deferred for the
+    same reason the others are.
+    """
+    from dataplatform.ingest.ca_refresh import run_bse_ca_sweep
+
+    run_bse_ca_sweep(context)
+
+
+#: The monthly BSE sweep. 06:00 IST on the first Sunday of the month (APScheduler ANDs the day and
+#: weekday fields): ~6,700 per-scrip requests at the host's spacing is most of a day's budget, so it
+#: runs where no session, no EOD pipeline and no snapshot competes for the BSE host, after the
+#: 03:00 L0 sweep. The lag budget spans the longest gap between first Sundays (35 days).
+BSE_CA_SWEEP = Job(
+    name="bse_ca_sweep",
+    cron="0 6 1-7 * sun",
+    fn=bse_ca_sweep,
+    timeout=timedelta(hours=10),
+    description="Monthly per-scrip BSE CA sweep of every traded scrip → recompute → rebuild L2",
+    covers=("bse_corp_actions",),
+    sync_sources=("bse_corp_actions",),
+    max_lag_sessions=27,
+)
+
+
+def fbil_reference_rates(context: JobContext) -> None:
+    """The daily FBIL reference-rate capture (macro-probes): USD/INR and the other INR benchmarks.
+
+    What it does: one request for FBIL's archive over the trailing three weeks — wide enough for
+    the public site's few-session lag — into L0, then one `macro_series` release per publication
+    date (`macro.capture.run_fbil_capture`). A window already in L0 costs no request.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: date a rate by the fetch; the benchmark's own `displayTime` dates it. The
+    import is deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.macro.capture import run_fbil_capture
+
+    run_fbil_capture(context)
+
+
+#: 16:00 IST on weekdays — after FBIL's 13:00 publication; no NSE host, so clear of every campaign
+#: window by construction.
+FBIL_REFERENCE_RATES = Job(
+    name="fbil_reference_rates",
+    cron="0 16 * * mon-fri",
+    fn=fbil_reference_rates,
+    timeout=timedelta(minutes=10),
+    description="Daily FBIL INR reference rates (trailing 3 weeks) → macro_series (macro-probes)",
+    covers=("fbil_reference_rates",),
+)
+
+
+def macro_release_capture(context: JobContext) -> None:
+    """The weekly macro forward capture (macro-probes, Tier B of the 2026-09-07 macro plan).
+
+    What it does: World Bank indicators (dated by the envelope's `lastupdated`), the RBI's "Current
+    Rates" panel, the OEA's WPI file, GSTN's collection workbook and the trailing month of India
+    VIX spot, each under its own host lease, each written to `macro_series` — current-vintage
+    tables only where a value is new or revised (`macro.capture.run_macro_release_capture`). One
+    step failing is logged and the others still run; the job then raises naming every failure.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: back-date a current-vintage figure: the Tier B series are knowable from
+    the capture on, which is the whole point of starting them now. The import is deferred.
+    """
+    from dataplatform.ingest.macro.capture import run_macro_release_capture
+
+    run_macro_release_capture(context)
+
+
+#: 10:00 IST on Sunday — no session, after the 03:00 L0 sweep, and on a day no niftyindices.com job
+#: holds that host's lease (the Saturday jobs do). No `sync_sources`: Tier B releases are monthly or
+#: irregular, so a session-lag budget would measure nothing.
+MACRO_RELEASE_CAPTURE = Job(
+    name="macro_release_capture",
+    cron="0 10 * * sun",
+    fn=macro_release_capture,
+    timeout=timedelta(minutes=20),
+    description="Weekly macro forward capture: World Bank, RBI rates, WPI, GST, India VIX",
+    covers=(
+        "worldbank_indicator_api",
+        "rbi_current_rates",
+        "oea_wpi_monthly_index",
+        "gstn_tax_collection",
+        "nifty_india_vix_history",
+    ),
+)
+
+
+#: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
+#: audit's root cause was not one broken job but sources that were simply never scheduled — the
+#: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
+#: reviewer can check; `test_scheduler_registry` fails for a live row in neither place, and
+#: `/status/jobs` serves this ledger so the gap is visible where operators look.
+UNSCHEDULED: dict[str, str] = {
+    "nse_mto": (
+        "Superseded from 2019-09-30 by nse_sec_bhavdata_full; the delivery source set fetches MTO "
+        "only for older sessions, so there is nothing new to take daily."
+    ),
+    "nse_financial_results_index": (
+        "fundamentals_backfill campaign (B1 NEEDS_GO: thousands of per-filing requests); no "
+        "incremental daily job yet."
+    ),
+    "nse_integrated_filing_index": "Same as nse_financial_results_index.",
+    "nse_xbrl_filing": "Same as nse_financial_results_index.",
+    "nifty_index_close_snapshot": (
+        "Input to the computed TRI fallback only; the published TRI is live (tri_refresh)."
+    ),
+    "nse_index_close_snapshot": (
+        "History via the M11.2 valuation backfill campaign; the daily valuation job is not wired "
+        "yet (no consumer in the decision path)."
+    ),
+    "nse_announcement_attachment": (
+        "Per-filing documents fetched on demand by the merger-terms campaign (M3.8); no job yet."
+    ),
+    "gdelt_doc_api": "Register status FAILED; nothing to schedule until it verifies.",
+    "alfred_series_vintage": "Register status FAILED; nothing to schedule until it verifies.",
+    "mospi_api": (
+        "Register status FAILED (TLS needs unsafe legacy renegotiation); not worked around."
+    ),
+    "rbi_dbie": "Register status FAILED (certificate hostname mismatch); not worked around.",
+    "screener_company_fundamentals": "Register status BLOCKED_CREDENTIAL.",
+}
+
+
+def lag_budgets(registry: JobRegistry) -> dict[str, int]:
+    """`sync_state` source → the sessions it may fall behind, from every job that answers for it.
+
+    Two jobs answering for one source is legal (a weekly and a daily refresh, say); the tighter
+    budget wins, because the source is owed by whichever is due sooner.
+    """
+    budgets: dict[str, int] = {}
+    for job in registry:
+        for source in job.sync_sources:
+            budgets[source] = min(budgets.get(source, job.max_lag_sessions), job.max_lag_sessions)
+    return budgets
 
 
 def default_registry() -> JobRegistry:
@@ -318,4 +798,22 @@ def default_registry() -> JobRegistry:
     A fresh object each call rather than a module-level singleton: two processes in one test, or a
     test that registers an extra job, must not be able to mutate what the next one sees.
     """
-    return JobRegistry([EOD_PIPELINE, CONSTITUENTS_SNAPSHOT, L0_VERIFY, IDENTITY_REFRESH])
+    return JobRegistry(
+        [
+            EOD_PIPELINE,
+            DAILY_SNAPSHOT,
+            CONSTITUENTS_SNAPSHOT,
+            L0_VERIFY,
+            IDENTITY_REFRESH,
+            TRI_REFRESH,
+            INDEX_PRESS_REFRESH,
+            CA_REFRESH,
+            BSE_CA_SWEEP,
+            FBIL_REFERENCE_RATES,
+            MACRO_RELEASE_CAPTURE,
+            NSE_DAILY_CAPTURE,
+            SHAREHOLDING_POLL,
+            ANNOUNCEMENTS_CAPTURE,
+            NEWS_CAPTURE,
+        ]
+    )

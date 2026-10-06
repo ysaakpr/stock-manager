@@ -1,0 +1,115 @@
+{
+  "era": "ffix_three_index",
+  "session": "2010-01-04",
+  "archive_filename": "PR040110.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR040110.zip",
+  "why_this_era": "the first bundle: NIFTY / JR. NIFTY / CNX 100 only, S&P-era banners, eight junk separator rows",
+  "reduced_from_l0": true,
+  "original_bytes": 255693,
+  "original_sha256": "b0b4498e70c644b4c46c836d5d6f94796739cba80b1bac4730ad0f67f5a9c6e8",
+  "original_members": [
+    {
+      "name": "Pr040110.csv",
+      "bytes": 129934
+    },
+    {
+      "name": "rdm.doc",
+      "bytes": 31744
+    },
+    {
+      "name": "Rdm_help.txt",
+      "bytes": 705
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 3092
+    },
+    {
+      "name": "RPD040110.csv",
+      "bytes": 203
+    },
+    {
+      "name": "Rtt040110.csv",
+      "bytes": 55
+    },
+    {
+      "name": "Tt040110.csv",
+      "bytes": 2192
+    },
+    {
+      "name": "cd04012010.doc",
+      "bytes": 36352
+    },
+    {
+      "name": "cf04012010.csv",
+      "bytes": 1135
+    },
+    {
+      "name": "An040110.txt",
+      "bytes": 111173
+    },
+    {
+      "name": "Bc040110.csv",
+      "bytes": 2797
+    },
+    {
+      "name": "bh04012010.csv",
+      "bytes": 6266
+    },
+    {
+      "name": "Bm040110.txt",
+      "bytes": 9041
+    },
+    {
+      "name": "ffix040110.csv",
+      "bytes": 21319
+    },
+    {
+      "name": "fo04012010.csv",
+      "bytes": 58242
+    },
+    {
+      "name": "fo04012010.doc",
+      "bytes": 288256
+    },
+    {
+      "name": "Gl040110.csv",
+      "bytes": 6035
+    },
+    {
+      "name": "help.txt",
+      "bytes": 3510
+    },
+    {
+      "name": "HL040110.csv",
+      "bytes": 1581
+    },
+    {
+      "name": "Ix040110.csv",
+      "bytes": 67525
+    },
+    {
+      "name": "NPD040110.txt",
+      "bytes": 3733
+    },
+    {
+      "name": "nuver.txt",
+      "bytes": 2670
+    },
+    {
+      "name": "op04012010.csv",
+      "bytes": 219542
+    },
+    {
+      "name": "Pd040110.csv",
+      "bytes": 145367
+    }
+  ],
+  "members_kept_in_fixture": [
+    "ffix040110.csv",
+    "Readme.txt"
+  ],
+  "ffix_member": "ffix040110.csv",
+  "ffix_member_bytes": 21319,
+  "ffix_member_sha256": "da23adae6603de41c90750856bea769afafaf82ddeb1ff429cb0cabf5e399495"
+}

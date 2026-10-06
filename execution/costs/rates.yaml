@@ -17,6 +17,26 @@
 #   reconstructed — the regime is real and the rates are the published figures of the period as
 #                  reported by the cited sources, but no primary rate card of that date was read.
 #                  Materiality of any error is noted per schedule.
+#
+# **The card was extended back to 2006-01-01 by W0-7 (2026-09-08).** It previously started at
+# 2017-07-01, which left roughly ten months of the existing lake (2016-09-01 onwards) unpriceable:
+# a full-span backtest raised `NoRateScheduleError` on its first fill. Ten schedules now cover
+# 2006-2017, and every one of their boundaries is a statutory date — a service-tax notification or
+# a Finance Act STT substitution — not a convenience split.
+#
+# Two things about that block are easy to misread and are spelled out in `service-tax-10-2`'s
+# `notes`, which the whole block refers back to:
+#
+#   * **`gst:` holds the *service-tax* rate before 2017-07-01.** The field is the schema's name for
+#     "the ad-valorem tax on the fee lines"; before GST that tax was service tax plus its cesses,
+#     folded into one effective rate on the same base (brokerage + transaction charges). No code
+#     branches on the name and no schema was invented for it.
+#   * **`brokerage_per_order: "0"` is this card's semantics, not a 2006 fact.** The card prices our
+#     execution at a modern zero-brokerage broker against the statutory rates of the day. Zerodha
+#     did not exist before August 2010 and charged "0.1% or ₹20/trade, whichever is lower" on
+#     delivery until 2015-16; `brokerage_per_order` is a flat amount and cannot express that rule
+#     at all. A pre-2016 result is statutory-and-exchange cost drag, not what a 2006 retail
+#     investor paid.
 
 version: 1
 
@@ -29,6 +49,454 @@ card:
     rate card and are deliberately absent: add them here, never in a second module (invariant #4).
 
 schedules:
+  # ── 2006-01-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: service-tax-10-2
+    effective_from: "2006-01-01"
+    label: Pre-GST — service tax 10.2% on brokerage + transaction charges; STT 0.1% both legs
+    provenance: reconstructed
+    sources_read_on: "2026-09-08"
+    sources:
+      - "Service tax: 10% + 2% education cess = 10.20% effective, in force 2004-09-10 to
+         2006-04-17 — http://www.simpletaxindia.in/history-of-service-tax-rates/ (read
+         2026-09-08), whose table gives every rate with its effective date."
+      - "STT: Chapter VII of the Finance (No. 2) Act 2004, s.98. Delivery-based purchase and
+         delivery-based sale of an equity share were each 0.075% from 2004-10-01; the Finance Act
+         2005 substituted 0.1% with effect from 2005-06-01. Rate table and substitution footnotes:
+         https://www.taxmann.com/bookstore/bookshop/bookfiles/STTCTTELRsamplechapter.pdf"
+      - "Stamp duty (state era, both legs): Karnataka Stamp Act 1957, contract-note article — ₹1
+         for every ₹10,000 of the value of the securities, i.e. 0.01%, subject to a maximum of ₹50
+         per contract note. The ₹50 cap is confirmed by Zerodha's own charge list
+         (`ZerodhaChargeList.xls`, last saved 2012-04-24, archived at
+         web.archive.org/web/20120504125926): \"Stamp Charges — 0.01% subject to a maximum of
+         Rs 50\". Both-legs collection pre-2020-07-01:
+         https://zerodha.com/z-connect/general/uniform-stamp-duty"
+    notes: >-
+      **Where the eras come from.** Every `effective_from` in the 2006-2017 block is a statutory
+      date — a service-tax notification or a Finance Act STT substitution — never a convenience
+      boundary. The two statutory series are the only things that move across these ten schedules.
+
+      **`gst:` carries the service-tax rate here.** Before 2017-07-01 the ad-valorem tax on the fee
+      lines was service tax plus its cesses, not GST. The field is named `gst` because that is the
+      schema's name for "the ad-valorem tax on the fee lines"; the *rate* is the era's effective
+      service-tax rate and the base is the same (brokerage + transaction charges), which is what
+      Zerodha's own cards of the period state verbatim. No code branches on the name.
+
+      **What is carried back rather than sourced to this date.** The exchange transaction rates
+      (NSE 0.00325%, BSE 0.00325%) and the SEBI turnover fee (₹10/crore) are the earliest figures
+      for which a primary card was located — Zerodha's charge list captured 2014-05-04. No
+      per-exchange rate card of a 2006-2013 date was found, so they are carried back. On a ₹50,000
+      trade the whole exchange + SEBI + service-tax block is ₹1.88; the residual error there is
+      paise, while STT (₹50-63) and stamp duty (₹5 a leg) are sourced to the statute.
+
+      **Brokerage is 0, and that is a modelling choice, not a 2006 fact.** This card prices *our*
+      execution at a modern zero-brokerage broker against the statutory rates of the day. Zerodha
+      did not exist until August 2010, and its own delivery brokerage was "0.1% or ₹20 per trade,
+      whichever is lower" until free delivery arrived between 2015-10-03 and 2016-06-23 (both dates
+      are archived Zerodha cards). `brokerage_per_order` is a flat amount and cannot express a
+      min(percentage, cap) rule at all, so a pre-2016 backtest run off this card understates
+      brokerage — by up to ₹20 an order for 2010-2015, and by a full-service percentage before
+      that. Read a long-horizon result as statutory-and-exchange cost drag, not as what a 2006
+      retail investor actually paid.
+
+      **The ₹50 Karnataka stamp cap is not modelled** — `StampDuty` has no cap field. It binds
+      above ₹5,00,000 of turnover per contract note, above which this card overstates KA duty.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.001"
+      sell_rate: "0.001"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000325"
+    sebi_turnover_rate: "0.000001"
+    gst:
+      # Service tax 10% + 2% education cess. Not GST — see `notes`.
+      rate: "0.102"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: state
+      sides: [BUY, SELL]
+      state_rates:
+        KA: "0.0001"
+        MH: "0.0001"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2006-04-18 ─────────────────────────────────────────────────────────────────────────────
+  - id: service-tax-12-24
+    effective_from: "2006-04-18"
+    label: Service tax raised to 12% + 2% education cess = 12.24% effective
+    provenance: reconstructed
+    sources_read_on: "2026-09-08"
+    sources:
+      - "Service tax 12% + 2% education cess = 12.24% effective, in force 2006-04-18 to
+         2007-05-10 — http://www.simpletaxindia.in/history-of-service-tax-rates/ (read
+         2026-09-08)."
+      - "Every other line is unchanged from `service-tax-10-2`; see that schedule's sources."
+    notes: >-
+      One statutory change, one boundary. STT is still 0.1% on both legs (the Finance Act 2005
+      level); the Finance Act 2006 increase lands six weeks later, at the next schedule.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.001"
+      sell_rate: "0.001"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000325"
+    sebi_turnover_rate: "0.000001"
+    gst:
+      rate: "0.1224"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: state
+      sides: [BUY, SELL]
+      state_rates:
+        KA: "0.0001"
+        MH: "0.0001"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2006-06-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: stt-0-125-both-legs
+    effective_from: "2006-06-01"
+    label: STT on delivery raised to 0.125% on both legs (Finance Act 2006)
+    provenance: reconstructed
+    sources_read_on: "2026-09-08"
+    sources:
+      - "STT: the Finance Act 2006 substituted 0.125% for 0.1% in the s.98 table for both
+         delivery-based purchase and delivery-based sale of an equity share, with effect from
+         2006-06-01 —
+         https://www.taxmann.com/bookstore/bookshop/bookfiles/STTCTTELRsamplechapter.pdf
+         (substitution footnotes to the rate table); Finance Act 2006 explanatory notes:
+         https://taxguru.in/income-tax/finance-act-2006-explanatory-notes-provisions-relating-direct-taxes.html"
+      - "Independent confirmation that 0.125% applied to BOTH legs of a delivery trade, from a
+         broker's own card of the period: `ZerodhaChargeList.xls` (last saved 2012-04-24, archived
+         web.archive.org/web/20120504125926) reads \"STT — 0.125% on both Buy and Sell\" for
+         equity delivery."
+    notes: >-
+      This is the single most material rate in the whole 2006-2017 block: on a ₹50,000 leg it is
+      ₹63 against ₹50, and it dwarfs every other line on the note. It is therefore sourced to the
+      statute and cross-checked against a dated broker card, not carried back.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.00125"
+      sell_rate: "0.00125"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000325"
+    sebi_turnover_rate: "0.000001"
+    gst:
+      rate: "0.1224"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: state
+      sides: [BUY, SELL]
+      state_rates:
+        KA: "0.0001"
+        MH: "0.0001"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2007-05-11 ─────────────────────────────────────────────────────────────────────────────
+  - id: service-tax-12-36
+    effective_from: "2007-05-11"
+    label: Secondary & higher education cess added — service tax 12.36% effective
+    provenance: reconstructed
+    sources_read_on: "2026-09-08"
+    sources:
+      - "Service tax 12% + 2% education cess + 1% secondary and higher education cess = 12.36%
+         effective, in force 2007-05-11 to 2009-02-23 —
+         http://www.simpletaxindia.in/history-of-service-tax-rates/ (read 2026-09-08)."
+      - "The three-component form is exactly how a broker billed it: Zerodha's charge list
+         captured 2014-05-04 (web.archive.org/web/20140504002448) shows \"Service Tax 12% on
+         Brokerage+turnover charge\", \"Education Cess 2% of Service Tax\", \"Higher Education
+         Cess 1% of Service Tax\" as three lines. This card folds them into one effective rate,
+         which is arithmetically identical on the same base."
+      - "Every other line is unchanged from `stt-0-125-both-legs`."
+    notes: >-
+      This is the longest schedule in the block — 2007-05-11 to 2009-02-23 — and the one a
+      2008 backtest lands in. On a ₹50,000 leg the service-tax line is ₹0.20.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.00125"
+      sell_rate: "0.00125"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000325"
+    sebi_turnover_rate: "0.000001"
+    gst:
+      rate: "0.1236"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: state
+      sides: [BUY, SELL]
+      state_rates:
+        KA: "0.0001"
+        MH: "0.0001"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2009-02-24 ─────────────────────────────────────────────────────────────────────────────
+  - id: service-tax-10-3
+    effective_from: "2009-02-24"
+    label: Service tax cut to 10% + cesses = 10.30% effective (the post-crisis stimulus cut)
+    provenance: reconstructed
+    sources_read_on: "2026-09-08"
+    sources:
+      - "Service tax 10% + 2% education cess + 1% SHEC = 10.30% effective, in force 2009-02-24 to
+         2012-03-31 — http://www.simpletaxindia.in/history-of-service-tax-rates/ (read
+         2026-09-08)."
+      - "Every other line is unchanged from `service-tax-12-36`."
+    notes: >-
+      A rate cut, not a base change: still levied on brokerage + transaction charges. Worth ~4
+      paise on a ₹50,000 leg against the previous schedule.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.00125"
+      sell_rate: "0.00125"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000325"
+    sebi_turnover_rate: "0.000001"
+    gst:
+      rate: "0.103"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: state
+      sides: [BUY, SELL]
+      state_rates:
+        KA: "0.0001"
+        MH: "0.0001"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2012-04-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: service-tax-12-36-restored
+    effective_from: "2012-04-01"
+    label: Service tax back to 12% + cesses = 12.36% effective
+    provenance: reconstructed
+    sources_read_on: "2026-09-08"
+    sources:
+      - "Service tax 12% + 2% education cess + 1% SHEC = 12.36% effective, in force 2012-04-01 to
+         2015-05-31 — http://www.simpletaxindia.in/history-of-service-tax-rates/ (read
+         2026-09-08)."
+      - "Corroborated at both ends by dated broker cards: `ZerodhaChargeList.xls` last saved
+         2012-04-24 and the charge list captured 2014-05-04 both show 12% + 2% + 1%."
+    notes: >-
+      STT is still 0.125% here — the Finance Act 2012 cut takes effect three months later, on
+      2012-07-01, which is the next schedule.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.00125"
+      sell_rate: "0.00125"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000325"
+    sebi_turnover_rate: "0.000001"
+    gst:
+      rate: "0.1236"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: state
+      sides: [BUY, SELL]
+      state_rates:
+        KA: "0.0001"
+        MH: "0.0001"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2012-07-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: stt-delivery-cut-to-0-1
+    effective_from: "2012-07-01"
+    label: STT on delivery cut from 0.125% to 0.1%, both legs (Finance Act 2012)
+    provenance: reconstructed
+    sources_read_on: "2026-09-08"
+    sources:
+      - "Finance Act 2012 reduced STT in the cash delivery segment from 0.125% to 0.1% on both the
+         purchase and the sale leg, with effect from 2012-07-01. Finance Bill 2012 memorandum on
+         direct-tax provisions:
+         https://www.indiabudget.gov.in/budget2012-2013/ub2012-13/mem/mem1.pdf (referenced, not
+         fetched — the host answered 403 on 2026-09-08); PwC's news alert on the official
+         amendments to the Bill:
+         https://www.pwc.in/services/tax/news_alert/2012/pdf/pwc_news_alert_21_june_2012_supplementary_memorandum_on_official_amendments_moved_in_the_finance_bill_2012.pdf"
+      - "The change is independently bracketed by two dated broker cards, which is why the date is
+         trusted despite the 403: `ZerodhaChargeList.xls` (saved 2012-04-24) reads \"0.125% on
+         both Buy and Sell\"; the charge list captured 2014-05-04
+         (web.archive.org/web/20140504002448) reads \"0.1% on both Buy and Sell\". Both are the
+         broker's own equity-delivery column."
+      - "Every other line is unchanged from `service-tax-12-36-restored`."
+    notes: >-
+      Both legs, not the sell side. That distinction is worth ₹12.50 a leg on a ₹50,000 trade and
+      it is the one number in this block most likely to be mis-remembered, so it carries two
+      independent sources: the Finance Act's own memorandum for the date and the pair of dated
+      broker cards for the "both Buy and Sell" wording.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.001"
+      sell_rate: "0.001"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000325"
+    sebi_turnover_rate: "0.000001"
+    gst:
+      rate: "0.1236"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: state
+      sides: [BUY, SELL]
+      state_rates:
+        KA: "0.0001"
+        MH: "0.0001"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2015-06-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: service-tax-14
+    effective_from: "2015-06-01"
+    label: Service tax 14% flat (cesses subsumed); BSE and SEBI rates revised in this window
+    provenance: reconstructed
+    sources_read_on: "2026-09-08"
+    sources:
+      - "Service tax 14%, with the education and secondary cesses subsumed, in force 2015-06-01 to
+         2015-11-14 — http://www.simpletaxindia.in/history-of-service-tax-rates/ (read
+         2026-09-08). Confirmed on a dated card: Zerodha's charge list captured 2015-10-03
+         (web.archive.org/web/20151003070235) reads \"Service Tax — 14% on (Brokerage +
+         Transaction Charge)\" with no cess lines."
+      - "BSE transaction charge 0.00275% and SEBI turnover fee ₹20/crore: Zerodha's charge lists
+         captured 2015-01-11 (web.archive.org/web/20150111095316), 2015-04-18 and 2015-10-03 all
+         show NSE 0.00325% / BSE 0.00275% and \"SEBI Charges — 20 Rs/Crore\"."
+    notes: >-
+      Two of the three changes at this boundary are dated to the day and one is not.
+
+      The service-tax rate is the statutory boundary and is exact. The BSE transaction charge
+      (0.00325% -> 0.00275%) and the SEBI turnover fee (₹10/crore -> ₹20/crore) are *bracketed*,
+      not dated: both are at the old level on the card captured 2014-05-04 and at the new level on
+      the card captured 2015-01-11, and no notification date was established for either. They are
+      attached here rather than invented an earlier boundary for, which means a trade dated
+      2014-05-05..2015-05-31 is priced with the older figures. The error that buys is 25 paise of
+      BSE charge and 5 paise of SEBI fee on a ₹50,000 trade, and it is zero on NSE, where the rate
+      did not move.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.001"
+      sell_rate: "0.001"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000275"
+    sebi_turnover_rate: "0.000002"
+    gst:
+      rate: "0.14"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: state
+      sides: [BUY, SELL]
+      state_rates:
+        KA: "0.0001"
+        MH: "0.0001"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2015-11-15 ─────────────────────────────────────────────────────────────────────────────
+  - id: swachh-bharat-cess
+    effective_from: "2015-11-15"
+    label: Swachh Bharat Cess 0.5% added — 14.5% effective
+    provenance: reconstructed
+    sources_read_on: "2026-09-08"
+    sources:
+      - "Service tax 14% + 0.5% Swachh Bharat Cess = 14.50% effective, in force 2015-11-15 to
+         2016-05-31 — http://www.simpletaxindia.in/history-of-service-tax-rates/ (read
+         2026-09-08)."
+      - "Every other line is unchanged from `service-tax-14`."
+    notes: >-
+      A cess on the same base, so it is folded into the effective rate exactly as the cesses were
+      before 2015. Six and a half months long; worth half a paisa on a ₹50,000 leg.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.001"
+      sell_rate: "0.001"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000275"
+    sebi_turnover_rate: "0.000002"
+    gst:
+      rate: "0.145"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: state
+      sides: [BUY, SELL]
+      state_rates:
+        KA: "0.0001"
+        MH: "0.0001"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
+  # ── 2016-06-01 ─────────────────────────────────────────────────────────────────────────────
+  - id: krishi-kalyan-cess
+    effective_from: "2016-06-01"
+    label: Krishi Kalyan Cess 0.5% added — 15% effective, the last pre-GST rate
+    provenance: reconstructed
+    sources_read_on: "2026-09-08"
+    sources:
+      - "Service tax 14% + 0.5% Swachh Bharat Cess + 0.5% Krishi Kalyan Cess = 15.00% effective,
+         from 2016-06-01 until GST — http://www.simpletaxindia.in/history-of-service-tax-rates/
+         (read 2026-09-08)."
+      - "Dated to the boundary by two broker cards three weeks apart on either side of it in the
+         archive: Zerodha's charge list captured 2015-10-03 reads 14%, and the one captured
+         2016-06-23 (web.archive.org/web/20160623181049) reads \"Service Tax — 15% on (Brokerage +
+         Transaction Charge)\". The card captured 2017-03-17
+         (web.archive.org/web/20170317010757) still reads 15%, with STT \"0.1% on buy & sell\",
+         \"NSE: 0.00325% BSE: 0.00275%\", \"Sebi charges ₹20 / crore\" and \"DP charges ₹13.5 per
+         scrip\" — the fullest primary snapshot of the pre-GST card there is."
+    notes: >-
+      This is the schedule a 2016-09-01 trade lands in, which matters because 2016-09-01 is where
+      the existing L0 lake starts: before this block, the first fill of a full-span backtest raised
+      `NoRateScheduleError`.
+
+      Every line here is read off a dated primary card except the DP charge split (₹5.50 depository
+      + ₹8.00 broker), which is the current card's split reconciling to the ₹13.50 total the
+      2017-03-17 page states. Zerodha's delivery brokerage became zero somewhere between the
+      2015-10-03 card ("0.1% or Rs. 20/Trade whichever is lower") and the 2016-06-23 card ("Zero
+      Brokerage"), so `brokerage_per_order: "0"` is very likely right for this schedule and
+      certainly wrong for the earlier ones — see `service-tax-10-2`'s notes.
+    brokerage_per_order: "0"
+    stt:
+      buy_rate: "0.001"
+      sell_rate: "0.001"
+    exchange_transaction:
+      NSE: "0.0000325"
+      BSE: "0.0000275"
+    sebi_turnover_rate: "0.000002"
+    gst:
+      rate: "0.15"
+      applies_to: [brokerage, exchange_transaction]
+    stamp_duty:
+      regime: state
+      sides: [BUY, SELL]
+      state_rates:
+        KA: "0.0001"
+        MH: "0.0001"
+    dp_charge:
+      depository_fee: "5.50"
+      broker_fee: "8.00"
+      gst_applies: true
+
   # ── 2017-07-01 ─────────────────────────────────────────────────────────────────────────────
   - id: gst-era-state-stamp
     effective_from: "2017-07-01"

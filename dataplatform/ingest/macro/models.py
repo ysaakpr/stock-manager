@@ -35,11 +35,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
     "SERIES_ID_PATTERN",
+    "STORE_QUANTUM",
     "Frequency",
     "MacroFact",
     "MacroRelease",
     "Unit",
     "series_id",
+    "store_value",
 ]
 
 
@@ -72,6 +74,12 @@ class Unit(StrEnum):
     INDEX = "INDEX"
     INR_CRORE = "INR_CRORE"
     COUNT = "COUNT"
+    #: Rupees, as an exchange-rate quote: rupees per the quantity of foreign currency the
+    #: `series_id` names (`INR_PER_USD`, `INR_PER_100_JPY`) — the quantity lives in the id, never
+    #: implied, because FBIL quotes yen per 100 and rupiah per 10,000.
+    INR = "INR"
+    #: US dollars, for the World Bank aggregates published in current US$.
+    USD = "USD"
 
 
 #: A `series_id` is dotted, upper-case and hierarchical:
@@ -87,6 +95,25 @@ SERIES_ID_PATTERN: Final = re.compile(r"^[A-Z0-9]{2,}(?:\.[A-Z0-9_]{1,90}){2,5}$
 
 SeriesId = Annotated[str, Field(min_length=5, max_length=200)]
 MacroValue = Annotated[Decimal, Field(description="the published value, exact")]
+
+
+#: The store's scale (`macro_series._VALUE_TYPE` is `decimal128(38, 6)`).
+STORE_QUANTUM: Final = Decimal("0.000001")
+
+
+def store_value(text: str) -> Decimal:
+    """A published number's text as the `Decimal` the store can hold, at six places.
+
+    What it does: build the `Decimal` from the *text* (never via `float`) and round half-even to the
+    store's six places. What it assumes: digits past the sixth are a spreadsheet's or a JSON
+    encoder's binary-double residue (`172738.89553549999`, `4.94821634062732`) — no publisher in
+    the macro register states a figure to seven places. What it never does: accept a non-number;
+    `InvalidOperation` reaches the caller, who turns it into a `ParseError` naming the file.
+    """
+    value = Decimal(text.strip())
+    if not value.is_finite():
+        raise ArithmeticError(f"{text!r} is not a finite number")
+    return value.quantize(STORE_QUANTUM)
 
 
 def series_id(country: str, publisher: str, subject: str, measure: str) -> str:
@@ -181,6 +208,10 @@ class MacroRelease(BaseModel):
     source: str = Field(min_length=1)
     facts: tuple[MacroFact, ...] = Field(min_length=1)
     l0_key: str | None = None
+    withheld: tuple[str, ...] = Field(
+        default=(),
+        description="subjects the publication stated ambiguously and the parser declined to store",
+    )
 
     @model_validator(mode="after")
     def _facts_agree(self) -> MacroRelease:

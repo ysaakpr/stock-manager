@@ -47,7 +47,7 @@ from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.identity.master import Exchange, IdentityMaster, IdentityStore
 from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
-from dataplatform.ingest.bse.bhavcopy import BseLegacyQuote
+from dataplatform.ingest.bse.bhavcopy import LegacyParse, MalformedLine
 from dataplatform.ingest.calendar import (
     CalendarCoverageError,
     TradingCalendar,
@@ -59,7 +59,7 @@ from dataplatform.ingest.fetcher import (
     ForbiddenSpikeError,
     build_fetcher,
 )
-from dataplatform.ingest.models import BhavcopyParse, ParseError, PriceRow
+from dataplatform.ingest.models import BhavcopyParse, ParseError, PriceRow, UnidentifiedRow
 from dataplatform.ingest.nse import bhavcopy, delivery, mto
 from dataplatform.ingest.nse.bhavcopy_legacy import LEGACY_SOURCE_ID
 from dataplatform.ingest.nse.bhavcopy_udiff import UDIFF_SOURCE_ID
@@ -71,6 +71,7 @@ from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Ref, L0Store
 from dataplatform.store.l1 import write_prices_raw
+from dataplatform.store.schemas import PriceQuarantineReason
 
 __all__ = [
     "SOURCE_SETS",
@@ -313,14 +314,34 @@ def _bse_legacy_request(trade_date: date, register: SourceRegister) -> FetchRequ
     )
 
 
-def _parse_bse_legacy(store: L0Store, ref: L0Ref) -> tuple[BseLegacyQuote, ...]:
-    """Parse one stored legacy payload. The trade date comes from the ref — the file has none."""
-    return bse_bhavcopy.parse_legacy(
+def _parse_bse_legacy(store: L0Store, ref: L0Ref) -> LegacyParse:
+    """Parse one stored legacy payload. The trade date comes from the ref — the file has none.
+
+    The report form, so a line the parser quarantined (two records run together that could not be
+    split unambiguously) reaches the writer and lands in `prices_raw_quarantine`.
+    """
+    return bse_bhavcopy.parse_legacy_report(
         store.get(ref), filename=ref.filename, trade_date=ref.logical_date
     )
 
 
-def _write_bse_legacy(quotes: Sequence[BseLegacyQuote], ctx: WriteContext) -> object:
+def _quarantine_row(malformed: MalformedLine, trade_date: date) -> UnidentifiedRow:
+    """A quarantined legacy line as the quarantine dataset's identity-less row.
+
+    `symbol`/`series` are the line's first and third fields as published — the scrip code and group
+    of its first record. Both are required non-empty by the dataset, and a line malformed enough to
+    lack them is still landed, under a placeholder naming the line, rather than dropped.
+    """
+    return UnidentifiedRow(
+        symbol=malformed.scrip_code or f"line:{malformed.line}",
+        series=malformed.group or "?",
+        trade_date=trade_date,
+        stated_isin="",
+        line=malformed.line,
+    )
+
+
+def _write_bse_legacy(parsed: LegacyParse, ctx: WriteContext) -> object:
     """Resolve a legacy session through the BSE scrip master and write its `prices_raw` partition.
 
     The whole reason this set declares `needs_master`: a legacy row is keyed on `SC_CODE` and has
@@ -332,10 +353,47 @@ def _write_bse_legacy(quotes: Sequence[BseLegacyQuote], ctx: WriteContext) -> ob
     """
     if ctx.master is None:  # pragma: no cover - the runner refuses to wire this set without one
         raise ValueError(f"{BSE_BHAVCOPY_LEGACY} needs the identity master to resolve scrip codes")
-    resolution = bse_bhavcopy.resolve_legacy(quotes, build_scrip_index(ctx.master, Exchange.BSE))
-    return write_prices_raw(
-        list(resolution.resolved), exchange=Exchange.BSE, data_root=ctx.data_root
+    resolution = bse_bhavcopy.resolve_legacy(
+        parsed.quotes, build_scrip_index(ctx.master, Exchange.BSE)
     )
+    trade_date = parsed.quotes[0].trade_date
+    return write_prices_raw(
+        list(resolution.resolved),
+        exchange=Exchange.BSE,
+        reasoned_rows=[
+            *((_quarantine_row(line, trade_date), line.reason) for line in parsed.quarantined),
+            *(
+                (row, PriceQuarantineReason.SCRIP_UNRESOLVED)
+                for row in _unresolved_rows(parsed.quotes, resolution.unresolved)
+            ),
+        ],
+        data_root=ctx.data_root,
+    )
+
+
+def _unresolved_rows(
+    quotes: Sequence[bse_bhavcopy.BseLegacyQuote],
+    unresolved: Sequence[bse_bhavcopy.BseLegacyQuote],
+) -> list[UnidentifiedRow]:
+    """The quotes the scrip master could not resolve, as quarantine rows — counted, never dropped.
+
+    Until 2026-10-06 `resolve_legacy`'s `unresolved` was logged (first 20 codes) and discarded
+    here, so a decade of BSE rows vanished without a count (RAW_DATA_CATALOG B1, defect (b)). The
+    pre-2016 deep backfill makes that loss far larger — delisted scrips carry `NA` for an ISIN —
+    so it is enumerated. `line` is the quote's 1-based ordinal + 1 for the header: the file line
+    exactly, except after a merged line the parser split in two.
+    """
+    ordinal = {id(quote): index for index, quote in enumerate(quotes, start=2)}
+    return [
+        UnidentifiedRow(
+            symbol=quote.scrip_code,
+            series=quote.group or "?",
+            trade_date=quote.trade_date,
+            stated_isin="",
+            line=ordinal[id(quote)],
+        )
+        for quote in unresolved
+    ]
 
 
 # ── nse_delivery source set ──────────────────────────────────────────────────────────────────
@@ -647,9 +705,7 @@ class BackfillRunner:
         )
         try:
             self._sync.begin(source, day)
-            ref = self._fetcher.fetch(
-                request.fetch_source, request.url, day, filename=request.filename
-            )
+            ref = self._stored_or_fetched(request)
             self._sync.mark_fetched(source, day, checksum=ref.sha256, l0_path=ref.key)
 
             rows = self._set.parse(self._l0, ref)
@@ -678,6 +734,30 @@ class BackfillRunner:
             self._fail(request, f"parse failed: {exc}", retryable=True, report=report)
         except Exception as exc:  # fetch/write/DB — recorded, not swallowed; the run continues
             self._fail(request, f"{type(exc).__name__}: {exc}", retryable=True, report=report)
+
+    def _stored_or_fetched(self, request: FetchRequest) -> L0Ref:
+        """The session's payload from L0 when the lake already holds it, else from the archive.
+
+        L0 is immutable, so a stored key *is* the bytes a fetch would land — re-requesting them
+        spends budget for nothing, and for a payload the archive re-serves with a fresh zip
+        timestamp it would raise `L0ImmutabilityError` and fail a session whose bytes we hold. This
+        is what lets an L0-only catch-up (`l0_acquire`) be derived into L1 later with zero requests
+        (BACKLOG M3.1). The ref's checksum is re-verified when the parser reads it back.
+        """
+        day = request.trade_date
+        if self._l0.exists(request.fetch_source, day, request.filename):
+            ref = self._l0.ref_for(request.fetch_source, day, request.filename)
+            _LOG.info(
+                "backfill.l0_reused",
+                source=request.state_source,
+                date=day.isoformat(),
+                l0_key=ref.key,
+                state="FETCHED",
+            )
+            return ref
+        return self._fetcher.fetch(
+            request.fetch_source, request.url, day, filename=request.filename
+        )
 
     def _fail(
         self, request: FetchRequest, message: str, *, retryable: bool, report: BackfillReport

@@ -1,0 +1,537 @@
+# Curated, sourced terms for amalgamations and cash-exit delistings that leave a held name with no
+# successor in the corporate_actions store (every stored MERGER row is UnquantifiedTerms and none
+# names its transferee). Read by dataplatform.corpactions.merger_terms; applied to the backtest
+# *book* only, by backtest.book_actions.
+#
+# Rules for a row (enforced by the loader and tests/unit/test_merger_terms.py):
+#   * Every number is transcribed from the source quoted beside it. Nothing here is derived, and
+#     nothing is remembered: a term no source states stays in `unsourced` with the reason.
+#   * `knowable_date` is the dissemination date of the earliest source in L0 that states the
+#     term, never the date this file was written.
+#   * `record_date` (share swap) is the scheme's record date as the source states it; the book
+#     applies the conversion then, or on the survivor's first priced session if that is later.
+#   * `effective_date` (cash exit) is the date of delisting, which opens the exit window at the
+#     stated exit price.
+#   * Shares: `shares_received` of the surviving company for every `shares_held` of the old one,
+#     in the source's own order (old -> new). Surviving ISINs are the company's current ISIN in the
+#     D2 identity master; the book resolves the ISIN that was live on the record date through the
+#     lineage chain (Grasim, Kotak and Tech Mahindra were reissued since).
+#   * `sources[].l0_key` is the L0 object; `member`/`line` locate the text inside a PR bundle.
+#     `line` is 1-BASED (`sed -n '<line>p'` prints it); `line_end` (inclusive) is set only where
+#     the source hard-wraps the quoted sentence across lines. `...` in a quote is an elision;
+#     every fragment between them is verbatim on those lines (tests/unit/test_merger_terms.py).
+#   * A source with no `member` is a document (PDF, or a ZIP of PDFs); its quote is checked against
+#     the document's text layer (tests/unit/test_merger_terms_round2.py) unless `scanned: true`
+#     marks a page image transcribed by reading it.
+#   * `cash_legs` (share swaps only): a non-share leg of the consideration - units of an instrument
+#     the book cannot hold, per old share, at the face or redemption value a source states. The
+#     book credits it as cash on the swap date. A leg with no sourced value leaves the scheme
+#     unsourced.
+
+share_swaps:
+  - old_isin: INE894F01025
+    old_company: Indiabulls Financial Services Ltd
+    surviving_isin: INE148I01020
+    surviving_company: Indiabulls Housing Finance Ltd
+    shares_received: 1
+    shares_held: 1
+    record_date: 2013-03-20
+    knowable_date: 2013-03-11
+    sources:
+      - l0_key: nse_pr_bundle/2013/03/PR110313.zip
+        member: An110313.txt
+        line: 549
+        quote: >-
+          fixed March 20, 2013, as the Record Date ... equity shares in the ratio of 1 (one)
+          equity share of face value Rs. 2 ... in IHFL for every 1 (one) equity share of face
+          value Rs. 2 ... held by such shareholder in IBFSL
+
+  - old_isin: INE275A01028
+    old_company: Satyam Computer Services Ltd (Mahindra Satyam)
+    surviving_isin: INE669C01036
+    surviving_company: Tech Mahindra Ltd
+    shares_received: 2
+    shares_held: 17
+    record_date: 2013-07-05
+    knowable_date: 2013-07-08
+    note: >-
+      L0's earliest statement of the ratio is the allotment notice, three days after the record
+      date (the record date itself was announced 2013-06-26, PR260613.zip An260613.txt:842).
+    sources:
+      - l0_key: nse_pr_bundle/2013/07/PR080713.zip
+        member: An080713.txt
+        line: 34
+        quote: >-
+          Record date i.e. July 05, 2013 ... approved swap ratio i.e. 2 equity Shares of Rs. 10/-
+          each fully paid up in respect of 17 equity shares of Rs. 2/- each fully paid up of
+          Mahindra Satyam
+
+  - old_isin: INE015A01028
+    old_company: Ranbaxy Laboratories Ltd
+    surviving_isin: INE044A01036
+    surviving_company: Sun Pharmaceutical Industries Ltd
+    shares_received: 8
+    shares_held: 10
+    record_date: 2015-04-07
+    knowable_date: 2015-03-25
+    sources:
+      - l0_key: nse_pr_bundle/2015/03/PR250315.zip
+        member: An250315.txt
+        line: 2394
+        quote: >-
+          fixed Record Date as April 7, 2015 ... entitled to receive 8 ( eight) equity shares of
+          Re.1 each of the Company for every 10 (ten) equity shares of Rs.5 each of erstwhile
+          Ranbaxy held
+
+  - old_isin: INE166A01011
+    old_company: ING Vysya Bank Ltd
+    surviving_isin: INE237A01036
+    surviving_company: Kotak Mahindra Bank Ltd
+    shares_received: 725
+    shares_held: 1000
+    record_date: 2015-04-17
+    knowable_date: 2015-04-07
+    sources:
+      - l0_key: nse_pr_bundle/2015/04/PR070415.zip
+        member: An070415.txt
+        line: 1077
+        quote: >-
+          fixed Record Date as April 17, 2015 ... in the ratio of 725 equity shares of Rs. 5/-
+          each in the transferee Bank i.e. Kotak Mahindra Bank Limited for every 1000 equity
+          shares of Rs. 10/- each held in transferor Bank i.e. ING Vysya Bank Limited
+
+  - old_isin: INE317A01028
+    old_company: Shasun Pharmaceuticals Ltd
+    surviving_isin: INE939A01011
+    surviving_company: Strides Arcolab Ltd (now Strides Pharma Science, NSE STAR)
+    shares_received: 5
+    shares_held: 16
+    record_date: 2015-11-19
+    knowable_date: 2015-11-09
+    sources:
+      - l0_key: nse_pr_bundle/2015/11/PR091115.zip
+        member: An091115.txt
+        line: 606
+        quote: >-
+          fixed Record Date as November 19, 2015 ... in the exchange ratio of 5 (five) equity
+          shares of Rs. 10/- each of Strides for every 16 (sixteen) equity shares of Rs. 2/- each
+          held in the Shasun Pharmaceuticals Limited
+
+  - old_isin: INE069A01017
+    old_company: Aditya Birla Nuvo Ltd
+    surviving_isin: INE047A01021
+    surviving_company: Grasim Industries Ltd
+    shares_received: 15
+    shares_held: 10
+    record_date: 2017-07-06
+    knowable_date: 2017-06-21
+    sources:
+      - l0_key: nse_pr_bundle/2017/06/PR210617.zip
+        member: An210617.txt
+        line: 357
+        quote: >-
+          fixed Record Date as July 6, 2017 ... fully paid up equity shares of Rs.2 each ... of
+          Grasim in the ratio of 15 (fifteen) equity shares of Grasim ... for every 10 (ten)
+          equity shares of Rs.10 each ... held by the equity shareholders in the Company
+
+  - old_isin: INE688I01017
+    old_company: Capital First Ltd
+    surviving_isin: INE092T01019
+    surviving_company: IDFC Bank Ltd (now IDFC First Bank)
+    shares_received: 139
+    shares_held: 10
+    record_date: 2018-12-31
+    knowable_date: 2018-12-19
+    sources:
+      - l0_key: nse_pr_bundle/2018/12/PR191218.zip
+        member: An191218.txt
+        line: 3194
+        line_end: 3197
+        quote: >-
+          IDFC Bank has fixed, Monday, December 31, 2018 as the Record Date ... 139 Equity Shares
+          of Rs. 10 each of IDFC Bank, fully paid-up, for every 10 Equity Shares of Rs. 10 each,
+          fully paid-up, held by such member in Capital First Limited
+
+  - old_isin: INE180K01011
+    old_company: Bharat Financial Inclusion Ltd
+    surviving_isin: INE095A01012
+    surviving_company: IndusInd Bank Ltd
+    shares_received: 639
+    shares_held: 1000
+    record_date: 2019-07-04
+    knowable_date: 2019-06-21
+    sources:
+      - l0_key: nse_announcement_attachment/2019/06/listcontract1_21062019110958_INDUSINDBK_045.pdf
+        url: https://nsearchives.nseindia.com/corporate/listcontract1_21062019110958_INDUSINDBK_045.pdf
+        scanned: true
+        quote: >-
+          Thursday, July 4, 2019 has also been fixed as the Record Date ... 639 (six hundred and
+          thirty nine) equity shares of the Bank ... for every 1,000 (one thousand) equity shares
+          of the face value of INR 10 ... held by such member in BFIL (scanned letter; OCR text)
+
+  - old_isin: INE264A01014
+    old_company: GlaxoSmithKline Consumer Healthcare Ltd
+    surviving_isin: INE030A01027
+    surviving_company: Hindustan Unilever Ltd
+    shares_received: 439
+    shares_held: 100
+    record_date: 2020-04-17
+    knowable_date: 2020-04-01
+    sources:
+      - l0_key: nse_announcement_attachment/2020/04/GSKCONS_01042020122800_GSKRECORDDATE.pdf
+        url: https://nsearchives.nseindia.com/corporate/GSKCONS_01042020122800_GSKRECORDDATE.pdf
+        quote: >-
+          will be issued and allotted 4.39 (four decimal three nine) equity shares of the
+          Transferee Company having a face value INR 1 ... for every 1 (one) equity share of the
+          Transferor Company having a face value INR 10 ... fixed the Record Date as April 17, 2020
+
+  - old_isin: INE572A01036
+    old_company: J. B. Chemicals & Pharmaceuticals Ltd
+    surviving_isin: INE685A01028
+    surviving_company: Torrent Pharmaceuticals Ltd
+    shares_received: 51
+    shares_held: 100
+    record_date: 2026-07-17
+    knowable_date: 2026-07-07
+    sources:
+      - l0_key: nse_announcement_attachment/2026/07/TORNTPHARM_07072026195823_Record_date.pdf
+        url: https://nsearchives.nseindia.com/corporate/TORNTPHARM_07072026195823_Record_date.pdf
+        quote: >-
+          fixed Friday, 17th July, 2026, as the Record Date ... share exchange ratio set out in
+          the Scheme i.e. 51 fully paid-up equity shares of Torrent Pharma having face value of
+          Rs. 5 each for every 100 fully paid-up equity shares of Re. 1 each in JB Chemicals
+
+  # ── round 2 (sourced 2026-10-06) ─────────────────────────────────────────────────────────────
+
+  - old_isin: INE850A01010
+    old_company: Mahindra Ugine Steel Co Ltd
+    surviving_isin: INE536H01010
+    surviving_company: Mahindra CIE Automotive Ltd (now CIE Automotive India, NSE CIEINDIA)
+    shares_received: 284
+    shares_held: 100
+    record_date: 2014-12-24
+    knowable_date: 2014-12-15
+    sources:
+      - l0_key: nse_announcement_attachment/2014/12/MahUg_12152014185202_2.zip
+        url: https://nsearchives.nseindia.com/corporate/MahUg_12152014185202_2.zip
+        scanned: true
+        quote: >-
+          284 equity shares of the face value of INR 10 each (credited as fully paid up) of the
+          Company for every 100 equity shares of the face value of INR 10 each (credited as fully
+          paid-up) held by each shareholder in MUSCO
+      - l0_key: nse_pr_bundle/2014/12/PR161214.zip
+        member: An161214.txt
+        line: 2431
+        quote: >-
+          December 24, 2014 has been fixed as the record date for identifying the shareholders of
+          Mahindra Hinoday Industries Limited ("MHIL"), Mahindra Ugine Steel Company Limited
+          ("MUSCO")
+
+  - old_isin: INE605A01026
+    old_company: Pricol Ltd
+    surviving_isin: INE726V01018
+    surviving_company: Pricol Ltd (formerly Pricol Pune Ltd)
+    shares_received: 1
+    shares_held: 1
+    record_date: 2016-12-06
+    knowable_date: 2016-11-23
+    sources:
+      - l0_key: nse_announcement_attachment/2016/11/PRICOL_RD.zip
+        url: https://nsearchives.nseindia.com/corporate/PRICOL_RD.zip
+        scanned: true
+        quote: >-
+          fixed Tuesday, 6th December 2016 as the Record Date ... 1 (One) fully paid up equity
+          shares of Re 1 (One) each of Pricol Limited (formerly known as Pricol Pune Limited) for
+          every 1 (One) fully paid equity share of Re 1 (One) each held by such shareholder in
+          erstwhile Pricol Limited
+
+  - old_isin: INE910H01017
+    old_company: Cairn India Ltd
+    surviving_isin: INE205A01025
+    surviving_company: Vedanta Ltd
+    shares_received: 1
+    shares_held: 1
+    record_date: 2017-04-27
+    knowable_date: 2016-07-22
+    note: >-
+      The revised and final terms (2016-07-22) replace the 2015 announcement's one preference
+      share (PR150615.zip An150615.txt:99) with four. The equity leg is a 1:1 swap; the four
+      Vedanta 7.5% redeemable preference shares are carried as cash at their stated face value
+      (see cash_legs). They were in fact listed (INE205A04011) and redeemed on a record date of
+      2018-10-22 (PR081018.zip An081018.txt:3730); crediting the face value on the swap date
+      forgoes their 7.5% coupon and moves the cash eighteen months early. The Rs 17.70 interim
+      dividend Vedanta paid Cairn holders on the record date (An130417.txt:2776) is not modelled.
+    sources:
+      - l0_key: nse_announcement_attachment/2016/07/CAIRN_22072016180406.zip
+        url: https://nsearchives.nseindia.com/corporate/CAIRN_22072016180406.zip
+        quote: >-
+          each Cairn India minority shareholder will receive for each equity share held: - 1
+          equity share in Vedanta Limited; and - 4 Redeemable Preference Shares with a face value
+          of INR 10 in Vedanta Limited
+      - l0_key: nse_pr_bundle/2017/04/PR130417.zip
+        member: An130417.txt
+        line: 2776
+        quote: >-
+          fixed Record Date as April 27, 2017 for the purpose of determining the list of the
+          shareholders of the Cairn India Limited to whom the equity and preference shares of
+          Vedanta will be allotted
+    cash_legs:
+      - instrument: Vedanta Ltd 7.5% redeemable preference share (INE205A04011)
+        units_received: 4
+        units_held: 1
+        value_inr: "10"
+        value_basis: face value, redeemable at face for cash
+        sources:
+          - l0_key: nse_announcement_attachment/2016/07/CAIRN_22072016180406.zip
+            url: https://nsearchives.nseindia.com/corporate/CAIRN_22072016180406.zip
+            quote: >-
+              4 Redeemable Preference Shares with a face value of INR 10 in Vedanta Limited, with
+              a coupon of 7.5% and tenure of 18 months from issuance
+          - l0_key: nse_pr_bundle/2015/06/PR150615.zip
+            member: An150615.txt
+            line: 104
+            quote: c) Redeemable at face value of INR 10 per share for cash at the end of the tenure
+
+  - old_isin: INE824B01021
+    old_company: Tata Steel BSL Ltd
+    surviving_isin: INE081A01020
+    surviving_company: Tata Steel Ltd
+    shares_received: 1
+    shares_held: 15
+    record_date: 2021-11-16
+    knowable_date: 2021-11-02
+    sources:
+      - l0_key: nse_announcement_attachment/2021/11/TATASTLBSL_02112021215543_TSBSL_Reg42_IntimationofRecordDatevr.pdf
+        url: https://nsearchives.nseindia.com/corporate/TATASTLBSL_02112021215543_TSBSL_Reg42_IntimationofRecordDatevr.pdf
+        quote: >-
+          Approved Tuesday, November 16, 2021 as the Record Date ... 1 (one) fully paid-up equity
+          share of ₹10/- (Rupees Ten) each of Tata Steel Limited, for every 15 (fifteen) equity
+          shares of the face value of ₹2/- (Rupees Two) each held by such member in the Company
+
+  - old_isin: INE988K01017
+    old_company: Equitas Holdings Ltd
+    surviving_isin: INE063P01018
+    surviving_company: Equitas Small Finance Bank Ltd
+    shares_received: 231
+    shares_held: 100
+    record_date: 2023-02-03
+    knowable_date: 2023-01-17
+    sources:
+      - l0_key: nse_announcement_attachment/2023/01/EQUITASBNK_17012023082705_17012022.pdf
+        url: https://nsearchives.nseindia.com/corporate/EQUITASBNK_17012023082705_17012022.pdf
+        quote: >-
+          231 shares of Transferee Company to be issued to the Shareholders holding 100 shares in
+          the Transferor Company. (all Rs 10 fully paid-up)
+      - l0_key: nse_pr_bundle/2023/01/PR200123.zip
+        member: An200123.txt
+        line: 911
+        quote: >-
+          Record date for the purpose of Allotment of equity shares in pursuance of the approved
+          Scheme of Amalgamation is 03-Feb-2023
+
+  - old_isin: INE312H01016
+    old_company: INOX Leisure Ltd
+    surviving_isin: INE191H01014
+    surviving_company: PVR Ltd (now PVR INOX)
+    shares_received: 3
+    shares_held: 10
+    record_date: 2023-02-17
+    knowable_date: 2022-03-27
+    sources:
+      - l0_key: nse_announcement_attachment/2022/03/INOXLEISUR_27032022150059_Regn_30_ILL_27032022.pdf
+        url: https://nsearchives.nseindia.com/corporate/INOXLEISUR_27032022150059_Regn_30_ILL_27032022.pdf
+        quote: >-
+          3 (Three) equity shares of INR 10 (Indian Rupees Ten) each of the Transferee Company,
+          credited as fully paid up, for every 10 (Ten) equity share of INR 10 (Indian Rupees Ten)
+          each of the Transferor Company
+      - l0_key: nse_pr_bundle/2023/02/PR070223.zip
+        member: An070223.txt
+        line: 351
+        quote: Record date for the purpose of Merger/HiveOff is 17-Feb-2023
+
+  - old_isin: IN9155A01020
+    old_company: Tata Motors Ltd 'A' Ordinary (DVR)
+    surviving_isin: INE155A01022
+    surviving_company: Tata Motors Ltd ordinary (now Tata Motors Passenger Vehicles, NSE TMPV)
+    shares_received: 7
+    shares_held: 10
+    record_date: 2024-09-01
+    knowable_date: 2024-08-19
+    sources:
+      - l0_key: nse_announcement_attachment/2024/08/TATAMTRDVR_19082024190721_LetterNSEBSErecorddatefinal.pdf
+        url: https://nsearchives.nseindia.com/corporate/TATAMTRDVR_19082024190721_LetterNSEBSErecorddatefinal.pdf
+        quote: >-
+          shall issue 7 (seven) fully paid up New Ordin ary Shares of the face value of ₹ 2 each
+          for every 10 (ten) ‘A’ Ordinary Shares of the face value of ₹2 each ... fixed Sunday,
+          September 1, 2024 as the ‘Record Date’
+
+  - old_isin: INE763G01038
+    old_company: ICICI Securities Ltd
+    surviving_isin: INE090A01021
+    surviving_company: ICICI Bank Ltd
+    shares_received: 67
+    shares_held: 100
+    record_date: 2025-03-24
+    knowable_date: 2023-06-29
+    sources:
+      - l0_key: nse_announcement_attachment/2023/06/ISEC_29062023144621_Outcomeofboardmeeting.pdf
+        url: https://nsearchives.nseindia.com/corporate/ISEC_29062023144621_Outcomeofboardmeeting.pdf
+        quote: >-
+          the public shareholders of the Company would be allotted 67 equity shares of ICICI Bank
+          for every 100 equity shares of the Company ("Share Exchange Ratio")
+      - l0_key: nse_announcement_attachment/2025/03/ISECINDIA_11032025111832_Recordateintimation.pdf
+        url: https://nsearchives.nseindia.com/corporate/ISECINDIA_11032025111832_Recordateintimation.pdf
+        quote: >-
+          approved Monday, March 24, 2025 as the ‘Record Date’ for the purpose of determining the
+          Public Shareholders of the Company whose Equity Shares will stand cancelled
+
+  - old_isin: INE140A01024
+    old_company: Piramal Enterprises Ltd
+    surviving_isin: INE202B01038
+    surviving_company: Piramal Finance Ltd (formerly Piramal Capital & Housing Finance, PCHFL)
+    shares_received: 1
+    shares_held: 1
+    record_date: 2025-09-23
+    knowable_date: 2024-05-08
+    note: >-
+      The equity leg is a 1:1 swap. The scheme also allots one non-convertible redeemable
+      preference share (NCRPS) of face value INR 67 per PEL share; it is carried as cash at that
+      stated face value (cash_legs). No source in L0 states its coupon, tenure or redemption
+      value, so the face value is the only sourced figure and the timing is the record date's.
+    sources:
+      - l0_key: nse_announcement_attachment/2024/05/PEL_08052024155953_PEL_Reg30_Scheme_signed08052024.pdf
+        url: https://nsearchives.nseindia.com/corporate/PEL_08052024155953_PEL_Reg30_Scheme_signed08052024.pdf
+        quote: >-
+          For every 1 (one) equity share having face value of INR 2 (Indian Rupees Two only) of
+          PEL , 1 (one) equity share having face value of INR 2 (Indian Rupees Two only) of PCHFL
+          shall be allotted to the shareholders of PEL
+      - l0_key: nse_announcement_attachment/2025/09/PEL_11092025155158_PEL_SE_Intimation_sd.pdf
+        url: https://nsearchives.nseindia.com/corporate/PEL_11092025155158_PEL_SE_Intimation_sd.pdf
+        quote: >-
+          Piramal Finance Limited (Formerly known as Piramal Capital & Housing Finance Limited)
+          ... fixed 23 th September 2025, as the Record Date
+    cash_legs:
+      - instrument: Piramal Finance Ltd non-convertible redeemable preference share (NCRPS)
+        units_received: 1
+        units_held: 1
+        value_inr: "67"
+        value_basis: face value (coupon, tenure and redemption terms unsourced)
+        sources:
+          - l0_key: nse_announcement_attachment/2024/05/PEL_08052024155953_PEL_Reg30_Scheme_signed08052024.pdf
+            url: https://nsearchives.nseindia.com/corporate/PEL_08052024155953_PEL_Reg30_Scheme_signed08052024.pdf
+            quote: >-
+              for every 1 (one) equity share having face value of INR 2 (Indian Rupees Two only)
+              of PEL, 1 (one) NCRPS having face value of INR 67 (Indian Rupees Sixty Seven only)
+              of PCHFL shall be allotted to the shareholders of PEL
+
+  - old_isin: INE274G01010
+    old_company: Dhani Services Ltd
+    surviving_isin: INE126M01010
+    surviving_company: Yaari Digital Integrated Services Ltd (NSE YAARI, now Indiabulls Ltd)
+    shares_received: 294
+    shares_held: 100
+    record_date: 2025-10-28
+    knowable_date: 2025-10-14
+    note: >-
+      Yaari's ISIN is the one the D2 identity master carries for NSE symbol YAARI (symbol history
+      from nse_symbol_changes: YAARI until 2025-11-09, then IBULLSLTD).
+    sources:
+      - l0_key: nse_announcement_attachment/2025/10/DHANI_14102025184822_DSL_Intimation_Scheme_effectiveness_and_Record_Date_14102025.pdf
+        url: https://nsearchives.nseindia.com/corporate/DHANI_14102025184822_DSL_Intimation_Scheme_effectiveness_and_Record_Date_14102025.pdf
+        quote: >-
+          Tuesday, October 28, 2025 as the Record Date ... “294 equity shares of Yaari of INR 2/ -
+          each fully paid-up for every 100 equity shares of DSL of INR 2/- each fully paid-up.”
+
+  - old_isin: IN9274G01034
+    old_company: Dhani Services Ltd (partly paid)
+    surviving_isin: INE126M01010
+    surviving_company: Yaari Digital Integrated Services Ltd (NSE YAARI, now Indiabulls Ltd)
+    shares_received: 162
+    shares_held: 100
+    record_date: 2025-10-28
+    knowable_date: 2025-10-14
+    sources:
+      - l0_key: nse_announcement_attachment/2025/10/DHANI_14102025184822_DSL_Intimation_Scheme_effectiveness_and_Record_Date_14102025.pdf
+        url: https://nsearchives.nseindia.com/corporate/DHANI_14102025184822_DSL_Intimation_Scheme_effectiveness_and_Record_Date_14102025.pdf
+        quote: >-
+          “162 equity shares of Yaari of INR 2/ - each fully paid-up for every 100 equity shares
+          of DSL of INR 2/- each partly paid-up.
+
+  - old_isin: INE558B01017
+    old_company: Mangalore Chemicals & Fertilisers Ltd
+    surviving_isin: INE088F01024
+    surviving_company: Paradeep Phosphates Ltd
+    shares_received: 187
+    shares_held: 100
+    record_date: 2025-10-31
+    knowable_date: 2025-10-16
+    sources:
+      - l0_key: nse_announcement_attachment/2025/10/MANGCHEFER_16102025170916_MCFLoutcome16102025DSC.pdf
+        url: https://nsearchives.nseindia.com/corporate/MANGCHEFER_16102025170916_MCFLoutcome16102025DSC.pdf
+        quote: >-
+          187 fully paid-up equity shares of INR 10/- each of the Transferee Company are to be
+          issued and allotted for every 100 fully paid-up equity shares of INR 10/- each of the
+          Transferor Company
+
+cash_exits:
+  - old_isin: INE011A01019
+    old_company: Essar Oil Ltd
+    exit_price_inr: "262.80"
+    effective_date: 2016-02-17
+    knowable_date: 2016-02-16
+    sources:
+      - l0_key: nse_announcement_attachment/2016/02/Exit-offer-letter-SEs-transfer-form-filed1_16022016174917_265.zip
+        url: https://nsearchives.nseindia.com/corporate/Exit-offer-letter-SEs-transfer-form-filed1_16022016174917_265.zip
+        quote: >-
+          EXIT PRICE: RS. 262.80/- PER EQUITY SHARE ... WILL BE DELISTED ... WITH EFFECT FROM
+          FEBRUARY 17, 2016 ... Exit Price at any time from February 17, 2016 till February 16,
+          2017
+
+  - old_isin: INE093A01033
+    old_company: Hexaware Technologies Ltd
+    exit_price_inr: "475"
+    effective_date: 2020-11-09
+    knowable_date: 2020-11-06
+    sources:
+      - l0_key: nse_announcement_attachment/2020/11/HEXAWARE_06112020174218_CopyofExitLetterOfOffertoResidualShareholders.pdf
+        url: https://nsearchives.nseindia.com/corporate/HEXAWARE_06112020174218_CopyofExitLetterOfOffertoResidualShareholders.pdf
+        quote: >-
+          EXIT PRICE: Rs. 475/- per Equity Share ... delisted from the Stock Exchanges with
+          effect from November 9, 2020 ... Exit Price at any time from November 9, 2020 till
+          November 8, 2021
+
+  - old_isin: INE456C01020
+    old_company: DFM Foods Ltd
+    exit_price_inr: "467"
+    effective_date: 2023-04-05
+    knowable_date: 2023-04-04
+    sources:
+      - l0_key: nse_announcement_attachment/2023/04/DFMFOODS_04042023182821_ExitLetterofOffer.pdf
+        url: https://nsearchives.nseindia.com/corporate/DFMFOODS_04042023182821_ExitLetterofOffer.pdf
+        quote: >-
+          EXIT PRICE: Rs. 467/- per Equity Share ... delisted from the Stock Exchanges with
+          effect from April 5, 2023 ... Exit Price at any time from April 5, 2023 till April 4,
+          2024
+
+  - old_isin: INE763A01023
+    old_company: Polaris Consulting & Services Ltd
+    exit_price_inr: "480"
+    effective_date: 2018-08-01
+    knowable_date: 2018-07-12
+    sources:
+      - l0_key: nse_announcement_attachment/2018/07/exitofferltrtoSE_12072018142936_407.zip
+        url: https://nsearchives.nseindia.com/corporate/exitofferltrtoSE_12072018142936_407.zip
+        scanned: true
+        quote: >-
+          shall be withdrawn (delisted) from NSE with effect from August 1, 2018 ... will be able
+          to tender their Equity Shares to the Acquirer at Rs. 480/- per Equity Share ("Exit
+          Price") for a period of one year from the Date of Delisting to July 31, 2019
+
+# Held names that stopped printing in a run on main (cap-tiers-ccd61f1, the 43bbb57 chain), whose
+# terms are NOT sourced. They stay at their last printed close, and the book names them when held.
+unsourced:
+  - {old_isin: INE479E01028, old_company: Chemfab Alkalies Ltd, kind: share_swap, record_date: 2017-05-26, reason: "10 Teamec Chlorates (Rs 10) for every 7 Chemfab (PR180517.zip An180517.txt:238; RD_464.zip, the Teamec letter) but no source names the ISIN Teamec's shares listed under; INE783X01023 (NSE CHEMFAB, listed 2018-04-25) is the likely survivor and stays unproven"}
+  - {old_isin: INE018B01012, old_company: Upper Ganges Sugar & Industries Ltd, kind: composite_scheme, record_date: 2017-03-25, reason: "composite scheme with several transferees; per-transferee ratios not stated in L0, and the book carries one survivor per scheme"}
+  - {old_isin: INE594A01014, old_company: Oudh Sugar Mills Ltd, kind: composite_scheme, record_date: 2017-03-25, reason: "composite scheme with several transferees (PR160317.zip An160317.txt:2588); per-transferee ratios not stated in L0, and the book carries one survivor per scheme"}
+  - {old_isin: INE974H01013, old_company: Meghmani Organics Ltd, kind: composite_scheme, record_date: 2021-05-19, reason: "amalgamation into Meghmani Organochem plus a demerger into Meghmani Finechem: two listed survivors, which the book cannot carry; terms not stated in L0"}
+  - {old_isin: INE797A01021, old_company: Geometric Ltd, kind: share_swap_plus_unlisted, record_date: 2017-03-15, reason: "HCL Technologies shares plus 3DPLM Software (unlisted) shares; the unlisted leg has no price or sourced cash value, and the ratios are not stated in L0"}

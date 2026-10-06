@@ -19,12 +19,19 @@ from dataplatform.identity.ingest import (
 )
 from dataplatform.identity.lineage import (
     CORROBORATING_TYPES,
+    LINEAGE_BACKFILL,
+    EqPresence,
     IsinSpan,
     LineageEdge,
     LineageResolver,
     LineageStore,
+    LineageWriteReport,
+    RegistrationPlan,
+    SkipReason,
     derive_edges,
+    plan_registrations,
     read_corroboration,
+    read_eq_presence,
     read_equity_spans,
 )
 from dataplatform.identity.master import (
@@ -63,14 +70,17 @@ from dataplatform.identity.primary import (
     select_primary,
     select_primary_map,
 )
+from dataplatform.identity.session import SessionIdentity, SessionStatement
 
 __all__ = [
     "CORROBORATING_TYPES",
+    "LINEAGE_BACKFILL",
     "AmbiguousSymbolError",
     "Canonical",
     "ConflictKind",
     "DailyLiquidity",
     "DetectedBy",
+    "EqPresence",
     "Exchange",
     "ExchangeLiquidity",
     "HistoryPlan",
@@ -86,6 +96,7 @@ __all__ = [
     "LineageEdge",
     "LineageResolver",
     "LineageStore",
+    "LineageWriteReport",
     "LiquidityMetric",
     "Listing",
     "ListingKeyed",
@@ -94,7 +105,11 @@ __all__ = [
     "PrimaryDecision",
     "PrimaryRule",
     "ReconciliationQueue",
+    "RegistrationPlan",
     "Security",
+    "SessionIdentity",
+    "SessionStatement",
+    "SkipReason",
     "SymbolWindow",
     "UnknownIsinError",
     "UnknownSymbolError",
@@ -104,7 +119,9 @@ __all__ = [
     "detect_conflicts",
     "ingest_snapshot",
     "plan_history",
+    "plan_registrations",
     "read_corroboration",
+    "read_eq_presence",
     "read_equity_spans",
     "select_primary",
     "select_primary_map",

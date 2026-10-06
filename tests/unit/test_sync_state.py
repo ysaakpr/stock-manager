@@ -41,7 +41,7 @@ SESSION_DATE = date(2026, 8, 7)
 WEEKEND_DATE = date(2026, 8, 8)  # Saturday
 HOLIDAY_DATE = date(2026, 1, 26)  # Republic Day, a Monday
 MUHURAT_DATE = date(2025, 10, 21)  # Diwali Laxmi Pujan — closed, but a bhavcopy exists
-UNCOVERED_DATE = date(2011, 6, 1)  # before the holiday file's coverage begins
+UNCOVERED_DATE = date(2001, 6, 1)  # before the holiday file's coverage begins (2006-01-01)
 
 AT = datetime(2026, 8, 7, 18, 30, tzinfo=IST)
 LATER = AT + timedelta(hours=1)

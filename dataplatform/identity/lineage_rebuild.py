@@ -2,7 +2,9 @@
 
 The four stages the lineage touches, in the only order they can run:
 
-1. **Derive** the reissue edges from L1 contiguity and write `isin_lineage` (0009).
+1. **Derive** the reissue edges from L1 contiguity and write `isin_lineage` (0009): equity
+   reissues by issuer code (`lineage.derive_edges`), and fund unit splits by NSE symbol with the
+   split corroborated in L0 (`fund_lineage.derive_fund_edges`).
 2. **Replay** every stored `nse_corp_actions` L0 payload back through the parser *with* that
    lineage, so an action filed against a retired ISIN reaches the surviving security (0010)
    instead of being recorded unresolved.
@@ -18,8 +20,10 @@ laptop between campaigns and on the server without touching the request budget. 
 yields the payloads in a stable order, so two runs over the same lake do the same work.
 
 **What it assumes:** L0 holds the corporate-action payloads and L1 the prices — a rebuild cannot
-invent either. An ISIN whose successor the identity master does not know is skipped with a count,
-not raised on: one unseen name must not cost the other four hundred edges.
+invent either. A successor the identity master does not know is registered as a DELISTED master row
+when it is a chain's retired middle with NSE EQ bars in L1 (`registered_intermediates`); any other
+unknown successor is skipped and counted per reason, not raised on: one unseen name must not cost
+the other five hundred edges.
 
     uv run python -m dataplatform.identity.lineage_rebuild            # the whole thing
     uv run python -m dataplatform.identity.lineage_rebuild --derive-only   # stage 1, to inspect
@@ -33,10 +37,12 @@ from dataclasses import asdict, dataclass
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import get_settings
 from dataplatform.corpactions.reconcile import SingleSourcePolicy
+from dataplatform.identity.fund_lineage import derive_fund_edges
 from dataplatform.identity.lineage import (
     LineageStore,
     derive_edges,
     read_corroboration,
+    read_eq_presence,
     read_equity_spans,
 )
 from dataplatform.identity.master import IdentityStore
@@ -46,7 +52,12 @@ from dataplatform.ingest.nse import corp_actions as nse_ca
 from dataplatform.logging import get_logger
 from dataplatform.store.db import connect
 from dataplatform.store.l0 import L0Store
-from dataplatform.store.l2 import materialize_missing, open_connection, rebuild_invalidated
+from dataplatform.store.l2 import (
+    materialize_missing,
+    open_connection,
+    prune_retired,
+    rebuild_invalidated,
+)
 
 __all__ = ["LineageRebuildReport", "rebuild"]
 
@@ -60,7 +71,10 @@ class LineageRebuildReport:
     """What each stage of one rebuild did."""
 
     edges_derived: int
+    fund_edges_derived: int
     edges_written: int
+    registered_intermediates: int
+    edges_still_skipped: int
     payloads_replayed: int
     actions_resolved_through_lineage: int
     actions_inserted: int
@@ -68,6 +82,12 @@ class LineageRebuildReport:
     l2_partitions_rebuilt: int
     l2_partitions_stitched: int
     l2_partitions_filled: int
+    #: `(predecessor, successor, reason)` for every edge not written — printed after the counts.
+    skipped_edges: tuple[tuple[str, str, str], ...] = ()
+
+    def counts(self) -> dict[str, int]:
+        """Every per-stage count, in field order — what the CLI prints as its table."""
+        return {k: v for k, v in asdict(self).items() if isinstance(v, int)}
 
 
 def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> LineageRebuildReport:
@@ -78,16 +98,40 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
 
     # ── 1. derive ────────────────────────────────────────────────────────────────────────────
     spans, sessions = read_equity_spans(data_root=data_root)
-    edges = derive_edges(spans, sessions, read_corroboration(data_root=data_root))
+    equity_edges = derive_edges(spans, sessions, read_corroboration(data_root=data_root))
+    # A fund edge's predecessor is an INF ISIN, which `derive_edges` never emits, so the two sets
+    # cannot claim the same predecessor and the table's one-successor-per-predecessor index holds.
+    fund_edges = derive_fund_edges(clock=clock, data_root=data_root)
+    edges = (*equity_edges, *fund_edges)
+    presence = read_eq_presence({e.successor_isin for e in edges}, data_root=data_root)
 
     with connect() as conn:
         store = LineageStore(conn, clock=clock)
-        written = store.replace_derived(edges)
+        lineage = store.replace_derived(edges, presence=presence)
         conn.commit()
         resolver = store.load()
+        skipped_edges = tuple(
+            (e.predecessor_isin, e.successor_isin, reason.value) for e, reason in lineage.skipped
+        )
 
         if derive_only:
-            return LineageRebuildReport(len(edges), written, 0, 0, 0, 0, 0, 0, 0)
+            report = LineageRebuildReport(
+                edges_derived=lineage.derived,
+                fund_edges_derived=len(fund_edges),
+                edges_written=lineage.written,
+                registered_intermediates=len(lineage.registered_intermediates),
+                edges_still_skipped=lineage.still_skipped,
+                payloads_replayed=0,
+                actions_resolved_through_lineage=0,
+                actions_inserted=0,
+                isins_recomputed=0,
+                l2_partitions_rebuilt=0,
+                l2_partitions_stitched=0,
+                l2_partitions_filled=0,
+                skipped_edges=skipped_edges,
+            )
+            _LOG.info("lineage_rebuild.done", **report.counts())
+            return report
 
         # ── 2. replay L0 through the parser, now with the lineage ────────────────────────────
         # The source's rows go first. `write_corporate_actions` is ON CONFLICT DO NOTHING, so a
@@ -136,7 +180,12 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         con = open_connection()
         try:
             reports = rebuild_invalidated(
-                conn, clock=clock, con=con, data_root=data_root, history_for=history
+                conn,
+                clock=clock,
+                con=con,
+                data_root=data_root,
+                history_for=history,
+                survivor_of=resolver.survivor_of,
             )
             # ── 5. fill L2 for the names no invalidation ever reached ────────────────────────
             # The queue rebuilds what a corporate action touched; a name with no action never
@@ -152,11 +201,17 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         finally:
             con.close()
         conn.commit()
+    # A partition a now-retired ISIN was built with before the lineage named it is a second,
+    # unadjusted copy of the survivor's history; the derived edges above are what retire it.
+    prune_retired(resolver.survivor_of, data_root=data_root)
 
     stitched = sum(1 for r in reports if r.isin in history)
     report = LineageRebuildReport(
-        edges_derived=len(edges),
-        edges_written=written,
+        edges_derived=lineage.derived,
+        fund_edges_derived=len(fund_edges),
+        edges_written=lineage.written,
+        registered_intermediates=len(lineage.registered_intermediates),
+        edges_still_skipped=lineage.still_skipped,
         payloads_replayed=replayed,
         actions_resolved_through_lineage=resolved,
         actions_inserted=inserted,
@@ -164,8 +219,9 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         l2_partitions_rebuilt=len(reports),
         l2_partitions_stitched=stitched,
         l2_partitions_filled=len(fill.written),
+        skipped_edges=skipped_edges,
     )
-    _LOG.info("lineage_rebuild.done", **asdict(report))
+    _LOG.info("lineage_rebuild.done", **report.counts())
     return report
 
 
@@ -179,8 +235,15 @@ def main() -> int:
     )
     args = parser.parse_args()
     report = rebuild(derive_only=args.derive_only)
-    for field, value in asdict(report).items():
+    for field, value in report.counts().items():
         print(f"{field:<36} {value}")
+    by_reason: dict[str, int] = {}
+    for _, _, reason in report.skipped_edges:
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    for reason, count in sorted(by_reason.items()):
+        print(f"  skipped: {reason:<32} {count}")
+    for predecessor, successor, reason in report.skipped_edges:
+        print(f"  skipped edge {predecessor} -> {successor}  {reason}")
     return 0
 
 

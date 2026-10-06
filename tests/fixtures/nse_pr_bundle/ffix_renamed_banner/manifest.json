@@ -1,0 +1,107 @@
+{
+  "era": "ffix_renamed_banner",
+  "session": "2013-03-04",
+  "archive_filename": "PR040313.zip",
+  "url": "https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/PR040313.zip",
+  "why_this_era": "the NIFTY banner renames from 'S&P CNX Nifty Sec.' to 'CNX Nifty Sec.'; INDEX_FLG is unchanged",
+  "reduced_from_l0": true,
+  "original_bytes": 310656,
+  "original_sha256": "83afe90c1299940f8d0f711b1f021d89a544fae2a381a4b7bf6e447b0062497d",
+  "original_members": [
+    {
+      "name": "An040313.txt",
+      "bytes": 235257
+    },
+    {
+      "name": "Bc040313.csv",
+      "bytes": 20406
+    },
+    {
+      "name": "bh040313.csv",
+      "bytes": 7017
+    },
+    {
+      "name": "Bm040313.txt",
+      "bytes": 585
+    },
+    {
+      "name": "corpbond040313.csv",
+      "bytes": 10439
+    },
+    {
+      "name": "etf040313.csv",
+      "bytes": 5736
+    },
+    {
+      "name": "ffix040313.csv",
+      "bytes": 111385
+    },
+    {
+      "name": "fo04032013.zip",
+      "bytes": 77030
+    },
+    {
+      "name": "Gl040313.csv",
+      "bytes": 6191
+    },
+    {
+      "name": "HL040313.csv",
+      "bytes": 5086
+    },
+    {
+      "name": "NPD040313.txt",
+      "bytes": 5742
+    },
+    {
+      "name": "nuver.txt",
+      "bytes": 2586
+    },
+    {
+      "name": "Pd040313.csv",
+      "bytes": 280219
+    },
+    {
+      "name": "Pr040313.csv",
+      "bytes": 261796
+    },
+    {
+      "name": "rdm.docx",
+      "bytes": 15915
+    },
+    {
+      "name": "Rdm_help.txt",
+      "bytes": 705
+    },
+    {
+      "name": "Readme.txt",
+      "bytes": 3092
+    },
+    {
+      "name": "RPD040313.csv",
+      "bytes": 203
+    },
+    {
+      "name": "Rtt040313.csv",
+      "bytes": 55
+    },
+    {
+      "name": "sme040313.csv",
+      "bytes": 310
+    },
+    {
+      "name": "Tt040313.csv",
+      "bytes": 2186
+    },
+    {
+      "name": "cd04032013.zip",
+      "bytes": 6386
+    }
+  ],
+  "members_kept_in_fixture": [
+    "ffix040313.csv",
+    "Readme.txt"
+  ],
+  "ffix_member": "ffix040313.csv",
+  "ffix_member_bytes": 111385,
+  "ffix_member_sha256": "83ebf46033430869874e66af9e9c1b516706cf9768d4256f9d41e79986b8061b"
+}

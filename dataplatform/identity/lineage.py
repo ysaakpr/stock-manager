@@ -17,8 +17,11 @@ where a SPLIT or BONUS in the L0 corporate-action payloads falls on the successo
 and records the rest as DERIVED rather than dropping them.
 
 **What it assumes.** L1 `prices_raw` is populated (the derivation is a pure function of it), and
-`security_master` holds the *successor* — the survivor is a live security. It does not assume the
-predecessor is known; that absence is the whole point.
+`security_master` holds the *survivor* at the end of each chain — a live security. It does not
+assume the predecessor is known; that absence is the whole point. Nor does it assume the middle of
+a chain is known: an ISIN issued by one reissue and retired by the next (BAJFINANCE's INE296A01024,
+2016-09-09 to 2025-06-13) is in no current snapshot, and `LineageStore.replace_derived` registers
+it as a DELISTED master row from its own L1 EQ rows rather than drop the edge that names it.
 
 **What it never does.** It never resolves a symbol — the join key is the ISIN the row carries
 (invariant #2). It never invents an edge across issuer codes: a merger or a rename to a different
@@ -30,9 +33,10 @@ from __future__ import annotations
 
 import json
 from bisect import bisect_left, bisect_right
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Container, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import StrEnum
 from itertools import pairwise
 from pathlib import Path
 from typing import Final
@@ -42,19 +46,27 @@ import duckdb
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.corpactions.parse_terms import classify, split_compound
 from dataplatform.corpactions.taxonomy import ActionType
+from dataplatform.identity.master import Exchange, IdentityStore, ListingStatus, Security
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection
 from dataplatform.store.l2 import open_connection, register_raw_view
 
 __all__ = [
     "CORROBORATING_TYPES",
+    "LINEAGE_BACKFILL",
+    "EqPresence",
     "IsinSpan",
     "LineageEdge",
     "LineageResolver",
     "LineageStore",
+    "LineageWriteReport",
+    "RegistrationPlan",
+    "SkipReason",
     "corroborating_type",
     "derive_edges",
+    "plan_registrations",
     "read_corroboration",
+    "read_eq_presence",
     "read_equity_spans",
 ]
 
@@ -83,6 +95,34 @@ _ISSUER_PREFIX_LEN: Final = 7
 #: The exchange whose L1 rows are span evidence. Only the NSE bhavcopy prints the ISIN as of each
 #: session; BSE legacy rows carry a scrip-master ISIN assigned today (see `read_equity_spans`).
 _SPAN_EXCHANGE: Final = "NSE"
+
+#: The `security_master.registered_by` marker (0011) on a row this module inferred from L1.
+LINEAGE_BACKFILL: Final = "lineage_backfill"
+
+
+class SkipReason(StrEnum):
+    """Why a derived edge was not written — each one a different fix, so each is counted apart."""
+
+    #: The successor is the end of its chain and no snapshot lists it. The survivor of a live
+    #: company is in the current snapshot, so this is an identity-refresh gap, not a lineage one,
+    #: and registering it from L1 would have to guess whether it is ACTIVE, SUSPENDED or DELISTED.
+    TERMINAL_SUCCESSOR_NOT_IN_MASTER = "terminal_successor_not_in_master"
+    #: The successor is a retired middle of a chain, but has no NSE EQ bar in L1 to register it
+    #: from. An ISIN with no evidence is never invented.
+    NO_L1_EQ_HISTORY = "no_l1_eq_history"
+    #: The successor is a retired middle, but the chain past it never reaches a security the
+    #: master knows or could register — there is no survivor for it to hand its history to.
+    CHAIN_SURVIVOR_NOT_IN_MASTER = "chain_survivor_not_in_master"
+
+
+@dataclass(frozen=True, slots=True)
+class EqPresence:
+    """One ISIN's NSE EQ extent in L1 — the evidence a retired intermediate is registered from."""
+
+    isin: str
+    first_date: date
+    last_date: date
+    last_symbol: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +207,41 @@ def read_equity_spans(
     spans = tuple(IsinSpan(r[0], r[1], r[2], r[3]) for r in rows)
     _LOG.info("lineage.spans_read", spans=len(spans), sessions=len(sessions))
     return spans, tuple(s[0] for s in sessions)
+
+
+def read_eq_presence(
+    isins: Iterable[str],
+    *,
+    con: duckdb.DuckDBPyConnection | None = None,
+    data_root: Path | None = None,
+) -> Mapping[str, EqPresence]:
+    """Each named ISIN's NSE `EQ` extent and last symbol in L1; an ISIN with no such row is absent.
+
+    `EQ` rather than every series, unlike `read_equity_spans`: a span only has to show the ISIN
+    existed, but a row registered from this is a security the L2 materializer will build bars
+    for, and it builds from `EQ` alone. NSE rows only, for `read_equity_spans`'s reason — a BSE
+    legacy row carries the ISIN today's scrip master assigns, not the one of its session. Keyed by
+    the ISIN each row carries; no symbol is ever resolved here (invariant #2).
+    """
+    wanted = sorted(set(isins))
+    if not wanted:
+        return {}
+    owns = con is None
+    con = open_connection() if con is None else con
+    try:
+        register_raw_view(con, view="prices_raw", data_root=data_root)
+        rows = con.execute(
+            "SELECT isin, min(trade_date), max(trade_date), arg_max(symbol, trade_date) "
+            "FROM prices_raw "
+            "WHERE exchange = $exchange AND series = 'EQ' AND list_contains($isins, isin) "
+            "GROUP BY isin ORDER BY isin",
+            {"exchange": _SPAN_EXCHANGE, "isins": wanted},
+        ).fetchall()
+    finally:
+        if owns:
+            con.close()
+    _LOG.info("lineage.eq_presence_read", asked=len(wanted), present=len(rows))
+    return {r[0]: EqPresence(r[0], r[1], r[2], r[3]) for r in rows}
 
 
 def corroborating_type(subject: str) -> ActionType | None:
@@ -280,6 +355,101 @@ def _sessions_between(sessions: Sequence[date], after: date, before: date) -> in
     return max(0, bisect_left(sessions, before) - bisect_right(sessions, after))
 
 
+@dataclass(frozen=True, slots=True)
+class RegistrationPlan:
+    """Which unknown successors to register, which edges to write, and which stay skipped."""
+
+    register: tuple[Security, ...]
+    writable: tuple[LineageEdge, ...]
+    skipped: tuple[tuple[LineageEdge, SkipReason], ...]
+
+
+def plan_registrations(
+    edges: Iterable[LineageEdge],
+    known: Container[str],
+    presence: Mapping[str, EqPresence],
+) -> RegistrationPlan:
+    """Decide, without I/O, which unknown successors to register and which edges that unblocks.
+
+    An unknown successor is registered only when it is a chain's *retired middle*: it is itself
+    the predecessor of a derived edge (so a reissue retired it — DELISTED is a fact, not a guess),
+    it has NSE EQ bars in L1 to be registered from, and the chain past it reaches a security the
+    master knows, through intermediates that qualify the same way. A chain end the master does not
+    know is not registered (`TERMINAL_SUCCESSOR_NOT_IN_MASTER`), and nothing without L1 evidence
+    ever is (`NO_L1_EQ_HISTORY`). Every edge whose successor is known or registered is writable;
+    every other edge is returned with its reason, so the count of skips is never a guess.
+    """
+    rows = tuple(edges)
+    forward = {e.predecessor_isin: e.successor_isin for e in rows}
+    verdict: dict[str, SkipReason | None] = {}
+
+    def resolve(isin: str, trail: frozenset[str]) -> SkipReason | None:
+        """None when `isin` is known or registrable, else why not. Memoised; cycle-safe."""
+        if isin in known:
+            return None
+        if isin in verdict:
+            return verdict[isin]
+        nxt = forward.get(isin)
+        reason: SkipReason | None
+        if nxt is None:
+            reason = SkipReason.TERMINAL_SUCCESSOR_NOT_IN_MASTER
+        elif isin not in presence:
+            reason = SkipReason.NO_L1_EQ_HISTORY
+        elif nxt in trail or resolve(nxt, trail | {isin}) is not None:
+            reason = SkipReason.CHAIN_SURVIVOR_NOT_IN_MASTER
+        else:
+            reason = None
+        verdict[isin] = reason
+        return reason
+
+    writable: list[LineageEdge] = []
+    skipped: list[tuple[LineageEdge, SkipReason]] = []
+    register: dict[str, Security] = {}
+    for edge in rows:
+        reason = resolve(edge.successor_isin, frozenset())
+        if reason is not None:
+            skipped.append((edge, reason))
+            continue
+        writable.append(edge)
+        if edge.successor_isin not in known and edge.successor_isin not in register:
+            seen = presence[edge.successor_isin]
+            register[edge.successor_isin] = Security(
+                isin=seen.isin,
+                name=seen.last_symbol,
+                primary_exchange=Exchange.NSE,
+                status=ListingStatus.DELISTED,
+                first_seen_date=seen.first_date,
+                last_seen_date=seen.last_date,
+            )
+    return RegistrationPlan(
+        register=tuple(register[i] for i in sorted(register)),
+        writable=tuple(writable),
+        skipped=tuple(skipped),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class LineageWriteReport:
+    """What one `replace_derived` did: every derived edge is written or skipped with a reason."""
+
+    derived: int
+    written: int
+    registered_intermediates: tuple[str, ...]
+    skipped: tuple[tuple[LineageEdge, SkipReason], ...]
+
+    @property
+    def still_skipped(self) -> int:
+        """Edges not written."""
+        return len(self.skipped)
+
+    def skipped_by_reason(self) -> dict[str, int]:
+        """Skip counts per `SkipReason` value, every reason present (zero when none)."""
+        counts = {r.value: 0 for r in SkipReason}
+        for _, reason in self.skipped:
+            counts[reason.value] += 1
+        return counts
+
+
 class LineageStore:
     """Reads and writes `isin_lineage`.
 
@@ -293,18 +463,31 @@ class LineageStore:
         self._conn = conn
         self._clock: Clock = SystemClock() if clock is None else clock
 
-    def replace_derived(self, edges: Iterable[LineageEdge]) -> int:
-        """Replace every `L1_CONTIGUITY` row with `edges`; return the number written.
+    def replace_derived(
+        self,
+        edges: Iterable[LineageEdge],
+        *,
+        presence: Mapping[str, EqPresence] | None = None,
+    ) -> LineageWriteReport:
+        """Replace every `L1_CONTIGUITY` row with `edges`; report what was written and skipped.
 
-        An edge whose successor is absent from `security_master` is skipped, not raised on: L1 can
-        hold a name the identity master has not ingested yet, and one such name must not cost the
-        other 400 edges. The count of skips is logged.
+        A successor absent from `security_master` that is a chain's retired middle is first
+        registered there as DELISTED, `registered_by = 'lineage_backfill'`, from its L1 EQ extent
+        in `presence` (`plan_registrations` decides which). Without that, A→B→C with B in no
+        snapshot drops A→B, and the survivor's history starts at B. Pass no `presence` and nothing
+        is registered. Any other edge whose successor is unknown is skipped, not raised on — one
+        unseen name must not cost the other 500 edges — and returned with its reason. Registered
+        rows are insert-only and outlive the rebuild (a master row is never removed, §4.5), so a
+        re-run finds them known and registers nothing twice.
         """
         rows = tuple(edges)
         self._conn.execute("DELETE FROM isin_lineage WHERE detected_by = 'L1_CONTIGUITY'")
         known = {r[0] for r in self._conn.execute("SELECT isin FROM security_master").fetchall()}
-        writable = [e for e in rows if e.successor_isin in known]
-        skipped = len(rows) - len(writable)
+        plan = plan_registrations(rows, known, {} if presence is None else presence)
+        IdentityStore(self._conn, clock=self._clock).register_inferred(
+            plan.register, registered_by=LINEAGE_BACKFILL
+        )
+        writable = plan.writable
         # One statement over unnested arrays, the same shape `IdentityStore` writes the master
         # with: 400-odd edges as 400 round trips would be the only slow part of a rebuild.
         self._conn.execute(
@@ -333,13 +516,22 @@ class LineageStore:
                 ],
             },
         )
+        report = LineageWriteReport(
+            derived=len(rows),
+            written=len(writable),
+            registered_intermediates=tuple(s.isin for s in plan.register),
+            skipped=plan.skipped,
+        )
         _LOG.info(
             "lineage.written",
-            written=len(writable),
-            skipped_unknown_successor=skipped,
+            derived=report.derived,
+            written=report.written,
+            registered_intermediates=len(report.registered_intermediates),
+            still_skipped=report.still_skipped,
             corroborated=sum(1 for e in writable if e.corroborating_action is not None),
+            **{f"skipped_{k}": v for k, v in report.skipped_by_reason().items()},
         )
-        return len(writable)
+        return report
 
     def load(self) -> LineageResolver:
         """Read every edge back as a resolver."""
@@ -403,6 +595,19 @@ class LineageResolver:
         """The session `predecessor`'s successor first traded, or None if it was never reissued."""
         found = self._forward.get(predecessor)
         return None if found is None else found[1]
+
+    def edges(self) -> tuple[tuple[str, str, date], ...]:
+        """Every one-hop edge as ``(predecessor, successor, effective_date)``, by effective date.
+
+        The backtest book carries a holding across each hop on the successor's first session, so it
+        needs the edges themselves, not the transitive chain.
+        """
+        return tuple(
+            sorted(
+                ((p, s, eff) for p, (s, eff) in self._forward.items()),
+                key=lambda edge: (edge[2], edge[0]),
+            )
+        )
 
     def survivors(self) -> frozenset[str]:
         """Every ISIN that inherited history from at least one predecessor — the stitch's keys."""
