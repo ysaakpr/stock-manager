@@ -1016,8 +1016,10 @@ sources:
       latest_available: 2026-09-01
       accrues_forward: true
       note: >-
-        No format eras (one 13-column header throughout); naming eras do exist — see
-        nifty_index_close_snapshot and dataplatform/ingest/macro/index_aliases.yaml.
+        One 13-column header throughout, but one date era: files from 2014-06-26 into 2015-06
+        write Index Date as DD/MM/YYYY (measured by the M11.2 backfill, which corrects M11.1's
+        "no format eras"). Twelve calendar sessions 2013-2016 answer 404. Naming eras exist too —
+        see nifty_index_close_snapshot and dataplatform/ingest/macro/index_aliases.yaml.
     failure_note: null
     candidate_alternatives: []
     owner_task: M11.1
