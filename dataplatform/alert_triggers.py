@@ -32,15 +32,17 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Iterable, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
+from functools import partial
 from typing import TYPE_CHECKING, Final
 
-from dataplatform.alerts import Alerter, Severity, build_alerter
+from dataplatform.alerts import Alerter, AlertOutcome, Severity, build_alerter
 from dataplatform.clock import Clock
 from dataplatform.config import Settings
-from dataplatform.ingest.calendar import TradingCalendar
+from dataplatform.ingest.calendar import TradingCalendar, trading_calendar
 from dataplatform.ingest.calendar import load as load_calendar
 from dataplatform.logging import get_logger
 from dataplatform.status import SourceStatus, SyncStateStore
@@ -54,21 +56,23 @@ __all__ = [
     "MAX_DETAIL_CHARS",
     "AlertCondition",
     "ConditionLedger",
-    "FailedAttempt",
+    "FinishedAttempt",
     "OpenQualityCheck",
     "TickReport",
     "Trigger",
     "TriggerEvaluationError",
+    "TriggerEvaluator",
     "calendar_expiry_conditions",
     "failed_job_conditions",
     "failed_streak_conditions",
     "quality_red_conditions",
-    "read_failed_jobs",
+    "read_last_attempts",
     "read_red_quality_checks",
     "reconcile",
     "redact",
     "run_failure_alerts",
     "run_failure_alerts_job",
+    "tick",
 ]
 
 #: The calendar condition's key. There is one holiday file, so there is one key.
@@ -261,22 +265,38 @@ def calendar_expiry_conditions(
 
 
 @dataclass(frozen=True, slots=True)
-class FailedAttempt:
-    """A job whose newest finished attempt raised — the shape `read_failed_jobs` returns."""
+class FinishedAttempt:
+    """A job's newest attempt that reached an outcome — the shape `read_last_attempts` returns.
+
+    `state` is `job_run.state`: FAILED, SUCCEEDED or TIMED_OUT. RUNNING and SKIPPED_LOCKED are
+    excluded at the read, because neither is an outcome.
+    """
 
     job_name: str
+    state: str
     started_at: datetime
     error: str | None
 
 
-def failed_job_conditions(attempts: Iterable[FailedAttempt]) -> list[AlertCondition]:
+#: The one `job_run.state` that means "the job raised" (`runner._execute`).
+_RAISED: Final = "FAILED"
+
+
+def failed_job_conditions(attempts: Iterable[FinishedAttempt]) -> list[AlertCondition]:
     """One CRITICAL condition per job whose newest finished attempt was FAILED.
 
     A job that fails three nights running without a success between is one condition: the key is
-    the job, not the run, so the onset pages and the repeats do not. A success clears it.
+    the job, not the run, so the onset pages and the repeats do not.
+
+    What clears it: a newer SUCCEEDED attempt — or a newer TIMED_OUT one. TIMED_OUT is the runner's
+    "returned normally but overran its budget": the job did *not* raise, so the condition this
+    trigger owns ("a scheduled job that raised") is over. The overrun itself is `/status/jobs`'
+    FAILING state and is not paged here; paging it would turn every slow EOD night into a page.
     """
     conditions = []
     for attempt in attempts:
+        if attempt.state != _RAISED:
+            continue
         error = "none recorded" if attempt.error is None else redact(attempt.error)
         conditions.append(
             AlertCondition(
@@ -308,16 +328,13 @@ _RED_QUALITY_SQL: Final = """
 
 #: The newest attempt per job that actually ran to an outcome. RUNNING has no outcome yet and
 #: SKIPPED_LOCKED means another process held the lock, so neither may clear — or raise — a failure.
-_FAILED_JOBS_SQL: Final = """
-    SELECT job_name, started_at, error
-    FROM (
-        SELECT DISTINCT ON (job_name) job_name, state, started_at, error
-        FROM job_run
-        WHERE state NOT IN ('RUNNING', 'SKIPPED_LOCKED') AND job_name = ANY(%s)
-        ORDER BY job_name, started_at DESC
-    ) newest
-    WHERE state = 'FAILED'
-    ORDER BY job_name
+#: Which outcomes are failures is decided in Python (`failed_job_conditions`), where a unit test
+#: can see it.
+_LAST_ATTEMPTS_SQL: Final = """
+    SELECT DISTINCT ON (job_name) job_name, state, started_at, error
+    FROM job_run
+    WHERE state NOT IN ('RUNNING', 'SKIPPED_LOCKED') AND job_name = ANY(%s)
+    ORDER BY job_name, started_at DESC
 """
 
 
@@ -331,17 +348,20 @@ def read_red_quality_checks(conn: Connection) -> list[OpenQualityCheck]:
     ]
 
 
-def read_failed_jobs(conn: Connection, job_names: Sequence[str]) -> list[FailedAttempt]:
-    """Registered jobs whose newest finished attempt raised.
+def read_last_attempts(conn: Connection, job_names: Sequence[str]) -> list[FinishedAttempt]:
+    """Each registered job's newest finished attempt.
 
     Only `job_names` — the registry — is asked about: a job removed from the registry whose last
     run failed would otherwise hold an alert open forever with nothing able to clear it.
     """
     return [
-        FailedAttempt(
-            job_name=str(row[0]), started_at=row[1], error=None if row[2] is None else str(row[2])
+        FinishedAttempt(
+            job_name=str(row[0]),
+            state=str(row[1]),
+            started_at=row[2],
+            error=None if row[3] is None else str(row[3]),
         )
-        for row in conn.execute(_FAILED_JOBS_SQL, (list(job_names),)).fetchall()
+        for row in conn.execute(_LAST_ATTEMPTS_SQL, (list(job_names),)).fetchall()
     ]
 
 
@@ -353,8 +373,8 @@ class ConditionLedger:
 
     What it does: reads the open keys of a trigger, opens/reopens a key at onset, stamps
     `last_seen_at` on a repeat, and closes a key on resolution.
-    What it assumes: an autocommit connection, so a row written after a successful send survives a
-    later failure in the same tick — the alert went out, and the ledger must say so.
+    What it assumes: an autocommit connection. Each onset or resolution runs inside its own
+    `transaction()`, so the ledger write and the send stand or fall together.
     What it never does: delete. A resolved row stays as the record of its last episode.
     """
 
@@ -362,6 +382,10 @@ class ConditionLedger:
 
     def __init__(self, conn: Connection) -> None:
         self._conn = conn
+
+    def transaction(self) -> AbstractContextManager[object]:
+        """A transaction that rolls the ledger write back if the block raises."""
+        return self._conn.transaction()
 
     def open_keys(self, trigger: Trigger) -> dict[str, str]:
         """Open condition keys of `trigger`, mapped to the title they paged with."""
@@ -424,6 +448,14 @@ class TickReport:
         return not self.errors
 
 
+class _NotSentError(Exception):
+    """Raised inside a ledger transaction to roll back a write whose alert did not go out."""
+
+    def __init__(self, outcome: AlertOutcome) -> None:
+        super().__init__(outcome.value)
+        self.outcome = outcome
+
+
 def reconcile(
     trigger: Trigger,
     conditions: Sequence[AlertCondition],
@@ -435,14 +467,17 @@ def reconcile(
 ) -> None:
     """Diff one trigger's current conditions against its open rows; page onsets and resolutions.
 
-    What it does: sends the onset alert for every condition with no open row and then opens it;
-    touches the ones already open; sends one INFO resolution for every open row no longer present
-    and then closes it.
+    What it does: for every condition with no open row, writes the open row and sends the onset
+    alert in one transaction; touches the ones already open; for every open row no longer present,
+    closes it and sends one INFO resolution, again in one transaction.
     What it assumes: `conditions` is the *complete* current set for `trigger` — a partial set would
     resolve the missing ones. A trigger that could not be evaluated must not reach here.
-    What it never does: record an onset whose send raised. The row stays absent, so the next tick
-    tries again rather than believing the owner was told. A delivery failure is collected into
-    `report.errors` and the remaining conditions still get their turn.
+    What it never does: record an onset or a resolution that did not go out. Write first, send
+    second, inside one transaction: a send that raises — or returns anything but SENT, e.g. the
+    alerter's own window suppressed it — rolls the write back, so the next tick tries again; a
+    ledger write that raises happens before the send, so a broken ledger costs a missing page (and
+    a FAILED run, which `/status/jobs` shows), never a page repeated every tick.
+    Ledger *reads* that raise propagate; `tick` isolates them per trigger.
     """
     open_rows = ledger.open_keys(trigger)
     current = {condition.dedup_key: condition for condition in conditions}
@@ -454,87 +489,88 @@ def reconcile(
     for key, condition in current.items():
         if key in open_rows:
             continue
-        try:
-            outcome = alerter.send(condition.severity, condition.title, condition.body, key)
-        except Exception as error:
-            report.errors.append(f"{key}: onset alert not delivered: {type(error).__name__}")
-            log.error("alert_trigger.send_failed", dedup_key=key, error_type=type(error).__name__)
-            continue
-        ledger.open(condition, at)
-        report.opened.append(key)
-        log.warning(
-            "alert_trigger.onset",
-            trigger=trigger.value,
-            dedup_key=key,
-            outcome=outcome.value,
-        )
+        if _write_then_send(
+            partial(ledger.open, condition, at),
+            partial(alerter.send, condition.severity, condition.title, condition.body, key),
+            ledger=ledger,
+            key=key,
+            what="onset alert",
+            report=report,
+        ):
+            report.opened.append(key)
+            log.warning("alert_trigger.onset", trigger=trigger.value, dedup_key=key)
 
     for key, title in open_rows.items():
         if key in current:
             continue
-        try:
-            outcome = alerter.send(
+        if _write_then_send(
+            partial(ledger.resolve, key, at),
+            partial(
+                alerter.send,
                 Severity.INFO,
                 f"resolved: {title}",
                 f"Cleared at {at.isoformat()}: {title}",
                 f"{key}:resolved",
-            )
-        except Exception as error:
-            report.errors.append(f"{key}: resolution not delivered: {type(error).__name__}")
-            log.error("alert_trigger.send_failed", dedup_key=key, error_type=type(error).__name__)
-            continue
-        ledger.resolve(key, at)
-        report.resolved.append(key)
-        log.info(
-            "alert_trigger.resolved",
-            trigger=trigger.value,
-            dedup_key=key,
-            outcome=outcome.value,
-        )
+            ),
+            ledger=ledger,
+            key=key,
+            what="resolution",
+            report=report,
+        ):
+            report.resolved.append(key)
+            log.info("alert_trigger.resolved", trigger=trigger.value, dedup_key=key)
+
+
+def _write_then_send(
+    write: Callable[[], None],
+    send: Callable[[], AlertOutcome],
+    *,
+    ledger: ConditionLedger,
+    key: str,
+    what: str,
+    report: TickReport,
+) -> bool:
+    """Run `write` then `send` in one ledger transaction; True only if both happened and SENT."""
+    try:
+        with ledger.transaction():
+            write()
+            outcome = send()
+            if outcome is not AlertOutcome.SENT:
+                raise _NotSentError(outcome)
+    except _NotSentError as not_sent:
+        report.errors.append(f"{key}: {what} {not_sent.outcome.value}; will retry next tick")
+        log.warning("alert_trigger.not_sent", dedup_key=key, outcome=not_sent.outcome.value)
+        return False
+    except Exception as error:
+        report.errors.append(f"{key}: {what} not delivered: {type(error).__name__}")
+        log.error("alert_trigger.send_failed", dedup_key=key, error_type=type(error).__name__)
+        return False
+    return True
 
 
 # ── the tick ─────────────────────────────────────────────────────────────────────────────────
 
+#: One trigger and the thunk that reads its current conditions. A thunk, so that everything the
+#: read needs — the holiday file included — is loaded inside the trigger's own isolation.
+TriggerEvaluator = tuple[Trigger, Callable[[], list[AlertCondition]]]
 
-def run_failure_alerts(
-    conn: Connection,
+
+def tick(
+    evaluators: Sequence[TriggerEvaluator],
     *,
-    settings: Settings,
-    clock: Clock,
+    ledger: ConditionLedger,
     alerter: Alerter,
-    calendar: TradingCalendar,
-    job_names: Sequence[str],
+    at: datetime,
 ) -> TickReport:
-    """Evaluate all four triggers once and page what changed since the last tick.
+    """Evaluate and reconcile each trigger in turn, each one isolated from the others' failures.
 
-    What it does: for each trigger in turn, reads the current conditions, then `reconcile`s them.
-    A trigger whose read raises is recorded in `report.errors` and skipped — nothing of it is
-    resolved — while the others still run.
-    What it assumes: `conn` is autocommit and migrated through 0013; `clock` is the run's (B10).
-    What it never does: raise for a failed trigger (`run_failure_alerts_job` turns errors into a
-    FAILED run), or read the wall clock.
+    What it does: for each trigger, reads the current conditions and `reconcile`s them. Anything
+    that raises — the read, a ledger read, a malformed holiday file — is collected into
+    `report.errors` against that trigger, and the next trigger still runs.
+    What it never does: resolve the conditions of a trigger it could not evaluate. Absence of
+    evidence is not a cleared alarm.
     """
-    now = clock.now()
-    today = clock.today()
     report = TickReport()
-    ledger = ConditionLedger(conn)
-    store = SyncStateStore(conn, clock=clock, calendar=calendar)
-    threshold = settings.alert_failure_streak_threshold
-
-    evaluators: tuple[tuple[Trigger, Callable[[], list[AlertCondition]]], ...] = (
-        (
-            Trigger.INGEST_FAILED_STREAK,
-            lambda: failed_streak_conditions(store.source_statuses(), threshold=threshold),
-        ),
-        (Trigger.QUALITY_RED, lambda: quality_red_conditions(read_red_quality_checks(conn))),
-        (
-            Trigger.CALENDAR_EXPIRY,
-            lambda: calendar_expiry_conditions(
-                calendar.coverage_end, today=today, lead_days=settings.alert_calendar_lead_days
-            ),
-        ),
-        (Trigger.JOB_FAILED, lambda: failed_job_conditions(read_failed_jobs(conn, job_names))),
-    )
     for trigger, evaluate in evaluators:
         try:
             conditions = evaluate()
@@ -547,8 +583,16 @@ def run_failure_alerts(
                 error=redact(str(error)),
             )
             continue
-        reconcile(trigger, conditions, ledger=ledger, alerter=alerter, at=now, report=report)
-
+        try:
+            reconcile(trigger, conditions, ledger=ledger, alerter=alerter, at=at, report=report)
+        except Exception as error:
+            report.errors.append(f"{trigger.value}: not reconciled: {type(error).__name__}")
+            log.error(
+                "alert_trigger.reconcile_failed",
+                trigger=trigger.value,
+                error_type=type(error).__name__,
+                error=redact(str(error)),
+            )
     log.info(
         "alert_trigger.tick",
         opened=report.opened,
@@ -559,12 +603,59 @@ def run_failure_alerts(
     return report
 
 
+def run_failure_alerts(
+    conn: Connection,
+    *,
+    settings: Settings,
+    clock: Clock,
+    alerter: Alerter,
+    job_names: Sequence[str],
+    calendar_loader: Callable[[], TradingCalendar] | None = None,
+) -> TickReport:
+    """Evaluate all four triggers once against the database and page what changed.
+
+    What it does: builds the four evaluators and hands them to `tick`.
+    - The expiry trigger calls `calendar_loader` (default `calendar.load`: a fresh read of the
+      YAML, not the per-process cache, so an appended year is seen without a restart), and
+      calls it *inside* its own evaluator: a malformed holiday file fails that one trigger, not
+      the other three.
+    - The streak trigger builds its `SyncStateStore` on the cached `trading_calendar()` inside its
+      evaluator, for the same reason.
+    What it assumes: `conn` is autocommit and migrated through 0013; `clock` is the run's (B10).
+    What it never does: raise for a failed trigger (`run_failure_alerts_job` turns errors into a
+    FAILED run), or read the wall clock.
+    """
+    today = clock.today()
+    threshold = settings.alert_failure_streak_threshold
+    lead_days = settings.alert_calendar_lead_days
+
+    def streaks() -> list[AlertCondition]:
+        store = SyncStateStore(conn, clock=clock, calendar=trading_calendar())
+        return failed_streak_conditions(store.source_statuses(), threshold=threshold)
+
+    def expiry() -> list[AlertCondition]:
+        coverage_end = (
+            load_calendar if calendar_loader is None else calendar_loader
+        )().coverage_end
+        return calendar_expiry_conditions(coverage_end, today=today, lead_days=lead_days)
+
+    evaluators: list[TriggerEvaluator] = [
+        (Trigger.INGEST_FAILED_STREAK, streaks),
+        (Trigger.QUALITY_RED, lambda: quality_red_conditions(read_red_quality_checks(conn))),
+        (Trigger.CALENDAR_EXPIRY, expiry),
+        (Trigger.JOB_FAILED, lambda: failed_job_conditions(read_last_attempts(conn, job_names))),
+    ]
+    return tick(evaluators, ledger=ConditionLedger(conn), alerter=alerter, at=clock.now())
+
+
 def run_failure_alerts_job(context: JobContext) -> None:
     """The `failure_alerts` scheduler job body: one tick against the production wiring.
 
-    What it does: loads the holiday calendar fresh from disk — not the per-process cached copy, so
-    a year appended to the YAML is seen without a scheduler restart — builds the configured
-    alerter, and runs `run_failure_alerts` over the production registry's job names.
+    What it does: builds the configured alerter and runs `run_failure_alerts` over the production
+    registry's job names.
+    What it assumes: a fresh alerter per tick, so the alerter's in-process dedup window never
+    suppresses anything here — dedup is the `alert_condition` ledger's job. Were it ever to
+    suppress, `reconcile` rolls the onset back rather than recording a page that was not sent.
     What it never does: report a green run when a trigger could not be evaluated or an alert could
     not be delivered; it raises `TriggerEvaluationError`, which the runner records FAILED.
     """
@@ -577,7 +668,6 @@ def run_failure_alerts_job(context: JobContext) -> None:
             settings=context.settings,
             clock=context.clock,
             alerter=alerter,
-            calendar=load_calendar(),
             job_names=default_registry().names(),
         )
     if not report.ok:

@@ -20,12 +20,19 @@ from uuid import uuid4
 import psycopg
 import pytest
 
-from dataplatform.alert_triggers import CALENDAR_KEY, TickReport, run_failure_alerts
+from dataplatform import alert_triggers
+from dataplatform.alert_triggers import (
+    CALENDAR_KEY,
+    TickReport,
+    TriggerEvaluationError,
+    run_failure_alerts,
+    run_failure_alerts_job,
+)
 from dataplatform.alerts import BaseAlerter, Severity
 from dataplatform.clock import IST, FrozenClock
-from dataplatform.config import Settings
-from dataplatform.ingest.calendar import load as load_calendar
-from dataplatform.scheduler.registry import default_registry
+from dataplatform.config import AlertProvider, Settings
+from dataplatform.ingest.calendar import CalendarDataError, TradingCalendar
+from dataplatform.scheduler.registry import JobContext, default_registry
 from dataplatform.store.db import Connection, connect, connection, with_dbname
 from dataplatform.store.migrate import migrate
 
@@ -134,7 +141,6 @@ def _tick(
         settings=settings,
         clock=clock,
         alerter=alerter,
-        calendar=load_calendar(),
         job_names=default_registry().names(),
     )
     assert report.ok, report.errors
@@ -231,3 +237,62 @@ def test_a_skipped_or_running_attempt_does_not_hide_a_failure(
     report, alerter = _tick(conn, scratch_settings, HEALTHY_NOW)
     assert alerter.keys == [JOB_KEY]
     assert report.opened == [JOB_KEY]
+
+
+# ── the scheduler job body itself ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def committed(scratch_settings: Settings) -> Iterator[Connection]:
+    """An autocommit connection for the job-wrapper tests, which open their own connection and so
+    only see committed rows. Everything it (or the job) wrote is deleted afterwards, so the
+    rollback-isolated tests above still start from empty tables."""
+    with connection(scratch_settings, autocommit=True) as live:
+        try:
+            yield live
+        finally:
+            for table in ("alert_condition", "job_run", "quality_flag", "sync_state"):
+                live.execute(f"DELETE FROM {table}")
+
+
+def _context(settings: Settings, now: datetime) -> JobContext:
+    """Pinned to the log channel: a developer `.env` selecting telegram must never make a test
+    page a real phone."""
+    log_only = settings.model_copy(update={"alert_provider": AlertProvider.LOG})
+    return JobContext(
+        job_name="failure_alerts", run_id=uuid4(), clock=FrozenClock(now), settings=log_only
+    )
+
+
+def _open_keys(conn: Connection) -> set[str]:
+    rows = conn.execute("SELECT dedup_key FROM alert_condition WHERE resolved_at IS NULL")
+    return {str(row[0]) for row in rows.fetchall()}
+
+
+def test_the_job_body_pages_through_the_configured_alerter(
+    committed: Connection, scratch_settings: Settings
+) -> None:
+    """`run_failure_alerts_job` end to end: real wiring, the log alerter, the ledger."""
+    _break_everything(committed)
+    run_failure_alerts_job(_context(scratch_settings, BROKEN_NOW))
+    assert _open_keys(committed) == {STREAK_KEY, QUALITY_KEY, CALENDAR_KEY, JOB_KEY}
+
+    # A second tick from a new process is silent and still green.
+    run_failure_alerts_job(_context(scratch_settings, BROKEN_NOW + timedelta(minutes=15)))
+    assert _open_keys(committed) == {STREAK_KEY, QUALITY_KEY, CALENDAR_KEY, JOB_KEY}
+
+
+def test_a_malformed_holiday_file_still_lets_the_other_triggers_page(
+    committed: Connection, scratch_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The review's blocking case through the job body: a bad YAML fails one trigger, loudly."""
+
+    def malformed() -> TradingCalendar:
+        raise CalendarDataError("nse_holidays.yaml does not match the holiday schema")
+
+    monkeypatch.setattr(alert_triggers, "load_calendar", malformed)
+    _break_everything(committed)
+
+    with pytest.raises(TriggerEvaluationError, match="calendar_expiry: not evaluated"):
+        run_failure_alerts_job(_context(scratch_settings, BROKEN_NOW))
+    assert _open_keys(committed) == {STREAK_KEY, QUALITY_KEY, JOB_KEY}

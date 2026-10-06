@@ -10,7 +10,8 @@ condition ledger, not from the alerter's in-process window hiding a second send.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -19,7 +20,7 @@ from dataplatform.alert_triggers import (
     CALENDAR_KEY,
     AlertCondition,
     ConditionLedger,
-    FailedAttempt,
+    FinishedAttempt,
     OpenQualityCheck,
     TickReport,
     Trigger,
@@ -29,10 +30,11 @@ from dataplatform.alert_triggers import (
     quality_red_conditions,
     reconcile,
     redact,
+    tick,
 )
-from dataplatform.alerts import BaseAlerter, Severity
+from dataplatform.alerts import AlertOutcome, BaseAlerter, Severity
 from dataplatform.clock import IST, FrozenClock
-from dataplatform.ingest.calendar import trading_calendar
+from dataplatform.ingest.calendar import CalendarDataError, trading_calendar
 from dataplatform.status import SourceStatus, SyncState
 
 NOW = datetime(2026, 11, 2, 9, 0, tzinfo=IST)
@@ -43,8 +45,10 @@ class RecordingAlerter(BaseAlerter):
 
     channel = "test"
 
-    def __init__(self, clock: FrozenClock, *, fail: bool = False) -> None:
-        super().__init__(clock=clock, dedup_window=timedelta(0))
+    def __init__(
+        self, clock: FrozenClock, *, fail: bool = False, window: timedelta = timedelta(0)
+    ) -> None:
+        super().__init__(clock=clock, dedup_window=window)
         self.sent: list[tuple[Severity, str, str, str]] = []
         self.fail = fail
 
@@ -57,8 +61,19 @@ class RecordingAlerter(BaseAlerter):
 class MemoryLedger(ConditionLedger):
     """`ConditionLedger`'s contract over a dict: key -> (trigger, title, resolved)."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, broken_writes: bool = False) -> None:
         self.rows: dict[str, tuple[Trigger, str, bool]] = {}
+        self.broken_writes = broken_writes
+
+    @contextmanager
+    def transaction(self) -> Iterator[object]:
+        """Postgres semantics: a block that raises leaves the rows as they were."""
+        snapshot = dict(self.rows)
+        try:
+            yield self
+        except BaseException:
+            self.rows = snapshot
+            raise
 
     def open_keys(self, trigger: Trigger) -> dict[str, str]:
         return {
@@ -68,6 +83,8 @@ class MemoryLedger(ConditionLedger):
         }
 
     def open(self, condition: AlertCondition, at: datetime) -> None:
+        if self.broken_writes:
+            raise OSError("ledger write failed")
         self.rows[condition.dedup_key] = (condition.trigger, condition.title, False)
 
     def touch(self, keys: Sequence[str], at: datetime) -> None:
@@ -177,7 +194,11 @@ def test_calendar_expiry_names_how_long_ago_it_ended() -> None:
 
 
 def test_a_failed_job_is_one_condition_per_job() -> None:
-    attempts = [FailedAttempt("eod_pipeline", NOW, "EodPipelineError: nse_bhavcopy not published")]
+    attempts = [
+        FinishedAttempt(
+            "eod_pipeline", "FAILED", NOW, "EodPipelineError: nse_bhavcopy not published"
+        )
+    ]
     (condition,) = failed_job_conditions(attempts)
     assert condition.dedup_key == "job:eod_pipeline:failed"
     assert "EodPipelineError" in condition.body
@@ -185,6 +206,23 @@ def test_a_failed_job_is_one_condition_per_job() -> None:
 
 def test_no_failed_jobs_means_no_job_condition() -> None:
     assert failed_job_conditions([]) == []
+
+
+@pytest.mark.parametrize("state", ["SUCCEEDED", "TIMED_OUT"])
+def test_a_job_whose_newest_outcome_did_not_raise_is_not_a_condition(state: str) -> None:
+    """Fails if the state filter is inverted. TIMED_OUT clears too: the job returned, it did not
+    raise — the overrun is `/status/jobs`' FAILING, not this trigger's page."""
+    attempts = [FinishedAttempt("eod_pipeline", state, NOW, None)]
+    assert failed_job_conditions(attempts) == []
+
+
+def test_only_the_jobs_that_raised_are_conditions() -> None:
+    attempts = [
+        FinishedAttempt("eod_pipeline", "SUCCEEDED", NOW, None),
+        FinishedAttempt("daily_snapshot", "FAILED", NOW, "boom"),
+        FinishedAttempt("tri_refresh", "TIMED_OUT", NOW, "ran for 999s"),
+    ]
+    assert [c.dedup_key for c in failed_job_conditions(attempts)] == ["job:daily_snapshot:failed"]
 
 
 # ── no secret in an alert body ───────────────────────────────────────────────────────────────
@@ -298,3 +336,99 @@ def test_resolution_only_touches_its_own_trigger() -> None:
     )
     assert _tick([], ledger, alerter).resolved == []
     assert ledger.open_keys(Trigger.CALENDAR_EXPIRY) == {CALENDAR_KEY: calendar.title}
+
+
+def test_a_suppressed_onset_is_not_recorded_as_told() -> None:
+    """Only a SENT outcome opens the row: a send the alerter's own window swallowed did not page."""
+    clock = FrozenClock(NOW)
+    alerter = RecordingAlerter(clock, window=timedelta(hours=6))
+    streak = failed_streak_conditions([_status("nse_bhavcopy", streak=3)], threshold=3)
+    key = streak[0].dedup_key
+    assert alerter.send(Severity.INFO, "earlier", "earlier", key) is AlertOutcome.SENT
+
+    report = _tick(streak, MemoryLedger(), alerter)
+    assert report.opened == [] and not report.ok
+    assert "suppressed" in report.errors[0]
+
+
+def test_a_ledger_write_failure_sends_nothing() -> None:
+    """Write before send: a broken ledger costs a page, never a page repeated every tick."""
+    alerter = RecordingAlerter(FrozenClock(NOW))
+    streak = failed_streak_conditions([_status("nse_bhavcopy", streak=3)], threshold=3)
+    for _ in range(3):
+        report = _tick(streak, MemoryLedger(broken_writes=True), alerter)
+        assert report.opened == [] and not report.ok
+    assert alerter.sent == []
+
+
+# ── one trigger's failure never silences the others ──────────────────────────────────────────
+
+
+def _conditions_for(trigger: Trigger) -> list[AlertCondition]:
+    if trigger is Trigger.INGEST_FAILED_STREAK:
+        return failed_streak_conditions([_status("nse_bhavcopy", streak=3)], threshold=3)
+    if trigger is Trigger.QUALITY_RED:
+        return quality_red_conditions(
+            [OpenQualityCheck("price_spike", 1, date(2026, 11, 1), date(2026, 11, 1))]
+        )
+    return failed_job_conditions([FinishedAttempt("eod_pipeline", "FAILED", NOW, "boom")])
+
+
+def test_a_malformed_holiday_file_fails_only_the_calendar_trigger() -> None:
+    """The review's blocking case: a bad YAML edit must not stop (a), (b) and (d) from paging."""
+
+    def broken_calendar() -> list[AlertCondition]:
+        raise CalendarDataError("nse_holidays.yaml does not match the holiday schema")
+
+    alerter, ledger = RecordingAlerter(FrozenClock(NOW)), MemoryLedger()
+    report = tick(
+        [
+            (Trigger.INGEST_FAILED_STREAK, lambda: _conditions_for(Trigger.INGEST_FAILED_STREAK)),
+            (Trigger.CALENDAR_EXPIRY, broken_calendar),
+            (Trigger.QUALITY_RED, lambda: _conditions_for(Trigger.QUALITY_RED)),
+            (Trigger.JOB_FAILED, lambda: _conditions_for(Trigger.JOB_FAILED)),
+        ],
+        ledger=ledger,
+        alerter=alerter,
+        at=NOW,
+    )
+    assert sorted(report.opened) == sorted(
+        ["ingest:nse_bhavcopy:failed_streak", "quality:price_spike:red", "job:eod_pipeline:failed"]
+    )
+    assert len(alerter.sent) == 3
+    assert report.errors == ["calendar_expiry: not evaluated: CalendarDataError"]
+
+
+def test_an_unevaluated_trigger_resolves_nothing() -> None:
+    """Absence of evidence is not a cleared alarm: a broken read keeps its open rows open."""
+    alerter, ledger = RecordingAlerter(FrozenClock(NOW)), MemoryLedger()
+    (calendar,) = calendar_expiry_conditions(date(2026, 12, 31), today=NOW.date(), lead_days=60)
+    tick([(Trigger.CALENDAR_EXPIRY, lambda: [calendar])], ledger=ledger, alerter=alerter, at=NOW)
+
+    def broken() -> list[AlertCondition]:
+        raise CalendarDataError("bad yaml")
+
+    report = tick([(Trigger.CALENDAR_EXPIRY, broken)], ledger=ledger, alerter=alerter, at=NOW)
+    assert report.resolved == []
+    assert ledger.open_keys(Trigger.CALENDAR_EXPIRY) == {CALENDAR_KEY: calendar.title}
+
+
+def test_a_ledger_read_failure_in_one_trigger_does_not_abort_the_rest() -> None:
+    class FlakyLedger(MemoryLedger):
+        def open_keys(self, trigger: Trigger) -> dict[str, str]:
+            if trigger is Trigger.QUALITY_RED:
+                raise OSError("connection reset")
+            return super().open_keys(trigger)
+
+    alerter, ledger = RecordingAlerter(FrozenClock(NOW)), FlakyLedger()
+    report = tick(
+        [
+            (Trigger.QUALITY_RED, lambda: _conditions_for(Trigger.QUALITY_RED)),
+            (Trigger.JOB_FAILED, lambda: _conditions_for(Trigger.JOB_FAILED)),
+        ],
+        ledger=ledger,
+        alerter=alerter,
+        at=NOW,
+    )
+    assert report.opened == ["job:eod_pipeline:failed"]
+    assert report.errors == ["quality_red: not reconciled: OSError"]
