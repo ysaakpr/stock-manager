@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from dataplatform.ingest.calendar import trading_calendar
 from dataplatform.ingest.macro import (
     Frequency,
     IndexAlias,
@@ -211,6 +212,16 @@ def test_each_alias_resolves_old_and_new_name_to_one_series_across_its_switch(
         assert abs(new_close / old_close - 1) < Decimal("0.03"), alias.evidence
 
 
+def test_sessions_between_matches_the_trading_calendar() -> None:
+    """`sessions_between` waives the per-alias level check, so it must be the calendar's count of
+    sessions strictly between the two cited files — a row cannot claim a gap to skip the check."""
+    calendar = trading_calendar()
+    for alias in _ALIASES:
+        start, end = alias.before.session, alias.after.session
+        between = [d for d in calendar.expected_data_dates(start, end) if start < d < end]
+        assert alias.sessions_between == len(between), alias.published
+
+
 def _table_file(tmp_path: Path, row: str, series: str = "") -> Path:
     path = tmp_path / "aliases.yaml"
     path.write_text(f"version: 2\naliases:\n{row}" + (f"series:\n{series}" if series else ""))
@@ -266,13 +277,28 @@ def test_a_mapping_without_dated_evidence_does_not_load(
 
 
 def test_a_switch_whose_names_land_on_two_series_does_not_load(tmp_path: Path) -> None:
+    """The canonical is not remapped, but the cited successor is a different index: refused."""
     row = _GOOD_ROW.replace('after: {name: "NIFTY Midcap 100"', 'after: {name: "Nifty Midcap 50"')
-    row = row.replace('canonical: "NIFTY Midcap 100"', 'canonical: "Nifty Midcap 50"')
-    other = _GOOD_ROW.replace('"CNX Midcap"', '"Nifty Midcap 50"').replace(
-        'canonical: "NIFTY Midcap 100"', 'canonical: "Nifty Midcap 150"'
+    with pytest.raises(ValueError, match="both sides of a switch must land on one series"):
+        load_index_aliases(_table_file(tmp_path, row))
+
+
+def _row(published: str, canonical: str, before: str, after: str) -> str:
+    return (
+        _GOOD_ROW.replace('published: "CNX Midcap"', f'published: "{published}"')
+        .replace('canonical: "NIFTY Midcap 100"', f'canonical: "{canonical}"')
+        .replace('before: {name: "CNX Midcap"', f'before: {{name: "{before}"')
+        .replace('after: {name: "NIFTY Midcap 100"', f'after: {{name: "{after}"')
     )
-    with pytest.raises(ValueError, match="one series"):
-        load_index_aliases(_table_file(tmp_path, row + other))
+
+
+def test_a_canonical_that_is_itself_remapped_does_not_load(tmp_path: Path) -> None:
+    """A chain left half-written. Every switch here lands on one series, so only the chained-
+    canonical check can refuse it: X -> Y means the CNX Midcap and Z rows must name Y, not X."""
+    x, y, z = "Nifty Free Float Midcap 100", "NIFTY Midcap 100", "Nifty Midcap 100 Interim"
+    rows = _row("CNX Midcap", x, "CNX Midcap", z) + _row(z, x, z, "CNX Midcap") + _row(x, y, x, y)
+    with pytest.raises(ValueError, match="itself remapped"):
+        load_index_aliases(_table_file(tmp_path, rows))
 
 
 def test_a_name_cannot_be_both_an_alias_and_its_own_series(tmp_path: Path) -> None:

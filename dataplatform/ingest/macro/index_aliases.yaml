@@ -685,8 +685,8 @@ series:
     first_seen: 2023-04-12
     evidence: "new index: first published 2023-04-12, regularly from 2024-11-27; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
   - name: "Nifty REITs & InvITs"
-    first_seen: 2023-04-12
-    evidence: "new index: first published 2023-04-12; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+    first_seen: 2023-04-06
+    evidence: "new index: first in the archive in ind_close_all_06042023.csv (the anchor: an L0 file refused for its month-first date, so M11.2's report, which reads only published sessions, put first seen at 2023-04-12); every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
   - name: "Nifty BHARAT Bond Index - April 2030"
     first_seen: 2025-01-16
     evidence: "new index: first published 2025-01-16; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"

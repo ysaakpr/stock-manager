@@ -235,12 +235,17 @@ def load_index_aliases(path: Path | None = None) -> IndexAliasTable:
         seen[key] = alias.canonical.strip()
     for alias in table.aliases:
         canonical = _alias_key(alias.canonical)
-        for name in (alias.canonical, alias.before.name, alias.after.name):
+        if _alias_key(table.resolve(alias.canonical)) != canonical:
+            raise ValueError(
+                f"{source}: {alias.published!r} maps to {alias.canonical!r}, which is itself "
+                f"remapped to {table.resolve(alias.canonical)!r}; write the chain out to its end"
+            )
+        for name in (alias.before.name, alias.after.name):
             if _alias_key(table.resolve(name)) != canonical:
                 raise ValueError(
                     f"{source}: {alias.published!r} cites {name!r}, which resolves to "
-                    f"{table.resolve(name)!r}, not {alias.canonical!r}; both sides of a switch and "
-                    "the canonical must land on one series"
+                    f"{table.resolve(name)!r}, not {alias.canonical!r}; both sides of a switch "
+                    "must land on one series"
                 )
     aliased = {_alias_key(n) for a in table.aliases for n in (a.published, a.canonical)}
     for series in table.series:
