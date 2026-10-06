@@ -18,6 +18,7 @@ from typing import Any
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from dataplatform.clock import IST
 from dataplatform.ingest.source_register import (
@@ -344,28 +345,107 @@ def test_reprobe_selection_is_not_inverted(raw: dict[str, Any]) -> None:
     assert problems(failed) == []
 
 
-def test_declined_without_a_record_is_rejected(raw: dict[str, Any]) -> None:
-    bare = _mutate(raw, SCREENER, declined=None)
-    assert any("DECLINED without a `declined` record" in p for p in problems(bare))
+def _changed(raw: dict[str, Any], source_id: str, **changes: Any) -> dict[str, Any]:
+    """A deep copy of the raw register document with one entry altered — not yet validated."""
+    doc = copy.deepcopy(raw)
+    next(entry for entry in doc["sources"] if entry["id"] == source_id).update(changes)
+    return doc
 
 
-def test_a_decline_record_on_a_live_row_is_rejected(raw: dict[str, Any]) -> None:
-    record = next(s for s in raw["sources"] if s["id"] == SCREENER)["declined"]
-    wrong = _mutate(raw, "nifty_tri_history", declined=record)
-    assert any("nifty_tri_history: carries a `declined` record" in p for p in problems(wrong))
+def _screener_record(raw: dict[str, Any]) -> dict[str, Any]:
+    record: dict[str, Any] = next(s for s in raw["sources"] if s["id"] == SCREENER)["declined"]
+    return record
 
 
-def test_a_decline_needs_a_reason_and_a_decision(raw: dict[str, Any]) -> None:
-    record = next(s for s in raw["sources"] if s["id"] == SCREENER)["declined"]
-    for field in ("reason", "decision"):
-        blank = _mutate(raw, SCREENER, declined={**record, field: "  "})
-        assert any("stated reason and decision" in p for p in problems(blank)), field
+def _bad_declines(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Every DECLINED rule broken once, as a raw document the register must refuse to build."""
+    record = _screener_record(raw)
+    return {
+        "declined-without-record": _changed(raw, SCREENER, declined=None),
+        "record-on-a-live-row": _changed(raw, "nifty_tri_history", declined=record),
+        "empty-reason": _changed(raw, SCREENER, declined={**record, "reason": ""}),
+        "blank-reason": _changed(raw, SCREENER, declined={**record, "reason": "   "}),
+        "empty-decision": _changed(raw, SCREENER, declined={**record, "decision": ""}),
+        "blank-decision": _changed(raw, SCREENER, declined={**record, "decision": "  "}),
+        "free-text-decision": _changed(
+            raw, SCREENER, declined={**record, "decision": "polly said so"}
+        ),
+        "decision-without-number": _changed(
+            raw, SCREENER, declined={**record, "decision": "HUMAN_DECISIONS D twelve"}
+        ),
+        "invented-robots-rule": _changed(
+            raw, SCREENER, declined={**record, "robots_rule": "/not-a-rule/*"}
+        ),
+    }
 
 
-def test_a_robots_rule_must_be_in_the_hosts_own_robots_record(raw: dict[str, Any]) -> None:
-    record = next(s for s in raw["sources"] if s["id"] == SCREENER)["declined"]
-    invented = _mutate(raw, SCREENER, declined={**record, "robots_rule": "/not-a-rule/*"})
-    assert any("not in the robots record" in p for p in problems(invented))
+BAD_DECLINE_CASES: list[str] = [
+    "declined-without-record",
+    "record-on-a-live-row",
+    "empty-reason",
+    "blank-reason",
+    "empty-decision",
+    "blank-decision",
+    "free-text-decision",
+    "decision-without-number",
+    "invented-robots-rule",
+]
+
+
+def test_the_case_list_covers_every_bad_decline(raw: dict[str, Any]) -> None:
+    assert sorted(BAD_DECLINE_CASES) == sorted(_bad_declines(raw))
+
+
+@pytest.mark.parametrize("case", BAD_DECLINE_CASES)
+def test_a_bad_decline_is_refused_by_model_validate(raw: dict[str, Any], case: str) -> None:
+    """The DECLINED rules are schema, not an optional `problems()` pass: construction refuses."""
+    with pytest.raises(ValidationError):
+        SourceRegister.model_validate(_bad_declines(raw)[case])
+
+
+@pytest.mark.parametrize("case", BAD_DECLINE_CASES)
+def test_a_bad_decline_is_refused_by_load(raw: dict[str, Any], case: str, tmp_path: Path) -> None:
+    """`load()` — what the fetcher, scheduler and status API all call — refuses it too."""
+    path = tmp_path / "source_register.yaml"
+    path.write_text(yaml.safe_dump(_bad_declines(raw)[case], allow_unicode=True), encoding="utf-8")
+    with pytest.raises(ValidationError):
+        load(path)
+
+
+def test_the_unbroken_document_round_trips_through_load(
+    raw: dict[str, Any], tmp_path: Path
+) -> None:
+    """Control for the two tests above: the refusal is the broken rule, not the round trip."""
+    path = tmp_path / "source_register.yaml"
+    path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    assert load(path).declined().keys() == {SCREENER}
+
+
+#: HUMAN_DECISIONS.md, where every decline's cited decision must be readable by the owner.
+HUMAN_DECISIONS: Path = REGISTER_PATH.parents[2] / "HUMAN_DECISIONS.md"
+
+
+def _decision_section(number: int) -> str | None:
+    """The text of `### D<number>` in HUMAN_DECISIONS.md, up to the next `### ` heading."""
+    text = HUMAN_DECISIONS.read_text(encoding="utf-8")
+    match = re.search(rf"^### D{number}\b.*?(?=^### |\Z)", text, flags=re.MULTILINE | re.DOTALL)
+    return None if match is None else match.group(0)
+
+
+@pytest.mark.parametrize("source_id", sorted(load().declined()))
+def test_every_decline_cites_a_real_decision_that_names_the_source(
+    register: SourceRegister, source_id: str
+) -> None:
+    """Mislabelling a failing source DECLINED would hide it from the red aggregation, so the
+    decline must point at a HUMAN_DECISIONS entry that exists and is about this very source.
+
+    Deliberately silent on the entry's answered/open status: that line belongs to the decisions
+    file's owner (PR #64 answers D12), and this test holds the citation, not the bookkeeping.
+    """
+    record = register.declined()[source_id]
+    section = _decision_section(record.decision_number)
+    assert section is not None, f"{source_id} cites D{record.decision_number}, which is absent"
+    assert source_id in section, f"D{record.decision_number} never mentions {source_id}"
 
 
 def test_validate_lists_declined_apart_from_open_rows(capsys: pytest.CaptureFixture[str]) -> None:

@@ -247,9 +247,9 @@ def resolve_policy(
             f"{', '.join(sorted(entry.id for entry in register.sources))}"
         )
     if source.is_declined:
-        decision = source.declined.decision if source.declined is not None else "unrecorded"
         raise SourceDeclinedError(
-            f"source {source_id} is DECLINED on policy grounds ({decision}); it is never fetched"
+            f"source {source_id} is DECLINED on policy grounds ({source.decline().decision}); "
+            "it is never fetched"
         )
     record = register.host_policy(source.host)
     if record is None:

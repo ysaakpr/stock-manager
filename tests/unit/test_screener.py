@@ -45,7 +45,6 @@ from dataplatform.ingest.screener import (
     parse_html,
     parse_l0,
 )
-from dataplatform.ingest.source_register import SourceRegister, Status
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.store import L0Ref, L0Store
 from dataplatform.store.paths import Layer, layer_root
@@ -57,6 +56,7 @@ from dataplatform.store.restated import (
     build,
     restated_root,
 )
+from tests.register_support import undeclined
 
 FIXTURE: Final = (
     Path(__file__).resolve().parents[1] / "fixtures" / "screener" / "2026-08" / "RELIANCE.html"
@@ -95,17 +95,7 @@ def _crawler() -> ScreenerCrawler:
     The URL rules are still the register's own robots record, so they are exercised against a copy
     whose screener row is un-declined: the robots posture must hold whatever the row's status.
     """
-    register = load_register()
-    sources = [
-        s.model_copy(update={"status": Status.FAILED, "declined": None})
-        if s.id == SCREENER_SOURCE_ID
-        else s
-        for s in register.sources
-    ]
-    undeclined = SourceRegister.model_validate(
-        register.model_copy(update={"sources": sources}).model_dump()
-    )
-    return ScreenerCrawler.from_register(undeclined)
+    return ScreenerCrawler.from_register(undeclined(load_register()))
 
 
 def test_the_crawler_cannot_be_wired_for_the_declined_source() -> None:
