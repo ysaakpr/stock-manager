@@ -9,6 +9,11 @@ guarantee:
   2. no entry claims VERIFIED without a real, successful, parsed fetch recorded against it;
   3. every host an entry talks to has a robots.txt record saying what it permits.
 
+A fourth status, `DECLINED` (HUMAN_DECISIONS D12, taken by D19), records a source we have chosen
+not to take on policy grounds. It is permanent: nothing schedules it, `policy.resolve_policy`
+refuses to build a fetch policy for it, the status API reports it as declined rather than red, and
+a re-probe sweep (`reprobe_candidates`) never selects it.
+
 It never fetches anything. The live sweep that produced the evidence is a one-off recorded in
 `ops/gates/source-verification.md`; re-verification belongs to M1.2's fetcher, which has the
 rate limiting, backoff and 403 hard stop this module deliberately does not reimplement.
@@ -71,6 +76,36 @@ class Status(StrEnum):
 
     BLOCKED_CREDENTIAL = "BLOCKED_CREDENTIAL"
     """Reachable only behind an account or key that does not exist (B4 / §3.7)."""
+
+    DECLINED = "DECLINED"
+    """We are choosing not to take this source, on policy grounds (HUMAN_DECISIONS D12/D19).
+
+    Not a failure and not a missing credential: nothing broke, and no credential would make the
+    source acceptable. Requires a `declined` record naming the reason and the decision. Permanent
+    — a re-probe sweep skips it, nothing schedules it and the fetch policy refuses it.
+    """
+
+
+#: The statuses a re-probe sweep re-examines: everything that is neither working nor declined.
+#: An explicit set rather than "not VERIFIED", so that a new status has to be placed on one side
+#: of the line deliberately — `test_source_register` fails if a status is on neither side.
+REPROBE_STATUSES: Final[frozenset[Status]] = frozenset({Status.FAILED, Status.BLOCKED_CREDENTIAL})
+
+
+class Declined(BaseModel):
+    """Why a source is `DECLINED`, and who decided it — the machine-readable half of the decision.
+
+    `robots_rule`, when the decline rests on robots.txt, must be one of the host record's own
+    `disallow` lines: the evidence is the register's robots record, not a sentence restating it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: str
+    decision: str
+    decided_on: date
+    declined_url: str | None = None
+    robots_rule: str | None = None
 
 
 class Era(BaseModel):
@@ -197,6 +232,12 @@ class Source(BaseModel):
     failure_note: str | None = None
     candidate_alternatives: list[str] = Field(default_factory=list)
     owner_task: str | None = None
+    declined: Declined | None = None
+
+    @property
+    def is_declined(self) -> bool:
+        """True for a source declined on policy grounds — never scheduled, fetched or re-probed."""
+        return self.status is Status.DECLINED
 
     @property
     def fetch_succeeded(self) -> bool:
@@ -243,6 +284,24 @@ class SourceRegister(BaseModel):
     def by_plan_row(self, plan_row: str) -> list[Source]:
         """Every entry covering one §4.1 row (a row can have several: NSE and BSE, or two eras)."""
         return [s for s in self.sources if s.plan_row == plan_row]
+
+    def declined(self) -> dict[str, Declined]:
+        """Source id → its decline record, for every source declined on policy grounds."""
+        return {s.id: s.declined for s in self.sources if s.is_declined and s.declined is not None}
+
+
+def reprobe_candidates(reg: SourceRegister) -> list[Source]:
+    """The rows a re-probe sweep should re-examine: FAILED and BLOCKED_CREDENTIAL, never DECLINED.
+
+    What it assumes: the register passed `problems`. What it never does: select a declined row —
+    D12's whole point is that a policy decision must survive re-probe sweeps untouched.
+    """
+    return [s for s in reg.sources if s.status in REPROBE_STATUSES]
+
+
+def declined_sources(path: Path = REGISTER_PATH) -> dict[str, Declined]:
+    """The checked-in register's declined sources (id → record). Loads the file each call."""
+    return load(path).declined()
 
 
 def load(path: Path = REGISTER_PATH) -> SourceRegister:
@@ -297,6 +356,25 @@ def _acceptance_problems(reg: SourceRegister) -> Iterator[str]:
         if source.failure_note:
             yield f"{source.id}: marked VERIFIED but carries a failure_note"
 
+    # DECLINED is a decision, so it must name one; and only a declined row may carry the record.
+    for source in reg.sources:
+        if source.is_declined and source.declined is None:
+            yield f"{source.id}: status DECLINED without a `declined` record (reason + decision)"
+        if not source.is_declined and source.declined is not None:
+            yield f"{source.id}: carries a `declined` record but its status is {source.status}"
+        record = source.declined
+        if record is None:
+            continue
+        if not record.reason.strip() or not record.decision.strip():
+            yield f"{source.id}: declined without a stated reason and decision reference"
+        if record.robots_rule is not None:
+            policy = reg.host_policy(source.host)
+            if policy is None or record.robots_rule not in policy.disallow:
+                yield (
+                    f"{source.id}: declined on robots rule {record.robots_rule!r}, which is not "
+                    f"in the robots record for {source.host}"
+                )
+
     # Criterion 3 — robots was checked per host, and the register says what it permits.
     for host in {s.host for s in reg.sources}:
         policy = reg.host_policy(host)
@@ -349,9 +427,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     print(f"source register OK — {_summarise(register)}")
-    for source in register.sources:
-        if source.status is not Status.VERIFIED:
-            print(f"  open: {source.id} [{source.status.value}] -> {source.owner_task}")
+    for source in reprobe_candidates(register):
+        print(f"  open: {source.id} [{source.status.value}] -> {source.owner_task}")
+    for source_id, record in register.declined().items():
+        print(f"  declined: {source_id} ({record.decision}) — not scheduled, fetched or re-probed")
     return 0
 
 

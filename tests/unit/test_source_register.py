@@ -23,11 +23,15 @@ from dataplatform.clock import IST
 from dataplatform.ingest.source_register import (
     PLAN_ROWS,
     REGISTER_PATH,
+    REPROBE_STATUSES,
     Source,
     SourceRegister,
     Status,
+    declined_sources,
     load,
+    main,
     problems,
+    reprobe_candidates,
 )
 
 #: The build horizon: the latest date any verification in the register may legitimately carry.
@@ -284,3 +288,88 @@ def test_fetch_succeeded_requires_all_three_signals() -> None:
     assert ok.fetch_succeeded is True
     for change in ({"last_http_status": 500}, {"sample_bytes": 0}, {"parse_check": None}):
         assert Source.model_validate({**template, **change}).fetch_succeeded is False
+
+
+# ── DECLINED: a source we choose not to take, on policy grounds (D12, taken by D19) ─────────────
+
+SCREENER: str = "screener_company_fundamentals"
+
+
+def test_screener_is_declined_with_its_robots_evidence(register: SourceRegister) -> None:
+    """D12: the row is declined by robots policy, not blocked on a credential."""
+    row = next(s for s in register.sources if s.id == SCREENER)
+    assert row.status is Status.DECLINED
+    assert row.is_declined
+    assert row.declined is not None
+    assert row.declined.reason.strip()
+    assert "D12" in row.declined.decision and "D19" in row.declined.decision
+    assert row.declined.robots_rule == "/user/*"
+    host = register.host_policy(row.host)
+    assert host is not None and row.declined.robots_rule in host.disallow
+    assert row.declined.declined_url is not None and "/user/" in row.declined.declined_url
+    assert declined_sources() == {SCREENER: row.declined}
+
+
+def test_every_status_is_placed_on_one_side_of_the_reprobe_line() -> None:
+    """Every switch on status handles every value: a new status must be classified deliberately.
+
+    VERIFIED works, DECLINED is permanent, everything else is re-probed. A status in none of those
+    (or in two) fails here rather than silently falling into whichever branch a reader defaulted to.
+    """
+    for status in Status:
+        sides = [
+            status is Status.VERIFIED,
+            status is Status.DECLINED,
+            status in REPROBE_STATUSES,
+        ]
+        assert sum(sides) == 1, status
+    assert Status.DECLINED not in REPROBE_STATUSES
+
+
+def test_a_reprobe_sweep_never_selects_a_declined_row(register: SourceRegister) -> None:
+    selected = {s.id for s in reprobe_candidates(register)}
+    assert SCREENER not in selected
+    assert all(not s.is_declined for s in reprobe_candidates(register))
+    # Every non-VERIFIED, non-DECLINED row *is* selected — the sweep skips only what it must.
+    expected = {
+        s.id for s in register.sources if s.status not in (Status.VERIFIED, Status.DECLINED)
+    }
+    assert selected == expected
+
+
+def test_reprobe_selection_is_not_inverted(raw: dict[str, Any]) -> None:
+    """Inverted check: the same row, as FAILED, is selected — the skip is the status, not the id."""
+    failed = _mutate(raw, SCREENER, status="FAILED", declined=None)
+    assert SCREENER in {s.id for s in reprobe_candidates(failed)}
+    assert problems(failed) == []
+
+
+def test_declined_without_a_record_is_rejected(raw: dict[str, Any]) -> None:
+    bare = _mutate(raw, SCREENER, declined=None)
+    assert any("DECLINED without a `declined` record" in p for p in problems(bare))
+
+
+def test_a_decline_record_on_a_live_row_is_rejected(raw: dict[str, Any]) -> None:
+    record = next(s for s in raw["sources"] if s["id"] == SCREENER)["declined"]
+    wrong = _mutate(raw, "nifty_tri_history", declined=record)
+    assert any("nifty_tri_history: carries a `declined` record" in p for p in problems(wrong))
+
+
+def test_a_decline_needs_a_reason_and_a_decision(raw: dict[str, Any]) -> None:
+    record = next(s for s in raw["sources"] if s["id"] == SCREENER)["declined"]
+    for field in ("reason", "decision"):
+        blank = _mutate(raw, SCREENER, declined={**record, field: "  "})
+        assert any("stated reason and decision" in p for p in problems(blank)), field
+
+
+def test_a_robots_rule_must_be_in_the_hosts_own_robots_record(raw: dict[str, Any]) -> None:
+    record = next(s for s in raw["sources"] if s["id"] == SCREENER)["declined"]
+    invented = _mutate(raw, SCREENER, declined={**record, "robots_rule": "/not-a-rule/*"})
+    assert any("not in the robots record" in p for p in problems(invented))
+
+
+def test_validate_lists_declined_apart_from_open_rows(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["validate"]) == 0
+    out = capsys.readouterr().out
+    assert f"declined: {SCREENER}" in out
+    assert f"open: {SCREENER}" not in out

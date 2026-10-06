@@ -147,7 +147,11 @@ class ScreenerCrawler:
 
     @classmethod
     def from_register(cls, register: SourceRegister | None = None) -> ScreenerCrawler:
-        """Wire the crawler from the checked-in Source Register (or a supplied one, for tests)."""
+        """Wire the crawler from the checked-in Source Register (or a supplied one, for tests).
+
+        Raises `SourceDeclinedError` while the register row is DECLINED (HUMAN_DECISIONS D12/D19):
+        a crawler for a source we declined to take must not exist to be called.
+        """
         reg = load_register() if register is None else register
         return cls(resolve_policy(SCREENER_SOURCE_ID, reg))
 

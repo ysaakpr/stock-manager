@@ -31,7 +31,7 @@ from pydantic import ValidationError
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.identity.master import Exchange, IdentityMaster, SymbolWindow
 from dataplatform.ingest.models import ParseError
-from dataplatform.ingest.policy import RobotsDisallowedError
+from dataplatform.ingest.policy import RobotsDisallowedError, SourceDeclinedError
 from dataplatform.ingest.screener import (
     SCREENER_HOST,
     SCREENER_SOURCE_ID,
@@ -45,6 +45,8 @@ from dataplatform.ingest.screener import (
     parse_html,
     parse_l0,
 )
+from dataplatform.ingest.source_register import SourceRegister, Status
+from dataplatform.ingest.source_register import load as load_register
 from dataplatform.store import L0Ref, L0Store
 from dataplatform.store.paths import Layer, layer_root
 from dataplatform.store.restated import (
@@ -87,7 +89,29 @@ def _master() -> IdentityMaster:
 
 
 def _crawler() -> ScreenerCrawler:
-    return ScreenerCrawler.from_register()
+    """The crawler as it would be wired if the row were not declined.
+
+    The checked-in row is DECLINED (D12/D19), so `from_register()` refuses — see the test below.
+    The URL rules are still the register's own robots record, so they are exercised against a copy
+    whose screener row is un-declined: the robots posture must hold whatever the row's status.
+    """
+    register = load_register()
+    sources = [
+        s.model_copy(update={"status": Status.FAILED, "declined": None})
+        if s.id == SCREENER_SOURCE_ID
+        else s
+        for s in register.sources
+    ]
+    undeclined = SourceRegister.model_validate(
+        register.model_copy(update={"sources": sources}).model_dump()
+    )
+    return ScreenerCrawler.from_register(undeclined)
+
+
+def test_the_crawler_cannot_be_wired_for_the_declined_source() -> None:
+    """D12/D19: the checked-in row is DECLINED, so no crawler — hence no fetch — can be built."""
+    with pytest.raises(SourceDeclinedError, match="DECLINED"):
+        ScreenerCrawler.from_register()
 
 
 def test_company_url_is_the_one_permitted_shape() -> None:
