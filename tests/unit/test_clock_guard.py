@@ -29,8 +29,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: The only file allowed to read the host clock, relative to the repo root.
 ALLOWED = frozenset({"dataplatform/clock.py"})
 
-#: `orchestrator/` is the build machinery, not product code: it is excluded from ruff and mypy for
-#: the same reason (pyproject.toml, M0.1) and none of its timestamps reach a trading decision.
+#: `orchestrator/` is the build machinery, not product code: it stamps build-state rows with the
+#: wall clock by design, and none of its timestamps reach a trading decision.
 #: Hidden directories (`.venv`, `.git`, caches) are pruned separately.
 SKIPPED_DIRS = frozenset({"__pycache__", "build", "data", "dist", "node_modules", "orchestrator"})
 
