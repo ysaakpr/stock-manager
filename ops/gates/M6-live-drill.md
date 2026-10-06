@@ -45,12 +45,17 @@ exit=0   real 1m12.6s
 
 What `make check` sees: `tests/integration/conftest.py` deselects every `live` test unless the run
 says `-m live`, so a bare run of this file reports `7/13 tests collected (6 deselected)` and makes no model
-call. Two tests pin this, both running in `make check` without a model:
+call. Three tests pin this, all running in `make check` without a model:
 
 - `test_a_bare_run_deselects_every_live_test` runs a collect-only pass with no `-m`, with
   `-m live` and with `-m "not live"`. I checked that it **fails** when the conftest gate is removed.
 - `test_the_live_call_budget_aborts_before_the_26th_call` lets 25 calls through to a `StubLLM`.
   The 26th raises pytest's `Exit` with return code 6, and the stub's call log still shows 25.
+- `test_every_test_using_the_live_fixture_must_carry_the_live_mark` covers the conftest guard
+  added after review. Any test whose fixture closure reaches `live_llm`, directly or through
+  another fixture, without `@pytest.mark.live` is refused at collection. The pin shows this in a
+  throwaway project and was checked to fail with the guard disabled. The gate only covers
+  `tests/integration/`.
 
 ## Real model vs the StubLLM baseline, on the same fixtures
 
