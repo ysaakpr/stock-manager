@@ -21,6 +21,10 @@ Two kinds of row:
   2013 NSEL crisis at Financial Technologies, YES Bank's 2020 moratorium). These get no factor:
   inventing one would erase a real loss from every backtest. They are an explicit allowlist the
   continuity check honours on the exact ISIN and session only, each with its reason and source.
+  Kind `UNSOURCED_ACTION` is the other case the allowlist holds: a step an exchange record shows
+  is a corporate action (EIH's 2006 ex-date lists a second, blank-purpose event beside its bonus)
+  whose terms no L0 object states. It gets no factor either, because that would mean inventing a
+  ratio; it is acknowledged, not fixed, and is the row to replace when a source arrives.
 
 **Why a reviewed file and not rows in ``corporate_actions``** — the same reason as
 `merger_terms`: the table's rows are produced by parsers from L0 and reconciled across two
@@ -83,8 +87,11 @@ MANUAL_SOURCE: Final = "manual_curated"
 _PRICE_EVENTS: Final = frozenset({ActionType.SPLIT, ActionType.BONUS})
 _BREAKS: Final = frozenset({ActionType.DEMERGER, ActionType.SCHEME_OF_ARRANGEMENT})
 
-#: What an explained move may be classified as. One kind today; a closed set on purpose.
-_MOVE_KINDS: Final = frozenset({"MARKET_MOVE"})
+#: What an explained move may be classified as; a closed set on purpose. `MARKET_MOVE` is a real
+#: change in price. `UNSOURCED_ACTION` is a share-basis step that an exchange record shows happened
+#: but whose terms no L0 object states: no factor is applied (this file never infers a ratio), so
+#: the step stays in the level series and is only acknowledged until a source arrives.
+_MOVE_KINDS: Final = frozenset({"MARKET_MOVE", "UNSOURCED_ACTION"})
 
 _ISIN: Final = re.compile(ISIN_PATTERN)
 

@@ -83,7 +83,8 @@ def test_every_row_is_sourced_checked_and_knowable_no_later_than_its_ex_date() -
         assert row.checked >= row.knowable_date, row.isin
         assert row.as_action().source == MANUAL_SOURCE
     for move in curated.explained_moves:
-        assert move.sources and move.reason and move.kind == "MARKET_MOVE", move.isin
+        assert move.sources and move.reason, move.isin
+        assert move.kind in {"MARKET_MOVE", "UNSOURCED_ACTION"}, move.isin
 
 
 def _sources() -> list[tuple[str, TermSource]]:
@@ -97,8 +98,10 @@ def test_every_quoted_line_is_in_l0_where_the_lake_is_here(isin: str, source: Te
     path = _LAKE / source.l0_key
     if not path.is_file():
         pytest.skip(f"L0 object {source.l0_key} is not on this host (no lake, e.g. CI)")
-    assert source.member is not None and source.line is not None
-    lines = zipfile.ZipFile(path).read(source.member).decode("latin-1").splitlines()
+    assert source.line is not None
+    # A PR bundle or bhavcopy is quoted from a member of its zip; a JSON payload from the file.
+    raw = path.read_bytes() if source.member is None else zipfile.ZipFile(path).read(source.member)
+    lines = raw.decode("latin-1").splitlines()
     assert 1 <= source.line <= len(lines), (isin, source.line)
     line = " ".join(lines[source.line - 1].split())
     missing = [f.strip() for f in source.quote.split("...") if f.strip() not in line]
@@ -296,13 +299,19 @@ def test_the_check_reads_curated_breaks_and_moves_without_postgres(tmp_path: Pat
     real = load_manual_actions()
     assert real.structural_dates() == {
         "INE069A01017": (date(2016, 1, 20),),
+        "INE133B01019": (date(2010, 5, 13),),
         "INE429C01035": (date(2017, 5, 25),),
+        "INE966H01019": (date(2010, 4, 15),),
     }
     assert set(real.explained_dates()) == {
+        "INE043A01012",
         "INE111B01023",
+        "INE230A01023",
         "INE247G01024",
         "INE483S01020",
         "INE528G01035",
+        "INE640C01011",
+        "INE780C01023",
     }
 
 
