@@ -87,7 +87,7 @@ render, exited with `CapTierCampaignError`), so promotion ran at 15:46:
   bse_bhavcopy_legacy --from 2011-06-22 --to 2016-08-31` → 1,275 published, 13 failed; re-run after
   the parser fixes → 13 published. **1,288 / 1,288 PUBLISHED**, 3,663,292 BSE rows in `prices_raw`,
   166,892 BSE quarantine rows. Zero requests (every payload reused from L0).
-* **2006-01-02 … 2011-06-21: PENDING — blocked by foreign partitions.** Every `prices_raw` partition
+* **2006-01-02 … 2011-06-21: DONE 2026-10-06 18:50–18:54 IST** (see the update below). *Original note:* **PENDING — blocked by foreign partitions.** Every `prices_raw` partition
   in this span (1,357 of them) was rewritten today between 13:49 and 13:50 by another process with
   NSE rows whose `total_trades` is **all-null** — a schema the canonical writer refuses
   (`PRICES_RAW_SCHEMA.total_trades` is non-nullable). The BSE write preserves other exchanges' rows
@@ -103,3 +103,22 @@ render, exited with `CapTierCampaignError`), so promotion ran at 15:46:
 
   Expected: 1,292 published, **65 FAILED with the soft-404 ParseError** (BSE published no file;
   `mark_gap` refuses a calendar session, so FAILED-with-cause is the honest state), zero requests.
+
+  **Update 2026-10-06 (D14).** The NSE partitions were re-derived first (`l1-widen-2026-10-06.md`
+  §7, 18:48–18:50 IST, with nullable `total_trades` merged in #61). The command above then ran
+  18:50:48 → 18:53:59 IST:
+
+  * **1,292 published, 65 FAILED**: the soft-404 ParseError, exactly the 65 dates in §2.
+  * **0 fetched.** All 1,357 payloads were reused from L0.
+  * 3,524,441 BSE rows in `prices_raw`, 72,650 `scrip_unresolved` in the quarantine. Both match
+    the table above.
+  * The 682 retryable FAILED rows are closed: 636 are now PUBLISHED, and the 46 soft-404 dates
+    among them stay FAILED with that cause.
+  * Log: `~/campaign/bse-promote-2006-2011-2026-10-06.log`.
+
+  **The §1 `l2_invalidation` side effect is still pending, deliberately.** The 3,452 queued ISINs
+  were **not** drained. A drain now builds each partition over its full L1 history, which includes
+  2006–2011. That would extend 1,506 of them and carry five of the seven uncurated pre-2011 steps
+  into L2, turning `l2_continuity` red. Drain only after M13.4 curates them. Note that the
+  Saturday `ca_refresh` drains the queue itself (`l1-widen-2026-10-06.md` §7).
+
