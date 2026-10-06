@@ -62,6 +62,7 @@ from backtest.policies.naive_momentum import MomentumParameters
 from backtest.policies.residual_momentum import with_residual_momentum
 from backtest.policies.swing_composite import SwingCompositeParameters
 from backtest.run import (
+    DEFAULT_UNIVERSE,
     BacktestError,
     BacktestResult,
     UniverseParameters,
@@ -684,15 +685,18 @@ def run_digests(
     floors: Sequence[Decimal] = (LOW_FLOOR, HIGH_FLOOR),
     opening_cash: Decimal = _DEFAULT_OPENING_CASH,
     adjusted: bool = True,
+    universe_name: str = DEFAULT_UNIVERSE,
 ) -> dict[tuple[str, Decimal], str]:
     """The persistence digest of every (arm, floor) run a sweep over this window would make.
 
     The one place a sweep's run identities are derived: :func:`run_sweep` resumes by them and a
     render-only campaign checks them, so the two can never disagree on what "already run" means.
+    ``universe_name`` is the investable universe (``backtest.run.UNIVERSE_CHOICES``); the default
+    ``nifty500`` gives exactly the digests every run had before the choice existed.
     """
     digests: dict[tuple[str, Decimal], str] = {}
     for floor in floors:
-        universe = UniverseParameters(median_turnover_floor=floor)
+        universe = UniverseParameters.for_universe(universe_name, median_turnover_floor=floor)
         for arm in arms:
             spec = _arm_spec(
                 arm,
@@ -715,8 +719,12 @@ def run_sweep(
     opening_cash: Decimal = _DEFAULT_OPENING_CASH,
     data_root: Path | None = None,
     adjusted: bool = True,
+    universe_name: str = DEFAULT_UNIVERSE,
 ) -> SweepResult:
     """Replay every arm on every floor against one shared lake, and collect the rows (M12.2).
+
+    Every run screens the one named investable universe ``universe_name`` (``nifty500`` by
+    default, ``turnover_floor`` on request) — never a mix, never a fallback between them.
 
     Assumes the arms are stated configurations, not a grid to be searched: nothing here is fitted to
     the window. Never drops a failing arm — its row carries the error instead of a result.
@@ -728,7 +736,10 @@ def run_sweep(
     """
     began = time.perf_counter()
     out_dir = current_ledger_dir()
-    universes = {floor: UniverseParameters(median_turnover_floor=floor) for floor in floors}
+    universes = {
+        floor: UniverseParameters.for_universe(universe_name, median_turnover_floor=floor)
+        for floor in floors
+    }
     done: dict[tuple[str, Decimal], SweepRow] = {}
     if out_dir is not None:
         digests = run_digests(
@@ -738,6 +749,7 @@ def run_sweep(
             floors=floors,
             opening_cash=opening_cash,
             adjusted=adjusted,
+            universe_name=universe_name,
         )
         for floor in floors:
             for arm in arms:
@@ -769,6 +781,7 @@ def run_sweep(
                 for _, arm in pending
             ),
             cap_tiers=any(arm.cap_tiers is not None for _, arm in pending),
+            universe=universe_name,
         )
         out.start, out.terminal, out.sessions = (
             lake.first_session,

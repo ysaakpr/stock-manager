@@ -29,6 +29,13 @@ proxy's validation is ``ops/studies/cap-tier-size-measure-2026-10-05.md``).
     past ``EMPTY_TIER_DECISIONS`` decision sessions, with its XIRR from its first buy as an
     informational figure beside the headline.
 
+``--universe {nifty500,turnover_floor}`` (both verbs) names the investable universe: ``nifty500``
+    (point-in-time NIFTY 500 membership, the default — it refuses any window before the membership
+    history's 2016-10-24 start, which the ``full`` window and early fold tests are) or
+    ``turnover_floor`` (every NSE EQ name above the floor, no index screen). It is in every run's
+    spec, the manifest and the report header; a directory started on one is never resumed on the
+    other.
+
 ``render --match-saved-runs`` finds each arm's run on disk by its strategy specification with the
     store- and lake-derived fields (:data:`STORE_SPEC_FIELDS`) set aside, so runs made against an
     earlier store can still be rendered once corporate actions or the index history have moved
@@ -65,7 +72,7 @@ from backtest.book_actions import (
 )
 from backtest.campaign import MAX_WORKERS, UnitOutcome, _git_commit
 from backtest.cash_interest import accrue_cash_interest, load_repo_rate_schedule
-from backtest.fold_campaign import PROFILE
+from backtest.fold_campaign import PROFILE, universe_line
 from backtest.folds import load_folds
 from backtest.idle_cash import (
     EMPTY_TIER_DECISIONS,
@@ -77,7 +84,13 @@ from backtest.idle_cash import (
 )
 from backtest.nav import nav_file, read_nav
 from backtest.rails import ratified_backtest_rail_policy
-from backtest.run import UniverseParameters, _first_session_of_each_month, _L1Reader
+from backtest.run import (
+    DEFAULT_UNIVERSE,
+    UNIVERSE_CHOICES,
+    UniverseParameters,
+    _first_session_of_each_month,
+    _L1Reader,
+)
 from backtest.run_ledger import (
     RunSummary,
     _replayed_quantities,
@@ -185,6 +198,8 @@ class CapTierPlan:
     windows: tuple[Window, ...]
     data_root: Path | None
     book_actions: bool = True
+    #: The investable universe every run screens (``backtest.run.UNIVERSE_CHOICES``).
+    universe: str = DEFAULT_UNIVERSE
 
     @property
     def units(self) -> tuple[tuple[int, Decimal], ...]:
@@ -197,9 +212,17 @@ class CapTierPlan:
 
 
 def cap_tier_plan(
-    out_dir: Path, *, data_root: Path | None, book_actions: bool = True
+    out_dir: Path,
+    *,
+    data_root: Path | None,
+    book_actions: bool = True,
+    universe: str = DEFAULT_UNIVERSE,
 ) -> CapTierPlan:
     """The full window plus every fold's test window, the cap-tier arms and the comparison arms."""
+    if universe not in UNIVERSE_CHOICES:
+        raise CapTierCampaignError(
+            f"unknown universe {universe!r}; one of: {', '.join(UNIVERSE_CHOICES)}"
+        )
     by_label = {arm.label: arm for arm in ARMS}
     comparison = tuple(by_label[label] for label in COMPARISON_LABELS)
     full = load_windows().named(_FULL)
@@ -212,6 +235,7 @@ def cap_tier_plan(
         windows=(Window(_FULL, full.start, full.end), *tests),
         data_root=data_root,
         book_actions=book_actions,
+        universe=universe,
     )
 
 
@@ -240,6 +264,7 @@ def run_unit(plan: CapTierPlan, window_index: int, floor: Decimal) -> UnitOutcom
             arms=plan.arms,
             floors=(floor,),
             data_root=plan.data_root,
+            universe_name=plan.universe,
         )
     failed = sum(1 for row in result.rows if not row.ok)
     for row in result.rows:
@@ -271,7 +296,11 @@ def _digests(
         _contexts(stack, actions)
         for window in plan.windows:
             digests = run_digests(
-                start=window.start, end=window.end, arms=plan.arms, floors=_FLOORS
+                start=window.start,
+                end=window.end,
+                arms=plan.arms,
+                floors=_FLOORS,
+                universe_name=plan.universe,
             )
             for (label, floor), digest in digests.items():
                 out[(label, window.name, floor)] = digest
@@ -303,7 +332,9 @@ def saved_run_digests(
         _contexts(stack, actions)
         for window in plan.windows:
             for floor in _FLOORS:
-                universe = UniverseParameters(median_turnover_floor=floor)
+                universe = UniverseParameters.for_universe(
+                    plan.universe, median_turnover_floor=floor
+                )
                 for arm in plan.arms:
                     spec = _arm_spec(
                         arm,
@@ -667,6 +698,7 @@ def _header(plan: CapTierPlan, *, commit: str, stores: Sequence[str] | None) -> 
         "# Cap-tier strategies vs the current strategies (X2, 2026-10-05)",
         "",
         f"- Runs: `{plan.out_dir}`, made at commit `{commit}`, lake `{plan.data_root}`.",
+        f"- {universe_line(plan.universe)}.",
         "- Tiers are **liquidity-rank tiers that proxy AMFI cap tiers** (126-session median "
         "close x quantity, ranks 1-100 / 101-250 / 251-500): "
         "`ops/studies/cap-tier-size-measure-2026-10-05.md`.",
@@ -940,6 +972,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--data-root", type=Path, required=True)
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument(
+        "--universe",
+        choices=UNIVERSE_CHOICES,
+        default=DEFAULT_UNIVERSE,
+        help="investable universe: nifty500 (point-in-time NIFTY 500 membership, the default) or "
+        "turnover_floor (every NSE EQ name above the floor, no index screen)",
+    )
+    parser.add_argument(
         "--match-saved-runs",
         action="store_true",
         help="render: find runs by strategy spec, store-derived fields set aside",
@@ -948,7 +987,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     data_root = args.data_root.resolve()
     out_dir = refuse_lake_location(args.out.resolve(), data_root)
     out_dir.mkdir(parents=True, exist_ok=True)
-    plan = cap_tier_plan(out_dir, data_root=data_root)
+    plan = cap_tier_plan(out_dir, data_root=data_root, universe=args.universe)
     commit = _git_commit()
     if args.command == "run":
         manifest = out_dir / "manifest.json"
@@ -958,6 +997,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "windows": [[w.name, w.start.isoformat(), w.end.isoformat()] for w in plan.windows],
             "arms": [a.label for a in plan.arms],
             "floors": [str(f) for f in _FLOORS],
+            "universe": plan.universe,
         }
         if manifest.is_file():
             existing = json.loads(manifest.read_text(encoding="utf-8"))

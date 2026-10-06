@@ -733,3 +733,122 @@ def test_the_fold_path_and_the_sweep_cli_derive_the_same_digest(
             start=window.start, end=window.end, arms=plan.arms, floors=(HIGH_FLOOR,)
         )[(fc.BASELINE_LABELS[0], HIGH_FLOOR)]
     assert fold == cli
+
+
+# ── the investable universe is chosen by name and never mixed (owner decision 2026-10-06) ─────
+
+_TF = "turnover_floor"
+
+
+def _frozen_on(out: Path, universe: str) -> fc.FoldRunPlan:
+    plan = fc.baseline_plan(out, _FOLDS, data_root=None, book_actions=False, universe=universe)
+    fc.run_fold_units(plan, workers=1)
+    fc.freeze_baseline(plan, _PINNED, None)
+    return plan
+
+
+def test_a_turnover_floor_campaign_runs_every_arm_on_the_turnover_floor_universe(
+    tmp_path: Path, stubbed: _Counters, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    universes: list[UniverseParameters] = []
+    run_arm = sweep_module._run_arm
+
+    def spy(arm: Arm, **kwargs: Any) -> Any:
+        universes.append(kwargs["universe"])
+        return run_arm(arm, **kwargs)
+
+    monkeypatch.setattr(sweep_module, "_run_arm", spy)
+    plan = _frozen_on(tmp_path, _TF)
+    assert universes and all(u.index_slug is None and u.universe == _TF for u in universes)
+    record = json.loads((tmp_path / fc.FROZEN_NAME).read_text(encoding="utf-8"))
+    assert record["universe"] == _TF
+    assert (
+        len(
+            fc.verify_frozen(tmp_path, _PINNED, _FOLDS, None, book_actions=False, universe=_TF)[
+                "runs"
+            ]
+        )
+        == 14
+    )
+    # Same windows, same arms, other universe: no digest in common.
+    default = fc.baseline_plan(tmp_path, _FOLDS, data_root=None, book_actions=False)
+    assert not set(fc._digests(plan, None).values()) & set(fc._digests(default, None).values())
+
+
+def test_a_round2_run_on_one_universe_refuses_a_baseline_frozen_on_the_other(
+    tmp_path: Path, stubbed: _Counters
+) -> None:
+    nifty, floor = tmp_path / "nifty", tmp_path / "floor"
+    _frozen(nifty)  # the default universe
+    _frozen_on(floor, _TF)
+    with pytest.raises(fc.FoldCampaignError, match="'nifty500' universe, not 'turnover_floor'"):
+        fc.verify_frozen(nifty, _PINNED, _FOLDS, None, book_actions=False, universe=_TF)
+    with pytest.raises(fc.FoldCampaignError, match="'turnover_floor' universe, not 'nifty500'"):
+        _verify(floor)
+
+
+def test_a_frozen_record_without_a_universe_is_refused(tmp_path: Path, stubbed: _Counters) -> None:
+    """A record struck before the choice existed predates the PIT screen: it is never reused."""
+    _frozen(tmp_path)
+    path = tmp_path / fc.FROZEN_NAME
+    record = json.loads(path.read_text(encoding="utf-8"))
+    del record["universe"]
+    path.write_text(json.dumps(record), encoding="utf-8")
+    with pytest.raises(fc.FoldCampaignError, match="'\\(unrecorded\\)' universe"):
+        _verify(tmp_path)
+
+
+def test_trial_sharpes_on_another_universe_are_refused(tmp_path: Path, stubbed: _Counters) -> None:
+    path = _trial_sharpes(tmp_path)
+    with pytest.raises(fc.FoldCampaignError, match="universe"):
+        fc.load_trial_sharpes(path, _PINNED, _FOLDS, book_actions=False, universe=_TF)
+
+
+def test_a_resume_manifest_names_the_universe() -> None:
+    assert fc._resume_manifest(_PINNED, "round2-signals", _TF)["universe"] == _TF
+    assert fc._resume_manifest(_PINNED, "round2-signals", "nifty500") != fc._resume_manifest(
+        _PINNED, "round2-signals", _TF
+    )
+
+
+@pytest.mark.parametrize("universe", ["nifty500", _TF])
+def test_every_fold_report_header_names_the_universe(
+    tmp_path: Path, stubbed: _Counters, universe: str
+) -> None:
+    base_dir = tmp_path / "base"
+    plan = _frozen_on(base_dir, universe)
+    baseline = fc.render_baseline_report(plan, _FOLDS, None, _FMV)
+    h = fc.round2_plan(
+        tmp_path / "h", _FOLDS, [_H_ARM], data_root=None, book_actions=False, universe=universe
+    )
+    fc.run_fold_units(h, workers=1)
+    decision = fc.render_round2(
+        h, base_dir, _FOLDS, None, _FMV, baseline_label=fc.BASELINE_LABELS[0], trials=28
+    )
+    line = f"- Universe: **`{universe}`**"
+    for text in (baseline, decision):
+        assert line in text
+        assert text.index(line) < text.index("## ")  # in the header, before the first section
+    other = "nifty500" if universe == _TF else _TF
+    assert f"**`{other}`**" not in baseline + decision
+
+
+def test_the_universe_flag_is_on_every_campaign_verb_and_defaults_to_nifty500() -> None:
+    base = ["--data-root", "d", "--workers", "1"]
+    h = ["--baseline-dir", "b", "--arms", _H_ARM, "--baseline", fc.BASELINE_LABELS[0]]
+    h += ["--trials", "28"]
+    verbs = {
+        "baseline-folds": ["baseline-folds", "--out", "o", *base],
+        "trial-sharpes": ["trial-sharpes", "--out", "o", *base],
+        "round2-signals": ["round2-signals", "--out", "o", *h, *base],
+    }
+    for argv in verbs.values():
+        assert fc._parse_args(argv).universe == "nifty500"
+        assert fc._parse_args([*argv, "--universe", _TF]).universe == _TF
+        with pytest.raises(SystemExit):
+            fc._parse_args([*argv, "--universe", "nifty50"])
+
+
+def test_an_unknown_universe_is_refused_by_the_plan(tmp_path: Path) -> None:
+    with pytest.raises(fc.FoldCampaignError, match="unknown universe"):
+        fc.baseline_plan(tmp_path, _FOLDS, data_root=None, universe="nifty50")
