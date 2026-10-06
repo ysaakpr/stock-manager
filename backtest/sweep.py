@@ -578,7 +578,7 @@ _WK_10 = "M10.7 @ weekly / 10-session hold"
 
 #: The duration grid plus the rows that price it: the M10.7 reference and the two momentum
 #: baselines. Deliberately *not* folded into :data:`ARMS` — the M12.2 sweep is a signal comparison
-#: with its own twenty-three arms and its own running campaign, and adding cells to it would change
+#: with its own twenty-five arms and its own running campaign, and adding cells to it would change
 #: a report that is already being generated.
 #:
 #: Two of these arms re-underwrite at 126 sessions, which is outside the 7-90 day band M10.7 was

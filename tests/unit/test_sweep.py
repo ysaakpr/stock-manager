@@ -389,6 +389,12 @@ def test_a_walk_forward_refuses_an_overlapping_split() -> None:
             selection=(date(2016, 9, 1), date(2021, 12, 31)),
             verification=(date(2021, 9, 1), date(2026, 8, 31)),
         )
+    # A split that shares its boundary session overlaps by that one day, and is refused too.
+    with pytest.raises(ValueError, match="close before verification opens"):
+        run_walk_forward(
+            selection=(date(2016, 9, 1), date(2021, 9, 1)),
+            verification=(date(2021, 9, 1), date(2026, 8, 31)),
+        )
 
 
 def test_the_verdict_names_its_choice_before_any_verification_figure() -> None:
@@ -844,6 +850,25 @@ def test_the_selection_winner_is_frozen_before_verification_is_swept(
                     label="sel",
                     start=date(2016, 9, 1),
                     end=date(2021, 12, 31),
+                    role=WindowRole.SELECTION,
+                ),
+                Window(
+                    label="ver",
+                    start=date(2021, 9, 1),
+                    end=date(2026, 8, 31),
+                    role=WindowRole.VERIFICATION,
+                ),
+            ),
+            "close before verification opens",
+        ),
+        # The boundary case: one shared session is still an overlap — the day the choice was made
+        # on would also be the first day it was graded on.
+        (
+            (
+                Window(
+                    label="sel",
+                    start=date(2016, 9, 1),
+                    end=date(2021, 9, 1),
                     role=WindowRole.SELECTION,
                 ),
                 Window(

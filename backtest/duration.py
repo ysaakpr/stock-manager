@@ -2,15 +2,15 @@
 
 **This module does not discharge M12.3.** ``TASK_GRAPH.yaml`` gives M12.3 the deliverable
 ``ops/gates/M12-strategy-verdict.md``, written by :mod:`backtest.verdict` over M12.2's
-twenty-three-arm sweep; this is the owner's separate ad-hoc request and writes its own path. It
-shares the walk-forward machinery and adopts one of M12.3's acceptance criteria — naming every arm
-whose verdict changes by window — because that is precisely what "multiple duration and window" was
-asking to see. The rendered report says so in its own first section rather than leaving a reader to
-infer it from a heading.
+twenty-five-arm sweep (twenty-three when that file was generated); this is the owner's separate
+ad-hoc request and writes its own path. It shares the walk-forward machinery and adopts one of
+M12.3's acceptance criteria — naming every arm whose verdict changes by window — because that is
+precisely what "multiple duration and window" was asking to see. The rendered report says so in
+its own first section rather than leaving a reader to infer it from a heading.
 
 
 The owner asked to try the M10.7 composite "in multiple duration and window". Neither axis
-existed. :mod:`backtest.sweep` varies the *signal* across twenty-three arms but pins M10.7's own
+existed. :mod:`backtest.sweep` varies the *signal* across twenty-five arms but pins M10.7's own
 three legs to one cadence, and its holding-period family sits on the short composite instead;
 and every comparison report in this repo, M10.7's included, measured one window. This module is
 both axes at once: :data:`~backtest.sweep.DURATION_ARMS` over :data:`MANDATED_WINDOWS`.
@@ -51,6 +51,7 @@ from pathlib import Path
 from backtest.policies.swing_composite import SwingCompositeParameters
 from backtest.run import UNIVERSE_CHOICES, UNIVERSE_TURNOVER_FLOOR
 from backtest.sweep import (
+    ARMS,
     DURATION_ARMS,
     HIGH_FLOOR,
     LOW_FLOOR,
@@ -922,7 +923,7 @@ def render_duration_report(sweep: MultiWindowSweep, *, floors: Sequence[Decimal]
         "This answers the owner's request to try the M10.7 swing composite *\"in multiple "
         'duration and window"*. It is **not** the M12.3 gate. `TASK_GRAPH.yaml` gives M12.3 the '
         "deliverable `ops/gates/M12-strategy-verdict.md`, which `backtest/verdict.py` writes over "
-        "the twenty-three-arm M12.2 sweep, and this file neither replaces it nor discharges its "
+        f"the {len(ARMS)}-arm M12.2 sweep, and this file neither replaces it nor discharges its "
         "acceptance criteria. What the two share is the module and the walk-forward machinery; "
         "what differs is the arm set — this is M10.7's own three legs at a grid of durations, not "
         "a comparison of strategy families.",
