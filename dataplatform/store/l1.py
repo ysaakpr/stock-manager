@@ -134,6 +134,7 @@ def write_prices_raw(
     unidentified_reason: str = PriceQuarantineReason.ISIN_NOT_PUBLISHED,
     master: IdentityMaster | None = None,
     data_root: Path | None = None,
+    unidentified_reasons: Sequence[str] | None = None,
 ) -> PricesRawWriteReport:
     """Write one exchange's session of raw prices — with delivery joined in — to its L1 partition.
 
@@ -154,7 +155,8 @@ def write_prices_raw(
 
     `unidentified_rows` are quarantined under `unidentified_reason` — one reason per call, because
     one source's parse refuses rows for one reason (the NSE placeholder ISIN, the BSE unsplittable
-    merged line).
+    merged line) — unless `unidentified_reasons` gives one reason per row, aligned with
+    `unidentified_rows` (the pre-ISIN resolver's enumerated refusals).
 
     Returns a `PricesRawWriteReport` whose delivery counts reconcile to the input delivery count.
     """
@@ -207,6 +209,7 @@ def write_prices_raw(
         trade_date=trade_date,
         data_root=data_root,
         unidentified_reason=unidentified_reason,
+        unidentified_reasons=unidentified_reasons,
     )
 
     delivery_joined = len(used_keys)
@@ -418,6 +421,7 @@ def write_unidentified_quarantine(
     trade_date: date,
     reason: str = PriceQuarantineReason.ISIN_COLUMN_ABSENT,
     data_root: Path | None = None,
+    reasons: Sequence[str] | None = None,
 ) -> Path | None:
     """Write a session whose rows have no identity at all to `prices_raw_quarantine`, and nowhere
     else.
@@ -444,6 +448,7 @@ def write_unidentified_quarantine(
         trade_date=trade_date,
         data_root=data_root,
         unidentified_reason=reason,
+        unidentified_reasons=reasons,
     )
 
 
@@ -456,6 +461,7 @@ def _write_quarantine(
     trade_date: date,
     data_root: Path | None,
     unidentified_reason: str = PriceQuarantineReason.ISIN_NOT_PUBLISHED,
+    unidentified_reasons: Sequence[str] | None = None,
 ) -> Path | None:
     """Replace `exchange`'s rows in the session's quarantine partition with what this write refused.
 
@@ -474,6 +480,16 @@ def _write_quarantine(
         pq.read_table(path, schema=PRICES_RAW_QUARANTINE_SCHEMA).to_pylist()
         if path.is_file()
         else []
+    )
+    if unidentified_reasons is not None and len(unidentified_reasons) != len(unidentified):
+        raise ValueError(
+            f"{len(unidentified_reasons)} reasons for {len(unidentified)} unidentified rows; "
+            "per-row reasons must align one-to-one"
+        )
+    row_reasons = (
+        list(unidentified_reasons)
+        if unidentified_reasons is not None
+        else [unidentified_reason] * len(unidentified)
     )
     others = [record for record in stored if record["exchange"] != exchange.value]
     cleared = len(stored) - len(others)
@@ -533,9 +549,9 @@ def _write_quarantine(
                 "isin": row.stated_isin or None,
                 "deliv_qty": None,
                 "deliv_pct": None,
-                "reason": unidentified_reason,
+                "reason": why,
             }
-            for row in unidentified
+            for row, why in zip(unidentified, row_reasons, strict=True)
         ]
     )
     _write_quarantine_table([*records, *others], path)
@@ -551,7 +567,11 @@ def _write_quarantine(
         # a delivery row that could not be placed, and a log line that reported only the pair said
         # `unresolved=0 orphaned=0` while writing 1,503 identity-less rows.
         unidentified=len(unidentified),
-        reason=unidentified_reason if unidentified else None,
+        reason=(
+            (unidentified_reason if unidentified_reasons is None else "per_row")
+            if unidentified
+            else None
+        ),
     )
     return path
 

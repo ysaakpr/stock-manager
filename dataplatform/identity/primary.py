@@ -114,7 +114,8 @@ class DailyLiquidity:
     trade_date: date
     turnover: Decimal
     volume: int = 0
-    trades: int = 0
+    #: `None` for a pre-2011-06-22 NSE session, whose bhavcopy did not publish a trade count.
+    trades: int | None = 0
 
     def score(self, metric: LiquidityMetric) -> Decimal:
         """This session's value under `metric`, always as a `Decimal` for one comparison type."""
@@ -122,6 +123,11 @@ class DailyLiquidity:
             return self.turnover
         if metric is LiquidityMetric.VOLUME:
             return Decimal(self.volume)
+        if self.trades is None:
+            raise ValueError(
+                f"{self.isin} on {self.trade_date.isoformat()} has no published trade count "
+                "(pre-2011 NSE session); score it by TURNOVER or VOLUME"
+            )
         return Decimal(self.trades)
 
 
