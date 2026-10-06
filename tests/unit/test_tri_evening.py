@@ -485,3 +485,61 @@ def test_the_first_landing_logs_its_ist_instant_once(
     assert landed[0]["session"] == "2026-10-06"
     assert landed[0]["landed_at_ist"] == "2026-10-06T14:20:00+05:30"
     assert landed[0]["attempts"] == 1
+
+
+class HealBreaksTracker(EveningRecordingTracker):
+    """Fails halfway through walking one missed session, as a database error mid-heal would."""
+
+    def __init__(self, clock: FrozenClock, *, breaks_on: date) -> None:
+        super().__init__(clock)
+        self._breaks_on = breaks_on
+
+    def mark_validated(self, source: str, logical_date: date) -> SyncRecord:
+        if logical_date == self._breaks_on:
+            raise RuntimeError("connection lost mid-heal")
+        return super().mark_validated(source, logical_date)
+
+
+def test_a_heal_that_fails_surfaces_and_does_not_undo_d(
+    settings: Settings, register: SourceRegister, tmp_path: Path
+) -> None:
+    """D is committed before healing starts, so a broken heal cannot roll back its row.
+
+    `commit` snapshots the rows, standing in for the transaction: what the last snapshot holds is
+    what survives once the job's connection closes without committing the half-walked heal.
+    Inverted — commit only after healing — the last snapshot predates D and D's row is lost while
+    L1 holds its level.
+    """
+    _seed(settings, register, tmp_path)
+    source = tri_state_source("nifty50")
+    at = datetime(2026, 10, 6, 19, 50, tzinfo=IST)
+    clock, fetcher, l0, _ = _evening(
+        [D_PRESENT], at=at, settings=settings, register=register, data_root=tmp_path
+    )
+    tracker = HealBreaksTracker(clock, breaks_on=MONDAY)
+    tracker.begin(source, MONDAY)
+    tracker.mark_failed(source, MONDAY, "missed evening", retryable=True)
+    committed: list[dict[tuple[str, date], SyncRecord]] = []
+
+    with capture_logs() as events, pytest.raises(RuntimeError, match="mid-heal"):
+        run_tri_evening(
+            fetcher=fetcher,
+            l0=l0,
+            tracker=tracker,
+            today=TUESDAY,
+            attempt_at=at,
+            indices=(NIFTY50,),
+            data_root=tmp_path,
+            commit=lambda: committed.append(dict(tracker.rows)),
+            calendar=trading_calendar(),
+        )
+
+    assert committed, "D was never committed"
+    durable = committed[-1]
+    assert durable[(source, TUESDAY)].state is SyncState.PUBLISHED
+    assert durable[(source, MONDAY)].state is SyncState.FAILED  # the half-walked heal is not kept
+    assert _latest(tmp_path) == (TUESDAY, Decimal("34608.14"))
+    failed = [event for event in events if event["event"] == "tri_evening.heal_failed"]
+    assert [(event["session"], event["error"]) for event in failed] == [
+        ("2026-10-06", "RuntimeError: connection lost mid-heal")
+    ]

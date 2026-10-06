@@ -109,13 +109,19 @@ whichever is earlier. An index already at D makes no request, so later fires are
 has landed.
 
 **Tune the first fire after two weeks.** Each landing logs `tri_evening.first_landed` once per
-index and session, with `landed_at_ist` and `attempts` (1 means the 19:50 fire landed it). About
-two weeks after this ships, read those events from the scheduler's log. The scheduler runs as
-the systemd user unit `scheduler.service`, so
+index and session, with `landed_at_ist` and `attempts`. About two weeks after this ships, read
+those events from the scheduler's log. The scheduler runs as the systemd user unit
+`scheduler.service`, so
 `XDG_RUNTIME_DIR=/run/user/$(id -u) journalctl --user -u scheduler.service --since -14d | grep tri_evening.first_landed`
-should find them. If 19:50 lands every
-session, the later fires are only insurance. If it rarely lands, move the first fire later rather
-than letting it fail most evenings.
+should find them.
+
+Tune on **`landed_at_ist`**, which is the instant of the attempt that landed the session (19:50,
+20:50 or 21:30 for a scheduled fire). `attempts` counts tries on that session's sync row, and
+`attempts == 1` does **not** prove the 19:50 fire landed it. A fire that was refused the host
+lease, or died before `begin`, never touched the row, so a session first attempted, and landed,
+at 20:50 also reads 1. If 19:50 shows up in `landed_at_ist` for nearly every session, the later
+fires are only insurance. If it rarely does, move the first fire later rather than letting it fail
+most evenings.
 
 **Before dissemination.** The answer is kept in L0, and the name carries the attempt instant
 (`tri_nifty50_<start>_<D>_at<YYYYMMDD>T<HHMMSS>.json`), so a later fire cannot collide with it. The
@@ -135,6 +141,10 @@ actually carry the missed level, and each healed row logs one `tri_evening.heale
 therefore stop reporting a session whose level L1 already holds. Two kinds of row stay as they
 are: a non-retryable failure (a dead end on purpose), and a row for a date the payload does not
 carry.
+
+D's row is committed before healing starts. A heal that fails logs `tri_evening.heal_failed` and
+fails the run without undoing D, and the missed rows stay FAILED and retryable for the next
+landing.
 
 **Lag budget is now 1 session.** `tri_evening` answers for `nifty_tri_history` with
 `max_lag_sessions=1`, and `lag_budgets` keeps the tighter of that and `tri_refresh`'s 6. So

@@ -394,7 +394,8 @@ def run_tri_evening(
     L0 → parse → L1 → `sync_state`, with the sync row dated D. An index already at D is skipped
     without a request, so a second fire the same evening is a no-op once the first landed. After a
     landing it logs `tri_evening.first_landed` (the IST instant, for tuning the first fire) and
-    heals earlier missed evenings the payload now covers (`heal_missed_sessions`).
+    heals earlier missed evenings the payload now covers (`heal_missed_sessions`). D is committed
+    before healing starts, so a heal that fails is logged and raised without undoing D.
     What it assumes: D's level is disseminated by the time this runs. When it is not, the payload is
     still kept in L0 (filed under `attempt_at`, so a retry later that evening cannot collide with
     it), the row parks `FAILED` retryable and is committed, and `TriNotYetPublishedError`
@@ -449,6 +450,10 @@ def run_tri_evening(
             if commit is not None:
                 commit()
             raise
+        # D is published and L1 holds it: commit now, so nothing after this — healing included —
+        # can roll back the row that says so while the level sits in L1.
+        if commit is not None:
+            commit()
         landed = tracker.get(tri_state_source(spec.slug), through)
         # One event per (index, session), and only here: a later fire finds L1 at D and skips, so
         # this is the first landing by construction. Read after two weeks to tune the first fire.
@@ -461,7 +466,21 @@ def run_tri_evening(
             attempts=None if landed is None else landed.attempts,
             state="PUBLISHED",
         )
-        heal_missed_sessions(tracker, spec, series, start=start, through=through)
+        try:
+            heal_missed_sessions(tracker, spec, series, start=start, through=through)
+        except Exception as exc:
+            # Loud, and without undoing D: D is already committed, and the half-walked heal is
+            # left uncommitted for the caller's connection to discard. The missed rows stay FAILED
+            # and retryable, so the next landing whose window covers them heals them again.
+            _LOG.error(
+                "tri_evening.heal_failed",
+                source=tri_state_source(spec.slug),
+                index=spec.slug,
+                session=through.isoformat(),
+                error=f"{type(exc).__name__}: {exc}",
+                state="PUBLISHED",
+            )
+            raise
         if commit is not None:
             commit()
         outcomes.append(
