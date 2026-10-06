@@ -17,10 +17,14 @@ ratios, applied to macro).
 
 from dataplatform.ingest.macro.index_valuation import (
     INDEX_ALIASES_PATH,
+    IndexAlias,
     IndexAliasTable,
+    IndexSeries,
+    SwitchSide,
     canonical_index,
     load_index_aliases,
     parse_index_valuation,
+    published_index_names,
 )
 from dataplatform.ingest.macro.models import (
     Frequency,
@@ -33,12 +37,16 @@ from dataplatform.ingest.macro.models import (
 __all__ = [
     "INDEX_ALIASES_PATH",
     "Frequency",
+    "IndexAlias",
     "IndexAliasTable",
+    "IndexSeries",
     "MacroFact",
     "MacroRelease",
+    "SwitchSide",
     "Unit",
     "canonical_index",
     "load_index_aliases",
     "parse_index_valuation",
+    "published_index_names",
     "series_id",
 ]

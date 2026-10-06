@@ -262,7 +262,12 @@ def test_coverage_is_per_session_and_unmapped_names_are_listed_separately(tmp_pa
     sync = _FakeSync()
     l0 = L0Store(clock=CLOCK, data_root=tmp_path)
     report = _runner(_transport(plan), tmp_path, sync).run(plan)
-    table = load_index_aliases()
+    # M11.3 aliased every name the archive has published, so take one row back out to have an
+    # unknown name for the report to list.
+    full = load_index_aliases()
+    table = full.model_copy(
+        update={"aliases": tuple(a for a in full.aliases if a.published != "CNX Midcap")}
+    )
     coverage = mb.survey(plan, l0=l0, sync=sync, table=table)
 
     assert [line.session for line in coverage] == [unit.session for unit in plan]
@@ -298,8 +303,11 @@ def test_a_name_published_twice_with_different_values_is_withheld_not_guessed() 
         ]
     ).encode()
     release = parse_index_valuation(body, filename="ind_close_all_08022013.csv")
-    assert release.withheld == ("IN.NSE.CNX_ALPHA_INDEX",)
-    assert {f.series_id.rsplit(".", 1)[0] for f in release.facts} == {"IN.NSE.CNX_LOW_VOLATILITY"}
+    # both names resolve through their M11.3 aliases (CNX Alpha Index -> Nifty Alpha 50)
+    assert release.withheld == ("IN.NSE.NIFTY_ALPHA_50",)
+    assert {f.series_id.rsplit(".", 1)[0] for f in release.facts} == {
+        "IN.NSE.NIFTY_LOW_VOLATILITY_50"
+    }
 
 
 def test_the_slash_dated_era_parses_to_the_same_session() -> None:
