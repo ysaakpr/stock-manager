@@ -199,11 +199,15 @@ day. Then, in order — each step can end the run:
      with an explicit journal entry (`HOLD`, `payload.event = LATE_CORPORATE_ACTION`, entitlement =
      the book entering the ex-date); a late split/bonus on a name traded since, or any other late
      kind on a held name, is journaled `ESCALATE` instead of guessed;
-   - **seen before, same terms** (including an `IMPLIED` split replaced by its `FEED` row with the
-     same ratio, under either kind) → nothing;
-   - **seen before, terms changed** (a corrected dividend amount or ratio) on a name the book held →
-     journaled `ESCALATE` (`payload.event = CHANGED_CORPORATE_ACTION`); **never credited or
-     re-booked**. On a name it did not hold, the new terms are recorded silently.
+   - **several terms under one new identity** (an interim and a special dividend on one ex-date)
+     → each is booked once;
+   - **seen before, terms among those seen** → nothing;
+   - **a new rescale with the ratio of one already seen under the other kind** (SPLIT vs BONUS) →
+     nothing if either record is `IMPLIED` (L2's inferred row and the feed's are one event);
+     journaled `ESCALATE` (`AMBIGUOUS_CORPORATE_ACTION`) if neither is, on a held name;
+   - **seen before, terms never seen under it** (a corrected dividend amount or ratio) on a name the
+     book held → journaled `ESCALATE` (`payload.event = CHANGED_CORPORATE_ACTION`); **never
+     credited or re-booked**. On a name it did not hold, the new terms are recorded silently.
 6. **Decide** the session and journal every entry (BUY/SELL, RAIL_BLOCK, or the day's HEARTBEAT),
    each tagged `payload.mode = PAPER`, `payload.paper_book = <book id>`; record the session
    `COMPLETED` with the new `book_state`. Journal entries and the ledger row commit in one
@@ -270,21 +274,26 @@ rolled back) and the next run retries the owed session.
   Do not delete or edit `paper_session` rows; escalate — re-basing a paper book is an owner
   decision.
 - **Red: "unresolved corporate-action escalation(s)".** An `ESCALATE` on a held name
-  (`LATE_CORPORATE_ACTION` that could not be booked mechanically, or `CHANGED_CORPORATE_ACTION`)
-  means the book's state is in question, so from the next session the job journals
-  `SKIPPED_DATA_RED` and does not trade — the same rule as red data — until the owner resolves it.
+  (`LATE_CORPORATE_ACTION` that could not be booked mechanically, `CHANGED_CORPORATE_ACTION` or
+  `AMBIGUOUS_CORPORATE_ACTION`) means the book's state is in question, so from the next session the
+  job journals `SKIPPED_DATA_RED` and does not trade — the same rule as red data — until the owner
+  resolves it. The reason names each escalation as `<key>@<terms>`. An escalation is **one key with
+  one set of terms**: resolving a correction does not pre-approve the next one — if the store
+  corrects the same action again, that is a new escalation and the book stops again.
   To resolve: read the `ESCALATE` entry's rationale and payload (`action` is the key, `terms` the
-  new terms), decide whether the paper book as it stands is acceptable (the action is **not**
-  re-applied either way — the book never rewrites itself), then record the decision:
+  terms it reports), decide whether the paper book as it stands is acceptable (the action is
+  **not** re-applied either way — the book never rewrites itself), then record the decision:
 
   ```sql
-  INSERT INTO paper_session_resolution (book_id, action_key, resolved_by, note, resolved_at)
-  VALUES ('momentum_v2_paper_2026_09_06', '<payload action key>', '<who>',
+  INSERT INTO paper_session_resolution (book_id, action_key, terms, resolved_by, note, resolved_at)
+  VALUES ('momentum_v2_paper_2026_09_06', '<payload action>', '<payload terms>', '<who>',
           '<what was decided and why>', now());
   ```
 
-  The next run trades again. If the owner judges the book wrong, that is a re-basing decision for
-  the owner (a new book id), not an edit of `paper_session`.
+  The table is append-only (UPDATE, DELETE and TRUNCATE are refused): a resolution is a record of a
+  human decision and is never withdrawn in place. The next run trades again. If the owner judges
+  the book wrong, that is a re-basing decision for the owner (a new book id), not an edit of
+  `paper_session`.
 - **`CalendarCoverageError` / no session after a date.** The holiday file covers through
   2026-12-31; the job needs the next year's holidays before the last December session. Extend
   `dataplatform/ingest/data/nse_holidays.yaml`.
