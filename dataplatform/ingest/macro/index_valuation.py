@@ -330,8 +330,15 @@ def _decode(payload: bytes, *, filename: str) -> str:
 
 
 def _session_date(raw: str, *, line: int, filename: str) -> date:
-    """`DD-MM-YYYY` as published. Any other shape is a format change, not a date to guess at."""
-    parts = raw.split("-")
+    """`DD-MM-YYYY` as published, or `DD/MM/YYYY` — the one date era the archive has.
+
+    Measured over the M11.2 backfill: files from (at least) 2014-06-26 to 2015-04 write the date
+    with slashes; every other session uses hyphens. The field order is day-month-year in both — a
+    26/06/2014 settles it, and the backfill also checks every file's date against the session it was
+    requested for. Any other shape is a format change, not a date to guess at.
+    """
+    separator = "/" if "/" in raw else "-"
+    parts = raw.split(separator)
     if len(parts) != 3:
         raise ParseError(f"{_COL_DATE} {raw!r} is not DD-MM-YYYY", filename=filename, line=line)
     try:

@@ -105,6 +105,11 @@ SOURCE_ID: Final = "nse_index_close_snapshot"
 ARCHIVE_EPOCH: Final = date(2012, 10, 1)
 
 
+#: How a fetch-side failure's `last_error` begins (`_process`); anything else is a refusal of bytes
+#: already in L0 — a parse or store rejection, which a re-run re-derives without a request.
+_FETCH_FAILURE_PREFIXES: Final = ("403", "HTTP ", "TransportError", "ServerError", "FetchError")
+
+
 class ParkReason(StrEnum):
     """Why a run stopped short of its plan and handed control to a human (an enumerated cause)."""
 
@@ -125,7 +130,8 @@ class Outcome(StrEnum):
     """A failure that may clear: transport, 5xx, a single 403. Retried on the next run."""
     REFUSED = "REFUSED"
     """The payload is in L0 but was refused — markup wearing a 200, a malformed row, or a file
-    dated to a different session than the one requested. Closed to retries; a human reads it."""
+    dated to a different session than the one requested. Left retryable: the bytes are in L0, so a
+    re-run (after a parser fix) re-derives the session without a request."""
     PENDING = "PENDING"
     """Not reached yet (a capped or stopped run, or a session after the park)."""
 
@@ -373,7 +379,7 @@ class MacroBackfillRunner:
                     filename=unit.filename,
                 )
         except (ParseError, L0Error) as exc:
-            self._fail(unit, str(exc), retryable=False, report=report, outcome=Outcome.REFUSED)
+            self._fail(unit, str(exc), retryable=True, report=report, outcome=Outcome.REFUSED)
             return
 
         try:
@@ -390,7 +396,7 @@ class MacroBackfillRunner:
             self._fail(
                 unit,
                 f"store refused: {exc}",
-                retryable=False,
+                retryable=True,
                 report=report,
                 outcome=Outcome.REFUSED,
             )
@@ -529,13 +535,12 @@ def survey(
                 )
             )
         elif state is SyncState.FAILED:
-            retryable = getattr(row, "retryable", True)
-            if not retryable and error.startswith("404"):
+            if error.startswith("404"):
                 outcome = Outcome.NOT_PUBLISHED
-            elif not retryable and "403" not in error and "spike" not in error.lower():
-                outcome = Outcome.REFUSED
-            else:
+            elif error.startswith(_FETCH_FAILURE_PREFIXES) or "spike" in error.lower():
                 outcome = Outcome.FAILED
+            else:
+                outcome = Outcome.REFUSED
             lines.append(SessionCoverage(unit.session, outcome, detail=error))
         else:
             lines.append(SessionCoverage(unit.session, Outcome.PENDING))

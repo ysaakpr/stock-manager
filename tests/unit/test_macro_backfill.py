@@ -300,3 +300,26 @@ def test_a_name_published_twice_with_different_values_is_withheld_not_guessed() 
     release = parse_index_valuation(body, filename="ind_close_all_08022013.csv")
     assert release.withheld == ("IN.NSE.CNX_ALPHA_INDEX",)
     assert {f.series_id.rsplit(".", 1)[0] for f in release.facts} == {"IN.NSE.CNX_LOW_VOLATILITY"}
+
+
+def test_the_slash_dated_era_parses_to_the_same_session() -> None:
+    """Files from 2014-06-26 to 2015-04 write `DD/MM/YYYY`; 26/06 pins the field order."""
+    from dataplatform.ingest.macro import parse_index_valuation
+
+    header = FILES[date(2012, 10, 1)].read_text().splitlines()[0]
+    body = f"{header}\nCNX Nifty,26/06/2014,1,1,1,7493.2,1,1,1,1,20.27,3.42,1.31\n".encode()
+    release = parse_index_valuation(body, filename="ind_close_all_26062014.csv")
+    assert release.release_date == date(2014, 6, 26)
+    assert "IN.NSE.NIFTY_50.PE" in {f.series_id for f in release.facts}
+
+
+def test_a_refused_session_stays_retryable_and_rederives_from_l0(tmp_path: Path) -> None:
+    """A parse refusal leaves its bytes in L0; after a fix the re-run costs no request."""
+    plan = _plan(date(2015, 11, 6))
+    wrong = RecordedResponse(body=FILES[date(2015, 11, 10)].read_bytes())
+    sync = _FakeSync()
+    first = _runner(_transport(plan, **{plan[0].url: wrong}), tmp_path, sync).run(plan)
+    assert first.refused == 1
+    assert sync.get(mb.SOURCE_ID, plan[0].session).retryable is True  # type: ignore[union-attr]
+    again = _runner(RecordedTransport({}), tmp_path, sync).run(plan)
+    assert again.requests == 0 and again.refused == 1  # re-derived from L0, refused again
