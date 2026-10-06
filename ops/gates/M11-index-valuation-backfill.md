@@ -163,3 +163,144 @@ uv run pytest tests/unit/test_macro_backfill.py tests/unit/test_macro_series.py 
 
 Logs: `~/campaign/macro-backfill-2026-10-06.log`, `~/campaign/macro-backfill-sample-2026-10-06.log`;
 coverage at the park: `~/campaign/macro-backfill-2026-10-06-parked.{md,csv}`.
+
+---
+
+# M11.3 — Widening the index-name alias table from the unknown-names list
+
+**Date:** 2026-10-06 (IST) · **Inputs:** the backfill's L0 (`data/L0/nse_index_close_snapshot/`,
+3,456 files) and the unknown-names list in §3 above · **Requests made: 0.**
+
+## Result
+
+| | Unknown names | Of which no longer published |
+|---|---|---|
+| Before (base table, M11.1) | **192** | 47 |
+| After (this table) | **0** | 0 |
+
+Both counts were measured **read-only from L0** over 2012-10-01 .. 2026-10-05: 3,453 sessions,
+with the runner's own refusal rule for a misdated file. "Before" was measured with the base branch's
+code and table, "after" with `--unknown-names` (below). Neither run wrote to the lake or the
+database. With the new table the re-derivation yields the same **994,224** facts, so no two names in
+any one file collapse onto one series. Only the `series_id` of renamed indices changes.
+
+Every one of the 192 names is now in `dataplatform/ingest/macro/index_aliases.yaml` (version 2):
+
+- **43 aliases** (renames), each with its own dated, cited switch. The 23 M11.1 rows are re-cited the
+  same way, for 66 rows in total.
+- **117 recorded series**: 113 new indices and 4 retired ones.
+
+## How a rename was decided
+
+The rule is evidence, never string similarity. For each name that stopped appearing, look at the
+session after its last appearance. A rename is admitted only when one name first published there:
+
+- continues the closing level (and, for equity indices, P/E, P/B and dividend yield);
+- is the **only** new name that does;
+- is not already the successor of another index.
+
+Several near misses show why the multiples matter:
+
+- `CNX Smallcap` (5222.5) is 0.14% from `Nifty Growth Sectors 15`, but its P/B is 1.00 against 8.02.
+  It continues as `Nifty Smallcap 100` (P/B 1.02), and Growth Sectors continues `NI15`.
+- `LIX 15` is nearest to `Nifty PSU Bank` on level, but the multiples point to `Nifty100 Liquid 15`.
+- `CNX High Beta` is nearest to a G-Sec index on level, but the multiples point to `Nifty High Beta 50`.
+
+Series that publish no multiples need a mechanical rule instead:
+
+- **Leveraged and inverse Nifty:** the 2015-11-09 level replicates −1× or 2× Nifty 50's −0.49% move.
+  For example, `NIFTY PR 1X Inverse` implies 491.10 and 491.4 was published.
+- **Dividend points:** the level is identical on both sides of the switch.
+- **G-Sec indices:** the successor is the only new name within 2–4%, and the three G-Sec indices
+  moved together that day (−0.20 to −0.27%).
+
+Every alias row now *requires*:
+
+- `renamed_on`;
+- `before` and `after`, each a `{name, file}`;
+- `evidence`, holding the measured levels.
+
+`before` and `after` are the two archive files straddling the switch. The predecessor appears in
+the `before` file and not the `after`, and the successor the reverse. The loader refuses a row
+without them. It also refuses a switch whose two names resolve to different series, a canonical that
+is itself remapped, and a name recorded both as an alias and as its own series.
+
+The cited files (17 new, plus the existing 2015-11-06 capture) are frozen byte-identical from L0
+under `tests/fixtures/nifty_index_close/renames/`. A parametrized test pins each of the 66 aliases:
+
+- each name appears only on its own side of the switch;
+- both names give one `series_id` on either side of `renamed_on`;
+- the level continues (under 3% for a one-session switch).
+
+## The renames, by switch
+
+| Switch (last old → first new) | Renames |
+|---|---|
+| 2013-02-07 → 02-08 ("S&P" dropped) | `S&P CNX 500`, `S&P CNX 500 Shariah`, `S&P CNX Nifty Dividend`, `S&P CNX Nifty Shariah` |
+| 2014-08-12 → 09-08 (case-only respelling, 16 unpublished sessions) | `Nifty TR 1X Inverse`, `Nifty TR 2X Leverage`, evidenced by compounding CNX Nifty's daily moves across the gap (inverse: 418.16 implied vs 419.96 published; 2X: 4219.01 vs 4205.58) |
+| 2015-11-06 → 11-09 (CNX → Nifty) | `CNX Consumption`, `CNX Dividend Opportunities`, `CNX Finance`, `CNX Midcap`, `CNX Service Sector`, `CNX Smallcap`, `NIFTY Midcap 50`, `CNX Alpha Index`, `CNX High Beta`, `CNX Low Volatility`, `CNX Nifty Dividend`, `CNX Nifty Shariah`, `CNX DEFTY`, `LIX 15`, `CPSE`, `NV 20`, `LIX15 Midcap`, `GSEC10 NSE Index`, `GSECBM NSE Index`, `NSE GSECBM Clean Price Index`, `NI15`, `NIFTY PR 1X Inverse`, `NIFTY PR 2x Leverage`, `NIFTY TR 1X Inverse`, `NIFTY TR 2X Leverage`, `NSE Quality 30` |
+| 2016-03-31 → 04-01 (free-float/full split) | `Nifty Midcap 100` → `Nifty Free Float Midcap 100`, `Nifty Smallcap 100` → `Nifty Free Float Smallcap 100` |
+| 2018-03-28 → 04-02 (split undone) | `Nifty Free Float Midcap 100` → `NIFTY Midcap 100`, `Nifty Free Float Smallcap 100` → `NIFTY Smallcap 100` |
+| 2018-07-13 → 07-16 | `Nifty Quality 30` → `NIFTY100 Quality 30` |
+| 2020-06-19 → 06-22 (one-session relabel) | `Nifty100 ESG Sector Leaders - Old` → `Nifty100 ESG Sector Leaders` |
+| 2024-04-26 → 04-29 | `Nifty Aditya Birla Group`, `Nifty Mahindra Group`, `Nifty Tata Group`, `Nifty Tata Group 25% Cap` → `Nifty India Corporate Group Index - …` |
+| 2025-05-02 → 05-05 | `Nifty India Internet & E-Commerce` → `Nifty India Internet` |
+
+**Retired, with their own series and a `last_seen`:**
+
+- `S&P ESG India`: last seen 2013-10-03, and no name was first published the next session.
+- `Nifty Full Midcap 100` and `Nifty Full Smallcap 100`: the full-cap variants. They stopped
+  2018-03-28 and no successor fits.
+- `Nifty BHARAT Bond Index - April 2025`: a target-maturity index that matured.
+
+## Findings worth keeping
+
+1. **Two archive files are regenerated, not as-of.** `ind_close_all_07072016.csv` (122 rows) and
+   `ind_close_all_12042023.csv` carry that day's values under *later* names. They include indices
+   launched years afterwards, and on those two dates the then-current names are missing. This is
+   why `NIFTY Midcap 100` is "first seen" 2016-07-07. It also independently corroborates two renames:
+   the 2016-07-07 file has `NIFTY Midcap 100` at 14095.35, between Free Float's 14122.85 (07-05) and
+   14077.45 (07-08).
+2. **At a financial-year start, multiples rebase for every index.** Nifty 50's P/B went from 3.10 to
+   3.26 on 2016-04-01 on a −0.3% day. On the FY switches, the evidence is level continuity against
+   peers plus uniqueness, not multiples, and each of those rows says so.
+3. **Some M11.1 evidence figures were wrong.** For example, the M11.1 rows put `CNX Pharma` at
+   "4.98%" and `CNX Realty` at "4.72%" across the 2015 switch. The measured values are −1.94% and
+   −2.14%. The mappings stand, and the figures are replaced with measured ones.
+4. **Case variants already shared a series.** The lookup key and `series_id` are case-insensitive,
+   so before this task `Nifty TR 1X Inverse` (2014) and `NIFTY TR 1X Inverse` were already merged
+   without evidence. They are now evidenced (row 2 of the table). `Nifty Midcap 100` and
+   `NIFTY Midcap 100` (2015-16 and 2018-) are likewise one series, and the free-float rows evidence
+   it.
+5. **One open caveat, outside this table.** `Nifty100 ESG Sector Leaders` was published neither
+   2020-06-23 nor 06-30 and resumes 2020-07-01 at 1814.39. The "- Old" label suggests a methodology
+   change around then. The row maps only the one-session relabel, which its evidence supports. The
+   level from 07-01 under the unchanged name was already one series before this task.
+
+## Commands (offline: no fetch, no lease, no `sync_state` change)
+
+```bash
+# read-only: the unknown-names count against L0 (prints the count and the list)
+DATA_ROOT=/home/ubuntu/stock-manager/data uv run python -m dataplatform.ingest.macro.backfill \
+  --from 2012-10-01 --to 2026-10-05 --unknown-names
+```
+
+**Post-merge re-derive (not run by this task).** This rewrites only `nse_index_close_snapshot`'s
+rows in each `macro_series` partition, through `write_release(..., replace_source=True)`. FBIL,
+World Bank, WPI, GST and RBI rows in the same partitions are kept. Run it from the main checkout
+after the merge, with no other `macro_series` writer running over 2012-10-01 .. 2026-10-05:
+
+```bash
+DATA_ROOT=/home/ubuntu/stock-manager/data nohup uv run python -m dataplatform.ingest.macro.backfill \
+  --from 2012-10-01 --to 2026-10-05 --rederive > ~/campaign/macro-rederive-$(date +%F).log 2>&1 &
+```
+
+Expected result: `3453 sessions rewritten, 994224 facts, 12 not in L0, 3 refused (0 requests)`.
+The 3 refusals are the misdated April 2023 files, and the 12 are the archive's 404 sessions. Then
+re-run the `--unknown-names` command above: it should print 0.
+
+## Verification
+
+```bash
+uv run pytest tests/unit/test_macro_series.py tests/unit/test_macro_backfill.py -q
+```
