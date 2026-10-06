@@ -41,11 +41,13 @@ from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.ingest.backfill import (
     BSE_BHAVCOPY,
+    BSE_BHAVCOPY_LEGACY,
     NSE_BHAVCOPY,
     NSE_DELIVERY,
     SOURCE_SETS,
     FetchRequest,
 )
+from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
 from dataplatform.ingest.calendar import CalendarCoverageError, trading_calendar
 from dataplatform.ingest.fetcher import (
     Fetcher,
@@ -82,7 +84,34 @@ _LOG = get_logger(__name__)
 
 #: The dated price source sets this driver may acquire. Each one's `build_request` names its own
 #: era's register id, so the cutover dates are the backfill's, never re-spelled here.
-ACQUIRABLE_SOURCE_SETS: Final[tuple[str, ...]] = (NSE_BHAVCOPY, NSE_DELIVERY, BSE_BHAVCOPY)
+ACQUIRABLE_SOURCE_SETS: Final[tuple[str, ...]] = (
+    NSE_BHAVCOPY,
+    NSE_DELIVERY,
+    BSE_BHAVCOPY,
+    BSE_BHAVCOPY_LEGACY,
+)
+
+#: The zip local-file-header magic every real legacy BSE bhavcopy starts with.
+_ZIP_MAGIC: Final = b"PK\x03\x04"
+
+
+def _bse_legacy_is_shell(body: bytes) -> bool:
+    """BSE answers a date it has no legacy file for with HTTP 200 and its Angular HTML shell.
+
+    Measured 2026-10-06: `EQ030106_CSV.ZIP` (2006-01-03) and `EQ260110_CSV.ZIP` (Republic Day
+    2010) both came back 200, `text/html`, 14,287 bytes, `<!DOCTYPE html>…` — never a 404. Every
+    real file in the lake (1,943 of them) is a zip. So "not a zip" is the absence signal.
+    """
+    return not body.startswith(_ZIP_MAGIC)
+
+
+#: Register sources whose archive signals "no file for this date" with a 200 rather than a 404.
+#: The bytes still land in L0 — the fetcher stores every 2xx body, and what the source served is
+#: the record — but the unit is reported `SOFT_404`, never `FETCHED`, so an absence is not
+#: counted as a session acquired.
+_SOFT_404: Final[dict[str, Callable[[bytes], bool]]] = {
+    bse_bhavcopy.LEGACY_SOURCE_ID: _bse_legacy_is_shell,
+}
 
 
 class AcquireStatus(StrEnum):
@@ -91,6 +120,7 @@ class AcquireStatus(StrEnum):
     FETCHED = "FETCHED"
     PRESENT = "PRESENT"  # L0 already held this key; no request was made
     MISSING = "MISSING"  # the archive answered non-2xx — the status code is the evidence
+    SOFT_404 = "SOFT_404"  # 200 carrying the archive's "no such file" page; bytes kept in L0
     FAILED = "FAILED"  # transport/5xx exhausted, or L0 refused the bytes
 
 
@@ -210,9 +240,12 @@ def acquire(
             "filename": unit.filename,
         }
         if l0.exists(unit.source_id, unit.logical_date, unit.filename):
-            key = l0.ref_for(unit.source_id, unit.logical_date, unit.filename).key
-            report.outcomes.append(AcquireOutcome(unit, AcquireStatus.PRESENT, l0_key=key))
-            _LOG.info("l0_acquire.present", **context, l0_key=key, state="PRESENT")
+            stored = l0.ref_for(unit.source_id, unit.logical_date, unit.filename)
+            if _is_soft_404(unit, l0.get(stored)):
+                report.outcomes.append(_soft_404(unit, stored.key, context))
+                continue
+            report.outcomes.append(AcquireOutcome(unit, AcquireStatus.PRESENT, l0_key=stored.key))
+            _LOG.info("l0_acquire.present", **context, l0_key=stored.key, state="PRESENT")
             continue
         try:
             ref = fetcher.fetch(
@@ -248,6 +281,9 @@ def acquire(
             report.outcomes.append(AcquireOutcome(unit, AcquireStatus.FAILED, detail=detail))
             _LOG.error("l0_acquire.failed", **context, error=detail, state="FAILED")
             continue
+        if _is_soft_404(unit, l0.get(ref)):
+            report.outcomes.append(_soft_404(unit, ref.key, context))
+            continue
         report.outcomes.append(AcquireOutcome(unit, AcquireStatus.FETCHED, l0_key=ref.key))
         _LOG.info(
             "l0_acquire.fetched",
@@ -258,6 +294,23 @@ def acquire(
             state="FETCHED",
         )
     return report
+
+
+def _is_soft_404(unit: AcquireUnit, body: bytes) -> bool:
+    probe = _SOFT_404.get(unit.source_id)
+    return probe is not None and probe(body)
+
+
+def _soft_404(unit: AcquireUnit, key: str, context: dict[str, str]) -> AcquireOutcome:
+    """The outcome for a stored body that is the archive's "no file" page, logged as evidence."""
+    _LOG.warning("l0_acquire.soft_404", **context, l0_key=key, http_status=200, state="SOFT_404")
+    return AcquireOutcome(
+        unit,
+        AcquireStatus.SOFT_404,
+        detail="HTTP 200 with the archive's HTML shell, not a file — no session published",
+        http_status=200,
+        l0_key=key,
+    )
 
 
 def _hosts(units: Sequence[AcquireUnit], register: SourceRegister) -> list[str]:

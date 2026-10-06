@@ -309,6 +309,25 @@ def test_table_covers_every_action_type_and_both_exchanges() -> None:
     assert len(quantified) >= 40
 
 
+@pytest.mark.parametrize(
+    ("raw", "action_type"),
+    [
+        # Verbatim from BSE's DefaultData for IGARASHI (517380), ex 2018-09-27. Before the guard
+        # this raised a pydantic ValidationError out of the parser and failed the whole scrip
+        # (`sync_state` bse_corp_actions/517380 FAILED since 2026-09-07).
+        ("Bonus issue 0:0", ActionType.BONUS),
+        ("Amalgamation 0:0", ActionType.MERGER),
+    ],
+)
+def test_zero_placeholder_ratio_is_queued_not_raised(raw: str, action_type: ActionType) -> None:
+    outcome = parse_purpose(raw, source=BSE)
+
+    assert outcome.action is not None and outcome.action.action_type is action_type
+    assert isinstance(outcome.action.terms, UnquantifiedTerms), "a 0:0 ratio must not be used"
+    assert outcome.queue_entry is not None and outcome.queue_entry.reason is CONFLICTING
+    assert outcome.queue_entry.raw_text == raw
+
+
 def test_face_value_direction_is_explicit() -> None:
     """A split and a consolidation are the same model; only from/to says which."""
     split = parse_purpose("FV SPLIT FROM RS.10/- TO RS.2/-", source=NSE).action

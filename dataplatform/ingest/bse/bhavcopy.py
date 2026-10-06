@@ -423,6 +423,30 @@ def parse_legacy_text_report(text: str, *, filename: str, trade_date: date) -> L
         if not record or not any(field.strip() for field in record):
             continue
         line = reader.line_num
+        if len(record) == len(LEGACY_COLUMNS) and not record[_PREVCLOSE_INDEX].strip():
+            # An instrument's first session states no previous close. One line, not the file:
+            # quarantined with its reason, the way an unsplittable merged line is.
+            absent = MalformedLine(
+                line=line,
+                text=",".join(record),
+                scrip_code=record[0].strip(),
+                group=record[2].strip(),
+                reason=PriceQuarantineReason.PREV_CLOSE_ABSENT,
+                detail="PREVCLOSE is blank — a first session has no previous close to state",
+            )
+            quarantined.append(absent)
+            _LOG.warning(
+                "bhavcopy.legacy_line_quarantined",
+                source=LEGACY_SOURCE_ID,
+                filename=filename,
+                trade_date=trade_date.isoformat(),
+                line=line,
+                reason=absent.reason,
+                detail=absent.detail,
+                text=absent.text,
+                state="QUARANTINED",
+            )
+            continue
         if len(record) != _MERGED_WIDTH:
             quotes.append(_legacy_row(record, line=line, filename=filename, trade_date=trade_date))
             continue
@@ -467,6 +491,9 @@ def parse_legacy_text_report(text: str, *, filename: str, trade_date: date) -> L
 #: glues that empty field to the next row's `SC_CODE`: 13 + 14 = 27 fields. BSE published exactly
 #: one such line in 1,943 legacy sessions (`EQ291221_CSV.ZIP`, line 1773, scrips 531358/531359).
 _MERGED_WIDTH: Final = 2 * len(LEGACY_COLUMNS) - 1
+
+#: Where `PREVCLOSE` sits in a legacy record.
+_PREVCLOSE_INDEX: Final = LEGACY_COLUMNS.index("PREVCLOSE")
 
 
 def split_merged_records(
@@ -544,7 +571,10 @@ def resolve_legacy(
             resolved.append(
                 PriceRow(
                     isin=isin,
-                    symbol=quote.scrip_name,
+                    # BSE left SC_NAME blank on a handful of rows (531364 on 2011-05-05, 526225 on
+                    # 2013-10-31). The symbol is a label, never a key (ISIN is), so the scrip code
+                    # as published stands in rather than the whole session failing over it.
+                    symbol=quote.scrip_name or quote.scrip_code,
                     series=quote.group,
                     trade_date=quote.trade_date,
                     open=quote.open,
@@ -591,6 +621,7 @@ def _text_of(payload: bytes, *, filename: str) -> str:
         try:
             with zipfile.ZipFile(io.BytesIO(payload)) as archive:
                 members = archive.namelist()
+                members = _bhavcopy_member(members, filename=filename)
                 if len(members) != 1:
                     raise ParseError(
                         f"expected exactly one member in the archive, found {len(members)}: "
@@ -604,6 +635,15 @@ def _text_of(payload: bytes, *, filename: str) -> str:
                 "the payload in L0 is the evidence, do not re-fetch over it",
                 filename=filename,
             ) from exc
+    elif payload.lstrip()[:15].lower().startswith((b"<!doctype html", b"<html")):
+        # BSE's answer for a date it has no file for: HTTP 200 and its Angular shell (measured
+        # 2026-10-06 across 2006 and on Republic Day 2010). Named, because "unexpected header
+        # '<!DOCTYPE HTML>'" reads like a format change when it is an absence.
+        raise ParseError(
+            "the payload is BSE's HTML page, not a bhavcopy — the soft-404 BSE serves (HTTP 200) "
+            "for a date it published no file for; the session has no data at this source",
+            filename=filename,
+        )
     else:
         body = payload
 
@@ -613,6 +653,35 @@ def _text_of(payload: bytes, *, filename: str) -> str:
         raise ParseError(
             f"payload is not UTF-8 text at byte {exc.start} ({exc.reason})", filename=filename
         ) from exc
+
+
+def _bhavcopy_member(members: list[str], *, filename: str) -> list[str]:
+    """The archive's members, narrowed to the bhavcopy itself when BSE packed strays beside it.
+
+    Three legacy archives carry a second member next to `EQ{DDMMYY}.CSV`: a nested zip
+    (`EQ020611_CSV.ZIP`), a `.dbf` (`EQ131011_CSV.ZIP`) and an archiver's advert `.url`
+    (`EQ260314_CSV.ZIP`). When exactly one member is named as the archive promises —
+    `EQ020611_CSV.ZIP` holds `EQ020611.CSV` — that member is the file and the strays are logged.
+    Any other shape is returned untouched for the caller to refuse: picking "the first CSV" is how a
+    format change becomes a day of quietly wrong data.
+    """
+    if len(members) <= 1:
+        return members
+    stem = filename.rsplit("/", 1)[-1].upper()
+    if not stem.endswith("_CSV.ZIP"):
+        return members
+    expected = stem.removesuffix("_CSV.ZIP") + ".CSV"
+    named = [member for member in members if member.upper() == expected]
+    if len(named) != 1:
+        return members
+    _LOG.warning(
+        "bhavcopy.archive_strays_ignored",
+        source=LEGACY_SOURCE_ID,
+        filename=filename,
+        member=named[0],
+        ignored=[member for member in members if member != named[0]],
+    )
+    return named
 
 
 def _check_udiff_header(header: list[str] | None, *, filename: str) -> None:

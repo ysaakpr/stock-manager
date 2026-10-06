@@ -60,6 +60,7 @@ from dataplatform.identity.ingest import (
     equity_list_filename,
     symbol_changes_filename,
 )
+from dataplatform.ingest.bse_scrip_refresh import STATUS_TOKEN as BSE_SCRIP_STATUS_TOKEN
 from dataplatform.ingest.calendar import DayKind, TradingCalendar, trading_calendar
 from dataplatform.ingest.constituents_ingest import (
     DEFAULT_INDEX_SET,
@@ -197,6 +198,13 @@ class SnapshotSpec:
     filename: Callable[[date], str]
     inspect: Inspector
     description: str = ""
+    url_tokens: tuple[tuple[str, str], ...] = ()
+    """`(token, value)` substitutions applied to the register's `url_template`.
+
+    For a template whose braces name a *choice* rather than a date: `bse_scrip_master` carries
+    `status={Active|Suspended|Delisted}`. The URL still comes from the register; this only picks
+    the branch. A template left with a brace after substitution is refused before any request.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -592,6 +600,7 @@ DEFAULT_SNAPSHOT_SET: Final[tuple[SnapshotSpec, ...]] = (
         filename=lambda on: f"ListofScripData_Active_{on:%Y%m%d}.json",
         inspect=_bse_scrip_master_inspector,
         description="BSE list-of-scrips — scrip→ISIN with BSE's own INDUSTRY",
+        url_tokens=((BSE_SCRIP_STATUS_TOKEN, "Active"),),
     ),
 )
 
@@ -605,6 +614,30 @@ def _entry(source_id: str, register: SourceRegister) -> Source:
     if entry is None:
         raise KeyError(f"source register has no row for {source_id!r}")
     return entry
+
+
+def _snapshot_url(spec: SnapshotSpec, entry: Source) -> str:
+    """The register's URL for this spec, its choice tokens filled, refused if any brace remains.
+
+    Snapshot endpoints take no date, so a brace left in the URL is always a template nobody
+    filled — and BSE answers the literal `status={Active|Suspended|Delisted}` with HTTP 200 and
+    `[]`, which reads as a broken payload rather than a broken request. Between 2026-09-08 and
+    2026-09-23 every BSE scrip-master capture was exactly that. Refusing here costs no request.
+    """
+    url = entry.url_template
+    for token, value in spec.url_tokens:
+        if token not in url:
+            raise ValueError(
+                f"{spec.source_id}: url_template no longer carries {token!r}; the register "
+                f"changed shape and this spec would fetch the wrong thing"
+            )
+        url = url.replace(token, value)
+    if "{" in url or "}" in url:
+        raise ValueError(
+            f"{spec.source_id}: url_template still carries an unfilled token after substitution "
+            f"({url}); nothing was requested"
+        )
+    return url
 
 
 def run_daily_snapshot(
@@ -785,7 +818,7 @@ def _snapshot_one(
                 state="REUSED",
             )
         else:
-            url = _entry(source, register).url_template
+            url = _snapshot_url(spec, _entry(source, register))
             ref = fetcher.fetch(source, url, as_of, filename=filename)
             spent = 1
             fresh = True

@@ -132,6 +132,7 @@ def write_prices_raw(
     delivery_rows: Iterable[DeliveryRow] = (),
     unidentified_rows: Iterable[UnidentifiedRow] = (),
     unidentified_reason: str = PriceQuarantineReason.ISIN_NOT_PUBLISHED,
+    reasoned_rows: Iterable[tuple[UnidentifiedRow, str]] = (),
     master: IdentityMaster | None = None,
     data_root: Path | None = None,
     unidentified_reasons: Sequence[str] | None = None,
@@ -157,6 +158,10 @@ def write_prices_raw(
     one source's parse refuses rows for one reason (the NSE placeholder ISIN, the BSE unsplittable
     merged line) — unless `unidentified_reasons` gives one reason per row, aligned with
     `unidentified_rows` (the pre-ISIN resolver's enumerated refusals).
+    `reasoned_rows` carry their own reason each, for a source that refuses rows for
+    several — a BSE legacy session can hold an unsplittable merged line, a blank-`PREVCLOSE` line
+    and scrip codes the master cannot map (`SCRIP_UNRESOLVED`) at once — and all of them must land
+    in the single write that owns the session's quarantine partition.
 
     Returns a `PricesRawWriteReport` whose delivery counts reconcile to the input delivery count.
     """
@@ -210,6 +215,7 @@ def write_prices_raw(
         data_root=data_root,
         unidentified_reason=unidentified_reason,
         unidentified_reasons=unidentified_reasons,
+        reasoned=list(reasoned_rows),
     )
 
     delivery_joined = len(used_keys)
@@ -462,6 +468,7 @@ def _write_quarantine(
     data_root: Path | None,
     unidentified_reason: str = PriceQuarantineReason.ISIN_NOT_PUBLISHED,
     unidentified_reasons: Sequence[str] | None = None,
+    reasoned: Sequence[tuple[UnidentifiedRow, str]] = (),
 ) -> Path | None:
     """Replace `exchange`'s rows in the session's quarantine partition with what this write refused.
 
@@ -493,7 +500,7 @@ def _write_quarantine(
     )
     others = [record for record in stored if record["exchange"] != exchange.value]
     cleared = len(stored) - len(others)
-    if not unresolved and not orphaned and not unidentified:
+    if not unresolved and not orphaned and not unidentified and not reasoned:
         if cleared:
             if others:
                 _write_quarantine_table(others, path)
@@ -553,6 +560,19 @@ def _write_quarantine(
             }
             for row, why in zip(unidentified, row_reasons, strict=True)
         ]
+        + [
+            {
+                "symbol": row.symbol,
+                "series": row.series,
+                "trade_date": row.trade_date,
+                "exchange": exchange.value,
+                "isin": None,
+                "deliv_qty": None,
+                "deliv_pct": None,
+                "reason": reason,
+            }
+            for row, reason in reasoned
+        ]
     )
     _write_quarantine_table([*records, *others], path)
     _LOG.warning(
@@ -572,6 +592,7 @@ def _write_quarantine(
             if unidentified
             else None
         ),
+        reasoned=len(reasoned),
     )
     return path
 

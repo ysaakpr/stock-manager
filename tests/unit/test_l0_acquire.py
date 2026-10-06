@@ -18,7 +18,12 @@ import pytest
 from dataplatform.alerts import AlertOutcome, Severity
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
-from dataplatform.ingest.backfill import NSE_BHAVCOPY, NSE_DELIVERY, SOURCE_SETS
+from dataplatform.ingest.backfill import (
+    BSE_BHAVCOPY_LEGACY,
+    NSE_BHAVCOPY,
+    NSE_DELIVERY,
+    SOURCE_SETS,
+)
 from dataplatform.ingest.fetcher import Fetcher, RecordedResponse, RecordedTransport
 from dataplatform.ingest.indices import TRI_SOURCE_ID, l0_tri_filename, tri_request_body
 from dataplatform.ingest.l0_acquire import (
@@ -157,3 +162,60 @@ def test_a_clean_run_is_clean(settings: Settings, register: SourceRegister, tmp_
     again = acquire([unit], fetcher=fetcher2, l0=l0b)
     assert again.clean and transport2.requests == []
     assert [o.status for o in again.outcomes] == [AcquireStatus.PRESENT]
+
+
+# ── BSE legacy: the archive answers a missing date with 200 and its HTML shell ───────────────
+
+BSE_2006: Final = Path(__file__).resolve().parents[1] / "fixtures" / "bse_bhavcopy" / "legacy-2006"
+
+
+def test_bse_legacy_units_are_the_backfills_own_requests(register: SourceRegister) -> None:
+    (unit,) = price_units(
+        BSE_BHAVCOPY_LEGACY, date(2006, 4, 3), date(2006, 4, 3), register=register
+    )
+    request = SOURCE_SETS[BSE_BHAVCOPY_LEGACY].build_request(unit.logical_date, register)
+    assert (unit.source_id, unit.url, unit.filename) == (
+        request.fetch_source,
+        request.url,
+        request.filename,
+    )
+    assert unit.filename == "EQ030406_CSV.ZIP"
+
+
+def test_a_bse_html_shell_is_a_soft_404_not_a_fetched_session(
+    settings: Settings, register: SourceRegister, tmp_path: Path
+) -> None:
+    """Frozen 2026-10-06: EQ030106 (2006-01-03) answered 200 text/html; EQ030406 a real zip.
+
+    Counting the shell as FETCHED would report a session acquired that BSE never published.
+    """
+    (shell_unit,) = price_units(
+        BSE_BHAVCOPY_LEGACY, date(2006, 1, 3), date(2006, 1, 3), register=register
+    )
+    (real_unit,) = price_units(
+        BSE_BHAVCOPY_LEGACY, date(2006, 4, 3), date(2006, 4, 3), register=register
+    )
+    fetcher, l0, _ = _wire(
+        {
+            shell_unit.url: RecordedResponse(
+                body=(BSE_2006 / "EQ030106_soft404.html").read_bytes(),
+                headers={"content-type": "text/html"},
+            ),
+            real_unit.url: RecordedResponse(body=(BSE_2006 / "EQ030406_CSV.ZIP").read_bytes()),
+        },
+        settings=settings,
+        register=register,
+        root=tmp_path,
+    )
+
+    report = acquire([shell_unit, real_unit], fetcher=fetcher, l0=l0)
+
+    assert [o.status for o in report.outcomes] == [AcquireStatus.SOFT_404, AcquireStatus.FETCHED]
+    assert report.outcomes[0].http_status == 200
+    assert not report.clean
+
+    # Resume re-reads the stored shell and still calls it absent, at zero requests.
+    fetcher2, l0b, transport2 = _wire({}, settings=settings, register=register, root=tmp_path)
+    again = acquire([shell_unit, real_unit], fetcher=fetcher2, l0=l0b)
+    assert transport2.requests == []
+    assert [o.status for o in again.outcomes] == [AcquireStatus.SOFT_404, AcquireStatus.PRESENT]

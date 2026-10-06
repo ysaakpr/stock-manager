@@ -655,3 +655,54 @@ def test_the_snapshot_set_covers_every_source_the_deadline_names() -> None:
         "nse_equity_list",
         "nse_symbol_changes",
     }
+
+
+# ── the BSE scrip master's choice token ──────────────────────────────────────────────────────
+
+BSE_SCRIP_FIXTURE: Final = Path("tests/fixtures/bse_scrip_master/2026-08-08/ListofScripData.json")
+
+
+def _bse_scrip_master_body(rows: int) -> bytes:
+    """A scrip-master payload over the inspector's 3,000-row floor, cloned from the frozen era."""
+    seed = json.loads(BSE_SCRIP_FIXTURE.read_text())
+    records = [{**seed[i % len(seed)], "SCRIP_CD": str(500000 + i)} for i in range(rows)]
+    return json.dumps(records).encode()
+
+
+def test_the_bse_scrip_master_is_requested_with_its_status_filled_in(
+    build: Build, tracker: RecordingTracker, alerter: SpyAlerter
+) -> None:
+    """The register's `status={Active|Suspended|Delisted}` is a choice, not a URL.
+
+    Sent literally, BSE answered HTTP 200 with `[]` — and every capture from 2026-09-08 to
+    2026-09-23 was filed FAILED as "an empty scrip master is a broken response". The request was
+    what was broken. Only the `status=Active` URL is scripted here, so the old literal request
+    finds nothing and the source fails.
+    """
+    spec = next(s for s in DEFAULT_SNAPSHOT_SET if s.source_id == "bse_scrip_master")
+    active = _url("bse_scrip_master").replace("{Active|Suspended|Delisted}", "Active")
+    script: dict[str, ScriptedOutcome | list[ScriptedOutcome]] = {
+        active: RecordedResponse(body=_bse_scrip_master_body(3_200))
+    }
+
+    report, _store, transport = _sweep(build, tracker, alerter, script=script, specs=(spec,))
+
+    assert [request.url for request in transport.requests] == [active]
+    (outcome,) = report.outcomes
+    assert outcome.status is SnapshotStatus.CAPTURED
+    assert outcome.rows == 3_200
+
+
+def test_no_snapshot_url_is_sent_with_an_unfilled_token(
+    build: Build, tracker: RecordingTracker, alerter: SpyAlerter
+) -> None:
+    """A spec that forgets its token is refused before the request, not answered with `[]`."""
+    spec = next(s for s in DEFAULT_SNAPSHOT_SET if s.source_id == "bse_scrip_master")
+    forgetful = SnapshotSpec(source_id=spec.source_id, filename=spec.filename, inspect=spec.inspect)
+
+    with pytest.raises(DailySnapshotError):
+        _sweep(build, tracker, alerter, script={}, specs=(forgetful,))
+
+    (row,) = tracker.rows.values()
+    assert row.state is SyncState.FAILED
+    assert row.last_error is not None and "unfilled token" in row.last_error

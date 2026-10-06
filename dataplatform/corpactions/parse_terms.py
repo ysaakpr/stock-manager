@@ -404,7 +404,13 @@ def _bonus_terms(text: str) -> _Extraction:
     if len(ratios) > 1:
         return _conflicting(f"{len(ratios)} different bonus ratios in one string")
     new, held = ratios[0]
-    return RatioTerms(new_shares=new, held_shares=held), None, ""
+    try:
+        return RatioTerms(new_shares=new, held_shares=held), None, ""
+    except ValidationError as exc:
+        # BSE prints a placeholder ratio for some bonus rows — `Bonus issue 0:0` (IGARASHI,
+        # 517380, ex 2018-09-27). A zero ratio has no adjustment factor, so the row is a human's,
+        # exactly like a rights row with a zero price — never an exception that fails the scrip.
+        return _conflicting(f"bonus ratio {new}:{held} not usable: {exc.error_count()} error")
 
 
 def _rights_terms(text: str) -> _Extraction:
@@ -484,7 +490,13 @@ def _exchange_ratio_terms(text: str) -> _Extraction:
     if len(ratios) > 1:
         return _conflicting(f"{len(ratios)} different exchange ratios in one string")
     received, held = ratios[0]
-    return ExchangeRatioTerms(shares_received=received, shares_held=held), None, ""
+    try:
+        return ExchangeRatioTerms(shares_received=received, shares_held=held), None, ""
+    except ValidationError as exc:
+        # Same placeholder hazard as a bonus: a `0:0` swap ratio is queued, never raised.
+        return _conflicting(
+            f"exchange ratio {received}:{held} not usable: {exc.error_count()} error"
+        )
 
 
 def _name_change_terms(original: str) -> _Extraction:

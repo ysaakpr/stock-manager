@@ -118,6 +118,18 @@ class PriceQuarantineReason:
     #: `bhavcopy.legacy_line_quarantined` log event. See `bse.bhavcopy.split_merged_records`.
     MERGED_RECORDS_UNSPLITTABLE: Final = "merged_records_unsplittable"
 
+    #: A BSE legacy price row whose `SC_CODE` the scrip master does not map to an ISIN — mostly
+    #: debt, gsec and ETF counters the master excludes, plus delisted scrips BSE lists with `NA`
+    #: (RAW_DATA_CATALOG B1). `symbol` holds the scrip code as published and `series` its group.
+    #: Until 2026-10-06 these rows were counted in a log line and dropped (catalog B1 defect (b)).
+    SCRIP_UNRESOLVED: Final = "scrip_unresolved"
+
+    #: A BSE legacy line with a blank `PREVCLOSE` — an instrument's first session, which has no
+    #: previous close to state (`EQ060112_CSV.ZIP` line 1090, a new IDFC bond; REL BANK ETF on
+    #: listing day). `prev_close` is required in `prices_raw`, so the line is enumerated here
+    #: rather than failing its whole session (ten sessions in January 2012 did) or inventing one.
+    PREV_CLOSE_ABSENT: Final = "prev_close_absent"
+
 
 class PricesRawRow(BaseModel):
     """One security's raw traded session on one exchange — the canonical `prices_raw` L1 row.
