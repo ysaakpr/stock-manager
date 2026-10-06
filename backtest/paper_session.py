@@ -8,11 +8,23 @@ of the paper book and journals it. It is the replay engine run *forward* — the
 through, one session at a time, so the paper book is the backtest's book continued past the end of
 history rather than a second implementation of the strategy (§7, invariant #5).
 
+**Disabled by default** (``Settings.paper_session_enabled``). The ratified regime filter reads the
+*published NIFTY 50 TRI* level for the session itself, and nothing lands that level the same
+evening yet: ``tri_refresh`` is weekly and stops at the session before the day it runs, and the
+close-all snapshot is a different series (the price index — compared over 3,159 overlapping
+sessions it never matches the TRI; ops/runbooks/daily-eod.md has the numbers). Until a same-evening
+TRI source exists, every rebalance would be journaled red, so the job is registered but does
+nothing until the flag is set.
+
+**Which session** (:func:`owed_session`). The job decides an explicit date: the latest trading
+session whose EOD is due by the run's clock — today's from :data:`EOD_DUE_AT` IST, otherwise the
+previous session. A retry after midnight therefore decides the session that failed, never the new
+calendar day.
+
 **What one run does** (:func:`run_paper_session`), in order, stopping at the first step that says
 stop:
 
-1. **Trading-day check.** A date the holiday calendar does not call a session is not a decision
-   day: nothing is journaled, nothing recorded.
+1. **Trading-day check.** A date the holiday calendar does not call a session writes nothing.
 2. **Idempotency.** A date already ``COMPLETED`` for the book is a no-op — a rerun never trades
    twice. A date recorded ``SKIPPED_DATA_RED`` is re-checked (the data may have healed), but a
    still-red rerun writes nothing new.
@@ -20,41 +32,52 @@ stop:
    status read that failed, or a decision input that is missing (no L1 prices for the date, no
    published regime index level on a rebalance, no investable universe) journals one
    ``SKIPPED_DATA_RED`` entry and places no order. A failed status read is red, never green.
-4. **Rebuild the paper book.** The broker is a fresh ``SimBroker`` — the paper book has no other
-   state than the ``paper_session`` rows (migration 0012). Every calendar session from the book's
-   first decided session up to yesterday is walked: corporate actions, settlement and fills run on
-   every one; on a ``COMPLETED`` session the recorded orders are placed again; on any other session
-   (red, missed) an order staged for it lapses unfilled. After each decided session the rebuilt
-   book is checked byte-for-byte against the digest recorded when it was decided, so a book that no
-   longer reproduces fails loud instead of trading on a different history than the one journaled.
-5. **Decide.** ``ReplayEngine`` runs exactly one session — fill yesterday's orders, ask the policy,
+4. **Restore the paper book.** The broker is restored from the state the latest ``COMPLETED``
+   session persisted (``SimBrokerState``), and must reproduce that session's ``book_digest``
+   before it is used. Nothing is replayed: the book rolls forward one session from its last
+   snapshot, so the cost of a run does not grow with the book's age. An order staged for a session
+   the book did not decide (red, missed) lapses unfilled.
+5. **Book the corporate actions known now.** Every reconciled action with an ex-date after the
+   book opened and on or before the session, not yet booked by this book, is booked *now*: one
+   whose ex-date falls after the last decided session the ordinary way (before the session's
+   fills); one whose ex-date the book has already decided past — learnt late, because the
+   corporate-action store refreshes weekly — on this session, with an explicit journal entry
+   (:func:`_book_late`). The past is never rewritten, so a late action cannot break the restore.
+6. **Decide.** ``ReplayEngine`` runs exactly one session — fill yesterday's orders, ask the policy,
    clear every order through A8, place what A8 allowed — and the entries it produced (BUY/SELL,
    RAIL_BLOCK, or the HEARTBEAT of a day with nothing to do: invariant #9) are appended to the
-   journal and the session recorded ``COMPLETED``, in the caller's one transaction.
+   journal and the session recorded ``COMPLETED`` with the new state, in the caller's one
+   transaction.
+
+**Journal timestamps.** An entry's ``ts`` is midnight IST of the session it decides: the engine
+freezes its clock on the session date, exactly as in every backtest, so the decision is a pure
+function of the session and replays byte-for-byte. When the row actually landed is
+``recorded_at``, which the journal stamps from the job's real clock.
 
 **Rebalance timing.** The ratified backtest rebalances on the first session of each month. A paper
 book cannot rebalance on a day it was not allowed to decide, so here a rebalance is due on the
 first session of the month *this book decides*: a red first session moves the rebalance to the next
-green one instead of skipping the month. The first session the book ever decides rebalances too —
-the book opens invested, not in cash until next month.
+green one instead of skipping the month. The first session the book ever decides rebalances too.
 
 **Paper only, structurally.** Nothing here takes a broker. The one broker this module can build is
-a ``SimBroker``, constructed inside :func:`_open_book` and checked by :func:`require_paper_broker`
-before a single order reaches it; ``execution.kite_broker`` is never imported (a test pins both).
-A real-money version is a separate ratification (AGENTIC_CONTEXT §3.2) and a separate job.
+a ``SimBroker``, constructed or restored inside :func:`_restore_book` and checked by
+:func:`require_paper_broker` before a single order reaches it; ``Settings.broker_provider`` is never
+read and ``execution.kite_broker`` is never imported (tests pin all three). A real-money version is
+a separate ratification (AGENTIC_CONTEXT §3.2) and a separate job.
 
-What it never does: read a wall clock for a decision (the engine's ``FrozenClock`` is set to the
-session — B10), trade on red data, journal a decision it did not make, or update a ``COMPLETED``
-session. Money is ``Decimal`` throughout; identity is the ISIN.
+What it never does: read a wall clock for a decision, trade on red data, journal a decision it did
+not make, rewrite a past session, or update a ``COMPLETED`` one. Money is ``Decimal`` throughout;
+identity is the ISIN.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -62,6 +85,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from psycopg.types.json import Json
 
+from analyst.journal import EVIDENCE_DIRNAME, EvidenceStore, Journal
 from analyst.journal.evidence import (
     EvidenceBundle,
     EvidenceRef,
@@ -69,8 +93,15 @@ from analyst.journal.evidence import (
     digest_of,
 )
 from analyst.journal.models import Actor, Decision, JournalEntry
-from backtest.accounting import PortfolioBook
-from backtest.book_actions import BookActionSource
+from analyst.monitor.interlock import StatusApiGate
+from backtest.accounting import BookPosition, PortfolioBook
+from backtest.book_actions import (
+    BookAction,
+    BookActionCalendar,
+    BookActionSource,
+    CashDividend,
+    ShareRescale,
+)
 from backtest.policies.momentum_v2 import (
     PAPER_RATIFIED_2026_09_06,
     MomentumV2Data,
@@ -101,7 +132,6 @@ from backtest.run import (
     UniverseParameters,
     _AccountingBroker,
     _AdjustedCloseSource,
-    _held_by,
     _HoldingMarks,
     _InvestableUniverse,
     _L1Market,
@@ -109,14 +139,14 @@ from backtest.run import (
     _L1Reader,
     _RegimeSource,
 )
-from dataplatform.clock import Clock, FrozenClock
+from dataplatform.clock import IST, Clock, FrozenClock
 from dataplatform.config import Settings
 from dataplatform.logging import get_logger
 from dataplatform.query.pit import Dataset
-from dataplatform.store.db import Connection
-from execution.broker import Exchange, Order, OrderRequest, OrderStatus, OrderType, Side
+from dataplatform.store.db import Connection, connection
+from execution.broker import Exchange, Order, OrderRequest, OrderType, Side
 from execution.costs import CostModel, load_rate_card
-from execution.sim_broker import SessionMarket, SimBroker
+from execution.sim_broker import SessionMarket, SimBroker, SimBrokerState
 
 if TYPE_CHECKING:
     from analyst.monitor.interlock import GreenLike
@@ -125,6 +155,8 @@ if TYPE_CHECKING:
     from dataplatform.scheduler.registry import JobContext
 
 __all__ = [
+    "EOD_DUE_AT",
+    "LATE_ACTION_EVENT",
     "PAPER_BOOK_ID",
     "PAPER_DATASETS",
     "PAPER_MODE",
@@ -144,7 +176,8 @@ __all__ = [
     "RecordingJournal",
     "RunVerdict",
     "SessionOutcome",
-    "StatusGate",
+    "action_key",
+    "owed_session",
     "ratified_paper_book",
     "require_paper_broker",
     "run_paper_session",
@@ -161,20 +194,31 @@ PAPER_BOOK_ID: Final = "momentum_v2_paper_2026_09_06"
 #: with the capital its evidence assumed, so its results are comparable to that evidence.
 PAPER_OPENING_CASH: Final = Decimal("1000000")
 
-#: The ``sync_state`` sources this decision reads, which must be ``PUBLISHED`` and quality-green for
-#: the session (invariant #10). Momentum v2 ranks NSE equities on NSE closes and fills on NSE bars,
-#: so the NSE bhavcopy is its whole price input; the regime index and the investable universe are
-#: checked as decision inputs on the days they are read (see the module docstring).
+#: The ``sync_state`` sources whose ``PUBLISHED``, quality-green state the interlock requires for
+#: the session (invariant #10). Momentum v2 ranks NSE equities on NSE closes and fills on NSE
+#: bars, so the NSE bhavcopy is its whole same-day input. ``CORE_DATASETS``' corporate-action feed
+#: is deliberately *not* here: it refreshes weekly (``ca_refresh``, Saturdays), so requiring it
+#: would make four sessions in five red. Corporate actions are booked when they become known
+#: instead — on their ex-date when known in time, otherwise as an explicit late action (module
+#: docstring, step 5).
 PAPER_DATASETS: Final[tuple[str, ...]] = ("nse_bhavcopy",)
 
 #: Stamped on every journal entry and in the payload, so a paper decision is never mistaken for a
 #: real-money one and every entry names the book it belongs to.
 PAPER_MODE: Final = "PAPER"
 
+#: From this time (IST) a session's EOD is due and the job owes that session a decision; before it,
+#: the job owes the previous session. The EOD pipeline fires at 18:30.
+EOD_DUE_AT: Final = time(18, 30)
+
 _BOOK_ID = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 #: How far past the session the fill calendar is extended: an order staged on the session needs the
 #: next session to target, and the longest Indian market closure runs to a few days.
 _CALENDAR_HEADROOM = timedelta(days=45)
+#: How far back :func:`owed_session` looks for a session (the longest closure, with margin).
+_OWED_LOOKBACK_DAYS = 10
+#: The payload ``event`` on a late corporate action's journal entry.
+LATE_ACTION_EVENT: Final = "LATE_CORPORATE_ACTION"
 
 
 # ── errors ───────────────────────────────────────────────────────────────────────────────────────
@@ -189,11 +233,12 @@ class PaperModeViolationError(PaperSessionError):
 
 
 class PaperBookDivergenceError(PaperSessionError):
-    """The rebuilt paper book does not reproduce the book recorded when a session was decided.
+    """The restored paper book does not reproduce the digest recorded with its state.
 
-    Means an input the rebuild reads — a raw bar a fill was priced on, a corporate action — changed
-    after the session was decided. The book is not silently re-based on the new history: an operator
-    must look (ops/runbooks/daily-eod.md).
+    The persisted state and its digest were written in one transaction, so a mismatch means the
+    stored row was altered or the serialisation changed — not that the market moved (a late
+    corporate action is booked forward, never replayed). An operator must look
+    (ops/runbooks/daily-eod.md); the book is never silently re-based.
     """
 
 
@@ -265,8 +310,10 @@ class PaperSessionRecord:
 
     ``orders`` are the requests placed on the paper broker after A8 cleared them, in placement
     order; ``pending`` the momentum policy's redeploy target carried to the next session;
-    ``book_digest`` the sha256 of the book after the session placed its orders — what the next
-    run's rebuild must reproduce. A red record holds none of the three.
+    ``book_state`` the broker's whole state after the session (``{"broker": SimBrokerState
+    document, "session_ledger": [...]}``) and ``book_digest`` the sha256 of its broker part;
+    ``actions`` the identity keys of the corporate actions this session booked. A red record holds
+    none of them.
     """
 
     book_id: str
@@ -277,15 +324,30 @@ class PaperSessionRecord:
     journal_digest: str
     orders: tuple[OrderRequest, ...] = ()
     pending: Mapping[str, Decimal] | None = None
+    book_state: Mapping[str, Any] | None = None
     book_digest: str | None = None
+    actions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.outcome is SessionOutcome.SKIPPED_DATA_RED and (
-            self.orders or self.pending is not None or self.rebalanced or self.book_digest
+            self.orders
+            or self.pending is not None
+            or self.rebalanced
+            or self.book_digest
+            or self.book_state is not None
+            or self.actions
         ):
             raise ValueError("a SKIPPED_DATA_RED session places nothing and carries no book state")
-        if self.outcome is SessionOutcome.COMPLETED and self.book_digest is None:
-            raise ValueError("a COMPLETED session must record the book digest it ended on")
+        if self.outcome is SessionOutcome.COMPLETED and (
+            self.book_digest is None or self.book_state is None
+        ):
+            raise ValueError("a COMPLETED session must record the book state it ended on")
+
+    def broker_state(self) -> SimBrokerState:
+        """The paper broker's state after this session; raises on a red record."""
+        if self.book_state is None:
+            raise PaperSessionError(f"{self.trading_date.isoformat()} recorded no book state")
+        return SimBrokerState.from_document(self.book_state["broker"])
 
     def orders_document(self) -> list[dict[str, str | None]]:
         """``orders`` as JSON-safe strings — Decimals never travel as JSON numbers."""
@@ -309,9 +371,11 @@ class PaperSessionRecord:
         journal_digest: str,
         orders: Sequence[Mapping[str, str | None]],
         pending: Mapping[str, str] | None,
+        book_state: Mapping[str, Any] | None,
         book_digest: str | None,
+        actions: Sequence[str],
     ) -> PaperSessionRecord:
-        """The record a stored row describes (the inverse of the two ``*_document`` methods)."""
+        """The record a stored row describes (the inverse of the ``*_document`` methods)."""
         return cls(
             book_id=book_id,
             trading_date=trading_date,
@@ -325,7 +389,9 @@ class PaperSessionRecord:
                 if pending is None
                 else {isin: Decimal(weight) for isin, weight in pending.items()}
             ),
+            book_state=book_state,
             book_digest=book_digest,
+            actions=tuple(actions),
         )
 
 
@@ -358,6 +424,10 @@ def _order_from(document: Mapping[str, str | None]) -> OrderRequest:
         limit_price=None if limit is None else Decimal(limit),
         tag=document.get("tag"),
     )
+
+
+def _state_digest(state: SimBrokerState) -> str:
+    return digest_of(canonical_bytes(state.to_document()))
 
 
 # ── persistence: the session ledger ──────────────────────────────────────────────────────────────
@@ -405,7 +475,7 @@ class InMemoryPaperSessionStore:
 
 _COLUMNS = (
     "book_id, trading_date, outcome, reason, rebalanced, orders, pending, journal_digest, "
-    "book_digest"
+    "book_state, book_digest, actions"
 )
 
 
@@ -440,13 +510,14 @@ class PostgresPaperSessionStore:
     def record(self, record: PaperSessionRecord, *, recorded_at: datetime) -> None:
         row = self._conn.execute(
             "INSERT INTO paper_session (book_id, trading_date, outcome, reason, rebalanced, "
-            "orders, pending, journal_digest, book_digest, recorded_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "orders, pending, journal_digest, book_state, book_digest, actions, recorded_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (book_id, trading_date) DO UPDATE SET "
             "outcome = EXCLUDED.outcome, reason = EXCLUDED.reason, "
             "rebalanced = EXCLUDED.rebalanced, orders = EXCLUDED.orders, "
             "pending = EXCLUDED.pending, journal_digest = EXCLUDED.journal_digest, "
-            "book_digest = EXCLUDED.book_digest, recorded_at = EXCLUDED.recorded_at "
+            "book_state = EXCLUDED.book_state, book_digest = EXCLUDED.book_digest, "
+            "actions = EXCLUDED.actions, recorded_at = EXCLUDED.recorded_at "
             "WHERE paper_session.outcome = 'SKIPPED_DATA_RED' "
             "RETURNING trading_date",
             (
@@ -458,7 +529,9 @@ class PostgresPaperSessionStore:
                 Json(record.orders_document()),
                 None if record.pending is None else Json(record.pending_document()),
                 record.journal_digest,
+                None if record.book_state is None else Json(dict(record.book_state)),
                 record.book_digest,
+                Json(list(record.actions)),
                 recorded_at,
             ),
         ).fetchone()
@@ -479,7 +552,9 @@ def _record_of(row: Sequence[Any]) -> PaperSessionRecord:
         orders,
         pending,
         journal_digest,
+        book_state,
         book_digest,
+        actions,
     ) = row
     return PaperSessionRecord.from_documents(
         book_id=book_id,
@@ -490,7 +565,9 @@ def _record_of(row: Sequence[Any]) -> PaperSessionRecord:
         journal_digest=journal_digest,
         orders=orders,
         pending=pending,
+        book_state=book_state,
         book_digest=book_digest,
+        actions=actions,
     )
 
 
@@ -563,29 +640,24 @@ class PaperWorld(Protocol):
         """The momentum signal and regime for the decision on ``day``."""
 
     def corporate_actions(self) -> BookActionSource | None:
-        """Splits, bonuses, dividends and exits applied to the book on their ex-dates."""
+        """Splits, bonuses, dividends and exits, as currently known, keyed by ex-date."""
 
 
-# ── the interlock ────────────────────────────────────────────────────────────────────────────────
+def owed_session(world: PaperWorld, now: datetime) -> date | None:
+    """The session the job owes a decision for at ``now`` — an explicit date, never "today".
 
-
-@dataclass(frozen=True, slots=True)
-class StatusGate:
-    """The production ``GreenGate``: ``dataplatform.status.is_green`` over this book's datasets.
-
-    Takes the job's own settings and clock rather than reading the process defaults, so a scheduler
-    run against a given database checks that database's status. Does not catch a failure — the
-    session turns one into a red day (:func:`run_paper_session`), never into a green one.
+    The latest trading session whose EOD is due: from :data:`EOD_DUE_AT` IST that is today (when
+    today is a session), before it the latest session before today. So the 20:30 run decides
+    today, and a retry at 00:30 decides yesterday's — the session that failed — not the new day,
+    whose market has not even opened. ``None`` only if no session lies in the lookback.
     """
-
-    datasets: Sequence[str]
-    settings: Settings | None = None
-    clock: Clock | None = None
-
-    def __call__(self, trading_date: date) -> GreenLike:
-        from dataplatform.status import is_green
-
-        return is_green(trading_date, self.datasets, settings=self.settings, clock=self.clock)
+    local = now.astimezone(IST)
+    day = local.date() if local.time() >= EOD_DUE_AT else local.date() - timedelta(days=1)
+    for _ in range(_OWED_LOOKBACK_DAYS):
+        if world.is_session(day):
+            return day
+        day -= timedelta(days=1)
+    return None
 
 
 # ── the paper broker ─────────────────────────────────────────────────────────────────────────────
@@ -609,11 +681,7 @@ def require_paper_broker(broker: object) -> SimBroker:
 
 
 class _PaperBroker(_AccountingBroker):
-    """The backtest's accounting broker over the paper ``SimBroker``, remembering what it placed.
-
-    The placements are what a decided session records (and what the next run's rebuild places
-    again); ``lapse`` cancels what was staged for a session the book did not decide.
-    """
+    """The backtest's accounting broker over the paper ``SimBroker``, remembering what it placed."""
 
     def __init__(
         self,
@@ -638,91 +706,207 @@ class _PaperBroker(_AccountingBroker):
         """The requests placed while ``session`` was being decided, in placement order."""
         return tuple(order.request for day, order in self._placed if day == session)
 
-    def lapse(self, session: date) -> int:
-        """Cancel every order still staged to fill on ``session``; return how many."""
-        lapsed = 0
-        for _, order in self._placed:
-            if order.target_session != session:
-                continue
-            if self._paper_sim.order(order.order_id).status is OrderStatus.STAGED:
-                self.cancel(order.order_id)
-                lapsed += 1
-        return lapsed
 
+class _Held:
+    """``held()`` for the market and the marks, bound to the broker once it exists."""
 
-def _book_digest(broker: _PaperBroker) -> str:
-    return digest_of(BookSnapshot.of(broker).canonical_bytes())
+    __slots__ = ("sim",)
+
+    def __init__(self) -> None:
+        self.sim: SimBroker | None = None
+
+    def __call__(self) -> list[str]:
+        if self.sim is None:
+            return []
+        held = {holding.isin for holding in self.sim.holdings()}
+        return sorted(held | {position.isin for position in self.sim.positions()})
 
 
 def _entries_digest(entries: Sequence[JournalEntry]) -> str:
     return digest_of(canonical_bytes([entry.model_dump(mode="json") for entry in entries]))
 
 
-def _open_book(
+def _restore_book(
     spec: PaperBookSpec,
     world: PaperWorld,
-    completed: Sequence[PaperSessionRecord],
+    last: PaperSessionRecord | None,
     trading_date: date,
     clock: FrozenClock,
-) -> _PaperBroker:
-    """Rebuild the paper book as it stood after the last session before ``trading_date``.
+    held: _Held,
+) -> SimBroker:
+    """The paper broker as the last decided session left it, or a fresh one on the first session.
 
-    Walks every calendar session from the first decided one: corporate actions, settlement and
-    fills on each; the recorded orders placed again on each decided one, and checked against its
-    recorded digest; an order staged for an undecided session lapses unfilled. ``clock`` is left
-    frozen on the last walked session; the engine moves it to ``trading_date``.
+    Restores the persisted ``SimBrokerState`` and checks it reproduces the recorded digest, then
+    lapses every order still staged for a session before ``trading_date`` — a session the book did
+    not decide, so its orders never reached a market.
     """
-    first = completed[0].trading_date if completed else trading_date
-    sessions = list(world.sessions(first, trading_date))
-    if not sessions or sessions[-1] != trading_date:
-        raise PaperSessionError(
-            f"{trading_date.isoformat()} is not in the calendar's sessions from {first.isoformat()}"
-        )
-    decided = {record.trading_date: record for record in completed}
-    off_calendar = sorted(set(decided) - set(sessions))
-    if off_calendar:
-        raise PaperSessionError(
-            "decided sessions the calendar no longer calls sessions: "
-            + ", ".join(day.isoformat() for day in off_calendar)
-        )
-
-    book = PortfolioBook()
-    book.deposit(first, spec.opening_cash)
-    held = _held_by(book)
-    sim = SimBroker(
-        clock=clock,
-        cost_model=CostModel(load_rate_card(), account_state=_ACCOUNT_STATE),
-        market=world.market(first=first, through=trading_date, held=held),
-        opening_cash=spec.opening_cash,
-    )
-    broker = _PaperBroker(sim, book, clock=clock, corporate_actions=world.corporate_actions())
-
-    for session in sessions[:-1]:
-        clock.freeze_at(session)
-        record = decided.get(session)
-        if record is None:
-            lapsed = broker.lapse(session)
-            if lapsed:
-                _LOG.info(
-                    "paper_session.orders_lapsed",
-                    book=spec.book_id,
-                    session=session.isoformat(),
-                    orders=lapsed,
-                    reason="the book did not decide this session; its staged orders never filled",
-                )
-        broker.execute_session(session)
-        if record is None:
-            continue
-        for request in record.orders:
-            broker.place(request)
-        rebuilt = _book_digest(broker)
-        if rebuilt != record.book_digest:
+    if last is None:
+        first = trading_date
+        state = None
+    else:
+        state = last.broker_state()
+        if _state_digest(state) != last.book_digest:
             raise PaperBookDivergenceError(
-                f"{spec.book_id}: the book rebuilt through {session.isoformat()} has digest "
-                f"{rebuilt}, but {record.book_digest} was recorded when that session was decided; "
-                "an input the rebuild reads changed since (see ops/runbooks/daily-eod.md)"
+                f"{spec.book_id}: the state recorded for {last.trading_date.isoformat()} does not "
+                f"reproduce its digest {last.book_digest}; refusing to trade on an altered book "
+                "(see ops/runbooks/daily-eod.md)"
             )
-    return broker
+        traded = [lot[1] for lot in state.pending] + [r[1] for r in state.receivables]
+        first = min([last.trading_date, *traded])
+    market = world.market(first=first, through=trading_date, held=held)
+    cost_model = CostModel(load_rate_card(), account_state=_ACCOUNT_STATE)
+    if state is None:
+        sim = SimBroker(
+            clock=clock, cost_model=cost_model, market=market, opening_cash=spec.opening_cash
+        )
+    else:
+        sim = SimBroker.restore(state, clock=clock, cost_model=cost_model, market=market)
+        for order in state.staged:
+            if order.target_session < trading_date:
+                sim.cancel(order.order_id)
+                _LOG.info(
+                    "paper_session.order_lapsed",
+                    book=spec.book_id,
+                    order_id=order.order_id,
+                    isin=order.request.isin,
+                    target_session=order.target_session.isoformat(),
+                    reason="the book did not decide that session; the order never filled",
+                )
+    held.sim = require_paper_broker(sim)
+    return sim
+
+
+def _mirror(sim: SimBroker) -> PortfolioBook:
+    """The share-count mirror corporate actions are checked against, seeded from the broker."""
+    lots: dict[str, tuple[int, Decimal]] = {}
+    for holding in sim.holdings():
+        lots[holding.isin] = (holding.quantity, holding.average_price * holding.quantity)
+    for position in sim.positions():
+        quantity, cost = lots.get(position.isin, (0, Decimal(0)))
+        lots[position.isin] = (
+            quantity + position.quantity,
+            cost + position.average_price * position.quantity,
+        )
+    return PortfolioBook.seeded(
+        sim.margins().cash_value,
+        [BookPosition(isin, quantity, cost) for isin, (quantity, cost) in sorted(lots.items())],
+    )
+
+
+# ── corporate actions: booked once, on the first session they are known ──────────────────────────
+
+
+def action_key(action: BookAction) -> str:
+    """A stable identity for a book action — its type, ex-date, ISIN and a digest of its terms."""
+    terms = hashlib.sha256(repr(action).encode()).hexdigest()[:16]
+    return f"{type(action).__name__}:{action.ex_date.isoformat()}:{action.isin}:{terms}"
+
+
+def _held_in(state: SimBrokerState, isin: str) -> int:
+    """Shares of ``isin`` in a persisted state: settled holdings plus pending buys."""
+    settled = sum(quantity for held, _, quantity, _ in state.holdings if held == isin)
+    pending = sum(quantity for held, _, _, _, quantity, _ in state.pending if held == isin)
+    return settled + pending
+
+
+def _book_late(
+    late: Sequence[BookAction],
+    sim: SimBroker,
+    completed: Sequence[PaperSessionRecord],
+    trading_date: date,
+    spec: PaperBookSpec,
+    clock: Clock,
+) -> list[JournalEntry]:
+    """Book corporate actions learnt after the book decided past their ex-date, on this session.
+
+    Entitlement is the book as it stood entering the ex-date — the state the last decided session
+    before it persisted (orders staged then fill on or after the ex-date, or lapse, so they are not
+    entitled). A dividend is credited now at that entitlement. A split or bonus is applied now when
+    the book has not traded the name since, so the entitled shares are exactly the ones still held;
+    otherwise, and for any other kind of action on a held name, the mechanical booking is not safe
+    and the action is escalated to the owner instead. Each one is journaled; none rewrites the past.
+    """
+    entries: list[JournalEntry] = []
+    for action in late:
+        before = [r for r in completed if r.trading_date < action.ex_date]
+        if not before:
+            continue
+        entitled = _held_in(before[-1].broker_state(), action.isin)
+        if entitled == 0:
+            continue
+        traded_since = any(
+            order.isin == action.isin
+            for record in completed
+            if record.trading_date >= before[-1].trading_date
+            for order in record.orders
+        )
+        what = (
+            f"{type(action).__name__} on {action.isin} ex {action.ex_date.isoformat()}, learnt "
+            f"{trading_date.isoformat()} after the book had decided past its ex-date"
+        )
+        payload = {
+            "event": LATE_ACTION_EVENT,
+            "action": action_key(action),
+            "ex_date": action.ex_date.isoformat(),
+            "entitled": str(entitled),
+            "paper_book": spec.book_id,
+            "mode": PAPER_MODE,
+        }
+        if isinstance(action, CashDividend):
+            amount = action.per_share * entitled
+            sim.credit_corporate_cash(
+                trading_date,
+                action.isin,
+                amount,
+                f"LATE DIVIDEND {entitled} x {action.per_share} ex {action.ex_date.isoformat()}",
+            )
+            decision, rationale = (
+                Decision.HOLD,
+                f"booked late: {what}; credited {entitled} x {action.per_share} = {amount}",
+            )
+            payload["amount"] = str(amount)
+        elif (
+            isinstance(action, ShareRescale)
+            and not traded_since
+            and sim.held_quantity(action.isin) == entitled
+        ):
+            old, new = sim.apply_share_rescale(
+                action.isin,
+                numerator=action.numerator,
+                denominator=action.denominator,
+                ex_date=trading_date,
+            )
+            decision, rationale = (
+                Decision.HOLD,
+                f"booked late: {what}; {action.kind.value} {action.numerator}:"
+                f"{action.denominator} rescaled {old} shares to {new}",
+            )
+        else:
+            decision, rationale = (
+                Decision.ESCALATE,
+                f"not booked: {what}; the book has traded the name since or the action is not a "
+                "dividend or a split/bonus, so it cannot be booked mechanically — owner review",
+            )
+        _LOG.warning(
+            "paper_session.late_corporate_action",
+            book=spec.book_id,
+            action=action_key(action),
+            decision=decision.value,
+            entitled=entitled,
+        )
+        entries.append(
+            JournalEntry(
+                ts=clock.now(),
+                trading_date=trading_date,
+                actor=Actor.SYSTEM,
+                decision=decision,
+                isin=action.isin,
+                sleeve=spec.parameters.sleeve,
+                rationale=rationale,
+                payload=payload,
+            )
+        )
+    return entries
 
 
 # ── the policy, as the paper book drives it ──────────────────────────────────────────────────────
@@ -812,8 +996,10 @@ class PaperSessionResult:
         return canonical_bytes([entry.model_dump(mode="json") for entry in self.entries])
 
     def book_bytes(self) -> bytes:
-        """The canonical bytes of the book after the session (empty when nothing was decided)."""
-        return b"" if self.book is None else self.book.canonical_bytes()
+        """The canonical bytes of the persisted book state (empty when nothing was decided)."""
+        if self.record is None or self.record.book_state is None:
+            return b""
+        return canonical_bytes(dict(self.record.book_state))
 
 
 def run_paper_session(
@@ -829,13 +1015,13 @@ def run_paper_session(
     """Decide one session of the paper book, or record why not (see the module docstring).
 
     What it does: the trading-day check, the idempotency check, the data-red interlock, the book
-    rebuild and one ``ReplayEngine`` session, then appends the session's entries to ``journal`` and
-    its record to ``store``.
+    restore, the corporate actions known now and one ``ReplayEngine`` session, then appends the
+    session's entries to ``journal`` and its record to ``store``.
     What it assumes: ``journal`` and ``store`` share the caller's transaction, which the caller
     commits after this returns — so a crash leaves neither half — and ``clock`` is the run's clock,
     used only for the record's landing time.
     What it never does: take or build any broker but the paper ``SimBroker``, place an order on a
-    red day, journal a still-red rerun twice, or touch a ``COMPLETED`` session.
+    red day, journal a still-red rerun twice, rewrite a past session, or touch a ``COMPLETED`` one.
     """
     log = _LOG.bind(book=spec.book_id, trading_date=trading_date.isoformat(), mode=PAPER_MODE)
     if not world.is_session(trading_date):
@@ -849,6 +1035,8 @@ def run_paper_session(
             trading_date, RunVerdict.ALREADY_DECIDED, "already decided", record=existing
         )
 
+    # Frozen on the session date: every entry this session journals is stamped midnight IST of the
+    # session, as in every replay (module docstring, "Journal timestamps").
     session_clock = FrozenClock(trading_date)
     red = _red_reason(gate, trading_date, world)
     if red is not None:
@@ -856,6 +1044,7 @@ def run_paper_session(
 
     history = store.history(spec.book_id, before=trading_date)
     completed = [record for record in history if record.outcome is SessionOutcome.COMPLETED]
+    last = completed[-1] if completed else None
     rebalance = not any(
         record.rebalanced
         and (record.trading_date.year, record.trading_date.month)
@@ -868,27 +1057,45 @@ def run_paper_session(
         spec.parameters,
         order_caps=spec.rail_policy.rails,
     )
-    policy.resume(completed[-1].pending if completed else None)
+    policy.resume(last.pending if last is not None else None)
     gap = _input_gap(data, policy, spec.parameters, trading_date, rebalance=rebalance)
     if gap is not None:
         return _skip(spec, trading_date, gap, existing, store, journal, session_clock, clock)
 
-    broker = _open_book(spec, world, completed, trading_date, session_clock)
+    held = _Held()
+    sim = _restore_book(spec, world, last, trading_date, session_clock, held)
+
+    # Corporate actions known now and not yet booked by this book. Nothing on or before the day the
+    # book opened can concern it (it held nothing until that session's orders filled).
+    booked = {key for record in history for key in record.actions}
+    source = world.corporate_actions()
+    due: list[BookAction] = []
+    if last is not None and source is not None:
+        inception = completed[0].trading_date
+        due = [a for a in source.between(inception, trading_date) if action_key(a) not in booked]
+    late = [a for a in due if last is not None and a.ex_date <= last.trading_date]
+    on_time = [a for a in due if a not in late]
+    late_entries = _book_late(late, sim, completed, trading_date, spec, session_clock)
+
+    broker = _PaperBroker(
+        sim, _mirror(sim), clock=session_clock, corporate_actions=BookActionCalendar(on_time)
+    )
     capturing = _Capturing(policy)
     result = ReplayEngine(
         policy=capturing,
         broker=broker,
         clock=session_clock,
         sessions=(trading_date,),
-        rails=RailGate(spec.rail_policy, world.marks(_held_by(broker.book))),
+        rails=RailGate(spec.rail_policy, world.marks(held)),
     ).run()
     if capturing.evidence is None:  # pragma: no cover - the engine always asks the policy once
         raise PaperSessionError("the engine finished a session without asking the policy")
 
-    entries = tuple(_tagged(entry, spec) for entry in result.journal)
+    entries = (*late_entries, *(_tagged(entry, spec) for entry in result.journal))
     journal.snapshot(capturing.evidence)
     for entry in entries:
         journal.append(entry)
+    state = sim.export_state()
     record = PaperSessionRecord(
         book_id=spec.book_id,
         trading_date=trading_date,
@@ -898,7 +1105,23 @@ def run_paper_session(
         journal_digest=_entries_digest(entries),
         orders=broker.placed_on(trading_date),
         pending=policy.pending,
-        book_digest=_book_digest(broker),
+        book_state={
+            "broker": state.to_document(),
+            "session_ledger": [
+                {
+                    "seq": str(line.seq),
+                    "session": line.session.isoformat(),
+                    "isin": line.isin,
+                    "description": line.description,
+                    "debit": str(line.debit),
+                    "credit": str(line.credit),
+                    "balance": str(line.balance),
+                }
+                for line in sim.ledger()
+            ],
+        },
+        book_digest=_state_digest(state),
+        actions=tuple(action_key(action) for action in due),
     )
     store.record(record, recorded_at=clock.now())
     log.info(
@@ -907,6 +1130,8 @@ def run_paper_session(
         entries=len(entries),
         decisions=sorted({entry.decision.value for entry in entries}),
         orders=len(record.orders),
+        corporate_actions=len(on_time),
+        late_corporate_actions=len(late),
         redeploy_pending=record.pending is not None,
         cash=str(result.book.cash),
         holdings=len(result.book.holdings),
@@ -1003,11 +1228,13 @@ class L1PaperWorld:
     The calendar is the checked-in NSE holiday calendar, not the dates on disk: today's session has
     no successor on disk, and an order staged on it must still target tomorrow. Bars, marks, the
     L2-adjusted signal closes, the investable universe (M9.3) and the published NIFTY 50 regime
-    index come from ``backtest.run``'s readers. Everything is opened lazily, so a holiday or a red
-    day opens nothing, and closed by :meth:`close`.
+    index come from ``backtest.run``'s readers; corporate actions from the store the job's own
+    settings name. Everything is opened lazily, so a holiday or a red day opens nothing, and closed
+    by :meth:`close`.
     """
 
     data_root: Path | None = None
+    settings: Settings | None = None
     calendar: TradingCalendar | None = None
     universe: UniverseParameters = field(default_factory=UniverseParameters)
     adjusted: bool = True
@@ -1062,7 +1289,9 @@ class L1PaperWorld:
         if self._actions is None:
             from backtest.book_actions import load_store_book_actions
 
-            self._actions = load_store_book_actions(data_root=self.data_root)
+            self._actions = load_store_book_actions(
+                data_root=self.data_root, settings=self.settings
+            )
         return self._actions
 
     def _build_momentum(self, day: date, parameters: MomentumV2Parameters) -> _L1MomentumV2Data:
@@ -1122,48 +1351,68 @@ class _LazyL1MomentumData:
 
 
 def run_paper_session_job(
-    context: JobContext, *, world: PaperWorld | None = None
-) -> PaperSessionResult:
-    """The ``paper_session`` scheduler job: today's session of the ratified paper book.
+    context: JobContext,
+    *,
+    world: PaperWorld | None = None,
+    trading_date: date | None = None,
+) -> PaperSessionResult | None:
+    """The ``paper_session`` scheduler job: the owed session of the ratified paper book.
 
-    What it does: opens one Postgres transaction, runs :func:`run_paper_session` for
-    ``context.clock.today()`` with the ratified spec, the status interlock over the job's own
+    What it does: unless ``Settings.paper_session_enabled`` is off (the default — module
+    docstring), opens one Postgres transaction, runs :func:`run_paper_session` for
+    ``trading_date`` — by default :func:`owed_session` at the context's clock, an explicit date,
+    never the calendar day — with the ratified spec, the status interlock over the job's own
     database, the L1 world, the real append-only journal and ``paper_session``, and commits.
-    What it assumes: the database is migrated through 0012 and the EOD pipeline has run for today.
-    ``world`` is injectable for a test; production passes nothing.
-    What it never does: route to a real broker (there is no broker parameter anywhere on this
-    path), or commit a half-written session — an exception rolls the whole session back and the
-    runner records the run FAILED.
+    What it assumes: the database is migrated through 0012 and the EOD pipeline has run for the
+    owed session. ``world`` is injectable for a test; production passes nothing.
+    What it never does: route to a real broker — there is no broker parameter anywhere on this
+    path and ``Settings.broker_provider`` is never read — or commit a half-written session: an
+    exception rolls the whole session back and the runner records the run FAILED.
     """
-    from analyst.journal import EVIDENCE_DIRNAME, EvidenceStore, Journal
-    from dataplatform.store.db import connection
-
+    settings = context.settings
+    if not settings.paper_session_enabled:
+        _LOG.warning(
+            "paper_session.disabled",
+            run_id=str(context.run_id),
+            reason=(
+                "PAPER_SESSION_ENABLED is off: the regime filter has no same-evening source for "
+                "the session's published NIFTY 50 TRI (ops/runbooks/daily-eod.md)"
+            ),
+        )
+        return None
     spec = ratified_paper_book()
-    trading_date = context.clock.today()
     with ExitStack() as stack:
         if world is None:
-            l1 = L1PaperWorld(data_root=context.settings.data_root)
+            l1 = L1PaperWorld(data_root=settings.data_root, settings=settings)
             stack.callback(l1.close)
             world = l1
-        conn = stack.enter_context(connection(context.settings))
+        owed = (
+            trading_date if trading_date is not None else owed_session(world, context.clock.now())
+        )
+        if owed is None:
+            raise PaperSessionError(
+                f"no trading session in the {_OWED_LOOKBACK_DAYS} days to "
+                f"{context.clock.now().isoformat()}; the holiday calendar is wrong"
+            )
+        conn = stack.enter_context(connection(settings))
         result = run_paper_session(
-            trading_date=trading_date,
+            trading_date=owed,
             spec=spec,
             world=world,
             store=PostgresPaperSessionStore(conn),
             journal=Journal(
                 conn,
                 clock=context.clock,
-                evidence=EvidenceStore(context.settings.data_root / EVIDENCE_DIRNAME),
+                evidence=EvidenceStore(settings.data_root / EVIDENCE_DIRNAME),
             ),
-            gate=StatusGate(datasets=spec.datasets, settings=context.settings, clock=context.clock),
+            gate=StatusApiGate(datasets=spec.datasets, clock=context.clock, settings=settings),
             clock=context.clock,
         )
         conn.commit()
     _LOG.info(
         "paper_session.job_done",
         book=spec.book_id,
-        trading_date=trading_date.isoformat(),
+        trading_date=owed.isoformat(),
         verdict=result.verdict.value,
         reason=result.reason,
         run_id=str(context.run_id),

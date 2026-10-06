@@ -753,7 +753,9 @@ def paper_session(context: JobContext) -> None:
     and records the session in `paper_session` — or, when the data is red, journals
     `SKIPPED_DATA_RED` and places nothing. Idempotent per trading date; a holiday is a no-op.
     What it assumes: the injected clock and settings are the run's (B10), the database is migrated
-    through 0012, and today's EOD pipeline has run — the status interlock checks that it published.
+    through 0012, and the owed session's EOD pipeline has run — the interlock checks it published.
+    Off unless `Settings.paper_session_enabled`: the ratified regime filter has no same-evening
+    source for the session's published NIFTY 50 TRI yet (ops/runbooks/daily-eod.md).
     What it never does: touch a real broker — the session builds a `SimBroker` and nothing else,
     and `execution.kite_broker` is not imported on this path. The import is deferred like the
     others', so loading the registry does not pull in the backtest stack.
@@ -766,13 +768,17 @@ def paper_session(context: JobContext) -> None:
 #: The paper session (M13.1). 20:30 IST Monday to Friday — after the 18:30 EOD pipeline's 45-minute
 #: budget has run out, so the session's prices have published or the interlock says why not. It
 #: reads the lake and Postgres only and fetches nothing, so it holds no host lease. Holidays are
-#: skipped inside the job against the holiday calendar.
+#: skipped inside the job against the holiday calendar. Registered but a no-op until
+#: PAPER_SESSION_ENABLED is set (see `paper_session`).
 PAPER_SESSION = Job(
     name="paper_session",
     cron="30 20 * * mon-fri",
     fn=paper_session,
     timeout=timedelta(minutes=30),
-    description="Daily paper-trading session of the D13-ratified momentum v2 book (M13.1)",
+    description=(
+        "Daily paper-trading session of the D13-ratified momentum v2 book (M13.1); "
+        "a no-op until PAPER_SESSION_ENABLED=true"
+    ),
 )
 
 

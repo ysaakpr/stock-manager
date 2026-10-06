@@ -154,6 +154,7 @@ from backtest.accounting import BookError, PortfolioBook
 from execution.sim_broker import SimBroker
 
 if TYPE_CHECKING:
+    from dataplatform.config import Settings
     from dataplatform.corpactions import MergerTerms
     from dataplatform.ingest.corp_actions import CorporateAction
     from dataplatform.store.db import Connection
@@ -1270,7 +1271,9 @@ def _live_isin(
     return best
 
 
-def load_store_book_actions(*, data_root: Path | None = None) -> BookActionCalendar:
+def load_store_book_actions(
+    *, data_root: Path | None = None, settings: Settings | None = None
+) -> BookActionCalendar:
     """:func:`load_book_actions` over the configured Postgres (``dataplatform.store.db``).
 
     A swap's survivor is checked for a close against the lake's L1 listing windows, and the
@@ -1278,11 +1281,12 @@ def load_store_book_actions(*, data_root: Path | None = None) -> BookActionCalen
     (:func:`_l2_composed_events`). The lake is ``data_root``, or the configured one when it is
     ``None``. A caller with a ``--data-root`` must pass it: the configured default is the
     checkout's own ``data/``, which in a fresh git worktree does not exist, and an empty lake
-    reads as no listing windows at all rather than failing as a missing one.
+    reads as no listing windows at all rather than failing as a missing one. ``settings`` picks the
+    database (the configured one when ``None``) — a scheduler job passes its own context's.
     """
     from dataplatform.store.db import connect
 
-    with connect() as conn:
+    with connect(settings) as conn:
         return load_book_actions(
             conn,
             first_priced=_l1_first_priced(data_root),

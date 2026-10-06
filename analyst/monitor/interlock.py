@@ -26,6 +26,7 @@ from typing import Final, Protocol, runtime_checkable
 
 from analyst.journal import Actor, Decision, Journal, JournalEntry, Sleeve
 from dataplatform.clock import Clock, SystemClock
+from dataplatform.config import Settings
 from dataplatform.status import GreenStatus, is_green
 from execution.broker import OrderRequest
 from execution.session import REAUTH_INSTRUCTION, AuthAlert, AuthAlerter
@@ -86,9 +87,12 @@ class StatusApiGate:
 
     datasets: Sequence[str] = CORE_DATASETS
     clock: Clock | None = None
+    #: The database to read the status of; ``None`` is the configured one. A scheduler job passes
+    #: its own context's settings so it checks the database it is about to write to.
+    settings: Settings | None = None
 
     def __call__(self, trading_date: date) -> GreenStatus:
-        return is_green(trading_date, self.datasets, clock=self.clock)
+        return is_green(trading_date, self.datasets, settings=self.settings, clock=self.clock)
 
 
 # ── the broker-session (auth) interlock ────────────────────────────────────────────────────────

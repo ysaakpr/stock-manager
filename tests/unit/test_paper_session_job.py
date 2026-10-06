@@ -22,13 +22,16 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 
 from analyst.journal.models import Decision, JournalEntry
 from backtest.accounting import PortfolioBook
-from backtest.book_actions import BookActionCalendar
+from backtest.book_actions import BookActionCalendar, CashDividend
 from backtest.paper_session import (
+    LATE_ACTION_EVENT,
+    PAPER_BOOK_ID,
     PAPER_MODE,
     InMemoryPaperSessionStore,
     PaperBookDivergenceError,
@@ -37,13 +40,17 @@ from backtest.paper_session import (
     RecordingJournal,
     RunVerdict,
     SessionOutcome,
+    owed_session,
     run_paper_session,
+    run_paper_session_job,
 )
 from backtest.policies.momentum_v2 import MomentumV2Parameters, MomentumV2Policy
 from backtest.rails import BACKTEST_CASE_ID, RailGate
 from backtest.replay import ReplayEngine
 from backtest.run import _ACCOUNT_STATE, _AccountingBroker, _held_by
 from dataplatform.clock import IST, FrozenClock
+from dataplatform.config import Settings
+from dataplatform.scheduler import JobContext
 from execution.costs import CostModel, load_rate_card
 from execution.sim_broker import SimBroker
 from tests.paper_session_support import (
@@ -57,6 +64,7 @@ from tests.paper_session_support import (
     FixtureWorld,
     calendar_sessions,
     fixture_spec,
+    install_job_seams,
 )
 
 RUN_AT = datetime(2026, 10, 1, 20, 30, tzinfo=IST)
@@ -244,7 +252,30 @@ def test_a_book_decided_a_day_at_a_time_equals_one_replay_over_the_same_days() -
         for entry in replay.journal
     ]
     assert untagged == replayed
-    assert paper[-1].book_bytes() == replay.book.canonical_bytes()
+    # The book rolled forward one process per day ends where the single walk ends: the persisted
+    # broker state equals the replay broker's own, and the per-session ledgers concatenate to its
+    # ledger line for line.
+    final = paper[-1].record
+    assert final is not None and final.book_state is not None
+    assert final.book_state["broker"] == sim.export_state().to_document()
+    session_lines = [
+        line
+        for run in paper
+        if run.record is not None and run.record.book_state is not None
+        for line in run.record.book_state["session_ledger"]
+    ]
+    assert session_lines == [
+        {
+            "seq": str(line.seq),
+            "session": line.session.isoformat(),
+            "isin": line.isin,
+            "description": line.description,
+            "debit": str(line.debit),
+            "credit": str(line.credit),
+            "balance": str(line.balance),
+        }
+        for line in sim.ledger()
+    ]
     # The fixture really exercised the carried state: October's rebalance sold, the next session
     # redeployed the proceeds, and that redeploy happened in a different process from the sells.
     october = {run.trading_date: run for run in paper}
@@ -401,24 +432,144 @@ def test_a_holiday_is_not_a_session_and_writes_nothing() -> None:
     assert desk.store.get("paper_fixture_book", HOLIDAY) is None
 
 
-# ── the rebuilt book must reproduce the recorded one ─────────────────────────────────────────────
+# ── the restored book must reproduce its recorded state ──────────────────────────────────────────
 
 
-def test_a_book_that_no_longer_rebuilds_to_its_recorded_digest_fails_loud() -> None:
+def test_a_persisted_book_that_no_longer_matches_its_digest_fails_loud() -> None:
     desk = _Desk.fresh()
     desk.run(OCT_FIRST)
     desk.run(OCT_SECOND)
-    recorded = desk.store.get("paper_fixture_book", OCT_SECOND)
-    assert recorded is not None
     tampered = InMemoryPaperSessionStore()
     for record in desk.store.history("paper_fixture_book", before=OCT_THIRD):
-        if record.trading_date == OCT_SECOND:
-            record = replace(record, book_digest="0" * 64)
+        if record.trading_date == OCT_SECOND and record.book_state is not None:
+            broker = {**record.book_state["broker"], "cash": "99999999"}
+            record = replace(record, book_state={**record.book_state, "broker": broker})
         tampered.record(record, recorded_at=RUN_AT)
     desk.store = tampered
 
     with pytest.raises(PaperBookDivergenceError, match=OCT_SECOND.isoformat()):
         desk.run(OCT_THIRD)
+
+
+def test_a_run_restores_the_last_snapshot_and_reads_no_older_session() -> None:
+    """Rolls forward from the latest snapshot: the restore never walks the book's history."""
+    desk = _Desk.fresh()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    reads: list[date] = []
+    world = desk.world
+    original = world.sessions
+
+    def counting(start: date, end: date) -> list[date]:
+        reads.append(start)
+        return list(original(start, end))
+
+    world.sessions = counting  # type: ignore[method-assign]
+    assert desk.run(OCT_FOURTH).verdict is RunVerdict.DECIDED
+    assert reads == [], "a run must not walk the calendar from inception"
+
+
+# ── corporate actions: booked on the first session they are known ───────────────────────────────
+
+
+def _held_isin(desk: _Desk) -> str:
+    record = desk.store.get("paper_fixture_book", OCT_THIRD)
+    assert record is not None and record.book_state is not None
+    return str(record.book_state["broker"]["holdings"][0]["isin"])
+
+
+def test_a_dividend_known_on_time_is_credited_on_its_ex_date_with_no_late_entry() -> None:
+    desk = _Desk.fresh()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    isin = _held_isin(desk)
+    desk.world.actions.append(CashDividend(isin=isin, ex_date=OCT_FOURTH, per_share=Decimal("5")))
+    fourth = desk.run(OCT_FOURTH)
+
+    assert fourth.verdict is RunVerdict.DECIDED
+    assert not [e for e in fourth.entries if e.payload.get("event") == LATE_ACTION_EVENT]
+    assert fourth.record is not None and fourth.record.book_state is not None
+    assert len(fourth.record.actions) == 1
+    # Credited the ordinary way, before the session's fills, on the ex-date.
+    (credit,) = [
+        line
+        for line in fourth.record.book_state["session_ledger"]
+        if line["isin"] == isin and line["description"].startswith("DIVIDEND")
+    ]
+    assert Decimal(credit["credit"]) > 0
+
+
+def test_a_dividend_learnt_after_its_ex_date_was_decided_is_booked_late_and_the_book_goes_on() -> (
+    None
+):
+    """B1: the corporate-action store learns a dividend days after its ex-date. Before the fix the
+    next run re-walked history with the new action, failed its recorded digest and raised
+    ``PaperBookDivergenceError`` on every run from then on; now it is booked on the session it
+    became known, journaled as a late action, and the book keeps deciding."""
+    desk = _Desk.fresh()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    isin = _held_isin(desk)
+    third = desk.store.get("paper_fixture_book", OCT_THIRD)
+    assert third is not None and third.book_state is not None
+    cash_before = Decimal(third.book_state["broker"]["cash"])
+    # Entitlement is the book entering the ex-date: what Monday's decided session left it holding.
+    monday = desk.store.get("paper_fixture_book", OCT_SECOND)
+    assert monday is not None and monday.book_state is not None
+    held = sum(
+        int(lot["quantity"])
+        for key in ("holdings", "pending")
+        for lot in monday.book_state["broker"][key]
+        if lot["isin"] == isin
+    )
+    assert held > 0
+    # Ex-date Tuesday 6 Oct, already decided; the store only learns of it on Wednesday.
+    desk.world.actions.append(CashDividend(isin=isin, ex_date=OCT_THIRD, per_share=Decimal("7")))
+    fourth = desk.run(OCT_FOURTH)
+
+    assert fourth.verdict is RunVerdict.DECIDED
+    late = [e for e in fourth.entries if e.payload.get("event") == LATE_ACTION_EVENT]
+    assert len(late) == 1
+    (entry,) = late
+    assert entry.decision is Decision.HOLD and entry.isin == isin
+    assert entry.payload["entitled"] == str(held)
+    assert Decimal(entry.payload["amount"]) == Decimal("7") * held
+    assert fourth.record is not None and fourth.record.book_state is not None
+    assert Decimal(fourth.record.book_state["broker"]["cash"]) == cash_before + Decimal("7") * held
+    # Booked once: the next session neither re-books it nor fails.
+    fifth = desk.run(date(2026, 10, 8))
+    assert fifth.verdict is RunVerdict.DECIDED
+    assert not [e for e in fifth.entries if e.payload.get("event") == LATE_ACTION_EVENT]
+
+
+def test_a_late_action_on_a_name_the_book_never_held_is_recorded_silently() -> None:
+    desk = _Desk.fresh()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    desk.world.actions.append(
+        CashDividend(isin="INE999Z01019", ex_date=OCT_THIRD, per_share=Decimal("1"))
+    )
+    fourth = desk.run(OCT_FOURTH)
+    assert fourth.verdict is RunVerdict.DECIDED
+    assert not [e for e in fourth.entries if e.payload.get("event") == LATE_ACTION_EVENT]
+    assert fourth.record is not None and len(fourth.record.actions) == 1
+
+
+# ── the owed session: an explicit date ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("now", "owed"),
+    [
+        (datetime(2026, 10, 5, 20, 30, tzinfo=IST), OCT_SECOND),  # the evening run: today
+        (datetime(2026, 10, 6, 0, 30, tzinfo=IST), OCT_SECOND),  # a retry after midnight
+        (datetime(2026, 10, 6, 18, 29, tzinfo=IST), OCT_SECOND),  # before today's EOD is due
+        (datetime(2026, 10, 3, 9, 0, tzinfo=IST), OCT_FIRST),  # Saturday, after the holiday
+        (datetime(2026, 10, 2, 20, 30, tzinfo=IST), OCT_FIRST),  # the holiday's own evening
+    ],
+)
+def test_the_owed_session_is_the_latest_whose_eod_is_due(now: datetime, owed: date) -> None:
+    assert owed_session(FixtureWorld(), now) == owed
 
 
 def test_a_decided_session_is_never_rewritten() -> None:
@@ -453,6 +604,69 @@ def test_a_record_round_trips_through_its_documents() -> None:
         journal_digest=record.journal_digest,
         orders=record.orders_document(),
         pending=record.pending_document(),
+        book_state=record.book_state,
         book_digest=record.book_digest,
+        actions=record.actions,
     )
     assert restored == record
+
+
+# ── the scheduler entry point: disabled by default, explicit date ────────────────────────────────
+
+
+def _context(now: datetime, *, enabled: bool) -> JobContext:
+    return JobContext(
+        job_name="paper_session",
+        run_id=uuid4(),
+        clock=FrozenClock(now),
+        settings=Settings(paper_session_enabled=enabled),
+    )
+
+
+def test_the_job_is_disabled_by_default_and_touches_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B2: no same-evening TRI for the regime filter yet, so the flag defaults off."""
+    world, store, journal = FixtureWorld(), InMemoryPaperSessionStore(), RecordingJournal()
+    install_job_seams(monkeypatch.setattr, world=world, store=store, journal=journal)
+
+    assert Settings().paper_session_enabled is False
+    result = run_paper_session_job(
+        _context(datetime(2026, 10, 1, 20, 30, tzinfo=IST), enabled=False)
+    )
+
+    assert result is None
+    assert journal.entries == [] and world.reads == []
+    assert store.get(PAPER_BOOK_ID, OCT_FIRST) is None
+
+
+def test_a_retry_after_midnight_decides_the_session_that_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N1: the 20:30 run failed; the 00:30 retry decides that session, not the new day."""
+    world, store, journal = FixtureWorld(), InMemoryPaperSessionStore(), RecordingJournal()
+    install_job_seams(monkeypatch.setattr, world=world, store=store, journal=journal)
+
+    retry = run_paper_session_job(_context(datetime(2026, 10, 6, 0, 30, tzinfo=IST), enabled=True))
+
+    assert retry is not None
+    assert retry.trading_date == OCT_SECOND
+    assert retry.verdict is RunVerdict.DECIDED
+    assert {entry.trading_date for entry in journal.entries} == {OCT_SECOND}
+    # The evening run of the new day then decides that day, and a rerun is a no-op.
+    evening = run_paper_session_job(
+        _context(datetime(2026, 10, 6, 20, 30, tzinfo=IST), enabled=True)
+    )
+    assert evening is not None and evening.trading_date == OCT_THIRD
+    again = run_paper_session_job(_context(datetime(2026, 10, 6, 21, 0, tzinfo=IST), enabled=True))
+    assert again is not None and again.verdict is RunVerdict.ALREADY_DECIDED
+
+
+def test_the_job_decides_an_explicit_date_when_given_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    world, store, journal = FixtureWorld(), InMemoryPaperSessionStore(), RecordingJournal()
+    install_job_seams(monkeypatch.setattr, world=world, store=store, journal=journal)
+    result = run_paper_session_job(
+        _context(datetime(2026, 10, 9, 20, 30, tzinfo=IST), enabled=True),
+        trading_date=OCT_FIRST,
+    )
+    assert result is not None and result.trading_date == OCT_FIRST

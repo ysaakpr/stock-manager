@@ -6,7 +6,8 @@ deterministic bars, a momentum signal per session whose ranking turns over at th
 rebalance, and a risk-on regime reading. Everything is a pure function of the date and the ISIN,
 so two worlds built the same way are indistinguishable and a session over one is byte-reproducible.
 
-Knobs a test turns: ``unpriced`` (sessions whose bars are missing — prices not in L1),
+Knobs a test turns: ``actions`` (the corporate actions the store knows at the time of a run),
+``unpriced`` (sessions whose bars are missing — prices not in L1),
 ``no_regime`` (sessions the published index has no level for), ``risk_off`` (sessions the regime
 filter reads as below its moving average). ``reads`` records every signal/regime read.
 
@@ -17,13 +18,14 @@ map over the fixture names, so A8 really clears every order.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
 
 from analyst.cases import RiskRails
-from backtest.book_actions import BookActionCalendar, BookActionSource
+from backtest.book_actions import BookAction, BookActionCalendar, BookActionSource
 from backtest.paper_session import PaperBookSpec
 from backtest.policies.momentum_v2 import (
     PAPER_RATIFIED_2026_09_06,
@@ -93,6 +95,8 @@ class FixtureWorld:
     no_regime: set[date] = field(default_factory=set)
     risk_off: set[date] = field(default_factory=set)
     rebalance_on: set[date] | None = None
+    #: The corporate actions the store knows *now* — a test appends one to model it arriving late.
+    actions: list[BookAction] = field(default_factory=list)
     reads: list[tuple[str, date]] = field(default_factory=list)
 
     def is_session(self, day: date) -> bool:
@@ -121,7 +125,10 @@ class FixtureWorld:
         return _FixtureMomentum(self)
 
     def corporate_actions(self) -> BookActionSource | None:
-        return BookActionCalendar(())
+        return BookActionCalendar(self.actions)
+
+    def close(self) -> None:
+        """Nothing to release — present so the world can stand in for ``L1PaperWorld``."""
 
 
 class _FixtureMarket:
@@ -223,3 +230,59 @@ def fixture_spec(parameters: MomentumV2Parameters = PAPER_RATIFIED_2026_09_06) -
         opening_cash=FIXTURE_CASH,
         rail_policy=fixture_rail_policy(),
     )
+
+
+# ── the job's I/O seams, replaced for a test that drives the real scheduler entry point ─────────
+
+
+class _NoConnection:
+    """Stands in for the Postgres connection the job opens; only ``commit`` may be called."""
+
+    commits = 0
+
+    def commit(self) -> None:
+        type(self).commits += 1
+
+    def execute(self, *_: object, **__: object) -> object:
+        raise AssertionError("the job reached the database past its seams")
+
+
+@contextmanager
+def _no_connection(_settings: object = None) -> Iterator[_NoConnection]:
+    yield _NoConnection()
+
+
+@dataclass(frozen=True, slots=True)
+class _GreenStatus:
+    green: bool = True
+    reason: str = ""
+
+    def __bool__(self) -> bool:
+        return self.green
+
+
+def install_job_seams(
+    setattr_: Callable[[object, str, object], None],
+    *,
+    world: FixtureWorld,
+    store: object,
+    journal: object,
+    green: bool = True,
+) -> None:
+    """Point ``run_paper_session_job``'s connection, ledger, journal, gate and world at fakes.
+
+    ``setattr_`` is ``monkeypatch.setattr`` in-process, or plain ``setattr`` in a subprocess probe.
+    Everything else on the job's path — the spec, the owed-session rule, the session itself, the
+    paper broker — is the production code.
+    """
+    import backtest.paper_session as module
+
+    setattr_(module, "connection", _no_connection)
+    setattr_(module, "PostgresPaperSessionStore", lambda _conn: store)
+    setattr_(module, "Journal", lambda _conn, **_kwargs: journal)
+    setattr_(
+        module,
+        "StatusApiGate",
+        lambda **_kwargs: lambda _day: _GreenStatus(green, "" if green else "nse_bhavcopy red"),
+    )
+    setattr_(module, "L1PaperWorld", lambda **_kwargs: world)

@@ -11,6 +11,7 @@ reading ``sync_state``, the real append-only ``decision_journal`` and the ``pape
 * once ``nse_bhavcopy`` is published for the date the same rerun decides it, and a further rerun
   is a no-op — the journal row count does not move;
 * the next session rebuilds the book from the ledger's JSON (orders, digest) and decides again;
+* left disabled (the default), the job writes nothing at all;
 * the table refuses a red row that claims orders.
 
 Needs the docker postgres (`make up`); skips loudly if it is unreachable. No network.
@@ -74,7 +75,7 @@ def scratch(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Settings]:
         conn.close()
     settings = _settings_for(SCRATCH_DB, tmp_path_factory.mktemp("paper_lake"))
     migrate(settings, clock=FrozenClock(MIGRATED_AT))
-    yield settings
+    yield settings.model_copy(update={"paper_session_enabled": True})
     conn = connect(admin, autocommit=True)
     try:
         conn.execute(f'DROP DATABASE IF EXISTS "{SCRATCH_DB}" WITH (FORCE)')
@@ -82,7 +83,7 @@ def scratch(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Settings]:
         conn.close()
 
 
-def _run(settings: Settings, day: date, world: FixtureWorld) -> PaperSessionResult:
+def _job(settings: Settings, day: date, world: FixtureWorld) -> PaperSessionResult | None:
     """One scheduler run of the job at 20:30 IST on ``day``."""
     context = JobContext(
         job_name="paper_session",
@@ -91,6 +92,12 @@ def _run(settings: Settings, day: date, world: FixtureWorld) -> PaperSessionResu
         settings=settings,
     )
     return run_paper_session_job(context, world=world)
+
+
+def _run(settings: Settings, day: date, world: FixtureWorld) -> PaperSessionResult:
+    result = _job(settings, day, world)
+    assert result is not None, "the scratch settings enable the job"
+    return result
 
 
 def _publish(settings: Settings, day: date) -> None:
@@ -143,6 +150,7 @@ def test_the_job_is_red_until_published_then_decides_once(scratch: Settings) -> 
         stored = PostgresPaperSessionStore(conn).get(PAPER_BOOK_ID, OCT_FIRST)
     assert stored is not None and stored == decided.record
     assert stored.outcome is SessionOutcome.COMPLETED and stored.orders
+    assert stored.book_state is not None and stored.book_digest is not None
 
 
 def test_the_next_session_rebuilds_the_book_from_the_ledger(scratch: Settings) -> None:
@@ -153,6 +161,16 @@ def test_the_next_session_rebuilds_the_book_from_the_ledger(scratch: Settings) -
     assert second.verdict is RunVerdict.DECIDED
     assert second.book is not None and second.book.positions, "Thursday's orders filled Monday"
     assert [decision for decision, _ in _journal_rows(scratch, OCT_SECOND)] == ["HEARTBEAT"]
+
+
+def test_the_job_left_disabled_writes_nothing(scratch: Settings) -> None:
+    disabled = scratch.model_copy(update={"paper_session_enabled": False})
+    assert _job(disabled, date(2026, 10, 6), FixtureWorld()) is None
+    with connection(scratch) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM paper_session WHERE trading_date = '2026-10-06'"
+        ).fetchone()
+    assert row is not None and row[0] == 0
 
 
 def test_the_table_refuses_a_red_row_that_claims_orders(scratch: Settings) -> None:

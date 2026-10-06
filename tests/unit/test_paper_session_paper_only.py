@@ -27,8 +27,8 @@ import pytest
 from backtest import paper_session
 from backtest.paper_session import (
     PaperModeViolationError,
-    _open_book,
     _PaperBroker,
+    _restore_book,
     require_paper_broker,
     run_paper_session,
     run_paper_session_job,
@@ -53,31 +53,56 @@ def test_the_paper_session_module_never_imports_the_real_broker() -> None:
     assert not [name for name in imported if "kite" in name.lower()], imported
 
 
-def test_running_the_scheduler_job_path_never_loads_the_real_broker_module() -> None:
-    """A fresh interpreter: registry → job → implementation, and kite_broker never loads."""
+def test_running_the_scheduler_job_end_to_end_never_loads_the_real_broker_module() -> None:
+    """A fresh interpreter runs the *registered* job — enabled, with the broker provider set to
+    kite — through its production path, only its I/O stubbed (no lake, no database), decides a
+    session, and has never loaded a kite module."""
     probe = (
         "import sys\n"
-        "from dataplatform.scheduler import default_registry\n"
-        "job = default_registry().get('paper_session')\n"
-        "import backtest.paper_session as p\n"
-        "assert job.fn.__name__ == 'paper_session'\n"
-        "loaded = sorted(m for m in sys.modules if 'kite' in m)\n"
-        "print(','.join(loaded))\n"
+        "from datetime import datetime\n"
+        "from uuid import uuid4\n"
+        "from backtest.paper_session import InMemoryPaperSessionStore, RecordingJournal\n"
+        "from dataplatform.clock import IST, FrozenClock\n"
+        "from dataplatform.config import Settings\n"
+        "from dataplatform.scheduler import JobContext, default_registry\n"
+        "from tests.paper_session_support import FixtureWorld, install_job_seams\n"
+        "store, journal = InMemoryPaperSessionStore(), RecordingJournal()\n"
+        "install_job_seams(setattr, world=FixtureWorld(), store=store, journal=journal)\n"
+        "settings = Settings(paper_session_enabled=True, broker_provider='kite')\n"
+        "clock = FrozenClock(datetime(2026, 10, 1, 20, 30, tzinfo=IST))\n"
+        "context = JobContext(job_name='paper_session', run_id=uuid4(), clock=clock,"
+        " settings=settings)\n"
+        "default_registry().get('paper_session').fn(context)\n"
+        "decisions = sorted({e.decision.value for e in journal.entries})\n"
+        "assert 'BUY' in decisions, decisions\n"
+        "loaded = sorted(m for m in sys.modules if 'kite' in m.lower())\n"
+        "print('decisions', decisions, 'kite', loaded)\n"
         "sys.exit(1 if loaded else 0)\n"
     )
     done = subprocess.run(
         [sys.executable, "-c", probe],
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=300,
         check=False,
         cwd=Path(__file__).resolve().parents[2],
     )
-    assert done.returncode == 0, f"kite modules loaded: {done.stdout} {done.stderr[-2000:]}"
+    assert done.returncode == 0, f"{done.stdout[-1000:]} {done.stderr[-3000:]}"
+    assert "'BUY'" in done.stdout
+
+
+def test_the_broker_provider_setting_is_never_read_on_the_job_path() -> None:
+    """``BROKER_PROVIDER=kite`` is how real money would be switched on; this module never asks."""
+    reads = [
+        node
+        for node in ast.walk(ast.parse(_MODULE.read_text()))
+        if isinstance(node, ast.Attribute) and node.attr == "broker_provider"
+    ]
+    assert reads == []
 
 
 @pytest.mark.parametrize(
-    "fn", [run_paper_session, run_paper_session_job, _open_book], ids=lambda f: f.__name__
+    "fn", [run_paper_session, run_paper_session_job, _restore_book], ids=lambda f: f.__name__
 )
 def test_no_function_on_the_job_path_accepts_a_broker(fn: object) -> None:
     signature = inspect.signature(fn)  # type: ignore[arg-type]
