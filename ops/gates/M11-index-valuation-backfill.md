@@ -1,9 +1,16 @@
 # M11.2 — Index valuation backfill (close-all snapshot → `macro_series`)
 
 **Date:** 2026-10-06 (IST) · **Authority:** owner go 2026-10-06 (chat) for the B1 campaign ·
-**Status: PARKED at 2017-07-03** (last published session), by request, before the run reached
-partitions another branch has written. **Resumes once PR #58 is on main and this branch includes
-main** (see §5).
+**Status: COMPLETE.** The window 2012-10-01 → 2026-10-05 is fully worked, with 0 sessions PENDING.
+
+| Outcome | Sessions |
+|---|---|
+| PUBLISHED | 3,453 |
+| NOT_PUBLISHED (archive 404) | 12 |
+| REFUSED (misdated files) | 3 |
+| FAILED | 0 |
+
+The last run finished 2026-10-06 at 20:42 IST (§5). All three acceptance criteria are met (§1).
 
 ## 1. What was built
 
@@ -46,61 +53,104 @@ and the pre-switch `GSEC10 NSE Index` / `GSECBM NSE Index` / `NSE GSECBM Clean P
 in this source**; deriving one from a clean-price index would need the benchmark bond's coupon and
 maturity, which this file does not carry. Not fabricated.
 
-## 3. Coverage at the park (whole window 2012-10-01 .. 2026-10-05, 3,468 expected-data dates)
+## 3. Final coverage (whole window 2012-10-01 .. 2026-10-05, 3,468 expected-data dates)
 
 | Outcome | Sessions |
 |---|---|
-| PUBLISHED | 1,164 (2012-10-01 → 2017-07-03, plus the 2026-10-01 / 10-05 sample) |
-| NOT_PUBLISHED (404 at the archive) | 12 |
-| REFUSED / FAILED | 0 |
-| PENDING (after the park) | 2,292 |
+| PUBLISHED | **3,453** (2012-10-01 → 2026-10-05) |
+| NOT_PUBLISHED (404 at the archive, closed non-retryable) | 12 |
+| REFUSED (file dated to another session) | 3 |
+| FAILED (retryable) / PENDING | 0 / 0 |
 
-Facts in published sessions: **196,930**. One subject withheld (2013-02-08 `CNX_ALPHA_INDEX`).
+Facts in published sessions: **994,224**. One subject withheld (2013-02-08 `CNX_ALPHA_INDEX`,
+published twice with different values).
 
 404 sessions: 2013-10-09, 2014-03-19, 2014-12-15, 2015-02-02, 2015-03-12, 2015-03-13, 2015-05-19,
 2015-07-08, 2015-09-04, 2015-10-16, 2015-12-01, 2016-06-20.
 
-**Requests:** 1,176 to `nsearchives.nseindia.com` (1,164 stored + 12 × 404), at the register's
-~2.5 s spacing, no 403, no 5xx. The remaining 2,292 sessions are ~2,292 requests.
+**The 3 refused sessions: the archive misdated them.** `ind_close_all_06042023.csv`, `…10042023`
+and `…11042023` print `Index Date` as `04-06-2023`, `04-10-2023` and `04-11-2023`, which is
+month-first. Their neighbours `05042023` and `12042023` print `05-04-2023` and `12-04-2023`
+(day-first). Read in the file's own format, each date names a different session from the one
+requested, so the runner refuses it: a misdated file would land its facts in the wrong partition.
 
-### Unknown index names (provisional until the window completes)
+- The bytes are in L0.
+- In `sync_state` the three rows are FAILED with `retryable = true`. Each re-run re-parses them from
+  L0 with no request and refuses them again.
+- Admitting them would take a parser rule: accept a date written month-first only when the filename
+  date, read day-first, matches it exactly. That is a code change and out of scope for this run;
+  it is logged here as a follow-up.
 
-189 published names are not in the alias table. Split by whether they are still published:
+**Requests over the whole campaign:** 3,468 to `nsearchives.nseindia.com` (1,176 at the park, then
+1,999 and 293). Every request used the register's ~2.5 s spacing. There was no 403 and no 5xx from
+the archive.
 
-- **Stopped appearing — 44.** 26 vanish at the 2015-11-06/10 rename event: exactly the 26 M11.1
-  left unmapped on purpose. 9 more last-seen 2017-07-03 are **artefacts of the park** and will move
-  once the run completes. The rest are genuine earlier disappearances worth researching, e.g.
-  `S&P CNX 500` last seen 2013-02-07 (89 sessions) — a likely `S&P CNX` → `CNX` rename two years
-  before the big event, which the table does not yet carry.
-- **Still published, never renamed on the evidence so far — 145** (current names such as
-  `India VIX`, the G-Sec indices, `Nifty Alpha 50`). Not errors; listed for completeness.
+### Unknown index names (final)
 
-The final list is produced by the completing run's report (`--report`), and widening
-`index_aliases.yaml` from it is a research task with evidence per row, not part of this one.
+192 published names are not in the alias table:
+
+- **Stopped appearing: 47.**
+  - 26 were last seen on 2015-11-06, the CNX → Nifty rename event. These are the names M11.1 left
+    unmapped on purpose.
+  - The 9 names "last seen 2017-07-03" at the park were artefacts of the park and are gone (0 now).
+  - The rest are genuine earlier or later disappearances worth researching. For example, `S&P CNX
+    500` was last seen 2013-02-07, and groups of names stop on 2018-03-28 and 2024-04-26.
+- **Still published, never renamed on the evidence: 145.**
+
+The full table, with first seen, last seen and sessions per name, is in
+`~/campaign/macro-backfill-2026-10-06-final.md`. That report is gitignored and lives on the server.
+Widening `index_aliases.yaml` from it is a research task with evidence per row, M11.3's input. It is
+not part of this task.
 
 ## 4. State changes worth knowing
 
 - The first build wrote parse refusals as `FAILED retryable=false`. The 59 slash-era rows were
   re-opened with one scoped `UPDATE sync_state SET retryable = true` (this source, FAILED, error
   text "is not DD-MM-YYYY"); a refusal is now written retryable by the runner itself.
-- Nothing written to `prices_raw` or L2. `macro_series` partitions written: 2012-10-01 → 2017-07-03
-  and 2026-10-01, 2026-10-05 only.
+- Nothing was written to `prices_raw` or L2. `macro_series` now has a partition for every
+  PUBLISHED session from 2012-10-01 to 2026-10-05. The 2018-07-10 → 2026-09-29 partitions already
+  held FBIL (`INR`) rows from PR #58, and `write_release` merged into them after the resume picked
+  up main.
 
-## 5. Why parked, and the resume
+## 5. Runs: park, resume, completion (all IST)
 
-Another branch (PR #58, open, owner to merge) landed FBIL rows (unit `INR`) in `macro_series`
-partitions 2018-07-10 .. 2026-09-29 and World Bank rows (`USD`) in 2026-07-13. This branch's `Unit`
-enum lacks those members, so `write_release`'s read-back of such a partition would raise. The run
-was stopped (SIGINT, graceful) at 14:24 IST, last published session 2017-07-03, before reaching
-them. Those partitions were not touched.
+| Run | Window | Result | Log / report |
+|---|---|---|---|
+| first run | 2026-10-06 → 14:24 (SIGINT park) | 1,164 published | `~/campaign/macro-backfill-2026-10-06.{log,md,csv}`, park survey `…-parked.{md,csv}` |
+| resume (after PR #58 merged) | 16:26 → 17:50 (`--stop-before 17:50`) | 1,996 published, 3 refused, 1,999 requests, 642,272 facts | `~/campaign/macro-backfill-2026-10-06-resume.{log,md,csv}` |
+| **final** | **20:30:09 → 20:42:58** | **293 published, 3 refused, 293 requests (3 L0 reuses), 155,022 facts, 0 × 403, 0 failed, not stopped early** | `~/campaign/macro-backfill-2026-10-06-final.{log,md,csv}` |
 
-Resume, after PR #58 is merged and this branch includes main, outside 18:00–20:30 IST:
+**Why the final run started at 20:30 IST.** The 18:00–20:30 IST quiet window comes from the
+scheduler's evening jobs (`dataplatform/scheduler/registry.py`), and two NSE host leases are
+involved:
+
+- **`www.nseindia.com`:** `shareholding_poll` at 18:05.
+- **The archive host, `nsearchives.nseindia.com`:**
+  - `eod_pipeline` at 18:30 (45-minute budget);
+  - `daily_snapshot` at 19:15 (30 minutes);
+  - `nse_daily_capture` at 20:00 (30 minutes).
+
+  The last two capture latest-only endpoints. A campaign holding the archive lease then would cost
+  that night's history, which no later run can recover.
+
+The final run began only after the 20:00 `nse_daily_capture` had finished (SUCCEEDED, 20:00:08), and
+with no lease held and no other driver running. It ran with `--stop-before 22:50` so it could not
+hold the archive lease into the 23:00 same-night retry of `nse_daily_capture`. It finished at 20:42.
+
+Command (from the main checkout at `22b616a`):
 
 ```bash
 DATA_ROOT=/home/ubuntu/stock-manager/data nohup uv run python -m dataplatform.ingest.macro.backfill \
-  --from 2012-10-01 --to <latest session> --stop-before 17:50 \
-  --report ~/campaign/macro-backfill-<date>.md > ~/campaign/macro-backfill-<date>.log 2>&1 &
+  --from 2012-10-01 --to 2026-10-05 --stop-before 22:50 \
+  --report ~/campaign/macro-backfill-2026-10-06-final.md > ~/campaign/macro-backfill-2026-10-06-final.log 2>&1 &
 ```
+
+`--to` stops at 2026-10-05, the last session whose file was certainly published. A file for today
+that is not yet published answers 404, and a 404 closes the session non-retryably.
+
+**Going forward.** No scheduler job captures `ind_close_all` daily, so sessions after 2026-10-05
+accrue as owed. Re-run the same command with a later `--to`, at least a day after the session.
+Published sessions cost no request.
 
 `write_release` is last-write-wins per partition: never run it beside another `macro_series`
 writer over the same dates.
