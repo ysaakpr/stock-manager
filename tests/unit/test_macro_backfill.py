@@ -434,3 +434,12 @@ def test_main_unknown_names_and_rederive_make_no_request(
     assert "4 sessions read from L0 (0 requests); 0 published names" in capsys.readouterr().out
     assert mb.main([*span, "--rederive"]) == 0
     assert "4 sessions rewritten" in capsys.readouterr().out
+
+
+def test_offline_modes_refuse_a_deadline_rather_than_ignore_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mb, "rederive", lambda *_a, **_k: pytest.fail("ran despite refusal"))
+    span = ["--from", "2012-10-01", "--to", "2026-09-01", "--stop-before", "23:59"]
+    assert mb.main([*span, "--rederive"]) == 2
+    assert mb.main([*span, "--unknown-names"]) == 2

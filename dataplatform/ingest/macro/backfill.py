@@ -848,6 +848,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--aliases", type=Path, default=None, help="alias table for --unknown-names/--rederive"
     )
     args = ap.parse_args(argv)
+    if (args.unknown_names or args.rederive) and args.stop_before is not None:
+        # An offline pass holds no lease and makes no request, so there is no evening window to
+        # step out of; silently ignoring a deadline would let an operator believe one applied.
+        print(
+            "--stop-before applies only to the fetching run; --unknown-names and --rederive "
+            "make no request and run to completion (a re-derive is idempotent: re-run it if "
+            "interrupted)",
+            file=sys.stderr,
+        )
+        return 2
 
     settings = get_settings()
     clock: Clock = SystemClock()

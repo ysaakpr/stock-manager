@@ -249,8 +249,11 @@ under `tests/fixtures/nifty_index_close/renames/`. A parametrized test pins each
 **Retired, with their own series and a `last_seen`:**
 
 - `S&P ESG India`: last seen 2013-10-03, and no name was first published the next session.
-- `Nifty Full Midcap 100` and `Nifty Full Smallcap 100`: the full-cap variants. They stopped
-  2018-03-28 and no successor fits.
+- `Nifty Full Midcap 100` and `Nifty Full Smallcap 100`: the full-cap variants launched beside the
+  free-float ones on 2016-04-01. Both were last published 2018-03-28. No name first published on
+  2018-04-02 continues their level: `NIFTY Midcap 100` and `NIFTY Smallcap 100` start at 19097.4
+  and 7929.2, which continue the *Free Float* variants (18757 and 7791.95), not the Full ones
+  (5987.56 and 4000.01). So they are recorded as discontinued, not renamed.
 - `Nifty BHARAT Bond Index - April 2025`: a target-maturity index that matured.
 
 ## Findings worth keeping
@@ -264,15 +267,31 @@ under `tests/fixtures/nifty_index_close/renames/`. A parametrized test pins each
 2. **At a financial-year start, multiples rebase for every index.** Nifty 50's P/B went from 3.10 to
    3.26 on 2016-04-01 on a −0.3% day. On the FY switches, the evidence is level continuity against
    peers plus uniqueness, not multiples, and each of those rows says so.
-3. **Some M11.1 evidence figures were wrong.** For example, the M11.1 rows put `CNX Pharma` at
+3. **⚠ The midcap/smallcap 100 P/E and P/B series break at the FY2016 and FY2018 switches.** The
+   *closing level* is one index across them; the *multiples* are not continuous, and valuation
+   consumers must not read them as one series across these dates:
+
+   | Switch | Series | P/E | P/B | Yield |
+   |---|---|---|---|---|
+   | 2016-03-31 → 04-01 | `NIFTY_SMALLCAP_100` | 43.18 → 204.75 | 0.96 → 0.83 | 1.56 → 1.48 |
+   | 2016-03-31 → 04-01 | `NIFTY_MIDCAP_100` | 23.79 → 27.51 | 2.16 → 2.14 | 1.52 → 1.62 |
+   | 2018-03-28 → 04-02 | `NIFTY_SMALLCAP_100` | 343.52 → 70.66 | 1.63 → 1.98 | 0.69 → 0.55 |
+   | 2018-03-28 → 04-02 | `NIFTY_MIDCAP_100` | 46.87 → 51.67 | 2.66 → 3.12 | 1.09 → 0.65 |
+
+   These moves are far beyond Nifty 50's own FY rebase. They are consistent with a change in how the
+   variant's earnings and book are aggregated (loss-makers, a full-cap vs free-float base), not with
+   one day's prices. A P/E-based regime or percentile over these series needs a break at both dates,
+   or should start from 2018-04-02. The table maps identity, and identity is right; it does not, and
+   cannot, make a methodology change continuous.
+4. **Some M11.1 evidence figures were wrong.** For example, the M11.1 rows put `CNX Pharma` at
    "4.98%" and `CNX Realty` at "4.72%" across the 2015 switch. The measured values are −1.94% and
    −2.14%. The mappings stand, and the figures are replaced with measured ones.
-4. **Case variants already shared a series.** The lookup key and `series_id` are case-insensitive,
+5. **Case variants already shared a series.** The lookup key and `series_id` are case-insensitive,
    so before this task `Nifty TR 1X Inverse` (2014) and `NIFTY TR 1X Inverse` were already merged
    without evidence. They are now evidenced (row 2 of the table). `Nifty Midcap 100` and
    `NIFTY Midcap 100` (2015-16 and 2018-) are likewise one series, and the free-float rows evidence
    it.
-5. **One open caveat, outside this table.** `Nifty100 ESG Sector Leaders` was published neither
+6. **One open caveat, outside this table.** `Nifty100 ESG Sector Leaders` was published neither
    2020-06-23 nor 06-30 and resumes 2020-07-01 at 1814.39. The "- Old" label suggests a methodology
    change around then. The row maps only the one-session relabel, which its evidence supports. The
    level from 07-01 under the unchanged name was already one series before this task.
@@ -298,6 +317,19 @@ DATA_ROOT=/home/ubuntu/stock-manager/data nohup uv run python -m dataplatform.in
 Expected result: `3453 sessions rewritten, 994224 facts, 12 not in L0, 3 refused (0 requests)`.
 The 3 refusals are the misdated April 2023 files, and the 12 are the archive's 404 sessions. Then
 re-run the `--unknown-names` command above: it should print 0.
+
+Operating notes:
+
+- **Idempotent; re-run it if interrupted.** Each partition is rewritten whole, from immutable L0,
+  through a temporary file renamed over the target. A kill mid-run leaves every partition either
+  old or new, never half-written, and a second run converges to the same bytes.
+- **`--to` must cover every captured session.** Only sessions inside `--from .. --to` are rewritten.
+  A session captured after `--to` keeps its old `series_id`s, and a renamed index then reads as two
+  series again from that date. Set `--to` to the last session in L0 (`ls data/L0/nse_index_close_snapshot`),
+  not to a fixed date copied from this note, if later sessions have been captured since.
+- **`--stop-before` does not apply.** The offline modes hold no lease and make no request, so there
+  is no evening window to leave. Passing `--stop-before` with `--rederive` or `--unknown-names` is
+  refused (exit 2) rather than silently ignored.
 
 ## Verification
 
