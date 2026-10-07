@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from backtest.campaign import CampaignError
-from backtest.m12_rerun import LONG, RERUN_ARMS, WALK_FORWARD, WINDOWS, RerunPlan, rerun_arms
+from backtest.m12_rerun import LONG, RERUN_ARMS, WINDOWS, RerunPlan, rerun_arms
 from backtest.paper_session import ratified_paper_book
 from backtest.sweep import ARMS, D13_PAPER_BASELINE, DURATION_ARMS
 
@@ -41,11 +41,11 @@ def test_long_window_is_opt_in() -> None:
     assert LONG not in RerunPlan(out_dir=Path("/x"), data_root=None).units
 
 
-def test_plan_refuses_unknown_units_and_a_toggled_walk_forward() -> None:
+def test_plan_refuses_unknown_units() -> None:
     with pytest.raises(CampaignError):
         RerunPlan(out_dir=Path("/x"), data_root=None, units=("nonsense",))
-    with pytest.raises(CampaignError):
-        RerunPlan(
-            out_dir=Path("/x"), data_root=None, units=(WALK_FORWARD,), universe="turnover_floor"
-        )
-    RerunPlan(out_dir=Path("/x"), data_root=None, units=("decade",), universe="turnover_floor")
+
+
+def test_universe_is_the_floor_only_screen_the_old_reports_ran() -> None:
+    # NIFTY 500 PIT membership opens 2016-10-24, after the decade and selection windows open.
+    assert RerunPlan(out_dir=Path("/x"), data_root=None).universe == "turnover_floor"

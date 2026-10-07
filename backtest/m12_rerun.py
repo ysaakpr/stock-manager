@@ -17,6 +17,10 @@ equal-session split of a 2012 span. These are the decade, the six-year window an
 2021-09 walk-forward the M12 reports used, plus an optional long window that opens once L2's
 2006 history fills every lookback — supplementary, and run only when asked.
 
+**The universe is the floor-only screen** (``turnover_floor``), on every window: the PIT NIFTY 500
+membership history opens 2016-10-24, after the decade and selection windows open, and the engine
+refuses an uncovered date rather than guess. It is also the screen the 2026-09-07 reports ran.
+
 **Resumable, run by run** (``backtest.run_ledger``): a killed driver restarted with the same
 command replays only what had not finished. The directory carries a manifest (commit, lake, arms,
 windows, switches) and is never resumed by a different one (``backtest.campaign.check_manifest``).
@@ -50,7 +54,7 @@ from backtest.cash_interest import (
     accrue_cash_interest,
     load_repo_rate_schedule,
 )
-from backtest.run import DEFAULT_UNIVERSE, UNIVERSE_CHOICES, _L1Reader
+from backtest.run import UNIVERSE_CHOICES, UNIVERSE_TURNOVER_FLOOR, _L1Reader
 from backtest.run_ledger import (
     ledger_path,
     persist_run_ledgers,
@@ -134,10 +138,13 @@ class RerunPlan:
     units: tuple[str, ...] = _DEFAULT_UNITS
     arms: tuple[Arm, ...] = RERUN_ARMS
     floors: tuple[Decimal, ...] = FLOORS
-    #: Today's engine defaults; switched off only for an attribution run (``--legacy-*``).
+    #: Today's engine defaults; switched off only for an attribution run.
     book_actions: bool = True
     cash_interest: bool = True
-    universe: str = DEFAULT_UNIVERSE
+    #: Not the engine's ``nifty500`` default: its PIT membership history opens 2016-10-24, and the
+    #: mandate's decade and selection windows open 2016-09-01, where that screen raises rather than
+    #: answer. The floor-only screen is also what the 2026-09-07 reports ran, so rows compare.
+    universe: str = UNIVERSE_TURNOVER_FLOOR
 
     def __post_init__(self) -> None:
         unknown = [u for u in self.units if u not in UNITS]
@@ -145,9 +152,6 @@ class RerunPlan:
             raise CampaignError(f"unknown units {unknown}; one of {', '.join(UNITS)}")
         if self.universe not in UNIVERSE_CHOICES:
             raise CampaignError(f"unknown universe {self.universe!r}")
-        if self.universe != DEFAULT_UNIVERSE and WALK_FORWARD in self.units:
-            # run_walk_forward screens the default universe; a toggled one would silently mix.
-            raise CampaignError("the walk-forward runs on the default universe only")
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,6 +193,7 @@ def _walk(plan: RerunPlan) -> WalkForward:
         arms=plan.arms,
         floors=plan.floors,
         data_root=plan.data_root,
+        universe_name=plan.universe,
     )
 
 
@@ -370,7 +375,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--no-book-corporate-actions", dest="book_actions", action="store_false")
     parser.add_argument("--no-cash-interest", dest="cash_interest", action="store_false")
-    parser.add_argument("--universe", default=DEFAULT_UNIVERSE, choices=UNIVERSE_CHOICES)
+    parser.add_argument("--universe", default=UNIVERSE_TURNOVER_FLOOR, choices=UNIVERSE_CHOICES)
     parser.add_argument(
         "--results-only",
         action="store_true",
