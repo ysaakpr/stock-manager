@@ -298,15 +298,21 @@ def _nse_lease_holders(registry: JobRegistry) -> list[Job]:
     ]
 
 
-def _clashes(job: Job, others: list[Job]) -> list[str]:
-    """Every overlap of `job`'s fire + budget with another NSE job's, over five weeks from a Monday.
+def _worst_case(job: Job, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    """Each fire to the latest the run can still hold its hosts: the latest start the scheduler
+    allows (`Job.latest_start`, its misfire grace) plus the whole budget."""
+    return [(fire, fire + job.latest_start + job.timeout) for fire, _ in _windows(job, start, end)]
 
-    Five weeks so the first-Sunday `bse_ca_sweep` (06:00, ten-hour budget) is in the span. Both
-    NSE hosts are treated as one: the forward job leases both for its whole run.
+
+def _clashes(job: Job, others: list[Job]) -> list[str]:
+    """Every overlap of `job`'s worst case with another NSE job's fire + budget, over five weeks.
+
+    Five weeks from a Monday so the first-Sunday `bse_ca_sweep` (06:00, ten-hour budget) is in the
+    span. Both NSE hosts are treated as one: the forward job leases both for its whole run.
     """
     start = datetime(2026, 10, 5, 0, 0, tzinfo=IST)
     end = start + timedelta(weeks=5)
-    mine = _windows(job, start, end)
+    mine = _worst_case(job, start, end)
     found: list[str] = []
     for other in others:
         if other.name == job.name:
@@ -359,10 +365,30 @@ def test_the_fundamentals_forward_job_never_overlaps_an_nse_lease() -> None:
     assert _clashes(FUNDAMENTALS_FORWARD, holders) == []
 
 
+def test_a_late_fire_cannot_start_after_three_or_run_past_the_first_sunday_sweep(
+    load_settings: SettingsLoader,
+) -> None:
+    """The misfire grace is what bounds a late start; the scheduler must actually be handed it."""
+    assert FUNDAMENTALS_FORWARD.latest_start == timedelta(hours=1)
+    fire = datetime(2026, 10, 4, 2, 0, tzinfo=IST)  # a first Sunday: bse_ca_sweep at 06:00
+    latest_end = fire + FUNDAMENTALS_FORWARD.latest_start + FUNDAMENTALS_FORWARD.timeout
+    assert (fire + FUNDAMENTALS_FORWARD.latest_start).time() == time(3, 0)
+    assert latest_end.time() <= time(6, 0)
+    scheduler = build_scheduler(SchedulerRunner(settings=load_settings(None)))
+    scheduled = scheduler.get_job("fundamentals_forward")
+    assert scheduled.misfire_grace_time == 3600
+    # Every other job keeps its budget as its grace, as before.
+    assert scheduler.get_job("eod_pipeline").misfire_grace_time == 45 * 60
+
+
 def test_the_overlap_check_is_not_inverted() -> None:
-    """The same check finds a clash for a job put in the evening, so a pass above means one."""
+    """The same check finds a clash for a job put in the evening, so a pass above means one.
+
+    The 02:00 probe is the real slot *without* its one-hour misfire grace: its latest start is then
+    its whole budget, and that worst case reaches the first-Sunday sweep and Saturday 07:00.
+    """
     holders = _nse_lease_holders(default_registry())
-    for cron in ("30 18 * * *", "0 20 * * mon-fri", "45 0 * * *", "0 6 * * sun"):
+    for cron in ("30 18 * * *", "0 20 * * mon-fri", "45 0 * * *", "0 6 * * sun", "0 2 * * *"):
         probe = Job(
             name="probe_forward",
             cron=cron,
@@ -375,7 +401,7 @@ def test_the_overlap_check_is_not_inverted() -> None:
 
 def test_the_fundamentals_forward_job_stays_out_of_the_evening_quiet_window() -> None:
     start = datetime(2026, 10, 5, 0, 0, tzinfo=IST)
-    windows = _windows(FUNDAMENTALS_FORWARD, start, start + timedelta(weeks=1))
+    windows = _worst_case(FUNDAMENTALS_FORWARD, start, start + timedelta(weeks=1))
     assert len(windows) == 7, "daily: results are disseminated on weekends too"
     for fire, end in windows:
         quiet_start = fire.replace(hour=QUIET_WINDOW[0].hour, minute=QUIET_WINDOW[0].minute)

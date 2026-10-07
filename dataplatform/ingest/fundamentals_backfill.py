@@ -80,7 +80,12 @@ from typing import Final
 
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
-from dataplatform.identity.master import IdentityMaster, IdentityStore, SymbolWindow
+from dataplatform.identity.master import (
+    AmbiguousSymbolError,
+    IdentityMaster,
+    IdentityStore,
+    SymbolWindow,
+)
 from dataplatform.ingest.calendar import (
     CalendarCoverageError,
     TradingCalendar,
@@ -125,6 +130,8 @@ __all__ = [
     "main",
     "render_report",
     "resolve_universe",
+    "symbols_accepted_on",
+    "try_resolve_unambiguous",
 ]
 
 _LOG = get_logger(__name__)
@@ -1300,11 +1307,16 @@ def _named(symbols: set[str], limit: int = 40) -> str:
     return f": {', '.join(sorted(symbols)[:limit])}" if symbols else ""
 
 
-def _try_resolve_quietly(master: IdentityMaster, symbol: str, on: date) -> str | None:
-    """`master.try_resolve` with an ambiguous symbol read as unresolved, not as an identity."""
+def try_resolve_unambiguous(master: IdentityMaster, symbol: str, on: date) -> str | None:
+    """`master.try_resolve`, with an ambiguous symbol read as unresolved rather than an identity.
+
+    What it does: the integrated feed's `resolve_isin` — a record whose symbol maps to two ISINs on
+    its dissemination date is counted and named as unresolved by the runner (invariant #2).
+    What it never does: swallow anything but `AmbiguousSymbolError`; a broken master raises.
+    """
     try:
         return master.try_resolve(symbol, on)
-    except Exception:
+    except AmbiguousSymbolError:
         return None
 
 
@@ -1476,7 +1488,7 @@ def _run_live(
                 isin=isin,
                 owner_on=lambda symbol: master.try_resolve(symbol, on),
             ),
-            resolve_isin=lambda symbol, on: _try_resolve_quietly(master, symbol, on),
+            resolve_isin=lambda symbol, on: try_resolve_unambiguous(master, symbol, on),
             rebuild_from_l0=rebuild_from_l0,
             # A rebuild is the only run that batches its writes. It is the run whose whole shape is
             # "throw the store away and redo it from L0", so the coarser checkpoint costs a local
