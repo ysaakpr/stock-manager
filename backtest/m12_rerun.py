@@ -174,53 +174,61 @@ def _actions(plan: RerunPlan) -> BookActionSource | None:
     return load_store_book_actions(data_root=plan.data_root) if plan.book_actions else None
 
 
-def _sweep(plan: RerunPlan, name: str) -> SweepResult:
+def _sweep(plan: RerunPlan, name: str, floors: Sequence[Decimal] | None = None) -> SweepResult:
     start, end = WINDOWS[name]
     return run_sweep(
         start=start,
         end=end,
         arms=plan.arms,
-        floors=plan.floors,
+        floors=plan.floors if floors is None else floors,
         data_root=plan.data_root,
         universe_name=plan.universe,
     )
 
 
-def _walk(plan: RerunPlan) -> WalkForward:
+def _walk(plan: RerunPlan, floors: Sequence[Decimal] | None = None) -> WalkForward:
     return run_walk_forward(
         selection=WINDOWS["wf-selection"],
         verification=WINDOWS["wf-verification"],
         arms=plan.arms,
-        floors=plan.floors,
+        floors=plan.floors if floors is None else floors,
         data_root=plan.data_root,
         universe_name=plan.universe,
     )
 
 
-def run_unit(plan: RerunPlan, name: str) -> UnitOutcome:
+def run_unit(plan: RerunPlan, name: str, floor: Decimal | None = None) -> UnitOutcome:
     """Run (or resume) one unit under the plan's switches, persisting every run as it finishes.
+
+    ``floor`` narrows the unit to one liquidity floor, so the two workers can share a window's
+    floors instead of one worker carrying a whole long window. A run's identity does not depend
+    on it: the same (window, arm, floor) has the same digest either way. A walk-forward narrowed
+    to the ₹10 crore floor "selects" on that floor; the choice on record is re-made over both
+    floors, ₹1 crore first, when the results are loaded (:func:`load_results`).
 
     Module-level so a spawned worker can import it; each worker reads the corporate-action
     calendar itself rather than receiving thirty-odd thousand actions pickled across.
     """
+    floors = None if floor is None else (floor,)
     with (
         corporate_actions_in_force(_actions(plan), apply_to_book=True),
         accrue_cash_interest(_interest(plan)),
         persist_run_ledgers(plan.out_dir),
     ):
         if name == WALK_FORWARD:
-            walk = _walk(plan)
+            walk = _walk(plan, floors)
             results: tuple[SweepResult, ...] = (walk.selection, walk.verification)
         else:
-            results = (_sweep(plan, name),)
+            results = (_sweep(plan, name, floors),)
     replayed = resumed = failed = 0
     for result in results:
         bad = sum(1 for row in result.rows if not row.ok)
         replayed += len(result.rows) - result.resumed - bad
         resumed += result.resumed
         failed += bad
-    outcome = UnitOutcome(name, replayed, resumed, failed)
-    _LOG.info("m12_rerun.unit_done", unit=name, replayed=replayed, resumed=resumed, failed=failed)
+    unit = name if floor is None else f"{name}@{floor}"
+    outcome = UnitOutcome(unit, replayed, resumed, failed)
+    _LOG.info("m12_rerun.unit_done", unit=unit, replayed=replayed, resumed=resumed, failed=failed)
     return outcome
 
 
@@ -231,8 +239,11 @@ def run_rerun(plan: RerunPlan, *, workers: int) -> list[UnitOutcome]:
     _LOG.info("m12_rerun.start", out=str(plan.out_dir), units=list(plan.units), workers=workers)
     if workers == 1:
         return [run_unit(plan, name) for name in plan.units]
+    # One item per (unit, floor), floor-major: both floors of the long units start before the
+    # short ones, so the two workers finish close together.
+    items = [(name, floor) for floor in plan.floors for name in plan.units]
     with ProcessPoolExecutor(max_workers=workers, mp_context=get_context("spawn")) as pool:
-        futures = [pool.submit(run_unit, plan, name) for name in plan.units]
+        futures = [pool.submit(run_unit, plan, name, floor) for name, floor in items]
         return [future.result() for future in futures]
 
 
