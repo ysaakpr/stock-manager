@@ -86,9 +86,12 @@ every run; it stays visible in the coverage report's failure list, and `attempts
 
 ## Picking up new filings
 
-There is **no scheduled job for this yet** — the scheduler runs `eod_pipeline` and
-`constituents_snapshot` only. Until one exists, a forward sync is this command run over a recent
-window, and there is one trap in doing that:
+**The scheduler does this now** — `fundamentals_forward` (M14.3), nightly at 02:00 IST; see
+[The scheduled forward job](#the-scheduled-forward-job-m143) below. Run a forward sync by hand
+only to recover from something the job cannot (a hole older than its retry lookback, a parser
+fix), and never while the job runs: both lease the same two hosts, so the second one to start is
+refused. A manual forward sync is this command run over a recent window, and there is one trap in
+doing that:
 
 > **A published index chunk is re-parsed from its frozen L0 payload, not re-fetched.** So rerunning
 > the *identical* window will never discover a filing broadcast since that chunk was first fetched.
@@ -112,7 +115,8 @@ it re-fetches index chunks you already have (~88 requests for the full window).
 
 ## Exit codes
 
-`0` clean or gracefully stopped · `2` cannot plan (bad range) · `3` parked on a 403 spike.
+`0` clean or gracefully stopped · `2` cannot plan (bad range) · `3` parked on a 403 spike · `4`
+another driver holds one of the hosts' leases (the scheduled job, for instance).
 
 ## Coverage report
 
@@ -150,6 +154,70 @@ the same PIT store as before; the filing-date partition is the first-knowable da
 Keep `--from` fixed at `2025-03-01` between runs so the month windows (and their checkpoints) stay
 identical; move `--to` forward to pick up new pages. About 26,600 records existed on 2026-09-06,
 so the first full run is a B1 campaign of roughly a day at the 2.5 s spacing.
+
+## The scheduled forward job (M14.3)
+
+`fundamentals_forward` in `dataplatform/scheduler/registry.py`, body
+`dataplatform/ingest/fundamentals_forward.py`. It is the integrated-feed campaign above, run by the
+scheduler over a window `sync_state` names, so the store keeps up through results season without
+anyone picking dates.
+
+- **When:** 02:00 IST every day (results are disseminated on weekends too), 3-hour budget. That is
+  the one long gap in which no other job leases `www.nseindia.com` or `nsearchives.nseindia.com`:
+  `announcements_capture` (00:30, 45 min) has finished, and the run is over before the
+  first-Sunday `bse_ca_sweep` (06:00), the Saturday `identity_refresh` (07:00) and `ca_refresh`
+  (10:00) — and nowhere near the 18:00-20:30 evening window (`shareholding_poll` 18:05,
+  `eod_pipeline` 18:30, `daily_snapshot` 19:15, `nse_daily_capture` 20:00 / 23:00).
+  `tests/unit/test_scheduler_coverage.py` fails the gate if the slot ever overlaps one of them.
+- **Window:** from the day after the **watermark** to **yesterday**. The watermark is the end of
+  the contiguous run of integrated-index windows whose six pages are all `PUBLISHED`, starting at
+  `2025-03-01`; a window with a failed or never-attempted page does not count, and a hole holds the
+  watermark at the hole. Yesterday, not today: the feed filters on the dissemination date, and a
+  window ending today would be marked done at 02:00 with the day's filings still to come.
+- **Bounded:** at most 3 new days per run (peak season: 840 filings on 2026-05-29, ~2.5 s each). A
+  longer outage is caught up 3 days a night; `/status/sources` shows the index overdue meanwhile.
+- **Retries:** a retryable `FAILED` filing from the last 7 days pulls the window's start back over
+  its date. The document is usually already in L0, so a retry costs index pages, not a re-download.
+  After 7 days a still-failing filing is left `FAILED` on `/status/sources` for a human.
+- **Universe:** ISINs with a `prices_raw` row in the 92 days to yesterday, resolved through D2 —
+  not the window's own days, which on a weekend have no price partition at all.
+- **Idempotent:** nothing owed means no lease, no request, a `fundamentals_forward.nothing_owed`
+  log line and a SUCCEEDED run. A `PUBLISHED` page or filing is never re-fetched.
+- **No watermark** (an empty store) fails the run: starting the store is the B1 campaign's job.
+
+**Where a failure shows.** The job raises — so `job_run` is FAILED, `GET /status/jobs` reports it
+`FAILING` and `failure_alerts` pages it once — when:
+
+- **another driver holds either NSE host** (`HostBusyError: … pid … running '<command>'` in
+  `job_run.error`). The lease is refused, never queued, and never broken while its holder lives.
+  The watermark has not moved, so the next night owes the same days plus one. If a campaign is
+  going to hold an NSE host across 02:00, expect this failure and let the next run catch up;
+- **an index page failed** (`FundamentalsForwardError: … index page(s) failed`) — the window is not
+  done and the next run re-plans it under a new key, re-fetching the live index;
+- **a 403 spike parked the run** (`… parked — FORBIDDEN_SPIKE …`) — AGENTIC_CONTEXT §8: find out
+  why the host refused before anything else; do not lower the rate or rotate the agent.
+
+A single filing's failure does **not** fail the run: it is `FAILED` on its own
+`nse_xbrl_filing/<filing_id>` row, which `/status/sources` counts, and the retry lookback re-plans
+it. The run's `fundamentals_forward.done` log line carries the counts, including the integrated
+records whose symbol D2 did not resolve (`unresolved_symbols`) — a listing newer than the Saturday
+`identity_refresh`. Those are not retried automatically; after the next identity refresh, re-run
+the affected window by hand (above) to pick them up.
+
+```bash
+# Run it now (an operator or an agent); exit 1 on FAILED, 3 if the scheduler is already running it.
+uv run python -m dataplatform.scheduler run-once fundamentals_forward
+# What did the last runs do?
+curl -s localhost:8000/status/jobs | jq '.jobs[] | select(.name == "fundamentals_forward")'
+```
+
+After a merge that changes the job, restart the scheduler — it reads the registry only at start:
+
+```bash
+cd /home/ubuntu/stock-manager            # the scheduler's checkout, on the merged main
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status scheduler
+```
 
 ## Retrying refusals after a parser fix
 
