@@ -35,7 +35,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from backtest.book_actions import add_book_actions_flag, store_book_actions_unless
-from backtest.run import describe_benchmark
+from backtest.run import DEFAULT_UNIVERSE, describe_benchmark
 from backtest.run_ledger import add_ledger_dir_flag, ledger_dir_unless
 from backtest.sweep import (
     ARMS,
@@ -101,11 +101,13 @@ def run_walk_forward(
     arms: Sequence[Arm] = ARMS,
     floors: Sequence[Decimal] = (LOW_FLOOR, HIGH_FLOOR),
     data_root: Path | None = None,
+    universe_name: str = DEFAULT_UNIVERSE,
 ) -> WalkForward:
     """Sweep the selection window, freeze its winner, then sweep the verification window (M12.3).
 
     Assumes ``selection`` ends before ``verification`` begins; an overlap would leak the answer into
-    the choice. Never re-ranks the selection window after the verification figures exist.
+    the choice. Never re-ranks the selection window after the verification figures exist. Both
+    windows screen the one investable universe ``universe_name`` (``backtest.run``).
     """
     if selection[1] >= verification[0]:
         raise ValueError(
@@ -113,7 +115,12 @@ def run_walk_forward(
             f"{selection[1].isoformat()} is not before {verification[0].isoformat()}"
         )
     chosen_on = run_sweep(
-        start=selection[0], end=selection[1], arms=arms, floors=floors, data_root=data_root
+        start=selection[0],
+        end=selection[1],
+        arms=arms,
+        floors=floors,
+        data_root=data_root,
+        universe_name=universe_name,
     )
     ranked = chosen_on.ranked(floors[0])
     winner = next((row.arm.label for row in ranked if row.ok), "")
@@ -124,7 +131,12 @@ def run_walk_forward(
     )
     # The name is frozen above this line. Nothing below may change it.
     verified_on = run_sweep(
-        start=verification[0], end=verification[1], arms=arms, floors=floors, data_root=data_root
+        start=verification[0],
+        end=verification[1],
+        arms=arms,
+        floors=floors,
+        data_root=data_root,
+        universe_name=universe_name,
     )
     return WalkForward(selection=chosen_on, verification=verified_on, selected=winner)
 
