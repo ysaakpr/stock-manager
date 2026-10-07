@@ -37,11 +37,37 @@ def test_a_valid_job_builds_a_trigger_in_the_exchange_timezone() -> None:
     assert str(trigger.timezone) == "Asia/Kolkata"
 
 
-@pytest.mark.parametrize("cron", ["not a cron", "30 18 * *", "70 18 * * *", ""])
+@pytest.mark.parametrize(
+    "cron",
+    ["not a cron", "30 18 * *", "70 18 * * *", "", "30 18 * * *; 70 18 * * *", "30 18 * * *;"],
+)
 def test_an_invalid_cron_fails_at_construction(cron: str) -> None:
     """Not at 18:30 on the trading day the schedule was supposed to fire."""
     with pytest.raises(ValueError, match="invalid cron expression"):
         _job(cron=cron)
+
+
+def test_several_crontabs_fire_as_their_union() -> None:
+    """A schedule no single crontab can say (19:50, 20:50, 21:30) is `;`-joined, one job."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    ist = ZoneInfo("Asia/Kolkata")
+    trigger = _job(cron="50 19,20 * * mon-fri; 30 21 * * mon-fri").trigger(ist)
+    fires: list[datetime] = []
+    previous: datetime | None = None
+    cursor = datetime(2026, 10, 9, 0, 0, tzinfo=ist)  # a Friday: the weekend must not fire
+    while len(fires) < 4:
+        fire = trigger.get_next_fire_time(previous, cursor)
+        assert fire is not None
+        fires.append(fire)
+        previous, cursor = fire, fire + timedelta(seconds=1)
+    assert [f"{fire:%a %H:%M}" for fire in fires] == [
+        "Fri 19:50",
+        "Fri 20:50",
+        "Fri 21:30",
+        "Mon 19:50",
+    ]
 
 
 @pytest.mark.parametrize("name", ["_scheduler", "EodPipeline", "eod-pipeline", "ab", "9lives", ""])
@@ -94,6 +120,7 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "l0_verify",
         "identity_refresh",
         "tri_refresh",
+        "tri_evening",
         "index_press_refresh",
         "ca_refresh",
         "bse_ca_sweep",
@@ -103,6 +130,8 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "shareholding_poll",
         "announcements_capture",
         "news_capture",
+        "failure_alerts",
+        "paper_session",
     )
     assert registry.get("eod_pipeline").cron == "30 18 * * mon-fri"
     # 19:15, after the 18:30 EOD pipeline: the two share nsearchives.nseindia.com, and a host
@@ -112,6 +141,10 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     assert registry.get("l0_verify").cron == "0 3 * * sun"
     assert registry.get("identity_refresh").cron == "0 7 * * sat"
     assert registry.get("tri_refresh").cron == "0 8 * * sat"
+    # M13.7: weekdays 19:50 (after daily_snapshot's 19:15 + 30-minute niftyindices.com lease),
+    # 20:50 (after the 20:47 IST point at which session D's TRI was measured out) and 21:30, the
+    # last attempt before the paper session decides D at 21:45.
+    assert registry.get("tri_evening").cron == "50 19,20 * * mon-fri; 30 21 * * mon-fri"
     # 09:00, after tri_refresh on the same niftyindices.com lease (refused, not queued, if held).
     assert registry.get("index_press_refresh").cron == "0 9 * * sat"
     # 10:00, after identity_refresh (07:00) so a name listed this week resolves.
@@ -122,6 +155,11 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     assert registry.get("fbil_reference_rates").cron == "0 16 * * mon-fri"
     # Sunday, when no niftyindices.com job holds that lease (the Saturday ones do).
     assert registry.get("macro_release_capture").cron == "0 10 * * sun"
+    # No network and a few reads, so a short cadence bounds how long a failure goes unpaged.
+    assert registry.get("failure_alerts").cron == "*/15 * * * *"
+    # 21:45, after the EOD pipeline and the last tri_evening attempt (21:30): a rebalance reads the
+    # session's own published TRI level.
+    assert registry.get("paper_session").cron == "45 21 * * mon-fri"
 
 
 def test_every_default_job_is_valid_and_describes_itself() -> None:
@@ -141,7 +179,10 @@ def test_every_default_job_is_valid_and_describes_itself() -> None:
         assert JOB_NAME.match(job.name), job.name
         assert job.timeout > timedelta(0), job.name
         # Builds in the exchange timezone the scheduler supplies from Settings, never the host's.
-        assert str(job.trigger(exchange).timezone) == "Asia/Kolkata", job.name
+        # A `;`-joined schedule is an OrTrigger: every crontab inside it must be in that zone.
+        trigger = job.trigger(exchange)
+        for part in getattr(trigger, "triggers", [trigger]):
+            assert str(part.timezone) == "Asia/Kolkata", job.name
         # A registered job nobody can identify from `scheduler list` is an operational trap.
         assert job.description.strip(), job.name
 

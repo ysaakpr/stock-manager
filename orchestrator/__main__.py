@@ -1,16 +1,18 @@
 """orch — the build orchestrator CLI.
 
-    ./orch validate            structural check on TASK_GRAPH.yaml
-    ./orch status              per-milestone progress + what is parked and why
-    ./orch ready               exactly what the next wave would pick up
-    ./orch why <id>            why a task is not running
-    ./orch prompt <id>         print the agent brief for a task
-    ./orch set <id> <STATE>    record an outcome (DONE re-verifies before it is accepted)
-    ./orch escalate <id> ...   park a task and file a human decision
-    ./orch answer <id> ...     record your decision and return the task to the queue
-    ./orch split <id> ...      replace a too-large task with children
-    ./orch gate <M>            re-run every verification in a milestone
-    ./orch run                 the unattended wave loop
+./orch validate            structural check on TASK_GRAPH.yaml
+./orch status              per-milestone progress + what is parked and why
+./orch ready               exactly what the next wave would pick up
+./orch why <id>            why a task is not running
+./orch prompt <id>         print the agent brief for a task
+./orch set <id> <STATE>    record an outcome (DONE re-verifies before it is accepted)
+./orch set <id> EXTERNAL   claim a task built outside the orchestrator; never released
+                           or re-run by `orch run` until set to DONE (or PENDING) again
+./orch escalate <id> ...   park a task and file a human decision
+./orch answer <id> ...     record your decision and return the task to the queue
+./orch split <id> ...      replace a too-large task with children
+./orch gate <M>            re-run every verification in a milestone
+./orch run                 the unattended wave loop
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ COLOR = {
     "IN_PROGRESS": BOLD,
     "PENDING": GREY,
     "SPLIT": GREY,
+    "EXTERNAL": BOLD,
 }
 
 
@@ -71,11 +74,9 @@ def _scoped_paths(task: object) -> list[str]:
     when the tree is quiet.
     """
     out: set[str] = set()
-    for raw in getattr(task, "deliverables", ()):  # type: ignore[arg-type]
+    for raw in getattr(task, "deliverables", ()):
         spec = str(raw).rstrip("/")
-        matches = (
-            list(REPO.glob(spec)) if any(c in spec for c in "*?[") else [REPO / spec]
-        )
+        matches = list(REPO.glob(spec)) if any(c in spec for c in "*?[") else [REPO / spec]
         for match in matches:
             if not match.exists():
                 continue
@@ -139,14 +140,24 @@ def cmd_status(_args: argparse.Namespace) -> int:
     if len(ready) > 20:
         print(f"  … {len(ready) - 20} more")
 
+    external = sorted(tid for tid, s in states.items() if s == "EXTERNAL")
+    if external:
+        print(f"\n{BOLD}built outside the orchestrator ({len(external)}){OFF}")
+        for tid in external:
+            task = graph.tasks.get(tid)
+            print(f"  {tid:8} {task.title if task else ''}")
+        print("  → ./orch set <id> DONE when it lands")
+
     parked = [tid for tid, s in states.items() if s == "PARKED"]
-    stuck = [tid for tid, s in states.items() if s == "FAILED" and attempts.get(tid, 0) >= MAX_ATTEMPTS]
+    stuck = [
+        tid for tid, s in states.items() if s == "FAILED" and attempts.get(tid, 0) >= MAX_ATTEMPTS
+    ]
     if parked or stuck:
         print(f"\n{YELLOW}blocked on you ({len(parked) + len(stuck)}){OFF}")
         for tid in sorted(parked + stuck):
             task = graph.tasks.get(tid)
             print(f"  {tid:8} {task.title if task else ''}")
-        print("  → see HUMAN_DECISIONS.md, then: ./orch answer <id> --decision \"...\"")
+        print('  → see HUMAN_DECISIONS.md, then: ./orch answer <id> --decision "..."')
     return 0
 
 
@@ -196,6 +207,7 @@ def cmd_set(args: argparse.Namespace) -> int:
         return 0
 
     # DONE is the one state the agent does not get to assert. We verify it ourselves.
+    previous = st.record(args.task_id).get("state", "PENDING")
     checks: list[tuple[str, str]] = []
     if task.verify:
         checks.append(("verify", task.verify))
@@ -212,18 +224,20 @@ def cmd_set(args: argparse.Namespace) -> int:
         code, out = _run(cmd)
         transcript.append(f"$ {cmd}\n(exit {code})\n{out.strip()[-4000:]}")
         if code != 0:
+            # A failed DONE on an EXTERNAL task must not drop the claim: FAILED with spare
+            # attempts is runnable, and the next `orch run` would start a duplicate builder.
+            held = previous == "EXTERNAL"
             st.set(
                 args.task_id,
-                "FAILED",
+                "EXTERNAL" if held else "FAILED",
                 reason=f"{label} failed with exit {code}",
                 verify_output="\n\n".join(transcript),
                 note=args.note,
             )
             print(f"\n{RED}{args.task_id} NOT done — {label} exited {code}{OFF}")
             print(out.strip()[-4000:])
-            print(
-                f"\n{YELLOW}Recorded FAILED. Fix the cause (not the test) and set DONE again.{OFF}"
-            )
+            recorded = "Still EXTERNAL — the claim is held" if held else "Recorded FAILED"
+            print(f"\n{YELLOW}{recorded}. Fix the cause (not the test) and set DONE again.{OFF}")
             return 1
 
     commit = None
@@ -239,9 +253,7 @@ def cmd_set(args: argparse.Namespace) -> int:
     )
     print(f"{GREEN}{args.task_id} → DONE{OFF} ({len(checks)} check(s) passed)")
     unblocked = [
-        d
-        for d in graph.dependents(args.task_id)
-        if graph.deps_done(graph.tasks[d], st.states())
+        d for d in graph.dependents(args.task_id) if graph.deps_done(graph.tasks[d], st.states())
     ]
     if unblocked:
         print(f"unblocked: {', '.join(unblocked)}")
@@ -276,8 +288,10 @@ def cmd_escalate(args: argparse.Namespace) -> int:
         unblocks=args.unblocks or (", ".join(graph.dependents(args.task_id)) if task else ""),
     )
     st.set(args.task_id, "PARKED", reason=args.question)
-    print(f"{YELLOW}{args.task_id} → PARKED{OFF}"
-          f"{' (decision filed)' if filed else ' (an open decision already exists)'}")
+    print(
+        f"{YELLOW}{args.task_id} → PARKED{OFF}"
+        f"{' (decision filed)' if filed else ' (an open decision already exists)'}"
+    )
     return 0
 
 
@@ -395,7 +409,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="orch", description=__doc__ or "")
+    parser = argparse.ArgumentParser(
+        prog="orch",
+        description=__doc__ or "",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("validate").set_defaults(fn=cmd_validate)
@@ -413,9 +431,23 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("task_id")
     p.set_defaults(fn=cmd_prompt)
 
-    p = sub.add_parser("set")
+    p = sub.add_parser(
+        "set",
+        help="record a task's state",
+        description=(
+            "Record a task's state. DONE re-runs the task's verify (and, for AUTO tasks, "
+            "format/lint/types on its deliverables) before it is accepted. EXTERNAL marks a "
+            "task as being built outside the orchestrator (e.g. by a polly worker): `orch run` "
+            "neither releases it at startup nor schedules it, so it never gets a duplicate "
+            "builder. Leave EXTERNAL with `orch set <id> DONE` when the work lands, or "
+            "`orch set <id> PENDING` to hand it back to the orchestrator."
+        ),
+    )
     p.add_argument("task_id")
-    p.add_argument("state", choices=["DONE", "FAILED", "PARKED", "IN_PROGRESS", "SPLIT", "PENDING"])
+    p.add_argument(
+        "state",
+        choices=["DONE", "FAILED", "PARKED", "IN_PROGRESS", "SPLIT", "PENDING", "EXTERNAL"],
+    )
     p.add_argument("--note")
     p.add_argument("--reason")
     p.add_argument("--skip-check", action="store_true", help="skip `make check` (needs a reason)")

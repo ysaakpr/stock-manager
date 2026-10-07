@@ -18,17 +18,20 @@ and must not go and get them itself (B10, invariant #11).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import timedelta
+from functools import lru_cache
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
+from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 
 from dataplatform.clock import Clock
 from dataplatform.config import Settings
+from dataplatform.ingest.source_register import declined_sources
 from dataplatform.logging import get_logger
 
 __all__ = [
@@ -38,13 +41,16 @@ __all__ = [
     "CONSTITUENTS_SNAPSHOT",
     "DAILY_SNAPSHOT",
     "EOD_PIPELINE",
+    "FAILURE_ALERTS",
     "FBIL_REFERENCE_RATES",
     "INDEX_PRESS_REFRESH",
     "JOB_NAME",
     "MACRO_RELEASE_CAPTURE",
     "NEWS_CAPTURE",
     "NSE_DAILY_CAPTURE",
+    "PAPER_SESSION",
     "SHAREHOLDING_POLL",
+    "TRI_EVENING",
     "TRI_REFRESH",
     "UNSCHEDULED",
     "Job",
@@ -59,12 +65,15 @@ __all__ = [
     "daily_snapshot",
     "default_registry",
     "eod_pipeline",
+    "failure_alerts",
     "fbil_reference_rates",
     "lag_budgets",
     "macro_release_capture",
     "news_capture",
     "nse_daily_capture",
+    "paper_session",
     "shareholding_poll",
+    "tri_evening",
     "tri_refresh",
 ]
 
@@ -143,15 +152,21 @@ class Job:
     def trigger(self, timezone: ZoneInfo | None = None) -> Any:
         """This job's cron expression as an APScheduler trigger, in `timezone`.
 
-        Raises `ValueError` naming the job when the expression is not a valid 5-field crontab —
+        `cron` is one 5-field crontab, or several joined by `;` when one expression cannot say the
+        schedule (19:50, 20:50 and 21:30 share no minute), which fire as their union through
+        `OrTrigger`. One job either way, so one lock, one health line and one run history.
+
+        Raises `ValueError` naming the job when any expression is not a valid 5-field crontab —
         the whole reason this is called from `__post_init__`.
         """
+        expressions = [part.strip() for part in self.cron.split(";")]
         try:
-            return CronTrigger.from_crontab(self.cron, timezone=timezone)
+            triggers = [CronTrigger.from_crontab(part, timezone=timezone) for part in expressions]
         except ValueError as error:
             raise ValueError(
                 f"job {self.name!r} has an invalid cron expression {self.cron!r}: {error}"
             ) from error
+        return triggers[0] if len(triggers) == 1 else OrTrigger(triggers)
 
 
 class JobRegistry:
@@ -160,13 +175,16 @@ class JobRegistry:
     What it does: holds jobs, rejects a duplicate name, and fails loud on an unknown one.
     What it assumes: it is built once at startup and not mutated afterwards.
     What it never does: create a job implicitly. A name that is not in here cannot be run, which
-    is the property that makes `run-once` safe to expose to an agent.
+    is the property that makes `run-once` safe to expose to an agent. Nor does it accept a job that
+    covers or answers for a source in `declined` — a source the register DECLINED on policy grounds
+    (HUMAN_DECISIONS D12/D19) is never scheduled.
     """
 
-    __slots__ = ("_jobs",)
+    __slots__ = ("_declined", "_jobs")
 
-    def __init__(self, jobs: Iterable[Job] = ()) -> None:
+    def __init__(self, jobs: Iterable[Job] = (), *, declined: Collection[str] = ()) -> None:
         self._jobs: dict[str, Job] = {}
+        self._declined = frozenset(declined)
         for job in jobs:
             self.register(job)
 
@@ -191,6 +209,12 @@ class JobRegistry:
         """
         if job.name in self._jobs:
             raise ValueError(f"job {job.name!r} is already registered")
+        refused = sorted(self._declined & {*job.covers, *job.sync_sources})
+        if refused:
+            raise ValueError(
+                f"job {job.name!r} would schedule {', '.join(refused)}, DECLINED on policy grounds "
+                "in the Source Register; a declined source is never scheduled"
+            )
         self._jobs[job.name] = job
         return job
 
@@ -584,6 +608,43 @@ TRI_REFRESH = Job(
 )
 
 
+def tri_evening(context: JobContext) -> None:
+    """The same-evening benchmark-TRI refresh (M13.7): session D's published level on D's evening.
+
+    What it does: one short-window POST per default index whose L1 series does not yet reach the
+    latest session on or before today, and nothing for an index already there — see
+    `tri_backfill.run_tri_evening`. The paper session's regime filter reads NIFTY 50 TRI for the
+    session it decides; with only the Saturday `tri_refresh` it had last week's.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: mark a session `PUBLISHED` before the endpoint carries it (the row parks
+    retryable and the run fails), or touch a host other than niftyindices.com. The import is
+    deferred for the same reason the others are.
+    """
+    from dataplatform.ingest.tri_backfill import run_tri_evening_job
+
+    run_tri_evening_job(context)
+
+
+#: The same-evening TRI refresh. 19:50, 20:50 and 21:30 IST Monday to Friday. NSE Indices
+#: disseminates session D's TRI on D's evening — measured: D absent at 16:08 IST (2026-10-05), D
+#: present at 20:47 IST (2026-10-06) — but the earliest time inside that bracket is unmeasured, so
+#: 19:50 is the first attempt, 20:50 (after the measured point) the retry and 21:30 the last
+#: chance before the paper session decides D at 21:45; a fire after a landed session is a no-op
+#: that makes no request. `tri_evening.first_landed` records which fire landed each session.
+#: 19:50 also clears `daily_snapshot` (19:15, 30-minute budget), which leases niftyindices.com
+#: too. The Saturday `tri_refresh` is unchanged and still the backstop; this job's one-session
+#: budget is the tighter one `lag_budgets` keeps.
+TRI_EVENING = Job(
+    name="tri_evening",
+    cron="50 19,20 * * mon-fri; 30 21 * * mon-fri",
+    fn=tri_evening,
+    timeout=timedelta(minutes=10),
+    description="Weekday same-evening benchmark TRI for the latest session (M13.7)",
+    covers=("nifty_tri_history",),
+    sync_sources=("nifty_tri_history",),
+)
+
+
 def index_press_refresh(context: JobContext) -> None:
     """The weekly index-change announcement capture (DQ-5): new releases into L0, nothing else.
 
@@ -743,6 +804,74 @@ MACRO_RELEASE_CAPTURE = Job(
 )
 
 
+def failure_alerts(context: JobContext) -> None:
+    """The failure-alert tick (M13.2): page each condition onset once, and its resolution.
+
+    What it does: evaluates four conditions nobody else turns into an alert — an ingestion source
+    FAILED for `alert_failure_streak_threshold` consecutive sessions, a quality check with open
+    ERROR flags, the holiday calendar ending within `alert_calendar_lead_days`, and a registered
+    job whose newest finished run raised — and diffs them against `alert_condition`, so an onset
+    pages once and a repeat pages nothing. See `alert_triggers.run_failure_alerts`.
+    What it assumes: the injected clock and settings are the run's (B10), migrated through 0013.
+    What it never does: fetch anything, or put a credential in an alert body (`redact`). The
+    import is deferred for the same reason the others are.
+    """
+    from dataplatform.alert_triggers import run_failure_alerts_job
+
+    run_failure_alerts_job(context)
+
+
+#: Every 15 minutes, every day: a few small reads and no network, so the cadence costs nothing and
+#: bounds how long a failure goes unpaged. No `covers` and no `sync_sources` — it keeps no source
+#: current; it watches the jobs that do.
+FAILURE_ALERTS = Job(
+    name="failure_alerts",
+    cron="*/15 * * * *",
+    fn=failure_alerts,
+    timeout=timedelta(minutes=5),
+    description="Page FAILED streaks, red quality, failed jobs and calendar expiry once (M13.2)",
+)
+
+
+def paper_session(context: JobContext) -> None:
+    """The daily paper-trading session (M13.1): one session of the D13-ratified momentum v2 book.
+
+    What it does: decides today's session of the paper book through the same replay-engine →
+    rails → `SimBroker` path its backtests ran on, journals every decision including the no-ops,
+    and records the session in `paper_session` — or, when the data is red, journals
+    `SKIPPED_DATA_RED` and places nothing. Idempotent per trading date; a holiday is a no-op.
+    What it assumes: the injected clock and settings are the run's (B10), the database is migrated
+    through 0012, and the owed session's EOD pipeline has run — the interlock checks it published.
+    Off unless `Settings.paper_session_enabled`: the ratified regime filter has no same-evening
+    source for the session's published NIFTY 50 TRI yet (ops/runbooks/daily-eod.md).
+    What it never does: touch a real broker — the session builds a `SimBroker` and nothing else,
+    and `execution.kite_broker` is not imported on this path. The import is deferred like the
+    others', so loading the registry does not pull in the backtest stack.
+    """
+    from backtest.paper_session import run_paper_session_job
+
+    run_paper_session_job(context)
+
+
+#: The paper session (M13.1). 21:45 IST Monday to Friday — after the 18:30 EOD pipeline (the
+#: session's prices) and after the last `tri_evening` attempt (M13.7, PR #73: 19:50, 20:50 and
+#: 21:30; NSE Indices' 20:47 publication time rests on one sample, hence the third fire), so a
+#: rebalance reads the session's own published NIFTY 50 TRI level or the journal names it missing.
+#: It reads the lake and Postgres only and fetches nothing, so it holds no host lease. Holidays are
+#: skipped inside the job against the holiday calendar. Registered but a no-op until
+#: PAPER_SESSION_ENABLED is set (see `paper_session`).
+PAPER_SESSION = Job(
+    name="paper_session",
+    cron="45 21 * * mon-fri",
+    fn=paper_session,
+    timeout=timedelta(minutes=30),
+    description=(
+        "Daily paper-trading session of the D13-ratified momentum v2 book (M13.1); "
+        "a no-op until PAPER_SESSION_ENABLED=true"
+    ),
+)
+
+
 #: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
 #: audit's root cause was not one broken job but sources that were simply never scheduled — the
 #: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
@@ -775,8 +904,19 @@ UNSCHEDULED: dict[str, str] = {
         "Register status FAILED (TLS needs unsafe legacy renegotiation); not worked around."
     ),
     "rbi_dbie": "Register status FAILED (certificate hostname mismatch); not worked around.",
-    "screener_company_fundamentals": "Register status BLOCKED_CREDENTIAL.",
 }
+# A DECLINED register row (screener_company_fundamentals, D12/D19) is not listed here: it is not
+# a gap awaiting a job but a decision never to fetch, and `default_registry` refuses to schedule it.
+
+
+@lru_cache(maxsize=1)
+def _declined_source_ids() -> frozenset[str]:
+    """The checked-in register's DECLINED source ids, read once per process.
+
+    Cached for the life of the process: a change to `source_register.yaml` (declining or
+    un-declining a source) reaches a running scheduler only after it is restarted.
+    """
+    return frozenset(declined_sources())
 
 
 def lag_budgets(registry: JobRegistry) -> dict[str, int]:
@@ -806,6 +946,7 @@ def default_registry() -> JobRegistry:
             L0_VERIFY,
             IDENTITY_REFRESH,
             TRI_REFRESH,
+            TRI_EVENING,
             INDEX_PRESS_REFRESH,
             CA_REFRESH,
             BSE_CA_SWEEP,
@@ -815,5 +956,8 @@ def default_registry() -> JobRegistry:
             SHAREHOLDING_POLL,
             ANNOUNCEMENTS_CAPTURE,
             NEWS_CAPTURE,
-        ]
+            FAILURE_ALERTS,
+            PAPER_SESSION,
+        ],
+        declined=_declined_source_ids(),
     )

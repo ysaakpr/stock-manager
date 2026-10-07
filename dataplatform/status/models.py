@@ -25,6 +25,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from dataplatform.ingest.source_register import Declined
 from dataplatform.quality.gaps import GapEntry, GapReason, GapReport
 from dataplatform.scheduler.health import JobHealth, JobHealthState
 from dataplatform.status.sync_state import GreenStatus, SourceStatus, SyncRecord, SyncState
@@ -39,6 +40,7 @@ __all__ = [
     "ArchiveFileOut",
     "ArchivesOut",
     "DatabaseHealthOut",
+    "DeclinedOut",
     "GapEntryOut",
     "GapReasonCountOut",
     "GapsOut",
@@ -113,6 +115,11 @@ class SyncStatusOut(BaseModel):
     green: bool | None = Field(description="Invariant #10's verdict; null when no dataset asked")
     reason: str | None = Field(description="Why the verdict came out that way, for the journal")
     missing: list[str] = Field(description="Requested datasets with no row for this date")
+    declined: list[str] = Field(
+        default_factory=list,
+        description="Requested datasets set aside because the register DECLINED them on policy "
+        "grounds; never fetched, so they neither make the date red nor count towards green",
+    )
     open_error_flags: int = Field(description="Unresolved ERROR-severity D7 flags for this date")
     rows: list[SyncRowOut]
 
@@ -140,8 +147,36 @@ class SyncStatusOut(BaseModel):
             green=green.green if green is not None else None,
             reason=green.reason if green is not None else None,
             missing=list(green.missing) if green is not None else [],
+            declined=list(green.declined) if green is not None else [],
             open_error_flags=green.open_error_flags if green is not None else 0,
             rows=[SyncRowOut.of(record) for record in rows],
+        )
+
+
+class DeclinedOut(BaseModel):
+    """Why a source is DECLINED on policy grounds (HUMAN_DECISIONS D12/D19), as served.
+
+    Declined is its own state — not failed, not blocked, not stale: the source is never scheduled
+    or fetched, and is never reported red. This says why, and which decision to read.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: str
+    decision: str = Field(description="The decision reference, e.g. a HUMAN_DECISIONS entry")
+    decided_on: date
+    declined_url: str | None
+    robots_rule: str | None = Field(description="The host's robots.txt rule it rests on, if any")
+
+    @classmethod
+    def of(cls, record: Declined) -> DeclinedOut:
+        """Project a register decline record onto the wire contract."""
+        return cls(
+            reason=record.reason,
+            decision=record.decision,
+            decided_on=record.decided_on,
+            declined_url=record.declined_url,
+            robots_rule=record.robots_rule,
         )
 
 
@@ -168,7 +203,12 @@ class SourceStatusOut(BaseModel):
         "current"
     )
     overdue: bool = Field(description="More sessions behind than its scheduled budget")
-    healthy: bool
+    healthy: bool = Field(description="Not failing and not behind; always true when declined")
+    declined: DeclinedOut | None = Field(
+        default=None,
+        description="Set when the register DECLINED this source on policy grounds: never "
+        "fetched, never red. Its counts are history from before the decision",
+    )
     counts: dict[SyncState, int]
 
     @classmethod
@@ -188,6 +228,7 @@ class SourceStatusOut(BaseModel):
             max_lag_sessions=status.max_lag_sessions,
             overdue=status.overdue,
             healthy=status.healthy,
+            declined=None if status.declined is None else DeclinedOut.of(status.declined),
             counts=dict(status.counts),
         )
 
@@ -199,6 +240,11 @@ class SourcesOut(BaseModel):
 
     as_of: date = Field(description="The trading date lag is measured against (injected clock)")
     sources: list[SourceStatusOut]
+    declined: dict[str, DeclinedOut] = Field(
+        default_factory=dict,
+        description="Every Source Register id DECLINED on policy grounds, whether or not it has "
+        "rows — declined, not failed, blocked or stale",
+    )
 
 
 # ── /status/jobs ────────────────────────────────────────────────────────────────────────────
@@ -246,6 +292,11 @@ class JobsOut(BaseModel):
     jobs: list[JobHealthOut]
     unscheduled: dict[str, str] = Field(
         description="Source Register ids no registered job covers, with the recorded reason"
+    )
+    declined: dict[str, DeclinedOut] = Field(
+        default_factory=dict,
+        description="Source Register ids DECLINED on policy grounds — never scheduled by design, "
+        "so neither a gap nor a failure",
     )
 
 

@@ -44,6 +44,7 @@ from dataplatform.ingest.shareholding import (
     PLEDGE_BREACH_PCT,
     SHAREHOLDING_DATASET,
     SOURCE_ID,
+    Bc3Status,
     ShareholdingRow,
     ShareholdingSnapshot,
     SyncTracker,
@@ -351,8 +352,8 @@ def test_bc3_flags_exactly_the_company_over_the_pledge_threshold(
 ) -> None:
     """§5.3 BC3: promoter pledge >50% is an integrity break. Only the pledged company qualifies."""
     assert {row.isin for row in parsed.breaching()} == {PLEDGED}
-    assert _row(parsed, PLEDGED).breaches_bc3 is True
-    assert _row(parsed, RELIANCE).breaches_bc3 is False
+    assert _row(parsed, PLEDGED).bc3_status is Bc3Status.BREACH
+    assert _row(parsed, RELIANCE).bc3_status is Bc3Status.CLEAR
 
 
 def test_the_bc3_threshold_is_a_strict_boundary() -> None:
@@ -360,8 +361,8 @@ def test_the_bc3_threshold_is_a_strict_boundary() -> None:
     assert Decimal("50") == PLEDGE_BREACH_PCT
     at = parse(_record(pledgeShares_prcnt="50.00"), filename="x.json").rows[0]
     over = parse(_record(pledgeShares_prcnt="50.01"), filename="x.json").rows[0]
-    assert at.breaches_bc3 is False
-    assert over.breaches_bc3 is True
+    assert at.bc3_status is Bc3Status.CLEAR
+    assert over.bc3_status is Bc3Status.BREACH
 
 
 def test_a_pledge_outside_0_to_100_is_rejected() -> None:
@@ -434,8 +435,16 @@ def test_the_bc3_break_is_invisible_until_its_filing_is_knowable(
     """A monitor scanning as of 11-May sees no breach; as of 12-May it sees exactly one."""
     write_l1(parsed, data_root=tmp_path)
 
-    before = [row for row in read_pit(date(2026, 5, 11), data_root=tmp_path) if row.breaches_bc3]
-    on = [row for row in read_pit(date(2026, 5, 12), data_root=tmp_path) if row.breaches_bc3]
+    before = [
+        row
+        for row in read_pit(date(2026, 5, 11), data_root=tmp_path)
+        if row.bc3_status is Bc3Status.BREACH
+    ]
+    on = [
+        row
+        for row in read_pit(date(2026, 5, 12), data_root=tmp_path)
+        if row.bc3_status is Bc3Status.BREACH
+    ]
 
     assert before == []
     assert [row.isin for row in on] == [PLEDGED]
@@ -612,3 +621,31 @@ def test_a_soft_404_fails_the_poll_without_a_retry(
 def test_the_snapshot_url_comes_from_the_register(register: SourceRegister) -> None:
     """C.1: the endpoint is read from the register, not repeated in code."""
     assert snapshot_url(register) == API
+
+
+def test_the_v1_format_still_requires_a_pledge() -> None:
+    """D17 makes pledge optional for the live master only; the format that states it keeps it
+    mandatory (M3.6), so a v1 record cannot slide into BC3 not_applicable by losing the field."""
+    with pytest.raises(ParseError, match="no 'pledgeShares_prcnt' field"):
+        parse(_record(pledgeShares_prcnt=None), filename="x.json")
+    body = json.dumps([json.loads(_record().decode())[0] | {"pledgeShares_prcnt": None}])
+    with pytest.raises(ParseError, match="'pledgeShares_prcnt' is null"):
+        parse(body.encode("utf-8"), filename="x.json")
+
+
+def test_a_partition_written_before_m13_3_still_reads(
+    parsed: ShareholdingSnapshot, tmp_path: Path
+) -> None:
+    """A pre-M13.3 partition has no `employee_trusts_pct`/`revised`; it reads as an original
+    filing with no trust figure, and its pledge is still the pledge it stored."""
+    write_l1(parsed, data_root=tmp_path)
+    path = l1_partition_path(SHAREHOLDING_DATASET, date(2026, 5, 12), data_root=tmp_path)
+    old = pq.read_table(path).drop_columns(["employee_trusts_pct", "revised"])
+    pq.write_table(old, path)
+
+    back = read_l1(date(2026, 5, 12), data_root=tmp_path)
+    assert {row.isin for row in back} == {HDFC, PLEDGED}
+    for row in back:
+        assert row.revised is False
+        assert row.employee_trusts_pct is None
+    assert _row_by(back, PLEDGED).bc3_status is Bc3Status.BREACH

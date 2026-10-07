@@ -82,3 +82,14 @@ excerpt in memory, so the fixture stays the real bytes.
 distinct `TDCLOINDI` values: this one carries five — `XD` ×4, `SA`, `XB`, `SS`, `CS` — on otherwise
 ordinary rows, so the ex-marker the parser now keeps (`BseLegacyQuote.close_indicator`) is tested on
 the exchange's own publication rather than on a constructed value.
+
+## `legacy/EQ110417_CSV.ZIP` — the last old-basis session before a consolidation (2017-04-11)
+
+**Real bytes, not constructed.** A byte-for-byte copy of the L0 payload
+`bse_bhavcopy_legacy/2017/04/EQ110417_CSV.ZIP` (sha256
+`d9fba200d3019fc88b4ddbf98e822d55e8009f864b5be06e3d7d459d4f9293c1`, 100,345 bytes, fetched
+2026-09-06). Frozen for M13.4 together with `EQ250517_CSV.ZIP` above. ONTIC (scrip 540386,
+INE989S01042) closes at 1.79 here with no marker. BSE's corporate-action feed dates its
+consolidation 2017-04-13. The scrip next trades on 2017-05-25, where its row carries `CS` and a
+`PREVCLOSE` of 1.79. Together the pair shows why a same-day marker-to-action comparison scored
+every consolidation unmatched (`tests/unit/test_ex_marker_witness.py`).

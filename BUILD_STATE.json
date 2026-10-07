@@ -320,14 +320,16 @@
     },
     "M10.4": {
       "attempts": 1,
-      "finished": "2026-09-03T14:41:57+00:00",
+      "commit": "32640d6",
+      "finished": "2026-10-06T15:45:28+00:00",
       "first_started": "2026-09-03T14:22:04+00:00",
       "human_cleared": true,
       "last_started": "2026-09-03T14:22:04+00:00",
-      "note": "cleared: Fix M7.3 properly (option A): rebuilt the XBRL path against 15 real captured NSE filings \u2014 parser rewritten around the format's actual column model (the index entry's (fromDate,toDate) selects the results column), ISIN from the index with a symbol cross-check, real segment axis, both taxonomy vocabularies. All four reported defects fixed plus two more found (hyphenated Un-Audited; read_latest collapsing a Q4 into a full year). M10.4's runner needed no logic change beyond skipping announcements with no XBRL document. See ops/gates/M7-xbrl-rebuild.md. The backfill execution itself remains NEEDS_GO under B1.",
-      "previous_state": "PARKED",
+      "note": "Owed fetch complete; pit_fundamentals current to 2026-10-05; acceptance met per PR #72.",
+      "previous_state": "PENDING",
       "reason": "Correct M7.3's XBRL path (built on fabricated fixtures) so real NSE filings ingest, before the M10.4 fundamentals backfill can land real facts?",
-      "state": "PENDING"
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_fundamentals_backfill.py -q\n(exit 0)\n...................................                                      [100%]"
     },
     "M10.5": {
       "attempts": 0,
@@ -347,6 +349,15 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_fundamentals_value.py -q\n(exit 0)\n.............                                                            [100%]\n\n$ uv run ruff format --check backtest/policies/fundamentals_value.py tests/unit/test_fundamentals_value.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/fundamentals_value.py tests/unit/test_fundamentals_value.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/fundamentals_value.py tests/unit/test_fundamentals_value.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     },
+    "M10.7": {
+      "attempts": 0,
+      "commit": "22b616a",
+      "finished": "2026-10-06T13:17:04+00:00",
+      "note": "Merged on main: 6f128ea, dea697d (swing policy + comparison report). Bookkeeping catch-up 2026-10-06.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_swing_composite.py -q\n(exit 0)\n........................................................................ [ 96%]\n...                                                                      [100%]\n\n$ uv run ruff format --check backtest/policies/swing_composite.py tests/unit/test_swing_composite.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/swing_composite.py tests/unit/test_swing_composite.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/swing_composite.py tests/unit/test_swing_composite.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
     "M11.1": {
       "attempts": 0,
       "commit": "af5da21",
@@ -355,6 +366,74 @@
       "previous_state": "PENDING",
       "state": "DONE",
       "verify_output": "$ uv run python -m dataplatform.ingest.source_register validate && uv run pytest tests/unit/test_macro_series.py -q\n(exit 0)\nsource register OK \u2014 27 entries over 17 \u00a74.1 rows (23 VERIFIED, 3 FAILED, 1 BLOCKED_CREDENTIAL); 14 hosts with a robots record; swept 2026-08-08 in 47 requests\n  open: nifty_tri_history [FAILED] -> M3.9\n  open: gdelt_doc_api [FAILED] -> M6.1\n  open: screener_company_fundamentals [BLOCKED_CREDENTIAL] -> M7.1\n  open: alfred_series_vintage [FAILED] -> M11.1\n.........................                                                [100%]\n\n$ uv run ruff format --check dataplatform/ingest/macro/index_valuation.py dataplatform/ingest/macro/models.py dataplatform/store/macro_series.py tests/unit/test_macro_series.py\n(exit 0)\n4 files already formatted\n\n$ uv run ruff check dataplatform/ingest/macro/index_valuation.py dataplatform/ingest/macro/models.py dataplatform/store/macro_series.py tests/unit/test_macro_series.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/macro/index_valuation.py dataplatform/ingest/macro/models.py dataplatform/store/macro_series.py tests/unit/test_macro_series.py\n(exit 0)\nSuccess: no issues found in 4 source files"
+    },
+    "M11.2": {
+      "attempts": 0,
+      "commit": "32640d6",
+      "finished": "2026-10-06T15:44:56+00:00",
+      "note": "Campaign complete: 3,453 sessions published, 0 pending; acceptance met per PR #72. 3 sessions (2023-04-06/10/11) refused on a month-first date format, logged in ops/BACKLOG.md.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_macro_backfill.py -q\n(exit 0)\n.............                                                            [100%]"
+    },
+    "M12.1": {
+      "attempts": 0,
+      "commit": "22b616a",
+      "finished": "2026-10-06T13:17:07+00:00",
+      "note": "Merged on main: c7ed5e6 (six legs + regime gate). Bookkeeping catch-up 2026-10-06.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_swing_composite.py -q\n(exit 0)\n........................................................................ [ 96%]\n...                                                                      [100%]\n\n$ uv run ruff format --check backtest/policies/swing_composite.py backtest/run.py tests/unit/test_swing_composite.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check backtest/policies/swing_composite.py backtest/run.py tests/unit/test_swing_composite.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/swing_composite.py backtest/run.py tests/unit/test_swing_composite.py\n(exit 0)\nSuccess: no issues found in 3 source files"
+    },
+    "M12.2": {
+      "attempts": 0,
+      "commit": "22b616a",
+      "finished": "2026-10-06T13:17:09+00:00",
+      "note": "Merged on main: ac099ff, 4306e24, bb489a5, 897eb0e (sweep runner; decade + six-year reports). Bookkeeping catch-up 2026-10-06.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_sweep.py -q\n(exit 0)\n........................                                                 [100%]\n\n$ uv run ruff format --check backtest/sweep.py tests/unit/test_sweep.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/sweep.py tests/unit/test_sweep.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/sweep.py tests/unit/test_sweep.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M12.3": {
+      "attempts": 0,
+      "commit": "22b616a",
+      "finished": "2026-10-06T13:17:09+00:00",
+      "note": "Merged on main: c9f0ed5 (walk-forward + verdict). Bookkeeping catch-up 2026-10-06.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ test -s ops/gates/M12-strategy-verdict.md\n(exit 0)\n"
+    },
+    "M13.1": {
+      "attempts": 1,
+      "first_started": "2026-10-06T13:40:25+00:00",
+      "last_started": "2026-10-06T13:40:25+00:00",
+      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
+      "previous_state": "PENDING",
+      "state": "IN_PROGRESS"
+    },
+    "M13.2": {
+      "attempts": 1,
+      "first_started": "2026-10-06T13:40:26+00:00",
+      "last_started": "2026-10-06T13:40:26+00:00",
+      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
+      "previous_state": "PENDING",
+      "state": "IN_PROGRESS"
+    },
+    "M13.3": {
+      "attempts": 1,
+      "first_started": "2026-10-06T13:40:26+00:00",
+      "last_started": "2026-10-06T13:40:26+00:00",
+      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
+      "previous_state": "PENDING",
+      "state": "IN_PROGRESS"
+    },
+    "M13.4": {
+      "attempts": 1,
+      "first_started": "2026-10-06T13:40:27+00:00",
+      "last_started": "2026-10-06T13:40:27+00:00",
+      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
+      "previous_state": "PENDING",
+      "state": "IN_PROGRESS"
     },
     "M2.1": {
       "attempts": 1,
@@ -571,14 +650,14 @@
     },
     "M3.9.b": {
       "attempts": 0,
-      "commit": null,
-      "finished": null,
+      "commit": "22b616a",
+      "finished": "2026-10-06T13:16:52+00:00",
       "first_started": null,
       "last_started": null,
-      "note": "NOT DONE, and recorded so. The TRI half of the old M3.9. M3.9's third acceptance criterion (\"NIFTY-TRI series ingested and spot-checked against a published value\") was closed at commit 3b24ae7 with \u00a74.1's *computed* fallback, on the premise \u2014 taken from the source register \u2014 that nifty_tri_history was session-gated/FAILED. D8 (2026-08-10) disproved that premise by probing the real endpoint: the register carried a stale URL path (Backpage.aspx/getTotalReturnIndexString, which answers 200 with the site's home page); POST /BackPage/getTotalReturnIndexString returns a whole index's published TRI history in one request, no session cookie, no Referer, no key. The published series was therefore never ingested and no spot-check against a published level was ever performed. Consequence, recorded rather than left to be rediscovered: backtest/run.py's _resolve_benchmark had no published TRI to find, so every benchmark/excess-return figure in every M9/M10/M12 report \u2014 the M12.3 verdict on the >25% bar included \u2014 was struck against the dividend-estimated proxy. This entry is opened by the W0 branch that corrects the register (C.1) and builds the ingest.",
-      "previous_state": null,
-      "state": "PENDING",
-      "verify_output": null
+      "note": "Merged on main: e0b07f6/2f292d6/6b76680 (published TRI ingest, L1 rebuild from L0). Bookkeeping catch-up 2026-10-06.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_benchmark_tri.py -q\n(exit 0)\n............................                                             [100%]\n\n$ uv run ruff format --check dataplatform/ingest/indices.py dataplatform/ingest/tri_backfill.py tests/unit/test_benchmark_tri.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check dataplatform/ingest/indices.py dataplatform/ingest/tri_backfill.py tests/unit/test_benchmark_tri.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/indices.py dataplatform/ingest/tri_backfill.py tests/unit/test_benchmark_tri.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
     "M4.1": {
       "attempts": 3,
@@ -1107,7 +1186,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-09-06T03:55:30+00:00",
+  "updated_at": "2026-10-06T15:45:28+00:00",
   "version": 1,
   "wave": 1
 }

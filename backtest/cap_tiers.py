@@ -43,8 +43,9 @@ import duckdb
 
 from dataplatform.ingest.models import is_isin_check_digit_valid
 from dataplatform.logging import get_logger
+from dataplatform.query import default_price_quarantine
 from dataplatform.query.pit import Dataset
-from dataplatform.store.l2 import open_connection, register_raw_view
+from dataplatform.store.l2 import open_connection
 
 __all__ = [
     "CAP_TIER_IDENTITY",
@@ -197,7 +198,10 @@ class LiquidityRankTiers:
         self._index = {session: i for i, session in enumerate(self._calendar)}
         self._owned = con is None
         self._con = con if con is not None else open_connection()
-        register_raw_view(self._con, view=self._VIEW, data_root=data_root)
+        # D22: a quarantined ISIN's pre-step bars never place it in a tier.
+        default_price_quarantine().register_raw_view(
+            self._con, view=self._VIEW, data_root=data_root
+        )
         self._tiers: dict[date, tuple[TierMembership, ...]] = {}
 
     def close(self) -> None:

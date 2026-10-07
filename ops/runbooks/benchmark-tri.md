@@ -76,6 +76,86 @@ knowing:
 - A stored series from 2021 does not satisfy a run asking back to 1990. Widen the window and it
   re-fetches; the L0 payload for the new window is a different file, so nothing is overwritten.
 
+## Same-evening refresh: `tri_evening` (M13.7)
+
+The Saturday `tri_refresh` keeps the series weekly. The paper session decides session D on D's
+evening, and its regime filter needs D's published NIFTY 50 TRI that night. `tri_evening` is the
+weekday job that lands it.
+
+**When D is published.** These are measured facts, not documented ones:
+
+| fetch (IST) | session D | newest row returned |
+|---|---|---|
+| 2026-09-08 09:41 | 09-07 is the previous session | 07-Sep: D is out by the next morning |
+| 2026-10-05 16:08 | 10-05 | 01-Oct (02-Oct holiday): D is **not** out 38 min after the close |
+| 2026-10-06 20:47 | 10-06 | 06-Oct (34608.14): D **is** out the same evening |
+
+The first two come from L0 sidecar `fetched_at`s. The third is a deliberate one-request probe
+through `leased_fetcher`. Each record's `RequestNumber` is .NET ticks of the request instant in
+UTC, so it says when the request was made, not when the level was published. The earliest
+publication time inside 16:08–20:47 has not been measured.
+
+**Schedule.** The job fires at `50 19,20 * * mon-fri; 30 21 * * mon-fri` (19:50, 20:50 and 21:30
+IST, Monday to Friday). A `;` joins crontabs whose union no single expression can say, and it is
+still one job.
+- 19:50 is the first attempt, after `daily_snapshot`'s niftyindices.com lease (19:15 + 30-minute
+  budget).
+- 20:50 is the retry after the measured 20:47 point.
+- 21:30 is the last attempt. Its 10-minute budget ends before the paper session decides D at 21:45.
+
+Each fire lands the latest session on or before today for the three default indices: one short
+POST each (about 1 KB), with the window starting at the stored series' last level or 14 days back,
+whichever is earlier. An index already at D makes no request, so later fires are no-ops once one
+has landed.
+
+**Tune the first fire after two weeks.** Each landing logs `tri_evening.first_landed` once per
+index and session, with `landed_at_ist` and `attempts`. About two weeks after this ships, read
+those events from the scheduler's log. The scheduler runs as the systemd user unit
+`scheduler.service`, so
+`XDG_RUNTIME_DIR=/run/user/$(id -u) journalctl --user -u scheduler.service --since -14d | grep tri_evening.first_landed`
+should find them.
+
+Tune on **`landed_at_ist`**, which is the instant of the attempt that landed the session (19:50,
+20:50 or 21:30 for a scheduled fire). `attempts` counts tries on that session's sync row, and
+`attempts == 1` does **not** prove the 19:50 fire landed it. A fire that was refused the host
+lease, or died before `begin`, never touched the row, so a session first attempted, and landed,
+at 20:50 also reads 1. If 19:50 shows up in `landed_at_ist` for nearly every session, the later
+fires are only insurance. If it rarely does, move the first fire later rather than letting it fail
+most evenings.
+
+**Before dissemination.** The answer is kept in L0, and the name carries the attempt instant
+(`tri_nifty50_<start>_<D>_at<YYYYMMDD>T<HHMMSS>.json`), so a later fire cannot collide with it. The
+`nifty_tri_history/<slug>` row for D parks `FAILED` with `retryable=True` and is committed, so it
+shows on `/status/sync`. L1 is left alone and the run is FAILED.
+
+**Running it by hand: only after the close.** `uv run python -m dataplatform.scheduler run-once
+tri_evening` owes the latest session on or before today, and that includes today. Run during
+market hours, it asks for a level that cannot exist yet: it spends a request and leaves a FAILED
+row and a FAILED run behind. Run it after the close, and in practice after the evening
+dissemination (20:47 IST is the measured point).
+
+**A missed evening heals itself.** When an evening lands session D, every earlier retryable FAILED
+`nifty_tri_history/<slug>` row inside that window whose session the payload carries is walked
+`PENDING → FETCHED → VALIDATED → NORMALIZED → PUBLISHED`. Its receipt is D's payload, the bytes that
+actually carry the missed level, and each healed row logs one `tri_evening.healed` event. Gap scans
+therefore stop reporting a session whose level L1 already holds. Two kinds of row stay as they
+are: a non-retryable failure (a dead end on purpose), and a row for a date the payload does not
+carry.
+
+D's row is committed before healing starts. A heal that fails logs `tri_evening.heal_failed` and
+fails the run without undoing D, and the missed rows stay FAILED and retryable for the next
+landing.
+
+**Lag budget is now 1 session.** `tri_evening` answers for `nifty_tri_history` with
+`max_lag_sessions=1`, and `lag_budgets` keeps the tighter of that and `tri_refresh`'s 6. So
+`/status/sources` shows the source overdue after **one** missed evening, not after a missed
+week. A single missed evening heals at the next landing; an overdue that persists means the job,
+the host or the endpoint needs looking at.
+
+**The paper job's cron.** PR #69 is moving `PAPER_SESSION` to **21:45 IST** (`45 21 * * mon-fri`),
+after the last `tri_evening` attempt. The paper job decides "the latest owed session", so a 21:45
+run still decides D.
+
 ## Moving the lake
 
 `data/L0` is the immutable record and L1 is a derivation of it, never copied between lakes

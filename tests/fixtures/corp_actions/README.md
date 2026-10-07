@@ -32,3 +32,12 @@ one model. Each file also carries a deliberate leftover: an NSE `Annual General 
 (→ unresolved), so the "surfaced, never dropped" behaviour is exercised.
 
 When the B1 sample fetch runs, replace these with captured bodies for each format era and re-freeze.
+
+## `bse/2026-09-07/defaultdata_540386.json` — real bytes (M13.4)
+
+A byte-for-byte copy of the L0 payload `bse_corp_actions/2016/09/defaultdata_540386.json` (sha256
+`1c835688c87b3f40d8d12641bda01c76a840ffa464c020730eb8c4a29d1b0d8f`, 582 bytes, fetched
+2026-09-07): ONTIC's per-scrip response. It holds the `Consolidation of Shares` record with ex-date
+2017-04-13, which states no ratio and so parses to `SPLIT` with unquantified terms, and a 2022
+Rs 10 -> Re 1 split. It is paired with the two legacy bhavcopies in `../../bse_bhavcopy/legacy/` to
+pin the ex-marker witness's first-session match.

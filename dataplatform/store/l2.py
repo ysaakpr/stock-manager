@@ -95,6 +95,7 @@ __all__ = [
     "L2RebuildReport",
     "L2TruncatedReport",
     "L2WriteReport",
+    "QuarantineLineageError",
     "RawBar",
     "build_adjusted_bars",
     "compose_events",
@@ -514,6 +515,7 @@ def materialize_isin(
     history_isins: Sequence[str] | None = None,
     infer_splits: bool = True,
     curated: Sequence[CorporateAction] | None = None,
+    history_floor: date | None = None,
 ) -> L2WriteReport:
     """Materialize one ISIN's L2 adjusted partition from L1 + its factor chain.
 
@@ -540,6 +542,13 @@ def materialize_isin(
     `isin` (`_curated_for_chain`). They are composed in before the implied-split scan — a curated
     split is a recorded event to it, so the same step is never adjusted twice — and one a feed has
     since published (same ex-date and type) is skipped in the feed's favour (`curated_actions`).
+
+    `history_floor` is the first trade date the partition may carry: bars before it — from `isin`
+    and from every ISIN in `history_isins` alike — are dropped before anything is composed or
+    adjusted, so the partition is what a build over an L1 that started at the floor would write.
+    `None` (the default) materializes the whole L1 history, which is what the first-time fill,
+    `--extend` and `--rebuild-all` do. `rebuild_invalidated` passes an existing partition's first
+    date, so draining the queue never extends a series into history no one curated.
     """
     if chain.isin != isin:
         raise ValueError(
@@ -552,10 +561,12 @@ def materialize_isin(
     # `isin` on the way out, so the partition is the survivor's however many ISINs fed it — and
     # the spans do not overlap, so the per-(exchange, date) uniqueness the adjuster needs holds.
     sources = (isin,) if history_isins is None else tuple(history_isins)
+    _refuse_an_unkeyed_quarantine(isin, sources)
     raw_bars = tuple(
         bar
         for source in sources
         for bar in read_raw_bars_from_l1(source, con=con, data_root=data_root)
+        if history_floor is None or bar.trade_date >= history_floor
     )
     path = l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=data_root)
     if not raw_bars:
@@ -564,6 +575,7 @@ def materialize_isin(
             "l2.prices_adjusted_empty",
             dataset=PRICES_ADJUSTED_DATASET,
             isin=isin,
+            history_floor=None if history_floor is None else history_floor.isoformat(),
             stale_removed=removed,
             state="EMPTY",
         )
@@ -603,11 +615,40 @@ def materialize_isin(
         rows=report.rows_written,
         from_date=report.from_date.isoformat() if report.from_date else None,
         to_date=report.to_date.isoformat() if report.to_date else None,
+        history_floor=None if history_floor is None else history_floor.isoformat(),
         implied_splits=len(implied),
         curated_actions=len(manual),
         state="PUBLISHED",
     )
     return report
+
+
+class QuarantineLineageError(ValueError):
+    """A quarantined ISIN's bars would be stitched under a survivor the quarantine does not name."""
+
+
+def _refuse_an_unkeyed_quarantine(isin: str, sources: Sequence[str]) -> None:
+    """Fail loud before a quarantined predecessor's bars enter a survivor no quarantine names.
+
+    The D22 quarantine (`ManualActions.unsourced_windows`, applied by
+    `dataplatform.query.PriceQuarantine`) is keyed by ISIN, and the decision path reads L2
+    without a lineage resolver. If a lineage edge retires a quarantined ISIN, its pre-step bars
+    land in the survivor's stitched partition under the survivor's ISIN, where a quarantine
+    keyed to the retired ISIN never looks, and the phantom step would reach every decision.
+    Rather than build that partition, raise and name the fix: key the curated row to the
+    survivor, which is the file's own rule for a row whose step sits in a stitched partition.
+    """
+    windows = default_manual_actions().unsourced_windows()
+    if isin in windows:
+        return
+    stray = sorted(s for s in sources if s != isin and s in windows)
+    if stray:
+        raise QuarantineLineageError(
+            f"{isin}'s stitched history includes quarantined {', '.join(stray)} "
+            f"(unsourced step before {', '.join(windows[s].isoformat() for s in stray)}); "
+            f"re-key that manual_actions.yaml explained_moves row to the survivor {isin} so "
+            f"the D22 quarantine covers its partition"
+        )
 
 
 def _curated_for_chain(isin: str, sources: Sequence[str]) -> tuple[CorporateAction, ...]:
@@ -1107,6 +1148,7 @@ def rebuild_invalidated(
     data_root: Path | None = None,
     history_for: Mapping[str, Sequence[str]] | None = None,
     survivor_of: Callable[[str], str] | None = None,
+    floor_existing: bool = True,
 ) -> tuple[L2WriteReport, ...]:
     """Drain the `l2_invalidation` queue and rebuild exactly the flagged ISINs' L2 partitions.
 
@@ -1129,6 +1171,21 @@ def rebuild_invalidated(
     resolved without being built — its bars are the survivor's — and any partition it still has is
     removed: building it would put one company in L2 twice, the second copy unadjusted (on
     2026-10-05, 60 such partitions, BAJFINANCE's INE296A01016 a -90% "day" on its split).
+
+    The drain never extends a series (M13.8). An ISIN that already has a partition is rebuilt from
+    that partition's first date (`history_floor`), whatever L1 now holds before it: L1 reaches back
+    to 2006 while L2 starts at 2011-06-22, and a weekly `ca_refresh` that rebuilt ~1,100 queued
+    names over their full L1 would surface uncurated pre-2011 steps and turn `l2_continuity` red.
+    Reaching back is `l2_fill --extend`'s job alone (`rebuild_truncated`). An ISIN with no
+    partition yet is built as the first-time fill builds it (`materialize_missing`: no floor).
+    A partition on disk with no rows raises `ValueError`: there is no floor to read off it, and
+    guessing one either way would be a silent extension or a silent truncation.
+
+    `floor_existing=False` drops the floor for every ISIN and rebuilds over the full L1 history
+    of its lineage chain. That is for `identity.lineage_rebuild` alone: a reissue edge it has just
+    derived must stitch the predecessor's whole history into the survivor, and the survivor's
+    current partition (built before the edge existed) starts at the reissue. The scheduled drains
+    (`ca_refresh`, `bse_ca_sweep`, `l2_fill --rebuild-invalidated`) keep the default.
     """
     isins = [
         str(r[0])
@@ -1150,6 +1207,7 @@ def rebuild_invalidated(
             for isin in isins:
                 wanted.update(history_for.get(isin, ()))
         preload_raw_bars(con, wanted, data_root=data_root)
+        floors = _l2_first_dates(con, isins, data_root=data_root) if floor_existing else {}
         for isin in isins:
             if survivor_of is not None and survivor_of(isin) != isin:
                 removed = _remove_partition(
@@ -1171,6 +1229,20 @@ def rebuild_invalidated(
                 continue
             chain = load_factor_chain(conn, isin)
             actions = load_reconciled_actions(conn, isin=isin)
+            floor = floors.get(isin)
+            if not floor_existing:
+                policy = "unfloored"
+            elif floor is not None:
+                policy = "existing_partition_start"
+            else:
+                policy = "first_time_fill"
+            _LOG.info(
+                "l2.rebuild_floor",
+                dataset=PRICES_ADJUSTED_DATASET,
+                isin=isin,
+                history_floor=None if floor is None else floor.isoformat(),
+                policy=policy,
+            )
             reports.append(
                 materialize_isin(
                     isin,
@@ -1179,6 +1251,7 @@ def rebuild_invalidated(
                     con=con,
                     data_root=data_root,
                     history_isins=None if history_for is None else history_for.get(isin),
+                    history_floor=floor,
                 )
             )
             conn.execute(
@@ -1595,6 +1668,40 @@ def rebuild_isins(
 def _isin_of_partition(path: Path) -> str:
     """The ISIN an L2 partition file belongs to, read back off its `isin=<ISIN>` directory."""
     return path.parent.name.removeprefix("isin=")
+
+
+def _l2_first_dates(
+    con: duckdb.DuckDBPyConnection, isins: Iterable[str], *, data_root: Path | None
+) -> dict[str, date]:
+    """The first trade date of each listed ISIN's `prices_adjusted` partition, where one exists.
+
+    Reads only those ISINs' partition files, one pass. An ISIN with no partition is absent from
+    the result — the caller's signal that there is no floor to keep. A partition file that exists
+    but holds no rows raises `ValueError`: `materialize_isin` never writes one (an empty build
+    removes the file), so it is a damaged lake, and reading it as "no partition" would turn the
+    next drain into a silent extension over the whole L1 history.
+    """
+    files = {
+        isin: path
+        for isin in sorted(set(isins))
+        if (
+            path := l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=data_root)
+        ).is_file()
+    }
+    if not files:
+        return {}
+    rows = con.execute(
+        "SELECT isin, min(trade_date) FROM read_parquet($files) GROUP BY isin",
+        {"files": [str(f) for f in files.values()]},
+    ).fetchall()
+    firsts = {str(r[0]): r[1] for r in rows if r[1] is not None}
+    empty = sorted(set(files) - set(firsts))
+    if empty:
+        raise ValueError(
+            "L2 partitions with no rows have no floor to keep; rebuild or remove them by hand: "
+            + ", ".join(f"{isin} ({files[isin]})" for isin in empty)
+        )
+    return firsts
 
 
 def _price_point(bar: RawBar) -> PricePoint:

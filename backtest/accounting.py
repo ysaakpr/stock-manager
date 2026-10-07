@@ -36,7 +36,7 @@ places it could have gone.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_FLOOR, Decimal
@@ -181,6 +181,21 @@ class PortfolioBook:
         #: External cashflows in XIRR sign convention: pay-in negative, pay-out positive.
         self._external: list[Cashflow] = []
         self._seq: int = 0
+
+    @classmethod
+    def seeded(cls, cash: Decimal, positions: Iterable[BookPosition]) -> PortfolioBook:
+        """A book that starts holding ``positions`` with ``cash`` — a mirror restored from state.
+
+        For a forward runner that persists its broker between processes (the daily paper session,
+        M13.1) and needs the share-count mirror corporate actions are applied against. The mirror
+        starts with no history: realized P&L, income and external flows count from here.
+        """
+        book = cls(cash)
+        for position in positions:
+            if position.quantity <= 0:
+                raise ValueError(f"a seeded position must hold shares, got {position!r}")
+            book._positions[position.isin] = position
+        return book
 
     # -- reads -----------------------------------------------------------------------------------
 

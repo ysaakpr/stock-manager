@@ -463,9 +463,9 @@ manually scanned and are clean.
 
 ---
 
-### D12 — The source register cannot say "we are declining this source on policy grounds"
+### D12 — The source register cannot say "we are declining this source on policy grounds" → **ANSWERED (polly, under the owner's delegation of 2026-10-06): option 1 — see D19.**
 
-**Raised:** 2026-08-10, from the D9(b) register sweep. **Status: OPEN.** Cited by
+**Raised:** 2026-08-10, from the D9(b) register sweep. **Status: ANSWERED 2026-10-06 (delegated, via D19).** Cited by
 `source_register.yaml` (`screener_company_fundamentals`) and by `M3.9.b`.
 
 **The finding.** `screener_company_fundamentals` is recorded `BLOCKED_CREDENTIAL`. The sweep found
@@ -515,6 +515,8 @@ and the scheduler registers no analyst session job; building it is the next deci
 
 ### D14 — Start the BSE bhavcopy campaign on the server, beside M10.4 → **ANSWERED (owner, 2026-09-06): go.**
 
+*Not to be confused with **D14 (2026-10-06)** below — a separate, delegated decision that reused the number.*
+
 The owner asked for the BSE fetch to start on the server in parallel with the Integrated Filing
 campaign. That is the B1 go for M3.1's full BSE history run ("joins M1.13's go"): 536 sessions of
 `bse_bhavcopy` from 2024-07-08 (the UDiFF cutover — the legacy era has no ISIN and is refused) to
@@ -529,6 +531,69 @@ a partition now holds both exchanges and a write replaces only its own exchange'
 (`tests/unit/test_l1_prices_raw_exchanges.py`; ops/BACKLOG.md, M3.1). Not covered by this go: the
 BSE scrip master, BSE corporate actions and the legacy-era bhavcopy — none has a fetch wired yet.
 
+---
+
+## Delegated decisions — run of 2026-10-06
+
+The owner instructed (2026-10-06, ~18:45 IST): *"apart from the real money trading and kite, do the
+end to end task without awaiting on me for anything."* The decisions below were therefore **taken
+by polly under the owner's delegation of 2026-10-06**, choosing the option the repo's own gate notes
+recommend wherever one exists. M8.3 / M8.4 (Kite, live capital, graduation) are explicitly out of
+scope and untouched. Each is the owner's to reverse.
+
+**Numbering:** this run's D14 is a different decision from the owner's D14 of 2026-09-06 above
+(the BSE bhavcopy campaign). Cite it as **D14 (2026-10-06)**; D15–D21 are unambiguous.
+
+**Review caveat:** only the `claude` CLI is installed, so every PR in this run is reviewed by an
+independent *fresh* Claude Code session given only the diff and its contract — not cross-vendor.
+
+### D14 (2026-10-06) — The 1,357 stray pre-ISIN `prices_raw` partitions → **ANSWERED (polly, delegated 2026-10-06): re-derive from L0.**
+
+1,357 pre-ISIN `prices_raw` partitions (2006-01-02 → 2011-06-21) were written into the primary lake
+at 13:49 IST on 2026-10-06 (`ops/gates/l1-widen-2026-10-06.md` §0). Taken: **re-derive** them from
+L0 (`pre_isin_promote promote`), then the BSE 2006→2011 promotion, `l2_fill --rebuild-invalidated`,
+and `session_attributes`. Basis: the recommendation in `ops/gates/l1-widen-2026-10-06.md` §5.
+Nothing in L0 is touched (AGENTIC_CONTEXT §3.10).
+
+### D15 — Daily paper-trading session job for the D13 configuration → **ANSWERED (polly, delegated 2026-10-06): GO, paper only.**
+
+D13 ratified `PAPER_RATIFIED_2026_09_06` for paper mode and named the daily job that runs it as "the
+next decision". Taken: **register it in the scheduler, paper mode only**. Task M13.1. A real-money
+version remains a separate ratification (AGENTIC_CONTEXT §3.2).
+
+### D16 — M6.8 live-model drill: API key or `ClaudeCliLLM` → **ANSWERED (polly, delegated 2026-10-06): accept `ClaudeCliLLM`.**
+
+No `ANTHROPIC_API_KEY` exists on this machine. Taken: **`ClaudeCliLLM` (`claude -p` on the
+subscription) counts as "the real model"** for M6.8; the M6.8 spec is amended accordingly in
+TASK_GRAPH.yaml (autonomy NEEDS_SECRET → AUTO).
+
+### D17 — Shareholding pattern: the live payload lacks pledge in the shape the parser expects → **ANSWERED (polly, delegated 2026-10-06): pledge optional.**
+
+Taken: **pledge is optional**. BC3 runs only where pledge is present and reports an explicit
+`not_applicable` status otherwise — never silent. Per-filing XBRL pledge sourcing is logged in
+`ops/BACKLOG.md`. Basis: unblocks the feed now without inventing data. Task M13.3.
+
+### D18 — Stranded branch `m12/swing-duration-window` → **ANSWERED (polly, delegated 2026-10-06): rebase and open a PR.**
+
+The branch carries 12 unique commits (the M12.3 duration grid). Taken: **rebase it and open a PR
+for owner review**. Basis: the work is complete and gate-reported on the branch. Opening a PR is not
+merging it.
+
+### D19 — D12: the register cannot mark a source declined on policy grounds → **ANSWERED (polly, delegated 2026-10-06): D12 option 1.**
+
+Taken: the option D12 recommends — **add a status** for a source declined on policy grounds — so
+`screener_company_fundamentals` stops wearing `BLOCKED_CREDENTIAL`. Task M13.6.
+
+### D20 — EXECUTION_PLAN §12 rows 17 (macro) and 18 (market-structure snapshots) → **ANSWERED (polly, delegated 2026-10-06): ratified.**
+
+Both are already built and merged (M11; the 2026-10-06 data-widening push). Taken: **ratified**,
+recording shipped reality. Both §12 rows now read RATIFIED, and a dated row records the act.
+
+### D21 — `ops/gates/ai-analyst-plan-2026-09-07.md` (untracked proposal) → **ANSWERED (polly, delegated 2026-10-06): commit as a proposal only.**
+
+Taken: **committed as a proposal — not ratified, not built**. Basis: scope control; it is too large
+to start without the owner. The file carries a header saying so.
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
@@ -536,7 +601,6 @@ the actual blocker. Listed here so nothing is a surprise.
 
 | Task | Decision you'll be asked for | Blocks |
 |---|---|---|
-| M6.8 | An Anthropic API key, to exercise T1/T2 against a real model and measure real cost | live-model quality evidence for the M6 gate |
 | M8.3 | Whether to run the tiny-capital live-order sessions yourself (Kite credentials + real money). **Read `ops/compliance/sebi-algo-memo.md` Q1 first** — Kite's terms 2(e) say the APIs are not intended for fully automated trading without manual intervention, which is a question about the product's shape, not just this gate. | M8 gate |
 | M8.4 | Graduation: fund a case with real money, or not (decision #8 — discretionary, always yours) | — |
 

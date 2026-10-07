@@ -27,6 +27,7 @@ from fastapi.testclient import TestClient
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
+from dataplatform.retry import RetryPendingError
 from dataplatform.scheduler import (
     ALIVE,
     DEFAULT_SCHEDULER_ID,
@@ -323,6 +324,51 @@ def test_a_raising_job_is_recorded_failed_and_does_not_propagate(
 
     beat = read_heartbeat(scratch_settings)
     assert beat is not None and (beat.state, beat.job) == ("FAILED", "explodes")
+
+
+def test_a_retry_pending_failure_is_recorded_failed_and_marked_by_type(
+    scratch_settings: Settings, conn: Connection
+) -> None:
+    """A `RetryPendingError` is still FAILED; the runner marks `retry_pending` from its type, and
+    any other exception (even one whose message says "not yet") is not marked."""
+
+    class NotYetError(RetryPendingError):
+        pass
+
+    def not_yet(context: JobContext) -> None:
+        raise NotYetError("the session is not published yet")
+
+    def other(context: JobContext) -> None:
+        raise ValueError("not yet published")  # the text must not matter
+
+    runner = _runner(scratch_settings, _job("not_yet", not_yet), _job("other_failure", other))
+
+    pending = runner.run_once("not_yet")
+    plain = runner.run_once("other_failure")
+
+    assert (pending.state, pending.retry_pending) == (JobState.FAILED, True)
+    assert (plain.state, plain.retry_pending) == (JobState.FAILED, False)
+    rows: dict[UUID, bool] = dict(
+        conn.execute(
+            "SELECT run_id, retry_pending FROM job_run WHERE run_id = ANY(%s)",
+            ([pending.run_id, plain.run_id],),
+        ).fetchall()
+    )
+    assert rows == {pending.run_id: True, plain.run_id: False}
+
+
+def test_only_a_failed_run_may_be_retry_pending(scratch_settings: Settings) -> None:
+    """0014's CHECK: a succeeded run marked retry-pending is refused by the schema itself."""
+    with (
+        connection(scratch_settings, autocommit=True) as live,
+        pytest.raises(psycopg.errors.CheckViolation),
+    ):
+        live.execute(
+            "INSERT INTO job_run (run_id, job_name, state, instance, started_at, finished_at, "
+            "retry_pending) VALUES (gen_random_uuid(), 'x_job', 'SUCCEEDED', 'test:1', %s, %s, "
+            "true)",
+            (NOW, NOW),
+        )
 
 
 def test_the_scheduler_keeps_running_after_a_job_raises(scratch_settings: Settings) -> None:

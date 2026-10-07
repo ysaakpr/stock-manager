@@ -53,6 +53,7 @@ from dataplatform.ingest.policy import (
     RateLimiter,
     RobotsDisallowedError,
     RobotsPolicy,
+    SourceDeclinedError,
     UnknownSourceError,
     resolve_policy,
 )
@@ -60,6 +61,7 @@ from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.store.l0 import L0Ref, L0Store
 from tests.conftest import SettingsLoader
+from tests.register_support import undeclined
 
 # ── the URLs the C.1 sweep verified; nothing here ever requests them ──────────────────────────
 ARCHIVES: Final = "nsearchives.nseindia.com"
@@ -127,6 +129,12 @@ def no_network(monkeypatch: pytest.MonkeyPatch) -> None:
 def register() -> SourceRegister:
     """The real, checked-in Source Register (C.1). Read for its shape, never for its hosts."""
     return load_register()
+
+
+@pytest.fixture(scope="session")
+def undeclined_register(register: SourceRegister) -> SourceRegister:
+    """The register with DECLINED rows un-declined, built once — for status-independent rules."""
+    return undeclined(register)
 
 
 @pytest.fixture
@@ -248,20 +256,20 @@ def test_three_fetches_from_one_host_are_spaced_by_the_configured_minimum(
 
 
 def test_every_registered_source_is_spaced_at_least_the_plan_floor(
-    register: SourceRegister, settings: Settings
+    undeclined_register: SourceRegister, settings: Settings
 ) -> None:
     """§4.1 says 2-3 s per host; a register row may be slower than that, never faster."""
-    for source in register.sources:
-        policy = resolve_policy(source.id, register, settings)
+    for source in undeclined_register.sources:
+        policy = resolve_policy(source.id, undeclined_register, settings)
         assert policy.min_interval_seconds >= MIN_SPACING_FLOOR_SECONDS, source.id
         assert policy.min_interval_seconds >= settings.http_min_interval_seconds, source.id
 
 
 def test_a_registered_host_that_asks_for_more_spacing_gets_it(
-    register: SourceRegister, settings: Settings
+    undeclined_register: SourceRegister, settings: Settings
 ) -> None:
     """Screener's 5 s beats the configured 3 s: the binding limit is whichever is slowest."""
-    policy = resolve_policy("screener_company_fundamentals", register, settings)
+    policy = resolve_policy("screener_company_fundamentals", undeclined_register, settings)
     assert policy.min_interval_seconds == 5.0
 
 
@@ -492,21 +500,38 @@ def test_an_api_url_carrying_no_date_takes_an_explicit_filename(build: Any, stor
 
 
 def test_a_robots_disallowed_url_is_refused_before_any_request_exists(build: Any) -> None:
-    """Screener disallows `?page=`; AGENTIC_CONTEXT §8 makes respecting that non-negotiable."""
+    """www.nseindia.com disallows `/market-data-test`; AGENTIC_CONTEXT §8 makes that binding."""
     fetcher, transport = build({})
-    with pytest.raises(RobotsDisallowedError, match=r"\?page="):
-        fetcher.fetch(
-            "screener_company_fundamentals",
-            "https://www.screener.in/company/INFY/?page=2",
-            TRADE_DATE,
-        )
+    with pytest.raises(RobotsDisallowedError, match="market-data-test"):
+        fetcher.fetch("nse_corp_actions", "https://www.nseindia.com/market-data-test", TRADE_DATE)
     assert transport.requests == []
 
 
-def test_the_permitted_screener_surface_is_still_allowed(
-    register: SourceRegister, settings: Settings
+def test_a_declined_source_is_refused_before_any_request_exists(build: Any) -> None:
+    """D12/D19: screener is DECLINED on policy grounds, so even a permitted URL is never fetched."""
+    fetcher, transport = build({SCREENER_COMPANY: RecordedResponse(status_code=200)})
+    with pytest.raises(SourceDeclinedError, match="D12"):
+        fetcher.fetch("screener_company_fundamentals", SCREENER_COMPANY, TRADE_DATE)
+    assert transport.requests == []
+
+
+def test_the_decline_refusal_is_the_status_and_nothing_else(
+    register: SourceRegister, undeclined_register: SourceRegister, settings: Settings
 ) -> None:
-    policy = resolve_policy("screener_company_fundamentals", register, settings)
+    """Inverted check: the same row, un-declined, resolves — so the refusal is not hiding a
+    different defect, and a non-declined source is never refused as if it were declined."""
+    with pytest.raises(SourceDeclinedError):
+        resolve_policy("screener_company_fundamentals", register, settings)
+    assert resolve_policy("screener_company_fundamentals", undeclined_register, settings)
+    for source in register.sources:
+        if not source.is_declined:
+            resolve_policy(source.id, register, settings)
+
+
+def test_the_permitted_screener_surface_is_still_allowed(
+    undeclined_register: SourceRegister, settings: Settings
+) -> None:
+    policy = resolve_policy("screener_company_fundamentals", undeclined_register, settings)
     policy.check_url(SCREENER_COMPANY)
     assert policy.robots.allows(SCREENER_COMPANY)
 
@@ -669,12 +694,16 @@ def test_the_rows_own_headers_are_sent_verbatim(build: Any) -> None:
 
 
 def test_every_source_in_the_register_resolves_to_a_usable_policy(
-    register: SourceRegister, settings: Settings
+    register: SourceRegister, undeclined_register: SourceRegister, settings: Settings
 ) -> None:
-    """Guards the C.1/M1.2 seam: a row that loses its host record or its agent fails here."""
+    """Guards the C.1/M1.2 seam: a row that loses its host record or its agent fails here.
+
+    A DECLINED row is refused by design (`test_a_declined_source_is_refused...`), so its shape is
+    checked through the un-declined copy: it must stay usable if the decision is ever reversed.
+    """
     assert register.sources
-    for source in register.sources:
-        policy = resolve_policy(source.id, register, settings)
+    for source in undeclined_register.sources:
+        policy = resolve_policy(source.id, undeclined_register, settings)
         assert policy.host == source.host
         assert policy.headers["User-Agent"] == settings.http_user_agent
         assert policy.method in {"GET", "POST"}

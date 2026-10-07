@@ -18,16 +18,21 @@ from typing import Any
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from dataplatform.clock import IST
 from dataplatform.ingest.source_register import (
     PLAN_ROWS,
     REGISTER_PATH,
+    REPROBE_STATUSES,
     Source,
     SourceRegister,
     Status,
+    declined_sources,
     load,
+    main,
     problems,
+    reprobe_candidates,
 )
 
 #: The build horizon: the latest date any verification in the register may legitimately carry.
@@ -284,3 +289,167 @@ def test_fetch_succeeded_requires_all_three_signals() -> None:
     assert ok.fetch_succeeded is True
     for change in ({"last_http_status": 500}, {"sample_bytes": 0}, {"parse_check": None}):
         assert Source.model_validate({**template, **change}).fetch_succeeded is False
+
+
+# ── DECLINED: a source we choose not to take, on policy grounds (D12, taken by D19) ─────────────
+
+SCREENER: str = "screener_company_fundamentals"
+
+
+def test_screener_is_declined_with_its_robots_evidence(register: SourceRegister) -> None:
+    """D12: the row is declined by robots policy, not blocked on a credential."""
+    row = next(s for s in register.sources if s.id == SCREENER)
+    assert row.status is Status.DECLINED
+    assert row.is_declined
+    assert row.declined is not None
+    assert row.declined.reason.strip()
+    assert "D12" in row.declined.decision and "D19" in row.declined.decision
+    assert row.declined.robots_rule == "/user/*"
+    host = register.host_policy(row.host)
+    assert host is not None and row.declined.robots_rule in host.disallow
+    assert row.declined.declined_url is not None and "/user/" in row.declined.declined_url
+    assert declined_sources() == {SCREENER: row.declined}
+
+
+def test_every_status_is_placed_on_one_side_of_the_reprobe_line() -> None:
+    """Every switch on status handles every value: a new status must be classified deliberately.
+
+    VERIFIED works, DECLINED is permanent, everything else is re-probed. A status in none of those
+    (or in two) fails here rather than silently falling into whichever branch a reader defaulted to.
+    """
+    for status in Status:
+        sides = [
+            status is Status.VERIFIED,
+            status is Status.DECLINED,
+            status in REPROBE_STATUSES,
+        ]
+        assert sum(sides) == 1, status
+    assert Status.DECLINED not in REPROBE_STATUSES
+
+
+def test_a_reprobe_sweep_never_selects_a_declined_row(register: SourceRegister) -> None:
+    selected = {s.id for s in reprobe_candidates(register)}
+    assert SCREENER not in selected
+    assert all(not s.is_declined for s in reprobe_candidates(register))
+    # Every non-VERIFIED, non-DECLINED row *is* selected — the sweep skips only what it must.
+    expected = {
+        s.id for s in register.sources if s.status not in (Status.VERIFIED, Status.DECLINED)
+    }
+    assert selected == expected
+
+
+def test_reprobe_selection_is_not_inverted(raw: dict[str, Any]) -> None:
+    """Inverted check: the same row, as FAILED, is selected — the skip is the status, not the id."""
+    failed = _mutate(raw, SCREENER, status="FAILED", declined=None)
+    assert SCREENER in {s.id for s in reprobe_candidates(failed)}
+    assert problems(failed) == []
+
+
+def _changed(raw: dict[str, Any], source_id: str, **changes: Any) -> dict[str, Any]:
+    """A deep copy of the raw register document with one entry altered — not yet validated."""
+    doc = copy.deepcopy(raw)
+    next(entry for entry in doc["sources"] if entry["id"] == source_id).update(changes)
+    return doc
+
+
+def _screener_record(raw: dict[str, Any]) -> dict[str, Any]:
+    record: dict[str, Any] = next(s for s in raw["sources"] if s["id"] == SCREENER)["declined"]
+    return record
+
+
+def _bad_declines(raw: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Every DECLINED rule broken once, as a raw document the register must refuse to build."""
+    record = _screener_record(raw)
+    return {
+        "declined-without-record": _changed(raw, SCREENER, declined=None),
+        "record-on-a-live-row": _changed(raw, "nifty_tri_history", declined=record),
+        "empty-reason": _changed(raw, SCREENER, declined={**record, "reason": ""}),
+        "blank-reason": _changed(raw, SCREENER, declined={**record, "reason": "   "}),
+        "empty-decision": _changed(raw, SCREENER, declined={**record, "decision": ""}),
+        "blank-decision": _changed(raw, SCREENER, declined={**record, "decision": "  "}),
+        "free-text-decision": _changed(
+            raw, SCREENER, declined={**record, "decision": "polly said so"}
+        ),
+        "decision-without-number": _changed(
+            raw, SCREENER, declined={**record, "decision": "HUMAN_DECISIONS D twelve"}
+        ),
+        "invented-robots-rule": _changed(
+            raw, SCREENER, declined={**record, "robots_rule": "/not-a-rule/*"}
+        ),
+    }
+
+
+BAD_DECLINE_CASES: list[str] = [
+    "declined-without-record",
+    "record-on-a-live-row",
+    "empty-reason",
+    "blank-reason",
+    "empty-decision",
+    "blank-decision",
+    "free-text-decision",
+    "decision-without-number",
+    "invented-robots-rule",
+]
+
+
+def test_the_case_list_covers_every_bad_decline(raw: dict[str, Any]) -> None:
+    assert sorted(BAD_DECLINE_CASES) == sorted(_bad_declines(raw))
+
+
+@pytest.mark.parametrize("case", BAD_DECLINE_CASES)
+def test_a_bad_decline_is_refused_by_model_validate(raw: dict[str, Any], case: str) -> None:
+    """The DECLINED rules are schema, not an optional `problems()` pass: construction refuses."""
+    with pytest.raises(ValidationError):
+        SourceRegister.model_validate(_bad_declines(raw)[case])
+
+
+@pytest.mark.parametrize("case", BAD_DECLINE_CASES)
+def test_a_bad_decline_is_refused_by_load(raw: dict[str, Any], case: str, tmp_path: Path) -> None:
+    """`load()` — what the fetcher, scheduler and status API all call — refuses it too."""
+    path = tmp_path / "source_register.yaml"
+    path.write_text(yaml.safe_dump(_bad_declines(raw)[case], allow_unicode=True), encoding="utf-8")
+    with pytest.raises(ValidationError):
+        load(path)
+
+
+def test_the_unbroken_document_round_trips_through_load(
+    raw: dict[str, Any], tmp_path: Path
+) -> None:
+    """Control for the two tests above: the refusal is the broken rule, not the round trip."""
+    path = tmp_path / "source_register.yaml"
+    path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    assert load(path).declined().keys() == {SCREENER}
+
+
+#: HUMAN_DECISIONS.md, where every decline's cited decision must be readable by the owner.
+HUMAN_DECISIONS: Path = REGISTER_PATH.parents[2] / "HUMAN_DECISIONS.md"
+
+
+def _decision_section(number: int) -> str | None:
+    """The text of `### D<number>` in HUMAN_DECISIONS.md, up to the next `### ` heading."""
+    text = HUMAN_DECISIONS.read_text(encoding="utf-8")
+    match = re.search(rf"^### D{number}\b.*?(?=^### |\Z)", text, flags=re.MULTILINE | re.DOTALL)
+    return None if match is None else match.group(0)
+
+
+@pytest.mark.parametrize("source_id", sorted(load().declined()))
+def test_every_decline_cites_a_real_decision_that_names_the_source(
+    register: SourceRegister, source_id: str
+) -> None:
+    """Mislabelling a failing source DECLINED would hide it from the red aggregation, so the
+    decline must point at a HUMAN_DECISIONS entry that exists and is about this very source.
+
+    Deliberately silent on the entry's answered/open status: that line belongs to the decisions
+    file's owner (PR #64 answers D12), and this test holds the citation, not the bookkeeping.
+    """
+    record = register.declined()[source_id]
+    section = _decision_section(record.decision_number)
+    assert section is not None, f"{source_id} cites D{record.decision_number}, which is absent"
+    assert source_id in section, f"D{record.decision_number} never mentions {source_id}"
+
+
+def test_validate_lists_declined_apart_from_open_rows(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["validate"]) == 0
+    out = capsys.readouterr().out
+    assert f"declined: {SCREENER}" in out
+    assert f"open: {SCREENER}" not in out

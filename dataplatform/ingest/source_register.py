@@ -9,6 +9,11 @@ guarantee:
   2. no entry claims VERIFIED without a real, successful, parsed fetch recorded against it;
   3. every host an entry talks to has a robots.txt record saying what it permits.
 
+A fourth status, `DECLINED` (HUMAN_DECISIONS D12, taken by D19), records a source we have chosen
+not to take on policy grounds. It is permanent: nothing schedules it, `policy.resolve_policy`
+refuses to build a fetch policy for it, the status API reports it as declined rather than red, and
+a re-probe sweep (`reprobe_candidates`) never selects it.
+
 It never fetches anything. The live sweep that produced the evidence is a one-off recorded in
 `ops/gates/source-verification.md`; re-verification belongs to M1.2's fetcher, which has the
 rate limiting, backoff and 403 hard stop this module deliberately does not reimplement.
@@ -17,15 +22,16 @@ rate limiting, backoff and 403 hard stop this module deliberately does not reimp
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from collections.abc import Iterator, Sequence
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Final
+from typing import Final, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 REGISTER_PATH: Final[Path] = Path(__file__).with_name("source_register.yaml")
 
@@ -71,6 +77,58 @@ class Status(StrEnum):
 
     BLOCKED_CREDENTIAL = "BLOCKED_CREDENTIAL"
     """Reachable only behind an account or key that does not exist (B4 / §3.7)."""
+
+    DECLINED = "DECLINED"
+    """We are choosing not to take this source, on policy grounds (HUMAN_DECISIONS D12/D19).
+
+    Not a failure and not a missing credential: nothing broke, and no credential would make the
+    source acceptable. Requires a `declined` record naming the reason and the decision. Permanent
+    — a re-probe sweep skips it, nothing schedules it and the fetch policy refuses it.
+    """
+
+
+#: The statuses a re-probe sweep re-examines: everything that is neither working nor declined.
+#: An explicit set rather than "not VERIFIED", so that a new status has to be placed on one side
+#: of the line deliberately — `test_source_register` fails if a status is on neither side.
+REPROBE_STATUSES: Final[frozenset[Status]] = frozenset({Status.FAILED, Status.BLOCKED_CREDENTIAL})
+
+
+#: A decline must cite an owner-visible decision: a HUMAN_DECISIONS entry, by number. A free-text
+#: reference would let any row be relabelled DECLINED — and so hidden from the red aggregation —
+#: without a decision anyone can read; `test_source_register` checks the cited entry exists.
+DECISION_REF: Final[re.Pattern[str]] = re.compile(r"^HUMAN_DECISIONS D(\d+)\b")
+
+
+class Declined(BaseModel):
+    """Why a source is `DECLINED`, and who decided it — the machine-readable half of the decision.
+
+    `robots_rule`, when the decline rests on robots.txt, must be one of the host record's own
+    `disallow` lines: the evidence is the register's robots record, not a sentence restating it.
+    Enforced when the register is constructed (`SourceRegister`), so `load()` itself refuses it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: str = Field(min_length=1)
+    decision: str = Field(min_length=1, pattern=DECISION_REF.pattern)
+    decided_on: date
+    declined_url: str | None = None
+    robots_rule: str | None = None
+
+    @field_validator("reason", "decision")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must state something, not whitespace")
+        return value
+
+    @property
+    def decision_number(self) -> int:
+        """The cited HUMAN_DECISIONS entry's number (`D12` → 12)."""
+        match = DECISION_REF.match(self.decision)
+        if match is None:  # pragma: no cover - the field pattern already refused it
+            raise ValueError(f"decision {self.decision!r} cites no HUMAN_DECISIONS entry")
+        return int(match.group(1))
 
 
 class Era(BaseModel):
@@ -197,6 +255,33 @@ class Source(BaseModel):
     failure_note: str | None = None
     candidate_alternatives: list[str] = Field(default_factory=list)
     owner_task: str | None = None
+    declined: Declined | None = None
+
+    @model_validator(mode="after")
+    def _declined_pairs_with_its_record(self) -> Self:
+        """DECLINED if and only if a `declined` record is present — checked at load, both ways.
+
+        A DECLINED row with no record would be a decision nobody can read; a record on a live row
+        would be a decline the fetcher, scheduler and status API all ignore.
+        """
+        if self.status is Status.DECLINED and self.declined is None:
+            raise ValueError(f"{self.id}: status DECLINED without a `declined` record")
+        if self.status is not Status.DECLINED and self.declined is not None:
+            raise ValueError(
+                f"{self.id}: carries a `declined` record but its status is {self.status}"
+            )
+        return self
+
+    @property
+    def is_declined(self) -> bool:
+        """True for a source declined on policy grounds — never scheduled, fetched or re-probed."""
+        return self.status is Status.DECLINED
+
+    def decline(self) -> Declined:
+        """The decline record of a DECLINED row. Raises for any other row — never a fallback."""
+        if self.declined is None:
+            raise ValueError(f"{self.id} is {self.status}, not DECLINED; it has no decline record")
+        return self.declined
 
     @property
     def fetch_succeeded(self) -> bool:
@@ -236,6 +321,21 @@ class SourceRegister(BaseModel):
     hosts: list[HostPolicy]
     sources: list[Source]
 
+    @model_validator(mode="after")
+    def _declined_robots_rule_is_in_the_robots_record(self) -> Self:
+        """A decline that rests on robots.txt must cite a rule the host's record actually holds."""
+        for source in self.sources:
+            rule = None if source.declined is None else source.declined.robots_rule
+            if rule is None:
+                continue
+            policy = self.host_policy(source.host)
+            if policy is None or rule not in policy.disallow:
+                raise ValueError(
+                    f"{source.id}: declined on robots rule {rule!r}, which is not in the robots "
+                    f"record for {source.host}"
+                )
+        return self
+
     def host_policy(self, host: str) -> HostPolicy | None:
         """The robots/rate policy for a host, or None if the host was never checked."""
         return next((h for h in self.hosts if h.host == host), None)
@@ -244,12 +344,32 @@ class SourceRegister(BaseModel):
         """Every entry covering one §4.1 row (a row can have several: NSE and BSE, or two eras)."""
         return [s for s in self.sources if s.plan_row == plan_row]
 
+    def declined(self) -> dict[str, Declined]:
+        """Source id → its decline record, for every source declined on policy grounds."""
+        return {s.id: s.decline() for s in self.sources if s.is_declined}
+
+
+def reprobe_candidates(reg: SourceRegister) -> list[Source]:
+    """The rows a re-probe sweep should re-examine: FAILED and BLOCKED_CREDENTIAL, never DECLINED.
+
+    What it assumes: the register passed `problems`. What it never does: select a declined row —
+    D12's whole point is that a policy decision must survive re-probe sweeps untouched.
+    """
+    return [s for s in reg.sources if s.status in REPROBE_STATUSES]
+
+
+def declined_sources(path: Path = REGISTER_PATH) -> dict[str, Declined]:
+    """The checked-in register's declined sources (id → record). Loads the file each call."""
+    return load(path).declined()
+
 
 def load(path: Path = REGISTER_PATH) -> SourceRegister:
     """Parse and type-check the register.
 
-    Assumes the file is checked in and trusted. Raises `ValidationError` on a schema break and
-    `FileNotFoundError` if the register is missing — both loud, neither recoverable here.
+    Assumes the file is checked in and trusted. Raises `ValidationError` on a schema break —
+    including every DECLINED rule (record paired with status, a non-blank reason, a
+    `HUMAN_DECISIONS D<n>` decision, a robots rule the host record holds) — and
+    `FileNotFoundError` if the register is missing; both loud, neither recoverable here.
     """
     with path.open(encoding="utf-8") as fh:
         raw = yaml.safe_load(fh)
@@ -349,9 +469,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     print(f"source register OK — {_summarise(register)}")
-    for source in register.sources:
-        if source.status is not Status.VERIFIED:
-            print(f"  open: {source.id} [{source.status.value}] -> {source.owner_task}")
+    for source in reprobe_candidates(register):
+        print(f"  open: {source.id} [{source.status.value}] -> {source.owner_task}")
+    for source_id, record in register.declined().items():
+        print(f"  declined: {source_id} ({record.decision}) — not scheduled, fetched or re-probed")
     return 0
 
 

@@ -9,7 +9,8 @@ a source 21 sessions stale `healthy`. Each test below fails if one of those come
 * a job's declared coverage drifting from what its body actually fetches;
 * a job with no `job_run` row reported as anything but NEVER_RAN, or a job whose newest success
   predates its newest due fire reported as anything but OVERDUE;
-* a scheduled source behind its lag budget reported `healthy`.
+* a scheduled source behind its lag budget reported `healthy`;
+* a source the register DECLINED on policy grounds (D12/D19) scheduled by any job.
 
 Offline: no database, no network, no scheduler started.
 """
@@ -17,7 +18,7 @@ Offline: no database, no network, no scheduler started.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Final
 
@@ -38,8 +39,11 @@ from dataplatform.scheduler.registry import (
     NEWS_CAPTURE,
     NSE_DAILY_CAPTURE,
     SHAREHOLDING_POLL,
+    TRI_EVENING,
+    TRI_REFRESH,
     UNSCHEDULED,
     Job,
+    JobRegistry,
     default_registry,
     lag_budgets,
 )
@@ -54,8 +58,12 @@ def _live_register_ids() -> set[str]:
     return {
         source.id
         for source in load_register().sources
-        if source.era.end is None and source.cadence != "backfill_only"
+        if source.era.end is None and source.cadence != "backfill_only" and not source.is_declined
     }
+
+
+def _declined_ids() -> set[str]:
+    return set(load_register().declined())
 
 
 def _covered() -> set[str]:
@@ -81,6 +89,39 @@ def test_coverage_and_the_ledger_name_real_sources_and_do_not_overlap() -> None:
     assert not both, f"scheduled *and* listed unscheduled: {sorted(both)}"
     for source, reason in UNSCHEDULED.items():
         assert reason.strip(), f"{source} is unscheduled with no reason recorded"
+
+
+def test_a_declined_source_is_neither_scheduled_nor_listed_as_a_gap() -> None:
+    """D12/D19: declined is a decision, not a job waiting to be written."""
+    declined = _declined_ids()
+    assert "screener_company_fundamentals" in declined
+    registry = default_registry()
+    scheduled = {s for job in registry for s in (*job.covers, *job.sync_sources)}
+    assert not declined & scheduled, sorted(declined & scheduled)
+    assert not declined & set(UNSCHEDULED), sorted(declined & set(UNSCHEDULED))
+    assert not declined & set(lag_budgets(registry))
+
+
+def _job_for(source: str) -> Job:
+    return Job(
+        name="probe_job",
+        cron="0 19 * * mon-fri",
+        fn=lambda ctx: None,
+        timeout=timedelta(minutes=1),
+        covers=(source,),
+        sync_sources=(source,),
+    )
+
+
+def test_the_registry_refuses_a_job_that_would_fetch_a_declined_source() -> None:
+    with pytest.raises(ValueError, match="DECLINED"):
+        JobRegistry([_job_for("screener_company_fundamentals")], declined=_declined_ids())
+
+
+def test_the_decline_refusal_is_not_inverted() -> None:
+    """A non-declined source is scheduled normally under the same declined set."""
+    registry = JobRegistry([_job_for("nse_bhavcopy_udiff")], declined=_declined_ids())
+    assert "probe_job" in registry
 
 
 @pytest.mark.parametrize(
@@ -199,7 +240,7 @@ def _windows(job: Job, start: datetime, end: datetime) -> list[tuple[datetime, d
 
 @pytest.mark.parametrize(
     "job",
-    [NSE_DAILY_CAPTURE, SHAREHOLDING_POLL, ANNOUNCEMENTS_CAPTURE, NEWS_CAPTURE],
+    [NSE_DAILY_CAPTURE, SHAREHOLDING_POLL, ANNOUNCEMENTS_CAPTURE, NEWS_CAPTURE, TRI_EVENING],
     ids=lambda job: job.name,
 )
 def test_a_capture_job_never_runs_while_another_job_holds_one_of_its_hosts(job: Job) -> None:
@@ -235,6 +276,34 @@ def test_the_nse_capture_fires_after_the_evening_publication_and_retries_the_sam
     ]
     assert [fire.hour for fire in fires] == [20, 23]
     assert all(fire.time() >= daily_capture.CAPTURE_CUTOFF for fire in fires)
+
+
+def test_the_evening_tri_fires_each_weekday_clear_of_the_snapshots_niftyindices_lease() -> None:
+    """M13.7: D's TRI the evening of D, never while `daily_snapshot` holds niftyindices.com.
+
+    `daily_snapshot` leases niftyindices.com for the constituent files without listing that source
+    in `covers`, so the generic overlap check above cannot see the clash; this one names it. A
+    weekend fire would owe nothing new (the Saturday `tri_refresh` is the backstop, unchanged).
+    """
+    week = MONDAY_EVENING.replace(hour=0)
+    fires = [fire for fire, _ in _windows(TRI_EVENING, week, week + timedelta(days=7))]
+    assert [f"{fire:%a %H:%M}" for fire in fires] == [
+        f"{day} {time}"
+        for day in ("Mon", "Tue", "Wed", "Thu", "Fri")
+        for time in ("19:50", "20:50", "21:30")
+    ]
+    # Every attempt, budget included, is over before the paper session decides D at 21:45.
+    assert all(
+        end.time() <= time(21, 45)
+        for _, end in _windows(TRI_EVENING, week, week + timedelta(days=7))
+    )
+    snapshot = _windows(DAILY_SNAPSHOT, week, week + timedelta(days=7))
+    for fire, end in _windows(TRI_EVENING, week, week + timedelta(days=7)):
+        for theirs_start, theirs_end in snapshot:
+            assert end <= theirs_start or theirs_end <= fire, f"{fire:%a %H:%M} overlaps"
+    assert TRI_REFRESH.cron == "0 8 * * sat"
+    # The weekday job owes the source daily, so its one-session budget is the one that binds.
+    assert lag_budgets(default_registry())["nifty_tri_history"] == 1
 
 
 def test_the_scheduler_fires_every_registered_job(load_settings: SettingsLoader) -> None:
