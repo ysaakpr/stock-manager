@@ -2438,14 +2438,19 @@ tasks:
     `ingest_tri` (L0 → L1 → sync_state). An answer that stops before D raises a retryable
     `TriNotYetPublishedError` after the L0 write and before L1, and the FAILED sync row is committed so
     it reaches `/status/sync`. Same-evening retries get a timestamped L0 filename (L0 immutability); an
-    index already at D makes no request; `--from-l0` replays payloads in fetch order. `tri_refresh`
-    is unchanged.
+    index already at D makes no request; `--from-l0` replays payloads in fetch order. A missed
+    evening is healed by the next landing (its payload carries the missed level and closes that
+    session's sync row); each session's first landing is logged once with its IST instant
+    (`tri_evening.first_landed`). D is committed before healing starts, so a heal failure surfaces
+    and cannot undo D. `tri_refresh` is unchanged.
   deliverables: [dataplatform/ingest/indices.py, dataplatform/ingest/tri_backfill.py, dataplatform/scheduler/registry.py, ops/runbooks/benchmark-tri.md, "tests/fixtures/nifty_indices/tri/2026/", tests/unit/test_tri_evening.py, tests/unit/test_scheduler_registry.py, tests/unit/test_scheduler_coverage.py]
   acceptance:
     - "the scheduler registers tri_evening on weekdays after daily_snapshot's niftyindices.com window, and a test pins that they never overlap"
     - "a same-evening run lands D in L0, L1 and sync_state with knowable_date == D"
     - "an answer that stops before D parks a committed, retryable FAILED sync row and leaves L1 untouched; a test fails if the check is inverted"
     - "a same-evening retry lands without an L0 filename collision, and a fire after D landed makes no request"
+    - "a missed evening is healed by the next landing; a heal failure surfaces and leaves D committed"
+    - "each session's first landing is logged once with its IST instant"
     - "tests use frozen fixtures and never hit the network"
   verify: "uv run pytest tests/unit/test_tri_evening.py tests/unit/test_scheduler_registry.py tests/unit/test_scheduler_coverage.py -q"
 
@@ -2461,12 +2466,18 @@ tasks:
     which would silently extend L2 into uncurated pre-2011 steps and turn `l2_continuity` red. Floor the
     drain at each ISIN's existing partition start (`materialize_isin(history_floor=…)`, applied to the
     ISIN and every lineage predecessor before adjustment); an ISIN with no partition yet is built as
-    the first-time fill builds it. Extension happens only through `l2_fill --extend`. Log
-    `l2.rebuild_floor` per drained ISIN. No live-lake run.
+    the first-time fill builds it. A partition on disk with no rows raises `ValueError` rather than
+    silently dropping the floor. The floor is the default (`rebuild_invalidated(floor_existing=True)`);
+    the one exception is the lineage rebuild (`dataplatform/identity/lineage_rebuild.py`), which passes
+    `floor_existing=False` on purpose so a newly derived edge stitches the predecessor over the full L1
+    history. Outside those, extension happens only through `l2_fill --extend`. Log `l2.rebuild_floor`
+    per drained ISIN. No live-lake run.
   deliverables: [dataplatform/store/l2.py, dataplatform/identity/lineage_rebuild.py, ops/runbooks/ca_backfill.md, ops/BACKLOG.md, tests/unit/test_l2_drain_floor.py]
   acceptance:
     - "a queued ISIN with L1 to 2006 and L2 from 2011 is rebuilt from its partition start only, byte-identical to the partition on disk, and the invalidation is resolved"
     - "lineage stitching respects the floor; a brand-new ISIN matches materialize_missing"
     - "--extend still extends to 2006 after a drain"
     - "dropping or inverting the floor fails the tests"
+    - "the lineage rebuild drains with floor_existing=False and stitches the predecessor's full history; a test pins the call-site argument"
+    - "a zero-row partition on disk raises instead of dropping the floor; a test pins it"
   verify: "uv run pytest tests/unit/test_l2_drain_floor.py -q"
