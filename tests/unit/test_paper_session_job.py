@@ -66,6 +66,7 @@ from dataplatform.config import Settings
 from dataplatform.scheduler import JobContext
 from execution.costs import CostModel, load_rate_card
 from execution.sim_broker import SimBroker
+from tests.conftest import SettingsLoader
 from tests.paper_session_support import (
     FIXTURE_CASH,
     HOLIDAY,
@@ -675,13 +676,18 @@ def _context(now: datetime, *, enabled: bool) -> JobContext:
 
 
 def test_the_job_is_disabled_by_default_and_touches_nothing(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, load_settings: SettingsLoader
 ) -> None:
-    """B2: no same-evening TRI for the regime filter yet, so the flag defaults off."""
+    """B2: no same-evening TRI for the regime filter yet, so the flag defaults off.
+
+    The default is read with no `.env` and a cleaned environment: the box that runs the paper
+    session has `PAPER_SESSION_ENABLED=true` in its `.env`, and that is configuration, not the
+    default this asserts.
+    """
     world, store, journal = FixtureWorld(), InMemoryPaperSessionStore(), RecordingJournal()
     install_job_seams(monkeypatch.setattr, world=world, store=store, journal=journal)
 
-    assert Settings().paper_session_enabled is False
+    assert load_settings(None).paper_session_enabled is False
     result = run_paper_session_job(
         _context(datetime(2026, 10, 1, 20, 30, tzinfo=IST), enabled=False)
     )
