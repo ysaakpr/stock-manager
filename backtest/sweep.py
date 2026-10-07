@@ -58,7 +58,7 @@ from backtest.cash_interest import (
     cash_interest_unless,
     describe_cash_interest,
 )
-from backtest.policies.momentum_v2 import MomentumV2Parameters
+from backtest.policies.momentum_v2 import PAPER_RATIFIED_2026_09_06, MomentumV2Parameters
 from backtest.policies.naive_momentum import MomentumParameters
 from backtest.policies.residual_momentum import with_residual_momentum
 from backtest.policies.swing_composite import SwingCompositeParameters
@@ -105,6 +105,7 @@ from dataplatform.query import QueryService
 __all__ = [
     "ARMS",
     "BAND_HIT_ARM",
+    "D13_PAPER_BASELINE",
     "DURATION_ARMS",
     "H1_RESIDUAL_MOMENTUM",
     "H2_BAND_HIT_AVOIDANCE",
@@ -262,6 +263,20 @@ _V2_BASELINE = Arm(
         redeploy_next_session=True,
         vol_target_annual=Decimal("0.15"),
     ),
+)
+
+#: The configuration paper trading actually runs (HUMAN_DECISIONS D13,
+#: :data:`~backtest.policies.momentum_v2.PAPER_RATIFIED_2026_09_06`): M9.5's toggles without its
+#: 15 % volatility target. ``_V2_BASELINE`` is the all-on research arm, not the paper book, so a
+#: re-run asking "is the paper strategy still the right one" needs this row beside it. Kept out of
+#: ``ARMS`` for the reason ``CAP_TIER_ARMS`` is: in it, it would change every campaign manifest and
+#: the round-1 trial set.
+D13_PAPER_BASELINE: Final = Arm(
+    label="Momentum v2, D13 paper config",
+    family="baseline",
+    reference="Momentum v2, all on (M9.5)",
+    note="the paper book's configuration (D13): M9.5's toggles without the 15% vol target",
+    v2=PAPER_RATIFIED_2026_09_06,
 )
 
 ARMS: tuple[Arm, ...] = (
