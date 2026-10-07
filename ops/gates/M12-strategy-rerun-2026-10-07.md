@@ -4,8 +4,10 @@
 
 ## How this run was made
 
+*Written analysis — not generated from run outputs.*
+
 - **Engine and code:** main @ `ed88d3a` plus this branch's driver/report commits; every run in the main tables was replayed at commit `2bb2b08` (pinned in the run directory's manifest — the commits after it touch only the driver's attribution options and this renderer, not the engine).
-- **Lake:** `/home/ubuntu/stock-manager/data`, last L1 session 2026-10-06, read-only. During the run the only files written under `data/L0`, `L1` or `L2` were the scheduler's own (curated RSS, GDELT, FBIL rates, macro series, news); no price, L1 price or L2 file changed, and no backtest wrote anywhere under `data/`.
+- **Lake:** the main checkout's `data/` (repo-relative), last L1 session 2026-10-06, read-only. During the run the only files written under `data/L0`, `L1` or `L2` were the scheduler's own (curated RSS, GDELT, FBIL rates, macro series, news); no price, L1 price or L2 file changed, and no backtest wrote anywhere under `data/`.
 - **Offline:** the driver's only sockets were to the local Postgres (the corporate-action calendar); zero network requests.
 - **When (IST):** main grid 2026-10-07 10:31 → 17:27 (288 runs, 0 failed, two workers); the NIFTY 500 universe check 17:29 → 18:30 (24 runs, 0 failed, at `1cd841f` — same engine). All compute finished by 18:30, before the 19:15 cut-off for the evening scheduler; nothing was restarted.
 - **Switches (today's defaults):** corporate actions applied to the book (splits, bonuses, dividends, mergers, reissues — 35,320 actions loaded), idle cash earning RBI repo - 0.50 %, the ratified A8 rails on every order, ₹10 lakh opening cash, signals off L2 back-adjusted closes, execution and marks off raw L1.
@@ -30,36 +32,71 @@
 
 ## Verdict
 
+*Written analysis — not generated from run outputs.*
+
 **Momentum v2 with the D13 configuration is still the right paper strategy. Keep it; switch nothing.**
 
-1. **On the universe the paper book actually trades (PIT NIFTY 500), D13 is first or second of the headline arms on every window and floor it can be run on**: second out-of-sample (2021-09 → 2026-08) at both floors, behind only momentum v2 all-on, which is D13 plus the 15 % volatility target. The swing composites fall behind it there, and the walk-forward's own choice comes last at ₹1 crore (see *Universe check*).
+1. **On the universe the paper book actually trades (PIT NIFTY 500), D13 is first or second of the six headline arms in every cell it can be run in** (six-year and verification, both floors). Out-of-sample (verification, 2021-09 → 2026-08) it is second at both floors, behind only momentum v2 all-on, which is D13 plus the 15 % volatility target. The swing composites fall behind it there. The walk-forward's own choice, M10.7 + 1-month trend, comes **last (6 of 6) on the verification window at ₹1 crore**; it is 5 of 6 on the six-year window at ₹1 crore and 4–5 of 6 at ₹10 crore (see *Universe check*).
 2. **On the floor-only universe these tables rank, D13 is the best out-of-sample arm at ₹1 crore** (33.04 % XIRR, 17.10 % drawdown, 1.93) and the best six-year arm at ₹10 crore (31.08 %, 19.87 %, 1.56).
 3. **It would not have been chosen.** On the selection window (2016-09 → 2021-08) it ranks 19th of 36 at ₹1 crore and 18th at ₹10 crore, and its 28.7–30.1 % decade drawdown is among the deepest of the headline arms (only naive momentum, and at ₹10 crore momentum v2 all-on, fall further). So it is right *for paper*, which needs a strategy that works on NIFTY 500 names at a reachable size. That is not the same as proving the walk-forward would have picked it.
-4. **One open question this evidence sharpens, for the owner rather than for this report:** the volatility target D13 leaves off (BACKLOG) wins on return per drawdown in three of the four NIFTY 500 cells (six-year ₹1 crore, both verification floors). D13 wins the fourth (six-year ₹10 crore, 1.23 against 1.02). That is a reason to read the target's cost, not to change a ratified paper book on one re-run.
+4. **Keeping D13 over momentum v2 all-on is a judgement call, not a measured win.** On NIFTY 500, all-on beats D13 on return per drawdown in three of the four cells: six-year ₹1 crore (1.46 against 1.24) and verification at both floors (1.19 against 1.03; 1.00 against 0.93). D13 wins only six-year ₹10 crore (1.23 against 1.02). The case for keeping D13 rests on three things:
+   - it is the configuration already ratified and running;
+   - the gaps are a single path's drawdown, often a few hundredths;
+   - the volatility target's cost is still unread (BACKLOG).
+
+   That is a reason for the owner to read the target's cost, not for this report to change a ratified paper book.
 
 ## What the walk-forward chose, and whether anything clears 25 % out-of-sample
 
+*Written analysis — not generated from run outputs. Every figure is from the tables below.*
+
 - **Chosen on 2016-09 → 2021-08 at ₹1 crore (the rule on record): M10.7 + 1-month trend**, 30.26 % XIRR at a 23.09 % drawdown (1.31). It was M10.7 + regime gate on 2026-09-07. **Verification rank 3 of 36** (1 of 22 within the old sweep's own arm set): 27.40 % at a 15.85 % drawdown (1.73). The same arm verifies at only 19.12 % at ₹10 crore, ranking 20 of 36. Its edge sits at the thin floor.
 - **The same rule on the ₹10 crore ranking chooses M10.7 @ fortnightly / 42-session hold** (24.10 %, 1.12). It verifies at 23.67 %, ranking 8 of 36 at ₹10 crore.
-- **Does anything clear 25 % out-of-sample?** On the floor-only universe at ₹1 crore, **yes**: 15 arms, the walk-forward's own choice among them (27.40 %). At ₹10 crore only the two momentum v2 arms clear it (all-on 31.29 %, D13 28.17 %), and neither is what the walk-forward chose at that floor. **On the PIT NIFTY 500, nothing clears 25 %** out-of-sample: the best is D13 at 22.79 % (₹1 crore) and momentum v2 all-on at 19.98 % (₹10 crore).
+- **Does anything clear 25 % out-of-sample?**
+  - **Floor-only universe, ₹1 crore: yes**, 15 arms, the walk-forward's own choice among them (27.40 %).
+  - **Floor-only universe, ₹10 crore:** only the two momentum v2 arms clear it (all-on 31.29 %, D13 28.17 %), and neither is what the walk-forward chose at that floor.
+  - **PIT NIFTY 500: nothing clears 25 %.** The best is D13 at 22.79 % (₹1 crore) and momentum v2 all-on at 19.98 % (₹10 crore).
 - **Answer to the owner's bar:** cleared out-of-sample only at the discovery end: the floor-only screen at ₹1 crore/day, where the median name trades a few crore a day and fills are a model's claim. It is not cleared by any walk-forward choice at ₹10 crore, and not by anything on the NIFTY 500 universe the paper book trades.
 
 ## Why every number moved, and by how much
 
-Every arm in every comparable cell earns more today than on 2026-09-07, typically by 5–15 pp. The moves are measured, not inferred, wherever a run exists to measure them (the *What moved* table carries the split row by row):
+*Written analysis — not generated from run outputs. The per-arm split is the Cause column of* What moved *below.*
 
-- **The engine up to 2026-09-28** (the after-tax campaign `ce49e0f` against the old figure): corporate actions entered the book, with dividends credited and splits and bonuses re-basing the position. Before that a bonus in raw prices read as a crash in a held name. Example: CUPID's 4:1 bonus on 2026-03-09 took its raw close from ₹412 to ₹82, and today's D13 verification ledger holds it through the bonus at a ₹5.05 lakh gain on ₹1.09 lakh. The same window also brought the A8 rails, the ₹5,000 minimum order and the seam fix. Decade, ₹1 crore: +1.8 to +8.0 pp per arm.
-- **The universe: the floor-only screen against the PIT NIFTY 500**, measured for the six headline arms on the six-year and verification windows: **+2.4 to +15.9 pp**, largest for the swing composites (M10.7 + 1-month trend +15.6 / +15.9 pp at ₹1 crore). This rung is why the floor-only tables flatter the swing family, and why the 2026-09-28 campaign (NIFTY 500) sits below today's floor-only figures.
-- **Today's lake, the engine since 2026-09-28 and cash interest together** (today on NIFTY 500 against `ce49e0f`, also NIFTY 500): between −9.3 and +4.2 pp on the six-year window. Most negative for the regime-gated arm, whose regime gate moved to the published NIFTY 50 on 2026-09-29 (`e6e862f`). Idle cash earning repo − 0.50 % is inside this rung and was not separated: the no-interest attribution run was set aside for the universe check, the larger question.
+**All three runs being compared screen the same floor-only universe:**
+- **the 2026-09-07 reports;**
+- **the 2026-09-28 after-tax campaign `ce49e0f`.** Its specs say `index_slug='nifty500'`, but at that commit the screen read constituent snapshots through `membership_asof`. That returns `None` before the first snapshot (2026-09-08, after every window ends), and the screen is then a no-op. The PIT membership history (`f006a9b`) is not an ancestor of `ce49e0f`;
+- **today's re-run.**
+
+So the universe is not a cause of any move below. The rise splits into two measured rungs on the decade and six-year windows. The walk-forward windows have no intermediate run, and their moves are engine and lake together. Ranges are per arm over the 22 M12.2 arms; Δ is in pp.
+
+| Window | Floor | Engine to 2026-09-28 | Everything since 2026-09-28 | Total move |
+| --- | --- | --- | --- | --- |
+| Decade | ₹1 crore | +1.75 to +8.03 (median +4.53) | +0.10 to +12.57 (median +4.63) | +4.54 to +15.03 |
+| Decade | ₹10 crore | +1.64 to +7.85 (median +3.83) | −1.02 to +9.08 (median +4.52) | +2.72 to +12.98 |
+| Six-year | ₹1 crore | −3.07 to +10.11 (median +2.46) | −0.24 to +13.08 (median +5.61) | +1.70 to +12.54 |
+| Six-year | ₹10 crore | +0.63 to +6.20 (median +2.79) | −1.04 to +6.91 (median +4.31) | +2.46 to +10.58 |
+| Walk-forward selection / verification | both | not separable (no intermediate run) | not separable | see *What moved* |
+
+- **Engine to 2026-09-28** (`ce49e0f` minus the old figure) is the *combined* engine change: corporate actions in the book, the A8 rails, the ₹5,000 minimum order and the L2 seam fix. No run separates them. One checked example of the corporate-action part: CUPID's 4:1 bonus on 2026-03-09 took its raw close from ₹412 to ₹82, and today's D13 verification ledger holds the name through it at a ₹5.05 lakh gain on ₹1.09 lakh. An engine that did not re-base the position would have read that bonus as an 80 % fall.
+- **Everything since 2026-09-28** (today minus `ce49e0f`) combines:
+  - lake #74/#75;
+  - the engine since that campaign, including the regime gate reading the published NIFTY 50 (`e6e862f`, 2026-09-29);
+  - idle cash earning repo − 0.50 %.
+
+  No run separates them. Examples at ₹1 crore on the six-year window: M10.7 + regime gate +1.05, M10.7 +7.66, M10.7 + 1-month trend +10.08, momentum v2 all-on +4.59, naive momentum +13.08.
 - **D22 quarantine and the CMC bonus (#75): zero, by construction.** The three quarantined price windows end on or before 2008-09-08 and CMC's bonus is 2011-06-08. Every mandate window's earliest lookback starts around 2015-08 (260 sessions before 2016-09-01), so neither can reach any figure here.
-- **History extension and new data:** the windows end 2026-08-31 and every read is point-in-time, so data for September–October 2026 cannot enter. L2's extension to 2006 reaches these windows only through the trading calendar: the decade now holds 2,477 sessions against 2,470. That is not separable from the other lake changes in the rung above.
+- **History extension and new data:** the windows end 2026-08-31 and every read is point-in-time, so data for September–October 2026 cannot enter. L2's extension to 2006 reaches these windows only through the trading calendar: the decade now holds 2,477 sessions against 2,470. That sits inside "everything since".
+- **The universe, measured separately:** the *Universe check* runs six headline arms on the PIT NIFTY 500. On the same engine and lake, the floor-only screen earns +2.4 to +15.9 pp more, most for the swing composites. That is a statement about which universe these tables rank, not a cause of the move from 2026-09-07.
 
-**Read the size of these moves as a warning, not a windfall.** Three engine generations have now produced decade figures of 17 %, 21 % and 26 % for the same M10.7 arm. The rankings within one table are the evidence; any single level is only as good as the engine that struck it.
+**Read the size of these moves as a warning, not a windfall.** Three engine generations have now produced decade figures of 17 %, 21 % and 26 % for the same M10.7 arm at ₹1 crore, all on the same floor-only universe. The rankings within one table are the evidence; any single level is only as good as the engine that struck it.
 
 ## What this report cannot be asked to prove
 
+*Written analysis — not generated from run outputs.*
+
 - One walk-forward split is one draw. Spearman between the selection and verification orderings is 0.69 at ₹1 crore and 0.48 at ₹10 crore: better than 2026-09-07's 0.37, still not a guarantee.
 - The floor-only universe is not the paper book's universe. Only six arms were priced on NIFTY 500, and only on the two windows its history reaches. A full NIFTY 500 table needs the membership history extended before 2016-10-24.
+- The two rungs of the attribution each bundle several changes, and the walk-forward windows have no rung at all. Separating, say, cash interest from the lake would need another run, which this review did not make.
 - The decade, six-year and selection windows overlap and are in-sample. Only verification is out-of-sample, and its five years include an unusually strong small- and mid-cap run.
 - Max drawdown is one path. Ratios within a few hundredths of each other are not distinguishable.
 - The supplementary 2007 window was not run (see *How this run was made*).
@@ -480,7 +517,7 @@ The choice on record is made by `backtest.verdict.run_walk_forward` on the selec
 
 ## What moved since 2026-09-07
 
-Every arm whose XIRR moved by more than 0.5 pp, or whose rank changed, against the report it was printed in. *Old rank* is as printed; *new rank* is re-ranked over that report's own arm set, so adding arms cannot move a row. The cause column is measured where intermediate runs exist (decade and six-year), as rungs that sum to the move. **engine to 2026-09-28** is `after-tax-ce49e0f` (rails, book corporate actions, ₹5,000 minimum order, seam fix and the PIT NIFTY 500 screen, on the pre-#75 lake, idle cash at 0 %) minus the old figure. Where a third run exists, **lake #74/#75, engine since, cash interest** is that run minus the reference and **floor-only universe** is today's figure minus that run; elsewhere **everything since 2026-09-28** is today's figure minus the reference: lake #74/#75, the engine since, idle cash earning repo - 0.50 %, and the step back from the NIFTY 500 screen to the floor-only one, together. The walk-forward windows have no intermediate run and say so.
+Every arm whose XIRR moved by more than 0.5 pp, or whose rank changed, against the report it was printed in. *Old rank* is as printed; *new rank* is re-ranked over that report's own arm set, so adding arms cannot move a row. The cause column is measured where intermediate runs exist (decade and six-year), as rungs that sum to the move. **engine to 2026-09-28** is `after-tax-ce49e0f` minus the old figure: the engine as of that campaign, on the pre-#75 lake with idle cash at 0 %. It is the *combined* engine change — corporate actions in the book, the A8 rails, the ₹5,000 minimum order and the L2 seam fix — and no run separates one from another. That campaign is **floor-only in effect**: its specs name `index_slug='nifty500'`, but at its commit the screen read constituent snapshots through `membership_asof`, which answers `None` before the first snapshot (2026-09-08, after every window ends), and the screen is then a no-op; the PIT membership history (`f006a9b`) is not its ancestor. So the old report, the reference campaign and today's run all screen the same floor-only universe. **everything since 2026-09-28** is today's figure minus the reference: lake #74/#75, the engine since (among it the regime gate reading the published NIFTY 50, `e6e862f`) and idle cash earning repo - 0.50 %, together. The walk-forward windows have no intermediate run and say so.
 
 | Window | Floor | Report | Strategy | Old XIRR | New XIRR | Δ pp | Old rank | New rank | Cause |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -554,18 +591,18 @@ Every arm whose XIRR moved by more than 0.5 pp, or whose rank changed, against t
 | Decade | ₹10 crore/day | duration grid | M10.7 @ weekly / 21-session hold | 12.09% | 23.87% | +11.78 | 11 | 4 | engine + lake, not separable on this window (no intermediate run) |
 | Decade | ₹10 crore/day | duration grid | M10.7 @ monthly / 126-session hold | 9.74% | 19.38% | +9.64 | 12 | 7 | engine + lake, not separable on this window (no intermediate run) |
 | Decade | ₹10 crore/day | duration grid | Naive momentum (M4.10) | 10.98% | 21.68% | +10.70 | 13 | 13 | mostly everything since 2026-09-28 (engine to 2026-09-28 +1.75, everything since 2026-09-28 +8.94 pp) |
-| Six-year | ₹1 crore/day | M12.2 sweep | Swing composite (M10.7) | 27.91% | 36.20% | +8.29 | 1 | 4 | mostly floor-only universe (engine to 2026-09-28 +0.63, lake #74/#75, engine since, cash interest -2.15, floor-only universe +9.81 pp) |
+| Six-year | ₹1 crore/day | M12.2 sweep | Swing composite (M10.7) | 27.91% | 36.20% | +8.29 | 1 | 4 | mostly everything since 2026-09-28 (engine to 2026-09-28 +0.63, everything since 2026-09-28 +7.66 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | Short composite + regime gate | 13.25% | 19.75% | +6.50 | 2 | 5 | mostly everything since 2026-09-28 (engine to 2026-09-28 +0.95, everything since 2026-09-28 +5.55 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | Short composite, top-10 + regime | 13.70% | 15.40% | +1.70 | 3 | 12 | mostly engine to 2026-09-28 (engine to 2026-09-28 +1.94, everything since 2026-09-28 -0.24 pp) |
-| Six-year | ₹1 crore/day | M12.2 sweep | M10.7 + regime gate | 19.42% | 30.58% | +11.16 | 4 | 3 | mostly floor-only universe (engine to 2026-09-28 +10.11, lake #74/#75, engine since, cash interest -9.32, floor-only universe +10.37 pp) |
+| Six-year | ₹1 crore/day | M12.2 sweep | M10.7 + regime gate | 19.42% | 30.58% | +11.16 | 4 | 3 | mostly engine to 2026-09-28 (engine to 2026-09-28 +10.11, everything since 2026-09-28 +1.05 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | M10.7 + delivery acceleration | 20.94% | 30.53% | +9.59 | 5 | 6 | mostly everything since 2026-09-28 (engine to 2026-09-28 +1.84, everything since 2026-09-28 +7.75 pp) |
-| Six-year | ₹1 crore/day | M12.2 sweep | M10.7 + 1-month trend | 23.96% | 36.50% | +12.54 | 6 | 2 | mostly floor-only universe (engine to 2026-09-28 +2.46, lake #74/#75, engine since, cash interest -5.49, floor-only universe +15.57 pp) |
+| Six-year | ₹1 crore/day | M12.2 sweep | M10.7 + 1-month trend | 23.96% | 36.50% | +12.54 | 6 | 2 | mostly everything since 2026-09-28 (engine to 2026-09-28 +2.46, everything since 2026-09-28 +10.08 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | Trend: 1-month | 19.85% | 22.46% | +2.61 | 7 | 16 | mostly everything since 2026-09-28 (engine to 2026-09-28 -3.07, everything since 2026-09-28 +5.69 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | Mean proximity (50d) | 18.64% | 25.41% | +6.77 | 8 | 11 | mostly everything since 2026-09-28 (engine to 2026-09-28 -1.07, everything since 2026-09-28 +7.84 pp) |
-| Six-year | ₹1 crore/day | M12.2 sweep | Momentum v2, all on (M9.5) | 21.19% | 28.42% | +7.23 | 9 | 1 | mostly engine to 2026-09-28 (engine to 2026-09-28 +2.64, lake #74/#75, engine since, cash interest +2.15, floor-only universe +2.44 pp) |
+| Six-year | ₹1 crore/day | M12.2 sweep | Momentum v2, all on (M9.5) | 21.19% | 28.42% | +7.23 | 9 | 1 | mostly everything since 2026-09-28 (engine to 2026-09-28 +2.64, everything since 2026-09-28 +4.59 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | Breakout | 14.45% | 24.42% | +9.97 | 10 | 8 | mostly everything since 2026-09-28 (engine to 2026-09-28 +3.85, everything since 2026-09-28 +6.12 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | Short composite + regime + low-vol | 6.94% | 12.82% | +5.88 | 11 | 7 | mostly engine to 2026-09-28 (engine to 2026-09-28 +3.90, everything since 2026-09-28 +1.98 pp) |
-| Six-year | ₹1 crore/day | M12.2 sweep | Naive momentum (M4.10) | 16.58% | 28.87% | +12.29 | 12 | 10 | mostly floor-only universe (engine to 2026-09-28 -0.78, lake #74/#75, engine since, cash interest +4.20, floor-only universe +8.88 pp) |
+| Six-year | ₹1 crore/day | M12.2 sweep | Naive momentum (M4.10) | 16.58% | 28.87% | +12.29 | 12 | 10 | mostly everything since 2026-09-28 (engine to 2026-09-28 -0.78, everything since 2026-09-28 +13.08 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | Short composite, 3-month holds | 10.86% | 17.36% | +6.50 | 13 | 14 | mostly engine to 2026-09-28 (engine to 2026-09-28 +3.42, everything since 2026-09-28 +3.08 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | Short composite, 1-month holds | 15.60% | 20.77% | +5.17 | 14 | 17 | mostly engine to 2026-09-28 (engine to 2026-09-28 +3.77, everything since 2026-09-28 +1.40 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | Short composite + reversal | 13.40% | 18.67% | +5.27 | 15 | 15 | mostly engine to 2026-09-28 (engine to 2026-09-28 +3.10, everything since 2026-09-28 +2.18 pp) |
@@ -576,7 +613,7 @@ Every arm whose XIRR moved by more than 0.5 pp, or whose rank changed, against t
 | Six-year | ₹1 crore/day | M12.2 sweep | Delivery acceleration | 6.85% | 12.12% | +5.27 | 21 | 21 | mostly everything since 2026-09-28 (engine to 2026-09-28 +2.16, everything since 2026-09-28 +3.12 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | Turnover expansion | 0.77% | 9.42% | +8.65 | 22 | 20 | mostly everything since 2026-09-28 (engine to 2026-09-28 +3.04, everything since 2026-09-28 +5.61 pp) |
 | Six-year | ₹1 crore/day | M12.2 sweep | Reversal: 5-day losers | 1.31% | 8.31% | +7.00 | 23 | 22 | mostly everything since 2026-09-28 (engine to 2026-09-28 +2.64, everything since 2026-09-28 +4.36 pp) |
-| Six-year | ₹1 crore/day | duration grid | Swing composite (M10.7) | 27.91% | 36.20% | +8.29 | 1 | 4 | mostly floor-only universe (engine to 2026-09-28 +0.63, lake #74/#75, engine since, cash interest -2.15, floor-only universe +9.81 pp) |
+| Six-year | ₹1 crore/day | duration grid | Swing composite (M10.7) | 27.91% | 36.20% | +8.29 | 1 | 4 | mostly everything since 2026-09-28 (engine to 2026-09-28 +0.63, everything since 2026-09-28 +7.66 pp) |
 | Six-year | ₹1 crore/day | duration grid | M10.7 @ monthly / 126-session hold | 25.96% | 34.11% | +8.15 | 2 | 2 | engine + lake, not separable on this window (no intermediate run) |
 | Six-year | ₹1 crore/day | duration grid | M10.7 @ monthly / 63-session hold | 27.46% | 32.74% | +5.28 | 3 | 3 | engine + lake, not separable on this window (no intermediate run) |
 | Six-year | ₹1 crore/day | duration grid | M10.7 @ fortnightly / 21-session hold | 25.30% | 34.16% | +8.86 | 4 | 9 | engine + lake, not separable on this window (no intermediate run) |
@@ -586,18 +623,18 @@ Every arm whose XIRR moved by more than 0.5 pp, or whose rank changed, against t
 | Six-year | ₹1 crore/day | duration grid | M10.7, band 1.5x top_n | 23.78% | 33.05% | +9.27 | 8 | 6 | engine + lake, not separable on this window (no intermediate run) |
 | Six-year | ₹1 crore/day | duration grid | M10.7 @ weekly / 21-session hold | 25.92% | 34.37% | +8.45 | 9 | 10 | engine + lake, not separable on this window (no intermediate run) |
 | Six-year | ₹1 crore/day | duration grid | M10.7 @ weekly / 10-session hold | 25.53% | 32.91% | +7.38 | 10 | 11 | engine + lake, not separable on this window (no intermediate run) |
-| Six-year | ₹1 crore/day | duration grid | Momentum v2, all on (M9.5) | 21.19% | 28.42% | +7.23 | 11 | 1 | mostly engine to 2026-09-28 (engine to 2026-09-28 +2.64, lake #74/#75, engine since, cash interest +2.15, floor-only universe +2.44 pp) |
+| Six-year | ₹1 crore/day | duration grid | Momentum v2, all on (M9.5) | 21.19% | 28.42% | +7.23 | 11 | 1 | mostly everything since 2026-09-28 (engine to 2026-09-28 +2.64, everything since 2026-09-28 +4.59 pp) |
 | Six-year | ₹1 crore/day | duration grid | M10.7 @ quarterly / 126-session hold | 14.29% | 27.70% | +13.41 | 12 | 7 | engine + lake, not separable on this window (no intermediate run) |
-| Six-year | ₹1 crore/day | duration grid | Naive momentum (M4.10) | 16.58% | 28.87% | +12.29 | 13 | 13 | mostly floor-only universe (engine to 2026-09-28 -0.78, lake #74/#75, engine since, cash interest +4.20, floor-only universe +8.88 pp) |
-| Six-year | ₹10 crore/day | M12.2 sweep | Swing composite (M10.7) | 21.08% | 27.10% | +6.02 | 1 | 3 | mostly floor-only universe (engine to 2026-09-28 +1.65, lake #74/#75, engine since, cash interest +1.99, floor-only universe +2.38 pp) |
-| Six-year | ₹10 crore/day | M12.2 sweep | M10.7 + 1-month trend | 18.49% | 24.13% | +5.64 | 2 | 4 | mostly floor-only universe (engine to 2026-09-28 +1.83, lake #74/#75, engine since, cash interest -1.43, floor-only universe +5.25 pp) |
-| Six-year | ₹10 crore/day | M12.2 sweep | M10.7 + regime gate | 15.36% | 21.66% | +6.30 | 3 | 6 | mostly floor-only universe (engine to 2026-09-28 +3.10, lake #74/#75, engine since, cash interest -2.20, floor-only universe +5.40 pp) |
+| Six-year | ₹1 crore/day | duration grid | Naive momentum (M4.10) | 16.58% | 28.87% | +12.29 | 13 | 13 | mostly everything since 2026-09-28 (engine to 2026-09-28 -0.78, everything since 2026-09-28 +13.08 pp) |
+| Six-year | ₹10 crore/day | M12.2 sweep | Swing composite (M10.7) | 21.08% | 27.10% | +6.02 | 1 | 3 | mostly everything since 2026-09-28 (engine to 2026-09-28 +1.65, everything since 2026-09-28 +4.37 pp) |
+| Six-year | ₹10 crore/day | M12.2 sweep | M10.7 + 1-month trend | 18.49% | 24.13% | +5.64 | 2 | 4 | mostly everything since 2026-09-28 (engine to 2026-09-28 +1.83, everything since 2026-09-28 +3.82 pp) |
+| Six-year | ₹10 crore/day | M12.2 sweep | M10.7 + regime gate | 15.36% | 21.66% | +6.30 | 3 | 6 | mostly everything since 2026-09-28 (engine to 2026-09-28 +3.10, everything since 2026-09-28 +3.20 pp) |
 | Six-year | ₹10 crore/day | M12.2 sweep | M10.7 + delivery acceleration | 18.41% | 24.66% | +6.25 | 4 | 7 | mostly everything since 2026-09-28 (engine to 2026-09-28 +2.63, everything since 2026-09-28 +3.62 pp) |
-| Six-year | ₹10 crore/day | M12.2 sweep | Momentum v2, all on (M9.5) | 22.19% | 30.21% | +8.02 | 5 | 1 | mostly floor-only universe (engine to 2026-09-28 +3.69, lake #74/#75, engine since, cash interest -2.44, floor-only universe +6.77 pp) |
+| Six-year | ₹10 crore/day | M12.2 sweep | Momentum v2, all on (M9.5) | 22.19% | 30.21% | +8.02 | 5 | 1 | mostly everything since 2026-09-28 (engine to 2026-09-28 +3.69, everything since 2026-09-28 +4.33 pp) |
 | Six-year | ₹10 crore/day | M12.2 sweep | Mean proximity (50d) | 15.05% | 21.14% | +6.09 | 6 | 9 | mostly engine to 2026-09-28 (engine to 2026-09-28 +3.37, everything since 2026-09-28 +2.72 pp) |
 | Six-year | ₹10 crore/day | M12.2 sweep | Trend: 1-month | 13.50% | 16.44% | +2.94 | 7 | 13 | mostly engine to 2026-09-28 (engine to 2026-09-28 +1.77, everything since 2026-09-28 +1.17 pp) |
 | Six-year | ₹10 crore/day | M12.2 sweep | Short composite + regime + low-vol | 7.16% | 9.62% | +2.46 | 8 | 17 | mostly engine to 2026-09-28 (engine to 2026-09-28 +3.50, everything since 2026-09-28 -1.04 pp) |
-| Six-year | ₹10 crore/day | M12.2 sweep | Naive momentum (M4.10) | 18.44% | 26.24% | +7.80 | 9 | 8 | mostly lake #74/#75, engine since, cash interest (engine to 2026-09-28 +1.55, lake #74/#75, engine since, cash interest +3.16, floor-only universe +3.09 pp) |
+| Six-year | ₹10 crore/day | M12.2 sweep | Naive momentum (M4.10) | 18.44% | 26.24% | +7.80 | 9 | 8 | mostly everything since 2026-09-28 (engine to 2026-09-28 +1.55, everything since 2026-09-28 +6.25 pp) |
 | Six-year | ₹10 crore/day | M12.2 sweep | Short composite + reversal | 12.34% | 18.63% | +6.29 | 10 | 11 | mostly everything since 2026-09-28 (engine to 2026-09-28 +1.70, everything since 2026-09-28 +4.59 pp) |
 | Six-year | ₹10 crore/day | M12.2 sweep | Short composite, top-10 + regime | 7.25% | 17.83% | +10.58 | 11 | 2 | mostly everything since 2026-09-28 (engine to 2026-09-28 +5.00, everything since 2026-09-28 +5.59 pp) |
 | Six-year | ₹10 crore/day | M12.2 sweep | Short composite + regime gate | 6.85% | 16.55% | +9.70 | 12 | 5 | mostly everything since 2026-09-28 (engine to 2026-09-28 +2.79, everything since 2026-09-28 +6.91 pp) |
@@ -614,16 +651,16 @@ Every arm whose XIRR moved by more than 0.5 pp, or whose rank changed, against t
 | Six-year | ₹10 crore/day | duration grid | M10.7 @ fortnightly / 42-session hold | 22.78% | 26.65% | +3.87 | 1 | 2 | engine + lake, not separable on this window (no intermediate run) |
 | Six-year | ₹10 crore/day | duration grid | M10.7, band 5x top_n | 22.25% | 27.16% | +4.91 | 2 | 3 | engine + lake, not separable on this window (no intermediate run) |
 | Six-year | ₹10 crore/day | duration grid | M10.7 @ fortnightly / 21-session hold | 20.70% | 25.14% | +4.44 | 3 | 4 | engine + lake, not separable on this window (no intermediate run) |
-| Six-year | ₹10 crore/day | duration grid | Swing composite (M10.7) | 21.08% | 27.10% | +6.02 | 4 | 5 | mostly floor-only universe (engine to 2026-09-28 +1.65, lake #74/#75, engine since, cash interest +1.99, floor-only universe +2.38 pp) |
+| Six-year | ₹10 crore/day | duration grid | Swing composite (M10.7) | 21.08% | 27.10% | +6.02 | 4 | 5 | mostly everything since 2026-09-28 (engine to 2026-09-28 +1.65, everything since 2026-09-28 +4.37 pp) |
 | Six-year | ₹10 crore/day | duration grid | M10.7, band 1.5x top_n | 18.68% | 24.48% | +5.80 | 5 | 6 | engine + lake, not separable on this window (no intermediate run) |
-| Six-year | ₹10 crore/day | duration grid | Momentum v2, all on (M9.5) | 22.19% | 30.21% | +8.02 | 6 | 1 | mostly floor-only universe (engine to 2026-09-28 +3.69, lake #74/#75, engine since, cash interest -2.44, floor-only universe +6.77 pp) |
+| Six-year | ₹10 crore/day | duration grid | Momentum v2, all on (M9.5) | 22.19% | 30.21% | +8.02 | 6 | 1 | mostly everything since 2026-09-28 (engine to 2026-09-28 +3.69, everything since 2026-09-28 +4.33 pp) |
 | Six-year | ₹10 crore/day | duration grid | M10.7 @ weekly / 10-session hold, 2-session floor | 19.06% | 23.52% | +4.46 | 7 | 11 | engine + lake, not separable on this window (no intermediate run) |
 | Six-year | ₹10 crore/day | duration grid | M10.7 @ monthly / 126-session hold | 16.67% | 22.61% | +5.94 | 8 | 8 | engine + lake, not separable on this window (no intermediate run) |
 | Six-year | ₹10 crore/day | duration grid | M10.7 @ weekly / 21-session hold | 19.32% | 24.55% | +5.23 | 9 | 10 | engine + lake, not separable on this window (no intermediate run) |
 | Six-year | ₹10 crore/day | duration grid | M10.7 @ weekly / 10-session hold | 18.41% | 23.30% | +4.89 | 10 | 13 | engine + lake, not separable on this window (no intermediate run) |
 | Six-year | ₹10 crore/day | duration grid | M10.7 @ monthly / 63-session hold | 15.50% | 23.19% | +7.69 | 11 | 7 | engine + lake, not separable on this window (no intermediate run) |
 | Six-year | ₹10 crore/day | duration grid | M10.7 @ quarterly / 126-session hold | 14.26% | 19.60% | +5.34 | 12 | 9 | engine + lake, not separable on this window (no intermediate run) |
-| Six-year | ₹10 crore/day | duration grid | Naive momentum (M4.10) | 18.44% | 26.24% | +7.80 | 13 | 12 | mostly lake #74/#75, engine since, cash interest (engine to 2026-09-28 +1.55, lake #74/#75, engine since, cash interest +3.16, floor-only universe +3.09 pp) |
+| Six-year | ₹10 crore/day | duration grid | Naive momentum (M4.10) | 18.44% | 26.24% | +7.80 | 13 | 12 | mostly everything since 2026-09-28 (engine to 2026-09-28 +1.55, everything since 2026-09-28 +6.25 pp) |
 | Walk-forward selection | ₹1 crore/day | M12.2 sweep | M10.7 + regime gate | — | 23.32% | — | 1 | 3 | rank only (the old report printed no XIRR for this window) |
 | Walk-forward selection | ₹1 crore/day | M12.2 sweep | Swing composite (M10.7) | — | 27.21% | — | 2 | 4 | rank only (the old report printed no XIRR for this window) |
 | Walk-forward selection | ₹1 crore/day | M12.2 sweep | M10.7 + delivery acceleration | — | 26.96% | — | 3 | 2 | rank only (the old report printed no XIRR for this window) |
@@ -721,7 +758,7 @@ Every arm whose XIRR moved by more than 0.5 pp, or whose rank changed, against t
 
 ## Universe check: the PIT NIFTY 500 screen the paper book trades
 
-Every table above screens the floor-only universe (see *How this run was made*). The paper book screens the PIT NIFTY 500, whose membership history opens 2016-10-24, so the headline arms were also run on it over the two windows it covers — today's engine and lake, the same switches, only the universe changed. Ranks are within these arms only.
+Every table above screens the floor-only universe (see *How this run was made*). The paper book screens the PIT NIFTY 500, whose membership history opens 2016-10-24, so the headline arms were also run on it over the two windows it covers — today's engine and lake, the same switches, only the universe changed. Ranks are within these arms only. It is a separate measurement of the universe, not a rung of the attribution in *What moved*: every run there screens the floor-only universe.
 
 | Window | Floor | Strategy | Floor-only XIRR / DD (ratio) | NIFTY 500 XIRR / DD (ratio) | NIFTY 500 rank | Δ XIRR pp (floor-only minus NIFTY 500) |
 | --- | --- | --- | --- | --- | --- | --- |
