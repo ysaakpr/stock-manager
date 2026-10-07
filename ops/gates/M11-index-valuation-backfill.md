@@ -325,7 +325,7 @@ Operating notes:
   old or new, never half-written, and a second run converges to the same bytes.
 - **`--to` must cover every captured session.** Only sessions inside `--from .. --to` are rewritten.
   A session captured after `--to` keeps its old `series_id`s, and a renamed index then reads as two
-  series again from that date. Set `--to` to the last session in L0 (`ls data/L0/nse_index_close_snapshot`),
+  series again from that date. Set `--to` to the last session in L0 (`ls data/L0/nse_index_close_snapshot/*/* | tail -1`),
   not to a fixed date copied from this note, if later sessions have been captured since.
 - **`--stop-before` does not apply.** The offline modes hold no lease and make no request, so there
   is no evening window to leave. Passing `--stop-before` with `--rederive` or `--unknown-names` is
