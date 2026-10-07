@@ -111,7 +111,9 @@ WINDOWS: dict[str, tuple[date, date]] = {
 
 #: Work units, mandate first; ``long`` only on request. The walk-forward is one unit so the
 #: selection sweep finishes, and its winner is frozen, before the verification sweep starts.
-UNITS: tuple[str, ...] = (WALK_FORWARD, "decade", "six-year", LONG)
+#: ``wf-verification`` alone is for an attribution run on a universe whose history cannot reach
+#: the selection window; it makes no choice.
+UNITS: tuple[str, ...] = (WALK_FORWARD, "decade", "six-year", LONG, "wf-verification")
 _DEFAULT_UNITS: tuple[str, ...] = (WALK_FORWARD, "decade", "six-year")
 
 
