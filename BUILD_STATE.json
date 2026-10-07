@@ -405,35 +405,50 @@
     },
     "M13.1": {
       "attempts": 1,
+      "external_since": "2026-10-07T02:19:42+00:00",
       "first_started": "2026-10-06T13:40:25+00:00",
       "last_started": "2026-10-06T13:40:25+00:00",
-      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "polly worker",
+      "previous_state": "EXTERNAL",
+      "reason": "verify failed with exit 1",
+      "state": "EXTERNAL",
+      "verify_output": "$ uv run pytest tests/unit/test_scheduler_registry.py tests/unit/test_paper_session_job.py -q\n(exit 1)\n.......................................................F................ [100%]\n=================================== FAILURES ===================================\n___________ test_the_job_is_disabled_by_default_and_touches_nothing ____________\n\nmonkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0xfac621b6be90>\n\n    def test_the_job_is_disabled_by_default_and_touches_nothing(\n        monkeypatch: pytest.MonkeyPatch,\n    ) -> None:\n        \"\"\"B2: no same-evening TRI for the regime filter yet, so the flag defaults off.\"\"\"\n        world, store, journal = FixtureWorld(), InMemoryPaperSessionStore(), RecordingJournal()\n        install_job_seams(monkeypatch.setattr, world=world, store=store, journal=journal)\n    \n>       assert Settings().paper_session_enabled is False\nE       AssertionError: assert True is False\nE        +  where True = Settings(app_env=<AppEnv.DEV: 'dev'>, log_level=<LogLevel.INFO: 'INFO'>, log_format=<LogFormat.AUTO: 'auto'>, timezone..._telegram_bot_token=None, alert_telegram_chat_id=None, anthropic_api_key=None, kite_api_key=None, kite_api_secret=None).paper_session_enabled\nE        +    where Settings(app_env=<AppEnv.DEV: 'dev'>, log_level=<LogLevel.INFO: 'INFO'>, log_format=<LogFormat.AUTO: 'auto'>, timezone..._telegram_bot_token=None, alert_telegram_chat_id=None, anthropic_api_key=None, kite_api_key=None, kite_api_secret=None) = Settings()\n\ntests/unit/test_paper_session_job.py:684: AssertionError\n=========================== short test summary info ============================\nFAILED tests/unit/test_paper_session_job.py::test_the_job_is_disabled_by_default_and_touches_nothing"
     },
     "M13.2": {
       "attempts": 1,
+      "commit": "f825db8",
+      "external_since": "2026-10-07T02:19:43+00:00",
+      "finished": "2026-10-07T02:20:05+00:00",
       "first_started": "2026-10-06T13:40:26+00:00",
       "last_started": "2026-10-06T13:40:26+00:00",
-      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "polly worker",
+      "previous_state": "EXTERNAL",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_alerts.py tests/unit/test_alert_triggers.py -q\n(exit 0)\n.......................................................................  [100%]\n\n$ uv run ruff format --check dataplatform/alerts.py tests/unit/test_alert_triggers.py tests/unit/test_alerts.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check dataplatform/alerts.py tests/unit/test_alert_triggers.py tests/unit/test_alerts.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/alerts.py tests/unit/test_alert_triggers.py tests/unit/test_alerts.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
     "M13.3": {
       "attempts": 1,
+      "commit": "f825db8",
+      "external_since": "2026-10-07T02:19:43+00:00",
+      "finished": "2026-10-07T02:20:07+00:00",
       "first_started": "2026-10-06T13:40:26+00:00",
       "last_started": "2026-10-06T13:40:26+00:00",
-      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "polly worker",
+      "previous_state": "EXTERNAL",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_shareholding.py -q\n(exit 0)\n........................................                                 [100%]\n\n$ uv run ruff format --check dataplatform/ingest/shareholding.py tests/unit/test_shareholding.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/shareholding.py tests/unit/test_shareholding.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/shareholding.py tests/unit/test_shareholding.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     },
     "M13.4": {
       "attempts": 1,
+      "commit": "f825db8",
+      "external_since": "2026-10-07T02:19:43+00:00",
+      "finished": "2026-10-07T02:20:10+00:00",
       "first_started": "2026-10-06T13:40:27+00:00",
       "last_started": "2026-10-06T13:40:27+00:00",
-      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "polly worker",
+      "previous_state": "EXTERNAL",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_manual_actions.py tests/unit/test_ex_marker_witness.py tests/unit/test_l2_continuity.py -q\n(exit 0)\n........................................................................ [ 77%]\n.....................                                                    [100%]\n\n$ uv run ruff format --check tests/unit/test_ex_marker_witness.py tests/unit/test_manual_actions.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check tests/unit/test_ex_marker_witness.py tests/unit/test_manual_actions.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy tests/unit/test_ex_marker_witness.py tests/unit/test_manual_actions.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     },
     "M2.1": {
       "attempts": 1,
@@ -1186,7 +1201,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-10-06T15:45:28+00:00",
+  "updated_at": "2026-10-07T02:20:10+00:00",
   "version": 1,
   "wave": 1
 }
