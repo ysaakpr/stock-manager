@@ -16,9 +16,11 @@ from typing import Any, Final
 
 import pytest
 
+from dataplatform.ingest import index_changes
 from dataplatform.ingest.index_changes import (
     ChangeAction,
     IndexChangeEvent,
+    _is_heading,
     canonical_index_slug,
     is_membership_candidate,
     parse_date_phrase,
@@ -293,6 +295,105 @@ def test_columns_printed_apart_are_unparsed_never_dropped(repo_root: Path) -> No
     }
     unread = {canonical_index_slug(problem.split(":")[0]) for problem in parsed.unparsed}
     assert unread == set(parsed.tracked_sections)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "1. Alembic Chemical Works Co. Ltd.",  # a numbered company row, ind_prs18082010
+        "1. Merger of Aditya Birla Nuvo Limited (ABNL) with Grasim Industries Ltd.",  # 27042017
+        "1. Sundaram Finance Ltd.: On account of proposed scheme of arrangement for demerger",
+        "2. The changes shall be effective from April 1, 2016",
+        "2. Shilpi Cable Tech Ltd.: On account of shifting of company to BZ series.",
+    ],
+)
+def test_a_numbered_row_or_sentence_is_not_a_section_heading(line: str) -> None:
+    assert _is_heading(line) is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["1. Nifty 500 Index", "1. CNX 200 index:", "2. Nifty Metal Index", "1) Nifty Next 50"],
+)
+def test_a_numbered_index_name_is_a_section_heading(line: str) -> None:
+    assert _is_heading(line) is not None
+
+
+def _parse_lines(monkeypatch: pytest.MonkeyPatch, lines: list[str]) -> Any:
+    """Run the body walk over hand-written text-layer lines (the PDF read is stubbed out)."""
+    monkeypatch.setattr(index_changes, "_pdf_lines", lambda payload, *, filename: list(lines))
+    return parse_press_release_pdf(
+        b"%PDF", filename="ind_prs01032016.pdf", announced=date(2016, 3, 1)
+    )
+
+
+def test_a_numbered_sentence_inside_a_tracked_section_does_not_close_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Taken for a heading, the "1. Sundaram …" line would end NIFTY 500 before its inclusions."""
+    parsed = _parse_lines(
+        monkeypatch,
+        [
+            "These changes shall become effective from April 1, 2016 (close of March 31, 2016).",
+            "1) NIFTY 500",
+            "The following company is being excluded:",
+            "Sr. No. Company Name Symbol",
+            "1 Sundaram Finance Ltd. SUNDARMFIN",
+            "1. Sundaram Finance Ltd.: On account of proposed scheme of arrangement for demerger",
+            "The following company is being included:",
+            "Sr. No. Company Name Symbol",
+            "1 Alembic Ltd. ALEMBICLTD",
+        ],
+    )
+    assert parsed.unparsed == ()
+    eff = date(2016, 4, 1)
+    assert _facts(parsed.events) == {
+        ("nifty500", "exclude", "SUNDARMFIN", eff),
+        ("nifty500", "include", "ALEMBICLTD", eff),
+    }
+
+
+def test_a_date_first_intro_leaves_its_sections_undated_not_shifted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Made up: each date precedes the index it governs. Paired "indices then date", NIFTY 500
+    would take the *next* clause's March 31 — the lookahead this guards against."""
+    parsed = _parse_lines(
+        monkeypatch,
+        [
+            "Effective from April 1, 2016, the changes in NIFTY 500 index are as under;",
+            "effective from March 31, 2016, the changes in NIFTY 50 index are as under.",
+            "1) NIFTY 500",
+            "The following company is being excluded:",
+            "Sr. No. Company Name Symbol",
+            "1 ABC Ltd. ABC",
+            "2) NIFTY 50",
+            "The following company is being included:",
+            "Sr. No. Company Name Symbol",
+            "1 XYZ Ltd. XYZ",
+        ],
+    )
+    assert parsed.events == ()
+    unread = {canonical_index_slug(problem.split(":")[0]) for problem in parsed.unparsed}
+    assert unread == {"nifty500", "nifty50"}
+
+
+def test_a_row_without_a_symbol_makes_its_section_unparsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-2011 tables print names only (ind_prs24022010): no half-read, symbol-less events."""
+    parsed = _parse_lines(
+        monkeypatch,
+        [
+            "These changes shall become effective from April 8, 2010.",
+            "1) S&P CNX 500 Index",
+            "The following companies are being excluded:",
+            "Sr. No. Company Name",
+            "1 Cadila Healthcare Ltd.",
+        ],
+    )
+    assert parsed.events == ()
+    assert parsed.unparsed and "without a symbol" in parsed.unparsed[0]
 
 
 def test_an_image_only_release_fails_loud(repo_root: Path) -> None:

@@ -17,14 +17,18 @@ Pure and offline: histories are built from hand-set anchors and events, written 
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 import pytest
 
+from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import ListingStatus
+from dataplatform.ingest import index_history
 from dataplatform.ingest.index_changes import (
+    PRESS_RELEASE_SOURCE_ID,
+    TRACKED_INDICES,
     ChangeAction,
     IndexChangeEvent,
     PressRelease,
@@ -42,18 +46,26 @@ from dataplatform.ingest.index_history import (
     _bounding_sections,
     _first_named,
     _supersede,
+    build_membership_history,
     members_asof,
     read_membership_history,
     reconstruct_index,
     write_membership_history,
 )
-from dataplatform.ingest.indices import ConstituentRow, ConstituentSnapshot, write_constituents_l1
+from dataplatform.ingest.indices import (
+    CONSTITUENTS_SOURCE_ID,
+    ConstituentRow,
+    ConstituentSnapshot,
+    l0_constituents_filename,
+    write_constituents_l1,
+)
 from dataplatform.query.universe import (
     InMemoryListingCalendar,
     ListingWindow,
     index_membership_asof,
     pit_universe,
 )
+from dataplatform.store.l0 import L0Store
 
 A: Final = "INE002A01018"
 B: Final = "INE237A01028"
@@ -320,6 +332,56 @@ def test_an_index_is_never_walked_back_past_the_first_release_naming_it() -> Non
         "niftysmallcap250": (date(2016, 4, 22), "ind_prs22042016.pdf"),
         "nifty500": (date(2012, 3, 7), "ind_prs07032012.pdf"),
     }
+
+
+def test_the_build_floors_each_index_at_its_first_naming_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End to end through `build_membership_history`, offline: L0 holds a listing, seven anchors
+    and two releases. The 2012 one names only NIFTY 50; Smallcap 250 is first named in 2016. With
+    no floor the walk would carry Smallcap 250 back to 2012 like everything else."""
+    as_of = date(2016, 12, 30)
+    l0 = L0Store(clock=FrozenClock(as_of), data_root=tmp_path)
+    old, new = ("ind_prs07032012.pdf", date(2012, 3, 7)), ("ind_prs22042016.pdf", date(2016, 4, 22))
+    items = "".join(
+        f'<div class="pressItem" data-date="{d:%b %d, %Y}" hidden="true">\n<p>{d:%b %d, %Y}</p>\n'
+        f"<a href='/Press_Release/{name}' target=\"_blank\">Change in Indices</a>\n</div>\n"
+        for name, d in (new, old)
+    )
+    l0.put(
+        PRESS_RELEASE_SOURCE_ID, as_of, f"press_release_listing_{as_of:%Y%m%d}.html", items.encode()
+    )
+    for name, d in (old, new):
+        l0.put(PRESS_RELEASE_SOURCE_ID, d, name, b"%PDF stub")
+    for slug in TRACKED_INDICES:
+        l0.put(CONSTITUENTS_SOURCE_ID, as_of, l0_constituents_filename(slug, as_of), b"stub")
+
+    def parse(store: Any, ref: Any, release: PressRelease) -> PressReleaseParse:
+        slug = "nifty50" if ref.filename == old[0] else "niftysmallcap250"
+        return PressReleaseParse(
+            release=ref.filename, announced=release.announced, events=(), tracked_sections=(slug,)
+        )
+
+    def anchor(store: Any, ref: Any, *, index_slug: str, index_name: str, as_of: date) -> Any:
+        return _anchor((A, B, C), as_of=as_of, slug=index_slug)
+
+    monkeypatch.setattr(index_history, "parse_press_release_l0", parse)
+    monkeypatch.setattr(index_history, "parse_constituents_l0", anchor)
+    build = build_membership_history(
+        l0=l0,
+        as_of=as_of,
+        data_root=tmp_path,
+        evidence=SymbolEvidence([], first_sessions=dict.fromkeys((A, B, C), date(2000, 1, 3))),
+        reissues=(),
+        transcriptions={},
+    )
+    assert build.histories["nifty50"].coverage_start == old[1]
+    smallcap = build.histories["niftysmallcap250"]
+    assert smallcap.coverage_start == new[1]
+    assert smallcap.members_on(new[1] - timedelta(days=1)) is None
+    assert [r.release for r in smallcap.residuals if r.kind is ResidualKind.BEFORE_FIRST_NAMED] == [
+        new[0]
+    ]
 
 
 # ── L1: write once, read back ──────────────────────────────────────────────────────────────────

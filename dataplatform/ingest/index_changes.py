@@ -550,6 +550,11 @@ def parse_press_release_pdf(
         if not name:
             section_problem = section_problem or f"row without a company name: {body!r}"
             return
+        if symbol is None:
+            # Pre-2011 tables print no symbol (ind_prs24022010): a name alone cannot be placed at
+            # an ISIN, so the section is unread rather than half-read into symbol-less events.
+            section_problem = section_problem or f"row without a symbol: {body!r}"
+            return
         if effective is None:
             section_undated.append((action, name, symbol))
             return
@@ -771,11 +776,28 @@ def _stated_effective_dates(lines: list[str]) -> set[date]:
 
 
 def _is_heading(line: str) -> re.Match[str] | None:
-    """A section heading the body walk opens a section on (not an action line, not a data row)."""
+    """A section heading the body walk opens a section on (not an action line, not a data row).
+
+    A full-stop heading ("1. Nifty 500 Index") must name an index: the same shape numbers company
+    rows ("1. Alembic Chemical Works Co. Ltd.", ind_prs18082010) and prose ("1. Merger of Aditya
+    Birla Nuvo …", ind_prs27042017; "2. The changes shall be effective from …"), and taken for a
+    heading such a line would close a tracked section after part of its rows.
+    """
     heading = _HEADING.match(line)
     if heading is None or _ACTION.search(line) or _ROW_LOOKS_LIKE_DATA(line):
         return None
+    if heading.group("dotnum") is not None and not _names_an_index(heading.group("name")):
+        return None
     return heading
+
+
+def _names_an_index(name: str) -> bool:
+    """A heading name that is a tracked index, or reads as one: it starts with "Nifty"/"CNX"/
+    "S&P CNX" or ends with "index"/"indices" — not prose that mentions an index mid-sentence."""
+    return canonical_index_slug(name) is not None or bool(
+        re.match(r"(?:s&p\s+)?(?:cnx|nifty)", name, re.I)
+        or re.search(r"\bind(?:ex|ices)\s*:?\s*$", name, re.I)
+    )
 
 
 #: A tracked index named in running prose: the alias, then a list separator, "index"/"indices"
@@ -786,6 +808,14 @@ _PROSE_INDEX: Final = re.compile(
     + "|".join(sorted((re.escape(a) for a in _INDEX_ALIASES), key=len, reverse=True))
     + r")(?=\s*(?:,|;|\band\b|\bindex\b|\bindices\b|$))"
 )
+
+
+def _prose_indices(text: str) -> set[str]:
+    """The tracked indices a stretch of running prose names (parentheticals dropped)."""
+    folded = html.unescape(text).lower()
+    folded = re.sub(r"\(.*?\)", " ", folded)
+    folded = " ".join(re.sub(r"[^a-z0-9&,; ]+", " ", folded).split())
+    return {_INDEX_ALIASES[found.group("alias")] for found in _PROSE_INDEX.finditer(folded)}
 
 
 def _intro_section_dates(lines: list[str]) -> dict[str, date | None] | None:
@@ -820,11 +850,15 @@ def _intro_section_dates(lines: list[str]) -> dict[str, date | None] | None:
         return None
     named: dict[str, set[date]] = defaultdict(set)
     for clause, stated in clauses:
-        folded = html.unescape(clause).lower()
-        folded = re.sub(r"\(.*?\)", " ", folded)
-        folded = " ".join(re.sub(r"[^a-z0-9&,; ]+", " ", folded).split())
-        for found in _PROSE_INDEX.finditer(folded):
-            named[_INDEX_ALIASES[found.group("alias")]].add(stated)
+        for slug in _prose_indices(clause):
+            named[slug].add(stated)
+    # The pairing reads "<indices> … effective from <date>". An intro that names an index after
+    # its last date ("Effective April 1, NIFTY 500 …; effective March 31, NIFTY 50 …") is written
+    # date first, and the pairing would hand each index the *next* clause's date. The order cannot
+    # be told apart reliably, so every index such an intro names is left undated (unparsed).
+    trailing = _prose_indices(text[start:])
+    if trailing:
+        return dict.fromkeys({*named, *trailing})
     if not named:
         # "On February 16 IISL had announced … effective from March 31 … rescheduled … effective
         # from March 16" (ind_prs07032017.pdf): a recounted date, and the indices are "listed
