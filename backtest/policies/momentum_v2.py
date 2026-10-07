@@ -79,11 +79,15 @@ __all__ = [
     "RegimeReading",
     "basket_volatility_annual",
     "inverse_vol_weights",
+    "regime_parked",
 ]
 
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
 _WEIGHT_QUANTUM = Decimal("0.00000001")
+
+#: The evidence label a regime-parking decision files its reading under (:func:`regime_parked`).
+_REGIME_LABEL: Final = "regime_index_vs_ma"
 
 
 @dataclass(frozen=True, slots=True)
@@ -416,7 +420,11 @@ class MomentumV2Policy:
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
 
     def _park(self, ctx: SessionContext, reading: RegimeReading) -> SessionDecision:
-        """Regime risk-off: sell the whole basket and hold cash (the liquid sleeve)."""
+        """Regime risk-off: sell the whole basket and hold cash (the liquid sleeve).
+
+        With nothing held the decision is a single HOLD of the parking sleeve carrying the reading,
+        so the journal row itself says why the book is in cash. It places no order either way.
+        """
         held = {holding.isin: holding for holding in ctx.broker.holdings()}
         sells: list[tuple[OrderRequest, str]] = []
         for isin in sorted(held):
@@ -430,6 +438,11 @@ class MomentumV2Policy:
             )
         orders = tuple(order for order, _ in sells)
         entries = tuple(self._park_entry(ctx, order, note) for order, note in sells)
+        if not entries:
+            # Nothing held, nothing to sell: the decision is still "risk-off, stay in cash", and
+            # the journal row says so itself rather than falling through to the engine's bare
+            # HEARTBEAT (invariant #9). A HOLD of the parking sleeve places no order.
+            entries = (self._regime_hold(ctx, reading),)
         evidence = EvidenceBundle(
             trading_date=ctx.session,
             actor=Actor.T0,
@@ -437,7 +450,7 @@ class MomentumV2Policy:
                 EvidenceItem(
                     kind=EvidenceKind.PRICE,
                     source="benchmark",
-                    label="regime_index_vs_ma",
+                    label=_REGIME_LABEL,
                     as_of=ctx.session,
                     value=reading.index_level,
                     detail={
@@ -730,6 +743,24 @@ class MomentumV2Policy:
             rationale=rationale,
         )
 
+    def _regime_hold(self, ctx: SessionContext, reading: RegimeReading) -> JournalEntry:
+        """A HOLD of the parking sleeve for a risk-off rebalance that had nothing to sell."""
+        return JournalEntry(
+            ts=ctx.clock.now(),
+            trading_date=ctx.session,
+            actor=Actor.T0,
+            decision=Decision.HOLD,
+            sleeve=self._params.parking_sleeve,
+            rationale="regime risk-off; holding cash",
+            payload={
+                "regime": "risk_off",
+                "index_level": str(reading.index_level),
+                "moving_average": str(reading.moving_average),
+                "ma_days": str(self._params.regime_ma_days),
+                "risk_on": "false",
+            },
+        )
+
     def _evidence(
         self,
         session: date,
@@ -868,3 +899,16 @@ def inverse_vol_weights(volatilities: Mapping[str, Decimal]) -> dict[str, Decima
     # The last name absorbs the residue so the weights sum to exactly 1.
     weights[isins[-1]] = _ONE - running
     return weights
+
+
+def regime_parked(evidence: EvidenceBundle) -> bool:
+    """Whether ``evidence`` is a rebalance the regime filter parked in cash (risk-off).
+
+    Reads the bundle the policy decided on, so a caller that only holds the evidence — the paper
+    session's record — can say why the book is in cash without re-reading the regime. Never infers
+    risk-off from the absence of orders: a risk-on rebalance can also place none.
+    """
+    return any(
+        item.label == _REGIME_LABEL and item.detail.get("risk_on") == "false"
+        for item in evidence.items
+    )
