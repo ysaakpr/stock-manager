@@ -302,14 +302,20 @@ def parse_index_valuation(
 
     facts: list[MacroFact] = []
     session: date | None = None
+    named = _filename_session(filename)
+    month_first = False
     indices = 0
     for line_no, record in enumerate(reader, start=2):
         published = (record.get(fields[_COL_NAME]) or "").strip()
         if not published:
             continue  # a trailing blank line is not a row
-        row_date = _session_date(
-            (record.get(fields[_COL_DATE]) or "").strip(), line=line_no, filename=filename
+        row_date, swapped = _session_date(
+            (record.get(fields[_COL_DATE]) or "").strip(),
+            named=named,
+            line=line_no,
+            filename=filename,
         )
+        month_first = month_first or swapped
         if session is None:
             session = row_date
         elif row_date != session:
@@ -357,6 +363,15 @@ def parse_index_valuation(
     if session is None or not facts:
         raise ParseError("no index rows in close-all snapshot", filename=filename)
 
+    if month_first:
+        _LOG.warning(
+            "macro.index_valuation_month_first",
+            source=source,
+            filename=filename,
+            session=session.isoformat(),
+            reason="Index Date written MM-DD-YYYY; read month-first because only that reading "
+            "names the session in the filename",
+        )
     _LOG.info(
         "macro.index_valuation_parsed",
         source=source,
@@ -437,25 +452,65 @@ def _decode(payload: bytes, *, filename: str) -> str:
     return text
 
 
-def _session_date(raw: str, *, line: int, filename: str) -> date:
-    """`DD-MM-YYYY` as published, or `DD/MM/YYYY` — the one date era the archive has.
+def _filename_session(filename: str) -> date | None:
+    """The session an archive filename names (`ind_close_all_<DDMMYYYY>.csv`), else `None`.
+
+    The filename is the one date the archive writes in a fixed order: it is the URL the session
+    was requested by, built from the trading calendar, never from the file's contents.
+    """
+    match = _SNAPSHOT_FILE.match(Path(filename).name)
+    if match is None:
+        return None
+    day, month, year = (int(group) for group in match.groups())
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _session_date(raw: str, *, named: date | None, line: int, filename: str) -> tuple[date, bool]:
+    """`DD-MM-YYYY` as published, or `DD/MM/YYYY`; month-first only when the filename settles it.
+
+    Returns the date and whether it was read month-first.
 
     Measured over the M11.2 backfill: files from (at least) 2014-06-26 to 2015-04 write the date
     with slashes; every other session uses hyphens. The field order is day-month-year in both — a
     26/06/2014 settles it, and the backfill also checks every file's date against the session it was
     requested for. Any other shape is a format change, not a date to guess at.
+
+    The one exception (M14.2): the 2023-04-06, -10 and -11 files write `04-06-2023`, `04-10-2023`
+    and `04-11-2023` — month-first, between day-first neighbours. The date is read month-first only
+    when all three hold: the filename names a session (`named`), the day-first reading is not that
+    session, and the month-first reading is exactly it. Then the two readings differ and only one of
+    them agrees with the date the file was requested under, so nothing is guessed. In every other
+    case the day-first reading stands, and a file it dates to another session is still refused by
+    the caller — a field order is never swapped to make a mismatch go away.
     """
     separator = "/" if "/" in raw else "-"
     parts = raw.split(separator)
     if len(parts) != 3:
         raise ParseError(f"{_COL_DATE} {raw!r} is not DD-MM-YYYY", filename=filename, line=line)
     try:
-        day, month, year = (int(part) for part in parts)
-        return date(year, month, day)
+        first, second, year = (int(part) for part in parts)
     except ValueError as exc:
         raise ParseError(
             f"{_COL_DATE} {raw!r} is not a real date: {exc}", filename=filename, line=line
         ) from exc
+    day_first = _real_date(year, second, first)
+    if day_first is not None and (named is None or day_first == named):
+        return day_first, False
+    if named is not None and _real_date(year, first, second) == named:
+        return named, True
+    if day_first is None:
+        raise ParseError(f"{_COL_DATE} {raw!r} is not a real date", filename=filename, line=line)
+    return day_first, False
+
+
+def _real_date(year: int, month: int, day: int) -> date | None:
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
 
 
 def _optional_decimal(raw: str, *, column: str, line: int, filename: str) -> Decimal | None:
