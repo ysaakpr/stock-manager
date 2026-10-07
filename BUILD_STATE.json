@@ -405,35 +405,52 @@
     },
     "M13.1": {
       "attempts": 1,
+      "commit": "e4b73c3",
+      "external_since": "2026-10-07T02:19:42+00:00",
+      "finished": "2026-10-07T02:45:56+00:00",
       "first_started": "2026-10-06T13:40:25+00:00",
       "last_started": "2026-10-06T13:40:25+00:00",
-      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "polly worker",
+      "previous_state": "EXTERNAL",
+      "reason": "verify failed with exit 1",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_scheduler_registry.py tests/unit/test_paper_session_job.py -q\n(exit 0)\n........................................................................ [100%]\n\n$ uv run ruff format --check dataplatform/scheduler/registry.py tests/unit/test_paper_session_job.py tests/unit/test_scheduler_registry.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check dataplatform/scheduler/registry.py tests/unit/test_paper_session_job.py tests/unit/test_scheduler_registry.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/scheduler/registry.py tests/unit/test_paper_session_job.py tests/unit/test_scheduler_registry.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
     "M13.2": {
       "attempts": 1,
+      "commit": "f825db8",
+      "external_since": "2026-10-07T02:19:43+00:00",
+      "finished": "2026-10-07T02:20:05+00:00",
       "first_started": "2026-10-06T13:40:26+00:00",
       "last_started": "2026-10-06T13:40:26+00:00",
-      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "polly worker",
+      "previous_state": "EXTERNAL",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_alerts.py tests/unit/test_alert_triggers.py -q\n(exit 0)\n.......................................................................  [100%]\n\n$ uv run ruff format --check dataplatform/alerts.py tests/unit/test_alert_triggers.py tests/unit/test_alerts.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check dataplatform/alerts.py tests/unit/test_alert_triggers.py tests/unit/test_alerts.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/alerts.py tests/unit/test_alert_triggers.py tests/unit/test_alerts.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
     "M13.3": {
       "attempts": 1,
+      "commit": "f825db8",
+      "external_since": "2026-10-07T02:19:43+00:00",
+      "finished": "2026-10-07T02:20:07+00:00",
       "first_started": "2026-10-06T13:40:26+00:00",
       "last_started": "2026-10-06T13:40:26+00:00",
-      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "polly worker",
+      "previous_state": "EXTERNAL",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_shareholding.py -q\n(exit 0)\n........................................                                 [100%]\n\n$ uv run ruff format --check dataplatform/ingest/shareholding.py tests/unit/test_shareholding.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/shareholding.py tests/unit/test_shareholding.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/shareholding.py tests/unit/test_shareholding.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     },
     "M13.4": {
       "attempts": 1,
+      "commit": "f825db8",
+      "external_since": "2026-10-07T02:19:43+00:00",
+      "finished": "2026-10-07T02:20:10+00:00",
       "first_started": "2026-10-06T13:40:27+00:00",
       "last_started": "2026-10-06T13:40:27+00:00",
-      "note": "Being built in parallel by a polly worker in this run (2026-10-06); set by bookkeeping so status does not offer it as ready.",
-      "previous_state": "PENDING",
-      "state": "IN_PROGRESS"
+      "note": "polly worker",
+      "previous_state": "EXTERNAL",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_manual_actions.py tests/unit/test_ex_marker_witness.py tests/unit/test_l2_continuity.py -q\n(exit 0)\n........................................................................ [ 77%]\n.....................                                                    [100%]\n\n$ uv run ruff format --check tests/unit/test_ex_marker_witness.py tests/unit/test_manual_actions.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check tests/unit/test_ex_marker_witness.py tests/unit/test_manual_actions.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy tests/unit/test_ex_marker_witness.py tests/unit/test_manual_actions.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     },
     "M2.1": {
       "attempts": 1,
@@ -1186,7 +1203,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-10-06T15:45:28+00:00",
+  "updated_at": "2026-10-07T02:45:56+00:00",
   "version": 1,
   "wave": 1
 }
