@@ -229,6 +229,72 @@ def test_a_detached_layout_is_unparsed_not_misread(repo_root: Path) -> None:
     assert all("detached" in problem for problem in parsed.unparsed)
 
 
+def test_scrip_name_tables_are_read_not_taken_for_a_detached_layout(repo_root: Path) -> None:
+    """2016-10-17: "Sr. No. Scrip Name Symbol" tables — the DQ-5.1 gate's "detached layout".
+
+    Exact facts, actions included: an inclusion read as an exclusion (or the other way round)
+    fails here, and so does dropping the "Scrip Name" header (every section unparsed again).
+    """
+    parsed = _parse(repo_root, "2016_scrip_name", "ind_prs17102016.pdf", date(2016, 10, 17))
+    assert parsed.unparsed == ()
+    eff = date(2016, 11, 15)
+    assert _facts(parsed.events) == {
+        ("niftynext50", "exclude", "CAIRN", eff),
+        ("niftynext50", "include", "HAVELLS", eff),
+        ("nifty100", "exclude", "CAIRN", eff),
+        ("nifty100", "include", "HAVELLS", eff),
+        ("nifty200", "exclude", "CAIRN", eff),
+        ("nifty200", "include", "CROMPTON", eff),
+        ("nifty500", "exclude", "CAIRN", eff),
+        ("nifty500", "include", "CROMPTON", eff),
+        ("niftymidcap150", "exclude", "HAVELLS", eff),
+        ("niftymidcap150", "include", "CROMPTON", eff),
+    }
+
+
+def test_each_section_takes_the_date_its_own_intro_clause_gives(repo_root: Path) -> None:
+    """2015-01-23: CNX 200/500 change on Feb 2, Nifty Midcap 50 on Feb 23 — one sentence.
+
+    The nearest date stated before a section is Feb 23 for all of them; the tracked sections are
+    named in the Feb 2 clause. The sections are numbered "1." — unread before M14.1.
+    """
+    parsed = _parse(repo_root, "2015_dated_clauses", "ind_prs23012015.pdf", date(2015, 1, 23))
+    assert parsed.unparsed == ()
+    eff = date(2015, 2, 2)
+    assert _facts(parsed.events) == {
+        ("nifty200", "exclude", "ARVIND", eff),
+        ("nifty200", "include", "CRISIL", eff),
+        ("nifty500", "exclude", "ARVIND", eff),
+        ("nifty500", "include", "LAOPALA", eff),
+    }
+
+
+def test_parts_of_an_intro_dated_apart_date_their_own_sections(repo_root: Path) -> None:
+    """2016-10-17: part B is Oct 24, parts A and C Nov 15; every tracked section is part C."""
+    parsed = _parse(repo_root, "2016_scrip_name", "ind_prs17102016.pdf", date(2016, 10, 17))
+    assert {e.effective for e in parsed.events} == {date(2016, 11, 15)}
+
+
+def test_columns_printed_apart_are_unparsed_never_dropped(repo_root: Path) -> None:
+    """2014-02-27: the text layer prints table columns apart — the truly detached layout.
+
+    Before M14.1 the CNX Nifty and Junior sections vanished without a word, and the NIFTY 50 walk
+    crossed the 2014-03-28 change without applying it. A tracked section must yield events or say
+    why it did not.
+    """
+    parsed = _parse(repo_root, "2014_columns_apart", "ind_prs27022014.pdf", date(2014, 2, 27))
+    assert parsed.events == ()
+    assert set(parsed.tracked_sections) == {
+        "nifty50",
+        "niftynext50",
+        "nifty100",
+        "nifty200",
+        "nifty500",
+    }
+    unread = {canonical_index_slug(problem.split(":")[0]) for problem in parsed.unparsed}
+    assert unread == set(parsed.tracked_sections)
+
+
 def test_an_image_only_release_fails_loud(repo_root: Path) -> None:
     path = repo_root / FIXTURES / "2023_image_only/ind_prs19062023.pdf"
     with pytest.raises(ParseError, match="image-only"):

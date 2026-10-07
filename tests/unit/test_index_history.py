@@ -24,7 +24,12 @@ from typing import Final
 import pytest
 
 from dataplatform.identity.master import ListingStatus
-from dataplatform.ingest.index_changes import ChangeAction, IndexChangeEvent
+from dataplatform.ingest.index_changes import (
+    ChangeAction,
+    IndexChangeEvent,
+    PressRelease,
+    PressReleaseParse,
+)
 from dataplatform.ingest.index_history import (
     HistoryBuild,
     ImmutableHistoryError,
@@ -34,6 +39,8 @@ from dataplatform.ingest.index_history import (
     SymbolEvidence,
     _apply_revocations,
     _apply_voidings,
+    _bounding_sections,
+    _first_named,
     _supersede,
     members_asof,
     read_membership_history,
@@ -266,6 +273,53 @@ def test_the_march_2020_review_is_void_except_nifty_50() -> None:
     ]
     # Only once the voiding release itself is in L0.
     assert _apply_voidings([voided], []) == [voided]
+
+
+def test_an_unread_section_of_a_voided_release_bounds_nothing() -> None:
+    """ind_prs19032020's NIFTY 200 prose is unread — and void, so it may not cut NIFTY 200's depth.
+
+    The NIFTY 50 section of the same release survived the voiding, so an unread one would bound.
+    """
+    void = PressReleaseParse(
+        release="ind_prs19032020.pdf",
+        announced=date(2020, 3, 19),
+        events=(),
+        unparsed=(
+            "NIFTY 200: no change could be read from the section",
+            "NIFTY 50: no change could be read from the section",
+        ),
+    )
+    erratum = PressReleaseParse(
+        release="ind_prs13052020.pdf", announced=date(2020, 5, 13), events=()
+    )
+    bounding = _bounding_sections([void, erratum])
+    assert [(r, slug) for r, slug, _ in bounding] == [("ind_prs19032020.pdf", "nifty50")]
+    # Without the erratum in L0 nothing is void, and both sections bound their index.
+    assert {slug for _, slug, _ in _bounding_sections([void])} == {"nifty50", "nifty200"}
+
+
+def _named(release: str, announced: date, *sections: str) -> tuple[PressReleaseParse, PressRelease]:
+    return (
+        PressReleaseParse(
+            release=release, announced=announced, events=(), tracked_sections=sections
+        ),
+        PressRelease(announced=announced, filename=release, title="Change in Indices"),
+    )
+
+
+def test_an_index_is_never_walked_back_past_the_first_release_naming_it() -> None:
+    """Smallcap 250 is first named 2016-04-22: an index launched in 2016 has no 2012 history."""
+    pairs = [
+        _named("ind_prs12082016.pdf", date(2016, 8, 12), "niftymidcap150", "niftysmallcap250"),
+        _named("ind_prs22042016.pdf", date(2016, 4, 22), "niftysmallcap250", "nifty500"),
+        _named("ind_prs07032012.pdf", date(2012, 3, 7), "nifty500"),
+    ]
+    first = _first_named([p for p, _ in pairs], {r.filename: r for _, r in pairs})
+    assert first == {
+        "niftymidcap150": (date(2016, 8, 12), "ind_prs12082016.pdf"),
+        "niftysmallcap250": (date(2016, 4, 22), "ind_prs22042016.pdf"),
+        "nifty500": (date(2012, 3, 7), "ind_prs07032012.pdf"),
+    }
 
 
 # ── L1: write once, read back ──────────────────────────────────────────────────────────────────

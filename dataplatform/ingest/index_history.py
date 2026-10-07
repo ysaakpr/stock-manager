@@ -860,40 +860,16 @@ def build_membership_history(
                 )
             )
     release_by_name = {r.filename: r for r in candidates}
-    unparsed_rows: list[tuple[str, str]] = []
-    voided = _voided_releases(p.release for p in parses)
-    for parse in parses:
-        for problem in parse.unparsed:
-            unparsed_rows.append((parse.release, problem))
-            release = release_by_name[parse.release]
-            reach = release.title_effective or release.announced + UNDATED_RELEASE_HORIZON
-            for slug in _slugs_named(problem):
-                if parse.release in voided and slug not in voided[parse.release]:
-                    # A section the exchange declared null and void bounds nothing: whatever it
-                    # said, none of it took effect (ind_prs19032020's NIFTY 200 prose).
-                    continue
-                horizon[slug] = max(horizon[slug], reach)
-                residual_seed.append(
-                    Residual(
-                        slug, ResidualKind.UNREADABLE_SECTION, reach, problem, release=parse.release
-                    )
-                )
+    unparsed_rows = [(parse.release, problem) for parse in parses for problem in parse.unparsed]
+    for release_name, slug, problem in _bounding_sections(parses):
+        release = release_by_name[release_name]
+        reach = release.title_effective or release.announced + UNDATED_RELEASE_HORIZON
+        horizon[slug] = max(horizon[slug], reach)
+        residual_seed.append(
+            Residual(slug, ResidualKind.UNREADABLE_SECTION, reach, problem, release=release_name)
+        )
 
-    # An index the change record never names before a date has no evidence of existing before it.
-    # NIFTY Midcap 150 and Smallcap 250 date from the 2016 restructuring of the broad indices; with
-    # no release naming them earlier, the walk would otherwise carry today's members back through
-    # years in which those indices were never published — a set no one could have held.
-    first_named: dict[str, tuple[date, str]] = {}
-    for parse in parses:
-        if parse.release not in release_by_name:
-            continue
-        announced = release_by_name[parse.release].announced
-        for slug in {*parse.tracked_sections, *(ev.index_slug for ev in parse.events)}:
-            if slug in TRACKED_INDICES and (announced, parse.release) < first_named.get(
-                slug, (date.max, "")
-            ):
-                first_named[slug] = (announced, parse.release)
-    for slug, (named_on, named_by) in first_named.items():
+    for slug, (named_on, named_by) in _first_named(parses, release_by_name).items():
         if named_on > horizon[slug]:
             horizon[slug] = named_on
             residual_seed.append(
@@ -1012,6 +988,43 @@ def build_membership_history(
         unparsed=tuple(unparsed_rows) + tuple((r.filename, why) for r, why in unreadable),
         transcribed=tuple(t.release for t in transcribed),
     )
+
+
+def _bounding_sections(parses: Sequence[PressReleaseParse]) -> list[tuple[str, str, str]]:
+    """`(release, slug, problem)` for every unread tracked section that bounds that index's depth.
+
+    A section of a release the exchange later declared null and void bounds nothing — none of it
+    took effect, read or not (ind_prs19032020's NIFTY 200 prose, voided by ind_prs13052020).
+    """
+    voided = _voided_releases(p.release for p in parses)
+    return [
+        (parse.release, slug, problem)
+        for parse in parses
+        for problem in parse.unparsed
+        for slug in _slugs_named(problem)
+        if not (parse.release in voided and slug not in voided[parse.release])
+    ]
+
+
+def _first_named(
+    parses: Sequence[PressReleaseParse], release_by_name: Mapping[str, PressRelease]
+) -> dict[str, tuple[date, str]]:
+    """Each tracked index's earliest naming release in L0: `(announced, release filename)`.
+
+    An index the change record never names before a date has no evidence of existing before it.
+    NIFTY Midcap 150 and Smallcap 250 date from the 2016 restructuring of the broad indices; with
+    no floor here the walk would carry today's members back through years in which those indices
+    were never published — a set no one could have held.
+    """
+    first: dict[str, tuple[date, str]] = {}
+    for parse in parses:
+        if parse.release not in release_by_name:
+            continue
+        named = (release_by_name[parse.release].announced, parse.release)
+        for slug in {*parse.tracked_sections, *(ev.index_slug for ev in parse.events)}:
+            if slug in TRACKED_INDICES and named < first.get(slug, (date.max, "")):
+                first[slug] = named
+    return first
 
 
 def _slugs_named(problem: str) -> list[str]:
