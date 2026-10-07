@@ -48,6 +48,8 @@ __all__ = [
 ]
 
 BAR = Decimal("0.25")
+#: Marks a section written by hand, so a reader can tell analysis from rendered run output.
+WRITTEN = "*Written analysis — not generated from run outputs.*"
 #: A move smaller than this, in XIRR, with an unchanged rank, is not listed in the diff table.
 MOVE = Decimal("0.005")
 
@@ -330,10 +332,10 @@ class Ladder:
     last_label: str = ""
 
 
-#: Today's engine with idle cash at 0 %: the last rung is cash interest alone.
-NO_INTEREST_RUNGS = ("lake #74/#75, engine since, universe", "cash interest")
-#: Today's engine on the PIT NIFTY 500 screen: the last rung is the universe step alone.
-NIFTY500_RUNGS = ("lake #74/#75, engine since, cash interest", "floor-only universe")
+#: Today's engine with idle cash at 0 %: the last rung is cash interest alone. Only a run that
+#: changes one switch and keeps the floor-only screen may be a middle rung — a run on another
+#: universe would step out of the ladder and back, two offsetting rungs that name nothing real.
+NO_INTEREST_RUNGS = ("lake #74/#75, engine since", "cash interest")
 
 
 _FIELD = re.compile(r"(\w+)=((?:Decimal\('[^']*'\))|(?:<[^>]*>)|[^,()]+)")
@@ -527,6 +529,8 @@ def render(
     add("")
     add("## How this run was made")
     add("")
+    add(WRITTEN)
+    add("")
     out.extend(f"- {line}" for line in facts)
     add("")
 
@@ -709,9 +713,15 @@ def render(
         "over that report's own arm set, so adding arms cannot move a row. The cause column is "
         "measured where intermediate runs exist (decade and six-year), as rungs that sum to the "
         "move. **engine to 2026-09-28** is "
-        f"`{ladder.reference_name or 'the reference campaign'}` (rails, book corporate actions, "
-        "₹5,000 minimum order, seam fix and the PIT NIFTY 500 screen, on the pre-#75 lake, idle "
-        "cash at 0 %) minus the old figure. "
+        f"`{ladder.reference_name or 'the reference campaign'}` minus the old figure: the engine "
+        "as of that campaign, on the pre-#75 lake with idle cash at 0 %. It is the *combined* "
+        "engine change — corporate actions in the book, the A8 rails, the ₹5,000 minimum order "
+        "and the L2 seam fix — and no run separates one from another. That campaign is "
+        "**floor-only in effect**: its specs name `index_slug='nifty500'`, but at its commit the "
+        "screen read constituent snapshots through `membership_asof`, which answers `None` "
+        "before the first snapshot (2026-09-08, after every window ends), and the screen is "
+        "then a no-op; the PIT membership history (`f006a9b`) is not its ancestor. So the old "
+        "report, the reference campaign and today's run all screen the same floor-only universe. "
         + (
             f"Where a third run exists, **{ladder.middle_label}** is that run minus the reference "
             f"and **{ladder.last_label}** is today's figure minus that run; elsewhere "
@@ -719,8 +729,8 @@ def render(
             else ""
         )
         + "**everything since 2026-09-28** is today's figure minus the reference: lake #74/#75, "
-        "the engine since, idle cash earning repo - 0.50 %, and the step back from the NIFTY 500 "
-        "screen to the floor-only one, together. "
+        "the engine since (among it the regime gate reading the published NIFTY 50, `e6e862f`) "
+        "and idle cash earning repo - 0.50 %, together. "
         + "The walk-forward windows have no intermediate run and say so."
     )
     add("")
@@ -753,7 +763,8 @@ def render(
             "The paper book screens the PIT NIFTY 500, whose membership history opens 2016-10-24, "
             "so the headline arms were also run on it over the two windows it covers — today's "
             "engine and lake, the same switches, only the universe changed. Ranks are within "
-            "these arms only."
+            "these arms only. It is a separate measurement of the universe, not a rung of the "
+            "attribution in *What moved*: every run there screens the floor-only universe."
         )
         add("")
         add(
@@ -828,9 +839,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     """``python -m backtest.m12_rerun_report``: render the gate report from persisted results."""
     parser = argparse.ArgumentParser(prog="python -m backtest.m12_rerun_report")
     parser.add_argument("--results", type=Path, required=True, help="the re-run's results.json")
-    middle = parser.add_mutually_exclusive_group()
-    middle.add_argument("--no-interest", type=Path, default=None, help="results.json, 0%% cash")
-    middle.add_argument("--nifty500", type=Path, default=None, help="results.json, NIFTY 500")
+    parser.add_argument("--no-interest", type=Path, default=None, help="results.json, 0%% cash")
+    parser.add_argument(
+        "--nifty500", type=Path, default=None, help="results.json for the universe check"
+    )
     parser.add_argument("--long", type=Path, default=None, help="results.json with the long window")
     parser.add_argument("--reference-campaign", type=Path, default=None)
     parser.add_argument("--fact", action="append", default=[], help="a line for 'How this was run'")
@@ -852,8 +864,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ladder.middle_label, ladder.last_label = NO_INTEREST_RUNGS
     universe_check: dict[str, WindowResult] = {}
     if args.nifty500 is not None:
-        ladder.middle = _xirrs(args.nifty500)
-        ladder.middle_label, ladder.last_label = NIFTY500_RUNGS
+        # The universe check only — never a rung of the attribution ladder (see NO_INTEREST_RUNGS).
         universe_check, _ = load_results(args.nifty500)
     if args.reference_campaign is not None:
         ladder.reference = load_ladder_campaign(
