@@ -76,7 +76,9 @@ def test_a_move_is_listed_with_its_measured_cause() -> None:
     old = [OldFigure("x.md", SWEEP_SET, "decade", LOW, "A", 1, Decimal("0.20"), None, None)]
     ladder = Ladder(
         reference={("decade", LOW, "A"): Decimal("0.19")},
-        no_interest={("decade", LOW, "A"): Decimal("0.14")},
+        middle={("decade", LOW, "A"): Decimal("0.14")},
+        middle_label="lake #74/#75, engine since, universe",
+        last_label="cash interest",
     )
     text = render(windows, "", old, ladder, facts=[])
     assert "| A | 20.00% | 15.00% | -5.00 |" in text
@@ -91,3 +93,19 @@ def test_without_the_no_interest_run_the_ladder_has_two_rungs() -> None:
     ladder = Ladder(reference={("decade", LOW, "A"): Decimal("0.16")})
     text = render(windows, "", old, ladder, facts=[])
     assert "mostly engine to 2026-09-28 (engine to 2026-09-28 -4.00, everything since" in text
+
+
+def test_universe_check_prices_the_floor_only_screen_against_nifty500() -> None:
+    windows = {"six-year": _window("six-year", [_row(D13, "0.30", "0.20")])}
+    check = {"six-year": _window("six-year", [_row(D13, "0.25", "0.20")])}
+    old = [OldFigure("x.md", SWEEP_SET, "six-year", LOW, D13, 1, Decimal("0.20"), None, None)]
+    ladder = Ladder(
+        reference={("six-year", LOW, D13): Decimal("0.22")},
+        middle={("six-year", LOW, D13): Decimal("0.25")},
+        middle_label="lake #74/#75, engine since, cash interest",
+        last_label="floor-only universe",
+    )
+    text = render(windows, "", old, ladder, facts=[], universe_check=check)
+    assert "## Universe check" in text
+    assert "| +5.00 |" in text  # floor-only 30 % minus NIFTY 500 25 %
+    assert "floor-only universe +5.00" in text

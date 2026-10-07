@@ -322,8 +322,18 @@ class Ladder:
     #: The 2026-09-28 after-tax campaign: engine ce49e0f on the pre-#75 lake, no cash interest.
     reference: dict[tuple[str, str, str], Decimal] = field(default_factory=dict)
     reference_name: str = ""
-    #: Today's lake and engine with idle cash earning nothing.
-    no_interest: dict[tuple[str, str, str], Decimal] = field(default_factory=dict)
+    #: A run of today's engine on today's lake with one switch changed, splitting the move since
+    #: the reference in two: ``middle_label`` names middle minus reference, ``last_label`` names
+    #: today's figure minus middle.
+    middle: dict[tuple[str, str, str], Decimal] = field(default_factory=dict)
+    middle_label: str = ""
+    last_label: str = ""
+
+
+#: Today's engine with idle cash at 0 %: the last rung is cash interest alone.
+NO_INTEREST_RUNGS = ("lake #74/#75, engine since, universe", "cash interest")
+#: Today's engine on the PIT NIFTY 500 screen: the last rung is the universe step alone.
+NIFTY500_RUNGS = ("lake #74/#75, engine since, cash interest", "floor-only universe")
 
 
 _FIELD = re.compile(r"(\w+)=((?:Decimal\('[^']*'\))|(?:<[^>]*>)|[^,()]+)")
@@ -435,7 +445,8 @@ class _Move:
     new_rank: int | None
     delta: Decimal | None
     reference: Decimal | None
-    no_interest: Decimal | None
+    middle: Decimal | None
+    labels: tuple[str, str]
 
 
 def _moves(
@@ -457,7 +468,15 @@ def _moves(
             continue
         key = (fig.window, fig.floor, fig.label)
         out.append(
-            _Move(fig, row, new_rank, delta, ladder.reference.get(key), ladder.no_interest.get(key))
+            _Move(
+                fig,
+                row,
+                new_rank,
+                delta,
+                ladder.reference.get(key),
+                ladder.middle.get(key),
+                (ladder.middle_label, ladder.last_label),
+            )
         )
     return out
 
@@ -469,11 +488,11 @@ def _cause(move: _Move) -> str:
     if move.reference is None:
         return "engine + lake, not separable on this window (no intermediate run)"
     parts = {"engine to 2026-09-28": move.reference - move.old.xirr}
-    if move.no_interest is None:
+    if move.middle is None:
         parts["everything since 2026-09-28"] = move.new.xirr - move.reference
     else:
-        parts["lake #74/#75, engine since, universe"] = move.no_interest - move.reference
-        parts["cash interest"] = move.new.xirr - move.no_interest
+        parts[move.labels[0]] = move.middle - move.reference
+        parts[move.labels[1]] = move.new.xirr - move.middle
     top = max(parts, key=lambda k: abs(parts[k]))
     detail = ", ".join(f"{k} {_pp(v)}" for k, v in parts.items())
     return f"mostly {top} ({detail} pp)"
@@ -488,6 +507,7 @@ def render(
     facts: Sequence[str],
     long_window: WindowResult | None = None,
     notes: str = "",
+    universe_check: Mapping[str, WindowResult] | None = None,
 ) -> str:
     """The whole gate report as markdown; ``notes`` (the written verdict) follows the headline."""
     floors = (LOW, HIGH)
@@ -693,13 +713,14 @@ def render(
         "₹5,000 minimum order, seam fix and the PIT NIFTY 500 screen, on the pre-#75 lake, idle "
         "cash at 0 %) minus the old figure. "
         + (
-            "**lake #74/#75, engine since, universe** is today's engine on today's lake with idle "
-            "cash at 0 % minus that, and **cash interest** is today's figure minus that. "
-            if ladder.no_interest
-            else "**everything since 2026-09-28** is today's figure minus that: lake #74/#75, the "
-            "engine since, idle cash earning repo - 0.50 %, and the step back from the NIFTY 500 "
-            "screen to the floor-only one, together — no run separates them. "
+            f"Where a third run exists, **{ladder.middle_label}** is that run minus the reference "
+            f"and **{ladder.last_label}** is today's figure minus that run; elsewhere "
+            if ladder.middle
+            else ""
         )
+        + "**everything since 2026-09-28** is today's figure minus the reference: lake #74/#75, "
+        "the engine since, idle cash earning repo - 0.50 %, and the step back from the NIFTY 500 "
+        "screen to the floor-only one, together. "
         + "The walk-forward windows have no intermediate run and say so."
     )
     add("")
@@ -724,6 +745,40 @@ def render(
             f"{_cause(move)} |"
         )
     add("")
+    if universe_check:
+        add("## Universe check: the PIT NIFTY 500 screen the paper book trades")
+        add("")
+        add(
+            "Every table above screens the floor-only universe (see *How this run was made*). "
+            "The paper book screens the PIT NIFTY 500, whose membership history opens 2016-10-24, "
+            "so the headline arms were also run on it over the two windows it covers — today's "
+            "engine and lake, the same switches, only the universe changed. Ranks are within "
+            "these arms only."
+        )
+        add("")
+        add(
+            "| Window | Floor | Strategy | Floor-only XIRR / DD (ratio) | NIFTY 500 XIRR / DD "
+            "(ratio) | NIFTY 500 rank | Δ XIRR pp (floor-only minus NIFTY 500) |"
+        )
+        add("| --- | --- | --- | --- | --- | --- | --- |")
+        for name, check in universe_check.items():
+            base = windows.get(name)
+            for floor in floors:
+                for position, row in enumerate(check.ranked(floor), start=1):
+                    wide = base.row(floor, row.label) if base else None
+                    diff = wide.xirr - row.xirr if wide and wide.ok and row.ok else None
+                    wide_cell = (
+                        f"{_p(wide.xirr)} / {_p(wide.max_drawdown)} ({_r(wide.ratio)})"
+                        if wide
+                        else "—"
+                    )
+                    add(
+                        f"| {WINDOW_TITLE[name]} | {FLOOR_LABEL[floor]} | {_mark(row.label)} | "
+                        f"{wide_cell} | {_p(row.xirr)} / {_p(row.max_drawdown)} "
+                        f"({_r(row.ratio)}) | {position} of {len(check.ranked(floor))} | "
+                        f"{_pp(diff)} |"
+                    )
+        add("")
     if long_window is not None:
         add(f"## Supplementary: {long_window.start} → {long_window.terminal}")
         add("")
@@ -756,7 +811,7 @@ def _arm_specs() -> dict[str, tuple[str, str]]:
     return specs
 
 
-def _no_interest(path: Path | None) -> dict[tuple[str, str, str], Decimal]:
+def _xirrs(path: Path | None) -> dict[tuple[str, str, str], Decimal]:
     if path is None:
         return {}
     windows, _ = load_results(path)
@@ -773,7 +828,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     """``python -m backtest.m12_rerun_report``: render the gate report from persisted results."""
     parser = argparse.ArgumentParser(prog="python -m backtest.m12_rerun_report")
     parser.add_argument("--results", type=Path, required=True, help="the re-run's results.json")
-    parser.add_argument("--no-interest", type=Path, default=None, help="results.json, 0% cash")
+    middle = parser.add_mutually_exclusive_group()
+    middle.add_argument("--no-interest", type=Path, default=None, help="results.json, 0%% cash")
+    middle.add_argument("--nifty500", type=Path, default=None, help="results.json, NIFTY 500")
     parser.add_argument("--long", type=Path, default=None, help="results.json with the long window")
     parser.add_argument("--reference-campaign", type=Path, default=None)
     parser.add_argument("--fact", action="append", default=[], help="a line for 'How this was run'")
@@ -789,7 +846,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         *parse_verdict_report(args.gates / "M12-strategy-verdict.md"),
         *parse_duration_report(args.gates / "M12-swing-duration-window-report.md"),
     ]
-    ladder = Ladder(no_interest=_no_interest(args.no_interest))
+    ladder = Ladder()
+    if args.no_interest is not None:
+        ladder.middle = _xirrs(args.no_interest)
+        ladder.middle_label, ladder.last_label = NO_INTEREST_RUNGS
+    universe_check: dict[str, WindowResult] = {}
+    if args.nifty500 is not None:
+        ladder.middle = _xirrs(args.nifty500)
+        ladder.middle_label, ladder.last_label = NIFTY500_RUNGS
+        universe_check, _ = load_results(args.nifty500)
     if args.reference_campaign is not None:
         ladder.reference = load_ladder_campaign(
             args.reference_campaign,
@@ -803,7 +868,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         long_window = long_windows.get("long")
     notes = args.notes.read_text(encoding="utf-8") if args.notes is not None else ""
     text = render(
-        windows, selected, old, ladder, facts=args.fact, long_window=long_window, notes=notes
+        windows,
+        selected,
+        old,
+        ladder,
+        facts=args.fact,
+        long_window=long_window,
+        notes=notes,
+        universe_check=universe_check,
     )
     args.out.write_text(text, encoding="utf-8")
     print(f"  report written to {args.out}", file=sys.stderr)
