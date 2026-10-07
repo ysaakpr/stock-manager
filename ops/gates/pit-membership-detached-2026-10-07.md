@@ -72,17 +72,22 @@ And one builder rule:
 
 ## 2. Releases parsed vs exceptions (all 417 candidates in L0)
 
-| | Old parser | M14.1 parser |
-| --- | --- | --- |
-| Fully parsed, with tracked events | 173 | **180** |
-| Read, no tracked change | 183 | 144 |
-| With at least one unparsed tracked section (an exception) | 58 | **90** |
-| `ParseError` | 3 | 3 |
-| Tracked events | 4,897 | **5,386** |
+| | Old parser | M14.1 parser (`84bfafc`) | After review hardening (`ec8b494`) |
+| --- | --- | --- | --- |
+| Fully parsed, with tracked events | 173 | 180 | **122** |
+| Read, no tracked change | 183 | 144 | 144 |
+| With at least one unparsed tracked section (an exception) | 58 | 90 | **148** |
+| `ParseError` | 3 | 3 | 3 |
+| Tracked events | 4,897 | 5,386 | **5,082** |
 
-The extra exceptions are honest ones: sections the old parser dropped without a word are now
-listed. **88 of the 90 are announced on or before 2013-11-07**, below every coverage start. The
-other two:
+The extra exceptions are honest ones. First, sections the old parser dropped without a word are
+now listed. Second, after review, a table row that prints no symbol (pre-2011 tables, and
+statements truncated by the text layer, e.g. `ind_prs07112013`, which had read Indiabulls Housing
+as an *exclusion*) makes its section unparsed instead of yielding symbol-less events. That second
+change touched 70 releases, all announced on or before 2013-11-07: 0 events gained and 304 lost
+(303 symbol-less, plus one 2005 row whose "symbol" was an industry word). It changes no membership
+interval: the rebuilt history is byte-identical before and after. **146 of the 148 exceptions are
+announced on or before 2013-11-07**, below every coverage start. The other two:
 
 - `ind_prs27022014.pdf`: CNX Nifty and Junior "no change could be read" (columns apart), CNX 100
   "detached layout", CNX 200 / 500 "no effective date". **This is the bound** for NIFTY 50, Next
@@ -99,6 +104,11 @@ Releases that M14.1 made readable, with their tracked events: `ind_prs22022016_2
 `ind_prs12082016` (146), `ind_prs17102016` (10), `ind_prs22042016` (+6, its NIFTY 500 section),
 `ind_prs18112014` (8), `ind_prs21012015` (10), `ind_prs23012015` (4), plus 2010-2011 rows below
 coverage.
+
+Review hardening (`ec8b494`), with no in-coverage effect: a `1.` line opens a section only when
+its name is an index (numbered company rows and prose such as "1. Sundaram Finance Ltd.: On
+account of …" do not). An intro that names an index *after* its last date (date-first) leaves
+every index it names undated rather than pairing it with the next clause's date.
 
 ## 3. Reconciliation against independent evidence
 
@@ -183,11 +193,17 @@ unexplained off-size segments for every index.
     2016-11-15.
   - `2015_dated_clauses/ind_prs23012015.pdf`: Feb 2, not Feb 23; `1.` headings.
   - `2014_columns_apart/ind_prs27022014.pdf`: no events, and every tracked section unparsed.
+  - Hand-written text-layer lines: the reviewer's exact numbered rows and sentences are not
+    headings; a numbered sentence inside NIFTY 500 does not close it; a made-up date-first intro
+    leaves both sections unparsed (on `84bfafc` it dates NIFTY 500 by the next clause); a row
+    without a symbol makes its section unparsed.
 
   Mutation-checked. Reverting the Scrip Name header, the clause dating, the full-stop headings or
   the silent-drop guard each fails a named test, and so does inverting include/exclude.
 - `tests/unit/test_index_history.py`: the first-naming floor, and "a voided release's unread
-  section bounds nothing" (pure helpers, offline).
+  section bounds nothing" (pure helpers, offline). There is also an offline end-to-end
+  `build_membership_history` run over a tmp L0 (listing, seven anchors, two releases) that fails
+  if the floor is unwired.
 - `tests/golden/test_index_history_golden.py` (lake-backed): the new coverage per index and
   `None` the day before. New facts: NIFTY 200 ARVIND → CRISIL on 2015-02-02 (and held on
   2015-02-20); NIFTY 50 on 2016-04-01; Next 50 CAIRN → HAVELLS on 2016-11-15 and not on part B's
