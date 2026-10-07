@@ -2670,6 +2670,7 @@ def render_report(run: BacktestResult) -> str:
         "",
         f"- **Total entries:** {len(run.result.journal)}",
         f"- **BUY:** {counts[Decision.BUY.value]}  ·  **SELL:** {counts[Decision.SELL.value]}  ·  "
+        f"**HOLD:** {counts[Decision.HOLD.value]}  ·  "
         f"**HEARTBEAT:** {counts[Decision.HEARTBEAT.value]}",
         f"- **Run digest (sha256 of journal + book + rail policy):** `{run.result.digest()}`",
         "- **PIT:** the run completed with every session's queries scoped to that session; no "

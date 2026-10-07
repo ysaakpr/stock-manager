@@ -139,10 +139,23 @@ class _WithoutRegimeHold:
         return dataclasses.replace(decision, entries=kept)
 
 
+class _Recording:
+    """Delegates to the policy and keeps what it decided each session, before the engine sees it."""
+
+    def __init__(self, policy: Policy) -> None:
+        self._policy = policy
+        self.decisions: dict[date, SessionDecision] = {}
+
+    def decide(self, ctx: SessionContext) -> SessionDecision:
+        decision = self._policy.decide(ctx)
+        self.decisions[ctx.session] = decision
+        return decision
+
+
 _PARAMS = MomentumV2Parameters(top_n=3, regime_filter=True)
 
 
-def _replay(*, legacy: bool) -> tuple[ReplayResult, SimBroker]:
+def _replay(*, legacy: bool) -> tuple[ReplayResult, SimBroker, _Recording]:
     clock = FrozenClock(SESSIONS[0])
     sim = SimBroker(
         clock=clock,
@@ -150,14 +163,13 @@ def _replay(*, legacy: bool) -> tuple[ReplayResult, SimBroker]:
         market=_Market(),
         opening_cash=_CASH,
     )
-    policy: Policy = MomentumV2Policy(_Data(), _PARAMS)
-    if legacy:
-        policy = _WithoutRegimeHold(policy)
+    recording = _Recording(MomentumV2Policy(_Data(), _PARAMS))
+    policy: Policy = _WithoutRegimeHold(recording) if legacy else recording
     closes = {(isin, s): _PRICE for isin in ISINS for s in SESSIONS}
     result = ReplayEngine(
         policy=policy, broker=sim, clock=clock, sessions=SESSIONS, rails=mechanics_gate(closes)
     ).run()
-    return result, sim
+    return result, sim, recording
 
 
 def _on(result: ReplayResult, day: date) -> list[JournalEntry]:
@@ -168,7 +180,7 @@ def _on(result: ReplayResult, day: date) -> list[JournalEntry]:
 
 
 def test_a_risk_off_rebalance_on_an_empty_book_journals_a_hold_never_a_bare_heartbeat() -> None:
-    result, _ = _replay(legacy=False)
+    result, _, _ = _replay(legacy=False)
 
     (entry,) = _on(result, EMPTY_PARK)
     assert entry.decision is Decision.HOLD, "a risk-off rebalance fell through to a bare HEARTBEAT"
@@ -193,8 +205,15 @@ def test_a_risk_off_rebalance_on_an_empty_book_journals_a_hold_never_a_bare_hear
 
 def test_the_change_is_journal_only_orders_and_book_are_byte_identical() -> None:
     """With and without the HOLD: same orders placed, same broker state, same final book."""
-    new, new_sim = _replay(legacy=False)
-    old, old_sim = _replay(legacy=True)
+    new, new_sim, decided = _replay(legacy=False)
+    old, old_sim, _ = _replay(legacy=True)
+
+    # The legacy run wraps the same policy, so an order the HOLD branch emitted would be placed in
+    # both runs and the comparisons below could not see it. Pin the policy's own decision instead:
+    # the risk-off rebalance on an empty book orders nothing and journals only the HOLD.
+    empty_park = decided.decisions[EMPTY_PARK]
+    assert empty_park.orders == ()
+    assert [e.decision for e in empty_park.entries] == [Decision.HOLD]
 
     assert new.book_bytes() == old.book_bytes()
     assert canonical_bytes(new_sim.export_state().to_document()) == canonical_bytes(
