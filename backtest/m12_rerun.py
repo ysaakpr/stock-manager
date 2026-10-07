@@ -384,6 +384,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=",".join(_DEFAULT_UNITS),
         help=f"comma-separated units, from {', '.join(UNITS)} (long is supplementary)",
     )
+    parser.add_argument(
+        "--arms",
+        default=None,
+        help="exact labels separated by '|': an attribution run over a few arms, never the "
+        "re-run's own tables (the manifest records the arm list)",
+    )
     parser.add_argument("--no-book-corporate-actions", dest="book_actions", action="store_false")
     parser.add_argument("--no-cash-interest", dest="cash_interest", action="store_false")
     parser.add_argument("--universe", default=UNIVERSE_TURNOVER_FLOOR, choices=UNIVERSE_CHOICES)
@@ -406,10 +412,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     units = tuple(part.strip() for part in args.units.split(",") if part.strip())
     try:
+        arms = RERUN_ARMS
+        if args.arms:
+            wanted = [part.strip() for part in args.arms.split("|") if part.strip()]
+            unknown = sorted(set(wanted) - {arm.label for arm in RERUN_ARMS})
+            if unknown:
+                raise CampaignError(f"no arm labelled {', '.join(unknown)}")
+            arms = tuple(arm for arm in RERUN_ARMS if arm.label in wanted)
         plan = RerunPlan(
             out_dir=refuse_lake_location(args.out, args.data_root),
             data_root=args.data_root,
             units=units,
+            arms=arms,
             book_actions=args.book_actions,
             cash_interest=args.cash_interest,
             universe=args.universe,
