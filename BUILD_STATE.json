@@ -376,6 +376,14 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_macro_backfill.py -q\n(exit 0)\n.............                                                            [100%]"
     },
+    "M11.3": {
+      "attempts": 0,
+      "commit": "19e2024",
+      "finished": "2026-10-07T11:12:19+00:00",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_macro_series.py tests/unit/test_macro_backfill.py -q\n(exit 0)\n........................................................................ [ 58%]\n...................................................                      [100%]\n\n$ uv run ruff format --check dataplatform/ingest/macro tests/unit/test_macro_series.py\n(exit 0)\n13 files already formatted\n\n$ uv run ruff check dataplatform/ingest/macro tests/unit/test_macro_series.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/macro tests/unit/test_macro_series.py\n(exit 0)\nSuccess: no issues found in 13 source files"
+    },
     "M12.1": {
       "attempts": 0,
       "commit": "22b616a",
@@ -451,6 +459,38 @@
       "previous_state": "EXTERNAL",
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_manual_actions.py tests/unit/test_ex_marker_witness.py tests/unit/test_l2_continuity.py -q\n(exit 0)\n........................................................................ [ 77%]\n.....................                                                    [100%]\n\n$ uv run ruff format --check tests/unit/test_ex_marker_witness.py tests/unit/test_manual_actions.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check tests/unit/test_ex_marker_witness.py tests/unit/test_manual_actions.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy tests/unit/test_ex_marker_witness.py tests/unit/test_manual_actions.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M13.5": {
+      "attempts": 0,
+      "commit": "19e2024",
+      "finished": "2026-10-07T11:11:40+00:00",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run ruff format --check orchestrator && uv run ruff check orchestrator && uv run mypy orchestrator && ./orch validate\n(exit 0)\n7 files already formatted\nAll checks passed!\nSuccess: no issues found in 7 source files\n\u001b[32mgraph OK\u001b[0m: 116 tasks, 15 milestones\n\n$ uv run ruff format --check orchestrator\n(exit 0)\n7 files already formatted\n\n$ uv run ruff check orchestrator\n(exit 0)\nAll checks passed!\n\n$ uv run mypy orchestrator\n(exit 0)\nSuccess: no issues found in 7 source files"
+    },
+    "M13.6": {
+      "attempts": 0,
+      "commit": "19e2024",
+      "finished": "2026-10-07T11:11:49+00:00",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run python -m dataplatform.ingest.source_register validate && uv run pytest tests/unit/test_source_register.py -q\n(exit 0)\nsource register OK \u2014 47 entries over 18 \u00a74.1 rows (42 VERIFIED, 4 FAILED, 1 DECLINED); 22 hosts with a robots record; swept 2026-08-08 in 47 requests\n  open: gdelt_doc_api [FAILED] -> M6.1\n  open: alfred_series_vintage [FAILED] -> M11.1\n  open: mospi_api [FAILED] -> M11.1\n  open: rbi_dbie [FAILED] -> M11.1\n  declined: screener_company_fundamentals (HUMAN_DECISIONS D12 (option 1), taken by D19 on 2026-10-06) \u2014 not scheduled, fetched or re-probed\n........................................................................ [ 77%]\n.....................                                                    [100%]\n\n$ uv run ruff format --check dataplatform/ingest/source_register.py tests/unit/test_source_register.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/source_register.py tests/unit/test_source_register.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/source_register.py tests/unit/test_source_register.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M13.7": {
+      "attempts": 0,
+      "commit": "19e2024",
+      "finished": "2026-10-07T11:13:35+00:00",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_tri_evening.py tests/unit/test_scheduler_registry.py tests/unit/test_scheduler_coverage.py -q\n(exit 0)\n........................................................................ [ 86%]\n...........                                                              [100%]\n\n$ uv run ruff format --check dataplatform/ingest/indices.py dataplatform/ingest/tri_backfill.py dataplatform/scheduler/registry.py tests/unit/test_scheduler_coverage.py tests/unit/test_scheduler_registry.py tests/unit/test_tri_evening.py\n(exit 0)\n6 files already formatted\n\n$ uv run ruff check dataplatform/ingest/indices.py dataplatform/ingest/tri_backfill.py dataplatform/scheduler/registry.py tests/unit/test_scheduler_coverage.py tests/unit/test_scheduler_registry.py tests/unit/test_tri_evening.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/indices.py dataplatform/ingest/tri_backfill.py dataplatform/scheduler/registry.py tests/unit/test_scheduler_coverage.py tests/unit/test_scheduler_registry.py tests/unit/test_tri_evening.py\n(exit 0)\nSuccess: no issues found in 6 source files"
+    },
+    "M13.8": {
+      "attempts": 0,
+      "commit": "19e2024",
+      "finished": "2026-10-07T11:13:37+00:00",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_l2_drain_floor.py -q\n(exit 0)\n............                                                             [100%]\n\n$ uv run ruff format --check dataplatform/identity/lineage_rebuild.py dataplatform/store/l2.py tests/unit/test_l2_drain_floor.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check dataplatform/identity/lineage_rebuild.py dataplatform/store/l2.py tests/unit/test_l2_drain_floor.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/identity/lineage_rebuild.py dataplatform/store/l2.py tests/unit/test_l2_drain_floor.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
     "M2.1": {
       "attempts": 1,
@@ -1057,6 +1097,14 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/integration/test_fire_drill.py -q\n(exit 0)\n.....                                                                    [100%]\n\n$ uv run ruff format --check tests/integration/test_fire_drill.py\n(exit 0)\n1 file already formatted\n\n$ uv run ruff check tests/integration/test_fire_drill.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy tests/integration/test_fire_drill.py\n(exit 0)\nSuccess: no issues found in 1 source file"
     },
+    "M6.8": {
+      "attempts": 0,
+      "commit": "19e2024",
+      "finished": "2026-10-07T11:12:30+00:00",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ test -s ops/gates/M6-live-drill.md && uv run pytest tests/integration/test_fire_drill.py -q\n(exit 0)\n........                                                                 [100%]\n\n$ uv run ruff format --check tests/integration/conftest.py tests/integration/test_fire_drill.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check tests/integration/conftest.py tests/integration/test_fire_drill.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy tests/integration/conftest.py tests/integration/test_fire_drill.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
     "M6.9": {
       "attempts": 1,
       "commit": "432368a",
@@ -1203,7 +1251,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-10-07T02:45:56+00:00",
+  "updated_at": "2026-10-07T11:13:37+00:00",
   "version": 1,
   "wave": 1
 }
