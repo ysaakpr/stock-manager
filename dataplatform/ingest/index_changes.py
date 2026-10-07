@@ -33,6 +33,7 @@ from __future__ import annotations
 import html
 import io
 import re
+from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from datetime import date
 from enum import StrEnum
@@ -215,16 +216,28 @@ _ALWAYS_MEMBERSHIP: Final = re.compile(
     r"replacements?\s+in\s+indices|deferment\s+of\s+index\s+rebalancing", re.I
 )
 
+#: "1) Nifty 50", "(2) CNX 100 Index", "a) Nifty 50" — and "1. Nifty 500 Index" (ind_prs22042016.pdf
+#: numbers its sections with a full stop; read with a ")" only, its NIFTY 500 section was dropped
+#: without a word). The full-stop form is digits only: "a. Market capitalization …" is prose.
 _HEADING: Final = re.compile(
-    r"^\s*\(?(?P<num>\d{1,2}|[a-z]|[ivx]{1,4})\s*\)\s*(?P<name>[A-Za-z&][^\n]{1,80}?)\s*$"
+    r"^\s*(?:\(?(?P<num>\d{1,2}|[a-z]|[ivx]{1,4})\s*\)|(?P<dotnum>\d{1,2})\.)\s*"
+    r"(?P<name>[A-Za-z&][^\n]{1,80}?)\s*$"
 )
 _ACTION: Final = re.compile(
     r"(?:following\s+)?(?:compan(?:y|ies)|stocks?|securit(?:y|ies)|scrips?)\s+"
     r"(?:is|are|shall\s+be|will\s+be)\s+(?:being\s+)?(?P<verb>excluded|included)",
     re.I,
 )
-_TABLE_HEADER: Final = re.compile(r"company\s+name", re.I)
+#: "Sr. No. Company Name Symbol"; 2016's releases (ind_prs22022016_2, ind_prs12082016,
+#: ind_prs17102016) head the same table "Sr. No. Scrip Name Symbol". Unrecognised, every statement
+#: there looked tableless and the release was quarantined as the detached layout it is not.
+_TABLE_HEADER: Final = re.compile(r"(?:company|scrip)\s+name", re.I)
 _ROW: Final = re.compile(r"^\s*(?P<sr>\d{1,3})\s+(?P<body>\S.*?)\s*$")
+#: Inside a section: wording that announces a change, and the explicit statement of none.
+_CHANGE_WORDING: Final = re.compile(
+    r"follow|includ|exclud|replac|compan|scrip|company\s+name", re.I
+)
+_NO_CHANGE: Final = re.compile(r"\bno\s+changes?\b", re.I)
 _SYMBOL: Final = re.compile(r"^[A-Z0-9][A-Z0-9&\-_.]*$")
 _SECTION_STOP: Final = re.compile(
     r"^\s*(?:note|notes|about\s+|disclaimer|for\s+more\s+information|place\s*:|"
@@ -488,6 +501,10 @@ def parse_press_release_pdf(
     returned in `unparsed`, never silently skipped and never half-read into events.
     """
     lines = _pdf_lines(payload, filename=filename)
+    # Set when the opening paragraph states several effective dates; consulted for each section
+    # until the body states a date of its own, after which the nearest stated date governs again.
+    intro_dates = _intro_section_dates(lines)
+    in_body = dated_in_body = False
     events: list[IndexChangeEvent] = []
     unparsed: list[str] = []
     tracked: list[str] = []
@@ -507,6 +524,7 @@ def parse_press_release_pdf(
     # exactly one (ind_prs01082018.pdf puts "These changes shall become effective from …" last).
     deferred: list[tuple[str, str, list[tuple[ChangeAction, str, str | None]]]] = []
     saw_action = False
+    section_speaks_of_change = section_says_unchanged = False  # what the open section's text says
     action_rows = 0  # rows read under the open action — an action with none is a detached table
     last_sr = (
         0  # the open table's last serial — a bare number that does not follow it is a page no.
@@ -561,6 +579,7 @@ def parse_press_release_pdf(
 
     def close_section() -> None:
         nonlocal section, section_events, section_problem, saw_action, section_undated
+        nonlocal section_speaks_of_change, section_says_unchanged
         close_action()
         if section is not None:
             if (
@@ -570,6 +589,20 @@ def parse_press_release_pdf(
                 and not section_undated
             ):
                 section_problem = "an include/exclude statement with no table rows"
+            if (
+                section_problem is None
+                and not section_events
+                and not section_undated
+                and section_speaks_of_change
+                and not section_says_unchanged
+            ):
+                # A tracked heading that yields nothing is a section this walk could not read, not
+                # an index with no change: ind_prs27022014.pdf's text layer prints each table's
+                # columns apart and truncates "The following companies [are being excluded]", so
+                # no statement opened and its NIFTY 50 changes vanished without a word.
+                # "No changes are being made in Nifty 50" (ind_prs23022026.pdf) and a heading with
+                # no body (a criteria table's "1. NIFTY 500", ind_prs22082017.pdf) are not that.
+                section_problem = "no change could be read from the section"
             if section_problem is not None:
                 unparsed.append(f"{section_label}: {section_problem}")
             else:
@@ -581,6 +614,7 @@ def parse_press_release_pdf(
         section_problem = None
         section_undated = []
         saw_action = False
+        section_speaks_of_change = section_says_unchanged = False
 
     for raw in lines:
         line = " ".join(raw.split())
@@ -589,8 +623,9 @@ def parse_press_release_pdf(
         intro = _EFFECTIVE_INTRO.search(line)
         stated = None if intro is None else parse_date_phrase(line[intro.end() :])
 
-        heading = _HEADING.match(line)
-        if heading is not None and not _ACTION.search(line) and not _ROW_LOOKS_LIKE_DATA(line):
+        heading = _is_heading(line)
+        if heading is not None:
+            in_body = True
             close_section()
             action = None
             name = heading.group("name")
@@ -598,12 +633,22 @@ def parse_press_release_pdf(
             section = slug
             section_label = name.strip()
             section_date = stated or current_date
+            if stated is None and intro_dates is not None and not dated_in_body:
+                # The opening gave different indices different dates: this section takes the one
+                # its own clause gives it, or none (undated rows end up unparsed, never guessed).
+                section_date = None if slug is None else intro_dates.get(slug)
             action = None
             action_date = None
             in_table = False
             if slug is not None:
                 tracked.append(slug)
             continue
+
+        if section is not None:
+            if _NO_CHANGE.search(line):
+                section_says_unchanged = True
+            elif _CHANGE_WORDING.search(line):
+                section_speaks_of_change = True
 
         verb = _ACTION.search(line)
         if verb is not None:
@@ -623,6 +668,7 @@ def parse_press_release_pdf(
             # "These changes shall become effective from …" re-dates everything after it.
             flush_row()
             current_date = stated
+            dated_in_body = dated_in_body or in_body
             if section is not None and not in_table:
                 section_date = stated
             continue
@@ -722,6 +768,69 @@ def _stated_effective_dates(lines: list[str]) -> set[date]:
     text = " ".join(" ".join(line.split()) for line in lines)
     found = (parse_date_phrase(text[m.end() :]) for m in _EFFECTIVE_INTRO.finditer(text))
     return {d for d in found if d is not None}
+
+
+def _is_heading(line: str) -> re.Match[str] | None:
+    """A section heading the body walk opens a section on (not an action line, not a data row)."""
+    heading = _HEADING.match(line)
+    if heading is None or _ACTION.search(line) or _ROW_LOOKS_LIKE_DATA(line):
+        return None
+    return heading
+
+
+#: A tracked index named in running prose: the alias, then a list separator, "index"/"indices"
+#: or the end — so "Nifty100 Equal Weight", "Nifty50 Value 20" and "CNX Nifty Junior" (for
+#: "cnx nifty") are not read as NIFTY 100, NIFTY 50 and NIFTY 50.
+_PROSE_INDEX: Final = re.compile(
+    r"(?<![a-z0-9&])(?P<alias>"
+    + "|".join(sorted((re.escape(a) for a in _INDEX_ALIASES), key=len, reverse=True))
+    + r")(?=\s*(?:,|;|\band\b|\bindex\b|\bindices\b|$))"
+)
+
+
+def _intro_section_dates(lines: list[str]) -> dict[str, date | None] | None:
+    """Which effective date the opening paragraph gives each tracked index, when it gives several.
+
+    `ind_prs23012015.pdf`: "The changes in CNX 200, CNX 500, CNX Midcap and CNX Alpha index shall
+    be effective from February 2, 2015 … and change in Nifty Midcap 50 index shall be effective
+    from February 23, 2015"; `ind_prs17102016.pdf` does the same in lettered parts A-C. The walk's
+    "nearest date stated before the section" would give every section the *last* of them. Here
+    the text before the first section heading is cut at each effective-date phrase; the clause
+    ending in a date owns the indices it names. Returns `None` when the opening states fewer than
+    two distinct dates or names no tracked index (nothing to attribute); else each tracked index
+    named, mapped to its date — or to `None` when clauses with different dates both name it
+    (ambiguous, so never guessed). A tracked section the opening does not name gets no date.
+    """
+    intro: list[str] = []
+    for raw in lines:
+        line = " ".join(raw.split())
+        if _is_heading(line):
+            break
+        intro.append(line)
+    text = " ".join(intro)
+    clauses: list[tuple[str, date]] = []
+    start = 0
+    for match in _EFFECTIVE_INTRO.finditer(text):
+        stated = parse_date_phrase(text[match.end() :])
+        if stated is None:
+            continue
+        clauses.append((text[start : match.start()], stated))
+        start = match.end()
+    if len({d for _, d in clauses}) < 2:
+        return None
+    named: dict[str, set[date]] = defaultdict(set)
+    for clause, stated in clauses:
+        folded = html.unescape(clause).lower()
+        folded = re.sub(r"\(.*?\)", " ", folded)
+        folded = " ".join(re.sub(r"[^a-z0-9&,; ]+", " ", folded).split())
+        for found in _PROSE_INDEX.finditer(folded):
+            named[_INDEX_ALIASES[found.group("alias")]].add(stated)
+    if not named:
+        # "On February 16 IISL had announced … effective from March 31 … rescheduled … effective
+        # from March 16" (ind_prs07032017.pdf): a recounted date, and the indices are "listed
+        # hereunder" — the nearest date before the sections is the one that applies.
+        return None
+    return {slug: next(iter(ds)) if len(ds) == 1 else None for slug, ds in named.items()}
 
 
 #: The one-column table a spin-off exclusion lists its indices in ("Sr. No. Index Name").

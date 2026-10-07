@@ -26,7 +26,9 @@ market could know — and `exit_knowable` the announcement of the exclusion, kep
 
 **Depth is earned, not assumed.** The history is valid only from `coverage_start`, the latest of:
 the effective date of any candidate release not in L0 (budget or failure), of any tracked section a
-release could not be read for, and of any event whose symbol did not resolve to an ISIN at its date.
+release could not be read for, and of any event whose symbol did not resolve to an ISIN at its
+date — and never earlier than the first release that names the index at all (an index launched in
+2016 has no history in 2012 to reconstruct).
 Before `coverage_start` the history answers `None` — a gap, never an extrapolation of the oldest
 reconstructed set. Every step that could not be reconciled is a `Residual` on the report: a count
 that is not the index's fixed size, an inclusion of a company the later set does not hold, an
@@ -143,6 +145,7 @@ class ResidualKind(StrEnum):
     UNREADABLE_SECTION = "unreadable_section"  # a tracked section a release could not be read for
     MISSING_RELEASE = "missing_release"  # a candidate release that is not in L0
     SNAPSHOT_MISMATCH = "snapshot_mismatch"  # reconstruction ≠ a stored daily snapshot
+    BEFORE_FIRST_NAMED = "before_first_named"  # no release names the index before this date
 
 
 @dataclass(frozen=True, slots=True)
@@ -651,6 +654,18 @@ _VOIDINGS: Final[Mapping[str, _Voiding]] = {
 }
 
 
+def _voided_releases(present: Iterable[str]) -> dict[str, tuple[str, ...]]:
+    """Each release voided by an erratum in L0, mapped to the indices the voiding spares."""
+    held = set(present)
+    excepted: dict[str, tuple[str, ...]] = {}
+    for release, voiding in _VOIDINGS.items():
+        if release not in held:
+            continue
+        for target in voiding.voided_releases:
+            excepted[target] = voiding.except_indices
+    return excepted
+
+
 def _apply_voidings(
     events: Sequence[IndexChangeEvent], present: Iterable[str]
 ) -> list[IndexChangeEvent]:
@@ -663,13 +678,7 @@ def _apply_voidings(
     before its tables, and the parser dated the next section by it, which put Yes Bank into
     NIFTY Midcap 150 for 2017-2020 alongside its NIFTY 50 seat.
     """
-    held = set(present)
-    excepted: dict[str, tuple[str, ...]] = {}
-    for release, voiding in _VOIDINGS.items():
-        if release not in held:
-            continue
-        for target in voiding.voided_releases:
-            excepted[target] = voiding.except_indices
+    excepted = _voided_releases(present)
     kept: list[IndexChangeEvent] = []
     for ev in events:
         if ev.release in excepted and ev.index_slug not in excepted[ev.release]:
@@ -852,18 +861,50 @@ def build_membership_history(
             )
     release_by_name = {r.filename: r for r in candidates}
     unparsed_rows: list[tuple[str, str]] = []
+    voided = _voided_releases(p.release for p in parses)
     for parse in parses:
         for problem in parse.unparsed:
             unparsed_rows.append((parse.release, problem))
             release = release_by_name[parse.release]
             reach = release.title_effective or release.announced + UNDATED_RELEASE_HORIZON
             for slug in _slugs_named(problem):
+                if parse.release in voided and slug not in voided[parse.release]:
+                    # A section the exchange declared null and void bounds nothing: whatever it
+                    # said, none of it took effect (ind_prs19032020's NIFTY 200 prose).
+                    continue
                 horizon[slug] = max(horizon[slug], reach)
                 residual_seed.append(
                     Residual(
                         slug, ResidualKind.UNREADABLE_SECTION, reach, problem, release=parse.release
                     )
                 )
+
+    # An index the change record never names before a date has no evidence of existing before it.
+    # NIFTY Midcap 150 and Smallcap 250 date from the 2016 restructuring of the broad indices; with
+    # no release naming them earlier, the walk would otherwise carry today's members back through
+    # years in which those indices were never published — a set no one could have held.
+    first_named: dict[str, tuple[date, str]] = {}
+    for parse in parses:
+        if parse.release not in release_by_name:
+            continue
+        announced = release_by_name[parse.release].announced
+        for slug in {*parse.tracked_sections, *(ev.index_slug for ev in parse.events)}:
+            if slug in TRACKED_INDICES and (announced, parse.release) < first_named.get(
+                slug, (date.max, "")
+            ):
+                first_named[slug] = (announced, parse.release)
+    for slug, (named_on, named_by) in first_named.items():
+        if named_on > horizon[slug]:
+            horizon[slug] = named_on
+            residual_seed.append(
+                Residual(
+                    slug,
+                    ResidualKind.BEFORE_FIRST_NAMED,
+                    named_on,
+                    "no release in L0 names this index before this date",
+                    release=named_by,
+                )
+            )
 
     if evidence is None:
         evidence = load_symbol_evidence(
