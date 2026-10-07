@@ -1597,7 +1597,10 @@ tasks:
     - "a written judgment on output quality with specific examples, not a pass/fail tick"
     - "a bare `uv run pytest` / `make check` deselects every `live` test, and a test pins that (it fails if a live test would run without `-m live`)"
     - "a live run makes at most 25 model calls; past the budget the drill aborts non-zero, and a stubbed test pins the abort"
-  verify: "uv run pytest tests/integration/test_fire_drill.py -q -m live"
+  # The bookkeeping verify is the bare run: it deselects every `live` test (pinned by
+  # test_a_bare_run_deselects_every_live_test), so re-verifying DONE never calls a model. The live
+  # drill itself is `uv run pytest tests/integration/test_fire_drill.py -q -m live`, run by hand.
+  verify: "test -s ops/gates/M6-live-drill.md && uv run pytest tests/integration/test_fire_drill.py -q"
 
 - id: M6.9
   title: "GATE M6 — Monitoring depth audit"
@@ -2419,3 +2422,51 @@ tasks:
     - "every switch on status handles the new value; a test fails if one does not"
     - "a re-probe sweep does not select a declined row"
   verify: "uv run python -m dataplatform.ingest.source_register validate && uv run pytest tests/unit/test_source_register.py -q"
+
+# M13.7 and M13.8 were built and merged (PRs #73, #74) without a graph entry; recorded here after the
+# fact so the graph reflects what is on main.
+- id: M13.7
+  title: Same-evening NIFTY TRI refresh (tri_evening weekday job)
+  milestone: M13
+  module: D1
+  autonomy: AUTO
+  deps: [M3.9.b, M13.1]
+  spec: |
+    The paper session (M13.1) needs the published NIFTY 50 TRI for session D on the evening of D;
+    `tri_refresh` runs only on Saturdays. One probe (2026-10-06 20:47 IST) showed D is published the
+    same evening. Register a weekday `tri_evening` job (19:50 / 20:50 / 21:30 IST) that lands D through
+    `ingest_tri` (L0 → L1 → sync_state). An answer that stops before D raises a retryable
+    `TriNotYetPublishedError` after the L0 write and before L1, and the FAILED sync row is committed so
+    it reaches `/status/sync`. Same-evening retries get a timestamped L0 filename (L0 immutability); an
+    index already at D makes no request; `--from-l0` replays payloads in fetch order. `tri_refresh`
+    is unchanged.
+  deliverables: [dataplatform/ingest/indices.py, dataplatform/ingest/tri_backfill.py, dataplatform/scheduler/registry.py, ops/runbooks/benchmark-tri.md, "tests/fixtures/nifty_indices/tri/2026/", tests/unit/test_tri_evening.py, tests/unit/test_scheduler_registry.py, tests/unit/test_scheduler_coverage.py]
+  acceptance:
+    - "the scheduler registers tri_evening on weekdays after daily_snapshot's niftyindices.com window, and a test pins that they never overlap"
+    - "a same-evening run lands D in L0, L1 and sync_state with knowable_date == D"
+    - "an answer that stops before D parks a committed, retryable FAILED sync row and leaves L1 untouched; a test fails if the check is inverted"
+    - "a same-evening retry lands without an L0 filename collision, and a fire after D landed makes no request"
+    - "tests use frozen fixtures and never hit the network"
+  verify: "uv run pytest tests/unit/test_tri_evening.py tests/unit/test_scheduler_registry.py tests/unit/test_scheduler_coverage.py -q"
+
+- id: M13.8
+  title: L2 invalidation drain never extends an ISIN's history
+  milestone: M13
+  module: D4
+  autonomy: AUTO
+  deps: [M2.5]
+  spec: |
+    L1 reaches back to 2006 but L2 partitions start at 2011-06-22. `rebuild_invalidated` (drained by the
+    weekly `ca_refresh` and monthly `bse_ca_sweep`) rebuilt each queued ISIN over its full L1 history,
+    which would silently extend L2 into uncurated pre-2011 steps and turn `l2_continuity` red. Floor the
+    drain at each ISIN's existing partition start (`materialize_isin(history_floor=…)`, applied to the
+    ISIN and every lineage predecessor before adjustment); an ISIN with no partition yet is built as
+    the first-time fill builds it. Extension happens only through `l2_fill --extend`. Log
+    `l2.rebuild_floor` per drained ISIN. No live-lake run.
+  deliverables: [dataplatform/store/l2.py, dataplatform/identity/lineage_rebuild.py, ops/runbooks/ca_backfill.md, ops/BACKLOG.md, tests/unit/test_l2_drain_floor.py]
+  acceptance:
+    - "a queued ISIN with L1 to 2006 and L2 from 2011 is rebuilt from its partition start only, byte-identical to the partition on disk, and the invalidation is resolved"
+    - "lineage stitching respects the floor; a brand-new ISIN matches materialize_missing"
+    - "--extend still extends to 2006 after a drain"
+    - "dropping or inverting the floor fails the tests"
+  verify: "uv run pytest tests/unit/test_l2_drain_floor.py -q"
