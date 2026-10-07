@@ -33,13 +33,14 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dataplatform.ingest.macro.models import Frequency, MacroFact, MacroRelease, Unit, series_id
 from dataplatform.ingest.models import ParseError
@@ -51,6 +52,8 @@ __all__ = [
     "MEASURES",
     "IndexAlias",
     "IndexAliasTable",
+    "IndexSeries",
+    "SwitchSide",
     "canonical_index",
     "load_index_aliases",
     "parse_index_valuation",
@@ -80,14 +83,85 @@ MEASURES: Final[tuple[tuple[str, str, Unit], ...]] = (
 )
 
 
+#: An archive filename, the only form a switch may be cited in: it names the session it reports.
+_SNAPSHOT_FILE: Final = re.compile(r"^ind_close_all_(\d{2})(\d{2})(\d{4})\.csv$")
+
+
+class SwitchSide(BaseModel):
+    """One side of a rename: the name as published, and the dated archive file that publishes it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    file: str = Field(pattern=_SNAPSHOT_FILE.pattern)
+
+    @property
+    def session(self) -> date:
+        """The session the cited file reports, read from its `DDMMYYYY` filename."""
+        match = _SNAPSHOT_FILE.match(self.file)
+        assert match is not None  # the field pattern already refused anything else
+        day, month, year = (int(group) for group in match.groups())
+        return date(year, month, day)
+
+
 class IndexAlias(BaseModel):
-    """One published index name and the canonical name it belongs to, with why we believe it."""
+    """One published name, the canonical index it belongs to, and the dated switch that shows it.
+
+    The evidence is structural, not prose alone: `before` and `after` are the two archive files
+    straddling the switch — the predecessor name in the first and not the second, the successor in
+    the second and not the first — and `published` is one of the two names. A row without them does
+    not load, so a mapping cannot be added on the strength of a sentence.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     published: str = Field(min_length=1)
     canonical: str = Field(min_length=1)
-    evidence: str = Field(min_length=1, description="what supports this mapping; never empty")
+    renamed_on: date = Field(description="first session published under the successor name")
+    before: SwitchSide
+    after: SwitchSide
+    sessions_between: int = Field(
+        default=0, ge=0, description="sessions between the two files in which neither name appears"
+    )
+    evidence: str = Field(
+        min_length=1, description="the measured levels and why no other name fits"
+    )
+
+    @model_validator(mode="after")
+    def _switch_is_dated_and_cited(self) -> IndexAlias:
+        if self.before.session >= self.after.session:
+            raise ValueError(
+                f"{self.published!r}: before ({self.before.file}) must precede after "
+                f"({self.after.file}) — a switch is cited by two files straddling it"
+            )
+        if self.renamed_on != self.after.session:
+            raise ValueError(
+                f"{self.published!r}: renamed_on {self.renamed_on} is not the session of the "
+                f"first file under the new name ({self.after.file})"
+            )
+        if self.published not in (self.before.name, self.after.name):
+            raise ValueError(
+                f"{self.published!r} is neither side of the switch it cites "
+                f"({self.before.name!r} -> {self.after.name!r})"
+            )
+        return self
+
+
+class IndexSeries(BaseModel):
+    """A published name that is its own index — new, or retired with no successor."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    first_seen: date
+    last_seen: date | None = Field(default=None, description="set only for a retired index")
+    evidence: str = Field(min_length=1, description="why no rename explains it; never empty")
+
+    @model_validator(mode="after")
+    def _dated(self) -> IndexSeries:
+        if self.last_seen is not None and self.last_seen < self.first_seen:
+            raise ValueError(f"{self.name!r}: last_seen {self.last_seen} precedes first_seen")
+        return self
 
 
 class IndexAliasTable(BaseModel):
@@ -97,6 +171,7 @@ class IndexAliasTable(BaseModel):
 
     version: int
     aliases: tuple[IndexAlias, ...]
+    series: tuple[IndexSeries, ...] = ()
 
     def resolve(self, published: str) -> str:
         """The canonical name for `published` — itself when the table does not know the name.
@@ -107,18 +182,24 @@ class IndexAliasTable(BaseModel):
         return self._by_key.get(_alias_key(published), published.strip())
 
     def knows(self, published: str) -> bool:
-        """Whether the table has any evidence about `published` — as a published or canonical name.
+        """Whether the table has any evidence about `published` — as an alias, a canonical name, a
+        name on either side of a cited switch, or a recorded series of its own.
 
         A name it does not know still resolves (to itself), so this is not a validity check. It is
         the question the backfill's coverage report asks: which names did the archive publish that
         the name history has never seen, the input to widening it.
         """
-        key = _alias_key(published)
-        return key in self._by_key or key in {_alias_key(a.canonical) for a in self.aliases}
+        return _alias_key(published) in self._known_keys
 
     @property
     def _by_key(self) -> dict[str, str]:
         return {_alias_key(a.published): a.canonical.strip() for a in self.aliases}
+
+    @property
+    def _known_keys(self) -> set[str]:
+        names = [n for a in self.aliases for n in (a.published, a.canonical, a.before.name)]
+        names += [a.after.name for a in self.aliases] + [s.name for s in self.series]
+        return {_alias_key(name) for name in names}
 
 
 def _alias_key(name: str) -> str:
@@ -129,13 +210,19 @@ def _alias_key(name: str) -> str:
 def load_index_aliases(path: Path | None = None) -> IndexAliasTable:
     """Load and validate the checked-in index name history.
 
-    Raises `ValueError` (through pydantic) on a malformed table, and on a duplicate published name
-    mapping to two different canonicals — an ambiguous rename must be resolved by a human, not by
-    whichever row happens to be read last.
+    Raises `ValueError` (through pydantic) on a malformed table or a row missing its dated switch;
+    on a duplicate published name mapping to two different canonicals (an ambiguous rename must be
+    resolved by a human, not by whichever row happens to be read last); on a switch whose two names
+    do not resolve to the row's canonical, or a canonical that is itself remapped (a chain must be
+    written out to its end); and on a name recorded both as its own series and as an alias.
     """
     source = INDEX_ALIASES_PATH if path is None else path
     raw = yaml.safe_load(source.read_text())
-    table = IndexAliasTable(version=raw["version"], aliases=tuple(raw.get("aliases") or ()))
+    table = IndexAliasTable(
+        version=raw["version"],
+        aliases=tuple(raw.get("aliases") or ()),
+        series=tuple(raw.get("series") or ()),
+    )
     seen: dict[str, str] = {}
     for alias in table.aliases:
         key = _alias_key(alias.published)
@@ -146,6 +233,27 @@ def load_index_aliases(path: Path | None = None) -> IndexAliasTable:
                 "an ambiguous rename is a research question, not a last-writer-wins"
             )
         seen[key] = alias.canonical.strip()
+    for alias in table.aliases:
+        canonical = _alias_key(alias.canonical)
+        if _alias_key(table.resolve(alias.canonical)) != canonical:
+            raise ValueError(
+                f"{source}: {alias.published!r} maps to {alias.canonical!r}, which is itself "
+                f"remapped to {table.resolve(alias.canonical)!r}; write the chain out to its end"
+            )
+        for name in (alias.before.name, alias.after.name):
+            if _alias_key(table.resolve(name)) != canonical:
+                raise ValueError(
+                    f"{source}: {alias.published!r} cites {name!r}, which resolves to "
+                    f"{table.resolve(name)!r}, not {alias.canonical!r}; both sides of a switch "
+                    "must land on one series"
+                )
+    aliased = {_alias_key(n) for a in table.aliases for n in (a.published, a.canonical)}
+    for series in table.series:
+        if _alias_key(series.name) in aliased:
+            raise ValueError(
+                f"{source}: {series.name!r} is recorded as its own series and as an alias; it "
+                "is one or the other"
+            )
     return table
 
 

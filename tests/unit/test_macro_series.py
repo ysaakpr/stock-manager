@@ -14,14 +14,17 @@ from pathlib import Path
 
 import pytest
 
+from dataplatform.ingest.calendar import trading_calendar
 from dataplatform.ingest.macro import (
     Frequency,
+    IndexAlias,
     MacroFact,
     MacroRelease,
     Unit,
     canonical_index,
     load_index_aliases,
     parse_index_valuation,
+    published_index_names,
     series_id,
 )
 from dataplatform.ingest.models import ParseError
@@ -151,6 +154,164 @@ def test_the_flagship_series_is_continuous_across_the_2015_rename() -> None:
     assert new_close.period_end == date(2015, 11, 10)
     # two sessions apart across one rename — a level jump would mean the alias is wrong
     assert abs(new_close.value - old_close.value) / old_close.value < Decimal("0.05")
+
+
+# ── M11.3: every name the archive published, aliased with a dated switch or recorded ─────────────
+
+#: The 192 names M11.2's final coverage report listed as unknown to the table (frozen, one a line).
+M11_2_UNKNOWN = FIXTURES / "m11_2_unknown_names.txt"
+_ALIASES = load_index_aliases().aliases
+
+
+def _fixture(filename: str) -> Path:
+    """A cited switch file, frozen from L0 under `tests/fixtures/nifty_index_close/`."""
+    found = sorted(FIXTURES.rglob(filename))
+    assert found, f"{filename} is cited by the alias table but not frozen under {FIXTURES}"
+    return found[0]
+
+
+def test_every_name_on_the_m11_2_unknown_list_is_aliased_or_recorded() -> None:
+    table = load_index_aliases()
+    names = [line.strip() for line in M11_2_UNKNOWN.read_text().splitlines() if line.strip()]
+    assert len(names) == 192
+    assert [n for n in names if not table.knows(n)] == []
+
+
+@pytest.mark.parametrize("alias", _ALIASES, ids=[a.published for a in _ALIASES])
+def test_each_alias_resolves_old_and_new_name_to_one_series_across_its_switch(
+    alias: IndexAlias,
+) -> None:
+    """The pin per alias: the two frozen files that straddle the switch show the rename.
+
+    The predecessor is in the `before` file and gone from the `after` one, the successor the other
+    way round, both parse to one `series_id` on either side of `renamed_on`, and the closing level
+    continues. Delete a row, point it at the wrong index, or cite files that do not straddle the
+    switch, and this fails.
+    """
+    before = _fixture(alias.before.file).read_bytes()
+    after = _fixture(alias.after.file).read_bytes()
+    before_names = set(published_index_names(before, filename=alias.before.file))
+    after_names = set(published_index_names(after, filename=alias.after.file))
+    assert alias.before.name in before_names and alias.before.name not in after_names
+    assert alias.after.name in after_names and alias.after.name not in before_names
+
+    def close(payload: bytes, filename: str, name: str) -> tuple[date, str, Decimal]:
+        release = parse_index_valuation(payload, filename=filename)
+        subject = canonical_index(name)
+        sid = series_id("IN", "NSE", subject, "CLOSE")
+        fact = next(f for f in release.facts if f.series_id == sid)
+        return fact.period_end, sid, fact.value
+
+    old_day, old_sid, old_close = close(before, alias.before.file, alias.before.name)
+    new_day, new_sid, new_close = close(after, alias.after.file, alias.after.name)
+    assert old_sid == new_sid == series_id("IN", "NSE", alias.canonical, "CLOSE")
+    assert old_day < alias.renamed_on == new_day
+    if alias.sessions_between == 0:
+        # one session apart: the widest measured switch move is 2.78%, a different index is not
+        # within 3% *and* on the evidence row's multiples
+        assert abs(new_close / old_close - 1) < Decimal("0.03"), alias.evidence
+
+
+def test_sessions_between_matches_the_trading_calendar() -> None:
+    """`sessions_between` waives the per-alias level check, so it must be the calendar's count of
+    sessions strictly between the two cited files — a row cannot claim a gap to skip the check."""
+    calendar = trading_calendar()
+    for alias in _ALIASES:
+        start, end = alias.before.session, alias.after.session
+        between = [d for d in calendar.expected_data_dates(start, end) if start < d < end]
+        assert alias.sessions_between == len(between), alias.published
+
+
+def _table_file(tmp_path: Path, row: str, series: str = "") -> Path:
+    path = tmp_path / "aliases.yaml"
+    path.write_text(f"version: 2\naliases:\n{row}" + (f"series:\n{series}" if series else ""))
+    return path
+
+
+_GOOD_ROW = """  - published: "CNX Midcap"
+    canonical: "NIFTY Midcap 100"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Midcap", file: ind_close_all_06112015.csv}
+    after: {name: "NIFTY Midcap 100", file: ind_close_all_09112015.csv}
+    evidence: "close 12995.7 -> 13073.8"
+"""
+
+
+def test_a_well_formed_row_loads(tmp_path: Path) -> None:
+    table = load_index_aliases(_table_file(tmp_path, _GOOD_ROW))
+    assert table.resolve("CNX Midcap") == "NIFTY Midcap 100"
+
+
+@pytest.mark.parametrize(
+    ("broken", "message"),
+    [
+        (_GOOD_ROW.replace('    evidence: "close 12995.7 -> 13073.8"\n', ""), "evidence"),
+        (_GOOD_ROW.replace('evidence: "close 12995.7 -> 13073.8"', 'evidence: ""'), "evidence"),
+        (
+            _GOOD_ROW.replace(
+                '    before: {name: "CNX Midcap", file: ind_close_all_06112015.csv}\n', ""
+            ),
+            "before",
+        ),
+        (_GOOD_ROW.replace("file: ind_close_all_06112015.csv", "file: a-screenshot.png"), "file"),
+        (_GOOD_ROW.replace("renamed_on: 2015-11-09", "renamed_on: 2015-11-10"), "renamed_on"),
+        (_GOOD_ROW.replace("06112015", "10112015"), "precede"),
+        (_GOOD_ROW.replace('published: "CNX Midcap"', 'published: "CNX Smallcap"'), "neither"),
+    ],
+    ids=[
+        "no-evidence",
+        "empty-evidence",
+        "no-before-file",
+        "not-a-file",
+        "wrong-date",
+        "order",
+        "not-on-switch",
+    ],
+)
+def test_a_mapping_without_dated_evidence_does_not_load(
+    tmp_path: Path, broken: str, message: str
+) -> None:
+    """The guard the acceptance asks for: a row lacking its dated, cited switch never loads."""
+    with pytest.raises(ValueError, match=message):
+        load_index_aliases(_table_file(tmp_path, broken))
+
+
+def test_a_switch_whose_names_land_on_two_series_does_not_load(tmp_path: Path) -> None:
+    """The canonical is not remapped, but the cited successor is a different index: refused."""
+    row = _GOOD_ROW.replace('after: {name: "NIFTY Midcap 100"', 'after: {name: "Nifty Midcap 50"')
+    with pytest.raises(ValueError, match="both sides of a switch must land on one series"):
+        load_index_aliases(_table_file(tmp_path, row))
+
+
+def _row(published: str, canonical: str, before: str, after: str) -> str:
+    return (
+        _GOOD_ROW.replace('published: "CNX Midcap"', f'published: "{published}"')
+        .replace('canonical: "NIFTY Midcap 100"', f'canonical: "{canonical}"')
+        .replace('before: {name: "CNX Midcap"', f'before: {{name: "{before}"')
+        .replace('after: {name: "NIFTY Midcap 100"', f'after: {{name: "{after}"')
+    )
+
+
+def test_a_canonical_that_is_itself_remapped_does_not_load(tmp_path: Path) -> None:
+    """A chain left half-written. Every switch here lands on one series, so only the chained-
+    canonical check can refuse it: X -> Y means the CNX Midcap and Z rows must name Y, not X."""
+    x, y, z = "Nifty Free Float Midcap 100", "NIFTY Midcap 100", "Nifty Midcap 100 Interim"
+    rows = _row("CNX Midcap", x, "CNX Midcap", z) + _row(z, x, z, "CNX Midcap") + _row(x, y, x, y)
+    with pytest.raises(ValueError, match="itself remapped"):
+        load_index_aliases(_table_file(tmp_path, rows))
+
+
+def test_a_name_cannot_be_both_an_alias_and_its_own_series(tmp_path: Path) -> None:
+    series = '  - name: "CNX Midcap"\n    first_seen: 2012-10-01\n    evidence: "new"\n'
+    with pytest.raises(ValueError, match="one or the other"):
+        load_index_aliases(_table_file(tmp_path, _GOOD_ROW, series))
+
+
+def test_a_recorded_series_is_known_and_resolves_to_itself() -> None:
+    table = load_index_aliases()
+    assert table.knows("India VIX") and table.resolve("India VIX") == "India VIX"
+    assert table.knows("S&P ESG India") and table.resolve("S&P ESG India") == "S&P ESG India"
+    assert not table.knows("Nifty Some Index Launched Tomorrow")
 
 
 # ── the parser, against real bytes from both eras ────────────────────────────────────────────────

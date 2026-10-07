@@ -1,0 +1,192 @@
+CNX Consumption
+CNX Dividend Opportunities
+CNX Finance
+CNX Midcap
+CNX Service Sector
+CNX Smallcap
+NIFTY Midcap 50
+S&P CNX 500
+S&P CNX 500 Shariah
+S&P CNX Nifty Dividend
+S&P CNX Nifty Shariah
+S&P ESG India
+CNX Alpha Index
+CNX High Beta
+CNX Low Volatility
+CNX Nifty Dividend
+CNX Nifty Shariah
+CNX DEFTY
+LIX 15
+CPSE
+NV 20
+LIX15 Midcap
+GSEC10 NSE Index
+GSECBM NSE Index
+NI15
+Nifty TR 1X Inverse
+Nifty TR 2X Leverage
+NIFTY PR 1X Inverse
+NIFTY PR 2x Leverage
+NIFTY TR 1X Inverse
+NIFTY TR 2X Leverage
+NSE GSECBM Clean Price Index
+NSE Quality 30
+Nifty Midcap 100
+Nifty Quality 30
+Nifty Smallcap 100
+Nifty Aditya Birla Group
+Nifty Mahindra Group
+Nifty Tata Group
+Nifty Tata Group 25% Cap
+Nifty Free Float Midcap 100
+Nifty Free Float Smallcap 100
+Nifty Full Midcap 100
+Nifty Full Smallcap 100
+Nifty100 ESG Sector Leaders - Old
+Nifty BHARAT Bond Index - April 2025
+Nifty India Internet & E-Commerce
+India VIX
+Nifty 11-15 yr G-Sec Index
+Nifty 15 yr and above G-Sec Index
+Nifty 4-8 yr G-Sec Index
+Nifty Composite G-sec Index
+Nifty 10 yr Benchmark G-Sec
+Nifty 10 yr Benchmark G-Sec (Clean Price)
+Nifty 8-13 yr G-Sec
+Nifty Alpha 50
+Nifty CPSE
+Nifty Dividend Opportunities 50
+Nifty Financial Services
+Nifty Growth Sectors 15
+Nifty High Beta 50
+Nifty India Consumption
+Nifty Low Volatility 50
+Nifty Midcap 50
+Nifty Midcap Liquid 15
+Nifty Services Sector
+Nifty100 Liquid 15
+Nifty50 Dividend Points
+Nifty50 PR 1x Inverse
+Nifty50 PR 2x Leverage
+Nifty50 Shariah
+Nifty50 TR 1x Inverse
+Nifty50 TR 2x Leverage
+Nifty50 USD
+Nifty50 Value 20
+Nifty Private Bank
+Nifty MidSmallcap 400
+Nifty Midcap 150
+Nifty Smallcap 250
+Nifty Smallcap 50
+Nifty 50 Futures Index
+Nifty 50 Futures TR Index
+Nifty 1D Rate Index
+NIFTY Alpha Low-Volatility 30
+NIFTY Alpha Quality Low-Volatility 30
+NIFTY Alpha Quality Value Low-Volatility 30
+NIFTY LargeMidcap 250
+NIFTY Midcap 100
+NIFTY Midcap150 Quality 50
+NIFTY Quality Low-Volatility 30
+NIFTY Smallcap 100
+NIFTY100 Alpha 30
+NIFTY100 ESG
+NIFTY100 Enhanced ESG
+NIFTY100 Quality 30
+NIFTY200 Quality 30
+NIFTY50 Equal Weight
+NIFTY500 Value 50
+Nifty 50 Arbitrage
+Nifty Consumer Durables
+Nifty Core Housing
+Nifty Financial Services 25/50
+Nifty Financial Services Ex-Bank
+Nifty Healthcare Index
+Nifty Housing
+Nifty India Corporate Group Index - Aditya Birla Group
+Nifty India Corporate Group Index - Mahindra Group
+Nifty India Corporate Group Index - Tata Group
+Nifty India Corporate Group Index - Tata Group 25% Cap
+Nifty India Digital
+Nifty India Manufacturing
+Nifty India New Age Consumption
+Nifty India Select 5 Corporate Groups (MAATR)
+Nifty India Tourism
+Nifty Microcap 250
+Nifty MidSmall Financial Services
+Nifty MidSmall Healthcare
+Nifty MidSmall IT & Telecom
+Nifty MidSmall India Consumption
+Nifty MidSmallcap400 Momentum Quality 100
+Nifty Midcap Select
+Nifty Midcap150 Momentum 50
+Nifty Mobility
+Nifty Non-Cyclical Consumer
+Nifty Oil & Gas
+Nifty Rural
+Nifty Smallcap250 Momentum Quality 100
+Nifty Smallcap250 Quality 50
+Nifty Top 10 Equal Weight
+Nifty Top 15 Equal Weight
+Nifty Top 20 Equal Weight
+Nifty Total Market
+Nifty Transportation & Logistics
+Nifty100 ESG Sector Leaders
+Nifty100 Low Volatility 30
+Nifty200 Alpha 30
+Nifty200 Momentum 30
+Nifty200 Value 30
+Nifty500 Equal Weight
+Nifty500 LargeMidSmall Equal-Cap Weighted
+Nifty500 Low Volatility 50
+Nifty500 Momentum 50
+Nifty500 Multicap 50:25:25
+Nifty500 Multicap India Manufacturing 50:30:20
+Nifty500 Multicap Infrastructure 50:30:20
+Nifty500 Multicap Momentum Quality 50
+Nifty500 Quality 50
+NIFTY SME EMERGE
+Nifty India Defence
+Nifty Capital Markets
+Nifty EV & New Age Automotive
+Nifty IPO
+Nifty India Railways PSU
+Nifty REITs & InvITs
+Nifty BHARAT Bond Index - April 2030
+Nifty BHARAT Bond Index - April 2031
+Nifty BHARAT Bond Index - April 2032
+Nifty BHARAT Bond Index - April 2033
+Nifty500 Multifactor MQVLv 50
+Nifty Chemicals
+Nifty500 Flexicap Quality 30
+Nifty Waves
+Nifty India Internet
+Nifty India Infrastructure & Logistics
+Nifty500 Healthcare
+Nifty Total Market Momentum Quality 50
+Nifty India FPI 150
+Nifty Conglomerate 50
+Nifty Smallcap 500
+Nifty MidSmallcap400 50:50
+Nifty Cement
+Nifty REITs & Realty
+Nifty Capital Goods
+Nifty Commercial & Transport Services
+Nifty Construction
+Nifty Consumer Services
+Nifty Hospitals
+Nifty Housing Finance
+Nifty Insurance
+Nifty NBFC
+Nifty Power
+Nifty Retail
+Nifty Telecommunications
+Nifty Small Finance Banks & Microfinance Institutions
+Nifty Sugar & Ethanol
+Nifty500 Ahimsa
+Nifty REITs & InvITs 90:10
+Nifty Next 100
+Nifty India Defence Equal Weight
+Nifty500 Growth 50
+Nifty AI Catalysts
+Nifty High Dividend Yield 15

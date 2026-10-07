@@ -69,6 +69,7 @@ from dataplatform.ingest.macro.index_valuation import (
     parse_index_valuation,
     published_index_names,
 )
+from dataplatform.ingest.macro.models import MacroRelease
 from dataplatform.ingest.models import ParseError
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
@@ -85,13 +86,16 @@ __all__ = [
     "MacroBackfillRunner",
     "Outcome",
     "ParkReason",
+    "RederiveReport",
     "SessionCoverage",
     "SessionUnit",
     "UnmappedName",
     "build_plan",
     "main",
+    "rederive",
     "render_report",
     "survey",
+    "survey_l0",
     "unmapped_names",
     "write_coverage_csv",
 ]
@@ -547,6 +551,117 @@ def survey(
     return lines
 
 
+def _from_l0(
+    unit: SessionUnit, *, l0: L0Store, table: IndexAliasTable
+) -> SessionCoverage | tuple[MacroRelease, bytes]:
+    """A session's release (and payload) re-derived from L0, or the coverage line saying why not.
+
+    The same refusal rule the runner applies: a payload dated to another session is not this
+    session's, and is refused rather than written to the wrong partition.
+    """
+    if not l0.exists(SOURCE_ID, unit.session, unit.filename):
+        return SessionCoverage(unit.session, Outcome.PENDING, detail="not in L0")
+    try:
+        ref = l0.ref_for(SOURCE_ID, unit.session, unit.filename)
+        payload = l0.get(ref)
+        release = parse_index_valuation(
+            payload, filename=unit.filename, table=table, l0_key=ref.key, source=SOURCE_ID
+        )
+    except (L0Error, ParseError) as exc:
+        return SessionCoverage(unit.session, Outcome.REFUSED, detail=str(exc))
+    if release.release_date != unit.session:
+        return SessionCoverage(
+            unit.session,
+            Outcome.REFUSED,
+            detail=f"file reports session {release.release_date}, requested {unit.session}",
+        )
+    return release, payload
+
+
+def survey_l0(
+    plan: Sequence[SessionUnit], *, l0: L0Store, table: IndexAliasTable
+) -> list[SessionCoverage]:
+    """Coverage read from L0 alone — no `sync_state`, no network, no write.
+
+    What it does: re-parse every planned session's stored payload with `table` and report its
+    index count, fact count and the names `table` does not know; a session with no payload is
+    PENDING, a payload refused by the parser or dated to another session is REFUSED.
+    What it is for: measuring an alias table against the archive's whole history — the
+    unknown-names count before and after widening it — without touching the lake or the database.
+    """
+    lines: list[SessionCoverage] = []
+    for unit in plan:
+        derived = _from_l0(unit, l0=l0, table=table)
+        if isinstance(derived, SessionCoverage):
+            lines.append(derived)
+            continue
+        release, payload = derived
+        names = published_index_names(payload, filename=unit.filename)
+        lines.append(
+            SessionCoverage(
+                unit.session,
+                Outcome.PUBLISHED,
+                indices=len(names),
+                facts=len(release.facts),
+                unmapped=tuple(dict.fromkeys(n for n in names if not table.knows(n))),
+            )
+        )
+    return lines
+
+
+@dataclass(slots=True)
+class RederiveReport:
+    """What one `rederive` did: sessions rewritten from L0, and those it could not."""
+
+    sessions: int = 0
+    facts: int = 0
+    missing: int = 0
+    refused: list[str] = field(default_factory=list)
+
+
+def rederive(
+    plan: Sequence[SessionUnit],
+    *,
+    l0: L0Store,
+    table: IndexAliasTable,
+    data_root: Path | None = None,
+) -> RederiveReport:
+    """Rewrite this source's `macro_series` facts for every planned session from L0.
+
+    What it does: re-parse each stored payload with `table` and write it with
+    `replace_source=True`, so a fact moves to its (new) canonical `series_id` and no row stays
+    behind under the old one. Rows from other sources in the same partition are untouched.
+    What it assumes: no other writer of `macro_series` runs over the same dates (last write wins
+    per partition), and `sync_state` already says which sessions are PUBLISHED — this never reads
+    or changes it; a session is rewritten exactly when its L0 payload is its own session's.
+    What it never does: fetch, take a host lease, or write a session whose payload is absent or
+    refused (those are counted, not guessed).
+    """
+    report = RederiveReport()
+    for unit in plan:
+        derived = _from_l0(unit, l0=l0, table=table)
+        if isinstance(derived, SessionCoverage):
+            if derived.outcome is Outcome.PENDING:
+                report.missing += 1
+            else:
+                report.refused.append(f"{unit.session.isoformat()}: {derived.detail}")
+            continue
+        release, _payload = derived
+        write_release(release, data_root=data_root, replace_source=True)
+        report.sessions += 1
+        report.facts += len(release.facts)
+    _LOG.info(
+        "macro_backfill.rederived",
+        source=SOURCE_ID,
+        sessions=report.sessions,
+        facts=report.facts,
+        missing=report.missing,
+        refused=len(report.refused),
+        state="NORMALIZED",
+    )
+    return report
+
+
 def unmapped_names(coverage: Sequence[SessionCoverage]) -> list[UnmappedName]:
     """Every name the alias table does not know, with first/last session seen, by first seen."""
     first: dict[str, date] = {}
@@ -717,7 +832,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=Path("ops/reports/macro-backfill-latest.md"),
         help="Markdown coverage summary (overwritten every run); a .csv sibling holds per-session",
     )
+    offline = ap.add_mutually_exclusive_group()
+    offline.add_argument(
+        "--unknown-names",
+        action="store_true",
+        help="read-only: count the published names the alias table does not know, from L0 alone",
+    )
+    offline.add_argument(
+        "--rederive",
+        action="store_true",
+        help="rewrite this source's macro_series facts from L0 with the current alias table; "
+        "no fetch, no lease, no sync_state change",
+    )
+    ap.add_argument(
+        "--aliases", type=Path, default=None, help="alias table for --unknown-names/--rederive"
+    )
     args = ap.parse_args(argv)
+    if (args.unknown_names or args.rederive) and args.stop_before is not None:
+        # An offline pass holds no lease and makes no request, so there is no evening window to
+        # step out of; silently ignoring a deadline would let an operator believe one applied.
+        print(
+            "--stop-before applies only to the fetching run; --unknown-names and --rederive "
+            "make no request and run to completion (a re-derive is idempotent: re-run it if "
+            "interrupted)",
+            file=sys.stderr,
+        )
+        return 2
 
     settings = get_settings()
     clock: Clock = SystemClock()
@@ -729,6 +869,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         print(f"cannot plan macro backfill: {exc}", file=sys.stderr)
         return 2
+
+    if args.unknown_names or args.rederive:
+        table = load_index_aliases(args.aliases)
+        l0 = L0Store(clock=clock, data_root=settings.data_root)
+        if args.unknown_names:
+            return _print_unknown(survey_l0(plan, l0=l0, table=table))
+        done = rederive(plan, l0=l0, table=table, data_root=settings.data_root)
+        print(
+            f"macro re-derive from L0: {done.sessions} sessions rewritten, {done.facts} facts, "
+            f"{done.missing} not in L0, {len(done.refused)} refused (0 requests)"
+        )
+        for line in done.refused:
+            print(f"  refused {line}")
+        return 0
 
     if args.dry_run:
         for unit in plan:
@@ -749,6 +903,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     except HostBusyError as busy:
         print(f"macro backfill refused to start: {busy}", file=sys.stderr)
         return 4
+
+
+def _print_unknown(coverage: Sequence[SessionCoverage]) -> int:
+    published = [line for line in coverage if line.outcome is Outcome.PUBLISHED]
+    names = unmapped_names(coverage)
+    last = max((line.session for line in published), default=None)
+    stopped = [u for u in names if u.last_seen != last]
+    print(
+        f"{len(published)} sessions read from L0 (0 requests); {len(names)} published names the "
+        f"alias table does not know, {len(stopped)} of them no longer published"
+    )
+    for u in names:
+        print(f"  {u.name}\t{u.first_seen.isoformat()}\t{u.last_seen.isoformat()}\t{u.sessions}")
+    return 0
 
 
 def _run_live(

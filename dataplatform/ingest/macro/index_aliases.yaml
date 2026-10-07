@@ -1,94 +1,800 @@
 # Index name history for the NSE daily close-all snapshot (`ind_close_all_<DDMMYYYY>.csv`).
 #
-# The file names each index in the form published *that day*, and NSE/IISL renamed essentially
-# every index in a single event between 2015-11-06 and 2015-11-10 (48 names out of 53 changed in
-# one step, verified by fetching both sides). A consumer that keys on today's name therefore loses
-# every observation before that date — the same survivorship trap D2's `symbol_history` exists to
-# close for equities, in the index dimension. This table is that history.
+# The file names each index in the form published *that day*, and NSE/IISL renamed indices in
+# several events: 'S&P' dropped from every CNX name on 2013-02-08, essentially every CNX name became
+# a Nifty name between 2015-11-06 and 2015-11-09, the midcap/smallcap 100 indices split into
+# free-float and full variants for FY2016-17 and FY2017-18, and smaller relabels since. A consumer
+# that keys on today's name loses every observation before the switch — the survivorship trap D2's
+# `symbol_history` closes for equities, in the index dimension. This table is that history.
 #
-# Evidence discipline, deliberately conservative: a row exists only where the *name stem* matches
-# and the closing level across the switch corroborates it, or where multi-year level continuity
-# pins it by hand. Twenty-six pre-2015 names have neither and are **absent on purpose** — an
-# unmapped name keeps its own published name as its canonical subject, so it forms a visibly
-# separate series rather than being silently merged into the wrong index. Adding one is a research
-# task with the evidence recorded here, never a guess.
+# Two sections, and every name the M11.2 backfill ever saw in the archive is in one of them:
 #
-# Provenance: dataplatform/ingest/macro (M11.1), probed 2026-09-04. Detail and the unmapped list:
-# ops/gates/M11-macro-source-probe.md
+#   aliases — a published name that is the same index as a canonical one. Every row cites the two
+#             dated L0 files that straddle the switch (`before` carries the predecessor name and
+#             not the successor, `after` the successor and not the predecessor; both are frozen
+#             under tests/fixtures/nifty_index_close/renames/), the first session under the new
+#             name, and the measured levels. A row is admitted only where the closing level (and,
+#             for equity indices, P/E, P/B and yield) continues across the switch and the successor
+#             is the only name first published that session that does — or, for a series that
+#             publishes no multiples, where the level replicates a mechanical rule (a leveraged or
+#             inverse Nifty, a dividend-points index). A name is never mapped from string
+#             similarity: "CNX Smallcap" -> "Nifty Smallcap 100" is here because P/B 1.00 continues
+#             as 1.02, not because the words match.
+#   series  — a published name that is its own index: new (first published with no stopped name it
+#             continues) or retired (stopped with no successor). It resolves to itself.
+#
+# A name in neither section still resolves to itself, so it forms a visibly separate series; the
+# backfill's coverage report lists it as unknown, and adding it here is a research task with the
+# evidence recorded, never a guess.
+#
+# Two archive files are not what their date suggests: `ind_close_all_07072016.csv` and
+# `ind_close_all_12042023.csv` were regenerated later with that day's values under *later* names
+# (indices launched years afterwards appear in them). That is why some names below are first seen
+# on those dates but published regularly only from a later one.
+#
+# Provenance: M11.1 (the 2015 switch, probed 2026-09-04: ops/gates/M11-macro-source-probe.md);
+# widened in M11.3 from the M11.2 backfill's L0 and unknown-names report
+# (ops/gates/M11-index-valuation-backfill.md). No fetch was made to build it.
 
-version: 1
+version: 2
 switch_event:
-  observed_between: [2015-11-06, 2015-11-10]
+  observed_between: [2015-11-06, 2015-11-09]
   names_changed: 48
   names_unchanged: 5
 
 aliases:
   - published: "S&P CNX Nifty"
     canonical: "Nifty 50"
-    evidence: "flagship; level continuity 2012-10-01 5718.8 -> 2015-04-01 8586.25 -> 2017-01-02 8179.5"
+    renamed_on: 2013-02-08
+    before: {name: "S&P CNX Nifty", file: ind_close_all_07022013.csv}
+    after: {name: "CNX Nifty", file: ind_close_all_08022013.csv}
+    evidence: "close 5938.8 -> 5903.5 (-0.59%); P/E 18.27 -> 18.16; P/B 3.15 -> 3.13; yield 1.39 -> 1.4. 'S&P' dropped from every CNX name on 2013-02-08; level and P/E, P/B continuous"
   - published: "CNX Nifty"
     canonical: "Nifty 50"
-    evidence: "flagship; same series as S&P CNX Nifty, renamed 2015-11 (level delta 2.15% across the switch)"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Nifty", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty 50", file: ind_close_all_09112015.csv}
+    evidence: "close 7954.3 -> 7915.2 (-0.49%); P/E 21.57 -> 21.41; P/B 3.19 -> 3.18; yield 1.43 -> 1.44. flagship; level and multiples continuous across the 2015-11 CNX -> Nifty rename"
   - published: "CNX Nifty Junior"
     canonical: "Nifty Next 50"
-    evidence: "level continuity 2015-04-01 19634.3 -> 2017-01-02 21580.25 (delta 1.28% across the switch)"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Nifty Junior", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Next 50", file: ind_close_all_09112015.csv}
+    evidence: "close 19561.75 -> 19679.95 (+0.60%); P/E 20.76 -> 20.84; P/B 2.78 -> 2.8; yield 1.66 -> 1.65. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX 100"
     canonical: "Nifty 100"
-    evidence: "name stem match; close delta 2.01% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX 100", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty 100", file: ind_close_all_09112015.csv}
+    evidence: "close 8069.6 -> 8044.45 (-0.31%); P/E 21.43 -> 21.31; P/B 3.11 -> 3.11; yield 1.47 -> 1.47. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX 100 Equal Weight"
     canonical: "Nifty100 Equal Weight"
-    evidence: "name stem match; close delta 1.79% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX 100 Equal Weight", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty100 Equal Weight", file: ind_close_all_09112015.csv}
+    evidence: "close 10112.4 -> 10118.22 (+0.06%); P/E 19.28 -> 19.53; P/B 2.08 -> 2.08; yield 1.77 -> 1.77. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX 200"
     canonical: "Nifty 200"
-    evidence: "name stem match; close delta 1.86% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX 200", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty 200", file: ind_close_all_09112015.csv}
+    evidence: "close 4173.7 -> 4164.65 (-0.22%); P/E 22.25 -> 22.16; P/B 2.97 -> 2.97; yield 1.43 -> 1.44. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX 500"
     canonical: "Nifty 500"
-    evidence: "name stem match; close delta 1.71% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX 500", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty 500", file: ind_close_all_09112015.csv}
+    evidence: "close 6650.1 -> 6641.4 (-0.13%); P/E 23.05 -> 23.02; P/B 2.84 -> 2.84; yield 1.41 -> 1.41. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX 500 Shariah"
     canonical: "Nifty500 Shariah"
-    evidence: "name stem match; close delta 1.64% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX 500 Shariah", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty500 Shariah", file: ind_close_all_09112015.csv}
+    evidence: "close 2132.74 -> 2134.69 (+0.09%); P/E 21.9 -> 21.95; P/B 3.26 -> 3.26; yield 1.26 -> 1.26. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX Auto"
     canonical: "Nifty Auto"
-    evidence: "name stem match; close delta 1.39% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Auto", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Auto", file: ind_close_all_09112015.csv}
+    evidence: "close 8144.45 -> 8246.2 (+1.25%); P/E 46.94 -> 41.49; P/B 6.19 -> 6.28; yield .8 -> .79. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX Bank"
     canonical: "Nifty Bank"
-    evidence: "name stem match; close delta 1.47% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Bank", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Bank", file: ind_close_all_09112015.csv}
+    evidence: "close 17086.5 -> 17003 (-0.49%); P/E 17.54 -> 17.53; P/B 2.4 -> 2.4; yield 1.15 -> 1.14. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX Commodities"
     canonical: "Nifty Commodities"
-    evidence: "name stem match; close delta 3.18% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Commodities", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Commodities", file: ind_close_all_09112015.csv}
+    evidence: "close 2379.4 -> 2374.15 (-0.22%); P/E 14.22 -> 14.43; P/B 1.42 -> 1.41; yield 2.55 -> 2.57. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX Energy"
     canonical: "Nifty Energy"
-    evidence: "name stem match; close delta 3.46% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Energy", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Energy", file: ind_close_all_09112015.csv}
+    evidence: "close 8168.45 -> 8175.25 (+0.08%); P/E 12.08 -> 12.14; P/B 1.47 -> 1.47; yield 1.86 -> 1.86. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX FMCG"
     canonical: "Nifty FMCG"
-    evidence: "name stem match; close delta 0.17% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX FMCG", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty FMCG", file: ind_close_all_09112015.csv}
+    evidence: "close 20251 -> 20496.15 (+1.21%); P/E 38.93 -> 37.94; P/B 11.92 -> 12.06; yield 1.42 -> 1.41. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX IT"
     canonical: "Nifty IT"
-    evidence: "name stem match; close delta 2.36% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX IT", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty IT", file: ind_close_all_09112015.csv}
+    evidence: "close 11485.45 -> 11412.15 (-0.64%); P/E 19.91 -> 19.86; P/B 6.2 -> 6.2; yield 2.3 -> 2.32. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX Infrastructure"
     canonical: "Nifty Infrastructure"
-    evidence: "name stem match; close delta 3.09% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Infrastructure", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Infrastructure", file: ind_close_all_09112015.csv}
+    evidence: "close 2775.85 -> 2740.6 (-1.27%); P/E 19.22 -> 19.16; P/B 1.82 -> 1.8; yield 1.14 -> 1.16. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX MNC"
     canonical: "Nifty MNC"
-    evidence: "name stem match; close delta 0.08% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX MNC", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty MNC", file: ind_close_all_09112015.csv}
+    evidence: "close 9539.35 -> 9613.75 (+0.78%); P/E 43.75 -> 41.5; P/B 7.04 -> 7.1; yield 1.69 -> 1.68. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX Media"
     canonical: "Nifty Media"
-    evidence: "name stem match; close delta 1.76% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Media", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Media", file: ind_close_all_09112015.csv}
+    evidence: "close 2336.9 -> 2315.3 (-0.92%); P/E 45.61 -> 45.51; P/B 5.68 -> 5.59; yield .8 -> .8. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX Metal"
     canonical: "Nifty Metal"
-    evidence: "name stem match; close delta 2.26% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Metal", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Metal", file: ind_close_all_09112015.csv}
+    evidence: "close 1720.25 -> 1723.65 (+0.20%); P/E 11.93 -> 12.7; P/B .64 -> .65; yield 3.99 -> 4.01. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX PSE"
     canonical: "Nifty PSE"
-    evidence: "name stem match; close delta 3.58% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX PSE", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty PSE", file: ind_close_all_09112015.csv}
+    evidence: "close 3090.75 -> 3069 (-0.70%); P/E 11.13 -> 11.33; P/B 1.65 -> 1.64; yield 3.2 -> 3.22. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX PSU Bank"
     canonical: "Nifty PSU Bank"
-    evidence: "name stem match; close delta 0.11% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX PSU Bank", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty PSU Bank", file: ind_close_all_09112015.csv}
+    evidence: "close 3103.8 -> 3147.7 (+1.41%); P/E 11.92 -> 12.32; P/B .93 -> .96; yield 1.89 -> 1.82. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX Pharma"
     canonical: "Nifty Pharma"
-    evidence: "name stem match; close delta 4.98% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Pharma", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Pharma", file: ind_close_all_09112015.csv}
+    evidence: "close 12226.65 -> 11989.05 (-1.94%); P/E 60.1 -> 60.73; P/B 6.57 -> 6.44; yield .5 -> .51. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX Realty"
     canonical: "Nifty Realty"
-    evidence: "name stem match; close delta 4.72% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Realty", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Realty", file: ind_close_all_09112015.csv}
+    evidence: "close 172.5 -> 168.8 (-2.14%); P/E 28.88 -> 28.15; P/B .8 -> .78; yield .86 -> .88. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
   - published: "CNX Shariah25"
     canonical: "Nifty Shariah 25"
-    evidence: "name stem match; close delta 1.68% across the 2015-11 switch"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Shariah25", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Shariah 25", file: ind_close_all_09112015.csv}
+    evidence: "close 3247.09 -> 3243.55 (-0.11%); P/E 26.53 -> 26.82; P/B 4.58 -> 4.69; yield 1.13 -> 1.14. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "S&P CNX 500"
+    canonical: "Nifty 500"
+    renamed_on: 2013-02-08
+    before: {name: "S&P CNX 500", file: ind_close_all_07022013.csv}
+    after: {name: "CNX 500", file: ind_close_all_08022013.csv}
+    evidence: "close 4713.25 -> 4682.55 (-0.65%); P/E 17.76 -> 17.63; P/B 2.6 -> 2.58; yield 1.4 -> 1.41. 'S&P' dropped on 2013-02-08; level and multiples continuous (CNX Alpha Index sits 0.00% away on level but publishes P/E 23.07 and was already published beside it)"
+  - published: "S&P CNX 500 Shariah"
+    canonical: "Nifty500 Shariah"
+    renamed_on: 2013-02-08
+    before: {name: "S&P CNX 500 Shariah", file: ind_close_all_07022013.csv}
+    after: {name: "CNX 500 Shariah", file: ind_close_all_08022013.csv}
+    evidence: "close 1358.43 -> 1349.72 (-0.64%); P/E 18.95 -> 18.83; P/B 3.72 -> 3.7; yield 1.47 -> 1.49. 'S&P' dropped on 2013-02-08; level and multiples continuous"
+  - published: "S&P CNX Nifty Dividend"
+    canonical: "Nifty50 Dividend Points"
+    renamed_on: 2013-02-08
+    before: {name: "S&P CNX Nifty Dividend", file: ind_close_all_07022013.csv}
+    after: {name: "CNX Nifty Dividend", file: ind_close_all_08022013.csv}
+    evidence: "close 79.86 -> 79.86 (+0.00%). dividend-points index (moves only on ex-dates, no multiples): identical level on both sides of the 2013-02-08 switch"
+  - published: "S&P CNX Nifty Shariah"
+    canonical: "Nifty50 Shariah"
+    renamed_on: 2013-02-08
+    before: {name: "S&P CNX Nifty Shariah", file: ind_close_all_07022013.csv}
+    after: {name: "CNX Nifty Shariah", file: ind_close_all_08022013.csv}
+    evidence: "close 1280.93 -> 1271.79 (-0.71%); P/E 18.54 -> 18.41; P/B 3.61 -> 3.59; yield 1.51 -> 1.52. 'S&P' dropped on 2013-02-08; level and multiples continuous"
+  - published: "CNX Consumption"
+    canonical: "Nifty India Consumption"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Consumption", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty India Consumption", file: ind_close_all_09112015.csv}
+    evidence: "close 3482.55 -> 3506.4 (+0.68%); P/E 29.94 -> 29.72; P/B 4.84 -> 4.87; yield 1.11 -> 1.1. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "CNX Dividend Opportunities"
+    canonical: "Nifty Dividend Opportunities 50"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Dividend Opportunities", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Dividend Opportunities 50", file: ind_close_all_09112015.csv}
+    evidence: "close 1901.35 -> 1901.55 (+0.01%); P/E 13.84 -> 14; P/B 1.96 -> 1.96; yield 2.92 -> 2.92. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "CNX Finance"
+    canonical: "Nifty Financial Services"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Finance", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Financial Services", file: ind_close_all_09112015.csv}
+    evidence: "close 7027.65 -> 6967.9 (-0.85%); P/E 18.74 -> 18.53; P/B 2.93 -> 2.92; yield 1.19 -> 1.19. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "CNX Midcap"
+    canonical: "NIFTY Midcap 100"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Midcap", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Midcap 100", file: ind_close_all_09112015.csv}
+    evidence: "close 12995.7 -> 13073.8 (+0.60%); P/E 24.34 -> 24.8; P/B 2.2 -> 2.23; yield 1.51 -> 1.49. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "CNX Service Sector"
+    canonical: "Nifty Services Sector"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Service Sector", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Services Sector", file: ind_close_all_09112015.csv}
+    evidence: "close 10304.45 -> 10222.8 (-0.79%); P/E 18.35 -> 18.27; P/B 3.1 -> 3.09; yield 1.46 -> 1.47. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "CNX Smallcap"
+    canonical: "NIFTY Smallcap 100"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Smallcap", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Smallcap 100", file: ind_close_all_09112015.csv}
+    evidence: "close 5222.5 -> 5277 (+1.04%); P/E 22.01 -> 22.55; P/B 1 -> 1.02; yield 1.47 -> 1.45. level and multiples continuous (Nifty Growth Sectors 15 is nearer on level but P/B 8.02 against 1.00, and it continues NI15); the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "NIFTY Midcap 50"
+    canonical: "Nifty Midcap 50"
+    renamed_on: 2015-11-09
+    before: {name: "NIFTY Midcap 50", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Midcap 50", file: ind_close_all_09112015.csv}
+    evidence: "close 3210.5 -> 3253.25 (+1.33%); P/E 17.91 -> 18.55; P/B 1.25 -> 1.28; yield 2.43 -> 2.38. a case-only respelling at the 2015-11 switch (the two spellings already share one lookup key); level and multiples continuous"
+  - published: "CNX Alpha Index"
+    canonical: "Nifty Alpha 50"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Alpha Index", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Alpha 50", file: ind_close_all_09112015.csv}
+    evidence: "close 9090.59 -> 9200.46 (+1.21%); P/E 41.83 -> 41.38; P/B 5.54 -> 5.61; yield .89 -> .88. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "CNX High Beta"
+    canonical: "Nifty High Beta 50"
+    renamed_on: 2015-11-09
+    before: {name: "CNX High Beta", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty High Beta 50", file: ind_close_all_09112015.csv}
+    evidence: "close 1477.16 -> 1486.91 (+0.66%); P/E 17.03 -> 17.03; P/B .7 -> .71; yield 1.69 -> 1.66. P/E 17.03 on both sides; the G-Sec indices near its level publish no multiples and were already published before the switch"
+  - published: "CNX Low Volatility"
+    canonical: "Nifty Low Volatility 50"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Low Volatility", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Low Volatility 50", file: ind_close_all_09112015.csv}
+    evidence: "close 7320.45 -> 7318.26 (-0.03%); P/E 24.11 -> 24.14; P/B 4.2 -> 4.2; yield 1.8 -> 1.8. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "CNX Nifty Dividend"
+    canonical: "Nifty50 Dividend Points"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Nifty Dividend", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty50 Dividend Points", file: ind_close_all_09112015.csv}
+    evidence: "close 92.97 -> 92.97 (+0.00%). dividend-points index (moves only on ex-dates, no multiples): identical level on both sides of the switch"
+  - published: "CNX Nifty Shariah"
+    canonical: "Nifty50 Shariah"
+    renamed_on: 2015-11-09
+    before: {name: "CNX Nifty Shariah", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty50 Shariah", file: ind_close_all_09112015.csv}
+    evidence: "close 1810.74 -> 1805.37 (-0.30%); P/E 19.07 -> 19.13; P/B 2.66 -> 2.65; yield 1.54 -> 1.54. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "CNX DEFTY"
+    canonical: "Nifty50 USD"
+    renamed_on: 2015-11-09
+    before: {name: "CNX DEFTY", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty50 USD", file: ind_close_all_09112015.csv}
+    evidence: "close 4189.26 -> 4134.33 (-1.31%). the dollar-denominated Nifty: neither name publishes multiples. The only name first published on 2015-11-09 within 8% of its level that is not another index's successor (Nifty 200 continues CNX 200); its ratio to Nifty 50 falls 0.82%, a one-day INR move, on the day Nifty 50 fell 0.49%"
+  - published: "LIX 15"
+    canonical: "Nifty100 Liquid 15"
+    renamed_on: 2015-11-09
+    before: {name: "LIX 15", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty100 Liquid 15", file: ind_close_all_09112015.csv}
+    evidence: "close 3145.2 -> 3167.35 (+0.70%); P/E 20.29 -> 19.78; P/B 2.06 -> 2.1; yield 1.09 -> 1.08. level and multiples continuous (Nifty PSU Bank is nearer on level but P/E 12.32, P/B 0.96 against 20.29, 2.06)"
+  - published: "CPSE"
+    canonical: "Nifty CPSE"
+    renamed_on: 2015-11-09
+    before: {name: "CPSE", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty CPSE", file: ind_close_all_09112015.csv}
+    evidence: "close 2072.75 -> 2060.8 (-0.58%); P/E 11.3 -> 11.42; P/B 1.83 -> 1.86; yield 3.64 -> 3.73. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "NV 20"
+    canonical: "Nifty50 Value 20"
+    renamed_on: 2015-11-09
+    before: {name: "NV 20", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty50 Value 20", file: ind_close_all_09112015.csv}
+    evidence: "close 3571.65 -> 3562.1 (-0.27%); P/E 15.12 -> 15.15; P/B 2.38 -> 2.38; yield 2.06 -> 2.06. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "LIX15 Midcap"
+    canonical: "Nifty Midcap Liquid 15"
+    renamed_on: 2015-11-09
+    before: {name: "LIX15 Midcap", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Midcap Liquid 15", file: ind_close_all_09112015.csv}
+    evidence: "close 2838.22 -> 2855.09 (+0.59%); P/E 9.79 -> 9.8; P/B 1.34 -> 1.36; yield 2.15 -> 2.12. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "GSEC10 NSE Index"
+    canonical: "Nifty 8-13 yr G-Sec"
+    renamed_on: 2015-11-09
+    before: {name: "GSEC10 NSE Index", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty 8-13 yr G-Sec", file: ind_close_all_09112015.csv}
+    evidence: "close 1445.42 -> 1442.14 (-0.23%). bond index, no multiples: the only name first published on 2015-11-09 within 2% of its level (the next new G-Sec name is 4.45% away, not a one-day bond move); it moved with GSECBM (-0.20%) and the clean-price index (-0.27%) the same day"
+  - published: "GSECBM NSE Index"
+    canonical: "Nifty 10 yr Benchmark G-Sec"
+    renamed_on: 2015-11-09
+    before: {name: "GSECBM NSE Index", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty 10 yr Benchmark G-Sec", file: ind_close_all_09112015.csv}
+    evidence: "close 1383.79 -> 1381.05 (-0.20%). bond index, no multiples: the only name first published on 2015-11-09 within 4% of its level; it moved with GSEC10 (-0.23%) and the clean-price index (-0.27%) the same day"
+  - published: "NSE GSECBM Clean Price Index"
+    canonical: "Nifty 10 yr Benchmark G-Sec (Clean Price)"
+    renamed_on: 2015-11-09
+    before: {name: "NSE GSECBM Clean Price Index", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty 10 yr Benchmark G-Sec (Clean Price)", file: ind_close_all_09112015.csv}
+    evidence: "close 936.99 -> 934.47 (-0.27%). bond index, no multiples: the only name first published on 2015-11-09 within 8% of its level; it moved with GSECBM (-0.20%) the same day"
+  - published: "NI15"
+    canonical: "Nifty Growth Sectors 15"
+    renamed_on: 2015-11-09
+    before: {name: "NI15", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Growth Sectors 15", file: ind_close_all_09112015.csv}
+    evidence: "close 5232.15 -> 5229.75 (-0.05%); P/E 25.52 -> 25.41; P/B 8.02 -> 8.02; yield 1.62 -> 1.63. level and multiples continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "Nifty TR 1X Inverse"
+    canonical: "Nifty50 TR 1x Inverse"
+    renamed_on: 2014-09-08
+    before: {name: "Nifty TR 1X Inverse", file: ind_close_all_12082014.csv}
+    after: {name: "NIFTY TR 1X Inverse", file: ind_close_all_08092014.csv}
+    sessions_between: 16
+    evidence: "close 442.55 -> 419.96 (-5.10%). a case-only respelling (one lookup key) across 16 sessions in which neither spelling was published; compounding the inverse of CNX Nifty's 16 daily moves from 442.55 implies 418.16 against 419.96 published, the gap being the cash leg"
+  - published: "Nifty TR 2X Leverage"
+    canonical: "Nifty50 TR 2x Leverage"
+    renamed_on: 2014-09-08
+    before: {name: "Nifty TR 2X Leverage", file: ind_close_all_12082014.csv}
+    after: {name: "NIFTY TR 2X Leverage", file: ind_close_all_08092014.csv}
+    sessions_between: 16
+    evidence: "close 3772.11 -> 4205.58 (+11.49%). a case-only respelling (one lookup key) across 16 sessions in which neither spelling was published; compounding twice CNX Nifty's 16 daily moves from 3772.11 implies 4219.01 against 4205.58 published"
+  - published: "NIFTY PR 1X Inverse"
+    canonical: "Nifty50 PR 1x Inverse"
+    renamed_on: 2015-11-09
+    before: {name: "NIFTY PR 1X Inverse", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty50 PR 1x Inverse", file: ind_close_all_09112015.csv}
+    evidence: "close 488.7 -> 491.4 (+0.55%). replicates the inverse of Nifty 50's move that day (-0.49%): implied 491.10, published 491.4"
+  - published: "NIFTY PR 2x Leverage"
+    canonical: "Nifty50 PR 2x Leverage"
+    renamed_on: 2015-11-09
+    before: {name: "NIFTY PR 2x Leverage", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty50 PR 2x Leverage", file: ind_close_all_09112015.csv}
+    evidence: "close 3110.4 -> 3077.95 (-1.04%). replicates twice Nifty 50's move that day (-0.49%): implied 3079.82, published 3077.95"
+  - published: "NIFTY TR 1X Inverse"
+    canonical: "Nifty50 TR 1x Inverse"
+    renamed_on: 2015-11-09
+    before: {name: "NIFTY TR 1X Inverse", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty50 TR 1x Inverse", file: ind_close_all_09112015.csv}
+    evidence: "close 452 -> 454.5 (+0.55%). replicates the inverse of Nifty 50's move that day (-0.49%): implied 454.22, published 454.5"
+  - published: "NIFTY TR 2X Leverage"
+    canonical: "Nifty50 TR 2x Leverage"
+    renamed_on: 2015-11-09
+    before: {name: "NIFTY TR 2X Leverage", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty50 TR 2x Leverage", file: ind_close_all_09112015.csv}
+    evidence: "close 3635.1 -> 3597.15 (-1.04%). replicates twice Nifty 50's move that day (-0.49%): implied 3599.36, published 3597.15"
+  - published: "NSE Quality 30"
+    canonical: "NIFTY100 Quality 30"
+    renamed_on: 2015-11-09
+    before: {name: "NSE Quality 30", file: ind_close_all_06112015.csv}
+    after: {name: "Nifty Quality 30", file: ind_close_all_09112015.csv}
+    evidence: "close 2097.4 -> 2094.11 (-0.16%); P/E 30.83 -> 29.92; P/B 7 -> 7; yield 1.57 -> 1.59. level, P/B and yield continuous; the only name first published on 2015-11-09 that matches on level and multiples"
+  - published: "Nifty Quality 30"
+    canonical: "NIFTY100 Quality 30"
+    renamed_on: 2018-07-16
+    before: {name: "Nifty Quality 30", file: ind_close_all_13072018.csv}
+    after: {name: "NIFTY100 Quality 30", file: ind_close_all_16072018.csv}
+    evidence: "close 2705.75 -> 2688.4 (-0.64%); P/E 27.03 -> 27.45; P/B 6.64 -> 6.77; yield 1.62 -> 1.56. level and multiples continuous (Nifty PSU Bank is nearer on level but publishes no P/E and P/B 0.91); the only name first published on 2018-07-16 that matches on level and multiples"
+  - published: "Nifty Midcap 100"
+    canonical: "NIFTY Midcap 100"
+    renamed_on: 2016-04-01
+    before: {name: "Nifty Midcap 100", file: ind_close_all_31032016.csv}
+    after: {name: "Nifty Free Float Midcap 100", file: ind_close_all_01042016.csv}
+    evidence: "close 12752.6 -> 12791.95 (+0.31%); P/E 23.79 -> 27.51; P/B 2.16 -> 2.14; yield 1.52 -> 1.62. multiples rebase at every financial-year start (Nifty 50's P/B 3.10 -> 3.26 the same day), so the level is the evidence: the only name within 8% (the Full Midcap 100 launched that day is at 3935.07); the archive's regenerated 07-07-2016 file publishes NIFTY Midcap 100 at 14095.35 between Free Float's 14122.85 (07-05) and 14077.45 (07-08)"
+  - published: "Nifty Smallcap 100"
+    canonical: "NIFTY Smallcap 100"
+    renamed_on: 2016-04-01
+    before: {name: "Nifty Smallcap 100", file: ind_close_all_31032016.csv}
+    after: {name: "Nifty Free Float Smallcap 100", file: ind_close_all_01042016.csv}
+    evidence: "close 4884.85 -> 4984.60 (+2.04%); P/E 43.18 -> 204.75; P/B .96 -> 0.83; yield 1.56 -> 1.48. multiples rebase at every financial-year start (Nifty 50's P/B 3.10 -> 3.26 the same day), so the level is the evidence: the only name within 8% (the Full Smallcap 100 launched that day is at 2614.81); the archive's regenerated 07-07-2016 file publishes NIFTY Smallcap 100 at 5967.1 between Free Float's 5960.85 (07-05) and 5928.15 (07-08)"
+  - published: "Nifty Free Float Midcap 100"
+    canonical: "NIFTY Midcap 100"
+    renamed_on: 2018-04-02
+    before: {name: "Nifty Free Float Midcap 100", file: ind_close_all_28032018.csv}
+    after: {name: "NIFTY Midcap 100", file: ind_close_all_02042018.csv}
+    evidence: "close 18757 -> 19097.4 (+1.81%); P/E 46.87 -> 51.67; P/B 2.66 -> 3.12; yield 1.09 -> .65. financial-year start, so multiples rebase (Nifty 50's P/E 24.66 -> 25.35); the level moved +1.81% with its peers (Nifty Midcap 150 +1.56%, Nifty Midcap 50 +2.07%) and is the only name within 8%; the Full variant (5987.56) stopped the same day"
+  - published: "Nifty Free Float Smallcap 100"
+    canonical: "NIFTY Smallcap 100"
+    renamed_on: 2018-04-02
+    before: {name: "Nifty Free Float Smallcap 100", file: ind_close_all_28032018.csv}
+    after: {name: "NIFTY Smallcap 100", file: ind_close_all_02042018.csv}
+    evidence: "close 7791.95 -> 7929.2 (+1.76%); P/E 343.52 -> 70.66; P/B 1.63 -> 1.98; yield .69 -> .55. financial-year start, so multiples rebase; the level moved +1.76% with its peers (Nifty Smallcap 250 +1.96%, Nifty Smallcap 50 +2.04%); the Full variant (4000.01) stopped the same day"
+  - published: "Nifty Aditya Birla Group"
+    canonical: "Nifty India Corporate Group Index - Aditya Birla Group"
+    renamed_on: 2024-04-29
+    before: {name: "Nifty Aditya Birla Group", file: ind_close_all_26042024.csv}
+    after: {name: "Nifty India Corporate Group Index - Aditya Birla Group", file: ind_close_all_29042024.csv}
+    evidence: "close 7575.82 -> 7677.13 (+1.34%); P/B 3.4 -> 3.45; yield .42 -> .41. renamed into the 'Nifty India Corporate Group Index' family; level, P/B and yield continuous, Nifty 500 +0.73% the same day"
+  - published: "Nifty Mahindra Group"
+    canonical: "Nifty India Corporate Group Index - Mahindra Group"
+    renamed_on: 2024-04-29
+    before: {name: "Nifty Mahindra Group", file: ind_close_all_26042024.csv}
+    after: {name: "Nifty India Corporate Group Index - Mahindra Group", file: ind_close_all_29042024.csv}
+    evidence: "close 25155.49 -> 25311.73 (+0.62%); P/E 25.38 -> 26.21; P/B 3.77 -> 3.8; yield 1.6 -> 1.59. renamed into the 'Nifty India Corporate Group Index' family; level, P/B and yield continuous, Nifty 500 +0.73% the same day"
+  - published: "Nifty Tata Group"
+    canonical: "Nifty India Corporate Group Index - Tata Group"
+    renamed_on: 2024-04-29
+    before: {name: "Nifty Tata Group", file: ind_close_all_26042024.csv}
+    after: {name: "Nifty India Corporate Group Index - Tata Group", file: ind_close_all_29042024.csv}
+    evidence: "close 18034.74 -> 18191.59 (+0.87%); P/E 39.29 -> 39.65; P/B 8.62 -> 8.69; yield 1.15 -> 1.14. renamed into the 'Nifty India Corporate Group Index' family; level and multiples move together (+0.87%, P/E +0.92%, P/B +0.81%)"
+  - published: "Nifty Tata Group 25% Cap"
+    canonical: "Nifty India Corporate Group Index - Tata Group 25% Cap"
+    renamed_on: 2024-04-29
+    before: {name: "Nifty Tata Group 25% Cap", file: ind_close_all_26042024.csv}
+    after: {name: "Nifty India Corporate Group Index - Tata Group 25% Cap", file: ind_close_all_29042024.csv}
+    evidence: "close 16243.7 -> 16378.35 (+0.83%); P/E 45.39 -> 45.76; P/B 6.84 -> 6.9; yield .89 -> .89. renamed into the 'Nifty India Corporate Group Index' family; level and multiples move together (+0.83%, P/E +0.82%, P/B +0.88%)"
+  - published: "Nifty100 ESG Sector Leaders - Old"
+    canonical: "Nifty100 ESG Sector Leaders"
+    renamed_on: 2020-06-22
+    before: {name: "Nifty100 ESG Sector Leaders", file: ind_close_all_19062020.csv}
+    after: {name: "Nifty100 ESG Sector Leaders - Old", file: ind_close_all_22062020.csv}
+    evidence: "close 1781.79 -> 1794.09 (+0.69%); P/E 27.09 -> 27.28; P/B 3.56 -> 3.59; yield 1.55 -> 1.54. a one-session relabel: it continues the 2020-06-19 level and multiples, neither name is published 2020-06-23 .. 06-30, and Nifty100 ESG Sector Leaders resumes on 2020-07-01 at 1814.39"
+  - published: "Nifty India Internet & E-Commerce"
+    canonical: "Nifty India Internet"
+    renamed_on: 2025-05-05
+    before: {name: "Nifty India Internet & E-Commerce", file: ind_close_all_02052025.csv}
+    after: {name: "Nifty India Internet", file: ind_close_all_05052025.csv}
+    evidence: "close 1201.35 -> 1234.74 (+2.78%); P/E 105.63 -> 110.07; P/B 7.51 -> 7.72; yield .25 -> .25. the multiples move with the level (P/B +2.80% against close +2.78%), the yield is unchanged, and its peer rose the same day (Nifty India Digital +1.41%)"
+
+series:
+  - name: "S&P ESG India"
+    first_seen: 2012-10-01
+    last_seen: 2013-10-03
+    evidence: "no name was first published on 2013-10-04, the session after it stopped; retired, not renamed"
+  - name: "Nifty Full Midcap 100"
+    first_seen: 2016-04-01
+    last_seen: 2018-03-28
+    evidence: "the full-market-cap variant launched beside the free-float index on 2016-04-01; no name first published on 2018-04-02 is within 8% of its level (NIFTY Midcap 100 continues Free Float, not this); retired"
+  - name: "Nifty Full Smallcap 100"
+    first_seen: 2016-04-01
+    last_seen: 2018-03-28
+    evidence: "the full-market-cap variant launched beside the free-float index on 2016-04-01; no name first published on 2018-04-02 is within 8% of its level; retired"
+  - name: "Nifty BHARAT Bond Index - April 2025"
+    first_seen: 2025-01-16
+    last_seen: 2025-04-15
+    evidence: "a target-maturity bond index whose bonds matured in April 2025; its siblings (April 2030 .. 2033) continue under their own names; retired"
+  - name: "India VIX"
+    first_seen: 2014-05-14
+    evidence: "new index: first published 2014-05-14; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty 11-15 yr G-Sec Index"
+    first_seen: 2015-10-13
+    evidence: "new index: first published 2015-10-13; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty 15 yr and above G-Sec Index"
+    first_seen: 2015-10-13
+    evidence: "new index: first published 2015-10-13; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty 4-8 yr G-Sec Index"
+    first_seen: 2015-10-13
+    evidence: "new index: first published 2015-10-13; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Composite G-sec Index"
+    first_seen: 2015-10-13
+    evidence: "new index: first published 2015-10-13; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Private Bank"
+    first_seen: 2016-01-05
+    evidence: "new index: first published 2016-01-05; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty MidSmallcap 400"
+    first_seen: 2016-04-01
+    evidence: "new index: first published 2016-04-01; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Midcap 150"
+    first_seen: 2016-04-01
+    evidence: "new index: first published 2016-04-01; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Smallcap 250"
+    first_seen: 2016-04-01
+    evidence: "new index: first published 2016-04-01; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Smallcap 50"
+    first_seen: 2016-04-01
+    evidence: "new index: first published 2016-04-01; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty 50 Futures Index"
+    first_seen: 2016-06-16
+    evidence: "new index: first published 2016-06-16; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty 50 Futures TR Index"
+    first_seen: 2016-06-16
+    evidence: "new index: first published 2016-06-16; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty 1D Rate Index"
+    first_seen: 2016-06-23
+    evidence: "new index: first published 2016-06-23; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY Alpha Low-Volatility 30"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2017-07-13; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY Alpha Quality Low-Volatility 30"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2017-07-13; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY Alpha Quality Value Low-Volatility 30"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2017-07-13; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY LargeMidcap 250"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2017-11-30; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY Midcap150 Quality 50"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2020-08-10; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY Quality Low-Volatility 30"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2017-07-13; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY100 Alpha 30"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2019-06-28; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY100 ESG"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2018-03-28; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY100 Enhanced ESG"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2018-03-28; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY200 Quality 30"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2018-04-18; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY50 Equal Weight"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2017-04-18; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY500 Value 50"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2018-10-24; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty 50 Arbitrage"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Consumer Durables"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2020-01-27; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Core Housing"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2023-05-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Financial Services 25/50"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2020-08-10; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Financial Services Ex-Bank"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2022-02-03; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Healthcare Index"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2020-11-19; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Housing"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2022-03-09; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty India Digital"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2021-12-14; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty India Manufacturing"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2021-08-17; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty India New Age Consumption"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-10-23; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty India Select 5 Corporate Groups (MAATR)"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-11-13; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty India Tourism"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-06-19; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Microcap 250"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2021-05-11; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty MidSmall Financial Services"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2022-08-04; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty MidSmall Healthcare"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2022-08-04; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty MidSmall IT & Telecom"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2022-08-04; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty MidSmall India Consumption"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2022-10-10; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty MidSmallcap400 Momentum Quality 100"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-02-12; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Midcap Select"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2021-09-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Midcap150 Momentum 50"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2022-08-17; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Mobility"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2021-12-08; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Non-Cyclical Consumer"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2021-11-17; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Oil & Gas"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2020-01-27; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Rural"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-07-26; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Smallcap250 Momentum Quality 100"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2023-12-21; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Smallcap250 Quality 50"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2023-03-16; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Top 10 Equal Weight"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-06-26; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Top 15 Equal Weight"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-10-16; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Top 20 Equal Weight"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-10-23; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Total Market"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2021-10-14; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Transportation & Logistics"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2022-02-22; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty100 Low Volatility 30"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2016-07-11; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty200 Alpha 30"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2022-07-21; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty200 Momentum 30"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2020-08-25; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty200 Value 30"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-06-13; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Equal Weight"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-06-03; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 LargeMidSmall Equal-Cap Weighted"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-06-10; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Low Volatility 50"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-12-20; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Momentum 50"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-06-05; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Multicap 50:25:25"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2020-12-02; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Multicap India Manufacturing 50:30:20"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-03-07; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Multicap Infrastructure 50:30:20"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-03-07; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Multicap Momentum Quality 50"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-09-05; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Quality 50"
+    first_seen: 2016-07-07
+    evidence: "new index: first published 2016-07-07, regularly from 2024-12-20; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "NIFTY SME EMERGE"
+    first_seen: 2017-11-17
+    evidence: "new index: first published 2017-11-17; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty India Defence"
+    first_seen: 2022-01-19
+    evidence: "new index: first published 2022-01-19; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Capital Markets"
+    first_seen: 2023-04-12
+    evidence: "new index: first published 2023-04-12, regularly from 2024-09-13; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty EV & New Age Automotive"
+    first_seen: 2023-04-12
+    evidence: "new index: first published 2023-04-12, regularly from 2024-05-30; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty IPO"
+    first_seen: 2023-04-12
+    evidence: "new index: first published 2023-04-12, regularly from 2024-07-18; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty India Railways PSU"
+    first_seen: 2023-04-12
+    evidence: "new index: first published 2023-04-12, regularly from 2024-11-27; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty REITs & InvITs"
+    first_seen: 2023-04-06
+    evidence: "new index: first in the archive in ind_close_all_06042023.csv (the anchor: an L0 file refused for its month-first date, so M11.2's report, which reads only published sessions, put first seen at 2023-04-12); every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty BHARAT Bond Index - April 2030"
+    first_seen: 2025-01-16
+    evidence: "new index: first published 2025-01-16; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty BHARAT Bond Index - April 2031"
+    first_seen: 2025-01-16
+    evidence: "new index: first published 2025-01-16; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty BHARAT Bond Index - April 2032"
+    first_seen: 2025-01-16
+    evidence: "new index: first published 2025-01-16; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty BHARAT Bond Index - April 2033"
+    first_seen: 2025-01-16
+    evidence: "new index: first published 2025-01-16; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Multifactor MQVLv 50"
+    first_seen: 2025-02-07
+    evidence: "new index: first published 2025-02-07; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Chemicals"
+    first_seen: 2025-03-11
+    evidence: "new index: first published 2025-03-11; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Flexicap Quality 30"
+    first_seen: 2025-04-08
+    evidence: "new index: first published 2025-04-08; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Waves"
+    first_seen: 2025-05-02
+    evidence: "new index: first published 2025-05-02; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty India Infrastructure & Logistics"
+    first_seen: 2025-06-05
+    evidence: "new index: first published 2025-06-05; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Healthcare"
+    first_seen: 2025-07-02
+    evidence: "new index: first published 2025-07-02; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Total Market Momentum Quality 50"
+    first_seen: 2025-08-06
+    evidence: "new index: first published 2025-08-06; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty India FPI 150"
+    first_seen: 2025-08-14
+    evidence: "new index: first published 2025-08-14; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Conglomerate 50"
+    first_seen: 2025-09-02
+    evidence: "new index: first published 2025-09-02; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Smallcap 500"
+    first_seen: 2026-01-01
+    evidence: "new index: first published 2026-01-01, regularly from 2026-01-28; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty MidSmallcap400 50:50"
+    first_seen: 2026-02-05
+    evidence: "new index: first published 2026-02-05; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Cement"
+    first_seen: 2026-02-17
+    evidence: "new index: first published 2026-02-17; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty REITs & Realty"
+    first_seen: 2026-03-04
+    evidence: "new index: first published 2026-03-04; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Capital Goods"
+    first_seen: 2026-06-15
+    evidence: "new index: first published 2026-06-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Commercial & Transport Services"
+    first_seen: 2026-06-15
+    evidence: "new index: first published 2026-06-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Construction"
+    first_seen: 2026-06-15
+    evidence: "new index: first published 2026-06-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Consumer Services"
+    first_seen: 2026-06-15
+    evidence: "new index: first published 2026-06-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Hospitals"
+    first_seen: 2026-06-15
+    evidence: "new index: first published 2026-06-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Housing Finance"
+    first_seen: 2026-06-15
+    evidence: "new index: first published 2026-06-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Insurance"
+    first_seen: 2026-06-15
+    evidence: "new index: first published 2026-06-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty NBFC"
+    first_seen: 2026-06-15
+    evidence: "new index: first published 2026-06-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Power"
+    first_seen: 2026-06-15
+    evidence: "new index: first published 2026-06-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Retail"
+    first_seen: 2026-06-15
+    evidence: "new index: first published 2026-06-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Telecommunications"
+    first_seen: 2026-06-15
+    evidence: "new index: first published 2026-06-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Small Finance Banks & Microfinance Institutions"
+    first_seen: 2026-06-19
+    evidence: "new index: first published 2026-06-19; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Sugar & Ethanol"
+    first_seen: 2026-06-19
+    evidence: "new index: first published 2026-06-19; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Ahimsa"
+    first_seen: 2026-07-14
+    evidence: "new index: first published 2026-07-14; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty REITs & InvITs 90:10"
+    first_seen: 2026-07-29
+    evidence: "new index: first published 2026-07-29; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty Next 100"
+    first_seen: 2026-08-05
+    evidence: "new index: first published 2026-08-05; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty India Defence Equal Weight"
+    first_seen: 2026-08-11
+    evidence: "new index: first published 2026-08-11; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty500 Growth 50"
+    first_seen: 2026-08-27
+    evidence: "new index: first published 2026-08-27; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty AI Catalysts"
+    first_seen: 2026-09-15
+    evidence: "new index: first published 2026-09-15; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"
+  - name: "Nifty High Dividend Yield 15"
+    first_seen: 2026-10-01
+    evidence: "new index: first published 2026-10-01; every name that stopped at that switch is accounted for elsewhere in this table, so there is nothing it continues"

@@ -87,7 +87,9 @@ _FACT_KEY = ("series_id", "period_start", "period_end", "revision_seq")
 _OBSERVATION_KEY = ("series_id", "period_start", "period_end")
 
 
-def write_release(release: MacroRelease, *, data_root: Path | None = None) -> Path:
+def write_release(
+    release: MacroRelease, *, data_root: Path | None = None, replace_source: bool = False
+) -> Path:
     """Write one release's facts into its `release_date` partition, and return the path.
 
     Revision-safe by construction: a later release of the same period lands in a later partition, or
@@ -102,6 +104,13 @@ def write_release(release: MacroRelease, *, data_root: Path | None = None) -> Pa
     Rows are sorted by the fact key so a re-derivation is byte-identical (the M1.5 determinism
     rule), and the file is written whole to a temporary name then renamed over the target, so a
     crash mid-write cannot leave a half file readable.
+
+    `replace_source=True` first drops the partition's existing rows from `release.source` — and only
+    that source. It exists for one case: a re-derivation from L0 after the *identity* layer changed
+    (an index alias table widened), which moves a source's facts to a new `series_id`. A merge would
+    leave the old-id rows standing beside the new ones, so one index would read as two. Another
+    source's rows in the same partition are kept untouched. Never a way to revise a number: L0 did
+    not change, so every value re-derived is the value already published, under its right name.
     """
     path = l1_partition_path(MACRO_SERIES_DATASET, release.release_date, data_root=data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,6 +118,8 @@ def write_release(release: MacroRelease, *, data_root: Path | None = None) -> Pa
     merged: dict[tuple[Any, ...], MacroFact] = {}
     if path.exists():
         for existing in _rows_of(path):
+            if replace_source and existing.source == release.source:
+                continue
             merged[_key_of(existing)] = existing
     for fact in release.facts:
         key = _key_of(fact)
