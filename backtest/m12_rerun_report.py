@@ -552,43 +552,57 @@ def render(
         add("## Walk-forward: chosen on 2016-09..2021-08, verified on 2021-09..2026-08")
         add("")
         add(
-            "The choice is made by `backtest.verdict.run_walk_forward` on the selection window's "
-            "₹1 crore ranking and frozen before the verification sweep runs. It is shown three "
-            "ways: over every arm of this re-run, and over each old report's own arm set, so the "
-            "old choice and the new one are compared like for like."
+            "The choice on record is made by `backtest.verdict.run_walk_forward` on the selection "
+            "window's ₹1 crore ranking and frozen before the verification sweep runs, as in "
+            "2026-09-07. The same rule applied to the ₹10 crore ranking is shown beside it, "
+            "because that is the floor a real book plans against. Each is shown over every arm "
+            "of this re-run and over each old report's own arm set, so the old choice and the "
+            "new one compare like for like."
         )
         add("")
         add(
-            "| Arm set | Chosen on selection | Selection XIRR / DD (ratio) | Verification rank "
-            "| Verification XIRR / DD (ratio) | Old choice (2026-09-07) |"
+            "| Arm set | Chosen on | Choice | Selection XIRR / DD (ratio) | Verification, same "
+            "floor: rank, XIRR / DD (ratio) | Verification, other floor: rank, XIRR | Old choice "
+            "(2026-09-07, ₹1 crore) |"
         )
-        add("| --- | --- | --- | --- | --- | --- |")
+        add("| --- | --- | --- | --- | --- | --- | --- |")
         sweep_labels = sorted({f.label for f in old if f.arm_set == SWEEP_SET})
         duration_labels = sorted({f.label for f in old if f.arm_set == DURATION_SET})
         olds = {
             SWEEP_SET: "M10.7 + regime gate",
             DURATION_SET: "M10.7 @ monthly / 126-session hold",
         }
-        for set_name, labels in (
-            ("every arm of this re-run", None),
-            (SWEEP_SET, sweep_labels),
-            (DURATION_SET, duration_labels),
-        ):
-            ranked = [r for r in sel.ranked(LOW, labels) if r.ok]
-            if not ranked:
-                continue
-            choice = ranked[0]
-            if labels is None and selected and choice.label != selected:
-                raise ValueError(f"frozen choice {selected!r} is not the top row {choice.label!r}")
-            vrow = ver.row(LOW, choice.label)
-            n = len(ver.ranked(LOW, labels))
-            add(
-                f"| {set_name} | **{choice.label}** | {_p(choice.xirr)} / "
-                f"{_p(choice.max_drawdown)} ({_r(choice.ratio)}) | "
-                f"**{ver.rank(LOW, choice.label, labels)} of {n}** | "
-                f"{_p(vrow.xirr if vrow else None)} / {_p(vrow.max_drawdown if vrow else None)} "
-                f"({_r(vrow.ratio if vrow else None)}) | {olds.get(set_name, '—')} |"
-            )
+        for floor in floors:
+            other = HIGH if floor == LOW else LOW
+            for set_name, labels in (
+                ("every arm of this re-run", None),
+                (SWEEP_SET, sweep_labels),
+                (DURATION_SET, duration_labels),
+            ):
+                ranked = [r for r in sel.ranked(floor, labels) if r.ok]
+                if not ranked:
+                    continue
+                choice = ranked[0]
+                if floor == LOW and labels is None and selected and choice.label != selected:
+                    raise ValueError(
+                        f"frozen choice {selected!r} is not the top row {choice.label!r}"
+                    )
+                vrow = ver.row(floor, choice.label)
+                orow = ver.row(other, choice.label)
+                n = len(ver.ranked(floor, labels))
+                old_choice = (
+                    olds.get(set_name, "—") if floor == LOW else "— (chose on ₹1 crore only)"
+                )
+                add(
+                    f"| {set_name} | {FLOOR_LABEL[floor]} | **{choice.label}** | "
+                    f"{_p(choice.xirr)} / {_p(choice.max_drawdown)} ({_r(choice.ratio)}) | "
+                    f"**{ver.rank(floor, choice.label, labels)} of {n}**, "
+                    f"{_p(vrow.xirr if vrow else None)} / "
+                    f"{_p(vrow.max_drawdown if vrow else None)} "
+                    f"({_r(vrow.ratio if vrow else None)}) | "
+                    f"{ver.rank(other, choice.label, labels)} of {n}, "
+                    f"{_p(orow.xirr if orow else None)} | {old_choice} |"
+                )
         add("")
         for floor in floors:
             rho = _spearman(
