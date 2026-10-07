@@ -80,6 +80,6 @@ def test_a_move_is_listed_with_its_measured_cause() -> None:
     )
     text = render(windows, "", old, ladder, facts=[])
     assert "| A | 20.00% | 15.00% | -5.00 |" in text
-    assert "mostly lake #74/#75 + engine since" in text
+    assert "mostly lake #74/#75, engine since, universe" in text
     # The paper configuration is marked in every table it appears in.
     assert f"**{D13}** ◆" in text
