@@ -96,4 +96,5 @@ markers = [
     "integration: needs the docker postgres (make up)",
     "golden: corporate-action golden suite (EXECUTION_PLAN.md 4.3)",
     "network: hits the live network (yfinance reference A); opt in with `-m network`, skipped otherwise",
+    "live: calls a real model (ClaudeCliLLM, D16) under a hard call budget; opt in with `-m live`, deselected otherwise",
 ]
