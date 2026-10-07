@@ -83,3 +83,11 @@ def test_a_move_is_listed_with_its_measured_cause() -> None:
     assert "mostly lake #74/#75, engine since, universe" in text
     # The paper configuration is marked in every table it appears in.
     assert f"**{D13}** ◆" in text
+
+
+def test_without_the_no_interest_run_the_ladder_has_two_rungs() -> None:
+    windows = {"decade": _window("decade", [_row("A", "0.15", "0.20")])}
+    old = [OldFigure("x.md", SWEEP_SET, "decade", LOW, "A", 1, Decimal("0.20"), None, None)]
+    ladder = Ladder(reference={("decade", LOW, "A"): Decimal("0.16")})
+    text = render(windows, "", old, ladder, facts=[])
+    assert "mostly engine to 2026-09-28 (engine to 2026-09-28 -4.00, everything since" in text

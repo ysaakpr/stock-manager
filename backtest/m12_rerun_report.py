@@ -466,13 +466,14 @@ def _cause(move: _Move) -> str:
     """The rung that carries most of the move, from measured runs only."""
     if move.delta is None or move.old.xirr is None:
         return "rank only (the old report printed no XIRR for this window)"
-    if move.reference is None or move.no_interest is None:
+    if move.reference is None:
         return "engine + lake, not separable on this window (no intermediate run)"
-    parts = {
-        "engine to 2026-09-28": move.reference - move.old.xirr,
-        "lake #74/#75, engine since, universe": move.no_interest - move.reference,
-        "cash interest": move.new.xirr - move.no_interest,
-    }
+    parts = {"engine to 2026-09-28": move.reference - move.old.xirr}
+    if move.no_interest is None:
+        parts["everything since 2026-09-28"] = move.new.xirr - move.reference
+    else:
+        parts["lake #74/#75, engine since, universe"] = move.no_interest - move.reference
+        parts["cash interest"] = move.new.xirr - move.no_interest
     top = max(parts, key=lambda k: abs(parts[k]))
     detail = ", ".join(f"{k} {_pp(v)}" for k, v in parts.items())
     return f"mostly {top} ({detail} pp)"
@@ -486,8 +487,9 @@ def render(
     *,
     facts: Sequence[str],
     long_window: WindowResult | None = None,
+    notes: str = "",
 ) -> str:
-    """The whole gate report as markdown."""
+    """The whole gate report as markdown; ``notes`` (the written verdict) follows the headline."""
     floors = (LOW, HIGH)
     out: list[str] = []
     add = out.append
@@ -540,6 +542,9 @@ def render(
                 f"{d13_cell} | {_p(window.benchmark_xirr)} |"
             )
     add("")
+
+    if notes:
+        out.extend([notes.rstrip(), ""])
 
     # ── walk-forward ──
     sel, ver = windows.get("wf-selection"), windows.get("wf-verification")
@@ -668,15 +673,20 @@ def render(
         f"Every arm whose XIRR moved by more than {MOVE * 100:.1f} pp, or whose rank changed, "
         "against the report it was printed in. *Old rank* is as printed; *new rank* is re-ranked "
         "over that report's own arm set, so adding arms cannot move a row. The cause column is "
-        "measured where intermediate runs exist (decade and six-year), as three rungs that sum to "
-        "the move: **engine to 2026-09-28** is "
+        "measured where intermediate runs exist (decade and six-year), as rungs that sum to the "
+        "move. **engine to 2026-09-28** is "
         f"`{ladder.reference_name or 'the reference campaign'}` (rails, book corporate actions, "
-        "₹5,000 minimum order, seam fix, and the PIT NIFTY 500 screen, on the pre-#75 lake) minus "
-        "the old figure; **lake #74/#75, engine since, universe** is today's engine on today's "
-        "lake with idle cash at 0 % minus that — it also carries the step back from the NIFTY 500 "
-        "screen to the floor-only one, so it is not a pure data effect; **cash interest** is "
-        "today's figure minus that. The walk-forward windows have no "
-        "intermediate run and say so."
+        "₹5,000 minimum order, seam fix and the PIT NIFTY 500 screen, on the pre-#75 lake, idle "
+        "cash at 0 %) minus the old figure. "
+        + (
+            "**lake #74/#75, engine since, universe** is today's engine on today's lake with idle "
+            "cash at 0 % minus that, and **cash interest** is today's figure minus that. "
+            if ladder.no_interest
+            else "**everything since 2026-09-28** is today's figure minus that: lake #74/#75, the "
+            "engine since, idle cash earning repo - 0.50 %, and the step back from the NIFTY 500 "
+            "screen to the floor-only one, together — no run separates them. "
+        )
+        + "The walk-forward windows have no intermediate run and say so."
     )
     add("")
     add(
@@ -754,6 +764,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--reference-campaign", type=Path, default=None)
     parser.add_argument("--fact", action="append", default=[], help="a line for 'How this was run'")
     parser.add_argument("--gates", type=Path, default=Path("ops/gates"))
+    parser.add_argument("--notes", type=Path, default=None, help="markdown: the written verdict")
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
 
@@ -776,7 +787,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.long is not None:
         long_windows, _ = load_results(args.long)
         long_window = long_windows.get("long")
-    text = render(windows, selected, old, ladder, facts=args.fact, long_window=long_window)
+    notes = args.notes.read_text(encoding="utf-8") if args.notes is not None else ""
+    text = render(
+        windows, selected, old, ladder, facts=args.fact, long_window=long_window, notes=notes
+    )
     args.out.write_text(text, encoding="utf-8")
     print(f"  report written to {args.out}", file=sys.stderr)
     return 0
