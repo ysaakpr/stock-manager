@@ -273,6 +273,13 @@ WHERE payload->>'paper_book' = 'momentum_v2_paper_2026_09_06'
 ORDER BY trading_date DESC, id;
 ```
 
+`reason` on a `COMPLETED` row is one of `decided` (an ordinary session), `rebalance` (the month's
+rebalance, regime risk-on) or `rebalance_risk_off` (the month's rebalance with the regime filter
+risk-off — the basket is sold, or with nothing held the book stays in cash and the journal's one
+entry is a `HOLD` carrying `index_level`, `moving_average`, `ma_days` and `risk_on=false`). Rows
+recorded before M14.4 (the first session, 2026-10-07) say `rebalance` even when risk-off; the
+journal's evidence link has the reading. A `SKIPPED_DATA_RED` row's `reason` is the red reason.
+
 `GET /status/jobs` shows the job's last run; a `FAILED` run left nothing behind (the transaction
 rolled back) and the next run retries the owed session.
 

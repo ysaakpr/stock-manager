@@ -45,9 +45,10 @@ stop:
    (:func:`_book_late`). The past is never rewritten, so a late action cannot break the restore.
 6. **Decide.** ``ReplayEngine`` runs exactly one session — fill yesterday's orders, ask the policy,
    clear every order through A8, place what A8 allowed — and the entries it produced (BUY/SELL,
-   RAIL_BLOCK, or the HEARTBEAT of a day with nothing to do: invariant #9) are appended to the
-   journal and the session recorded ``COMPLETED`` with the new state, in the caller's one
-   transaction.
+   RAIL_BLOCK, the HOLD of a risk-off rebalance with nothing to sell, or the HEARTBEAT of a day
+   with nothing to do: invariant #9) are appended to the journal and the session recorded
+   ``COMPLETED`` with the new state, in the caller's one transaction. A rebalance the regime
+   filter parked in cash is recorded with reason ``rebalance_risk_off``.
 
 **Journal timestamps.** An entry's ``ts`` is midnight IST of the session it decides: the engine
 freezes its clock on the session date, exactly as in every backtest, so the decision is a pure
@@ -112,6 +113,7 @@ from backtest.policies.momentum_v2 import (
     MomentumV2Policy,
     MomentumV2Record,
     RegimeReading,
+    regime_parked,
 )
 from backtest.rails import (
     BACKTEST_CASE_ID,
@@ -1572,6 +1574,7 @@ def run_paper_session(
         *late_entries,
         *(_tagged(entry, spec) for entry in result.journal),
     )
+    risk_off = rebalance and regime_parked(capturing.evidence)
     journal.snapshot(capturing.evidence)
     for entry in entries:
         journal.append(entry)
@@ -1580,7 +1583,7 @@ def run_paper_session(
         book_id=spec.book_id,
         trading_date=trading_date,
         outcome=SessionOutcome.COMPLETED,
-        reason="rebalance" if rebalance else "decided",
+        reason=_decided_reason(rebalance=rebalance, risk_off=risk_off),
         rebalanced=rebalance,
         journal_digest=_entries_digest(entries),
         orders=broker.placed_on(trading_date),
@@ -1607,6 +1610,7 @@ def run_paper_session(
     log.info(
         "paper_session.decided",
         rebalance=rebalance,
+        risk_off=risk_off,
         entries=len(entries),
         decisions=sorted({entry.decision.value for entry in entries}),
         orders=len(record.orders),
@@ -1628,6 +1632,18 @@ def run_paper_session(
         record=record,
         book=result.book,
     )
+
+
+def _decided_reason(*, rebalance: bool, risk_off: bool) -> str:
+    """A ``COMPLETED`` row's reason: ``decided``, ``rebalance``, or ``rebalance_risk_off``.
+
+    ``risk_off`` is a rebalance the regime filter parked in cash, named on the row so the book's
+    being in cash is legible without following the evidence link (M14.4). The reason is prose for a
+    reader; nothing keys on it — the rebalance rule reads ``rebalanced``.
+    """
+    if not rebalance:
+        return "decided"
+    return "rebalance_risk_off" if risk_off else "rebalance"
 
 
 def _red_reason(
