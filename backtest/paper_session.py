@@ -1797,6 +1797,8 @@ class PaperSessionResult:
     entries: tuple[JournalEntry, ...] = ()
     record: PaperSessionRecord | None = None
     book: BookSnapshot | None = None
+    #: The fills the staging step booked this session, in fill order (each carries its costs).
+    fills: tuple[Fill, ...] = ()
 
     def journal_bytes(self) -> bytes:
         """The canonical bytes of the entries this invocation journaled."""
@@ -2096,6 +2098,7 @@ def run_paper_session(
         entries=entries,
         record=record,
         book=book,
+        fills=tuple(broker.fills),
     )
 
 
@@ -2105,19 +2108,25 @@ def _restore_expected(
     """The paper book's accounting book as the last session left it, and whether it was seeded.
 
     Restored from the last session's ``expected_book``. The first session opens it with the
-    book's capital. A last session recorded before M15.3 persisted none: the book is seeded once
-    from the restored broker (logged, and marked ``seeded`` on the session's reconciliation), and
-    carried on its own from then on.
+    book's capital. Two cases seed it from the restored broker instead — logged, and marked
+    ``seeded`` on the session's reconciliation — and carry it on its own from then on: a last
+    session recorded before M15.3, which persisted none; and a last session that broke
+    reconciliation, which the session only reaches once the owner has resolved the break — the
+    resolution is the owner's acceptance of the broker's side (ops/runbooks/daily-eod.md).
     """
     if last is None:
         return PortfolioBook.seeded(spec.opening_cash, ()), False
-    if last.expected_book is not None:
+    if last.expected_book is not None and last.outcome is not SessionOutcome.RECON_BREAK:
         return _ExpectedBook.from_document(last.expected_book).book, False
     _LOG.warning(
         "paper_session.expected_book_seeded",
         book=spec.book_id,
         from_session=last.trading_date.isoformat(),
-        reason="the last session predates M15.3 and persisted no accounting book",
+        reason=(
+            "the break recorded on that session was resolved; the book is re-based on the broker"
+            if last.outcome is SessionOutcome.RECON_BREAK
+            else "the last session predates M15.3 and persisted no accounting book"
+        ),
     )
     return _mirror(sim), True
 
