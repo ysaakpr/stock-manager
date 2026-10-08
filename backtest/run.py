@@ -90,7 +90,13 @@ from backtest.book_actions import (
     store_book_actions_unless,
 )
 from backtest.cap_tiers import LiquidityRankTiers, TierSleeve, describe_sleeves
-from backtest.cash_interest import CashInterestAccrual, InterestCredit, current_cash_interest
+from backtest.cash_interest import (
+    CashInterestAccrual,
+    InterestCredit,
+    RepoRateSchedule,
+    current_cash_interest,
+    load_repo_rate_schedule,
+)
 from backtest.policies.earnings_surprise import CONCEPTS as EARNINGS_SURPRISE_CONCEPTS
 from backtest.policies.earnings_surprise import EarningsSurprisePanel, NoSignal
 from backtest.policies.fundamentals_value import (
@@ -105,6 +111,11 @@ from backtest.policies.momentum_v2 import (
     MomentumV2Policy,
     MomentumV2Record,
     RegimeReading,
+)
+from backtest.policies.momentum_v2_overlays import (
+    ProfitabilityReading,
+    RepoRateReading,
+    ResidualScore,
 )
 from backtest.policies.naive_momentum import (
     MomentumParameters,
@@ -1306,6 +1317,11 @@ class _L1MomentumV2Data:
 
     Rebalance sessions are computed up front; any other session of the look-back calendar (the
     redeploy follow-up, a daily regime re-entry) is computed on first read and cached.
+
+    The M16.1 overlay seams (:mod:`backtest.policies.momentum_v2_overlays`) are served only when
+    their input is supplied — ``repo_rates`` (A1), ``residual_panel`` (A3), ``profitability`` (A4)
+    — and raise :class:`BacktestError` when asked without it. A run with every overlay off supplies
+    none, so it reads no rate, no index window and no filing beyond what it read before.
     """
 
     def __init__(
@@ -1317,7 +1333,13 @@ class _L1MomentumV2Data:
         signal_closes: SignalCloses | None = None,
         universe_filter: _InvestableUniverse | None = None,
         lookback_sessions: Sequence[date] | None = None,
+        repo_rates: RepoRateSchedule | None = None,
+        residual_panel: ResidualMomentumPanel | None = None,
+        profitability: _L1Profitability | None = None,
     ) -> None:
+        self._repo_rates = repo_rates
+        self._residual_panel = residual_panel
+        self._profitability = profitability
         self._reader = reader
         self._signal_closes: SignalCloses = (
             signal_closes if signal_closes is not None else reader.closes_on
@@ -1364,6 +1386,61 @@ class _L1MomentumV2Data:
         return Dataset.declaring(
             f"regime@{as_of.isoformat()}",
             (reading,),
+            knowable_date=lambda r: r.knowable_date,
+        )
+
+    def repo_rate(self, as_of: date) -> Dataset[RepoRateReading]:
+        """A1: the repo rate in force on ``as_of``, knowable from the day it took effect."""
+        if self._repo_rates is None:
+            raise BacktestError("absolute momentum needs the repo-rate schedule; none was supplied")
+        change = self._repo_rates.change_for(as_of)
+        reading = RepoRateReading(
+            repo_rate=change.repo_rate,
+            effective_from=change.effective_from,
+            knowable_date=change.effective_from,
+        )
+        return Dataset.declaring(
+            f"repo_rate@{as_of.isoformat()}", (reading,), knowable_date=lambda r: r.knowable_date
+        )
+
+    def residual_momentum(self, as_of: date) -> Dataset[ResidualScore]:
+        """A3: the H1 score of every candidate of ``signal(as_of)``, on the same signal closes.
+
+        The window is the panel's own (the 253 published NIFTY 50 sessions before ``as_of``), and
+        each name's closes come from the same seam its 12-1 return does, so a split inside the
+        window is expressed in one share basis. Each score is knowable on the window's last
+        session, ``t-1``.
+        """
+        panel = self._residual_panel
+        if panel is None:
+            raise BacktestError("residual ranking needs the published market series; none supplied")
+        window = panel.window(as_of)
+        isins = sorted(record.isin for record in self.signal(as_of).records)
+        by_session = [(session, self._signal_closes(session)) for session in window]
+        closes = {
+            isin: {
+                session: (float(day[isin]) if isin in day else None) for session, day in by_session
+            }
+            for isin in isins
+        }
+        scores = panel.scores(as_of, closes)
+        records = tuple(ResidualScore(isin, scores[isin], window[-1]) for isin in isins)
+        return Dataset.declaring(
+            f"residual_momentum@{as_of.isoformat()}",
+            records,
+            knowable_date=lambda r: r.knowable_date,
+        )
+
+    def profitability(self, as_of: date) -> Dataset[ProfitabilityReading]:
+        """A4: TTM profit for every candidate of ``signal(as_of)`` with a knowable filing."""
+        if self._profitability is None:
+            raise BacktestError(
+                "the profitability filter needs the PIT fundamentals; none supplied"
+            )
+        isins = frozenset(record.isin for record in self.signal(as_of).records)
+        return Dataset.declaring(
+            f"profitability@{as_of.isoformat()}",
+            self._profitability.readings(as_of, isins),
             knowable_date=lambda r: r.knowable_date,
         )
 
@@ -2125,6 +2202,48 @@ def run_naive_momentum(
         reader.close()
 
 
+@dataclass(frozen=True, slots=True)
+class _V2OverlayInputs:
+    """What the M16.1 overlays switched on in a run read — and nothing for one switched off.
+
+    Loaded only for a switch that is on, so a D13 run opens no repo schedule, market window or
+    fundamentals store it did not open before.
+    """
+
+    repo_rates: RepoRateSchedule | None = None
+    residual_panel: ResidualMomentumPanel | None = None
+    profitability: _L1Profitability | None = None
+
+    @classmethod
+    def for_parameters(
+        cls, params: MomentumV2Parameters, *, through: date, data_root: Path | None
+    ) -> _V2OverlayInputs:
+        panel: ResidualMomentumPanel | None = None
+        if params.residual_ranking:
+            # The pre-registered H1 regresses on the published NIFTY 50 TRI, as the swing leg does.
+            series = read_tri_series(
+                _BENCHMARK_TRI_SLUG, through, method=TRI_METHOD_PUBLISHED, data_root=data_root
+            )
+            if series is None:
+                raise BacktestError(
+                    f"residual ranking regresses on the published {_BENCHMARK_TRI_SLUG!r} TRI, "
+                    f"absent from L1/benchmark_tri through {through.isoformat()}"
+                )
+            panel = ResidualMomentumPanel(
+                [
+                    MarketSession(p.as_of, Decimal(p.tri_value), p.knowable_date)
+                    for p in series.points
+                ]
+            )
+        return cls(
+            repo_rates=load_repo_rate_schedule() if params.absolute_momentum else None,
+            residual_panel=panel,
+            profitability=(
+                _L1Profitability.load(data_root) if params.profitability_filter else None
+            ),
+        )
+
+
 def run_momentum_v2(
     *,
     start: date,
@@ -2192,6 +2311,9 @@ def run_momentum_v2(
             ma_days=v2_parameters.regime_ma_days,
             data_root=data_root,
         )
+        overlays = _V2OverlayInputs.for_parameters(
+            v2_parameters, through=sessions[-1], data_root=data_root
+        )
         data = _L1MomentumV2Data(
             reader,
             sessions,
@@ -2199,6 +2321,9 @@ def run_momentum_v2(
             signal_closes=signal_closes,
             universe_filter=universe_filter,
             lookback_sessions=calendar,
+            repo_rates=overlays.repo_rates,
+            residual_panel=overlays.residual_panel,
+            profitability=overlays.profitability,
         )
         clock = FrozenClock(first_session)
         book = PortfolioBook()
@@ -4476,6 +4601,40 @@ class _L1FundamentalsData:
             for isin in base
             if isin in recent and base[isin] > _ZERO
         }
+
+
+class _L1Profitability:
+    """A4's input (M16.1): each name's TTM profit as of a date, off the PIT fundamentals store.
+
+    The facts are loaded once and sorted by filing date, exactly as :class:`_L1FundamentalsData`
+    loads them; a reading as of ``as_of`` hands :func:`compute_metrics` the prefix knowable then,
+    and ``compute_metrics`` itself refuses a later filing (``PitError``) as the backstop. Each
+    reading is dated by its newest filing, which the policy's guard checks again.
+    """
+
+    def __init__(self, facts: Sequence[_PitFact]) -> None:
+        self._facts = sorted(facts, key=lambda fact: fact.filing_date)
+        self._filing_dates = [fact.filing_date for fact in self._facts]
+
+    @classmethod
+    def load(cls, data_root: Path | None) -> _L1Profitability:
+        """Every company-level fact the metrics read, from the PIT store (raises if absent)."""
+        return cls(_L1FundamentalsData._load_facts(data_root))
+
+    def readings(self, as_of: date, isins: frozenset[str]) -> tuple[ProfitabilityReading, ...]:
+        """One reading per ISIN of ``isins`` with any filing knowable on ``as_of``, ISIN order."""
+        cutoff = bisect_right(self._filing_dates, as_of)
+        metrics = compute_metrics(
+            (fact for fact in self._facts[:cutoff] if fact.isin in isins), as_of=as_of
+        )
+        return tuple(
+            ProfitabilityReading(
+                isin=isin,
+                earnings_ttm=m.earnings_ttm if isinstance(m.earnings_ttm, Decimal) else None,
+                knowable_date=m.knowable_date,
+            )
+            for isin, m in sorted(metrics.items())
+        )
 
 
 @dataclass(frozen=True, slots=True)

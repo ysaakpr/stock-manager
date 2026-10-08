@@ -54,6 +54,14 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
   over its exposure sells pro-rata; one under it buys only up to the cap. It is the standard
   risk-parity-at-the-portfolio-level overlay, chosen once (15 %, rho 0.3) and never fitted.
 
+* **Absolute momentum, residual ranking, profitability** (``absolute_momentum``,
+  ``residual_ranking``, ``profitability_filter``) — M16.1, three research variants on D13, each
+  documented in :mod:`backtest.policies.momentum_v2_overlays` with its own data seam. A1 leaves a
+  basket slot in cash when the name's 12-1 return does not beat the repo-based cash hurdle; A3 ranks
+  on the round-2 H1 residual-momentum score instead of the 12-1 return; A4 drops a candidate
+  without positive TTM profit in a filing at most 200 days old. Off by default and absent from the
+  parameters' ``repr`` while off, like the M14.5 switches.
+
 With **all six toggles off** the policy reproduces the naive top-N decision exactly — that is the
 "naive" baseline the increment report is struck against, and a unit test pins the parity. Every knob
 is a stated parameter, echoed verbatim into the report, so nothing here is silently tuned.
@@ -71,7 +79,7 @@ or reach data outside the point-in-time context. Given the same inputs it return
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
 from typing import Final, Protocol, runtime_checkable
@@ -80,6 +88,15 @@ from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
 from backtest.policies.industry_gate import apply_industry_gate
+from backtest.policies.momentum_v2_overlays import (
+    AbsoluteMomentumData,
+    ProfitabilityData,
+    ResidualRankingData,
+    absolute_momentum_evidence,
+    profitability_evidence,
+    profitable,
+    residual_scores,
+)
 from backtest.policies.sizing import account_order_ceiling
 from backtest.replay import SessionContext, SessionDecision
 from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
@@ -87,7 +104,10 @@ from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, Holding, OrderRequest, Side
 
 __all__ = [
+    "D13_ABS_MOM",
     "D13_INDUSTRY_GATE",
+    "D13_PROFIT_FILTER",
+    "D13_RESID_MOM",
     "PAPER_RATIFIED_2026_09_06",
     "MomentumV2Data",
     "MomentumV2Parameters",
@@ -221,6 +241,9 @@ class MomentumV2Parameters:
     * ``industry_gate`` — M16.2: each rebalance, admit only names whose industry maps to one of the
       top-5 NSE sectoral indices by 6-1 month return (:mod:`backtest.policies.industry_gate`). Its
       K, look-back and cadence are fixed there, not here. Off by default, out of ``repr`` while off.
+    * ``absolute_momentum`` / ``residual_ranking`` / ``profitability_filter`` — M16.1 (A1, A3, A4;
+      :mod:`backtest.policies.momentum_v2_overlays`). Off by default and out of ``repr`` while off,
+      for the same reason. Each needs its data source to serve the matching overlay seam.
 
     With ``use_12_1``, ``sell_band``, ``regime_filter``, ``vol_scaled``, ``redeploy_next_session``
     and ``vol_target_annual`` all off/``None`` the policy is the naive top-N policy exactly. Every
@@ -244,6 +267,9 @@ class MomentumV2Parameters:
     regime_daily_exit: bool = field(default=False, repr=False)
     regime_daily_band: Decimal = field(default=Decimal("0"), repr=False)
     industry_gate: bool = field(default=False, repr=False)
+    absolute_momentum: bool = field(default=False, repr=False)
+    residual_ranking: bool = field(default=False, repr=False)
+    profitability_filter: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -333,6 +359,16 @@ D13_INDUSTRY_GATE: Final = MomentumV2Parameters(
     industry_gate=True,
 )
 
+#: M16.1's three variants, each D13 with exactly one overlay switched on, named so an arm set can
+#: reference them (:mod:`backtest.policies.momentum_v2_overlays`). Research configurations only:
+#: none is ratified for paper or real money.
+#: A1 — a basket slot whose 12-1 return does not beat the repo-based cash hurdle stays in cash.
+D13_ABS_MOM: Final = replace(PAPER_RATIFIED_2026_09_06, absolute_momentum=True)
+#: A3 — rank on the round-2 H1 residual-momentum score instead of the 12-1 return.
+D13_RESID_MOM: Final = replace(PAPER_RATIFIED_2026_09_06, residual_ranking=True)
+#: A4 — only names with positive TTM profit in a filing at most 200 days old are eligible.
+D13_PROFIT_FILTER: Final = replace(PAPER_RATIFIED_2026_09_06, profitability_filter=True)
+
 
 @runtime_checkable
 class MomentumV2Data(Protocol):
@@ -388,6 +424,19 @@ class MomentumV2Policy:
     ) -> None:
         self._data = data
         self._params = params if params is not None else MomentumV2Parameters()
+        # M16.1: an overlay switched on against a source with no method for it is refused here,
+        # not on the first rebalance a month into a run. The check is runtime_checkable's, so it
+        # sees only that the method exists: the L1 source always has all three and raises
+        # BacktestError on the first call when its input was not supplied.
+        for switch, seam in (
+            ("absolute_momentum", AbsoluteMomentumData),
+            ("residual_ranking", ResidualRankingData),
+            ("profitability_filter", ProfitabilityData),
+        ):
+            if getattr(self._params, switch) and not isinstance(data, seam):
+                raise TypeError(
+                    f"{switch} is on but the data source does not serve {seam.__name__}"
+                )
         # The rails A8 will clear this policy's orders against. With them, no buy is sized past the
         # per-order ceiling (``backtest.policies.sizing.account_order_ceiling``): a buy the rail is
         # bound to refuse leaves its cash idle, the next rebalance spreads the larger idle balance
@@ -509,37 +558,94 @@ class MomentumV2Policy:
         if self._params.industry_gate:  # M16.2: narrow to the top sectoral indices' names
             candidates, gate = apply_industry_gate(self._data, ctx, candidates)
         use_12_1 = self._params.use_12_1
-        ranked = sorted(
-            candidates, key=lambda record: (-record.momentum(use_12_1=use_12_1), record.isin)
-        )
+        overlay_evidence: list[EvidenceItem] = []
+        if self._params.profitability_filter:
+            # A4: the eligible set narrows before anything is ranked (filings through the guard).
+            assert isinstance(self._data, ProfitabilityData)
+            offered = len(candidates)
+            readings = ctx.pit.admit(self._data.profitability(ctx.session))
+            candidates = profitable(candidates, readings, as_of=ctx.session)
+            overlay_evidence.append(profitability_evidence(ctx.session, offered, len(candidates)))
+        scores: Mapping[str, Decimal] | None = None
+        if self._params.residual_ranking:
+            # A3: the H1 score is the ranking key; a name the panel excludes cannot be ranked.
+            assert isinstance(self._data, ResidualRankingData)
+            scores = residual_scores(ctx.pit.admit(self._data.residual_momentum(ctx.session)))
+            ranking = scores
+            ranked = sorted(
+                (record for record in candidates if record.isin in ranking),
+                key=lambda record: (-ranking[record.isin], record.isin),
+            )
+        else:
+            ranked = sorted(
+                candidates, key=lambda record: (-record.momentum(use_12_1=use_12_1), record.isin)
+            )
         chosen = ranked[: self._params.top_n]
         # The outer band that governs sells: the top ``sell_band`` names (banding), or just the
         # top ``top_n`` (no banding — the naive rule). A held name inside this band is retained.
         band = self._params.sell_band if self._params.sell_band is not None else self._params.top_n
         keep = {record.isin for record in ranked[:band]}
         target = {record.isin: record for record in chosen}
-        prices = {record.isin: record.price for record in chosen}
+        slots: dict[str, Decimal] | None = None
+        if self._params.absolute_momentum:
+            # A1: weights are struck over the whole chosen basket, then a name that does not beat
+            # the cash hurdle gives up its slot to cash — never to the next-ranked name. It is not
+            # kept either: a held name failing the hurdle is sold even inside the sell band.
+            assert isinstance(self._data, AbsoluteMomentumData)
+            (repo,) = ctx.pit.admit(self._data.repo_rate(ctx.session))
+            hurdle = repo.hurdle
+            slots = self._weights_for(target) if target else {}
+            passing = {r.isin for r in ranked[:band] if r.momentum_12_1 > hurdle}
+            keep &= passing
+            failing = [isin for isin in target if isin not in passing]
+            # Held names the band alone would keep but the hurdle sells — the sells A1 asks for.
+            in_band = {r.isin for r in ranked[:band]}
+            selling = [
+                h.isin for h in ctx.broker.holdings() if h.isin in in_band and h.isin not in passing
+            ]
+            overlay_evidence.append(
+                absolute_momentum_evidence(ctx.session, repo, chosen, failing, selling)
+            )
+            target = {isin: record for isin, record in target.items() if isin in passing}
+            slots = {isin: weight for isin, weight in slots.items() if isin in target}
+        prices = {record.isin: record.price for record in target.values()}
 
         held = {holding.isin: holding for holding in ctx.broker.holdings()}
         sells = self._sells(held, keep)
-        exposure = _ONE
+        # A1's cash slots cap the basket at the passing names' share of capital.
+        exposure = _ONE if slots is None else sum(slots.values(), _ZERO)
         trims: list[tuple[OrderRequest, str]] = []
         if self._params.vol_target_annual is not None and target:
-            exposure = self._exposure(target)
+            vol_exposure = self._exposure(target)
+            exposure = vol_exposure if slots is None else (exposure * vol_exposure)
             trims = self._trims(held, target, prices, exposure, ctx, ranked)
         buys, drifts_note = self._buys(
-            ctx, held, target, prices, use_12_1=use_12_1, exposure=exposure, ranked=ranked
+            ctx,
+            held,
+            target,
+            prices,
+            use_12_1=use_12_1,
+            exposure=exposure,
+            ranked=ranked,
+            scores=scores,
         )
         if trims:
             buys = []  # a book being cut back to its exposure does not also add to it
         if self._params.redeploy_next_session and target and sells:
-            # Only a rebalance that sold something leaves proceeds to deploy tomorrow.
-            self._pending = self._weights_for(target)
+            # Only a rebalance that sold something leaves proceeds to deploy tomorrow. Under A1
+            # the slot weights go (summing below one), so the redeploy also leaves the cash slots.
+            self._pending = self._weights_for(target) if slots is None else slots
 
         orders = tuple(order for order, _ in (*sells, *trims, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *trims, *buys))
         evidence = self._evidence(
-            ctx.session, chosen, drifts_note, use_12_1=use_12_1, exposure=exposure
+            ctx.session,
+            chosen,
+            drifts_note,
+            use_12_1=use_12_1,
+            exposure=exposure,
+            scores=scores,
+            extra=overlay_evidence,
         )
         if gate is not None:
             evidence = gate.annotate(evidence)
@@ -623,6 +729,7 @@ class MomentumV2Policy:
         use_12_1: bool,
         exposure: Decimal = _ONE,
         ranked: Sequence[MomentumV2Record] = (),
+        scores: Mapping[str, Decimal] | None = None,
     ) -> tuple[list[tuple[OrderRequest, str]], Decimal]:
         """Whole-share buys toward the model weights, sized from free cash; return them and drift.
 
@@ -661,6 +768,16 @@ class MomentumV2Policy:
                 self._order_caps, ctx.broker, {**{r.isin: r.price for r in ranked}, **prices}
             ),
         )
+        if scores is not None:  # A3: the rationale names the key the name was ranked on
+            buys = [
+                (
+                    order.to_order_request(exchange=Exchange.NSE, tag="MOMENTUM"),
+                    f"top-{self._params.top_n} residual momentum {scores[order.isin]:+} (H1); "
+                    f"buy {order.quantity} @ {order.price}",
+                )
+                for order in allocation.orders
+            ]
+            return buys, allocation.tracking_drift
         buys = [
             (
                 order.to_order_request(exchange=Exchange.NSE, tag="MOMENTUM"),
@@ -780,6 +897,23 @@ class MomentumV2Policy:
         existing_value = {
             isin: Decimal(held[isin].quantity) * prices[isin] for isin in priced if isin in held
         }
+        share = sum(weights.values(), _ZERO)
+        if share < _ONE:
+            # A1 (M16.1): slot weights summing below one mean the hurdle left slots in cash. The
+            # redeploy fills the passing names up to their share of capital and never into those.
+            in_basket = sum(
+                (
+                    Decimal(held[isin].quantity)
+                    * (records[isin].price if isin in records else held[isin].average_price)
+                    for isin in weights
+                    if isin in held
+                ),
+                _ZERO,
+            )
+            capital = self._capital(ctx, held, prices, tuple(records.values()))
+            budget = min(budget, max(_ZERO, capital * share - in_basket))
+            if budget <= _ZERO:
+                return self._redeploy_heartbeat(ctx, budget, reason="basket at its A1 cash cap")
         allocation = simulate_sip_instalment(
             instalment=budget,
             targets=weights_norm,
@@ -896,9 +1030,17 @@ class MomentumV2Policy:
         *,
         use_12_1: bool,
         exposure: Decimal = _ONE,
+        scores: Mapping[str, Decimal] | None = None,
+        extra: Sequence[EvidenceItem] = (),
     ) -> EvidenceBundle:
-        """The ranked momentum table the decision was made on, as one content-addressed bundle."""
+        """The ranked momentum table the decision was made on, as one content-addressed bundle.
+
+        Under A3 (``scores``) the table carries the residual-momentum key it was ranked on; any
+        M16.1 overlay's own item (``extra``) follows the table.
+        """
         label = "momentum_12_1" if use_12_1 else "momentum_0_12"
+        if scores is not None:
+            label = "residual_momentum"
         items = [
             EvidenceItem(
                 kind=EvidenceKind.PRICE,
@@ -906,7 +1048,9 @@ class MomentumV2Policy:
                 label=label,
                 isin=record.isin,
                 as_of=session,
-                value=record.momentum(use_12_1=use_12_1),
+                value=(
+                    record.momentum(use_12_1=use_12_1) if scores is None else scores[record.isin]
+                ),
                 detail={
                     "price": str(record.price),
                     "volatility": str(record.volatility),
@@ -941,6 +1085,7 @@ class MomentumV2Policy:
                     text="share of capital the basket may occupy under the volatility target",
                 )
             )
+        items.extend(extra)
         return EvidenceBundle(trading_date=session, actor=Actor.T0, items=tuple(items))
 
 
