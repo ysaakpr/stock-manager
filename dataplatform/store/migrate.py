@@ -35,10 +35,12 @@ from dataplatform.store.db import Connection, connection
 __all__ = [
     "MIGRATIONS_DIR",
     "Migration",
+    "MigrationDriftError",
     "MigrationError",
+    "SchemaStatus",
     "discover",
     "migrate",
-    "pending_migrations",
+    "schema_status",
 ]
 
 #: Where the numbered SQL files live, beside this module.
@@ -68,6 +70,10 @@ log = get_logger(__name__)
 
 class MigrationError(RuntimeError):
     """The migrations on disk and the ones recorded in the database disagree."""
+
+
+class MigrationDriftError(MigrationError):
+    """An applied migration's file was edited after it ran: the repo no longer says what ran."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,47 +162,71 @@ def migrate(
     return pending
 
 
-def pending_migrations(
-    settings: Settings | None = None, *, directory: Path | None = None
-) -> list[Migration]:
-    """The migrations on disk that the database has not applied, without applying any.
+@dataclass(frozen=True, slots=True)
+class SchemaStatus:
+    """How the database's migration ledger compares with the files in this checkout.
 
-    What it does: reads `schema_migrations` read-only and returns every file not recorded there,
-    in order. A database with no ledger at all has applied nothing, so every file is pending.
-    What it assumes: the database is reachable; an unreachable one raises, which is the truth.
+    `pending` are files the database has not applied; `ahead` are versions the database has applied
+    that this checkout does not have (a newer checkout migrated it). A checksum mismatch is not a
+    status but an error, `MigrationDriftError`.
+    """
+
+    pending: tuple[Migration, ...]
+    ahead: tuple[str, ...]
+
+    @property
+    def current(self) -> bool:
+        return not self.pending and not self.ahead
+
+
+def schema_status(
+    settings: Settings | None = None, *, directory: Path | None = None
+) -> SchemaStatus:
+    """Compare the database's ledger with the migrations on disk, without applying any.
+
+    What it does: reads `schema_migrations` read-only. A database with no ledger at all has
+    applied nothing, so every file is pending.
+    What it assumes: the database is reachable; an unreachable one raises `psycopg.OperationalError`.
     What it never does: write — no bootstrap, no advisory lock, no DDL. This is what the scheduler
     asks before it starts (M15.4), and a status check that could migrate as a side effect would
-    hide exactly the drift it exists to catch. A checksum mismatch or a version this checkout does
-    not know raises `MigrationError`, as `migrate` does.
+    hide exactly the drift it exists to catch. An applied file whose content changed raises
+    `MigrationDriftError`, as `migrate` does.
     """
     settings = get_settings() if settings is None else settings
     migrations = discover(directory)
     with connection(settings) as conn:
         ledger = conn.execute("SELECT to_regclass('public.schema_migrations')").fetchone()
         if ledger is None or ledger[0] is None:
-            return migrations
-        return _pending(conn, migrations)
+            return SchemaStatus(pending=tuple(migrations), ahead=())
+        return _compare(conn, migrations)
 
 
-def _pending(conn: Connection, migrations: list[Migration]) -> list[Migration]:
-    """Migrations not yet in `schema_migrations`, after checking the applied ones still match."""
+def _compare(conn: Connection, migrations: list[Migration]) -> SchemaStatus:
+    """Pending and ahead, after checking every applied file still hashes to what was applied."""
     rows = conn.execute("SELECT version, checksum FROM schema_migrations").fetchall()
     applied = {str(version): str(checksum) for version, checksum in rows}
     for migration in migrations:
         recorded = applied.get(migration.version)
         if recorded is not None and recorded != migration.checksum:
-            raise MigrationError(
+            raise MigrationDriftError(
                 f"{migration.path.name} was applied with checksum {recorded[:12]}… but now "
                 f"hashes to {migration.checksum[:12]}…: an applied migration was edited, so the "
                 "database no longer matches this repo. Revert the file and add a new migration."
             )
-    unknown = sorted(set(applied) - {migration.version for migration in migrations})
-    if unknown:
+    ahead = tuple(sorted(set(applied) - {migration.version for migration in migrations}))
+    pending = tuple(migration for migration in migrations if migration.version not in applied)
+    return SchemaStatus(pending=pending, ahead=ahead)
+
+
+def _pending(conn: Connection, migrations: list[Migration]) -> list[Migration]:
+    """Migrations not yet applied — refusing a database that is ahead of this checkout."""
+    status = _compare(conn, migrations)
+    if status.ahead:
         raise MigrationError(
-            f"database has migrations this checkout does not: {unknown}. "
+            f"database has migrations this checkout does not: {list(status.ahead)}. "
             "Running an older checkout against a newer database would corrupt it."
         )
-    return [migration for migration in migrations if migration.version not in applied]
+    return list(status.pending)
 
 
 def _apply(conn: Connection, migration: Migration, *, applied_at: datetime) -> None:
