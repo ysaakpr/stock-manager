@@ -254,8 +254,16 @@ def test_make_check_runs_the_secret_scan_first() -> None:
     """Removing (or demoting) the scan from the gate must fail this test."""
     make = shutil.which("make")
     assert make, "make is required: `make check` is the gate"
+    # Run as a top-level make even when this test runs inside `make check`: a sub-make inherits
+    # MAKEFLAGS/MAKELEVEL and prints "Entering directory" lines.
+    env = {k: v for k, v in os.environ.items() if k not in {"MAKEFLAGS", "MAKELEVEL", "MFLAGS"}}
     dry_run = subprocess.run(
-        [make, "-n", "check"], cwd=REPO, capture_output=True, text=True, check=True
+        [make, "--no-print-directory", "-n", "check"],
+        cwd=REPO,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     commands = [line.strip() for line in dry_run.stdout.splitlines() if line.strip()]
     assert commands[0] == SCAN_CMD, commands
