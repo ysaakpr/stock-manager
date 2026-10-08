@@ -225,6 +225,20 @@ day. Then, in order — each step can end the run:
    each tagged `payload.mode = PAPER`, `payload.paper_book = <book id>`; record the session
    `COMPLETED` with the new `book_state`. Journal entries and the ledger row commit in one
    transaction.
+7. **Stage, fill and reconcile through the live path's code** (M15.3). Orders reach the paper
+   `SimBroker` only through `execution.staging.StagingCoordinator` — it checks the **kill switch**
+   before every placement — and yesterday's orders fill through the same coordinator into the
+   paper book's own accounting book (`paper_session.expected_book`, carried from session to
+   session). Right after the fills, before the policy decides, `execution.recon.Reconciler`
+   compares that book with the `SimBroker`'s positions and cash. Clean: one more `HEARTBEAT`
+   closes the session's journal (`payload.event = RECONCILIATION`, with the broker order ids
+   staged and filled), and `paper_session.recon` says `CLEAN`. A break: see "When it is red".
+
+The kill switch is read **before** step 4 as well: a tripped switch journals one `SKIPPED_DATA_RED`
+with `payload.event = KILL_SWITCH_TRIPPED` and the trip's source and reason, records the date red,
+and stages nothing — orders staged for that session lapse, as on a red day. The switch is the
+paper book's own file, `<DATA_ROOT>/kill_switch/momentum_v2_paper_2026_09_06.json`; it survives
+restarts and nothing ever resets it automatically.
 
 **Journal timestamps.** An entry's `ts` is **midnight IST of the session it decides**, not the
 wall-clock time: the engine freezes its clock on the session date, as in every backtest, so the
@@ -236,11 +250,15 @@ A red first-of-month moves the rebalance to the next green session rather than s
 
 ### Installing and restarting
 
-Apply the migration first, then restart the user service so it reads the new registry (do not
-restart it mid-run of another job — check `GET /status/jobs` first):
+Apply the migrations first, then restart the user service so it reads the new registry (do not
+restart it mid-run of another job — check `GET /status/jobs` first). **Migrate before restart**:
+the M15.3 code writes `paper_session.recon` and `expected_book` (0015), so a scheduler restarted on
+it against a database without 0015 fails every paper run until it is applied. 0015 is backward
+compatible: existing rows keep NULL in both columns and the first session after it seeds its
+accounting book from the restored broker once (`recon.seeded = true`, `payload.seeded = true`).
 
 ```bash
-make migrate     # applies 0012_paper_session if it is not yet applied
+make migrate     # applies 0012_paper_session and 0015_paper_session_recon if not yet applied
 XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler
 XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status scheduler
 ```
@@ -263,7 +281,8 @@ network. With `PAPER_SESSION_ENABLED` off it logs `paper_session.disabled` and d
 -- the ledger: one row per decided or refused session
 SELECT trading_date, outcome, reason, rebalanced, jsonb_array_length(orders) AS orders,
        jsonb_array_length(actions) AS corporate_actions, pending IS NOT NULL AS redeploy_pending,
-       book_state->'broker'->>'cash' AS cash
+       book_state->'broker'->>'cash' AS cash, recon->>'status' AS recon,
+       expected_book->>'cash' AS book_cash
 FROM paper_session WHERE book_id = 'momentum_v2_paper_2026_09_06' ORDER BY trading_date DESC;
 
 -- the decisions behind it, late corporate actions included
@@ -273,8 +292,22 @@ WHERE payload->>'paper_book' = 'momentum_v2_paper_2026_09_06'
 ORDER BY trading_date DESC, id;
 ```
 
+`reason` on a `COMPLETED` row is one of `decided` (an ordinary session), `rebalance` (the month's
+rebalance, regime risk-on) or `rebalance_risk_off` (the month's rebalance with the regime filter
+risk-off — the basket is sold, or with nothing held the book stays in cash and the journal's one
+entry is a `HOLD` carrying `index_level`, `moving_average`, `ma_days` and `risk_on=false`). Rows
+recorded before M14.4 (the first session, 2026-10-07) say `rebalance` even when risk-off; the
+journal's evidence link has the reading. A `SKIPPED_DATA_RED` row's `reason` is the red reason.
+
 `GET /status/jobs` shows the job's last run; a `FAILED` run left nothing behind (the transaction
-rolled back) and the next run retries the owed session.
+rolled back) and the next run retries the owed session. `GET /status/paper` (M15.3) is the paper
+book's own red: the kill switch's state, the latest session's outcome and reconciliation, and every
+escalation or break with no resolution row — `healthy` is false while any of them blocks the book.
+A session the switch refused is a *successful* job run, so `/status/jobs` alone never shows it.
+
+```bash
+uv run python -m execution.kill_switch status --account momentum_v2_paper_2026_09_06  # exit 3 = tripped
+```
 
 ### When it is red or fails
 
@@ -310,6 +343,74 @@ rolled back) and the next run retries the owed session.
   human decision and is never withdrawn in place. The next run trades again. If the owner judges
   the book wrong, that is a re-basing decision for the owner (a new book id), not an edit of
   `paper_session`.
+- **Red: "kill switch tripped by …"** (`payload.event = KILL_SWITCH_TRIPPED`, verdict `HALTED`).
+  Trading is halted by the paper book's kill switch: by hand (`MANUAL`) or by a reconciliation
+  break (`RECON`, next item). Every session is refused, journaled once per date, until a human
+  resets it. Find out why (`… kill_switch status --account …` prints source, reason and time;
+  the `ESCALATE` entry has the break), deal with the cause, then re-arm it — the note is required
+  and logged:
+
+  ```bash
+  uv run python -m execution.kill_switch reset --account momentum_v2_paper_2026_09_06 \
+      --by "<who>" --note "<what was wrong and why it is safe to trade again>"
+  ```
+
+  The reset is persisted in the switch file (`last_reset`: when, `--by` — the OS user if omitted —
+  the note, and the trip it cleared), so a trip-and-reset leaves a trace beyond the log. A switch
+  file that exists but has no boolean `tripped` is refused rather than read as armed: the job
+  fails and `/status/paper` reports the error. Fix or restore the file; never delete it to "arm"
+  the switch without understanding why it was unreadable.
+
+  To halt the paper book on purpose (an incident, a drill, a data question you want answered
+  before it trades again):
+
+  ```bash
+  uv run python -m execution.kill_switch trip --account momentum_v2_paper_2026_09_06 \
+      --reason "<why>"
+  ```
+
+  A tripped switch halts *this* paper book only; the next scheduled run after a reset decides the
+  owed session normally (a date already refused stays refused in the journal, append-only).
+- **`RECON_BREAK`: "reconciliation break: …"** (`payload.event = RECON_BREAK`, an `ESCALATE`
+  entry). After the session's fills, the paper book's accounting book and the `SimBroker`
+  disagreed on a position or on cash — by any amount; there is no tolerance. The session's fills
+  stand (the row carries the book they left), but the switch tripped (source `RECON`) and nothing
+  was staged, so a rebalance due that day moves to the next green session. A `recon.alert` error
+  log line names every break. Every later session is refused — first by the switch, then, once it
+  is reset, by the unresolved break (`SKIPPED_DATA_RED`, "unresolved reconciliation break(s):
+  RECON:<date>@<terms>") — until **both** are cleared. To resolve:
+
+  1. Read the break: `paper_session.recon->'breaks'` for the date (book vs broker, per ISIN or
+     cash), or the `ESCALATE` entry's rationale and evidence (both sides as compared).
+  2. Decide which side is right. The paper `SimBroker` is the simulated account — if the
+     accounting book is what went wrong (a corporate action booked on one side, a hand edit of
+     `expected_book`), accepting the broker is the normal answer, and the next session re-bases
+     the accounting book on the broker (`recon.seeded = true` on that session). If the broker side
+     is wrong, do not resolve: re-basing the paper book on other numbers is an owner decision (a
+     new book id), not an edit of `paper_session`.
+  3. Record the decision — the same append-only table as a corporate-action escalation, keyed by
+     the break:
+
+     ```sql
+     INSERT INTO paper_session_resolution (book_id, action_key, terms, resolved_by, note, resolved_at)
+     SELECT book_id, recon->>'key', recon->>'terms', '<who>', '<what was decided and why>', now()
+     FROM paper_session
+     WHERE book_id = 'momentum_v2_paper_2026_09_06' AND trading_date = '<break date>';
+     ```
+
+  4. Reset the switch (previous item). The next run decides the owed session; check its row says
+     `recon = CLEAN` and `GET /status/paper` is healthy.
+
+  `GET /status/paper` **stays unhealthy after the resolution and the reset** until that next
+  session has run: its `latest_outcome` is still the `RECON_BREAK` row. That is expected — the
+  book is healthy again once a session has decided and reconciled clean on it, not when the
+  paperwork is done. `kill_switch.tripped = false` and an empty `unresolved` list confirm the two
+  steps landed; the reset itself is recorded in the switch file as `last_reset` (who, when, the
+  note, and the trip it cleared) — `python -m execution.kill_switch status --account …` shows it.
+  A break day is never the month's rebalance: the first green session after it rebalances.
+
+  A break is never repaired automatically and the switch never re-arms itself: the whole value of
+  the check is that it does not negotiate.
 - **`CalendarCoverageError` / no session after a date.** The holiday file covers through
   2026-12-31; the job needs the next year's holidays before the last December session. Extend
   `dataplatform/ingest/data/nse_holidays.yaml`.
@@ -318,4 +419,7 @@ rolled back) and the next run retries the owed session.
 
 **Never** point this job at a real broker. Real money for this configuration is a separate
 ratification (AGENTIC_CONTEXT §3.2) and a separate job; `tests/unit/test_paper_session_paper_only.py`
-fails if this one could reach `KiteBroker`.
+fails if this one could reach `KiteBroker`. What it does share with a real-money loop is everything
+above the broker — staging, the kill switch and reconciliation are the same `execution` code
+(invariant #5; `tests/unit/test_paper_session_shared_path.py` pins that the trades are unchanged by
+it).

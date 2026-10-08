@@ -1,16 +1,161 @@
 # Runbook — backup and restore
 
-Two scripts and one drill. `ops/backup.sh` writes a Postgres dump plus a checksummed fingerprint of
-L0; `ops/restore.sh` proves that dump restores and that every row count survived. §8.1 requires the
-drill to have been executed at least once for the M0 gate — the transcripts below are that run, on
-2026-08-08, pasted verbatim.
+Two layers. **The nightly one (M15.4)** is two scheduler jobs and one drill command, all in
+`dataplatform/store/backup.py`; it is what protects the platform day to day and what the
+real-money readiness checklist (item e) rests on. **The by-hand one (M0.7)** is `ops/backup.sh` +
+`ops/restore.sh`, kept for an operator who wants a full backup directory with an L0 fingerprint
+before something structural; its drills from 2026-08-08 are further down.
+
+## Nightly, scheduled (M15.4)
+
+| Job | IST | What | Budget |
+|---|---|---|---|
+| `postgres_backup` | 05:30 daily | `pg_dump -Fc --no-owner --no-privileges` → `~/backups/postgres/trading-<stamp>.dump` + `.json` sidecar, then retention | 30 min |
+| `l0_backup` | 05:45 daily | extend `~/backups/l0/MANIFEST.sha256` with every new L0 file; rsync L0 to `BACKUP_L0_MIRROR` if set | 1 h |
+
+Why 05:30: every writer of the day has finished — the paper session (21:45), `nse_daily_capture`
+(23:00), `announcements_capture` (00:30) and `fundamentals_forward` (02:00, own deadline 04:45) —
+and it is clear of the 19:15–21:50 evening jobs and Saturday's 09:00–11:00 refreshes. A dump is an
+MVCC snapshot, so a straggling writer is consistent, just not included.
+
+Both are ordinary jobs: a failure is a FAILED `job_run`, shown on `GET /status/jobs` and paged by
+`failure_alerts` within 15 minutes, like any other job. By hand, the same code:
+
+```bash
+uv run python -m dataplatform.store.backup postgres   # dump now + retention
+DATA_ROOT=/home/ubuntu/stock-manager/data uv run python -m dataplatform.store.backup l0
+uv run python -m dataplatform.store.backup drill      # restore newest dump into a scratch container
+```
+
+Run the `l0` command with `DATA_ROOT` pointing at the real lake when you are in a worktree — a
+worktree's own `data/` has no L0 and the command refuses it ("no lake at …").
+
+### Settings (`.env`, all optional)
+
+| Key | Default | Meaning |
+|---|---|---|
+| `BACKUP_ROOT` | `~/backups` | dumps under `postgres/`, the L0 manifest under `l0/`; must be absolute or `~`-prefixed |
+| `BACKUP_KEEP_DAILY` | 14 | newest dump of each of the last 14 days that have one |
+| `BACKUP_KEEP_WEEKLY` | 8 | plus the newest of each of the last 8 ISO weeks |
+| `BACKUP_PG_CLIENT_IMAGE` | `postgres:16` | image whose `pg_dump`/`pg_restore` run on the host network (the host has no libpq client); empty = tools on `PATH` |
+| `BACKUP_L0_MIRROR` | unset | rsync destination for L0 (second disk path or `host:path`) |
+| `RESTORE_DRILL_DATABASE_URL` | unset | an empty throwaway database for the drill; unset = a scratch container per drill |
+
+Retention counts *days that have a backup*, not calendar days, so a fortnight of failed runs does not
+age every good dump out at once; the newest dump is always kept; nothing not named
+`trading-<stamp>.dump` is ever pruned. Expect 14 + up to 8 dumps (~11 MB each on 2026-10-08).
+
+### Credentials
+
+The live DSN is `DATABASE_URL`; its password reaches `pg_dump`/`pg_restore` only as `PGPASSWORD` in
+the child's environment, and `docker run -e PGPASSWORD` passes the variable *by name*, so the value
+is never in an argv (`ps`), a log line or a sidecar. Logs and sidecars name the target as
+`host:port/db`. A failing tool's stderr is redacted before it reaches the job error.
+`RESTORE_DRILL_DATABASE_URL` is a `SecretStr`.
+
+### The restore drill
+
+`python -m dataplatform.store.backup drill` takes the newest dump (or `--dump PATH`), checks its
+sha256 against the sidecar, then restores it with `pg_restore --exit-on-error` into a **throwaway**
+database: `RESTORE_DRILL_DATABASE_URL` if set, otherwise a `postgres:16` container started for the
+drill on a random `127.0.0.1` port with a random password, removed afterwards (`--keep` leaves it).
+It then compares:
+
+- the restored `schema_migrations` with the ledger recorded at dump time, and reports it against the
+  migrations in this checkout;
+- the counts of `schema_migrations`, `sync_state`, `job_run`, `decision_journal`, `paper_session`,
+  `paper_session_resolution`, `security_master` with the sidecar's. Counts are taken just before
+  the dump and every one of these tables only grows, so restored < recorded fails; restored > recorded
+  is writes that landed in between.
+
+**It refuses the live database** — exit 2, before any byte is restored. First a cheap string check
+(the DSNs spell the same host, port and database, counting every loopback spelling and this host's
+own name as one host); then the real one, which no alias can get past: it connects to both the
+target and `DATABASE_URL` and compares `pg_control_system().system_identifier` (fixed per cluster at
+initdb) and `current_database()`. Equal is refused; a side that cannot be reached or identified is
+refused too ("could not prove it is not the live database"). A scratch database *on* the live
+cluster has the same identifier but a different name, and is allowed. It never stops, alters or
+restarts the live `trading-platform-postgres-1` container. Exit 0 pass, 1 a check failed, 2 refused.
+
+A dump is only restorable — and only counted or pruned by retention — with a valid sidecar. The
+backup writes the sidecar first (temp file + rename) and renames the dump into place last, so a crash
+leaves a `*.partial` (deleted by the next run once a day old) or a sidecar with no dump, never a
+finished-looking dump without its checksum.
+
+While a drill runs, `docker inspect trading-restore-drill-…` shows the scratch container's random
+`POSTGRES_PASSWORD` to anyone in the `docker` group. It guards only a throwaway copy that lives for
+seconds, but it is a copy of the live data: treat docker-group membership as database access.
+
+Run it monthly and after anything structural; add a line to the table at the end of this file.
+
+### L0: manifest yes, second copy only with an owner decision
+
+`l0_backup` keeps a cumulative `sha256sum`-format manifest, checkable from the lake root:
+
+```bash
+cd /home/ubuntu/stock-manager/data && sha256sum -c --quiet ~/backups/l0/MANIFEST.sha256
+```
+
+L0 is write-once, so only files the manifest has not seen are hashed each night (megabytes); the
+first run hashed the whole lake. A recorded file that is no longer on disk fails the job — that is an
+invariant-#1 incident and repairing it is the owner's (AGENTIC_CONTEXT §3.10). Re-hashing old bytes
+is the weekly `l0_verify` sweep's job, not this one.
+
+A file is recorded only once it has been unmodified for **10 minutes**, so a payload still being
+written is deferred to the next night rather than fingerprinted half-written (`deferred` in the log).
+When a payload has its own L0 `<name>.meta.json`, the hash must equal the sidecar's `sha256`; a
+mismatch fails the job and nothing from that run is recorded.
+
+A local `BACKUP_L0_MIRROR` must exist and be on a **different filesystem** from the lake: an
+unmounted mount point is a plain directory on the root disk, and copying the lake there is no copy.
+The job refuses that (`… is on the lake's own filesystem`). A remote `host:path` is not checked.
+
+**There is no second copy of L0 today.** This host has one disk (`/dev/root`, 193 GB, the lake
+~10 GB) and no remote target, so `BACKUP_L0_MIRROR` is unset and the job logs
+`backup.l0_mirror_unconfigured` every night. Choosing a target — a second EBS volume, an S3 bucket
+via a mounted path, or another host reachable by rsync — is an owner decision (a spending decision,
+AGENTIC_CONTEXT §3.9). Once chosen, set `BACKUP_L0_MIRROR` and the nightly job starts copying with
+`rsync -a --ignore-existing` (never `--delete`). The same is true of the Postgres dumps: they sit on
+the same disk as the database, which protects against a bad migration or a dropped table, not against
+losing the disk. A nightly copy of `~/backups/postgres/` to the same target closes that too.
+
+### Scheduler start guard
+
+`python -m dataplatform.scheduler run` (and `run-once`) compare the database's migration ledger with
+`dataplatform/store/migrations` before building anything. Each case has its own alert title and
+remedy:
+
+| Case | Behaviour | Remedy |
+|---|---|---|
+| a file is not applied | exit 5, CRITICAL "migrations not applied" | `make migrate`, then restart |
+| an applied file was edited | exit 5, CRITICAL "an applied migration was edited" | restore the file to what was applied, put the change in a new numbered migration, restart (`make migrate` refuses until then) |
+| both pending files and migrations this checkout lacks | exit 5, CRITICAL "database and checkout have diverged" | deploy the checkout that applied them (normally `main`), `make migrate`, restart |
+| the database has migrations this checkout lacks, nothing pending | **starts**, WARNING "database ahead of its checkout" | `git pull` on the scheduler's checkout and restart — migrations are additive, so the older code's tables are all there meanwhile |
+| Postgres unreachable | retries for ~4.6 min (5, 10, 20, 40, 80, 120 s), then exit 1 | none: systemd restarts it; a real outage shows as the stale heartbeat |
+
+On exit 5 the unit's `RestartPreventExitStatus=5` leaves it `failed` rather than restarting into the
+same refusal, and the stale heartbeat turns `/health` 503 within five minutes. After the remedy:
+
+```bash
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler.service
+```
+
+After merging a PR that adds a migration, migrate **before** restarting the scheduler.
+
+## By hand: ops/backup.sh and ops/restore.sh (M0.7)
 
 ```bash
 make backup     # bash ops/backup.sh
 make restore    # bash ops/restore.sh --scratch
 ```
 
-## What a backup contains
+`ops/backup.sh` writes a Postgres dump plus a checksummed fingerprint of L0 into
+`ops/backups/<ts>/` (gitignored, inside the checkout — move anything you want to keep to
+`~/backups/`); `ops/restore.sh` proves that dump restores and that every row count survived. §8.1
+required the drill to have been executed at least once for the M0 gate — the transcripts below are
+that run, on 2026-08-08, pasted verbatim.
+
+### What an M0.7 backup contains
 
 `ops/backups/<ts>/`, where `<ts>` is `%Y%m%dT%H%M%S` in IST:
 
@@ -29,7 +174,7 @@ compose defaults does not break either script.
 
 Environment both scripts honour: `COMPOSE_FILE`, `PG_SERVICE`, `DATA_ROOT`, `BACKUP_ROOT`.
 
-### The gap: nothing leaves this host
+#### The gap: nothing leaves this host
 
 **L0 is fingerprinted, not copied, and no backup is uploaded anywhere.** §8.1 calls for
 object-storage backup of L0 + Postgres dumps; no target exists yet (a bucket is a spending decision,
@@ -43,7 +188,8 @@ AGENTIC_CONTEXT §3.9). Until one does:
 Closing it is one task when a target is chosen: upload `ops/backups/<ts>/` and mirror `DATA_ROOT/L0`,
 then extend the drill to restore *from the remote copy*. `ops/BACKLOG.md` carries the line.
 
-Nothing prunes old backups either. `ops/backups/` is gitignored; delete old directories by hand.
+Nothing prunes `ops/backups/`; delete old directories by hand. (The nightly dumps under
+`~/backups/postgres/` are pruned by the job.)
 
 ## Drill 1 — the nightly path, executed 2026-08-08
 
@@ -253,7 +399,10 @@ A corrupt `postgres.dump` fails earlier still, at the `SHA256SUMS` gate, before 
 
 `ops/restore.sh` **only ever restores into a scratch database** and refuses a target named the same as
 the live one. That asymmetry is deliberate: the drill runs unattended, and no unattended run should be
-able to overwrite production with last night's dump. A genuine recovery is a human at a terminal:
+able to overwrite production with last night's dump. A genuine recovery is a human at a terminal.
+From a nightly dump, step 2 is `uv run python -m dataplatform.store.backup drill --dump
+~/backups/postgres/trading-<stamp>.dump` and step 3 reads that file instead; stop the scheduler
+(`systemctl --user stop scheduler.service`) alongside the app.
 
 ```bash
 # 1. stop the app so nothing writes while the database is being replaced
@@ -296,16 +445,14 @@ are re-fetchable from the sources (that is what makes L0 recoverable at all) —
 rewriting what is left of it is reserved to the owner, AGENTIC_CONTEXT §3.10, with no exception for
 "it looked corrupt".
 
-## Scheduling
+## Drill log
 
-Not scheduled yet. Once M0.6's scheduler owns the daily pipeline, the backup belongs at the end of
-it, after ingestion and quality have run. Until then, run `make backup` by hand before anything
-structural — a migration, a compose change, a `docker compose down -v`.
-
-The monthly restore drill is a continuous track in EXECUTION_PLAN §11 with no gate: run `make
-restore` once a month and add a dated line to the table below.
+The nightly jobs above are the schedule (M15.4). Run the restore drill monthly — `uv run python -m
+dataplatform.store.backup drill` — and add a dated line here. M0.7's script drill (`make restore`)
+remains valid for an `ops/backups/` directory.
 
 | Date | Backup | Result | Recovery time |
 |---|---|---|---|
 | 2026-08-08 | `20260808T190102` (live, 17 tables / 3 rows) | pass | 1.5 s |
 | 2026-08-08 | `20260808T190155` (seeded, 17 tables / 13 rows, 2 L0 files) | pass | 1.5 s |
+| 2026-10-08 | `~/backups/postgres/trading-20261008T085052.dump` (live, 11.3 MB; scratch `postgres:16` container) | pass — 7 key tables match, 14/14 migrations | 3.0 s restore, 5.4 s drill |

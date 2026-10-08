@@ -117,6 +117,7 @@ from analyst.monitor import (
     T1Result,
     T1Reviewer,
     build_messages,
+    request_for_escalation,
 )
 from analyst.monitor.t1 import SYSTEM_PROMPT, T1_MODEL
 from analyst.monitor.t2 import T2Reviewer
@@ -168,6 +169,9 @@ RUN_AT: Final = datetime(2026, 8, 31, 18, 30, tzinfo=IST)
 #: The exchange dissemination instant of the injected disclosure — its natural PIT, on the drill
 #: date and knowable before the review.
 DISCLOSED_AT: Final = datetime(2026, 8, 7, 10, 0, tzinfo=IST)
+#: The T1 review's as-of instant on the drill date: the EOD review, after the disclosure. Only
+#: disclosures disseminated at or before it may enter the bundle (invariant #7).
+REVIEW_AS_OF: Final = datetime(2026, 8, 7, 19, 30, tzinfo=IST)
 
 SIP_AMOUNT: Final = Decimal("10000")
 CASE_VALUE: Final = Decimal("100000")
@@ -335,6 +339,7 @@ class DrillResult:
     t0_flag_summary: str
     queued_isin: str | None
     t1_result: T1Result
+    bundle_prompt: str
 
 
 def _reviewer(llm: LLM, journal: Journal, clock: FrozenClock) -> T1Reviewer:
@@ -403,15 +408,16 @@ def run_drill(
         DRILL_DATE, lambda: make_t0_inputs(case_id), datasets=("nse_eod", "nse_corporate_actions")
     )
 
-    # The escalation T0 raised is the T1 input — build its bundle from that flag, then review it.
+    # The escalation T0 raised is the T1 input. Its bundle is built the production way, from the
+    # flag and the same announcement index T0 read, so T1 sees the disclosure's text (M15.2) and
+    # not only the flag's headline (M6.8 finding F1).
     (escalation,) = queue.pending
     built = BundleBuilder().build(
-        BundleRequest(
-            case_id=case_id,
-            isin=ISIN,
-            trading_date=DRILL_DATE,
-            flag=escalation.flag,
+        request_for_escalation(
+            escalation,
             thesis=make_thesis(case_id),
+            announcements=make_t0_inputs(case_id).announcements,
+            as_of=REVIEW_AS_OF,
             prices=price_facts(),
             actor=Actor.T1,
         )
@@ -429,6 +435,7 @@ def run_drill(
         t0_flag_summary=t0_result.flags[0].summary if t0_result.flags else "",
         queued_isin=escalation.flag.isin,
         t1_result=t1_result,
+        bundle_prompt=built.rendered_prompt,
     )
 
 
@@ -544,6 +551,12 @@ def test_injected_news_escalates_t0_to_t1_and_journals_an_in_policy_action(
     assert result.t0_outcome is T0Outcome.ESCALATED
     assert result.queued_isin == ISIN
     assert "BC3" in result.t0_flag_summary
+
+    # T1 read the disclosure's text, not only its headline (M15.2, M6.8 finding F1).
+    body = injected_disclosure().body
+    assert body is not None
+    assert f"  text: {body}" in result.bundle_prompt
+    assert "text_unavailable" not in result.bundle_prompt
 
     # A verdict was produced, schema-valid, one per break condition.
     t1 = result.t1_result
@@ -905,7 +918,7 @@ def _live_t1_review(
 
     The drill proper goes through T0; these samples build the flag directly so each can put a
     specific piece of evidence in front of the reviewer — including the disclosure body, which the
-    drill's own bundle does not carry (it hands T1 the flag line only).
+    drill's own bundle did not carry before M15.2 (it handed T1 the flag line only).
     """
     flag = T0Flag(
         check=T0Check.ANNOUNCEMENT,

@@ -1,0 +1,5 @@
+#!/bin/sh
+# Secret scan of the staged blobs — what this commit will contain, not the working tree (M15.1,
+# AGENTIC_CONTEXT §6 invariant #13). Installed by `make hooks`; ops/runbooks/secret-scan.md.
+# A finding blocks the commit. Never bypass it with --no-verify: if the value is real, rotate it.
+exec uv run --quiet python ops/secret_scan.py --staged

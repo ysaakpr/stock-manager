@@ -817,8 +817,12 @@ def _digest_section(sweep: MultiWindowSweep, floors: Sequence[Decimal]) -> list[
 def _replay_digest(row: SweepRow) -> str | None:
     """The journal-and-book digest of ``row``'s replay, from its run or its persisted summary.
 
-    A resumed row carries no ``run``; its summary's ``replay_digest`` was written from the same
-    ``result.digest()`` at the time of the replay, so the two are the same number.
+    A resumed row carries no ``run``; its summary's ``replay_digest`` is the ``result.digest()``
+    the code of its day produced. That is the same number only while the journal's shape is: since
+    M14.4 a momentum v2 regime-filter arm journals a risk-off rebalance on an empty book as a HOLD
+    rather than a HEARTBEAT, so a summary persisted before M14.4 carries a different replay digest
+    from a fresh run of the same spec — same orders, same book, same metrics. Resume keys on the
+    spec digest, never on this one, so nothing reruns; the report just shows the digest it has.
     """
     if row.run is not None:
         return row.run.result.digest()

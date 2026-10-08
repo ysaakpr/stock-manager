@@ -29,10 +29,15 @@ switch is reproducible and nothing here reads a wall clock behind the caller's b
 
 from __future__ import annotations
 
+import argparse
 import contextlib
+import getpass
 import json
 import os
+import re
+import sys
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -43,10 +48,14 @@ import structlog
 from dataplatform.clock import Clock, SystemClock
 
 __all__ = [
+    "KILL_SWITCH_DIRNAME",
     "KillSwitch",
     "KillSwitchState",
+    "ResetRecord",
     "TradingHaltedError",
     "TripSource",
+    "kill_switch_path",
+    "main",
 ]
 
 _LOG = structlog.get_logger(__name__)
@@ -54,6 +63,23 @@ _LOG = structlog.get_logger(__name__)
 #: State-file schema version, written into the file so a future format change is detectable rather
 #: than silently misread as the current shape.
 _STATE_VERSION = 1
+
+#: The directory under the lake root (``Settings.data_root``) that holds every account's switch.
+KILL_SWITCH_DIRNAME = "kill_switch"
+
+_ACCOUNT = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
+
+
+def kill_switch_path(data_root: Path, account: str) -> Path:
+    """The state file of ``account``'s switch: ``<data_root>/kill_switch/<account>.json``.
+
+    One file per account, so a halt on one account (the paper book, M15.3) never silently halts
+    or arms another. ``account`` is a lower snake_case id — a paper book id, for the paper session —
+    and is refused otherwise, so it can never walk out of the directory.
+    """
+    if not _ACCOUNT.match(account):
+        raise ValueError(f"account {account!r} must be lower snake_case, 3-64 chars")
+    return data_root / KILL_SWITCH_DIRNAME / f"{account}.json"
 
 
 class TripSource(StrEnum):
@@ -92,54 +118,123 @@ class TradingHaltedError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
+class ResetRecord:
+    """The last time the switch was re-armed: when, by whom, why, and the trip it cleared.
+
+    Kept in the state file across later trips and resets (each reset replaces it), so a manual
+    trip-and-reset leaves a durable trace in the switch itself, not only in a log line.
+    """
+
+    at: datetime
+    note: str
+    by: str | None
+    cleared_reason: str | None
+    cleared_source: TripSource | None
+    cleared_tripped_at: datetime | None
+
+    def to_json(self) -> dict[str, object]:
+        return {
+            "at": self.at.isoformat(),
+            "note": self.note,
+            "by": self.by,
+            "cleared_reason": self.cleared_reason,
+            "cleared_source": None if self.cleared_source is None else self.cleared_source.value,
+            "cleared_tripped_at": (
+                None if self.cleared_tripped_at is None else self.cleared_tripped_at.isoformat()
+            ),
+        }
+
+    @classmethod
+    def from_json(cls, raw: object) -> ResetRecord:
+        if not isinstance(raw, dict):
+            raise ValueError(f"last_reset must be an object, got {raw!r}")
+        at = _aware(raw.get("at"), "last_reset.at")
+        if at is None:
+            raise ValueError("last_reset.at is required")
+        note = raw.get("note")
+        if not isinstance(note, str) or not note.strip():
+            raise ValueError("last_reset.note is required")
+        by, reason, source = raw.get("by"), raw.get("cleared_reason"), raw.get("cleared_source")
+        return cls(
+            at=at,
+            note=note,
+            by=None if by is None else str(by),
+            cleared_reason=None if reason is None else str(reason),
+            cleared_source=None if source is None else TripSource(str(source)),
+            cleared_tripped_at=_aware(raw.get("cleared_tripped_at"), "cleared_tripped_at"),
+        )
+
+
+def _aware(raw: object, name: str) -> datetime | None:
+    """A persisted timestamp: ``None``, or a tz-aware ISO string — anything else is refused."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"{name} must be an ISO string, got {raw!r}")
+    value = datetime.fromisoformat(raw)
+    if value.tzinfo is None:
+        raise ValueError(f"persisted {name} is naive: {raw!r}")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
 class KillSwitchState:
     """The switch's state as it is persisted and read back — the whole latch in one value.
 
     Frozen because a state is a record of a transition, not a mutable slot; a new transition
     produces a new state and a new file, it does not edit this one. `tripped_at`/`source`/`reason`
     are populated only while `tripped` is true, and cleared on reset so a stale reason cannot be
-    read off an armed switch.
+    read off an armed switch. `last_reset` is the trace of the latest re-arming (who, when, why,
+    and the trip it cleared); it survives later trips, and is absent on a switch never reset.
     """
 
     tripped: bool
     reason: str | None = None
     source: TripSource | None = None
     tripped_at: datetime | None = None
+    last_reset: ResetRecord | None = None
 
     def to_json(self) -> dict[str, object]:
-        """Serialize to the on-disk shape. `tripped_at` is an ISO-8601 string (tz-aware)."""
+        """Serialize to the on-disk shape. Timestamps are ISO-8601 strings (tz-aware)."""
         return {
             "version": _STATE_VERSION,
             "tripped": self.tripped,
             "reason": self.reason,
             "source": None if self.source is None else self.source.value,
             "tripped_at": None if self.tripped_at is None else self.tripped_at.isoformat(),
+            "last_reset": None if self.last_reset is None else self.last_reset.to_json(),
         }
 
     @classmethod
     def from_json(cls, raw: dict[str, object]) -> KillSwitchState:
-        """Rebuild from the on-disk shape, validating the version and the timestamp's awareness."""
+        """Rebuild from the on-disk shape, validating the version, the latch and the timestamps.
+
+        Fails closed: a file without a boolean ``tripped`` is refused, never read as armed — a
+        truncated or hand-edited state file is an operational fault, not a green light. (A
+        *missing* file is a never-tripped switch; that is ``KillSwitch._read``'s call.) A file
+        written before ``last_reset`` existed reads as never reset.
+        """
         version = raw.get("version")
         if version != _STATE_VERSION:
             raise ValueError(
                 f"kill-switch state file is version {version!r}, this build reads "
                 f"{_STATE_VERSION}; refusing to guess at an unknown format"
             )
+        tripped = raw.get("tripped")
+        if not isinstance(tripped, bool):
+            raise ValueError(
+                f"kill-switch state file has no boolean 'tripped' (got {tripped!r}); refusing to "
+                "read it as armed"
+            )
         source_raw = raw.get("source")
-        tripped_at_raw = raw.get("tripped_at")
-        tripped_at = None
-        if tripped_at_raw is not None:
-            if not isinstance(tripped_at_raw, str):
-                raise ValueError(f"tripped_at must be an ISO string, got {tripped_at_raw!r}")
-            tripped_at = datetime.fromisoformat(tripped_at_raw)
-            if tripped_at.tzinfo is None:
-                raise ValueError(f"persisted tripped_at is naive: {tripped_at_raw!r}")
         reason = raw.get("reason")
+        last_reset = raw.get("last_reset")
         return cls(
-            tripped=bool(raw.get("tripped")),
+            tripped=tripped,
             reason=None if reason is None else str(reason),
             source=None if source_raw is None else TripSource(str(source_raw)),
-            tripped_at=tripped_at,
+            tripped_at=_aware(raw.get("tripped_at"), "tripped_at"),
+            last_reset=None if last_reset is None else ResetRecord.from_json(last_reset),
         )
 
 
@@ -207,7 +302,11 @@ class KillSwitch:
             )
             return self._state
         state = KillSwitchState(
-            tripped=True, reason=reason, source=source, tripped_at=self._clock.now()
+            tripped=True,
+            reason=reason,
+            source=source,
+            tripped_at=self._clock.now(),
+            last_reset=self._state.last_reset,
         )
         self._write(state)
         _LOG.warning(
@@ -218,20 +317,38 @@ class KillSwitch:
         )
         return state
 
-    def reset(self, *, note: str) -> KillSwitchState:
+    def reset(self, *, note: str, by: str | None = None) -> KillSwitchState:
         """Arm the switch again, clearing the trip. A deliberate human act, never automatic.
 
-        `note` is required and logged: re-arming a safety latch after a halt is a decision that
-        should leave a trace of who decided the cause was resolved. A no-op on an already-armed
-        switch, so re-running a recovery step is safe.
+        `note` is required: re-arming a safety latch after a halt is a decision that should leave a
+        trace of who decided the cause was resolved. The trace is persisted with the state
+        (`last_reset`: when, `by`, the note, and the trip it cleared — written atomically with the
+        re-arm) as well as logged. A no-op on an already-armed switch, so re-running a recovery
+        step is safe and does not overwrite the trace of the reset that mattered.
         """
         if not note.strip():
             raise ValueError("a reset needs a non-blank note — re-arming is a recorded decision")
         if not self._state.tripped:
             return self._state
-        state = KillSwitchState(tripped=False)
+        cleared = self._state
+        state = KillSwitchState(
+            tripped=False,
+            last_reset=ResetRecord(
+                at=self._clock.now(),
+                note=note,
+                by=by,
+                cleared_reason=cleared.reason,
+                cleared_source=cleared.source,
+                cleared_tripped_at=cleared.tripped_at,
+            ),
+        )
         self._write(state)
-        _LOG.warning("kill_switch.reset", note=note)
+        _LOG.warning(
+            "kill_switch.reset",
+            note=note,
+            by=by,
+            cleared_source=None if cleared.source is None else cleared.source.value,
+        )
         return state
 
     # ── persistence ────────────────────────────────────────────────────────────────────────────
@@ -274,3 +391,45 @@ class KillSwitch:
                 tmp_path.unlink()
             raise
         self._state = state
+
+
+# ── the operator's command ───────────────────────────────────────────────────────────────────────
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """``python -m execution.kill_switch {status,trip,reset} --account <id>`` — the operator's CLI.
+
+    ``status`` prints the state; ``trip --reason`` halts placement (source ``MANUAL``); ``reset
+    --note [--by]`` re-arms it, persisting the note, who (default: the OS user) and the trip it
+    cleared as ``last_reset`` in the state file. The file lives
+    under ``Settings.data_root`` (``kill_switch_path``), or ``--path`` names it directly. Exit 0 on
+    success; ``status`` exits 3 when the switch is tripped, so a script can test it.
+    """
+    parser = argparse.ArgumentParser(prog="python -m execution.kill_switch")
+    parser.add_argument("command", choices=("status", "trip", "reset"))
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--account", help="the account id, e.g. a paper book id")
+    target.add_argument("--path", type=Path, help="the state file itself")
+    parser.add_argument("--reason", default="", help="trip: why placement is being halted")
+    parser.add_argument("--note", default="", help="reset: why it is safe to trade again")
+    parser.add_argument(
+        "--by", default=None, help="reset: who re-armed it (defaults to the OS user)"
+    )
+    args = parser.parse_args(argv)
+    if args.path is not None:
+        path = args.path
+    else:
+        from dataplatform.config import get_settings
+
+        path = kill_switch_path(get_settings().data_root, args.account)
+    switch = KillSwitch(path)
+    if args.command == "trip":
+        switch.trip(reason=args.reason, source=TripSource.MANUAL)
+    elif args.command == "reset":
+        switch.reset(note=args.note, by=args.by or getpass.getuser())
+    print(json.dumps({"path": str(path), **switch.state.to_json()}, indent=2, sort_keys=True))
+    return 3 if args.command == "status" and switch.is_tripped else 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through main() in the tests
+    sys.exit(main())

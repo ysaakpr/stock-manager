@@ -63,6 +63,8 @@ jobs:
       # ── the full gate: format + lint + types + the whole offline test suite ───────────────────
 
       - name: make check
+        # Its first step is the working-tree secret scan (M15.1); the per-commit scan is
+        # .github/workflows/secret-scan.yml.
         # The same command CLAUDE.md / AGENTIC_CONTEXT §5 name as the gate for every task. Its
         # pytest run is offline: database-backed tests skip without `make up`, network tests are
         # opt-in. This re-covers the suites above; running them first is fail-fast, not duplication.

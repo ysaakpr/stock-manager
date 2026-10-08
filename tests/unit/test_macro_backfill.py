@@ -328,6 +328,71 @@ def test_the_slash_dated_era_parses_to_the_same_session() -> None:
     assert "IN.NSE.NIFTY_50.PE" in {f.series_id for f in release.facts}
 
 
+# ── M14.2: the three month-first files of April 2023 ─────────────────────────────────────────────
+
+MONTH_FIRST: Final = FIXTURES / "month_first_2023"
+#: Session → (printed `Index Date`, Nifty 50 close). The 5th and 12th are day-first neighbours.
+APRIL_2023: Final = {
+    date(2023, 4, 5): ("05-04-2023", Decimal("17557.05")),
+    date(2023, 4, 6): ("04-06-2023", Decimal("17599.15")),
+    date(2023, 4, 10): ("04-10-2023", Decimal("17624.05")),
+    date(2023, 4, 11): ("04-11-2023", Decimal("17722.3")),
+    date(2023, 4, 12): ("12-04-2023", Decimal("17812.4")),
+}
+
+
+def _april(session: date) -> Path:
+    return MONTH_FIRST / f"ind_close_all_{session:%d%m%Y}.csv"
+
+
+def test_month_first_files_publish_the_session_they_are_named_for(tmp_path: Path) -> None:
+    """The real 2023-04-06/10/11 payloads print `04-06-2023` etc.; the runner refused all three.
+
+    Without the month-first rule they parse to 2023-06-04, 2023-10-04 and 2023-11-04, are refused
+    as dated to another session, and nothing is written — so this fails if the rule is removed.
+    """
+    plan = _plan(*APRIL_2023)
+    assert [unit.session for unit in plan] == sorted(APRIL_2023)  # the 7th is Good Friday
+    script = {unit.url: RecordedResponse(body=_april(unit.session).read_bytes()) for unit in plan}
+    sync = _FakeSync()
+    report = _runner(RecordedTransport(script), tmp_path, sync).run(plan)
+    assert (report.published, report.refused) == (5, 0)
+    for session, (printed, close) in APRIL_2023.items():
+        assert printed in _april(session).read_text()
+        facts = {f.series_id: f for f in read_l1(session, data_root=tmp_path)}
+        assert facts["IN.NSE.NIFTY_50.CLOSE"].value == close
+        assert {f.period_end for f in facts.values()} == {session}
+        assert sync.get(mb.SOURCE_ID, session).state is SyncState.PUBLISHED  # type: ignore[union-attr]
+
+
+def test_an_ambiguous_day_first_date_is_never_swapped() -> None:
+    """`05-04-2023` reads either way; named for the 5th of April it is the 5th of April.
+
+    Fails if the parser reads month-first whenever both readings are real dates (it would date the
+    file 2023-05-04), and if it swaps to make a filename mismatch go away: the same bytes under
+    another session's name keep their day-first date, for the runner to refuse.
+    """
+    from dataplatform.ingest.macro import parse_index_valuation
+
+    neighbour = _april(date(2023, 4, 5)).read_bytes()
+    own = parse_index_valuation(neighbour, filename="ind_close_all_05042023.csv")
+    assert own.release_date == date(2023, 4, 5)
+    misnamed = parse_index_valuation(neighbour, filename="ind_close_all_12042023.csv")
+    assert misnamed.release_date == date(2023, 4, 5)
+    # with no session in the filename there is nothing to settle the order: day-first, as ever
+    bare = parse_index_valuation(_april(date(2023, 4, 6)).read_bytes(), filename="upload.csv")
+    assert bare.release_date == date(2023, 6, 4)
+
+
+def test_a_month_first_file_under_another_sessions_name_is_still_refused(tmp_path: Path) -> None:
+    """`04-06-2023` served for the 12th matches neither reading of the filename: refused."""
+    plan = _plan(date(2023, 4, 12))
+    misdated = RecordedResponse(body=_april(date(2023, 4, 6)).read_bytes())
+    report = _runner(RecordedTransport({plan[0].url: misdated}), tmp_path, _FakeSync()).run(plan)
+    assert (report.published, report.refused) == (0, 1)
+    assert not (tmp_path / "L1" / "macro_series").exists()
+
+
 def test_a_refused_session_stays_retryable_and_rederives_from_l0(tmp_path: Path) -> None:
     """A parse refusal leaves its bytes in L0; after a fix the re-run costs no request."""
     plan = _plan(date(2015, 11, 6))

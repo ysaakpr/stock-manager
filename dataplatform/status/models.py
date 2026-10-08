@@ -688,3 +688,49 @@ class ArchivesOut(BaseModel):
     bundle: ArchiveBundleOut | None = Field(
         default=None, description="Null when no bundle has been published for this date"
     )
+
+
+# ── /status/paper ───────────────────────────────────────────────────────────────────────────
+
+
+class KillSwitchOut(BaseModel):
+    """A paper book's kill switch, as its state file says (M15.3) — never assumed armed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    tripped: bool | None = Field(description="None when the state file could not be read")
+    source: str | None = Field(description="MANUAL, RAILS or RECON while tripped")
+    reason: str | None
+    tripped_at: datetime | None
+    error: str | None = Field(
+        default=None, description="Why the state could not be read — an unreadable switch is red"
+    )
+
+
+class PaperBookStatusOut(BaseModel):
+    """One paper book: its latest session, its kill switch, what blocks it (M15.3)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    book_id: str
+    healthy: bool = Field(
+        description="Switch armed, latest session not a reconciliation break, nothing unresolved"
+    )
+    kill_switch: KillSwitchOut
+    latest_date: date | None
+    latest_outcome: str | None = Field(description="COMPLETED, SKIPPED_DATA_RED or RECON_BREAK")
+    latest_reason: str | None
+    latest_recon: str | None = Field(description="CLEAN, BREAK, or None before M15.3")
+    unresolved: list[str] = Field(
+        description="Escalations and reconciliation breaks with no resolution row, as key@terms"
+    )
+
+
+class PaperOut(BaseModel):
+    """`GET /status/paper` — every paper book the ledger or the kill-switch directory knows."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    as_of: datetime
+    healthy: bool = Field(description="Every book is healthy (true when there are none)")
+    books: list[PaperBookStatusOut]

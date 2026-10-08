@@ -450,9 +450,9 @@ def _replay(params: MomentumV2Parameters) -> ReplayResult:
 
 
 #: The digest of :func:`_replay` over D13, struck with the policy as it stood before M14.5
-#: (origin/main 1822c5f). Journal, book and rails byte-for-byte: if the defaults-off path drifts
-#: in any order, entry or fill, this moves.
-_D13_DIGEST_BEFORE_M14_5 = "2a92a65fa5d731ef83eb573da76fd9d202d738bf81bbe8b9cdc1698f2931ad1e"
+#: (origin/main c504f9c, which includes M14.4's HOLD on an empty park). Journal, book and rails
+#: byte-for-byte: if the defaults-off path drifts in any order, entry or fill, this moves.
+_D13_DIGEST_BEFORE_M14_5 = "67d887030dd04994c4f675992924b893a108030d0b3d6270dd40963daf879b28"
 
 
 def _trade_dates(result: ReplayResult, side: Decision) -> list[date]:

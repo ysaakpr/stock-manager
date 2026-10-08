@@ -11,14 +11,28 @@ DATA_ROOT ?= $(CURDIR)/data
 export DATA_ROOT
 
 .DEFAULT_GOAL := check
-.PHONY: check fmt test up down logs psql migrate backup restore
+.PHONY: check secret-scan hooks fmt test up down logs psql migrate backup restore
 
-## check: format check + lint + types + tests. Must pass before any task is DONE.
+## check: secret scan + format check + lint + types + tests. Must pass before any task is DONE.
+##
+## The secret scan runs FIRST (M15.1, invariant #13): a credential must be caught on a tree that is
+## red for every other reason too, not only on one clean enough to reach the last step. The repo is
+## public, so a leak is undone only by rotation. tests/unit/test_secret_scan.py fails if it is removed.
 check:
+	uv run python ops/secret_scan.py
 	uv run ruff format --check .
 	uv run ruff check .
 	uv run mypy
 	uv run pytest
+
+## secret-scan: the working-tree scan alone (detect-secrets, offline, against .secrets.baseline).
+secret-scan:
+	uv run python ops/secret_scan.py
+
+## hooks: point this clone's git hooks at ops/hooks — the staged-diff scan (pre-commit) and the
+## commit-message scan (commit-msg). core.hooksPath is shared by every worktree of the clone.
+hooks:
+	git config core.hooksPath ops/hooks
 
 ## fmt: rewrite files to the canonical format and apply safe lint fixes.
 fmt:

@@ -19,7 +19,7 @@ The KiteBroker-unreachability tests are in ``test_paper_session_paper_only.py``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -41,6 +41,7 @@ from backtest.paper_session import (
     LATE_ACTION_EVENT,
     PAPER_BOOK_ID,
     PAPER_MODE,
+    RECON_EVENT,
     REGIME_TRI_INPUT,
     ActionStatus,
     InMemoryPaperSessionStore,
@@ -65,6 +66,7 @@ from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
 from dataplatform.scheduler import JobContext
 from execution.costs import CostModel, load_rate_card
+from execution.kill_switch import KillSwitch
 from execution.sim_broker import SimBroker
 from tests.conftest import SettingsLoader
 from tests.paper_session_support import (
@@ -78,6 +80,7 @@ from tests.paper_session_support import (
     FixtureWorld,
     calendar_sessions,
     fixture_spec,
+    fresh_kill_switch,
     install_job_seams,
 )
 
@@ -114,6 +117,7 @@ class _Desk:
     store: InMemoryPaperSessionStore
     journal: RecordingJournal
     spec: object
+    kill_switch: KillSwitch = field(default_factory=fresh_kill_switch)
 
     @classmethod
     def fresh(cls, world: FixtureWorld | None = None, spec: object | None = None) -> _Desk:
@@ -133,11 +137,13 @@ class _Desk:
             journal=self.journal,
             gate=gate,  # type: ignore[arg-type]
             clock=FrozenClock(RUN_AT),
+            kill_switch=self.kill_switch,
         )
 
 
 def _decisions(entries: tuple[JournalEntry, ...] | list[JournalEntry]) -> list[Decision]:
-    return [entry.decision for entry in entries]
+    """The decisions, without the reconciliation entry M15.3 adds to every decided session."""
+    return [entry.decision for entry in entries if entry.payload.get("event") != RECON_EVENT]
 
 
 # ── the expected journal and book, deterministically ─────────────────────────────────────────────
@@ -151,9 +157,10 @@ def test_the_first_session_rebalances_into_the_ratified_basket_through_the_rails
     assert result.record is not None and result.record.rebalanced
     # Ten candidates under top-20: the whole fixture universe is bought, one BUY per name.
     assert _decisions(result.entries) == [Decision.BUY] * len(ISINS)
-    assert sorted(str(entry.isin) for entry in result.entries) == sorted(ISINS)
+    buys = result.entries[:-1]
+    assert sorted(str(entry.isin) for entry in buys) == sorted(ISINS)
     assert len(result.record.orders) == len(ISINS)
-    for entry in result.entries:
+    for entry in buys:
         assert entry.trading_date == OCT_FIRST
         assert entry.payload["mode"] == PAPER_MODE
         assert entry.payload["paper_book"] == "paper_fixture_book"
@@ -246,6 +253,10 @@ def test_a_book_decided_a_day_at_a_time_equals_one_replay_over_the_same_days() -
         rails=RailGate(spec.rail_policy, world.marks(_held_by(book))),
     ).run()
 
+    # M15.3 appends one reconciliation HEARTBEAT to each decided session; it is the only addition.
+    for run in paper:
+        assert [e.payload.get("event") for e in run.entries].count(RECON_EVENT) == 1
+        assert run.entries[-1].payload["event"] == RECON_EVENT
     untagged = [
         entry.model_copy(
             update={
@@ -258,6 +269,7 @@ def test_a_book_decided_a_day_at_a_time_equals_one_replay_over_the_same_days() -
         )
         for run in paper
         for entry in run.entries
+        if entry.payload.get("event") != RECON_EVENT
     ]
     # The one deliberate difference: the paper journal files a caseless rail block under no case
     # rather than the backtest's placeholder, which the live journal's foreign key refuses.
@@ -659,6 +671,8 @@ def test_a_record_round_trips_through_its_documents() -> None:
         book_state=record.book_state,
         book_digest=record.book_digest,
         actions=record.actions_document(),
+        recon=None if record.recon is None else record.recon.to_document(),
+        expected_book=record.expected_book,
     )
     assert restored == record
 
@@ -835,7 +849,7 @@ def test_an_implied_split_followed_by_its_feed_record_is_neither_rebooked_nor_es
 
     assert fifth.verdict is RunVerdict.DECIDED
     assert not [e for e in fifth.entries if e.decision is Decision.ESCALATE]
-    assert not [e for e in fifth.entries if "event" in e.payload]
+    assert not [e for e in fifth.entries if e.payload.get("event", RECON_EVENT) != RECON_EVENT]
     assert _held_quantity(fifth.record, isin) == 2 * before
     assert fifth.record is not None and fifth.record.actions == ()
 

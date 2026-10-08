@@ -411,9 +411,10 @@ def build_scheduler(
             max_instances=1,
             # A missed fire is coalesced into one run and is still worth running late: yesterday's
             # bhavcopy is the same file at 19:00 as it was at 18:30. The grace window is the job's
-            # own budget, past which a run that has not started yet is a run the next tick owns.
+            # own budget unless it names a shorter one (`Job.misfire_grace`: a job that must be off
+            # its hosts by a fixed hour), past which a run not yet started is the next tick's.
             coalesce=True,
-            misfire_grace_time=max(1, int(job.timeout.total_seconds())),
+            misfire_grace_time=max(1, int(job.latest_start.total_seconds())),
         )
 
     scheduler.add_job(

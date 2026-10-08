@@ -71,7 +71,9 @@ not attempt cleanup, do not amend, do not force-push.
 
 A leak is a control failure, not a typing mistake. Before closing:
 
-- Which gate should have caught it? Add the pattern to the secret scan in `make check`.
+- Which gate should have caught it? Add the pattern to the secret scan in `make check`
+  (`ops/secret_scan_plugins.py`, with a planted case in `tests/unit/test_secret_scan.py`; see
+  `ops/runbooks/secret-scan.md`).
 - Was it a *code path* rather than a literal — a secret in a log line, a URL, a traceback's frame
   locals, an exception message, a recorded fixture? Fix the code path, and add a test that fails if the
   secret becomes loggable again. The masking test beside `tests/unit/test_config.py` is the model:

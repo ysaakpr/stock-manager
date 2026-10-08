@@ -152,6 +152,42 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── backups (M15.4) ───────────────────────────────────────────────────────────────────────
+    backup_root: Path = Field(
+        default=Path("~/backups"),
+        description=(
+            "where the nightly dumps (postgres/) and the L0 manifest (l0/) go; outside the repo, "
+            "absolute or ~-prefixed"
+        ),
+    )
+    backup_keep_daily: Annotated[int, Field(ge=1)] = Field(
+        default=14, description="keep the newest dump of each of this many most recent days"
+    )
+    backup_keep_weekly: Annotated[int, Field(ge=0)] = Field(
+        default=8, description="and the newest dump of each of this many most recent ISO weeks"
+    )
+    backup_pg_client_image: str = Field(
+        default="postgres:16",
+        description=(
+            "image whose pg_dump/pg_restore run against the live server (the host has no libpq "
+            "client); empty uses the tools on PATH"
+        ),
+    )
+    backup_l0_mirror: str | None = Field(
+        default=None,
+        description=(
+            "rsync destination L0 is copied to nightly (a path on a second disk, or host:path); "
+            "unset means L0 has a manifest but no second copy"
+        ),
+    )
+    restore_drill_database_url: SecretStr | None = Field(
+        default=None,
+        description=(
+            "DSN of an empty throwaway database the restore drill restores into; unset starts a "
+            "scratch container instead. Refused if it is the live database"
+        ),
+    )
+
     # ── crawl policy (§4.1: 2-3 s spacing, backoff, hard stop on a 403 spike) ─────────────────
     http_user_agent: str = Field(
         default=(
@@ -268,6 +304,8 @@ class Settings(BaseSettings):
         "alert_email_from",
         "alert_telegram_bot_token",
         "alert_telegram_chat_id",
+        "backup_l0_mirror",
+        "restore_drill_database_url",
         mode="before",
     )
     @classmethod
@@ -296,6 +334,16 @@ class Settings(BaseSettings):
     @classmethod
     def _anchor_at_repo_root(cls, value: Path) -> Path:
         return value if value.is_absolute() else REPO_ROOT / value
+
+    @field_validator("backup_root")
+    @classmethod
+    def _backup_root_outside_the_checkout(cls, value: Path) -> Path:
+        """A relative backup root would land in whichever checkout ran the job — a worktree's
+        copy is deleted with the worktree, and the repo itself is no place for a dump."""
+        expanded = value.expanduser()
+        if not expanded.is_absolute():
+            raise ValueError(f"backup_root must be absolute or ~-prefixed, got {str(value)!r}")
+        return expanded
 
     @property
     def tzinfo(self) -> ZoneInfo:

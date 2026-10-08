@@ -28,6 +28,10 @@ ExecStart=/home/ubuntu/stock-manager/ops/scheduler.sh
 # heartbeat going stale on /health be what tells a human it is flapping.
 Restart=always
 RestartSec=30
+# Exit 5 is the scheduler refusing to start on an unmigrated database (M15.4). Restarting cannot
+# fix that — `make migrate` can — so the unit stays failed, `systemctl --user status` shows the
+# reason, and the stale heartbeat turns /health 503 until an operator migrates and restarts.
+RestartPreventExitStatus=5
 Nice=5
 
 [Install]
