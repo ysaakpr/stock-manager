@@ -11,6 +11,11 @@ Exit codes for `run-once` are the point of it being a command rather than a func
 succeeded, 1 it failed or overran its budget, 2 the name is not registered, 3 another process was
 already running it. A caller — a systemd unit, a retry wrapper, a future agent tool — can tell
 "the job broke" from "the job was already running" without parsing the log.
+
+`run` and `run-once` both refuse to start — exit 5, before any job is built — while a migration in
+`dataplatform/store/migrations` is not applied (M15.4). Every job is written against the schema in
+this checkout; a scheduler that started on an older database would fail one job at a time, at each
+job's own hour, with an `UndefinedColumn` nobody connects to a skipped `make migrate`.
 """
 
 from __future__ import annotations
@@ -20,9 +25,12 @@ import sys
 import threading
 from collections.abc import Sequence
 
+from dataplatform.alerts import Severity, build_alerter
+from dataplatform.config import Settings
 from dataplatform.logging import configure_logging, get_logger
 from dataplatform.scheduler.registry import JobNotRegisteredError
 from dataplatform.scheduler.runner import JobState, SchedulerRunner, build_scheduler
+from dataplatform.store.migrate import MigrationError, pending_migrations
 
 #: `run-once` exit codes, by outcome. SKIPPED_LOCKED is deliberately not a failure: the job is
 #: running, which is what the caller wanted, just not in this process.
@@ -35,6 +43,11 @@ _EXIT_CODES = {
 }
 
 _UNKNOWN_JOB = 2
+
+#: The schema is not what this checkout's jobs were written against. Distinct from every job
+#: outcome, and named in `ops/systemd/scheduler.service`'s `RestartPreventExitStatus` so systemd
+#: stops rather than restarting into the same refusal every 30 seconds.
+EXIT_MIGRATIONS_PENDING = 5
 
 log = get_logger(__name__)
 
@@ -64,6 +77,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"{job.name}\t{job.cron}\t{job.description}")
         return 0
 
+    refusal = schema_refusal(runner.settings)
+    if refusal is not None:
+        log.error("scheduler.refused", reason=refusal)
+        print(f"scheduler: refusing to start: {refusal}", file=sys.stderr)
+        _page(runner.settings, refusal)
+        return EXIT_MIGRATIONS_PENDING
+
     if args.command == "run-once":
         try:
             run = runner.run_once(args.job)
@@ -77,6 +97,41 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _EXIT_CODES[run.state]
 
     return _run_forever(runner)
+
+
+def schema_refusal(settings: Settings) -> str | None:
+    """Why the scheduler must not start against this database, or `None` when it may.
+
+    What it does: asks `pending_migrations` (read-only) whether every file on disk is applied.
+    What it assumes: the database is reachable; an unreachable one raises out of here, which
+    systemd's restart loop already handles.
+    What it never does: migrate. Applying DDL is an operator's `make migrate`, run deliberately
+    after a merge — never a side effect of a restart.
+    """
+    try:
+        pending = pending_migrations(settings)
+    except MigrationError as error:
+        return str(error)
+    if not pending:
+        return None
+    names = ", ".join(migration.path.name for migration in pending)
+    return (
+        f"{len(pending)} migration(s) not applied: {names}. "
+        "Run `make migrate`, then restart the scheduler."
+    )
+
+
+def _page(settings: Settings, reason: str) -> None:
+    """Page the refusal: the stopped scheduler is also the one that would run `failure_alerts`."""
+    try:
+        build_alerter(settings).send(
+            Severity.CRITICAL,
+            "scheduler refused to start: database not migrated",
+            reason,
+            dedup_key="scheduler.refused_pending_migrations",
+        )
+    except Exception as error:  # the refusal itself must still reach stderr and the exit code
+        log.error("scheduler.refusal_alert_failed", error=str(error))
 
 
 def _run_forever(runner: SchedulerRunner) -> int:

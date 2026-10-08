@@ -32,7 +32,14 @@ from dataplatform.config import Settings, get_settings
 from dataplatform.logging import configure_logging, get_logger
 from dataplatform.store.db import Connection, connection
 
-__all__ = ["MIGRATIONS_DIR", "Migration", "MigrationError", "discover", "migrate"]
+__all__ = [
+    "MIGRATIONS_DIR",
+    "Migration",
+    "MigrationError",
+    "discover",
+    "migrate",
+    "pending_migrations",
+]
 
 #: Where the numbered SQL files live, beside this module.
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
@@ -147,6 +154,28 @@ def migrate(
         total=len(migrations),
     )
     return pending
+
+
+def pending_migrations(
+    settings: Settings | None = None, *, directory: Path | None = None
+) -> list[Migration]:
+    """The migrations on disk that the database has not applied, without applying any.
+
+    What it does: reads `schema_migrations` read-only and returns every file not recorded there,
+    in order. A database with no ledger at all has applied nothing, so every file is pending.
+    What it assumes: the database is reachable; an unreachable one raises, which is the truth.
+    What it never does: write — no bootstrap, no advisory lock, no DDL. This is what the scheduler
+    asks before it starts (M15.4), and a status check that could migrate as a side effect would
+    hide exactly the drift it exists to catch. A checksum mismatch or a version this checkout does
+    not know raises `MigrationError`, as `migrate` does.
+    """
+    settings = get_settings() if settings is None else settings
+    migrations = discover(directory)
+    with connection(settings) as conn:
+        ledger = conn.execute("SELECT to_regclass('public.schema_migrations')").fetchone()
+        if ledger is None or ledger[0] is None:
+            return migrations
+        return _pending(conn, migrations)
 
 
 def _pending(conn: Connection, migrations: list[Migration]) -> list[Migration]:
