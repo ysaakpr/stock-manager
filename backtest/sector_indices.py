@@ -182,15 +182,17 @@ class SectorIndexLevels:
     """Each mapped index's published closes, read only as of a decision date.
 
     Built from :class:`SectorIndexLevel` rows (a test) or from the store (:meth:`from_l1`). Refuses
-    two rows for one index and session — two aliases overlapping, or a duplicated partition — since
-    picking one silently would make the reading depend on read order.
+    two *different* rows for one index and session — two aliases overlapping, or a restated close —
+    since picking one silently would make the reading depend on read order. An identical repeat is
+    one fact and is kept once: the 2022-03-07 PR bundle lists every index row twice.
     """
 
     def __init__(self, levels: Iterable[SectorIndexLevel]) -> None:
         by_index: dict[str, dict[date, SectorIndexLevel]] = {}
         for level in levels:
             series = by_index.setdefault(level.index, {})
-            if level.session in series:
+            seen = series.get(level.session)
+            if seen is not None and seen != level:
                 raise SectorIndexError(f"{level.index} has two levels for {level.session}")
             series[level.session] = level
         self._series = {
