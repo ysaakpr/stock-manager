@@ -6,8 +6,9 @@ from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 
-from backtest.m14_5_report import MARKER, Switches, render, switches
+from backtest.m14_5_report import MARKER, RunFacts, Switches, render, scorecard, switches
 from backtest.policies.momentum_v2 import PAPER_RATIFIED_2026_09_06, RegimeReading
+from backtest.sweep import D13_DAILY_REENTRY, D13_PAPER_BASELINE, LOW_FLOOR
 
 D13 = PAPER_RATIFIED_2026_09_06
 REENTRY = replace(D13, regime_daily_reentry=True)
@@ -46,20 +47,22 @@ def _count(params: object) -> Switches:
 
 def test_d13_switches_only_on_rebalance_sessions() -> None:
     # Parked at the January rebalance, re-entered at February's; the mid-Feb breakdown is unread.
-    assert _count(D13) == Switches(1, 1, 0, 0)
+    assert _count(D13) == Switches(1, 1, 0, 0, park_sessions=1)
 
 
 def test_daily_reentry_counts_the_mid_month_reentry_but_no_mid_month_exit() -> None:
-    assert _count(REENTRY) == Switches(1, 1, 0, 0)  # re-enters Jan 10, Feb 15 is not acted on
+    assert _count(REENTRY) == Switches(
+        1, 1, 0, 0, park_sessions=1
+    )  # re-enters Jan 10, Feb 15 is not acted on
 
 
 def test_daily_both_ways_counts_the_breakdown_and_the_recovery() -> None:
-    assert _count(BOTH) == Switches(2, 2, 0, 0)
+    assert _count(BOTH) == Switches(2, 2, 0, 0, park_sessions=2)
 
 
 def test_the_band_delays_reentry_but_not_the_count() -> None:
     # 101 is inside the 2% band: the banded arm waits for the 17th; still one re-entry.
-    assert _count(BANDED) == Switches(1, 1, 0, 0)
+    assert _count(BANDED) == Switches(1, 1, 0, 0, park_sessions=1)
 
 
 def test_switches_are_confirmed_only_by_a_fill_on_the_following_session() -> None:
@@ -83,3 +86,79 @@ def test_floor_labels_read_in_whole_crore() -> None:
 
     assert _floor_label(LOW_FLOOR) == "₹1 cr/day floor"
     assert _floor_label(HIGH_FLOOR) == "₹10 cr/day floor"
+
+
+def test_a_park_held_across_rebalances_is_one_park_but_reissued_each_risk_off_rebalance() -> None:
+    # Risk-off at the January and February rebalances: one entry into the parked state, two
+    # sessions on which the monthly rule issues the park (each can meet A8's floor again).
+    held = switches(
+        D13,
+        SESSIONS,
+        _readings({date(2024, 1, 1): "95", date(2024, 2, 20): "105"}),
+        sold=set(),
+        bought=set(),
+    )
+    assert (held.parks, held.park_sessions) == (1, 2)
+
+
+# ── the scorecard ────────────────────────────────────────────────────────────────────────────────
+
+
+def _facts(label: str, window: str, xirr: str, dd: str, *, charges: str = "100") -> RunFacts:
+    return RunFacts(
+        window=window,
+        universe="turnover_floor",
+        floor=LOW_FLOOR,
+        label=label,
+        digest="d",
+        replay_digest="r",
+        xirr=Decimal(xirr),
+        max_drawdown=Decimal(dd),
+        excess=Decimal("0"),
+        charges=Decimal(charges),
+        final_nav=Decimal("1"),
+        trades=1,
+        traded_value=Decimal("1"),
+        turnover=Decimal("2.00"),
+        switches=Switches(0, 0, 0, 0, park_sessions=0),
+        floor_refusals=0,
+    )
+
+
+def _row(lines: list[str], label: str) -> list[str]:
+    (line,) = [line for line in lines if line.startswith(f"| {label} |")]
+    return [cell.strip() for cell in line.strip("|").split("|")]
+
+
+def test_scorecard_counts_wins_ties_and_names_the_lost_cells() -> None:
+    base = D13_PAPER_BASELINE.label
+    facts = [
+        _facts(base, "decade", "0.25", "0.25"),
+        _facts(base, "six-year", "0.30", "0.20"),
+        _facts(base, "wf-selection", "0.20", "0.20"),
+        _facts(D13_DAILY_REENTRY, "decade", "0.30", "0.25", charges="150"),  # better, DD tie
+        _facts(D13_DAILY_REENTRY, "six-year", "0.30", "0.30"),  # worse, DD worse
+        _facts(D13_DAILY_REENTRY, "wf-selection", "0.20", "0.20"),  # exact tie both ways
+    ]
+    cells = _row(scorecard(facts), D13_DAILY_REENTRY)
+    assert cells[1] == "3"
+    assert cells[2] == "1 / 1 / 1"
+    assert cells[3] == "floor-only six-year ₹1 cr"
+    assert cells[4] == "1 / 2 / 0"
+    assert cells[5] == "+10.00pp"
+    assert cells[6] == "2 / 3"  # 0.30 twice clears the bar; 0.20 does not
+    assert cells[8] == "+0% to +50%"
+
+
+def test_scorecard_flips_with_the_comparison_inversion() -> None:
+    base = D13_PAPER_BASELINE.label
+    facts = [
+        _facts(base, "decade", "0.30", "0.20"),
+        _facts(D13_DAILY_REENTRY, "decade", "0.25", "0.25"),
+    ]
+    assert _row(scorecard(facts), D13_DAILY_REENTRY)[2] == "0 / 0 / 1"
+    flipped = [
+        _facts(base, "decade", "0.25", "0.25"),
+        _facts(D13_DAILY_REENTRY, "decade", "0.30", "0.20"),
+    ]
+    assert _row(scorecard(flipped), D13_DAILY_REENTRY)[2] == "1 / 0 / 0"

@@ -37,7 +37,7 @@ from backtest.policies.momentum_v2 import MomentumV2Parameters, RegimeReading
 from backtest.run import _first_session_of_each_month, _L1Reader, _RegimeSource
 from backtest.sweep import D13_PAPER_BASELINE, HIGH_FLOOR, LOW_FLOOR
 
-__all__ = ["RunFacts", "Switches", "collect", "main", "render", "switches"]
+__all__ = ["RunFacts", "Switches", "collect", "main", "render", "scorecard", "switches"]
 
 REPORT = Path("ops/gates/M14.5-regime-reentry-report.md")
 MARKER = "<!-- hand-written analysis below: kept verbatim on re-render -->"
@@ -52,12 +52,18 @@ _WINDOW_ORDER = ("decade", "six-year", "wf-selection", "wf-verification")
 @dataclass(frozen=True, slots=True)
 class Switches:
     """Parks and re-entries the policy's triggers produce over a window, and how many the ledger
-    confirms (a sale, respectively a purchase, filled on the following session)."""
+    confirms (a sale, respectively a purchase, filled on the following session).
+
+    ``park_sessions`` counts every session a park is *issued* — each risk-off rebalance (the
+    monthly rule re-issues the park while the book stays parked) plus each daily exit — which is
+    what bounds the sells A8's minimum-holdings floor can refuse on parks.
+    """
 
     parks: int
     reentries: int
     parks_confirmed: int
     reentries_confirmed: int
+    park_sessions: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +85,8 @@ class RunFacts:
     traded_value: Decimal
     turnover: Decimal
     switches: Switches
-    #: Sells A8's minimum-holdings rail refused — the part of each park that did not happen.
+    #: Every sell A8's minimum-holdings rail refused over the run, on any session. Read from the
+    #: run summary's rail blocks; the report compares no cap itself (A8 owns every rail number).
     floor_refusals: int
 
     @property
@@ -107,10 +114,12 @@ def switches(
     parked = invested = False
     park_days: list[date] = []
     entry_days: list[date] = []
+    park_sessions = 0
     for session in sessions:
         r = reading[session]
         if session in rebalances:
             if not r.risk_on:
+                park_sessions += 1
                 if not parked:
                     park_days.append(session)
                 parked = True
@@ -125,6 +134,7 @@ def switches(
                 parked, invested = False, True
         elif params.regime_daily_exit and invested and r.breaks_below(band):
             park_days.append(session)
+            park_sessions += 1
             parked = True
     following = dict(pairwise(sessions))
     return Switches(
@@ -132,6 +142,7 @@ def switches(
         reentries=len(entry_days),
         parks_confirmed=sum(1 for d in park_days if following.get(d) in sold),
         reentries_confirmed=sum(1 for d in entry_days if following.get(d) in bought),
+        park_sessions=park_sessions,
     )
 
 
@@ -185,6 +196,13 @@ def collect(run_dir: Path, *, data_root: Path | None) -> list[RunFacts]:
         for s in sessions:
             if s not in readings:
                 readings[s] = regime.reading(s)
+        flips = switches(
+            arm.v2,
+            sessions,
+            readings,
+            sold={date.fromisoformat(t["trade_date"]) for t in trades if t["side"] == "SELL"},
+            bought={date.fromisoformat(t["trade_date"]) for t in trades if t["side"] == "BUY"},
+        )
         facts.append(
             RunFacts(
                 window=window,
@@ -202,17 +220,7 @@ def collect(run_dir: Path, *, data_root: Path | None) -> list[RunFacts]:
                 traded_value=traded,
                 turnover=(traded / 2 / mean_nav / years).quantize(Decimal("0.01")),
                 floor_refusals=int(summary["rail_blocks"].get("MIN_HOLDINGS", 0)),
-                switches=switches(
-                    arm.v2,
-                    sessions,
-                    readings,
-                    sold={
-                        date.fromisoformat(t["trade_date"]) for t in trades if t["side"] == "SELL"
-                    },
-                    bought={
-                        date.fromisoformat(t["trade_date"]) for t in trades if t["side"] == "BUY"
-                    },
-                ),
+                switches=flips,
             )
         )
     return facts
@@ -253,7 +261,7 @@ def _table(rows: list[RunFacts]) -> list[str]:
     lines = [
         "| # | Strategy | XIRR | Max DD | **XIRR/DD** | Δ XIRR vs D13 | Δ DD vs D13 | Excess vs "
         "NIFTY 50 TRI | Parks / re-entries (ledger-confirmed) | Trades | One-way turnover /yr "
-        "| Charges | A8 min-holdings refusals | >25%? |",
+        "| Charges | A8 min-holdings refusals, all sessions (park sessions) | >25%? |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for position, row in enumerate(ranked, start=1):
@@ -266,9 +274,86 @@ def _table(rows: list[RunFacts]) -> list[str]:
             f"| **{_r(row.ratio)}** | {delta_x} | {delta_d} | {_p(row.excess)} "
             f"| {sw.parks} / {sw.reentries} ({sw.parks_confirmed} / {sw.reentries_confirmed}) "
             f"| {row.trades} | {row.turnover}x "
-            f"| {_lakh(row.charges)} | {row.floor_refusals} | {'yes' if row.xirr > BAR else 'no'} |"
+            f"| {_lakh(row.charges)} | {row.floor_refusals} ({row.switches.park_sessions}) "
+            f"| {'yes' if row.xirr > BAR else 'no'} |"
         )
     return lines
+
+
+def _cell(row: RunFacts) -> str:
+    universe = "floor-only" if row.universe == "turnover_floor" else row.universe.upper()
+    return f"{universe} {row.window} {_floor_label(row.floor).removesuffix('/day floor')}"
+
+
+def _range(values: Sequence[Decimal], fmt: Any) -> str:
+    return f"{fmt(min(values))} to {fmt(max(values))}" if values else "—"
+
+
+def scorecard(facts: Sequence[RunFacts]) -> list[str]:
+    """Each variant against D13, cell by cell, counted in code from the same runs as the tables.
+
+    A cell is one (universe, window, floor); a variant counts only in cells where D13 also ran.
+    XIRR/DD and max drawdown are compared exactly (no rounding), so a tie is a tie.
+    """
+    base = {
+        (f.universe, f.window, f.floor): f for f in facts if f.label == D13_PAPER_BASELINE.label
+    }
+    order = [arm.label for arm in REGIME_DAILY_SET]
+    out = [
+        "## Scorecard against D13 (generated)",
+        "",
+        "Counted in code (`backtest.m14_5_report.scorecard`) over every cell (universe, window, "
+        "floor) that has both the variant and D13. Comparisons are exact.",
+        "",
+        "| Strategy | Cells | XIRR/DD better / tie / worse than D13 | Cells where XIRR/DD is "
+        "worse | Max DD worse / tie / better | Worst DD increase | XIRR > 25% | One-way turnover "
+        "/yr | Charges vs D13 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for label in order:
+        rows = sorted(
+            (f for f in facts if f.label == label and (f.universe, f.window, f.floor) in base),
+            key=lambda f: (f.universe != "turnover_floor", _WINDOW_ORDER.index(f.window), f.floor),
+        )
+        if not rows:
+            continue
+        cleared = sum(1 for f in rows if f.xirr > BAR)
+        turnover = _range([f.turnover for f in rows], lambda v: f"{v}x")
+        if label == D13_PAPER_BASELINE.label:
+            out.append(
+                f"| **{label}** | {len(rows)} | — | — | — | — | {cleared} / {len(rows)} "
+                f"| {turnover} | — |"
+            )
+            continue
+        pairs = [(f, base[(f.universe, f.window, f.floor)]) for f in rows]
+        better = sum(1 for f, b in pairs if f.ratio > b.ratio)
+        r_tie = sum(1 for f, b in pairs if f.ratio == b.ratio)
+        worse_cells = [_cell(f) for f, b in pairs if f.ratio < b.ratio]
+        dd_worse = sum(1 for f, b in pairs if f.max_drawdown > b.max_drawdown)
+        dd_tie = sum(1 for f, b in pairs if f.max_drawdown == b.max_drawdown)
+        dd_better = len(pairs) - dd_worse - dd_tie
+        worst = max((f.max_drawdown - b.max_drawdown for f, b in pairs), default=_ZERO)
+        charges = _range(
+            [f.charges / b.charges - 1 for f, b in pairs if b.charges > _ZERO], _pp_rel
+        )
+        out.append(
+            f"| {label} | {len(pairs)} | {better} / {r_tie} / {len(worse_cells)} "
+            f"| {_cells_text(worse_cells, len(pairs))} | {dd_worse} / {dd_tie} / {dd_better} "
+            f"| {_pp(worst) if worst > _ZERO else '—'} | {cleared} / {len(rows)} | {turnover} "
+            f"| {charges} |"
+        )
+    out.append("")
+    return out
+
+
+def _cells_text(cells: Sequence[str], total: int) -> str:
+    if not cells:
+        return "—"
+    return f"all {total}" if len(cells) == total else "; ".join(cells)
+
+
+def _pp_rel(value: Decimal) -> str:
+    return f"{'+' if value >= 0 else ''}{(value * 100).quantize(Decimal('1'))}%"
 
 
 def render(
@@ -315,14 +400,20 @@ def render(
         "",
         "Columns: **Parks / re-entries** are regime switches — the policy's own triggers replayed "
         "over the published TRI and calendar (`backtest.m14_5_report.switches`); in brackets, how "
-        "many the fill ledger confirms (a sale, resp. a purchase, on the following session). An "
-        "unconfirmed park is one with nothing to sell; a D13 park after the first is usually "
-        "that, since A8's minimum-holdings floor (8 names) refuses the last sells of a park and "
-        "the kept names then sit through the risk-off spell. **One-way turnover** is "
+        "many the fill ledger confirms (a sale, resp. a purchase, on the following session). The "
+        "confirmation is weak for a switch made on a monthly rebalance, where the ordinary "
+        "rebalance trades anyway; it is informative only for the mid-month (daily) switches. "
+        "Parks count entries into the parked state; while parked, the monthly rule re-issues the "
+        "park every risk-off rebalance (counted in the ceiling below). **One-way turnover** is "
         "(buys + sells) ÷ 2 ÷ mean NAV ÷ years. **Charges** are every brokerage, STT, stamp, "
         "exchange and GST rupee the shared cost model charged (₹10L opening book). **A8 "
-        "min-holdings refusals** are the sells A8's 8-name floor refused over the run (from the "
-        "run summary's rail blocks) — the share of each park that never happened.",
+        "min-holdings refusals** are *all* sells A8's 8-name floor refused over the run, on any "
+        "session (the run summary's rail blocks). In brackets, the sessions on which a park was "
+        "issued. One park refuses at most as many sells as the floor itself — 8 under the "
+        "ratified rails, since the rail bites only on a sell taking a book at the floor below it "
+        "(`analyst/rails/engine.py`) — so refusals beyond 8 per park session happened on "
+        "sessions that were not parks, such as a re-entry rebalance trying to sell a kept name "
+        "that has left the band.",
         "",
     ]
     universes = sorted({f.universe for f in facts}, key=lambda u: (u != "turnover_floor", u))
@@ -360,6 +451,7 @@ def render(
                 "choice on record is the floor-only one.",
                 "",
             ]
+    out += scorecard(facts)
     out += [MARKER, hand_written.strip("\n"), ""]
     return "\n".join(out)
 

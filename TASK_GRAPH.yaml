@@ -2505,10 +2505,10 @@ tasks:
     (`REGIME_DAILY_ARMS`, `backtest.m12_rerun --arm-set regime-daily`), run on the strategy-search
     mandate's windows, both floors, floor-only and NIFTY 500 universes; gate report with an explicit
     recommendation. The paper job and D13 itself are not changed — adoption is an owner decision.
-  deliverables: [backtest/policies/momentum_v2.py, backtest/run.py, backtest/sweep.py, backtest/m12_rerun.py, backtest/m14_5_report.py, tests/unit/test_momentum_v2_daily_regime.py, tests/unit/test_m12_rerun.py, ops/gates/M14.5-regime-reentry-report.md]
+  deliverables: [backtest/policies/momentum_v2.py, backtest/run.py, backtest/sweep.py, backtest/m12_rerun.py, backtest/m14_5_report.py, tests/unit/test_momentum_v2_daily_regime.py, tests/unit/test_m12_rerun.py, tests/unit/test_m14_5_report.py, ops/gates/M14.5-regime-reentry-report.md]
   acceptance:
     - "both switches default off; D13's repr (run fingerprint) is unchanged and a replay digest struck before M14.5 is reproduced"
     - "inverted-rule tests fail if re-entry or exit is flipped; a future-dated daily reading trips the PIT guard"
     - "the gate report is rendered from the saved runs, carries D13 in every table with regime switches and costs, and states a recommendation"
     - "make check is green"
-  verify: "uv run pytest tests/unit/test_momentum_v2_daily_regime.py tests/unit/test_m12_rerun.py -q"
+  verify: "uv run pytest tests/unit/test_momentum_v2_daily_regime.py tests/unit/test_m12_rerun.py tests/unit/test_m14_5_report.py -q"

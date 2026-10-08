@@ -34,16 +34,17 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
 * **Daily regime checks** (``regime_daily_reentry``, ``regime_daily_exit``, ``regime_daily_band``)
   — M14.5. The regime filter above is read only on the monthly rebalance session, so a book parked
   in cash waits up to a month to re-enter after the index recovers its average, and an invested
-  book rides a breakdown until the month turns. With ``regime_daily_reentry`` a book holding no
-  shares at all re-enters, through a full rebalance, on the first non-rebalance session whose
-  regime reads risk-on; with ``regime_daily_exit`` a book holding settled shares is parked on the
-  first non-rebalance session reading risk-off. ``regime_daily_band`` widens both daily triggers
-  (re-enter at ``MA * (1 + band)``, exit below ``MA * (1 - band)``) to damp whipsaw; the monthly
-  rule is never banded. "Parked" is remembered (:attr:`MomentumV2Policy.parked`), not read from the
-  book: A8's minimum-holdings rail refuses the sells that would take a book below its floor, so a
-  parked book is rarely empty — it keeps its last few names. Both off by default, and absent from
-  the parameters' ``repr`` while off, so every configuration defined before them keeps its run
-  fingerprint.
+  book rides a breakdown until the month turns. With ``regime_daily_reentry`` a parked book
+  re-enters, through a full rebalance, on the first non-rebalance session whose regime reads
+  risk-on — "parked" is the policy's remembered flag (set by every park, cleared by a risk-on
+  rebalance), not an empty book; with ``regime_daily_exit`` an unparked book holding settled
+  shares is parked on the first non-rebalance session reading risk-off. ``regime_daily_band``
+  widens both daily triggers (re-enter at ``MA * (1 + band)``, exit below ``MA * (1 - band)``) to
+  damp whipsaw; the monthly rule is never banded. "Parked" is remembered
+  (:attr:`MomentumV2Policy.parked`), not read from the book: A8's minimum-holdings rail refuses
+  the sells that would take a book below its floor, so a parked book is rarely empty — it keeps
+  its last few names. Both off by default, and absent from the parameters' ``repr`` while off,
+  so every configuration defined before them keeps its run fingerprint.
 
 * **Volatility target** (``vol_target_annual``) — a portfolio-level overlay on top of whichever
   basket the other toggles chose. From each name's trailing monthly-return volatility (already on
