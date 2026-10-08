@@ -12,8 +12,8 @@ policy ratification (§3.2) and graduation (§3.6, EXECUTION_PLAN §1 decision #
 What M8 must prove (EXECUTION_PLAN §9, M8 gate): **10 sessions of tiny-capital live orders reconcile clean;
 kill switch fired and verified mid-session; rules memo journaled.** Graduation remains the owner's call.
 
-The task entry (TASK_GRAPH.yaml M8.3) names its deliverables `ops/runbooks/live-orders.md` and
-`ops/gates/M8-live-plan.md`; this file was commissioned as `m8-3-live-orders.md` under M15.5. See §8.
+This file is the `ops/runbooks/live-orders.md` deliverable of TASK_GRAPH.yaml M8.3. The task's second
+deliverable, `ops/gates/M8-live-plan.md`, is not written by this task; see §8.
 
 Every claim below cites a file, a decision ID or the compliance memo. Items marked **Proposed — needs owner
 decision** are proposals, not decisions; HUMAN_DECISIONS.md is not edited by this task.
@@ -44,7 +44,7 @@ when its evidence exists at the named place.
 | P4 | **Daily login / 2FA token policy.** Every API session is force-logged-out daily; re-login is OAuth + 2FA only (memo §3.3, Q5; NSE/INVG/73992 §8.3.2.1.8). Decide who logs in, when (proposed 08:30–09:00 IST, §3.3), where the day's access token lives, and that it is never in argv, a URL, a log or the journal (AGENTIC_CONTEXT §6 #13). | human decides; agent builds the storage (gap G3) | Decision recorded by the owner; G3 closed | **Open** — memo Q5 unanswered; no access-token setting exists (G3) |
 | P5 | **Capital amount** for phase 3. | human | Owner's figure, written into the phase-3 session log (§3.5) | **Open.** **Proposed — needs owner decision:** an amount sized to the probe orders of §3.1, not to the paper book (the paper book is ₹10 lakh, `ops/runbooks/daily-eod.md` "The daily paper session"). Agent computes the per-session probe cost from the last close before phase 3 starts. |
 | P6 | **D13 ratified for real money.** D13 ratified `PAPER_RATIFIED_2026_09_06` for paper only; "a real-money version is a separate ratification (AGENTIC_CONTEXT §3.2, B9)" (HUMAN_DECISIONS.md D13; D15). | human | A new HUMAN_DECISIONS entry ratifying a real-money policy (rails, cash policy, exit menu) | **Open.** Needed before phase 3 only if phase 3 trades the D13 basket (§3.1 option B); needed in all cases before graduation. |
-| P7 | **Paper-period exit criteria met.** **Proposed — needs owner decision:** ≥20 decided paper sessions, including ≥1 rebalance that placed orders; 0 rail breaches; 0 recon breaks; one monthly evidence pack generated (`analyst/journal/evidence_pack.py:423` `generate_pack`). | agent assembles; owner accepts | `paper_session` ledger (`ops/runbooks/daily-eod.md` "Checking it" SQL), decision journal, the generated pack | **Not met.** One session decided: 2026-10-07, `COMPLETED`, reason `rebalance`, 0 orders (risk-off; read from `paper_session` on 2026-10-08). With the NSE holiday file (`dataplatform/ingest/data/nse_holidays.yaml`) the 20th session counted from 2026-10-07 is **2026-11-04**; the next rebalance is the first green session of November, **2026-11-02** (D24 timing, `daily-eod.md` "Rebalance timing"). Whether it places orders depends on the regime filter. "0 recon breaks" is only meaningful once P10 lands — the paper job does not run `Reconciler` today. |
+| P7 | **Paper-period exit criteria met.** **Proposed — needs owner decision:** ≥20 decided paper sessions, including ≥1 rebalance that placed orders; 0 rail breaches; 0 recon breaks; one monthly evidence pack generated (`analyst/journal/evidence_pack.py:423` `generate_pack`). | agent assembles; owner accepts | `paper_session` ledger (`ops/runbooks/daily-eod.md` "Checking it" SQL), decision journal, the generated pack | **Not met.** One session decided: 2026-10-07, `COMPLETED`, reason `rebalance`, 0 orders (risk-off; read from `paper_session` on 2026-10-08). With the NSE holiday file (`dataplatform/ingest/data/nse_holidays.yaml`) the 20th session counted from 2026-10-07 is **2026-11-04**; the next rebalance is the first green session of November, **2026-11-02** (D24, `daily-eod.md` "Rebalance timing"). Whether it places orders depends on the regime filter. "0 recon breaks" is only meaningful once P10 lands — the paper job does not run `Reconciler` today. |
 | P8 | **M15.1 secret scan merged.** D5: the scan must be mandatory and exist — pre-commit hook, `make check` scan and CI scan, each shown to fail on a planted fake — **before** the Kite credential exists on the machine. Kite is "the highest-severity credential in the system". | agent | Merged PR; `make check` runs the scan | **Not met.** `polly/m15-1-secret-scan` has no commits beyond main; `Makefile:17-22` `check` runs format, lint, mypy, pytest — no scan |
 | P9 | **M15.2 disclosure text merged.** | agent | Merged PR | **Not met** — branch has no commits beyond main |
 | P10 | **M15.3: paper on the shared staging / recon / kill-switch path.** Today the paper job runs `ReplayEngine` → `RailGate` → `SimBroker` (`ops/runbooks/daily-eod.md`), not `StagingCoordinator` / `Reconciler` / `KillSwitch` (`backtest/paper_session.py` has no reference to them). Invariant #5 needs the real path to have been exercised in paper first. | agent | Merged PR; paper sessions after it show a recon result per session | **Not met** — branch has no commits beyond main |
@@ -75,7 +75,7 @@ therefore does not depend on P2.
 ### 2.2 Sessions and timing
 
 Proposed — needs owner decision: 5 consecutive sessions that **include the November rebalance (2026-11-02)**
-if the preconditions allow, because the paper book only trades on a rebalance (D24) and ordinary sessions
+if the preconditions allow, because the paper book only trades on a rebalance (D24, §8) and ordinary sessions
 produce no orders to compare. If the window has no rebalance, the probe orders of §3.1 are generated in
 dry-run every session instead, so every session has something to compare.
 
@@ -113,7 +113,7 @@ decides to start phase 3.
 
 ### 3.1 What gets traded
 
-The paper book rebalances once a month (D24), so 10 consecutive sessions of the D13 basket would send orders
+The paper book rebalances once a month (D24, §8), so 10 consecutive sessions of the D13 basket would send orders
 on at most one or two days. The gate wants 10 sessions of live orders reconciling clean.
 
 **Proposed — needs owner decision:**
@@ -270,10 +270,16 @@ All **Proposed — needs owner decision**; none is recorded in HUMAN_DECISIONS.m
 
 ## 8. Notes
 
-- **Deliverable name.** TASK_GRAPH.yaml M8.3 names `ops/runbooks/live-orders.md` and `ops/gates/M8-live-plan.md`
-  (its `verify` is `test -s ops/runbooks/live-orders.md`). This file is `m8-3-live-orders.md` as commissioned
-  under M15.5; renaming or pointing the task entry at it is a TASK_GRAPH edit this task does not make.
-- **Decision IDs.** D22 is the unsourced-step price quarantine (`dataplatform/query/price_quarantine.py`) and
-  does not bear on execution. D23 is not found anywhere in the repo on 2026-10-08. D24 is cited from
-  `ops/runbooks/daily-eod.md` only; it has no entry in HUMAN_DECISIONS.md.
+- **Deliverables.** TASK_GRAPH.yaml M8.3 names `ops/runbooks/live-orders.md` (this file; its `verify` is
+  `test -s ops/runbooks/live-orders.md`) and `ops/gates/M8-live-plan.md`, which this task does not write —
+  the plan content lives in this runbook.
+- **Decisions D23–D24** (orchestrator decisions 2026-10-06/07, pending entry in HUMAN_DECISIONS.md; recorded in the
+  orchestrator's untracked decision log and, for D24, PR #69). They
+  bear on M8.3 through the paper record that P7 and phase 2 compare against:
+  - **D23** — the paper regime input must be the same TRI series as the backtest, else the job ships
+    disabled. It shipped disabled; M13.7 then added the same-evening TRI fetch (`ops/runbooks/daily-eod.md`).
+    A rebalance whose TRI did not land is `SKIPPED_DATA_RED`, which delays P7's "≥1 rebalance with orders".
+  - **D24** — paper timing differences vs the backtest are accepted: mid-month start, a missed rebalance
+    rolls to the next green session, and orders lapse unfilled on red days. A real broker would fill an
+    order the paper book lets lapse, so a phase-2 comparison across a red day is expected to differ.
 - What was verified and what was assumed: `ops/gates/M15.5-m8-3-plan-2026-10-08.md`.
