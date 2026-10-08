@@ -133,6 +133,8 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "failure_alerts",
         "paper_session",
         "fundamentals_forward",
+        "postgres_backup",
+        "l0_backup",
     )
     assert registry.get("eod_pipeline").cron == "30 18 * * mon-fri"
     # 19:15, after the 18:30 EOD pipeline: the two share nsearchives.nseindia.com, and a host
