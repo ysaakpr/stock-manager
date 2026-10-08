@@ -336,6 +336,16 @@ def test_dsr_fails_when_the_arm_is_the_weaker_series() -> None:
     assert _passed(swapped)["5"] is False
 
 
+def test_trials_outside_v_are_listed_and_the_two_lists_make_n() -> None:
+    from backtest.m16_report import M16_TRIAL_LABELS, _n_only
+
+    sharpes = [TrialSharpe("k1", D13, 0.05), TrialSharpe("k2", A7_LOW_VOL, 0.06)]
+    rest = _n_only(sharpes)
+    assert D13 not in rest and A7_LOW_VOL not in rest
+    assert len(rest) + len(sharpes) == TRIALS
+    assert set(rest) | {D13, A7_LOW_VOL} == {*TRIALS_ON_RECORD, *M16_TRIAL_LABELS}
+
+
 def test_trial_sharpes_are_one_per_configuration_campaign_first() -> None:
     cell = (FLOOR, VER, HIGH_FLOOR)
     old = replace(_facts(D13, cell, "0", "0", nav=_path(1, 0.0)), key="k")

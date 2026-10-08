@@ -759,10 +759,20 @@ def decision(
         f"verification window, floor-only, {_floor_label(PRIMARY_FLOOR)}, over the n = "
         f"{len(sharpes)} trials with a saved run there: "
         + ", ".join(t.label for t in sharpes)
-        + f". The other {TRIALS - len(sharpes)} of the N = {TRIALS} count toward N only.",
+        + ".",
+        "",
+        f"Counted toward N = {TRIALS} only, with no saved run on that cell: "
+        + (", ".join(_n_only(sharpes)) or "none")
+        + ".",
         "",
     ]
     return out
+
+
+def _n_only(sharpes: Sequence[TrialSharpe]) -> list[str]:
+    """The pre-registered trials (Appendix A and the M16 arms) that did not contribute to V."""
+    seen = {t.label for t in sharpes}
+    return [label for label in (*TRIALS_ON_RECORD, *M16_TRIAL_LABELS) if label not in seen]
 
 
 def render(
