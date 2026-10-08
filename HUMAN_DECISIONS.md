@@ -597,7 +597,7 @@ to start without the owner. The file carries a header saying so.
 D22–D24 below were taken in the same run, during review of PRs #68 and #69. They were recorded in
 the orchestrator's untracked decision log on 2026-10-06 and are entered here on 2026-10-08. Each
 was **taken by the orchestrating agent (polly) on the owner's behalf on 2026-10-06**, under the
-owner's "don't wait on me" instruction quoted above, and is **pending the owner's ratification**.
+owner's instruction quoted above ("do the end to end task without awaiting on me for anything"), and is **pending the owner's ratification**.
 
 ### D22 — Three pre-2011 L2 steps with no sourced terms → **ANSWERED (polly, delegated 2026-10-06, pending ratification): quarantine the pre-event prices.**
 
