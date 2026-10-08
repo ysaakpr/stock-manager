@@ -28,38 +28,101 @@ _VALUE = rf"(?=[{_CHARS}]*[0-9])(?=[{_CHARS}]*[A-Za-z])([{_CHARS}]{{16,}})"
 
 
 # A name that carries a credential: the keyword anywhere in it, words joined by `_` or `-`
-# (KITE_ACCESS_TOKEN, TOKEN_VALUE, x-api-key, X-Api-Key, KITE_PASS, db_password).
-_NAME = r"[\w-]*(?:token|secret|api[-_]?key|passw(?:or)?d|pass)[\w-]*"
-# The assignment, including a Python annotation (`name: str = `, `name: SecretStr | None = `).
-_ASSIGN = r"[\"']?\s*(?::\s*[\w.\[\], |]+?\s*=(?!=)|:=|==?|:)\s*"
-# A wrapper the literal may sit in: pydantic's `SecretStr("…")`, `Secret("…")`, `str("…")`.
-_WRAPPER = r"(?:(?:SecretStr|SecretBytes|Secret|str|bytes)\(\s*)?"
+# (KITE_ACCESS_TOKEN, TOKEN_VALUE, x-api-key, X-Api-Key, KITE_PASS, db_password). `pass` only as a
+# whole word (not passport/passenger/passthrough/bypass); `token` not as tokenize/tokenizer.
+_NAME = r"[\w-]*(?:token(?!i[sz])|secret|api[-_]?key|passw(?:or)?d|(?<![a-z])pass(?![a-z]))[\w-]*"
+# A Python annotation, brackets balanced to two levels: `str`, `SecretStr | None`,
+# `dict[str, str]`, `Annotated[SecretStr, Field(description="…")]`.
+_BRACKET_0 = r"[^\[\]\n]*"
+_BRACKET_1 = rf"\[(?:[^\[\]\n]|\[{_BRACKET_0}\])*\]"
+_BRACKET_2 = rf"\[(?:[^\[\]\n]|{_BRACKET_1})*\]"
+_TYPE = rf"[\w.]+(?:{_BRACKET_2})?"
+_ANNOTATION = rf"{_TYPE}(?:\s*\|\s*{_TYPE})*"
+# The assignment: `:`/`=`/`:=`, or a Python annotation then `=`. Never `==`, `!=`, `<=`, `>=`.
+_ASSIGN = rf"[\"']?\s*(?::\s*{_ANNOTATION}\s*=(?!=)|:=|=(?!=)|:)\s*"
+# What the literal may sit in, outermost first, on the same line: a dict literal's first key
+# (`{{"kite": "…"}}`), pydantic/dataclass `Field(`/`field(` with an optional `default=`, and
+# `SecretStr(`/`SecretBytes(`/`Secret(`/`str(`/`bytes(`.
+_WRAPPER = (
+    r"(?:\{\s*[\"'][^\"'\n]*[\"']\s*:\s*)?"
+    r"(?:(?:Field|field)\(\s*(?:default\s*=\s*)?)?"
+    r"(?:(?:SecretStr|SecretBytes|Secret|str|bytes)\(\s*)?"
+)
+# A Python/JS string prefix: b"…", f"…", r"…", rb"…", u"…".
+_PREFIX = r"(?:[bBfFrRuU]{1,2})?"
 # An unquoted value that is a reference, not a literal: a dotted chain (`settings.db2_password`,
-# `self.access_token_v2`, `cfg.kite.api_key_2024`) or a call/subscript (`b64encode(…)`, `x[…]`).
-_REFERENCE = r"(?![A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+|[A-Za-z_]\w*\s*[(\[])"
+# `self.access_token_v2`) or a call/subscript (`b64encode(…)`, `x[…]`). Only meaningful in code.
+_REFERENCE = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+(?![\w.])|[A-Za-z_]\w*\s*[(\[]")
+_CODE_SUFFIXES = frozenset(
+    {
+        ".py",
+        ".pyi",
+        ".js",
+        ".jsx",
+        ".mjs",
+        ".cjs",
+        ".ts",
+        ".tsx",
+        ".go",
+        ".java",
+        ".kt",
+        ".rb",
+        ".rs",
+    }
+)
+_COMMENT_START = re.compile(r"#|//|/\*|^\s*\*")
+_QUOTED = re.compile(_NAME + _ASSIGN + _WRAPPER + _PREFIX + r"[\"']" + _VALUE, re.IGNORECASE)
+_UNQUOTED = re.compile(_NAME + _ASSIGN + _WRAPPER + rf"(?=[{_CHARS}])" + _VALUE, re.IGNORECASE)
 
 
 class TokenAssignmentDetector(RegexBasedDetector):
     """A credential assigned or passed: `KITE_ACCESS_TOKEN=…`, `token: …`, `x-api-key: …`,
     `APP=1 KITE_API_SECRET=…`, `# api_secret = …`, `kite.set_access_token("…")`, and the
-    pydantic-settings shapes `kite_api_secret: str = "…"`, `token: SecretStr = SecretStr("…")`.
+    pydantic/dataclass shapes `kite_api_secret: str = "…"`, `token: SecretStr = SecretStr("…")`,
+    `x: Annotated[str, Field(…)] = "…"`, `x: SecretStr = Field(default="…")`, `x: bytes = b"…"`,
+    `x: dict[str, str] = {"kite": "…"}`.
 
-    Any name containing token, secret, api-key/api_key/apikey, password, passwd or pass, in Python,
-    YAML, JSON, .env, INI or shell syntax, inside a comment or not, plus the call form
-    `…token("<value>")`. A quoted value is always a literal; an unquoted one is skipped when it is
-    a reference (a dotted chain, a call, a subscript). It backs up KeywordDetector, which needs
-    quotes in code files and misses annotated assignments and env lines with an earlier
-    assignment. A value split across lines inside parentheses is not seen — detection is
-    line-based; documented in the runbook.
+    Any name containing token, secret, api-key/api_key/apikey, password, passwd or a whole-word
+    pass, in any syntax, inside a comment or not, plus the call form `…token("<value>")`. A quoted
+    value is always a literal. An unquoted value is a literal too, except one exemption: in a code
+    file (.py, .js, .ts, …) and **before any comment marker on the line**, an unquoted dotted chain,
+    call or subscript is a reference (`password=settings.db2_password.get_secret_value()`). In
+    .env, .sh, .md, INI, YAML and every comment, nothing is a reference — `DB_PASSWORD=a.b123…` is
+    a value there. Line-based: a value on a later line than its name is a named gap (runbook).
     """
 
     secret_type = "Credential Assignment"
 
     denylist = (
-        re.compile(_NAME + _ASSIGN + _WRAPPER + r"[\"']" + _VALUE, flags=re.IGNORECASE),
-        re.compile(_NAME + _ASSIGN + _WRAPPER + _REFERENCE + _VALUE, flags=re.IGNORECASE),
-        re.compile(r"\w*token\(\s*[\"']" + _VALUE, flags=re.IGNORECASE),
+        _QUOTED,
+        re.compile(r"\w*token\(\s*" + _PREFIX + r"[\"']" + _VALUE, flags=re.IGNORECASE),
     )
+
+    def analyze_line(
+        self,
+        filename: str,
+        line: str,
+        line_number: int = 0,
+        context: CodeSnippet | None = None,
+        **kwargs: Any,
+    ) -> set[PotentialSecret]:
+        snippet = cast(CodeSnippet, context)
+        found: set[PotentialSecret] = super().analyze_line(
+            filename, line, line_number, snippet, **kwargs
+        )
+        code = PurePath(filename).suffix.lower() in _CODE_SUFFIXES
+        comment = _COMMENT_START.search(line)
+        code_until = comment.start() if comment else len(line)
+        for match in _UNQUOTED.finditer(line):
+            value = match.group(1)
+            is_reference = (
+                code
+                and match.start(1) < code_until
+                and _REFERENCE.match(line, match.start(1)) is not None
+            )
+            if not is_reference:
+                found.add(PotentialSecret(self.secret_type, filename, value, line_number))
+        return found
 
 
 class AuthorizationHeaderDetector(RegexBasedDetector):

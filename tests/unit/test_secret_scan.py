@@ -262,6 +262,107 @@ def test_references_are_not_credentials(line: str, tmp_path: Path) -> None:
     assert result.returncode == CLEAN_EXIT, result.stderr
 
 
+# Unquoted values shaped like references — `ident.ident…` or ending in `(` — are literals
+# everywhere except code lines of code files. These are the shapes main caught and the first
+# version of the reference exemption let through: duplicate .env keys and broken YAML (no parsed
+# view to fall back on), shell lines, comments, prose.
+DOTTED = "k" + _fake("dotted-a", 11) + ".k" + _fake("dotted-b", 13)
+CALLED = "k" + _fake("called", 20)
+REFERENCE_SHAPED = {
+    "env_dup_key_dotted_password": ("app.env", "A=1\nA=2\nDB_PASSWORD=" + DOTTED + "\n"),
+    "env_dup_key_dotted_token": ("app.env", "A=1\nA=2\nKITE_ACCESS_TOKEN=" + DOTTED + "\n"),
+    "env_dup_key_called_secret": ("app.env", "A=1\nA=2\nKITE_API_SECRET=" + CALLED + "()\n"),
+    "sh_export_dotted_password": ("run.sh", "set -eu\nexport DB_PASSWORD=" + DOTTED + "\n"),
+    "py_comment_dotted_password": ("app.py", "# password = " + DOTTED + "\n"),
+    "py_trailing_comment_dotted_secret": ("app.py", "x = 1  # api_secret = " + DOTTED + "\n"),
+    "md_fenced_dotted_token": ("README.md", "```\nKITE_ACCESS_TOKEN=" + DOTTED + "\n```\n"),
+    "md_prose_called_secret": ("notes.md", "Set KITE_API_SECRET=" + CALLED + "() first.\n"),
+    "yaml_broken_dotted_token": ("kite.yaml", "kite: [\n  access_token: " + DOTTED + "\n"),
+    "ini_dotted_password": ("db.ini", "[db]\npassword = " + DOTTED + "\n"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REFERENCE_SHAPED))
+def test_reference_shaped_literals_outside_code_are_caught(case: str, tmp_path: Path) -> None:
+    name, content = REFERENCE_SHAPED[case]
+    target = tmp_path / name
+    target.write_text(content)
+
+    result = _scan(target)
+
+    assert result.returncode == FINDING, f"{case}: {result.stdout}{result.stderr}"
+    assert DOTTED not in result.stderr and CALLED not in result.stderr
+
+
+# pydantic / dataclass forms — the value is a literal however it is wrapped or typed.
+PYDANTIC_FORMS = {
+    "annotated_field_str": (
+        'kite_api_secret: Annotated[str, Field(description="kite", min_length=3)] = "'
+        + KITE_SECRET
+        + '"'
+    ),
+    "annotated_secretstr": (
+        'kite_access_token: Annotated[SecretStr, Field(repr=False)] = SecretStr("'
+        + KITE_TOKEN
+        + '")'
+    ),
+    "field_default": 'kite_api_secret: SecretStr = Field(default="' + KITE_SECRET + '")',
+    "field_positional_alias": (
+        'kite_api_secret: str = Field("' + KITE_SECRET + '", alias="KITE_API_SECRET")'
+    ),
+    "field_default_secretstr": (
+        'kite_access_token: SecretStr = Field(default=SecretStr("' + KITE_TOKEN + '"))'
+    ),
+    "dataclass_field_default": 'api_secret: str = field(default="' + KITE_SECRET + '")',
+    "bytes_literal": 'api_secret: bytes = b"' + KITE_SECRET + '"',
+    "f_string_literal": 'api_secret: str = f"' + KITE_SECRET + '"',
+    "dict_literal": 'kite_secrets: dict[str, str] = {"kite": "' + KITE_SECRET + '"}',
+}
+
+
+@pytest.mark.parametrize("case", sorted(PYDANTIC_FORMS))
+def test_pydantic_and_dataclass_forms_are_caught(case: str, tmp_path: Path) -> None:
+    target = tmp_path / "settings.py"
+    target.write_text("class Settings(BaseSettings):\n    " + PYDANTIC_FORMS[case] + "\n")
+
+    result = _scan(target)
+
+    assert result.returncode == FINDING, f"{case}: {result.stdout}{result.stderr}"
+    assert ": Credential Assignment" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'passport_number = "' + KITE_SECRET + '"',
+        'passenger_ref = "' + KITE_SECRET + '"',
+        'passthrough_id = "' + KITE_SECRET + '"',
+        'bypass_cache_key_v1 = "' + KITE_SECRET + '"',
+        'tokenizer_name = "' + KITE_SECRET + '"',
+        'if access_token == "' + KITE_TOKEN + '":',
+        'if api_secret != "' + KITE_SECRET + '":',
+    ],
+    ids=["passport", "passenger", "passthrough", "bypass", "tokenizer", "eq", "ne"],
+)
+def test_lookalike_names_and_comparisons_are_not_assignments(line: str, tmp_path: Path) -> None:
+    """Only the assignment detector is pinned here: the stock KeywordDetector has its own,
+    broader idea of a comparison and is not this detector's to narrow."""
+    target = tmp_path / "app.py"
+    target.write_text(line + "\n")
+
+    result = _scan(target)
+
+    assert ": Credential Assignment" not in result.stderr, result.stderr
+
+
+def test_the_reference_exemption_still_applies_on_code_lines(tmp_path: Path) -> None:
+    """The same dotted value that is a finding in .env/.sh/comments is a reference in code."""
+    target = tmp_path / "app.py"
+    target.write_text("db_password = settings." + DOTTED.split(".")[1] + ".value\n")
+
+    assert _scan(target).returncode == CLEAN_EXIT
+
+
 def test_the_real_settings_module_scans_clean() -> None:
     """dataplatform/config.py: SecretStr fields with defaults, None and env — no finding."""
     assert _scan(REPO / "dataplatform" / "config.py").returncode == CLEAN_EXIT
