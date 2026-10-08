@@ -12,7 +12,8 @@
 --     session restores so the two sides of the reconciliation are built independently.
 --   * outcome `RECON_BREAK` — red: the session's fills happened (the row carries the book they
 --     left, which the next session restores from), but the kill switch tripped and nothing was
---     staged, and the book trades no more until the break is resolved.
+--     staged, and the book trades no more until the break is resolved. A break row names its
+--     key and terms (what a resolution row must match) and is never the month's rebalance.
 --
 -- Backward compatible with every row already written: the new columns are NULL on them (the next
 -- session seeds its accounting book from the restored broker once, and says so in its recon), and
@@ -41,7 +42,9 @@ ALTER TABLE paper_session
     ),
     ADD CONSTRAINT paper_session_recon_break_stages_nothing CHECK (
         outcome <> 'RECON_BREAK'
-        OR (orders = '[]'::jsonb AND recon IS NOT NULL AND recon->>'status' = 'BREAK')
+        OR (orders = '[]'::jsonb AND NOT rebalanced AND recon IS NOT NULL
+            AND recon->>'status' = 'BREAK' AND recon->>'key' IS NOT NULL
+            AND recon->>'terms' IS NOT NULL)
     ),
     ADD CONSTRAINT paper_session_completed_recon_is_clean CHECK (
         outcome <> 'COMPLETED' OR recon IS NULL OR recon->>'status' = 'CLEAN'

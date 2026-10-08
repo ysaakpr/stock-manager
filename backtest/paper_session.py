@@ -560,9 +560,15 @@ class PaperSessionRecord:
                 f"a {self.outcome.value} session must record the book state it ended on"
             )
         if self.outcome is SessionOutcome.RECON_BREAK and (
-            self.orders or self.recon is None or self.recon.status is not ReconStatus.BREAK
+            self.orders
+            or self.rebalanced
+            or self.recon is None
+            or self.recon.status is not ReconStatus.BREAK
         ):
-            raise ValueError("a RECON_BREAK session records its break and stages no order")
+            raise ValueError(
+                "a RECON_BREAK session records its break, stages no order and is never the "
+                "month's rebalance"
+            )
         if self.outcome is SessionOutcome.COMPLETED and (
             self.recon is not None and self.recon.status is not ReconStatus.CLEAN
         ):
@@ -2029,6 +2035,13 @@ def run_paper_session(
         risk_off = (
             rebalance and capturing.evidence is not None and regime_parked(capturing.evidence)
         )
+    if not recon.ok:
+        # A break day never counts as the month's rebalance and never advances the redeploy state,
+        # whether the policy wanted orders (refused above) or wanted none: the decision was made on
+        # a book recon said was wrong, so the next green session makes it again on a sound one.
+        pending = carried
+        rebalanced = False
+        risk_off = False
     entries = (*changed_entries, *late_entries, *engine_entries, recon_entry)
     if result is not None and capturing.evidence is not None:
         journal.snapshot(capturing.evidence)

@@ -40,6 +40,7 @@ from backtest.accounting import PortfolioBook
 from backtest.book_actions import BookActionCalendar, CashDividend, RescaleKind, ShareRescale
 from backtest.paper_session import (
     KILL_SWITCH_EVENT,
+    LATE_ACTION_EVENT,
     RECON_BREAK_EVENT,
     RECON_EVENT,
     InMemoryPaperSessionStore,
@@ -62,7 +63,7 @@ from execution import kill_switch as kill_switch_module
 from execution.broker import Exchange, Fill, OrderRequest, OrderType, Side
 from execution.costs import CostModel, load_rate_card
 from execution.kill_switch import KillSwitch, TradingHaltedError, TripSource
-from execution.recon import RecordingAlerter
+from execution.recon import Reconciler, RecordingAlerter
 from execution.sim_broker import SimBroker
 from execution.staging import StagingCoordinator
 from tests.paper_session_support import (
@@ -112,6 +113,17 @@ class _Desk:
     kill_switch: KillSwitch = field(default_factory=fresh_kill_switch)
     alerter: RecordingAlerter = field(default_factory=RecordingAlerter)
     parameters: MomentumV2Parameters | None = None
+
+    @staticmethod
+    def run_quantities(record: PaperSessionRecord) -> list[tuple[str, int]]:
+        """(ISIN, shares) the broker held after ``record``'s session: settled plus pending."""
+        out: dict[str, int] = {}
+        state = record.broker_state()
+        for isin, _exchange, quantity, _cost in state.holdings:
+            out[isin] = out.get(isin, 0) + quantity
+        for isin, _traded, _lag, _exchange, quantity, _cost in state.pending:
+            out[isin] = out.get(isin, 0) + quantity
+        return sorted(out.items())
 
     def run(self, day: date) -> PaperSessionResult:
         spec = fixture_spec() if self.parameters is None else fixture_spec(self.parameters)
@@ -527,3 +539,144 @@ def test_a_crash_after_a_break_tripped_the_switch_leaves_the_book_halted() -> No
     rerun = desk.run(OCT_SECOND)
     assert rerun.verdict is RunVerdict.HALTED
     assert rerun.record is not None and rerun.record.orders == ()
+
+
+# ── 5. review round: the mid-session halt, a late split, break-day rebalance, the switch file ───
+
+
+def test_a_switch_tripped_mid_session_by_anything_but_recon_raises_and_records_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Recon is clean, then something else trips the switch before the first order is staged.
+
+    The staging step refuses the order; since the session's own reconciliation found nothing, the
+    refusal is not a break the session can record — it is surfaced, and the caller's transaction
+    rolls back. Nothing is recorded or journaled for the date.
+    """
+    real = Reconciler.reconcile
+
+    def reconcile_then_trip(self: Reconciler, session: date) -> Any:
+        result = real(self, session)
+        self.kill_switch.trip(reason="tripped by another process mid-run", source=TripSource.MANUAL)
+        return result
+
+    monkeypatch.setattr(Reconciler, "reconcile", reconcile_then_trip)
+    desk = _Desk()
+    with pytest.raises(TradingHaltedError, match="another process"):
+        desk.run(OCT_FIRST)  # the first session rebalances: it would stage ten orders
+    assert desk.store.get(BOOK, OCT_FIRST) is None
+    assert desk.journal.entries == []
+    # The switch stays tripped: the rerun is the journaled no-op, never a decision.
+    monkeypatch.setattr(Reconciler, "reconcile", real)
+    assert desk.run(OCT_FIRST).verdict is RunVerdict.HALTED
+
+
+def test_a_late_split_on_a_held_name_is_booked_on_both_sides_and_recon_stays_clean() -> None:
+    desk = _Desk()
+    for day in (OCT_FIRST, OCT_SECOND, OCT_THIRD):
+        desk.run(day)
+    third = desk.store.get(BOOK, OCT_THIRD)
+    assert third is not None and third.expected_book is not None
+    isin = str(third.broker_state().holdings[0][0])
+    held = dict(desk.run_quantities(third))[isin]
+    # Ex-date Tuesday 6 Oct, already decided, untraded since: learnt on Wednesday, booked then.
+    desk.world.actions.append(
+        ShareRescale(
+            isin=isin,
+            ex_date=OCT_THIRD,
+            kind=RescaleKind.SPLIT,
+            numerator=Decimal("2"),
+            denominator=Decimal("1"),
+        )
+    )
+    fourth = desk.run(OCT_FOURTH)
+
+    assert fourth.verdict is RunVerdict.DECIDED
+    late = [e for e in fourth.entries if e.payload.get("event") == LATE_ACTION_EVENT]
+    assert [e.decision for e in late] == [Decision.HOLD]
+    assert fourth.record is not None and fourth.record.recon is not None
+    assert fourth.record.recon.status is ReconStatus.CLEAN
+    assert dict(desk.run_quantities(fourth.record))[isin] == 2 * held
+    assert fourth.record.expected_book is not None
+    (booked,) = [p for p in fourth.record.expected_book["positions"] if p["isin"] == isin]
+    assert int(booked["quantity"]) == 2 * held
+
+
+def test_a_break_day_never_counts_as_the_months_rebalance_even_with_no_orders_wanted() -> None:
+    """The ratified book already holds every fixture name, so October's rebalance wants no order.
+
+    The engine finishes (nothing was refused), yet the break day is still not the rebalance and
+    does not advance the redeploy state — exactly as when the staging step refused the orders —
+    and the first green session after the resolution makes the rebalance.
+    """
+    desk = _Desk()
+    for day in calendar_sessions(date(2026, 9, 28), SEPT_LAST):
+        desk.run(day)
+    september = desk.store.get(BOOK, SEPT_LAST)
+    assert september is not None
+    _tamper_expected_cash(desk.store, SEPT_LAST, Decimal("1"))
+
+    broken = desk.run(OCT_FIRST)
+
+    assert broken.verdict is RunVerdict.RECON_BREAK
+    decided = [
+        e for e in broken.entries if e.payload.get("event") not in (RECON_EVENT, RECON_BREAK_EVENT)
+    ]
+    assert decided, "the engine finished: this is the policy-wanted-nothing branch"
+    assert not [e for e in decided if e.decision in (Decision.BUY, Decision.SELL)]
+    assert broken.record is not None
+    assert not broken.record.rebalanced
+    assert broken.record.pending == september.pending
+    desk.kill_switch.reset(note="owner reviewed")
+    assert broken.record.recon is not None
+    desk.store.resolve(BOOK, broken.record.recon.key, broken.record.recon.terms)
+    resumed = desk.run(OCT_SECOND)
+    assert resumed.verdict is RunVerdict.DECIDED
+    assert resumed.record is not None and resumed.record.rebalanced
+
+
+def test_a_reset_leaves_a_durable_trace_in_the_state_file(tmp_path: Path) -> None:
+    path = tmp_path / "switch.json"
+    tripped_at = datetime(2026, 10, 8, 9, 0, tzinfo=IST)
+    switch = KillSwitch(path, clock=FrozenClock(tripped_at))
+    switch.trip(reason="drill halt", source=TripSource.MANUAL)
+    reset_at = datetime(2026, 10, 8, 9, 30, tzinfo=IST)
+    KillSwitch(path, clock=FrozenClock(reset_at)).reset(note="drill over", by="owner")
+
+    reread = KillSwitch(path).state  # a fresh process reads the trace back
+    assert not reread.tripped and reread.last_reset is not None
+    trace = reread.last_reset
+    assert (trace.at, trace.note, trace.by) == (reset_at, "drill over", "owner")
+    assert (trace.cleared_reason, trace.cleared_source, trace.cleared_tripped_at) == (
+        "drill halt",
+        TripSource.MANUAL,
+        tripped_at,
+    )
+    # A later trip keeps the trace; a no-op reset of an armed switch never overwrites it.
+    KillSwitch(path).trip(reason="again", source=TripSource.RECON)
+    assert KillSwitch(path).state.last_reset == trace
+    assert not list(tmp_path.glob(".killswitch-*")), "written atomically, no temp file left"
+
+
+def test_the_cli_reset_records_who_reset_it(tmp_path: Path) -> None:
+    path = tmp_path / "switch.json"
+    kill_switch_module.main(["trip", "--path", str(path), "--reason", "manual"])
+    kill_switch_module.main(["reset", "--path", str(path), "--note", "ok", "--by", "ops"])
+    trace = KillSwitch(path).state.last_reset
+    assert trace is not None and trace.by == "ops" and trace.cleared_reason == "manual"
+
+
+def test_a_missing_file_is_armed_but_a_file_without_tripped_fails_closed(tmp_path: Path) -> None:
+    assert not KillSwitch(tmp_path / "never_written.json").is_tripped
+    for broken in (
+        {"version": 1},
+        {"version": 1, "tripped": None},
+        {"version": 1, "tripped": "no"},
+    ):
+        path = tmp_path / "switch.json"
+        path.write_text(json.dumps(broken))
+        with pytest.raises(ValueError, match="tripped"):
+            KillSwitch(path)
+    # A state file written before `last_reset` existed still reads, as never reset.
+    path.write_text(json.dumps({"version": 1, "tripped": True, "reason": "x", "source": "MANUAL"}))
+    assert KillSwitch(path).is_tripped and KillSwitch(path).state.last_reset is None
