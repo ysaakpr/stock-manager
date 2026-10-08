@@ -221,10 +221,15 @@ class SwingRecord:
     # Round 2, H1 (backtest.policies.residual_momentum). ``None`` is "excluded from the leg" — not
     # computed, or fewer than 200 valid sessions — and ranks at the leg's mean, never at a value.
     residual_momentum: Decimal | None = None
+    # M16.3 (backtest.policies.earnings_surprise): the SUE inside its 63-session window, 0 after it.
+    # ``None`` is "no signal" — too short a filing history — and ranks at the leg's mean.
+    earnings_surprise: Decimal | None = None
 
     def __post_init__(self) -> None:
-        if self.residual_momentum is not None and not isinstance(self.residual_momentum, Decimal):
-            raise TypeError("residual_momentum must be a Decimal or None")
+        for optional in ("residual_momentum", "earnings_surprise"):
+            value = getattr(self, optional)
+            if value is not None and not isinstance(value, Decimal):
+                raise TypeError(f"{optional} must be a Decimal or None")
         for name in (
             "high_proximity",
             "delivery_share",
@@ -255,6 +260,7 @@ class SwingRecord:
 _DIGEST_OPTIONAL_PARAMETERS: dict[str, object] = {
     "weight_residual_momentum": _ZERO,
     "redeploy_next_session": False,
+    "weight_earnings_surprise": _ZERO,
 }
 
 
@@ -336,6 +342,9 @@ class SwingCompositeParameters:
     # Idle-cash fix: momentum v2's ``redeploy_next_session``, settlement-aware. Off by default, and
     # absent from ``repr`` when off, so no arm persisted before it changes digest.
     redeploy_next_session: bool = False
+    # M16.3: the earnings-surprise (PEAD) leg (backtest.policies.earnings_surprise). Zero by
+    # default, and absent from ``repr`` at zero, so M10.7 and every persisted arm keep their digest.
+    weight_earnings_surprise: Decimal = _ZERO
 
     def __repr__(self) -> str:
         shown = (
@@ -381,6 +390,7 @@ class SwingCompositeParameters:
             "weight_ma_proximity",
             "weight_volatility",
             "weight_residual_momentum",
+            "weight_earnings_surprise",
         ):
             if not isinstance(getattr(self, name), Decimal):
                 raise TypeError(f"{name} must be a Decimal")
@@ -443,6 +453,7 @@ def _weighted_legs(params: SwingCompositeParameters) -> tuple[tuple[str, Decimal
         ("ma_proximity", params.weight_ma_proximity),
         ("volatility", params.weight_volatility),
         ("residual_momentum", params.weight_residual_momentum),
+        ("earnings_surprise", params.weight_earnings_surprise),
     )
     return tuple((attribute, weight) for attribute, weight in legs if weight != _ZERO)
 
@@ -501,7 +512,7 @@ def composite_scores(
         return {}
     scores: dict[str, Decimal] = dict.fromkeys((r.isin for r in records), _ZERO)
     for attribute, weight in legs:
-        # A name excluded from a leg (a ``None`` value — only residual momentum has one) is ranked
+        # A name excluded from a leg (a ``None`` value: residual momentum, earnings surprise) ranks
         # on the others and scores 0 here, the leg's mean rank; the rest rank among themselves.
         ranked = [r for r in records if getattr(r, attribute) is not None]
         n = len(ranked)
@@ -1271,6 +1282,11 @@ class SwingCompositePolicy:
                     **(
                         {"residual_momentum": str(record.residual_momentum)}
                         if self._params.weight_residual_momentum != _ZERO
+                        else {}
+                    ),
+                    **(
+                        {"earnings_surprise": str(record.earnings_surprise)}
+                        if self._params.weight_earnings_surprise != _ZERO
                         else {}
                     ),
                     # Only on a tiered arm, for the same reason.

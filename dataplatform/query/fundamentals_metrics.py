@@ -63,6 +63,7 @@ __all__ = [
     "MetricValue",
     "Unavailable",
     "compute_metrics",
+    "drop_misscaled_filings",
     "metrics_asof",
 ]
 
@@ -389,7 +390,7 @@ def _metrics_for(
     price: Decimal | None,
     prefer: Nature,
 ) -> FundamentalMetrics | None:
-    rows, excluded = _drop_misscaled_filings(rows)
+    rows, excluded = drop_misscaled_filings(rows)
     nature = _pick_nature(rows, prefer)
     if nature is None:
         return None  # no quarterly earnings under either nature: nothing to derive
@@ -486,11 +487,12 @@ def _metrics_for(
     )
 
 
-def _drop_misscaled_filings(rows: Sequence[FactRow]) -> tuple[list[FactRow], int]:
+def drop_misscaled_filings(rows: Sequence[FactRow]) -> tuple[list[FactRow], int]:
     """Remove every fact of a filing whose paid-up capital is a clean 10^k off the company's median.
 
     Needs at least three filings stating paid-up capital to have a median worth trusting; with fewer
-    nothing is dropped. Returns the surviving rows and how many filings were excluded.
+    nothing is dropped. Returns the surviving rows and how many filings were excluded. Public since
+    M16.3: the earnings-surprise leg drops the same filings before it differences EPS.
     """
     paid_up: dict[str, Decimal] = {}
     for row in rows:

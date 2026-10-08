@@ -58,6 +58,7 @@ from backtest.cash_interest import (
     cash_interest_unless,
     describe_cash_interest,
 )
+from backtest.policies.earnings_surprise import M10_7_EARNINGS_SURPRISE
 from backtest.policies.momentum_v2 import PAPER_RATIFIED_2026_09_06, MomentumV2Parameters
 from backtest.policies.naive_momentum import MomentumParameters
 from backtest.policies.residual_momentum import with_residual_momentum
@@ -107,6 +108,7 @@ __all__ = [
     "BAND_HIT_ARM",
     "D13_PAPER_BASELINE",
     "DURATION_ARMS",
+    "EARNINGS_SURPRISE_ARM",
     "H1_RESIDUAL_MOMENTUM",
     "H2_BAND_HIT_AVOIDANCE",
     "H3_RESIDUAL_AND_BAND_HIT",
@@ -314,6 +316,17 @@ REGIME_DAILY_ARMS: tuple[Arm, ...] = (
             regime_daily_band=Decimal("0.02"),
         ),
     ),
+)
+
+#: M16.3, arm A5: M10.7 with the earnings-surprise (PEAD) leg as an equal fourth leg. Kept out of
+#: ``ARMS`` for the reason D13 is: in it, it would change every campaign manifest and the round-1
+#: trial set.
+EARNINGS_SURPRISE_ARM: Final = Arm(
+    label="Swing composite + earnings surprise (A5)",
+    family="earnings surprise (M16.3)",
+    reference=_M10_7,
+    note="standalone-EPS SUE, on for 63 sessions from the filing, equal weight with the three legs",
+    swing=M10_7_EARNINGS_SURPRISE,
 )
 
 ARMS: tuple[Arm, ...] = (
@@ -1001,6 +1014,11 @@ def run_sweep(
             ),
             cap_tiers=any(arm.cap_tiers is not None for _, arm in pending),
             universe=universe_name,
+            # M16.3: the PIT fundamentals read only when a pending arm weights the leg.
+            earnings_surprise=any(
+                arm.swing is not None and arm.swing.weight_earnings_surprise != _ZERO
+                for _, arm in pending
+            ),
         )
         out.start, out.terminal, out.sessions = (
             lake.first_session,
