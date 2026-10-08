@@ -6,7 +6,7 @@ reconciliation job and the kill switch a real-money loop will run. These tests p
 acceptance contract over the frozen fixture market (``tests/paper_session_support.py``):
 
 * **Nothing about the trading changes.** A four-month paper run (two rebalances that turn the
-  basket over, a risk-off rebalance that sells it, an on-time dividend and split on held names)
+  basket over, a risk-off rebalance that sells, an on-time dividend and split on held names)
   decided one process per day through the new path equals one plain ``ReplayEngine`` walk — the
   backtest path, with no staging, recon or switch — fill for fill, cost for cost, ledger line for
   ledger line and Decimal for Decimal. The journal differs by exactly one reconciliation
