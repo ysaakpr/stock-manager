@@ -46,10 +46,12 @@ __all__ = [
     "FUNDAMENTALS_FORWARD",
     "INDEX_PRESS_REFRESH",
     "JOB_NAME",
+    "L0_BACKUP",
     "MACRO_RELEASE_CAPTURE",
     "NEWS_CAPTURE",
     "NSE_DAILY_CAPTURE",
     "PAPER_SESSION",
+    "POSTGRES_BACKUP",
     "SHAREHOLDING_POLL",
     "TRI_EVENING",
     "TRI_REFRESH",
@@ -69,11 +71,13 @@ __all__ = [
     "failure_alerts",
     "fbil_reference_rates",
     "fundamentals_forward",
+    "l0_backup",
     "lag_budgets",
     "macro_release_capture",
     "news_capture",
     "nse_daily_capture",
     "paper_session",
+    "postgres_backup",
     "shareholding_poll",
     "tri_evening",
     "tri_refresh",
@@ -935,6 +939,65 @@ FUNDAMENTALS_FORWARD = Job(
 )
 
 
+def postgres_backup(context: JobContext) -> None:
+    """The nightly Postgres backup (M15.4): one `pg_dump -Fc`, then retention.
+
+    What it does: dumps the live database to `BACKUP_ROOT/postgres/trading-<IST stamp>.dump` with a
+    sidecar of its sha256, the migration ledger and the key tables' counts, then keeps the newest
+    of each of the last 14 days and 8 ISO weeks — see `store.backup.run_postgres_backup`.
+    What it assumes: the injected settings are the run's (B10), the client image is pulled.
+    What it never does: put the DSN in an argv or a log line, or prune a file it did not write. A
+    failed dump raises, so the run is FAILED and `failure_alerts` pages it. The import is deferred
+    for the same reason the others are.
+    """
+    from dataplatform.store.backup import run_postgres_backup
+
+    run_postgres_backup(context.settings, clock=context.clock)
+
+
+#: The nightly dump. 05:30 IST every day — after the day's last writers have finished: the paper
+#: session (21:45), `nse_daily_capture` (23:00), `announcements_capture` (00:30) and the
+#: `fundamentals_forward` run, whose own deadline is 04:45; the Sunday `l0_verify` (03:00, 2h) is
+#: done too. Clear of the 19:15-21:50 evening jobs and of Saturday's 09:00-11:00 refreshes. It
+#: fetches nothing and holds no host lease; a dump is an MVCC snapshot, so a late writer still
+#: running is consistent, just not included.
+POSTGRES_BACKUP = Job(
+    name="postgres_backup",
+    cron="30 5 * * *",
+    fn=postgres_backup,
+    timeout=timedelta(minutes=30),
+    description="Nightly pg_dump of the live database + 14 daily / 8 weekly retention (M15.4)",
+)
+
+
+def l0_backup(context: JobContext) -> None:
+    """The nightly L0 protection step (M15.4): extend the lake's manifest, mirror if configured.
+
+    What it does: appends the sha256 of every L0 file the manifest has not seen (L0 is write-once,
+    so this is the day's new payloads), raises if a recorded file is gone, and — only when
+    `BACKUP_L0_MIRROR` names a target — rsyncs L0 onto it without deleting anything. See
+    `store.backup.run_l0_backup`.
+    What it assumes: the injected settings are the run's (B10); `DATA_ROOT` is the real lake.
+    What it never does: write into L0, re-hash the whole lake (the weekly `l0_verify` sweep does
+    that), or pick a mirror itself. The import is deferred for the same reason the others are.
+    """
+    from dataplatform.store.backup import run_l0_backup
+
+    run_l0_backup(context.settings)
+
+
+#: 05:45 IST every day, after the dump and before the first-Sunday `bse_ca_sweep` (06:00). A
+#: night's new L0 is megabytes; the hour budget is for the very first run, which hashes the
+#: whole lake.
+L0_BACKUP = Job(
+    name="l0_backup",
+    cron="45 5 * * *",
+    fn=l0_backup,
+    timeout=timedelta(hours=1),
+    description="Nightly L0 sha256 manifest extension + optional rsync mirror (M15.4)",
+)
+
+
 #: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
 #: audit's root cause was not one broken job but sources that were simply never scheduled — the
 #: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
@@ -1021,6 +1084,8 @@ def default_registry() -> JobRegistry:
             FAILURE_ALERTS,
             PAPER_SESSION,
             FUNDAMENTALS_FORWARD,
+            POSTGRES_BACKUP,
+            L0_BACKUP,
         ],
         declined=_declined_source_ids(),
     )
