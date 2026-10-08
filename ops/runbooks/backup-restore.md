@@ -68,9 +68,23 @@ It then compares:
   the dump and every one of these tables only grows, so restored < recorded fails; restored > recorded
   is writes that landed in between.
 
-**It refuses the live database** — exit 2, before any byte is restored — when the target's host
-(any loopback spelling), port and database name match `DATABASE_URL`. It never stops, alters or
+**It refuses the live database** — exit 2, before any byte is restored. First a cheap string check
+(the DSNs spell the same host, port and database, counting every loopback spelling and this host's
+own name as one host); then the real one, which no alias can get past: it connects to both the
+target and `DATABASE_URL` and compares `pg_control_system().system_identifier` (fixed per cluster at
+initdb) and `current_database()`. Equal is refused; a side that cannot be reached or identified is
+refused too ("could not prove it is not the live database"). A scratch database *on* the live
+cluster has the same identifier but a different name, and is allowed. It never stops, alters or
 restarts the live `trading-platform-postgres-1` container. Exit 0 pass, 1 a check failed, 2 refused.
+
+A dump is only restorable — and only counted or pruned by retention — with a valid sidecar. The
+backup writes the sidecar first (temp file + rename) and renames the dump into place last, so a crash
+leaves a `*.partial` (deleted by the next run once a day old) or a sidecar with no dump, never a
+finished-looking dump without its checksum.
+
+While a drill runs, `docker inspect trading-restore-drill-…` shows the scratch container's random
+`POSTGRES_PASSWORD` to anyone in the `docker` group. It guards only a throwaway copy that lives for
+seconds, but it is a copy of the live data: treat docker-group membership as database access.
 
 Run it monthly and after anything structural; add a line to the table at the end of this file.
 
@@ -87,6 +101,15 @@ first run hashed the whole lake. A recorded file that is no longer on disk fails
 invariant-#1 incident and repairing it is the owner's (AGENTIC_CONTEXT §3.10). Re-hashing old bytes
 is the weekly `l0_verify` sweep's job, not this one.
 
+A file is recorded only once it has been unmodified for **10 minutes**, so a payload still being
+written is deferred to the next night rather than fingerprinted half-written (`deferred` in the log).
+When a payload has its own L0 `<name>.meta.json`, the hash must equal the sidecar's `sha256`; a
+mismatch fails the job and nothing from that run is recorded.
+
+A local `BACKUP_L0_MIRROR` must exist and be on a **different filesystem** from the lake: an
+unmounted mount point is a plain directory on the root disk, and copying the lake there is no copy.
+The job refuses that (`… is on the lake's own filesystem`). A remote `host:path` is not checked.
+
 **There is no second copy of L0 today.** This host has one disk (`/dev/root`, 193 GB, the lake
 ~10 GB) and no remote target, so `BACKUP_L0_MIRROR` is unset and the job logs
 `backup.l0_mirror_unconfigured` every night. Choosing a target — a second EBS volume, an S3 bucket
@@ -98,14 +121,22 @@ losing the disk. A nightly copy of `~/backups/postgres/` to the same target clos
 
 ### Scheduler start guard
 
-`python -m dataplatform.scheduler run` (and `run-once`) refuse to start — exit 5, `scheduler.refused`
-in the log, a CRITICAL alert, the reason on stderr — while any file in
-`dataplatform/store/migrations` is not applied, or an applied one was edited. The unit has
-`RestartPreventExitStatus=5`, so systemd leaves it `failed` rather than restarting into the same
-refusal, and the heartbeat going stale turns `/health` 503 within five minutes. The fix is always:
+`python -m dataplatform.scheduler run` (and `run-once`) compare the database's migration ledger with
+`dataplatform/store/migrations` before building anything. Each case has its own alert title and
+remedy:
+
+| Case | Behaviour | Remedy |
+|---|---|---|
+| a file is not applied | exit 5, CRITICAL "migrations not applied" | `make migrate`, then restart |
+| an applied file was edited | exit 5, CRITICAL "an applied migration was edited" | restore the file to what was applied, put the change in a new numbered migration, restart (`make migrate` refuses until then) |
+| both pending files and migrations this checkout lacks | exit 5, CRITICAL "database and checkout have diverged" | deploy the checkout that applied them (normally `main`), `make migrate`, restart |
+| the database has migrations this checkout lacks, nothing pending | **starts**, WARNING "database ahead of its checkout" | `git pull` on the scheduler's checkout and restart — migrations are additive, so the older code's tables are all there meanwhile |
+| Postgres unreachable | retries for ~4.6 min (5, 10, 20, 40, 80, 120 s), then exit 1 | none: systemd restarts it; a real outage shows as the stale heartbeat |
+
+On exit 5 the unit's `RestartPreventExitStatus=5` leaves it `failed` rather than restarting into the
+same refusal, and the stale heartbeat turns `/health` 503 within five minutes. After the remedy:
 
 ```bash
-make migrate
 XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler.service
 ```
 

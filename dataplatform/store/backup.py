@@ -44,7 +44,7 @@ import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -63,12 +63,16 @@ __all__ = [
     "BackupRecord",
     "DrillReport",
     "DsnParts",
+    "Identity",
     "L0BackupResult",
     "LiveTargetError",
     "PgClient",
     "RetentionPlan",
+    "identify_database",
     "list_backups",
+    "load_sidecar",
     "parse_dsn",
+    "refuse_live_target",
     "run_l0_backup",
     "run_postgres_backup",
     "run_restore_drill",
@@ -94,12 +98,22 @@ KEY_TABLES: tuple[str, ...] = (
 _DUMP_NAME = re.compile(r"^trading-(\d{8}T\d{6})\.dump$")
 _STAMP_FORMAT = "%Y%m%dT%H%M%S"
 
-#: Hosts that all mean "this machine" when deciding whether a target is the live database.
-_LOOPBACK = frozenset({"", "localhost", "127.0.0.1", "::1"})
+#: Hosts that all mean "this machine" for the cheap first-line check. Not the defence — aliases
+#: are endless; `refuse_live_target` compares server identity as well.
+_LOOPBACK = frozenset(
+    {"", "localhost", "localhost.localdomain", "0.0.0.0", "::", "::1", "::ffff:127.0.0.1"}
+)
 
 #: Free space a dump must leave behind, beyond twice the newest dump's size. A full root disk
 #: takes Postgres (and the lake writer) down with it; a skipped backup is the cheaper failure.
 _DISK_HEADROOM_BYTES = 1 << 30
+
+#: How long an L0 file must sit unmodified before the manifest records it. L0 writes a payload
+#: and its `.meta.json` in well under a second; ten minutes is a wide margin over a slow disk.
+_SETTLE = timedelta(minutes=10)
+
+#: How old a `*.partial` must be before a backup run deletes it as a crashed run's leftover.
+_STALE_PARTIAL = timedelta(days=1)
 
 #: The scratch container's name prefix — `docker ps` shows a drill left running by a crash.
 _DRILL_CONTAINER_PREFIX = "trading-restore-drill"
@@ -184,9 +198,16 @@ def same_database(a: DsnParts, b: DsnParts) -> bool:
     other, but neither can make a live target look different.
     """
 
+    this_host = {socket.gethostname().lower(), socket.getfqdn().lower()}
+
     def host(value: str) -> str:
-        lowered = value.lower()
-        return "loopback" if lowered in _LOOPBACK or lowered.startswith("/") else lowered
+        lowered = value.lower().strip("[]")
+        local = (
+            lowered in _LOOPBACK
+            or lowered in this_host
+            or lowered.startswith(("/", "127.", "::ffff:127."))
+        )
+        return "loopback" if local else lowered
 
     return host(a.host) == host(b.host) and a.port == b.port and a.dbname == b.dbname
 
@@ -326,17 +347,62 @@ def postgres_dir(settings: Settings) -> Path:
     return settings.backup_root / "postgres"
 
 
+def load_sidecar(dump: Path) -> dict[str, Any]:
+    """The dump's sidecar, validated. Raises `BackupError` for a missing or unusable one.
+
+    A sidecar is written (temp + rename) *before* its dump is renamed into place, so a dump with no
+    valid sidecar is not one this module finished — it is never restored from, and never counted
+    or pruned by retention.
+    """
+    path = dump.with_suffix(".json")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise BackupError(f"{dump.name} has no sidecar {path.name}") from None
+    except (OSError, ValueError) as error:
+        raise BackupError(f"{path.name} is not a readable sidecar: {error}") from None
+    if not isinstance(document, dict) or not isinstance(document.get("sha256"), str):
+        raise BackupError(f"{path.name} has no sha256: not a sidecar this module wrote")
+    return document
+
+
 def list_backups(directory: Path, tzinfo: Any) -> dict[datetime, Path]:
-    """Every finished dump this module wrote under `directory`, by its stamp. Ignores the rest."""
+    """Every finished dump under `directory` — named like ours *and* with a valid sidecar.
+
+    A dump without one is logged and left alone: not restorable, not retention's to count or prune.
+    """
     found: dict[datetime, Path] = {}
     if not directory.is_dir():
         return found
     for path in directory.iterdir():
         match = _DUMP_NAME.match(path.name)
-        if match:
-            stamp = datetime.strptime(match.group(1), _STAMP_FORMAT).replace(tzinfo=tzinfo)
-            found[stamp] = path
+        if not match:
+            continue
+        try:
+            load_sidecar(path)
+        except BackupError as error:
+            log.warning("backup.sidecar_invalid", path=str(path), error=str(error))
+            continue
+        stamp = datetime.strptime(match.group(1), _STAMP_FORMAT).replace(tzinfo=tzinfo)
+        found[stamp] = path
     return found
+
+
+def _clean_stale_partials(directory: Path, *, now: datetime) -> int:
+    """Delete `trading-*.partial` files older than `_STALE_PARTIAL`; return the bytes freed.
+
+    A partial is what a run killed mid-dump leaves behind. The job's lock means none is being
+    written by another run, but a younger one is left alone in case a by-hand run is in flight.
+    """
+    freed = 0
+    cutoff = (now - _STALE_PARTIAL).timestamp()
+    for path in directory.glob("trading-*.partial"):
+        stat = path.stat()
+        if stat.st_mtime < cutoff:
+            path.unlink()
+            freed += stat.st_size
+            log.info("backup.partial_removed", path=str(path), bytes=stat.st_size)
+    return freed
 
 
 def _sha256(path: Path) -> str:
@@ -404,17 +470,20 @@ def run_postgres_backup(
     directory = postgres_dir(settings)
     directory.mkdir(parents=True, exist_ok=True)
 
+    now = clock.now()
+    # Stale partials go first, so the space they held counts as free in the guard below.
+    freed = _clean_stale_partials(directory, now=now)
     existing = list_backups(directory, settings.tzinfo)
     newest_bytes = existing[max(existing)].stat().st_size if existing else 0
     free = shutil.disk_usage(directory).free
     needed = 2 * newest_bytes + _DISK_HEADROOM_BYTES
     if free < needed:
         raise BackupError(
-            f"refusing to dump: {free} bytes free under {directory}, need {needed} "
-            "(twice the newest dump plus 1 GiB headroom)"
+            f"refusing to dump: {free} bytes free under {directory} ({freed} freed from stale "
+            f"partials), need {needed} (twice the newest dump plus 1 GiB headroom)"
         )
 
-    stamp = clock.now().astimezone(settings.tzinfo).replace(microsecond=0)
+    stamp = now.astimezone(settings.tzinfo).replace(microsecond=0)
     final = directory / f"trading-{stamp.strftime(_STAMP_FORMAT)}.dump"
     if final.exists():
         raise BackupError(f"{final.name} already exists; a backup is never overwritten")
@@ -438,24 +507,27 @@ def run_postgres_backup(
         if size == 0:
             raise BackupError("pg_dump produced an empty archive")
         digest = _sha256(partial)
+        record = BackupRecord(
+            path=final,
+            stamp=stamp,
+            bytes=size,
+            sha256=digest,
+            source=live.redacted,
+            server_version=server_version,
+            migrations=migrations,
+            counts=counts,
+            seconds=round(time.monotonic() - started, 1),
+        )
+        # The sidecar lands first, atomically, and the dump is renamed into place last: a crash
+        # anywhere leaves either a partial (cleaned later) or a sidecar with no dump (ignored),
+        # never a finished-looking dump whose sidecar is missing or torn.
+        _write_atomically(
+            final.with_suffix(".json"), json.dumps(record.sidecar(), indent=2, sort_keys=True)
+        )
     except BaseException:
         partial.unlink(missing_ok=True)
         raise
     partial.rename(final)
-    record = BackupRecord(
-        path=final,
-        stamp=stamp,
-        bytes=size,
-        sha256=digest,
-        source=live.redacted,
-        server_version=server_version,
-        migrations=migrations,
-        counts=counts,
-        seconds=round(time.monotonic() - started, 1),
-    )
-    final.with_suffix(".json").write_text(
-        json.dumps(record.sidecar(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
     log.info(
         "backup.done",
         target=live.redacted,
@@ -466,6 +538,15 @@ def run_postgres_backup(
     )
     _apply_retention(settings, directory)
     return record
+
+
+def _write_atomically(path: Path, text: str) -> None:
+    temporary = path.with_name(path.name + ".partial")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(text + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    temporary.replace(path)
 
 
 def _apply_retention(settings: Settings, directory: Path) -> RetentionPlan:
@@ -493,6 +574,8 @@ class L0BackupResult:
     files: int
     hashed: int
     mirrored_to: str | None
+    #: New files too young to record this run (`_SETTLE`); the next run picks them up.
+    deferred: int = 0
 
 
 def _read_manifest(path: Path) -> dict[str, str]:
@@ -514,8 +597,36 @@ def _lake_files(data_root: Path) -> Iterator[str]:
             yield path.relative_to(data_root).as_posix()
 
 
+def _sidecar_sha256(payload: Path) -> str | None:
+    """The sha256 L0's own `<payload>.meta.json` records, or `None` when there is no sidecar."""
+    meta = payload.with_name(payload.name + ".meta.json")
+    if payload.name.endswith(".meta.json") or not meta.exists():
+        return None
+    try:
+        recorded = json.loads(meta.read_text(encoding="utf-8")).get("sha256")
+    except (OSError, ValueError, AttributeError) as error:
+        raise BackupError(f"unreadable L0 sidecar {meta}: {error}") from None
+    return recorded if isinstance(recorded, str) else None
+
+
+def _device(path: Path) -> int:
+    try:
+        return path.stat().st_dev
+    except FileNotFoundError:
+        raise BackupError(f"L0 mirror target {path} does not exist (not mounted?)") from None
+
+
+def _is_remote(target: str) -> bool:
+    """rsync's remote forms: `host:path`, `user@host:path`, `rsync://…`."""
+    head = target.split("/", 1)[0]
+    return target.startswith("rsync://") or ":" in head
+
+
 def run_l0_backup(
-    settings: Settings | None = None, *, runner: Runner = subprocess.run
+    settings: Settings | None = None,
+    *,
+    clock: Clock | None = None,
+    runner: Runner = subprocess.run,
 ) -> L0BackupResult:
     """Extend the L0 manifest with every new file, then mirror L0 if a target is configured.
 
@@ -525,11 +636,15 @@ def run_l0_backup(
     read. A recorded file that is no longer on disk raises: that is an incident, not drift. Then,
     when `BACKUP_L0_MIRROR` is set, `rsync -a --ignore-existing DATA_ROOT/L0/ <mirror>/L0/`.
     What it assumes: `rsync` is on PATH when a mirror is configured.
-    What it never does: delete or rewrite anything in L0 or on the mirror (`--ignore-existing`,
-    never `--delete`), or invent a mirror target when none is configured — that stays an owner
-    decision, and the job says so in its log.
+    What it never does: record a file modified in the last `_SETTLE` (10 minutes) — it may still be
+    being written; the next run takes it — or a payload whose bytes disagree with the sha256 its
+    own L0 `.meta.json` recorded (that raises). Never deletes or rewrites anything in L0 or on the
+    mirror (`--ignore-existing`, never `--delete`); never copies to a local mirror path on the
+    lake's own filesystem (an unmounted mount point would silently fill the root disk); never
+    invents a mirror target — that stays an owner decision, and the job says so in its log.
     """
     settings = get_settings() if settings is None else settings
+    clock = SystemClock(settings.tzinfo) if clock is None else clock
     data_root = settings.data_root
     directory = settings.backup_root / "l0"
     directory.mkdir(parents=True, exist_ok=True)
@@ -547,18 +662,39 @@ def run_l0_backup(
             "(AGENTIC_CONTEXT §3.10)"
         )
 
-    new = sorted(present - set(recorded))
+    settled_before = (clock.now() - _SETTLE).timestamp()
+    unseen = sorted(present - set(recorded))
+    new = [name for name in unseen if (data_root / name).stat().st_mtime < settled_before]
+    deferred = len(unseen) - len(new)
     if new:
         partial = manifest.with_name(manifest.name + ".partial")
         if manifest.exists():
             shutil.copyfile(manifest, partial)
-        with partial.open("a", encoding="utf-8") as handle:
-            for name in new:
-                handle.write(f"{_sha256(data_root / name)}  {name}\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        try:
+            with partial.open("a", encoding="utf-8") as handle:
+                for name in new:
+                    digest = _sha256(data_root / name)
+                    expected = _sidecar_sha256(data_root / name)
+                    if expected is not None and expected != digest:
+                        raise BackupError(
+                            f"{name} hashes to {digest[:12]}… but its L0 sidecar records "
+                            f"{expected[:12]}…: not recorded; L0 integrity is the owner's call "
+                            "(AGENTIC_CONTEXT §3.10)"
+                        )
+                    handle.write(f"{digest}  {name}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except BaseException:
+            partial.unlink(missing_ok=True)
+            raise
         partial.replace(manifest)
-    log.info("backup.l0_manifest", files=len(present), hashed=len(new), manifest=str(manifest))
+    log.info(
+        "backup.l0_manifest",
+        files=len(present),
+        hashed=len(new),
+        deferred=deferred,
+        manifest=str(manifest),
+    )
 
     mirror = settings.backup_l0_mirror
     if not mirror:
@@ -566,7 +702,13 @@ def run_l0_backup(
             "backup.l0_mirror_unconfigured",
             reason="BACKUP_L0_MIRROR is unset: L0 has a manifest but no second copy",
         )
-        return L0BackupResult(manifest, len(present), len(new), None)
+        return L0BackupResult(manifest, len(present), len(new), None, deferred)
+
+    if not _is_remote(mirror) and _device(Path(mirror)) == _device(data_root / "L0"):
+        raise BackupError(
+            f"L0 mirror target {mirror} is on the lake's own filesystem — an unmounted mount "
+            "point? Refusing to copy the lake onto the disk it is meant to survive."
+        )
 
     argv = ["rsync", "-a", "--ignore-existing", f"{data_root / 'L0'}/", f"{mirror.rstrip('/')}/L0/"]
     result = runner(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
@@ -574,7 +716,7 @@ def run_l0_backup(
         detail = (result.stderr or b"").decode("utf-8", "replace").strip()[-2000:]
         raise BackupError(f"rsync of L0 to the mirror exited {result.returncode}: {detail}")
     log.info("backup.l0_mirrored", files=len(present))
-    return L0BackupResult(manifest, len(present), len(new), mirror)
+    return L0BackupResult(manifest, len(present), len(new), mirror, deferred)
 
 
 # ── the restore drill ─────────────────────────────────────────────────────────────────────────
@@ -701,7 +843,12 @@ def ephemeral_postgres(image: str, *, keep: bool = False) -> Iterator[DsnParts]:
     started = subprocess.run(argv, env=env, capture_output=True, check=False)
     if started.returncode != 0:
         detail = _redact(started.stderr.decode("utf-8", "replace"), password)
-        raise BackupError(f"could not start the scratch container: {detail.strip()}")
+        # `docker run -d` can fail after creating the container (a port clash, a start error);
+        # remove it by name either way — `rm -f` of a container that never existed succeeds.
+        try:
+            _remove_container(name)
+        finally:
+            raise BackupError(f"could not start the scratch container: {detail.strip()}")
     log.info("drill.container_started", container=name, port=port)
     try:
         target = DsnParts(
@@ -717,8 +864,21 @@ def ephemeral_postgres(image: str, *, keep: bool = False) -> Iterator[DsnParts]:
         if keep:
             log.info("drill.container_kept", container=name, port=port)
         else:
-            subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
-            log.info("drill.container_removed", container=name)
+            _remove_container(name)
+
+
+def _remove_container(name: str) -> None:
+    """`docker rm -f` the scratch container, failing loud: a drill container left running holds
+    a port and a restored copy of the live data, and must not be reported as removed."""
+    removed = subprocess.run(["docker", "rm", "-f", name], capture_output=True, check=False)
+    if removed.returncode != 0:
+        detail = removed.stderr.decode("utf-8", "replace").strip()
+        log.error("drill.container_remove_failed", container=name, error=detail)
+        raise BackupError(
+            f"could not remove scratch container {name} (exit {removed.returncode}): {detail}; "
+            f"remove it by hand: docker rm -f {name}"
+        )
+    log.info("drill.container_removed", container=name)
 
 
 def run_restore_drill(
@@ -729,6 +889,7 @@ def run_restore_drill(
     client: PgClient | None = None,
     keep: bool = False,
     runner: Runner = subprocess.run,
+    identify: Identifier | None = None,
 ) -> DrillReport:
     """Restore a dump into a throwaway database and check it. Never the live database.
 
@@ -738,7 +899,8 @@ def run_restore_drill(
     for this drill — and compares the migration ledger and key-table counts with the sidecar.
     What it assumes: the target database exists and is empty.
     What it never does: restore into the live database — `LiveTargetError` before any byte is
-    written when the target is the same server, port and database as `Settings.database_url`.
+    written when the target *is* the live database by `refuse_live_target`'s identity check, or
+    cannot be told apart from it.
     """
     settings = get_settings() if settings is None else settings
     client = PgClient(settings.backup_pg_client_image) if client is None else client
@@ -749,32 +911,78 @@ def run_restore_drill(
         if not backups:
             raise BackupError(f"no dumps under {postgres_dir(settings)}; run a backup first")
         dump = backups[max(backups)]
-    sidecar_path = dump.with_suffix(".json")
-    if not sidecar_path.exists():
-        raise BackupError(f"{dump.name} has no sidecar {sidecar_path.name}; cannot verify it")
-    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar = load_sidecar(dump)
     if _sha256(dump) != sidecar["sha256"]:
         raise BackupError(f"{dump.name} does not match its recorded sha256: corrupt, not restoring")
 
     if target is None and settings.restore_drill_database_url is not None:
         target = parse_dsn(settings.restore_drill_database_url)
     live = parse_dsn(settings.database_url)
+    identify = identify_database if identify is None else identify
     if target is not None:
-        _refuse_live(target, live)
+        refuse_live_target(target, live, identify=identify)
         return _drill_into(dump, sidecar, target, client, runner, started)
 
     image = client.image or "postgres:16"
     with ephemeral_postgres(image, keep=keep) as scratch:
-        _refuse_live(scratch, live)
+        refuse_live_target(scratch, live, identify=identify)
         return _drill_into(dump, sidecar, scratch, client, runner, started)
 
 
-def _refuse_live(target: DsnParts, live: DsnParts) -> None:
+#: (cluster system identifier, database name): what makes two connections the same database,
+#: however their DSNs spell the host.
+Identity = tuple[str, str]
+Identifier = Callable[[DsnParts], Identity]
+
+
+def identify_database(parts: DsnParts) -> Identity:
+    """Ask the server which cluster and database a DSN actually reaches.
+
+    `pg_control_system().system_identifier` is fixed at initdb and differs between clusters, so it
+    tells the live server from a scratch container whatever the host is called; with
+    `current_database()` it tells two databases on one cluster apart. Needs a superuser or
+    `pg_monitor`; a role without it cannot be identified, and is refused.
+    """
+    with psycopg.connect(parts.conninfo(), connect_timeout=10, autocommit=True) as conn:
+        row = conn.execute(
+            "SELECT system_identifier::text, current_database() FROM pg_control_system()"
+        ).fetchone()
+    if row is None:
+        raise BackupError(f"{parts.redacted} returned no system identifier")
+    return str(row[0]), str(row[1])
+
+
+def refuse_live_target(
+    target: DsnParts, live: DsnParts, *, identify: Identifier = identify_database
+) -> None:
+    """Raise `LiveTargetError` unless `target` is provably not the live database.
+
+    First the cheap check — the DSNs spell the same host, port and database. Then the one that
+    cannot be fooled by an alias (`127.0.0.2`, `0.0.0.0`, the host's own name, a mapped IPv6
+    address): connect to both and compare cluster identifier and database name. Either side
+    that cannot be reached or identified is a refusal too — "could not tell" is never "different".
+    """
+    refusal = (
+        f"refusing to restore into {target.redacted}: that is the live database. "
+        "The drill only restores into a throwaway one."
+    )
     if same_database(target, live):
-        raise LiveTargetError(
-            f"refusing to restore into {target.redacted}: that is the live database. "
-            "The drill only restores into a throwaway one."
+        raise LiveTargetError(refusal)
+    try:
+        theirs, ours = identify(target), identify(live)
+    except Exception as error:
+        detail = _redact(
+            str(error),
+            target.password.get_secret_value(),
+            live.password.get_secret_value(),
         )
+        raise LiveTargetError(
+            f"refusing to restore into {target.redacted}: could not prove it is not the live "
+            f"database ({type(error).__name__}: {detail.strip()})"
+        ) from None
+    if theirs == ours:
+        raise LiveTargetError(refusal)
+    log.info("drill.target_identified", target=target.redacted, distinct_from_live=True)
 
 
 def _drill_into(
@@ -865,7 +1073,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "l0":
             result = run_l0_backup()
             mirror = result.mirrored_to or "none configured (BACKUP_L0_MIRROR unset)"
-            print(f"L0 manifest {result.manifest}: {result.files} files, {result.hashed} new")
+            print(
+                f"L0 manifest {result.manifest}: {result.files} files, {result.hashed} new, "
+                f"{result.deferred} deferred (modified < 10 min ago)"
+            )
             print(f"L0 mirror   {mirror}")
             return 0
         report = run_restore_drill(dump=args.dump, keep=args.keep)

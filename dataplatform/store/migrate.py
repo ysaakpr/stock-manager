@@ -186,7 +186,8 @@ def schema_status(
 
     What it does: reads `schema_migrations` read-only. A database with no ledger at all has
     applied nothing, so every file is pending.
-    What it assumes: the database is reachable; an unreachable one raises `psycopg.OperationalError`.
+    What it assumes: the database is reachable; an unreachable one raises
+    `psycopg.OperationalError`.
     What it never does: write — no bootstrap, no advisory lock, no DDL. This is what the scheduler
     asks before it starts (M15.4), and a status check that could migrate as a side effect would
     hide exactly the drift it exists to catch. An applied file whose content changed raises

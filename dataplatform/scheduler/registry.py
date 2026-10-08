@@ -983,7 +983,7 @@ def l0_backup(context: JobContext) -> None:
     """
     from dataplatform.store.backup import run_l0_backup
 
-    run_l0_backup(context.settings)
+    run_l0_backup(context.settings, clock=context.clock)
 
 
 #: 05:45 IST every day, after the dump and before the first-Sunday `bse_ca_sweep` (06:00). A
