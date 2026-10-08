@@ -6,8 +6,8 @@ no nginx, no sidecars.
 
 | Service | Image | Holds / runs | Ports (host → container) |
 |---|---|---|---|
-| `postgres` | `postgres:16` | masters, sync state, cases, policies, append-only journal | `5433 → 5432` |
-| `app` | built from `ops/Dockerfile` | the D5 status API (`uvicorn dataplatform.status.api:app`) | `8000 → 8000` |
+| `postgres` | `postgres:16` | masters, sync state, cases, policies, append-only journal | `127.0.0.1:5433 → 5432` |
+| `app` | built from `ops/Dockerfile` | the D5 status API (`uvicorn dataplatform.status.api:app`) | `127.0.0.1:8000 → 8000` |
 
 ## Running it
 
@@ -51,6 +51,21 @@ DATABASE_URL=postgresql://trading:trading@localhost:5433/trading
 own Postgres; on this one it silently resolves to the wrong server. Set
 `POSTGRES_HOST_PORT=5432` (in `ops/.env` or the environment) to get the conventional mapping
 back once the host Postgres is gone.
+
+## Both ports are loopback-only
+
+Since M15.6 compose publishes `127.0.0.1:5433` and `127.0.0.1:8000` and nothing on `0.0.0.0` or
+`[::]`. Everything that uses them runs on this host, so nothing changes for the scheduler,
+`make migrate`, `tests/integration` or a `curl` from a shell here. From another machine, tunnel:
+
+```bash
+ssh -N -L 8000:127.0.0.1:8000 -L 5433:127.0.0.1:5433 <you>@<this-host>
+curl -s 127.0.0.1:8000/status/sync     # on your machine, through the tunnel
+```
+
+The bind address is deliberately not a variable, and `tests/unit/test_compose_ports.py` fails on
+any publish that is not a loopback literal. Why, and the one-time recreate this needed:
+[runbooks/loopback-only-ports.md](runbooks/loopback-only-ports.md).
 
 ## Configuration
 
@@ -109,7 +124,7 @@ heartbeat. The compose stack does not change when that lands.
 
 ```bash
 docker compose -f ops/docker-compose.yml ps                      # postgres healthy, app healthy
-curl -s localhost:8000/health                                    # {"status":"ok"}
+curl -s 127.0.0.1:8000/health                                    # {"status":"ok"}
 docker compose -f ops/docker-compose.yml exec -T app \
   python -c "import os,psycopg; print(psycopg.connect(os.environ['DATABASE_URL']).info.dsn)"
 ```

@@ -9,6 +9,15 @@
 #   POSTGRES_USER/PASSWORD/DB   trading/trading/trading
 #   POSTGRES_HOST_PORT          5433 — host-side publish only; see the note on the mapping
 #   APP_HOST_PORT               8000
+#
+# Both ports are published on 127.0.0.1 only, and that is not a variable (M15.6). Docker's
+# default publish is 0.0.0.0 and [::], which put a Postgres with the dev-default credentials and
+# the unauthenticated status API on every interface; whether that reached the internet then
+# depended on a cloud security group nobody on the box can see, because docker's own iptables
+# rules sit ahead of the host's INPUT chain. Nothing that needs these ports is off the host —
+# the scheduler, make migrate and tests/integration all connect from the host itself — so reach
+# them remotely through an ssh tunnel (ops/README.md). tests/unit/test_compose_ports.py fails
+# on any publish that is not loopback.
 #   DATA_ROOT                   ../data — host path of the lake; inside the app it is /data
 
 name: trading-platform
@@ -26,8 +35,8 @@ services:
       # 127.0.0.1:5432: docker happily publishes over it on 0.0.0.0, but a host-side client
       # connecting to localhost:5432 then reaches the *other* server (it fails with
       # `role "trading" does not exist`). Host tooling — make migrate, integration tests —
-      # must use 5433. See ops/README.md.
-      - "${POSTGRES_HOST_PORT:-5433}:5432"
+      # must use 5433. See ops/README.md. Loopback only: see the header.
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       # Named volume, not a bind mount: Postgres is rebuildable from L0 + migrations, and its
       # data directory is the one thing that must never be edited by hand from the host.
@@ -65,7 +74,8 @@ services:
       - path: ../.env
         required: false
     ports:
-      - "${APP_HOST_PORT:-8000}:8000"
+      # Loopback only, like postgres: the status API has no authentication.
+      - "127.0.0.1:${APP_HOST_PORT:-8000}:8000"
     volumes:
       - ${DATA_ROOT:-../data}:/data
     healthcheck:
