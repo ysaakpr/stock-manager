@@ -18,11 +18,13 @@ map over the fixture names, so A8 really clears every order.
 
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from analyst.cases import RiskRails
 from backtest.book_actions import BookAction, BookActionCalendar, BookActionSource
@@ -37,6 +39,7 @@ from backtest.rails import BacktestRailPolicy, SectorMap
 from backtest.run import RegimeSourceError
 from dataplatform.query.pit import Dataset
 from execution.broker import Exchange
+from execution.kill_switch import KillSwitch
 from execution.sim_broker import NoReferenceBarError, ReferenceBar, SessionMarket
 
 #: Ten NSE names, ISIN-shaped, each with a fixed base price and volatility.
@@ -77,9 +80,13 @@ def _price(isin: str, session: date) -> Decimal:
 
 
 def _momentum(isin: str, session: date) -> Decimal:
-    """September ranks the low-index names first; from October the ranking reverses."""
+    """September ranks the low-index names first; October reverses it; and so on, month by month.
+
+    Odd months (September, November) rank the low-index names first, even months the reverse, so a
+    world run past October (``FixtureWorld.last``) turns the basket over at every rebalance.
+    """
     index = ISINS.index(isin)
-    rank_key = index if session < OCT_FIRST else len(ISINS) - 1 - index
+    rank_key = index if session.month % 2 else len(ISINS) - 1 - index
     return Decimal("0.60") - Decimal(rank_key) * Decimal("0.05")
 
 
@@ -98,12 +105,14 @@ class FixtureWorld:
     #: The corporate actions the store knows *now* — a test appends one to model it arriving late.
     actions: list[BookAction] = field(default_factory=list)
     reads: list[tuple[str, date]] = field(default_factory=list)
+    #: The last session of the fixture calendar; a multi-month test runs it past October.
+    last: date = LAST
 
     def is_session(self, day: date) -> bool:
-        return day in set(calendar_sessions())
+        return day in set(calendar_sessions(end=self.last))
 
     def sessions(self, start: date, end: date) -> Sequence[date]:
-        return [day for day in calendar_sessions() if start <= day <= end]
+        return [day for day in calendar_sessions(end=self.last) if start <= day <= end]
 
     def prices_ready(self, day: date) -> bool:
         return day not in self.unpriced
@@ -136,7 +145,7 @@ class _FixtureMarket:
         self._world = world
 
     def next_session(self, after: date) -> date:
-        for session in calendar_sessions():
+        for session in calendar_sessions(end=self._world.last + timedelta(days=7)):
             if session > after:
                 return session
         raise NoReferenceBarError(f"no session after {after.isoformat()}")
@@ -164,7 +173,7 @@ class _FixtureMomentum:
     def is_rebalance(self, session: date) -> bool:
         if self._world.rebalance_on is not None:
             return session in self._world.rebalance_on
-        earlier = [day for day in calendar_sessions() if day < session]
+        earlier = [day for day in calendar_sessions(end=self._world.last) if day < session]
         return not earlier or (earlier[-1].year, earlier[-1].month) != (session.year, session.month)
 
     def signal(self, as_of: date) -> Dataset[MomentumV2Record]:
@@ -221,6 +230,14 @@ def fixture_rail_policy() -> BacktestRailPolicy:
         sectors=SectorMap(source="fixture", sha256="fixture", by_isin=dict(SECTORS)),
         provenance="test-only: the ratified rail numbers over the paper-session fixture names",
     )
+
+
+def fresh_kill_switch(*, at: datetime | None = None) -> KillSwitch:
+    """An armed kill switch in a fresh temporary directory — one per paper book under test."""
+    from dataplatform.clock import IST, FrozenClock
+
+    clock = FrozenClock(at or datetime(2026, 10, 1, 20, 30, tzinfo=IST))
+    return KillSwitch(Path(tempfile.mkdtemp(prefix="paper-ks-")) / "kill_switch.json", clock=clock)
 
 
 def fixture_spec(parameters: MomentumV2Parameters = PAPER_RATIFIED_2026_09_06) -> PaperBookSpec:

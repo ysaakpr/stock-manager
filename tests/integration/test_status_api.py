@@ -25,6 +25,7 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Protocol
 
 import psycopg
@@ -41,6 +42,7 @@ from dataplatform.status.models import (
     GapsOut,
     HealthOut,
     JobsOut,
+    PaperOut,
     QualityOut,
     SchedulerState,
     ServiceStatus,
@@ -50,6 +52,7 @@ from dataplatform.status.models import (
 from dataplatform.status.sync_state import SyncState
 from dataplatform.store.db import Connection, connect, connection, with_dbname
 from dataplatform.store.migrate import migrate
+from execution.kill_switch import KillSwitch, TripSource, kill_switch_path
 
 pytestmark = pytest.mark.integration
 
@@ -757,3 +760,76 @@ def test_a_status_endpoint_answers_503_when_the_database_is_gone(
 
     assert response.status_code == 503
     assert "database unreachable" in response.json()["detail"]
+
+
+# ── /status/paper (M15.3) ────────────────────────────────────────────────────────────────────
+
+
+def test_status_paper_is_200_and_empty_with_no_paper_book(
+    scratch_settings: Settings, make_client: ClientFactory, tmp_path: Path
+) -> None:
+    with make_client(scratch_settings.model_copy(update={"data_root": tmp_path})) as live:
+        response = live.get("/status/paper")
+    assert response.status_code == 200
+    body = PaperOut.model_validate(response.json())
+    assert body.books == [] and body.healthy
+
+
+def test_status_paper_shows_a_recon_break_and_the_tripped_switch_until_resolved(
+    scratch_settings: Settings, make_client: ClientFactory, conn: Connection, tmp_path: Path
+) -> None:
+    book = "paper_status_book"
+    seed_paper = (
+        "INSERT INTO paper_session (book_id, trading_date, outcome, reason, rebalanced, "
+        "journal_digest, book_state, book_digest, recon, recorded_at) "
+        "VALUES (%s, %s, %s, %s, false, 'j', '{}'::jsonb, 'd', %s, %s)"
+    )
+    conn.execute(
+        seed_paper,
+        (book, date(2026, 8, 6), "COMPLETED", "decided", Json({"status": "CLEAN"}), NOW),
+    )
+    recon = {"status": "BREAK", "key": "RECON:2026-08-07", "terms": "0123456789abcdef"}
+    conn.execute(
+        seed_paper,
+        (book, SESSION, "RECON_BREAK", "reconciliation break: CASH", Json(recon), NOW),
+    )
+    switch = KillSwitch(kill_switch_path(tmp_path, book), clock=FrozenClock(NOW))
+    switch.trip(reason="1 reconciliation break(s) on 2026-08-07", source=TripSource.RECON)
+    settings = scratch_settings.model_copy(update={"data_root": tmp_path})
+
+    with make_client(settings) as live:
+        body = PaperOut.model_validate(live.get("/status/paper").json())
+    (status,) = body.books
+    assert not body.healthy and not status.healthy
+    assert status.book_id == book
+    assert (status.latest_date, status.latest_outcome, status.latest_recon) == (
+        SESSION,
+        "RECON_BREAK",
+        "BREAK",
+    )
+    assert status.unresolved == ["RECON:2026-08-07@0123456789abcdef"]
+    assert status.kill_switch.tripped is True and status.kill_switch.source == "RECON"
+
+    # The runbook's two steps: reset the switch, record the resolution. Healthy only after both.
+    switch.reset(note="owner: broker side accepted")
+    conn.execute(
+        "INSERT INTO paper_session_resolution (book_id, action_key, terms, resolved_by, note, "
+        "resolved_at) VALUES (%s, %s, %s, 'owner', 'broker side accepted', %s)",
+        (book, recon["key"], recon["terms"], NOW),
+    )
+    with make_client(settings) as live:
+        (after,) = PaperOut.model_validate(live.get("/status/paper").json()).books
+    assert after.unresolved == [] and after.kill_switch.tripped is False
+    assert not after.healthy, "the latest session is still the break until a session decides"
+
+
+def test_status_paper_never_reports_an_unreadable_switch_as_armed(
+    scratch_settings: Settings, make_client: ClientFactory, tmp_path: Path
+) -> None:
+    path = kill_switch_path(tmp_path, "paper_status_book")
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json")
+    with make_client(scratch_settings.model_copy(update={"data_root": tmp_path})) as live:
+        (status,) = PaperOut.model_validate(live.get("/status/paper").json()).books
+    assert status.kill_switch.tripped is None and status.kill_switch.error
+    assert not status.healthy

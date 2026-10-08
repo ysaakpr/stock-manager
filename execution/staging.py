@@ -53,6 +53,7 @@ _LOG = structlog.get_logger(__name__)
 
 __all__ = [
     "BookPosition",
+    "FillLedger",
     "InMemoryOrderJournal",
     "InternalBook",
     "OrderJournal",
@@ -200,6 +201,18 @@ class InternalBook:
         else:
             self._holdings[isin] = quantity
             self._exchange[isin] = exchange
+
+
+class FillLedger(Protocol):
+    """What the coordinator posts each completed fill into — the expectation side of recon.
+
+    `InternalBook` is the plain implementation. A caller whose book must also absorb what is not a
+    fill (the paper session's accounting book takes corporate actions as well, M15.3) injects its
+    own; the coordinator only ever calls `apply`, so it cannot tell the two apart.
+    """
+
+    def apply(self, fill: Fill) -> None:
+        """Post one completed fill."""
 
 
 # ── the order-journal seam ─────────────────────────────────────────────────────────────────────
@@ -409,8 +422,9 @@ class StagingCoordinator:
 
     Wires the four collaborators of the order lifecycle: the `Broker` (invariant #5 — a protocol,
     never a concrete broker), the `KillSwitch` (consulted before every placement), the
-    `OrderJournal` (staged orders written down before they can execute), and the `InternalBook`
-    (the platform's tally, which `recon.py` checks against the broker). Time is an injected `Clock`.
+    `OrderJournal` (staged orders written down before they can execute), and the book of record
+    (`InternalBook` or any `FillLedger` — the platform's tally, which `recon.py` checks against the
+    broker). Time is an injected `Clock`.
 
     The flow is exactly the M5.12 spec's: `stage` places one order (STAGED) and journals it;
     `execute(session)` fills the session's staged orders and posts each fill to the journal and the
@@ -421,7 +435,7 @@ class StagingCoordinator:
     broker: SimBroker
     kill_switch: KillSwitch
     journal: OrderJournal
-    book: InternalBook
+    book: FillLedger
     clock: Clock = field(default_factory=SystemClock)
     _seq: int = field(default=0, init=False)
 

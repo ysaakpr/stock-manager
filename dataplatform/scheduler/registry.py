@@ -853,11 +853,13 @@ def paper_session(context: JobContext) -> None:
     """The daily paper-trading session (M13.1): one session of the D13-ratified momentum v2 book.
 
     What it does: decides today's session of the paper book through the same replay-engine →
-    rails → `SimBroker` path its backtests ran on, journals every decision including the no-ops,
-    and records the session in `paper_session` — or, when the data is red, journals
-    `SKIPPED_DATA_RED` and places nothing. Idempotent per trading date; a holiday is a no-op.
+    rails → `SimBroker` path its backtests ran on — its orders staged, filled and reconciled
+    through the live path's `execution` staging coordinator, reconciler and kill switch (M15.3) —
+    journals every decision including the no-ops, and records the session in `paper_session` — or,
+    when the data is red or the switch tripped, journals `SKIPPED_DATA_RED` and places nothing.
+    Idempotent per trading date; a holiday is a no-op.
     What it assumes: the injected clock and settings are the run's (B10), the database is migrated
-    through 0012, and the owed session's EOD pipeline has run — the interlock checks it published.
+    through 0015, and the owed session's EOD pipeline has run — the interlock checks it published.
     Off unless `Settings.paper_session_enabled`: the ratified regime filter has no same-evening
     source for the session's published NIFTY 50 TRI yet (ops/runbooks/daily-eod.md).
     What it never does: touch a real broker — the session builds a `SimBroker` and nothing else,

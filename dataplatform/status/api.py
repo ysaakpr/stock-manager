@@ -55,6 +55,7 @@ from dataplatform.status.models import (
     HealthOut,
     JobHealthOut,
     JobsOut,
+    PaperOut,
     QualityOut,
     QuarantineOut,
     SchedulerHealthOut,
@@ -64,7 +65,12 @@ from dataplatform.status.models import (
     SourceStatusOut,
     SyncStatusOut,
 )
-from dataplatform.status.queries import read_archives, read_quality, read_quarantine_status
+from dataplatform.status.queries import (
+    read_archives,
+    read_paper_status,
+    read_quality,
+    read_quarantine_status,
+)
 from dataplatform.status.sync_state import MalformedSyncSourceError, SyncStateStore
 from dataplatform.store.db import Connection, connection
 from dataplatform.store.paths import PathLayoutError
@@ -412,6 +418,20 @@ def status_quality(
         as_of=clock.now(),
         limit=settings.status_quality_flag_limit if limit is None else limit,
     )
+
+
+@app.get("/status/paper", summary="Each paper book: latest session, kill switch, what blocks it")
+def status_paper(conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> PaperOut:
+    """The paper session's own red (M15.3): a tripped kill switch, a reconciliation break, an
+    unresolved escalation.
+
+    A session the switch or a break refused is journaled and recorded red in `paper_session`, but
+    nothing about it reaches `/status/jobs` — the job ran fine. This is where it shows: per book,
+    the latest session's outcome and reconciliation, the switch's state file (under
+    `Settings.data_root`), and every escalation or break with no resolution row.
+    What it never does: report an unreadable switch file as armed.
+    """
+    return read_paper_status(conn, data_root=settings.data_root, as_of=clock.now())
 
 
 # ── /archives ───────────────────────────────────────────────────────────────────────────────

@@ -29,6 +29,7 @@ from decimal import Decimal
 from analyst.journal.evidence import canonical_bytes, digest_of
 from analyst.journal.models import Decision, JournalEntry, Sleeve
 from backtest.paper_session import (
+    RECON_EVENT,
     InMemoryPaperSessionStore,
     PaperSessionResult,
     RecordingJournal,
@@ -48,7 +49,13 @@ from dataplatform.query.pit import Dataset, PitContext
 from execution.broker import Exchange
 from execution.costs import CostModel, load_rate_card
 from execution.sim_broker import NoReferenceBarError, ReferenceBar, SimBroker
-from tests.paper_session_support import OCT_FIRST, OCT_SECOND, FixtureWorld, fixture_spec
+from tests.paper_session_support import (
+    OCT_FIRST,
+    OCT_SECOND,
+    FixtureWorld,
+    fixture_spec,
+    fresh_kill_switch,
+)
 from tests.rails_support import mechanics_gate
 
 ISINS = ("INE001A01036", "INE002A01018", "INE003A01016", "INE004A01014")
@@ -279,6 +286,7 @@ def _run(
         journal=journal,
         gate=lambda _day: _Green(),
         clock=FrozenClock(RUN_AT),
+        kill_switch=fresh_kill_switch(),
     )
 
 
@@ -292,7 +300,9 @@ def test_a_risk_off_paper_rebalance_names_it_on_the_row_and_in_the_journal() -> 
     assert first.record is not None and first.record.rebalanced
     assert first.record.reason == "rebalance_risk_off"
     assert first.record.orders == ()
-    (entry,) = first.entries
+    # The HOLD, then the session's reconciliation (M15.3) — nothing else.
+    entry, recon = first.entries
+    assert recon.payload["event"] == RECON_EVENT
     assert entry.decision is Decision.HOLD
     assert entry.payload["risk_on"] == "false" and entry.payload["mode"] == "PAPER"
     assert entry.payload["index_level"] == "90" and entry.payload["moving_average"] == "100"
@@ -309,7 +319,7 @@ def test_a_row_recorded_before_m14_4_still_restores_and_the_next_session_decides
     fresh = InMemoryPaperSessionStore()
     first = _run(OCT_FIRST, fresh, RecordingJournal(), world)
     assert first.record is not None
-    (hold,) = first.entries
+    hold, _recon = first.entries
     heartbeat = hold.model_copy(
         update={
             "decision": Decision.HEARTBEAT,
@@ -322,6 +332,9 @@ def test_a_row_recorded_before_m14_4_still_restores_and_the_next_session_decides
         first.record,
         reason="rebalance",
         journal_digest=digest_of(canonical_bytes([heartbeat.model_dump(mode="json")])),
+        # ... and, written before M15.3, no reconciliation and no accounting book.
+        recon=None,
+        expected_book=None,
     )
     assert legacy.journal_digest != first.record.journal_digest
     store = InMemoryPaperSessionStore()
@@ -332,4 +345,8 @@ def test_a_row_recorded_before_m14_4_still_restores_and_the_next_session_decides
     assert second.verdict is RunVerdict.DECIDED
     assert second.record is not None and not second.record.rebalanced
     assert second.record.reason == "decided"
-    assert [e.decision for e in second.entries] == [Decision.HEARTBEAT]
+    assert [e.decision for e in second.entries] == [Decision.HEARTBEAT, Decision.HEARTBEAT]
+    # The pre-M15.3 row persisted no accounting book: seeded once from the broker, and says so.
+    assert second.record.recon is not None and second.record.recon.seeded
+    assert second.entries[-1].payload["seeded"] == "true"
+    assert second.record.expected_book is not None

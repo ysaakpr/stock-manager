@@ -31,6 +31,9 @@ from dataplatform.status.models import (
     ArchiveFileOut,
     ArchivesOut,
     CheckCountOut,
+    KillSwitchOut,
+    PaperBookStatusOut,
+    PaperOut,
     QualityFlagOut,
     QualityOut,
     QuarantineCountOut,
@@ -40,7 +43,7 @@ from dataplatform.status.models import (
 )
 from dataplatform.store.db import Connection
 
-__all__ = ["StatusQueryError", "read_archives", "read_quality"]
+__all__ = ["StatusQueryError", "read_archives", "read_paper_status", "read_quality"]
 
 
 class StatusQueryError(RuntimeError):
@@ -232,3 +235,82 @@ def read_quarantine_status(
         ],
         limit=limit,
     )
+
+
+# ── /status/paper ───────────────────────────────────────────────────────────────────────────
+
+_PAPER_LATEST_SQL = """
+SELECT DISTINCT ON (book_id) book_id, trading_date, outcome, reason, recon->>'status'
+FROM paper_session ORDER BY book_id, trading_date DESC
+"""
+
+#: Every escalated corporate action and every reconciliation break with no resolution row — the
+#: same (key, terms) the paper session itself refuses to trade past.
+_PAPER_UNRESOLVED_SQL = """
+WITH raised AS (
+    SELECT p.book_id, a->>'key' AS key, a->>'terms' AS terms
+    FROM paper_session p, jsonb_array_elements(p.actions) AS a
+    WHERE a->>'status' = 'ESCALATED'
+    UNION
+    SELECT book_id, recon->>'key', recon->>'terms'
+    FROM paper_session WHERE recon->>'status' = 'BREAK'
+)
+SELECT r.book_id, r.key || '@' || r.terms
+FROM raised r
+WHERE NOT EXISTS (
+    SELECT 1 FROM paper_session_resolution s
+    WHERE s.book_id = r.book_id AND s.action_key = r.key AND s.terms = r.terms
+)
+ORDER BY 1, 2
+"""
+
+
+def read_paper_status(conn: Connection, *, data_root: Path, as_of: datetime) -> PaperOut:
+    """Each paper book's latest session, kill switch and unresolved blocks (M15.3).
+
+    The books are the union of those with a ``paper_session`` row and those with a kill-switch file
+    under ``<data_root>/kill_switch`` — a switch tripped before a book's first row still shows. A
+    switch file that cannot be read is reported with its error and counts as unhealthy, never as
+    armed (the switch itself refuses to treat it as armed, too).
+    """
+    from execution.kill_switch import KILL_SWITCH_DIRNAME, KillSwitch, kill_switch_path
+
+    latest = {row[0]: row for row in conn.execute(_PAPER_LATEST_SQL).fetchall()}
+    unresolved: dict[str, list[str]] = {}
+    for book_id, item in conn.execute(_PAPER_UNRESOLVED_SQL).fetchall():
+        unresolved.setdefault(book_id, []).append(item)
+    switch_dir = data_root / KILL_SWITCH_DIRNAME
+    with_switch = (
+        {path.stem for path in switch_dir.glob("*.json")} if switch_dir.is_dir() else set()
+    )
+    books: list[PaperBookStatusOut] = []
+    for book_id in sorted(set(latest) | with_switch):
+        try:
+            state = KillSwitch(kill_switch_path(data_root, book_id)).state
+            switch = KillSwitchOut(
+                tripped=state.tripped,
+                source=None if state.source is None else state.source.value,
+                reason=state.reason,
+                tripped_at=state.tripped_at,
+            )
+        except (OSError, ValueError) as error:
+            switch = KillSwitchOut(
+                tripped=None, source=None, reason=None, tripped_at=None, error=str(error)
+            )
+        row = latest.get(book_id)
+        blocks = unresolved.get(book_id, [])
+        books.append(
+            PaperBookStatusOut(
+                book_id=book_id,
+                healthy=switch.tripped is False
+                and (row is None or row[2] != "RECON_BREAK")
+                and not blocks,
+                kill_switch=switch,
+                latest_date=None if row is None else row[1],
+                latest_outcome=None if row is None else row[2],
+                latest_reason=None if row is None else row[3],
+                latest_recon=None if row is None else row[4],
+                unresolved=blocks,
+            )
+        )
+    return PaperOut(as_of=as_of, healthy=all(book.healthy for book in books), books=books)
