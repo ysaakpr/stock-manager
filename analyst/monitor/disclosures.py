@@ -63,8 +63,14 @@ _INFORMED_LEAD: Final = re.compile(
     re.IGNORECASE,
 )
 
-#: Punctuation and spacing, which do not change what a headline says (quotes, dashes, full stops).
-_NOISE: Final = re.compile(r"[\W_]+")
+#: A word, for comparing what the text says with what the headline says.
+_WORD: Final = re.compile(r"[^\W_]+")
+
+#: Words that add nothing to a headline when NSE wraps it ("...regarding Change in Auditors of the
+#: company."). A text whose only words beyond the headline's are these is still an echo.
+_FILLER: Final = frozenset(
+    {"a", "an", "and", "bank", "company", "for", "in", "its", "limited", "ltd", "of", "on", "the"}
+)
 
 #: How a truncated text ends, so the reader (and the model) knows it is not the whole document.
 _TRUNCATION_MARK: Final = " […truncated]"
@@ -152,9 +158,9 @@ class DisclosureText:
 
 def _is_headline_echo(subject: str, body: str) -> bool:
     """Whether `body` says nothing beyond `subject` once the exchange's lead-in is stripped."""
-    remainder = _NOISE.sub("", normalize(_INFORMED_LEAD.sub("", normalize(body), count=1)))
-    headline = _NOISE.sub("", normalize(subject))
-    return remainder in ("", headline)
+    remainder = set(_WORD.findall(_INFORMED_LEAD.sub("", normalize(body), count=1)))
+    headline = set(_WORD.findall(normalize(subject)))
+    return remainder - headline <= _FILLER
 
 
 def disclosure_text(

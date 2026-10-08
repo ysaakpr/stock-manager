@@ -225,6 +225,16 @@ def test_headline_echo_is_text_unavailable() -> None:
     assert item.unavailable is TextUnavailableReason.HEADLINE_ECHO
 
 
+def test_headline_wrapped_in_filler_is_still_an_echo() -> None:
+    """The real feed's shape for an auditor change: it cannot tell a rotation from a resignation."""
+    wrapped = row(
+        subject="Change in Auditors",
+        body="Advit Jewels Limited has informed the Exchange regarding Change in Auditors of the "
+        "company.",
+    )
+    assert disclosure_text(wrapped).unavailable is TextUnavailableReason.HEADLINE_ECHO
+
+
 def test_exchange_text_that_adds_to_the_headline_is_available() -> None:
     body = (
         "Inox Green Energy Services Limited has informed the Exchange about General Updates on "
