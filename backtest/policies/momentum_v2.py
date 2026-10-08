@@ -79,6 +79,7 @@ from typing import Final, Protocol, runtime_checkable
 from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from backtest.policies.industry_gate import apply_industry_gate
 from backtest.policies.sizing import account_order_ceiling
 from backtest.replay import SessionContext, SessionDecision
 from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
@@ -86,6 +87,7 @@ from dataplatform.query.pit import Dataset
 from execution.broker import Exchange, Holding, OrderRequest, Side
 
 __all__ = [
+    "D13_INDUSTRY_GATE",
     "PAPER_RATIFIED_2026_09_06",
     "MomentumV2Data",
     "MomentumV2Parameters",
@@ -216,6 +218,9 @@ class MomentumV2Parameters:
       parking an invested one on risk-off, with an optional symmetric band around the average.
       Require ``regime_filter``. Off by default and left out of ``repr`` while at their defaults,
       so the run fingerprint of every pre-M14.5 configuration is unchanged.
+    * ``industry_gate`` — M16.2: each rebalance, admit only names whose industry maps to one of the
+      top-5 NSE sectoral indices by 6-1 month return (:mod:`backtest.policies.industry_gate`). Its
+      K, look-back and cadence are fixed there, not here. Off by default, out of ``repr`` while off.
 
     With ``use_12_1``, ``sell_band``, ``regime_filter``, ``vol_scaled``, ``redeploy_next_session``
     and ``vol_target_annual`` all off/``None`` the policy is the naive top-N policy exactly. Every
@@ -238,6 +243,7 @@ class MomentumV2Parameters:
     regime_daily_reentry: bool = field(default=False, repr=False)
     regime_daily_exit: bool = field(default=False, repr=False)
     regime_daily_band: Decimal = field(default=Decimal("0"), repr=False)
+    industry_gate: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -313,6 +319,18 @@ PAPER_RATIFIED_2026_09_06: Final = MomentumV2Parameters(
     regime_filter=True,
     vol_scaled=True,
     redeploy_next_session=True,
+)
+
+#: M16.2 arm A2: D13 with the point-in-time industry-momentum gate on, and nothing else changed.
+#: Research configuration only — paper trading runs D13.
+D13_INDUSTRY_GATE: Final = MomentumV2Parameters(
+    top_n=20,
+    use_12_1=True,
+    sell_band=30,
+    regime_filter=True,
+    vol_scaled=True,
+    redeploy_next_session=True,
+    industry_gate=True,
 )
 
 
@@ -487,6 +505,9 @@ class MomentumV2Policy:
         self._parked = False
 
         candidates = ctx.pit.admit(self._data.signal(ctx.session))
+        gate = None
+        if self._params.industry_gate:  # M16.2: narrow to the top sectoral indices' names
+            candidates, gate = apply_industry_gate(self._data, ctx, candidates)
         use_12_1 = self._params.use_12_1
         ranked = sorted(
             candidates, key=lambda record: (-record.momentum(use_12_1=use_12_1), record.isin)
@@ -520,6 +541,8 @@ class MomentumV2Policy:
         evidence = self._evidence(
             ctx.session, chosen, drifts_note, use_12_1=use_12_1, exposure=exposure
         )
+        if gate is not None:
+            evidence = gate.annotate(evidence)
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
 
     def _park(self, ctx: SessionContext, reading: RegimeReading) -> SessionDecision:

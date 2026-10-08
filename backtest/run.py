@@ -100,6 +100,7 @@ from backtest.policies.fundamentals_value import (
     FundamentalsValuePolicy,
 )
 from backtest.policies.momentum_v2 import (
+    MomentumV2Data,
     MomentumV2Parameters,
     MomentumV2Policy,
     MomentumV2Record,
@@ -139,6 +140,7 @@ from backtest.run_ledger import (
     run_digest,
     run_spec,
 )
+from backtest.sector_indices import IndustryGatedData, SectorIndexLevels, load_sector_index_map
 from backtest.tax import RunLedger
 from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import Exchange as IdentityExchange
@@ -2221,7 +2223,15 @@ def run_momentum_v2(
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         # One rail policy for both: the gate enforces it, and the policy sizes its buys to it.
         rails_in_force = rail_policy or ratified_backtest_rail_policy()
-        policy = MomentumV2Policy(data, v2_parameters, order_caps=rails_in_force.rails)
+        policy_data: MomentumV2Data = data
+        if v2_parameters.industry_gate:  # M16.2: only a gated run loads the sector index levels
+            index_map = load_sector_index_map()
+            policy_data = IndustryGatedData(
+                data,
+                SectorIndexLevels.from_l1(index_map, through=terminal, data_root=data_root),
+                index_map,
+            )
+        policy = MomentumV2Policy(policy_data, v2_parameters, order_caps=rails_in_force.rails)
 
         engine = ReplayEngine(
             policy=policy,
@@ -2377,6 +2387,10 @@ def backtest_spec(
             extra["investable_universe"] = TURNOVER_FLOOR_UNIVERSE_IDENTITY
         else:
             extra["index_membership"] = INDEX_MEMBERSHIP_IDENTITY
+    if getattr(parameters, "industry_gate", False):
+        # M16.2: a gated run is a function of the reviewed mapping table too; an edited table must
+        # not resume a ledger struck under the old one. Absent when the gate is off (D13 unchanged).
+        extra["sector_index_map"] = load_sector_index_map().sha256
     return run_spec(
         runner,
         start=start,
