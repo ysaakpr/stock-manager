@@ -27,24 +27,37 @@ _CHARS = r"A-Za-z0-9_\-.+/="
 _VALUE = rf"(?=[{_CHARS}]*[0-9])(?=[{_CHARS}]*[A-Za-z])([{_CHARS}]{{16,}})"
 
 
-class TokenAssignmentDetector(RegexBasedDetector):
-    """A credential assigned or passed, quoted or not: `KITE_ACCESS_TOKEN=…`, `token: …`,
-    `APP=1 KITE_API_SECRET=…`, `# api_secret = …`, `kite.set_access_token("…")`.
+# A name that carries a credential: the keyword anywhere in it, words joined by `_` or `-`
+# (KITE_ACCESS_TOKEN, TOKEN_VALUE, x-api-key, X-Api-Key, KITE_PASS, db_password).
+_NAME = r"[\w-]*(?:token|secret|api[-_]?key|passw(?:or)?d|pass)[\w-]*"
+# The assignment, including a Python annotation (`name: str = `, `name: SecretStr | None = `).
+_ASSIGN = r"[\"']?\s*(?::\s*[\w.\[\], |]+?\s*=(?!=)|:=|==?|:)\s*"
+# A wrapper the literal may sit in: pydantic's `SecretStr("…")`, `Secret("…")`, `str("…")`.
+_WRAPPER = r"(?:(?:SecretStr|SecretBytes|Secret|str|bytes)\(\s*)?"
+# An unquoted value that is a reference, not a literal: a dotted chain (`settings.db2_password`,
+# `self.access_token_v2`, `cfg.kite.api_key_2024`) or a call/subscript (`b64encode(…)`, `x[…]`).
+_REFERENCE = r"(?![A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+|[A-Za-z_]\w*\s*[(\[])"
 
-    Any name ending in token, secret, api_key/apikey, password or passwd, in Python, YAML, JSON,
-    .env, INI or shell syntax, inside a comment or not, plus the call form `…token("<value>")`.
-    It backs up KeywordDetector, which needs quotes in code files and misses an env line with an
-    earlier assignment. A value split across lines inside parentheses is not seen — detection is
+
+class TokenAssignmentDetector(RegexBasedDetector):
+    """A credential assigned or passed: `KITE_ACCESS_TOKEN=…`, `token: …`, `x-api-key: …`,
+    `APP=1 KITE_API_SECRET=…`, `# api_secret = …`, `kite.set_access_token("…")`, and the
+    pydantic-settings shapes `kite_api_secret: str = "…"`, `token: SecretStr = SecretStr("…")`.
+
+    Any name containing token, secret, api-key/api_key/apikey, password, passwd or pass, in Python,
+    YAML, JSON, .env, INI or shell syntax, inside a comment or not, plus the call form
+    `…token("<value>")`. A quoted value is always a literal; an unquoted one is skipped when it is
+    a reference (a dotted chain, a call, a subscript). It backs up KeywordDetector, which needs
+    quotes in code files and misses annotated assignments and env lines with an earlier
+    assignment. A value split across lines inside parentheses is not seen — detection is
     line-based; documented in the runbook.
     """
 
     secret_type = "Credential Assignment"
 
     denylist = (
-        re.compile(
-            r"\w*(?:token|secret|api_?key|passw(?:or)?d)[\"']?\s*(?::=|=|:)\s*[\"']?" + _VALUE,
-            flags=re.IGNORECASE,
-        ),
+        re.compile(_NAME + _ASSIGN + _WRAPPER + r"[\"']" + _VALUE, flags=re.IGNORECASE),
+        re.compile(_NAME + _ASSIGN + _WRAPPER + _REFERENCE + _VALUE, flags=re.IGNORECASE),
         re.compile(r"\w*token\(\s*[\"']" + _VALUE, flags=re.IGNORECASE),
     )
 

@@ -161,6 +161,34 @@ PLANTED = {
         'kite = KiteConnect(user_id="AB1234", api_key="' + KITE_KEY + '")\n',
     ),
     "app_id_then_api_secret_env": ("app.env", "APP_ID=1 KITE_API_SECRET=" + KITE_SECRET + "\n"),
+    "app_id_then_api_secret_py": (
+        "app.py",
+        'app_id = 1; kite_api_secret = "' + KITE_SECRET + '"\n',
+    ),
+    # pydantic-settings style annotated assignments (dataplatform/config.py's own shape).
+    "annotated_api_secret_str": ("cfg.py", 'kite_api_secret: str = "' + KITE_SECRET + '"\n'),
+    "annotated_password_str": ("cfg.py", 'password: str = "' + PG_PW + '"\n'),
+    "annotated_secretstr_wrapper": (
+        "cfg.py",
+        'kite_access_token: SecretStr = SecretStr("' + KITE_TOKEN + '")\n',
+    ),
+    "basesettings_class_str": (
+        "cfg.py",
+        'class Settings(BaseSettings):\n    kite_api_secret: str = "' + KITE_SECRET + '"\n',
+    ),
+    "basesettings_class_optional_secretstr": (
+        "cfg.py",
+        "class Settings(BaseSettings):\n"
+        + '    pg_password: SecretStr | None = SecretStr("'
+        + PG_PW
+        + '")\n',
+    ),
+    # Hyphenated and mid-name keywords.
+    "x_api_key_yaml": ("gateway.yaml", "headers:\n  x-api-key: " + KITE_KEY + "\n"),
+    "x_api_key_header_md": ("api.md", "curl -H 'X-Api-Key: " + KITE_KEY + "' https://h\n"),
+    "kite_pass_env": ("kite.env", "KITE_PASS=" + PG_PW + "\n"),
+    "token_value_py": ("kite.py", 'TOKEN_VALUE = "' + KITE_TOKEN + '"\n'),
+    "unquoted_literal_kwarg": ("kite.env", "OPTS=api_key=" + KITE_KEY + " debug=1\n"),
     # Paths the stock filters used to skip wholesale (B3).
     "swagger_path": ("docs/swagger-setup.md", "KITE_API_SECRET=" + KITE_SECRET + "\n"),
     "lock_file_name": ("package-lock.json", '{"api_secret": "' + KITE_SECRET + '"}\n'),
@@ -211,6 +239,62 @@ def test_clean_file_passes(tmp_path: Path) -> None:
 
     assert result.returncode == CLEAN_EXIT, result.stderr
     assert "clean" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "conn = connect(password=settings.db2_password.get_secret_value())",
+        "token = self.access_token_v2",
+        "kite = KiteConnect(api_key=cfg.kite.api_key_2024, debug=True)",
+        "secret = base64.b64encode(raw_bytes_v1)",
+        "api_secret = load_kite_secret_v2(path)",
+        "access_token = tokens_by_day2026[day]",
+    ],
+)
+def test_references_are_not_credentials(line: str, tmp_path: Path) -> None:
+    """An unquoted dotted chain, call or subscript is a reference, even with digits in it."""
+    target = tmp_path / "refs.py"
+    target.write_text(line + "\n")
+
+    result = _scan(target)
+
+    assert result.returncode == CLEAN_EXIT, result.stderr
+
+
+def test_the_real_settings_module_scans_clean() -> None:
+    """dataplatform/config.py: SecretStr fields with defaults, None and env — no finding."""
+    assert _scan(REPO / "dataplatform" / "config.py").returncode == CLEAN_EXIT
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["id_then_api_secret_dict", "kiteconnect_user_id_then_api_key", "app_id_then_api_secret_py"],
+)
+def test_id_token_does_not_hide_the_keyword_hit(case: str, tmp_path: Path) -> None:
+    """Pinned to KeywordDetector's own finding: is_likely_id_string only filters non-regex
+    detectors, so re-allowing it fails here even though the repo-local assignment detector would
+    still catch the line. (The .env shape is not a KeywordDetector hit at all — the stock regex
+    misses it — so it is covered by the planted case, not here.)"""
+    name, content = PLANTED[case]
+    target = tmp_path / name
+    target.write_text(content)
+
+    result = _scan(target)
+
+    assert result.returncode == FINDING
+    assert ": Secret Keyword" in result.stderr, result.stderr
+
+
+def test_yaml_value_only_the_parsed_view_reveals(tmp_path: Path) -> None:
+    """A folded block scalar puts the value on its own line with no key: only detect-secrets'
+    YAML transformer pass rejoins them, so dropping that extra pass fails this test."""
+    target = tmp_path / "kite.yaml"
+    target.write_text("kite:\n  api_secret: >-\n    " + KITE_SECRET + "\n")
+
+    result = _scan(target)
+
+    assert result.returncode == FINDING, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("name", ["digests.md", "digests.json", "digests.yaml", "kite.py"])
