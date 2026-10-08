@@ -572,6 +572,19 @@ class PortfolioBook:
         )
         return amount
 
+    def credit_late_dividend(self, when: date, isin: str, amount: Decimal) -> None:
+        """Credit a dividend whose entitlement an earlier holding fixed, as a rupee ``amount``.
+
+        For a dividend learnt after its ex-date had passed (the daily paper session, M13.1): the
+        entitlement is the holding *entering* the ex-date, which may differ from — or no longer be —
+        what the book holds now, so the caller computes the amount and the book takes it as is.
+        Income, exactly as :meth:`credit_dividend`.
+        """
+        amount = self._require_positive_money("late dividend", amount)
+        self._cash += amount
+        self._dividends += amount
+        self._post_ledger(when, isin, "late dividend", debit=_ZERO, credit=amount)
+
     def credit_interest(self, when: date, amount: Decimal) -> None:
         """Credit ``amount`` of interest on idle cash (``backtest.cash_interest``) to free cash.
 

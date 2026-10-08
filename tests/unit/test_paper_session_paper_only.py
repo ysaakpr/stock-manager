@@ -136,4 +136,13 @@ def test_a_sim_broker_subclass_is_refused_too() -> None:
 def test_the_paper_broker_cannot_be_built_over_a_real_broker() -> None:
     kite = KiteBroker.__new__(KiteBroker)
     with pytest.raises(PaperModeViolationError):
-        _PaperBroker(kite, None, clock=None, corporate_actions=None)  # type: ignore[arg-type]
+        _PaperBroker(
+            kite,  # type: ignore[arg-type]
+            None,  # type: ignore[arg-type]
+            clock=None,  # type: ignore[arg-type]
+            corporate_actions=None,
+            kill_switch=None,  # type: ignore[arg-type]
+            alerter=None,  # type: ignore[arg-type]
+            book_id="paper_fixture_book",
+            sleeve="TACTICAL",
+        )

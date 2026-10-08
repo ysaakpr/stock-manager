@@ -18,11 +18,13 @@ map over the fixture names, so A8 really clears every order.
 
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from analyst.cases import RiskRails
 from backtest.book_actions import BookAction, BookActionCalendar, BookActionSource
@@ -37,6 +39,7 @@ from backtest.rails import BacktestRailPolicy, SectorMap
 from backtest.run import RegimeSourceError
 from dataplatform.query.pit import Dataset
 from execution.broker import Exchange
+from execution.kill_switch import KillSwitch
 from execution.sim_broker import NoReferenceBarError, ReferenceBar, SessionMarket
 
 #: Ten NSE names, ISIN-shaped, each with a fixed base price and volatility.
@@ -221,6 +224,14 @@ def fixture_rail_policy() -> BacktestRailPolicy:
         sectors=SectorMap(source="fixture", sha256="fixture", by_isin=dict(SECTORS)),
         provenance="test-only: the ratified rail numbers over the paper-session fixture names",
     )
+
+
+def fresh_kill_switch(*, at: datetime | None = None) -> KillSwitch:
+    """An armed kill switch in a fresh temporary directory — one per paper book under test."""
+    from dataplatform.clock import IST, FrozenClock
+
+    clock = FrozenClock(at or datetime(2026, 10, 1, 20, 30, tzinfo=IST))
+    return KillSwitch(Path(tempfile.mkdtemp(prefix="paper-ks-")) / "kill_switch.json", clock=clock)
 
 
 def fixture_spec(parameters: MomentumV2Parameters = PAPER_RATIFIED_2026_09_06) -> PaperBookSpec:

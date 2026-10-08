@@ -29,10 +29,14 @@ switch is reproducible and nothing here reads a wall clock behind the caller's b
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import json
 import os
+import re
+import sys
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -43,10 +47,13 @@ import structlog
 from dataplatform.clock import Clock, SystemClock
 
 __all__ = [
+    "KILL_SWITCH_DIRNAME",
     "KillSwitch",
     "KillSwitchState",
     "TradingHaltedError",
     "TripSource",
+    "kill_switch_path",
+    "main",
 ]
 
 _LOG = structlog.get_logger(__name__)
@@ -54,6 +61,23 @@ _LOG = structlog.get_logger(__name__)
 #: State-file schema version, written into the file so a future format change is detectable rather
 #: than silently misread as the current shape.
 _STATE_VERSION = 1
+
+#: The directory under the lake root (``Settings.data_root``) that holds every account's switch.
+KILL_SWITCH_DIRNAME = "kill_switch"
+
+_ACCOUNT = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
+
+
+def kill_switch_path(data_root: Path, account: str) -> Path:
+    """The state file of ``account``'s switch: ``<data_root>/kill_switch/<account>.json``.
+
+    One file per account, so a halt on one account (the paper book, M15.3) never silently halts
+    or arms another. ``account`` is a lower snake_case id — a paper book id, for the paper session —
+    and is refused otherwise, so it can never walk out of the directory.
+    """
+    if not _ACCOUNT.match(account):
+        raise ValueError(f"account {account!r} must be lower snake_case, 3-64 chars")
+    return data_root / KILL_SWITCH_DIRNAME / f"{account}.json"
 
 
 class TripSource(StrEnum):
@@ -274,3 +298,41 @@ class KillSwitch:
                 tmp_path.unlink()
             raise
         self._state = state
+
+
+# ── the operator's command ───────────────────────────────────────────────────────────────────────
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """``python -m execution.kill_switch {status,trip,reset} --account <id>`` — the operator's CLI.
+
+    ``status`` prints the state; ``trip --reason`` halts placement (source ``MANUAL``); ``reset
+    --note`` re-arms it, the note recording who decided the cause was dealt with. The file lives
+    under ``Settings.data_root`` (``kill_switch_path``), or ``--path`` names it directly. Exit 0 on
+    success; ``status`` exits 3 when the switch is tripped, so a script can test it.
+    """
+    parser = argparse.ArgumentParser(prog="python -m execution.kill_switch")
+    parser.add_argument("command", choices=("status", "trip", "reset"))
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--account", help="the account id, e.g. a paper book id")
+    target.add_argument("--path", type=Path, help="the state file itself")
+    parser.add_argument("--reason", default="", help="trip: why placement is being halted")
+    parser.add_argument("--note", default="", help="reset: who re-armed it and why")
+    args = parser.parse_args(argv)
+    if args.path is not None:
+        path = args.path
+    else:
+        from dataplatform.config import get_settings
+
+        path = kill_switch_path(get_settings().data_root, args.account)
+    switch = KillSwitch(path)
+    if args.command == "trip":
+        switch.trip(reason=args.reason, source=TripSource.MANUAL)
+    elif args.command == "reset":
+        switch.reset(note=args.note)
+    print(json.dumps({"path": str(path), **switch.state.to_json()}, indent=2, sort_keys=True))
+    return 3 if args.command == "status" and switch.is_tripped else 0
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised through main() in the tests
+    sys.exit(main())

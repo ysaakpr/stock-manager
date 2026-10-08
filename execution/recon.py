@@ -36,6 +36,7 @@ to a real channel in production without this module knowing the difference.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -47,7 +48,6 @@ import structlog
 from dataplatform.clock import Clock, SystemClock
 from execution.broker import Broker
 from execution.kill_switch import KillSwitch, TripSource
-from execution.staging import InternalBook
 
 _LOG = structlog.get_logger(__name__)
 
@@ -56,11 +56,31 @@ __all__ = [
     "Alerter",
     "BreakKind",
     "LoggingAlerter",
+    "ReconBook",
     "ReconBreak",
     "ReconResult",
     "Reconciler",
     "RecordingAlerter",
 ]
+
+
+# ── the expectation side ─────────────────────────────────────────────────────────────────────
+
+
+class ReconBook(Protocol):
+    """The platform's side of the comparison: believed share counts and believed cash.
+
+    `execution.staging.InternalBook` is the plain implementation; the paper session's accounting
+    book is another (M15.3). Whatever it is, it must be built from what the platform processed —
+    never read off the broker, or the comparison compares the broker to itself.
+    """
+
+    @property
+    def cash(self) -> Decimal:
+        """Cash the platform believes it has."""
+
+    def quantities(self) -> Mapping[str, int]:
+        """The believed share count per ISIN."""
 
 
 # ── the alerting seam ──────────────────────────────────────────────────────────────────────────
@@ -201,7 +221,7 @@ class Reconciler:
     """
 
     broker: Broker
-    book: InternalBook
+    book: ReconBook
     kill_switch: KillSwitch
     alerter: Alerter
     clock: Clock = field(default_factory=SystemClock)
