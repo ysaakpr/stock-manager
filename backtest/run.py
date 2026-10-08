@@ -92,7 +92,7 @@ from backtest.book_actions import (
 from backtest.cap_tiers import LiquidityRankTiers, TierSleeve, describe_sleeves
 from backtest.cash_interest import CashInterestAccrual, InterestCredit, current_cash_interest
 from backtest.policies.earnings_surprise import CONCEPTS as EARNINGS_SURPRISE_CONCEPTS
-from backtest.policies.earnings_surprise import EarningsSurprisePanel
+from backtest.policies.earnings_surprise import EarningsSurprisePanel, NoSignal
 from backtest.policies.fundamentals_value import (
     FundamentalsRecord,
     FundamentalsSignal,
@@ -5166,6 +5166,25 @@ class _SwingFeatures:
                     )
                 )
             self._by_date[session] = tuple(records)
+        if earnings is not None:
+            self._log_earnings(earnings, grouped)
+
+    @staticmethod
+    def _log_earnings(
+        panel: EarningsSurprisePanel, grouped: Mapping[date, Sequence[tuple[Any, ...]]]
+    ) -> None:
+        """Count the M16.3 leg's readings and every no-signal reason over the loaded records."""
+        tally: dict[str, int] = {}
+        for session, day_rows in grouped.items():
+            for row in day_rows:
+                found = panel.explain(str(row[1]), session)
+                reason = found.value if isinstance(found, NoSignal) else "scored"
+                tally[reason] = tally.get(reason, 0) + 1
+        _LOG.info(
+            "backtest.swing_earnings_surprise",
+            decision_dates=len(grouped),
+            **{reason.lower(): count for reason, count in sorted(tally.items())},
+        )
 
     def _residual_scores(
         self, base: str, grouped: Mapping[date, Sequence[tuple[Any, ...]]]

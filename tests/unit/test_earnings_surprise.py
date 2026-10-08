@@ -22,7 +22,9 @@ from backtest.policies.earnings_surprise import (
     ACTIVE_SESSIONS,
     M10_7_EARNINGS_SURPRISE,
     EarningsSurprisePanel,
+    NoSignal,
     standardised_unexpected_earnings,
+    surprise_readings,
 )
 from backtest.policies.swing_composite import (
     SwingCompositeParameters,
@@ -290,6 +292,7 @@ def quarter_facts(
     filing_id: str | None = None,
     nature: Nature = Nature.STANDALONE,
     isin: str = ISIN,
+    paid_up: str = "10000000",
 ) -> list[_Fact]:
     start = _quarter_start(period_end)
     filed = filed or _filed(period_end)
@@ -298,7 +301,7 @@ def quarter_facts(
     if shares is not None:
         out += [
             _Fact(isin, start, period_end, filed, fid, nature, c, None, Decimal(v))
-            for c, v in (("shares_outstanding", shares), ("paid_up_equity_capital", "10000000"))
+            for c, v in (("shares_outstanding", shares), ("paid_up_equity_capital", paid_up))
         ]
     return out
 
@@ -401,6 +404,37 @@ def test_insufficient_history_gets_no_signal() -> None:
     calendar = _weekdays(date(2015, 1, 1), 1200)
     assert EarningsSurprisePanel(short, calendar).value(ISIN, calendar[-1]) is None
     assert EarningsSurprisePanel([], calendar).value(ISIN, calendar[-1]) is None
+    # Each refusal names its reason, so a run can count why its names went unscored.
+    reasons = {
+        name: surprise_readings(facts, as_of=AS_OF)[ISIN]
+        for name, facts in (("short", short), ("no_count", no_count), ("flat", flat))
+    }
+    assert reasons == {
+        "short": NoSignal.SHORT_HISTORY,
+        "no_count": NoSignal.NO_SHARE_COUNT,
+        "flat": NoSignal.FLAT_HISTORY,
+    }
+    assert EarningsSurprisePanel(short, calendar).explain(ISIN, calendar[-1]) is (
+        NoSignal.SHORT_HISTORY
+    )
+    assert EarningsSurprisePanel([], calendar).explain(ISIN, calendar[-1]) is NoSignal.NO_FILINGS
+
+
+def test_thirteen_quarters_with_one_missing_get_no_signal() -> None:
+    """The fiscal-period guard: fourteen quarter-ends less one is thirteen, but not consecutive.
+
+    Passes the length check, so only the consecutive-quarter check can refuse it — without that
+    check this would difference quarters a half-year apart as if they were a year apart.
+    """
+    quarters = _quarter_ends(date(2014, 12, 1), 14)
+    values = ("9", *EPS, "15")
+    facts: list[_Fact] = []
+    for i, (quarter, eps) in enumerate(zip(quarters, values, strict=True)):
+        if i != 6:
+            facts += quarter_facts(quarter, eps)
+    assert len({f.period_end for f in facts}) == 13
+    assert surprise_readings(facts, as_of=AS_OF)[ISIN] is NoSignal.QUARTER_GAP
+    assert standardised_unexpected_earnings(facts, as_of=AS_OF) == {}
 
 
 def test_consolidated_figures_are_never_read() -> None:
@@ -443,6 +477,45 @@ def test_a_restatement_wins_only_from_its_own_filing_date() -> None:
     revised = standardised_unexpected_earnings(facts, as_of=restated_on)[ISIN]
     assert original.sue == BEAT_SUE
     assert revised.sue == (BEAT_SUE / 3).quantize(Decimal("0.00000001"))
+    # The value is the restatement's; the date the window opens on is still the original's.
+    assert revised.filing_date == original.filing_date == AS_OF
+
+
+@pytest.mark.parametrize("refiled_after", [30, 70])
+def test_a_refiling_neither_extends_nor_reopens_the_window(refiled_after: int) -> None:
+    """A same-value re-filing of the latest quarter, inside the window or after it closed.
+
+    Fails if the window is dated off the newest filing: a re-filing at session 31 would carry the
+    SUE past session 63, and one at session 71 would switch a zeroed leg back on.
+    """
+    calendar = _weekdays(date(2015, 1, 1), 1200)
+    opened = calendar.index(AS_OF)
+    refiled_on = calendar[opened + refiled_after]
+    refiling = quarter_facts(QUARTERS[-1], "15", filed=refiled_on, filing_id="refiled")
+    panel = EarningsSurprisePanel([*series("15"), *refiling], calendar)
+    assert panel.value(ISIN, calendar[opened + ACTIVE_SESSIONS - 1]) == BEAT_SUE
+    assert panel.value(ISIN, calendar[opened + ACTIVE_SESSIONS]) == Decimal(0)
+    for later in (refiled_after, refiled_after + 10):
+        expected = BEAT_SUE if later < ACTIVE_SESSIONS else Decimal(0)
+        assert panel.value(ISIN, calendar[opened + later]) == expected
+
+
+def test_a_misscaled_restatement_is_dropped_not_read_as_a_surprise() -> None:
+    """A filing stated 100x off (paid-up capital a clean 10^2 from the median) never enters the SUE.
+
+    Without the drop this restatement — every figure 100x — would win the collapse and score the
+    latest quarter as a hundredfold beat.
+    """
+    misscaled = quarter_facts(
+        QUARTERS[-1],
+        "1500",
+        filed=AS_OF + timedelta(days=5),
+        filing_id="misscaled",
+        paid_up="1000000000",
+    )
+    facts = [*series("15"), *misscaled]
+    reading = standardised_unexpected_earnings(facts, as_of=AS_OF + timedelta(days=5))[ISIN]
+    assert reading.sue == BEAT_SUE
 
 
 # ── end to end on the offline lake ──────────────────────────────────────────────────────────────
