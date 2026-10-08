@@ -28,7 +28,7 @@ define an arm the pre-registration does not list.
 from __future__ import annotations
 
 import importlib
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from decimal import Decimal
 from typing import Final
 
@@ -87,8 +87,10 @@ class PresetArm:
 
     ``module`` and ``preset`` name the constant (``backtest.policies.momentum_v2.D13_ABS_MOM``,
     say); it is imported when the arm is resolved, never at import of this module. ``reference``
-    is the arm the preset must differ from, and must drive the same parameter class; ``owner`` is
-    the task (and PR) that publishes it.
+    is the arm the preset is built on: the preset must equal ``reference`` with exactly
+    ``options`` applied (Amendment 1 (d)), so a preset that drifted from the pre-registered switch,
+    or a PR that renamed the switch, is refused rather than run. ``owner`` is the task (and PR)
+    that publishes it.
     """
 
     label: str
@@ -96,6 +98,7 @@ class PresetArm:
     note: str
     module: str
     preset: str
+    options: tuple[tuple[str, object], ...]
     owner: str
 
     def _reference_params(self) -> object:
@@ -129,9 +132,22 @@ class PresetArm:
                 f"{self.label}: {self.preset} is a {type(params).__name__}, "
                 f"not the {type(reference).__name__} {self.reference.label} drives"
             )
-        if params == reference:
+        known = {f.name for f in fields(reference)}  # type: ignore[arg-type]
+        unknown = [name for name, _ in self.options if name not in known]
+        if unknown:
+            raise M16ArmError(
+                f"{self.label}: {type(reference).__name__} has no option {', '.join(unknown)} "
+                f"({self.owner}; {PREREGISTRATION}, Amendment 1)"
+            )
+        expected = replace(reference, **dict(self.options))  # type: ignore[type-var]
+        if expected == reference:
             raise M16ArmError(
                 f"{self.label}: {self.preset} leaves {self.reference.label} unchanged"
+            )
+        if params != expected:
+            raise M16ArmError(
+                f"{self.label}: {self.preset} is not {self.reference.label} with exactly "
+                f"{dict(self.options)} ({PREREGISTRATION}, Amendment 1)"
             )
         driving = "v2" if self.reference.v2 is not None else "swing"
         return Arm(
@@ -153,6 +169,7 @@ _A1 = PresetArm(
     note="a slot is held only if the name's 12-1 return beats repo - 0.5% over the same span",
     module=_V2,
     preset="D13_ABS_MOM",
+    options=(("absolute_momentum", True),),
     owner="M16.1 (#98)",
 )
 _A2 = PresetArm(
@@ -161,6 +178,8 @@ _A2 = PresetArm(
     note="eligible only in an industry mapped to a top-5 sectoral index by 6-1 month return",
     module=_V2,
     preset="D13_INDUSTRY_GATE",
+    # A boolean switch; K = 5 is a fixed constant of the gate, not a parameter (Amendment 1 (c)).
+    options=(("industry_gate", True),),
     owner="M16.2 (#97)",
 )
 _A3 = PresetArm(
@@ -169,6 +188,7 @@ _A3 = PresetArm(
     note="ranks on round 2's H1 residual momentum instead of 12-1; everything else D13",
     module=_V2,
     preset="D13_RESID_MOM",
+    options=(("residual_ranking", True),),
     owner="M16.1 (#98)",
 )
 _A4 = PresetArm(
@@ -177,6 +197,7 @@ _A4 = PresetArm(
     note="eligible only with TTM PAT > 0 (PIT XBRL) and a filing at most 200 days old",
     module=_V2,
     preset="D13_PROFIT_FILTER",
+    options=(("profitability_filter", True),),
     owner="M16.1 (#98)",
 )
 _A5 = PresetArm(
@@ -185,6 +206,7 @@ _A5 = PresetArm(
     note="a fourth, equal-weight leg: standardised YoY EPS surprise, live 63 sessions",
     module="backtest.policies.earnings_surprise",
     preset="M10_7_EARNINGS_SURPRISE",
+    options=(("weight_earnings_surprise", _ONE),),
     owner="M16.3 (#96)",
 )
 

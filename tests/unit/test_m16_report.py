@@ -12,12 +12,14 @@ from pathlib import Path
 import pytest
 
 from backtest.m12_rerun import REGIME_DAILY_SET, RERUN_ARMS, WINDOWS
-from backtest.m16_arms import A6_BLEND, A7_ARM, A7_LOW_VOL, M10_7_BASELINE
+from backtest.m16_arms import A2_INDUSTRY_GATE, A6_BLEND, A7_ARM, A7_LOW_VOL, M10_7_BASELINE
 from backtest.m16_report import (
+    DILUTION_THRESHOLD,
     MARKER,
     PRIMARY_FLOOR,
     TRIALS,
     TRIALS_ON_RECORD,
+    A2Coverage,
     RunFacts,
     TrialSharpe,
     blend,
@@ -25,6 +27,8 @@ from backtest.m16_report import (
     config_key,
     criteria,
     decision,
+    decisive,
+    load_a2_coverage,
     main,
     render,
     select,
@@ -438,3 +442,80 @@ def test_main_renders_tables_blend_scorecard_and_decision(tmp_path: Path) -> Non
 def test_render_keeps_the_hand_written_section() -> None:
     text = render([], manifests={}, sharpes=[], hand_written="\n## Analysis\n\nkept\n")
     assert text.split(MARKER, 1)[1].strip() == "## Analysis\n\nkept"
+
+
+# ── Amendment 1: A2's dilution ───────────────────────────────────────────────────────────────────
+
+
+def _coverage(share: str, cell: tuple[str, str, Decimal]) -> A2Coverage:
+    return A2Coverage(
+        share={cell: Decimal(share)},
+        by_year={cell: {2016: Decimal("0.42"), 2021: Decimal(share)}},
+        first_rankable={"niftyit": date(2006, 1, 2)},
+    )
+
+
+def test_a_diluted_a2_takes_no_part_in_the_choice() -> None:
+    cell = (FLOOR, SEL, HIGH_FLOOR)
+    facts = [
+        _facts(A2_INDUSTRY_GATE, cell, "0.40", "0.10"),  # best ratio on the window
+        _facts(D13, cell, "0.20", "0.20"),
+    ]
+    over = decision(facts, [], coverage=_coverage("0.3001", cell))
+    assert "Choice: **Momentum v2, D13 paper config**" in "\n".join(over)
+    at = decision(facts, [], coverage=_coverage("0.30", cell))  # not over 30%: A2 decides
+    assert f"Choice: **{A2_INDUSTRY_GATE}**" in "\n".join(at)
+    # No coverage measured for the cell counts as diluted, never as clean.
+    unmeasured = decision(facts, [], coverage=_coverage("0.10", (FLOOR, VER, HIGH_FLOOR)))
+    assert "Choice: **Momentum v2, D13 paper config**" in "\n".join(unmeasured)
+
+
+def test_decisive_keeps_every_other_arm_and_drops_only_diluted_a2() -> None:
+    cell = (FLOOR, VER, HIGH_FLOOR)
+    rows = [_facts(A2_INDUSTRY_GATE, cell, "0.3", "0.1"), _facts(A7_LOW_VOL, cell, "0.3", "0.1")]
+    assert [f.label for f in decisive(rows, _coverage("0.5", cell))] == [A7_LOW_VOL]
+    assert [f.label for f in decisive(rows, _coverage("0.2", cell))] == [
+        A2_INDUSTRY_GATE,
+        A7_LOW_VOL,
+    ]
+    assert [f.label for f in decisive(rows, None)] == [A7_LOW_VOL]
+    assert Decimal("0.30") == DILUTION_THRESHOLD
+
+
+def test_render_refuses_a2_rows_without_coverage_and_labels_them_with_it() -> None:
+    cell = (FLOOR, VER, HIGH_FLOOR)
+    rows = [_facts(A2_INDUSTRY_GATE, cell, "0.3", "0.1"), _facts(D13, cell, "0.2", "0.2")]
+    with pytest.raises(ValueError, match="A2 coverage"):
+        render(rows, manifests={}, sharpes=[])
+    text = render(rows, manifests={}, sharpes=[], a2_coverage=_coverage("0.45", cell))
+    assert f"{A2_INDUSTRY_GATE} *(diluted: informational, decides nothing)*" in text
+    assert (
+        "| floor-only wf-verification ₹10 cr | 45.00% | diluted | 2016 42.00%, 2021 45.00% |"
+        in text
+    )
+    assert "| niftyit | 2006-01-02 |" in text
+
+
+def test_a2_coverage_file_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "a2.json"
+    path.write_text(
+        json.dumps(
+            {
+                "cells": [
+                    {
+                        "universe": FLOOR,
+                        "window": VER,
+                        "floor": "100000000",
+                        "unclassified_share": "0.25",
+                        "by_year": {"2022": "0.27"},
+                    }
+                ],
+                "first_rankable": {"niftybank": "2005-01-03"},
+            }
+        )
+    )
+    coverage = load_a2_coverage(path)
+    assert coverage.share == {(FLOOR, VER, HIGH_FLOOR): Decimal("0.25")}
+    assert coverage.by_year[(FLOOR, VER, HIGH_FLOOR)] == {2022: Decimal("0.27")}
+    assert coverage.first_rankable == {"niftybank": date(2005, 1, 3)}
+    assert not coverage.diluted((FLOOR, VER, HIGH_FLOOR))

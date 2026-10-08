@@ -2582,7 +2582,8 @@ tasks:
   autonomy: AUTO
   deps: [M16.0]
   spec: |
-    Implement pre-registration §2 A2, as amended in §8, behind a `MomentumV2Parameters` switch that
+    Implement pre-registration §2 A2, as amended by Amendment 1 (§8: unclassified names are
+    gate-neutral; 180/30 calendar-day lookback with a 10-day staleness limit), behind a `MomentumV2Parameters` switch that
     is off by default and out of `repr`. Publish the preset `D13_INDUSTRY_GATE` in
     `backtest.policies.momentum_v2` (Appendix B). The gate ranks the sectoral indices'
     published price-index levels by their 6-1 month return (t-126 to t-21 sessions), knowable on
@@ -2629,21 +2630,23 @@ tasks:
   autonomy: NEEDS_GO
   deps: [M16.0, M16.1, M16.2, M16.3]
   spec: |
-    Start only after both of these are recorded in the pre-registration: the owner's confirmation
-    of the primary selection floor (§4, in §7), and the A2 amendment (§8). On one commit carrying M16.0-M16.3, run `backtest.m12_rerun`:
+    Start only after the owner's confirmation of the primary selection floor (§4) is recorded in
+    the pre-registration's §7. Amendment 1 (§8) already governs A2. On one commit carrying M16.0-M16.3, run `backtest.m12_rerun`:
     - `--arm-set m16` on the floor-only units (walk-forward, decade, six-year);
     - `--arm-set m16-fundamentals` on six-year and wf-verification;
     - both again with `--universe nifty500` on every window its PIT coverage supports at launch.
 
     Two workers at most, and no other campaign on the box. Render
     `ops/gates/M16-strategy-exploration-report.md` with `backtest.m16_report`, passing the M12.R
-    and M14.5 directories as `--trial-dirs` for V. Then apply the rule as written: no extra arm, no
+    and M14.5 directories as `--trial-dirs` for V, and A2's classification coverage per cell and
+    year plus each index's first rankable date as `--a2-coverage` (Amendment 1 (a)). Then apply the rule as written: no extra arm, no
     re-choice after verification. The paper book changes only by owner decision.
   deliverables: [ops/gates/M16-strategy-exploration-report.md]
   acceptance:
     - "every grid cell the pre-registration names has a saved run, or its absence is stated with the engine's reason"
     - "the report is generated from the saved runs, prints N = 75 with V's n, and states the Step 1-4 outcome"
-    - "the primary-floor confirmation (§7) and the A2 amendment (§8) are recorded in the pre-registration before the first run"
+    - "the primary-floor confirmation is recorded in pre-registration §7 before the first run; no amendment is added after the first M16 figure"
+    - "A2 is labelled diluted (informational) in every cell where more than 30% of the floor universe is unclassified"
   verify: "uv run pytest tests/unit/test_m16_report.py -q"
   escalation:
     question: "Confirm the M16 selection floor: choose on the Rs 10 crore floor (pre-registered primary), or name Rs 1 crore?"

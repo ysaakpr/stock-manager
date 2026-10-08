@@ -86,7 +86,10 @@ def test_an_incomplete_set_raises_naming_every_missing_preset(
 
 
 def _stand_in(
-    monkeypatch: pytest.MonkeyPatch, preset: object, reference: Arm = D13_PAPER_BASELINE
+    monkeypatch: pytest.MonkeyPatch,
+    preset: object,
+    reference: Arm = D13_PAPER_BASELINE,
+    options: tuple[tuple[str, object], ...] = (("regime_daily_reentry", True),),
 ) -> PresetArm:
     module = types.ModuleType("m16_stand_in")
     module.PRESET = preset  # type: ignore[attr-defined]
@@ -97,6 +100,7 @@ def _stand_in(
         note="n",
         module="m16_stand_in",
         preset="PRESET",
+        options=options,
         owner="test",
     )
 
@@ -120,6 +124,7 @@ def test_a_missing_preset_or_module_names_its_owner() -> None:
             note="n",
             module=module,
             preset=preset,
+            options=(("weight_volatility", Decimal("-1")),),
             owner="M16.9",
         )
         assert entry.missing() == (f"{module}.{preset}",)
@@ -129,7 +134,41 @@ def test_a_missing_preset_or_module_names_its_owner() -> None:
 
 def test_a_preset_equal_to_its_reference_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(M16ArmError, match="unchanged"):
-        _stand_in(monkeypatch, D13_PAPER_BASELINE.v2).resolve()
+        _stand_in(monkeypatch, D13_PAPER_BASELINE.v2, options=(("top_n", 20),)).resolve()
+
+
+def test_a_preset_that_is_not_exactly_the_preregistered_switch_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paper = D13_PAPER_BASELINE.v2
+    assert paper is not None
+    # The switch on, plus a second change nobody pre-registered.
+    drifted = replace(paper, regime_daily_reentry=True, top_n=10, sell_band=30)
+    with pytest.raises(M16ArmError, match="with exactly"):
+        _stand_in(monkeypatch, drifted).resolve()
+
+
+def test_an_option_the_parameter_class_lacks_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    paper = D13_PAPER_BASELINE.v2
+    assert paper is not None
+    preset = replace(paper, regime_daily_reentry=True)
+    with pytest.raises(M16ArmError, match="has no option industry_gate_top"):
+        _stand_in(monkeypatch, preset, options=(("industry_gate_top", 5),)).resolve()
+
+
+def test_the_arms_name_the_preregistered_presets_and_switches() -> None:
+    # Amendment 1 (c)/(d): A2 is the boolean industry_gate (K = 5 fixed), A3 is residual_ranking.
+    entries = [e for e in (*M16_ALL_WINDOW, *M16_FUNDAMENTALS) if isinstance(e, PresetArm)]
+    assert {e.label: (e.preset, dict(e.options)) for e in entries} == {
+        "D13 + absolute momentum (A1)": ("D13_ABS_MOM", {"absolute_momentum": True}),
+        "D13 + industry gate (A2)": ("D13_INDUSTRY_GATE", {"industry_gate": True}),
+        "Residual momentum v2 (A3)": ("D13_RESID_MOM", {"residual_ranking": True}),
+        "D13 + profitability filter (A4)": ("D13_PROFIT_FILTER", {"profitability_filter": True}),
+        "M10.7 + earnings-surprise leg (A5)": (
+            "M10_7_EARNINGS_SURPRISE",
+            {"weight_earnings_surprise": Decimal("1")},
+        ),
+    }
 
 
 def test_a_preset_of_the_wrong_engine_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:

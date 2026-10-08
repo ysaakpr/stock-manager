@@ -68,10 +68,12 @@ from backtest.sweep import (
 from backtest.xirr import Cashflow, xirr
 
 __all__ = [
+    "DILUTION_THRESHOLD",
     "M16_TRIAL_LABELS",
     "PRIMARY_FLOOR",
     "TRIALS",
     "TRIALS_ON_RECORD",
+    "A2Coverage",
     "Criterion",
     "RunFacts",
     "TrialSharpe",
@@ -80,6 +82,8 @@ __all__ = [
     "config_key",
     "criteria",
     "decision",
+    "decisive",
+    "load_a2_coverage",
     "main",
     "render",
     "scorecard",
@@ -107,6 +111,9 @@ BAR: Final = Decimal("0.25")
 DD_TOLERANCE: Final = Decimal("0.03")
 #: Step 2 criterion 5: deflated-Sharpe probability at least this.
 DSR_THRESHOLD: Final = 0.95
+#: Amendment 1 (a): A2 is *diluted* — informational, deciding nothing — in any cell where more than
+#: this share of the floor universe is missing from the (2026-snapshot) industry classification.
+DILUTION_THRESHOLD: Final = Decimal("0.30")
 
 #: The arms Step 1 ranks (every arm with a selection-window row); A4/A5 have none (§2, §4).
 SELECTION_LABELS: Final = (
@@ -447,6 +454,59 @@ def with_blends(facts: Sequence[RunFacts]) -> list[RunFacts]:
     return out
 
 
+# ── A2's classification coverage (Amendment 1 (a)) ──────────────────────────────────────────────
+
+Cell = tuple[str, str, Decimal]
+
+
+@dataclass(frozen=True, slots=True)
+class A2Coverage:
+    """How much of each cell's floor universe the industry classification leaves out.
+
+    The classification is a 2026 snapshot, so names delisted or merged since are absent from it,
+    and under Amendment 1 an unclassified name passes the gate. ``share`` is the unclassified
+    share of the floor universe (before the gate) over a cell's rebalance sessions, ``by_year`` the
+    same per calendar year, and ``first_rankable`` each sector index's first rankable date.
+    Produced at campaign time from the lake (M16.4); this module only reads it.
+    """
+
+    share: Mapping[Cell, Decimal]
+    by_year: Mapping[Cell, Mapping[int, Decimal]]
+    first_rankable: Mapping[str, date]
+
+    def diluted(self, cell: Cell) -> bool:
+        """Whether A2 decides nothing in ``cell``: over the threshold, or not measured at all."""
+        share = self.share.get(cell)
+        return share is None or share > DILUTION_THRESHOLD
+
+
+def load_a2_coverage(path: Path) -> A2Coverage:
+    """Read an A2 coverage file.
+
+    The file is ``{"cells": [{"universe", "window", "floor", "unclassified_share",
+    "by_year": {"2016": "0.42", ...}}], "first_rankable": {"<index slug>": "YYYY-MM-DD"}}``, with
+    shares as decimal strings.
+    """
+    doc = _load(path)
+    share: dict[Cell, Decimal] = {}
+    by_year: dict[Cell, dict[int, Decimal]] = {}
+    for entry in doc["cells"]:
+        cell = (str(entry["universe"]), str(entry["window"]), Decimal(str(entry["floor"])))
+        share[cell] = Decimal(str(entry["unclassified_share"]))
+        by_year[cell] = {int(y): Decimal(str(v)) for y, v in entry.get("by_year", {}).items()}
+    first = {str(k): date.fromisoformat(v) for k, v in doc.get("first_rankable", {}).items()}
+    return A2Coverage(share=share, by_year=by_year, first_rankable=first)
+
+
+def decisive(facts: Sequence[RunFacts], coverage: A2Coverage | None) -> list[RunFacts]:
+    """The rows the rule may read: every row except A2's in a diluted (or unmeasured) cell."""
+    return [
+        f
+        for f in facts
+        if f.label != A2_INDUSTRY_GATE or (coverage is not None and not coverage.diluted(f.cell))
+    ]
+
+
 # ── the decision ─────────────────────────────────────────────────────────────────────────────────
 
 
@@ -623,15 +683,18 @@ def _blocks(blocks: Mapping[str, int]) -> str:
     return ", ".join(f"{k} {v}" for k, v in sorted(blocks.items())) or "—"
 
 
-def _table(rows: Sequence[RunFacts]) -> list[str]:
+def _table(rows: Sequence[RunFacts], coverage: A2Coverage | None = None) -> list[str]:
     base = next((r for r in rows if r.label == D13), None)
     lines = [
         "| # | Strategy | XIRR | Max DD | **XIRR/DD** | Δ XIRR vs D13 | Δ DD vs D13 | Excess vs "
-        "NIFTY 50 TRI | Trades | Charges | A8 min-holdings refusals | All rail blocks | >25%? |",
+        "NIFTY 50 TRI | Trades | Charges | A8 min-holdings refused sells | All rail blocks "
+        "| >25%? |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for position, row in enumerate(sorted(rows, key=lambda r: (-r.ratio, r.label)), start=1):
         name = f"**{row.label}**" if row is base else row.label
+        if row.label == A2_INDUSTRY_GATE and (coverage is None or coverage.diluted(row.cell)):
+            name += " *(diluted: informational, decides nothing)*"
         dx = "—" if base is None or row is base else _pp(row.xirr - base.xirr)
         dd = "—" if base is None or row is base else _pp(row.max_drawdown - base.max_drawdown)
         lines.append(
@@ -701,6 +764,40 @@ def scorecard(facts: Sequence[RunFacts]) -> list[str]:
     return out
 
 
+def a2_coverage_lines(coverage: A2Coverage | None) -> list[str]:
+    """Amendment 1 (a): A2's unclassified share per cell and year, and the indices' first dates."""
+    out = ["## A2 — industry-classification coverage (Amendment 1)", ""]
+    if coverage is None:
+        return [*out, "No coverage file was supplied; every A2 row is diluted.", ""]
+    out += [
+        "Unclassified share of the floor universe (names absent from the 2026 classification, "
+        f"which pass the gate). Over {_p(DILUTION_THRESHOLD)} in a cell, A2 is **diluted** "
+        "there: shown, but informational, and read by no step of the rule.",
+        "",
+        "| Cell | Unclassified | A2 | By year |",
+        "| --- | --- | --- | --- |",
+    ]
+    for cell in sorted(
+        coverage.share,
+        key=lambda c: (
+            c[0] != FLOOR_ONLY,
+            c[0],
+            _WINDOW_ORDER.index(c[1]) if c[1] in _WINDOW_ORDER else 9,
+            c[2],
+        ),
+    ):
+        years = ", ".join(f"{y} {_p(v)}" for y, v in sorted(coverage.by_year.get(cell, {}).items()))
+        verdict = "diluted" if coverage.diluted(cell) else "decides"
+        out.append(
+            f"| {_cell_name(cell)} | {_p(coverage.share[cell])} | {verdict} | {years or '—'} |"
+        )
+    out += ["", "| Sector index | First rankable date |", "| --- | --- |"]
+    for slug, first in sorted(coverage.first_rankable.items()):
+        out.append(f"| {slug} | {first.isoformat()} |")
+    out.append("")
+    return out
+
+
 def _criteria_lines(label: str, tests: Sequence[Criterion], outcome: str) -> list[str]:
     lines = [f"**{label}**", "", "| Criterion | Result | Figures |", "| --- | --- | --- |"]
     for test in tests:
@@ -711,9 +808,17 @@ def _criteria_lines(label: str, tests: Sequence[Criterion], outcome: str) -> lis
 
 
 def decision(
-    facts: Sequence[RunFacts], sharpes: Sequence[TrialSharpe], *, missing: Sequence[str] = ()
+    facts: Sequence[RunFacts],
+    sharpes: Sequence[TrialSharpe],
+    *,
+    missing: Sequence[str] = (),
+    coverage: A2Coverage | None = None,
 ) -> list[str]:
-    """Steps 1-4 of the pre-registration's selection rule, as report lines."""
+    """Steps 1-4 of the pre-registration's selection rule, as report lines.
+
+    Reads only :func:`decisive` rows: A2 in a diluted cell takes part in no step (Amendment 1).
+    """
+    facts = decisive(facts, coverage)
     primary, secondary = select(facts, PRIMARY_FLOOR), select(facts, SECONDARY_FLOOR)
     out = [
         "## Decision (pre-registered rule)",
@@ -782,8 +887,15 @@ def render(
     sharpes: Sequence[TrialSharpe],
     missing: Sequence[str] = (),
     hand_written: str = "",
+    a2_coverage: A2Coverage | None = None,
 ) -> str:
-    """The whole report: provenance, the tables, the scorecard, the decision."""
+    """The whole report: provenance, the tables, the scorecard, the decision.
+
+    Raises ``ValueError`` when A2 has rows but no coverage was supplied: its dilution label
+    (Amendment 1) cannot be struck without it.
+    """
+    if a2_coverage is None and any(f.label == A2_INDUSTRY_GATE for f in facts):
+        raise ValueError("A2 rows need an A2 coverage file (--a2-coverage; Amendment 1)")
     out = [
         "# M16 — strategy exploration (gate report)",
         "",
@@ -827,9 +939,10 @@ def render(
             for floor in (LOW_FLOOR, HIGH_FLOOR):
                 rows = [f for f in facts if f.cell == (universe, window, floor)]
                 if rows:
-                    out += [f"**{_floor_label(floor)}**", "", *_table(rows), ""]
+                    out += [f"**{_floor_label(floor)}**", "", *_table(rows, a2_coverage), ""]
+    out += a2_coverage_lines(a2_coverage)
     out += scorecard(facts)
-    out += decision(facts, sharpes, missing=missing)
+    out += decision(facts, sharpes, missing=missing, coverage=a2_coverage)
     out += [MARKER, hand_written.strip("\n"), ""]
     return "\n".join(out)
 
@@ -843,6 +956,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         type=Path,
         default=[],
         help="earlier saved runs (M12.R, M14.5) read for V only; later directories win a tie",
+    )
+    parser.add_argument(
+        "--a2-coverage",
+        type=Path,
+        default=None,
+        help="A2's classification coverage per cell (Amendment 1); required when A2 has runs",
     )
     parser.add_argument("--out", type=Path, default=REPORT)
     return parser.parse_args(argv)
@@ -875,6 +994,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             sharpes=trial_sharpes(facts, extra),
             missing=missing,
             hand_written=hand_written,
+            a2_coverage=load_a2_coverage(args.a2_coverage) if args.a2_coverage else None,
         ),
         encoding="utf-8",
     )
