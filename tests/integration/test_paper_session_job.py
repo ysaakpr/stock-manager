@@ -278,6 +278,27 @@ def test_the_table_refuses_a_recon_break_that_claims_orders(scratch: Settings) -
         )
 
 
+@pytest.mark.parametrize(
+    ("rebalanced", "recon"),
+    [
+        ("true", '{"status": "BREAK", "key": "RECON:2026-10-07", "terms": "0123456789abcdef"}'),
+        ("false", '{"status": "BREAK", "terms": "0123456789abcdef"}'),
+        ("false", '{"status": "BREAK", "key": "RECON:2026-10-07"}'),
+    ],
+    ids=["rebalanced", "no-key", "no-terms"],
+)
+def test_the_table_refuses_a_recon_break_row_it_could_not_resolve_or_that_rebalanced(
+    scratch: Settings, rebalanced: str, recon: str
+) -> None:
+    with connection(scratch) as conn, pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute(
+            "INSERT INTO paper_session (book_id, trading_date, outcome, reason, rebalanced, "
+            "journal_digest, book_state, book_digest, recon, recorded_at) VALUES "
+            f"('paper_check_book', '2026-10-07', 'RECON_BREAK', 'break', {rebalanced}, 'x', "
+            f"'{{}}'::jsonb, 'd', '{recon}'::jsonb, now())"
+        )
+
+
 def test_a_recon_break_is_stored_halts_the_book_and_clears_only_by_reset_and_resolution(
     scratch: Settings,
 ) -> None:
@@ -416,6 +437,13 @@ def test_0015_keeps_a_book_saved_before_it_and_the_next_session_decides(
         assert result.record is not None and result.record.recon is not None
         assert result.record.recon.seeded and result.record.recon.status is ReconStatus.CLEAN
         assert result.record.recon.executed, "the legacy session's staged orders filled"
+        # Seeded once: the next session restores the accounting book the previous one persisted.
+        _publish(enabled, OCT_THIRD)
+        third = _run(enabled, OCT_THIRD, FixtureWorld())
+        assert third.verdict is RunVerdict.DECIDED
+        assert third.record is not None and third.record.recon is not None
+        assert not third.record.recon.seeded
+        assert third.record.recon.status is ReconStatus.CLEAN
     finally:
         conn = connect(admin, autocommit=True)
         try:

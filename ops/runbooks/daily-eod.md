@@ -352,8 +352,14 @@ uv run python -m execution.kill_switch status --account momentum_v2_paper_2026_0
 
   ```bash
   uv run python -m execution.kill_switch reset --account momentum_v2_paper_2026_09_06 \
-      --note "<who>: <what was wrong and why it is safe to trade again>"
+      --by "<who>" --note "<what was wrong and why it is safe to trade again>"
   ```
+
+  The reset is persisted in the switch file (`last_reset`: when, `--by` — the OS user if omitted —
+  the note, and the trip it cleared), so a trip-and-reset leaves a trace beyond the log. A switch
+  file that exists but has no boolean `tripped` is refused rather than read as armed: the job
+  fails and `/status/paper` reports the error. Fix or restore the file; never delete it to "arm"
+  the switch without understanding why it was unreadable.
 
   To halt the paper book on purpose (an incident, a drill, a data question you want answered
   before it trades again):
@@ -394,6 +400,14 @@ uv run python -m execution.kill_switch status --account momentum_v2_paper_2026_0
 
   4. Reset the switch (previous item). The next run decides the owed session; check its row says
      `recon = CLEAN` and `GET /status/paper` is healthy.
+
+  `GET /status/paper` **stays unhealthy after the resolution and the reset** until that next
+  session has run: its `latest_outcome` is still the `RECON_BREAK` row. That is expected — the
+  book is healthy again once a session has decided and reconciled clean on it, not when the
+  paperwork is done. `kill_switch.tripped = false` and an empty `unresolved` list confirm the two
+  steps landed; the reset itself is recorded in the switch file as `last_reset` (who, when, the
+  note, and the trip it cleared) — `python -m execution.kill_switch status --account …` shows it.
+  A break day is never the month's rebalance: the first green session after it rebalances.
 
   A break is never repaired automatically and the switch never re-arms itself: the whole value of
   the check is that it does not negotiate.
