@@ -1,0 +1,157 @@
+# M16.2 — the ratified industry classification mapped to NSE sectoral price indices.
+#
+# Read by backtest/sector_indices.py (load_sector_index_map). The momentum v2 industry gate
+# (backtest/policies/industry_gate.py) ranks the *indices* named here by their 6-1 month return,
+# keeps the top 5, and admits only names whose industry maps to one of them. An industry mapped to
+# `null` is unmapped: with the gate on, every name in it is ineligible. So is any ISIN the
+# classification does not name at all (see "Survivorship" below).
+#
+# The classification is the one A8's sector rail already uses (backtest/rails.py,
+# ratified_sector_map): NSE's Nifty Total Market constituent list of 2026-09-08, 755 names in 22
+# industries. Its granularity is NSE's *industry* (macro-sector) level — there is no basic-industry
+# column — so one industry maps to at most one index, and indices narrower than an industry
+# (NIFTY BANK, PSU BANK, PVT BANK inside Financial Services) cannot be told apart from it and are
+# not used. Thematic and strategy indices (MNC, PSE, CPSE, Consumption, Commodities, Services
+# Sector, India Manufacturing, Defence, ...) cut across industries and are not used either.
+#
+# Every mapping is to a *price* index read from data/L1/pr_index_eod (the daily PR bundle), which
+# is what M16.2 specifies. Ranking on price rather than total return differs by the dividend-yield
+# spread between sectors over five months — a few tenths of a percent — and is stated, not hidden.
+#
+# Index ids changed when NSE renamed its CNX indices on 2015-11-09. `aliases` lists every id one
+# series has been published under; the loader chains them into one series. Each chain was checked
+# against the store: on 2015-11-09 the Nifty-named id's prev_close equals the CNX-named id's
+# 2015-11-06 close exactly, for every pair below, and no two aliases publish on the same session.
+# The first session each id appears in the store is noted; a series is never backfilled before it
+# (the gate only ranks an index once it has a published level six months before the decision).
+#
+# Survivorship: the classification is a 2026-09-08 snapshot applied to every decision date. A name
+# that left the Nifty Total Market before then is not in it, so under the gate it is unmapped and
+# ineligible — the gate shrinks the historical universe toward today's survivors. That bias is the
+# same static-map limitation ops/gates/M10-sector-rotation-report.md states, now over 755 names in
+# 22 industries rather than 42 in 12; a gate report must state it next to its numbers.
+
+classification:
+  source: tests/fixtures/nse_market_structure/2026-09-08/ind_niftytotalmarket_list.csv
+  sha256: 6b23b6c155d7ffead0b8ef89e75d54e61e74f6d39e2aece7392aa02a9492e445
+
+indices:
+  NIFTY AUTO:
+    aliases: [CNX AUTO, Nifty Auto]          # 2011-10-03 / 2015-11-09
+  NIFTY CHEMICALS:
+    aliases: [Nifty Chemicals]               # 2025-11-10
+  NIFTY CONSUMER DURABLES:
+    aliases: [NIFTY CONSR DURBL]             # 2021-08-09
+  NIFTY ENERGY:
+    aliases: [CNX Energy, Nifty Energy]      # 2011-01-31 / 2015-11-09
+  NIFTY FIN SERVICE:
+    aliases: [CNX Finance, Nifty Fin Service]  # 2012-02-27 / 2015-11-09
+  NIFTY FMCG:
+    aliases: [CNX FMCG, Nifty FMCG]          # 2011-01-31 / 2015-11-09
+  NIFTY INFRA:
+    aliases: [CNX Infra, Nifty Infra]        # 2010-07-19 / 2015-11-09
+  NIFTY IT:
+    aliases: [NIFTY IT]                      # 2010-01-04 (store start)
+  NIFTY MEDIA:
+    aliases: [CNX Media, Nifty Media]        # 2011-10-03 / 2015-11-09
+  NIFTY METAL:
+    aliases: [CNX Metal, Nifty Metal]        # 2011-10-03 / 2015-11-09
+  NIFTY PHARMA:
+    aliases: [CNX Pharma, Nifty Pharma]      # 2011-01-31 / 2015-11-09
+  NIFTY REALTY:
+    aliases: [CNX Realty, Nifty Realty]      # 2010-07-19 / 2015-11-09
+
+# Every industry in the classification appears here exactly once. `why` is the reviewed reason.
+industries:
+  Automobile and Auto Components:
+    index: NIFTY AUTO
+    why: The sector index for the industry — OEMs and auto-component makers.
+  Capital Goods:
+    index: null
+    why: >-
+      No NSE sectoral capital-goods index in the PR bundle. NIFTY INFRA is dominated by telecom,
+      power, oil and cement rather than machinery and electricals; India Manufacturing (2022) and
+      India Defence (2024) are thematic and cut across industries. Unmapped rather than proxied.
+  Chemicals:
+    index: NIFTY CHEMICALS
+    why: >-
+      The exact sector index. It is first published 2025-11-10, so the gate cannot rank it before
+      mid-2026 and Chemicals names are ineligible until then — no backfill.
+  Construction:
+    index: NIFTY INFRA
+    why: >-
+      Construction and engineering (L&T and peers) is a core constituent group of NIFTY INFRA;
+      there is no narrower construction index.
+  Construction Materials:
+    index: NIFTY INFRA
+    why: >-
+      Cement makers are NIFTY INFRA constituents. Nifty Cement exists only from 2026-05-11, too
+      late to rank in any history the backtests use.
+  Consumer Durables:
+    index: NIFTY CONSUMER DURABLES
+    why: The exact sector index; first published 2021-08-09, so ineligible before early 2022.
+  Consumer Services:
+    index: null
+    why: >-
+      Retail, hotels, food delivery and travel have no sectoral index. Nifty Consumption is a
+      cross-industry theme weighted to FMCG and autos, so it would rank another industry's
+      momentum. Unmapped.
+  Diversified:
+    index: null
+    why: Three conglomerates; NiftyConglomerate starts 2026-02-09. Unmapped.
+  Fast Moving Consumer Goods:
+    index: NIFTY FMCG
+    why: The sector index for the industry.
+  Financial Services:
+    index: NIFTY FIN SERVICE
+    why: >-
+      The industry spans banks, NBFCs, insurers and capital-market firms; NIFTY FIN SERVICE (CNX
+      Finance before 2015-11-09) covers that whole span. NIFTY BANK / PSU BANK / PVT BANK are
+      narrower than the industry and the classification cannot say which names are banks.
+  Forest Materials:
+    index: null
+    why: One name; no index. Unmapped.
+  Healthcare:
+    index: NIFTY PHARMA
+    why: >-
+      Pharmaceuticals are most of the industry by count and by weight. NIFTY HEALTHCARE is the
+      exact match but is in the store only from 2021-08-09; NIFTY PHARMA runs from 2011-01-31 and
+      is chosen for history. Hospitals and diagnostics ride on the pharma index's momentum.
+  Information Technology:
+    index: NIFTY IT
+    why: The sector index for the industry.
+  Media Entertainment & Publication:
+    index: NIFTY MEDIA
+    why: The sector index for the industry.
+  Metals & Mining:
+    index: NIFTY METAL
+    why: The sector index for the industry.
+  Oil Gas & Consumable Fuels:
+    index: NIFTY ENERGY
+    why: >-
+      NIFTY ENERGY (oil, gas, coal and power) is the long-history index; NIFTY OIL AND GAS is the
+      exact match but starts 2021-08-09.
+  Power:
+    index: NIFTY ENERGY
+    why: Power generators and transmitters are NIFTY ENERGY constituents; no separate power index.
+  Realty:
+    index: NIFTY REALTY
+    why: The sector index for the industry.
+  Services:
+    index: null
+    why: >-
+      Logistics, ports, staffing and other business services have no sectoral index; Nifty
+      Services Sector is mostly IT, banks and telecom. Unmapped.
+  Telecommunication:
+    index: null
+    why: >-
+      No telecom sectoral index. NIFTY INFRA holds the largest telco but is not a telecom index,
+      and Nifty India Digital (2022) is a cross-industry theme. Unmapped.
+  Textiles:
+    index: null
+    why: No textiles index. Unmapped.
+  Utilities:
+    index: null
+    why: >-
+      City-gas distributors and water utilities have no sectoral index of their own and are not a
+      stable part of NIFTY ENERGY. Unmapped rather than proxied.
