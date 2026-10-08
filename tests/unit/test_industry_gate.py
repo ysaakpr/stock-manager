@@ -1,21 +1,27 @@
 """M16.2 — momentum v2's point-in-time industry-momentum gate (off by default).
 
 The gate ranks NSE sectoral indices by their 6-1 month return from *published* levels, keeps the top
-five, and admits only names whose industry maps to one of them. The tests here pin, each with an
-inverted twin where the rule has a direction: the ranking keeps the strongest indices (not the
-weakest); a level published after the decision date is never read, and a reading dated after it
-trips the PIT guard; an index that starts mid-window is rankable only six months after its first
-published level; unmapped and unclassified names are excluded; the reviewed mapping table covers the
-classification exactly; and with the gate off D13's replay digest and run fingerprint are the ones
-struck before M16.2.
+five, and drops every classified name whose industry is not mapped to one of them. A name the
+classification does not name is gate-neutral and passes (PR #97 review, B1: the 2026 snapshot
+omits every name that died before it). The tests here pin, each with an inverted twin where the
+rule has a direction: the ranking keeps the strongest indices; the return is 6-1, not 1-6 or 0-6;
+unclassified names pass while unmapped and non-top-5 names do not; a level published after the
+decision date is never read, and a reading dated after it trips the PIT guard; an index that starts
+mid-window is rankable only 180 calendar days after its first published level; the reviewed table
+covers the classification exactly; and with the gate off D13's replay digest and run fingerprint
+are the ones struck before M16.2.
+
+Fixtures are local on purpose: this file imports no private helper from another test module.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -40,7 +46,13 @@ from backtest.policies.momentum_v2 import (
     MomentumV2Record,
     RegimeReading,
 )
-from backtest.rails import BacktestRailPolicy, RailGate, SectorMap, ratified_sector_map
+from backtest.rails import (
+    BacktestRailPolicy,
+    RailGate,
+    SectorMap,
+    ratified_backtest_rail_policy,
+    ratified_sector_map,
+)
 from backtest.replay import ReplayEngine, ReplayResult, SessionContext, SessionDecision
 from backtest.run import _AccountingBroker, backtest_spec
 from backtest.run_ledger import run_digest
@@ -50,31 +62,31 @@ from backtest.sector_indices import (
     SectorIndexError,
     SectorIndexLevel,
     SectorIndexLevels,
+    UnclassifiedShare,
+    first_rankable_dates,
     load_sector_index_map,
+    unclassified_shares,
 )
 from dataplatform.clock import FrozenClock
 from dataplatform.query.pit import Dataset, PitContext, PitError
 from execution.broker import Exchange, Holding, Margins, Side
 from execution.costs import CostModel, load_rate_card
-from execution.sim_broker import SimBroker
+from execution.sim_broker import NoReferenceBarError, ReferenceBar, SimBroker
 from tests.rails_support import marks_from
-from tests.unit.test_buy_sizing_ceiling import NAMES, PRICE, RAILS, _Market
-from tests.unit.test_momentum_v2_daily_regime import (
-    _D13_DIGEST_BEFORE_M14_5,
-    _OPENING,
-    _SESSIONS,
-    _ScriptedData,
-)
-from tests.unit.test_momentum_v2_daily_regime import _replay as _d13_replay
 
 D13 = PAPER_RATIFIED_2026_09_06
 SESSION = date(2024, 7, 1)
+NAMES = tuple(f"INE{index:03d}A01010" for index in range(1, 11))
+PRICE = Decimal("100")
+RAILS = ratified_backtest_rail_policy().rails
+UNCLASSIFIED = "INE011A01010"
 
 # Seven indices, strongest first: S1 +0.7 ... S7 +0.1. The top five are S1..S5.
 _INDEX_MOMENTUM = {f"S{n}": Decimal(8 - n) / 10 for n in range(1, 8)}
 _TOP5 = frozenset({"S1", "S2", "S3", "S4", "S5"})
-# Ten names. The two strongest *stocks* sit in the two weakest indices, and the third in no index:
-# without the gate they lead the basket; with it they must be the names left out.
+# The classified names. The two strongest classified *stocks* sit in the two weakest indices and the
+# third in an unmapped industry (None): ungated they lead the basket, gated they are the names left
+# out. UNCLASSIFIED is absent on purpose — it is the strongest stock of all and must pass the gate.
 _NAME_INDEX: dict[str, str | None] = {
     NAMES[0]: "S7",
     NAMES[1]: "S6",
@@ -102,33 +114,30 @@ def _reading(index: str, momentum: Decimal, knowable: date) -> IndexMomentum:
 
 
 def _records(as_of: date) -> tuple[MomentumV2Record, ...]:
-    # Stock momentum falls with the name's position: NAMES[0] strongest.
+    # Stock momentum falls with position: UNCLASSIFIED (0.95) strongest, then NAMES[0] (0.9) ...
+    order = (
+        (UNCLASSIFIED, Decimal("0.95")),
+        *((isin, Decimal(9 - n) / 10) for n, isin in enumerate(NAMES)),
+    )
     return tuple(
         MomentumV2Record(
             isin=isin,
-            momentum_0_12=Decimal(10 - n) / 10,
-            momentum_12_1=Decimal(10 - n) / 10,
+            momentum_0_12=momentum,
+            momentum_12_1=momentum,
             price=PRICE,
             volatility=Decimal("0.2"),
             knowable_date=as_of,
         )
-        for n, isin in enumerate(NAMES)
+        for isin, momentum in order
     )
 
 
 class _GatedData:
-    """A rebalance every session, risk-on, the ten names above, and scripted sector readings."""
+    """A rebalance every session, risk-on, the eleven names above, and scripted sector readings."""
 
-    def __init__(
-        self,
-        momentum: dict[str, Decimal] | None = None,
-        *,
-        leak: bool = False,
-        name_index: dict[str, str | None] | None = None,
-    ) -> None:
+    def __init__(self, momentum: dict[str, Decimal] | None = None, *, leak: bool = False) -> None:
         self._momentum = _INDEX_MOMENTUM if momentum is None else momentum
         self._leak = leak
-        self._name_index = _NAME_INDEX if name_index is None else name_index
 
     def is_rebalance(self, session: date) -> bool:
         return True
@@ -149,14 +158,18 @@ class _GatedData:
         readings = tuple(_reading(i, m, knowable) for i, m in self._momentum.items())
         return Dataset.declaring(f"s@{as_of}", readings, knowable_date=lambda r: r.knowable_date)
 
+    def is_classified(self, isin: str) -> bool:
+        return isin in _NAME_INDEX
+
     def sector_index_of(self, isin: str) -> str | None:
-        return self._name_index.get(isin)
+        return _NAME_INDEX[isin]
 
 
 class _UngatedData(_GatedData):
     """The same world without the gate's reads — a source not wired for the gate."""
 
     sector_index_momentum = None  # type: ignore[assignment]
+    is_classified = None  # type: ignore[assignment]
     sector_index_of = None  # type: ignore[assignment]
 
 
@@ -252,7 +265,7 @@ def test_the_gate_keeps_the_five_strongest_indices_inversion() -> None:
     assert TOP_K == 5
     assert outcome.chosen == _TOP5
     assert [r.index for r in outcome.ranked] == [f"S{n}" for n in range(1, 8)]
-    assert {r.isin for r in admitted} == set(NAMES[3:])
+    assert {r.isin for r in admitted} == {UNCLASSIFIED, *NAMES[3:]}
 
 
 def test_rank_ties_break_by_index_name() -> None:
@@ -260,45 +273,111 @@ def test_rank_ties_break_by_index_name() -> None:
     assert [r.index for r in rank_indices(tied)] == ["SA", "SB", "SC"]
 
 
+def _level(
+    index: str, session: date, close: str, published: date | None = None
+) -> SectorIndexLevel:
+    return SectorIndexLevel(
+        index=index, session=session, publication_date=published or session, close=Decimal(close)
+    )
+
+
+def _series(index: str, points: dict[date, str]) -> list[SectorIndexLevel]:
+    return [_level(index, day, close) for day, close in points.items()]
+
+
+def test_the_return_is_6_1_not_1_6_or_0_6() -> None:
+    # Decision 2024-07-01: the 6m reference is 2024-01-03 (180 calendar days), the 1m 2024-06-01.
+    # PEAKED rose 6m->1m then crashed in the last month; LATE was flat 6m->1m and then surged.
+    # 6-1 ranks PEAKED first (+50% vs 0%). Swapping the anchors (1-6) gives PEAKED -33%, LATE 0%;
+    # dropping the skip (0-6) gives PEAKED -10%, LATE +100%. Either inversion puts LATE first.
+    six, one, now = date(2024, 1, 3), date(2024, 5, 31), date(2024, 7, 1)
+    levels = SectorIndexLevels(
+        [
+            *_series("PEAKED", {six: "100", one: "150", now: "90"}),
+            *_series("LATE", {six: "100", one: "100", now: "200"}),
+        ]
+    )
+    ranked = rank_indices(levels.readings(["LATE", "PEAKED"], now))
+    assert [r.index for r in ranked] == ["PEAKED", "LATE"]
+    assert ranked[0].momentum == Decimal("0.5")
+    assert (ranked[0].start_session, ranked[0].end_session) == (six, one)
+
+
 def test_with_the_gate_the_basket_comes_from_the_top_indices_only() -> None:
     gated = _decide(_params(industry_gate=True), _GatedData())
     ungated = _decide(_params(), _GatedData())
-    assert _bought(ungated) == {NAMES[0], NAMES[1], NAMES[2]}
-    assert _bought(gated) == {NAMES[3], NAMES[4], NAMES[5]}
+    assert _bought(ungated) == {UNCLASSIFIED, NAMES[0], NAMES[1]}
+    assert _bought(gated) == {UNCLASSIFIED, NAMES[3], NAMES[4]}
 
 
-def test_unmapped_names_are_excluded_even_when_their_stock_momentum_leads() -> None:
-    # NAMES[2] (no index) is the third-strongest stock; every index is in the top five here.
+# ── classified, unmapped, unclassified ───────────────────────────────────────────────────────────
+
+
+def test_unclassified_names_are_gate_neutral_inversion() -> None:
+    # If "unclassified" were read as "ineligible" (the survivorship bias B1 removed), the strongest
+    # stock would be dropped and this fails.
+    admitted, outcome = apply_industry_gate(_GatedData(), _ctx(), _records(SESSION))
+    assert UNCLASSIFIED in {r.isin for r in admitted}
+    assert outcome.unclassified_admitted == 1
+    assert UNCLASSIFIED in _bought(_decide(_params(industry_gate=True), _GatedData()))
+
+
+def test_a_classified_name_in_an_unmapped_industry_is_excluded_inversion() -> None:
+    # NAMES[2] is classified, industry unmapped. Every mapped index is in the top five here, so the
+    # only thing that can drop it is "unmapped means ineligible"; were unmapped treated like
+    # unclassified (neutral), it would be bought.
     momentum = {"S1": Decimal("0.3"), "S6": Decimal("0.2"), "S7": Decimal("0.1")}
-    decision = _decide(_params(industry_gate=True), _GatedData(momentum))
+    decision = _decide(_params(industry_gate=True, top_n=4), _GatedData(momentum))
     assert NAMES[2] not in _bought(decision)
-    assert {NAMES[0], NAMES[1]} <= _bought(decision)
+    assert _bought(decision) == {UNCLASSIFIED, NAMES[0], NAMES[1], NAMES[3]}
+
+
+def test_a_classified_name_in_a_non_top_5_index_is_excluded() -> None:
+    admitted, _ = apply_industry_gate(_GatedData(), _ctx(), _records(SESSION))
+    assert not {NAMES[0], NAMES[1]} & {r.isin for r in admitted}  # S7, S6: ranks 7 and 6
+
+
+def test_the_map_tells_unclassified_from_unmapped() -> None:
+    index_map = load_sector_index_map()
+    unmapped = next(
+        isin for isin, industry in index_map.sectors.by_isin.items() if industry == "Capital Goods"
+    )
+    assert index_map.is_classified(unmapped)
+    assert index_map.index_of(unmapped) is None
+    assert not index_map.is_classified("INE000X00000")
+    with pytest.raises(SectorIndexError, match="not in the classification"):
+        index_map.index_of("INE000X00000")
 
 
 def test_a_held_name_whose_index_drops_out_is_sold() -> None:
     held = (Holding(isin=NAMES[0], exchange=Exchange.NSE, quantity=10, average_price=PRICE),)
-    gated = _decide(_params(industry_gate=True, sell_band=10), _GatedData(), _Broker(held))
-    ungated = _decide(_params(sell_band=10), _GatedData(), _Broker(held))
+    gated = _decide(_params(industry_gate=True, sell_band=11), _GatedData(), _Broker(held))
+    ungated = _decide(_params(sell_band=11), _GatedData(), _Broker(held))
     assert {o.isin for o in gated.orders if o.side is Side.SELL} == {NAMES[0]}
     assert not [o for o in ungated.orders if o.side is Side.SELL]
 
 
-def test_fewer_than_five_rankable_indices_keeps_all_of_them_and_none_admits_nobody() -> None:
+def test_fewer_than_five_rankable_indices_keeps_all_and_none_leaves_only_the_unclassified() -> None:
     two = _decide(
-        _params(industry_gate=True), _GatedData({"S6": Decimal("-0.2"), "S7": Decimal("-0.3")})
+        _params(industry_gate=True),
+        _GatedData({"S6": Decimal("-0.2"), "S7": Decimal("-0.3")}),
     )
-    assert _bought(two) == {NAMES[0], NAMES[1]}
+    assert _bought(two) == {UNCLASSIFIED, NAMES[0], NAMES[1]}
     none = _decide(_params(industry_gate=True), _GatedData({}))
-    assert not none.orders
-    assert any("none eligible" in (item.text or "") for item in none.evidence.items)
+    assert _bought(none) == {UNCLASSIFIED}
+    assert any("only unclassified" in (item.text or "") for item in none.evidence.items)
 
 
-def test_the_decision_evidence_records_the_ranking() -> None:
+def test_the_decision_evidence_records_the_ranking_and_the_neutral_count() -> None:
     decision = _decide(_params(industry_gate=True), _GatedData())
     items = [i for i in decision.evidence.items if i.label == "sector_index_momentum_6_1"]
     assert [(i.detail["index"], i.detail["kept"]) for i in items] == [
         (f"S{n}", "true" if n <= 5 else "false") for n in range(1, 8)
     ]
+    (neutral,) = [
+        i for i in decision.evidence.items if i.label == "industry_gate_unclassified_admitted"
+    ]
+    assert neutral.value == Decimal(1)
 
 
 def test_a_source_not_wired_for_the_gate_is_refused() -> None:
@@ -308,7 +387,7 @@ def test_a_source_not_wired_for_the_gate_is_refused() -> None:
 
 def test_an_outcome_with_no_ranking_still_annotates() -> None:
     outcome = IndustryGateOutcome(ranked=(), chosen=frozenset())
-    assert len(outcome.evidence_items(SESSION)) == 1
+    assert len(outcome.evidence_items(SESSION)) == 2
 
 
 # ── point in time ────────────────────────────────────────────────────────────────────────────────
@@ -321,15 +400,7 @@ def test_a_future_dated_sector_reading_trips_the_pit_guard() -> None:
 
 def test_with_the_gate_off_the_sector_readings_are_never_read() -> None:
     # A leaking sector source is harmless to an ungated policy: it never asks.
-    assert _bought(_decide(_params(), _GatedData(leak=True))) == {NAMES[0], NAMES[1], NAMES[2]}
-
-
-def _level(
-    index: str, session: date, close: str, published: date | None = None
-) -> SectorIndexLevel:
-    return SectorIndexLevel(
-        index=index, session=session, publication_date=published or session, close=Decimal(close)
-    )
+    assert _bought(_decide(_params(), _GatedData(leak=True))) == {UNCLASSIFIED, NAMES[0], NAMES[1]}
 
 
 def test_a_level_published_after_the_decision_date_is_refused() -> None:
@@ -368,9 +439,7 @@ def _daily(
     ]
 
 
-def test_an_index_that_starts_mid_window_is_rankable_only_six_months_after_its_first_level() -> (
-    None
-):
+def test_an_index_that_starts_mid_window_is_rankable_only_180_days_after_its_first_level() -> None:
     first = date(2024, 3, 1)
     levels = SectorIndexLevels(_daily("NEW", first, date(2025, 3, 31)))
     # Six-month reference on 2024-07-01 is 2024-01-03 — before the series exists: no reading, and
@@ -396,12 +465,13 @@ def test_a_mid_window_index_is_not_ranked_before_it_is_rankable() -> None:
 
 def test_a_series_that_stopped_publishing_is_not_carried_forward() -> None:
     levels = SectorIndexLevels(_daily("DEAD", date(2015, 1, 1), date(2015, 11, 6)))
+    last = date(2015, 11, 6)
     assert levels.level_on_or_before(
-        "DEAD", date(2015, 11, 6) + timedelta(days=MAX_STALE_DAYS), as_of=date(2016, 1, 1)
+        "DEAD", last + timedelta(days=MAX_STALE_DAYS), as_of=date(2016, 1, 1)
     )
     assert (
         levels.level_on_or_before(
-            "DEAD", date(2015, 11, 6) + timedelta(days=MAX_STALE_DAYS + 1), as_of=date(2016, 1, 1)
+            "DEAD", last + timedelta(days=MAX_STALE_DAYS + 1), as_of=date(2016, 1, 1)
         )
         is None
     )
@@ -458,6 +528,47 @@ def test_the_l1_loader_never_reads_a_row_published_after_the_decision(tmp_path: 
     assert got is not None and got.close == Decimal("100")
 
 
+# ── report helpers ───────────────────────────────────────────────────────────────────────────────
+
+
+def test_unclassified_shares_per_period() -> None:
+    index_map = load_sector_index_map()
+    classified = sorted(index_map.sectors.by_isin)[:3]
+    shares = unclassified_shares(
+        index_map,
+        {
+            "2017": [*classified, "INE000X00001"],
+            "2016": ["INE000X00001", "INE000X00002", classified[0], classified[0]],
+            "empty": [],
+        },
+    )
+    assert shares == (
+        UnclassifiedShare("2016", 3, 2, Decimal(2) / Decimal(3)),
+        UnclassifiedShare("2017", 4, 1, Decimal("0.25")),
+        UnclassifiedShare("empty", 0, 0, Decimal(0)),
+    )
+
+
+def test_first_rankable_dates_are_180_calendar_days_after_the_first_level() -> None:
+    index_map = load_sector_index_map()
+    levels = SectorIndexLevels(
+        [
+            *_daily("NIFTY IT", date(2024, 3, 1), date(2025, 3, 31)),
+            # Starts on a Saturday, so its first level is Monday 4 March.
+            *_daily("NIFTY AUTO", date(2024, 3, 2), date(2025, 3, 31)),
+        ]
+    )
+    found = first_rankable_dates(levels, index_map)
+    assert set(found) == set(index_map.indices)
+    assert found["NIFTY IT"] == date(2024, 8, 28)
+    assert found["NIFTY AUTO"] == date(2024, 3, 4) + timedelta(days=180)
+    assert found["NIFTY METAL"] is None
+    for index, day in found.items():  # the date found is genuinely the first rankable one
+        if day is not None:
+            assert levels.momentum(index, day) is not None
+            assert levels.momentum(index, day - timedelta(days=1)) is None
+
+
 # ── the mapping table ────────────────────────────────────────────────────────────────────────────
 
 _UNMAPPED = (
@@ -484,13 +595,9 @@ def test_the_reviewed_table_covers_the_ratified_classification_exactly() -> None
     assert (mapped, len(sectors.by_isin)) == (536, 755)
 
 
-def test_an_unclassified_isin_maps_to_nothing() -> None:
-    assert load_sector_index_map().index_of("INE000X00000") is None
-
-
-def _table_with(tmp_path: Path, edit: object) -> Path:
+def _table_with(tmp_path: Path, edit: Callable[[dict[str, Any]], object]) -> Path:
     doc = yaml.safe_load(SECTOR_INDEX_MAP_PATH.read_text())
-    edit(doc)  # type: ignore[operator]
+    edit(doc)
     path = tmp_path / "map.yaml"
     path.write_text(yaml.safe_dump(doc))
     return path
@@ -514,32 +621,99 @@ def _table_with(tmp_path: Path, edit: object) -> Path:
         (lambda d: d["classification"].update({"sha256": "0" * 64}), "re-review"),
     ],
 )
-def test_an_inconsistent_table_is_refused(tmp_path: Path, edit: object, match: str) -> None:
+def test_an_inconsistent_table_is_refused(
+    tmp_path: Path, edit: Callable[[dict[str, Any]], object], match: str
+) -> None:
     with pytest.raises(SectorIndexError, match=match):
         load_sector_index_map(_table_with(tmp_path, edit))
 
 
 # ── the real stack: D13 unchanged, the gate wired end to end ─────────────────────────────────────
+# A local copy of the M14.5 scripted world (tests/unit/test_momentum_v2_daily_regime.py): Q1 2024
+# weekdays, ten names at a flat price, a momentum order that rotates monthly, a scripted regime.
+
+_SESSIONS = tuple(
+    day for day in (date(2024, 1, 1) + timedelta(days=n) for n in range(91)) if day.weekday() < 5
+)
+_REBALANCES = frozenset(
+    min(s for s in _SESSIONS if s.month == month) for month in {s.month for s in _SESSIONS}
+)
+_OPENING = Decimal("1000000")
+
+#: D13's digest over :func:`_replay`, struck with the policy before M16.2 (main 523882e; the same
+#: value M14.5 pins). Journal, book and rails byte-for-byte: if the gate-off path drifts in any
+#: order, entry or fill, this moves.
+_D13_DIGEST_BEFORE_M16_2 = "67d887030dd04994c4f675992924b893a108030d0b3d6270dd40963daf879b28"
 
 
-def test_gate_off_reproduces_d13s_pre_m16_2_replay_byte_for_byte() -> None:
-    # The digest was struck with the policy before M16.2 (and before M14.5) — journal, book, rails.
-    assert _d13_replay(D13).digest() == _D13_DIGEST_BEFORE_M14_5
-    assert _d13_replay(replace(D13, industry_gate=False)).digest() == _D13_DIGEST_BEFORE_M14_5
+class _Market:
+    def __init__(self, sessions: tuple[date, ...]) -> None:
+        self._calendar = (*sessions, date(2024, 12, 31))
+
+    def next_session(self, after: date) -> date:
+        return next(session for session in self._calendar if session > after)
+
+    def reference_bar(self, isin: str, session: date) -> ReferenceBar:
+        if isin not in NAMES:
+            raise NoReferenceBarError(isin)
+        return ReferenceBar(
+            isin=isin,
+            session=session,
+            exchange=Exchange.NSE,
+            open=PRICE,
+            vwap=PRICE,
+            traded_value=Decimal("100000000000"),
+        )
+
+
+def _risk_on(session: date) -> bool:
+    return date(2024, 1, 10) <= session < date(2024, 2, 15) or session >= date(2024, 2, 29)
+
+
+class _ScriptedData:
+    """Ten names, a momentum order that rotates each month, and the scripted regime above."""
+
+    def is_rebalance(self, session: date) -> bool:
+        return session in _REBALANCES
+
+    def signal(self, as_of: date) -> Dataset[MomentumV2Record]:
+        shift = as_of.month
+        records = tuple(
+            MomentumV2Record(
+                isin=isin,
+                momentum_0_12=Decimal((index + shift) % 10) / 10,
+                momentum_12_1=Decimal((index * 3 + shift) % 10) / 10,
+                price=PRICE,
+                volatility=Decimal("0.1") + Decimal(index) / 100,
+                knowable_date=as_of,
+            )
+            for index, isin in enumerate(NAMES)
+        )
+        return Dataset.declaring(f"m@{as_of}", records, knowable_date=lambda r: r.knowable_date)
+
+    def regime(self, as_of: date) -> Dataset[RegimeReading]:
+        level = Decimal("105") if _risk_on(as_of) else Decimal("95")
+        reading = RegimeReading(
+            index_level=level, moving_average=Decimal("100"), knowable_date=as_of
+        )
+        return Dataset.declaring(f"r@{as_of}", (reading,), knowable_date=lambda r: r.knowable_date)
 
 
 class _ScriptedGatedData(_ScriptedData):
-    """The M14.5 scripted world plus sectors: names 0-4 in a rising one, 5-9 in none."""
+    """Plus sectors: names 0-4 in one index, 5-8 in an unmapped industry, 9 unclassified."""
 
     def sector_index_momentum(self, as_of: date) -> Dataset[IndexMomentum]:
-        readings = (_reading("UP", Decimal("0.2"), as_of), _reading("DOWN", Decimal("-0.2"), as_of))
+        readings = (_reading("UP", Decimal("0.2"), as_of),)
         return Dataset.declaring(f"s@{as_of}", readings, knowable_date=lambda r: r.knowable_date)
+
+    def is_classified(self, isin: str) -> bool:
+        return isin != NAMES[9]
 
     def sector_index_of(self, isin: str) -> str | None:
         return "UP" if NAMES.index(isin) < 5 else None
 
 
-def _gated_replay(params: MomentumV2Parameters) -> ReplayResult:
+def _replay(params: MomentumV2Parameters, data: _ScriptedData | None = None) -> ReplayResult:
     clock = FrozenClock(_SESSIONS[0])
     sim = SimBroker(
         clock=clock,
@@ -559,7 +733,7 @@ def _gated_replay(params: MomentumV2Parameters) -> ReplayResult:
     )
     prices = {(isin, day): PRICE for isin in NAMES for day in _SESSIONS}
     return ReplayEngine(
-        policy=MomentumV2Policy(_ScriptedGatedData(), params, order_caps=RAILS),
+        policy=MomentumV2Policy(data or _ScriptedData(), params, order_caps=RAILS),
         broker=broker,
         clock=clock,
         sessions=_SESSIONS,
@@ -567,11 +741,16 @@ def _gated_replay(params: MomentumV2Parameters) -> ReplayResult:
     ).run()
 
 
-def test_the_gated_preset_replays_and_buys_only_mapped_top_index_names() -> None:
-    gated = _gated_replay(D13_INDUSTRY_GATE)
-    ungated = _gated_replay(D13)
-    assert ungated.digest() == _D13_DIGEST_BEFORE_M14_5  # the gate's reads change nothing while off
+def test_gate_off_reproduces_d13s_pre_m16_2_replay_byte_for_byte() -> None:
+    assert _replay(D13).digest() == _D13_DIGEST_BEFORE_M16_2
+    assert _replay(replace(D13, industry_gate=False)).digest() == _D13_DIGEST_BEFORE_M16_2
+
+
+def test_the_gated_preset_replays_and_buys_only_top_index_or_unclassified_names() -> None:
+    gated = _replay(D13_INDUSTRY_GATE, _ScriptedGatedData())
+    ungated = _replay(D13, _ScriptedGatedData())
+    assert ungated.digest() == _D13_DIGEST_BEFORE_M16_2  # the gate's reads change nothing off
     assert gated.digest() != ungated.digest()
     bought = {e.isin for e in gated.journal if e.decision is Decision.BUY}
-    assert bought and bought <= set(NAMES[:5])
-    assert {e.isin for e in ungated.journal if e.decision is Decision.BUY} - set(NAMES[:5])
+    assert bought and bought <= {*NAMES[:5], NAMES[9]}
+    assert {e.isin for e in ungated.journal if e.decision is Decision.BUY} & set(NAMES[5:9])

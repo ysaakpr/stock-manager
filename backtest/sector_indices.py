@@ -48,13 +48,16 @@ __all__ = [
     "SectorIndexLevel",
     "SectorIndexLevels",
     "SectorIndexMap",
+    "UnclassifiedShare",
+    "first_rankable_dates",
     "load_sector_index_map",
+    "unclassified_shares",
 ]
 
 _REPO_ROOT: Final = Path(__file__).resolve().parent.parent
 SECTOR_INDEX_MAP_PATH: Final = Path(__file__).resolve().parent / "sector_index_map.yaml"
 
-#: Calendar days per month for the reference dates: 30, the step ``backtest.run`` uses for its
+#: *Calendar* days per month for the reference dates: 30, the step ``backtest.run`` uses for its
 #: skip-month point, so "one month back" means the same thing for the stock and the sector signal.
 _MONTH_DAYS: Final = 30
 #: A reference level older than this many calendar days before its reference date is not used: the
@@ -95,10 +98,26 @@ class SectorIndexMap:
         """Industries whose names the gate never admits, sorted."""
         return tuple(sorted(i for i, idx in self.industry_index.items() if idx is None))
 
+    def is_classified(self, isin: str) -> bool:
+        """Whether the classification names ``isin`` at all.
+
+        An unclassified ISIN is *gate-neutral*: the 2026-09-08 snapshot omits every name that died
+        before it, so treating "not classified" as "not eligible" would drop exactly the losers
+        and bias the gated universe toward survivors (PR #97 review, B1).
+        """
+        return isin in self.sectors.by_isin
+
     def index_of(self, isin: str) -> str | None:
-        """The index ``isin``'s industry maps to; ``None`` if unmapped or not classified."""
+        """The index a *classified* ``isin``'s industry maps to; ``None`` if it is unmapped.
+
+        Refuses an unclassified ISIN (``SectorIndexError``) rather than answering ``None``, so a
+        caller cannot confuse "unclassified" (gate-neutral) with "unmapped" (ineligible) — ask
+        :meth:`is_classified` first.
+        """
         industry = self.sectors.by_isin.get(isin)
-        return None if industry is None else self.industry_index.get(industry)
+        if industry is None:
+            raise SectorIndexError(f"{isin} is not in the classification; it has no industry")
+        return self.industry_index[industry]
 
 
 def load_sector_index_map(
@@ -256,9 +275,11 @@ class SectorIndexLevels:
     def momentum(self, index: str, as_of: date) -> IndexMomentum | None:
         """``index``'s 6-1 return as of ``as_of``, or ``None`` without both published levels.
 
-        Six months is ``6 x 30`` calendar days back and one month ``30``, each resolved to the last
-        level published by ``as_of``. An index first published after the six-month reference has
-        no reading — it becomes rankable six months after its first level, never by backfill.
+        Six months is ``6 x 30 = 180`` *calendar* days back and one month ``30`` calendar days
+        (D13's ``_MONTH_DAYS`` convention — not trading sessions, not calendar months), each
+        resolved to the last level published by ``as_of`` within :data:`MAX_STALE_DAYS` calendar
+        days. An index first published after the six-month reference has no reading: it becomes
+        rankable 180 calendar days after its first level, never by backfill.
         """
         start = self.level_on_or_before(
             index, as_of - timedelta(days=_MONTH_DAYS * TOTAL_MONTHS), as_of=as_of
@@ -318,5 +339,70 @@ class IndustryGatedData:
             knowable_date=lambda reading: reading.knowable_date,
         )
 
+    def is_classified(self, isin: str) -> bool:
+        return self._map.is_classified(isin)
+
     def sector_index_of(self, isin: str) -> str | None:
         return self._map.index_of(isin)
+
+
+# ── report helpers (M16 gate report) ─────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class UnclassifiedShare:
+    """How much of one period's eligible universe the gate passes only because it is unclassified.
+
+    ``eligible`` is the size of the universe the caller handed in (the pre-gate candidate set for a
+    window or a year); ``unclassified`` how many of those ISINs the classification does not name;
+    ``share`` their fraction (``0`` for an empty universe). A high share means the gated arm is
+    mostly ungated in that period — the report must print it beside the period's numbers.
+    """
+
+    label: str
+    eligible: int
+    unclassified: int
+    share: Decimal
+
+
+def unclassified_shares(
+    index_map: SectorIndexMap, universes: Mapping[str, Iterable[str]]
+) -> tuple[UnclassifiedShare, ...]:
+    """The unclassified share of each labelled universe (a window, a year), in label order."""
+    shares: list[UnclassifiedShare] = []
+    for label in sorted(universes):
+        isins = set(universes[label])
+        unclassified = sum(1 for isin in isins if not index_map.is_classified(isin))
+        share = Decimal(unclassified) / Decimal(len(isins)) if isins else Decimal(0)
+        shares.append(UnclassifiedShare(label, len(isins), unclassified, share))
+    return tuple(shares)
+
+
+#: How far past the 180-day mark :func:`first_rankable_dates` searches before calling an index
+#: never rankable (a series with a hole at one of its reference points).
+_RANKABLE_SEARCH_DAYS: Final = 366
+
+
+def first_rankable_dates(
+    levels: SectorIndexLevels, index_map: SectorIndexMap
+) -> dict[str, date | None]:
+    """For each mapped index, the first decision date on which it has a 6-1 reading.
+
+    That is 180 calendar days after its first published level when the series is continuous; a gap
+    at a reference point pushes it later. ``None`` for an index with no level at all, or none
+    rankable within a year of the 180-day mark. Assumes levels are published on their session
+    (true of ``pr_index_eod``), so a decision date is never earlier than the data it reads.
+    """
+    found: dict[str, date | None] = {}
+    for index in index_map.indices:
+        first = levels.first_session(index)
+        found[index] = None
+        if first is None:
+            continue
+        candidate = first + timedelta(days=_MONTH_DAYS * TOTAL_MONTHS)
+        for offset in range(_RANKABLE_SEARCH_DAYS + 1):
+            day = candidate + timedelta(days=offset)
+            if levels.momentum(index, day) is not None:
+                found[index] = day
+                break
+    return found

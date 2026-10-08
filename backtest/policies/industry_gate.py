@@ -2,10 +2,12 @@
 
 Each rebalance, rank the NSE sectoral indices of :mod:`backtest.sector_indices` by their 6-1 month
 return (the level one month back over the level six months back, from published levels only), keep
-the top :data:`TOP_K` (5), and admit into the momentum ranking only names whose industry maps to one
-of those five. Names in an unmapped industry, or absent from the classification, are never admitted
-while the gate is on. Every parameter is fixed — K=5, 6-1 months, the monthly rebalance — and none
-is exposed as an option, so the gate cannot be tuned through its configuration.
+the top :data:`TOP_K` (5), and drop from the momentum ranking every *classified* name whose industry
+is not mapped to one of those five (an unmapped industry included). A name the classification does
+not name at all is gate-neutral and passes: the classification is a 2026 snapshot that omits every
+name which died before it, so excluding the unclassified would keep only survivors. Every parameter
+is fixed — K=5, 6-1 months, the monthly rebalance — and none is exposed as an option, so the gate
+cannot be tuned through its configuration.
 
 Why it replaces M10.3's sector test: M10.3 scored sectors from a static 42-name current-day map and
 the members' own momentum, so the sector signal was the stock signal regrouped. Here the sector
@@ -84,15 +86,22 @@ class IndustryGateData(Protocol):
 
     * ``sector_index_momentum(as_of)`` — one :class:`IndexMomentum` per mapped index that has
       published levels at both reference dates, as a guardable dataset;
-    * ``sector_index_of(isin)`` — the index the name's industry maps to, or ``None`` when the
-      industry is unmapped or the classification does not name the ISIN.
+    * ``is_classified(isin)`` — whether the classification names the ISIN at all. An unclassified
+      name is *gate-neutral* (it passes): the classification is a 2026 snapshot that omits every
+      name which died before it, so excluding the unclassified would drop the losers and keep the
+      survivors (PR #97 review, B1);
+    * ``sector_index_of(isin)`` — for a *classified* ISIN, the index its industry maps to, or
+      ``None`` when that industry is unmapped (then the name is ineligible).
     """
+
+    def is_classified(self, isin: str) -> bool:
+        """Whether the classification names ``isin``."""
 
     def sector_index_momentum(self, as_of: date) -> Dataset[IndexMomentum]:
         """The admitted-to-be 6-1 readings as of ``as_of``."""
 
     def sector_index_of(self, isin: str) -> str | None:
-        """The sectoral index ``isin``'s industry maps to, or ``None``."""
+        """The sectoral index a classified ``isin``'s industry maps to, or ``None`` if unmapped."""
 
 
 class _Named(Protocol):
@@ -111,9 +120,21 @@ class IndustryGateOutcome:
 
     ranked: tuple[IndexMomentum, ...]
     chosen: frozenset[str]
+    unclassified_admitted: int = 0
 
     def evidence_items(self, session: date) -> tuple[EvidenceItem, ...]:
-        """One item per ranked index — its return, both levels, its rank, whether it was kept."""
+        """One item per ranked index, plus how many names passed only by being unclassified."""
+        neutral = EvidenceItem(
+            kind=EvidenceKind.POSITION,
+            source="policy",
+            label="industry_gate_unclassified_admitted",
+            as_of=session,
+            value=Decimal(self.unclassified_admitted),
+            text="candidates not in the industry classification, passed gate-neutral",
+        )
+        return (*self._ranking_items(session), neutral)
+
+    def _ranking_items(self, session: date) -> tuple[EvidenceItem, ...]:
         if not self.ranked:
             return (
                 EvidenceItem(
@@ -121,7 +142,7 @@ class IndustryGateOutcome:
                     source="L1",
                     label=_LABEL,
                     as_of=session,
-                    text="industry gate: no sectoral index has published 6-1 levels; none eligible",
+                    text="industry gate: no index has 6-1 levels; only unclassified names pass",
                 ),
             )
         return tuple(
@@ -154,12 +175,14 @@ class IndustryGateOutcome:
 def apply_industry_gate[R: _Named](
     data: object, ctx: SessionContext, candidates: Sequence[R]
 ) -> tuple[tuple[R, ...], IndustryGateOutcome]:
-    """Restrict ``candidates`` to names mapped to the session's top-:data:`TOP_K` sectoral indices.
+    """Drop the classified candidates whose industry is not mapped to a top-:data:`TOP_K` index.
 
     Reads the readings through ``ctx.pit.admit`` (a future-published level raises ``PitError``),
-    ranks them, keeps the top five — fewer when fewer indices have six months of published history,
-    none when none do — and returns the candidates whose mapped index was kept, in their original
-    order, with the outcome for the evidence. Refuses a data source that does not serve the gate.
+    ranks them and keeps the top five — fewer when fewer indices have six months of published
+    history, none when none do. A candidate passes when its industry maps to a kept index, or when
+    the classification does not name it at all (gate-neutral); a classified name in an unmapped
+    industry or a non-top-5 index is dropped. Returns the survivors in their original order, with
+    the outcome for the evidence. Refuses a data source that does not serve the gate.
     """
     if not isinstance(data, IndustryGateData):
         raise TypeError(
@@ -168,5 +191,10 @@ def apply_industry_gate[R: _Named](
         )
     ranked = rank_indices(ctx.pit.admit(data.sector_index_momentum(ctx.session)))
     chosen = frozenset(reading.index for reading in ranked[:TOP_K])
-    admitted = tuple(c for c in candidates if data.sector_index_of(c.isin) in chosen)
-    return admitted, IndustryGateOutcome(ranked=ranked, chosen=chosen)
+    neutral = {c.isin for c in candidates if not data.is_classified(c.isin)}
+    admitted = tuple(
+        c for c in candidates if c.isin in neutral or data.sector_index_of(c.isin) in chosen
+    )
+    return admitted, IndustryGateOutcome(
+        ranked=ranked, chosen=chosen, unclassified_admitted=len(neutral)
+    )
