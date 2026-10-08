@@ -1299,6 +1299,9 @@ class _L1MomentumV2Data:
     The candidate set is identical to the naive/M9.3 set for the same parameters, so the increment
     report isolates each toggle rather than confounding it with a universe change. The regime
     reading is served through the injected :class:`_RegimeSource`.
+
+    Rebalance sessions are computed up front; any other session of the look-back calendar (the
+    redeploy follow-up, a daily regime re-entry) is computed on first read and cached.
     """
 
     def __init__(
@@ -1334,17 +1337,16 @@ class _L1MomentumV2Data:
         # prices yesterday's basket at today's close there. Computed lazily on first read, so runs
         # without the toggle pay nothing for it and the rebalance-date universe sizes stay the
         # report's universe figure.
-        self._followups: set[date] = {
-            self._sessions[i + 1]
-            for i, session in enumerate(self._sessions[:-1])
-            if session in self._rebalance
-        }
+        # Any other calendar session is served on demand too: a daily regime re-entry (M14.5)
+        # rebalances on whatever session the regime turns. Same lazy rule, so a run that never
+        # asks pays nothing and its digest is unchanged.
+        self._calendar: frozenset[date] = frozenset(self._sessions)
 
     def is_rebalance(self, session: date) -> bool:
         return session in self._rebalance
 
     def signal(self, as_of: date) -> Dataset[MomentumV2Record]:
-        if as_of not in self._signals and as_of in self._followups:
+        if as_of not in self._signals and as_of in self._calendar:
             self._signals[as_of] = self._compute(as_of)
         records = self._signals.get(as_of, ())
         return Dataset.declaring(
