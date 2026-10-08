@@ -64,6 +64,7 @@ from execution.costs import CostModel, load_rate_card
 from execution.kill_switch import KillSwitch, TradingHaltedError, TripSource
 from execution.recon import RecordingAlerter
 from execution.sim_broker import SimBroker
+from execution.staging import StagingCoordinator
 from tests.paper_session_support import (
     FIXTURE_CASH,
     ISINS,
@@ -263,9 +264,26 @@ def test_four_months_through_the_shared_path_trade_exactly_as_the_plain_replay()
     assert decisions == replayed
 
 
-def test_every_order_reaches_the_broker_through_the_staging_step() -> None:
+def test_every_order_reaches_the_broker_through_the_staging_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    staged_by_coordinator: list[OrderRequest] = []
+    executed_sessions: list[date] = []
+    real_stage, real_execute = StagingCoordinator.stage, StagingCoordinator.execute
+
+    def stage(self: StagingCoordinator, request: OrderRequest, **kwargs: Any) -> Any:
+        staged_by_coordinator.append(request)
+        return real_stage(self, request, **kwargs)
+
+    def execute(self: StagingCoordinator, session: date) -> Any:
+        executed_sessions.append(session)
+        return real_execute(self, session)
+
+    monkeypatch.setattr(StagingCoordinator, "stage", stage)
+    monkeypatch.setattr(StagingCoordinator, "execute", execute)
     desk = _Desk()
     first = desk.run(OCT_FIRST)
+    assert staged_by_coordinator == list(first.record.orders if first.record else ())
     assert first.record is not None and first.record.recon is not None and first.record.orders
     state = first.record.broker_state()
     # Every order the SimBroker holds staged was placed by the staging coordinator, under the
@@ -275,6 +293,7 @@ def test_every_order_reaches_the_broker_through_the_staging_step() -> None:
     second = desk.run(OCT_SECOND)
     assert second.record is not None and second.record.recon is not None
     assert second.record.recon.executed == first.record.recon.staged
+    assert executed_sessions == [OCT_FIRST, OCT_SECOND]
 
 
 # ── 2. the kill switch ───────────────────────────────────────────────────────────────────────────

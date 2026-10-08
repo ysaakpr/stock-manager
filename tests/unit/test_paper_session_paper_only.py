@@ -75,6 +75,9 @@ def test_running_the_scheduler_job_end_to_end_never_loads_the_real_broker_module
         "default_registry().get('paper_session').fn(context)\n"
         "decisions = sorted({e.decision.value for e in journal.entries})\n"
         "assert 'BUY' in decisions, decisions\n"
+        # M15.3: the orders went through the live path's staging, recon and kill switch...
+        "shared = ('execution.staging', 'execution.recon', 'execution.kill_switch')\n"
+        "assert all(m in sys.modules for m in shared), shared\n"
         "loaded = sorted(m for m in sys.modules if 'kite' in m.lower())\n"
         "print('decisions', decisions, 'kite', loaded)\n"
         "sys.exit(1 if loaded else 0)\n"
@@ -89,6 +92,25 @@ def test_running_the_scheduler_job_end_to_end_never_loads_the_real_broker_module
     )
     assert done.returncode == 0, f"{done.stdout[-1000:]} {done.stderr[-3000:]}"
     assert "'BUY'" in done.stdout
+
+
+@pytest.mark.parametrize(
+    "module", ["execution.staging", "execution.recon", "execution.kill_switch"]
+)
+def test_the_shared_execution_path_never_imports_the_real_broker(module: str) -> None:
+    """M15.3 put staging, recon and the kill switch on the paper path; none may reach Kite."""
+    path = _MODULE.parents[1] / (module.replace(".", "/") + ".py")
+    imported = {
+        node.module or ""
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.ImportFrom)
+    } | {
+        alias.name
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    }
+    assert not [name for name in imported if "kite" in name.lower()], imported
 
 
 def test_the_broker_provider_setting_is_never_read_on_the_job_path() -> None:
