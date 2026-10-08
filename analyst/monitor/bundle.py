@@ -55,12 +55,20 @@ from analyst.journal import (
     EvidenceItem,
     EvidenceKind,
 )
-from analyst.monitor.t0 import T0Check, T0Flag
+from analyst.monitor.disclosures import (
+    DEFAULT_DISCLOSURE_POLICY,
+    DisclosurePolicy,
+    DisclosureText,
+    DocumentTextStatus,
+    select_disclosures,
+)
+from analyst.monitor.t0 import T0Check, T0Escalation, T0Flag
 from analyst.thesis import Thesis
 from dataplatform.clock import IST
 from dataplatform.ingest.announcements import AnnouncementRow
 from dataplatform.ingest.news import NewsRow
 from dataplatform.logging import get_logger
+from dataplatform.query import AnnouncementIndex
 
 __all__ = [
     "CHARS_PER_TOKEN",
@@ -74,6 +82,7 @@ __all__ = [
     "BundleRequest",
     "PriceFact",
     "count_tokens",
+    "request_for_escalation",
 ]
 
 _LOG = get_logger(__name__)
@@ -210,6 +219,7 @@ class BundleRequest:
     announcements: tuple[AnnouncementRow, ...] = ()
     news: tuple[NewsRow, ...] = ()
     actor: Actor = Actor.T1
+    disclosures: tuple[DisclosureText, ...] = ()
 
     def __post_init__(self) -> None:
         if self.actor not in (Actor.T1, Actor.T2):
@@ -372,7 +382,10 @@ class BundleBuilder:
             self._assert_not_future(
                 request.trading_date, news_row.ts, f"news {news_row.url!r} ({news_row.source})"
             )
-        for announcement in request.announcements:
+        for announcement in (
+            *request.announcements,
+            *(disclosure.announcement for disclosure in request.disclosures),
+        ):
             self._assert_not_future(
                 request.trading_date,
                 announcement.ts,
@@ -526,6 +539,22 @@ class BundleBuilder:
                 (announcement.ts, f"{announcement.source}\x00{announcement.subject}", item, snippet)
             )
 
+        for disclosure in request.disclosures:
+            row = disclosure.announcement
+            item = EvidenceItem(
+                kind=EvidenceKind.FILING,
+                source=row.source,
+                label="announcement",
+                isin=row.isin,
+                as_of=row.ts.astimezone(IST).date(),
+                knowable_at=row.ts,
+                text=row.subject,
+                detail=_disclosure_detail(disclosure),
+            )
+            pool.append(
+                (row.ts, f"{row.source}\x00{row.subject}", item, _disclosure_snippet(disclosure))
+            )
+
         for news_row in request.news:
             title = news_row.title or news_row.url
             item = EvidenceItem(
@@ -544,6 +573,86 @@ class BundleBuilder:
 
         pool.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
         return [(item, snippet) for _, _, item, snippet in pool]
+
+
+def request_for_escalation(
+    escalation: T0Escalation,
+    *,
+    thesis: Thesis,
+    announcements: AnnouncementIndex,
+    as_of: datetime,
+    prices: tuple[PriceFact, ...] = (),
+    news: tuple[NewsRow, ...] = (),
+    policy: DisclosurePolicy = DEFAULT_DISCLOSURE_POLICY,
+    actor: Actor = Actor.T1,
+) -> BundleRequest:
+    """The production `BundleRequest` for a T0 escalation, with the holding's disclosure text.
+
+    What it does: pairs the escalation's flag with the holding's disclosures known at `as_of`
+    (`select_disclosures`), each carrying its bounded text or a `text_unavailable` reason, so the
+    review reads what a triggering filing says and not only its headline (M6.8 finding F1).
+    What it assumes: `as_of` is the decision's tz-aware as-of instant on the escalation's trading
+    date, and `announcements` is the index the daily job built from L1.
+    What it never does: select a disclosure disseminated after `as_of`, fetch a document, or read
+    `Settings`; a flag with no ISIN (a book-level rails flag) gets no disclosures.
+    """
+    if as_of.tzinfo is None or as_of.utcoffset() is None:
+        raise ValueError("as_of must be tz-aware; a decision's as-of instant is a point in time")
+    as_of_date = as_of.astimezone(IST).date()
+    if as_of_date != escalation.trading_date:
+        raise ValueError(
+            f"as_of {as_of.isoformat()} falls on {as_of_date.isoformat()}, not on the "
+            f"escalation's trading date {escalation.trading_date.isoformat()}"
+        )
+    flag = escalation.flag
+    isin = flag.isin if flag.isin is not None else thesis.isin
+    disclosures = (
+        select_disclosures(announcements, isin=flag.isin, as_of=as_of, policy=policy)
+        if flag.isin is not None
+        else ()
+    )
+    return BundleRequest(
+        case_id=flag.case_id,
+        isin=isin,
+        trading_date=escalation.trading_date,
+        flag=flag,
+        thesis=thesis,
+        prices=prices,
+        news=news,
+        actor=actor,
+        disclosures=disclosures,
+    )
+
+
+def _disclosure_snippet(disclosure: DisclosureText) -> str:
+    """One disclosure as the prompt shows it: headline, then its text or why the text is absent."""
+    row = disclosure.announcement
+    lines = [f"- [FILING {row.ts.isoformat()}] {row.isin} {row.subject}"]
+    if disclosure.text is not None:
+        lines.append(f"  text: {disclosure.text}")
+    else:
+        assert disclosure.unavailable is not None  # DisclosureText holds one or the other
+        lines.append(f"  text_unavailable: {disclosure.unavailable.value}")
+    if disclosure.document is DocumentTextStatus.NOT_CAPTURED:
+        lines.append(f"  attached document: text not captured ({row.attachment_ref})")
+    return "\n".join(lines)
+
+
+def _disclosure_detail(disclosure: DisclosureText) -> dict[str, str]:
+    """The strings-only detail for a disclosure item: the filing, plus what text it carried."""
+    row = disclosure.announcement
+    detail = _announcement_detail(row.model_copy(update={"body": None}))
+    if disclosure.text is not None:
+        detail["text"] = disclosure.text
+        detail["text_status"] = "available"
+    else:
+        assert disclosure.unavailable is not None
+        detail["text_status"] = "unavailable"
+        detail["text_unavailable"] = disclosure.unavailable.value
+    detail["text_truncated"] = "true" if disclosure.truncated else "false"
+    detail["text_original_chars"] = str(disclosure.original_chars)
+    detail["document_text"] = disclosure.document.value
+    return detail
 
 
 def _announcement_detail(announcement: AnnouncementRow) -> dict[str, str]:
