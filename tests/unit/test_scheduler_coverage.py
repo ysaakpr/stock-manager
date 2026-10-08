@@ -29,6 +29,7 @@ from dataplatform.ingest import daily_capture
 from dataplatform.ingest.backfill import SOURCE_SETS
 from dataplatform.ingest.daily_snapshot import DEFAULT_SNAPSHOT_SET
 from dataplatform.ingest.eod import DAILY_NSE_SOURCES
+from dataplatform.ingest.fundamentals_backfill import LEASED_HOSTS as FUNDAMENTALS_HOSTS
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.scheduler import SchedulerRunner, build_scheduler
 from dataplatform.scheduler.health import JobHealthState, LastRuns, assess, last_due_fire
@@ -36,6 +37,7 @@ from dataplatform.scheduler.registry import (
     ANNOUNCEMENTS_CAPTURE,
     DAILY_SNAPSHOT,
     EOD_PIPELINE,
+    FUNDAMENTALS_FORWARD,
     NEWS_CAPTURE,
     NSE_DAILY_CAPTURE,
     SHAREHOLDING_POLL,
@@ -240,7 +242,14 @@ def _windows(job: Job, start: datetime, end: datetime) -> list[tuple[datetime, d
 
 @pytest.mark.parametrize(
     "job",
-    [NSE_DAILY_CAPTURE, SHAREHOLDING_POLL, ANNOUNCEMENTS_CAPTURE, NEWS_CAPTURE, TRI_EVENING],
+    [
+        NSE_DAILY_CAPTURE,
+        SHAREHOLDING_POLL,
+        ANNOUNCEMENTS_CAPTURE,
+        NEWS_CAPTURE,
+        TRI_EVENING,
+        FUNDAMENTALS_FORWARD,
+    ],
     ids=lambda job: job.name,
 )
 def test_a_capture_job_never_runs_while_another_job_holds_one_of_its_hosts(job: Job) -> None:
@@ -262,6 +271,144 @@ def test_a_capture_job_never_runs_while_another_job_holds_one_of_its_hosts(job: 
                     f"{theirs_start:%a %H:%M}-{theirs_end:%H:%M} on "
                     f"{sorted(_hosts_of(job) & _hosts_of(other))}"
                 )
+
+
+# ── the fundamentals forward job (M14.3) ────────────────────────────────────────────────────
+
+NSE_HOSTS: Final = frozenset({"www.nseindia.com", "nsearchives.nseindia.com"})
+
+#: Jobs that lease an NSE host without every such host showing in their `covers` — `bse_ca_sweep`
+#: runs `ca_refresh`'s NSE request under a lease on `www.nseindia.com` but covers only the BSE
+#: feed, and `daily_snapshot` leases hosts its covered rows do not all name. Named so the generic
+#: `covers`-derived check cannot miss them; every other NSE job is found from its register rows.
+NSE_LEASE_HOLDERS_BY_BODY: Final = frozenset(
+    {"bse_ca_sweep", "ca_refresh", "daily_snapshot", "eod_pipeline", "identity_refresh"}
+)
+
+#: 18:00-20:30 IST: the evening window in which the scheduler's NSE jobs run back to back and no
+#: campaign may hold an NSE host (ops/gates/M11-index-valuation-backfill.md §5).
+QUIET_WINDOW: Final = (time(18, 0), time(20, 30))
+
+
+def _nse_lease_holders(registry: JobRegistry) -> list[Job]:
+    return [
+        job
+        for job in registry
+        if job.name in NSE_LEASE_HOLDERS_BY_BODY or _hosts_of(job) & NSE_HOSTS
+    ]
+
+
+def _worst_case(job: Job, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    """Each fire to the latest the run can still hold its hosts: the latest start the scheduler
+    allows (`Job.latest_start`, its misfire grace) plus the whole budget."""
+    return [(fire, fire + job.latest_start + job.timeout) for fire, _ in _windows(job, start, end)]
+
+
+def _clashes(job: Job, others: list[Job]) -> list[str]:
+    """Every overlap of `job`'s worst case with another NSE job's fire + budget, over five weeks.
+
+    Five weeks from a Monday so the first-Sunday `bse_ca_sweep` (06:00, ten-hour budget) is in the
+    span. Both NSE hosts are treated as one: the forward job leases both for its whole run.
+    """
+    start = datetime(2026, 10, 5, 0, 0, tzinfo=IST)
+    end = start + timedelta(weeks=5)
+    mine = _worst_case(job, start, end)
+    found: list[str] = []
+    for other in others:
+        if other.name == job.name:
+            continue
+        for theirs_start, theirs_end in _windows(other, start - timedelta(days=1), end):
+            for my_start, my_end in mine:
+                if my_start < theirs_end and theirs_start < my_end:
+                    found.append(
+                        f"{job.name} {my_start:%a %d %H:%M}-{my_end:%H:%M} overlaps {other.name} "
+                        f"{theirs_start:%a %d %H:%M}-{theirs_end:%H:%M}"
+                    )
+    return found
+
+
+def test_the_fundamentals_forward_job_is_registered_and_covers_the_integrated_feed() -> None:
+    """Fails if the job is unregistered, or the feed it keeps current drops back into the ledger."""
+    registry = default_registry()
+    assert "fundamentals_forward" in registry
+    job = registry.get("fundamentals_forward")
+    assert job is FUNDAMENTALS_FORWARD
+    assert set(job.covers) == {"nse_integrated_filing_index", "nse_xbrl_filing"}
+    for source in job.covers:
+        assert source not in UNSCHEDULED, source
+    # The index is dated one row a night by window start, so it can carry a session budget; a
+    # filing's row is dated by its filing date, and a week with no filings is not a lag.
+    budgets = lag_budgets(registry)
+    assert budgets["nse_integrated_filing_index"] == 2
+    assert "nse_xbrl_filing" not in budgets
+    # The superseded feed stays explained, not silently dropped.
+    assert "nse_financial_results_index" in UNSCHEDULED
+
+
+def test_the_fundamentals_forward_job_leases_exactly_the_nse_hosts_its_sources_live_on() -> None:
+    assert set(FUNDAMENTALS_HOSTS) == NSE_HOSTS == _hosts_of(FUNDAMENTALS_FORWARD)
+
+
+def test_the_fundamentals_forward_job_never_overlaps_an_nse_lease() -> None:
+    """A host lease is refused, not queued: an overlap is a night's fundamentals that never land."""
+    holders = _nse_lease_holders(default_registry())
+    assert {
+        "eod_pipeline",
+        "daily_snapshot",
+        "nse_daily_capture",
+        "shareholding_poll",
+        "announcements_capture",
+        "identity_refresh",
+        "ca_refresh",
+        "bse_ca_sweep",
+    } <= {job.name for job in holders}
+    assert _clashes(FUNDAMENTALS_FORWARD, holders) == []
+
+
+def test_a_late_fire_cannot_start_after_three_or_run_past_the_first_sunday_sweep(
+    load_settings: SettingsLoader,
+) -> None:
+    """The misfire grace is what bounds a late start; the scheduler must actually be handed it."""
+    assert FUNDAMENTALS_FORWARD.latest_start == timedelta(hours=1)
+    fire = datetime(2026, 10, 4, 2, 0, tzinfo=IST)  # a first Sunday: bse_ca_sweep at 06:00
+    latest_end = fire + FUNDAMENTALS_FORWARD.latest_start + FUNDAMENTALS_FORWARD.timeout
+    assert (fire + FUNDAMENTALS_FORWARD.latest_start).time() == time(3, 0)
+    assert latest_end.time() <= time(6, 0)
+    scheduler = build_scheduler(SchedulerRunner(settings=load_settings(None)))
+    scheduled = scheduler.get_job("fundamentals_forward")
+    assert scheduled.misfire_grace_time == 3600
+    # Every other job keeps its budget as its grace, as before.
+    assert scheduler.get_job("eod_pipeline").misfire_grace_time == 45 * 60
+
+
+def test_the_overlap_check_is_not_inverted() -> None:
+    """The same check finds a clash for a job put in the evening, so a pass above means one.
+
+    The 02:00 probe is the real slot *without* its one-hour misfire grace: its latest start is then
+    its whole budget, and that worst case reaches the first-Sunday sweep and Saturday 07:00.
+    """
+    holders = _nse_lease_holders(default_registry())
+    for cron in ("30 18 * * *", "0 20 * * mon-fri", "45 0 * * *", "0 6 * * sun", "0 2 * * *"):
+        probe = Job(
+            name="probe_forward",
+            cron=cron,
+            fn=lambda ctx: None,
+            timeout=FUNDAMENTALS_FORWARD.timeout,
+            covers=FUNDAMENTALS_FORWARD.covers,
+        )
+        assert _clashes(probe, holders), cron
+
+
+def test_the_fundamentals_forward_job_stays_out_of_the_evening_quiet_window() -> None:
+    start = datetime(2026, 10, 5, 0, 0, tzinfo=IST)
+    windows = _worst_case(FUNDAMENTALS_FORWARD, start, start + timedelta(weeks=1))
+    assert len(windows) == 7, "daily: results are disseminated on weekends too"
+    for fire, end in windows:
+        quiet_start = fire.replace(hour=QUIET_WINDOW[0].hour, minute=QUIET_WINDOW[0].minute)
+        quiet_end = fire.replace(hour=QUIET_WINDOW[1].hour, minute=QUIET_WINDOW[1].minute)
+        assert end <= quiet_start or quiet_end <= fire, f"{fire:%a %H:%M}-{end:%H:%M}"
+        # Same calendar day as it fired: yesterday is complete when the run plans its window.
+        assert end.date() == fire.date()
 
 
 def test_the_nse_capture_fires_after_the_evening_publication_and_retries_the_same_night() -> None:

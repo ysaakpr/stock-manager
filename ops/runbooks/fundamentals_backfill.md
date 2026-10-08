@@ -86,9 +86,12 @@ every run; it stays visible in the coverage report's failure list, and `attempts
 
 ## Picking up new filings
 
-There is **no scheduled job for this yet** — the scheduler runs `eod_pipeline` and
-`constituents_snapshot` only. Until one exists, a forward sync is this command run over a recent
-window, and there is one trap in doing that:
+**The scheduler does this now** — `fundamentals_forward` (M14.3), nightly at 02:00 IST; see
+[The scheduled forward job](#the-scheduled-forward-job-m143) below. Run a forward sync by hand
+only to recover from something the job cannot (a hole older than its re-read lookback, a parser
+fix), and never while the job runs: both lease the same two hosts, so the second one to start is
+refused. A manual forward sync is this command run over a recent window, and there is one trap in
+doing that:
 
 > **A published index chunk is re-parsed from its frozen L0 payload, not re-fetched.** So rerunning
 > the *identical* window will never discover a filing broadcast since that chunk was first fetched.
@@ -98,8 +101,12 @@ with its L0 filename — so **moving `--to` forward creates a new chunk and re-f
 which is what you want:
 
 ```bash
-uv run python -m dataplatform.ingest.fundamentals_backfill --from 2026-07-01 --to $(date +%F)
+uv run python -m dataplatform.ingest.fundamentals_backfill --from 2026-07-01 --to $(TZ=Asia/Kolkata date -d yesterday +%F)
 ```
+
+**End `--to` at yesterday, never today.** The feed filters on the dissemination date, so a page
+fetched during D cannot hold what D publishes later. The scheduled job already discounts a window's
+own fetch day, so `--to` today is not lost — but it is a page fetched twice for no gain.
 
 The per-filing checkpoint is keyed on the feed's `seqNumber`, which is stable across fetches, so
 everything already ingested is skipped and only genuinely new filings are fetched. A verified run of
@@ -112,7 +119,8 @@ it re-fetches index chunks you already have (~88 requests for the full window).
 
 ## Exit codes
 
-`0` clean or gracefully stopped · `2` cannot plan (bad range) · `3` parked on a 403 spike.
+`0` clean or gracefully stopped · `2` cannot plan (bad range) · `3` parked on a 403 spike · `4`
+another driver holds one of the hosts' leases (the scheduled job, for instance).
 
 ## Coverage report
 
@@ -131,11 +139,11 @@ up to 1000), carries no ISIN and no period start, and points at `INTEGRATED_FILI
 
 ```bash
 uv run python -m dataplatform.ingest.fundamentals_backfill --feed integrated \
-    --from 2025-03-01 --to $(date +%F) --dry-run          # 6 pages per calendar month
+    --from 2025-03-01 --to $(TZ=Asia/Kolkata date -d yesterday +%F) --dry-run  # 6 pages a month
 uv run python -m dataplatform.ingest.fundamentals_backfill --feed integrated \
     --from 2025-03-01 --to 2025-04-30 --max-filings 20    # B1 verify + sample
 uv run python -m dataplatform.ingest.fundamentals_backfill --feed integrated \
-    --from 2025-03-01 --to $(date +%F) --report ops/reports/fundamentals-integrated-<date>.md
+    --from 2025-03-01 --to $(TZ=Asia/Kolkata date -d yesterday +%F) --report ops/reports/fundamentals-integrated-<date>.md
 ```
 
 Each page is its own resumable unit (`nse_integrated_filing_index/<month end>/p<NN>`); a page past
@@ -150,6 +158,88 @@ the same PIT store as before; the filing-date partition is the first-knowable da
 Keep `--from` fixed at `2025-03-01` between runs so the month windows (and their checkpoints) stay
 identical; move `--to` forward to pick up new pages. About 26,600 records existed on 2026-09-06,
 so the first full run is a B1 campaign of roughly a day at the 2.5 s spacing.
+
+## The scheduled forward job (M14.3)
+
+`fundamentals_forward` in `dataplatform/scheduler/registry.py`, body
+`dataplatform/ingest/fundamentals_forward.py`. It is the integrated-feed campaign above, run by the
+scheduler over a window `sync_state` names, so the store keeps up through results season without
+anyone picking dates.
+
+- **When:** 02:00 IST every day (results are disseminated on weekends too). That is the one long
+  gap in which no other job leases `www.nseindia.com` or `nsearchives.nseindia.com`:
+  `announcements_capture` (00:30, 45 min) has finished, and the run is off both hosts before the
+  first-Sunday `bse_ca_sweep` (06:00), the Saturday `identity_refresh` (07:00) and `ca_refresh`
+  (10:00) — and nowhere near the 18:00-20:30 evening window (`shareholding_poll` 18:05,
+  `eod_pipeline` 18:30, `daily_snapshot` 19:15, `nse_daily_capture` 20:00 / 23:00).
+- **Bounded in time, two ways.** A one-hour misfire grace: a fire the scheduler missed (it was
+  down at 02:00) starts no later than 03:00, or not at all — the next night owes it. And a
+  deadline on the injected clock: a run that started before 04:45 stops starting units at 04:45
+  (any other start: after 2h45m), finishes the unit in hand and releases both leases. The budget
+  is 2h45m, so the worst case is 03:00 + 2h45m = 05:45. `tests/unit/test_scheduler_coverage.py`
+  models exactly that worst case against every NSE job and fails the gate on any overlap.
+- **New days:** from the day after the **watermark** to **yesterday**, at most 3 per run (peak
+  season: 840 filings on 2026-05-29, ~2.5 s each); a longer outage is caught up 3 days a night and
+  `/status/sources` shows the index overdue meanwhile. The watermark is the end of the contiguous
+  run of integrated-index windows whose six pages are all `PUBLISHED`, from `2025-03-01` — and a
+  window counts only **through the day before its pages were fetched** (`sync_state.updated_at`,
+  in IST). The feed filters on the dissemination date, so a page fetched at 15:00 on D says nothing
+  about what D publishes at 22:00: a same-day fetch never marks its own day done. A window with a
+  failed or never-attempted page does not count, and a hole holds the watermark at the hole. If
+  the new window's key already exists (a same-day manual run), its start moves back a day until
+  the key is new, so the page is fetched live rather than re-parsed from a frozen payload.
+- **Re-reads (retries):** every fully published window that ends in the last 7 days is planned
+  again under its **own** key. The runner re-parses those pages from L0 — no request, no new index
+  row — and drives every entry not yet `PUBLISHED`: a retryable failure, or a filing a deadline
+  stop never reached. The document is usually in L0 already, so a retry is a parse, not a
+  download. Kept separate from the new days on purpose: index rows are dated by their window's
+  start and `/status/sources` measures lag from the newest one, so tonight's row is always dated
+  watermark + 1. After 7 days a still-failing filing is left `FAILED` on `/status/sources`.
+- **Universe:** ISINs with a `prices_raw` row in the 92 days to yesterday, resolved through D2 —
+  not the window's own days, which on a weekend have no price partition at all.
+- **Order of work:** a read-only `sync_state` query first (holding no lease, so a night with nothing
+  owed takes none), then both NSE leases, and only then the runner's own database connection — a
+  refused lease writes nothing.
+- **Idempotent:** no new day owed means no lease, no request, a `fundamentals_forward.nothing_owed`
+  log line and a SUCCEEDED run (re-reads ride with the next new day). A `PUBLISHED` page or filing
+  is never re-fetched.
+- **No watermark** (an empty store) fails the run: starting the store is the B1 campaign's job.
+
+**Where a failure shows.** The job raises — so `job_run` is FAILED, `GET /status/jobs` reports it
+`FAILING` and `failure_alerts` pages it once — when:
+
+- **another driver holds either NSE host** (`HostBusyError: … pid … running '<command>'` in
+  `job_run.error`). The lease is refused, never queued, and never broken while its holder lives.
+  The watermark has not moved, so the next night owes the same days plus one. If a campaign is
+  going to hold an NSE host across 02:00, expect this failure and let the next run catch up;
+- **an index page failed** (`FundamentalsForwardError: … index page(s) failed`) — the window is not
+  done and the next run re-plans it under a new key, re-fetching the live index;
+- **the deadline stopped it** (`… stopped at the 04:45 deadline …`) — an unfinished new window
+  holds the watermark; a finished one whose filings were cut short is re-read the next night;
+- **a 403 spike parked the run** (`… parked — FORBIDDEN_SPIKE …`) — AGENTIC_CONTEXT §8: find out
+  why the host refused before anything else; do not lower the rate or rotate the agent.
+
+A single filing's failure does **not** fail the run: it is `FAILED` on its own
+`nse_xbrl_filing/<filing_id>` row, which `/status/sources` counts, and the week's re-reads retry
+it. The run's `fundamentals_forward.done` log line carries the counts, including the integrated
+records whose symbol D2 did not resolve (`unresolved_symbols`) — a listing newer than the Saturday
+`identity_refresh`. Those are not retried automatically and do not reach the status API yet
+(`ops/BACKLOG.md`); after the next identity refresh, re-run the affected window by hand (above).
+
+```bash
+# Run it now (an operator or an agent); exit 1 on FAILED, 3 if the scheduler is already running it.
+uv run python -m dataplatform.scheduler run-once fundamentals_forward
+# What did the last runs do?
+curl -s localhost:8000/status/jobs | jq '.jobs[] | select(.name == "fundamentals_forward")'
+```
+
+After a merge that changes the job, restart the scheduler — it reads the registry only at start:
+
+```bash
+cd /home/ubuntu/stock-manager            # the scheduler's checkout, on the merged main
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status scheduler
+```
 
 ## Retrying refusals after a parser fix
 

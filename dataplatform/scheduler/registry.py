@@ -43,6 +43,7 @@ __all__ = [
     "EOD_PIPELINE",
     "FAILURE_ALERTS",
     "FBIL_REFERENCE_RATES",
+    "FUNDAMENTALS_FORWARD",
     "INDEX_PRESS_REFRESH",
     "JOB_NAME",
     "MACRO_RELEASE_CAPTURE",
@@ -67,6 +68,7 @@ __all__ = [
     "eod_pipeline",
     "failure_alerts",
     "fbil_reference_rates",
+    "fundamentals_forward",
     "lag_budgets",
     "macro_release_capture",
     "news_capture",
@@ -135,6 +137,9 @@ class Job:
     covers: tuple[str, ...] = ()
     sync_sources: tuple[str, ...] = ()
     max_lag_sessions: int = 1
+    #: How late a missed fire may still start. `None` is the job's own budget (the default the
+    #: runner has always used); a job that must be off its hosts by a fixed hour sets it shorter.
+    misfire_grace: timedelta | None = None
 
     def __post_init__(self) -> None:
         if not JOB_NAME.match(self.name):
@@ -147,7 +152,14 @@ class Job:
             raise ValueError(f"job {self.name!r} needs a positive timeout, got {self.timeout!r}")
         if self.max_lag_sessions < 0:
             raise ValueError(f"job {self.name!r} needs a non-negative max_lag_sessions")
+        if self.misfire_grace is not None and self.misfire_grace <= timedelta(0):
+            raise ValueError(f"job {self.name!r} needs a positive misfire_grace")
         self.trigger()  # validate the cron now, not on the morning it was supposed to fire
+
+    @property
+    def latest_start(self) -> timedelta:
+        """How long after a fire the scheduler may still start it (APScheduler's misfire grace)."""
+        return self.timeout if self.misfire_grace is None else self.misfire_grace
 
     def trigger(self, timezone: ZoneInfo | None = None) -> Any:
         """This job's cron expression as an APScheduler trigger, in `timezone`.
@@ -872,6 +884,57 @@ PAPER_SESSION = Job(
 )
 
 
+def fundamentals_forward(context: JobContext) -> None:
+    """The nightly fundamentals forward run (M14.3): the integrated results feed, kept current.
+
+    What it does: plans the integrated-feed window from the `sync_state` watermark (the end of the
+    contiguous run of fully published index windows, each complete only through the day before it
+    was fetched) to yesterday, at most three new days a run, and drives it through the campaign's
+    own `FundamentalsBackfillRunner` — index pages, then each in-universe filing's XBRL into L0 and
+    the PIT store, a `PUBLISHED` unit never re-fetched. The done windows of the last week are
+    re-read from L0 under their own keys, which retries any filing not yet published without a new
+    index request. See `fundamentals_forward.run_fundamentals_forward`.
+    What it assumes: the injected clock and settings are the run's (B10), and the integrated
+    campaign has run at least once (with no watermark it raises rather than start the store).
+    What it never does: swallow a refused host lease — `HostBusyError` propagates, so the run is
+    FAILED naming the holder and the watermark stays put for the next night — or mark a window done
+    whose index pages did not all publish. The import is deferred for the same reason the others
+    are.
+    """
+    from dataplatform.ingest.fundamentals_forward import run_fundamentals_forward_job
+
+    run_fundamentals_forward_job(context)
+
+
+_FUNDAMENTALS_SOURCES: tuple[str, ...] = ("nse_integrated_filing_index", "nse_xbrl_filing")
+
+#: The fundamentals forward run. 02:00 IST every day — results are disseminated on weekends too, and
+#: at 02:00 yesterday is a complete dissemination day. It leases both NSE hosts, and this is the one
+#: long gap neither is held in: `announcements_capture` (00:30, 45-minute budget) has released
+#: `www.nseindia.com`, and the run is off both hosts by 04:45 — before the first-Sunday
+#: `bse_ca_sweep` takes `www.nseindia.com` at 06:00, the Saturday `identity_refresh` takes the
+#: archive host at 07:00 and the Saturday `ca_refresh` takes the site at 10:00 — and nowhere near
+#: the 18:00-20:30 evening quiet window (`shareholding_poll` 18:05, `eod_pipeline` 18:30,
+#: `daily_snapshot` 19:15, `nse_daily_capture` 20:00 and 23:00). Two things hold that end: the
+#: job's own deadline (`fundamentals_forward.forward_deadline`, 04:45 for a night start, checked
+#: between units) and a one-hour misfire grace, so a fire the scheduler missed never starts after
+#: 03:00; the latest start plus the 2h45m budget is 05:45. Three peak days (840 filings on
+#: 2026-05-29) at the 2.5 s spacing is under two hours. Lag is budgeted on the index only: its
+#: newest row is dated by the new window's start, one a night; a filing's row is dated by its
+#: filing date, and a quiet week of no filings is not a lag.
+FUNDAMENTALS_FORWARD = Job(
+    name="fundamentals_forward",
+    cron="0 2 * * *",
+    fn=fundamentals_forward,
+    timeout=timedelta(hours=2, minutes=45),
+    description="Nightly integrated-feed fundamentals: watermark → yesterday → PIT store (M14.3)",
+    covers=_FUNDAMENTALS_SOURCES,
+    sync_sources=("nse_integrated_filing_index",),
+    max_lag_sessions=2,
+    misfire_grace=timedelta(hours=1),
+)
+
+
 #: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
 #: audit's root cause was not one broken job but sources that were simply never scheduled — the
 #: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
@@ -883,11 +946,10 @@ UNSCHEDULED: dict[str, str] = {
         "only for older sessions, so there is nothing new to take daily."
     ),
     "nse_financial_results_index": (
-        "fundamentals_backfill campaign (B1 NEEDS_GO: thousands of per-filing requests); no "
-        "incremental daily job yet."
+        "Receives no new periods after the quarter ended Dec-2024; every new results filing is on "
+        "nse_integrated_filing_index, which fundamentals_forward keeps current. History stays the "
+        "fundamentals_backfill campaign's (B1)."
     ),
-    "nse_integrated_filing_index": "Same as nse_financial_results_index.",
-    "nse_xbrl_filing": "Same as nse_financial_results_index.",
     "nifty_index_close_snapshot": (
         "Input to the computed TRI fallback only; the published TRI is live (tri_refresh)."
     ),
@@ -958,6 +1020,7 @@ def default_registry() -> JobRegistry:
             NEWS_CAPTURE,
             FAILURE_ALERTS,
             PAPER_SESSION,
+            FUNDAMENTALS_FORWARD,
         ],
         declined=_declined_source_ids(),
     )
