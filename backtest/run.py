@@ -91,6 +91,8 @@ from backtest.book_actions import (
 )
 from backtest.cap_tiers import LiquidityRankTiers, TierSleeve, describe_sleeves
 from backtest.cash_interest import CashInterestAccrual, InterestCredit, current_cash_interest
+from backtest.policies.earnings_surprise import CONCEPTS as EARNINGS_SURPRISE_CONCEPTS
+from backtest.policies.earnings_surprise import EarningsSurprisePanel, NoSignal
 from backtest.policies.fundamentals_value import (
     FundamentalsRecord,
     FundamentalsSignal,
@@ -4271,6 +4273,51 @@ class _PitFact(NamedTuple):
     value: Decimal
 
 
+def _read_pit_facts(data_root: Path | None, concepts: Iterable[str]) -> list[_PitFact]:
+    """Every company-level PIT fact of ``concepts``, sorted by filing date, then ISIN, then concept.
+
+    The whole history, unfiltered by date: the caller cuts it point-in-time (a prefix by filing
+    date), and the consumers it feeds refuse a later filing as the backstop. Raises when the store
+    has not been built.
+    """
+    root = layer_root(Layer.L1, data_root=data_root) / PIT_FUNDAMENTALS_DATASET
+    if not root.is_dir():
+        raise BacktestError(f"no PIT fundamentals store at {root}; run the M10.4 backfill first")
+    con = open_connection()
+    try:
+        rows = con.execute(
+            "SELECT isin, period_start, period_end, filing_date, filing_id, nature, concept, "
+            "value FROM read_parquet($glob) WHERE segment IS NULL AND concept IN $concepts "
+            "ORDER BY filing_date, isin, concept",
+            {"glob": str(root / "*" / "*.parquet"), "concepts": sorted(concepts)},
+        ).fetchall()
+    finally:
+        con.close()
+    return [
+        _PitFact(
+            isin=str(isin),
+            period_start=period_start,
+            period_end=period_end,
+            filing_date=filing_date,
+            filing_id=str(filing_id),
+            nature=Nature(nature),
+            concept=str(concept),
+            segment=None,
+            value=Decimal(value),
+        )
+        for (
+            isin,
+            period_start,
+            period_end,
+            filing_date,
+            filing_id,
+            nature,
+            concept,
+            value,
+        ) in rows
+    ]
+
+
 class _L1FundamentalsData:
     """The M10.6 policy's :class:`FundamentalsSignalData` over the PIT store and L1 closes.
 
@@ -4321,44 +4368,7 @@ class _L1FundamentalsData:
 
     @staticmethod
     def _load_facts(data_root: Path | None) -> list[_PitFact]:
-        root = layer_root(Layer.L1, data_root=data_root) / PIT_FUNDAMENTALS_DATASET
-        if not root.is_dir():
-            raise BacktestError(
-                f"no PIT fundamentals store at {root}; run the M10.4 backfill first"
-            )
-        con = open_connection()
-        try:
-            rows = con.execute(
-                "SELECT isin, period_start, period_end, filing_date, filing_id, nature, concept, "
-                "value FROM read_parquet($glob) WHERE segment IS NULL AND concept IN $concepts "
-                "ORDER BY filing_date, isin, concept",
-                {"glob": str(root / "*" / "*.parquet"), "concepts": sorted(CONCEPTS_USED)},
-            ).fetchall()
-        finally:
-            con.close()
-        return [
-            _PitFact(
-                isin=str(isin),
-                period_start=period_start,
-                period_end=period_end,
-                filing_date=filing_date,
-                filing_id=str(filing_id),
-                nature=Nature(nature),
-                concept=str(concept),
-                segment=None,
-                value=Decimal(value),
-            )
-            for (
-                isin,
-                period_start,
-                period_end,
-                filing_date,
-                filing_id,
-                nature,
-                concept,
-                value,
-            ) in rows
-        ]
+        return _read_pit_facts(data_root, CONCEPTS_USED)
 
     def is_rebalance(self, session: date) -> bool:
         return session in self._rebalance
@@ -4936,6 +4946,8 @@ class _SwingFeatures:
 
     #: The H1 leg's market panel, or ``None`` when no arm needs it (see :meth:`attach_market`).
     _residual: ResidualMomentumPanel | None = None
+    #: The M16.3 leg's panel, or ``None`` when no arm needs it (see :meth:`attach_earnings`).
+    _earnings: EarningsSurprisePanel | None = None
 
     def __init__(
         self,
@@ -4984,6 +4996,21 @@ class _SwingFeatures:
     def residual_momentum(self) -> bool:
         """Whether records carry the residual-momentum leg (a market series is attached)."""
         return self._residual is not None
+
+    def attach_earnings(self, panel: EarningsSurprisePanel) -> None:
+        """Carry the M16.3 earnings-surprise leg on every record, read off ``panel``.
+
+        Must be called before the first ``load``, for the reason :meth:`attach_market` must: a
+        record materialized without the leg would silently rank as having no signal.
+        """
+        if self._by_date:
+            raise BacktestError("attach the earnings panel before the first load, not after")
+        self._earnings = panel
+
+    @property
+    def earnings_surprise(self) -> bool:
+        """Whether records carry the earnings-surprise leg (a panel is attached)."""
+        return self._earnings is not None
 
     @property
     def delivery_imputed(self) -> int:
@@ -5093,6 +5120,7 @@ class _SwingFeatures:
         for row in rows:
             grouped.setdefault(row[0], []).append(row)
         residual = self._residual_scores(base, grouped)
+        earnings = self._earnings
         for session, day_rows in grouped.items():
             deliveries = sorted(r[4] for r in day_rows if r[4] is not None)
             fallback = deliveries[len(deliveries) // 2] if deliveries else 0.0
@@ -5132,9 +5160,31 @@ class _SwingFeatures:
                         delivery_observed=delivery_observed,
                         delivery_trend_observed=row[10] is not None,
                         residual_momentum=residual.get((session, str(isin))),
+                        earnings_surprise=(
+                            None if earnings is None else earnings.value(str(isin), session)
+                        ),
                     )
                 )
             self._by_date[session] = tuple(records)
+        if earnings is not None:
+            self._log_earnings(earnings, grouped)
+
+    @staticmethod
+    def _log_earnings(
+        panel: EarningsSurprisePanel, grouped: Mapping[date, Sequence[tuple[Any, ...]]]
+    ) -> None:
+        """Count the M16.3 leg's readings and every no-signal reason over the loaded records."""
+        tally: dict[str, int] = {}
+        for session, day_rows in grouped.items():
+            for row in day_rows:
+                found = panel.explain(str(row[1]), session)
+                reason = found.value if isinstance(found, NoSignal) else "scored"
+                tally[reason] = tally.get(reason, 0) + 1
+        _LOG.info(
+            "backtest.swing_earnings_surprise",
+            decision_dates=len(grouped),
+            **{reason.lower(): count for reason, count in sorted(tally.items())},
+        )
 
     def _residual_scores(
         self, base: str, grouped: Mapping[date, Sequence[tuple[Any, ...]]]
@@ -5353,6 +5403,7 @@ def open_swing_lake(
     residual_momentum: bool = False,
     cap_tiers: bool = False,
     universe: str = DEFAULT_UNIVERSE,
+    earnings_surprise: bool = False,
 ) -> SwingLake:
     """Build the shared lake state for a swing sweep over ``[start, end]`` (M12.2).
 
@@ -5366,6 +5417,10 @@ def open_swing_lake(
     ``residual_momentum`` (round 2, H1) attaches the published NIFTY 50 TRI to the features so every
     record carries the residual-momentum leg; off by default, so a lake no arm needs it for does no
     extra pass. With it on and no published series in the lake, it raises — no proxy stands in.
+
+    ``earnings_surprise`` (M16.3) reads the PIT fundamentals store's standalone EPS and share
+    counts once and attaches the earnings-surprise leg to every record; off by default, so a lake
+    no arm needs it for reads no fundamentals. With it on and no PIT store, it raises.
 
     ``band_hits`` (X2 H2) also reads the window's PR-bundle band hits into memory, from far enough
     back that the first session's lookback is full.
@@ -5396,6 +5451,12 @@ def open_swing_lake(
                     "(`uv run python -m dataplatform.ingest.tri_backfill`)"
                 )
             features.attach_market(market)
+        if earnings_surprise:
+            features.attach_earnings(
+                EarningsSurprisePanel(
+                    _read_pit_facts(data_root, EARNINGS_SURPRISE_CONCEPTS), calendar
+                )
+            )
         hits: BandHitIndex | None = None
         if band_hits:
             before = [session for session in calendar if session < sessions[0]]
@@ -5492,12 +5553,19 @@ def run_swing_composite(
             residual_momentum=parameters.weight_residual_momentum != _ZERO,
             cap_tiers=cap_tiers is not None,
             universe=DEFAULT_UNIVERSE if universe is None else universe.universe,
+            earnings_surprise=parameters.weight_earnings_surprise != _ZERO,
         )
     elif parameters.weight_residual_momentum != _ZERO and not lake.features.residual_momentum:
         raise BacktestError(
             "this arm weights residual momentum but the shared lake was opened without it — "
             "open_swing_lake(residual_momentum=True) before loading, or every name ranks as "
             "excluded"
+        )
+    elif parameters.weight_earnings_surprise != _ZERO and not lake.features.earnings_surprise:
+        raise BacktestError(
+            "this arm weights the earnings surprise but the shared lake was opened without it — "
+            "open_swing_lake(earnings_surprise=True) before loading, or every name ranks as "
+            "having no signal"
         )
     elif lake.adjusted != adjusted:
         raise BacktestError(
