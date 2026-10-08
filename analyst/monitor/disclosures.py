@@ -120,6 +120,11 @@ class DisclosurePolicy:
                 raise TypeError(f"{name} must be a whole number, got {value!r}")
             if value <= 0:
                 raise ValueError(f"{name} must be positive, got {value}")
+        if self.max_chars_per_item <= len(_TRUNCATION_MARK):
+            raise ValueError(
+                f"max_chars_per_item ({self.max_chars_per_item}) must exceed the "
+                f"{len(_TRUNCATION_MARK)}-character truncation mark, or a cut text has no room"
+            )
         if self.max_chars_per_item > self.max_chars_per_bundle:
             raise ValueError(
                 f"max_chars_per_item ({self.max_chars_per_item}) exceeds max_chars_per_bundle "
@@ -174,8 +179,12 @@ def disclosure_text(
     What it never does: fetch the attached document. It only reports that document as
     `not_captured`.
     """
-    if max_chars <= 0:
-        raise ValueError(f"max_chars must be positive, got {max_chars}")
+    if max_chars <= len(_TRUNCATION_MARK):
+        # Below this the slice index goes negative and returns nearly the whole text.
+        raise ValueError(
+            f"max_chars ({max_chars}) must exceed the {len(_TRUNCATION_MARK)}-character "
+            "truncation mark"
+        )
     document = (
         DocumentTextStatus.NOT_CAPTURED if announcement.attachment_ref else DocumentTextStatus.NONE
     )

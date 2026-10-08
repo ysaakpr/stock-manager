@@ -279,6 +279,19 @@ def test_text_is_truncated_per_item_and_marked() -> None:
     assert item.original_chars == len(long_body.strip())
 
 
+@pytest.mark.parametrize("max_chars", [1, 10, 13])
+def test_a_cap_no_longer_than_the_truncation_mark_is_refused(max_chars: int) -> None:
+    """Below the mark's length the slice index went negative and returned nearly the whole text."""
+    with pytest.raises(ValueError, match="truncation mark"):
+        disclosure_text(row(body="x" * 49), max_chars=max_chars)
+
+
+def test_smallest_allowed_cap_still_bounds_the_text() -> None:
+    item = disclosure_text(row(body="word " * 20), max_chars=14)
+    assert item.text is not None
+    assert len(item.text) <= 14
+
+
 def test_bundle_text_cap_marks_the_overflow_unavailable() -> None:
     policy = DisclosurePolicy(max_chars_per_item=100, max_chars_per_bundle=250, max_items=5)
     rows = tuple(
@@ -310,6 +323,7 @@ def test_default_policy_text_fits_well_inside_the_default_token_budget() -> None
     "kwargs",
     [
         {"max_chars_per_item": 0},
+        {"max_chars_per_item": 13},
         {"max_items": -1},
         {"lookback_days": 0},
         {"max_chars_per_item": 500, "max_chars_per_bundle": 400},

@@ -208,6 +208,11 @@ class BundleRequest:
     real point-in-time fact (the parsers guarantee tz-aware timestamps). The filings/news pool may
     be larger than the budget allows — that is the builder's job to bound, not the caller's.
     What it never does: hold a bare dict as an interface, or a float where a price belongs.
+
+    `announcements` (raw rows, rendered with their full body) and `disclosures` (rows with bounded
+    text, from `select_disclosures`) are two routes for the same kind of evidence. A caller must not
+    pass the same row through both: the builder does not de-duplicate, so it would be rendered and
+    budgeted twice. `request_for_escalation` sets only `disclosures`.
     """
 
     case_id: str
