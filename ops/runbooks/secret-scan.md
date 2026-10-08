@@ -22,15 +22,26 @@ failing to load, a filter that would skip files, a `--commits` argument that is 
 
 Every file is read by the wrapper, not by detect-secrets (which skips unreadable and non-UTF-8 files
 without a word). Non-UTF-8 text is decoded (UTF-16 by BOM, else UTF-8, else latin-1) and scanned.
-**Known gaps, by design and named:**
+Every line of a text file is scanned as written, comments included; detect-secrets' parsed views
+(YAML/INI) are an extra pass, never a replacement. A file with NULs on one byte parity only is read
+as UTF-16LE/BE without a BOM.
 
-- **Binaries** — any file containing a NUL byte (zip, xlsx, most pdf) has no text lines to scan. Each
-  run prints them under `NOT SCANNED, binary (N)` (60 tracked fixtures today); nothing passes
-  silently. Never commit a credential inside an archive or office file; the scan cannot see it.
-- **A value split across lines** — e.g. a multi-line parenthesised call whose argument sits on its
-  own line with no keyword. Detection is line-based.
-- **A bare high-entropy credential** with no keyword, no known prefix, not `user:pass@`, and not
-  Kite-shaped (32 mixed-case alphanumerics) — the entropy detectors are off (see the gate note).
+**Known gaps — what the scan cannot see, by design and named:**
+
+- **Binaries.** A file with NUL bytes on both parities (zip, xlsx, most pdf) has no text lines to
+  scan. Each run prints them under `NOT SCANNED, binary (N)` (60 tracked fixtures today); nothing
+  passes silently, but nothing inside them is checked. Never commit a credential inside an
+  archive or office file.
+- **A value split across lines.** Detection is line-based: a multi-line parenthesised call whose
+  value sits alone on its own line, with no keyword, no known prefix and no Kite shape, is missed.
+- **A bare token outside the Kite-shape scope.** A value with no keyword, no known prefix and no
+  `user:pass@` is caught only if it is exactly 32 mixed-case alphanumerics (upper, lower and digit;
+  not pure hex) **and** either sits on a line mentioning kite/token/access or is in a
+  .env/.json/.yaml/.yml/.md/.toml file. Such a value in, say, a .py/.sh/.txt/.csv file on a line
+  without those words, or a bare credential of any other shape (another length, pure hex, with
+  symbols) anywhere, is missed: the entropy detectors are off (see the gate note).
+- **A keyword-named value shorter than 16 characters, or without both a letter and a digit**, is
+  left to detect-secrets' stock KeywordDetector, which needs quotes in code files.
 
 `make secret-scan` runs the working-tree scan on its own (~40 s for the whole tree on this box).
 
@@ -98,7 +109,7 @@ Never add a filter, re-enable the entropy detectors, remove a detector, or rely 
 |---|---|
 | any filter beyond the value heuristics (`should_exclude_file/line/secret`, a regex, a wordlist, a `file://` filter) | `ops/secret_scan.py` exits 2 |
 | a `keyword_exclude` on KeywordDetector | exits 2 |
-| re-listing a skip filter (swagger, lock-file, indirect-reference, line-allowlist, verification) | silently stripped — it never takes effect |
+| re-listing a skip filter (swagger, lock-file, indirect-reference, likely-id-string, line-allowlist, verification) | silently stripped — it never takes effect |
 | removing any of the 30 detectors, or a detector that fails to load | exits 2 |
 | an inline `pragma: allowlist secret` | ignored |
 | re-enabling Hex/Base64HighEntropyString | not rejected by the scanner; `test_baseline_holds_only_hashes_and_reviewed_entries` fails |
@@ -109,7 +120,8 @@ Never add a filter, re-enable the entropy detectors, remove a detector, or rely 
 - Detector set: `plugins_used` in `.secrets.baseline`, which must list every name in
   `REQUIRED_PLUGINS` in `ops/secret_scan.py` (30: detect-secrets' own minus the two entropy ones,
   plus the repo-local five). Each must load from the file its entry names, or the scan exits 2.
-- Repo-local detectors: `ops/secret_scan_plugins.py` — token assignments and `…token("…")` calls,
+- Repo-local detectors: `ops/secret_scan_plugins.py` — quoted or unquoted assignments to any
+  `*token`/`*secret`/`*api_key`/`*password` name, `…token("…")` calls,
   `Authorization: token|Bearer` headers, Kite-shaped bare tokens, conninfo `password=`, Anthropic
   keys. A new credential shape the stock set misses goes there, in `REQUIRED_PLUGINS`, and gets a
   planted case in the test.

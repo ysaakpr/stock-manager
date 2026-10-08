@@ -28,17 +28,23 @@ _VALUE = rf"(?=[{_CHARS}]*[0-9])(?=[{_CHARS}]*[A-Za-z])([{_CHARS}]{{16,}})"
 
 
 class TokenAssignmentDetector(RegexBasedDetector):
-    """A token assigned or passed: `KITE_ACCESS_TOKEN=…`, `token: …`, `kite.set_access_token("…")`.
+    """A credential assigned or passed, quoted or not: `KITE_ACCESS_TOKEN=…`, `token: …`,
+    `APP=1 KITE_API_SECRET=…`, `# api_secret = …`, `kite.set_access_token("…")`.
 
-    Any name ending in `token` (KITE_TOKEN, kite_token, access_token, bare token), in Python, YAML,
-    JSON, .env or shell syntax, plus the call form `…token("<value>")`. A value split across lines
-    inside parentheses is not seen — line-based scanning; documented in the runbook.
+    Any name ending in token, secret, api_key/apikey, password or passwd, in Python, YAML, JSON,
+    .env, INI or shell syntax, inside a comment or not, plus the call form `…token("<value>")`.
+    It backs up KeywordDetector, which needs quotes in code files and misses an env line with an
+    earlier assignment. A value split across lines inside parentheses is not seen — detection is
+    line-based; documented in the runbook.
     """
 
-    secret_type = "Token Assignment"
+    secret_type = "Credential Assignment"
 
     denylist = (
-        re.compile(r"\w*token[\"']?\s*(?::=|=|:)\s*[\"']?" + _VALUE, flags=re.IGNORECASE),
+        re.compile(
+            r"\w*(?:token|secret|api_?key|passw(?:or)?d)[\"']?\s*(?::=|=|:)\s*[\"']?" + _VALUE,
+            flags=re.IGNORECASE,
+        ),
         re.compile(r"\w*token\(\s*[\"']" + _VALUE, flags=re.IGNORECASE),
     )
 

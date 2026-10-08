@@ -26,6 +26,7 @@ and never prints a matched value — so its own output can never become the leak
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -37,9 +38,10 @@ from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from detect_secrets.core import scan as ds_scan
+from detect_secrets.core.log import log as ds_log
 from detect_secrets.core.plugins.util import get_mapping_from_secret_type_to_class
 from detect_secrets.settings import (
     configure_settings_from_baseline,
@@ -48,6 +50,11 @@ from detect_secrets.settings import (
     get_settings,
 )
 from detect_secrets.util.importlib import import_file_as_module
+
+# detect-secrets logs its own "[initialize] ERROR …" lines before the wrapper's single exit-2 line
+# (and logs "Unable to load plugins!" where it would otherwise pass). The wrapper reports every
+# failure itself, so the library's logger is silenced in this process and every worker.
+ds_log.disabled = True
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_BASELINE = REPO / ".secrets.baseline"
@@ -66,6 +73,9 @@ FORBIDDEN_FILTERS = frozenset(
         "detect_secrets.filters.heuristic.is_lock_file",
         "detect_secrets.filters.heuristic.is_indirect_reference",
         "detect_secrets.filters.heuristic.is_non_text_file",
+        # Drops any keyword hit with an `id` / `_id` token earlier on the line:
+        # `KiteConnect(user_id=…, api_key=…)`, `APP_ID=1 KITE_API_SECRET=…`.
+        "detect_secrets.filters.heuristic.is_likely_id_string",
     }
 )
 # Value-shape heuristics that drop a placeholder, never a file or a path. A baseline naming any
@@ -74,7 +84,6 @@ FORBIDDEN_FILTERS = frozenset(
 PERMITTED_FILTERS = frozenset(
     {
         "detect_secrets.filters.common.is_invalid_file",
-        "detect_secrets.filters.heuristic.is_likely_id_string",
         "detect_secrets.filters.heuristic.is_not_alphanumeric_string",
         "detect_secrets.filters.heuristic.is_potential_uuid",
         "detect_secrets.filters.heuristic.is_prefixed_with_dollar_sign",
@@ -123,9 +132,22 @@ REQUIRED_PLUGINS = frozenset(
 )
 
 # detect-secrets' own detectors, by class name, as shipped in the pinned version.
-_STOCK_PLUGINS = frozenset(cls.__name__ for cls in get_mapping_from_secret_type_to_class().values())
+_STOCK_PLUGINS: frozenset[str] = frozenset(
+    plugin_class.__name__
+    for plugin_class in cast(dict[str, type], get_mapping_from_secret_type_to_class()).values()
+)
 
-_ENTRY_KEYS = frozenset({"type", "filename", "hashed_secret", "is_verified", "line_number"})
+_ENTRY_TYPES: dict[str, type] = {
+    "type": str,
+    "filename": str,
+    "hashed_secret": str,
+    "is_verified": bool,
+    "line_number": int,
+}
+_TOP_LEVEL_KEYS = frozenset({"version", "plugins_used", "filters_used", "results", "generated_at"})
+_PLUGIN_KEYS = frozenset({"name", "path", "limit", "keyword_exclude"})
+_VERSION = re.compile(r"\d+\.\d+\.\d+")
+_GENERATED_AT = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
 _SHA1 = re.compile(r"[0-9a-f]{40}")
 _UTF16_BOMS = (b"\xff\xfe", b"\xfe\xff")
 
@@ -175,6 +197,18 @@ def _read_baseline(path: Path) -> dict[str, Any]:
 
 def _validate(config: dict[str, Any]) -> Settings:
     """Check a baseline and return the detect-secrets settings to run with (filters sanitised)."""
+    # The baseline is the one file the tree scan skips (its hashes would read as secrets), so
+    # nothing may hide in it: every key, at every level, must be one the format defines.
+    unknown = set(config) - _TOP_LEVEL_KEYS
+    if unknown:
+        raise ScanConfigError(f"baseline: unknown top-level key(s): {', '.join(sorted(unknown))}")
+    if not isinstance(config.get("version"), str) or not _VERSION.fullmatch(config["version"]):
+        raise ScanConfigError("baseline: version must be a dotted version string")
+    generated = config.get("generated_at")
+    if generated is not None and not (
+        isinstance(generated, str) and _GENERATED_AT.fullmatch(generated)
+    ):
+        raise ScanConfigError("baseline: generated_at must be an ISO UTC timestamp")
     plugins = config.get("plugins_used")
     filters = config.get("filters_used", [])
     results = config.get("results")
@@ -192,27 +226,49 @@ def _validate(config: dict[str, Any]) -> Settings:
     if missing:
         raise ScanConfigError(f"baseline lacks required detector(s): {', '.join(sorted(missing))}")
     for plugin in plugins:
+        if set(plugin) - _PLUGIN_KEYS:
+            raise ScanConfigError(f"baseline: unexpected field(s) on plugin {plugin['name']}")
         if plugin.get("keyword_exclude"):
             raise ScanConfigError(f"baseline: {plugin['name']} has a keyword_exclude")
+        if "path" in plugin and not (
+            isinstance(plugin["path"], str) and plugin["path"].startswith("file://")
+        ):
+            raise ScanConfigError(f"baseline: {plugin['name']} path must be a file:// string")
+        if "limit" in plugin and not isinstance(plugin["limit"], int | float):
+            raise ScanConfigError(f"baseline: {plugin['name']} limit must be a number")
 
     kept = []
     for filt in filters:
         path = filt.get("path")
-        if path in FORBIDDEN_FILTERS:
-            continue
-        if path not in PERMITTED_FILTERS:
+        if path not in PERMITTED_FILTERS | FORBIDDEN_FILTERS:
             raise ScanConfigError(
                 f"baseline: filter not allowed: {path} — accept a false positive with --accept"
             )
+        extra = set(filt) - {"path", "min_level"}
+        if extra or not isinstance(filt.get("min_level", 0), int):
+            raise ScanConfigError(f"baseline: unexpected field(s) on filter {path}")
+        if path in FORBIDDEN_FILTERS:
+            continue
         kept.append(filt)
 
     for filename, entries in results.items():
         if not isinstance(entries, list):
             raise ScanConfigError(f"baseline: results[{filename!r}] must be a list")
         for entry in entries:
-            if not isinstance(entry, dict) or set(entry) - _ENTRY_KEYS:
-                raise ScanConfigError(f"baseline: unexpected fields in an entry for {filename}")
-            if entry.get("filename") != filename or not isinstance(entry.get("type"), str):
+            if not isinstance(entry, dict) or set(entry) != set(_ENTRY_TYPES):
+                raise ScanConfigError(
+                    f"baseline: an entry for {filename} must have exactly the fields "
+                    + ", ".join(sorted(_ENTRY_TYPES))
+                )
+            for key, kind in _ENTRY_TYPES.items():
+                # bool is an int subclass; a line number of `true` is still malformed.
+                if not isinstance(entry[key], kind) or (
+                    kind is int and isinstance(entry[key], bool)
+                ):
+                    raise ScanConfigError(
+                        f"baseline: {key} of an entry for {filename} is not {kind.__name__}"
+                    )
+            if entry["filename"] != filename:
                 raise ScanConfigError(f"baseline: malformed entry for {filename}")
             # Only a sha1 may sit here — never the value itself.
             if not _SHA1.fullmatch(str(entry.get("hashed_secret", ""))):
@@ -305,13 +361,20 @@ def load_baseline(path: Path) -> tuple[Settings, Accepted]:
 def decode(data: bytes) -> str | None:
     """Text to scan, or None for a true binary.
 
-    UTF-16 by BOM; otherwise a NUL anywhere means binary (git's own heuristic, over the whole
-    blob); otherwise UTF-8, falling back to latin-1, which maps every byte — so one stray byte
-    never makes a file unscannable.
+    UTF-16 by BOM, or without one when every NUL falls on the same byte parity (the high byte of
+    ASCII in UTF-16LE/BE); otherwise a NUL anywhere means binary (git's own heuristic, over the
+    whole blob); otherwise UTF-8, falling back to latin-1, which maps every byte — so one stray
+    byte never makes a file unscannable.
     """
     if data.startswith(_UTF16_BOMS):
         return data.decode("utf-16", errors="replace")
     if b"\0" in data:
+        even = data[0::2].count(0)
+        odd = data[1::2].count(0)
+        if odd and not even and odd * 4 >= len(data) // 2:
+            return data.decode("utf-16-le", errors="replace")
+        if even and not odd and even * 4 >= len(data) // 2:
+            return data.decode("utf-16-be", errors="replace")
         return None
     try:
         return data.decode("utf-8-sig")
@@ -323,13 +386,32 @@ def _worker_init(settings: Settings) -> None:
     _configure(settings)
 
 
+def _scan_file(path: str) -> list[tuple[int, str, str]]:
+    """Scan one UTF-8 scratch file: (line, type, value hash) per distinct finding.
+
+    The raw lines are always scanned. detect-secrets' own `scan_file` does not do that: a
+    transformer that claims the file (ConfigFileTransformer takes anything configparser accepts —
+    a .toml, .md or .py with one `[section]` line) replaces the raw lines, and comments such as
+    `# access_token = …` vanish. Its transformed views are scanned as an extra pass only, which
+    still lets it read values a YAML/INI parser unfolds.
+    """
+    if ds_scan._is_filtered_out(required_filter_parameters=["filename"], filename=path):
+        return []
+    with Path(path).open(encoding="utf-8") as handle:
+        passes = [handle.readlines()]
+    # The transformed views are a bonus; if a transformer chokes, the raw pass has every line.
+    with contextlib.suppress(OSError, UnicodeDecodeError):
+        passes += list(ds_scan._get_lines_from_file(path))
+    found: dict[tuple[str, str], int] = {}
+    for lines in passes:
+        for secret in ds_scan._process_line_based_plugins(list(enumerate(lines, 1)), path):
+            found.setdefault((secret.type, secret.secret_hash), secret.line_number)
+    return [(line, kind, digest) for (kind, digest), line in found.items()]
+
+
 def _scan_files(paths: list[str]) -> list[tuple[str, int, str, str]]:
     """Scan absolute paths with the configured detectors: (path, line, type, value hash)."""
-    out = []
-    for path in paths:
-        for secret in ds_scan.scan_file(path):
-            out.append((path, secret.line_number, secret.type, secret.secret_hash))
-    return out
+    return [(path, *hit) for path in paths for hit in _scan_file(path)]
 
 
 def _materialise(

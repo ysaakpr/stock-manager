@@ -151,6 +151,16 @@ PLANTED = {
     "aws_access_key": ("aws.py", 'region = "ap-south-1"\nkey_id = "' + AWS_KEY + '"\n'),
     "private_key": ("id_rsa", PEM_HEADER + "\n" + _fake("pem", 64) + "\n"),
     "anthropic_key_in_prose": ("notes.md", "The key was " + ANTHROPIC + " until rotated.\n"),
+    # An `id` token earlier on the line used to hide the keyword hit (is_likely_id_string).
+    "id_then_api_secret_dict": (
+        "cfg.py",
+        'CFG = {"user_id": "AB1234", "api_secret": "' + KITE_SECRET + '"}\n',
+    ),
+    "kiteconnect_user_id_then_api_key": (
+        "kite.py",
+        'kite = KiteConnect(user_id="AB1234", api_key="' + KITE_KEY + '")\n',
+    ),
+    "app_id_then_api_secret_env": ("app.env", "APP_ID=1 KITE_API_SECRET=" + KITE_SECRET + "\n"),
     # Paths the stock filters used to skip wholesale (B3).
     "swagger_path": ("docs/swagger-setup.md", "KITE_API_SECRET=" + KITE_SECRET + "\n"),
     "lock_file_name": ("package-lock.json", '{"api_secret": "' + KITE_SECRET + '"}\n'),
@@ -280,6 +290,36 @@ def test_binary_is_named_as_not_scanned(tmp_path: Path) -> None:
     assert "bundle.zip" in result.stdout
 
 
+@pytest.mark.parametrize("codec", ["utf-16-le", "utf-16-be"])
+def test_utf16_without_bom_is_decoded_and_scanned(codec: str, tmp_path: Path) -> None:
+    target = tmp_path / "kite.env"
+    target.write_bytes(("KITE_API_SECRET=" + KITE_SECRET + "\n").encode(codec))
+
+    assert _scan(target).returncode == FINDING
+
+
+@pytest.mark.parametrize("suffix", [".toml", ".ini", ".md", ".py", ".cfg"])
+@pytest.mark.parametrize(
+    "comment",
+    [
+        "# access_token = " + KITE_BARE,
+        "; api_secret = " + KITE_SECRET,
+        "# KITE_ACCESS_TOKEN=" + KITE_TOKEN,
+    ],
+    ids=["hash_token", "semicolon_secret", "hash_env"],
+)
+def test_comment_lines_in_ini_parsable_files_are_scanned(
+    suffix: str, comment: str, tmp_path: Path
+) -> None:
+    """A `[section]` makes configparser claim the file; its comments must still be scanned."""
+    target = tmp_path / f"settings{suffix}"
+    target.write_text("[kite]\nname = drill\n" + comment + "\nregion = in\n")
+
+    result = _scan(target)
+
+    assert result.returncode == FINDING, result.stdout + result.stderr
+
+
 def test_tree_and_commit_modes_scan_non_utf8_files(tmp_path: Path) -> None:
     _git(tmp_path, "init", "-q")
     (tmp_path / "README.md").write_text("project\n")
@@ -338,7 +378,8 @@ def test_missing_plugin_file_is_a_config_error(tmp_path: Path) -> None:
     result = _scan(target, baseline=_baseline_copy(tmp_path, edit))
 
     assert result.returncode == UNTRUSTED, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr
+    # One line from the wrapper; detect-secrets' own "[initialize] ERROR" lines are silenced.
+    assert len(result.stderr.strip().splitlines()) == 1, result.stderr
 
 
 def test_plugin_import_error_is_a_config_error(tmp_path: Path) -> None:
@@ -351,7 +392,7 @@ def test_plugin_import_error_is_a_config_error(tmp_path: Path) -> None:
     result = _scan(target, baseline=_baseline_copy(tmp_path, edit))
 
     assert result.returncode == UNTRUSTED, result.stdout + result.stderr
-    assert "Traceback" not in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1, result.stderr
 
 
 def test_plugin_path_without_the_class_is_a_config_error(tmp_path: Path) -> None:
@@ -415,6 +456,7 @@ def test_keyword_exclude_is_rejected(tmp_path: Path) -> None:
         "detect_secrets.filters.heuristic.is_swagger_file",
         "detect_secrets.filters.heuristic.is_lock_file",
         "detect_secrets.filters.common.is_ignored_due_to_verification_policies",
+        "detect_secrets.filters.heuristic.is_likely_id_string",
     ],
 )
 def test_forbidden_filters_are_stripped(filter_path: str, tmp_path: Path) -> None:
@@ -450,6 +492,70 @@ def test_corrupt_baseline_is_a_clear_error(content: str, tmp_path: Path) -> None
     assert result.returncode == UNTRUSTED
     assert result.stderr.startswith("secret-scan: ")
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda c: c.update({"notes": "KITE_API_SECRET=" + KITE_SECRET}),
+        lambda c: c.update({"version": "KITE_API_SECRET=" + KITE_SECRET}),
+        lambda c: c.update({"generated_at": "token " + KITE_TOKEN}),
+        lambda c: c.pop("version"),
+        lambda c: c["plugins_used"][0].update({"note": KITE_SECRET}),
+        lambda c: c["filters_used"][0].update({"note": KITE_SECRET}),
+    ],
+    ids=[
+        "unknown_key",
+        "bad_version",
+        "bad_generated_at",
+        "no_version",
+        "plugin_extra",
+        "filter_extra",
+    ],
+)
+def test_nothing_can_hide_in_the_baseline(
+    edit: Callable[[dict[str, Any]], Any], tmp_path: Path
+) -> None:
+    """The tree scan skips the baseline itself, so its schema is closed at every level."""
+    target = tmp_path / "clean.py"
+    target.write_text(CLEAN)
+
+    result = _scan(target, baseline=_baseline_copy(tmp_path, edit))
+
+    assert result.returncode == UNTRUSTED
+    assert len(result.stderr.strip().splitlines()) == 1, result.stderr
+
+
+def _entry_edit(change: Callable[[dict[str, Any]], Any]) -> Callable[[dict[str, Any]], None]:
+    def edit(config: dict[str, Any]) -> None:
+        first = next(iter(config["results"].values()))[0]
+        change(first)
+
+    return edit
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda e: e.pop("line_number"),
+        lambda e: e.pop("is_verified"),
+        lambda e: e.update({"line_number": "16"}),
+        lambda e: e.update({"line_number": True}),
+        lambda e: e.update({"is_verified": "no"}),
+        lambda e: e.update({"type": 3}),
+    ],
+    ids=["no_line", "no_verified", "line_str", "line_bool", "verified_str", "type_int"],
+)
+def test_baseline_entries_have_exactly_the_five_typed_fields(
+    change: Callable[[dict[str, Any]], Any], tmp_path: Path
+) -> None:
+    target = tmp_path / "clean.py"
+    target.write_text(CLEAN)
+
+    result = _scan(target, baseline=_baseline_copy(tmp_path, _entry_edit(change)))
+
+    assert result.returncode == UNTRUSTED
+    assert len(result.stderr.strip().splitlines()) == 1, result.stderr
 
 
 def test_unknown_plugin_is_a_clear_error(tmp_path: Path) -> None:
