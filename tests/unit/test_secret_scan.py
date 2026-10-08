@@ -161,6 +161,34 @@ PLANTED = {
         'kite = KiteConnect(user_id="AB1234", api_key="' + KITE_KEY + '")\n',
     ),
     "app_id_then_api_secret_env": ("app.env", "APP_ID=1 KITE_API_SECRET=" + KITE_SECRET + "\n"),
+    "app_id_then_api_secret_py": (
+        "app.py",
+        'app_id = 1; kite_api_secret = "' + KITE_SECRET + '"\n',
+    ),
+    # pydantic-settings style annotated assignments (dataplatform/config.py's own shape).
+    "annotated_api_secret_str": ("cfg.py", 'kite_api_secret: str = "' + KITE_SECRET + '"\n'),
+    "annotated_password_str": ("cfg.py", 'password: str = "' + PG_PW + '"\n'),
+    "annotated_secretstr_wrapper": (
+        "cfg.py",
+        'kite_access_token: SecretStr = SecretStr("' + KITE_TOKEN + '")\n',
+    ),
+    "basesettings_class_str": (
+        "cfg.py",
+        'class Settings(BaseSettings):\n    kite_api_secret: str = "' + KITE_SECRET + '"\n',
+    ),
+    "basesettings_class_optional_secretstr": (
+        "cfg.py",
+        "class Settings(BaseSettings):\n"
+        + '    pg_password: SecretStr | None = SecretStr("'
+        + PG_PW
+        + '")\n',
+    ),
+    # Hyphenated and mid-name keywords.
+    "x_api_key_yaml": ("gateway.yaml", "headers:\n  x-api-key: " + KITE_KEY + "\n"),
+    "x_api_key_header_md": ("api.md", "curl -H 'X-Api-Key: " + KITE_KEY + "' https://h\n"),
+    "kite_pass_env": ("kite.env", "KITE_PASS=" + PG_PW + "\n"),
+    "token_value_py": ("kite.py", 'TOKEN_VALUE = "' + KITE_TOKEN + '"\n'),
+    "unquoted_literal_kwarg": ("kite.env", "OPTS=api_key=" + KITE_KEY + " debug=1\n"),
     # Paths the stock filters used to skip wholesale (B3).
     "swagger_path": ("docs/swagger-setup.md", "KITE_API_SECRET=" + KITE_SECRET + "\n"),
     "lock_file_name": ("package-lock.json", '{"api_secret": "' + KITE_SECRET + '"}\n'),
@@ -211,6 +239,163 @@ def test_clean_file_passes(tmp_path: Path) -> None:
 
     assert result.returncode == CLEAN_EXIT, result.stderr
     assert "clean" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "conn = connect(password=settings.db2_password.get_secret_value())",
+        "token = self.access_token_v2",
+        "kite = KiteConnect(api_key=cfg.kite.api_key_2024, debug=True)",
+        "secret = base64.b64encode(raw_bytes_v1)",
+        "api_secret = load_kite_secret_v2(path)",
+        "access_token = tokens_by_day2026[day]",
+    ],
+)
+def test_references_are_not_credentials(line: str, tmp_path: Path) -> None:
+    """An unquoted dotted chain, call or subscript is a reference, even with digits in it."""
+    target = tmp_path / "refs.py"
+    target.write_text(line + "\n")
+
+    result = _scan(target)
+
+    assert result.returncode == CLEAN_EXIT, result.stderr
+
+
+# Unquoted values shaped like references — `ident.ident…` or ending in `(` — are literals
+# everywhere except code lines of code files. These are the shapes main caught and the first
+# version of the reference exemption let through: duplicate .env keys and broken YAML (no parsed
+# view to fall back on), shell lines, comments, prose.
+DOTTED = "k" + _fake("dotted-a", 11) + ".k" + _fake("dotted-b", 13)
+CALLED = "k" + _fake("called", 20)
+REFERENCE_SHAPED = {
+    "env_dup_key_dotted_password": ("app.env", "A=1\nA=2\nDB_PASSWORD=" + DOTTED + "\n"),
+    "env_dup_key_dotted_token": ("app.env", "A=1\nA=2\nKITE_ACCESS_TOKEN=" + DOTTED + "\n"),
+    "env_dup_key_called_secret": ("app.env", "A=1\nA=2\nKITE_API_SECRET=" + CALLED + "()\n"),
+    "sh_export_dotted_password": ("run.sh", "set -eu\nexport DB_PASSWORD=" + DOTTED + "\n"),
+    "py_comment_dotted_password": ("app.py", "# password = " + DOTTED + "\n"),
+    "py_trailing_comment_dotted_secret": ("app.py", "x = 1  # api_secret = " + DOTTED + "\n"),
+    "md_fenced_dotted_token": ("README.md", "```\nKITE_ACCESS_TOKEN=" + DOTTED + "\n```\n"),
+    "md_prose_called_secret": ("notes.md", "Set KITE_API_SECRET=" + CALLED + "() first.\n"),
+    "yaml_broken_dotted_token": ("kite.yaml", "kite: [\n  access_token: " + DOTTED + "\n"),
+    "ini_dotted_password": ("db.ini", "[db]\npassword = " + DOTTED + "\n"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(REFERENCE_SHAPED))
+def test_reference_shaped_literals_outside_code_are_caught(case: str, tmp_path: Path) -> None:
+    name, content = REFERENCE_SHAPED[case]
+    target = tmp_path / name
+    target.write_text(content)
+
+    result = _scan(target)
+
+    assert result.returncode == FINDING, f"{case}: {result.stdout}{result.stderr}"
+    assert DOTTED not in result.stderr and CALLED not in result.stderr
+
+
+# pydantic / dataclass forms — the value is a literal however it is wrapped or typed.
+PYDANTIC_FORMS = {
+    "annotated_field_str": (
+        'kite_api_secret: Annotated[str, Field(description="kite", min_length=3)] = "'
+        + KITE_SECRET
+        + '"'
+    ),
+    "annotated_secretstr": (
+        'kite_access_token: Annotated[SecretStr, Field(repr=False)] = SecretStr("'
+        + KITE_TOKEN
+        + '")'
+    ),
+    "field_default": 'kite_api_secret: SecretStr = Field(default="' + KITE_SECRET + '")',
+    "field_positional_alias": (
+        'kite_api_secret: str = Field("' + KITE_SECRET + '", alias="KITE_API_SECRET")'
+    ),
+    "field_default_secretstr": (
+        'kite_access_token: SecretStr = Field(default=SecretStr("' + KITE_TOKEN + '"))'
+    ),
+    "dataclass_field_default": 'api_secret: str = field(default="' + KITE_SECRET + '")',
+    "bytes_literal": 'api_secret: bytes = b"' + KITE_SECRET + '"',
+    "f_string_literal": 'api_secret: str = f"' + KITE_SECRET + '"',
+    "dict_literal": 'kite_secrets: dict[str, str] = {"kite": "' + KITE_SECRET + '"}',
+}
+
+
+@pytest.mark.parametrize("case", sorted(PYDANTIC_FORMS))
+def test_pydantic_and_dataclass_forms_are_caught(case: str, tmp_path: Path) -> None:
+    target = tmp_path / "settings.py"
+    target.write_text("class Settings(BaseSettings):\n    " + PYDANTIC_FORMS[case] + "\n")
+
+    result = _scan(target)
+
+    assert result.returncode == FINDING, f"{case}: {result.stdout}{result.stderr}"
+    assert ": Credential Assignment" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'passport_number = "' + KITE_SECRET + '"',
+        'passenger_ref = "' + KITE_SECRET + '"',
+        'passthrough_id = "' + KITE_SECRET + '"',
+        'bypass_cache_key_v1 = "' + KITE_SECRET + '"',
+        'tokenizer_name = "' + KITE_SECRET + '"',
+        'if access_token == "' + KITE_TOKEN + '":',
+        'if api_secret != "' + KITE_SECRET + '":',
+    ],
+    ids=["passport", "passenger", "passthrough", "bypass", "tokenizer", "eq", "ne"],
+)
+def test_lookalike_names_and_comparisons_are_not_assignments(line: str, tmp_path: Path) -> None:
+    """Only the assignment detector is pinned here: the stock KeywordDetector has its own,
+    broader idea of a comparison and is not this detector's to narrow."""
+    target = tmp_path / "app.py"
+    target.write_text(line + "\n")
+
+    result = _scan(target)
+
+    assert ": Credential Assignment" not in result.stderr, result.stderr
+
+
+def test_the_reference_exemption_still_applies_on_code_lines(tmp_path: Path) -> None:
+    """The same dotted value that is a finding in .env/.sh/comments is a reference in code."""
+    target = tmp_path / "app.py"
+    target.write_text("db_password = settings." + DOTTED.split(".")[1] + ".value\n")
+
+    assert _scan(target).returncode == CLEAN_EXIT
+
+
+def test_the_real_settings_module_scans_clean() -> None:
+    """dataplatform/config.py: SecretStr fields with defaults, None and env — no finding."""
+    assert _scan(REPO / "dataplatform" / "config.py").returncode == CLEAN_EXIT
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["id_then_api_secret_dict", "kiteconnect_user_id_then_api_key", "app_id_then_api_secret_py"],
+)
+def test_id_token_does_not_hide_the_keyword_hit(case: str, tmp_path: Path) -> None:
+    """Pinned to KeywordDetector's own finding: is_likely_id_string only filters non-regex
+    detectors, so re-allowing it fails here even though the repo-local assignment detector would
+    still catch the line. (The .env shape is not a KeywordDetector hit at all — the stock regex
+    misses it — so it is covered by the planted case, not here.)"""
+    name, content = PLANTED[case]
+    target = tmp_path / name
+    target.write_text(content)
+
+    result = _scan(target)
+
+    assert result.returncode == FINDING
+    assert ": Secret Keyword" in result.stderr, result.stderr
+
+
+def test_yaml_value_only_the_parsed_view_reveals(tmp_path: Path) -> None:
+    """A folded block scalar puts the value on its own line with no key: only detect-secrets'
+    YAML transformer pass rejoins them, so dropping that extra pass fails this test."""
+    target = tmp_path / "kite.yaml"
+    target.write_text("kite:\n  api_secret: >-\n    " + KITE_SECRET + "\n")
+
+    result = _scan(target)
+
+    assert result.returncode == FINDING, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("name", ["digests.md", "digests.json", "digests.yaml", "kite.py"])

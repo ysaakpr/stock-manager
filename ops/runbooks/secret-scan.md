@@ -23,17 +23,31 @@ failing to load, a filter that would skip files, a `--commits` argument that is 
 Every file is read by the wrapper, not by detect-secrets (which skips unreadable and non-UTF-8 files
 without a word). Non-UTF-8 text is decoded (UTF-16 by BOM, else UTF-8, else latin-1) and scanned.
 Every line of a text file is scanned as written, comments included; detect-secrets' parsed views
-(YAML/INI) are an extra pass, never a replacement. A file with NULs on one byte parity only is read
-as UTF-16LE/BE without a BOM.
+(YAML/INI) are an extra pass, never a replacement. A file is read as UTF-16 when it starts with a
+BOM, or — without one — when **every** NUL byte sits on the same parity **and** NULs fill at least a
+quarter of that parity's positions (about one byte in eight overall); that is ASCII-heavy UTF-16LE
+or BE.
 
 **Known gaps — what the scan cannot see, by design and named:**
 
-- **Binaries.** A file with NUL bytes on both parities (zip, xlsx, most pdf) has no text lines to
-  scan. Each run prints them under `NOT SCANNED, binary (N)` (60 tracked fixtures today); nothing
-  passes silently, but nothing inside them is checked. Never commit a credential inside an
-  archive or office file.
-- **A value split across lines.** Detection is line-based: a multi-line parenthesised call whose
-  value sits alone on its own line, with no keyword, no known prefix and no Kite shape, is missed.
+- **Binaries — and UTF-16 that does not look like UTF-16.** Any other file containing a NUL byte is
+  treated as binary and not scanned: zip, xlsx and most pdf, but also BOM-less UTF-16 whose NULs
+  are too sparse (mostly non-Latin text, where few high bytes are zero) or fall on both parities
+  (a character such as U+0100 puts a NUL on the other side). Each run prints them under
+  `NOT SCANNED, binary (N)` (60 tracked fixtures today); nothing passes silently, but nothing
+  inside them is checked. Never commit a credential inside an archive or office file, and save
+  text as UTF-8.
+- **A value split across lines.** Detection is line-based. When the value sits on a later line
+  than its name, with no keyword, known prefix or Kite shape on that line, it is missed. Named
+  forms:
+  - `token: SecretStr = SecretStr(` ⏎ `"<value>"` ⏎ `)`
+  - `api_secret: str = Field(` ⏎ `default="<value>",` ⏎ `)` — here `default="<value>"` has no
+    credential keyword, so nothing on the line identifies it
+  - `api_secret = (` ⏎ `"<value>"` ⏎ `)` — a parenthesised value on its own line
+  - a dict or list spread over lines, a `\`-continued shell line, a YAML value folded with
+    `>`/`|` when the file does not parse (a file that parses is caught by detect-secrets' YAML
+    pass)
+  - an annotation nested more than two brackets deep (`dict[str, list[dict[str, str]]] = …`)
 - **A bare token outside the Kite-shape scope.** A value with no keyword, no known prefix and no
   `user:pass@` is caught only if it is exactly 32 mixed-case alphanumerics (upper, lower and digit;
   not pure hex) **and** either sits on a line mentioning kite/token/access or is in a
@@ -42,6 +56,15 @@ as UTF-16LE/BE without a BOM.
   symbols) anywhere, is missed: the entropy detectors are off (see the gate note).
 - **A keyword-named value shorter than 16 characters, or without both a letter and a digit**, is
   left to detect-secrets' stock KeywordDetector, which needs quotes in code files.
+- **An unquoted value that looks like a reference, on a code line of a code file.** In .py, .pyi,
+  .js, .jsx, .mjs, .cjs, .ts, .tsx, .go, .java, .kt, .rb and .rs files, an unquoted dotted chain
+  (`settings.db2_password`), call or subscript **before any `#`, `//` or `/*`** on the line is
+  treated as code, not as a credential, so passing `settings.db2_password.get_secret_value()` as the password is
+  not a finding. A real secret written unquoted in that shape on such a line is missed. Everywhere
+  else it is a value and is caught: .env, .sh, .md, INI, YAML and other non-code files, and every
+  comment, including a trailing one.
+- **A credential under a name with no keyword** (`KITE_SESSION=<value>`, `auth: <value>`) is
+  caught only if it has a known prefix, a `user:pass@`, or the Kite shape in scope.
 
 `make secret-scan` runs the working-tree scan on its own (~40 s for the whole tree on this box).
 
@@ -125,8 +148,13 @@ Never add a filter, re-enable the entropy detectors, remove a detector, or rely 
 - Detector set: `plugins_used` in `.secrets.baseline`, which must list every name in
   `REQUIRED_PLUGINS` in `ops/secret_scan.py` (30: detect-secrets' own minus the two entropy ones,
   plus the repo-local five). Each must load from the file its entry names, or the scan exits 2.
-- Repo-local detectors: `ops/secret_scan_plugins.py` — quoted or unquoted assignments to any
-  `*token`/`*secret`/`*api_key`/`*password` name, `…token("…")` calls,
+- Repo-local detectors: `ops/secret_scan_plugins.py` — assignments (plain, `:`-style, or
+  Python-annotated, brackets balanced to two levels; never `==`/`!=`) with an optional dict-literal
+  key, `Field(`/`field(` with optional `default=`, `SecretStr(`/`Secret(`/`str(`/`bytes(` wrapper
+  and `b`/`f`/`r`/`u` string prefix, to any name containing token (not tokenize/tokenizer),
+  secret, api-key/api_key/apikey, password, passwd or a whole-word pass (not passport/passenger/
+  passthrough/bypass), joined by `_` or `-`;
+  `…token("…")` calls,
   `Authorization: token|Bearer` headers, Kite-shaped bare tokens, conninfo `password=`, Anthropic
   keys. A new credential shape the stock set misses goes there, in `REQUIRED_PLUGINS`, and gets a
   planted case in the test.
