@@ -230,7 +230,7 @@ records whose symbol D2 did not resolve (`unresolved_symbols`) — a listing new
 # Run it now (an operator or an agent); exit 1 on FAILED, 3 if the scheduler is already running it.
 uv run python -m dataplatform.scheduler run-once fundamentals_forward
 # What did the last runs do?
-curl -s localhost:8000/status/jobs | jq '.jobs[] | select(.name == "fundamentals_forward")'
+curl -s 127.0.0.1:8000/status/jobs | jq '.jobs[] | select(.name == "fundamentals_forward")'
 ```
 
 After a merge that changes the job, restart the scheduler — it reads the registry only at start:
