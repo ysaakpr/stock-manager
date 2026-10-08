@@ -14,7 +14,8 @@ Python 3.12 via `uv` (never the host's 3.9). Postgres via docker-compose.
 uv sync                     # install/refresh env from uv.lock
 uv run pytest               # tests
 uv run pytest tests/unit    # fast subset
-make check                  # format + lint + types + tests — the gate for every task
+make check                  # secret scan + format + lint + types + tests — the gate for every task
+make hooks                  # once per clone: secret-scan pre-commit + commit-msg hooks
 make up                     # docker compose up -d (postgres + app)
 make migrate                # apply platform/store/migrations/*.sql
 ```
