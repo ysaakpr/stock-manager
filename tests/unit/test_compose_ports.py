@@ -5,7 +5,8 @@ ahead of the host's INPUT chain, so a host firewall does not close it. Until M15
 Postgres (dev-default credentials) and the unauthenticated status API on every interface. These
 tests parse the compose files and fail on a publish with no host IP, a wildcard host IP, a
 non-loopback host IP, or a host IP taken from a variable — an override is one `.env` line away
-from 0.0.0.0, so the address is a literal on purpose.
+from 0.0.0.0, so the address is a literal on purpose — and on `network_mode: host`, which puts
+every listening port on the host's interfaces without any `ports:` entry to check.
 
 The parser is exercised on bad specs too, so a parser that stopped finding the host IP cannot
 pass the real file vacuously.
@@ -14,8 +15,10 @@ pass the real file vacuously.
 from __future__ import annotations
 
 import ipaddress
+import os
 import re
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
@@ -23,11 +26,23 @@ import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[2]
-COMPOSE_FILES = sorted(
-    p
-    for pattern in ("docker-compose*.y*ml", "compose*.y*ml")
-    for p in [*REPO.glob(pattern), *(REPO / "ops").glob(pattern)]
-)
+# Pruned, not filtered afterwards: the main checkout's data/ is the whole lake.
+_NOT_SOURCE = {".git", ".venv", "node_modules", "data", ".worktrees", ".claude", ".polly"}
+
+
+def _compose_files() -> list[Path]:
+    found: list[Path] = []
+    for root, dirs, files in os.walk(REPO):
+        dirs[:] = [d for d in dirs if d not in _NOT_SOURCE]
+        found += [
+            Path(root, f)
+            for f in files
+            if fnmatch(f, "docker-compose*.y*ml") or fnmatch(f, "compose*.y*ml")
+        ]
+    return sorted(found)
+
+
+COMPOSE_FILES = _compose_files()
 
 # `${VAR}`, `${VAR:-default}` and friends. Replaced before splitting so a `:-` inside a default
 # is not mistaken for the ip:published:target separator.
@@ -61,10 +76,21 @@ def published_ports(compose: dict[str, Any]) -> list[Publish]:
         for entry in service.get("ports") or []:
             if isinstance(entry, dict):
                 ip = entry.get("host_ip")
-                out.append(Publish(name, repr(entry), None if ip is None else str(ip)))
+                host_ip = None if ip is None else _INTERPOLATION.sub(_VAR, str(ip))
+                out.append(Publish(name, repr(entry), host_ip))
             else:
                 out.append(Publish(name, str(entry), _host_ip_of_short(str(entry))))
     return out
+
+
+def host_networked(compose: dict[str, Any]) -> list[str]:
+    """Services on `network_mode: host`: every port they listen on is on the host's interfaces,
+    with no `ports:` entry for the checks above to see."""
+    return [
+        name
+        for name, service in (compose.get("services") or {}).items()
+        if str(service.get("network_mode", "")).strip() == "host"
+    ]
 
 
 def violation(p: Publish) -> str | None:
@@ -91,6 +117,7 @@ def test_every_published_port_binds_loopback_only(path: Path) -> None:
     compose = yaml.safe_load(path.read_text())
     ports = published_ports(compose)
     bad = [f"{p.service}: {p.spec!r} — {why}" for p in ports if (why := violation(p))]
+    bad += [f"{name}: network_mode: host bypasses the publish" for name in host_networked(compose)]
     assert not bad, "\n".join(bad)
 
 
@@ -133,6 +160,17 @@ def test_a_non_loopback_short_spec_is_caught(spec: str) -> None:
 def test_a_non_loopback_long_spec_is_caught(entry: dict[str, Any]) -> None:
     [publish] = published_ports({"services": {"svc": {"ports": [entry]}}})
     assert violation(publish) is not None
+
+
+def test_a_long_spec_host_ip_from_a_variable_is_reported_as_such() -> None:
+    entry = {"target": 8000, "published": "8000", "host_ip": "${BIND_IP:-127.0.0.1}"}
+    [publish] = published_ports({"services": {"svc": {"ports": [entry]}}})
+    assert violation(publish) == "host IP comes from a variable; it must be a loopback literal"
+
+
+def test_host_network_mode_is_caught() -> None:
+    compose = {"services": {"app": {"network_mode": "host"}, "db": {"network_mode": "bridge"}}}
+    assert host_networked(compose) == ["app"]
 
 
 @pytest.mark.parametrize(

@@ -50,7 +50,30 @@ psql "host=127.0.0.1 port=5433 dbname=trading user=trading"
 ## The one-time post-merge step
 
 The change takes effect only when the containers are recreated. It was **not** done by the
-task that made it. The owner runs, from the merged main checkout:
+task that made it.
+
+**When: a weekday (Monday–Friday) between 13:00 and 15:45 IST, on a minute that is not :00, :15,
+:30 or :45.** Never Saturday or Sunday. Derived from `dataplatform/scheduler/registry.py`: the
+last weekday job before the window is `news_capture` at 12:15 (15-minute budget), the first after
+it is `fbil_reference_rates` at 16:00, and the only job that fires inside it is `failure_alerts`,
+every 15 minutes — hence the minute rule. Every other slot of the week has some job that a
+Postgres recreate would cut off mid-run (the evening EOD chain from 18:05, the overnight captures,
+`fundamentals_forward` from 02:00, the Saturday and Sunday sweeps, and the 05:30/05:45 backups
+once #88 merges). If the registry has changed since, re-derive the window from it first.
+
+**Before `up -d`, confirm no job is running** — the cron times say when a job starts, not when it
+ends:
+
+```bash
+XDG_RUNTIME_DIR=/run/user/$(id -u) journalctl --user -u scheduler -n 30 --no-pager
+#   the last job events are finished ones, not a start with no end
+docker compose -f ops/docker-compose.yml exec -T postgres sh -c \
+  'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT job_name, started_at FROM job_run WHERE state = '"'"'RUNNING'"'"' ORDER BY started_at"'
+#   expect no rows, or only rows started days ago (a process that died mid-job leaves its row
+#   RUNNING); a row started in the last few hours is a live job — wait for it to finish
+```
+
+Then, from the merged main checkout:
 
 ```bash
 docker compose -f ops/docker-compose.yml up -d
@@ -59,15 +82,13 @@ docker compose -f ops/docker-compose.yml up -d
 That recreates both containers (the `ports` of each changed). Postgres data survives: it lives in
 the **named volume `pgdata`** (`pgdata:/var/lib/postgresql/data`, declared under top-level
 `volumes:`), which `up -d` reattaches; only `down -v` would remove it. The lake is a host bind
-mount and is untouched. The app is rebuilt from the current checkout only if its image is
-missing — `up -d` does not rebuild an existing image.
+mount and is untouched.
 
-**When:** a quiet window. Not 19:15–21:50 IST (`daily_snapshot` 19:15 through `paper_session`
-21:45), not 02:00–05:45 IST (`fundamentals_forward` from 02:00), not Saturday 09:00–11:00 IST
-(`index_press_refresh` 09:00, `ca_refresh` 10:00) — `dataplatform/scheduler/registry.py` has the
-full list. Postgres is down for the seconds the recreate takes; a job that connects in that gap
-fails, so pick a minute no job fires in (`failure_alerts` runs every 15 minutes — avoid :00, :15,
-:30, :45).
+`up -d` does not rebuild an existing image. The running app container was created on 2026-10-05
+(image built 2026-10-05 18:58 UTC) from a since-removed worktree, `/home/ubuntu/wt/r3-apply`, so
+the recreated app still runs that 2026-10-05 code. Rebuilding it
+(`docker compose -f ops/docker-compose.yml up -d --build app`) is a separate decision with its own
+review of what changed in the app since then; it is not part of this step.
 
 **Then check:**
 
