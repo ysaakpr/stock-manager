@@ -29,6 +29,47 @@ permissions:
   contents: read
 
 jobs:
+  # Invariant #13 (AGENTIC_CONTEXT §6, HUMAN_DECISIONS D5): the repo is public, so a credential in ANY
+  # pushed commit is published, even one a later commit deletes. `make check` (below) scans the
+  # final tree; this job scans every commit the PR or push adds — each commit's own blobs and its
+  # message — so add-then-delete is caught too. Offline: detect-secrets from uv.lock, no
+  # verification calls. Runbook: ops/runbooks/secret-scan.md.
+  secret-scan:
+    name: secret scan (every commit in the PR / push)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history — the scan walks the commit range)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv (pinned Python 3.12)
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Sync the locked environment
+        run: uv sync --frozen
+
+      - name: Scan the commits this event adds
+        # SHAs pass through env, never interpolated into the script body.
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.sha }}
+        run: |
+          if [ -n "$PR_BASE" ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ -n "$PUSH_BEFORE" ] && ! printf '%s' "$PUSH_BEFORE" | grep -qE '^0+$'; then
+            range="$PUSH_BEFORE..$PUSH_AFTER"
+          else
+            range="$PUSH_AFTER^!"   # first push of a ref: the head commit alone
+          fi
+          echo "scanning $range"
+          uv run python ops/secret_scan.py --commits "$range"
+
   check:
     name: offline gate (make check + determinism + PIT leak + golden)
     runs-on: ubuntu-latest
@@ -63,6 +104,7 @@ jobs:
       # ── the full gate: format + lint + types + the whole offline test suite ───────────────────
 
       - name: make check
+        # Its first step is the working-tree secret scan (M15.1).
         # The same command CLAUDE.md / AGENTIC_CONTEXT §5 name as the gate for every task. Its
         # pytest run is offline: database-backed tests skip without `make up`, network tests are
         # opt-in. This re-covers the suites above; running them first is fail-fast, not duplication.

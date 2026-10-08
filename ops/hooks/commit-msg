@@ -1,0 +1,4 @@
+#!/bin/sh
+# Secret scan of the commit message (M15.1). A message can never be rewritten once pushed — history
+# is not rewritten here — so this is the last point a credential in one can be stopped.
+exec uv run --quiet python ops/secret_scan.py --message "$1"
