@@ -31,6 +31,21 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
   one more allocator pass, no new signal, no second look at the ranking. It is an execution
   improvement, not a return knob: the basket is the one already decided.
 
+* **Daily regime checks** (``regime_daily_reentry``, ``regime_daily_exit``, ``regime_daily_band``)
+  — M14.5. The regime filter above is read only on the monthly rebalance session, so a book parked
+  in cash waits up to a month to re-enter after the index recovers its average, and an invested
+  book rides a breakdown until the month turns. With ``regime_daily_reentry`` a parked book
+  re-enters, through a full rebalance, on the first non-rebalance session whose regime reads
+  risk-on — "parked" is the policy's remembered flag (set by every park, cleared by a risk-on
+  rebalance), not an empty book; with ``regime_daily_exit`` an unparked book holding settled
+  shares is parked on the first non-rebalance session reading risk-off. ``regime_daily_band``
+  widens both daily triggers (re-enter at ``MA * (1 + band)``, exit below ``MA * (1 - band)``) to
+  damp whipsaw; the monthly rule is never banded. "Parked" is remembered
+  (:attr:`MomentumV2Policy.parked`), not read from the book: A8's minimum-holdings rail refuses
+  the sells that would take a book below its floor, so a parked book is rarely empty — it keeps
+  its last few names. Both off by default, and absent from the parameters' ``repr`` while off,
+  so every configuration defined before them keeps its run fingerprint.
+
 * **Volatility target** (``vol_target_annual``) — a portfolio-level overlay on top of whichever
   basket the other toggles chose. From each name's trailing monthly-return volatility (already on
   the record) and one stated average pairwise correlation, the basket's annualised volatility is
@@ -56,7 +71,7 @@ or reach data outside the point-in-time context. Given the same inputs it return
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
 from typing import Final, Protocol, runtime_checkable
@@ -165,8 +180,16 @@ class RegimeReading:
         """Whether the index is at or above its moving average — the basket is held only if so."""
         return self.index_level >= self.moving_average
 
+    def clears_above(self, band: Decimal) -> bool:
+        """Whether the level is at or above ``MA * (1 + band)`` — the daily re-entry trigger."""
+        return self.index_level >= self.moving_average * (_ONE + band)
 
-@dataclass(frozen=True, slots=True)
+    def breaks_below(self, band: Decimal) -> bool:
+        """Whether the level is below ``MA * (1 - band)`` — the daily exit trigger."""
+        return self.index_level < self.moving_average * (_ONE - band)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class MomentumV2Parameters:
     """The v2 knobs — the naive top-N plus four independently-toggleable, a-priori improvements.
 
@@ -188,6 +211,11 @@ class MomentumV2Parameters:
     * ``buy_budget_fraction`` — the share of free cash a rebalance deploys (a mechanical execution
       margin, not a return knob — carried over from the naive policy).
     * ``sleeve`` / ``parking_sleeve`` — journal sleeves for basket trades and for regime parking.
+    * ``regime_daily_reentry`` / ``regime_daily_exit`` / ``regime_daily_band`` — M14.5: read the
+      regime on every non-rebalance session too, re-entering an all-cash book on risk-on and/or
+      parking an invested one on risk-off, with an optional symmetric band around the average.
+      Require ``regime_filter``. Off by default and left out of ``repr`` while at their defaults,
+      so the run fingerprint of every pre-M14.5 configuration is unchanged.
 
     With ``use_12_1``, ``sell_band``, ``regime_filter``, ``vol_scaled``, ``redeploy_next_session``
     and ``vol_target_annual`` all off/``None`` the policy is the naive top-N policy exactly. Every
@@ -207,6 +235,9 @@ class MomentumV2Parameters:
     buy_budget_fraction: Decimal = Decimal("0.98")
     sleeve: Sleeve = Sleeve.TACTICAL
     parking_sleeve: Sleeve = Sleeve.CASH
+    regime_daily_reentry: bool = field(default=False, repr=False)
+    regime_daily_exit: bool = field(default=False, repr=False)
+    regime_daily_band: Decimal = field(default=Decimal("0"), repr=False)
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -237,6 +268,36 @@ class MomentumV2Parameters:
             raise ValueError(
                 f"buy_budget_fraction must be in (0, 1], got {self.buy_budget_fraction}"
             )
+        if not isinstance(self.regime_daily_band, Decimal):
+            raise TypeError("regime_daily_band must be a Decimal")
+        if not (_ZERO <= self.regime_daily_band < _ONE):
+            raise ValueError(f"regime_daily_band must be in [0, 1), got {self.regime_daily_band}")
+        daily = self.regime_daily_reentry or self.regime_daily_exit
+        if daily and not self.regime_filter:
+            raise ValueError("the daily regime checks extend regime_filter; turn it on")
+        if self.regime_daily_band != _ZERO and not daily:
+            raise ValueError("regime_daily_band applies only to a daily regime check")
+
+    @property
+    def regime_daily(self) -> bool:
+        """Whether the regime is read on non-rebalance sessions too (either daily switch on)."""
+        return self.regime_daily_reentry or self.regime_daily_exit
+
+    def __repr__(self) -> str:
+        """The dataclass rendering, with each ``repr=False`` (M14.5) field shown only off default.
+
+        A run's identity is the ``repr`` of its parameters (``backtest.run_ledger``): a field added
+        to the dataclass would otherwise change the fingerprint of every configuration ever
+        persisted — D13's included — though none of them changed behaviour. Rendered this way, a
+        default-off configuration renders exactly as it did before the field existed, and a
+        switched-on one never shares a fingerprint with it.
+        """
+        shown = ", ".join(
+            f"{f.name}={getattr(self, f.name)!r}"
+            for f in fields(self)
+            if f.repr or getattr(self, f.name) != f.default
+        )
+        return f"{type(self).__qualname__}({shown})"
 
 
 #: The momentum-sleeve configuration the owner ratified for **paper mode** on 2026-09-06 — the
@@ -267,7 +328,8 @@ class MomentumV2Data(Protocol):
       basket already chosen — a source must serve those sessions too (the L1 one does).
     * ``regime(as_of)`` — the :class:`RegimeReading` for the session, as a one-element guardable
       dataset. Only read when ``regime_filter`` is on; a source that does not model regime need not
-      implement anything more than a stub when the filter is off.
+      implement anything more than a stub when the filter is off. With a daily regime check on it
+      is read on *every* session, and ``signal`` on any session a daily re-entry fires.
 
     A test supplies an in-memory implementation; the ten-year run supplies one backed by L1 through
     the query layer. The policy never reaches past this surface.
@@ -297,7 +359,7 @@ class MomentumV2Policy:
     the decision exactly.
     """
 
-    __slots__ = ("_data", "_order_caps", "_params", "_pending")
+    __slots__ = ("_data", "_order_caps", "_params", "_parked", "_pending")
 
     def __init__(
         self,
@@ -319,6 +381,10 @@ class MomentumV2Policy:
         #: (``redeploy_next_session``). ``None`` when nothing is pending. Deterministic state: it is
         #: a pure function of the previous session's decision, so a replay reproduces it.
         self._pending: dict[str, Decimal] | None = None
+        #: Whether the last regime decision parked the basket (M14.5). Set by every park, cleared
+        #: by every risk-on rebalance; read only by the daily regime checks, so a configuration
+        #: without them behaves exactly as before it existed.
+        self._parked = False
 
     @property
     def pending(self) -> Mapping[str, Decimal] | None:
@@ -330,14 +396,25 @@ class MomentumV2Policy:
         """
         return None if self._pending is None else dict(self._pending)
 
-    def resume(self, pending: Mapping[str, Decimal] | None) -> None:
+    @property
+    def parked(self) -> bool:
+        """Whether the basket is parked by the regime filter — the daily re-entry's trigger state.
+
+        Only the daily regime checks (M14.5) read it. A forward runner that adopts one must carry
+        it across sessions with :meth:`resume`, as it carries :attr:`pending`.
+        """
+        return self._parked
+
+    def resume(self, pending: Mapping[str, Decimal] | None, *, parked: bool = False) -> None:
         """Restore the state :attr:`pending` reported at the end of the previous decided session.
 
         What it assumes: ``pending`` is exactly what this policy reported after the last session it
         decided for this book, so resuming and then deciding is the same decision an uninterrupted
-        replay would make. What it never does: invent a target — ``None`` clears it.
+        replay would make; likewise ``parked`` (read only under a daily regime check). What it
+        never does: invent a target — ``None`` clears it.
         """
         self._pending = None if pending is None else dict(pending)
+        self._parked = parked
 
     def decide(self, ctx: SessionContext) -> SessionDecision:
         """Decide this session: a heartbeat off a rebalance, a full rebalance on one.
@@ -347,10 +424,35 @@ class MomentumV2Policy:
         """
         if self._data.is_rebalance(ctx.session):
             return self._rebalance(ctx)
+        if self._params.regime_daily:
+            daily = self._daily_regime(ctx)
+            if daily is not None:
+                return daily
         if self._pending is not None:
             pending, self._pending = self._pending, None
             return self._redeploy(ctx, pending)
         return self._heartbeat(ctx)
+
+    def _daily_regime(self, ctx: SessionContext) -> SessionDecision | None:
+        """M14.5: the regime read off a rebalance session — a park, a re-entry, or ``None``.
+
+        An invested book (not :attr:`parked`, settled shares held) reading below the band is parked
+        exactly as a risk-off rebalance parks it; shares still in settlement cannot be delivered
+        and stay until the next park attempt — the next risk-off rebalance. A parked book reading
+        above the band re-enters through a full :meth:`_rebalance` on this session, which re-reads
+        the regime through the same PIT guard. A parked book is never re-parked daily: the names
+        A8's minimum-holdings floor kept are not offered to it again every session.
+        """
+        (reading,) = ctx.pit.admit(self._data.regime(ctx.session))
+        band = self._params.regime_daily_band
+        if self._parked:
+            if self._params.regime_daily_reentry and reading.clears_above(band):
+                return self._rebalance(ctx)
+            return None
+        if self._params.regime_daily_exit and ctx.broker.holdings() and reading.breaks_below(band):
+            self._pending = None  # nothing is redeployed into a basket being parked
+            return self._park(ctx, reading)
+        return None
 
     # ── branches ──────────────────────────────────────────────────────────────────────────────────
 
@@ -382,6 +484,7 @@ class MomentumV2Policy:
             (reading,) = ctx.pit.admit(self._data.regime(ctx.session))
             if not reading.risk_on:
                 return self._park(ctx, reading)
+        self._parked = False
 
         candidates = ctx.pit.admit(self._data.signal(ctx.session))
         use_12_1 = self._params.use_12_1
@@ -425,6 +528,7 @@ class MomentumV2Policy:
         With nothing held the decision is a single HOLD of the parking sleeve carrying the reading,
         so the journal row itself says why the book is in cash. It places no order either way.
         """
+        self._parked = True
         held = {holding.isin: holding for holding in ctx.broker.holdings()}
         sells: list[tuple[OrderRequest, str]] = []
         for isin in sorted(held):

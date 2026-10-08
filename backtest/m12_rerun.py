@@ -67,6 +67,7 @@ from backtest.sweep import (
     DURATION_ARMS,
     HIGH_FLOOR,
     LOW_FLOOR,
+    REGIME_DAILY_ARMS,
     Arm,
     SweepResult,
     run_digests,
@@ -76,7 +77,9 @@ from backtest.verdict import WalkForward, run_walk_forward
 from dataplatform.logging import get_logger
 
 __all__ = [
+    "ARM_SETS",
     "LONG",
+    "REGIME_DAILY_SET",
     "RERUN_ARMS",
     "UNITS",
     "WALK_FORWARD",
@@ -129,6 +132,12 @@ def rerun_arms() -> tuple[Arm, ...]:
 
 
 RERUN_ARMS: tuple[Arm, ...] = rerun_arms()
+
+#: M14.5's arm set: D13 beside its daily-regime variants (``backtest.sweep.REGIME_DAILY_ARMS``), so
+#: every window's table carries the baseline the variants are read against. A separate set, never
+#: folded into ``RERUN_ARMS``: the M12.R directories' manifests pin their arm lists.
+REGIME_DAILY_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *REGIME_DAILY_ARMS)
+ARM_SETS: dict[str, tuple[Arm, ...]] = {"m12": RERUN_ARMS, "regime-daily": REGIME_DAILY_SET}
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,6 +396,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help=f"comma-separated units, from {', '.join(UNITS)} (long is supplementary)",
     )
     parser.add_argument(
+        "--arm-set",
+        default="m12",
+        choices=sorted(ARM_SETS),
+        help="m12: the M12 review's arms (default); regime-daily: D13 and its M14.5 variants",
+    )
+    parser.add_argument(
         "--arms",
         default=None,
         help="exact labels separated by '|': an attribution run over a few arms, never the "
@@ -414,13 +429,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     units = tuple(part.strip() for part in args.units.split(",") if part.strip())
     try:
-        arms = RERUN_ARMS
+        arms = ARM_SETS[args.arm_set]
         if args.arms:
             wanted = [part.strip() for part in args.arms.split("|") if part.strip()]
-            unknown = sorted(set(wanted) - {arm.label for arm in RERUN_ARMS})
+            unknown = sorted(set(wanted) - {arm.label for arm in arms})
             if unknown:
                 raise CampaignError(f"no arm labelled {', '.join(unknown)}")
-            arms = tuple(arm for arm in RERUN_ARMS if arm.label in wanted)
+            arms = tuple(arm for arm in arms if arm.label in wanted)
         plan = RerunPlan(
             out_dir=refuse_lake_location(args.out, args.data_root),
             data_root=args.data_root,

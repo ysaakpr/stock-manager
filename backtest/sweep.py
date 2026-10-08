@@ -113,6 +113,7 @@ __all__ = [
     "MULTI_CAP_REDEPLOY",
     "NAIVE_REDEPLOY",
     "REDEPLOY_ARMS",
+    "REGIME_DAILY_ARMS",
     "RETIRED_ARMS",
     "SWING_REDEPLOY",
     "SWING_REGIME_REDEPLOY",
@@ -277,6 +278,42 @@ D13_PAPER_BASELINE: Final = Arm(
     reference="Momentum v2, all on (M9.5)",
     note="the paper book's configuration (D13): M9.5's toggles without the 15% vol target",
     v2=PAPER_RATIFIED_2026_09_06,
+)
+
+#: M14.5: D13 with the regime read between rebalances too. D13 reads it only on the monthly
+#: rebalance session, so a parked book waits up to a month to re-enter after the index recovers its
+#: 200-session average. Each arm changes only the M14.5 switches on D13's own parameters, so each
+#: row reads directly against ``D13_PAPER_BASELINE``. Kept out of ``ARMS`` for the same reason D13
+#: is: adding them there would change every campaign manifest and the round-1 trial set.
+D13_DAILY_REENTRY = "D13 + daily regime re-entry"
+D13_DAILY_BOTH = "D13 + daily regime re-entry and exit"
+D13_DAILY_REENTRY_BAND = "D13 + daily regime re-entry, 2% band"
+REGIME_DAILY_ARMS: tuple[Arm, ...] = (
+    Arm(
+        label=D13_DAILY_REENTRY,
+        family="regime timing (M14.5)",
+        reference=D13_PAPER_BASELINE.label,
+        note="monthly exit; a parked book re-enters the first session the index is >= its 200d MA",
+        v2=replace(PAPER_RATIFIED_2026_09_06, regime_daily_reentry=True),
+    ),
+    Arm(
+        label=D13_DAILY_BOTH,
+        family="regime timing (M14.5)",
+        reference=D13_PAPER_BASELINE.label,
+        note="the regime read every session, both ways: park on risk-off, re-enter on risk-on",
+        v2=replace(PAPER_RATIFIED_2026_09_06, regime_daily_reentry=True, regime_daily_exit=True),
+    ),
+    Arm(
+        label=D13_DAILY_REENTRY_BAND,
+        family="regime timing (M14.5)",
+        reference=D13_DAILY_REENTRY,
+        note="daily re-entry only once the index is >= 1.02 x its 200d MA (whipsaw damping)",
+        v2=replace(
+            PAPER_RATIFIED_2026_09_06,
+            regime_daily_reentry=True,
+            regime_daily_band=Decimal("0.02"),
+        ),
+    ),
 )
 
 ARMS: tuple[Arm, ...] = (
