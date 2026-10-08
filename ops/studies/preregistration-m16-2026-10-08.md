@@ -44,7 +44,11 @@ A held name that fails the hurdle at a rebalance is sold, and its slot stays in 
 made only on rebalance sessions. Failing slots are **not** passed down to the 21st name or below.
 Reference: D13.
 
-**A2 — D13 + industry gate.** On each D13 rebalance session, rank the NSE sectoral indices by
+**A2 — D13 + industry gate.** *Open to amendment before launch (§8).* The 2026-only industry
+classification maps far fewer of the 2016 NIFTY 500 names than of today's, which tilts the gate
+toward survivors. An amendment of A2's eligibility and universe treatment is expected; it will be
+recorded in §8 before any M16 campaign figure exists, and A2 is not run until it is settled. The
+definition as first written is below. On each D13 rebalance session, rank the NSE sectoral indices by
 their 6-1 month return: the published price-index level 21 sessions before the decision over the
 level 126 sessions before it, minus one. Only levels knowable on the decision date are used. Keep
 the top five, with ties broken by index slug. A name is eligible only if its industry maps to one
@@ -227,6 +231,24 @@ Anything else is a new trial.
 
 (none yet)
 
+## 8. Amendments
+
+An amendment changes an arm's definition, the grid or the rule. It is allowed **only before any
+M16 campaign figure exists**: no M16 return, XIRR, drawdown, Sharpe or ranking computed on any
+window. Each amendment is a dated entry below. It states what changed, why, and what had been
+computed when it was made, and the text above is not rewritten. An amendment does not add a trial,
+because the amended arm has never been run; N stays 75. Once the first M16 campaign figure exists,
+this section is closed, and any further change is a new trial.
+
+**2026-10-08 — Appendix B: the arms resolve through the owning PRs' presets.** M16.1 (#98),
+M16.2 (#97) and M16.3 (#96) each publish a named parameter preset. The arm set now refers to those
+presets instead of to option values (Appendix B). The names change; the behaviour stays as §2
+states it. Computed at the time: no M16 figure; unit tests only.
+
+**Pending — A2's eligibility and universe treatment.** This follows from the industry-gate review
+(the coverage of the 2016 NIFTY 500 by today's classification). The entry will be written here
+before launch.
+
 ## Appendix A — the 68 configurations already run on this lake
 
 **How it was counted (2026-10-08).**
@@ -330,17 +352,19 @@ counting it raises N, which makes criterion 5 harder to pass, never easier.
 ## Appendix B — implementation names
 
 These are names, not behaviour; §2 governs behaviour. The M16 arm set
-(`backtest/m16_arms.py`) refers to the A1–A5 policy options by these names, which M16.1–M16.3
-implement:
+(`backtest/m16_arms.py`) refers to A1–A5 by the parameter presets their PRs publish. Each preset
+is imported only when its arm is resolved, and must drive the same parameter class as its
+reference while differing from it:
 
-| Arm | Policy | Option |
-|---|---|---|
-| A1 | `MomentumV2Parameters` | `absolute_momentum = True` |
-| A2 | `MomentumV2Parameters` | `industry_gate_top = 5` |
-| A3 | `MomentumV2Parameters` | `residual_momentum = True` |
-| A4 | `MomentumV2Parameters` | `profitability_filter = True` |
-| A5 | `SwingCompositeParameters` | `weight_earnings_surprise = 1` |
-| A7 | `SwingCompositeParameters` | `weight_volatility = −1`, `weight_high = weight_delivery = weight_momentum = 0` (exists) |
+| Arm | Preset | Module | Owner |
+|---|---|---|---|
+| A1 | `D13_ABS_MOM` | `backtest.policies.momentum_v2` | M16.1, #98 |
+| A2 | `D13_INDUSTRY_GATE` | `backtest.policies.momentum_v2` | M16.2, #97 |
+| A3 | `D13_RESID_MOM` | `backtest.policies.momentum_v2` | M16.1, #98 |
+| A4 | `D13_PROFIT_FILTER` | `backtest.policies.momentum_v2` | M16.1, #98 |
+| A5 | `M10_7_EARNINGS_SURPRISE` | `backtest.policies.earnings_surprise` | M16.3, #96 |
+| A7 | `SwingCompositeParameters(weight_volatility=−1, weight_high = weight_delivery = weight_momentum = 0)` | built in `backtest/m16_arms.py` (no new code) | M16.0 |
 
-If a landed PR chose a different field name, the arm set's mapping is updated to it. That is a
-rename, not a new trial, as long as the behaviour is the one §2 states.
+Until a preset exists, asking for its arm set raises `M16ArmError`, naming the missing preset and
+its PR. If a landed PR renames a preset, the mapping follows. That is a rename, not a new trial,
+as long as the behaviour is the one §2 (as amended in §8) states.

@@ -143,10 +143,10 @@ REGIME_DAILY_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *REGIME_DAILY_ARMS)
 class _ArmSets(Mapping[str, tuple[Arm, ...]]):
     """The named arm sets: fixed tuples, plus sets resolved when asked for.
 
-    M16's sets (``backtest.m16_arms``) name policy options other tasks implement, so they are
+    M16's sets (``backtest.m16_arms``) name parameter presets other tasks publish, so they are
     resolved on lookup rather than at import: importing this module never fails for a missing
-    option, while asking for an incomplete set raises :class:`~backtest.m16_arms.M16ArmError`
-    (a :class:`CampaignError`) naming every option still missing.
+    preset, while asking for an incomplete set raises :class:`~backtest.m16_arms.M16ArmError`
+    (a :class:`CampaignError`) naming every preset still missing.
     """
 
     def __init__(

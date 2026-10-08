@@ -1,15 +1,16 @@
-"""M16 — the strategy-exploration arms, resolved by option name against the policies that exist.
+"""M16 — the strategy-exploration arms, resolved by preset name against the policies that exist.
 
 ``ops/studies/preregistration-m16-2026-10-08.md`` fixes seven arms before any of them ran. Two
 need no new code: A6 is a report-side blend of two baselines' saved runs
 (``backtest.m16_report.blend``) and A7 is a swing-engine weighting that exists today. A1-A5 need
-policy options that M16.1 (momentum v2: A1, A3, A4), M16.2 (the industry gate: A2) and M16.3 (the
-swing earnings-surprise leg: A5) implement. This module names those options (Appendix B of the
-pre-registration) and builds each arm with :func:`dataclasses.replace` on its reference's
-parameters, so an arm is exactly its reference plus the stated option and nothing else.
+policy code that M16.1 (momentum v2: A1, A3, A4; PR #98), M16.2 (the industry gate: A2; #97) and
+M16.3 (the swing earnings-surprise leg: A5; #96) implement, each publishing a named parameter
+preset. This module names those presets (Appendix B of the pre-registration) and imports each only
+when its arm is resolved, checking it drives the same parameter class as its reference and differs
+from it.
 
-**A missing option is a loud error, never a silent skip.** Until the owning PR lands,
-:func:`m16_arms` raises :class:`M16ArmError` naming every missing option and the task that owns
+**A missing preset is a loud error, never a silent skip.** Until the owning PR lands,
+:func:`m16_arms` raises :class:`M16ArmError` naming every missing preset and the PR that owns
 it; a campaign that ran without A1 would report a table with a hole the reader could not see.
 :func:`resolvable_m16_arms` is the lenient form the report uses, so baselines and A7 can be rendered
 (and tested) before the rest lands, with the missing arms listed rather than dropped.
@@ -20,13 +21,14 @@ and A5, which read PIT XBRL fundamentals (open 2018-05) and run on the six-year 
 windows only, beside D13 and M10.7 so each of their tables carries its reference.
 :data:`ARM_SET_UNITS` states that restriction where ``backtest.m12_rerun`` enforces it.
 
-What this module never does: invent an option's default, change a baseline's parameters, or
+What this module never does: build a preset itself, change a baseline's parameters, or
 define an arm the pre-registration does not list.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields, replace
+import importlib
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final
 
@@ -50,10 +52,10 @@ __all__ = [
     "PREREGISTRATION",
     "V2_ALL_ON_BASELINE",
     "M16ArmError",
-    "OptionArm",
+    "PresetArm",
     "m16_arms",
     "m16_fundamentals_arms",
-    "missing_options",
+    "missing_presets",
     "resolvable_m16_arms",
 ]
 
@@ -76,46 +78,61 @@ V2_ALL_ON_BASELINE: Final = next(arm for arm in ARMS if arm.label == "Momentum v
 
 
 class M16ArmError(CampaignError):
-    """An M16 arm names a policy option the code does not have yet."""
+    """An M16 arm names a parameter preset the code does not have yet (or a malformed one)."""
 
 
 @dataclass(frozen=True, slots=True)
-class OptionArm:
-    """An M16 arm as its reference arm plus named policy options (pre-registration Appendix B).
+class PresetArm:
+    """An M16 arm as a named parameter preset its owning PR publishes (pre-registration App. B).
 
-    ``options`` is applied with :func:`dataclasses.replace` to the reference's one driving
-    parameter set (``v2`` or ``swing``); ``owner`` is the task that implements the options.
+    ``module`` and ``preset`` name the constant (``backtest.policies.momentum_v2.D13_ABS_MOM``,
+    say); it is imported when the arm is resolved, never at import of this module. ``reference``
+    is the arm the preset must differ from, and must drive the same parameter class; ``owner`` is
+    the task (and PR) that publishes it.
     """
 
     label: str
     reference: Arm
     note: str
-    options: tuple[tuple[str, object], ...]
+    module: str
+    preset: str
     owner: str
 
-    def _params(self) -> object:
+    def _reference_params(self) -> object:
         params = self.reference.v2 or self.reference.swing
         if params is None:
             raise M16ArmError(f"{self.label}: its reference drives neither v2 nor the swing engine")
         return params
 
+    def _lookup(self) -> object | None:
+        try:
+            module = importlib.import_module(self.module)
+        except ModuleNotFoundError:
+            return None
+        return getattr(module, self.preset, None)
+
     def missing(self) -> tuple[str, ...]:
-        """The option names the reference's parameter class does not have, in order."""
-        params = self._params()
-        known = {f.name for f in fields(params)}  # type: ignore[arg-type]
-        return tuple(name for name, _ in self.options if name not in known)
+        """``("module.PRESET",)`` while the preset does not exist yet, else ``()``."""
+        return () if self._lookup() is not None else (f"{self.module}.{self.preset}",)
 
     def resolve(self) -> Arm:
-        """The arm, built on its reference; :class:`M16ArmError` if any option is missing."""
-        missing = self.missing()
-        if missing:
+        """The arm, driving the preset; :class:`M16ArmError` if it is missing or malformed."""
+        params = self._lookup()
+        if params is None:
             raise M16ArmError(
-                f"{self.label}: {type(self._params()).__name__} has no option "
-                f"{', '.join(missing)} yet — {self.owner} implements it ({PREREGISTRATION})"
+                f"{self.label}: {self.module}.{self.preset} does not exist yet — "
+                f"{self.owner} publishes it ({PREREGISTRATION})"
             )
-        params = replace(self._params(), **dict(self.options))  # type: ignore[type-var]
-        if params == self._params():
-            raise M16ArmError(f"{self.label}: its options leave {self.reference.label} unchanged")
+        reference = self._reference_params()
+        if type(params) is not type(reference):
+            raise M16ArmError(
+                f"{self.label}: {self.preset} is a {type(params).__name__}, "
+                f"not the {type(reference).__name__} {self.reference.label} drives"
+            )
+        if params == reference:
+            raise M16ArmError(
+                f"{self.label}: {self.preset} leaves {self.reference.label} unchanged"
+            )
         driving = "v2" if self.reference.v2 is not None else "swing"
         return Arm(
             label=self.label,
@@ -126,41 +143,49 @@ class OptionArm:
         )
 
 
-#: A1-A5, by option name. The values are the pre-registration's; the names are Appendix B's.
-_A1 = OptionArm(
+_V2 = "backtest.policies.momentum_v2"
+
+#: A1-A5, by preset name (Appendix B). Behaviour is the pre-registration's §2; the presets are the
+#: owning PRs' (#98 M16.1, #97 M16.2, #96 M16.3).
+_A1 = PresetArm(
     label=A1_ABSOLUTE_MOMENTUM,
     reference=D13_PAPER_BASELINE,
     note="a slot is held only if the name's 12-1 return beats repo - 0.5% over the same span",
-    options=(("absolute_momentum", True),),
-    owner="M16.1",
+    module=_V2,
+    preset="D13_ABS_MOM",
+    owner="M16.1 (#98)",
 )
-_A2 = OptionArm(
+_A2 = PresetArm(
     label=A2_INDUSTRY_GATE,
     reference=D13_PAPER_BASELINE,
     note="eligible only in an industry mapped to a top-5 sectoral index by 6-1 month return",
-    options=(("industry_gate_top", 5),),
-    owner="M16.2",
+    module=_V2,
+    preset="D13_INDUSTRY_GATE",
+    owner="M16.2 (#97)",
 )
-_A3 = OptionArm(
+_A3 = PresetArm(
     label=A3_RESIDUAL_MOMENTUM_V2,
     reference=D13_PAPER_BASELINE,
     note="ranks on round 2's H1 residual momentum instead of 12-1; everything else D13",
-    options=(("residual_momentum", True),),
-    owner="M16.1",
+    module=_V2,
+    preset="D13_RESID_MOM",
+    owner="M16.1 (#98)",
 )
-_A4 = OptionArm(
+_A4 = PresetArm(
     label=A4_PROFITABILITY,
     reference=D13_PAPER_BASELINE,
     note="eligible only with TTM PAT > 0 (PIT XBRL) and a filing at most 200 days old",
-    options=(("profitability_filter", True),),
-    owner="M16.1",
+    module=_V2,
+    preset="D13_PROFIT_FILTER",
+    owner="M16.1 (#98)",
 )
-_A5 = OptionArm(
+_A5 = PresetArm(
     label=A5_EARNINGS_SURPRISE,
     reference=M10_7_BASELINE,
     note="a fourth, equal-weight leg: standardised YoY EPS surprise, live 63 sessions",
-    options=(("weight_earnings_surprise", _ONE),),
-    owner="M16.3",
+    module="backtest.policies.earnings_surprise",
+    preset="M10_7_EARNINGS_SURPRISE",
+    owner="M16.3 (#96)",
 )
 
 #: A7 needs no new code: the swing engine's volatility leg alone, sign -1.
@@ -180,33 +205,33 @@ A7_ARM: Final = Arm(
 _BASELINES: tuple[Arm, ...] = (D13_PAPER_BASELINE, V2_ALL_ON_BASELINE, M10_7_BASELINE)
 
 #: What each arm set runs, in table order. Baselines first: every table carries D13.
-M16_ALL_WINDOW: tuple[Arm | OptionArm, ...] = (*_BASELINES, _A1, _A2, _A3, A7_ARM)
-M16_FUNDAMENTALS: tuple[Arm | OptionArm, ...] = (D13_PAPER_BASELINE, M10_7_BASELINE, _A4, _A5)
+M16_ALL_WINDOW: tuple[Arm | PresetArm, ...] = (*_BASELINES, _A1, _A2, _A3, A7_ARM)
+M16_FUNDAMENTALS: tuple[Arm | PresetArm, ...] = (D13_PAPER_BASELINE, M10_7_BASELINE, _A4, _A5)
 
 #: The units an arm set may run (``backtest.m12_rerun`` refuses others). A4 and A5 read PIT XBRL
 #: fundamentals, which open 2018-05: the decade and selection windows would be all-cash noise.
 ARM_SET_UNITS: dict[str, tuple[str, ...]] = {"m16-fundamentals": ("six-year", "wf-verification")}
 
 
-def missing_options(entries: tuple[Arm | OptionArm, ...]) -> list[str]:
-    """Every ``arm: option (owner)`` in ``entries`` the code does not implement yet."""
+def missing_presets(entries: tuple[Arm | PresetArm, ...]) -> list[str]:
+    """Every ``arm: module.PRESET (owner)`` in ``entries`` the code does not have yet."""
     return [
         f"{entry.label}: {name} ({entry.owner})"
         for entry in entries
-        if isinstance(entry, OptionArm)
+        if isinstance(entry, PresetArm)
         for name in entry.missing()
     ]
 
 
-def _resolve(entries: tuple[Arm | OptionArm, ...]) -> tuple[Arm, ...]:
-    missing = missing_options(entries)
+def _resolve(entries: tuple[Arm | PresetArm, ...]) -> tuple[Arm, ...]:
+    missing = missing_presets(entries)
     if missing:
         raise M16ArmError(
-            "the M16 arm set is incomplete — these options do not exist yet: "
+            "the M16 arm set is incomplete — these presets do not exist yet: "
             + "; ".join(missing)
             + f" ({PREREGISTRATION}, Appendix B)"
         )
-    return tuple(e.resolve() if isinstance(e, OptionArm) else e for e in entries)
+    return tuple(e.resolve() if isinstance(e, PresetArm) else e for e in entries)
 
 
 def m16_arms() -> tuple[Arm, ...]:
@@ -217,7 +242,7 @@ def m16_arms() -> tuple[Arm, ...]:
 def m16_fundamentals_arms() -> tuple[Arm, ...]:
     """The ``m16-fundamentals`` set: D13, M10.7, A4, A5.
 
-    Raises :class:`M16ArmError` while an option is missing.
+    Raises :class:`M16ArmError` while a preset is missing.
     """
     return _resolve(M16_FUNDAMENTALS)
 
@@ -225,7 +250,7 @@ def m16_fundamentals_arms() -> tuple[Arm, ...]:
 def resolvable_m16_arms() -> tuple[tuple[Arm, ...], tuple[str, ...]]:
     """Every M16 engine arm that resolves today, and the labels of those that do not.
 
-    Never raises for a missing option; the caller prints the missing labels.
+    Never raises for a missing preset; the caller prints the missing labels.
     """
     arms: list[Arm] = []
     missing: list[str] = []
@@ -234,7 +259,7 @@ def resolvable_m16_arms() -> tuple[tuple[Arm, ...], tuple[str, ...]]:
         if entry.label in seen:
             continue
         seen.add(entry.label)
-        if isinstance(entry, OptionArm):
+        if isinstance(entry, PresetArm):
             if entry.missing():
                 missing.append(entry.label)
                 continue

@@ -1,7 +1,9 @@
-"""M16.0: the M16 arm sets name their policy options, and fail loudly while one is missing."""
+"""M16.0: the M16 arm sets name their parameter presets, and fail loudly while one is missing."""
 
 from __future__ import annotations
 
+import sys
+import types
 from dataclasses import fields, replace
 from decimal import Decimal
 from pathlib import Path
@@ -17,14 +19,14 @@ from backtest.m16_arms import (
     M16_FUNDAMENTALS,
     V2_ALL_ON_BASELINE,
     M16ArmError,
-    OptionArm,
+    PresetArm,
     m16_arms,
     m16_fundamentals_arms,
-    missing_options,
+    missing_presets,
     resolvable_m16_arms,
 )
 from backtest.policies.swing_composite import SwingCompositeParameters
-from backtest.sweep import D13_PAPER_BASELINE
+from backtest.sweep import D13_PAPER_BASELINE, Arm
 
 _ZERO = Decimal("0")
 
@@ -66,12 +68,12 @@ def test_a7_is_the_volatility_leg_alone_on_m10_7_defaults() -> None:
         ("m16-fundamentals", M16_FUNDAMENTALS, m16_fundamentals_arms),
     ],
 )
-def test_an_incomplete_set_raises_naming_every_missing_option(
+def test_an_incomplete_set_raises_naming_every_missing_preset(
     arm_set: str, entries: tuple[object, ...], resolve: object
 ) -> None:
     # Written to hold both before and after M16.1-M16.3 land: either every option exists and the
     # set resolves to its labels, or the lookup raises and names each missing option.
-    missing = missing_options(entries)  # type: ignore[arg-type]
+    missing = missing_presets(entries)  # type: ignore[arg-type]
     if missing:
         with pytest.raises(M16ArmError) as caught:
             ARM_SETS[arm_set]
@@ -83,45 +85,56 @@ def test_an_incomplete_set_raises_naming_every_missing_option(
         assert resolve() == arms  # type: ignore[operator]
 
 
-def test_an_option_arm_is_its_reference_plus_the_option_and_nothing_else() -> None:
-    # A stand-in with an option that exists today (the M14.5 switch), to pin the mechanics.
-    arm = OptionArm(
+def _stand_in(
+    monkeypatch: pytest.MonkeyPatch, preset: object, reference: Arm = D13_PAPER_BASELINE
+) -> PresetArm:
+    module = types.ModuleType("m16_stand_in")
+    module.PRESET = preset  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "m16_stand_in", module)
+    return PresetArm(
         label="stand-in",
-        reference=D13_PAPER_BASELINE,
+        reference=reference,
         note="n",
-        options=(("regime_daily_reentry", True),),
+        module="m16_stand_in",
+        preset="PRESET",
         owner="test",
-    ).resolve()
-    assert arm.reference == D13_PAPER_BASELINE.label
+    )
+
+
+def test_a_preset_arm_drives_the_preset_against_its_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     paper = D13_PAPER_BASELINE.v2
     assert paper is not None
-    assert arm.v2 == replace(paper, regime_daily_reentry=True)
-    assert arm.v2 != paper
+    preset = replace(paper, regime_daily_reentry=True)
+    arm = _stand_in(monkeypatch, preset).resolve()
+    assert arm.reference == D13_PAPER_BASELINE.label
+    assert arm.v2 is preset and arm.swing is None
 
 
-def test_a_missing_option_names_its_owner() -> None:
-    entry = OptionArm(
-        label="needs code",
-        reference=M10_7_BASELINE,
-        note="n",
-        options=(("weight_not_yet_there", Decimal("1")),),
-        owner="M16.9",
-    )
-    assert entry.missing() == ("weight_not_yet_there",)
-    with pytest.raises(M16ArmError, match=r"weight_not_yet_there.*M16\.9"):
-        entry.resolve()
+def test_a_missing_preset_or_module_names_its_owner() -> None:
+    for module, preset in (("backtest.m16_arms", "NOT_YET"), ("backtest.not_a_module", "X")):
+        entry = PresetArm(
+            label="needs code",
+            reference=M10_7_BASELINE,
+            note="n",
+            module=module,
+            preset=preset,
+            owner="M16.9",
+        )
+        assert entry.missing() == (f"{module}.{preset}",)
+        with pytest.raises(M16ArmError, match=rf"{preset}.*M16\.9"):
+            entry.resolve()
 
 
-def test_an_option_at_its_default_is_refused() -> None:
-    entry = OptionArm(
-        label="no-op",
-        reference=D13_PAPER_BASELINE,
-        note="n",
-        options=(("top_n", 20),),
-        owner="test",
-    )
+def test_a_preset_equal_to_its_reference_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(M16ArmError, match="unchanged"):
-        entry.resolve()
+        _stand_in(monkeypatch, D13_PAPER_BASELINE.v2).resolve()
+
+
+def test_a_preset_of_the_wrong_engine_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    with pytest.raises(M16ArmError, match="SwingCompositeParameters"):
+        _stand_in(monkeypatch, SwingCompositeParameters(top_n=10, sell_band=30)).resolve()
 
 
 def test_resolvable_arms_list_the_missing_rather_than_drop_them() -> None:

@@ -2535,14 +2535,14 @@ tasks:
     - the exact trial count N = 68 + 7 = 75, listed in Appendix A.
 
     Wire `m16` (baselines, A1, A2, A3, A7) and `m16-fundamentals` (D13, M10.7, A4, A5; six-year
-    and wf-verification only) into `backtest.m12_rerun.ARM_SETS`. A1-A5 are referenced by option
-    name (Appendix B), and a missing option is a loud CampaignError. `backtest/m16_report.py`
+    and wf-verification only) into `backtest.m12_rerun.ARM_SETS`. A1-A5 are referenced by the
+    parameter presets their PRs publish (Appendix B), and a missing preset is a loud CampaignError. `backtest/m16_report.py`
     renders the report from saved runs: tables, scorecard, rail refusals, the A6 blend, and the
     rule with the DSR. No A1-A5 policy code; no window-scale backtest.
   deliverables: [ops/studies/preregistration-m16-2026-10-08.md, backtest/m16_arms.py, backtest/m12_rerun.py, backtest/m16_report.py, tests/unit/test_m16_arms.py, tests/unit/test_m16_report.py, TASK_GRAPH.yaml]
   acceptance:
     - "the pre-registration is the first M16 commit and no M16 figure exists before it is pushed"
-    - "ARM_SETS keeps m12 and regime-daily unchanged; m16/m16-fundamentals resolve or raise naming every missing option"
+    - "ARM_SETS keeps m12 and regime-daily unchanged; m16/m16-fundamentals resolve or raise naming every missing preset"
     - "m16_report renders from synthetic saved runs; a test fails if the selection floor or any comparison direction is inverted"
     - "make check is green"
   verify: "uv run pytest tests/unit/test_m16_arms.py tests/unit/test_m16_report.py tests/unit/test_m12_rerun.py -q"
@@ -2555,9 +2555,9 @@ tasks:
   deps: [M16.0]
   spec: |
     Implement in `backtest/policies/momentum_v2.py` (and its data source in `backtest/run.py`)
-    exactly the behaviour of pre-registration §2 for A1, A3 and A4. The `MomentumV2Parameters`
-    options are named as in Appendix B: `absolute_momentum`, `residual_momentum`,
-    `profitability_filter`.
+    exactly the behaviour of pre-registration §2 for A1, A3 and A4. Publish the presets named in
+    Appendix B: `D13_ABS_MOM`, `D13_RESID_MOM` and `D13_PROFIT_FILTER` in
+    `backtest.policies.momentum_v2`.
     - Each option is off by default and left out of `repr` at its default, so D13's run
       fingerprint and replay digest are unchanged.
     - A1's hurdle is (repo - 50 bp) summed simply over the 12-1 span's calendar days, read from
@@ -2571,7 +2571,7 @@ tasks:
   acceptance:
     - "D13's repr and a pre-M16 replay digest are unchanged with every option off"
     - "inverted-rule tests fail if the hurdle, the residual ranking or the PAT sign is flipped; a future-dated filing trips the PIT guard"
-    - "backtest.m16_arms resolves A1, A3 and A4 without a mapping change, or the mapping is updated in the same PR"
+    - "backtest.m16_arms resolves A1, A3 and A4 from the published presets"
     - "make check is green"
   verify: "uv run pytest tests/unit/test_momentum_v2_m16.py tests/unit/test_m16_arms.py -q"
 
@@ -2582,8 +2582,9 @@ tasks:
   autonomy: AUTO
   deps: [M16.0]
   spec: |
-    Implement pre-registration §2 A2 as the `MomentumV2Parameters` option `industry_gate_top`
-    (Appendix B; `None` by default and out of `repr`). The gate ranks the sectoral indices'
+    Implement pre-registration §2 A2, as amended in §8, behind a `MomentumV2Parameters` switch that
+    is off by default and out of `repr`. Publish the preset `D13_INDUSTRY_GATE` in
+    `backtest.policies.momentum_v2` (Appendix B). The gate ranks the sectoral indices'
     published price-index levels by their 6-1 month return (t-126 to t-21 sessions), knowable on
     the decision date, monthly on D13's rebalance session.
     - Names in industries mapped to a non-top-5 index, or to no index, are ineligible.
@@ -2594,7 +2595,7 @@ tasks:
   acceptance:
     - "D13's repr and a pre-M16 replay digest are unchanged with the gate off"
     - "a test fails if the ranking direction or the 6-1 span is inverted; a future-dated index level trips the PIT guard"
-    - "backtest.m16_arms resolves A2 without a mapping change, or the mapping is updated in the same PR"
+    - "backtest.m16_arms resolves A2 from the published preset"
     - "make check is green"
   verify: "uv run pytest tests/unit/test_industry_gate.py tests/unit/test_m16_arms.py -q"
 
@@ -2605,8 +2606,9 @@ tasks:
   autonomy: AUTO
   deps: [M16.0]
   spec: |
-    Implement pre-registration §2 A5 as `SwingCompositeParameters.weight_earnings_surprise`
-    (Appendix B; zero by default and out of `repr`).
+    Implement pre-registration §2 A5 as `SwingCompositeParameters.weight_earnings_surprise`, zero
+    by default and out of `repr`. Publish the preset `M10_7_EARNINGS_SURPRISE` in
+    `backtest.policies.earnings_surprise` (Appendix B).
     - Surprise = (latest quarter's basic EPS - EPS four quarters earlier) / the sample stdev of
       those differences over the last 8 quarters.
     - First-filed PIT XBRL values, on one basis.
@@ -2616,7 +2618,7 @@ tasks:
   acceptance:
     - "M10.7's repr and a pre-M16 replay digest are unchanged at weight 0"
     - "a test fails if the surprise sign or the 63-session window is inverted; a future-dated filing trips the PIT guard"
-    - "backtest.m16_arms resolves A5 without a mapping change, or the mapping is updated in the same PR"
+    - "backtest.m16_arms resolves A5 from the published preset"
     - "make check is green"
   verify: "uv run pytest tests/unit/test_earnings_surprise.py tests/unit/test_m16_arms.py -q"
 
@@ -2627,8 +2629,8 @@ tasks:
   autonomy: NEEDS_GO
   deps: [M16.0, M16.1, M16.2, M16.3]
   spec: |
-    Start only after the owner has confirmed the primary selection floor (pre-registration §4),
-    recorded in §7. On one commit carrying M16.0-M16.3, run `backtest.m12_rerun`:
+    Start only after both of these are recorded in the pre-registration: the owner's confirmation
+    of the primary selection floor (§4, in §7), and the A2 amendment (§8). On one commit carrying M16.0-M16.3, run `backtest.m12_rerun`:
     - `--arm-set m16` on the floor-only units (walk-forward, decade, six-year);
     - `--arm-set m16-fundamentals` on six-year and wf-verification;
     - both again with `--universe nifty500` on every window its PIT coverage supports at launch.
@@ -2641,7 +2643,7 @@ tasks:
   acceptance:
     - "every grid cell the pre-registration names has a saved run, or its absence is stated with the engine's reason"
     - "the report is generated from the saved runs, prints N = 75 with V's n, and states the Step 1-4 outcome"
-    - "the primary-floor confirmation is recorded in pre-registration §7 before the first run"
+    - "the primary-floor confirmation (§7) and the A2 amendment (§8) are recorded in the pre-registration before the first run"
   verify: "uv run pytest tests/unit/test_m16_report.py -q"
   escalation:
     question: "Confirm the M16 selection floor: choose on the Rs 10 crore floor (pre-registered primary), or name Rs 1 crore?"
