@@ -12,12 +12,25 @@ deleting it in a later commit un-publishes nothing — the only remedy is rotati
 | `make check` (first step) | `uv run python ops/secret_scan.py` | every tracked + untracked-not-ignored file | the gate |
 | pre-commit hook | `… --staged` | the staged blobs — what the commit will contain | the commit |
 | commit-msg hook | `… --message <file>` | the commit message | the commit |
-| CI, `secret-scan` job | `… --commits <base>..<head>` | every commit of the PR / push: its changed blobs **and** its message | the PR check |
+| CI, `.github/workflows/secret-scan.yml` (never cancelled by a newer push) | `… --commits <base>..<head>` | every commit of the PR / push: its changed blobs **and** its message | the PR check |
 
 The tool is detect-secrets, pinned in `uv.lock`, run through `ops/secret_scan.py`. It never touches
 the network: live verification is stripped from its settings, whatever `.secrets.baseline` says.
 Output names `path:line: detector` and **never prints the matched value**. Exit 0 clean, 1 finding,
-2 misconfiguration (missing baseline, a required detector dropped from it, a git error).
+2 when the scan cannot be trusted: a file it cannot read, a corrupt baseline, a detector missing or
+failing to load, a filter that would skip files, a `--commits` argument that is not `A..B`.
+
+Every file is read by the wrapper, not by detect-secrets (which skips unreadable and non-UTF-8 files
+without a word). Non-UTF-8 text is decoded (UTF-16 by BOM, else UTF-8, else latin-1) and scanned.
+**Known gaps, by design and named:**
+
+- **Binaries** — any file containing a NUL byte (zip, xlsx, most pdf) has no text lines to scan. Each
+  run prints them under `NOT SCANNED, binary (N)` (60 tracked fixtures today); nothing passes
+  silently. Never commit a credential inside an archive or office file; the scan cannot see it.
+- **A value split across lines** — e.g. a multi-line parenthesised call whose argument sits on its
+  own line with no keyword. Detection is line-based.
+- **A bare high-entropy credential** with no keyword, no known prefix, not `user:pass@`, and not
+  Kite-shaped (32 mixed-case alphanumerics) — the entropy detectors are off (see the gate note).
 
 `make secret-scan` runs the working-tree scan on its own (~40 s for the whole tree on this box).
 
@@ -78,18 +91,28 @@ compared, so editing above an accepted line does not resurrect it.
 4. `git diff .secrets.baseline` must show only the entries you reviewed. Say in the commit message
    what each one is and why it cannot authenticate.
 
-Never: add an `exclude`/`should_exclude_file` filter or any blanket path rule (tests/, fixtures/,
-docs/); re-enable the entropy detectors and bulk-accept what they find; remove a detector; or use an
-inline `# pragma: allowlist secret` comment — the wrapper ignores it, by design.
-`tests/unit/test_secret_scan.py` fails on the first three.
+Never add a filter, re-enable the entropy detectors, remove a detector, or rely on an inline
+`# pragma: allowlist secret` comment. What actually stops each:
+
+| Attempt | Stopped by |
+|---|---|
+| any filter beyond the value heuristics (`should_exclude_file/line/secret`, a regex, a wordlist, a `file://` filter) | `ops/secret_scan.py` exits 2 |
+| a `keyword_exclude` on KeywordDetector | exits 2 |
+| re-listing a skip filter (swagger, lock-file, indirect-reference, line-allowlist, verification) | silently stripped — it never takes effect |
+| removing any of the 30 detectors, or a detector that fails to load | exits 2 |
+| an inline `pragma: allowlist secret` | ignored |
+| re-enabling Hex/Base64HighEntropyString | not rejected by the scanner; `test_baseline_holds_only_hashes_and_reviewed_entries` fails |
+| bulk-accepting real findings with `--accept` | **nothing but review** — read the baseline diff |
 
 ## Changing the detectors
 
-- Detector set: `plugins_used` in `.secrets.baseline`. `ops/secret_scan.py` refuses to run (exit 2)
-  without KeywordDetector, TokenAssignmentDetector, BasicAuthDetector, AWSKeyDetector and
-  PrivateKeyDetector.
-- Repo-local detectors: `ops/secret_scan_plugins.py` (token assignments, Anthropic keys). A new
-  credential shape the stock set misses goes there, with a planted case in the test.
+- Detector set: `plugins_used` in `.secrets.baseline`, which must list every name in
+  `REQUIRED_PLUGINS` in `ops/secret_scan.py` (30: detect-secrets' own minus the two entropy ones,
+  plus the repo-local five). Each must load from the file its entry names, or the scan exits 2.
+- Repo-local detectors: `ops/secret_scan_plugins.py` — token assignments and `…token("…")` calls,
+  `Authorization: token|Bearer` headers, Kite-shaped bare tokens, conninfo `password=`, Anthropic
+  keys. A new credential shape the stock set misses goes there, in `REQUIRED_PLUGINS`, and gets a
+  planted case in the test.
 - The entropy detectors (Hex/Base64HighEntropyString) are off deliberately: this repo holds hundreds
   of sha256 content addresses, every one a "finding". See `ops/gates/M15.1-secret-scan-2026-10-08.md`.
 - Upgrading detect-secrets: bump the pin in `pyproject.toml`, `uv lock`, then run the unit test and
