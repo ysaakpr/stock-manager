@@ -14,8 +14,8 @@ none of them (the daily paper job's, D13's own) is not asked for anything new:
   ``absolute_momentum_hurdle`` evidence counts the slots the policy *intended* to leave in cash
   (``slots_in_cash`` / ``in_cash``) and the held failing names it *asked* to sell (``selling``) —
   not what the rails let through. Rails clear orders after the decision: A8's minimum-holdings
-  floor (``analyst/rails/engine.py`` ``_min_holdings_breach``, eight names) refuses a sell that
-  would take a book at or above the floor below it, so a failing name past that point stays held.
+  floor (``analyst/rails/engine.py``, eight names) refuses a sell that would take a book at or
+  above the floor below it, so a failing name past that point stays held.
   Each refusal is journalled as its own ``RAIL_BLOCK`` entry, which is where to count them.
 * **A3 — residual-momentum ranking** (``residual_ranking``). The 12-1 ranking key is replaced by the
   round-2 H1 residual-momentum score, exactly as pre-registered
