@@ -10,7 +10,13 @@ none of them (the daily paper job's, D13's own) is not asked for anything new:
   compounded over :data:`ABSOLUTE_MOMENTUM_HORIZON_DAYS`. A name that fails keeps its slot *in
   cash* — the next-ranked name is not promoted into it, which is the whole point: a market where
   most leaders trail cash is one to be partly out of. The rate is the one in force on the decision
-  date (:class:`RepoRateReading`, knowable from its ``effective_from``).
+  date (:class:`RepoRateReading`, knowable from its ``effective_from``). The
+  ``absolute_momentum_hurdle`` evidence counts the slots the policy *intended* to leave in cash
+  (``slots_in_cash`` / ``in_cash``) and the held failing names it *asked* to sell (``selling``) —
+  not what the rails let through. Rails clear orders after the decision: A8's minimum-holdings
+  floor (``analyst/rails/engine.py`` ``_min_holdings_breach``, eight names) refuses a sell that
+  would take a book at or above the floor below it, so a failing name past that point stays held.
+  Each refusal is journalled as its own ``RAIL_BLOCK`` entry, which is where to count them.
 * **A3 — residual-momentum ranking** (``residual_ranking``). The 12-1 ranking key is replaced by the
   round-2 H1 residual-momentum score, exactly as pre-registered
   (``ops/studies/preregistration-signals-2026-09-29.md`` §3 and §6) and computed by
@@ -20,9 +26,26 @@ none of them (the daily paper job's, D13's own) is not asked for anything new:
 * **A4 — profitability filter** (``profitability_filter``). A candidate is eligible only if its
   trailing-twelve-month profit after tax is positive and its newest filing is at most
   :data:`PROFITABILITY_MAX_STALENESS_DAYS` old on the decision date. TTM profit is
-  :func:`~dataplatform.query.fundamentals_metrics.compute_metrics`'s ``earnings_ttm`` (owners'
-  share where every quarter states it, else the bottom line). A name with fewer than four
-  consecutive quarters, or no filing at all, is ineligible while the filter is on.
+  :func:`~dataplatform.query.fundamentals_metrics.compute_metrics`'s ``earnings_ttm``, so A4
+  inherits its rules rather than stating new ones:
+
+  - **One nature, never mixed** (``_pick_nature``): consolidated whenever the company has *ever*
+    filed a consolidated quarterly ``profit_after_tax`` knowable on the date, else standalone. The
+    four quarters are summed within that one nature only.
+  - **Owners' share first** (``_earnings_series``): ``profit_attributable_to_owners`` when every
+    quarter of the run states it, else ``profit_after_tax`` (the bottom line).
+  - **Banks and NBFCs.** The banking taxonomy's ``ProfitLossForThePeriod`` maps to
+    ``profit_after_tax`` and its "after minority interest" element to
+    ``profit_attributable_to_owners`` (``dataplatform/ingest/xbrl/models.py``
+    ``_BANKING_OWNERS_CONCEPTS`` and ``BANKING_CONCEPTS``), so a bank is screened on the same
+    keys. NBFCs file the Ind-AS NBFC entry point, which carries the whole Ind-AS P&L spine and
+    reads with the Ind-AS vocabulary.
+  - **Staleness is measured from the newest filing of the chosen nature.** So a company that has
+    stopped filing consolidated results but still files fresh standalone ones stays on the
+    consolidated nature and is ineligible once its last consolidated filing is over 200 days old.
+
+  A name with fewer than four consecutive quarters (of that nature), or no filing at all, is
+  ineligible while the filter is on.
 
 Point-in-time (invariant #7): each input is a :class:`~dataplatform.query.pit.Dataset` whose
 ``knowable_date`` is the date it became known — the repo change's effective date, the newest filing
@@ -122,9 +145,15 @@ def absolute_momentum_evidence(
     reading: RepoRateReading,
     chosen: Iterable[MomentumV2Record],
     held_in_cash: Iterable[str],
+    selling: Iterable[str] = (),
 ) -> EvidenceItem:
-    """The hurdle a rebalance applied and the basket slots it left in cash."""
+    """The hurdle a rebalance applied, the basket slots it left in cash, and the sells it asked for.
+
+    Both are the policy's *intent*. A sell the minimum-holdings rail refuses still appears in
+    ``selling`` here; the refusal is its own ``RAIL_BLOCK`` journal entry.
+    """
     cash = sorted(held_in_cash)
+    sells = sorted(selling)
     return EvidenceItem(
         kind=EvidenceKind.PRICE,
         source="repo_rates",
@@ -139,8 +168,12 @@ def absolute_momentum_evidence(
             "slots": str(len(list(chosen))),
             "slots_in_cash": str(len(cash)),
             "in_cash": ",".join(cash),
+            "selling": ",".join(sells),
         },
-        text="12-1 return must beat cash over the same span; a failing slot stays in cash",
+        text=(
+            "12-1 return must beat cash over the same span; a failing slot stays in cash "
+            "(intended; rail refusals are journalled as RAIL_BLOCK)"
+        ),
     )
 
 

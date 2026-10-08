@@ -406,8 +406,10 @@ class MomentumV2Policy:
     ) -> None:
         self._data = data
         self._params = params if params is not None else MomentumV2Parameters()
-        # M16.1: an overlay switched on against a source that cannot serve it is refused here,
-        # not on the first rebalance a month into a run.
+        # M16.1: an overlay switched on against a source with no method for it is refused here,
+        # not on the first rebalance a month into a run. The check is runtime_checkable's, so it
+        # sees only that the method exists: the L1 source always has all three and raises
+        # BacktestError on the first call when its input was not supplied.
         for switch, seam in (
             ("absolute_momentum", AbsoluteMomentumData),
             ("residual_ranking", ResidualRankingData),
@@ -575,7 +577,14 @@ class MomentumV2Policy:
             passing = {r.isin for r in ranked[:band] if r.momentum_12_1 > hurdle}
             keep &= passing
             failing = [isin for isin in target if isin not in passing]
-            overlay_evidence.append(absolute_momentum_evidence(ctx.session, repo, chosen, failing))
+            # Held names the band alone would keep but the hurdle sells — the sells A1 asks for.
+            in_band = {r.isin for r in ranked[:band]}
+            selling = [
+                h.isin for h in ctx.broker.holdings() if h.isin in in_band and h.isin not in passing
+            ]
+            overlay_evidence.append(
+                absolute_momentum_evidence(ctx.session, repo, chosen, failing, selling)
+            )
             target = {isin: record for isin, record in target.items() if isin in passing}
             slots = {isin: weight for isin, weight in slots.items() if isin in target}
         prices = {record.isin: record.price for record in target.values()}

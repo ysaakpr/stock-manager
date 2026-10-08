@@ -37,6 +37,7 @@ from backtest.policies.momentum_v2_overlays import (
     ProfitabilityReading,
     RepoRateReading,
     ResidualScore,
+    residual_scores,
 )
 from backtest.policies.residual_momentum import MarketSession, ResidualMomentumPanel
 from backtest.rails import BacktestRailPolicy, RailGate, SectorMap
@@ -273,6 +274,26 @@ def test_without_a1_the_failing_name_is_bought_inversion() -> None:
     assert sum(o.quantity * PRICE for o in decision.orders) > Decimal("90000")
 
 
+def test_a1_never_backfills_with_a_passing_name_below_the_basket() -> None:
+    # Ranked on 0-12 (+90 % for every name, so ISIN order): A, B chosen, C next. B fails the hurdle
+    # on its 12-1 return; C (+10 %) clears it — and must still not be promoted into B's slot.
+    data = _Data({A: "0.5", B: "0.03", C: "0.10"})
+    decision = _decide(_params(absolute_momentum=True, use_12_1=False), data)
+    assert _bought(decision) == {A}
+    assert _bought(_decide(_params(use_12_1=False), data)) == {A, B}  # the slot exists without A1
+
+
+def test_a1_under_a_vol_target_scales_both_caps_together() -> None:
+    # One passing name at 0.2 monthly vol is ~69 % a year; a 34.64 % target halves the basket,
+    # and A1's half-book slot halves it again: A is sized to about a quarter of the book.
+    decision = _decide(
+        _params(absolute_momentum=True, vol_target_annual=Decimal("0.3464")), _Data(_A1_MOMENTA)
+    )
+    (buy,) = decision.orders
+    assert buy.isin == A
+    assert Decimal("20000") < buy.quantity * PRICE <= Decimal("25000")
+
+
 def test_a1_with_every_name_above_the_hurdle_buys_the_whole_basket() -> None:
     momenta = {A: "0.5", B: "0.3", C: "0.01"}
     with_a1 = _decide(_params(absolute_momentum=True), _Data(momenta))
@@ -312,6 +333,14 @@ def test_a_higher_repo_rate_raises_the_bar() -> None:
     assert B in _bought(_decide(_params(absolute_momentum=True), _Data(momenta)))
     high = _Data(momenta, repo=Decimal("0.075"))  # hurdle ~6.4 %
     assert B not in _bought(_decide(_params(absolute_momentum=True), high))
+
+
+def test_a1_evidence_names_the_held_failing_names_it_asks_to_sell() -> None:
+    broker = _Broker(holdings=_held(B, D))  # B: in the band, fails the hurdle; D: outside the band
+    decision = _decide(_params(absolute_momentum=True), _Data(_A1_MOMENTA), broker)
+    (item,) = [i for i in decision.evidence.items if i.label == "absolute_momentum_hurdle"]
+    assert item.detail["selling"] == B  # D is sold by the band, not by A1
+    assert "intended" in (item.text or "")
 
 
 def test_a1_files_the_hurdle_and_the_cash_slots_as_evidence() -> None:
@@ -400,6 +429,16 @@ def test_a3_leaves_out_a_name_the_panel_excluded() -> None:
         _Broker(holdings=_held(C)),
     )
     assert C in _sold(held_c)  # an unrankable holding is outside every band
+
+
+def test_a3_never_zero_fills_an_excluded_score() -> None:
+    # Every scored name is negative: a None read as 0 would put A first.
+    data = _Data(_A3_MOMENTA, residual={A: None, B: "-0.5", C: "-1.0"})
+    decision = _decide(_params(top_n=1, sell_band=1, residual_ranking=True), data)
+    assert _bought(decision) == {B}
+    assert residual_scores(
+        [ResidualScore(A, None, REBALANCE), ResidualScore(B, Decimal("-0.5"), REBALANCE)]
+    ) == {B: Decimal("-0.5")}
 
 
 def test_a_future_dated_residual_score_trips_the_guard() -> None:
