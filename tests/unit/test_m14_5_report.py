@@ -75,3 +75,11 @@ def test_switches_are_confirmed_only_by_a_fill_on_the_following_session() -> Non
 def test_render_keeps_the_hand_written_section() -> None:
     text = render([], manifests={}, selected={}, hand_written="\n## Analysis\n\nkept\n")
     assert text.split(MARKER, 1)[1].strip() == "## Analysis\n\nkept"
+
+
+def test_floor_labels_read_in_whole_crore() -> None:
+    from backtest.m14_5_report import _floor_label
+    from backtest.sweep import HIGH_FLOOR, LOW_FLOOR
+
+    assert _floor_label(LOW_FLOOR) == "₹1 cr/day floor"
+    assert _floor_label(HIGH_FLOOR) == "₹10 cr/day floor"

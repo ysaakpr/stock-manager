@@ -79,6 +79,8 @@ class RunFacts:
     traded_value: Decimal
     turnover: Decimal
     switches: Switches
+    #: Sells A8's minimum-holdings rail refused — the part of each park that did not happen.
+    floor_refusals: int
 
     @property
     def ratio(self) -> Decimal:
@@ -199,6 +201,7 @@ def collect(run_dir: Path, *, data_root: Path | None) -> list[RunFacts]:
                 trades=len(trades),
                 traded_value=traded,
                 turnover=(traded / 2 / mean_nav / years).quantize(Decimal("0.01")),
+                floor_refusals=int(summary["rail_blocks"].get("MIN_HOLDINGS", 0)),
                 switches=switches(
                     arm.v2,
                     sessions,
@@ -239,7 +242,9 @@ def _crore(value: Decimal) -> str:
 
 
 def _floor_label(floor: Decimal) -> str:
-    return f"₹{(floor / _CRORE).normalize()} cr/day floor"
+    crore = floor / _CRORE
+    shown = crore.to_integral_value() if crore == crore.to_integral_value() else crore
+    return f"₹{shown} cr/day floor"
 
 
 def _table(rows: list[RunFacts]) -> list[str]:
@@ -248,8 +253,8 @@ def _table(rows: list[RunFacts]) -> list[str]:
     lines = [
         "| # | Strategy | XIRR | Max DD | **XIRR/DD** | Δ XIRR vs D13 | Δ DD vs D13 | Excess vs "
         "NIFTY 50 TRI | Parks / re-entries (ledger-confirmed) | Trades | One-way turnover /yr "
-        "| Charges | >25%? |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| Charges | A8 min-holdings refusals | >25%? |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for position, row in enumerate(ranked, start=1):
         sw = row.switches
@@ -261,7 +266,7 @@ def _table(rows: list[RunFacts]) -> list[str]:
             f"| **{_r(row.ratio)}** | {delta_x} | {delta_d} | {_p(row.excess)} "
             f"| {sw.parks} / {sw.reentries} ({sw.parks_confirmed} / {sw.reentries_confirmed}) "
             f"| {row.trades} | {row.turnover}x "
-            f"| {_lakh(row.charges)} | {'yes' if row.xirr > BAR else 'no'} |"
+            f"| {_lakh(row.charges)} | {row.floor_refusals} | {'yes' if row.xirr > BAR else 'no'} |"
         )
     return lines
 
@@ -315,7 +320,9 @@ def render(
         "that, since A8's minimum-holdings floor (8 names) refuses the last sells of a park and "
         "the kept names then sit through the risk-off spell. **One-way turnover** is "
         "(buys + sells) ÷ 2 ÷ mean NAV ÷ years. **Charges** are every brokerage, STT, stamp, "
-        "exchange and GST rupee the shared cost model charged (₹10L opening book).",
+        "exchange and GST rupee the shared cost model charged (₹10L opening book). **A8 "
+        "min-holdings refusals** are the sells A8's 8-name floor refused over the run (from the "
+        "run summary's rail blocks) — the share of each park that never happened.",
         "",
     ]
     universes = sorted({f.universe for f in facts}, key=lambda u: (u != "turnover_floor", u))
@@ -343,6 +350,14 @@ def render(
                 f"(`backtest.verdict.run_walk_forward`, ₹1 cr floor first) chose "
                 f"**{selected[universe]}**; its verification-window row is in the table above, "
                 "read after the choice was frozen.",
+                "",
+            ]
+        elif any(f.universe == universe and f.window == "wf-verification" for f in facts):
+            out += [
+                f"**Walk-forward ({title})**: no selection window — the PIT NIFTY 500 membership "
+                "history opens 2016-10-24, after the selection window opens, and the engine "
+                "refuses an uncovered date. These rows are attribution only; the walk-forward "
+                "choice on record is the floor-only one.",
                 "",
             ]
     out += [MARKER, hand_written.strip("\n"), ""]
