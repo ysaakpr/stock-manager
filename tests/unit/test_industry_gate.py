@@ -42,7 +42,8 @@ from backtest.policies.momentum_v2 import (
 )
 from backtest.rails import BacktestRailPolicy, RailGate, SectorMap, ratified_sector_map
 from backtest.replay import ReplayEngine, ReplayResult, SessionContext, SessionDecision
-from backtest.run import _AccountingBroker
+from backtest.run import _AccountingBroker, backtest_spec
+from backtest.run_ledger import run_digest
 from backtest.sector_indices import (
     MAX_STALE_DAYS,
     SECTOR_INDEX_MAP_PATH,
@@ -215,6 +216,26 @@ def test_d13s_repr_is_the_pre_m16_2_rendering_so_its_run_fingerprint_is_unchange
     )
     assert repr(D13) == expected
     assert repr(replace(D13, industry_gate=False)) == expected
+
+
+def test_a_gated_run_spec_records_the_mapping_table_and_d13s_does_not() -> None:
+    def spec(params: MomentumV2Parameters) -> dict[str, str]:
+        return backtest_spec(
+            "momentum_v2",
+            start=date(2019, 1, 1),
+            end=date(2019, 3, 31),
+            parameters=params,
+            opening_cash=Decimal("1000000"),
+            adjusted=True,
+            universe=None,
+        )
+
+    d13 = spec(D13)
+    assert "sector_index_map" not in d13
+    assert spec(replace(D13, industry_gate=False)) == d13
+    gated = spec(D13_INDUSTRY_GATE)
+    assert gated["sector_index_map"] == load_sector_index_map().sha256
+    assert run_digest(gated) != run_digest(d13)
 
 
 def test_the_preset_is_d13_with_only_the_gate_switched_on() -> None:

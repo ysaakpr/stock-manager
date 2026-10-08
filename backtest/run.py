@@ -2385,6 +2385,10 @@ def backtest_spec(
             extra["investable_universe"] = TURNOVER_FLOOR_UNIVERSE_IDENTITY
         else:
             extra["index_membership"] = INDEX_MEMBERSHIP_IDENTITY
+    if getattr(parameters, "industry_gate", False):
+        # M16.2: a gated run is a function of the reviewed mapping table too; an edited table must
+        # not resume a ledger struck under the old one. Absent when the gate is off (D13 unchanged).
+        extra["sector_index_map"] = load_sector_index_map().sha256
     return run_spec(
         runner,
         start=start,
