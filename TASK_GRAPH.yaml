@@ -25,6 +25,7 @@ milestones:
         depends: [M9, M10]}
   M13: {title: "Run of 2026-10-06 — paper operations, alert triggers, data repairs", depends: [M5, M9, M10]}
   M14: {title: "Follow-ups of the 2026-10-07 M12.R re-run", depends: [M9, M12, M13]}
+  M15: {title: "Real-money readiness prerequisites (run of 2026-10-08)", depends: [M5, M6, M13]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -1734,6 +1735,14 @@ tasks:
     - "dry-run constructs correct requests and provably sends nothing"
     - "placement without the explicit live-confirm flag raises"
   verify: "uv run pytest tests/unit/test_kite_broker.py -q"
+  notes: |
+    Commit correction (2026-10-08): BUILD_STATE.json records M8.1's commit as `7ffaff7`, which is
+    `[M6.3] Evidence bundle builder` — the HEAD at the moment `orch set M8.1 DONE` ran, before the work
+    was committed. M8.1's own commit is `6ec4e26` ("[M8.1] KiteBroker adapter (recorded-response
+    tested)"), committed directly on main with `7ffaff7` as its parent; there is no merge commit.
+    `orch` has no command that rewrites a recorded commit (re-running `orch set M8.1 DONE` would record
+    the current HEAD, which is no better), and BUILD_STATE.json is never hand-edited, so the
+    correction is recorded here.
 
 - id: M8.2
   title: SEBI / Zerodha algo rules verification memo
@@ -1765,7 +1774,13 @@ tasks:
     mid-session. This requires Kite credentials, real money, and real orders — all reserved to the human
     (AGENTIC_CONTEXT §3.5). Agents prepare: the runbook, the tiny-capital plan, the recon checklist, the
     kill-switch drill script, and the exact commands to run.
-  deliverables: [ops/runbooks/live-orders.md, ops/gates/M8-live-plan.md]
+  deliverables: [ops/runbooks/live-orders.md]
+  notes: |
+    The separate plan deliverable `ops/gates/M8-live-plan.md` is covered by `ops/runbooks/live-orders.md`
+    (M15.5, PR #86): the runbook carries the tiny-capital plan, the recon checklist, the kill-switch drill
+    and the exact commands, and `ops/gates/M15.5-m8-3-plan-2026-10-08.md` records what was verified and
+    what was assumed. That runbook is a proposal for the owner, not an approval: M8.3 itself stays open
+    (HUMAN_GATE) until the owner runs the sessions.
   acceptance:
     - "runbook and plan complete enough for the owner to execute unassisted"
   verify: "test -s ops/runbooks/live-orders.md"
@@ -2487,6 +2502,105 @@ tasks:
 # M14 — follow-ups of the 2026-10-07 M12.R re-run
 # ─────────────────────────────────────────────────────────────────────────────
 
+# M14.1–M14.4 were built and merged (PRs #84, #82, #83, #85) without a graph entry; recorded here
+# after the fact (2026-10-08) so the graph reflects what is on main.
+- id: M14.1
+  title: PIT index membership before 2016-10-24 — read the 2014-2016 releases
+  milestone: M14
+  module: D1
+  autonomy: AUTO
+  deps: [M3.9.a]
+  spec: |
+    The DQ-5.1 history opened NIFTY 500 and most tracked indices at 2016-10-24 because three releases
+    (`ind_prs17102016`, `ind_prs12082016`, `ind_prs22022016_2`) were misread as "detached layout": their
+    tables are headed `Scrip Name`, not `Company Name`. Fix the table header, then the holes reading back
+    exposed: `1.` section headings; one intro stating several effective dates (each section takes the
+    date of the clause that names it, or none — never a guess); a tracked section that speaks of a
+    change but yields no events is unparsed, never silently dropped; an index's history starts no
+    earlier than the first release that names it. Built offline from the releases already in L0; every
+    change diffed release by release against the old parser over all 417 releases. Result: NIFTY 50 /
+    Next 50 / 100 / 200 from 2014-03-28, NIFTY 500 from 2015-03-28, Midcap 150 from 2016-08-12,
+    Smallcap 250 from 2016-04-22, with 0 unexplained off-size segments. Gate note
+    `ops/gates/pit-membership-detached-2026-10-07.md` (PR #84).
+  deliverables: [dataplatform/ingest/index_changes.py, dataplatform/ingest/index_history.py, ops/gates/pit-membership-detached-2026-10-07.md, "tests/fixtures/nifty_index_press_releases/", tests/unit/test_index_changes.py, tests/unit/test_index_history.py, tests/golden/test_index_history_golden.py]
+  acceptance:
+    - "the Scrip Name and dated-clause releases parse, each section dated by its own intro clause; a frozen fixture per era pins each"
+    - "a tracked section that names a change but yields no events (the columns-apart 2014 release) is reported unparsed, never dropped"
+    - "no index history starts before the first release that names the index"
+    - "built from L0 only; no network fetch, L0 only read"
+  verify: "uv run pytest tests/unit/test_index_changes.py tests/unit/test_index_history.py -q"
+
+- id: M14.2
+  title: Accept month-first close-all dates only when the filename settles them
+  milestone: M14
+  module: D1
+  autonomy: AUTO
+  deps: [M11.2]
+  spec: |
+    The M11.2 index-valuation backfill refused 2023-04-06, 2023-04-10 and 2023-04-11: those
+    `ind_close_all` files print `Index Date` month-first. `_session_date` in
+    `dataplatform/ingest/macro/index_valuation.py` reads a row month-first only when the filename names a
+    session, the day-first reading is not that session, and the month-first reading is exactly it.
+    Otherwise day-first stands, and a file dated to another session is still refused. A swap is logged
+    once per file (`macro.index_valuation_month_first`). Fixtures are byte-identical copies of the five L0
+    payloads 2023-04-05..12; no request is made. Gate note `ops/gates/macro-monthfirst-2026-10-07.md`
+    (PR #82). The live L1 re-derive is a post-merge step.
+  deliverables: [dataplatform/ingest/macro/index_valuation.py, "tests/fixtures/nifty_index_close/month_first_2023/", tests/unit/test_macro_backfill.py, ops/gates/macro-monthfirst-2026-10-07.md]
+  acceptance:
+    - "the three month-first files publish the sessions their filenames name"
+    - "an ambiguous day-first date is never swapped, and a file named for another session is still refused"
+    - "the tests fail if the rule is removed or widened to swap whenever both readings are dates"
+  verify: "uv run pytest tests/unit/test_macro_backfill.py -q"
+
+- id: M14.3
+  title: Scheduled fundamentals forward job (integrated feed, 02:00 IST)
+  milestone: M14
+  module: D1
+  autonomy: AUTO
+  deps: [M10.4]
+  spec: |
+    `nse_integrated_filing_index` and `nse_xbrl_filing` had no scheduled job, so the PIT fundamentals
+    store stopped at 2026-10-05. Add `fundamentals_forward` (cron `0 2 * * *` IST, 2h45m budget, 1 h
+    misfire grace, a new `Job.misfire_grace` defaulting to the budget) driving the existing
+    `FundamentalsBackfillRunner`: new days from the watermark (end of the unbroken run of fully
+    `PUBLISHED` windows, capped at the day before each window's fetch) to yesterday, at most 3 days per
+    run; plus re-reads from L0 of every published window ending in the last 7 days. A read-only
+    `sync_state` query runs first, so a night with nothing owed takes no lease and makes no request;
+    then both NSE host leases; deadline 04:45 IST. A failed index page, a 403 park or a deadline stop
+    raises, so the run is a FAILED `job_run`. Both sources leave `UNSCHEDULED`. Runbook section in
+    `ops/runbooks/fundamentals_backfill.md` (PR #83).
+  deliverables: [dataplatform/ingest/fundamentals_forward.py, dataplatform/ingest/fundamentals_backfill.py, dataplatform/scheduler/registry.py, dataplatform/scheduler/runner.py, ops/runbooks/fundamentals_backfill.md, tests/unit/test_fundamentals_forward.py, tests/unit/test_scheduler_registry.py, tests/unit/test_scheduler_coverage.py]
+  acceptance:
+    - "the scheduler registers fundamentals_forward at 02:00 IST and both sources are covered, not UNSCHEDULED"
+    - "the watermark never counts a window's own fetch day as complete; a test fails if it does"
+    - "a night with nothing owed takes no lease and makes no request"
+    - "an index-page failure, park or deadline stop fails the job run"
+    - "tests use frozen fixtures and never hit the network"
+  verify: "uv run pytest tests/unit/test_fundamentals_forward.py tests/unit/test_scheduler_registry.py tests/unit/test_scheduler_coverage.py -q"
+
+- id: M14.4
+  title: Journal a risk-off rebalance as a HOLD that names the regime
+  milestone: M14
+  module: X2
+  autonomy: AUTO
+  deps: [M9.5, M13.1]
+  spec: |
+    Observability only. A momentum v2 rebalance that parks with nothing held journaled a bare
+    `HEARTBEAT` (the first paper session, 2026-10-07). `_park` with no sells now returns one `HOLD`
+    (sleeve = the parking sleeve, rationale `regime risk-off; holding cash`, payload `regime=risk_off`,
+    index level, moving average, MA days). A park that sells is unchanged. `regime_parked(evidence)`
+    reads the decision's own evidence, never the absence of orders. The paper session records
+    `reason = 'rebalance_risk_off'` for every risk-off rebalance. Orders and book are byte-identical;
+    only the journal (and so replay digests of regime-filter runs) changes. A pre-M14.4 paper row
+    still restores. The run report counts HOLD. Runbook `ops/runbooks/daily-eod.md` lists the reasons
+    (PR #85).
+  deliverables: [backtest/policies/momentum_v2.py, backtest/paper_session.py, backtest/run.py, backtest/duration.py, ops/runbooks/daily-eod.md, tests/unit/test_regime_park_journal.py]
+  acceptance:
+    - "an empty-book risk-off rebalance journals one HOLD naming the regime, never a bare HEARTBEAT; the test fails if reverted"
+    - "orders, book bytes and cash ledger are byte-identical to the pre-change run"
+    - "a paper row recorded before M14.4 restores and the next session decides"
+  verify: "uv run pytest tests/unit/test_regime_park_journal.py -q"
+
 - id: M14.5
   title: Momentum v2 — daily regime re-entry/exit variants and their backtest
   milestone: M14
@@ -2512,3 +2626,154 @@ tasks:
     - "the gate report is rendered from the saved runs, carries D13 in every table with regime switches and costs, and states a recommendation"
     - "make check is green"
   verify: "uv run pytest tests/unit/test_momentum_v2_daily_regime.py tests/unit/test_m12_rerun.py tests/unit/test_m14_5_report.py -q"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M15 — real-money readiness prerequisites (run of 2026-10-08)
+# Built and merged (PRs #90 + #93, #87, #89, #88, #86, #91) without graph entries; recorded here after
+# the fact (2026-10-08) so the graph reflects what is on main. None of them places an order, uses a
+# Kite credential or approves M8.3 — those stay reserved to the owner (AGENTIC_CONTEXT §3.4-3.6).
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: M15.1
+  title: Secret-scanning gate — make check, git hooks and per-commit CI
+  milestone: M15
+  module: "—"
+  autonomy: AUTO
+  deps: [M0.1]
+  spec: |
+    Readiness item (a): D5 made a secret scan mandatory before any real credential (M8.3's Kite key)
+    exists on this box; it enforces invariant #13. `ops/secret_scan.py` wraps detect-secrets 1.5.0
+    (dev dependency, hash-pinned in `uv.lock`; provider verification stripped, so no network at scan
+    time) plus repo plugins (`ops/secret_scan_plugins.py`). It runs as the first recipe line of
+    `make check`, as `pre-commit` (`--staged`) and `commit-msg` (`--message`) hooks (`make hooks`),
+    and in its own CI workflow over every commit of the range (`--commits base..head`, which catches
+    a secret added in one commit and deleted in the next, and scans commit messages). A finding exits
+    1; a scan that cannot trust itself (unreadable file, broken baseline) exits 2, never 0. False
+    positives are path-pinned in `.secrets.baseline`. #93 (review round 3) scoped the
+    reference-shaped-value exemption to code files before the first comment marker, and caught the
+    pydantic/dataclass assignment forms (`Field(…)`, `field(default=…)`, string prefixes, a dict
+    literal's first key). Known residual gaps are named in `ops/runbooks/secret-scan.md` and
+    `ops/BACKLOG.md`. Gate note `ops/gates/M15.1-secret-scan-2026-10-08.md`.
+  deliverables: [ops/secret_scan.py, ops/secret_scan_plugins.py, .secrets.baseline, ops/hooks/pre-commit, ops/hooks/commit-msg, .github/workflows/secret-scan.yml, Makefile, ops/runbooks/secret-scan.md, ops/runbooks/secret-leak.md, tests/unit/test_secret_scan.py, ops/gates/M15.1-secret-scan-2026-10-08.md]
+  acceptance:
+    - "make check runs the secret scan first; a test pins it"
+    - "the staged, commit-message and commit-range modes each catch a planted secret, including one deleted by a later commit"
+    - "the scan exits non-zero on a finding and 2 when it cannot trust itself"
+    - "the tree scans clean with only reviewed, path-pinned false positives; the scan makes no network call"
+  verify: "uv run pytest tests/unit/test_secret_scan.py -q && uv run python ops/secret_scan.py"
+
+- id: M15.2
+  title: Disclosure text, bounded and PIT, in the T1 evidence bundle
+  milestone: M15
+  module: A4
+  autonomy: AUTO
+  deps: [M6.3, M6.8]
+  spec: |
+    Readiness item (b); closes the code half of BACKLOG `M6.8 (F1)`: the T1 bundle carried only the T0
+    flag line, never the triggering disclosure. `analyst.monitor.request_for_escalation` builds the
+    `BundleRequest` for a T0 escalation from the same `AnnouncementIndex` the daily job builds;
+    `select_disclosures` keeps only rows with `ts <= as_of` (the tz-aware instant, not the date), 30-day
+    lookback, newest first. `BundleBuilder` renders each disclosure's headline plus its text,
+    `text_unavailable: <reason>`, or `attached document: text not captured`. Bounded by
+    `DisclosurePolicy` (2,000 chars per disclosure, 8,000 per bundle, 8 disclosures, 30 days) under the
+    existing token budget. No network fetch and no model call. Gate note
+    `ops/gates/M15.2-disclosure-text-2026-10-08.md` (PR #87).
+  deliverables: [analyst/monitor/__init__.py, analyst/monitor/bundle.py, analyst/monitor/disclosures.py, tests/unit/test_disclosures.py, ops/gates/M15.2-disclosure-text-2026-10-08.md]
+  acceptance:
+    - "a T0 escalation's T1 bundle carries the triggering disclosure's text or an explicit text_unavailable reason"
+    - "a disclosure stamped after the decision's as-of instant never enters the bundle, one at the instant does; tests pin both sides"
+    - "per-disclosure, per-bundle and count caps hold and are marked in the evidence detail"
+  verify: "uv run pytest tests/unit/test_disclosures.py -q"
+
+- id: M15.3
+  title: Paper session on the shared staging / recon / kill-switch path
+  milestone: M15
+  module: X1
+  autonomy: AUTO
+  deps: [M5.12, M13.1, M14.4]
+  spec: |
+    Readiness item (c), invariant #5. The daily paper session placed straight onto `SimBroker`; the
+    execution pieces a real-money loop runs were never on its path. Now `_PaperBroker.place` goes through
+    `StagingCoordinator.stage` (kill switch, then `SimBroker.place`, then the order journal), fills go
+    through `StagingCoordinator.execute`, and `Reconciler.reconcile` checks the persisted accounting
+    book (`expected_book`) against the broker every decided session. A tripped switch journals
+    `SKIPPED_DATA_RED` / `KILL_SWITCH_TRIPPED` and stages nothing; a recon break trips the switch
+    (source `RECON`) and records `RECON_BREAK`. Migration `0015_paper_session_recon.sql`; operator CLI
+    `python -m execution.kill_switch {status,trip,reset}`; `GET /status/paper`. `execution.kite_broker`
+    stays unreachable from the paper path (AST test). Trading outcome is unchanged against the plain
+    replay. Gate note `ops/gates/M15.3-paper-shared-path-2026-10-08.md` (PR #89).
+  deliverables: [backtest/paper_session.py, backtest/accounting.py, execution/staging.py, execution/recon.py, execution/kill_switch.py, dataplatform/store/migrations/0015_paper_session_recon.sql, dataplatform/status/api.py, dataplatform/status/models.py, dataplatform/status/queries.py, dataplatform/scheduler/registry.py, ops/runbooks/daily-eod.md, tests/paper_session_support.py, tests/unit/test_paper_session_shared_path.py, tests/unit/test_paper_session_paper_only.py, tests/unit/test_paper_session_job.py, ops/gates/M15.3-paper-shared-path-2026-10-08.md]
+  acceptance:
+    - "every paper placement passes the kill switch and the order journal; a tripped switch stages nothing"
+    - "every decided session reconciles book against broker; a break trips the switch and is recorded"
+    - "four months through the shared path trade exactly as the plain replay"
+    - "kite_broker is never imported on the paper path; a test fails if it is"
+  verify: "uv run pytest tests/unit/test_paper_session_shared_path.py tests/unit/test_paper_session_paper_only.py tests/unit/test_paper_session_job.py -q"
+
+- id: M15.4
+  title: Scheduled backups, restore drill, scheduler migration guard
+  milestone: M15
+  module: D4
+  autonomy: AUTO
+  deps: [M0.6, M0.7]
+  spec: |
+    Readiness item (e). Nothing on this host had ever been dumped. Add `postgres_backup` (05:30 IST
+    daily; `pg_dump` with the password passed only as `PGPASSWORD` in the child environment, a disk
+    guard, retention of 14 daily + 8 weekly) and `l0_backup` (05:45 daily: incremental sha256 manifest,
+    rsync to `BACKUP_L0_MIRROR` when set). `python -m dataplatform.store.backup drill` restores the
+    newest dump into a throwaway database (`RESTORE_DRILL_DATABASE_URL` is a `SecretStr`). The
+    scheduler refuses to start with pending migrations (`check_schema`, exit 5,
+    `RestartPreventExitStatus=5` in the systemd unit). Failures are FAILED job runs on
+    `/status/jobs`. Runbook `ops/runbooks/backup-restore.md`; gate note
+    `ops/gates/M15.4-backup-restore-2026-10-08.md` with three executed drills (PR #88).
+  deliverables: [dataplatform/store/backup.py, dataplatform/store/migrate.py, dataplatform/scheduler/__main__.py, dataplatform/scheduler/registry.py, dataplatform/config.py, ops/systemd/scheduler.service, ops/runbooks/backup-restore.md, tests/unit/test_backup.py, tests/unit/test_scheduler_migration_guard.py, ops/gates/M15.4-backup-restore-2026-10-08.md]
+  acceptance:
+    - "both backup jobs are registered in the scheduler (a test pins the registry), at 05:30 and 05:45 IST, outside every busy window"
+    - "the dump password never reaches an argv, a log line or a sidecar, and a failed dump leaves no partial"
+    - "retention prunes only its own dump files and always keeps the newest"
+    - "the scheduler exits 5 with pending migrations and the unit does not restart-loop on it"
+  verify: "uv run pytest tests/unit/test_backup.py tests/unit/test_scheduler_migration_guard.py tests/unit/test_scheduler_registry.py -q"
+
+- id: M15.5
+  title: M8.3 live-order runbook and plan (proposed, not approved)
+  milestone: M15
+  module: "—"
+  autonomy: AUTO
+  deps: [M8.1, M8.2]
+  spec: |
+    Docs only; the runbook deliverable of M8.3. `ops/runbooks/live-orders.md`: preconditions; phase 2
+    dry run (~5 sessions, nothing sent); phase 3 tiny capital (10 sessions, the owner releases every
+    order) with the daily IST procedure, the mid-session kill-switch drill and a session log; the
+    known gaps in the Kite connector that must close first (each citing file and line); abort and
+    rollback; the M8.4 packet contents; the decisions it asks of the owner.
+    `ops/gates/M15.5-m8-3-plan-2026-10-08.md` separates what was verified from what was assumed. No code
+    changed, no Kite credential used, no broker contacted, no order placed. **M8.3 itself is not done
+    and not approved**: it stays HUMAN_GATE until the owner runs the sessions. The runbook also covers
+    M8.3's `ops/gates/M8-live-plan.md` deliverable (see M8.3's notes) (PR #86).
+  deliverables: [ops/runbooks/live-orders.md, ops/gates/M15.5-m8-3-plan-2026-10-08.md]
+  acceptance:
+    - "the runbook covers preconditions, the dry-run and tiny-capital phases, the kill-switch drill, the connector gaps, abort/rollback and the M8.4 packet"
+    - "the plan note separates verified from assumed"
+    - "no code changes, no credential, no broker contact; M8.3 stays open"
+  verify: "test -s ops/gates/M15.5-m8-3-plan-2026-10-08.md && grep -q '^## 1. Preconditions checklist' ops/runbooks/live-orders.md && grep -q '^## 2. Phase 2 — dry run' ops/runbooks/live-orders.md && grep -q '^## 3. Phase 3 — tiny capital' ops/runbooks/live-orders.md && grep -q '^### 3.4 Kill-switch drill' ops/runbooks/live-orders.md && grep -q '^## 4. Known gaps in the Kite connector' ops/runbooks/live-orders.md && grep -q '^## 5. Abort and rollback' ops/runbooks/live-orders.md && grep -q '^## 6. M8.4 graduation packet' ops/runbooks/live-orders.md"
+
+- id: M15.6
+  title: Publish Postgres and the status API on 127.0.0.1 only
+  milestone: M15
+  module: "—"
+  autonomy: AUTO
+  deps: [M0.3]
+  spec: |
+    From the #90 review, confirmed with `ss -ltn`: Postgres (dev-default credentials) and the
+    unauthenticated status API were published on 0.0.0.0 and `[::]`, so only the cloud security group
+    stood between them and the internet. `ops/docker-compose.yml` now publishes both on a literal
+    `127.0.0.1`. `tests/unit/test_compose_ports.py` parses every compose file in the repo and fails on
+    a publish with no host IP, a wildcard, a non-loopback IP or an IP from a variable (also run on bad
+    specs, so it cannot pass vacuously). Every consumer was checked. Runbook
+    `ops/runbooks/loopback-only-ports.md`; gate note `ops/gates/M15.6-bind-localhost-2026-10-08.md`
+    (PR #91). Recreating the live containers is a post-merge step.
+  deliverables: [ops/docker-compose.yml, ops/README.md, ops/runbooks/loopback-only-ports.md, ops/runbooks/fundamentals_backfill.md, tests/unit/test_compose_ports.py, ops/gates/M15.6-bind-localhost-2026-10-08.md]
+  acceptance:
+    - "every published port in every compose file binds 127.0.0.1; a test fails on any other bind"
+    - "the parser is exercised on non-loopback short and long specs, a host IP from a variable and host network mode, so it cannot pass vacuously"
+  verify: "uv run pytest tests/unit/test_compose_ports.py -q"
