@@ -49,3 +49,28 @@ def test_plan_refuses_unknown_units() -> None:
 def test_universe_is_the_floor_only_screen_the_old_reports_ran() -> None:
     # NIFTY 500 PIT membership opens 2016-10-24, after the decade and selection windows open.
     assert RerunPlan(out_dir=Path("/x"), data_root=None).universe == "turnover_floor"
+
+
+# ── M14.5: the regime-daily arm set ──────────────────────────────────────────────────────────────
+
+
+def test_regime_daily_set_is_d13_and_variants_that_change_only_the_m14_5_switches() -> None:
+    from dataclasses import replace
+
+    from backtest.m12_rerun import ARM_SETS, REGIME_DAILY_SET
+    from backtest.sweep import REGIME_DAILY_ARMS
+
+    assert ARM_SETS["m12"] == RERUN_ARMS  # the default set (and its manifests) is untouched
+    assert REGIME_DAILY_SET[0] is D13_PAPER_BASELINE  # every table carries the baseline
+    assert not {a.label for a in REGIME_DAILY_ARMS} & {a.label for a in RERUN_ARMS}
+    assert D13_PAPER_BASELINE.v2 is not None
+    for arm in REGIME_DAILY_ARMS:
+        assert arm.v2 is not None and arm.v2.regime_daily
+        undone = replace(
+            arm.v2,
+            regime_daily_reentry=False,
+            regime_daily_exit=False,
+            regime_daily_band=D13_PAPER_BASELINE.v2.regime_daily_band,
+        )
+        assert undone == D13_PAPER_BASELINE.v2
+        assert repr(arm.v2) != repr(D13_PAPER_BASELINE.v2)  # never resumes a D13 run
