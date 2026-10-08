@@ -12,6 +12,17 @@ state outright, on both sides of their effective dates:
   swaps; and NIFTY 500 / Midcap 150 per the 2021-09-15 restatement — GILLETTE stays, the REITs
   never enter, HIKAL does.
 
+And, from the span M14.1 opened (2014-2016, the "Scrip Name" releases and their neighbours):
+
+* 2015-02-02 (ind_prs23012015): NIFTY 200 swaps ARVIND for CRISIL — on Feb 2, the date the
+  intro gives CNX 200, not Feb 23, the date it gives Nifty Midcap 50.
+* 2016-04-01 (ind_prs22022016_2): NIFTY 50 swaps CAIRN, PNB, VEDL for AUROPHARMA, INFRATEL,
+  EICHERMOT (and adds the Tata Motors DVR line).
+* 2016-11-15 (ind_prs17102016): Next 50 swaps CAIRN for HAVELLS — still not done on 2016-10-24,
+  the date the same intro gives its part B.
+* The exchange's own per-session flags (L1 `pr_security_marks`: `nifty50_flag`, the "NIFTY Next 50
+  Sec" section) agree with the rebuilt NIFTY 50 / Next 50 on every session of the added span.
+
 Each fact is checked on the eve, on the day, and between announcement and effective date (no
 announcement leakage). Symbols map to ISINs through the build's own resolved events — the identity
 evidence of the date — never a remembered ISIN. Sizes and the composition identities are checked on
@@ -36,17 +47,22 @@ pytestmark = pytest.mark.golden
 _LAKE: Final = Path("/home/ubuntu/stock-manager/data")
 AS_OF: Final = date(2026, 10, 5)
 
-#: The earliest provable date per index: each is the effective date of the first release, going
-#: back, whose section for that index cannot be read (2016 detached layouts).
+#: The earliest provable date per index, and what bounds it. NIFTY 50 / Next 50 / 100 / 200:
+#: ind_prs27022014's sections are printed with their columns apart (unparsed). NIFTY 500: the
+#: 2015-03-27 IL&FS ENGG row of ind_prs20022015, whose symbol the text layer splits (unresolved).
+#: Midcap 150 / Smallcap 250: the first release naming each (the indices date from 2016).
 COVERAGE: Final = {
-    "nifty50": date(2016, 4, 1),
-    "niftynext50": date(2016, 10, 24),
-    "nifty100": date(2016, 10, 24),
-    "nifty200": date(2016, 10, 24),
-    "nifty500": date(2016, 10, 24),
-    "niftymidcap150": date(2016, 10, 24),
-    "niftysmallcap250": date(2016, 9, 30),
+    "nifty50": date(2014, 3, 28),
+    "niftynext50": date(2014, 3, 28),
+    "nifty100": date(2014, 3, 28),
+    "nifty200": date(2014, 3, 28),
+    "nifty500": date(2015, 3, 28),
+    "niftymidcap150": date(2016, 8, 12),
+    "niftysmallcap250": date(2016, 4, 22),
 }
+
+#: Where the published DQ-5.1 build (PR #37's extension) started each index; M14.1's added span.
+PREVIOUS_COVERAGE: Final = {"nifty50": date(2016, 4, 1), "niftynext50": date(2016, 10, 24)}
 
 
 @pytest.fixture(scope="module")
@@ -96,7 +112,9 @@ def _switch(
     assert came <= on_day and not gone & on_day, (slug, effective)
 
 
-def test_coverage_reaches_2016_and_answers_nothing_before(build: HistoryBuild) -> None:
+def test_coverage_starts_at_the_first_unread_section_and_answers_nothing_before(
+    build: HistoryBuild,
+) -> None:
     for slug, start in COVERAGE.items():
         history = build.histories[slug]
         assert history.coverage_start == start, slug
@@ -199,10 +217,15 @@ def test_every_segment_has_the_index_size_and_the_composition_holds(build: Histo
             }
             extra = len(stand_ins) + (1 if dvr in members else 0)
             assert count - extra == history.expected_size, (slug, start, count)
-    for start, _ in build.histories["nifty500"].segments:
+    for start, _ in build.histories["nifty100"].segments:
         n100 = _members(build, "nifty100", start)
         n50_next = _members(build, "nifty50", start) | _members(build, "niftynext50", start)
         assert n100 - {dvr} == n50_next - {dvr}, start
+    # NIFTY 500 = 100 + Midcap 150 + Smallcap 250 only once all three exist (the 2016 structure).
+    since = max(COVERAGE["niftymidcap150"], COVERAGE["niftysmallcap250"])
+    for start, _ in build.histories["nifty500"].segments:
+        start = max(start, since)
+        n100 = _members(build, "nifty100", start)
         union = n100 | _members(build, "niftymidcap150", start)
         union |= _members(build, "niftysmallcap250", start)
         assert union - {dvr} == _members(build, "nifty500", start), start
@@ -220,3 +243,66 @@ def test_no_change_is_ever_visible_before_it_was_announced(build: HistoryBuild) 
                     and r.event.action is ChangeAction.INCLUDE
                 }
                 assert interval.knowable_from in announced, interval
+
+
+# ── the span M14.1 opened ──────────────────────────────────────────────────────────────────────
+
+
+def test_nifty_200_on_2015_02_02_by_its_own_intro_clause(build: HistoryBuild) -> None:
+    eff = date(2015, 2, 2)
+    _switch(build, "nifty200", eff, date(2015, 1, 23), out=("ARVIND",), into=("CRISIL",))
+    crisil = _isin(build, "CRISIL", "nifty200", eff)
+    assert crisil in _members(build, "nifty200", date(2015, 2, 20))  # not held off to Feb 23
+
+
+def test_nifty_50_on_2016_04_01_from_a_scrip_name_release(build: HistoryBuild) -> None:
+    _switch(
+        build,
+        "nifty50",
+        date(2016, 4, 1),
+        date(2016, 2, 22),
+        out=("CAIRN", "PNB", "VEDL"),
+        into=("AUROPHARMA", "INFRATEL", "EICHERMOT", "TATAMTRDVR"),
+    )
+
+
+def test_next_50_on_2016_11_15_not_on_its_releases_other_date(build: HistoryBuild) -> None:
+    eff = date(2016, 11, 15)
+    _switch(build, "niftynext50", eff, date(2016, 10, 17), out=("CAIRN",), into=("HAVELLS",))
+    cairn = _isin(build, "CAIRN", "niftynext50", eff)
+    assert cairn in _members(build, "niftynext50", date(2016, 10, 24))  # part B's date
+
+
+def _exchange_flags(predicate: str, since: date, until: date) -> dict[date, frozenset[str]]:
+    duckdb = pytest.importorskip("duckdb")
+    marks = _LAKE / "L1/pr_security_marks"
+    if not marks.is_dir():
+        pytest.skip("no pr_security_marks in this lake")
+    rows = duckdb.sql(
+        f"select session, isin from read_parquet('{marks}/*/*.parquet') "
+        f"where {predicate} and session >= ? and session < ?",
+        params=[since, until],
+    ).fetchall()
+    flagged: dict[date, set[str]] = {}
+    for session, isin in rows:
+        flagged.setdefault(session, set()).add(isin)
+    return {d: frozenset(i) for d, i in flagged.items() if len(i) >= 40}
+
+
+@pytest.mark.parametrize(
+    ("slug", "predicate", "expected_sessions"),
+    [("nifty50", "nifty50_flag", 492), ("niftynext50", "section = 'NIFTY Next 50 Sec'", 234)],
+)
+def test_the_added_span_matches_the_exchanges_own_per_session_flags(
+    build: HistoryBuild, slug: str, predicate: str, expected_sessions: int
+) -> None:
+    """Independent evidence: the PR bundle prints, per session and ISIN, NIFTY 50 / Next 50 seats.
+
+    Every session from the new coverage start to the old one must agree exactly — the 2014-03-28
+    change ind_prs27022014 prints with its columns apart is why NIFTY 50 cannot start earlier.
+    ("NIFTY Next 50 Sec" is printed only from 2015-11-09.)
+    """
+    flagged = _exchange_flags(predicate, COVERAGE[slug], PREVIOUS_COVERAGE[slug])
+    assert len(flagged) == expected_sessions
+    for session, members in sorted(flagged.items()):
+        assert _members(build, slug, session) == members, session

@@ -16,9 +16,11 @@ from typing import Any, Final
 
 import pytest
 
+from dataplatform.ingest import index_changes
 from dataplatform.ingest.index_changes import (
     ChangeAction,
     IndexChangeEvent,
+    _is_heading,
     canonical_index_slug,
     is_membership_candidate,
     parse_date_phrase,
@@ -227,6 +229,171 @@ def test_a_detached_layout_is_unparsed_not_misread(repo_root: Path) -> None:
     assert set(parsed.tracked_sections) == {"nifty50", "nifty100", "nifty500"}
     assert len(parsed.unparsed) == 3
     assert all("detached" in problem for problem in parsed.unparsed)
+
+
+def test_scrip_name_tables_are_read_not_taken_for_a_detached_layout(repo_root: Path) -> None:
+    """2016-10-17: "Sr. No. Scrip Name Symbol" tables — the DQ-5.1 gate's "detached layout".
+
+    Exact facts, actions included: an inclusion read as an exclusion (or the other way round)
+    fails here, and so does dropping the "Scrip Name" header (every section unparsed again).
+    """
+    parsed = _parse(repo_root, "2016_scrip_name", "ind_prs17102016.pdf", date(2016, 10, 17))
+    assert parsed.unparsed == ()
+    eff = date(2016, 11, 15)
+    assert _facts(parsed.events) == {
+        ("niftynext50", "exclude", "CAIRN", eff),
+        ("niftynext50", "include", "HAVELLS", eff),
+        ("nifty100", "exclude", "CAIRN", eff),
+        ("nifty100", "include", "HAVELLS", eff),
+        ("nifty200", "exclude", "CAIRN", eff),
+        ("nifty200", "include", "CROMPTON", eff),
+        ("nifty500", "exclude", "CAIRN", eff),
+        ("nifty500", "include", "CROMPTON", eff),
+        ("niftymidcap150", "exclude", "HAVELLS", eff),
+        ("niftymidcap150", "include", "CROMPTON", eff),
+    }
+
+
+def test_each_section_takes_the_date_its_own_intro_clause_gives(repo_root: Path) -> None:
+    """2015-01-23: CNX 200/500 change on Feb 2, Nifty Midcap 50 on Feb 23 — one sentence.
+
+    The nearest date stated before a section is Feb 23 for all of them; the tracked sections are
+    named in the Feb 2 clause. The sections are numbered "1." — unread before M14.1.
+    """
+    parsed = _parse(repo_root, "2015_dated_clauses", "ind_prs23012015.pdf", date(2015, 1, 23))
+    assert parsed.unparsed == ()
+    eff = date(2015, 2, 2)
+    assert _facts(parsed.events) == {
+        ("nifty200", "exclude", "ARVIND", eff),
+        ("nifty200", "include", "CRISIL", eff),
+        ("nifty500", "exclude", "ARVIND", eff),
+        ("nifty500", "include", "LAOPALA", eff),
+    }
+
+
+def test_parts_of_an_intro_dated_apart_date_their_own_sections(repo_root: Path) -> None:
+    """2016-10-17: part B is Oct 24, parts A and C Nov 15; every tracked section is part C."""
+    parsed = _parse(repo_root, "2016_scrip_name", "ind_prs17102016.pdf", date(2016, 10, 17))
+    assert {e.effective for e in parsed.events} == {date(2016, 11, 15)}
+
+
+def test_columns_printed_apart_are_unparsed_never_dropped(repo_root: Path) -> None:
+    """2014-02-27: the text layer prints table columns apart — the truly detached layout.
+
+    Before M14.1 the CNX Nifty and Junior sections vanished without a word, and the NIFTY 50 walk
+    crossed the 2014-03-28 change without applying it. A tracked section must yield events or say
+    why it did not.
+    """
+    parsed = _parse(repo_root, "2014_columns_apart", "ind_prs27022014.pdf", date(2014, 2, 27))
+    assert parsed.events == ()
+    assert set(parsed.tracked_sections) == {
+        "nifty50",
+        "niftynext50",
+        "nifty100",
+        "nifty200",
+        "nifty500",
+    }
+    unread = {canonical_index_slug(problem.split(":")[0]) for problem in parsed.unparsed}
+    assert unread == set(parsed.tracked_sections)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "1. Alembic Chemical Works Co. Ltd.",  # a numbered company row, ind_prs18082010
+        "1. Merger of Aditya Birla Nuvo Limited (ABNL) with Grasim Industries Ltd.",  # 27042017
+        "1. Sundaram Finance Ltd.: On account of proposed scheme of arrangement for demerger",
+        "2. The changes shall be effective from April 1, 2016",
+        "2. Shilpi Cable Tech Ltd.: On account of shifting of company to BZ series.",
+    ],
+)
+def test_a_numbered_row_or_sentence_is_not_a_section_heading(line: str) -> None:
+    assert _is_heading(line) is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["1. Nifty 500 Index", "1. CNX 200 index:", "2. Nifty Metal Index", "1) Nifty Next 50"],
+)
+def test_a_numbered_index_name_is_a_section_heading(line: str) -> None:
+    assert _is_heading(line) is not None
+
+
+def _parse_lines(monkeypatch: pytest.MonkeyPatch, lines: list[str]) -> Any:
+    """Run the body walk over hand-written text-layer lines (the PDF read is stubbed out)."""
+    monkeypatch.setattr(index_changes, "_pdf_lines", lambda payload, *, filename: list(lines))
+    return parse_press_release_pdf(
+        b"%PDF", filename="ind_prs01032016.pdf", announced=date(2016, 3, 1)
+    )
+
+
+def test_a_numbered_sentence_inside_a_tracked_section_does_not_close_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Taken for a heading, the "1. Sundaram …" line would end NIFTY 500 before its inclusions."""
+    parsed = _parse_lines(
+        monkeypatch,
+        [
+            "These changes shall become effective from April 1, 2016 (close of March 31, 2016).",
+            "1) NIFTY 500",
+            "The following company is being excluded:",
+            "Sr. No. Company Name Symbol",
+            "1 Sundaram Finance Ltd. SUNDARMFIN",
+            "1. Sundaram Finance Ltd.: On account of proposed scheme of arrangement for demerger",
+            "The following company is being included:",
+            "Sr. No. Company Name Symbol",
+            "1 Alembic Ltd. ALEMBICLTD",
+        ],
+    )
+    assert parsed.unparsed == ()
+    eff = date(2016, 4, 1)
+    assert _facts(parsed.events) == {
+        ("nifty500", "exclude", "SUNDARMFIN", eff),
+        ("nifty500", "include", "ALEMBICLTD", eff),
+    }
+
+
+def test_a_date_first_intro_leaves_its_sections_undated_not_shifted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Made up: each date precedes the index it governs. Paired "indices then date", NIFTY 500
+    would take the *next* clause's March 31 — the lookahead this guards against."""
+    parsed = _parse_lines(
+        monkeypatch,
+        [
+            "Effective from April 1, 2016, the changes in NIFTY 500 index are as under;",
+            "effective from March 31, 2016, the changes in NIFTY 50 index are as under.",
+            "1) NIFTY 500",
+            "The following company is being excluded:",
+            "Sr. No. Company Name Symbol",
+            "1 ABC Ltd. ABC",
+            "2) NIFTY 50",
+            "The following company is being included:",
+            "Sr. No. Company Name Symbol",
+            "1 XYZ Ltd. XYZ",
+        ],
+    )
+    assert parsed.events == ()
+    unread = {canonical_index_slug(problem.split(":")[0]) for problem in parsed.unparsed}
+    assert unread == {"nifty500", "nifty50"}
+
+
+def test_a_row_without_a_symbol_makes_its_section_unparsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pre-2011 tables print names only (ind_prs24022010): no half-read, symbol-less events."""
+    parsed = _parse_lines(
+        monkeypatch,
+        [
+            "These changes shall become effective from April 8, 2010.",
+            "1) S&P CNX 500 Index",
+            "The following companies are being excluded:",
+            "Sr. No. Company Name",
+            "1 Cadila Healthcare Ltd.",
+        ],
+    )
+    assert parsed.events == ()
+    assert parsed.unparsed and "without a symbol" in parsed.unparsed[0]
 
 
 def test_an_image_only_release_fails_loud(repo_root: Path) -> None:
