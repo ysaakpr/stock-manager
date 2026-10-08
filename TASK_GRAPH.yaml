@@ -24,6 +24,7 @@ milestones:
   M12: {title: Strategy search — short-horizon families and the risk-adjusted comparison,
         depends: [M9, M10]}
   M13: {title: "Run of 2026-10-06 — paper operations, alert triggers, data repairs", depends: [M5, M9, M10]}
+  M14: {title: "Follow-ups of the 2026-10-07 M12.R re-run", depends: [M9, M12, M13]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -2481,3 +2482,33 @@ tasks:
     - "the lineage rebuild drains with floor_existing=False and stitches the predecessor's full history; a test pins the call-site argument"
     - "a zero-row partition on disk raises instead of dropping the floor; a test pins it"
   verify: "uv run pytest tests/unit/test_l2_drain_floor.py -q"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M14 — follow-ups of the 2026-10-07 M12.R re-run
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: M14.5
+  title: Momentum v2 — daily regime re-entry/exit variants and their backtest
+  milestone: M14
+  module: X2
+  autonomy: AUTO
+  deps: [M9.5]
+  spec: |
+    D13 (`PAPER_RATIFIED_2026_09_06`) reads the regime — NIFTY 50 TRI vs its 200-session average —
+    only on the monthly rebalance, so a parked book waits up to a month to re-enter. Add two
+    `MomentumV2Parameters` switches, both off by default: `regime_daily_reentry` (a parked book
+    re-enters through a full rebalance on the first non-rebalance session reading risk-on) and
+    `regime_daily_exit` (an invested book is parked on the first non-rebalance session reading
+    risk-off), plus an optional symmetric `regime_daily_band`. The reading goes through the same PIT
+    guard and the L1 source computes the signal on demand for any session. Defaults reproduce D13
+    byte-for-byte and keep its run fingerprint. Sweep arms beside `D13_PAPER_BASELINE`
+    (`REGIME_DAILY_ARMS`, `backtest.m12_rerun --arm-set regime-daily`), run on the strategy-search
+    mandate's windows, both floors, floor-only and NIFTY 500 universes; gate report with an explicit
+    recommendation. The paper job and D13 itself are not changed — adoption is an owner decision.
+  deliverables: [backtest/policies/momentum_v2.py, backtest/run.py, backtest/sweep.py, backtest/m12_rerun.py, backtest/m14_5_report.py, tests/unit/test_momentum_v2_daily_regime.py, tests/unit/test_m12_rerun.py, ops/gates/M14.5-regime-reentry-report.md]
+  acceptance:
+    - "both switches default off; D13's repr (run fingerprint) is unchanged and a replay digest struck before M14.5 is reproduced"
+    - "inverted-rule tests fail if re-entry or exit is flipped; a future-dated daily reading trips the PIT guard"
+    - "the gate report is rendered from the saved runs, carries D13 in every table with regime switches and costs, and states a recommendation"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_momentum_v2_daily_regime.py tests/unit/test_m12_rerun.py -q"
