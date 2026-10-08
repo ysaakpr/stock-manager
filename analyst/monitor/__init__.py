@@ -23,6 +23,16 @@ from analyst.monitor.bundle import (
     BundleRequest,
     PriceFact,
     count_tokens,
+    request_for_escalation,
+)
+from analyst.monitor.disclosures import (
+    DEFAULT_DISCLOSURE_POLICY,
+    DisclosurePolicy,
+    DisclosureText,
+    DocumentTextStatus,
+    TextUnavailableReason,
+    disclosure_text,
+    select_disclosures,
 )
 from analyst.monitor.interlock import (
     CORE_DATASETS,
@@ -125,6 +135,7 @@ __all__ = [
     "CHECKS_PERFORMED",
     "CORE_DATASETS",
     "DEFAULT_BUDGET",
+    "DEFAULT_DISCLOSURE_POLICY",
     "INTEGRITY_QUERY",
     "SYSTEM_PROMPT",
     "T1_MODEL",
@@ -150,6 +161,9 @@ __all__ = [
     "CycleContext",
     "Deal",
     "DeliverySignal",
+    "DisclosurePolicy",
+    "DisclosureText",
+    "DocumentTextStatus",
     "EscalationQueue",
     "FlowKind",
     "GreenGate",
@@ -188,6 +202,7 @@ __all__ = [
     "T2Request",
     "T2Review",
     "T2Reviewer",
+    "TextUnavailableReason",
     "ThesisAssessment",
     "ThesisAssessmentVerdict",
     "Urgency",
@@ -203,6 +218,7 @@ __all__ = [
     "check_rails",
     "count_tokens",
     "default_integrity_watch",
+    "disclosure_text",
     "load_aliases",
     "match_link",
     "match_links",
@@ -210,5 +226,7 @@ __all__ = [
     "parse_review",
     "parse_verdict",
     "render_review",
+    "request_for_escalation",
+    "select_disclosures",
     "validate_action",
 ]
