@@ -492,6 +492,105 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_l2_drain_floor.py -q\n(exit 0)\n............                                                             [100%]\n\n$ uv run ruff format --check dataplatform/identity/lineage_rebuild.py dataplatform/store/l2.py tests/unit/test_l2_drain_floor.py\n(exit 0)\n3 files already formatted\n\n$ uv run ruff check dataplatform/identity/lineage_rebuild.py dataplatform/store/l2.py tests/unit/test_l2_drain_floor.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/identity/lineage_rebuild.py dataplatform/store/l2.py tests/unit/test_l2_drain_floor.py\n(exit 0)\nSuccess: no issues found in 3 source files"
     },
+    "M14.1": {
+      "attempts": 0,
+      "commit": "38a12ed",
+      "finished": "2026-10-08T10:35:31+00:00",
+      "note": "Merged to main in PR #84 (merge commit bb8a3ba); recorded DONE by the 2026-10-08 bookkeeping pass. The commit field below is the bookkeeping branch HEAD, not the build commit.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_index_changes.py tests/unit/test_index_history.py -q\n(exit 0)\n........................................................................ [ 87%]\n..........                                                               [100%]\n\n$ uv run ruff format --check dataplatform/ingest/index_changes.py dataplatform/ingest/index_history.py tests/golden/test_index_history_golden.py tests/unit/test_index_changes.py tests/unit/test_index_history.py\n(exit 0)\n5 files already formatted\n\n$ uv run ruff check dataplatform/ingest/index_changes.py dataplatform/ingest/index_history.py tests/golden/test_index_history_golden.py tests/unit/test_index_changes.py tests/unit/test_index_history.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/index_changes.py dataplatform/ingest/index_history.py tests/golden/test_index_history_golden.py tests/unit/test_index_changes.py tests/unit/test_index_history.py\n(exit 0)\nSuccess: no issues found in 5 source files"
+    },
+    "M14.2": {
+      "attempts": 0,
+      "commit": "38a12ed",
+      "finished": "2026-10-08T10:35:40+00:00",
+      "note": "Merged to main in PR #82 (merge commit 34e13de); recorded DONE by the 2026-10-08 bookkeeping pass. The commit field below is the bookkeeping branch HEAD, not the build commit.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_macro_backfill.py -q\n(exit 0)\n.....................                                                    [100%]\n\n$ uv run ruff format --check dataplatform/ingest/macro/index_valuation.py tests/unit/test_macro_backfill.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check dataplatform/ingest/macro/index_valuation.py tests/unit/test_macro_backfill.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/macro/index_valuation.py tests/unit/test_macro_backfill.py\n(exit 0)\nSuccess: no issues found in 2 source files"
+    },
+    "M14.3": {
+      "attempts": 0,
+      "commit": "38a12ed",
+      "finished": "2026-10-08T10:36:16+00:00",
+      "note": "Merged to main in PR #83 (merge commit 4c3c16f); recorded DONE by the 2026-10-08 bookkeeping pass. The commit field below is the bookkeeping branch HEAD, not the build commit.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_fundamentals_forward.py tests/unit/test_scheduler_registry.py tests/unit/test_scheduler_coverage.py -q\n(exit 0)\n........................................................................ [ 65%]\n......................................                                   [100%]\n\n$ uv run ruff format --check dataplatform/ingest/fundamentals_backfill.py dataplatform/ingest/fundamentals_forward.py dataplatform/scheduler/registry.py dataplatform/scheduler/runner.py tests/unit/test_fundamentals_forward.py tests/unit/test_scheduler_coverage.py tests/unit/test_scheduler_registry.py\n(exit 0)\n7 files already formatted\n\n$ uv run ruff check dataplatform/ingest/fundamentals_backfill.py dataplatform/ingest/fundamentals_forward.py dataplatform/scheduler/registry.py dataplatform/scheduler/runner.py tests/unit/test_fundamentals_forward.py tests/unit/test_scheduler_coverage.py tests/unit/test_scheduler_registry.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/ingest/fundamentals_backfill.py dataplatform/ingest/fundamentals_forward.py dataplatform/scheduler/registry.py dataplatform/scheduler/runner.py tests/unit/test_fundamentals_forward.py tests/unit/test_scheduler_coverage.py tests/unit/test_scheduler_registry.py\n(exit 0)\nSuccess: no issues found in 7 source files"
+    },
+    "M14.4": {
+      "attempts": 0,
+      "commit": "38a12ed",
+      "finished": "2026-10-08T10:36:19+00:00",
+      "note": "Merged to main in PR #85 (merge commit 6b52405); recorded DONE by the 2026-10-08 bookkeeping pass. The commit field below is the bookkeeping branch HEAD, not the build commit.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_regime_park_journal.py -q\n(exit 0)\n.....                                                                    [100%]\n\n$ uv run ruff format --check backtest/duration.py backtest/paper_session.py backtest/policies/momentum_v2.py backtest/run.py tests/unit/test_regime_park_journal.py\n(exit 0)\n5 files already formatted\n\n$ uv run ruff check backtest/duration.py backtest/paper_session.py backtest/policies/momentum_v2.py backtest/run.py tests/unit/test_regime_park_journal.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/duration.py backtest/paper_session.py backtest/policies/momentum_v2.py backtest/run.py tests/unit/test_regime_park_journal.py\n(exit 0)\nSuccess: no issues found in 5 source files"
+    },
+    "M14.5": {
+      "attempts": 0,
+      "commit": "38a12ed",
+      "finished": "2026-10-08T10:36:26+00:00",
+      "note": "Merged to main in PR #92 (merge commit 523882e); recorded DONE by the 2026-10-08 bookkeeping pass. The commit field below is the bookkeeping branch HEAD, not the build commit.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_momentum_v2_daily_regime.py tests/unit/test_m12_rerun.py tests/unit/test_m14_5_report.py -q\n(exit 0)\n..................................................                       [100%]\n\n$ uv run ruff format --check backtest/m12_rerun.py backtest/m14_5_report.py backtest/policies/momentum_v2.py backtest/run.py backtest/sweep.py tests/unit/test_m12_rerun.py tests/unit/test_m14_5_report.py tests/unit/test_momentum_v2_daily_regime.py\n(exit 0)\n8 files already formatted\n\n$ uv run ruff check backtest/m12_rerun.py backtest/m14_5_report.py backtest/policies/momentum_v2.py backtest/run.py backtest/sweep.py tests/unit/test_m12_rerun.py tests/unit/test_m14_5_report.py tests/unit/test_momentum_v2_daily_regime.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/m12_rerun.py backtest/m14_5_report.py backtest/policies/momentum_v2.py backtest/run.py backtest/sweep.py tests/unit/test_m12_rerun.py tests/unit/test_m14_5_report.py tests/unit/test_momentum_v2_daily_regime.py\n(exit 0)\nSuccess: no issues found in 8 source files"
+    },
+    "M15.1": {
+      "attempts": 0,
+      "commit": "38a12ed",
+      "finished": "2026-10-08T10:37:31+00:00",
+      "note": "Merged to main in PR #90+#93 (merge commit a1d6183+dbcb52b); recorded DONE by the 2026-10-08 bookkeeping pass. The commit field below is the bookkeeping branch HEAD, not the build commit.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_secret_scan.py -q && uv run python ops/secret_scan.py\n(exit 0)\n............                                                          [100%]\nsecret-scan: NOT SCANNED, binary (60):\n  tests/fixtures/bse_bhavcopy/legacy-2006/EQ030406_CSV.ZIP\n  tests/fixtures/bse_bhavcopy/legacy/EQ020124_CSV.ZIP\n  tests/fixtures/bse_bhavcopy/legacy/EQ110417_CSV.ZIP\n  tests/fixtures/bse_bhavcopy/legacy/EQ250517_CSV.ZIP\n  tests/fixtures/gdelt/v2/20260902074500.export.CSV.zip\n  tests/fixtures/macro/gst/2026-10-06/Gross_Net_Tax_collection.xlsx\n  tests/fixtures/macro/wpi/2026-10-06/wpi_monthly_index_202609.xlsx\n  tests/fixtures/nifty_index_press_releases/2007_detached/ind_prs12092007.pdf\n  tests/fixtures/nifty_index_press_releases/2014_columns_apart/ind_prs27022014.pdf\n  tests/fixtures/nifty_index_press_releases/2015_dated_clauses/ind_prs23012015.pdf\n  tests/fixtures/nifty_index_press_releases/2016_scrip_name/ind_prs17102016.pdf\n  tests/fixtures/nifty_index_press_releases/2018_trailing_date/ind_prs01082018.pdf\n  tests/fixtures/nifty_index_press_releases/2019_split_day/ind_prs21012019.pdf\n  tests/fixtures/nifty_index_press_releases/2021_replaced_lists/ind_prs15092021.pdf\n  tests/fixtures/nifty_index_press_releases/2023_image_only/ind_prs19062023.pdf\n  tests/fixtures/nifty_index_press_releases/2023_spinoff_exclusion/ind_prs05092023.pdf\n  tests/fixtures/nifty_index_press_releases/2024_modern/ind_prs10102024.pdf\n  tests/fixtures/nifty_index_press_releases/2024_revocation/ind_prs19032024.pdf\n  tests/fixtures/nse_bhavcopy/legacy/cm01JAN2016bhav.csv.zip\n  tests/fixtures/nse_bhavcopy/legacy/cm05JUL2024bhav.csv.zip\n  tests/fixtures/nse_bhavcopy/legacy/cm06NOV2013bhav.csv.zip\n  tests/fixtures/nse_bhavcopy/legacy/cm13JUL2020bhav.csv.zip\n  tests/fixtures/nse_bhavcopy/legacy/cm16FEB2021bhav.csv.zip\n  tests/fixtures/nse_bhavcopy/legacy/cm22JUN2011bhav.csv.zip\n  tests/fixtures/nse_bhavcopy/legacy/cm23MAR2020bhav.csv.zip\n  tests/fixtures/nse_bhavcopy/pre_isin/cm02JAN2006bhav.csv.zip\n  tests/fixtures/nse_bhavcopy/pre_isin/cm21JUN2011bhav.csv.zip\n  tests/fixtures/nse_bhavcopy/udiff/BhavCopy_NSE_CM_0_0_0_20240708_F_0000.csv.zip\n  tests/fixtures/nse_bhavcopy/udiff/BhavCopy_NSE_CM_0_0_0_20260807_F_0000.csv.zip\n  tests/fixtures/nse_delivery/sec_bhavdata_full_08082022_XLSX.csv\n  tests/fixtures/nse_fo/udiff/BhavCopy_NSE_FO_0_0_0_20260807_F_0000.csv.zip\n  tests/fixtures/nse_pr_bundle/bc/comma_in_purpose/PR111019.zip\n  tests/fixtures/nse_pr_bundle/bc/comma_in_security/PR300810.zip\n  tests/fixtures/nse_pr_bundle/bc/day_dash_date/PR290416.zip\n  tests/fixtures/nse_pr_bundle/bc/published_empty/PR100122.zip\n  tests/fixtures/nse_pr_bundle/bh_empty/PR170521.zip\n  tests/fixtures/nse_pr_bundle/bh_index_flag/PR110810.zip\n  tests/fixtures/nse_pr_bundle/bh_misserved/PR020118.zip\n  tests/fixtures/nse_pr_bundle/bh_no_flag/PR040926.zip\n  tests/fixtures/nse_pr_bundle/bh_series/PR010713.zip\n  tests/fixtures/nse_pr_bundle/bh_sr/PR040110.zip\n  tests/fixtures/nse_pr_bundle/bh_sr_padded/PR170910.zip\n  tests/fixtures/nse_pr_bundle/bh_sr_swapped/PR091110.zip\n  tests/fixtures/nse_pr_bundle/classic/PR020113.zip\n  tests/fixtures/nse_pr_bundle/ffix_banner_relapse/PR090413.zip\n  tests/fixtures/nse_pr_bundle/ffix_renamed_banner/PR040313.zip\n  tests/fixtures/nse_pr_bundle/ffix_seventeen_index/PR310111.zip\n  tests/fixtures/nse_pr_bundle/ffix_three_index/PR040110.zip\n  tests/fixtures/nse_pr_bundle/fund_unit_splits/PR111219.zip\n  tests/fixtures/nse_pr_bundle/fund_unit_splits/PR150221.zip\n  tests/fixtures/nse_pr_bundle/fund_unit_splits/PR160720.zip\n  tests/fixtures/nse_pr_bundle/fund_unit_splits/PR210225.zip\n  tests/fixtures/nse_pr_bundle/fund_unit_splits/PR290124.zip\n  tests/fixtures/nse_pr_bundle/ix_era/PR040110.zip\n  tests/fixtures/nse_pr_bundle/lowercase/PR040926.zip\n  tests/fixtures/nse_pr_bundle/mcap_upper/PR010724.zip\n  tests/fixtures/nse_pr_bundle/pd/lowercase/PR040926.zip\n  tests/fixtures/nse_pr_bundle/pd/padded/PR150615.zip\n  tests/fixtures/nse_pr_bundle/pd/trailing_head\n\u2026[truncated]"
+    },
+    "M15.2": {
+      "attempts": 0,
+      "commit": "38a12ed",
+      "finished": "2026-10-08T10:37:33+00:00",
+      "note": "Merged to main in PR #87 (merge commit aeec244); recorded DONE by the 2026-10-08 bookkeeping pass. The commit field below is the bookkeeping branch HEAD, not the build commit.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_disclosures.py -q\n(exit 0)\n...........................                                              [100%]\n\n$ uv run ruff format --check analyst/monitor/__init__.py analyst/monitor/bundle.py analyst/monitor/disclosures.py tests/unit/test_disclosures.py\n(exit 0)\n4 files already formatted\n\n$ uv run ruff check analyst/monitor/__init__.py analyst/monitor/bundle.py analyst/monitor/disclosures.py tests/unit/test_disclosures.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy analyst/monitor/__init__.py analyst/monitor/bundle.py analyst/monitor/disclosures.py tests/unit/test_disclosures.py\n(exit 0)\nSuccess: no issues found in 4 source files"
+    },
+    "M15.3": {
+      "attempts": 0,
+      "commit": "38a12ed",
+      "finished": "2026-10-08T10:37:57+00:00",
+      "note": "Merged to main in PR #89 (merge commit 06864aa); recorded DONE by the 2026-10-08 bookkeeping pass. The commit field below is the bookkeeping branch HEAD, not the build commit.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_paper_session_shared_path.py tests/unit/test_paper_session_paper_only.py tests/unit/test_paper_session_job.py -q\n(exit 0)\n........................................................................ [ 87%]\n..........                                                               [100%]\n\n$ uv run ruff format --check backtest/accounting.py backtest/paper_session.py dataplatform/scheduler/registry.py dataplatform/status/api.py dataplatform/status/models.py dataplatform/status/queries.py execution/kill_switch.py execution/recon.py execution/staging.py tests/paper_session_support.py tests/unit/test_paper_session_job.py tests/unit/test_paper_session_paper_only.py tests/unit/test_paper_session_shared_path.py\n(exit 0)\n13 files already formatted\n\n$ uv run ruff check backtest/accounting.py backtest/paper_session.py dataplatform/scheduler/registry.py dataplatform/status/api.py dataplatform/status/models.py dataplatform/status/queries.py execution/kill_switch.py execution/recon.py execution/staging.py tests/paper_session_support.py tests/unit/test_paper_session_job.py tests/unit/test_paper_session_paper_only.py tests/unit/test_paper_session_shared_path.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/accounting.py backtest/paper_session.py dataplatform/scheduler/registry.py dataplatform/status/api.py dataplatform/status/models.py dataplatform/status/queries.py execution/kill_switch.py execution/recon.py execution/staging.py tests/paper_session_support.py tests/unit/test_paper_session_job.py tests/unit/test_paper_session_paper_only.py tests/unit/test_paper_session_shared_path.py\n(exit 0)\nSuccess: no issues found in 13 source files"
+    },
+    "M15.4": {
+      "attempts": 0,
+      "commit": "38a12ed",
+      "finished": "2026-10-08T10:37:59+00:00",
+      "note": "Merged to main in PR #88 (merge commit 955bd73); recorded DONE by the 2026-10-08 bookkeeping pass. The commit field below is the bookkeeping branch HEAD, not the build commit.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_backup.py tests/unit/test_scheduler_migration_guard.py tests/unit/test_scheduler_registry.py -q\n(exit 0)\n........................................................................ [ 78%]\n....................                                                     [100%]\n\n$ uv run ruff format --check dataplatform/config.py dataplatform/scheduler/__main__.py dataplatform/scheduler/registry.py dataplatform/store/backup.py dataplatform/store/migrate.py tests/unit/test_backup.py tests/unit/test_scheduler_migration_guard.py\n(exit 0)\n7 files already formatted\n\n$ uv run ruff check dataplatform/config.py dataplatform/scheduler/__main__.py dataplatform/scheduler/registry.py dataplatform/store/backup.py dataplatform/store/migrate.py tests/unit/test_backup.py tests/unit/test_scheduler_migration_guard.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/config.py dataplatform/scheduler/__main__.py dataplatform/scheduler/registry.py dataplatform/store/backup.py dataplatform/store/migrate.py tests/unit/test_backup.py tests/unit/test_scheduler_migration_guard.py\n(exit 0)\nSuccess: no issues found in 7 source files"
+    },
+    "M15.5": {
+      "attempts": 0,
+      "commit": "38a12ed",
+      "finished": "2026-10-08T10:37:59+00:00",
+      "note": "Merged to main in PR #86 (merge commit df29ded); recorded DONE by the 2026-10-08 bookkeeping pass. The commit field below is the bookkeeping branch HEAD, not the build commit. Delivers only the M8.3 runbook; M8.3 itself stays open (HUMAN_GATE).",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ test -s ops/gates/M15.5-m8-3-plan-2026-10-08.md && grep -q '^## 1. Preconditions checklist' ops/runbooks/live-orders.md && grep -q '^## 2. Phase 2 \u2014 dry run' ops/runbooks/live-orders.md && grep -q '^## 3. Phase 3 \u2014 tiny capital' ops/runbooks/live-orders.md && grep -q '^### 3.4 Kill-switch drill' ops/runbooks/live-orders.md && grep -q '^## 4. Known gaps in the Kite connector' ops/runbooks/live-orders.md && grep -q '^## 5. Abort and rollback' ops/runbooks/live-orders.md && grep -q '^## 6. M8.4 graduation packet' ops/runbooks/live-orders.md\n(exit 0)\n"
+    },
+    "M15.6": {
+      "attempts": 0,
+      "commit": "38a12ed",
+      "finished": "2026-10-08T10:38:00+00:00",
+      "note": "Merged to main in PR #91 (merge commit c504f9c); recorded DONE by the 2026-10-08 bookkeeping pass. The commit field below is the bookkeeping branch HEAD, not the build commit.",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_compose_ports.py -q\n(exit 0)\n......................                                                   [100%]\n\n$ uv run ruff format --check tests/unit/test_compose_ports.py\n(exit 0)\n1 file already formatted\n\n$ uv run ruff check tests/unit/test_compose_ports.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy tests/unit/test_compose_ports.py\n(exit 0)\nSuccess: no issues found in 1 source file"
+    },
     "M2.1": {
       "attempts": 1,
       "commit": "1941253",
@@ -1251,7 +1350,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-10-07T11:13:37+00:00",
+  "updated_at": "2026-10-08T10:38:00+00:00",
   "version": 1,
   "wave": 1
 }
