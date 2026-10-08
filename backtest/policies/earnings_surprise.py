@@ -35,6 +35,15 @@ its dilution is treated as a change of basis rather than as a miss: the leg scor
 not the capital raise. A filing stated at the wrong scale (``drop_misscaled_filings``) is dropped
 whole first, so it cannot become a fake surprise.
 
+**Coverage is thin, and a reader of any A5 result must know where.** Measured on the lake on
+2026-10-08 (first session of each month, NIFTY 500 PIT members): no member has a reading before
+2021-07 (the store's filings open 2018-05, and thirteen quarters must accumulate); about a quarter
+to 30 % have one from 2021-07 to 2025, about 40 % from 2026-01, and **it never reaches 50 %**.
+On 2025-07-01 the 345 members without one split as 172 with fewer than thirteen standalone quarters
+in the store, 119 with a missing quarter in the run (mostly in 2022), 31 with a quarter that has no
+corroborated share count, and 24 with no standalone filing at all. Those are gaps in the store, not
+in the definition: the leg ranks the names it can score and gives the rest the leg's mean.
+
 Point-in-time (invariant #7): :func:`standardised_unexpected_earnings` refuses — ``PitError``, not a
 filter — any fact filed after the date it is asked about, and collapses a restatement to the latest
 filing on or before it (invariant #8). :class:`EarningsSurprisePanel` hands it only the prefix of a
