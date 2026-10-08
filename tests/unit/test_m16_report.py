@@ -11,12 +11,14 @@ from pathlib import Path
 
 import pytest
 
+import backtest.m16_report as report_module
 from backtest.m12_rerun import REGIME_DAILY_SET, RERUN_ARMS, WINDOWS
 from backtest.m16_arms import A2_INDUSTRY_GATE, A6_BLEND, A7_ARM, A7_LOW_VOL, M10_7_BASELINE
 from backtest.m16_report import (
     DILUTION_THRESHOLD,
     MARKER,
     PRIMARY_FLOOR,
+    TRIAL_DIRS,
     TRIALS,
     TRIALS_ON_RECORD,
     A2Coverage,
@@ -30,6 +32,7 @@ from backtest.m16_report import (
     decisive,
     load_a2_coverage,
     main,
+    merge_rows,
     render,
     select,
     trial_sharpes,
@@ -53,6 +56,7 @@ from backtest.xirr import Cashflow, xirr
 D13 = D13_PAPER_BASELINE.label
 M107 = M10_7_BASELINE.label
 FLOOR = "turnover_floor"
+N500 = "nifty500"
 VER = "wf-verification"
 SEL = "wf-selection"
 _START = date(2021, 9, 1)
@@ -206,10 +210,29 @@ def test_a6_is_added_only_where_both_halves_ran() -> None:
     assert [f.cell for f in blends] == [(FLOOR, VER, HIGH_FLOOR)]
 
 
+def test_blend_drawdown_is_measured_from_the_peak() -> None:
+    # The blend runs 100 -> 75 -> 100: a fall of 25 from a peak of 100 is 25%, not 25/75.
+    cell = (FLOOR, VER, HIGH_FLOOR)
+    days = [date(2024, 1, 1), date(2024, 7, 1), date(2025, 1, 1)]
+    a = _facts(
+        D13, cell, "0", "0.5", nav=tuple(zip(days, map(Decimal, ("100", "50", "110")), strict=True))
+    )
+    b = _facts(
+        M107, cell, "0", "0", nav=tuple(zip(days, map(Decimal, ("100", "100", "110")), strict=True))
+    )
+    assert blend(a, b).max_drawdown == Decimal("0.25")
+
+
 # ── Step 1: the selection floor ──────────────────────────────────────────────────────────────────
 
 
-def test_the_choice_is_made_at_ten_crore_not_one() -> None:
+def _only(monkeypatch: pytest.MonkeyPatch, *labels: str) -> None:
+    """Narrow Step 1's arm list for a test that does not build all eight selection arms."""
+    monkeypatch.setattr(report_module, "SELECTION_LABELS", labels)
+
+
+def test_the_choice_is_made_at_ten_crore_not_one(monkeypatch: pytest.MonkeyPatch) -> None:
+    _only(monkeypatch, D13, A7_LOW_VOL)
     # A7 wins at ₹1 cr, D13 wins at ₹10 cr: the choice must be D13. Choosing on ₹1 cr (M12's
     # floor) — or ranking on the verification window — would pick A7 and fail here.
     assert PRIMARY_FLOOR == HIGH_FLOOR
@@ -235,6 +258,33 @@ def test_the_choice_ranks_on_return_per_drawdown_best_first() -> None:
         _facts(A7_LOW_VOL, (FLOOR, SEL, HIGH_FLOOR), "0.15", "0.05"),  # 3.0
     ]
     assert [f.label for f in select(facts)] == [A7_LOW_VOL, D13, "Swing composite (M10.7)"]
+
+
+def test_a_ratio_tie_goes_to_the_smaller_drawdown() -> None:
+    facts = [
+        _facts(D13, (FLOOR, SEL, HIGH_FLOOR), "0.40", "0.20"),  # 2.0, deeper
+        _facts(A7_LOW_VOL, (FLOOR, SEL, HIGH_FLOOR), "0.20", "0.10"),  # 2.0, shallower
+    ]
+    assert [f.label for f in select(facts)] == [A7_LOW_VOL, D13]
+
+
+def test_step_1_refuses_when_an_arm_lacks_its_selection_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _only(monkeypatch, D13, A7_LOW_VOL, M107)
+    facts = [_facts(D13, (FLOOR, SEL, HIGH_FLOOR), "0.2", "0.2")]
+    with pytest.raises(
+        ValueError, match=r"Step 1 refuses.*Pure low volatility \(A7\), Swing composite"
+    ):
+        decision(facts, [])
+
+
+def test_a_zero_drawdown_has_no_ratio() -> None:
+    flat = _facts(D13, (FLOOR, SEL, HIGH_FLOOR), "0.1", "0")
+    with pytest.raises(ValueError, match="undefined"):
+        _ = flat.ratio
+    with pytest.raises(ValueError, match="undefined"):
+        select([flat])
 
 
 def test_a4_and_a5_never_take_part_in_the_choice() -> None:
@@ -276,7 +326,7 @@ def _step2_facts(arm_ratio_ten: tuple[str, str], *, dd_gap: str = "0.00") -> lis
 def _trials(facts: list[RunFacts]) -> list[TrialSharpe]:
     # Eight earlier trials clustered where this lake's Sharpes sit, plus the campaign's own.
     earlier = [TrialSharpe(f"t{n}", f"t{n}", 0.04 + 0.01 * n) for n in range(8)]
-    return [*earlier, *trial_sharpes(facts)]
+    return [*earlier, *trial_sharpes(facts, commit_time=lambda _: 0)]
 
 
 def _passed(facts: list[RunFacts]) -> dict[str, bool]:
@@ -305,6 +355,51 @@ def test_a_drawdown_more_than_3pp_worse_anywhere_fails() -> None:
     assert _passed(_step2_facts(("0.30", "0.15"), dd_gap="0.03"))["4"] is True
     # A *better* drawdown is never held against the arm.
     assert _passed(_step2_facts(("0.30", "0.15"), dd_gap="-0.10"))["4"] is True
+
+
+def test_criterion_1a_reads_the_one_crore_cell() -> None:
+    facts = _step2_facts(("0.30", "0.15"))
+    low = (FLOOR, VER, LOW_FLOOR)
+    worse_at_one = [
+        replace(f, max_drawdown=Decimal("0.40")) if f.label == A7_LOW_VOL and f.cell == low else f
+        for f in facts
+    ]
+    passed = _passed(worse_at_one)
+    assert passed["1a"] is False and passed["1b"] is True
+
+
+def test_a_missing_required_cell_fails_criterion_4() -> None:
+    facts = [
+        f
+        for f in _step2_facts(("0.30", "0.15"))
+        if not (f.label == A7_LOW_VOL and f.window == "decade")
+    ]
+    test = next(c for c in criteria(facts, A7_LOW_VOL, _trials(facts)) if c.name.startswith("4."))
+    assert test.passed is False and "no floor-only decade" in test.detail
+
+
+def test_a_diluted_required_cell_fails_every_criterion_that_needs_it() -> None:
+    facts = [
+        replace(f, label=A2_INDUSTRY_GATE) if f.label == A7_LOW_VOL else f
+        for f in _step2_facts(("0.30", "0.15"))
+    ]
+    clean = A2Coverage(
+        share={f.cell: Decimal("0.1") for f in facts},
+        by_year={},
+        first_rankable={},
+    )
+    assert all(c.passed for c in criteria(facts, A2_INDUSTRY_GATE, _trials(facts), coverage=clean))
+    diluted_ten = A2Coverage(
+        share={**clean.share, (FLOOR, VER, HIGH_FLOOR): Decimal("0.31")},
+        by_year={},
+        first_rankable={},
+    )
+    got = {
+        c.name.split(".")[0]: c
+        for c in criteria(facts, A2_INDUSTRY_GATE, _trials(facts), coverage=diluted_ten)
+    }
+    assert {k for k, c in got.items() if not c.passed} == {"1b", "3", "4", "5"}
+    assert all("diluted" in got[k].detail for k in ("1b", "3", "4", "5"))
 
 
 def test_a_missing_nifty500_row_fails_rather_than_passes() -> None:
@@ -350,14 +445,33 @@ def test_trials_outside_v_are_listed_and_the_two_lists_make_n() -> None:
     assert set(rest) | {D13, A7_LOW_VOL} == {*TRIALS_ON_RECORD, *M16_TRIAL_LABELS}
 
 
-def test_trial_sharpes_are_one_per_configuration_campaign_first() -> None:
+def test_v_uses_the_newest_commits_run_whatever_the_order() -> None:
     cell = (FLOOR, VER, HIGH_FLOOR)
-    old = replace(_facts(D13, cell, "0", "0", nav=_path(1, 0.0)), key="k")
-    new = replace(_facts(D13, cell, "0", "0", nav=_path(2, 0.002)), key="k")
+    old = replace(
+        _facts(D13, cell, "0", "0", nav=_path(1, 0.0)), key="k", commit="old", digest="d1"
+    )
+    new = replace(
+        _facts(D13, cell, "0", "0", nav=_path(2, 0.002)), key="k", commit="new", digest="d2"
+    )
     other = _facts("x", (FLOOR, VER, LOW_FLOOR), "0", "0", nav=_path(3, 0.0))  # wrong cell
-    got = trial_sharpes([new], [old, other])
-    assert len(got) == 1
-    assert got[0].sharpe == sharpe_stats(daily_returns(new.nav)).sharpe
+    when = {"old": 1, "new": 2, "c": 0}.__getitem__
+    expected = sharpe_stats(daily_returns(new.nav)).sharpe
+    for facts, extra in (([], [old, new]), ([], [new, old]), ([old], [new]), ([new], [old, other])):
+        got = trial_sharpes(facts, extra, commit_time=when)
+        assert [t.sharpe for t in got] == [expected]
+
+
+def test_v_refuses_two_different_runs_at_one_commit() -> None:
+    cell = (FLOOR, VER, HIGH_FLOOR)
+    a = replace(_facts(D13, cell, "0", "0", nav=_path(1, 0.0)), key="k", commit="c", digest="d1")
+    b = replace(a, digest="d2")
+    with pytest.raises(ValueError, match="two different runs"):
+        trial_sharpes([a], [b], commit_time=lambda _: 0)
+    assert len(trial_sharpes([a], [a], commit_time=lambda _: 0)) == 1
+
+
+def test_trial_dirs_are_pinned_by_name() -> None:
+    assert TRIAL_DIRS == ("m12-rerun-2bb2b08", "m14-5-regime-floor-cb1fcf9")
 
 
 # ── loading and rendering ────────────────────────────────────────────────────────────────────────
@@ -409,7 +523,33 @@ def test_collect_reads_m16_runs_and_skips_other_configurations(tmp_path: Path) -
     ]
 
 
-def test_main_renders_tables_blend_scorecard_and_decision(tmp_path: Path) -> None:
+def _trial_dirs(tmp_path: Path) -> list[str]:
+    paths = []
+    for name in TRIAL_DIRS:
+        (tmp_path / name / "runs").mkdir(parents=True)
+        paths.append(str(tmp_path / name))
+    return paths
+
+
+def _manifest(run_dir: Path) -> None:
+    (run_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "universe": FLOOR,
+                "commit": "0" * 40,
+                "lake_last_session": "2026-10-07",
+                "units": ["walk-forward"],
+                "arms": [D13, M107, A7_LOW_VOL],
+            }
+        )
+    )
+
+
+def test_main_renders_tables_blend_scorecard_and_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _only(monkeypatch, D13, M107, A6_BLEND, A7_LOW_VOL)
+    monkeypatch.setattr(report_module, "git_commit_time", lambda _: 0)
     run_dir = tmp_path / "m16-floor"
     seed = 1
     for window in (SEL, VER):
@@ -430,7 +570,7 @@ def test_main_renders_tables_blend_scorecard_and_decision(tmp_path: Path) -> Non
     )
     out = tmp_path / "report.md"
     out.write_text(f"old\n{MARKER}\n## Analysis\n\nkept\n")
-    assert main([str(run_dir), "--out", str(out)]) == 0
+    assert main([str(run_dir), "--trial-dirs", *_trial_dirs(tmp_path), "--out", str(out)]) == 0
     text = out.read_text()
     # A6 is built in each of the four cells where D13 and M10.7 both ran, and scored.
     assert text.count(f"| {A6_BLEND} |") == 4 + 1  # four tables plus its scorecard row
@@ -439,7 +579,58 @@ def test_main_renders_tables_blend_scorecard_and_decision(tmp_path: Path) -> Non
     assert text.split(MARKER, 1)[1].strip() == "## Analysis\n\nkept"
 
 
-def test_render_keeps_the_hand_written_section() -> None:
+def test_two_overlapping_run_directories_give_one_row_per_cell(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # m16 and m16-fundamentals both carry D13 and M10.7: the same runs, saved twice.
+    _only(monkeypatch, D13, M107, A6_BLEND, A7_LOW_VOL)
+    monkeypatch.setattr(report_module, "git_commit_time", lambda _: 0)
+    first, second = tmp_path / "m16", tmp_path / "m16-fundamentals"
+    seed = 1
+    for window in (SEL, VER):
+        for floor in (LOW_FLOOR, HIGH_FLOOR):
+            for arm in (D13_PAPER_BASELINE, M10_7_BASELINE, A7_ARM):
+                _write_run(first, arm, window, floor, seed)
+                if arm is not A7_ARM and window == VER:
+                    _write_run(second, arm, window, floor, seed)
+                seed += 1
+    _manifest(first)
+    _manifest(second)
+    assert len(collect(first)) + len(collect(second)) == 12 + 4
+    assert len(merge_rows([*collect(first), *collect(second)])) == 12
+    out = tmp_path / "report.md"
+    args = [str(first), str(second), "--trial-dirs", *_trial_dirs(tmp_path), "--out", str(out)]
+    assert main(args) == 0
+    text = out.read_text()
+    assert f"| **{D13}** | 4 |" in text  # the scorecard counts D13's four cells once each
+
+
+def test_two_different_runs_of_one_cell_are_refused(tmp_path: Path) -> None:
+    _write_run(tmp_path / "a", D13_PAPER_BASELINE, VER, HIGH_FLOOR, 1)
+    _write_run(tmp_path / "b", D13_PAPER_BASELINE, VER, HIGH_FLOOR, 2)
+    with pytest.raises(ValueError, match="two different runs"):
+        merge_rows([*collect(tmp_path / "a"), *collect(tmp_path / "b")])
+
+
+def test_unmerged_duplicates_are_refused_by_render_and_criteria() -> None:
+    row = _facts(D13, (FLOOR, VER, HIGH_FLOOR), "0.2", "0.2")
+    with pytest.raises(ValueError, match="more than one row"):
+        render([row, row], manifests={}, sharpes=[])
+    with pytest.raises(ValueError, match="more than one row"):
+        criteria([row, row], D13, [])
+
+
+def test_main_refuses_unpinned_trial_dirs(tmp_path: Path) -> None:
+    run_dir = tmp_path / "m16"
+    _write_run(run_dir, D13_PAPER_BASELINE, VER, HIGH_FLOOR, 1)
+    _manifest(run_dir)
+    (tmp_path / "elsewhere" / "runs").mkdir(parents=True)
+    with pytest.raises(SystemExit, match="must be exactly the pinned"):
+        main([str(run_dir), "--trial-dirs", str(tmp_path / "elsewhere")])
+
+
+def test_render_keeps_the_hand_written_section(monkeypatch: pytest.MonkeyPatch) -> None:
+    _only(monkeypatch)
     text = render([], manifests={}, sharpes=[], hand_written="\n## Analysis\n\nkept\n")
     assert text.split(MARKER, 1)[1].strip() == "## Analysis\n\nkept"
 
@@ -455,7 +646,8 @@ def _coverage(share: str, cell: tuple[str, str, Decimal]) -> A2Coverage:
     )
 
 
-def test_a_diluted_a2_takes_no_part_in_the_choice() -> None:
+def test_a_diluted_a2_takes_no_part_in_the_choice(monkeypatch: pytest.MonkeyPatch) -> None:
+    _only(monkeypatch, D13, A2_INDUSTRY_GATE)
     cell = (FLOOR, SEL, HIGH_FLOOR)
     facts = [
         _facts(A2_INDUSTRY_GATE, cell, "0.40", "0.10"),  # best ratio on the window
@@ -468,6 +660,8 @@ def test_a_diluted_a2_takes_no_part_in_the_choice() -> None:
     # No coverage measured for the cell counts as diluted, never as clean.
     unmeasured = decision(facts, [], coverage=_coverage("0.10", (FLOOR, VER, HIGH_FLOOR)))
     assert "Choice: **Momentum v2, D13 paper config**" in "\n".join(unmeasured)
+    # The exclusion is listed, never silent.
+    assert f"Excluded as diluted (Amendment 1): {A2_INDUSTRY_GATE}." in "\n".join(over)
 
 
 def test_decisive_keeps_every_other_arm_and_drops_only_diluted_a2() -> None:
@@ -482,7 +676,10 @@ def test_decisive_keeps_every_other_arm_and_drops_only_diluted_a2() -> None:
     assert Decimal("0.30") == DILUTION_THRESHOLD
 
 
-def test_render_refuses_a2_rows_without_coverage_and_labels_them_with_it() -> None:
+def test_render_refuses_a2_rows_without_coverage_and_labels_them_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _only(monkeypatch)
     cell = (FLOOR, VER, HIGH_FLOOR)
     rows = [_facts(A2_INDUSTRY_GATE, cell, "0.3", "0.1"), _facts(D13, cell, "0.2", "0.2")]
     with pytest.raises(ValueError, match="A2 coverage"):

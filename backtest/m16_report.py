@@ -29,7 +29,8 @@ from __future__ import annotations
 import argparse
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+import subprocess
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -73,6 +74,7 @@ __all__ = [
     "PRIMARY_FLOOR",
     "TRIALS",
     "TRIALS_ON_RECORD",
+    "TRIAL_DIRS",
     "A2Coverage",
     "Criterion",
     "RunFacts",
@@ -83,8 +85,10 @@ __all__ = [
     "criteria",
     "decision",
     "decisive",
+    "git_commit_time",
     "load_a2_coverage",
     "main",
+    "merge_rows",
     "render",
     "scorecard",
     "select",
@@ -114,6 +118,10 @@ DSR_THRESHOLD: Final = 0.95
 #: Amendment 1 (a): A2 is *diluted* — informational, deciding nothing — in any cell where more than
 #: this share of the floor universe is missing from the (2026-snapshot) industry classification.
 DILUTION_THRESHOLD: Final = Decimal("0.30")
+
+#: The earlier run directories V reads (Amendment 2 (iii)), pinned by name: the M12.R re-run and
+#: M14.5's floor-only directory under ``~/campaign`` — the two with runs on V's cell.
+TRIAL_DIRS: Final = ("m12-rerun-2bb2b08", "m14-5-regime-floor-cb1fcf9")
 
 #: The arms Step 1 ranks (every arm with a selection-window row); A4/A5 have none (§2, §4).
 SELECTION_LABELS: Final = (
@@ -299,10 +307,23 @@ class RunFacts:
     #: Every rail block of the run, by rail.
     rail_blocks: Mapping[str, int] = field(default_factory=dict)
     nav: tuple[tuple[date, Decimal], ...] = ()
+    #: The commit its run directory's manifest pins; orders several runs of one configuration (V).
+    commit: str = ""
 
     @property
     def ratio(self) -> Decimal:
-        return self.xirr / self.max_drawdown if self.max_drawdown > _ZERO else _ZERO
+        """XIRR ÷ max drawdown. Refused (``ValueError``) at a drawdown of zero (Amendment 2 (iv)).
+
+        A path that never fell has no finite ratio, and ranking it first (or last) by convention
+        would let a degenerate run win or vanish silently; a backtest of years with no drawdown is
+        a defect to look at, not a result.
+        """
+        if self.max_drawdown <= _ZERO:
+            raise ValueError(
+                f"{self.label} on {self.window}: max drawdown {self.max_drawdown}; XIRR/DD is "
+                "undefined (Amendment 2 (iv))"
+            )
+        return self.xirr / self.max_drawdown
 
     @property
     def cell(self) -> tuple[str, str, Decimal]:
@@ -328,6 +349,8 @@ def collect(run_dir: Path, labels: Mapping[str, str] | None = None) -> list[RunF
     """
     if labels is None:
         labels = _known_labels(resolvable_m16_arms()[0])
+    manifest = run_dir / "manifest.json"
+    commit = str(_load(manifest)["commit"]) if manifest.is_file() else ""
     facts: list[RunFacts] = []
     for summary_file in sorted((run_dir / "runs").glob("*.json")):
         summary = _load(summary_file)
@@ -363,6 +386,7 @@ def collect(run_dir: Path, labels: Mapping[str, str] | None = None) -> list[RunF
                 floor_refusals=blocks.get("MIN_HOLDINGS", 0),
                 rail_blocks=blocks,
                 nav=tuple((date.fromisoformat(d), Decimal(v)) for d, v in nav["points"]),
+                commit=commit,
             )
         )
     return facts
@@ -439,6 +463,7 @@ def blend(a: RunFacts, b: RunFacts, *, label: str = A6_BLEND) -> RunFacts:
         floor_refusals=a.floor_refusals + b.floor_refusals,
         rail_blocks=dict(sorted(blocks.items())),
         nav=path,
+        commit=a.commit,
     )
 
 
@@ -500,11 +525,41 @@ def load_a2_coverage(path: Path) -> A2Coverage:
 
 def decisive(facts: Sequence[RunFacts], coverage: A2Coverage | None) -> list[RunFacts]:
     """The rows the rule may read: every row except A2's in a diluted (or unmeasured) cell."""
-    return [
-        f
-        for f in facts
-        if f.label != A2_INDUSTRY_GATE or (coverage is not None and not coverage.diluted(f.cell))
-    ]
+    return [f for f in facts if not _diluted(f.label, f.cell, coverage)]
+
+
+def _diluted(label: str, cell: Cell, coverage: A2Coverage | None) -> bool:
+    return label == A2_INDUSTRY_GATE and (coverage is None or coverage.diluted(cell))
+
+
+# ── one row per (cell, arm) ──────────────────────────────────────────────────────────────────────
+
+
+def merge_rows(facts: Iterable[RunFacts]) -> list[RunFacts]:
+    """One row per (cell, label), in first-seen order — the M16 run directories overlap.
+
+    ``m16`` and ``m16-fundamentals`` both carry D13 and M10.7 on the six-year and verification
+    windows, so the same run can arrive twice. Two rows with the same digest are the same run and
+    are kept once; two with different digests are two different runs claiming one cell, and the
+    report refuses rather than pick one (``ValueError`` naming both).
+    """
+    kept: dict[tuple[Cell, str], RunFacts] = {}
+    for f in facts:
+        seen = kept.get((f.cell, f.label))
+        if seen is None:
+            kept[(f.cell, f.label)] = f
+        elif seen.digest != f.digest:
+            raise ValueError(
+                f"two different runs of {f.label} on {_cell_name(f.cell)}: "
+                f"{seen.digest[:12]} and {f.digest[:12]}"
+            )
+    return list(kept.values())
+
+
+def _unique(facts: Sequence[RunFacts]) -> None:
+    pairs = [(f.cell, f.label) for f in facts]
+    if len(pairs) != len(set(pairs)):
+        raise ValueError("more than one row per (cell, arm); merge the run directories first")
 
 
 # ── the decision ─────────────────────────────────────────────────────────────────────────────────
@@ -514,15 +569,26 @@ def _row(facts: Sequence[RunFacts], label: str, cell: tuple[str, str, Decimal]) 
     return next((f for f in facts if f.label == label and f.cell == cell), None)
 
 
-def select(facts: Sequence[RunFacts], floor: Decimal = PRIMARY_FLOOR) -> list[RunFacts]:
+def select(
+    facts: Sequence[RunFacts],
+    floor: Decimal = PRIMARY_FLOOR,
+    *,
+    required: Sequence[str] | None = None,
+) -> list[RunFacts]:
     """Step 1: the selection window's floor-only rows at ``floor``, best XIRR/DD first.
 
     Only :data:`SELECTION_LABELS` take part. Ties go to the smaller drawdown, then the label. The
     choice is the first row; it is made before, and never changed by, a verification figure.
+    ``required`` (Amendment 2 (ii)) lists the arms that must have a row; a missing one is a
+    ``ValueError`` naming every absentee, so the choice is never made over a partial field.
     """
-    rows = [
-        f for f in facts if f.cell == (FLOOR_ONLY, SELECTION, floor) and f.label in SELECTION_LABELS
-    ]
+    cell = (FLOOR_ONLY, SELECTION, floor)
+    rows = [f for f in facts if f.cell == cell and f.label in SELECTION_LABELS]
+    absent = sorted(set(required or ()) - {f.label for f in rows})
+    if absent:
+        raise ValueError(
+            f"Step 1 refuses: no {_cell_name(cell)} run for {', '.join(absent)} (Amendment 2 (ii))"
+        )
     return sorted(rows, key=lambda f: (-f.ratio, f.max_drawdown, f.label))
 
 
@@ -544,23 +610,44 @@ class TrialSharpe:
     sharpe: float
 
 
-def _ratio_criterion(
-    name: str, facts: Sequence[RunFacts], label: str, cell: tuple[str, str, Decimal]
-) -> Criterion:
+def _needed(
+    facts: Sequence[RunFacts], label: str, cell: Cell, coverage: A2Coverage | None
+) -> tuple[RunFacts | None, RunFacts | None, str]:
+    """The arm's and D13's rows on a required cell, or why the cell fails (Amendment 2 (i))."""
     arm, base = _row(facts, label, cell), _row(facts, D13, cell)
+    if arm is None:
+        return None, base, f"no {_cell_name(cell)} row"
+    if base is None:
+        return arm, None, f"no D13 {_cell_name(cell)} row"
+    if _diluted(label, cell, coverage):
+        return None, base, f"diluted on {_cell_name(cell)}: informational, cannot pass"
+    return arm, base, ""
+
+
+def _ratio_criterion(
+    name: str,
+    facts: Sequence[RunFacts],
+    label: str,
+    cell: Cell,
+    coverage: A2Coverage | None,
+) -> Criterion:
+    arm, base, why = _needed(facts, label, cell, coverage)
     if arm is None or base is None:
-        return Criterion(name, False, "no row" if arm is None else "no D13 row")
+        return Criterion(name, False, why)
     return Criterion(name, arm.ratio >= base.ratio, f"{_r(arm.ratio)} vs D13 {_r(base.ratio)}")
 
 
 def _dsr(
-    facts: Sequence[RunFacts], label: str, sharpes: Sequence[TrialSharpe], trials: int
+    facts: Sequence[RunFacts],
+    label: str,
+    sharpes: Sequence[TrialSharpe],
+    trials: int,
+    coverage: A2Coverage | None,
 ) -> Criterion:
     name = "5. deflated Sharpe ≥ 0.95 vs D13"
-    cell = (FLOOR_ONLY, VERIFICATION, PRIMARY_FLOOR)
-    arm, base = _row(facts, label, cell), _row(facts, D13, cell)
+    arm, base, why = _needed(facts, label, (FLOOR_ONLY, VERIFICATION, PRIMARY_FLOOR), coverage)
     if arm is None or base is None:
-        return Criterion(name, False, "no row" if arm is None else "no D13 row")
+        return Criterion(name, False, why)
     if len(sharpes) < 2:
         return Criterion(name, False, f"V needs two trial Sharpes, has {len(sharpes)}")
     stats = sharpe_stats(daily_returns(arm.nav))
@@ -577,80 +664,129 @@ def _dsr(
     )
 
 
+def _drawdown_cells(facts: Sequence[RunFacts], label: str) -> list[Cell]:
+    """Criterion 4's required cells: every cell D13 ran that the arm is pre-registered to run.
+
+    A4 and A5 run on the six-year and verification windows only (§2); every other arm, A6
+    included, on every cell D13 ran.
+    """
+    windows = ("six-year", VERIFICATION) if label in SHADOW_ONLY else _WINDOW_ORDER
+    return sorted(
+        (f.cell for f in facts if f.label == D13 and f.window in windows),
+        key=lambda c: (c[0], _WINDOW_ORDER.index(c[1]), c[2]),
+    )
+
+
 def criteria(
     facts: Sequence[RunFacts],
     label: str,
     sharpes: Sequence[TrialSharpe],
     *,
     trials: int = TRIALS,
+    coverage: A2Coverage | None = None,
 ) -> list[Criterion]:
     """Step 2's five tests for ``label`` against D13 (pre-registration §4). All must pass.
 
-    Ties pass criteria 1 and 2 (≥); criterion 4 compares exact drawdowns over every cell both ran.
+    Ties pass criteria 1 and 2 (≥); criterion 4 compares exact drawdowns. Fail-closed
+    (Amendment 2 (i)): a required cell that is missing, or on which A2 is diluted, fails the
+    criterion that needs it — for criterion 4, every cell :func:`_drawdown_cells` names.
     """
+    _unique(facts)
     out = [
         _ratio_criterion(
             "1a. verification XIRR/DD ≥ D13, floor-only ₹1 cr",
             facts,
             label,
             (FLOOR_ONLY, VERIFICATION, LOW_FLOOR),
+            coverage,
         ),
         _ratio_criterion(
             "1b. verification XIRR/DD ≥ D13, floor-only ₹10 cr",
             facts,
             label,
             (FLOOR_ONLY, VERIFICATION, HIGH_FLOOR),
+            coverage,
         ),
         _ratio_criterion(
             "2. verification XIRR/DD ≥ D13, NIFTY 500 ₹10 cr",
             facts,
             label,
             (NIFTY500, VERIFICATION, HIGH_FLOOR),
+            coverage,
         ),
     ]
-    row = _row(facts, label, (FLOOR_ONLY, VERIFICATION, HIGH_FLOOR))
+    name3 = "3. verification XIRR > 25%, floor-only ₹10 cr"
+    row, _, why = _needed(facts, label, (FLOOR_ONLY, VERIFICATION, HIGH_FLOOR), coverage)
     out.append(
-        Criterion(
-            "3. verification XIRR > 25%, floor-only ₹10 cr",
-            row is not None and row.xirr > BAR,
-            "no row" if row is None else _p(row.xirr),
-        )
+        Criterion(name3, row.xirr > BAR, _p(row.xirr))
+        if row is not None and not why
+        else Criterion(name3, False, why)
     )
-    pairs = [
-        (f, base)
-        for f in facts
-        if f.label == label and (base := _row(facts, D13, f.cell)) is not None
-    ]
-    worst = max((f.max_drawdown - b.max_drawdown for f, b in pairs), default=None)
-    out.append(
-        Criterion(
-            "4. max DD ≤ D13 + 3.0pp in every covered cell",
-            worst is not None and worst <= DD_TOLERANCE,
-            "no covered cell" if worst is None else f"worst {_pp(worst)} over {len(pairs)} cells",
+    name4 = "4. max DD ≤ D13 + 3.0pp in every covered cell"
+    cells = _drawdown_cells(facts, label)
+    gaps: list[str] = []
+    worst: Decimal | None = None
+    for cell in cells:
+        arm, base, why = _needed(facts, label, cell, coverage)
+        if arm is None or base is None:
+            gaps.append(why)
+            continue
+        gap = arm.max_drawdown - base.max_drawdown
+        worst = gap if worst is None else max(worst, gap)
+    if gaps or worst is None:
+        out.append(Criterion(name4, False, "; ".join(gaps) or "no covered cell"))
+    else:
+        out.append(
+            Criterion(name4, worst <= DD_TOLERANCE, f"worst {_pp(worst)} over {len(cells)} cells")
         )
-    )
-    out.append(_dsr(facts, label, sharpes, trials))
+    out.append(_dsr(facts, label, sharpes, trials, coverage))
     return out
 
 
-def trial_sharpes(facts: Sequence[RunFacts], extra: Sequence[RunFacts] = ()) -> list[TrialSharpe]:
+def git_commit_time(commit: str) -> int:
+    """The committer timestamp of ``commit`` in this checkout; ``ValueError`` if git lacks it."""
+    done = subprocess.run(
+        ["git", "show", "-s", "--format=%ct", commit],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if done.returncode != 0 or not done.stdout.strip():
+        raise ValueError(f"commit {commit[:12]} is not in this checkout; cannot order its runs")
+    return int(done.stdout.strip())
+
+
+def trial_sharpes(
+    facts: Sequence[RunFacts],
+    extra: Sequence[RunFacts] = (),
+    *,
+    commit_time: Callable[[str], int] | None = None,
+) -> list[TrialSharpe]:
     """V's inputs: one Sharpe per distinct configuration with a run on the deciding cell.
 
-    The deciding cell is the verification window, floor-only, ₹10 crore. ``facts`` (the M16
-    campaign's runs, blends included) take precedence over ``extra`` (earlier saved runs: M12.R,
-    M14.5); among ``extra``, a later run of the same configuration replaces an earlier one.
+    The deciding cell is the verification window, floor-only, ₹10 crore. When a configuration has
+    several saved runs there — across the campaign's ``facts`` and the pinned earlier directories
+    in ``extra`` alike — V uses the one from the **newest manifest commit** (Amendment 2 (iii)),
+    whatever order the directories were given in. Two runs of one configuration at the same commit
+    must be the same run (same digest); otherwise ``ValueError``.
     """
+    order = git_commit_time if commit_time is None else commit_time
     cell = (FLOOR_ONLY, VERIFICATION, PRIMARY_FLOOR)
-    chosen: dict[str, RunFacts] = {}
-    for f in extra:
-        if f.cell == cell and f.nav:
-            chosen[f.key] = f
-    for f in facts:
-        if f.cell == cell and f.nav:
-            chosen[f.key] = f
+    chosen: dict[str, tuple[int, RunFacts]] = {}
+    for f in (*extra, *facts):
+        if f.cell != cell or not f.nav:
+            continue
+        when = order(f.commit)
+        held = chosen.get(f.key)
+        if held is None or when > held[0]:
+            chosen[f.key] = (when, f)
+        elif when == held[0] and held[1].digest != f.digest:
+            raise ValueError(
+                f"{f.label}: two different runs at commit {f.commit[:12]} on {_cell_name(cell)}"
+            )
     return [
         TrialSharpe(key, f.label, sharpe_stats(daily_returns(f.nav)).sharpe)
-        for key, f in sorted(chosen.items())
+        for key, (_, f) in sorted(chosen.items())
     ]
 
 
@@ -818,8 +954,17 @@ def decision(
 
     Reads only :func:`decisive` rows: A2 in a diluted cell takes part in no step (Amendment 1).
     """
-    facts = decisive(facts, coverage)
-    primary, secondary = select(facts, PRIMARY_FLOOR), select(facts, SECONDARY_FLOOR)
+    _unique(facts)
+    clean = decisive(facts, coverage)
+    selection = (FLOOR_ONLY, SELECTION, PRIMARY_FLOOR)
+    excluded = [
+        label
+        for label in SELECTION_LABELS
+        if _diluted(label, selection, coverage) and _row(facts, label, selection) is not None
+    ]
+    required = [label for label in SELECTION_LABELS if label not in excluded]
+    primary = select(clean, PRIMARY_FLOOR, required=required)
+    secondary = select(clean, SECONDARY_FLOOR)
     out = [
         "## Decision (pre-registered rule)",
         "",
@@ -834,6 +979,8 @@ def decision(
     ]
     for position, row in enumerate(primary, start=1):
         out.append(f"{position}. {row.label} — {_r(row.ratio)}")
+    if excluded:
+        out += ["", f"Excluded as diluted (Amendment 1): {', '.join(excluded)}."]
     choice = primary[0].label if primary else ""
     out += [
         "",
@@ -852,13 +999,15 @@ def decision(
     elif choice == D13:
         out += ["The choice is D13 itself; nothing changes.", ""]
     else:
-        out += _criteria_lines(choice, criteria(facts, choice, sharpes), "replaces D13 for paper")
+        tests = criteria(facts, choice, sharpes, coverage=coverage)
+        out += _criteria_lines(choice, tests, "replaces D13 for paper")
     out += ["**Step 3 — A4 and A5** (verification-only evidence; at most shadow in paper):", ""]
     for label in SHADOW_ONLY:
         if label in missing or not any(f.label == label for f in facts):
             out += [f"**{label}**: no runs.", ""]
             continue
-        out += _criteria_lines(label, criteria(facts, label, sharpes), "shadow in paper")
+        tests = criteria(facts, label, sharpes, coverage=coverage)
+        out += _criteria_lines(label, tests, "shadow in paper")
     out += [
         f"**V** (criterion 5) is the sample variance of the per-session Sharpe on the "
         f"verification window, floor-only, {_floor_label(PRIMARY_FLOOR)}, over the n = "
@@ -896,6 +1045,7 @@ def render(
     """
     if a2_coverage is None and any(f.label == A2_INDUSTRY_GATE for f in facts):
         raise ValueError("A2 rows need an A2 coverage file (--a2-coverage; Amendment 1)")
+    _unique(facts)
     out = [
         "# M16 — strategy exploration (gate report)",
         "",
@@ -955,7 +1105,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         nargs="*",
         type=Path,
         default=[],
-        help="earlier saved runs (M12.R, M14.5) read for V only; later directories win a tie",
+        help=f"the pinned earlier run directories read for V only: {', '.join(TRIAL_DIRS)}",
     )
     parser.add_argument(
         "--a2-coverage",
@@ -977,7 +1127,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     for run_dir in args.run_dirs:
         manifests[run_dir.name] = _load(run_dir / "manifest.json")
         facts.extend(collect(run_dir, m16_labels))
-    facts = with_blends(facts)
+    facts = with_blends(merge_rows(facts))
+    names = sorted(d.name for d in args.trial_dirs)
+    if names != sorted(TRIAL_DIRS):
+        raise SystemExit(
+            f"error: --trial-dirs must be exactly the pinned {', '.join(TRIAL_DIRS)} "
+            f"(Amendment 2 (iii)); got {', '.join(names) or 'none'}"
+        )
     prior = _known_labels((*RERUN_ARMS, *REGIME_DAILY_SET, *CAP_TIER_ARMS, *REDEPLOY_ARMS))
     extra: list[RunFacts] = []
     for trial_dir in args.trial_dirs:
