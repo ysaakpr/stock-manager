@@ -303,6 +303,45 @@ then less in cash than §2 describes. That is intended: the rails are not bypass
 report already shows every arm's rail-refused sells, as A8 min-holdings refusals plus all rail
 blocks by rail, so the size of this effect is visible per arm.
 
+### Amendment 2 (2026-10-08, before any run)
+
+Computed when this was made: still no M16 campaign figure on any window. Only unit tests on
+synthetic runs had been run. A review of the report code (PR #99) found places where the rule as
+written could be read permissively. These clarifications make it **fail closed**:
+
+**(i) A missing or diluted required cell fails.** Each Step 2 criterion needs certain cells:
+- criteria 1 and 2 need verification at ₹1 cr and ₹10 cr floor-only, and on NIFTY 500 at ₹10 cr;
+- criterion 3 needs verification at ₹10 cr floor-only;
+- criterion 4 needs every cell D13 ran that the arm is pre-registered to run (§2, §3);
+- criterion 5 needs verification at ₹10 cr floor-only, for both the arm and D13.
+
+If such a cell has no run, or A2 is diluted on it (Amendment 1 (a)), that criterion **fails**.
+Criterion 4 is not read over the cells that happen to be present.
+
+**(ii) Step 1 refuses over an incomplete field.** If any arm Step 1 ranks (§4) lacks its
+selection-window run at the deciding floor, Step 1 stops with an error listing every absent arm,
+and no choice is made. The only legitimate absence is A2 excluded as diluted on the selection
+cell, and the report lists that exclusion by name.
+
+**(iii) V uses the newest run, from pinned directories.** When a configuration has several saved
+runs on V's cell, V uses the one whose run directory's manifest pins the **newest commit**, by
+commit time. The order the directories are passed in does not matter. Two different runs of one
+configuration at the same commit are refused. The earlier run directories V reads are pinned by
+name, and the report refuses any other set:
+- `~/campaign/m12-rerun-2bb2b08` (M12.R, floor-only);
+- `~/campaign/m14-5-regime-floor-cb1fcf9` (M14.5, floor-only).
+
+These are the two directories with runs on V's cell (verification, floor-only, ₹10 cr).
+
+**(iv) XIRR ÷ max DD is undefined at a drawdown of zero.** A run whose max drawdown is zero has no
+ratio. The report refuses to rank it or print a ratio for it, rather than ranking it first or last
+by convention.
+
+**Rows are merged per cell.** The `m16` and `m16-fundamentals` directories both carry D13 and
+M10.7, so the report merges rows by (cell, arm):
+- two copies of the same run (same digest) are kept once;
+- two different runs claiming one cell are refused.
+
 ## Appendix A — the 68 configurations already run on this lake
 
 **How it was counted (2026-10-08).**

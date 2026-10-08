@@ -2556,8 +2556,9 @@ tasks:
   spec: |
     Implement in `backtest/policies/momentum_v2.py` (and its data source in `backtest/run.py`)
     exactly the behaviour of pre-registration §2 for A1, A3 and A4. Publish the presets named in
-    Appendix B: `D13_ABS_MOM`, `D13_RESID_MOM` and `D13_PROFIT_FILTER` in
-    `backtest.policies.momentum_v2`.
+    §8(d): `D13_ABS_MOM`, `D13_RESID_MOM` and `D13_PROFIT_FILTER` in
+    `backtest.policies.momentum_v2`, each D13 with exactly its switch on (`absolute_momentum`,
+    `residual_ranking`, `profitability_filter`).
     - Each option is off by default and left out of `repr` at its default, so D13's run
       fingerprint and replay digest are unchanged.
     - A1's hurdle is (repo - 50 bp) summed simply over the 12-1 span's calendar days, read from
@@ -2582,13 +2583,22 @@ tasks:
   autonomy: AUTO
   deps: [M16.0]
   spec: |
-    Implement pre-registration §2 A2, as amended by Amendment 1 (§8: unclassified names are
-    gate-neutral; 180/30 calendar-day lookback with a 10-day staleness limit), behind a `MomentumV2Parameters` switch that
-    is off by default and out of `repr`. Publish the preset `D13_INDUSTRY_GATE` in
-    `backtest.policies.momentum_v2` (Appendix B). The gate ranks the sectoral indices'
-    published price-index levels by their 6-1 month return (t-126 to t-21 sessions), knowable on
-    the decision date, monthly on D13's rebalance session.
-    - Names in industries mapped to a non-top-5 index, or to no index, are ineligible.
+    Implement pre-registration §2 A2 as amended by §8 Amendment 1. It sits behind the boolean
+    `MomentumV2Parameters.industry_gate`, off by default and out of `repr`; K = 5 is a fixed
+    constant. Publish the preset `D13_INDUSTRY_GATE` (D13 + `industry_gate=True`) in
+    `backtest.policies.momentum_v2` (§8(d)).
+    - Ranking (§8(b)): monthly on D13's rebalance session, rank the sectoral indices' published
+      price-index levels by their 6-1 month return. That is the level 30 calendar days before
+      the decision date over the level 180 calendar days before it, minus one.
+    - A level counts only if it was published on or before the decision date and is at most 10
+      calendar days older than the reference date it stands for. Otherwise the index is unranked
+      that month.
+    - Eligibility (§8(a)): only a *classified* name whose industry maps to a non-top-5 index, or to
+      no mapped index, is ineligible. A name absent from the classification is gate-neutral (it
+      passes).
+    - Coverage output for the report: export the unclassified share of the floor universe per
+      cell and per year, and each sector index's first rankable date. M16.4 feeds this to
+      `--a2-coverage`.
     - The index list and the industry-to-index map are a checked-in table, frozen before any A2
       run.
     - The industry label is the static current-day classification; state that limitation.
@@ -2637,10 +2647,15 @@ tasks:
     - both again with `--universe nifty500` on every window its PIT coverage supports at launch.
 
     Two workers at most, and no other campaign on the box. Render
-    `ops/gates/M16-strategy-exploration-report.md` with `backtest.m16_report`, passing the M12.R
-    and M14.5 directories as `--trial-dirs` for V, and A2's classification coverage per cell and
-    year plus each index's first rankable date as `--a2-coverage` (Amendment 1 (a)). Then apply the rule as written: no extra arm, no
-    re-choice after verification. The paper book changes only by owner decision.
+    `ops/gates/M16-strategy-exploration-report.md` with `backtest.m16_report`, passing:
+    - both run directories (rows merged per cell);
+    - exactly the pinned `~/campaign/m12-rerun-2bb2b08` and `~/campaign/m14-5-regime-floor-cb1fcf9`
+      as `--trial-dirs` for V (§8 Amendment 2 (iii));
+    - A2's classification coverage per cell and year, plus each index's first rankable date, as
+      `--a2-coverage` (Amendment 1 (a)).
+
+    Then apply the rule as written: no extra arm, and no re-choice after verification. The report
+    fails closed (Amendment 2). The paper book changes only by owner decision.
   deliverables: [ops/gates/M16-strategy-exploration-report.md]
   acceptance:
     - "every grid cell the pre-registration names has a saved run, or its absence is stated with the engine's reason"
