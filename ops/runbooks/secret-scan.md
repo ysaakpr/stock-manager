@@ -101,6 +101,11 @@ compared, so editing above an accepted line does not resurrect it.
    other file's entries.
 4. `git diff .secrets.baseline` must show only the entries you reviewed. Say in the commit message
    what each one is and why it cannot authenticate.
+5. **Do not prune an entry just because the line left the working tree.** CI's `--commits` scan
+   reads every commit of the PR, so an accepted value that still exists in any commit of an open
+   branch must keep its entry, or that PR's check goes red. Prune only once no unmerged commit
+   carries the value (`uv run python ops/secret_scan.py --commits origin/main..HEAD` before pushing
+   tells you).
 
 Never add a filter, re-enable the entropy detectors, remove a detector, or rely on an inline
 `# pragma: allowlist secret` comment. What actually stops each:
