@@ -11,7 +11,6 @@ import json
 import os
 import socket
 import subprocess
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -447,9 +446,14 @@ def test_lost_rows_fail_the_drill_and_later_writes_do_not() -> None:
 # ── L0 ────────────────────────────────────────────────────────────────────────────────────────
 
 
+def _l0(settings: Settings, **kwargs: Any) -> Any:
+    """`run_l0_backup` on the frozen clock the file ages in `_lake` are set against."""
+    return run_l0_backup(settings, clock=FrozenClock(NOW), **kwargs)
+
+
 def _lake(tmp_path: Path, *names: str, age: timedelta = timedelta(hours=1)) -> None:
     """Write L0 files, aged past the settle window unless `age` says otherwise."""
-    when = time.time() - age.total_seconds()
+    when = (NOW - age).timestamp()
     for name in names:
         path = tmp_path / "data" / "L0" / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -460,10 +464,10 @@ def _lake(tmp_path: Path, *names: str, age: timedelta = timedelta(hours=1)) -> N
 def test_the_l0_manifest_hashes_only_new_files(tmp_path: Path) -> None:
     _lake(tmp_path, "nse/2026/a.csv", "nse/2026/a.json")
     settings = _settings(tmp_path)
-    first = run_l0_backup(settings)
+    first = _l0(settings)
     assert (first.files, first.hashed, first.mirrored_to) == (2, 2, None)
     _lake(tmp_path, "nse/2026/b.csv")
-    second = run_l0_backup(settings)
+    second = _l0(settings)
     assert (second.files, second.hashed) == (3, 1)
     lines = second.manifest.read_text().splitlines()
     assert [line.split("  ")[1] for line in lines] == [
@@ -477,22 +481,22 @@ def test_the_l0_manifest_hashes_only_new_files(tmp_path: Path) -> None:
 def test_a_recorded_l0_file_that_vanished_fails_the_job(tmp_path: Path) -> None:
     _lake(tmp_path, "nse/a.csv", "nse/b.csv")
     settings = _settings(tmp_path)
-    run_l0_backup(settings)
+    _l0(settings)
     (tmp_path / "data" / "L0" / "nse" / "b.csv").unlink()
     with pytest.raises(BackupError, match="immutable"):
-        run_l0_backup(settings)
+        _l0(settings)
 
 
 def test_no_lake_is_a_failure_not_an_empty_manifest(tmp_path: Path) -> None:
     with pytest.raises(BackupError, match="no lake"):
-        run_l0_backup(_settings(tmp_path))
+        _l0(_settings(tmp_path))
 
 
 def test_no_mirror_means_no_rsync(tmp_path: Path) -> None:
     _lake(tmp_path, "nse/a.csv")
     runner = FakeRunner()
     with capture_logs() as logs:
-        run_l0_backup(_settings(tmp_path), runner=runner)
+        _l0(_settings(tmp_path), runner=runner)
     assert runner.calls == []
     assert any(event["event"] == "backup.l0_mirror_unconfigured" for event in logs)
 
@@ -500,7 +504,7 @@ def test_no_mirror_means_no_rsync(tmp_path: Path) -> None:
 def test_a_file_still_being_written_is_deferred_not_recorded(tmp_path: Path) -> None:
     _lake(tmp_path, "nse/old.csv")
     _lake(tmp_path, "nse/new.csv", age=timedelta(seconds=30))
-    result = run_l0_backup(_settings(tmp_path))
+    result = _l0(_settings(tmp_path))
     assert (result.hashed, result.deferred) == (1, 1)
     assert "new.csv" not in result.manifest.read_text()
 
@@ -509,10 +513,10 @@ def test_a_payload_disagreeing_with_its_l0_sidecar_is_not_recorded(tmp_path: Pat
     _lake(tmp_path, "nse/a.csv")
     meta = tmp_path / "data" / "L0" / "nse" / "a.csv.meta.json"
     meta.write_text(json.dumps({"sha256": "0" * 64}))
-    old = time.time() - 3600
+    old = (NOW - timedelta(hours=1)).timestamp()
     os.utime(meta, (old, old))
     with pytest.raises(BackupError, match="sidecar"):
-        run_l0_backup(_settings(tmp_path))
+        _l0(_settings(tmp_path))
     assert not (tmp_path / "backups" / "l0" / "MANIFEST.sha256").exists()
 
 
@@ -521,9 +525,9 @@ def test_a_payload_matching_its_l0_sidecar_is_recorded(tmp_path: Path) -> None:
     payload = tmp_path / "data" / "L0" / "nse" / "a.csv"
     meta = payload.with_name("a.csv.meta.json")
     meta.write_text(json.dumps({"sha256": backup._sha256(payload)}))
-    old = time.time() - 3600
+    old = (NOW - timedelta(hours=1)).timestamp()
     os.utime(meta, (old, old))
-    assert run_l0_backup(_settings(tmp_path)).hashed == 2
+    assert _l0(_settings(tmp_path)).hashed == 2
 
 
 def test_a_mirror_on_the_lakes_own_filesystem_is_refused(tmp_path: Path) -> None:
@@ -533,20 +537,20 @@ def test_a_mirror_on_the_lakes_own_filesystem_is_refused(tmp_path: Path) -> None
     mount_point.mkdir(parents=True)
     runner = FakeRunner()
     with pytest.raises(BackupError, match="own filesystem"):
-        run_l0_backup(_settings(tmp_path, backup_l0_mirror=str(mount_point)), runner=runner)
+        _l0(_settings(tmp_path, backup_l0_mirror=str(mount_point)), runner=runner)
     assert runner.calls == []
 
 
 def test_a_missing_mirror_path_is_refused(tmp_path: Path) -> None:
     _lake(tmp_path, "nse/a.csv")
     with pytest.raises(BackupError, match="does not exist"):
-        run_l0_backup(_settings(tmp_path, backup_l0_mirror=str(tmp_path / "absent")))
+        _l0(_settings(tmp_path, backup_l0_mirror=str(tmp_path / "absent")))
 
 
 def test_a_remote_mirror_skips_the_device_check(tmp_path: Path) -> None:
     _lake(tmp_path, "nse/a.csv")
     runner = FakeRunner()
-    run_l0_backup(_settings(tmp_path, backup_l0_mirror="backup-host:/srv/lake"), runner=runner)
+    _l0(_settings(tmp_path, backup_l0_mirror="backup-host:/srv/lake"), runner=runner)
     ((argv, _),) = runner.calls
     assert argv[-1] == "backup-host:/srv/lake/L0/"
 
@@ -565,7 +569,7 @@ def second_disk(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 def test_a_mirror_is_copied_onto_and_never_deleted_from(tmp_path: Path, second_disk: None) -> None:
     _lake(tmp_path, "nse/a.csv")
     runner = FakeRunner()
-    result = run_l0_backup(_settings(tmp_path, backup_l0_mirror="/mnt/second/lake"), runner=runner)
+    result = _l0(_settings(tmp_path, backup_l0_mirror="/mnt/second/lake"), runner=runner)
     ((argv, _),) = runner.calls
     assert argv[0] == "rsync" and "--ignore-existing" in argv
     assert not any(part.startswith("--delete") for part in argv)
@@ -576,9 +580,7 @@ def test_a_mirror_is_copied_onto_and_never_deleted_from(tmp_path: Path, second_d
 def test_a_failed_mirror_fails_the_job(tmp_path: Path, second_disk: None) -> None:
     _lake(tmp_path, "nse/a.csv")
     with pytest.raises(BackupError, match="rsync"):
-        run_l0_backup(
-            _settings(tmp_path, backup_l0_mirror="/mnt/x"), runner=FakeRunner(returncode=23)
-        )
+        _l0(_settings(tmp_path, backup_l0_mirror="/mnt/x"), runner=FakeRunner(returncode=23))
 
 
 # ── the scratch container ─────────────────────────────────────────────────────────────────────
