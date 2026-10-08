@@ -26,6 +26,7 @@ milestones:
   M13: {title: "Run of 2026-10-06 — paper operations, alert triggers, data repairs", depends: [M5, M9, M10]}
   M14: {title: "Follow-ups of the 2026-10-07 M12.R re-run", depends: [M9, M12, M13]}
   M15: {title: "Real-money readiness prerequisites (run of 2026-10-08)", depends: [M5, M6, M13]}
+  M16: {title: "Strategy exploration — seven pre-registered arms against D13", depends: [M9, M12, M14]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -2777,3 +2778,157 @@ tasks:
     - "every published port in every compose file binds 127.0.0.1; a test fails on any other bind"
     - "the parser is exercised on non-loopback short and long specs, a host IP from a variable and host network mode, so it cannot pass vacuously"
   verify: "uv run pytest tests/unit/test_compose_ports.py -q"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M16 — strategy exploration (ops/studies/preregistration-m16-2026-10-08.md)
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: M16.0
+  title: Pre-registration + campaign plumbing for the M16 strategy exploration
+  milestone: M16
+  module: X2
+  autonomy: AUTO
+  deps: [M14.5]
+  spec: |
+    Commit `ops/studies/preregistration-m16-2026-10-08.md` before any other M16 code. It fixes:
+    - the arms A1-A7 with their parameters;
+    - the grid: floor-only decade, six-year, walk-forward selection and verification at Rs 1 cr and
+      Rs 10 cr, plus NIFTY 500 on every window its PIT membership coverage supports at campaign
+      time;
+    - the selection rule: the walk-forward choice at Rs 10 cr (pending owner confirmation), then
+      the replacement test with the deflated Sharpe;
+    - the exact trial count N = 68 + 7 = 75, listed in Appendix A.
+
+    Wire `m16` (baselines, A1, A2, A3, A7) and `m16-fundamentals` (D13, M10.7, A4, A5; six-year
+    and wf-verification only) into `backtest.m12_rerun.ARM_SETS`. A1-A5 are referenced by the
+    parameter presets their PRs publish (Appendix B), and a missing preset is a loud CampaignError. `backtest/m16_report.py`
+    renders the report from saved runs: tables, scorecard, rail refusals, the A6 blend, and the
+    rule with the DSR. No A1-A5 policy code; no window-scale backtest.
+  deliverables: [ops/studies/preregistration-m16-2026-10-08.md, backtest/m16_arms.py, backtest/m12_rerun.py, backtest/m16_report.py, tests/unit/test_m16_arms.py, tests/unit/test_m16_report.py, TASK_GRAPH.yaml]
+  acceptance:
+    - "the pre-registration is the first M16 commit and no M16 figure exists before it is pushed"
+    - "ARM_SETS keeps m12 and regime-daily unchanged; m16/m16-fundamentals resolve or raise naming every missing preset"
+    - "m16_report renders from synthetic saved runs; a test fails if the selection floor or any comparison direction is inverted"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_m16_arms.py tests/unit/test_m16_report.py tests/unit/test_m12_rerun.py -q"
+
+- id: M16.1
+  title: Momentum v2 options for A1 (absolute momentum), A3 (residual-momentum ranking), A4 (profitability filter)
+  milestone: M16
+  module: X2
+  autonomy: AUTO
+  deps: [M16.0]
+  spec: |
+    Implement in `backtest/policies/momentum_v2.py` (and its data source in `backtest/run.py`)
+    exactly the behaviour of pre-registration §2 for A1, A3 and A4. Publish the presets named in
+    §8(d): `D13_ABS_MOM`, `D13_RESID_MOM` and `D13_PROFIT_FILTER` in
+    `backtest.policies.momentum_v2`, each D13 with exactly its switch on (`absolute_momentum`,
+    `residual_ranking`, `profitability_filter`).
+    - Each option is off by default and left out of `repr` at its default, so D13's run
+      fingerprint and replay digest are unchanged.
+    - A1's hurdle is (repo - 50 bp) summed simply over the 12-1 span's calendar days, read from
+      the cash-interest schedule.
+    - A3 reuses `backtest/policies/residual_momentum.py` unchanged.
+    - A4 reads PIT XBRL TTM PAT on first-filed values; a filing more than 200 days old, or fewer
+      than four quarters, makes a name ineligible.
+
+    Tiny smokes only, reported as counts; no return figure.
+  deliverables: [backtest/policies/momentum_v2.py, backtest/run.py, tests/unit/test_momentum_v2_m16.py]
+  acceptance:
+    - "D13's repr and a pre-M16 replay digest are unchanged with every option off"
+    - "inverted-rule tests fail if the hurdle, the residual ranking or the PAT sign is flipped; a future-dated filing trips the PIT guard"
+    - "backtest.m16_arms resolves A1, A3 and A4 from the published presets"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_momentum_v2_m16.py tests/unit/test_m16_arms.py -q"
+
+- id: M16.2
+  title: A2 industry gate — top-5 NSE sectoral indices by 6-1 month return
+  milestone: M16
+  module: X2
+  autonomy: AUTO
+  deps: [M16.0]
+  spec: |
+    Implement pre-registration §2 A2 as amended by §8 Amendment 1. It sits behind the boolean
+    `MomentumV2Parameters.industry_gate`, off by default and out of `repr`; K = 5 is a fixed
+    constant. Publish the preset `D13_INDUSTRY_GATE` (D13 + `industry_gate=True`) in
+    `backtest.policies.momentum_v2` (§8(d)).
+    - Ranking (§8(b)): monthly on D13's rebalance session, rank the sectoral indices' published
+      price-index levels by their 6-1 month return. That is the level 30 calendar days before
+      the decision date over the level 180 calendar days before it, minus one.
+    - A level counts only if it was published on or before the decision date and is at most 10
+      calendar days older than the reference date it stands for. Otherwise the index is unranked
+      that month.
+    - Eligibility (§8(a)): only a *classified* name whose industry maps to a non-top-5 index, or to
+      no mapped index, is ineligible. A name absent from the classification is gate-neutral (it
+      passes).
+    - Coverage output for the report: export the unclassified share of the floor universe per
+      cell and per year, and each sector index's first rankable date. M16.4 feeds this to
+      `--a2-coverage`.
+    - The index list and the industry-to-index map are a checked-in table, frozen before any A2
+      run.
+    - The industry label is the static current-day classification; state that limitation.
+  deliverables: [backtest/industry_gate.py, backtest/policies/momentum_v2.py, backtest/run.py, tests/unit/test_industry_gate.py]
+  acceptance:
+    - "D13's repr and a pre-M16 replay digest are unchanged with the gate off"
+    - "a test fails if the ranking direction or the 6-1 span is inverted; a future-dated index level trips the PIT guard"
+    - "backtest.m16_arms resolves A2 from the published preset"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_industry_gate.py tests/unit/test_m16_arms.py -q"
+
+- id: M16.3
+  title: A5 earnings-surprise leg on the M10.7 swing composite
+  milestone: M16
+  module: X2
+  autonomy: AUTO
+  deps: [M16.0]
+  spec: |
+    Implement pre-registration §2 A5 as `SwingCompositeParameters.weight_earnings_surprise`, zero
+    by default and out of `repr`. Publish the preset `M10_7_EARNINGS_SURPRISE` in
+    `backtest.policies.earnings_surprise` (Appendix B).
+    - Surprise = (latest quarter's basic EPS - EPS four quarters earlier) / the sample stdev of
+      those differences over the last 8 quarters.
+    - First-filed PIT XBRL values, on one basis.
+    - Active for 63 sessions from the first session after `filing_date`.
+    - An undefined value takes the leg's mean rank, the H1 convention.
+  deliverables: [backtest/policies/swing_composite.py, backtest/run.py, tests/unit/test_earnings_surprise.py]
+  acceptance:
+    - "M10.7's repr and a pre-M16 replay digest are unchanged at weight 0"
+    - "a test fails if the surprise sign or the 63-session window is inverted; a future-dated filing trips the PIT guard"
+    - "backtest.m16_arms resolves A5 from the published preset"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_earnings_surprise.py tests/unit/test_m16_arms.py -q"
+
+- id: M16.4
+  title: M16 campaign run and gate report
+  milestone: M16
+  module: X2
+  autonomy: NEEDS_GO
+  deps: [M16.0, M16.1, M16.2, M16.3]
+  spec: |
+    Start only after the owner's confirmation of the primary selection floor (§4) is recorded in
+    the pre-registration's §7. Amendment 1 (§8) already governs A2. On one commit carrying M16.0-M16.3, run `backtest.m12_rerun`:
+    - `--arm-set m16` on the floor-only units (walk-forward, decade, six-year);
+    - `--arm-set m16-fundamentals` on six-year and wf-verification;
+    - both again with `--universe nifty500` on every window its PIT coverage supports at launch.
+
+    Two workers at most, and no other campaign on the box. Render
+    `ops/gates/M16-strategy-exploration-report.md` with `backtest.m16_report`, passing:
+    - both run directories (rows merged per cell);
+    - exactly the pinned `~/campaign/m12-rerun-2bb2b08` and `~/campaign/m14-5-regime-floor-cb1fcf9`
+      as `--trial-dirs` for V (§8 Amendment 2 (iii));
+    - A2's classification coverage per cell and year, plus each index's first rankable date, as
+      `--a2-coverage` (Amendment 1 (a)).
+
+    Then apply the rule as written: no extra arm, and no re-choice after verification. The report
+    fails closed (Amendment 2). The paper book changes only by owner decision.
+  deliverables: [ops/gates/M16-strategy-exploration-report.md]
+  acceptance:
+    - "every grid cell the pre-registration names has a saved run, or its absence is stated with the engine's reason"
+    - "the report is generated from the saved runs, prints N = 75 with V's n, and states the Step 1-4 outcome"
+    - "the primary-floor confirmation is recorded in pre-registration §7 before the first run; no amendment is added after the first M16 figure"
+    - "A2 is labelled diluted (informational) in every cell where more than 30% of the floor universe is unclassified"
+  verify: "uv run pytest tests/unit/test_m16_report.py -q"
+  escalation:
+    question: "Confirm the M16 selection floor: choose on the Rs 10 crore floor (pre-registered primary), or name Rs 1 crore?"
+    why_blocked: "The pre-registration marks the primary floor pending owner confirmation, and the campaign may not launch before it is recorded."
+    unblocks: []

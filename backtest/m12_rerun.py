@@ -34,7 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import date
@@ -54,6 +54,7 @@ from backtest.cash_interest import (
     accrue_cash_interest,
     load_repo_rate_schedule,
 )
+from backtest.m16_arms import ARM_SET_UNITS, m16_arms, m16_fundamentals_arms
 from backtest.run import UNIVERSE_CHOICES, UNIVERSE_TURNOVER_FLOOR, _L1Reader
 from backtest.run_ledger import (
     ledger_path,
@@ -137,7 +138,41 @@ RERUN_ARMS: tuple[Arm, ...] = rerun_arms()
 #: every window's table carries the baseline the variants are read against. A separate set, never
 #: folded into ``RERUN_ARMS``: the M12.R directories' manifests pin their arm lists.
 REGIME_DAILY_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *REGIME_DAILY_ARMS)
-ARM_SETS: dict[str, tuple[Arm, ...]] = {"m12": RERUN_ARMS, "regime-daily": REGIME_DAILY_SET}
+
+
+class _ArmSets(Mapping[str, tuple[Arm, ...]]):
+    """The named arm sets: fixed tuples, plus sets resolved when asked for.
+
+    M16's sets (``backtest.m16_arms``) name parameter presets other tasks publish, so they are
+    resolved on lookup rather than at import: importing this module never fails for a missing
+    preset, while asking for an incomplete set raises :class:`~backtest.m16_arms.M16ArmError`
+    (a :class:`CampaignError`) naming every preset still missing.
+    """
+
+    def __init__(
+        self,
+        fixed: dict[str, tuple[Arm, ...]],
+        resolved: dict[str, Callable[[], tuple[Arm, ...]]],
+    ) -> None:
+        self._fixed = fixed
+        self._resolved = resolved
+
+    def __getitem__(self, name: str) -> tuple[Arm, ...]:
+        if name in self._fixed:
+            return self._fixed[name]
+        return self._resolved[name]()
+
+    def __iter__(self) -> Iterator[str]:
+        return iter((*self._fixed, *self._resolved))
+
+    def __len__(self) -> int:
+        return len(self._fixed) + len(self._resolved)
+
+
+ARM_SETS: Mapping[str, tuple[Arm, ...]] = _ArmSets(
+    {"m12": RERUN_ARMS, "regime-daily": REGIME_DAILY_SET},
+    {"m16": m16_arms, "m16-fundamentals": m16_fundamentals_arms},
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -399,7 +434,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "--arm-set",
         default="m12",
         choices=sorted(ARM_SETS),
-        help="m12: the M12 review's arms (default); regime-daily: D13 and its M14.5 variants",
+        help="m12: the M12 review's arms (default); regime-daily: D13 and its M14.5 variants; "
+        "m16: baselines, A1, A2, A3, A7; m16-fundamentals: D13, M10.7, A4, A5 "
+        "(six-year and wf-verification only)",
     )
     parser.add_argument(
         "--arms",
@@ -429,6 +466,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     units = tuple(part.strip() for part in args.units.split(",") if part.strip())
     try:
+        allowed = ARM_SET_UNITS.get(args.arm_set)
+        if allowed is not None and any(unit not in allowed for unit in units):
+            raise CampaignError(
+                f"the {args.arm_set} arm set runs only on units {', '.join(allowed)}; "
+                f"got {', '.join(units)}"
+            )
         arms = ARM_SETS[args.arm_set]
         if args.arms:
             wanted = [part.strip() for part in args.arms.split("|") if part.strip()]
