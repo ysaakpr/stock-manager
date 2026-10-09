@@ -110,11 +110,15 @@ A local `BACKUP_L0_MIRROR` must exist and be on a **different filesystem** from 
 unmounted mount point is a plain directory on the root disk, and copying the lake there is no copy.
 The job refuses that (`… is on the lake's own filesystem`). A remote `host:path` is not checked.
 
-**There is no second copy of L0 today.** This host has one disk (`/dev/root`, 193 GB, the lake
-~10 GB) and no remote target, so `BACKUP_L0_MIRROR` is unset and the job logs
-`backup.l0_mirror_unconfigured` every night. Choosing a target — a second EBS volume, an S3 bucket
-via a mounted path, or another host reachable by rsync — is an owner decision (a spending decision,
-AGENTIC_CONTEXT §3.9). Once chosen, set `BACKUP_L0_MIRROR` and the nightly job starts copying with
+**The second copy of L0 is the S3 mirror, run by hand.** This host has one disk (`/dev/root`,
+193 GB, the lake ~10 GB). L0 is copied to S3 under an SSE-C key by `ops/l0-s3-sync.sh`
+([l0-s3-mirror.md](l0-s3-mirror.md)): `sync` uploads only keys S3 lacks and never overwrites,
+`verify` checks names, sizes and a sha256 sample against both the lake and this manifest. It is not
+a scheduler job — run `sync` then `verify` after a fetch campaign and at least monthly, and note it
+in the table at the end of this file. The nightly job's own mirror is separate and still unset
+(`BACKUP_L0_MIRROR`), so it logs `backup.l0_mirror_unconfigured` every night; that is expected.
+Pointing it at a second EBS volume or another host reachable by rsync is an owner decision (a
+spending decision, AGENTIC_CONTEXT §3.9); once set, the nightly job copies with
 `rsync -a --ignore-existing` (never `--delete`). The same is true of the Postgres dumps: they sit on
 the same disk as the database, which protects against a bad migration or a dropped table, not against
 losing the disk. A nightly copy of `~/backups/postgres/` to the same target closes that too.
