@@ -66,6 +66,7 @@ from analyst.commons import (
     FetchOutcome,
     FetchRequest,
     FilingDigest,
+    OnDemandDigests,
     ScreenSource,
     Shortlist,
     Snapshot,
@@ -171,7 +172,9 @@ _REPAIR_SUFFIX: Final = (
 )
 
 DossierProvider = Callable[[Sequence[str]], tuple[Dossier, ...]]
-DigestProvider = Callable[[Sequence[str]], tuple[FilingDigest, ...]]
+#: On-demand filing digests for named ISINs: `analyst.commons.digest_for_isins` bound to the
+#: session, its source, the digest model, the digest store and the green gate.
+DigestProvider = Callable[[Sequence[str]], OnDemandDigests]
 
 
 class SnapshotCache(Protocol):
@@ -384,8 +387,8 @@ class _Session:
         )
         self.journal.append(entry, evidence=evidence)
 
-    def _evidence(self, prompt: str) -> EvidenceBundle:
-        """Everything one call was shown: the exact prompt, and the digest of every input."""
+    def _evidence(self, prompt: str | None) -> EvidenceBundle:
+        """Every input digest shown so far, and the exact prompt when a model call is the reader."""
         commons = self.commons
         items = [
             EvidenceItem(
@@ -672,12 +675,21 @@ class _Session:
         new_digests: list[FilingDigest] = []
         if self.commons.digests is not None and in_universe:
             try:
-                for digest in self.commons.digests(in_universe):
+                on_demand = self.commons.digests(in_universe)
+            except (CommonsRefusedError, LLMError) as exc:
+                unfulfilled.append(Unfulfilled("filing digests", str(exc)))
+            else:
+                for digest in on_demand.digests:
                     if digest.filing_id not in self.digests:
                         self.digests[digest.filing_id] = digest
                         new_digests.append(digest)
-            except (CommonsRefusedError, LLMError) as exc:
-                unfulfilled.append(Unfulfilled("filing digests", str(exc)))
+                unfulfilled += [
+                    Unfulfilled(f"filing digest {f.filing_id}", f.reason)
+                    for f in on_demand.failures
+                ]
+                unfulfilled += [
+                    Unfulfilled(f"filing digests: {g.source}", g.reason) for g in on_demand.gaps
+                ]
 
         fetched: list[tuple[QueryItem, Snapshot]] = []
         hits = 0
@@ -713,7 +725,7 @@ class _Session:
             unfulfilled=tuple(unfulfilled),
         )
         self.bundles.append(bundle)
-        evidence = self._evidence(render_bundles([bundle]))
+        evidence = self._evidence(None)
         self._write(
             decision=Decision.HEARTBEAT,
             evidence=evidence,

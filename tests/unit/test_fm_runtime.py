@@ -30,12 +30,14 @@ from analyst.commons import (
     CommonsScreens,
     CommonsSheets,
     DigestBody,
+    DigestFailure,
     FetchedPage,
     FetchError,
     FetchRequest,
     FetchResponse,
     FilingDigest,
     FilingKind,
+    OnDemandDigests,
     Shortlist,
     ShortlistEntry,
     SnapshotStore,
@@ -212,6 +214,19 @@ def _digest() -> FilingDigest:
     )
 
 
+def _on_demand(isins: Sequence[str]) -> OnDemandDigests:
+    return OnDemandDigests(
+        trading_date=SESSION,
+        isins=tuple(isins),
+        since=SESSION,
+        digests=(_digest(),) if LEADER in isins else (),
+        digested=(),
+        cached=(),
+        failures=(DigestFailure(filing_id="nse_announcements:9003", reason="stub refused"),),
+        gaps=(),
+    )
+
+
 class StubFetcher:
     """A fetcher that transcribes a fixed page per request and counts what it was asked."""
 
@@ -247,7 +262,7 @@ def _commons(world: World, tmp_path: Path, *, digests: bool = True) -> ManagerCo
         source=FakeScreenSource(screen_world()),
         snapshots=SnapshotStore(tmp_path / "fetch", clock=clock()),
         cost_model=CostModel(load_rate_card()),
-        digests=(lambda isins: (_digest(),) if LEADER in isins else ()) if digests else None,
+        digests=_on_demand if digests else None,
     )
 
 
@@ -538,6 +553,10 @@ def test_a_full_session_runs_four_calls_and_journals_every_decision_and_bundle(
     snapshot_ids = [s for e in fulfilled for s in e.payload["snapshots"].split(",") if s]
     assert len(snapshot_ids) == 2 and len(fetcher.asked) == 2
     assert fulfilled[0].payload["digests"] == "nse_announcements:9002"
+    assert "nse_announcements:9003" in fulfilled[0].payload["unfulfilled"]  # a digest failure
+    assert all(
+        journal.evidence[e.evidence_snapshot_ref or ""].rendered_prompt is None for e in fulfilled
+    )
     final_bundle = journal.evidence[calls[-1].evidence_snapshot_ref or ""]
     assert {i.text for i in final_bundle.items if i.label == "dossier"} == set(
         dossier_digests.values()
