@@ -424,7 +424,12 @@ def test_0015_keeps_a_book_saved_before_it_and_the_next_session_decides(
             )
             conn.commit()
 
-        assert [m.version for m in migrate(settings, clock=FrozenClock(MIGRATED_AT))] == ["0015"]
+        # Exactly the migrations after 0014 apply, 0015 first; later ones (0018, M17.1) ride along.
+        applied = [m.version for m in migrate(settings, clock=FrozenClock(MIGRATED_AT))]
+        assert applied == sorted(
+            p.name[:4] for p in MIGRATIONS_DIR.glob("*.sql") if p.name >= "0015"
+        )
+        assert applied[0] == "0015"
         with connection(settings) as conn:
             kept = PostgresPaperSessionStore(conn).get(PAPER_BOOK_ID, OCT_FIRST)
         assert kept is not None and kept.recon is None and kept.expected_book is None

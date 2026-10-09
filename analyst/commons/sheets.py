@@ -8,9 +8,10 @@ writes or judges. Storage is `analyst.commons.store`; the lake reads are behind
 **The market sheet.** NIFTY 50 and NIFTY 500 against their 50- and 200-session means. Breadth:
 the share of the universe above its own 50-session mean, plus advancers and decliners. India VIX.
 The 1/3/6-month returns of the NSE sectoral indices. Delivery-volume anomalies. The RBI policy
-repo rate. Every field is optional. A source that is missing, stale or too short is named in
-``gaps`` with the reason, and the field is left ``None``. Nothing is imputed, carried forward or
-substituted from another source.
+repo rate. Every field is optional. A source that is missing, stale (over a week old) or too
+short is named in ``gaps`` with the reason, and the field is left ``None``. A level that is recent
+but older than the session is kept under its own date, and ``gaps`` says it lags. Nothing is
+imputed, carried forward to the session or substituted from another source.
 
 **The universe sheet** (pre-registration §2). It has one row per ISIN that meets all of these:
 
