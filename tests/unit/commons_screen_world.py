@@ -98,21 +98,29 @@ def _zig(i: int, amp: str) -> Decimal:
     return Decimal(1) + Decimal(amp) * (1 if i % 2 else -1)
 
 
-def trend(isin: str, growth: str, *, amp: str = "0.003", base: int = 100) -> list[PriceBar]:
+def trend(
+    isin: str,
+    growth: str,
+    *,
+    amp: str = "0.003",
+    base: int = 100,
+    calendar: Sequence[date] = CALENDAR,
+) -> list[PriceBar]:
     g = Decimal(growth)
     return [
         pbar(isin, day, Decimal(base) * g**i * _zig(i, amp), deliv=80_000 + (i % 2) * 20_000)
-        for i, day in enumerate(CALENDAR)
+        for i, day in enumerate(calendar)
     ]
 
 
-def breakout(isin: str) -> list[PriceBar]:
+def breakout(isin: str, calendar: Sequence[date] = CALENDAR) -> list[PriceBar]:
     """Wide ranges, then ten tight sessions, then a close above every close of 60, on 3x volume."""
+    n = len(calendar)
     out: list[PriceBar] = []
-    for i, day in enumerate(CALENDAR):
-        if i == N - 1:
+    for i, day in enumerate(calendar):
+        if i == n - 1:
             out.append(pbar(isin, day, Decimal(103), rng=Decimal("0.01"), volume=600_000))
-        elif i >= N - 11:
+        elif i >= n - 11:
             out.append(pbar(isin, day, Decimal(100) * _zig(i, "0.002"), rng=Decimal("0.002")))
         else:
             out.append(pbar(isin, day, Decimal(100) * _zig(i, "0.015"), rng=Decimal("0.03")))
@@ -173,7 +181,11 @@ class ScreenWorld:
 
 
 class FakeScreenSource:
-    """Serves the world unfiltered by date (the guard selects); filters by name and session."""
+    """Serves the world by name and session, plus anything dated after the world's last session.
+
+    A record dated after the calendar is a leak by construction, so it is always served: the PIT
+    guard has to refuse it, not the fake.
+    """
 
     def __init__(self, world: ScreenWorld, *, missing: frozenset[str] = frozenset()) -> None:
         self.world = world
@@ -195,7 +207,7 @@ class FakeScreenSource:
         rows = [
             raw_of(b)
             for b in self.world.bars
-            if b.trade_date in wanted or b.trade_date > max(wanted)
+            if b.trade_date in wanted or b.trade_date > self.world.calendar[-1]
         ]
         return self._serve("equity_bars", rows, lambda b: b.trade_date)
 
@@ -206,7 +218,8 @@ class FakeScreenSource:
         rows = [
             b
             for b in self.world.bars
-            if b.isin in isins and (b.trade_date in wanted or b.trade_date > max(wanted))
+            if b.isin in isins
+            and (b.trade_date in wanted or b.trade_date > self.world.calendar[-1])
         ]
         return self._serve("price_bars", rows, lambda b: b.trade_date)
 

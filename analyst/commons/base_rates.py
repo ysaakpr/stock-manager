@@ -653,7 +653,8 @@ def write_table(table: BaseRateTable, out_dir: Path) -> Path:
     table.verify()
     p = table.parameters
     path = out_dir / f"base_rates_{p.start:%Y%m%d}_{p.end:%Y%m%d}_{table.digest[:12]}.json"
-    payload = json.dumps(table.model_dump(mode="json"), sort_keys=True, indent=1) + "\n"
+    payload = json.dumps(table.model_dump(mode="json"), sort_keys=True, separators=(",", ":"))
+    payload += "\n"
     out_dir.mkdir(parents=True, exist_ok=True)
     if path.exists():
         if load_table(path).digest != table.digest:
