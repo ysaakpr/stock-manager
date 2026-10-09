@@ -174,7 +174,8 @@ The cost of a round trip in each liquidity tier, from the shared cost model:
    - **web queries** (at most {{max_queries}} across all requests), only where the lake can't
      answer. Be specific: name the company, the topic and the period. Prefer exchange filings,
      company presentations, rating agencies and reputable financial press. Social media tips and
-     anonymous forums are not evidence.
+     anonymous forums are not evidence. Ask as **search queries**. Don't guess URLs: a URL you
+     haven't seen in a snapshot usually fails, and a failed request still uses up your budget.
 
 You will receive the dossiers and snapshots next round.
 [[/ROUND]]
