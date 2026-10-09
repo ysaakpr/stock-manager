@@ -610,3 +610,34 @@ def _restore_l2(root: Path, bars: dict[date, AdjustedBar]) -> None:
     """Write ``bars`` back as the ISIN's partition, as the lagging drain left it."""
     table = _bars_to_table([bars[d] for d in sorted(bars)])
     _write_table(table, l2_isin_partition_path(PRICES_ADJUSTED_DATASET, ISIN, data_root=root))
+
+
+def test_a_split_known_only_after_l2_was_built_is_still_checked_against_l2(tmp_path: Path) -> None:
+    """INE2FMX01012's shape: ex 09-28 inside L2's span, knowable only 10-06 (after L2's last
+    bar). Knowable by the session, so the session must ask whether L2 carries it."""
+    inside = date(2026, 9, 15)
+    rows = _price_rows(DAYS, _closes(((inside, Decimal("0.5")),)))
+    _write_l1(tmp_path, rows, [d for d in DAYS if d <= L2_LAST])
+    materialize_isin(
+        ISIN,
+        chain=build_chain_for_isin(ISIN, []),
+        actions=[],
+        data_root=tmp_path,
+        curated=(),
+        infer_splits=False,
+    )
+    _write_l1(tmp_path, rows, [d for d in DAYS if d > L2_LAST])
+    late = split(inside, "10", "5", knowable=date(2026, 10, 6))
+    window = [d for d in DAYS if d >= date(2026, 9, 1)]
+    with _source(tmp_path, _Actions([late])) as source:
+        notes = source.price_overlay_notes(frozenset({ISIN}), window).records
+    (excluded,) = [n for n in notes if n.kind == PriceOverlayNote.EXCLUDED]
+    assert "rebuild is owed" in excluded.reason
+    # A session before it was knowable sees nothing to check.
+    early = [d for d in window if d <= date(2026, 10, 5)]
+    with _source(tmp_path, _Actions([late])) as source:
+        assert not [
+            n
+            for n in source.price_overlay_notes(frozenset({ISIN}), early).records
+            if n.kind == PriceOverlayNote.EXCLUDED
+        ]

@@ -444,13 +444,15 @@ class LakeCommonsSource:
                     applied = ()
         if tail is not None and tail.last > lo:
             # An action ex inside L2's own span, ingested after L2 was built over it, leaves the
-            # raw step in L2 until the drain rebuilds it.
-            span = plan_events(
-                isin,
-                recorded=recorded,
-                unreconciled=(),
-                after=lo,
-                as_of=min(tail.last, as_of),
+            # raw step in L2 until the drain rebuilds it. Knowability is the session's, not L2's
+            # last bar's: the feed often learns an action days after its ex-date (INE2FMX01012's
+            # bonus, ex 2026-09-28, knowable 10-06), and that is exactly the case L2 missed.
+            span = tuple(
+                e
+                for e in plan_events(
+                    isin, recorded=recorded, unreconciled=(), after=lo, as_of=as_of
+                )
+                if e.ex_date <= tail.last
             )
             if any(e.kind is OverlayKind.APPLIED for e in span):
                 flags.extend(stale_l2_events(isin, span, self._l2_window(service, isin, window)))
@@ -789,7 +791,9 @@ class LakeCommonsSource:
         The same rule as :meth:`adjusted_closes`, for the whole bar: the raw L1 bar is the base,
         and where L2 holds the name's NSE bar for the session (not a fallback from another venue)
         its adjusted high, low, close and volume replace the raw ones. Delivered quantity takes
-        the bar's quantity factor. A raw bar with no high or low takes its close for both.
+        the bar's quantity factor. A raw bar with no high or low takes its close for both. The
+        sessions after a name's last L2 bar, and its L2 history before them, take the corporate
+        actions ex in between (module docstring, "The L2 lag").
         """
         files = self._files_for(sessions)
         if not files:
