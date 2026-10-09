@@ -3271,7 +3271,7 @@ tasks:
     - Stops across a CA: a stop expressed as a price is scaled by the CA factor on the ex-date
       (and only by it), so the next close cannot fire a false STOP_EXIT.
     - Run the Commons build read-only on the real lake for 2026-10-09 and report the numbers.
-  deliverables: [dataplatform/store/l2_overlay.py, analyst/commons/sources.py, analyst/commons/sheets.py, backtest/fm_world.py, backtest/fm_job.py, tests/unit/test_l2_overlay.py]
+  deliverables: [dataplatform/store/l2_overlay.py, analyst/commons/sources.py, analyst/commons/sheets.py, backtest/fm_world.py, backtest/fm_job.py, tests/unit/test_l2_overlay.py, tests/unit/test_fm_world_readiness.py]
   acceptance:
     - "for a synthetic ISIN with a split, a bonus and a demerger inside the overlay window, the overlay equals a full L2 materialize over the same bars, Decimal for Decimal; an inverted factor fails"
     - "an INE0IQ001011-shaped demerger in the lag window flags the ISIN in the sheet gaps and keeps it out of the universe the screens read"
@@ -3279,7 +3279,7 @@ tasks:
     - "the readiness probe no longer waits on L2 freshness; an uncomputable CA on a top-10 name is a wait reason"
     - "a just-bought name's stop is rescaled by the split/bonus factor on its ex-date and no false STOP_EXIT fires"
     - "make check is green"
-  verify: "uv run pytest tests/unit/test_l2_overlay.py tests/unit/test_commons_sheets.py tests/unit/test_fm_job.py -q"
+  verify: "uv run pytest tests/unit/test_l2_overlay.py tests/unit/test_commons_sheets.py tests/unit/test_fm_world_readiness.py tests/unit/test_fm_job.py tests/unit/test_fm_stops.py -q"
 
 - id: M17.8
   title: Five-session dry run, then the forward clock (S0)

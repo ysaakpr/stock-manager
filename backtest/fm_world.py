@@ -10,7 +10,9 @@ M15.3 paper session read it:
   industry snapshot, corporate actions from the store, the upper-circuit reader
   (`backtest.fm_circuit.LakeCircuitMarket`), adjusted closes from the query service, the bench's
   TRI from ``L1/benchmark_tri``, and `readiness` — what the session's Commons build would still be
-  waiting for.
+  waiting for: the index levels, L1 for the most liquid names, a corporate-action overlay that
+  can price every action on them (`overlay_readiness`), and the bench's TRI. L2's lag behind L1
+  is not waited for (M17.11): the Commons compose the lagged actions themselves.
 - `LakeDelistedNames` — the `DelistedNames` the marks, the caps and the outcomes read: a name is
   delisted only when the **identity master's listing record** says its listing has ended (every
   exchange delisted it, `store_listing_calendar`); its last trade is its last L1 print on or
@@ -38,8 +40,6 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
-import duckdb
-
 from analyst.commons import (
     DigestStore,
     FetchError,
@@ -60,7 +60,12 @@ from analyst.commons import (
 )
 from analyst.commons import base_rates as base_rate_tables
 from analyst.commons.fetch import default_store_root
-from analyst.commons.sheets import INDIA_VIX_SERIES, TREND_INDEX_SERIES, CommonsSource
+from analyst.commons.sheets import (
+    ADJUSTED_LOOKBACK_SESSIONS,
+    INDIA_VIX_SERIES,
+    TREND_INDEX_SERIES,
+    CommonsSource,
+)
 from analyst.commons.store import CommonsStore, ShortlistStore
 from analyst.fundmanager.books import LastTraded
 from analyst.fundmanager.controls import BenchmarkUnavailableError, LakeTriBenchmark
@@ -92,8 +97,7 @@ from dataplatform.identity.master import Exchange
 from dataplatform.logging import get_logger
 from dataplatform.query import AdjustedSeriesRequest, PitContext
 from dataplatform.query.universe import ListingCalendar, ListingWindow
-from dataplatform.store.l2 import PRICES_ADJUSTED_DATASET
-from dataplatform.store.paths import l2_isin_partition_path
+from dataplatform.store.l2_overlay import OverlayActionSource, OverlayKind, StoreOverlayActions
 from execution.costs import CostModel, load_rate_card
 from execution.sim_broker import SessionMarket, SlippageModel
 
@@ -113,6 +117,7 @@ __all__ = [
     "NoLiveFetcher",
     "cli_run",
     "index_level_gaps",
+    "overlay_readiness",
     "production_run",
 ]
 
@@ -124,7 +129,7 @@ _LOG = get_logger(__name__)
 M17_DATASETS: Final[tuple[str, ...]] = ("nse_bhavcopy", "nse_delivery")
 #: The bench's TRI slug (`controls.BENCHMARK_INDEX_SLUGS`).
 BENCH_SLUG: Final = "nifty500"
-#: How many of the session's most liquid names the L2-refresh probe samples.
+#: How many of the session's most liquid names the readiness probe samples (L1 and the overlay).
 READINESS_SAMPLE: Final = 10
 #: An unknown sector groups under this for the sector cap (conservative: one shared bucket).
 UNKNOWN_SECTOR: Final = "UNKNOWN"
@@ -244,6 +249,7 @@ class LakeM17World:
         clock: Clock,
         listings: ListingCalendar | None,
         calendar: TradingCalendar | None = None,
+        actions: Callable[[], OverlayActionSource] | None = None,
     ) -> None:
         if calendar is None:
             from dataplatform.ingest.calendar import trading_calendar
@@ -257,6 +263,9 @@ class LakeM17World:
         self._reader = _L1Reader(data_root=data_root)
         self._service: QueryService | None = None
         self._commons = LakeCommonsSource(clock=clock, data_root=data_root)
+        if actions is None and settings is not None:
+            actions = functools.partial(StoreOverlayActions, settings)
+        self._overlay_actions = actions
         self._sector_map: dict[str, str] | None = None
         self._sector_as_of: date | None = None
         self._actions: BookActionSource | None = None
@@ -358,16 +367,20 @@ class LakeM17World:
     def readiness(self, session: date) -> tuple[str, ...]:
         missing = list(index_level_gaps(self._commons, session))
         sample = self._reader.most_liquid_on(session, READINESS_SAMPLE)
-        behind = [
-            isin for isin in sample if (_l2_last(isin, self._data_root) or date.min) < session
-        ]
         if not sample:
             missing.append(f"L1 prices for {session.isoformat()}")
-        elif behind:
-            missing.append(
-                f"L2 prices_adjusted refresh ({len(behind)} of the {len(sample)} most liquid "
-                f"names end before {session.isoformat()})"
-            )
+        else:
+            index = bisect_right(self._sessions, session)
+            window = self._sessions[max(0, index - ADJUSTED_LOOKBACK_SESSIONS) : index]
+            if not window or window[-1] != session:
+                window = [*window, session]
+            # A fresh source and a fresh store read per poll: a reconciliation or a curation
+            # that lands mid-wait must end the wait on the next poll, as a landed level does.
+            actions = None if self._overlay_actions is None else self._overlay_actions()
+            with LakeCommonsSource(
+                clock=self._clock, data_root=self._data_root, actions=actions
+            ) as probe:
+                missing.extend(overlay_readiness(probe, frozenset(sample), window))
         try:
             if (
                 LakeTriBenchmark(
@@ -379,6 +392,53 @@ class LakeM17World:
         except BenchmarkUnavailableError as exc:
             missing.append(f"{BENCH_SLUG} TRI: {exc}")
         return tuple(missing)
+
+
+def overlay_readiness(
+    commons: LakeCommonsSource, sample: frozenset[str], window: Sequence[date]
+) -> tuple[str, ...]:
+    """The readiness probe's price half, past L1: is the overlay CA-correct for ``sample``?
+
+    A wait reason for each sampled name with a corporate action the overlay could price once
+    something lands (``UNCOMPUTABLE``: unquantified terms, an unreconciled split, a rebuild owed),
+    and one when the corporate-action store cannot be read at all. Never one for L2's lag: the
+    overlay composes the lagged actions, so how far L2 is behind is logged and left to the
+    Commons' own informational gap. A demerger or rights issue (``BREAK``/``UNPRICED``) is not a
+    wait reason either — the engine never prices one, so no wait ends it; the Commons exclude
+    the name for the session instead.
+    """
+    session = window[-1]
+    ends = commons.l2_ends(sample)
+    behind = sorted(i for i, last in ends.items() if last is None or last < session)
+    if behind:
+        _LOG.info(
+            "fm_world.l2_lag",
+            session=session.isoformat(),
+            behind=len(behind),
+            sample=len(sample),
+            earliest=min((ends[i] or date.min) for i in behind).isoformat(),
+            note="informational: the Commons overlay composes the lagged corporate actions",
+        )
+    try:
+        flags = commons.corporate_action_flags(sample, window)
+    except SourceUnavailableError as exc:
+        return (f"corporate-action overlay ({exc.source}): {exc.reason}",)
+    missing: list[str] = []
+    for isin, events in flags.items():
+        waiting = [e for e in events if e.kind is OverlayKind.UNCOMPUTABLE]
+        if waiting:
+            missing.append(
+                f"corporate action on {isin} the overlay cannot price yet: "
+                + "; ".join(e.detail for e in waiting)
+            )
+        else:
+            _LOG.info(
+                "fm_world.ca_excluded_name",
+                isin=isin,
+                session=session.isoformat(),
+                detail="; ".join(e.detail for e in events)[:300],
+            )
+    return tuple(missing)
 
 
 #: The `macro_series` ids the readiness probe waits for — what `index_close_evening` lands (M17.10).
@@ -406,19 +466,6 @@ def index_level_gaps(commons: CommonsSource, session: date) -> tuple[str, ...]:
         if last is None or last < session:
             missing.append(f"index level {series} (latest {'none' if last is None else last})")
     return tuple(missing)
-
-
-def _l2_last(isin: str, data_root: Path) -> date | None:
-    path = l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=data_root)
-    if not path.exists():
-        return None
-    files = sorted(str(p) for p in path.glob("*.parquet"))
-    if not files:
-        return None
-    row = duckdb.execute(
-        "SELECT max(trade_date) FROM read_parquet($files)", {"files": files}
-    ).fetchone()
-    return None if row is None else row[0]
 
 
 # ── the Commons ──────────────────────────────────────────────────────────────────────────────────
@@ -455,6 +502,9 @@ class LakeCommonsBuilder:
     recorded_at: Clock
     digest_model: str
     source: LakeCommonsSource | None = None
+    #: A fresh corporate-action store per build (M17.11); ``None`` leaves L2's lag raw, which the
+    #: sheets then name in a gap.
+    actions: Callable[[], OverlayActionSource] | None = None
 
     def close(self) -> None:
         if self.source is not None:
@@ -472,7 +522,11 @@ class LakeCommonsBuilder:
             mark = now
 
         self.close()
-        source = self.source = LakeCommonsSource(clock=clock, data_root=self.data_root)
+        source = self.source = LakeCommonsSource(
+            clock=clock,
+            data_root=self.data_root,
+            actions=None if self.actions is None else self.actions(),
+        )
         sheets = build_commons_sheets(
             session, source=source, gate=self.gate, clock=clock, universe=self.universe
         )
@@ -664,6 +718,7 @@ def _wire(
         universe=universe_parameters(roster),
         recorded_at=clock,
         digest_model=roster.managers[0].models.digest,
+        actions=functools.partial(StoreOverlayActions, settings),
     )
     stack.callback(builder.close)
     result = run_m17_session(

@@ -466,6 +466,37 @@ class LakeCommonsSource:
             )
         return _IsinOverlay(tail=tail, applied=applied, flags=tuple(flags))
 
+    def corporate_action_flags(
+        self, isins: frozenset[str], sessions: Sequence[date]
+    ) -> dict[str, tuple[OverlayEvent, ...]]:
+        """Each of ``isins`` the overlay cannot make CA-correct on the window, with its events.
+
+        The kinds say whether waiting can help: ``UNCOMPUTABLE`` (a curation, a reconciliation
+        or a rebuild fixes it) against ``BREAK`` / ``UNPRICED`` (the engine never prices them).
+        Raises `SourceUnavailableError` as `price_overlay_notes` does.
+        """
+        if self._actions is None:
+            raise SourceUnavailableError(
+                "corporate_actions",
+                "no corporate-action store is wired; sessions after L2's last are raw L1 closes",
+            )
+        if not isins:
+            return {}
+        overlays = self._overlay(isins, sorted(set(sessions)))
+        return {isin: state.flags for isin, state in sorted(overlays.items()) if state.flags}
+
+    def l2_ends(self, isins: frozenset[str]) -> dict[str, date | None]:
+        """Each ISIN's last NSE session in L2 (``None``: no partition)."""
+        unknown = [i for i in sorted(isins) if i not in self._tails]
+        if unknown:
+            found = l2_tails(self._con, unknown, data_root=self._data_root)
+            for isin in unknown:
+                self._tails[isin] = found.get(isin)
+        return {
+            isin: None if (tail := self._tails[isin]) is None else tail.last
+            for isin in sorted(isins)
+        }
+
     def price_overlay_notes(
         self, isins: frozenset[str], sessions: Sequence[date]
     ) -> Dataset[PriceOverlayNote]:
