@@ -62,7 +62,7 @@ from analyst.commons.sheets import (
 )
 from analyst.llm import LLM, LLMError, LLMResponse, Message, Role, ToolSpec, prompt_digest
 from analyst.monitor.interlock import GreenGate
-from dataplatform.clock import Clock
+from dataplatform.clock import IST, Clock
 from dataplatform.logging import get_logger
 from dataplatform.query import Dataset, PitContext
 
@@ -346,7 +346,7 @@ def _announcement_input(row: AnnouncementText) -> FilingInput:
     lines = [f"Subject: {row.subject}"]
     if row.category:
         lines.append(f"Category: {row.category}")
-    lines.append(f"Disseminated: {row.ts.isoformat()}")
+    lines.append(f"Disseminated: {row.ts.astimezone(IST).isoformat()}")
     if row.body:
         lines.append(f"Text: {row.body}")
     if row.attachment_ref:

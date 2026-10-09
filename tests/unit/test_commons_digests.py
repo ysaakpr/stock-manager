@@ -22,8 +22,8 @@ model or the network. The lake readers run on a scratch lake under ``tmp_path``.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
-from datetime import date, datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -38,6 +38,7 @@ from analyst.commons import (
     DigestBody,
     DigestRefusedError,
     DigestRun,
+    DigestStore,
     FilingDigest,
     FilingInput,
     FilingKind,
@@ -198,7 +199,7 @@ def _stub(world: DigestWorld, overrides: dict[str, StubReply] | None = None) -> 
 
 def _run(
     world: DigestWorld,
-    store: InMemoryDigestStore,
+    store: DigestStore,
     llm: LLM,
     session: date = DAY2,
     **kwargs: Any,
@@ -443,6 +444,11 @@ def test_a_long_announcement_is_bounded_and_marked() -> None:
     assert short.truncated is False
     # The attachment is named, never fetched: its link is in the text, its content is not.
     assert "Attachment (not included): https://nsearchives" in short.text
+    # The dissemination time is stated in IST whatever zone the store returned it in.
+    utc = _ann(RISING, "utc", DAY2)
+    utc = replace(utc, ts=utc.ts.astimezone(UTC))
+    (item_utc,) = filing_inputs([utc], [], isins=UNIVERSE, after=DAY1, through=DAY2)
+    assert f"Disseminated: {_ts(DAY2).isoformat()}" in item_utc.text
 
 
 def test_a_results_filing_is_one_input_with_its_facts() -> None:

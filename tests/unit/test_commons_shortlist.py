@@ -350,6 +350,39 @@ def test_a_missing_index_is_a_gap_and_relative_strength_takes_the_mean(
     assert {e.relative_strength_20 for e in shortlist.entries} == {None}
 
 
+def test_a_lagging_index_is_named_and_leaves_the_order_unchanged(
+    sheets: CommonsSheets, shortlist: Shortlist
+) -> None:
+    lagging = _shortlist_world()
+    lag_from = CALENDAR[-3]
+    lagging.levels = [
+        lv
+        for lv in lagging.levels
+        if not (lv.series_id == RS_INDEX_SERIES and lv.session > lag_from)
+    ]
+    late = build_shortlist(sheets, source=FakeSource(lagging), clock=_clock(22))
+    (gap,) = late.gaps
+    assert gap.source == RS_INDEX_SERIES and lag_from.isoformat() in gap.reason
+    assert late.coverage["relative_strength_20"] == 4
+    # The index return is common to every name, so the ranks and the order do not move.
+    assert [e.isin for e in late.entries] == [e.isin for e in shortlist.entries]
+    assert [e.rank_relative_strength_20 for e in late.entries] == [
+        e.rank_relative_strength_20 for e in shortlist.entries
+    ]
+    assert late.entries[0].relative_strength_20 != shortlist.entries[0].relative_strength_20
+
+
+def test_a_stale_index_is_not_used(sheets: CommonsSheets) -> None:
+    stale = _shortlist_world()
+    cutoff = SESSION - timedelta(days=10)
+    stale.levels = [
+        lv for lv in stale.levels if not (lv.series_id == RS_INDEX_SERIES and lv.session > cutoff)
+    ]
+    shortlist = build_shortlist(sheets, source=FakeSource(stale), clock=_clock(22))
+    assert [g.source for g in shortlist.gaps] == [RS_INDEX_SERIES]
+    assert {e.relative_strength_20 for e in shortlist.entries} == {None}
+
+
 def test_missing_filings_are_a_gap(world: World, sheets: CommonsSheets) -> None:
     shortlist = build_shortlist(
         sheets, source=FakeSource(world, missing=frozenset({"filings"})), clock=_clock(22)

@@ -9,7 +9,8 @@ sheet) is scored on four factors:
   must print on exactly those sessions.
 - **20-session relative strength against NIFTY 500.** ``(1 + r) / (1 + r_index) - 1``. ``r`` is the
   sheet's ``return_4w``, the name's 20-session adjusted return. ``r_index`` is NIFTY 500's
-  return from its last level on or before ``t-20`` to its level on the session.
+  20-session return to its latest level on or before the session. A lagging level is named in a
+  gap. The rank is the same either way, because the index return is common to every name.
 - **Earnings surprise.** The M16.3 leg, reused and not re-derived:
   :class:`backtest.policies.earnings_surprise.EarningsSurprisePanel` over the same PIT filings. It
   is the standardised unexpected earnings inside its 63-session window, 0 after it, and undefined
@@ -67,6 +68,7 @@ __all__ = [
     "MOMENTUM_LONG_SESSIONS",
     "MOMENTUM_SHORT_SESSIONS",
     "RS_INDEX_SERIES",
+    "RS_INDEX_STALE_DAYS",
     "RS_SESSIONS",
     "SHORTLIST_RULE_HASH",
     "SHORTLIST_SIZE",
@@ -95,6 +97,8 @@ MOMENTUM_SHORT_SESSIONS: Final = 21
 #: The relative-strength window, in NSE sessions, and the index it is measured against.
 RS_SESSIONS: Final = 20
 RS_INDEX_SERIES: Final = "IN.NSE.NIFTY_500.CLOSE"
+#: An index level older than this many calendar days is not used (the market sheet's rule).
+RS_INDEX_STALE_DAYS: Final = 7
 #: Sessions the calendar must hold: the session and the 252 before it.
 _CALENDAR_SESSIONS: Final = MOMENTUM_LONG_SESSIONS + 1
 
@@ -227,6 +231,9 @@ def shortlist_rule_source() -> bytes:
             percentile_ranks,
             rank_shortlist,
             _factors_of,
+            _momentum_bases,
+            _index_return,
+            _surprises,
             _m16_3._surprise_for,
             _m16_3.surprise_readings,
             _m16_3.EarningsSurprisePanel,
@@ -239,6 +246,7 @@ def shortlist_rule_source() -> bytes:
         "momentum_short": MOMENTUM_SHORT_SESSIONS,
         "rs_sessions": RS_SESSIONS,
         "rs_index": RS_INDEX_SERIES,
+        "rs_index_stale_days": RS_INDEX_STALE_DAYS,
         "factors": list(_FACTORS),
         "score_scale": str(_SCORE),
         "m16_3": {
@@ -463,35 +471,55 @@ def _momentum_bases(
 def _index_return(
     calendar: Sequence[date], source: CommonsSource, pit: PitContext, gaps: list[Gap]
 ) -> Decimal | None:
-    """NIFTY 500's return from its last level on or before t-20 to its level on the session."""
+    """NIFTY 500's 20-session return, ending at its latest level on or before the session.
+
+    The return runs from the index's last level on or before the NSE session 20 before that
+    latest level, to the latest level. A latest level older than the session is kept and named in
+    a gap, as the market sheet keeps a lagging level (M17.1). It is never carried forward to the
+    session. One older than :data:`RS_INDEX_STALE_DAYS` is not used.
+
+    The rank does not depend on this value. ``(1 + r) / (1 + r_index)`` is the same increasing
+    function of ``r`` for every name, so a lagging or missing index changes the reported relative
+    strength, never the order.
+    """
     if len(calendar) <= RS_SESSIONS:
         if calendar:
             gaps.append(Gap(source="relative_strength_20", reason="too few sessions"))
         return None
-    session, start = calendar[-1], calendar[-1 - RS_SESSIONS]
+    session = calendar[-1]
     try:
         levels: Sequence[IndexLevel] = pit.admit(source.index_levels([RS_INDEX_SERIES], session))
     except SourceUnavailableError as exc:
         gaps.append(Gap(source=exc.source, reason=exc.reason))
         return None
     own = {lv.session: lv.close for lv in levels if lv.series_id == RS_INDEX_SERIES}
-    now = own.get(session)
-    then_sessions = [s for s in own if s <= start]
-    if now is None or not then_sessions:
+    published = sorted(day for day in own if day <= session)
+    if not published or (session - published[-1]).days > RS_INDEX_STALE_DAYS:
         gaps.append(
             Gap(
                 source=RS_INDEX_SERIES,
-                reason=f"no level on {session} or none on or before {start}",
+                reason=f"no level within {RS_INDEX_STALE_DAYS} days of {session}",
             )
         )
         return None
-    then = own[max(then_sessions)]
-    if then <= _ZERO:
-        gaps.append(
-            Gap(source=RS_INDEX_SERIES, reason=f"non-positive level on {max(then_sessions)}")
-        )
+    latest = published[-1]
+    ending = [day for day in calendar if day <= latest]
+    if len(ending) <= RS_SESSIONS:
+        gaps.append(Gap(source=RS_INDEX_SERIES, reason=f"too few sessions before {latest}"))
         return None
-    return now / then - _ONE
+    start = ending[-1 - RS_SESSIONS]
+    before = [day for day in published if day <= start]
+    if not before or own[before[-1]] <= _ZERO:
+        gaps.append(Gap(source=RS_INDEX_SERIES, reason=f"no usable level on or before {start}"))
+        return None
+    if latest != session:
+        gaps.append(
+            Gap(
+                source=RS_INDEX_SERIES,
+                reason=f"latest level is {latest}, not the session; its return ends there",
+            )
+        )
+    return own[latest] / own[before[-1]] - _ONE
 
 
 def _surprises(
