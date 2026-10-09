@@ -30,7 +30,6 @@ the next tick pages about that.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Collection, Iterable, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -45,6 +44,7 @@ from dataplatform.config import Settings
 from dataplatform.ingest.calendar import TradingCalendar, trading_calendar
 from dataplatform.ingest.calendar import load as load_calendar
 from dataplatform.logging import get_logger
+from dataplatform.redaction import mask_secrets
 from dataplatform.status import SourceStatus, SyncStateStore
 from dataplatform.store.db import Connection, connection
 
@@ -121,31 +121,19 @@ class TriggerEvaluationError(RuntimeError):
 
 # ── redaction ────────────────────────────────────────────────────────────────────────────────
 
-_URL_USERINFO = re.compile(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@")
-_URL_QUERY = re.compile(r"(?P<path>://[^\s?#]+)\?[^\s#]*")
-_TELEGRAM_TOKEN = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
-_CREDENTIAL_PAIR = re.compile(
-    r"(?P<name>password|passwd|pwd|token|secret|api[_-]?key|apikey|authorization)"
-    r"(?P<sep>\s*[=:]\s*)(?P<value>\S+)",
-    re.IGNORECASE,
-)
-
 
 def redact(text: str, *, limit: int = MAX_DETAIL_CHARS) -> str:
     """`text` with anything credential-shaped removed, then truncated to `limit` characters.
 
-    What it does: masks URL userinfo (a DSN's `user:password@`), drops URL query strings (where a
-    token travels when it travels in a URL), masks Telegram bot tokens, and masks the value of any
-    `password=`/`token:`-style pair.
+    What it does: `dataplatform.redaction.mask_secrets` (URL userinfo, URL query strings, bot and
+    prefixed API tokens, `Bearer` credentials, `password=`/`token:`-style pairs), then collapses
+    whitespace.
     What it assumes: the upstream error strings are diagnostic text, not structured data — an
     over-eager mask costs a little detail, an under-eager one publishes a credential.
     What it never does: pass a secret through on the grounds that it was already in a log line.
     An alert leaves the box; the log does not.
     """
-    text = _URL_USERINFO.sub(r"\g<scheme>***@", text)
-    text = _URL_QUERY.sub(r"\g<path>?***", text)
-    text = _TELEGRAM_TOKEN.sub("bot***", text)
-    text = _CREDENTIAL_PAIR.sub(r"\g<name>\g<sep>***", text)
+    text = mask_secrets(text)
     text = " ".join(text.split())
     if len(text) > limit:
         text = text[: limit - 1] + "…"

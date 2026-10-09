@@ -9,4 +9,30 @@ This package never imports `analyst.fundmanager`, directly or through anything i
 `tests/unit/test_commons_isolation.py` walks the import graph and fails the build if it does.
 """
 
-__all__: list[str] = []
+from analyst.commons.fetch import (
+    FetchedPage,
+    Fetcher,
+    FetchError,
+    FetchKind,
+    FetchOutcome,
+    FetchRequest,
+    FetchResponse,
+    Snapshot,
+    SnapshotIntegrityError,
+    SnapshotPage,
+    SnapshotStore,
+)
+
+__all__ = [
+    "FetchError",
+    "FetchKind",
+    "FetchOutcome",
+    "FetchRequest",
+    "FetchResponse",
+    "FetchedPage",
+    "Fetcher",
+    "Snapshot",
+    "SnapshotIntegrityError",
+    "SnapshotPage",
+    "SnapshotStore",
+]
