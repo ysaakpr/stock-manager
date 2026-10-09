@@ -47,6 +47,10 @@ __all__ = [
     "HealthOut",
     "JobHealthOut",
     "JobsOut",
+    "ManagerBookOut",
+    "ManagerDecisionOut",
+    "ManagerScoreOut",
+    "ManagersOut",
     "QualityFlagOut",
     "QualityOut",
     "QualitySeverity",
@@ -734,3 +738,87 @@ class PaperOut(BaseModel):
     as_of: datetime
     healthy: bool = Field(description="Every book is healthy (true when there are none)")
     books: list[PaperBookStatusOut]
+
+
+# ── /status/managers (M17.6) ─────────────────────────────────────────────────────────────────
+
+
+class ManagerBookOut(BaseModel):
+    """One M17 book's latest journaled mark: a manager, its control, or the bench."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    book_id: str
+    kind: str = Field(description="MANAGER, CONTROL or BENCH")
+    opening_capital_inr: Decimal
+    latest_session: date | None = Field(description="None before the book's first mark")
+    nav: Decimal | None
+    cash: Decimal | None
+    positions: int | None
+    return_pct: Decimal | None = Field(description="Latest mark over opening capital, in percent")
+
+
+class ManagerDecisionOut(BaseModel):
+    """One journaled decision of an M17 book on the latest session: what, never why.
+
+    Carries no rationale, prompt or evidence text — only the decision's structured fields.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    book_id: str
+    trading_date: date
+    decision: str
+    event: str | None
+    isin: str | None
+    action: str | None
+    target_weight: str | None
+    p_beat_bench: str | None
+    horizon_sessions: str | None
+    rails: str | None = Field(description="The rails that refused it, for a RAIL_BLOCK")
+
+
+class ManagerScoreOut(BaseModel):
+    """One manager on the pre-registration §6 scoreboard, over its current window."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    manager_id: str
+    control_id: str
+    phase: str = Field(description="NOT_STARTED, PRIMARY, EXTENSION or FINAL")
+    verdict: str = Field(description="NOT_STARTED, IN_PROGRESS, PASS, CLEAR_FAIL or INCONCLUSIVE")
+    window: str | None = Field(description="primary (S0..S0+62) or extension (S0..S0+125)")
+    window_sessions: int | None
+    window_end: date | None
+    excess_vs_control_pp: Decimal | None
+    excess_vs_bench_pp: Decimal | None
+    max_drawdown_pp: Decimal | None
+    bench_max_drawdown_pp: Decimal | None
+    brier: Decimal | None
+    resolved_decisions: int | None
+
+
+class ManagersOut(BaseModel):
+    """`GET /status/managers` — the M17 books, the latest session's decisions, the scoreboard.
+
+    Everything is rebuilt from the M17 journal streams on each request. No secret, no prompt text.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    as_of: datetime
+    s0: date | None = Field(description="The journaled S0; None before the clock starts")
+    scoreboard_as_of: date | None = Field(description="The latest mark any book journaled")
+    sessions_elapsed: int
+    k_of_n: str = Field(description="'k of 4 passed' — never a lone winner (§6)")
+    passed: int
+    scoreboard_digest: str | None = Field(
+        description="sha256 of the scoreboard's canonical bytes; None when it could not be built"
+    )
+    scoreboard_error: str | None = Field(
+        description="Why the journal could not be scored (a missing mark, a malformed line)"
+    )
+    books: list[ManagerBookOut]
+    managers: list[ManagerScoreOut]
+    decisions_session: date | None
+    decisions: list[ManagerDecisionOut]
