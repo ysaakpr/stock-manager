@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
@@ -79,6 +79,7 @@ from analyst.fundmanager.bundle import (
     UNRANKED_TIER,
     ManagerBook,
     ResearchBundle,
+    SlippageCurve,
     Unfulfilled,
     tier_hurdles,
 )
@@ -132,7 +133,6 @@ from analyst.llm import LLM, LLMError, LLMResponse, Message, Role, ToolSpec, pro
 from dataplatform.clock import Clock
 from dataplatform.logging import get_logger
 from execution.costs import CostModel
-from execution.sim_broker import SlippageModel
 
 __all__ = [
     "CALL_EVENT",
@@ -191,6 +191,8 @@ class ManagerCommons:
     base-rate table is injected rather than loaded here: until its digest is pinned,
     `base_rates.load_frozen` refuses, and the caller decides what that means for the session.
     ``dossiers`` and ``digests`` fulfil research for named ISINs; ``snapshots`` is the web cache.
+    ``cost_model`` and ``slippage`` are what the paper book fills with (the shared cost model and
+    the SimBroker slippage), so a BUY's hurdle is the round trip it will actually pay.
     """
 
     sheets: CommonsSheets
@@ -200,8 +202,8 @@ class ManagerCommons:
     dossiers: DossierProvider
     snapshots: SnapshotCache
     cost_model: CostModel
+    slippage: SlippageCurve
     digests: DigestProvider | None = None
-    slippage: SlippageModel = field(default_factory=SlippageModel)
 
     @classmethod
     def from_builds(
@@ -214,8 +216,8 @@ class ManagerCommons:
         source: ScreenSource,
         snapshots: SnapshotCache,
         cost_model: CostModel,
+        slippage: SlippageCurve,
         digests: DigestProvider | None = None,
-        slippage: SlippageModel | None = None,
     ) -> ManagerCommons:
         """Commons whose dossiers are `build_dossiers` over ``source`` for these builds."""
 
@@ -231,7 +233,7 @@ class ManagerCommons:
             snapshots=snapshots,
             cost_model=cost_model,
             digests=digests,
-            slippage=slippage or SlippageModel(),
+            slippage=slippage,
         )
 
     def verify(self, session: date) -> None:

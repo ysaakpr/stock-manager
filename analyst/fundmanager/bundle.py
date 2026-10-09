@@ -26,12 +26,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
-from typing import Final
+from typing import Final, Protocol
 
 from analyst.commons import Dossier, FilingDigest, Snapshot, UniverseRow
 from analyst.fundmanager.schemas import QueryItem, ResearchItem
 from execution.costs import CostModel, Side, Trade
-from execution.sim_broker import SlippageModel
 
 __all__ = [
     "UNRANKED_TIER",
@@ -41,6 +40,7 @@ __all__ = [
     "ManagerBook",
     "ResearchBundle",
     "RoundTrip",
+    "SlippageCurve",
     "Unfulfilled",
     "round_trip",
     "tier_hurdles",
@@ -53,6 +53,17 @@ _HUNDRED: Final = Decimal(100)
 _BPS: Final = Decimal(10_000)
 _Q4: Final = Decimal("0.0001")
 _ZERO: Final = Decimal(0)
+
+
+class SlippageCurve(Protocol):
+    """The paper fills' slippage, in bps, for an order against a session's traded value.
+
+    `execution.sim_broker.SlippageModel` satisfies it. It is a protocol, injected, because
+    `analyst/` never names a concrete broker module (invariant #5,
+    `tests/unit/test_sim_broker.py`); the caller hands in the model the paper book fills with.
+    """
+
+    def bps_for(self, *, order_turnover: Decimal, traded_value: Decimal) -> Decimal: ...
 
 
 # ── the manager's own book ───────────────────────────────────────────────────────────────────────
@@ -168,7 +179,7 @@ def round_trip(
     notional: Decimal,
     median_traded_value: Decimal,
     cost_model: CostModel,
-    slippage: SlippageModel,
+    slippage: SlippageCurve,
 ) -> RoundTrip | None:
     """The round-trip cost of a ``notional`` order in ``isin`` at ``price`` on ``session``.
 
@@ -227,7 +238,7 @@ def tier_hurdles(
     session: date,
     notional: Decimal,
     cost_model: CostModel,
-    slippage: SlippageModel,
+    slippage: SlippageCurve,
 ) -> tuple[CostHurdle, ...]:
     """Each tier's round trip for a ``notional`` order in its median name.
 

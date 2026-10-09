@@ -55,7 +55,7 @@ from decimal import Decimal
 from typing import Final
 
 from analyst.commons import BaseRateCell, CommonsScreens, Dossier, UnknownFieldError, resolve_field
-from analyst.fundmanager.bundle import ManagerBook, RoundTrip, round_trip
+from analyst.fundmanager.bundle import ManagerBook, RoundTrip, SlippageCurve, round_trip
 from analyst.fundmanager.schemas import (
     CANDIDATE_ACTIONS,
     HOLDING_ACTIONS,
@@ -66,7 +66,6 @@ from analyst.fundmanager.schemas import (
     ScenarioName,
 )
 from execution.costs import CostModel
-from execution.sim_broker import SlippageModel
 
 __all__ = [
     "CITATION_PATTERN",
@@ -234,7 +233,7 @@ class DecisionContext:
     buys_blocked: bool
     max_position_pct: Decimal
     cost_model: CostModel
-    slippage: SlippageModel
+    slippage: SlippageCurve
 
 
 @dataclass(frozen=True, slots=True)

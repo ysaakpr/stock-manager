@@ -99,6 +99,7 @@ from analyst.llm import (
 )
 from analyst.llm.client import DEFAULT_MAX_TOKENS
 from execution.costs import CostModel, load_rate_card
+from execution.sim_broker import SlippageModel
 from tests.unit.commons_screen_world import (
     BREAKOUT,
     FILLERS,
@@ -262,6 +263,7 @@ def _commons(world: World, tmp_path: Path, *, digests: bool = True) -> ManagerCo
         source=FakeScreenSource(screen_world()),
         snapshots=SnapshotStore(tmp_path / "fetch", clock=clock()),
         cost_model=CostModel(load_rate_card()),
+        slippage=SlippageModel(),
         digests=_on_demand if digests else None,
     )
 
