@@ -103,6 +103,17 @@ def test_known_rate_changes_take_effect_on_their_date() -> None:
     assert SCHEDULE.repo_rate(date(2026, 9, 29)) == Decimal("0.0525")
 
 
+def test_october_2026_mpc_hike_is_in_force_from_its_announcement() -> None:
+    # RBI press release prid=63742 (MPC 5-7 Oct 2026): repo raised 25 bp to 5.50%.
+    assert SCHEDULE.coverage_through >= date(2026, 10, 9)
+    assert SCHEDULE.repo_rate(date(2026, 10, 6)) == Decimal("0.0525")
+    assert SCHEDULE.repo_rate(date(2026, 10, 7)) == Decimal("0.055")
+    assert SCHEDULE.repo_rate(date(2026, 10, 9)) == Decimal("0.055")
+    latest = SCHEDULE.changes[-1]
+    assert latest.provenance is Provenance.VERIFIED
+    assert "prid=63742" in latest.source
+
+
 def test_earning_rate_is_repo_less_fifty_basis_points() -> None:
     day = date(2024, 1, 15)  # repo 6.50%
     assert Decimal("0.0050") == HAIRCUT

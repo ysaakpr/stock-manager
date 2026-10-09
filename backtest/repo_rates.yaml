@@ -17,8 +17,8 @@
 #   verified      — the rate and its effective date were read off the cited rbi.org.in page.
 #   reconstructed — the change is real and dated as RBI announced it, but the RBI page itself was
 #                   not read (rbidocs.rbi.org.in serves a CAPTCHA to automated readers, and it is
-#                   not evaded; a secondary timeline returned 403). Every row except the latest is
-#                   reconstructed as of 2026-09-29: upgrade a row only by reading its RBI release. Materiality: an effective date off by a day moves a year's
+#                   not evaded; a secondary timeline returned 403). Every row except the latest two is
+#                   reconstructed as of 2026-10-09: upgrade a row only by reading its RBI release. Materiality: an effective date off by a day moves a year's
 #                   interest by ~1/365 of 25 bp — immaterial against any backtest figure.
 #
 # Before 2011-05-03 the "repo rate" is the LAF repo rate of the corridor era (RBI then quoted a
@@ -34,10 +34,11 @@ haircut_note: >-
 coverage:
   from: "2006-01-01"
   # The last date on which the latest row was confirmed still in force: https://www.rbi.org.in/
-  # read 2026-09-29 shows "Policy Repo Rate : 5.25%" (the Feb, Apr, Jun and Aug 2026 MPCs held).
-  # The next MPC decision falls after this date; extend `through` only after checking it.
-  through: "2026-09-29"
-  read_on: "2026-09-29"
+  # read 2026-10-09 shows "Policy Repo Rate : 5.50%" (the 5-7 Oct 2026 MPC raised it; the Feb,
+  # Apr, Jun and Aug 2026 MPCs had held at 5.25%). The next MPC meets 2-4 Dec 2026; extend
+  # `through` past that only after checking its decision.
+  through: "2026-10-09"
+  read_on: "2026-10-09"
 
 changes:
   - effective_from: "2005-10-26"
@@ -291,4 +292,12 @@ changes:
       'the MPC voted unanimously to reduce the policy repo rate under the liquidity adjustment
       facility (LAF) to 5.25 per cent' —
       https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=61749 (read 2026-09-29).
+      Effective date is the announcement date: a repo change takes effect on the day announced."
+  - effective_from: "2026-10-07"
+    repo_rate_pct: "5.50"
+    provenance: verified
+    source: "RBI press release, Monetary Policy Statement, 2026-27 Resolution of the Monetary Policy
+      Committee October 5 to 7, 2026, 2026-10-07: 'voted unanimously to increase the policy repo
+      rate under the liquidity adjustment facility (LAF) by 25 bps to 5.50 per cent' —
+      https://www.rbi.org.in/Scripts/BS_PressReleaseDisplay.aspx?prid=63742 (read 2026-10-09).
       Effective date is the announcement date: a repo change takes effect on the day announced."
