@@ -20,12 +20,16 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import threading
+import time
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 from typer.testing import CliRunner
 
 from analyst.commons import fetch as fetch_module
@@ -176,6 +180,54 @@ def test_an_empty_answer_is_a_failure_not_a_snapshot(store: SnapshotStore) -> No
     with pytest.raises(FetchError, match="no pages"):
         store.get_or_fetch(request, StubFetcher(pages=()))
     assert store.lookup(request) is None
+
+
+def test_an_empty_answer_is_logged_as_a_failed_fetch_with_its_reason(store: SnapshotStore) -> None:
+    """M17.12: 20 fetches of the 2026-10-09 dry run came back empty and left no log line."""
+    request = FetchRequest.url("https://www.nseindia.com/made-up-page", SESSION)
+    with capture_logs() as logs, pytest.raises(FetchError):
+        store.get_or_fetch(request, StubFetcher(pages=()))
+    (line,) = [e for e in logs if e["event"] == "commons.fetch.failed"]
+    assert line["key"] == request.key and line["kind"] == "url"
+    assert "no pages" in line["reason"]
+
+
+started = threading.Event()
+
+
+class _SlowFetcher(StubFetcher):
+    """Holds each fetch open long enough for a second asker to queue behind its lock."""
+
+    def fetch(self, request: FetchRequest) -> FetchResponse:
+        started.set()
+        time.sleep(0.2)
+        return super().fetch(request)
+
+
+def test_two_concurrent_identical_requests_cost_one_fetch(store: SnapshotStore) -> None:
+    started.clear()
+    fetcher = _SlowFetcher()
+    request = FetchRequest.query("leader ltd order book", SESSION)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(store.get_or_fetch, request, fetcher)
+        assert started.wait(5)
+        second = pool.submit(store.get_or_fetch, request, fetcher)
+        outcomes = [first.result(timeout=10), second.result(timeout=10)]
+    assert len(fetcher.calls) == 1
+    assert sorted(o.cache_hit for o in outcomes) == [False, True]
+    assert outcomes[0].snapshot.id == outcomes[1].snapshot.id
+    assert len(store.index_path.read_text().splitlines()) == 1
+
+
+def test_concurrent_distinct_requests_each_land_one_whole_index_line(store: SnapshotStore) -> None:
+    requests = [FetchRequest.query(f"query number {n}", SESSION) for n in range(12)]
+    fetcher = StubFetcher()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        outcomes = list(pool.map(lambda r: store.get_or_fetch(r, fetcher), requests))
+    assert len(fetcher.calls) == 12 and not any(o.cache_hit for o in outcomes)
+    lines = store.index_path.read_text().splitlines()
+    assert sorted(json.loads(line)["key"] for line in lines) == sorted(r.key for r in requests)
+    assert store.verify() == []
 
 
 # ── 2. immutable and content-addressed ──────────────────────────────────────────────────────

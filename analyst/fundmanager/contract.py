@@ -41,6 +41,10 @@ and the session's other decisions stand. The numbers are fixed here, once:
   this session's regime or ALL; its quoted numbers must equal the table's within
   :data:`QUOTE_TOLERANCE`.
 
+Every breach carries a stable :class:`ReasonCode` beside its message (M17.12): the message is for
+the journal, the code is what a log line, the digest and the status page show, because a message
+can quote words the model wrote (an adjustment's reason, a malformed ref) and a code never does.
+
 What this module never does: call a model, read a clock, change a decision to make it pass, or
 apply a rail (caps, participation, min hold are M17.5's, applied when M17.7 stages).
 """
@@ -52,6 +56,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from enum import StrEnum
 from typing import Final
 
 from analyst.commons import BaseRateCell, CommonsScreens, Dossier, UnknownFieldError, resolve_field
@@ -79,6 +84,7 @@ __all__ = [
     "ContractVerdict",
     "DecisionContext",
     "NameFacts",
+    "ReasonCode",
     "citations_of",
     "implied_p_beat",
     "scenario_mean",
@@ -103,6 +109,47 @@ _HALF: Final = Decimal("0.5")
 _HUNDRED: Final = Decimal(100)
 _ALL: Final = "ALL"
 _RANKED_SCREENS: Final = frozenset({"S1", "S2", "S3", "S4"})
+
+
+class ReasonCode(StrEnum):
+    """Why the contract voided a decision, one code per rule (module docstring)."""
+
+    WRONG_ROLE = "WRONG_ROLE"
+    NOT_RESEARCHED = "NOT_RESEARCHED"
+    MALFORMED_REF = "MALFORMED_REF"
+    UNCITED_ADJUSTMENT = "UNCITED_ADJUSTMENT"
+    UNKNOWN_CITATION = "UNKNOWN_CITATION"
+    SCENARIO_SHAPE = "SCENARIO_SHAPE"
+    SCENARIO_SUM = "SCENARIO_SUM"
+    P_DISAGREES = "P_DISAGREES"
+    CELL_NOT_SHOWN = "CELL_NOT_SHOWN"
+    CELL_WRONG_SCREEN = "CELL_WRONG_SCREEN"
+    CELL_WRONG_TIER = "CELL_WRONG_TIER"
+    CELL_WRONG_REGIME = "CELL_WRONG_REGIME"
+    CELL_MISQUOTED = "CELL_MISQUOTED"
+    EDGE_NONE_BUY = "EDGE_NONE_BUY"
+    BUYS_BLOCKED = "BUYS_BLOCKED"
+    NO_FACTS = "NO_FACTS"
+    EXCLUDED = "EXCLUDED"
+    WEIGHT = "WEIGHT"
+    NO_WHOLE_SHARE = "NO_WHOLE_SHARE"
+    COST_CHECK = "COST_CHECK"
+    BELOW_HURDLE = "BELOW_HURDLE"
+    SCENARIOS_BELOW_HURDLE = "SCENARIOS_BELOW_HURDLE"
+    NO_STOP = "NO_STOP"
+    NO_ATR = "NO_ATR"
+    STOP_OUTSIDE_ATR = "STOP_OUTSIDE_ATR"
+    STOP_OVER_CEILING = "STOP_OVER_CEILING"
+    STOP_ON_NON_BUY = "STOP_ON_NON_BUY"
+    NEW_STOP_NOT_HELD = "NEW_STOP_NOT_HELD"
+    STOP_LOOSENED = "STOP_LOOSENED"
+
+
+_Breach = tuple[ReasonCode, str]
+
+
+def _b(code: ReasonCode, message: str) -> _Breach:
+    return code, message
 
 
 # ── citations ────────────────────────────────────────────────────────────────────────────────────
@@ -173,24 +220,36 @@ def scenario_mean(scenarios: Sequence[Scenario]) -> Decimal:
     return sum((s.probability * s.excess_pct for s in scenarios), _ZERO)
 
 
-def _scenario_breaches(decision: ManagerDecision) -> list[str]:
+def _scenario_breaches(decision: ManagerDecision) -> list[_Breach]:
     scenarios = decision.scenarios
     if not scenarios:
         return []
-    out: list[str] = []
+    out: list[_Breach] = []
     names = sorted(s.name.value for s in scenarios)
     if names != sorted(n.value for n in ScenarioName):
-        out.append(f"scenarios must be one each of BULL, BASE and BEAR, got {names}")
+        out.append(
+            _b(
+                ReasonCode.SCENARIO_SHAPE,
+                f"scenarios must be one each of BULL, BASE and BEAR, got {names}",
+            )
+        )
     total = sum((s.probability for s in scenarios), _ZERO)
     if abs(total - _ONE) > SCENARIO_SUM_TOLERANCE:
         out.append(
-            f"scenario probabilities sum to {total}, not 1 (tolerance {SCENARIO_SUM_TOLERANCE})"
+            _b(
+                ReasonCode.SCENARIO_SUM,
+                f"scenario probabilities sum to {total}, not 1 (tolerance "
+                f"{SCENARIO_SUM_TOLERANCE})",
+            )
         )
     implied = implied_p_beat(scenarios)
     if abs(decision.p_beat_bench - implied) > P_TOLERANCE:
         out.append(
-            f"p_beat_bench {decision.p_beat_bench} disagrees with the scenarios' implied "
-            f"P(excess > 0) of {implied} by more than {P_TOLERANCE}"
+            _b(
+                ReasonCode.P_DISAGREES,
+                f"p_beat_bench {decision.p_beat_bench} disagrees with the scenarios' implied "
+                f"P(excess > 0) of {implied} by more than {P_TOLERANCE}",
+            )
         )
     return out
 
@@ -238,7 +297,11 @@ class DecisionContext:
 
 @dataclass(frozen=True, slots=True)
 class ContractVerdict:
-    """The contract's answer for one decision: every breach, and what an accepted one implies."""
+    """The contract's answer for one decision: every breach, and what an accepted one implies.
+
+    ``reasons`` are the breach messages (journaled); ``codes`` are their `ReasonCode` values in
+    the same order (logged and shown), one per reason.
+    """
 
     decision: ManagerDecision
     reasons: tuple[str, ...]
@@ -246,6 +309,7 @@ class ContractVerdict:
     round_trip: RoundTrip | None = None
     stop_price: Decimal | None = None
     base_rate: BaseRateCell | None = None
+    codes: tuple[ReasonCode, ...] = ()
 
     @property
     def accepted(self) -> bool:
@@ -258,54 +322,92 @@ def _close(value: Decimal | None, reference: Decimal) -> bool:
 
 def _cell_breaches(
     decision: ManagerDecision, ctx: DecisionContext, facts: NameFacts | None
-) -> tuple[list[str], BaseRateCell | None]:
+) -> tuple[list[_Breach], BaseRateCell | None]:
     quote = decision.base_rate_cell
     if quote is None:
         return [], None
     cell = ctx.cells.get(quote.cell_id)
     if cell is None or cell.p_beat is None:
-        return [f"base_rate_cell {quote.cell_id!r} is not a cell you were shown"], None
-    out: list[str] = []
+        return [
+            _b(
+                ReasonCode.CELL_NOT_SHOWN,
+                f"base_rate_cell {quote.cell_id!r} is not a cell you were shown",
+            )
+        ], None
+    out: list[_Breach] = []
     if facts is not None:
         if cell.screen not in facts.base_rate_screens():
             out.append(
-                f"base_rate_cell {cell.cell_id} is screen {cell.screen}; {decision.isin} belongs "
-                f"to {sorted(facts.base_rate_screens())}"
+                _b(
+                    ReasonCode.CELL_WRONG_SCREEN,
+                    f"base_rate_cell {cell.cell_id} is screen {cell.screen}; {decision.isin} "
+                    f"belongs to {sorted(facts.base_rate_screens())}",
+                )
             )
         if cell.tier not in (facts.cap_tier, _ALL):
             out.append(
-                f"base_rate_cell {cell.cell_id} is tier {cell.tier}; {decision.isin} is "
-                f"{facts.cap_tier}"
+                _b(
+                    ReasonCode.CELL_WRONG_TIER,
+                    f"base_rate_cell {cell.cell_id} is tier {cell.tier}; {decision.isin} is "
+                    f"{facts.cap_tier}",
+                )
             )
     if cell.regime not in ({ctx.regime, _ALL} if ctx.regime is not None else {_ALL}):
-        out.append(f"base_rate_cell {cell.cell_id} is regime {cell.regime}, not {ctx.regime}")
+        out.append(
+            _b(
+                ReasonCode.CELL_WRONG_REGIME,
+                f"base_rate_cell {cell.cell_id} is regime {cell.regime}, not {ctx.regime}",
+            )
+        )
     if not _close(quote.p_beat, cell.p_beat):
-        out.append(f"quoted P(beat) {quote.p_beat} is not the table's {cell.p_beat}")
+        out.append(
+            _b(
+                ReasonCode.CELL_MISQUOTED,
+                f"quoted P(beat) {quote.p_beat} is not the table's {cell.p_beat}",
+            )
+        )
     for name, quoted, actual in (
         ("median excess", quote.median_excess, cell.median_excess),
         ("IQR", quote.iqr_excess, cell.iqr_excess),
     ):
         if quoted is not None and (actual is None or not _close(quoted, actual)):
-            out.append(f"quoted {name} {quoted} is not the table's {actual}")
+            out.append(
+                _b(ReasonCode.CELL_MISQUOTED, f"quoted {name} {quoted} is not the table's {actual}")
+            )
     return out, (cell if not out else None)
 
 
 def _buy_breaches(
     decision: ManagerDecision, ctx: DecisionContext, facts: NameFacts | None
-) -> tuple[list[str], RoundTrip | None, Decimal | None]:
-    out: list[str] = []
+) -> tuple[list[_Breach], RoundTrip | None, Decimal | None]:
+    out: list[_Breach] = []
     if decision.edge_type is EdgeType.NONE:
-        out.append("edge_type NONE forces PASS, WATCH or HOLD; it never buys")
+        out.append(
+            _b(ReasonCode.EDGE_NONE_BUY, "edge_type NONE forces PASS, WATCH or HOLD; it never buys")
+        )
     if ctx.buys_blocked:
-        out.append("no new BUY is admitted this session: the GSM/ESM list is missing or stale")
+        out.append(
+            _b(
+                ReasonCode.BUYS_BLOCKED,
+                "no new BUY is admitted this session: the GSM/ESM list is missing or stale",
+            )
+        )
     if facts is None:
-        return [*out, f"{decision.isin} has no facts in today's universe to size a BUY"], None, None
+        missing = _b(
+            ReasonCode.NO_FACTS, f"{decision.isin} has no facts in today's universe to size a BUY"
+        )
+        return [*out, missing], None, None
     if facts.excluded:
-        out.append(f"{decision.isin} is excluded from the universe today")
+        out.append(_b(ReasonCode.EXCLUDED, f"{decision.isin} is excluded from the universe today"))
     weight = decision.target_weight
     trip: RoundTrip | None = None
     if weight is None or weight <= _ZERO or weight > ctx.max_position_pct:
-        out.append(f"a BUY's target_weight must be in (0, {ctx.max_position_pct}], got {weight}")
+        out.append(
+            _b(
+                ReasonCode.WEIGHT,
+                f"a BUY's target_weight must be in (0, {ctx.max_position_pct}], got {weight}",
+            )
+        )
     else:
         trip = round_trip(
             isin=decision.isin,
@@ -318,69 +420,117 @@ def _buy_breaches(
         )
         if trip is None:
             out.append(
-                f"target_weight {weight}% of the book buys no whole share of {decision.isin}"
+                _b(
+                    ReasonCode.NO_WHOLE_SHARE,
+                    f"target_weight {weight}% of the book buys no whole share of {decision.isin}",
+                )
             )
     if decision.cost_hurdle_check is None or decision.cost_hurdle_check <= _ZERO:
-        out.append(f"a BUY needs a positive cost_hurdle_check, got {decision.cost_hurdle_check}")
+        out.append(
+            _b(
+                ReasonCode.COST_CHECK,
+                f"a BUY needs a positive cost_hurdle_check, got {decision.cost_hurdle_check}",
+            )
+        )
     if trip is not None:
         if decision.expected_excess_pct - trip.total_pct <= _ZERO:
             out.append(
-                f"expected_excess_pct {decision.expected_excess_pct} does not clear the "
-                f"{trip.total_pct}% round trip"
+                _b(
+                    ReasonCode.BELOW_HURDLE,
+                    f"expected_excess_pct {decision.expected_excess_pct} does not clear the "
+                    f"{trip.total_pct}% round trip",
+                )
             )
         mean = scenario_mean(decision.scenarios)
         if mean - trip.total_pct <= _ZERO:
             out.append(
-                f"the scenarios' mean excess {mean} does not clear the {trip.total_pct}% round trip"
+                _b(
+                    ReasonCode.SCENARIOS_BELOW_HURDLE,
+                    f"the scenarios' mean excess {mean} does not clear the {trip.total_pct}% "
+                    "round trip",
+                )
             )
 
     stop = decision.stop_pct
     stop_price: Decimal | None = None
     if stop is None:
-        out.append("a BUY must declare stop_pct")
+        out.append(_b(ReasonCode.NO_STOP, "a BUY must declare stop_pct"))
     elif facts.atr14_pct is None or facts.atr14_pct <= _ZERO:
-        out.append(f"{decision.isin} has no ATR(14) today, so no stop can be checked")
+        out.append(
+            _b(
+                ReasonCode.NO_ATR,
+                f"{decision.isin} has no ATR(14) today, so no stop can be checked",
+            )
+        )
     else:
         atr = facts.atr14_pct * _HUNDRED
         low, high = STOP_ATR_MIN * atr, STOP_ATR_MAX * atr
         if stop < low or stop > high:
             out.append(
-                f"stop_pct {stop} is outside 1.5-3 x ATR ({low:.4f}-{high:.4f}%) for "
-                f"{decision.isin}"
+                _b(
+                    ReasonCode.STOP_OUTSIDE_ATR,
+                    f"stop_pct {stop} is outside 1.5-3 x ATR ({low:.4f}-{high:.4f}%) for "
+                    f"{decision.isin}",
+                )
             )
         if stop > STOP_MAX_PCT:
-            out.append(f"stop_pct {stop} exceeds the {STOP_MAX_PCT}% ceiling")
+            out.append(
+                _b(
+                    ReasonCode.STOP_OVER_CEILING,
+                    f"stop_pct {stop} exceeds the {STOP_MAX_PCT}% ceiling",
+                )
+            )
         stop_price = facts.close * (_ONE - stop / _HUNDRED)
     return out, trip, stop_price
 
 
 def _stop_breaches(
     decision: ManagerDecision, ctx: DecisionContext
-) -> tuple[list[str], Decimal | None]:
-    out: list[str] = []
+) -> tuple[list[_Breach], Decimal | None]:
+    out: list[_Breach] = []
     if decision.stop_pct is not None and decision.action is not Action.BUY:
-        out.append("stop_pct belongs to a BUY; a held stop is tightened with new_stop_pct")
+        out.append(
+            _b(
+                ReasonCode.STOP_ON_NON_BUY,
+                "stop_pct belongs to a BUY; a held stop is tightened with new_stop_pct",
+            )
+        )
     new = decision.new_stop_pct
     if new is None:
         return out, None
     holding = ctx.book.holding(decision.isin)
     facts = ctx.facts.get(decision.isin)
     if holding is None:
-        return [*out, f"new_stop_pct applies to a holding; {decision.isin} is not held"], None
+        not_held = _b(
+            ReasonCode.NEW_STOP_NOT_HELD,
+            f"new_stop_pct applies to a holding; {decision.isin} is not held",
+        )
+        return [*out, not_held], None
     if facts is None:
-        return [*out, f"{decision.isin} has no close today to set a stop against"], None
+        no_close = _b(
+            ReasonCode.NO_FACTS, f"{decision.isin} has no close today to set a stop against"
+        )
+        return [*out, no_close], None
     if new > STOP_MAX_PCT:
-        out.append(f"new_stop_pct {new} exceeds the {STOP_MAX_PCT}% ceiling")
+        out.append(
+            _b(
+                ReasonCode.STOP_OVER_CEILING,
+                f"new_stop_pct {new} exceeds the {STOP_MAX_PCT}% ceiling",
+            )
+        )
     price = facts.close * (_ONE - new / _HUNDRED)
     if holding.stop_price is not None and price < holding.stop_price:
         out.append(
-            f"new_stop_pct {new} would put the stop at {price:.4f}, below the current stop "
-            f"{holding.stop_price}: a stop can be tightened, never loosened"
+            _b(
+                ReasonCode.STOP_LOOSENED,
+                f"new_stop_pct {new} would put the stop at {price:.4f}, below the current stop "
+                f"{holding.stop_price}: a stop can be tightened, never loosened",
+            )
         )
     return out, price
 
 
-def _weight_breaches(decision: ManagerDecision, ctx: DecisionContext) -> list[str]:
+def _weight_breaches(decision: ManagerDecision, ctx: DecisionContext) -> list[_Breach]:
     weight = decision.target_weight
     holding = ctx.book.holding(decision.isin)
     if (
@@ -389,13 +539,21 @@ def _weight_breaches(decision: ManagerDecision, ctx: DecisionContext) -> list[st
         and (weight is None or weight <= _ZERO or weight >= holding.weight_pct)
     ):
         return [
-            f"a TRIM's target_weight must be above 0 and below the current "
-            f"{holding.weight_pct}%, got {weight}"
+            _b(
+                ReasonCode.WEIGHT,
+                f"a TRIM's target_weight must be above 0 and below the current "
+                f"{holding.weight_pct}%, got {weight}",
+            )
         ]
     if decision.action is Action.SELL and weight not in (None, _ZERO):
-        return [f"a SELL exits the position; target_weight must be 0 or absent, got {weight}"]
+        return [
+            _b(
+                ReasonCode.WEIGHT,
+                f"a SELL exits the position; target_weight must be 0 or absent, got {weight}",
+            )
+        ]
     if decision.action in (Action.WATCH, Action.PASS) and weight not in (None, _ZERO):
-        return [f"a {decision.action.value} carries no weight, got {weight}"]
+        return [_b(ReasonCode.WEIGHT, f"a {decision.action.value} carries no weight, got {weight}")]
     return []
 
 
@@ -403,57 +561,75 @@ def validate_decision(decision: ManagerDecision, ctx: DecisionContext) -> Contra
     """Every contract breach of one well-formed decision (module docstring), and its implications.
 
     What it does: checks every rule and reports all the breaches, not the first, so the journal
-    says everything that was wrong with a voided decision.
+    says everything that was wrong with a voided decision, each with its `ReasonCode`.
     What it never does: repair a decision or raise for a breach.
     """
-    reasons: list[str] = []
+    breaches: list[_Breach] = []
     held = decision.isin in ctx.book.isins
     if held and decision.action not in HOLDING_ACTIONS:
-        reasons.append(f"{decision.isin} is held: decide HOLD, TRIM or SELL, not {decision.action}")
+        breaches.append(
+            _b(
+                ReasonCode.WRONG_ROLE,
+                f"{decision.isin} is held: decide HOLD, TRIM or SELL, not {decision.action}",
+            )
+        )
     if not held:
         if decision.action not in CANDIDATE_ACTIONS:
-            reasons.append(
-                f"{decision.isin} is not held: decide BUY, WATCH or PASS, not {decision.action}"
+            breaches.append(
+                _b(
+                    ReasonCode.WRONG_ROLE,
+                    f"{decision.isin} is not held: decide BUY, WATCH or PASS, not "
+                    f"{decision.action}",
+                )
             )
         if decision.isin not in ctx.researched:
-            reasons.append(
-                f"{decision.isin} was neither held nor researched; there is no dossier to decide on"
+            breaches.append(
+                _b(
+                    ReasonCode.NOT_RESEARCHED,
+                    f"{decision.isin} was neither held nor researched; there is no dossier to "
+                    "decide on",
+                )
             )
 
     citations = citations_of(decision)
-    reasons += [f"malformed evidence ref {ref!r}" for ref in _malformed_refs(decision)]
-    reasons += [
-        f"adjustment {a.reason!r} cites nothing resolvable"
+    breaches += [
+        _b(ReasonCode.MALFORMED_REF, f"malformed evidence ref {ref!r}")
+        for ref in _malformed_refs(decision)
+    ]
+    breaches += [
+        _b(ReasonCode.UNCITED_ADJUSTMENT, f"adjustment {a.reason!r} cites nothing resolvable")
         for a in decision.adjustments
         if CITATION_PATTERN.search(a.citation) is None and _BARE_REF.match(a.citation) is None
     ]
-    reasons += [
-        f"unknown citation [{kind}:{ident}]"
+    breaches += [
+        _b(ReasonCode.UNKNOWN_CITATION, f"unknown citation [{kind}:{ident}]")
         for kind, ident in citations
         if not ctx.citations.resolves(kind, ident)
     ]
-    reasons += _scenario_breaches(decision)
+    breaches += _scenario_breaches(decision)
 
     facts = ctx.facts.get(decision.isin)
-    cell_reasons, cell = _cell_breaches(decision, ctx, facts)
-    reasons += cell_reasons
+    cell_breaches, cell = _cell_breaches(decision, ctx, facts)
+    breaches += cell_breaches
     trip: RoundTrip | None = None
     stop_price: Decimal | None = None
     if decision.action is Action.BUY:
-        buy_reasons, trip, stop_price = _buy_breaches(decision, ctx, facts)
-        reasons += buy_reasons
-    stop_reasons, tightened = _stop_breaches(decision, ctx)
-    reasons += stop_reasons
+        buy_breaches, trip, stop_price = _buy_breaches(decision, ctx, facts)
+        breaches += buy_breaches
+    stop_breaches, tightened = _stop_breaches(decision, ctx)
+    breaches += stop_breaches
     if tightened is not None:
         stop_price = tightened
-    reasons += _weight_breaches(decision, ctx)
+    breaches += _weight_breaches(decision, ctx)
+    unique = tuple(dict.fromkeys(breaches))
     return ContractVerdict(
         decision=decision,
-        reasons=tuple(dict.fromkeys(reasons)),
+        reasons=tuple(message for _, message in unique),
         citations=citations,
         round_trip=trip,
         stop_price=stop_price,
         base_rate=cell,
+        codes=tuple(code for code, _ in unique),
     )
 
 

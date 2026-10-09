@@ -92,7 +92,7 @@ from backtest.paper_session import (
 )
 from backtest.run import _L1Market, _L1Reader
 from dataplatform.clock import Clock, SystemClock
-from dataplatform.config import Settings, get_settings
+from dataplatform.config import LlmProvider, Settings, get_settings
 from dataplatform.identity.master import Exchange
 from dataplatform.logging import get_logger
 from dataplatform.query import AdjustedSeriesRequest, PitContext
@@ -117,6 +117,7 @@ __all__ = [
     "NoLiveFetcher",
     "cli_run",
     "index_level_gaps",
+    "m17_provider",
     "overlay_readiness",
     "production_run",
 ]
@@ -616,18 +617,38 @@ class NoLiveFetcher:
 # ── wiring ───────────────────────────────────────────────────────────────────────────────────────
 
 
-def _llm(settings: Settings, *, stub: bool) -> LLM:
-    if stub:
+def m17_provider(settings: Settings, *, stub: bool, memory: bool) -> LlmProvider:
+    """The provider the M17 desk's managers, digests and fetcher run on (M17.12).
+
+    What it does: ``--stub-llm`` forces `STUB`; otherwise it is ``settings.m17_llm_provider``
+    (``M17_LLM_PROVIDER``, default the Claude CLI) — never the global ``llm_provider``, which
+    the older analyst paper paths follow and which stays the stub by default.
+    What it never does: let a persisted run decide with the stub. Every manager would fail its
+    first call and the session would journal a desk of ``MANAGER_ERROR``s that look like a
+    model outage; a non-``--memory`` run that resolves to `STUB` is refused here, before any
+    connection opens or anything is journaled.
+    """
+    provider = LlmProvider.STUB if stub else settings.m17_llm_provider
+    if provider is LlmProvider.STUB and not memory:
+        how = "--stub-llm" if stub else "M17_LLM_PROVIDER=stub"
+        raise M17JobError(
+            f"the M17 desk resolved to the stub LLM ({how}) on a persisted run; a stub cannot "
+            "decide, so nothing runs. Set M17_LLM_PROVIDER=claude_cli (the default), or rehearse "
+            "with --memory"
+        )
+    return provider
+
+
+def _llm(settings: Settings, provider: LlmProvider) -> LLM:
+    if provider is LlmProvider.STUB:
         return StubLLM()
     from analyst.llm import build_llm
 
-    return build_llm(settings)
+    return build_llm(settings, provider=provider)
 
 
-def _fetcher(settings: Settings, *, stub: bool) -> Any:
-    from dataplatform.config import LlmProvider
-
-    if stub or settings.llm_provider is not LlmProvider.CLAUDE_CLI:
+def _fetcher(provider: LlmProvider) -> Any:
+    if provider is not LlmProvider.CLAUDE_CLI:
         return NoLiveFetcher()
     from analyst.commons.fetch import ClaudeWebFetcher
 
@@ -650,6 +671,8 @@ def _wire(
 ) -> M17SessionResult:
     from analyst.fundmanager.digest import DIGEST_DIR
 
+    provider = m17_provider(settings, stub=stub_llm, memory=memory)
+    _LOG.info("fm_world.provider", provider=provider.value, memory=memory, dry_run=dry_run)
     roster = load_roster()
     data_root = settings.data_root
     listings: ListingCalendar | None
@@ -667,8 +690,8 @@ def _wire(
         raise M17JobError(
             f"--start {start.isoformat()} is not the session this run decides ({owed.isoformat()})"
         )
-    llm = _llm(settings, stub=stub_llm)
-    fetcher = _fetcher(settings, stub=stub_llm)
+    llm = _llm(settings, provider)
+    fetcher = _fetcher(provider)
     gate = StatusApiGate(datasets=M17_DATASETS, clock=clock, settings=settings)
     stream = STREAM_DRY if dry_run else STREAM_LIVE
     if memory:
@@ -777,7 +800,7 @@ def _read_stream(
 def production_run(
     context: JobContext, *, dry_run: bool, start: date | None, session: date | None
 ) -> M17SessionResult:
-    """The scheduler's run: Postgres journal and ledger, the lake, the configured LLM."""
+    """The scheduler's run: Postgres journal and ledger, the lake, ``M17_LLM_PROVIDER``'s LLM."""
     with ExitStack() as stack:
         return _wire(
             settings=context.settings,

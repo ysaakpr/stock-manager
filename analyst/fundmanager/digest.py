@@ -4,6 +4,7 @@ One markdown page per session: where the test stands (S0, the phase, "*k* of 4 p
 manager's §6 numbers against its control and the bench, each book's latest mark, and the session's
 decisions. It renders a `Scoreboard` and the session's `DecisionLine` rows and nothing else, so it
 holds no rationale, no prompt and no evidence text — what was decided, never what the model read.
+A voided decision shows the contract's reason codes (``Refused for``), never the breach messages.
 
 What it never does: read a clock (the session is given), choose its own directory (it is
 injected; `DIGEST_DIR` is the default the daily job passes), or leave a half-written page behind
@@ -66,6 +67,7 @@ def _decision_row(line: DecisionLine) -> str:
         line.p_beat_bench or "",
         line.horizon_sessions or "",
         line.rails or "",
+        line.refused_for or "",
     )
     return "| " + " | ".join(cells) + " |"
 
@@ -110,8 +112,9 @@ def render_digest(scoreboard: Scoreboard, session: date, decisions: Sequence[Dec
         lines.append("No decision journaled for this session.")
     else:
         lines += [
-            "| Book | Decision | Action | ISIN | Target weight | p(beat bench) | Horizon | Rails |",
-            "|---|---|---|---|---|---|---|---|",
+            "| Book | Decision | Action | ISIN | Target weight | p(beat bench) | Horizon | Rails "
+            "| Refused for |",
+            "|---|---|---|---|---|---|---|---|---|",
         ]
         lines += [_decision_row(line) for line in decisions]
     return "\n".join(lines) + "\n"

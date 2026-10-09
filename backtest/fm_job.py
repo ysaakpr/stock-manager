@@ -1463,7 +1463,7 @@ def run_m17_job(
 
     What it does: opens one Postgres transaction and runs `run_m17_session` for the owed session
     (or ``session``) over the lake (`backtest.fm_world`), the real append-only journal, the
-    ``paper_session`` ledger, the status interlock, the configured LLM (`build_llm`) and the
+    ``paper_session`` ledger, the status interlock, the desk's LLM (``M17_LLM_PROVIDER``) and the
     Commons fetcher, then commits. ``dry_run`` (the registered default until M17.8's go) files
     everything under the ``m17-dry`` stream. ``start`` must equal the session it runs.
     What it never does: route to a real broker, or commit a half-run session — an exception
@@ -1491,7 +1491,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--memory", action="store_true", help="in-memory journal and stores; nothing persists"
     )
     parser.add_argument(
-        "--stub-llm", action="store_true", help="StubLLM for the managers and digests"
+        "--stub-llm",
+        action="store_true",
+        help="StubLLM for the managers and digests (with --memory only; a persisted run refuses)",
     )
     parser.add_argument("--no-wait", action="store_true", help="do not wait for late data")
     parser.add_argument("--scratch", type=Path, default=None)

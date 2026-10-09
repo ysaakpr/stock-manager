@@ -10,8 +10,11 @@ one manager, in isolation:
 2. **Fulfilment** — the harness, not the model: a dossier for every requested name in the
    session's universe and for every holding (`analyst.commons.build_dossiers`), the filing digests
    of those names (on demand, `analyst.commons.digest_for_isins`, cache first), and each web query
-   or URL through the Commons snapshot store, cache first (`SnapshotStore.get_or_fetch`). A request
-   over the mandate's caps is truncated and the truncation journaled.
+   or URL through the Commons snapshot store, cache first (`SnapshotStore.get_or_fetch`), up to
+   `FETCH_CONCURRENCY` (3) at once. A request over the mandate's caps is truncated and the
+   truncation journaled; every request that could not be fulfilled is journaled and shown with
+   its reason (a fetcher that retrieved no page, a refused target, a repeat of a request that
+   already failed this session — which is not re-fetched).
 3. **Research rounds** — at most ``rounds.max_research_rounds`` (2) calls, each showing every
    bundle so far and allowed one more request within the same caps; an empty request ends them.
 4. **Final call** — one call with `schemas.decision_tool`. Each well-formed decision then passes
@@ -48,6 +51,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -132,10 +136,12 @@ from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve, TokenS
 from analyst.llm import LLM, LLMError, LLMResponse, Message, Role, ToolSpec, prompt_digest
 from dataplatform.clock import Clock
 from dataplatform.logging import get_logger
+from dataplatform.redaction import mask_secrets
 from execution.costs import CostModel
 
 __all__ = [
     "CALL_EVENT",
+    "FETCH_CONCURRENCY",
     "MANAGER_ERROR_EVENT",
     "NO_ACTION_EVENT",
     "REFUSED_EVENT",
@@ -160,10 +166,15 @@ RESEARCH_EVENT: Final = "FM_RESEARCH_FULFILLED"
 REFUSED_EVENT: Final = "FM_DECISION_REFUSED"
 NO_ACTION_EVENT: Final = "NO_ACTION"
 MANAGER_ERROR_EVENT: Final = "MANAGER_ERROR"
+#: How many Commons fetches one fulfilment runs at once (M17.12). Each is a ~70-90 s CLI run, so
+#: serial fulfilment of 8 took 6-9 minutes a round; three keep the request budget modest.
+FETCH_CONCURRENCY: Final = 3
 #: ``token_usage.purpose`` of every manager call.
 TOKEN_PURPOSE: Final = "m17_manager"
 #: The decision line's sleeve: an M17 book is all tactical (pre-registration §1).
 _SLEEVE: Final = Sleeve.TACTICAL
+#: The longest single message a log line carries; the journal keeps the whole text.
+_LOG_TEXT_CHARS: Final = 240
 
 _REPAIR_SUFFIX: Final = (
     "\n\n## Your previous answer was refused\n\n"
@@ -297,6 +308,12 @@ def _canonical(document: Any) -> str:
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+def _log_text(text: str) -> str:
+    """A harness message as a log line carries it: secret-masked and bounded (never a prompt)."""
+    masked = mask_secrets(text)
+    return masked if len(masked) <= _LOG_TEXT_CHARS else masked[: _LOG_TEXT_CHARS - 1] + "…"
+
+
 def _fetch_request(query: QueryItem, session: date) -> FetchRequest:
     if query.kind is QueryKind.URL:
         return FetchRequest.url(query.target, session)
@@ -355,6 +372,8 @@ class _Session:
         self.digests: dict[str, FilingDigest] = {}
         self.snapshots: dict[str, Snapshot] = {}
         self.queried: set[str] = set()
+        self.query_failures: dict[str, str] = {}
+        self.shown_unfulfilled: set[tuple[str, str]] = set()
         self.researched: list[str] = []
         self._static = self._static_values()
 
@@ -570,6 +589,12 @@ class _Session:
             repair=repair,
             tokens_in=usage.prompt_tokens,
             tokens_out=usage.output_tokens,
+            # The buckets of tokens_in: a CLI call's reported usage sums every turn it took, and a
+            # later turn re-reads the prompt from the cache, so tokens_in alone overstates it.
+            tokens_uncached=usage.input_tokens,
+            tokens_cache_write=usage.cache_write_tokens,
+            tokens_cache_read=usage.cache_read_tokens,
+            prompt_chars=len(prompt),
         )
         return response, evidence.ref().ref
 
@@ -651,6 +676,31 @@ class _Session:
             )
         return request
 
+    def _fetch_all(
+        self, pending: Sequence[tuple[QueryItem, FetchRequest]]
+    ) -> list[FetchOutcome | FetchError]:
+        """Every pending fetch through the Commons cache, up to `FETCH_CONCURRENCY` at once.
+
+        Results come back in request order, so the bundle and the journal are the same whatever
+        order the fetches finish in. The cache's per-request lock keeps identical requests at one
+        fetch however many threads ask. A `FetchError` is returned, not raised, so one failed
+        request never cancels the others; anything else propagates.
+        """
+
+        def one(fetch: FetchRequest) -> FetchOutcome | FetchError:
+            try:
+                return self.commons.snapshots.get_or_fetch(fetch, self.fetcher)
+            except FetchError as exc:
+                return exc
+
+        requests = [fetch for _, fetch in pending]
+        if len(requests) <= 1:
+            return [one(fetch) for fetch in requests]
+        with ThreadPoolExecutor(
+            max_workers=min(FETCH_CONCURRENCY, len(requests)), thread_name_prefix="fm-fetch"
+        ) as pool:
+            return list(pool.map(one, requests))
+
     def _fulfil(self, request: ResearchRequest, round_index: int) -> None:
         unfulfilled: list[Unfulfilled] = []
         wanted: list[str] = []
@@ -696,20 +746,35 @@ class _Session:
         fetched: list[tuple[QueryItem, Snapshot]] = []
         hits = 0
         fetch_in = fetch_out = 0
+        pending: list[tuple[QueryItem, FetchRequest]] = []
         for query in request.queries:
+            what = f"{query.kind.value} {query.target!r}"
             try:
                 fetch = _fetch_request(query, self.session)
             except ValueError as exc:
-                unfulfilled.append(Unfulfilled(f"{query.kind.value} {query.target!r}", str(exc)))
+                unfulfilled.append(Unfulfilled(what, str(exc)))
+                continue
+            if fetch.key in self.query_failures:
+                # Asked again after it failed this session: not re-fetched (one attempt per
+                # request per manager-session), and said so rather than dropped in silence.
+                unfulfilled.append(
+                    Unfulfilled(
+                        what,
+                        "already attempted this session and not fulfilled: "
+                        + self.query_failures[fetch.key],
+                    )
+                )
                 continue
             if fetch.key in self.queried:
-                continue
+                continue  # fulfilled in an earlier round; its snapshot is already shown
             self.queried.add(fetch.key)
-            try:
-                outcome = self.commons.snapshots.get_or_fetch(fetch, self.fetcher)
-            except FetchError as exc:
-                unfulfilled.append(Unfulfilled(f"{query.kind.value} {query.target!r}", str(exc)))
+            pending.append((query, fetch))
+        for (query, fetch), result in zip(pending, self._fetch_all(pending), strict=True):
+            if isinstance(result, FetchError):
+                self.query_failures[fetch.key] = str(result)
+                unfulfilled.append(Unfulfilled(f"{query.kind.value} {query.target!r}", str(result)))
                 continue
+            outcome = result
             hits += int(outcome.cache_hit)
             if outcome.usage is not None:
                 fetch_in += outcome.usage.prompt_tokens
@@ -717,6 +782,16 @@ class _Session:
             self.snapshots[outcome.snapshot.id] = outcome.snapshot
             fetched.append((query, outcome.snapshot))
 
+        # Every round re-shows every bundle so far, so a line already in an earlier bundle is not
+        # repeated in this one: a digest source gap recurs on every round that asks for names, and
+        # rendering it again costs tokens on every later call and tells the manager nothing new.
+        # The journal below keeps this round's full list.
+        new_unfulfilled = tuple(
+            u
+            for u in dict.fromkeys(unfulfilled)
+            if (u.what, u.reason) not in self.shown_unfulfilled
+        )
+        self.shown_unfulfilled.update((u.what, u.reason) for u in new_unfulfilled)
         bundle = ResearchBundle(
             round=round_index,
             requests=request.requests,
@@ -724,7 +799,7 @@ class _Session:
             dossiers=new_dossiers,
             digests=tuple(new_digests),
             snapshots=tuple(fetched),
-            unfulfilled=tuple(unfulfilled),
+            unfulfilled=new_unfulfilled,
         )
         self.bundles.append(bundle)
         evidence = self._evidence(None)
@@ -754,6 +829,7 @@ class _Session:
             snapshots=len(fetched),
             cache_hits=hits,
             unfulfilled=len(unfulfilled),
+            unfulfilled_reasons=[_log_text(f"{u.what}: {u.reason}") for u in unfulfilled],
         )
 
     # -- decisions --------------------------------------------------------------------------------
@@ -918,6 +994,7 @@ class _Session:
                 "event": REFUSED_EVENT,
                 "action": d.action.value,
                 "reasons": _canonical(list(verdict.reasons)),
+                "reason_codes": ",".join(dict.fromkeys(c.value for c in verdict.codes)),
                 "record": _canonical(d.model_dump(mode="json")),
                 "schema": SCHEMA_VERSION,
             },
@@ -928,7 +1005,8 @@ class _Session:
             session=self.session.isoformat(),
             isin=d.isin,
             action=d.action.value,
-            reasons=len(verdict.reasons),
+            reason_codes=list(dict.fromkeys(c.value for c in verdict.codes)),
+            reasons=[_log_text(r) for r in verdict.reasons],
         )
 
     def _result(

@@ -236,6 +236,15 @@ class Settings(BaseSettings):
         default=LlmProvider.STUB, description="stub | anthropic | claude_cli"
     )
     broker_provider: BrokerProvider = Field(default=BrokerProvider.STUB, description="stub | kite")
+    #: The M17 desk's own provider (M17.12): its managers, its on-demand digests and its web
+    #: fetcher follow this and never `llm_provider`, so switching the desk to the Claude CLI does
+    #: not also switch the older analyst paper paths, and the global default stays the stub (B4).
+    #: A persisted M17 run that resolves to `stub` is refused (`backtest.fm_world`); only a
+    #: `--memory` rehearsal may decide with the stub.
+    m17_llm_provider: LlmProvider = Field(
+        default=LlmProvider.CLAUDE_CLI,
+        description="the M17 desk's managers, digests and fetcher: stub | anthropic | claude_cli",
+    )
 
     # ── alerting (§8.1: FAILED streaks, red quality, reconciliation breaks) ───────────────────
     alert_provider: AlertProvider = Field(

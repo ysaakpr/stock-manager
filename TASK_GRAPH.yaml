@@ -3281,12 +3281,46 @@ tasks:
     - "make check is green"
   verify: "uv run pytest tests/unit/test_l2_overlay.py tests/unit/test_commons_sheets.py tests/unit/test_fm_world_readiness.py tests/unit/test_fm_job.py tests/unit/test_fm_stops.py -q"
 
+- id: M17.12
+  title: Fixes from the first live dry session (2026-10-09)
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.11]
+  spec: |
+    Measured on the first live dry session (2026-10-09, one scheduler-style run with no provider
+    set and one `--memory` run on the Claude CLI):
+    - Provider wiring. Without `LLM_PROVIDER` the job silently used StubLLM, so every manager hit
+      MANAGER_ERROR, and setting the global provider would also switch the older analyst paper
+      paths. Add `Settings.m17_llm_provider` (`M17_LLM_PROVIDER`, default `claude_cli`), read only
+      by the M17 job for its managers, digests and web fetcher; `--stub-llm` still overrides. A
+      non-memory run whose resolved provider is STUB refuses loudly. The global default stays.
+    - Refusal reasons. `fm.decision_refused` logged only a count. Log the contract's reason codes
+      and messages (no prompt text, no secrets), journal the codes, and show them in the digest's
+      decisions table.
+    - Web requests unfulfilled. Find why round 0 showed `unfulfilled=4` with `snapshots=4`; fix it
+      if it is a bug, match pre-registration if it is a cap, and journal a reason per unfulfilled
+      request. Run up to 3 fetches concurrently with the same cache and lock semantics (identical
+      requests still cost one fetch).
+    - Token volume. Research calls carried 180-245k input tokens each. Without changing what the
+      manager sees, check whether a bundle item is rendered twice across rounds and dedupe it;
+      report before/after token counts on the frozen fixture.
+  deliverables: [dataplatform/config.py, backtest/fm_world.py, analyst/fundmanager/contract.py, analyst/fundmanager/runtime.py, analyst/fundmanager/digest.py, analyst/commons/fetch.py, tests/unit/test_fm_provider.py, tests/unit/test_fm_runtime.py, tests/unit/test_commons_fetch.py]
+  acceptance:
+    - "the M17 job reads M17_LLM_PROVIDER and never the global llm_provider; a non-memory run resolving to STUB raises before opening anything"
+    - "a refused decision's reason codes and messages are on the fm.decision_refused log line, in the journal payload and in the digest's decisions table"
+    - "every unfulfilled web request is journaled with its reason and logged; a fetcher returning no pages is logged as a failed fetch"
+    - "at most 3 fetches run at once; two concurrent identical requests cost one fetch"
+    - "no dossier, digest, snapshot or unfulfilled line is rendered twice across a session's rounds"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_fm_provider.py tests/unit/test_fm_runtime.py tests/unit/test_commons_fetch.py tests/unit/test_fm_job.py tests/unit/test_fm_scoreboard.py -q"
+
 - id: M17.8
   title: Five-session dry run, then the forward clock (S0)
   milestone: M17
   module: A10
   autonomy: NEEDS_GO
-  deps: [M17.7, M17.10, M17.11]
+  deps: [M17.7, M17.10, M17.11, M17.12]
   spec: |
     Run 5 consecutive live sessions in `--dry-run` on the real lake with the Claude CLI. Write
     `ops/gates/M17-dry-run-<date>.md` covering, per manager:

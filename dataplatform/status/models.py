@@ -776,6 +776,10 @@ class ManagerDecisionOut(BaseModel):
     p_beat_bench: str | None
     horizon_sessions: str | None
     rails: str | None = Field(description="The rails that refused it, for a RAIL_BLOCK")
+    refused_for: str | None = Field(
+        default=None,
+        description="The decision contract's reason codes, for an FM_DECISION_REFUSED",
+    )
 
 
 class ManagerScoreOut(BaseModel):

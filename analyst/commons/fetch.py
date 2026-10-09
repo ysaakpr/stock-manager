@@ -503,10 +503,18 @@ class SnapshotStore:
         return Snapshot.from_bytes(snapshot_id, data)
 
     def _index(self) -> Iterator[dict[str, Any]]:
+        # A shared lock against `_append_index`'s exclusive one: with fetches running
+        # concurrently, a read must never see half of a line another thread is appending.
         try:
-            lines = self.index_path.read_text(encoding="utf-8").splitlines()
+            fd = os.open(self.index_path, os.O_RDONLY)
         except FileNotFoundError:
             return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+            with os.fdopen(os.dup(fd), "rb") as handle:
+                lines = handle.read().decode("utf-8").splitlines()
+        finally:
+            os.close(fd)
         for n, line in enumerate(lines, start=1):
             try:
                 entry = json.loads(line)
@@ -539,7 +547,11 @@ class SnapshotStore:
         pages it already holds through the same bounds and redaction.
         """
         if not response.pages:
-            raise FetchError(f"the fetcher returned no pages for {request.kind} {request.target!r}")
+            raise FetchError(
+                f"the fetcher returned no pages for {request.kind.value} {request.target!r} "
+                "(nothing found or nothing retrievable); nothing is stored, so a later request "
+                "tries again"
+            )
         kept = response.pages[:MAX_PAGES_PER_REQUEST]
         pages = tuple(_bound(page) for page in kept)
         dropped = len(response.pages) - len(kept)
@@ -617,8 +629,11 @@ class SnapshotStore:
 
         What it does: holds the request's lock, checks the index, and calls `fetcher` only on a
         miss. A hit never touches the fetcher.
-        What it never does: store anything when the fetcher raises. The error propagates as a
-        `FetchError` and the next asker tries again.
+        What it assumes: it may be called from several threads at once (the runtime runs up to
+        three fetches concurrently). The per-request `flock` serialises identical requests, so
+        the second asker waits and reads the first one's snapshot: one fetch, not two.
+        What it never does: store anything when the fetcher raises or retrieves no page. The error
+        propagates as a `FetchError`, is logged with its reason, and the next asker tries again.
         """
         with self._request_lock(request):
             stored = self.lookup(request)
@@ -633,16 +648,19 @@ class SnapshotStore:
                 return FetchOutcome(snapshot=stored, cache_hit=True)
             try:
                 response = fetcher.fetch(request)
-            except FetchError:
+                # Inside the try: a run that came back with no pages fails in `put`, and that is
+                # the failure the 2026-10-09 dry run left unlogged (M17.12).
+                snapshot = self.put(request, response, fetcher=fetcher.name)
+            except FetchError as error:
                 log.warning(
                     "commons.fetch.failed",
                     key=request.key,
                     kind=request.kind.value,
                     session=request.session.isoformat(),
                     fetcher=fetcher.name,
+                    reason=mask_secrets(str(error))[:400],
                 )
                 raise
-            snapshot = self.put(request, response, fetcher=fetcher.name)
             return FetchOutcome(snapshot=snapshot, cache_hit=False, usage=response.usage)
 
     def verify(self) -> list[str]:

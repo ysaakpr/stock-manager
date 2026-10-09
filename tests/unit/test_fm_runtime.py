@@ -17,13 +17,17 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, fields
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 import pytest
+from structlog.testing import capture_logs
 
 from accounting import TokenPricer, load_price_card
 from analyst.commons import (
@@ -48,7 +52,7 @@ from analyst.commons import (
 from analyst.commons.base_rates import BaseRateTable
 from analyst.fundmanager import ManagerMandate, ModelIds, load_roster
 from analyst.fundmanager.bundle import Holding, InvalidationStatus, ManagerBook
-from analyst.fundmanager.contract import P_TOLERANCE, implied_p_beat
+from analyst.fundmanager.contract import P_TOLERANCE, ReasonCode, implied_p_beat
 from analyst.fundmanager.render import (
     ROUND_FINAL,
     ROUND_RESEARCH,
@@ -59,6 +63,7 @@ from analyst.fundmanager.render import (
 )
 from analyst.fundmanager.runtime import (
     CALL_EVENT,
+    FETCH_CONCURRENCY,
     MANAGER_ERROR_EVENT,
     NO_ACTION_EVENT,
     REFUSED_EVENT,
@@ -585,6 +590,37 @@ def test_a_full_session_runs_four_calls_and_journals_every_decision_and_bundle(
     assert Decimal(buy_line.payload["round_trip_pct"]) > 0
 
 
+def test_no_bundle_item_is_rendered_twice_across_a_sessions_rounds(
+    world: World, tmp_path: Path
+) -> None:
+    """M17.12: every round re-sends every bundle, so a repeated item is paid for on every call.
+
+    The on-demand digest stub reports the same failed filing on every call, as a digest source gap
+    does on every round that asks for names; it is shown once. Dossiers, digests and snapshots
+    were already shown once each; this pins it.
+    """
+    _, journal, llm = _run(
+        world,
+        tmp_path,
+        [
+            research([LEADER, FILLERS[1]], ["leader ltd order book q2 2026", "filler results"]),
+            research([BREAKOUT], ["breakout ltd board meeting results date"]),
+            research([LEADER], ["leader ltd order book q2 2026"]),  # a repeat: nothing new
+            final(hold(), passed(LEADER), passed(), passed(FILLERS[1])),
+        ],
+    )
+    last = llm.prompts[-1]
+    for isin in (HELD, LEADER, FILLERS[1], BREAKOUT):
+        assert last.count(f"#### Dossier {isin} ") == 1, isin
+    assert last.count("- [F:nse_announcements:9002] ") == 1
+    snapshot_ids = re.findall(r"#### \[S:([0-9a-f]{64})\]", last)
+    assert len(snapshot_ids) == len(set(snapshot_ids)) == 3
+    assert last.count("filing digest nse_announcements:9003: stub refused") == 1
+    # The journal still says what each round could not fulfil.
+    rounds = journal.events(RESEARCH_EVENT)
+    assert all("nse_announcements:9003" in e.payload["unfulfilled"] for e in rounds[:2])
+
+
 def test_research_rounds_stop_at_two_so_a_session_never_exceeds_four_calls(
     world: World, tmp_path: Path
 ) -> None:
@@ -688,6 +724,87 @@ def test_token_usage_is_journaled_per_call_priced_when_the_card_knows_the_model(
         )
 
 
+class ConcurrencyProbe(StubFetcher):
+    """Counts fetches in flight; each holds until three are open at once (or a timeout)."""
+
+    def __init__(self, *, fail: frozenset[str] = frozenset(), want: int = 3) -> None:
+        super().__init__(fail=fail)
+        self.want = want
+        self.lock = threading.Condition()
+        self.in_flight = 0
+        self.peak = 0
+
+    def fetch(self, request: FetchRequest) -> FetchResponse:
+        with self.lock:
+            self.in_flight += 1
+            self.peak = max(self.peak, self.in_flight)
+            self.lock.notify_all()
+            # Wait for company: proves the fetches overlap. Never longer than 2 s, so a serial
+            # implementation fails on `peak` rather than hanging the suite.
+            self.lock.wait_for(lambda: self.peak >= self.want, timeout=2)
+        try:
+            # Later fetches finish first, so request order in the result is not finish order.
+            time.sleep(0.01 * (8 - int(request.target.rsplit(" ", 1)[-1])))
+            return super().fetch(request)
+        finally:
+            with self.lock:
+                self.in_flight -= 1
+
+
+def test_fetches_run_three_at_once_and_come_back_in_request_order(
+    world: World, tmp_path: Path
+) -> None:
+    """M17.12: eight serial ~80 s fetches took 6-9 minutes a round on 2026-10-09."""
+    queries = [f"leader ltd query {n}" for n in range(1, 8)]
+    fetcher = ConcurrencyProbe(fail=frozenset({"leader ltd query 4"}))
+    _, journal, llm = _run(
+        world, tmp_path, [research([], queries), research(), final(hold())], fetcher=fetcher
+    )
+    assert fetcher.peak == FETCH_CONCURRENCY == 3  # never more than three, and really three
+    assert sorted(r.target for r in fetcher.asked) == sorted(queries)
+    (fulfilled,) = journal.events(RESEARCH_EVENT)
+    snapshot_ids = fulfilled.payload["snapshots"].split(",")
+    assert len(snapshot_ids) == 6
+    shown = [
+        m.group(1) for m in re.finditer(r"\[S:([0-9a-f]{64})\] [A-Z]+ '([^']+)'", llm.prompts[1])
+    ]
+    targets = re.findall(r"\[S:[0-9a-f]{64}\] [A-Z]+ '([^']+)'", llm.prompts[1])
+    assert targets == [q for q in queries if q != "leader ltd query 4"]  # request order
+    assert shown == snapshot_ids
+    assert "leader ltd query 4" in fulfilled.payload["unfulfilled"]
+
+
+def test_identical_requests_from_two_managers_at_once_cost_one_fetch(
+    world: World, tmp_path: Path
+) -> None:
+    commons = _commons(world, tmp_path)
+    fetcher = ConcurrencyProbe(want=1)
+    request = FetchRequest.query("leader ltd query 1", SESSION)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        outcomes = list(
+            pool.map(lambda _: commons.snapshots.get_or_fetch(request, fetcher), range(3))
+        )
+    assert len(fetcher.asked) == 1
+    assert sorted(o.cache_hit for o in outcomes) == [False, True, True]
+
+
+def test_a_query_that_failed_is_not_refetched_when_asked_again_and_says_why(
+    world: World, tmp_path: Path
+) -> None:
+    fetcher = StubFetcher(fail=frozenset({"broken query"}))
+    _, journal, llm = _run(
+        world,
+        tmp_path,
+        [research([], ["broken query"]), research([], ["broken query"]), research(), final(hold())],
+        fetcher=fetcher,
+    )
+    assert [r.target for r in fetcher.asked] == ["broken query"]
+    first, second = journal.events(RESEARCH_EVENT)
+    assert "stub refused broken query" in first.payload["unfulfilled"]
+    assert "already attempted this session" in second.payload["unfulfilled"]
+    assert "already attempted this session" in llm.prompts[2]
+
+
 def test_a_failed_fetch_is_shown_as_unfulfilled_and_a_repeat_query_is_a_cache_hit(
     world: World, tmp_path: Path
 ) -> None:
@@ -707,7 +824,9 @@ def test_a_failed_fetch_is_shown_as_unfulfilled_and_a_repeat_query_is_a_cache_hi
     assert "broken query" in fulfilled[0].payload["unfulfilled"]
     assert "Not fulfilled" in llm.prompts[1]
     assert fulfilled[1].payload["snapshots"] == ""  # asked twice in the session, fetched once
-    assert [r.target for r in fetcher.asked] == ["broken query", "good query"]
+    # Each asked exactly once. The two run concurrently (M17.12), so the order they reached the
+    # fetcher in is not a property; the order they are shown in is (tested above).
+    assert sorted(r.target for r in fetcher.asked) == ["broken query", "good query"]
 
 
 # ── acceptance 1: the contract refuses what the prompt promises it will ──────────────────────────
@@ -725,6 +844,83 @@ def test_an_invented_citation_voids_the_decision(
     (line,) = journal.events(REFUSED_EVENT)
     assert line.isin == LEADER and line.decision is Decision.HOLD
     assert not [e for e in journal.events(DECISION_EVENT) if e.isin == LEADER]
+
+
+def test_a_refusal_names_its_reason_codes_on_the_log_line_the_journal_and_the_digest(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    """M17.12: ``fm.decision_refused`` logged ``reasons=1`` and nothing a reader could act on."""
+    from analyst.fundmanager.digest import render_digest
+    from analyst.fundmanager.scoreboard import (
+        ScoreboardInputs,
+        build_scoreboard,
+        todays_decisions,
+    )
+
+    # A credential-shaped value, assembled at runtime so this file trips no secret scanner.
+    planted = "-".join(("sk", "ant", "api03", "".join(chr(65 + i % 26) for i in range(32))))
+    secret_ish = f"adjusted for the {planted} rumour"
+    bad = buy(
+        atr_pct[LEADER],
+        rationale=f"Strong [F:{LEADER}.made_up_field].",
+        adjustments=[{"reason": secret_ish, "direction": "UP", "size_pp": 1, "citation": "none"}],
+    )
+    watch = {**passed(BREAKOUT), "action": "WATCH", "target_weight": 3}
+    with capture_logs() as logs:
+        result, journal, _ = _run(
+            world,
+            tmp_path,
+            [research([LEADER, BREAKOUT]), research(), final(hold(), bad, watch)],
+        )
+    by_isin = {v.decision.isin: v for v in result.refused}
+    assert by_isin[LEADER].codes == (
+        ReasonCode.UNCITED_ADJUSTMENT,
+        ReasonCode.UNKNOWN_CITATION,
+    )
+    assert by_isin[BREAKOUT].codes == (ReasonCode.WEIGHT,)
+
+    lines = {e["isin"]: e for e in logs if e["event"] == "fm.decision_refused"}
+    assert lines[LEADER]["reason_codes"] == ["UNCITED_ADJUSTMENT", "UNKNOWN_CITATION"]
+    assert f"unknown citation [F:{LEADER}.made_up_field]" in lines[LEADER]["reasons"]
+    assert all(planted not in r for r in lines[LEADER]["reasons"])  # masked on the log
+    assert lines[BREAKOUT]["reason_codes"] == ["WEIGHT"]
+    assert lines[BREAKOUT]["reasons"] == ["a WATCH carries no weight, got 3"]
+
+    refused = {e.isin: e for e in journal.events(REFUSED_EVENT)}
+    assert refused[LEADER].payload["reason_codes"] == "UNCITED_ADJUSTMENT,UNKNOWN_CITATION"
+    assert refused[BREAKOUT].payload["reason_codes"] == "WEIGHT"
+
+    roster = load_roster()
+    session, decided = todays_decisions(journal.entries, roster)
+    assert session == SESSION
+    page = render_digest(build_scoreboard(roster, ScoreboardInputs(s0=None)), SESSION, decided)
+    assert "| Refused for |" in page
+    leader_row = next(r for r in page.splitlines() if "FM_DECISION_REFUSED" in r and LEADER in r)
+    assert leader_row.rstrip().endswith("| UNCITED_ADJUSTMENT,UNKNOWN_CITATION |")
+    assert "made_up_field" not in page and "rumour" not in page  # codes, never messages
+
+
+def test_every_contract_breach_carries_a_code_one_per_reason(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    bad = buy(
+        atr_pct[LEADER],
+        edge_type="NONE",
+        target_weight=50,
+        stop_pct=40,
+        scenarios=scenarios(0.3, 0.45, 0.35),
+        base_rate_cell={"cell_id": "S9.none", "p_beat": 0.6},
+    )
+    result, _ = _one_buy_session(world, tmp_path, bad)
+    (verdict,) = result.refused
+    assert len(verdict.codes) == len(verdict.reasons) >= 5
+    assert {
+        ReasonCode.EDGE_NONE_BUY,
+        ReasonCode.WEIGHT,
+        ReasonCode.SCENARIO_SUM,
+        ReasonCode.CELL_NOT_SHOWN,
+        ReasonCode.STOP_OVER_CEILING,
+    } <= set(verdict.codes)
 
 
 def test_a_real_citation_of_every_kind_resolves(

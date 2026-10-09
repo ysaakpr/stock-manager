@@ -1388,6 +1388,9 @@ class DecisionLine(_Record):
     p_beat_bench: str | None
     horizon_sessions: str | None
     rails: str | None
+    #: A voided decision's contract `ReasonCode` values (M17.12), comma-separated; codes only,
+    #: because a breach message can quote words the model wrote.
+    refused_for: str | None = None
 
 
 def todays_decisions(
@@ -1418,6 +1421,7 @@ def todays_decisions(
                 p_beat_bench=entry.payload.get("p_beat_bench"),
                 horizon_sessions=entry.payload.get("horizon_sessions"),
                 rails=entry.payload.get("rails"),
+                refused_for=entry.payload.get("reason_codes") or None,
             )
         )
     return day, tuple(lines)
