@@ -27,6 +27,7 @@ milestones:
   M14: {title: "Follow-ups of the 2026-10-07 M12.R re-run", depends: [M9, M12, M13]}
   M15: {title: "Real-money readiness prerequisites (run of 2026-10-08)", depends: [M5, M6, M13]}
   M16: {title: "Strategy exploration — seven pre-registered arms against D13", depends: [M9, M12, M14]}
+  M17: {title: "AI fund managers — forward paper test on a shared Research Commons", depends: [M5, M6, M15]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -2931,4 +2932,256 @@ tasks:
   escalation:
     question: "Confirm the M16 selection floor: choose on the Rs 10 crore floor (pre-registered primary), or name Rs 1 crore?"
     why_blocked: "The pre-registration marks the primary floor pending owner confirmation, and the campaign may not launch before it is recorded."
+    unblocks: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M17 — AI fund managers (ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md)
+# Forward paper test. Facts are shared through the Research Commons; judgment is private per manager.
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: M17.0
+  title: Pre-registration, roster configs and the manager/Commons package skeleton
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M15.3]
+  spec: |
+    The pre-registration `ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md` is the
+    first M17 commit. No decision exists before it. This task makes it machine-readable.
+    - `analyst/fundmanager/roster.yaml` holds the four managers of pre-registration §2 and the
+      control/bench books of §3. `analyst/fundmanager/mandate.py` holds the frozen pydantic model it
+      loads into: id, horizon band, opening capital (`Decimal`), max positions, max position %,
+      universe floor, model ids, prompt path and round limits (12 ISINs, 8 queries, 2 research
+      rounds). An unknown key or a float in a money field is a loud error.
+    - `mandate_hash(mandate, prompt_bytes, schema_bytes, shortlist_rule, rails)` is a stable sha256.
+      Pre-registration §7 says a changed hash is a new manager, and M17.8 journals it at S0.
+    - Package skeletons: `analyst/commons/` (shared facts) and `analyst/fundmanager/` (private
+      judgment). `analyst/commons` may never import `analyst/fundmanager`, enforced by an AST test,
+      so no decision content can reach the shared layer.
+  deliverables: [ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md, analyst/fundmanager/__init__.py, analyst/fundmanager/mandate.py, analyst/fundmanager/roster.yaml, analyst/commons/__init__.py, tests/unit/test_fm_mandate.py, tests/unit/test_commons_isolation.py]
+  acceptance:
+    - "the roster loads into four managers + four controls + BENCH-N500 exactly as pre-registration §2/§3"
+    - "a float capital, an unknown key or a duplicate id is refused"
+    - "mandate_hash changes when any one input changes and is stable across processes"
+    - "an AST test fails if analyst/commons imports analyst/fundmanager"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_fm_mandate.py tests/unit/test_commons_isolation.py -q"
+
+- id: M17.1
+  title: Research Commons store — market sheet and universe sheet, built once per session
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.0]
+  spec: |
+    One migration (the next free number on main) creates `commons_market_sheet`,
+    `commons_universe_sheet` and `commons_build`. Each row is keyed by `trading_date` and the build
+    digest, and is append-only: a rebuild writes a new build and never updates an old row.
+    - Market sheet, through the query service only: NIFTY 50/500 trend versus the 50/200-session
+      means, breadth (the share of the universe above its 50-session mean, advance/decline),
+      India VIX, sector index 1/3/6-month returns, delivery-volume anomalies, the RBI policy rate.
+      Every field is optional. A missing source is named in `gaps[]` and never imputed.
+    - Universe sheet: one row per ISIN in pre-registration §2's universe. Fields: close, 1/4/13/52-week
+      return, distance from the 52-week high, 20-session volatility, 20-session median traded value,
+      cap tier (M13 size measure), sector, ASM flag, delivery %, latest PIT fundamentals (TTM
+      revenue/PAT growth, ROE, P/E against the sector median, filing date) and the count of
+      announcements in the last 5 sessions. Keyed by ISIN only (invariant #2).
+    - The builder takes the decision session and a `Clock`. A test fails if any input row is dated
+      after the decision session (invariant #7).
+    - The build is deterministic: the same lake gives a byte-identical sheet digest.
+  deliverables: [dataplatform/store/migrations/, analyst/commons/sheets.py, analyst/commons/store.py, tests/unit/test_commons_sheets.py]
+  acceptance:
+    - "a future-dated price, filing or index level trips the PIT guard"
+    - "a missing source appears in gaps[] and the build still completes; a red data day refuses to build"
+    - "the same lake builds a byte-identical digest twice"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_commons_sheets.py -q"
+
+- id: M17.2
+  title: Mechanical shortlist and filing digests in the Commons
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.1]
+  spec: |
+    - Shortlist rule (pre-registration §3): an equal-weight composite of the percentile ranks of
+      12-1 momentum, 20-session relative strength against NIFTY 500, the M16.3 earnings surprise
+      (reuse `backtest.policies.earnings_surprise`, on main since PR #100)
+      (the undefined case takes the mean rank) and log median traded value. It returns the top 40
+      per session, ties broken by ISIN. The rule is a frozen function, and its source hash feeds
+      `mandate_hash`.
+    - Digests: for each announcement or results filing new since the last build, one
+      `claude-sonnet-5-5` call through `analyst.llm` produces a factual digest: what was disclosed,
+      with numbers and the period. The digest schema has no field for a recommendation, rating or
+      price view, and a test proves a digest carrying one is rejected. Digests are cached by filing
+      id, so a filing is digested once for every manager.
+    - Calls go through `analyst.llm`, so `StubLLM` drives the tests offline.
+  deliverables: [analyst/commons/shortlist.py, analyst/commons/digests.py, tests/unit/test_commons_shortlist.py, tests/unit/test_commons_digests.py]
+  acceptance:
+    - "a test fails if any shortlist factor's rank direction is inverted"
+    - "a filing is digested once across repeated builds; a digest with an opinion field is refused"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_commons_shortlist.py tests/unit/test_commons_digests.py -q"
+
+- id: M17.3
+  title: Commons fetcher — web search and page snapshots, content-addressed and shared
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.0]
+  spec: |
+    Pre-registration §5.
+    - `FetchRequest` (a normalised query or a URL, plus the session date) → `Snapshot` (id = sha256
+      of the canonical bytes, fetched_at, source URLs, text, byte length).
+    - Snapshots are stored immutable under the gitignored `data/commons/fetch/` with an index table.
+      The same (request, session) is a cache hit.
+    - The live fetcher is a separate `claude -p` invocation whose tool set is limited to web search
+      and web fetch. Verify the exact CLI flags against the installed version and record them in
+      the module docstring. Its prompt allows only retrieval and transcription. Output is bounded
+      per page, and a page over the bound is truncated with the truncation recorded.
+    - `analyst.llm.claude_cli` stays tool-less. The fetcher is its own narrow class, and the
+      decision path never gets web tools.
+    - Tests use a stub fetcher and never hit the network. A secret-shaped string in a fetched page
+      is redacted before storage (invariant #13).
+  deliverables: [analyst/commons/fetch.py, analyst/commons/fetch_cli.py, tests/unit/test_commons_fetch.py]
+  acceptance:
+    - "a second identical request in one session returns the stored snapshot without calling the fetcher"
+    - "a snapshot's bytes never change after write; a tampered file fails its digest check"
+    - "the decision-path LLM class is still invoked with an empty tool set (test)"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_commons_fetch.py -q"
+
+- id: M17.4
+  title: Fund-manager runtime — bounded research rounds and the decision contract
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.2, M17.3]
+  spec: |
+    Pre-registration §4 steps 3–4.
+    - `run_manager(mandate, session, commons, book, llm, fetcher)` runs round 0, then at most 2
+      research rounds, then the final decision call. Each call is one structured-output schema,
+      which is the only shape `ClaudeCliLLM` supports.
+    - The research-request schema caps ISINs and queries at the mandate limits. Over-asking is
+      truncated, and the truncation is journaled.
+    - The decision schema follows pre-registration §4. `SELL`/`TRIM` must carry `what_changed`,
+      which is one of `INVALIDATION | STOP | TARGET | BETTER_USE` plus text. `p_beat_bench` is a
+      probability in [0, 1].
+    - The prompt skeleton lives under `analyst/fundmanager/prompts/`. It gives the manager its
+      mandate, its own book and open rationales, the market sheet, the shortlist and the fulfilled
+      bundles, and nothing about any other manager.
+    - Every input bundle is written to the evidence pack, and every decision to the journal,
+      including a whole-session `NO_ACTION` and its reason. Token usage is per call (decision #12).
+    - A malformed model output gets one repair retry. After that the session journals
+      `MANAGER_ERROR` and stages nothing.
+  deliverables: [analyst/fundmanager/runtime.py, analyst/fundmanager/schemas.py, analyst/fundmanager/prompts/manager.md, tests/unit/test_fm_runtime.py]
+  acceptance:
+    - "with StubLLM a full session runs ≤4 calls and journals every decision and the bundle digests"
+    - "a SELL without what_changed is refused; p_beat_bench outside [0,1] is refused"
+    - "a manager's prompt never contains another manager's id, book or decisions (test over the rendered prompt)"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_fm_runtime.py -q"
+
+- id: M17.5
+  title: Multi-book paper execution — per-manager books, participation rail, M17 rails
+  milestone: M17
+  module: X1
+  autonomy: AUTO
+  deps: [M17.0]
+  spec: |
+    Each manager and control book is its own paper book on the M15.3 shared path:
+    `StagingCoordinator.stage`, then `SimBroker` (OPEN reference, the existing `SlippageModel`),
+    then `Reconciler`. One kill switch stops all M17 books.
+    - Add the rails of pre-registration §4 step 5 to `analyst/rails`:
+      - participation: order notional ≤ 5% of the 20-session median traded value;
+      - minimum hold of 2 sessions;
+      - sector ≤ 30%, position ≤ 10%, positions ≤ max;
+      - no short, F&O or margin.
+    - Property test: no generated decision stream produces a fill that breaches any rail.
+    - Idle cash accrues repo − 50 bp through the existing cash-interest schedule.
+    - The AST test confirms `execution.kite_broker` is unreachable from M17.
+  deliverables: [analyst/rails/policies.py, analyst/fundmanager/books.py, tests/unit/test_fm_books.py, tests/unit/test_fm_rails_property.py]
+  acceptance:
+    - "an oversized order in a thin name is refused by the participation rail and journaled with the rail id"
+    - "the rails property test passes; inverting any cap makes it fail"
+    - "two books never share a position, cash balance or journal stream"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_fm_books.py tests/unit/test_fm_rails_property.py -q"
+
+- id: M17.6
+  title: Control books, BENCH-N500 and the scoreboard
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.2, M17.5]
+  spec: |
+    - `CTRL-<manager>` follows pre-registration §3: equal weight across the top N of the session's
+      shortlist, rebalanced weekly (swing) or every 21 sessions (positional), on the same rails,
+      costs and capital, with no LLM. `BENCH-N500` is the buy-and-hold TRI proxy from S0.
+    - `analyst/fundmanager/scoreboard.py` computes the §6 primary and secondary metrics from the
+      journal and the books only, so the scoreboard is reproducible from persisted state.
+    - It also applies the §6 rule (pass / clear fail / inconclusive, "k of 4"). A test fails if
+      the comparison direction, a threshold or the Brier formula is inverted.
+    - Add `GET /status/managers` (books, today's decisions, scoreboard), with no secret and no
+      prompt text. A daily digest markdown goes to `~/campaign/m17/digest-<date>.md`.
+  deliverables: [analyst/fundmanager/controls.py, analyst/fundmanager/scoreboard.py, dataplatform/status/api.py, dataplatform/status/models.py, tests/unit/test_fm_scoreboard.py, tests/unit/test_fm_controls.py]
+  acceptance:
+    - "the scoreboard rebuilt from journal + books equals the live one byte for byte"
+    - "inverted direction, threshold or Brier formula fails a test"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_fm_scoreboard.py tests/unit/test_fm_controls.py -q"
+
+- id: M17.7
+  title: Daily M17 job — Commons build, managers, staging, marks, scheduler wiring
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.4, M17.5, M17.6]
+  spec: |
+    Register a scheduler job that runs after the EOD job is green. The order of work:
+    1. interlock (data red, kill switch);
+    2. Commons build;
+    3. managers sequentially, each in isolation;
+    4. control books;
+    5. stage for the next open;
+    6. after the next session's fills: marks, recon, scoreboard, digest.
+    - A manager unfinished by 08:30 IST journals `MISSED_SESSION`.
+    - Managers run sequentially by default, so the subscription rate limit is a queue, not a race.
+      A rate-limit error backs off and retries inside the deadline.
+    - A `--dry-run` flag is honoured (journal stream `m17-dry`), and a `--start S0` flag journals
+      every `mandate_hash`.
+    - Restart the user systemd scheduler after registering. Update the runbook
+      `ops/runbooks/m17-fund-managers.md`.
+  deliverables: [analyst/fundmanager/job.py, dataplatform/scheduler/registry.py, ops/runbooks/m17-fund-managers.md, tests/unit/test_fm_job.py]
+  acceptance:
+    - "a red data day journals SKIPPED_DATA_RED for every manager and stages nothing"
+    - "a manager past the deadline journals MISSED_SESSION and the others still run"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_fm_job.py -q"
+
+- id: M17.8
+  title: Five-session dry run, then the forward clock (S0)
+  milestone: M17
+  module: A10
+  autonomy: NEEDS_GO
+  deps: [M17.7]
+  spec: |
+    Run 5 consecutive live sessions in `--dry-run` on the real lake with the Claude CLI. Write
+    `ops/gates/M17-dry-run-<date>.md` covering, per manager:
+    - calls and tokens per session;
+    - the share of Commons and fetch cache hits;
+    - rail refusals;
+    - wall-clock time against the 08:30 IST deadline;
+    - one fully traced decision (inputs → snapshot ids → journal entry).
+    Then park for the owner's go. On the go, record S0 and the confirmed items in pre-registration
+    §9, and start with `--start S0`. Nothing from the dry run counts toward the score.
+  deliverables: [ops/gates/M17-dry-run-<date>.md, ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md]
+  acceptance:
+    - "5 consecutive dry sessions complete inside the deadline with every decision journaled"
+    - "pre-registration §9 is complete before the first scored session"
+    - "every manager's mandate_hash is journaled at S0"
+  verify: "uv run pytest tests/unit/test_fm_job.py -q"
+  escalation:
+    question: "Start the M17 forward clock? Confirm models and pass/fail thresholds (pre-registration §9) and name S0."
+    why_blocked: "The scored window must not open before the owner ratifies the policy layer (decision #5) and the thresholds are fixed."
     unblocks: []
