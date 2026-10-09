@@ -3056,9 +3056,20 @@ tasks:
   milestone: M17
   module: A10
   autonomy: AUTO
-  deps: [M17.2, M17.3]
+  deps: [M17.2, M17.3, M17.9]
   spec: |
-    Pre-registration §4 steps 3–4.
+    Pre-registration §4 steps 3–4 as extended by §8 Amendment 1 (d), (g). The prompt
+    `analyst/fundmanager/prompts/manager.md` v1 already exists (written from
+    `ops/studies/m17-analyst-strategy-2026-10-09.md`). Render it. Do not rewrite its guidance. A
+    placeholder name may change if the runtime needs it, and the change must be stated in the
+    commit body. Enforce in code what it promises:
+    - citations `[F:<field_id>]` / `[S:<snapshot_id>]` resolve against the bundle, and an unknown id
+      voids the decision;
+    - the scenario probabilities sum to 1, and `p_beat_bench` is consistent with them;
+    - `edge_type` NONE forces PASS/WATCH/HOLD, and a BUY needs a positive `cost_hurdle_check`;
+    - each BUY's stop is within 1.5–3 × ATR and ≤ 15%, and a stop can only tighten;
+    - holdings are rendered without cost basis or P&L;
+    - only the [[STYLE]] and [[ROUND]] blocks that apply are rendered.
     - `run_manager(mandate, session, commons, book, llm, fetcher)` runs round 0, then at most 2
       research rounds, then the final decision call. Each call is one structured-output schema,
       which is the only shape `ClaudeCliLLM` supports.
@@ -3076,6 +3087,8 @@ tasks:
       `MANAGER_ERROR` and stages nothing.
   deliverables: [analyst/fundmanager/runtime.py, analyst/fundmanager/schemas.py, analyst/fundmanager/prompts/manager.md, tests/unit/test_fm_runtime.py]
   acceptance:
+    - "an invented citation id, scenarios not summing to 1, an edge_type NONE BUY, or a loosened stop is refused (test each)"
+    - "the rendered prompt carries no cost basis or P&L for any holding, and only the manager's own STYLE block"
     - "with StubLLM a full session runs ≤4 calls and journals every decision and the bundle digests"
     - "a SELL without what_changed is refused; p_beat_bench outside [0,1] is refused"
     - "a manager's prompt never contains another manager's id, book or decisions (test over the rendered prompt)"
@@ -3150,6 +3163,17 @@ tasks:
       A rate-limit error backs off and retries inside the deadline.
     - A `--dry-run` flag is honoured (journal stream `m17-dry`), and a `--start S0` flag journals
       every `mandate_hash`.
+    - Pre-S0 blockers carried from the M17.1 and M17.5 reports. Every one must be fixed before the
+      dry run:
+      - extend `backtest/repo_rates.yaml` past 2026-09-29 from RBI's own October 2026 MPC press
+        release, with the source quoted as the file does;
+      - book corporate actions on M17 books (the paper session's late-action booking);
+      - slice an over-participation SELL/TRIM across sessions;
+      - land same-evening index and VIX levels and the L2 refresh before the Commons build, or make
+        the job wait for them and journal the wait.
+    - Amendment 1 (c) and (e): execute declared stops mechanically at the next open, with no model
+      call, and journal them as `STOP_EXIT`. Leave a buy into an upper-circuit lock unfilled.
+      Forced reviews come first after an integrity event.
     - Restart the user systemd scheduler after registering. Update the runbook
       `ops/runbooks/m17-fund-managers.md`.
   deliverables: [analyst/fundmanager/job.py, dataplatform/scheduler/registry.py, ops/runbooks/m17-fund-managers.md, tests/unit/test_fm_job.py]
@@ -3158,6 +3182,39 @@ tasks:
     - "a manager past the deadline journals MISSED_SESSION and the others still run"
     - "make check is green"
   verify: "uv run pytest tests/unit/test_fm_job.py -q"
+
+- id: M17.9
+  title: Commons screens S1–S5, dossier features, base-rate table and regime state
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.2]
+  spec: |
+    Pre-registration §8 Amendment 1 (a), (b); rules in `ops/studies/m17-analyst-strategy-2026-10-09.md`
+    §2–§4. These are facts only, shared, and never import `analyst.fundmanager`.
+    - Screens S1–S4 use the exact rules in study §2, top 15 each, ties broken by ISIN. S5 is an
+      unranked event list from a frozen keyword table on announcement subjects, plus bulk and block
+      deals.
+    - Per-ISIN dossier features (study §2). The F&O block reads L2 `fo_aggregates` (OI build-up
+      category, put-call ratio on OI, rollover). Delivered-quantity z-score is against the name's
+      own 60 sessions. SUE and the results-day return come from PIT XBRL filing dates. Every
+      feature has a stable field id for `[F:…]` citations.
+    - Base-rate table: 2016-10 → 2026-09, PIT universe at the ₹1 cr floor. Buckets: screen × cap
+      tier × regime × horizon (5/20/60). Each cell holds P(beat NIFTY 500), median excess, IQR and
+      n. Compute it once, freeze it by digest, and store the build command in the module docstring.
+      Run it as one ranged job, not one invocation per date.
+    - Regime: the three-state rule of study §4.
+    - Universe exclusions of Amendment 1 (b): price band ≤ 5%; an integrity event in the last 60
+      sessions; the GSM/ESM list newest-within-5-sessions rule. A missing list blocks new BUYs and
+      is recorded as a gap.
+    - Every input passes the PIT guard as of the session.
+  deliverables: [analyst/commons/screens.py, analyst/commons/dossier.py, analyst/commons/base_rates.py, analyst/commons/regime.py, analyst/commons/event_keywords.yaml, tests/unit/test_commons_screens.py, tests/unit/test_commons_base_rates.py]
+  acceptance:
+    - "a test fails if any screen rule's direction or threshold is inverted; a future-dated bar or filing trips the PIT guard"
+    - "the base-rate table rebuilds to the same digest; cells with n < 30 are marked thin"
+    - "an integrity-event announcement excludes the ISIN for 60 sessions; a stale GSM list blocks BUYs"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_commons_screens.py tests/unit/test_commons_base_rates.py -q"
 
 - id: M17.8
   title: Five-session dry run, then the forward clock (S0)

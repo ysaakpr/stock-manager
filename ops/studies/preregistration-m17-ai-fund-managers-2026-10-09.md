@@ -186,7 +186,62 @@ for evidence and is never republished in an archive.
 
 ## 8. Amendments
 
-None. Amendments are additive, dated, and only valid before S0.
+Amendments are additive, dated, and only valid before S0.
+
+### Amendment 1 (2026-10-09, before any decision): analyst strategy
+
+Source: `ops/studies/m17-analyst-strategy-2026-10-09.md` (research on short-horizon fundamental,
+price/volume and LLM-forecasting evidence). §2–§7 stand, except where this amendment adds to them:
+
+(a) **Commons additions** (facts only, shared; new task M17.9):
+- screens S1 trend leaders, S2 volume breakout, S3 pullback in a leader, S4 earnings momentum,
+  S5 event watch, with the rules in study §2;
+- per-name dossier features (study §2);
+- a frozen base-rate table (study §3) computed from 2016-10 → 2026-09 history;
+- the three-state regime (study §4).
+
+The composite shortlist of §3 and the control books are **unchanged**.
+
+(b) **Universe exclusions** added to §2:
+- price band ≤ 5%;
+- an integrity event in the last 60 sessions: auditor, CFO or independent-director resignation,
+  SEBI order, a rating downgrade to sub-investment-grade or "issuer not cooperating", or a default.
+  This is detected with a frozen keyword table on announcement subjects.
+
+The GSM/ESM exclusion reads the newest list at most 5 sessions old. With no such list, the session
+admits no new BUY.
+
+(c) **Stops are mechanical** (adds to §4 step 5). A BUY must declare `stop_pct`, 1.5–3 × ATR and at
+most 15%. A close below a stop sells the position at the next open, with no model call. A manager may
+tighten a stop, or convert it to a trailing stop, but never loosen it. A new integrity event in a held
+name puts it first in the next session as a forced review.
+
+(d) **The decision schema adds:**
+- `edge_type` (`NONE` forces PASS/WATCH/HOLD);
+- `base_rate_cell`;
+- `adjustments[]`;
+- `scenarios[]` (bull, base and bear, with probabilities summing to 1);
+- `already_priced_in`;
+- `catalyst`;
+- `cost_hurdle_check`;
+- `premortem[]`;
+- `invalidation[]`, which must be observable and dated.
+
+Every numeric claim cites a bundle field or snapshot id, and an unknown id voids that decision.
+Holdings are shown to the manager **without** cost basis or P&L.
+
+(e) **Fills:** a BUY whose session opens and stays locked at the upper price band (open = high = low
+= the upper band) is unfilled and journaled `UNFILLED_UPPER_CIRCUIT`.
+
+(f) **Scoring additions, secondary only.** These never change the §6 pass/fail rule, which stays on
+the raw `p_beat_bench`:
+- Brier score of p shrunk towards its base-rate cell (`0.5·p + 0.5·base_rate`, weight fixed now);
+- excess return by regime state;
+- the cap-tier mix of BUYs against the control book;
+- the hit rate by `edge_type`.
+
+(g) **Prompt:** `analyst/fundmanager/prompts/manager.md` v1 is the prompt of every manager. Its bytes
+are in `mandate_hash`.
 
 ## 9. Owner confirmation
 
