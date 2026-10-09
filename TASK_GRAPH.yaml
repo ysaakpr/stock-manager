@@ -3219,12 +3219,41 @@ tasks:
     - "make check is green"
   verify: "uv run pytest tests/unit/test_commons_screens.py tests/unit/test_commons_base_rates.py -q"
 
+- id: M17.10
+  title: Same-evening index levels and India VIX for the M17 desk
+  milestone: M17
+  module: D1
+  autonomy: AUTO
+  deps: [M17.7]
+  spec: |
+    Measured 2026-10-09: `macro_series` IN.NSE.<INDEX>.{CLOSE,PE,PB,DIV_YIELD} and
+    IN.NSE.INDIA_VIX.CLOSE stop at 2026-10-05. Both close-all registrations sat in `UNSCHEDULED`
+    ("no consumer in the decision path"), which stopped being true when the M17 Commons began
+    reading them, and India VIX came only with the Sunday capture. So every M17 session ran on
+    stale index levels, and the M17 job's 120-minute data wait timed out every evening.
+    - Register a weekday evening job that runs after NSE publishes the day's index closes and
+      before the 22:00 IST M17 job. It must not share a host lease with any other job.
+    - The job lands the close-all snapshot (close, P/E, P/B, dividend yield) through the M11.2
+      runner and India VIX spot through `india_vix.py`. Reuse the existing parsers; do not write
+      new ones.
+    - Missed sessions are caught up in one run, with one ranged request where the source allows
+      it. Take the sources out of `UNSCHEDULED`, add `covers=` and a lag budget.
+    - The M17 readiness probe must count the levels as satisfied once they land.
+    - Backfill 2026-10-06 to today once, as a single ranged run.
+  deliverables: [dataplatform/ingest/macro/index_evening.py, dataplatform/ingest/macro/backfill.py, dataplatform/scheduler/registry.py, backtest/fm_world.py, tests/unit/test_index_evening.py]
+  acceptance:
+    - "the job is registered with covers, cron and a one-session lag budget, and no fire overlaps another lease on its hosts"
+    - "a missed-sessions catch-up issues one ranged VIX request and one close-all request per missed session, none for a landed one"
+    - "a level for session D is released on D and is not knowable before it; tonight's 404 stays retryable"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_index_evening.py tests/unit/test_scheduler_registry.py tests/unit/test_scheduler_coverage.py -q"
+
 - id: M17.8
   title: Five-session dry run, then the forward clock (S0)
   milestone: M17
   module: A10
   autonomy: NEEDS_GO
-  deps: [M17.7]
+  deps: [M17.7, M17.10]
   spec: |
     Run 5 consecutive live sessions in `--dry-run` on the real lake with the Claude CLI. Write
     `ops/gates/M17-dry-run-<date>.md` covering, per manager:

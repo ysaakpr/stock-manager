@@ -121,6 +121,7 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "identity_refresh",
         "tri_refresh",
         "tri_evening",
+        "index_close_evening",
         "index_press_refresh",
         "ca_refresh",
         "bse_ca_sweep",
@@ -149,6 +150,11 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     # 20:50 (after the 20:47 IST point at which session D's TRI was measured out) and 21:30, the
     # last attempt before the paper session decides D at 21:45.
     assert registry.get("tri_evening").cron == "50 19,20 * * mon-fri; 30 21 * * mon-fri"
+    # M17.10: 20:35 (after nse_daily_capture's 20:00 + 30-minute archive lease and tri_evening's
+    # 19:50 fire), 21:10 and 21:45 — between tri_evening's fires, and over before the 22:00 desk.
+    assert registry.get("index_close_evening").cron == (
+        "35 20 * * mon-fri; 10 21 * * mon-fri; 45 21 * * mon-fri"
+    )
     # 09:00, after tri_refresh on the same niftyindices.com lease (refused, not queued, if held).
     assert registry.get("index_press_refresh").cron == "0 9 * * sat"
     # 10:00, after identity_refresh (07:00) so a name listed this week resolves.

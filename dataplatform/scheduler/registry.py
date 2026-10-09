@@ -44,6 +44,7 @@ __all__ = [
     "FAILURE_ALERTS",
     "FBIL_REFERENCE_RATES",
     "FUNDAMENTALS_FORWARD",
+    "INDEX_CLOSE_EVENING",
     "INDEX_PRESS_REFRESH",
     "JOB_NAME",
     "L0_BACKUP",
@@ -73,6 +74,7 @@ __all__ = [
     "failure_alerts",
     "fbil_reference_rates",
     "fundamentals_forward",
+    "index_close_evening",
     "l0_backup",
     "lag_budgets",
     "m17_fund_managers",
@@ -664,6 +666,52 @@ TRI_EVENING = Job(
 )
 
 
+def index_close_evening(context: JobContext) -> None:
+    """Same-evening index levels and India VIX (M17.10): session D's market state on D's evening.
+
+    What it does: lands the NSE close-all snapshot (closing level, P/E, P/B and dividend yield of
+    every NIFTY index) for each expected data date of the last two weeks `sync_state` has not
+    closed — through the M11.2 runner, so a session already published costs no request — and India
+    VIX spot OHLC in one ranged POST from the first session that source lacks, all into
+    `macro_series` dated to the session. See `macro.index_evening.run_index_close_evening`.
+    The M17 Commons (market sheet, regime, screens, sector returns) read these for the session they
+    decide; before this job they stopped at whatever a campaign last fetched.
+    What it assumes: the injected clock and settings are the run's (B10), migrated and networked.
+    What it never does: date a level by the fetch, close tonight's session to retries on a 404
+    (the archive may simply not have it yet), or touch a host other than the NSE archive and
+    niftyindices.com, each under its own lease. The import is deferred like the others'.
+    """
+    from dataplatform.ingest.macro.index_evening import run_index_close_evening_job
+
+    run_index_close_evening_job(context)
+
+
+#: The same-evening index levels. 20:35, 21:10 and 21:45 IST Monday to Friday, each fire with a
+#: 10-minute budget and a 5-minute misfire grace, so even a late start is off both hosts before the
+#: next holder: 20:35 follows `nse_daily_capture` (20:00, 30-minute budget on the NSE archive host)
+#: and `tri_evening`'s 19:50 fire on niftyindices.com, and ends by its 20:50 fire; 21:10 sits
+#: between that fire's budget and the 21:30 one; 21:45 follows the 21:30 one and is over by the
+#: 22:00 M17 desk, which reads what it landed (`fm_world.M17LakeWorld.readiness`). The close-all
+#: file's same-evening publication time is not in the register ("published the evening of the
+#: session"); NSE Indices' TRI for D was measured out by 20:47 IST, so 20:35 is the first attempt,
+#: the two later fires the retries, and a fire after D landed makes no request. The 22:00 desk then
+#: waits for nothing here; a late night costs at most the desk's bounded wait.
+INDEX_CLOSE_EVENING = Job(
+    name="index_close_evening",
+    cron="35 20 * * mon-fri; 10 21 * * mon-fri; 45 21 * * mon-fri",
+    fn=index_close_evening,
+    timeout=timedelta(minutes=10),
+    description=(
+        "Weekday same-evening NIFTY index close/PE/PB/yield (close-all) and India VIX spot "
+        "→ macro_series, catching up missed sessions (M17.10)"
+    ),
+    covers=("nse_index_close_snapshot", "nifty_india_vix_history"),
+    # India VIX writes no `sync_state` rows (macro captures never have); the close-all runner does.
+    sync_sources=("nse_index_close_snapshot",),
+    misfire_grace=timedelta(minutes=5),
+)
+
+
 def index_press_refresh(context: JobContext) -> None:
     """The weekly index-change announcement capture (DQ-5): new releases into L0, nothing else.
 
@@ -1066,11 +1114,9 @@ UNSCHEDULED: dict[str, str] = {
         "fundamentals_backfill campaign's (B1)."
     ),
     "nifty_index_close_snapshot": (
-        "Input to the computed TRI fallback only; the published TRI is live (tri_refresh)."
-    ),
-    "nse_index_close_snapshot": (
-        "History via the M11.2 valuation backfill campaign; the daily valuation job is not wired "
-        "yet (no consumer in the decision path)."
+        "The niftyindices.com copy of the close-all file; the byte-identical NSE archive copy "
+        "(nse_index_close_snapshot) is landed every weekday evening by index_close_evening, so "
+        "this host's copy stays the register's fallback and is not fetched twice."
     ),
     "nse_announcement_attachment": (
         "Per-filing documents fetched on demand by the merger-terms campaign (M3.8); no job yet."
@@ -1124,6 +1170,7 @@ def default_registry() -> JobRegistry:
             IDENTITY_REFRESH,
             TRI_REFRESH,
             TRI_EVENING,
+            INDEX_CLOSE_EVENING,
             INDEX_PRESS_REFRESH,
             CA_REFRESH,
             BSE_CA_SWEEP,
