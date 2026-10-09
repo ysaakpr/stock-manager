@@ -475,11 +475,11 @@ class ControlBook:
     def _nav(self, session: date, held: Mapping[str, int]) -> Decimal:
         total = self._book.account.cash_value
         for isin, quantity in held.items():
-            close = self._book.market.close(isin, session)
+            close = self._book.valuation_close(isin, session)
             if close is None:
                 raise ControlError(
-                    f"{self._mandate.id}: held {isin} has no close on {session.isoformat()}; the "
-                    "control cannot be valued, so it cannot be rebalanced"
+                    f"{self._mandate.id}: held {isin} has no close on {session.isoformat()} and "
+                    "has not delisted; the control cannot be valued, so it cannot be rebalanced"
                 )
             total += close * quantity
         return total

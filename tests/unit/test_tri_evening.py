@@ -543,3 +543,12 @@ def test_a_heal_that_fails_surfaces_and_does_not_undo_d(
     assert [(event["session"], event["error"]) for event in failed] == [
         ("2026-10-06", "RuntimeError: connection lost mid-heal")
     ]
+
+
+def test_the_evening_set_lands_the_m17_bench_beside_the_defaults() -> None:
+    """BENCH-N500 marks every close, so NIFTY 500 lands the same evening, not only on Saturday."""
+    from dataplatform.ingest.tri_backfill import DEFAULT_INDEX_SET, EVENING_INDEX_SET
+
+    slugs = [spec.slug for spec in EVENING_INDEX_SET]
+    assert slugs[: len(DEFAULT_INDEX_SET)] == [spec.slug for spec in DEFAULT_INDEX_SET]
+    assert "nifty500" in slugs and len(set(slugs)) == len(slugs)

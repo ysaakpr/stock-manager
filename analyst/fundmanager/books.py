@@ -106,10 +106,12 @@ __all__ = [
     "BookedCorporateAction",
     "CorporateActionStatus",
     "DecisionReport",
+    "DelistedNames",
     "ExecutionReport",
     "FundBook",
     "FundDesk",
     "FutureDataError",
+    "LastTraded",
     "PendingExit",
     "UnfilledOrder",
     "book_rails",
@@ -334,6 +336,30 @@ class BookMarket(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class LastTraded:
+    """A delisted name's last traded session, with its raw and adjusted closes there."""
+
+    session: date
+    raw_close: Decimal
+    adjusted_close: Decimal
+
+
+class DelistedNames(Protocol):
+    """Which names' listings have ended, and where they last traded (the listing record).
+
+    M17.7: a held name whose listing has ended is valued at its last traded raw close — by the
+    book's caps (`FundBook.valuation_close`), its mark (`scoreboard.mark_book`) and its decision's
+    outcome (`scoreboard.resolve_outcome`) — until a corporate action converts it. A listed name
+    with no close is still a loud error: a gap is a data fault, not a delisting.
+    """
+
+    def last_traded(self, isin: str, session: date) -> LastTraded | None:
+        """For ``isin`` delisted on or before ``session``: its last traded session and closes.
+        None for a name still listed on ``session``."""
+        ...
+
+
 class BookJournal(Protocol):
     """The slice of `analyst.journal.Journal` a book writes through. Append-only by shape."""
 
@@ -483,6 +509,8 @@ class FundBook:
     clock: Clock
     last_buy_fill: dict[str, date] = field(default_factory=dict)
     pending_exits: dict[str, PendingExit] = field(default_factory=dict)
+    #: The listing record: a held name that delisted is valued at its last traded close.
+    delisted: DelistedNames | None = None
 
     def __post_init__(self) -> None:
         if not self.book_id.strip():
@@ -746,7 +774,8 @@ class FundBook:
         staged order is journaled `BUY`/`SELL` with its uid. A session with no orders and no exit
         to work journals a `HOLD`.
         Raises `BookError` for two orders in one ISIN (one decision per name), or a held name with
-        no close (the book cannot be valued, so no cap can be checked).
+        no close that has not delisted (the book cannot be valued, so no cap can be checked); a
+        delisted holding is valued at its last traded close (`valuation_close`).
         """
         if self.kill_switch.is_tripped:
             self._journal_halt(session, "staged")
@@ -998,16 +1027,31 @@ class FundBook:
         exits = [PendingExit.from_document(document) for document in documents]
         return {pending.isin: pending for pending in exits}
 
+    def valuation_close(self, isin: str, session: date) -> Decimal | None:
+        """What a held ``isin`` is worth a share at ``session``'s close: its close, or — for a name
+        `delisted` says has delisted — its last traded raw close. None when neither exists.
+
+        For valuing the book only (caps, marks, the manager's weights). An order is still priced
+        at the session's own close (`_proposed`), so a delisted name is never offered to the
+        market at a stale price.
+        """
+        price = self.market.close(isin, session)
+        if price is None and self.delisted is not None:
+            last = self.delisted.last_traded(isin, session)
+            if last is not None:
+                price = last.raw_close
+        return price
+
     def _portfolio(self, session: date) -> Portfolio:
         lots: list[Lot] = []
         for isin, quantity in sorted(self.account.quantities().items()):
             if quantity <= 0:
                 continue
-            price = self.market.close(isin, session)
+            price = self.valuation_close(isin, session)
             if price is None:
                 raise BookError(
-                    f"{self.book_id}: held {isin} has no close on {session.isoformat()}; the book "
-                    "cannot be valued, so no cap can be checked"
+                    f"{self.book_id}: held {isin} has no close on {session.isoformat()} and has "
+                    "not delisted; the book cannot be valued, so no cap can be checked"
                 )
             lots.append(
                 Lot(isin=isin, sector=self.market.sector(isin), quantity=quantity, price=price)
