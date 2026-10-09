@@ -17,6 +17,12 @@ The module is two layers, and the split is deliberate:
   `RAIL_BLOCK` line naming every breached rail; a breached drawdown writes a forced-review
   `ESCALATE` line by the `RAILS` actor. This layer takes the `Journal` and an injected `Clock`.
 
+**The M17 book rails** (pre-registration §4 step 5) are the same kind of pure check —
+`check_book_order` — over the same `Portfolio` and `ProposedOrder`, against a `BookRails` built
+from the fund-manager roster plus the per-order `BookOrderFacts` (liquidity, series, last buy fill,
+spendable cash) the book knew at the decision session. `RailEngine.guard_book_order` journals a
+refusal exactly as `guard_order` does: one `RAIL_BLOCK` line naming every rail it broke.
+
 A8 decides; it does not act. `guard_order` returns the assessment and journals a block — it never
 places the order, because placement is X1's job and giving the rail engine a broker would be a
 second path an order could reach the market by. The caller places the order only if the assessment
@@ -34,6 +40,8 @@ from typing import Final, Protocol
 from analyst.cases import RiskRails
 from analyst.journal import Actor, Decision, JournalEntry, RecordedEntry, Sleeve
 from analyst.rails.policies import (
+    BookOrderFacts,
+    BookRails,
     DrawdownStatus,
     HouseholdExposure,
     Lot,
@@ -56,6 +64,7 @@ __all__ = [
     "RailJournal",
     "apply_order",
     "assess_drawdown",
+    "check_book_order",
     "check_order",
     "max_child_quantity",
     "order_value_ceiling",
@@ -65,6 +74,7 @@ __all__ = [
 _LOG = get_logger(__name__)
 
 _ZERO: Final = Decimal(0)
+_ONE: Final = Decimal(1)
 _HUNDRED: Final = Decimal(100)
 
 #: The payload marker on a forced-review journal line, so a reviewer can query the drawdown trigger
@@ -154,6 +164,192 @@ def check_order(
         if cross is not None:
             breaches.append(cross)
     return RailAssessment(isin=order.isin, side=order.side, breaches=tuple(breaches))
+
+
+def _breached(rail: RailId, observed: Decimal, limit: Decimal, *, floor: bool = False) -> bool:
+    """Whether ``observed`` breaks ``limit`` for ``rail``: above a cap, or below a ``floor``.
+
+    Every M17 book rail compares through this one function, so the comparison direction lives in
+    exactly one place — and the property test can show that inverting it for any single rail lets
+    a breaching order through (tests/unit/test_fm_rails_property.py).
+    """
+    del rail  # named at every call site so a breach and its comparison read together
+    return observed < limit if floor else observed > limit
+
+
+def check_book_order(
+    order: ProposedOrder,
+    portfolio: Portfolio,
+    rails: BookRails,
+    facts: BookOrderFacts,
+) -> RailAssessment:
+    """Assess one order of an M17 paper book against the rails of pre-registration §4 step 5.
+
+    What it does: a SELL is checked for a short (more shares than ``portfolio`` holds), the
+    minimum hold (sessions since the last buy fill, at the decision session) and participation;
+    a BUY for F&O (a series outside ``rails.equity_series``), margin (notional above
+    ``facts.spendable_cash``), participation, and — on the book the buy would produce, valued at
+    the order's reference price — the position, sector and number-of-names caps. Every breach is
+    returned, not just the first.
+    What it assumes: ``portfolio`` is the book marked at the decision session's reference prices
+    (the same price the order carries), with every buy already cleared this session applied to it,
+    and its ``cash`` is the cash the book is worth (settled and in settlement). For a sell it holds
+    what is still sellable after the sells already cleared this session. A sell never frees cash
+    or a name slot for a buy of the same session: its fill is not certain, and its proceeds are
+    not spendable before it settles — the caller clears buys against a book without it.
+    What it never does: take an override, read a clock or a market, or construct a book with
+    negative cash. A refused order is refused whole; this function does not resize it.
+    """
+    breaches: list[RailBreach] = []
+    held = portfolio.lot(order.isin)
+    if order.side is Side.SELL:
+        held_quantity = 0 if held is None else held.quantity
+        if _breached(RailId.NO_SHORT, Decimal(order.quantity), Decimal(held_quantity)):
+            breaches.append(
+                RailBreach(
+                    rail=RailId.NO_SHORT,
+                    limit=Decimal(held_quantity),
+                    observed=Decimal(order.quantity),
+                    detail=f"selling {order.quantity} of {order.isin} with {held_quantity} held",
+                )
+            )
+        held_for = facts.sessions_since_buy_fill
+        if held_for is None or _breached(
+            RailId.MIN_HOLD, Decimal(held_for), Decimal(rails.min_hold_sessions), floor=True
+        ):
+            breaches.append(
+                RailBreach(
+                    rail=RailId.MIN_HOLD,
+                    limit=Decimal(rails.min_hold_sessions),
+                    observed=Decimal(-1 if held_for is None else held_for),
+                    detail=(
+                        f"{order.isin} has no buy fill on record"
+                        if held_for is None
+                        else f"{order.isin} last bought {held_for} session(s) before the decision"
+                    ),
+                )
+            )
+    else:
+        # 1 when the instrument is outside every cash-equity series the book may buy, else 0.
+        outside = _ONE if facts.series is None or facts.series not in rails.equity_series else _ZERO
+        if _breached(RailId.NO_FNO, outside, _ZERO):
+            breaches.append(
+                RailBreach(
+                    rail=RailId.NO_FNO,
+                    limit=_ZERO,
+                    observed=outside,
+                    detail=(
+                        f"{order.isin} is in series {facts.series!r} on "
+                        f"{facts.decision_session.isoformat()}, not a cash-equity series of "
+                        f"{sorted(rails.equity_series)}"
+                    ),
+                )
+            )
+        if _breached(RailId.NO_MARGIN, order.value, facts.spendable_cash):
+            breaches.append(
+                RailBreach(
+                    rail=RailId.NO_MARGIN,
+                    limit=facts.spendable_cash,
+                    observed=order.value,
+                    detail=f"buy of {order.value} for {order.isin} exceeds spendable cash",
+                )
+            )
+    breaches.extend(_participation_breaches(order, rails, facts))
+    if order.side is Side.BUY:
+        breaches.extend(_book_cap_breaches(order, portfolio, rails))
+    return RailAssessment(isin=order.isin, side=order.side, breaches=tuple(breaches))
+
+
+def _participation_breaches(
+    order: ProposedOrder, rails: BookRails, facts: BookOrderFacts
+) -> list[RailBreach]:
+    """The participation rail: notional vs ``participation_max_pct`` of the median traded value."""
+    median = facts.median_traded_value
+    complete = facts.median_sessions >= rails.participation_lookback_sessions
+    if median is None or median <= _ZERO or not complete:
+        return [
+            RailBreach(
+                rail=RailId.PARTICIPATION,
+                limit=_ZERO,
+                observed=order.value,
+                detail=(
+                    f"no {rails.participation_lookback_sessions}-session median traded value for "
+                    f"{order.isin} at {facts.decision_session.isoformat()} "
+                    f"({facts.median_sessions} session(s) knowable)"
+                ),
+            )
+        ]
+    ceiling = rails.participation_max_pct * median / _HUNDRED
+    if _breached(RailId.PARTICIPATION, order.value, ceiling):
+        return [
+            RailBreach(
+                rail=RailId.PARTICIPATION,
+                limit=ceiling,
+                observed=order.value,
+                detail=(
+                    f"order notional for {order.isin} exceeds {rails.participation_max_pct}% of "
+                    f"its {rails.participation_lookback_sessions}-session median traded value "
+                    f"{median}"
+                ),
+            )
+        ]
+    return []
+
+
+def _book_cap_breaches(
+    order: ProposedOrder, portfolio: Portfolio, rails: BookRails
+) -> list[RailBreach]:
+    """Position, sector and number-of-names caps on the book a buy would produce.
+
+    Computed arithmetically rather than through ``apply_order`` so a buy the margin rail refuses
+    still has its caps reported: the resulting book re-marks the traded lot at the order's price,
+    exactly as ``apply_order`` does, and moves cash into it, which leaves every other value alone.
+    """
+    breaches: list[RailBreach] = []
+    held = portfolio.lot(order.isin)
+    held_quantity = 0 if held is None else held.quantity
+    lot_after = order.price * (held_quantity + order.quantity)
+    remark = _ZERO if held is None else order.price * held.quantity - held.value
+    total_after = portfolio.total_value + remark
+    position_pct = _pct_of(lot_after, total_after)
+    if _breached(RailId.MAX_POSITION, position_pct, rails.max_position_pct):
+        breaches.append(
+            RailBreach(
+                rail=RailId.MAX_POSITION,
+                limit=rails.max_position_pct,
+                observed=position_pct,
+                detail=f"{order.isin} would be {position_pct}% of book value",
+            )
+        )
+    others_in_sector = sum(
+        (
+            lot.value
+            for lot in portfolio.lots
+            if lot.sector == order.sector and lot.isin != order.isin
+        ),
+        _ZERO,
+    )
+    sector_pct = _pct_of(others_in_sector + lot_after, total_after)
+    if _breached(RailId.MAX_SECTOR, sector_pct, rails.max_sector_pct):
+        breaches.append(
+            RailBreach(
+                rail=RailId.MAX_SECTOR,
+                limit=rails.max_sector_pct,
+                observed=sector_pct,
+                detail=f"sector {order.sector!r} would be {sector_pct}% of book value",
+            )
+        )
+    names_after = portfolio.holding_count + (0 if held is not None else 1)
+    if _breached(RailId.MAX_POSITIONS, Decimal(names_after), Decimal(rails.max_positions)):
+        breaches.append(
+            RailBreach(
+                rail=RailId.MAX_POSITIONS,
+                limit=Decimal(rails.max_positions),
+                observed=Decimal(names_after),
+                detail=f"buying {order.isin} would make {names_after} names",
+            )
+        )
+    return breaches
 
 
 def _pct_of(value: Decimal, total: Decimal) -> Decimal:
@@ -496,6 +692,30 @@ class RailEngine:
         changes the verdict — `household` and `sleeve` add context, they do not grant exceptions.
         """
         assessment = check_order(order, portfolio, rails, household=household)
+        if not assessment.allowed:
+            self._journal_block(
+                order, portfolio, assessment, trading_date=trading_date, sleeve=sleeve
+            )
+        return assessment
+
+    def guard_book_order(
+        self,
+        order: ProposedOrder,
+        portfolio: Portfolio,
+        rails: BookRails,
+        facts: BookOrderFacts,
+        *,
+        trading_date: date,
+        sleeve: Sleeve | None = None,
+    ) -> RailAssessment:
+        """Clear an M17 book's order, journalling a `RAIL_BLOCK` if any rail refuses it.
+
+        What it does: call `check_book_order`; a refusal appends one `RAIL_BLOCK` line under the
+        book's id (``portfolio.case_id``) whose ``payload.rails`` names every rail that refused it
+        and whose rationale gives each one's numbers. An allowed order writes nothing here.
+        What it never does: place the order, or pass a refused one.
+        """
+        assessment = check_book_order(order, portfolio, rails, facts)
         if not assessment.allowed:
             self._journal_block(
                 order, portfolio, assessment, trading_date=trading_date, sleeve=sleeve
