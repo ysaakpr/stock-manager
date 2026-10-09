@@ -42,6 +42,7 @@ from analyst.llm.client import (
     DEFAULT_MAX_TOKENS,
     LLMCredentialError,
     LLMError,
+    LLMRateLimitError,
     LLMRefusalError,
     LLMResponse,
     Message,
@@ -106,6 +107,17 @@ _AUTH_MARKERS: Final[tuple[str, ...]] = (
     "invalid api key",
     "oauth token has expired",
     "credit balance is too low",
+)
+
+#: Substrings that mean "the subscription's rate or usage limit refused this call", checked
+#: against a failed run's output like the auth markers above. Retryable (`LLMRateLimitError`).
+_RATE_LIMIT_MARKERS: Final[tuple[str, ...]] = (
+    "rate limit",
+    "rate_limit",
+    "usage limit",
+    "too many requests",
+    "overloaded",
+    " 429",
 )
 
 
@@ -290,6 +302,11 @@ class ClaudeCliLLM:
                     "the Claude CLI is installed but not authenticated (or its token has "
                     "expired). Run `claude setup-token` on this machine and put nothing in the "
                     "repo: the CLI holds the credential itself."
+                )
+            if any(marker in combined for marker in _RATE_LIMIT_MARKERS):
+                raise LLMRateLimitError(
+                    f"the Claude CLI was rate limited for {model} (exit {finished.returncode}): "
+                    f"{finished.stderr.strip() or finished.stdout.strip() or '(no output)'}"
                 )
             raise LLMError(
                 f"the Claude CLI failed for {model} (exit {finished.returncode}): "

@@ -66,6 +66,12 @@ class LLMCredentialError(LLMError):
     """
 
 
+class LLMRateLimitError(LLMError):
+    """The provider (or the subscription behind the Claude CLI) refused the call for rate or usage
+    limits. Retryable after a wait — unlike a credential or a refusal — so a caller with a
+    deadline backs off and asks again rather than failing the session (M17.7)."""
+
+
 class LLMRefusalError(LLMError):
     """The provider declined the request; there is no answer to read.
 
