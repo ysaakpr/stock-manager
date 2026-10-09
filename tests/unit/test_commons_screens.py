@@ -715,11 +715,9 @@ def test_excluded_names_are_on_no_screen(built: CommonsScreens) -> None:
     screened = built.digest_scope(None)
     assert FLAGGED not in screened and BANDED not in screened
     # FLAGGED's trend is the strongest in the world: only the exclusion keeps it off S1.
-    flagged = next(f for f in built.features if f.isin == FLAGGED)
-    assert (
-        flagged.ret_12_1 is not None
-        and flagged.ret_12_1 > next(f for f in built.features if f.isin == LEADER).ret_12_1
-    )  # type: ignore[operator]
+    flagged = next(f.ret_12_1 for f in built.features if f.isin == FLAGGED)
+    leader = next(f.ret_12_1 for f in built.features if f.isin == LEADER)
+    assert flagged is not None and leader is not None and flagged > leader
     assert not built.exclusions.buys_blocked
 
 
