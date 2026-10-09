@@ -327,6 +327,45 @@ class CashInterestAccrual:
         )
         return credit
 
+    def to_document(self) -> dict[str, Any]:
+        """The accrual's carried state — what a forward runner persists between sessions.
+
+        The last session, the balance earning since it and every month accrued but not yet
+        credited (exact, unrounded), as strings. Past ``credits`` are not state: each is already a
+        ledger line where it was paid. ``from_document`` continues the walk exactly.
+        """
+        return {
+            "last": None if self._last is None else self._last.isoformat(),
+            "balance": str(self._balance),
+            "pending": [
+                [
+                    f"{year:04d}-{month:02d}",
+                    str(entry[0]),
+                    entry[1].isoformat(),
+                    entry[2].isoformat(),
+                ]
+                for (year, month), entry in sorted(self._pending.items())
+            ],
+        }
+
+    @classmethod
+    def from_document(
+        cls, schedule: RepoRateSchedule, document: Mapping[str, Any]
+    ) -> CashInterestAccrual:
+        """An accrual that continues from ``document`` (``to_document``) under ``schedule``."""
+        accrual = cls(schedule)
+        last = document["last"]
+        accrual._last = None if last is None else date.fromisoformat(last)
+        accrual._balance = _text_decimal(document["balance"], "cash interest balance")
+        for month, amount, first, through in document["pending"]:
+            year, number = (int(part) for part in str(month).split("-"))
+            accrual._pending[(year, number)] = [
+                _text_decimal(amount, f"cash interest pending {month}"),
+                date.fromisoformat(first),
+                date.fromisoformat(through),
+            ]
+        return accrual
+
     def close_session(self, session: date, balance: Decimal) -> None:
         """Record ``balance`` — settled cash at the end of ``session`` — as what earns from now.
 
