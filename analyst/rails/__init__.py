@@ -16,6 +16,7 @@ broker on purpose — a second path to the market is the one thing invariant #6 
 
 from analyst.rails.engine import (
     FORCED_REVIEW_EVENT,
+    BookExitClearance,
     ExitClearance,
     RailEngine,
     RailJournal,
@@ -25,6 +26,8 @@ from analyst.rails.engine import (
     check_order,
     max_child_quantity,
     order_value_ceiling,
+    participation_child_quantity,
+    slice_book_exit,
     slice_exit,
 )
 from analyst.rails.policies import (
@@ -43,6 +46,7 @@ from analyst.rails.policies import (
 
 __all__ = [
     "FORCED_REVIEW_EVENT",
+    "BookExitClearance",
     "BookOrderFacts",
     "BookRails",
     "DrawdownStatus",
@@ -63,5 +67,7 @@ __all__ = [
     "drawdown_of",
     "max_child_quantity",
     "order_value_ceiling",
+    "participation_child_quantity",
+    "slice_book_exit",
     "slice_exit",
 ]

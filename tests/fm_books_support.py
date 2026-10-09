@@ -26,7 +26,9 @@ from analyst.fundmanager.books import (
 from analyst.journal.evidence import EvidenceBundle
 from analyst.journal.models import JournalEntry
 from analyst.rails import BookRails
+from backtest.book_actions import BookActionCalendar, BookActionSource
 from backtest.cash_interest import load_repo_rate_schedule
+from backtest.fm_circuit import CircuitMarket, NoCircuitData
 from backtest.fm_paper import M17PaperAccount
 from dataplatform.clock import FrozenClock
 from execution.broker import Exchange
@@ -148,8 +150,13 @@ def open_book(
     journal: BookJournal,
     rails: BookRails | None = None,
     opening_cash: Decimal | None = None,
+    corporate_actions: BookActionSource | None = None,
+    circuit: CircuitMarket | None = None,
 ) -> tuple[FundBook, M17PaperAccount]:
-    """One M17 book on a fresh paper account, rails from the roster unless given."""
+    """One M17 book on a fresh paper account, rails from the roster unless given.
+
+    No corporate actions and no circuit data unless given — each test that is about them says so.
+    """
     roster_book_rails, capital = roster_rails(book_id)
     account = M17PaperAccount.open(
         account_id=paper_account_id(book_id),
@@ -158,6 +165,8 @@ def open_book(
         kill_switch=kill_switch,
         clock=clock,
         schedule=load_repo_rate_schedule(),
+        corporate_actions=BookActionCalendar() if corporate_actions is None else corporate_actions,
+        circuit=NoCircuitData() if circuit is None else circuit,
         alerter=RecordingAlerter(),
     )
     book = FundBook(

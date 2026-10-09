@@ -59,6 +59,7 @@ from execution.broker import Side
 
 __all__ = [
     "FORCED_REVIEW_EVENT",
+    "BookExitClearance",
     "ExitClearance",
     "RailEngine",
     "RailJournal",
@@ -68,6 +69,8 @@ __all__ = [
     "check_order",
     "max_child_quantity",
     "order_value_ceiling",
+    "participation_child_quantity",
+    "slice_book_exit",
     "slice_exit",
 ]
 
@@ -459,6 +462,60 @@ def slice_exit(
     )
 
 
+def participation_child_quantity(
+    order: ProposedOrder, rails: BookRails, facts: BookOrderFacts
+) -> int:
+    """The most shares of ``order``'s instrument one session's order may carry under participation.
+
+    What it does: the largest whole-share count whose value at the order's reference price is
+    within ``participation_max_pct`` of the decision session's median traded value.
+    What it never does: round up, or guess a median. Zero means the median is not knowable (an
+    incomplete lookback) or one share is already above the ceiling.
+    """
+    median = facts.median_traded_value
+    if (
+        median is None
+        or median <= _ZERO
+        or facts.median_sessions < rails.participation_lookback_sessions
+    ):
+        return 0
+    ceiling = rails.participation_max_pct * median / _HUNDRED
+    shares = int((ceiling / order.price).to_integral_value(rounding=ROUND_FLOOR))
+    # Held to the same ``price * quantity`` product the rail computes, as in max_child_quantity.
+    while shares > 0 and _breached(RailId.PARTICIPATION, order.price * shares, ceiling):
+        shares -= 1
+    return max(shares, 0)
+
+
+def slice_book_exit(
+    order: ProposedOrder, portfolio: Portfolio, rails: BookRails, facts: BookOrderFacts
+) -> ProposedOrder:
+    """This session's child of an M17 book's exit: the order whole, or the part participation lets.
+
+    What it does: return ``order`` unchanged unless it is a SELL of a held long, no larger than
+    the held quantity, that participation alone refuses (every other rail passes it whole) with a
+    knowable median; then return a child of ``participation_child_quantity`` shares. The rest of
+    the parent is worked on later sessions, a child per session, each cleared afresh against that
+    session's median — participation is a per-session cap, so two children of one exit in one
+    session would together breach it, and they are never staged together.
+    What it never does: slice a buy, a short, an oversell, or a sell some other rail refuses: those
+    reach ``check_book_order`` whole and are refused there. It never weakens a rail either — the
+    child is cleared through every rail by the caller.
+    """
+    if order.side is not Side.SELL:
+        return order
+    lot = portfolio.lot(order.isin)
+    if lot is None or order.quantity > lot.quantity:
+        return order
+    whole = check_book_order(order, portfolio, rails, facts)
+    if whole.allowed or whole.breached_rails != (RailId.PARTICIPATION,):
+        return order
+    shares = participation_child_quantity(order, rails, facts)
+    if shares <= 0:
+        return order
+    return replace(order, request=replace(order.request, quantity=shares))
+
+
 def _position_breaches(
     order: ProposedOrder, resulting: Portfolio, rails: RiskRails
 ) -> list[RailBreach]:
@@ -647,6 +704,43 @@ class ExitClearance:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class BookExitClearance:
+    """A8's verdict on one session's child of an M17 book's exit (``slice_book_exit``).
+
+    ``child`` is the order whole when nothing needed slicing. ``allowed`` says whether the caller
+    may stage ``child`` this session; ``remaining`` is what of ``parent`` is still to sell after it
+    — the caller works that on the following sessions, one child each, through this method again.
+    """
+
+    parent: ProposedOrder
+    child: ProposedOrder
+    assessment: RailAssessment
+
+    @property
+    def allowed(self) -> bool:
+        return self.assessment.allowed
+
+    @property
+    def sliced(self) -> bool:
+        """True when the child is less than the parent (the rest waits for later sessions)."""
+        return self.child.quantity < self.parent.quantity
+
+    @property
+    def remaining(self) -> int:
+        """Shares of the parent left to sell after this session's child, if it is staged."""
+        return self.parent.quantity - (self.child.quantity if self.allowed else 0)
+
+    def payload(self) -> dict[str, str]:
+        """The parent intent and this child, for the child's journal line (strings only)."""
+        return {
+            "exit_parent_quantity": str(self.parent.quantity),
+            "exit_child_quantity": str(self.child.quantity),
+            "exit_remaining": str(self.remaining),
+            "exit_reference_price": str(self.parent.price),
+        }
+
+
 class RailEngine:
     """A8 wired to the journal: it clears orders and monitors drawdown, and writes down what it did.
 
@@ -721,6 +815,57 @@ class RailEngine:
                 order, portfolio, assessment, trading_date=trading_date, sleeve=sleeve
             )
         return assessment
+
+    def guard_book_exit(
+        self,
+        order: ProposedOrder,
+        portfolio: Portfolio,
+        rails: BookRails,
+        facts: BookOrderFacts,
+        *,
+        trading_date: date,
+        sleeve: Sleeve | None = None,
+    ) -> BookExitClearance:
+        """Clear this session's child of an M17 book's sell, journalling a refusal.
+
+        What it does: cut the order with ``slice_book_exit`` (a no-op for anything but a held
+        long's sell that participation alone refuses), then ``check_book_order`` the child. A
+        refused child is journalled as a ``RAIL_BLOCK`` naming its rails and, when sliced, the
+        parent it belongs to. An allowed one writes nothing here; the caller stages it and
+        journals the parent intent with ``BookExitClearance.payload``.
+        What it assumes: the caller stages at most one child of a parent per session, and offers
+        the remainder again on the next session against that session's facts.
+        What it never does: weaken a rail. Every rail sees the child; the participation ceiling is
+        the same number, applied to each session's child. A buy is cleared whole, exactly as
+        ``guard_book_order`` clears it — a buy too big for participation is refused, not sliced.
+        """
+        child = slice_book_exit(order, portfolio, rails, facts)
+        assessment = check_book_order(child, portfolio, rails, facts)
+        if not assessment.allowed:
+            context = (
+                {"exit_parent_quantity": str(order.quantity)}
+                if child.quantity < order.quantity
+                else {}
+            )
+            self._journal_block(
+                child,
+                portfolio,
+                assessment,
+                trading_date=trading_date,
+                sleeve=sleeve,
+                context=context,
+            )
+        clearance = BookExitClearance(parent=order, child=child, assessment=assessment)
+        if clearance.sliced:
+            _LOG.info(
+                "rails.book_exit_sliced",
+                case_id=portfolio.case_id,
+                isin=order.isin,
+                parent_quantity=order.quantity,
+                child_quantity=child.quantity,
+                allowed=clearance.allowed,
+            )
+        return clearance
 
     def guard_exit(
         self,

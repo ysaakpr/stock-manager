@@ -99,10 +99,12 @@ DEFAULT_INDEX_SET: Final[tuple[IndexSpec, ...]] = (
 
 #: Indices fetched only when named with ``--index`` (X2, 2026-10-05): the size-tier benchmarks the
 #: cap-tier strategies are measured against, so a mid- or small-cap book is not judged against the
-#: NIFTY 50 alone. Opt-in, so the default run stays the three-request campaign above.
+#: NIFTY 50 alone. Opt-in, so the default run stays the three-request campaign above. NIFTY 500
+#: (M17.7) is the series ``BENCH-N500`` (analyst.fundmanager.controls) buys and holds from S0.
 OPT_IN_INDEX_SET: Final[tuple[IndexSpec, ...]] = (
     IndexSpec(name="NIFTY MIDCAP 150", slug="niftymidcap150"),
     IndexSpec(name="NIFTY SMALLCAP 250", slug="niftysmallcap250"),
+    IndexSpec(name="NIFTY 500", slug="nifty500"),
 )
 
 #: How far behind session D the same-evening window starts, at the latest. The window always

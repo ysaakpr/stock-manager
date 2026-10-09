@@ -584,5 +584,15 @@ def test_size_tier_benchmarks_are_opt_in_and_resolvable() -> None:
     assert opt_in == {
         "niftymidcap150": "NIFTY MIDCAP 150",
         "niftysmallcap250": "NIFTY SMALLCAP 250",
+        "nifty500": "NIFTY 500",
     }
     assert not defaults & set(opt_in)
+
+
+def test_nifty500_is_the_slug_bench_n500_reads() -> None:
+    """M17.7: the opt-in NIFTY 500 spec lands under the slug BENCH-N500's label resolves to."""
+    from analyst.fundmanager.controls import BENCHMARK_INDEX_SLUGS
+
+    opt_in = {spec.slug: spec.name for spec in OPT_IN_INDEX_SET}
+    assert opt_in[BENCHMARK_INDEX_SLUGS["nifty500-tri-proxy"]] == "NIFTY 500"
+    assert "nifty500" not in {spec.slug for spec in DEFAULT_INDEX_SET}
