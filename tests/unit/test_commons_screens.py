@@ -162,7 +162,8 @@ def test_s1_gives_the_bonus_to_a_top_half_industry() -> None:
     sectors = {A: "Up", C: "Up", B: "Down", D: "Down"}
     entries = s1_trend_leaders(names, sectors)
     assert [e.isin for e in entries] == [A, B]
-    assert entries[0].score - entries[1].score == S1_SECTOR_BONUS
+    assert S1_SECTOR_BONUS == Decimal("0.5")  # this module's frozen choice (the study names none)
+    assert entries[0].score - entries[1].score == Decimal("0.5")
     # Swap the industries and the order swaps with them, against the ISIN tie-break.
     swapped = s1_trend_leaders(names, {A: "Down", D: "Down", B: "Up", C: "Up"})
     assert [e.isin for e in swapped] == [B, A]
