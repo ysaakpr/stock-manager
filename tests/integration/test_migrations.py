@@ -59,8 +59,14 @@ APPEND_ONLY_TABLES = ("decision_journal", "policy_set")
 
 #: Append-only tables keyed without an ``id``/``recorded_at``, so the row-level probes above do not
 #: fit them; each one's own suite proves the guard (paper_session_resolution:
-#: tests/integration/test_paper_session_job.py). Listed here so the guard-set check stays exact.
-OTHER_APPEND_ONLY_TABLES = ("paper_session_resolution",)
+#: tests/integration/test_paper_session_job.py; the three commons_* tables of 0018:
+#: tests/integration/test_commons_store.py). Listed here so the guard-set check stays exact.
+OTHER_APPEND_ONLY_TABLES = (
+    "paper_session_resolution",
+    "commons_build",
+    "commons_market_sheet",
+    "commons_universe_sheet",
+)
 
 #: Column types that can never hold money. `money` is PostgreSQL's own type and is excluded too:
 #: its output depends on the server's lc_monetary, so the same row reads differently on two hosts.
@@ -82,8 +88,9 @@ MONEY_COLUMNS = (
     ("token_usage", "cost_inr"),
 )
 
-#: Every table comment must open with the plan module that owns it (D1-D7, A1-A9, X1-X3).
-PLAN_MODULE = re.compile(r"^(D[1-7]|A[1-9]|X[1-3]) ")
+#: Every table comment must open with the plan module that owns it (D1-D7, A1-A10, X1-X3). A10,
+#: the M17 Research Commons and fund managers, was added to the plan on 2026-10-09 (§12).
+PLAN_MODULE = re.compile(r"^(D[1-7]|A10|A[1-9]|X[1-3]) ")
 
 #: The instant the runner's injected clock is frozen at, so `applied_at` is asserted rather than
 #: observed. Compared as an instant, not a local date: the server returns timestamptz in its own
@@ -371,7 +378,7 @@ def test_every_table_is_commented_with_its_owning_plan_module(conn: Connection) 
         str(name) for name, comment in rows if not (comment and PLAN_MODULE.match(str(comment)))
     ]
     assert uncommented == [], (
-        f"tables must open their comment with D1-D7/A1-A9/X1-X3: {uncommented}"
+        f"tables must open their comment with D1-D7/A1-A10/X1-X3: {uncommented}"
     )
 
 
