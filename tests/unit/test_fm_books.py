@@ -47,8 +47,10 @@ from analyst.fundmanager.books import (
 from analyst.journal.models import Actor, Decision, JournalEntry
 from analyst.rails import BookOrderFacts, Lot, Portfolio, ProposedOrder, RailId, check_book_order
 from backtest.accounting import PortfolioBook
+from backtest.book_actions import BookActionCalendar
 from backtest.cash_interest import CashInterestAccrual, load_repo_rate_schedule
-from backtest.fm_paper import M17PaperAccount, _AccountBook
+from backtest.fm_circuit import NoCircuitData
+from backtest.fm_paper import CorporateActionLedger, M17PaperAccount, _AccountBook
 from backtest.paper_session import (
     InMemoryPaperSessionStore,
     PaperModeViolationError,
@@ -643,6 +645,8 @@ def test_an_account_persists_as_a_paper_session_row_and_continues_exactly(tmp_pa
         kill_switch=switch,
         clock=clock,
         schedule=load_repo_rate_schedule(),
+        corporate_actions=BookActionCalendar(),
+        circuit=NoCircuitData(),
         book_digest=stored.book_digest or "",
         alerter=RecordingAlerter(),
     )
@@ -681,6 +685,8 @@ def test_a_tampered_persisted_state_is_refused(tmp_path: Path) -> None:
             kill_switch=switch,
             clock=clock,
             schedule=load_repo_rate_schedule(),
+            corporate_actions=BookActionCalendar(),
+            circuit=NoCircuitData(),
             book_digest=account.book_digest,
         )
 
@@ -839,6 +845,9 @@ def test_the_account_trades_only_on_the_paper_broker(tmp_path: Path) -> None:
             kill_switch=switch_at(tmp_path, clock),
             clock=clock,
             alerter=RecordingAlerter(),
+            corporate_actions=BookActionCalendar(),
+            circuit=NoCircuitData(),
+            ledger=CorporateActionLedger(D0),
         )
 
 

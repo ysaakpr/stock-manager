@@ -15,12 +15,20 @@ layer never names a concrete broker (invariant #5) — and the only account M17 
    accrues repo - 50 bp (credited monthly, `backtest.cash_interest`), and the account's book is
    reconciled against the broker. A clean reconciliation journals a `HEARTBEAT`
    (``payload.event = RECONCILIATION``) with both sides as evidence; a break trips the kill switch
-   and journals an `ESCALATE` (``payload.event = RECON_BREAK``).
+   and journals an `ESCALATE` (``payload.event = RECON_BREAK``). Before the fills, the account
+   books the corporate actions it knows of on held names (M17.7, the paper session's rule: on time
+   through ``BookActionApplier``, late ones on this session); each is journaled
+   (``payload.event = CORPORATE_ACTION``), and one that cannot be booked mechanically is an
+   ``ESCALATE`` that trips the kill switch. A buy whose fill session is locked at the upper price
+   band is left unfilled and journaled ``payload.event = UNFILLED_UPPER_CIRCUIT`` (Amendment 1 e).
 2. `FundBook.decide(session, orders)` — each `BookOrder` is valued at the session's close and
    cleared through the rails: sells first, against what the book holds; then buys, against the
    book without those sells (a sale frees neither a name slot nor cash before it has filled and
    settled). A refused order is journaled `RAIL_BLOCK` with ``payload.rails`` naming every rail
-   that refused it; an allowed one is staged and journaled `BUY`/`SELL`.
+   that refused it; an allowed one is staged and journaled `BUY`/`SELL`. A sell that only the
+   participation rail refuses is not refused (M17.7): it becomes one parent exit worked as a child
+   per session, each child the most participation allows that session and cleared through every
+   rail, until the book holds what the parent leaves (`PendingExit`). A buy is never sliced.
 
 **One kill switch stops every M17 book** (§4 step 1): `m17_kill_switch` is the single switch file,
 `FundDesk` refuses books that do not share it, and a tripped switch makes every book journal a
@@ -47,7 +55,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
+from enum import StrEnum
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -73,27 +82,36 @@ from analyst.rails import (
 from dataplatform.clock import Clock
 from dataplatform.logging import get_logger
 from execution.broker import Fill, OrderRequest, Side
-from execution.kill_switch import KillSwitch, kill_switch_path
+from execution.kill_switch import KillSwitch, TripSource, kill_switch_path
 from execution.recon import ReconResult
 
 __all__ = [
     "BOOK_HALTED_EVENT",
     "BOOK_SLEEVE",
+    "CORPORATE_ACTION_EVENT",
+    "EXIT_COMPLETE_EVENT",
+    "EXIT_SUPERSEDED_EVENT",
     "M17_KILL_SWITCH_ACCOUNT",
+    "ORDER_STAGED_EVENT",
     "PAPER_MODE",
     "RECON_BREAK_EVENT",
     "RECON_EVENT",
+    "UNFILLED_UPPER_CIRCUIT_EVENT",
     "AccountSession",
     "BookAccount",
     "BookError",
     "BookJournal",
     "BookMarket",
     "BookOrder",
+    "BookedCorporateAction",
+    "CorporateActionStatus",
     "DecisionReport",
     "ExecutionReport",
     "FundBook",
     "FundDesk",
     "FutureDataError",
+    "PendingExit",
+    "UnfilledOrder",
     "book_rails",
     "m17_kill_switch",
     "median_traded_value",
@@ -116,6 +134,15 @@ RECON_EVENT: Final = "RECONCILIATION"
 RECON_BREAK_EVENT: Final = "RECON_BREAK"
 #: ``payload.event`` on the no-op a book journals while the shared kill switch is tripped.
 BOOK_HALTED_EVENT: Final = "KILL_SWITCH_TRIPPED"
+#: ``payload.event`` on an ordinary order's staging line (`BookOrder.event`'s default).
+ORDER_STAGED_EVENT: Final = "STAGED"
+#: ``payload.event`` on a corporate action the account booked (or escalated) on a held name.
+CORPORATE_ACTION_EVENT: Final = "CORPORATE_ACTION"
+#: ``payload.event`` on a buy left unfilled because its session was locked at the upper band.
+UNFILLED_UPPER_CIRCUIT_EVENT: Final = "UNFILLED_UPPER_CIRCUIT"
+#: ``payload.event`` when a parent exit worked across sessions is done, or replaced by a decision.
+EXIT_COMPLETE_EVENT: Final = "EXIT_COMPLETE"
+EXIT_SUPERSEDED_EVENT: Final = "EXIT_SUPERSEDED"
 
 
 class BookError(RuntimeError):
@@ -177,6 +204,58 @@ def median_traded_value(values: Sequence[Decimal]) -> Decimal:
 # ── the seams: the account, the market, the journal ─────────────────────────────────────────────
 
 
+class CorporateActionStatus(StrEnum):
+    """What the account did with a corporate action on a held name."""
+
+    BOOKED = "BOOKED"
+    """Applied to the broker and the accounting book alike."""
+
+    ESCALATED = "ESCALATED"
+    """Not safe to book mechanically (late, and the name traded since; or no modelled terms):
+    the book is left as it was and the owner decides."""
+
+
+@dataclass(frozen=True, slots=True)
+class BookedCorporateAction:
+    """One corporate action the account saw on a held name in a session, and what it did.
+
+    ``identity`` is the paper session's ``action_identity`` (kind, ISIN, ex-date), so an action is
+    booked once whatever its later corrections. ``late`` says the account had already executed
+    past its ex-date when it learnt of it. ``rescale`` is ``(numerator, denominator)`` when shares
+    of ``isin`` were multiplied by that ratio, so the book can rescale what it keeps in prices or
+    shares (a stop level, a parent exit's remainder); ``cash`` is what was credited.
+    """
+
+    identity: str
+    isin: str
+    ex_date: date
+    kind: str
+    status: CorporateActionStatus
+    late: bool
+    entitled: int
+    detail: str
+    cash: Decimal = Decimal(0)
+    rescale: tuple[Decimal, Decimal] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class UnfilledOrder:
+    """An order the account cancelled at its fill session instead of filling (Amendment 1 e).
+
+    ``basis`` says which test found the lock: ``BAND`` (the session's price band) or
+    ``SMALLEST_BAND`` (no band known for the session, so the smallest NSE band stood in).
+    """
+
+    order_id: str
+    isin: str
+    quantity: int
+    session: date
+    open: Decimal
+    prev_close: Decimal
+    threshold: Decimal
+    basis: str
+
+
 @dataclass(frozen=True, slots=True)
 class AccountSession:
     """What one session did to a book's paper account: its fills, interest and reconciliation."""
@@ -189,6 +268,8 @@ class AccountSession:
     quantities: Mapping[str, int]
     broker_cash: Decimal
     broker_quantities: Mapping[str, int]
+    corporate_actions: tuple[BookedCorporateAction, ...] = ()
+    unfilled: tuple[UnfilledOrder, ...] = ()
 
 
 class BookAccount(Protocol):
@@ -276,12 +357,62 @@ class BookOrder:
     side: Side
     quantity: int
     rationale: str
+    #: ``payload.event`` on the order's staging line: ``STAGED`` for a decision's order,
+    #: ``STOP_EXIT`` for a mechanical stop (`analyst.fundmanager.stops`).
+    event: str = ORDER_STAGED_EVENT
 
     def __post_init__(self) -> None:
         # OrderRequest validates the ISIN and the whole-share quantity; fail at construction.
         OrderRequest(isin=self.isin, side=self.side, quantity=self.quantity)
         if not self.rationale.strip():
             raise ValueError("a book order carries the decision's rationale")
+        if not self.event.strip():
+            raise ValueError("a book order names the event its staging line records")
+
+
+@dataclass(frozen=True, slots=True)
+class PendingExit:
+    """A sell the participation rail let through only in part: one parent, a child per session.
+
+    ``floor`` is what the book holds once the whole parent has sold; each session the remainder is
+    what is held above it (so a child that did not fill is simply offered again). ``parent_uid`` is
+    the first child's order uid — every child's journal line names it, so the children read as one
+    exit. Persisted with the book (`FundBook.pending_exits_document`).
+    """
+
+    isin: str
+    parent_uid: str
+    decided: date
+    parent_quantity: int
+    floor: int
+    rationale: str
+    event: str
+    children: int
+
+    def to_document(self) -> dict[str, str]:
+        return {
+            "isin": self.isin,
+            "parent_uid": self.parent_uid,
+            "decided": self.decided.isoformat(),
+            "parent_quantity": str(self.parent_quantity),
+            "floor": str(self.floor),
+            "rationale": self.rationale,
+            "event": self.event,
+            "children": str(self.children),
+        }
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, str]) -> PendingExit:
+        return cls(
+            isin=document["isin"],
+            parent_uid=document["parent_uid"],
+            decided=date.fromisoformat(document["decided"]),
+            parent_quantity=int(document["parent_quantity"]),
+            floor=int(document["floor"]),
+            rationale=document["rationale"],
+            event=document["event"],
+            children=int(document["children"]),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +426,8 @@ class ExecutionReport:
     lapsed: tuple[str, ...] = ()
     recon: ReconResult | None = None
     interest_credited: Decimal = _ZERO
+    corporate_actions: tuple[BookedCorporateAction, ...] = ()
+    unfilled: tuple[UnfilledOrder, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,11 +482,13 @@ class FundBook:
     kill_switch: KillSwitch
     clock: Clock
     last_buy_fill: dict[str, date] = field(default_factory=dict)
+    pending_exits: dict[str, PendingExit] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.book_id.strip():
             raise ValueError("a book needs an id")
         self.last_buy_fill = dict(self.last_buy_fill)
+        self.pending_exits = dict(self.pending_exits)
 
     # -- journal stream ---------------------------------------------------------------------------
 
@@ -433,6 +568,8 @@ class FundBook:
         for fill in run.fills:
             if fill.side is Side.BUY:
                 self.last_buy_fill[fill.isin] = fill.session
+        self._journal_corporate_actions(run)
+        self._journal_unfilled(run)
         self._journal_recon(run)
         _LOG.info(
             "fm_books.executed",
@@ -449,7 +586,89 @@ class FundBook:
             fills=run.fills,
             recon=run.recon,
             interest_credited=run.interest_credited,
+            corporate_actions=run.corporate_actions,
+            unfilled=run.unfilled,
         )
+
+    def _journal_corporate_actions(self, run: AccountSession) -> None:
+        """Journal each corporate action the account saw on a held name; trip on an escalation.
+
+        A rescale also rescales a parent exit's floor in that name, so the exit still leaves the
+        same fraction of the position it meant to leave.
+        """
+        for action in run.corporate_actions:
+            pending = self.pending_exits.get(action.isin)
+            if action.rescale is not None and pending is not None:
+                numerator, denominator = action.rescale
+                floor = int(
+                    (Decimal(pending.floor) * numerator / denominator).to_integral_value(
+                        rounding=ROUND_FLOOR
+                    )
+                )
+                self.pending_exits[action.isin] = replace(pending, floor=floor)
+            escalated = action.status is CorporateActionStatus.ESCALATED
+            self._write(
+                self._entry(
+                    run.session,
+                    actor=Actor.EXEC,
+                    decision=Decision.ESCALATE if escalated else Decision.HOLD,
+                    isin=action.isin,
+                    rationale=(
+                        f"{'not booked' if escalated else 'booked'}"
+                        f"{' late' if action.late else ''}: {action.detail}"
+                    ),
+                    payload={
+                        "event": CORPORATE_ACTION_EVENT,
+                        "action": action.identity,
+                        "kind": action.kind,
+                        "ex_date": action.ex_date.isoformat(),
+                        "status": action.status.value,
+                        "late": str(action.late).lower(),
+                        "entitled": str(action.entitled),
+                        "cash": str(action.cash),
+                        "rescale": (
+                            ""
+                            if action.rescale is None
+                            else f"{action.rescale[0]}:{action.rescale[1]}"
+                        ),
+                    },
+                )
+            )
+            if escalated:
+                # The book's share count is in question; trading on it would compound the error.
+                self.kill_switch.trip(
+                    reason=(
+                        f"{self.book_id}: corporate action {action.identity} on a held name "
+                        "cannot be booked mechanically; owner review"
+                    ),
+                    source=TripSource.RECON,
+                )
+
+    def _journal_unfilled(self, run: AccountSession) -> None:
+        for order in run.unfilled:
+            self._write(
+                self._entry(
+                    run.session,
+                    actor=Actor.EXEC,
+                    decision=Decision.HOLD,
+                    isin=order.isin,
+                    rationale=(
+                        f"buy of {order.quantity} {order.isin} left unfilled: the session opened "
+                        f"and stayed at {order.open} (open = high = low), at or above the upper "
+                        f"band {order.threshold} over the previous close {order.prev_close} "
+                        f"({order.basis})"
+                    ),
+                    payload={
+                        "event": UNFILLED_UPPER_CIRCUIT_EVENT,
+                        "order_id": order.order_id,
+                        "quantity": str(order.quantity),
+                        "open": str(order.open),
+                        "prev_close": str(order.prev_close),
+                        "threshold": str(order.threshold),
+                        "basis": order.basis,
+                    },
+                )
+            )
 
     def _journal_recon(self, run: AccountSession) -> None:
         items: list[EvidenceItem] = []
@@ -517,10 +736,15 @@ class FundBook:
     def decide(self, session: date, orders: Sequence[BookOrder]) -> DecisionReport:
         """Clear ``orders`` through the M17 rails at ``session``'s close and stage what they allow.
 
-        Sells are cleared first against what the book holds, then buys against the book without
-        those sells; within a side, in the order given. A refused order is journaled `RAIL_BLOCK`
-        by A8; an order with no close to value it at is journaled `DEFERRED`; a staged order is
-        journaled `BUY`/`SELL` with its uid. A session with no orders journals a `HOLD`.
+        Parent exits still being worked (`PendingExit`) go first, a child each, unless this
+        session's orders name the same ISIN — a new decision on a name replaces the old exit
+        (journaled ``EXIT_SUPERSEDED``). Then sells are cleared against what the book holds, then
+        buys against the book without those sells; within a side, in the order given. A sell that
+        only participation refuses is staged as its first child (`RailEngine.guard_book_exit`) and
+        the rest becomes a `PendingExit`; a buy is cleared whole. A refused order is journaled
+        `RAIL_BLOCK` by A8; an order with no close to value it at is journaled `DEFERRED`; a
+        staged order is journaled `BUY`/`SELL` with its uid. A session with no orders and no exit
+        to work journals a `HOLD`.
         Raises `BookError` for two orders in one ISIN (one decision per name), or a held name with
         no close (the book cannot be valued, so no cap can be checked).
         """
@@ -537,20 +761,44 @@ class FundBook:
         unpriced: list[BookOrder] = []
 
         sellable = book
+        worked = self._work_pending_exits(session, set(names), sellable, engine, staged, refused)
+        for isin in worked:
+            sellable = _less(sellable, isin, worked[isin])
         for order in (o for o in orders if o.side is Side.SELL):
             proposed = self._proposed(order, session)
             if proposed is None:
                 unpriced.append(order)
                 continue
             facts = self._facts(proposed, session, spendable=self.account.spendable_cash)
-            verdict = engine.guard_book_order(
+            clearance = engine.guard_book_exit(
                 proposed, sellable, self.rails, facts, trading_date=session, sleeve=BOOK_SLEEVE
             )
-            if not verdict.allowed:
-                refused.append((order, verdict))
+            if not clearance.allowed:
+                refused.append((order, clearance.assessment))
                 continue
-            staged.append((order, self._stage(order, proposed, session)))
-            sellable = _less(sellable, order.isin, order.quantity)
+            child = clearance.child
+            if clearance.sliced:
+                held = sellable.lot(order.isin)
+                uid = self._stage(
+                    replace(order, quantity=child.quantity),
+                    child,
+                    session,
+                    exit_payload={**clearance.payload(), "exit_child": "1"},
+                )
+                self.pending_exits[order.isin] = PendingExit(
+                    isin=order.isin,
+                    parent_uid=uid,
+                    decided=session,
+                    parent_quantity=order.quantity,
+                    floor=(0 if held is None else held.quantity) - order.quantity,
+                    rationale=order.rationale,
+                    event=order.event,
+                    children=1,
+                )
+                staged.append((order, uid))
+            else:
+                staged.append((order, self._stage(order, proposed, session)))
+            sellable = _less(sellable, order.isin, child.quantity)
 
         spendable = self.account.spendable_cash
         buying = book
@@ -591,7 +839,7 @@ class FundBook:
                     payload={"event": "UNPRICED", "side": order.side.value},
                 )
             )
-        if not orders:
+        if not orders and not worked and not self.pending_exits:
             self._write(
                 self._entry(
                     session,
@@ -618,8 +866,25 @@ class FundBook:
             unpriced=tuple(unpriced),
         )
 
-    def _stage(self, order: BookOrder, proposed: ProposedOrder, session: date) -> str:
+    def _stage(
+        self,
+        order: BookOrder,
+        proposed: ProposedOrder,
+        session: date,
+        *,
+        exit_payload: Mapping[str, str] | None = None,
+    ) -> str:
         uid = self.account.stage(proposed.request)
+        payload = {
+            "event": order.event,
+            "order_uid": uid,
+            "quantity": str(proposed.quantity),
+            "reference_price": str(proposed.price),
+            "notional": str(proposed.value),
+        }
+        if exit_payload is not None:
+            payload.update(exit_payload)
+            payload.setdefault("exit_parent", uid)
         self._write(
             self._entry(
                 session,
@@ -627,16 +892,111 @@ class FundBook:
                 decision=Decision.BUY if order.side is Side.BUY else Decision.SELL,
                 isin=order.isin,
                 rationale=order.rationale,
-                payload={
-                    "event": "STAGED",
-                    "order_uid": uid,
-                    "quantity": str(order.quantity),
-                    "reference_price": str(proposed.price),
-                    "notional": str(proposed.value),
-                },
+                payload=payload,
             ).model_copy(update={"orders_ref": uid})
         )
         return uid
+
+    def _work_pending_exits(
+        self,
+        session: date,
+        named: set[str],
+        sellable: Portfolio,
+        engine: RailEngine,
+        staged: list[tuple[BookOrder, str]],
+        refused: list[tuple[BookOrder, RailAssessment]],
+    ) -> dict[str, int]:
+        """Stage this session's child of every parent exit still open; the shares each staged.
+
+        The remainder is what the book holds above the parent's floor *now*, after this
+        session's fills — so a child that filled is gone from it and one that did not is offered
+        again. A child is cleared through every rail against this session's facts; a refusal is
+        journaled by A8 and the exit stays open for the next session.
+        """
+        worked: dict[str, int] = {}
+        for isin in sorted(self.pending_exits):
+            pending = self.pending_exits[isin]
+            lot = sellable.lot(isin)
+            remainder = (0 if lot is None else lot.quantity) - pending.floor
+            if isin in named or remainder <= 0:
+                superseded = isin in named and remainder > 0
+                del self.pending_exits[isin]
+                self._write(
+                    self._entry(
+                        session,
+                        actor=Actor.EXEC,
+                        decision=Decision.HOLD,
+                        isin=isin,
+                        rationale=(
+                            f"exit {pending.parent_uid} of {pending.parent_quantity} "
+                            + (
+                                f"replaced by this session's decision with {remainder} unsold"
+                                if superseded
+                                else f"complete after {pending.children} child order(s)"
+                            )
+                        ),
+                        payload={
+                            "event": EXIT_SUPERSEDED_EVENT if superseded else EXIT_COMPLETE_EVENT,
+                            "exit_parent": pending.parent_uid,
+                            "exit_parent_quantity": str(pending.parent_quantity),
+                            "exit_children": str(pending.children),
+                            "exit_remaining": str(max(remainder, 0)),
+                        },
+                    )
+                )
+                continue
+            order = BookOrder(isin, Side.SELL, remainder, pending.rationale, pending.event)
+            proposed = self._proposed(order, session)
+            if proposed is None:
+                self._write(
+                    self._entry(
+                        session,
+                        actor=Actor.EXEC,
+                        decision=Decision.DEFERRED,
+                        isin=isin,
+                        rationale=(
+                            f"no close for {isin} on {session.isoformat()} to value exit "
+                            f"{pending.parent_uid}'s next child at; offered again next session"
+                        ),
+                        payload={"event": "UNPRICED", "exit_parent": pending.parent_uid},
+                    )
+                )
+                continue
+            facts = self._facts(proposed, session, spendable=self.account.spendable_cash)
+            clearance = engine.guard_book_exit(
+                proposed, sellable, self.rails, facts, trading_date=session, sleeve=BOOK_SLEEVE
+            )
+            if not clearance.allowed:
+                refused.append((order, clearance.assessment))
+                continue
+            child = clearance.child
+            number = pending.children + 1
+            uid = self._stage(
+                replace(order, quantity=child.quantity),
+                child,
+                session,
+                exit_payload={
+                    "exit_parent": pending.parent_uid,
+                    "exit_parent_quantity": str(pending.parent_quantity),
+                    "exit_child_quantity": str(child.quantity),
+                    "exit_remaining": str(remainder - child.quantity),
+                    "exit_child": str(number),
+                },
+            )
+            staged.append((order, uid))
+            self.pending_exits[isin] = replace(pending, children=number)
+            worked[isin] = child.quantity
+        return worked
+
+    def pending_exits_document(self) -> list[dict[str, str]]:
+        """The parent exits still being worked, to persist with the book."""
+        return [self.pending_exits[isin].to_document() for isin in sorted(self.pending_exits)]
+
+    @staticmethod
+    def pending_exits_from(documents: Sequence[Mapping[str, str]]) -> dict[str, PendingExit]:
+        """The inverse of `pending_exits_document`."""
+        exits = [PendingExit.from_document(document) for document in documents]
+        return {pending.isin: pending for pending in exits}
 
     def _portfolio(self, session: date) -> Portfolio:
         lots: list[Lot] = []

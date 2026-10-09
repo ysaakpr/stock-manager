@@ -62,7 +62,9 @@ from analyst.fundmanager.scoreboard import (
 )
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve, TokenSpend
+from backtest.book_actions import BookActionCalendar
 from backtest.cash_interest import load_repo_rate_schedule
+from backtest.fm_circuit import NoCircuitData
 from backtest.fm_paper import M17PaperAccount
 from dataplatform.clock import FrozenClock
 from dataplatform.status.api import app, clock_source, m17_journal_source, m17_roster_source
@@ -860,6 +862,8 @@ def test_the_last_marks_agree_with_the_persisted_books(m17_run: _Run, tmp_path: 
             kill_switch=switch_at(tmp_path, m17_run.clock),
             clock=m17_run.clock,
             schedule=load_repo_rate_schedule(),
+            corporate_actions=BookActionCalendar(),
+            circuit=NoCircuitData(),
             book_digest=account.book_digest,
             alerter=RecordingAlerter(),
         )
