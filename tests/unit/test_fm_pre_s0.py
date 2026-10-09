@@ -495,3 +495,78 @@ def test_with_no_band_known_the_smallest_band_stands_in() -> None:
     assert two is not None and two.locked and two.basis is CircuitBasis.SMALLEST_BAND
     under = upper_circuit_lock(_print("101.9", "101.9", "101.9"), missing)
     assert under is not None and not under.locked
+
+
+def test_a_band_list_older_than_the_session_before_the_fill_is_not_used(tmp_path: Path) -> None:
+    """M17.9's reader searches back 14 days; a band revised inside that window must not be judged
+    on the old list, so only a list dated the fill session or the one before it counts."""
+    from analyst.commons.inputs import PriceBandEntry
+    from backtest.fm_circuit import LakeCircuitMarket
+    from dataplatform.query import Dataset
+
+    fill = date(2026, 10, 8)
+    isin = "INE000501010"
+
+    def market_with_list(listed: date) -> LakeCircuitMarket:
+        market = LakeCircuitMarket(
+            clock=FrozenClock(fill),
+            data_root=tmp_path,
+            previous_session=lambda day: date(2026, 10, 7),
+        )
+        entries = [
+            PriceBandEntry(isin=isin, series="EQ", band_pct=Decimal(20), knowable_date=listed)
+        ]
+        market._commons.price_bands = lambda through: Dataset.declaring(  # type: ignore[method-assign]
+            "test.bands", entries, knowable_date=lambda e: e.knowable_date
+        )
+        return market
+
+    assert market_with_list(date(2026, 10, 7)).price_band(isin, fill).band_pct == Decimal(20)
+    assert market_with_list(fill).price_band(isin, fill).known
+    stale = market_with_list(date(2026, 9, 28)).price_band(isin, fill)
+    assert not stale.known  # the smallest NSE band stands in (SMALLEST_BAND)
+
+
+def test_an_isin_change_mid_exit_supersedes_the_exit_with_a_journal_line(tmp_path: Path) -> None:
+    """A parent exit's floor is in shares of the old ISIN; after a reissue it would 'complete' with
+    nothing sold, so it ends, journaled, and the next decision sees the successor ISIN."""
+    from analyst.fundmanager.books import (
+        EXIT_SUPERSEDED_EVENT,
+        AccountSession,
+        BookedCorporateAction,
+        CorporateActionStatus,
+    )
+    from execution.recon import ReconResult
+
+    book, _, clock, journal = _holding_thin(tmp_path, 900)
+    session = SESSIONS[41]
+    clock.freeze_at(session)
+    book.pending_exits[THIN] = PendingExit(
+        THIN, "m17_x:2025-02-26:000", D0, 900, 0, "exit", "STAGED", 1
+    )
+    reissue = BookedCorporateAction(
+        identity=f"REISSUE:INE00002A028:{session.isoformat()}",
+        isin=THIN,
+        ex_date=session,
+        kind="REISSUE",
+        status=CorporateActionStatus.BOOKED,
+        late=False,
+        entitled=0,
+        detail=f"holding in {THIN} carried 1:1 to INE00002A028",
+    )
+    run = AccountSession(
+        session=session,
+        fills=(),
+        interest_credited=Decimal(0),
+        recon=ReconResult(session=session, breaks=(), froze=False),
+        cash=Decimal(0),
+        quantities={},
+        broker_cash=Decimal(0),
+        broker_quantities={},
+        corporate_actions=(reissue,),
+    )
+    book._journal_corporate_actions(run)
+    assert THIN not in book.pending_exits
+    (line,) = _events(journal, EXIT_SUPERSEDED_EVENT)
+    assert line.payload["reason"] == "ISIN_CHANGE:REISSUE" and line.isin == THIN
+    assert _events(journal, CORPORATE_ACTION_EVENT)  # the action itself is journaled too

@@ -3176,7 +3176,10 @@ tasks:
       Forced reviews come first after an integrity event.
     - Restart the user systemd scheduler after registering. Update the runbook
       `ops/runbooks/m17-fund-managers.md`.
-  deliverables: [analyst/fundmanager/job.py, dataplatform/scheduler/registry.py, ops/runbooks/m17-fund-managers.md, tests/unit/test_fm_job.py]
+  # The composition root is backtest/fm_job.py (+ backtest/fm_world.py, the lake side): it builds the
+  # M17 paper accounts, and analyst/ may not name execution.sim_broker. analyst/fundmanager/job.py holds
+  # the decision-side pieces only (streams, S0 hashes, deadline, book view, verdict -> orders).
+  deliverables: [analyst/fundmanager/job.py, backtest/fm_job.py, backtest/fm_world.py, dataplatform/scheduler/registry.py, ops/runbooks/m17-fund-managers.md, tests/unit/test_fm_job.py]
   acceptance:
     - "a red data day journals SKIPPED_DATA_RED for every manager and stages nothing"
     - "a manager past the deadline journals MISSED_SESSION and the others still run"

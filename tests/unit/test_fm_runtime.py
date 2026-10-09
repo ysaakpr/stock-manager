@@ -677,7 +677,8 @@ def test_token_usage_is_journaled_per_call_priced_when_the_card_knows_the_model(
     assert len(inputs.calls) == 2  # the scoreboard counts each call once, decisions carry none
     assert len(inputs.decisions) == 1
 
-    # The roster's own model is not on the dated card yet: counts journaled, no rupee invented.
+    # The roster's own model is not on the card in force on 2026-10-08 (it is priced from
+    # 2026-10-09): counts journaled, no rupee invented.
     _, unpriced, _ = _run(world, tmp_path / "u", [research(), final(hold())])
     for call in unpriced.events(CALL_EVENT):
         assert call.tokens is None and call.payload["priced"] == "false"

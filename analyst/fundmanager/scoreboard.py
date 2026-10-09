@@ -64,7 +64,14 @@ from typing import Any, Final, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from analyst.fundmanager.books import PAPER_MODE, BookError, ExecutionReport, FundBook
+from analyst.fundmanager.books import (
+    PAPER_MODE,
+    BookError,
+    DelistedNames,
+    ExecutionReport,
+    FundBook,
+    LastTraded,
+)
 from analyst.fundmanager.mandate import (
     BenchMandate,
     ControlMandate,
@@ -970,24 +977,6 @@ def _canonical(document: Any) -> bytes:
 # ── writing the inputs: marks and outcomes ───────────────────────────────────────────────────────
 
 
-@dataclass(frozen=True, slots=True)
-class LastTraded:
-    """A delisted name's last traded session, with its raw and adjusted closes there."""
-
-    session: date
-    raw_close: Decimal
-    adjusted_close: Decimal
-
-
-class DelistedNames(Protocol):
-    """Which names' listings have ended, and where they last traded (the listing record)."""
-
-    def last_traded(self, isin: str, session: date) -> LastTraded | None:
-        """For ``isin`` delisted on or before ``session``: its last traded session and closes.
-        None for a name still listed on ``session``."""
-        ...
-
-
 def mark_book(
     book: FundBook,
     session: date,
@@ -998,12 +987,15 @@ def mark_book(
     """A manager or control book's mark at ``session``'s close.
 
     ``execution`` is the session's `FundBook.execute` report (its fills, costs and interest); None
-    on a session the book did not execute. A held name with no close that ``delisted`` says has
-    delisted is valued at its last traded raw close (module docstring). Raises `BookError` for
-    any other held name with no close — a book that cannot be valued is never marked at a guess.
+    on a session the book did not execute. A held name with no close that ``delisted`` (default:
+    the book's own listing record) says has delisted is valued at its last traded raw close
+    (module docstring). Raises `BookError` for any other held name with no close — a book that
+    cannot be valued is never marked at a guess.
     """
     invested = _ZERO
     positions = 0
+    if delisted is None:
+        delisted = book.delisted
     for isin, quantity in sorted(book.account.quantities().items()):
         if quantity <= 0:
             continue

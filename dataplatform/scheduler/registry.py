@@ -47,6 +47,8 @@ __all__ = [
     "INDEX_PRESS_REFRESH",
     "JOB_NAME",
     "L0_BACKUP",
+    "M17_DRY_RUN",
+    "M17_FUND_MANAGERS",
     "MACRO_RELEASE_CAPTURE",
     "NEWS_CAPTURE",
     "NSE_DAILY_CAPTURE",
@@ -73,6 +75,7 @@ __all__ = [
     "fundamentals_forward",
     "l0_backup",
     "lag_budgets",
+    "m17_fund_managers",
     "macro_release_capture",
     "news_capture",
     "nse_daily_capture",
@@ -890,6 +893,53 @@ PAPER_SESSION = Job(
 )
 
 
+def m17_fund_managers(context: JobContext) -> None:
+    """The daily M17 fund-manager desk (M17.7): one session of every manager, control and the bench.
+
+    What it does: for the owed session — after the interlock (data red or the M17 kill switch
+    tripped stages nothing) — fills and reconciles last night's orders, marks every book, resolves
+    due decisions, stages mechanical stop exits, waits (bounded) for same-evening index, VIX, TRI
+    and L2 data, builds the Commons, runs each manager in turn under the 08:30 IST next-session
+    deadline, runs the control books, records the desk, and writes the scoreboard and the owner's
+    digest. See `backtest.fm_job.run_m17_session`.
+    What it assumes: the injected clock and settings are the run's (B10), the EOD pipeline has run
+    for the session (the interlock checks it published), and the configured LLM is the Claude CLI
+    on the subscription (`LLM_PROVIDER`), or the stub.
+    What it never does: touch a real broker (the desk builds `SimBroker` accounts and nothing
+    else), or run the live stream before M17.8's go: it is registered with ``dry_run=True``, so
+    every entry goes to the ``m17-dry`` stream until the owner's go flips it and `--start S0` opens
+    the live one (ops/runbooks/m17-fund-managers.md). The import is deferred like the others'.
+    """
+    from backtest.fm_job import run_m17_job
+
+    run_m17_job(context, dry_run=M17_DRY_RUN)
+
+
+#: Until M17.8's go (pre-registration §6, §9: the 5-session dry run passes, then the owner names
+#: S0), the registered job runs the ``m17-dry`` stream only. The go flips this to False together
+#: with the `--start S0` run, in one reviewed commit.
+M17_DRY_RUN = True
+
+#: The M17 desk (M17.7). 22:00 IST Monday to Friday — after the 18:30 EOD pipeline, the last
+#: `tri_evening` attempt (21:30, which now lands NIFTY 500 for the bench too) and the 21:45 paper
+#: session, so the interlock sees the session published and the bench its level. The budget runs
+#: to the deadline: a manager unfinished by 08:30 IST on the next session misses it, so ten and a
+#: half hours is the most a run can usefully take. A fire the scheduler missed may still start
+#: within two hours (the managers' queue then has eight). It fetches nothing from NSE, so it holds
+#: no host lease; the Commons fetcher and the model run on the Claude CLI subscription.
+M17_FUND_MANAGERS = Job(
+    name="m17_fund_managers",
+    cron="0 22 * * mon-fri",
+    fn=m17_fund_managers,
+    timeout=timedelta(hours=10, minutes=30),
+    description=(
+        "Daily M17 fund-manager desk: interlock, Commons, managers, controls, marks (M17.7); "
+        "the m17-dry stream until M17.8's go"
+    ),
+    misfire_grace=timedelta(hours=2),
+)
+
+
 def fundamentals_forward(context: JobContext) -> None:
     """The nightly fundamentals forward run (M14.3): the integrated results feed, kept current.
 
@@ -1085,6 +1135,7 @@ def default_registry() -> JobRegistry:
             NEWS_CAPTURE,
             FAILURE_ALERTS,
             PAPER_SESSION,
+            M17_FUND_MANAGERS,
             FUNDAMENTALS_FORWARD,
             POSTGRES_BACKUP,
             L0_BACKUP,

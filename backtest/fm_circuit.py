@@ -13,7 +13,10 @@ left unfilled (`M17PaperAccount` cancels it before the session's fills) and the 
   bhavcopy statement). The upper band is ``prev_close * (1 + band / 100)``; NSE rounds band prices
   to the tick, so the open is at the band when it is within one tick (₹0.05) below that figure, or
   above it. A "No Band" name (the F&O names, with no static band) is never locked by this rule.
-* **band missing** — no band list readable for the session, or the list does not name the ISIN:
+* **band missing** — no band list readable for the session, the newest list is older than the
+  session before the fill session (a list dated the fill session or the one before it is the
+  newest that can describe the fill session's band; M17.9's reader searches back 14 days, and a band
+  revised inside that window must not be judged on the old one), or the list does not name the ISIN:
   the smallest NSE band (2 %) stands in, so a locked print whose open is at least 2 % above the
   previous close is treated as locked (``basis = SMALLEST_BAND``). That errs towards leaving a buy
   unfilled — the conservative side for a paper book's record — and the journal line says which
@@ -28,6 +31,7 @@ an upper-circuit lock does not stop a seller, it is the buyer who cannot be fill
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
@@ -164,14 +168,22 @@ class NoCircuitData:
 class LakeCircuitMarket:
     """`CircuitMarket` over the local lake: L1 ``prices_raw`` and M17.9's band list reader.
 
-    The band list is the newest ``sec_list`` on or before the session (`price_bands`); a list that
-    cannot be read is "band missing" for every name that session, logged once.
+    The band list is the newest ``sec_list`` on or before the session (`price_bands`), and only if
+    it is dated the session or the session before; a list that is older, or cannot be read, is
+    "band missing" for every name that session (the smallest band stands in), logged once.
     """
 
-    def __init__(self, *, clock: Clock, data_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        data_root: Path | None = None,
+        previous_session: Callable[[date], date] | None = None,
+    ) -> None:
         self._data_root = data_root
         self._commons = LakeCommonsSource(clock=clock, data_root=data_root)
         self._bands: dict[date, dict[str, Decimal | None] | None] = {}
+        self._previous = previous_session or _calendar_previous
 
     def session_print(self, isin: str, session: date) -> SessionPrint | None:
         path = (
@@ -192,25 +204,50 @@ class LakeCircuitMarket:
         open_, high, low, prev_close = (Decimal(value) for value in rows[0])
         return SessionPrint(isin, session, open_, high, low, prev_close)
 
+    def _read_bands(self, session: date) -> dict[str, Decimal | None] | None:
+        """``session``'s bands by ISIN, or None when no list fresh enough to describe it exists."""
+        try:
+            listed = PitContext(session).admit(self._commons.price_bands(session))
+        except SourceUnavailableError as exc:
+            _LOG.warning(
+                "fm_circuit.band_missing",
+                session=session.isoformat(),
+                detail=str(exc),
+                state="SMALLEST_BAND",
+            )
+            return None
+        oldest = self._previous(session)
+        if listed and listed[0].knowable_date < oldest:
+            _LOG.warning(
+                "fm_circuit.band_stale",
+                session=session.isoformat(),
+                listed=listed[0].knowable_date.isoformat(),
+                state="SMALLEST_BAND",
+            )
+            return None
+        bands: dict[str, Decimal | None] = {}
+        for entry in listed:
+            if entry.series == "EQ" or entry.isin not in bands:
+                bands[entry.isin] = entry.band_pct
+        return bands
+
     def price_band(self, isin: str, session: date) -> BandReading:
         if session not in self._bands:
-            try:
-                listed = PitContext(session).admit(self._commons.price_bands(session))
-            except SourceUnavailableError as exc:
-                _LOG.warning(
-                    "fm_circuit.band_missing",
-                    session=session.isoformat(),
-                    detail=str(exc),
-                    state="SMALLEST_BAND",
-                )
-                self._bands[session] = None
-            else:
-                bands: dict[str, Decimal | None] = {}
-                for entry in listed:
-                    if entry.series == "EQ" or entry.isin not in bands:
-                        bands[entry.isin] = entry.band_pct
-                self._bands[session] = bands
+            self._bands[session] = self._read_bands(session)
         bands_today = self._bands[session]
         if bands_today is None or isin not in bands_today:
             return BandReading(known=False)
         return BandReading(known=True, band_pct=bands_today[isin])
+
+
+def _calendar_previous(day: date) -> date:
+    """The NSE session before ``day`` on the checked-in holiday calendar."""
+    from dataplatform.ingest.calendar import trading_calendar
+
+    calendar = trading_calendar()
+    probe = day
+    for _ in range(15):
+        probe = date.fromordinal(probe.toordinal() - 1)
+        if calendar.is_session(probe):
+            return probe
+    raise ValueError(f"no NSE session in the 15 days before {day.isoformat()}")
