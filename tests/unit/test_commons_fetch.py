@@ -503,12 +503,12 @@ def test_a_secret_shaped_string_in_a_page_is_redacted_before_storage(store: Snap
 
 def test_a_secret_straddling_the_truncation_point_is_still_masked(store: SnapshotStore) -> None:
     """Redaction runs before the cut; inverted, a stranded half-key would no longer match."""
-    secret = "sk-" + "ant-" + _fake("straddle", 60)
-    text = "x" * (MAX_PAGE_BYTES - 21) + " " + secret
+    planted = "sk-" + "ant-" + _fake("straddle", 60)
+    text = "x" * (MAX_PAGE_BYTES - 21) + " " + planted
     page = FetchedPage(url="https://example.org/s", text=text)
     snapshot = store.get_or_fetch(FetchRequest.query("s", SESSION), StubFetcher((page,))).snapshot
     data = store.snapshot_path(snapshot.id).read_bytes().decode()
-    assert secret[:20] not in data  # the 20 characters before the cut
+    assert planted[:20] not in data  # the 20 characters before the cut
 
 
 def test_a_clean_page_is_not_marked_redacted(store: SnapshotStore) -> None:
