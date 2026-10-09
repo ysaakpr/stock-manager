@@ -34,6 +34,8 @@ the dataset and the reason. The builder turns that into a gap.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import re
 from collections.abc import Iterator, Sequence
@@ -45,6 +47,13 @@ from typing import Any, Final
 import pyarrow.dataset as pads
 
 from analyst.commons.digests import AnnouncementText
+from analyst.commons.inputs import (
+    CorporateActionNotice,
+    DealRecord,
+    FoReading,
+    PriceBandEntry,
+    PriceBar,
+)
 from analyst.commons.sheets import (
     AdjustedClose,
     AnnouncementRecord,
@@ -61,6 +70,8 @@ from dataplatform.identity.master import Exchange
 from dataplatform.ingest.announcements import ANNOUNCEMENTS_DATASET, iter_l1
 from dataplatform.ingest.indices import parse_constituents
 from dataplatform.ingest.models import ISIN_PATTERN
+from dataplatform.ingest.nse.deals import DEALS_DATASET
+from dataplatform.ingest.pr_bundle_l1 import CA_BROADCASTS_DATASET, load_session_identity
 from dataplatform.ingest.xbrl.models import Nature
 from dataplatform.logging import get_logger
 from dataplatform.query import (
@@ -70,6 +81,8 @@ from dataplatform.query import (
     default_price_quarantine,
 )
 from dataplatform.query.fundamentals_metrics import CONCEPTS_USED
+from dataplatform.store.fo_aggregates import UnderlyingKind
+from dataplatform.store.fo_aggregates import read_l2 as read_fo_aggregates
 from dataplatform.store.l0 import L0Store
 from dataplatform.store.l2 import PRICES_ADJUSTED_DATASET, open_connection
 from dataplatform.store.macro_series import MACRO_SERIES_DATASET
@@ -82,7 +95,12 @@ from dataplatform.store.paths import (
 from dataplatform.store.pit_fundamentals import PIT_FUNDAMENTALS_DATASET
 from dataplatform.store.schemas import PRICES_RAW_DATASET
 
-__all__ = ["INDUSTRY_SOURCE", "SURVEILLANCE_SOURCES", "LakeCommonsSource"]
+__all__ = [
+    "INDUSTRY_SOURCE",
+    "PRICE_BANDS_SOURCE",
+    "SURVEILLANCE_SOURCES",
+    "LakeCommonsSource",
+]
 
 _LOG = get_logger(__name__)
 
@@ -97,6 +115,12 @@ INDUSTRY_SOURCE: Final = "nse_industry_classification"
 #: How far back a daily snapshot is looked for. The builder's own staleness rule is tighter.
 _SNAPSHOT_SEARCH_DAYS: Final = 14
 _NSE_ANNOUNCEMENTS: Final = "nse_announcements"
+#: The L0 daily snapshot of NSE's per-security operative price band (``sec_list_YYYYMMDD.csv``).
+PRICE_BANDS_SOURCE: Final = "nse_price_bands"
+_PRICE_BANDS_HEADER: Final = ("Symbol", "Series", "Security Name", "Band", "Remarks")
+#: How far back a session's own bhavcopy statement is looked for when a band list is dated on a
+#: non-session day.
+_IDENTITY_SEARCH_DAYS: Final = 5
 _ISIN: Final = re.compile(ISIN_PATTERN)
 
 
@@ -480,6 +504,295 @@ class LakeCommonsSource:
         ]
         return Dataset.declaring(
             "commons.results_filings", facts, knowable_date=lambda f: f.filing_date
+        )
+
+    # ── M17.9: what the screens, the dossier and the base-rate table read ────────────────────
+
+    def price_bars(
+        self, isins: frozenset[str], sessions: Sequence[date], series: str
+    ) -> Dataset[PriceBar]:
+        """Adjusted OHLCV in ``series`` for ``isins`` on ``sessions``: raw base, L2 laid over.
+
+        The same rule as :meth:`adjusted_closes`, for the whole bar: the raw L1 bar is the base,
+        and where L2 holds the name's NSE bar for the session (not a fallback from another venue)
+        its adjusted high, low, close and volume replace the raw ones. Delivered quantity takes
+        the bar's quantity factor. A raw bar with no high or low takes its close for both.
+        """
+        files = self._files_for(sessions)
+        if not files:
+            raise SourceUnavailableError(PRICES_RAW_DATASET, "no partition for the window")
+        if not isins:
+            return Dataset.declaring("commons.price_bars", [], knowable_date=lambda b: b.trade_date)
+        rows = self._con.execute(
+            "SELECT isin, trade_date, high, low, close, total_traded_qty, total_traded_value, "
+            "deliv_qty, deliv_pct FROM read_parquet($files) "
+            "WHERE exchange = 'NSE' AND series = $series AND close > 0 "
+            f"AND isin IN (SELECT unnest($isins)) AND {self._admits} ORDER BY isin, trade_date",
+            {"files": files, "series": series, "isins": sorted(isins)},
+        ).fetchall()
+        base: dict[tuple[str, date], PriceBar] = {}
+        for isin, day, high, low, close, qty, value, dq, dp in rows:
+            raw_close = Decimal(close)
+            key = (str(isin), day)
+            base.setdefault(
+                key,
+                PriceBar(
+                    isin=str(isin),
+                    trade_date=day,
+                    high=Decimal(high) if high is not None and high > 0 else raw_close,
+                    low=Decimal(low) if low is not None and low > 0 else raw_close,
+                    close=raw_close,
+                    volume=Decimal(int(qty)),
+                    raw_close=raw_close,
+                    traded_value=Decimal(value),
+                    size=raw_close * int(qty),
+                    deliv_qty=None if dq is None else Decimal(int(dq)),
+                    deliv_pct=None if dp is None else Decimal(dp),
+                ),
+            )
+        overlaid = 0
+        window = sorted(set(sessions))
+        with QueryService(data_root=self._data_root, con=self._con) as service:
+            for isin in sorted({isin for isin, _ in base}):
+                partition = l2_isin_partition_path(
+                    PRICES_ADJUSTED_DATASET, isin, data_root=self._data_root
+                )
+                if not partition.exists():
+                    continue
+                adjusted = service.adjusted_series(
+                    AdjustedSeriesRequest(
+                        isin=isin, start=window[0], end=window[-1], primary=Exchange.NSE
+                    )
+                )
+                for point in adjusted.points:
+                    key = (isin, point.trade_date)
+                    raw = base.get(key)
+                    if point.fell_back or raw is None:
+                        continue
+                    factor = point.cum_qty_factor
+                    base[key] = PriceBar(
+                        isin=isin,
+                        trade_date=point.trade_date,
+                        high=point.adj_high,
+                        low=point.adj_low,
+                        close=point.adj_close,
+                        volume=point.adj_volume,
+                        raw_close=raw.raw_close,
+                        traded_value=raw.traded_value,
+                        size=raw.size,
+                        deliv_qty=None if raw.deliv_qty is None else raw.deliv_qty * factor,
+                        deliv_pct=raw.deliv_pct,
+                    )
+                    overlaid += 1
+        _LOG.info(
+            "commons.source.price_bars", sessions=len(files), bars=len(base), overlaid=overlaid
+        )
+        return Dataset.declaring(
+            "commons.price_bars",
+            [base[key] for key in sorted(base)],
+            knowable_date=lambda b: b.trade_date,
+        )
+
+    def concept_facts(self, concepts: frozenset[str], through: date) -> Dataset[FilingFact]:
+        """Every company-level PIT fact of ``concepts`` filed on or before ``through``."""
+        root = layer_root(Layer.L1, data_root=self._data_root) / PIT_FUNDAMENTALS_DATASET
+        if not root.is_dir():
+            raise SourceUnavailableError(PIT_FUNDAMENTALS_DATASET, f"no dataset at {root}")
+        rows = self._con.execute(
+            "SELECT isin, period_start, period_end, filing_date, filing_id, nature, concept, "
+            "value FROM read_parquet($glob) WHERE segment IS NULL AND concept IN "
+            "(SELECT unnest($concepts)) AND filing_date <= $through "
+            "ORDER BY filing_date, isin, concept, filing_id, period_end",
+            {
+                "glob": str(root / "*" / "*.parquet"),
+                "concepts": sorted(concepts),
+                "through": through,
+            },
+        ).fetchall()
+        facts = [
+            FilingFact(
+                isin=str(isin),
+                period_start=period_start,
+                period_end=period_end,
+                filing_date=filing_date,
+                filing_id=str(filing_id),
+                nature=Nature(nature),
+                concept=str(concept),
+                segment=None,
+                value=Decimal(value),
+            )
+            for (
+                isin,
+                period_start,
+                period_end,
+                filing_date,
+                filing_id,
+                nature,
+                concept,
+                value,
+            ) in rows
+        ]
+        return Dataset.declaring(
+            "commons.concept_facts", facts, knowable_date=lambda f: f.filing_date
+        )
+
+    def price_bands(self, through: date) -> Dataset[PriceBandEntry]:
+        """The newest NSE ``sec_list`` dated on or before ``through``, each row on its ISIN.
+
+        The file names securities by symbol and series. Each is placed on its ISIN by the
+        exchange's own bhavcopy statement for the list's date (`load_session_identity`, the path
+        the PR-bundle rows take), or, when the list is dated on a non-session day, for the latest
+        session before it. A row that statement does not name is counted and logged, never
+        guessed.
+        """
+        listed, filename, payload = self._latest_snapshot(PRICE_BANDS_SOURCE, through)
+        identity = None
+        for back in range(_IDENTITY_SEARCH_DAYS + 1):
+            identity = load_session_identity(
+                listed - timedelta(days=back), l0=self._l0, data_root=self._data_root
+            )
+            if identity is not None:
+                break
+        if identity is None:
+            raise SourceUnavailableError(
+                PRICE_BANDS_SOURCE,
+                f"no NSE session statement on or before {listed} to place {filename}",
+            )
+        reader = csv.reader(io.StringIO(payload.decode("utf-8-sig")))
+        header = tuple(cell.strip() for cell in next(reader, ()))
+        if header != _PRICE_BANDS_HEADER:
+            raise SourceUnavailableError(
+                PRICE_BANDS_SOURCE, f"{filename}: unexpected header {header}"
+            )
+        entries: dict[tuple[str, str], PriceBandEntry] = {}
+        unresolved = 0
+        for row in reader:
+            if len(row) < len(_PRICE_BANDS_HEADER):
+                continue
+            symbol, series, band = row[0].strip(), row[1].strip().upper(), row[3].strip()
+            isin = identity.try_resolve(symbol, series, identity.trade_date, exchange=Exchange.NSE)
+            if isin is None:
+                unresolved += 1
+                continue
+            band_pct = None if band.lower() == "no band" else Decimal(band)
+            entries.setdefault(
+                (isin, series),
+                PriceBandEntry(isin=isin, series=series, band_pct=band_pct, knowable_date=listed),
+            )
+        _LOG.info(
+            "commons.source.price_bands",
+            file=filename,
+            listed=listed.isoformat(),
+            statement=identity.trade_date.isoformat(),
+            entries=len(entries),
+            unresolved=unresolved,
+        )
+        return Dataset.declaring(
+            "commons.price_bands",
+            [entries[key] for key in sorted(entries)],
+            knowable_date=lambda e: e.knowable_date,
+        )
+
+    def _l1_partitions(self, dataset: str, start: date, through: date) -> list[str]:
+        root = layer_root(Layer.L1, data_root=self._data_root) / dataset
+        if not root.is_dir():
+            raise SourceUnavailableError(dataset, f"no dataset at {root}")
+        files: list[str] = []
+        for child in sorted(root.iterdir()):
+            try:
+                day = partition_date_of(child)
+            except ValueError:
+                continue
+            if start <= day <= through:
+                files.extend(str(p) for p in sorted(child.glob("*.parquet")))
+        return files
+
+    def deals(self, start: date, through: date) -> Dataset[DealRecord]:
+        """Every NSE bulk and block deal traded in ``[start, through]`` with an ISIN."""
+        files = self._l1_partitions(DEALS_DATASET, start, through)
+        rows = (
+            self._con.execute(
+                "SELECT isin, deal_type, trade_date, client_name, side, quantity, price "
+                "FROM read_parquet($files) WHERE isin IS NOT NULL "
+                "AND trade_date BETWEEN $start AND $through "
+                "ORDER BY trade_date, isin, deal_type, client_name, side, quantity, price",
+                {"files": files, "start": start, "through": through},
+            ).fetchall()
+            if files
+            else []
+        )
+        records = [
+            DealRecord(
+                isin=str(isin),
+                deal_type=str(kind),
+                trade_date=day,
+                client_name=str(client or ""),
+                side=str(side),
+                quantity=int(qty),
+                price=Decimal(price),
+            )
+            for isin, kind, day, client, side, qty, price in rows
+        ]
+        return Dataset.declaring("commons.deals", records, knowable_date=lambda d: d.trade_date)
+
+    def fo_readings(self, sessions: Sequence[date]) -> Dataset[FoReading]:
+        """The L2 ``fo_aggregates`` of every stock underlier with an ISIN, on ``sessions``."""
+        readings: list[FoReading] = []
+        found = 0
+        for day in sorted(set(sessions)):
+            try:
+                rows = read_fo_aggregates(day, data_root=self._data_root)
+            except FileNotFoundError:
+                continue
+            found += 1
+            readings.extend(
+                FoReading(
+                    isin=row.isin,
+                    trade_date=row.trade_date,
+                    spot=row.spot,
+                    total_oi=row.total_oi,
+                    total_oi_change=row.total_oi_change,
+                    pcr_oi=row.pcr_oi,
+                    rollover_pct=row.rollover_pct,
+                )
+                for row in rows
+                if row.underlying_kind is UnderlyingKind.STOCK and row.isin is not None
+            )
+        if not found:
+            raise SourceUnavailableError("fo_aggregates", "no partition for the sessions asked")
+        return Dataset.declaring(
+            "commons.fo_readings", readings, knowable_date=lambda r: r.trade_date
+        )
+
+    def corporate_actions(self, start: date, through: date) -> Dataset[CorporateActionNotice]:
+        """Every corporate-action broadcast (L1 ``pr_ca_broadcasts``) knowable in the range."""
+        files = self._l1_partitions(CA_BROADCASTS_DATASET, start, through)
+        rows = (
+            self._con.execute(
+                "SELECT isin, purpose, ex_date, record_date, knowable_date "
+                "FROM read_parquet($files) WHERE isin IS NOT NULL "
+                "AND knowable_date BETWEEN $start AND $through "
+                "ORDER BY knowable_date, isin, purpose, ex_date, record_date",
+                {"files": files, "start": start, "through": through},
+            ).fetchall()
+            if files
+            else []
+        )
+        records = sorted(
+            {
+                CorporateActionNotice(
+                    isin=str(isin),
+                    purpose=str(purpose),
+                    ex_date=ex_date,
+                    record_date=record_date,
+                    knowable_date=knowable,
+                )
+                for isin, purpose, ex_date, record_date, knowable in rows
+            },
+            key=lambda n: (n.knowable_date, n.isin, n.purpose, n.ex_date or date.min),
+        )
+        return Dataset.declaring(
+            "commons.corporate_actions", records, knowable_date=lambda n: n.knowable_date
         )
 
 

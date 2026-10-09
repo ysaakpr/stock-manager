@@ -584,3 +584,70 @@ def test_the_lake_reports_absent_datasets(tmp_path: Path) -> None:
             source.announcement_texts(DAY1, DAY2)
         with pytest.raises(SourceUnavailableError, match="pit_fundamentals"):
             source.results_filings(DAY1, DAY2)
+
+
+# ── M17.9: the digest scope and on-demand digests ────────────────────────────────────────────────
+
+
+def _on_demand(
+    world: DigestWorld, store: DigestStore, llm: LLM, isins: frozenset[str], **kwargs: Any
+) -> Any:
+    from analyst.commons import digest_for_isins
+
+    session = kwargs.pop("session", DAY2)
+    return digest_for_isins(
+        isins,
+        session,
+        source=FakeDigestSource(world, missing=kwargs.pop("missing", frozenset())),
+        llm=llm,
+        store=store,
+        gate=kwargs.pop("gate", Gate()),
+        clock=kwargs.pop("clock", _clock(session)),
+        **kwargs,
+    )
+
+
+def test_on_demand_digests_a_researched_name_once_and_records_no_run() -> None:
+    world, store = _world(), InMemoryDigestStore()
+    llm = _stub(world)
+    found = _on_demand(world, store, llm, frozenset({OUTSIDER}))
+    assert found.digested == ("nse_announcements:o-1",) and found.cached == ()
+    assert [d.filing_id for d in found.digests] == ["nse_announcements:o-1"]
+    assert len(llm.calls) == 1
+    assert store.runs() == ()  # never moves the daily build's window
+    again = _stub(world)
+    cached = _on_demand(world, store, again, frozenset({OUTSIDER}))
+    assert again.calls == () and cached.cached == ("nse_announcements:o-1",)
+    assert cached.digests == found.digests
+
+
+def test_on_demand_and_the_daily_build_share_one_cache() -> None:
+    world, store = _world(), InMemoryDigestStore()
+    _run(world, store, _stub(world))  # the daily build digests RISING and FALLING
+    llm = _stub(world)
+    found = _on_demand(world, store, llm, frozenset({RISING}))
+    assert found.cached == ("nse_announcements:r-1",)  # the daily build's digest, no new call
+    assert len(llm.calls) == 1
+    # The on-demand window is longer than the daily one: r-old is in it and is digested now.
+    assert found.digested == ("nse_announcements:r-old",)
+
+
+def test_on_demand_keeps_the_refusals_and_isolates_failures() -> None:
+    world, store = _world(), InMemoryDigestStore()
+    with pytest.raises(CommonsRefusedError):
+        _on_demand(world, store, _stub(world), frozenset({RISING}), gate=Gate(False, "red"))
+    with pytest.raises(CommonsRefusedError):
+        _on_demand(world, store, _stub(world), frozenset({RISING}), clock=_clock(DAY1))
+    opinion = _reply({**GOOD_BODY, "recommendation": "BUY"})
+    llm = _stub(world, {"nse_announcements:r-1": opinion})
+    found = _on_demand(world, store, llm, frozenset({RISING}))
+    assert [f.filing_id for f in found.failures] == ["nse_announcements:r-1"]
+    assert store.get("nse_announcements:r-1") is None
+    assert "nse_announcements:r-old" in found.digested
+
+
+def test_on_demand_refuses_a_future_filing() -> None:
+    world = _world()
+    world.announcements.append(_ann(RISING, "r-future", DAY3))
+    with pytest.raises(PitError):
+        _on_demand(world, InMemoryDigestStore(), _stub(world), frozenset({RISING}))
