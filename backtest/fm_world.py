@@ -60,7 +60,7 @@ from analyst.commons import (
 )
 from analyst.commons import base_rates as base_rate_tables
 from analyst.commons.fetch import default_store_root
-from analyst.commons.sheets import INDIA_VIX_SERIES, TREND_INDEX_SERIES
+from analyst.commons.sheets import INDIA_VIX_SERIES, TREND_INDEX_SERIES, CommonsSource
 from analyst.commons.store import CommonsStore, ShortlistStore
 from analyst.fundmanager.books import LastTraded
 from analyst.fundmanager.controls import BenchmarkUnavailableError, LakeTriBenchmark
@@ -105,12 +105,14 @@ if TYPE_CHECKING:
 __all__ = [
     "BENCH_SLUG",
     "M17_DATASETS",
+    "READINESS_INDEX_SERIES",
     "READINESS_SAMPLE",
     "LakeCommonsBuilder",
     "LakeDelistedNames",
     "LakeM17World",
     "NoLiveFetcher",
     "cli_run",
+    "index_level_gaps",
     "production_run",
 ]
 
@@ -354,25 +356,7 @@ class LakeM17World:
 
     # the data the Commons build waits for
     def readiness(self, session: date) -> tuple[str, ...]:
-        missing: list[str] = []
-        try:
-            levels = PitContext(session).admit(
-                self._commons.index_levels((*TREND_INDEX_SERIES, INDIA_VIX_SERIES), session)
-            )
-        except SourceUnavailableError as exc:
-            missing.append(f"index levels: {exc}")
-        else:
-            latest: dict[str, date] = {}
-            for level in levels:
-                latest[level.series_id] = max(
-                    latest.get(level.series_id, level.session), level.session
-                )
-            for series in (*TREND_INDEX_SERIES, INDIA_VIX_SERIES):
-                last = latest.get(series)
-                if last is None or last < session:
-                    missing.append(
-                        f"index level {series} (latest {'none' if last is None else last})"
-                    )
+        missing = list(index_level_gaps(self._commons, session))
         sample = self._reader.most_liquid_on(session, READINESS_SAMPLE)
         behind = [
             isin for isin in sample if (_l2_last(isin, self._data_root) or date.min) < session
@@ -395,6 +379,33 @@ class LakeM17World:
         except BenchmarkUnavailableError as exc:
             missing.append(f"{BENCH_SLUG} TRI: {exc}")
         return tuple(missing)
+
+
+#: The `macro_series` ids the readiness probe waits for — what `index_close_evening` lands (M17.10).
+READINESS_INDEX_SERIES: Final[tuple[str, ...]] = (*TREND_INDEX_SERIES, INDIA_VIX_SERIES)
+
+
+def index_level_gaps(commons: CommonsSource, session: date) -> tuple[str, ...]:
+    """The readiness probe's index half: each awaited series whose level for ``session`` is absent.
+
+    Read through `PitContext(session)`, so a level is satisfied only once it is knowable on the
+    session (its `release_date` ≤ the session) and only by a level *for* the session — the evening
+    job's release for D satisfies D, and nothing satisfies D before it lands. Re-read on every
+    poll; nothing is cached, so a level landed mid-wait ends the wait on the next poll.
+    """
+    try:
+        levels = PitContext(session).admit(commons.index_levels(READINESS_INDEX_SERIES, session))
+    except SourceUnavailableError as exc:
+        return (f"index levels: {exc}",)
+    latest: dict[str, date] = {}
+    for level in levels:
+        latest[level.series_id] = max(latest.get(level.series_id, level.session), level.session)
+    missing: list[str] = []
+    for series in READINESS_INDEX_SERIES:
+        last = latest.get(series)
+        if last is None or last < session:
+            missing.append(f"index level {series} (latest {'none' if last is None else last})")
+    return tuple(missing)
 
 
 def _l2_last(isin: str, data_root: Path) -> date | None:

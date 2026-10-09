@@ -13,6 +13,7 @@ reach a real broker. All times are **IST**.
 | 09:15–15:30 | Market session D. Last night's staged orders fill at D's open (paper, `SimBroker`). | — |
 | 18:30 | EOD pipeline publishes D (the interlock reads it). | `eod_pipeline` |
 | 19:50 / 20:50 / 21:30 | Same-evening TRI, **now including NIFTY 500** (the bench). | `tri_evening` |
+| 20:35 / 21:10 / 21:45 | Same-evening index close/PE/PB/yield (NSE close-all file) and India VIX into `macro_series`, catching up any missed session; a fire after D landed makes no request (M17.10). | `index_close_evening` |
 | 21:45 | The D13 momentum paper session (unrelated book). | `paper_session` |
 | **22:00** | **`m17_fund_managers` starts for session D.** | this job |
 | 22:00 + seconds | Interlock → fills at D's open → reconciliation → `BOOK_MARK` for all nine books → due `DECISION_OUTCOME`s → mechanical stops. | |

@@ -262,6 +262,10 @@ class MacroBackfillRunner:
     store's connection.
     What it never does: re-request a session that is `PUBLISHED` or closed by a 404, retry a 403
     differently, or write a fact dated to a session other than the one requested.
+
+    `pending_from` is the same-evening job's (M17.10): a 404 for a session on or after it is "not
+    published yet", left retryable, rather than a gap at the source closed for good — the evening
+    job asks for D on D's evening, possibly before the archive has it.
     """
 
     def __init__(
@@ -276,6 +280,7 @@ class MacroBackfillRunner:
         data_root: Path | None = None,
         table: IndexAliasTable | None = None,
         max_sessions: int | None = None,
+        pending_from: date | None = None,
     ) -> None:
         self._fetcher = fetcher
         self._l0 = l0
@@ -286,6 +291,7 @@ class MacroBackfillRunner:
         self._data_root = data_root
         self._table = load_index_aliases() if table is None else table
         self._max_sessions = max_sessions
+        self._pending_from = pending_from
 
     def run(self, plan: Sequence[SessionUnit]) -> MacroBackfillReport:
         """Run the plan; returns the report. Never raises for one session's failure."""
@@ -344,7 +350,18 @@ class MacroBackfillRunner:
             self._fail(unit, f"403: {exc}", retryable=True, report=report, outcome=Outcome.FAILED)
             return
         except FetchHTTPError as exc:
-            if exc.status_code == 404:
+            if exc.status_code == 404 and self._not_yet_due(unit):
+                # The same-evening job asks for D before it may be up: a 404 then is "not yet",
+                # and closing D to retries would lose the session for good (M17.10).
+                self._fail(
+                    unit,
+                    f"HTTP 404: {unit.filename} not yet published (asked the evening of the "
+                    "session; retried by the next fire)",
+                    retryable=True,
+                    report=report,
+                    outcome=Outcome.FAILED,
+                )
+            elif exc.status_code == 404:
                 self._fail(
                     unit,
                     f"404: the archive does not hold {unit.filename}",
@@ -418,6 +435,10 @@ class MacroBackfillRunner:
             l0_key=ref.key,
             state="PUBLISHED",
         )
+
+    def _not_yet_due(self, unit: SessionUnit) -> bool:
+        """Whether a 404 for `unit` may only mean the file is not up yet (`pending_from`)."""
+        return self._pending_from is not None and unit.session >= self._pending_from
 
     def _ref_for(self, unit: SessionUnit, report: MacroBackfillReport) -> L0Ref:
         """The session's payload from L0 if it is already there, else fetched (one request)."""
