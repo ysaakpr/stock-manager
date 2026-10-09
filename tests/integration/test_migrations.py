@@ -60,12 +60,18 @@ APPEND_ONLY_TABLES = ("decision_journal", "policy_set")
 #: Append-only tables keyed without an ``id``/``recorded_at``, so the row-level probes above do not
 #: fit them; each one's own suite proves the guard (paper_session_resolution:
 #: tests/integration/test_paper_session_job.py; the three commons_* tables of 0018:
-#: tests/integration/test_commons_store.py). Listed here so the guard-set check stays exact.
+#: tests/integration/test_commons_store.py; the four of 0019:
+#: tests/integration/test_commons_shortlist_digest_store.py). Listed here so the guard-set check
+#: stays exact.
 OTHER_APPEND_ONLY_TABLES = (
     "paper_session_resolution",
     "commons_build",
     "commons_market_sheet",
     "commons_universe_sheet",
+    "commons_shortlist_build",
+    "commons_shortlist",
+    "commons_filing_digest",
+    "commons_digest_run",
 )
 
 #: Column types that can never hold money. `money` is PostgreSQL's own type and is excluded too:

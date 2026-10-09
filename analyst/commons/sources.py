@@ -24,7 +24,9 @@ read fetches, and no read writes:
 - **Filings.** L1 ``pit_fundamentals``, company level, the concepts `compute_metrics` reads, filed
   on or before the session. This is the read `backtest.run._read_pit_facts` makes.
 - **Announcements.** L1 ``announcements`` through `announcements.iter_l1`, NSE rows only. Each
-  row is dated by its dissemination timestamp in IST.
+  row is dated by its dissemination timestamp in IST. The digests (M17.2) read the same rows with
+  their stored text (`announcement_texts`), and every fact of each results filing in a date range
+  (`results_filings`). Neither fetches an attachment.
 
 A source that is absent raises :class:`~analyst.commons.sheets.SourceUnavailableError`, naming
 the dataset and the reason. The builder turns that into a gap.
@@ -42,6 +44,7 @@ from typing import Any, Final
 
 import pyarrow.dataset as pads
 
+from analyst.commons.digests import AnnouncementText
 from analyst.commons.sheets import (
     AdjustedClose,
     AnnouncementRecord,
@@ -391,6 +394,92 @@ class LakeCommonsSource:
         )
         return Dataset.declaring(
             "commons.announcements", records, knowable_date=lambda r: r.knowable_date
+        )
+
+    # ── M17.2: the filing texts the digests read ─────────────────────────────────────────────
+
+    def announcement_texts(self, start: date, through: date) -> Dataset[AnnouncementText]:
+        """NSE announcements disseminated in ``[start, through]`` (IST), with their stored text.
+
+        Partitions are chosen by poll date in the same range: a disclosure is polled on or after
+        the day it was disseminated, so none dated in the range sits in an earlier partition.
+        """
+        root = layer_root(Layer.L1, data_root=self._data_root) / ANNOUNCEMENTS_DATASET
+        if not root.is_dir():
+            raise SourceUnavailableError(ANNOUNCEMENTS_DATASET, f"no dataset at {root}")
+        rows: dict[str, AnnouncementText] = {}
+        for row in iter_l1(start=start, end=through, data_root=self._data_root):
+            day = row.ts.astimezone(IST).date()
+            if row.source != _NSE_ANNOUNCEMENTS or not start <= day <= through:
+                continue
+            ref = row.source_ref or f"{row.ts.isoformat()}|{row.subject}"
+            rows.setdefault(
+                ref,
+                AnnouncementText(
+                    isin=row.isin,
+                    ref=ref,
+                    ts=row.ts,
+                    knowable_date=day,
+                    category=row.category,
+                    subject=row.subject,
+                    body=row.body,
+                    attachment_ref=row.attachment_ref,
+                ),
+            )
+        records = sorted(rows.values(), key=lambda r: (r.knowable_date, r.ref))
+        return Dataset.declaring(
+            "commons.announcement_texts", records, knowable_date=lambda r: r.knowable_date
+        )
+
+    def results_filings(self, start: date, through: date) -> Dataset[FilingFact]:
+        """Every company-level PIT fact filed in ``[start, through]``, every concept."""
+        root = layer_root(Layer.L1, data_root=self._data_root) / PIT_FUNDAMENTALS_DATASET
+        if not root.is_dir():
+            raise SourceUnavailableError(PIT_FUNDAMENTALS_DATASET, f"no dataset at {root}")
+        files: list[str] = []
+        for child in sorted(root.iterdir()):
+            try:
+                day = partition_date_of(child)
+            except ValueError:
+                continue
+            if start <= day <= through:
+                files.extend(str(p) for p in sorted(child.glob("*.parquet")))
+        if not files:
+            return Dataset.declaring(
+                "commons.results_filings", [], knowable_date=lambda f: f.filing_date
+            )
+        rows = self._con.execute(
+            "SELECT isin, period_start, period_end, filing_date, filing_id, nature, concept, "
+            "value FROM read_parquet($files) WHERE segment IS NULL "
+            "AND filing_date BETWEEN $start AND $through "
+            "ORDER BY filing_date, filing_id, isin, concept, period_end",
+            {"files": files, "start": start, "through": through},
+        ).fetchall()
+        facts = [
+            FilingFact(
+                isin=str(isin),
+                period_start=period_start,
+                period_end=period_end,
+                filing_date=filing_date,
+                filing_id=str(filing_id),
+                nature=Nature(nature),
+                concept=str(concept),
+                segment=None,
+                value=Decimal(value),
+            )
+            for (
+                isin,
+                period_start,
+                period_end,
+                filing_date,
+                filing_id,
+                nature,
+                concept,
+                value,
+            ) in rows
+        ]
+        return Dataset.declaring(
+            "commons.results_filings", facts, knowable_date=lambda f: f.filing_date
         )
 
 
