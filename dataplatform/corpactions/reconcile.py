@@ -46,7 +46,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from datetime import date, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -82,6 +82,7 @@ __all__ = [
     "collapse_reconciled_rows",
     "eligible_for_factor_chain",
     "load_reconciled_actions",
+    "load_unreconciled_actions",
     "persist_reconciliation",
     "reconcile",
 ]
@@ -791,6 +792,12 @@ _LOAD_RECONCILED_SQL: Final = (
     "WHERE reconciled = true"
 )
 
+_LOAD_UNRECONCILED_SQL: Final = (
+    "SELECT isin, ex_date, action_type, ratio_terms, record_date, announcement_date, "
+    "knowable_date, source, source_ref, raw_text, l0_key FROM corporate_actions "
+    "WHERE reconciled = false"
+)
+
 
 class PersistCounts(BaseModel):
     """What `persist_reconciliation` changed. `flags_skipped` are disagreements already queued."""
@@ -903,7 +910,11 @@ def persist_reconciliation(
 
 
 def load_reconciled_actions(
-    conn: Connection, *, isin: str | None = None
+    conn: Connection,
+    *,
+    isin: str | None = None,
+    ex_after: date | None = None,
+    ex_through: date | None = None,
 ) -> tuple[CorporateAction, ...]:
     """The factor chain's single door: corporate actions marked `reconciled = true`, one per event.
 
@@ -916,32 +927,69 @@ def load_reconciled_actions(
     The rows come back *collapsed* (`collapse_reconciled_rows`): an event both feeds published is
     two reconciled rows in the table and exactly one action here, because everything behind this
     door counts per event and would otherwise count it twice.
+
+    `ex_after` / `ex_through` bound the ex-date (``ex_after < ex_date <= ex_through``) for a reader
+    that needs only a recent window across every ISIN — the L2 overlay (`store.l2_overlay`) —
+    rather than one ISIN's whole history. The rows inside the window collapse exactly as before.
     """
     sql = _LOAD_RECONCILED_SQL
-    params: tuple[object, ...] = ()
+    params: list[object] = []
     if isin is not None:
         sql += " AND isin = %s"
-        params = (isin,)
+        params.append(isin)
+    if ex_after is not None:
+        sql += " AND ex_date > %s"
+        params.append(ex_after)
+    if ex_through is not None:
+        sql += " AND ex_date <= %s"
+        params.append(ex_through)
     sql += " ORDER BY isin, ex_date, action_type, source"
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    return collapse_reconciled_rows(_action_from_row(row) for row in rows)
 
+
+def load_unreconciled_actions(
+    conn: Connection,
+    *,
+    ex_after: date,
+    ex_through: date,
+    action_types: Iterable[ActionType],
+) -> tuple[CorporateAction, ...]:
+    """The rows of ``action_types`` ex in ``(ex_after, ex_through]`` that are *not* reconciled.
+
+    What it does: reads the rows `load_reconciled_actions` keeps out of the factor chain, so a
+    reader that must not treat "no factor" as "no event" can see them: the L2 overlay flags an
+    ISIN whose unreconciled split is ex inside its window rather than showing the raw step as a
+    return. One row per source, uncollapsed — a caller only asks whether an event exists.
+
+    What it never does: hand a row to a factor. Nothing built from these is an adjustment.
+    """
+    types = sorted(t.value for t in action_types)
+    rows = conn.execute(
+        _LOAD_UNRECONCILED_SQL
+        + " AND ex_date > %s AND ex_date <= %s AND action_type = ANY(%s)"
+        + " ORDER BY isin, ex_date, action_type, source",
+        (ex_after, ex_through, types),
+    ).fetchall()
+    return tuple(_action_from_row(row) for row in rows)
+
+
+def _action_from_row(row: Sequence[Any]) -> CorporateAction:
+    """A `CorporateAction` from one `_LOAD_RECONCILED_SQL`-shaped row."""
     from dataplatform.ingest.corp_actions import CorporateAction
 
-    rows = conn.execute(sql, params).fetchall()
-    return collapse_reconciled_rows(
-        CorporateAction(
-            isin=str(row[0]),
-            ex_date=row[1],
-            action_type=ActionType(row[2]),
-            terms=TERMS_ADAPTER.validate_python(row[3]),
-            record_date=row[4],
-            announcement_date=row[5],
-            knowable_date=row[6],
-            source=str(row[7]),
-            source_ref=None if row[8] is None else str(row[8]),
-            raw_text=str(row[9]),
-            l0_key=None if row[10] is None else str(row[10]),
-        )
-        for row in rows
+    return CorporateAction(
+        isin=str(row[0]),
+        ex_date=row[1],
+        action_type=ActionType(row[2]),
+        terms=TERMS_ADAPTER.validate_python(row[3]),
+        record_date=row[4],
+        announcement_date=row[5],
+        knowable_date=row[6],
+        source=str(row[7]),
+        source_ref=None if row[8] is None else str(row[8]),
+        raw_text=str(row[9]),
+        l0_key=None if row[10] is None else str(row[10]),
     )
 
 

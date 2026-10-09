@@ -3248,12 +3248,45 @@ tasks:
     - "make check is green"
   verify: "uv run pytest tests/unit/test_index_evening.py tests/unit/test_scheduler_registry.py tests/unit/test_scheduler_coverage.py -q"
 
+- id: M17.11
+  title: Corporate-action-correct prices for the M17 desk while L2 lags L1
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.10]
+  spec: |
+    Measured 2026-10-09: L2 prices_adjusted is extended only by the Saturday ca_refresh drain or a
+    manual l2_fill, so it lags L1 by up to a week (1,715 traded names end 2026-10-01, 945 end
+    10-06; L1 at 10-09). The Commons price reads fall back to raw L1 closes for the sessions L2
+    lacks, so a corporate action that went ex inside that lag shows as a return
+    (INE0IQ001011's 2026-10-06 demerger: 212.76 -> 29.72). The readiness probe waits on L2
+    freshness for the 10 most liquid names and hits its 120-minute cap every night.
+    - In the Commons overlay, adjust the L1 segment for every corporate action with
+      knowable_date <= session and ex_date in (L2 last date, session], with the L2 engine's own
+      factor computation (never re-derived), and back-adjust the L2 history by the same factors so
+      the series equals what L2 holds after a rebuild. A CA the engine cannot price flags the ISIN
+      in the sheet gaps and excludes it for the session. No CA with knowable_date > session.
+    - Readiness: L1 has the session for the top-10 names and the overlay is CA-correct; the L2
+      lag is an informational gap, not a wait reason.
+    - Stops across a CA: a stop expressed as a price is scaled by the CA factor on the ex-date
+      (and only by it), so the next close cannot fire a false STOP_EXIT.
+    - Run the Commons build read-only on the real lake for 2026-10-09 and report the numbers.
+  deliverables: [dataplatform/store/l2_overlay.py, analyst/commons/sources.py, analyst/commons/sheets.py, backtest/fm_world.py, backtest/fm_job.py, tests/unit/test_l2_overlay.py]
+  acceptance:
+    - "for a synthetic ISIN with a split, a bonus and a demerger inside the overlay window, the overlay equals a full L2 materialize over the same bars, Decimal for Decimal; an inverted factor fails"
+    - "an INE0IQ001011-shaped demerger in the lag window flags the ISIN in the sheet gaps and keeps it out of the universe the screens read"
+    - "no corporate action with knowable_date after the session reaches the overlay"
+    - "the readiness probe no longer waits on L2 freshness; an uncomputable CA on a top-10 name is a wait reason"
+    - "a just-bought name's stop is rescaled by the split/bonus factor on its ex-date and no false STOP_EXIT fires"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_l2_overlay.py tests/unit/test_commons_sheets.py tests/unit/test_fm_job.py -q"
+
 - id: M17.8
   title: Five-session dry run, then the forward clock (S0)
   milestone: M17
   module: A10
   autonomy: NEEDS_GO
-  deps: [M17.7, M17.10]
+  deps: [M17.7, M17.10, M17.11]
   spec: |
     Run 5 consecutive live sessions in `--dry-run` on the real lake with the Claude CLI. Write
     `ops/gates/M17-dry-run-<date>.md` covering, per manager:

@@ -79,6 +79,7 @@ from dataplatform.corpactions.reconcile import (
     collapse_reconciled_rows,
     eligible_for_factor_chain,
     load_reconciled_actions,
+    load_unreconciled_actions,
     persist_reconciliation,
     reconcile,
 )
@@ -163,6 +164,7 @@ __all__ = [
     "load_manual_actions",
     "load_merger_terms",
     "load_reconciled_actions",
+    "load_unreconciled_actions",
     "parse_purpose",
     "persist_reconciliation",
     "price_adjusted_series",
