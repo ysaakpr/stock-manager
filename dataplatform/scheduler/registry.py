@@ -693,9 +693,10 @@ def index_close_evening(context: JobContext) -> None:
 #: between that fire's budget and the 21:30 one; 21:45 follows the 21:30 one and is over by the
 #: 22:00 M17 desk, which reads what it landed (`fm_world.M17LakeWorld.readiness`). The close-all
 #: file's same-evening publication time is not in the register ("published the evening of the
-#: session"); NSE Indices' TRI for D was measured out by 20:47 IST, so 20:35 is the first attempt,
-#: the two later fires the retries, and a fire after D landed makes no request. The 22:00 desk then
-#: waits for nothing here; a late night costs at most the desk's bounded wait.
+#: session"). NSE Indices' TRI for D, from the same end-of-day run, landed on `tri_evening`'s 19:50
+#: fire on 2026-10-07, -08 and -09 (`tri_evening.first_landed`), so 20:35 is the first attempt and
+#: the two later fires are retries. A fire after D landed makes no request. The 22:00 desk then
+#: waits for nothing here, and a late night costs at most the desk's bounded wait.
 INDEX_CLOSE_EVENING = Job(
     name="index_close_evening",
     cron="35 20 * * mon-fri; 10 21 * * mon-fri; 45 21 * * mon-fri",
