@@ -16,7 +16,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +24,9 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[2] / "ops" / "l0-s3-sync.sh"
 BUCKET = "stub-bucket-123456789012"
 KEY = bytes(range(7, 39))  # 32 bytes, no 0x00, so a raw leak would be visible in the log
+# 2020-01-01: far past any settle window, without reading the wall clock (test_clock_guard).
+# A file the test writes without it keeps its fresh mtime and is deferred.
+SETTLED_MTIME = 1_577_836_800
 
 STUB = """#!{python}
 import base64, hashlib, json, os, shutil, sys
@@ -130,8 +132,7 @@ class Rig:
 def _settled(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
-    old = time.time() - 3600
-    os.utime(path, (old, old))
+    os.utime(path, (SETTLED_MTIME, SETTLED_MTIME))
 
 
 @pytest.fixture
