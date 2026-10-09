@@ -56,6 +56,7 @@ from analyst.commons.sheets import (
     FilingFact,
     IndexLevel,
     MacroReading,
+    PriceOverlayNote,
     SectorAssignment,
     SurveillanceEntry,
     canonical_bytes,
@@ -589,6 +590,70 @@ def test_a_session_with_no_bars_is_refused() -> None:
 def test_prices_are_the_spine_and_never_a_gap(missing: str) -> None:
     with pytest.raises(CommonsRefusedError):
         _build(missing=frozenset({missing}))
+
+
+# ── M17.11: what the L2-lag overlay could not price stays out of the universe ────────────────────
+
+
+class OverlaySource(FakeSource):
+    """A fake source that also reports on its corporate-action overlay."""
+
+    def __init__(self, world: World, notes: Sequence[PriceOverlayNote], **kw: bool) -> None:
+        super().__init__(world)
+        self.notes = list(notes)
+        self.down = bool(kw.get("down"))
+        self.asked: list[frozenset[str]] = []
+
+    def price_overlay_notes(
+        self, isins: frozenset[str], sessions: Sequence[date]
+    ) -> Dataset[PriceOverlayNote]:
+        self.asked.append(isins)
+        if self.down:
+            raise SourceUnavailableError("corporate_actions", "store unreadable")
+        return Dataset.declaring("price_overlay", self.notes, knowable_date=lambda n: n.session)
+
+
+def _overlay_build(source: OverlaySource) -> CommonsSheets:
+    return build_commons_sheets(
+        SESSION, source=source, gate=Gate(), clock=_clock(), universe=PARAMS
+    )
+
+
+def test_a_name_the_overlay_cannot_price_is_excluded_and_named_in_gaps() -> None:
+    reason = "DEMERGER ex 2026-10-06: a structural break; the engine composes no price factor"
+    source = OverlaySource(
+        _world(),
+        [
+            PriceOverlayNote(FALLING, SESSION, PriceOverlayNote.EXCLUDED, reason),
+            PriceOverlayNote(RISING, SESSION, PriceOverlayNote.ADJUSTED, "SPLIT ex 2026-10-07"),
+            PriceOverlayNote(RISING, SESSION, PriceOverlayNote.LAGGING, "L2 ends 2026-10-01"),
+            PriceOverlayNote(FALLING, SESSION, PriceOverlayNote.LAGGING, "L2 ends 2026-10-01"),
+        ],
+    )
+    built = _overlay_build(source)
+    members = {r.isin for r in built.universe}
+    assert FALLING not in members and RISING in members
+    gaps = {g.source: g.reason for g in built.gaps}
+    assert reason in gaps[f"corporate_action:{FALLING}"]
+    # The L2 lag is informational: one gap, not a refusal and not an exclusion.
+    assert "L2 ends before 2026-10-08 for 2 of" in gaps["prices_adjusted"]
+    assert "1 names adjusted, 1 excluded" in gaps["prices_adjusted"]
+    # The inverse: the same build with nothing to exclude keeps the name.
+    kept = _overlay_build(OverlaySource(_world(), []))
+    assert FALLING in {r.isin for r in kept.universe}
+    assert built.build_digest != kept.build_digest
+
+
+def test_an_overlay_note_dated_after_the_session_trips_the_pit_guard() -> None:
+    late = PriceOverlayNote(FALLING, FUTURE, PriceOverlayNote.EXCLUDED, "from tomorrow")
+    with pytest.raises(PitError):
+        _overlay_build(OverlaySource(_world(), [late]))
+
+
+def test_an_unreadable_overlay_is_a_gap_and_excludes_nothing() -> None:
+    built = _overlay_build(OverlaySource(_world(), [], down=True))
+    assert {g.source: g.reason for g in built.gaps}["corporate_actions"] == "store unreadable"
+    assert FALLING in {r.isin for r in built.universe}
 
 
 # ── acceptance 3: the same lake builds a byte-identical digest ───────────────────────────────────

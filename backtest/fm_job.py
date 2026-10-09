@@ -155,7 +155,7 @@ from analyst.journal.evidence import canonical_bytes, digest_of
 from analyst.journal.models import Actor, Decision, JournalEntry
 from analyst.llm import LLM
 from analyst.monitor.interlock import GreenGate
-from backtest.book_actions import BookActionSource
+from backtest.book_actions import BookActionSource, ShareRescale
 from backtest.cash_interest import RepoRateSchedule, load_repo_rate_schedule
 from backtest.fm_circuit import CircuitMarket
 from backtest.fm_paper import M17PaperAccount
@@ -706,7 +706,7 @@ def run_m17_session(
     else:
         _lapse_stale(desk, session, book_clock)
         reports = FundDesk(list(desk.books.values()), kill_switch=kill_switch).execute(session)
-    _after_fills(desk, reports, session)
+    _after_fills(desk, world, reports, session)
     marks = _mark_all(desk, world, reports, session)
     deferred = _resolve_outcomes(desk, world, session, book_clock)
     stages.done("fills_marks_outcomes")
@@ -853,15 +853,53 @@ def _lapse_stale(desk: _Desk, session: date, clock: Clock) -> None:
             )
 
 
-def _after_fills(desk: _Desk, reports: Mapping[str, ExecutionReport], session: date) -> None:
-    """Rescale stops on a split or bonus; note when a held position was fully sold."""
+def _after_fills(
+    desk: _Desk, world: M17World, reports: Mapping[str, ExecutionReport], session: date
+) -> None:
+    """Rescale stops on a split or bonus; note when a held position was fully sold.
+
+    A stop is a price, struck on the close of the session its BUY was staged, so on a split's
+    ex-date it must move by the split's factor whether or not the account held shares at the
+    open. A held name's rescale is the one the account booked. A name whose BUY fills *on* the
+    ex-date holds no entitled shares, so the account books nothing — yet its stop was struck on
+    the pre-split close and the first post-split close would trip it (M17.11). Its stop takes the
+    store's own split/bonus ex this session, by that factor and nothing else, so the protected
+    fraction of the position is exactly what was declared.
+    """
+    previous: date | None
+    try:
+        previous = world.previous_session(session)
+    except M17JobError:
+        previous = None
+    due = [
+        a
+        for a in world.corporate_actions().between(previous, session)
+        if isinstance(a, ShareRescale)
+    ]
     for book_id, report in reports.items():
         side = desk.managers.get(book_id)
         if side is not None:
+            rescaled: set[tuple[str, date]] = set()
             for action in report.corporate_actions:
                 if action.status is CorporateActionStatus.BOOKED and action.rescale is not None:
                     side.stops.rescale(
                         action.isin, numerator=action.rescale[0], denominator=action.rescale[1]
+                    )
+                    rescaled.add((action.isin, action.ex_date))
+            for rescale in due:
+                if (rescale.isin, rescale.ex_date) in rescaled:
+                    continue
+                if rescale.isin in side.stops.stops:
+                    side.stops.rescale(
+                        rescale.isin, numerator=rescale.numerator, denominator=rescale.denominator
+                    )
+                    rescaled.add((rescale.isin, rescale.ex_date))
+                    _LOG.info(
+                        "fm_job.stop_rescaled_unheld",
+                        book=book_id,
+                        isin=rescale.isin,
+                        ex_date=rescale.ex_date.isoformat(),
+                        ratio=f"{rescale.numerator}:{rescale.denominator}",
                     )
         held = desk.accounts[book_id].quantities()
         for fill in report.fills:

@@ -8,11 +8,17 @@ read fetches, and no read writes:
   SQL, the same predicate `backtest.run` uses.
 - **Adjusted closes.** The raw close is the base. The L2 back-adjusted close from
   `QueryService.adjusted_series`, pinned to NSE, is laid over it wherever L2 has the session.
-  `backtest.run._AdjustedCloseSource` does the same: L2 holds only names with a non-identity
-  factor chain, so for every other name the raw close *is* the adjusted close. A factored name
-  whose L2 stops before the session is adjusted up to L2's last session. If a corporate action
-  went ex after that, it shows in the returns until L2 is rebuilt. That is the lake's state, and
-  this reader does not hide it.
+  `backtest.run._AdjustedCloseSource` does the same: a name with no partition has an identity
+  chain, so its raw close *is* its adjusted close.
+- **The L2 lag (M17.11).** L2 is extended only by the weekly drain, so it ends days before the
+  session. With a corporate-action store wired (``actions``), every split or bonus that went ex
+  after a name's last L2 session and is knowable by the window's last session is composed with
+  the L2 engine's own factors (`dataplatform.store.l2_overlay`): the raw sessions after L2 and
+  the L2 history before them come back as a rebuild will write them. An action the engine cannot
+  price (a demerger, a merger or scheme, a rights issue, an unquantified or unreconciled split, a
+  split L2's span covers without its factor) is not hidden either: `price_overlay_notes` names
+  the ISIN, and the sheets keep it out of the universe for the session. Without a store, the
+  lagged sessions are raw, and `price_overlay_notes` says so.
 - **Index levels, India VIX, the repo rate.** L1 ``macro_series``, with the same rule as
   `macro_series.read_latest`: per observation, the latest release on or before the session. The
   read is pushed down to the requested series ids. An unfiltered `read_latest` decodes every one
@@ -38,11 +44,12 @@ import csv
 import io
 import json
 import re
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pyarrow.dataset as pads
 
@@ -61,11 +68,13 @@ from analyst.commons.sheets import (
     FilingFact,
     IndexLevel,
     MacroReading,
+    PriceOverlayNote,
     SectorAssignment,
     SourceUnavailableError,
     SurveillanceEntry,
 )
 from dataplatform.clock import IST, Clock
+from dataplatform.corpactions.manual_actions import default_manual_actions
 from dataplatform.identity.master import Exchange
 from dataplatform.ingest.announcements import ANNOUNCEMENTS_DATASET, iter_l1
 from dataplatform.ingest.indices import parse_constituents
@@ -84,7 +93,25 @@ from dataplatform.query.fundamentals_metrics import CONCEPTS_USED
 from dataplatform.store.fo_aggregates import UnderlyingKind
 from dataplatform.store.fo_aggregates import read_l2 as read_fo_aggregates
 from dataplatform.store.l0 import L0Store
-from dataplatform.store.l2 import PRICES_ADJUSTED_DATASET, open_connection
+from dataplatform.store.l2 import (
+    PRICES_ADJUSTED_DATASET,
+    AdjustedBar,
+    RawBar,
+    open_connection,
+)
+from dataplatform.store.l2_overlay import (
+    EXCLUDING_KINDS,
+    L2Tail,
+    OverlayActionSource,
+    OverlayError,
+    OverlayEvent,
+    OverlayKind,
+    composed_in_l2,
+    l2_tails,
+    overlay_bars,
+    plan_events,
+    stale_l2_events,
+)
 from dataplatform.store.macro_series import MACRO_SERIES_DATASET
 from dataplatform.store.paths import (
     Layer,
@@ -94,6 +121,9 @@ from dataplatform.store.paths import (
 )
 from dataplatform.store.pit_fundamentals import PIT_FUNDAMENTALS_DATASET
 from dataplatform.store.schemas import PRICES_RAW_DATASET
+
+if TYPE_CHECKING:
+    from dataplatform.ingest.corp_actions import CorporateAction
 
 __all__ = [
     "INDUSTRY_SOURCE",
@@ -124,19 +154,42 @@ _IDENTITY_SEARCH_DAYS: Final = 5
 _ISIN: Final = re.compile(ISIN_PATTERN)
 
 
+@dataclass(frozen=True, slots=True)
+class _IsinOverlay:
+    """One ISIN's corporate-action overlay for one window: L2's tail, what is composed, what is
+    flagged. ``applied`` is empty whenever ``flags`` holds an ``UNCOMPUTABLE`` guard failure."""
+
+    tail: L2Tail | None
+    applied: tuple[CorporateAction, ...] = ()
+    flags: tuple[OverlayEvent, ...] = ()
+
+
+_NO_OVERLAY: Final = _IsinOverlay(tail=None)
+
+
 class LakeCommonsSource:
     """`CommonsSource` over the local lake (module docstring).
 
     ``clock`` exists only because `L0Store` takes one. Nothing here reads it for a date: every
-    read is bounded by the session it is asked about.
+    read is bounded by the session it is asked about. ``actions`` is the corporate-action store
+    the L2-lag overlay reads (M17.11); ``None`` leaves the lagged sessions raw.
     """
 
-    def __init__(self, *, clock: Clock, data_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        data_root: Path | None = None,
+        actions: OverlayActionSource | None = None,
+    ) -> None:
         self._data_root = data_root
         self._l0 = L0Store(clock=clock, data_root=data_root)
         self._quarantine = default_price_quarantine()
         self._admits = self._quarantine.sql_admits()
         self._con = open_connection()
+        self._actions = actions
+        self._tails: dict[str, L2Tail | None] = {}
+        self._overlays: dict[tuple[str, date, date], _IsinOverlay] = {}
 
     def close(self) -> None:
         self._con.close()
@@ -224,40 +277,262 @@ class LakeCommonsSource:
         if not files:
             raise SourceUnavailableError(PRICES_RAW_DATASET, "no partition for the window")
         rows = self._con.execute(
-            "SELECT isin, trade_date, close FROM read_parquet($files) "
+            "SELECT isin, trade_date, close, series, open, high, low, total_traded_qty "
+            "FROM read_parquet($files) "
             f"WHERE exchange = 'NSE' AND close > 0 AND isin IN (SELECT unnest($isins)) "
             f"AND {self._admits} ORDER BY isin, trade_date, series",
             {"files": files, "isins": sorted(isins)},
         ).fetchall()
         closes: dict[tuple[str, date], Decimal] = {}
-        for isin, trade_date, close in rows:
+        raw: dict[str, dict[date, RawBar]] = {}
+        for isin, trade_date, close, series, open_, high, low, qty in rows:
             # One NSE close per session: a name that moved series mid-window prints once a day.
             closes.setdefault((str(isin), trade_date), Decimal(close))
-        overlaid = 0
-        window = set(sessions)
+            bar = _raw_bar(str(isin), trade_date, close, open_, high, low, qty)
+            # The overlay recomputes from the bar L2 is built from: EQ wins over another series.
+            by_day = raw.setdefault(str(isin), {})
+            if series == "EQ" or trade_date not in by_day:
+                by_day[trade_date] = bar
+        window = sorted(set(sessions))
+        overlays = self._overlay(isins, window)
+        overlaid = adjusted = 0
         with QueryService(data_root=self._data_root, con=self._con) as service:
             for isin in sorted(isins):
-                partition = l2_isin_partition_path(
-                    PRICES_ADJUSTED_DATASET, isin, data_root=self._data_root
-                )
-                if not partition.exists():
-                    continue
-                series = service.adjusted_series(
-                    AdjustedSeriesRequest(
-                        isin=isin, start=min(window), end=max(window), primary=Exchange.NSE
-                    )
-                )
-                for point in series.points:
-                    key = (isin, point.trade_date)
-                    if point.fell_back or key not in closes:
-                        continue
-                    closes[key] = point.adj_close
-                    overlaid += 1
-        _LOG.info("commons.source.adjusted_closes", isins=len(isins), overlaid=overlaid)
+                l2 = self._l2_window(service, isin, window)
+                for day, held in l2.items():
+                    key = (isin, day)
+                    if key in closes:
+                        closes[key] = held.adj_close
+                        overlaid += 1
+                state = overlays.get(isin, _NO_OVERLAY)
+                if state.applied and isin in raw:
+                    for out in overlay_bars(
+                        isin, events=state.applied, raw_bars=tuple(raw[isin].values()), l2_bars=l2
+                    ):
+                        key = (isin, out.trade_date)
+                        if key in closes and out.adjusted:
+                            closes[key] = out.adj_close
+                            adjusted += 1
+        _LOG.info(
+            "commons.source.adjusted_closes",
+            isins=len(isins),
+            overlaid=overlaid,
+            ca_adjusted_isins=sum(1 for i in isins if overlays.get(i, _NO_OVERLAY).applied),
+            ca_adjusted_closes=adjusted,
+            ca_flagged=sum(1 for i in isins if overlays.get(i, _NO_OVERLAY).flags),
+        )
         records = [AdjustedClose(isin, day, close) for (isin, day), close in sorted(closes.items())]
         return Dataset.declaring(
             "commons.adjusted_closes", records, knowable_date=lambda r: r.trade_date
         )
+
+    # ── the L2-lag corporate-action overlay (M17.11) ─────────────────────────────────────────
+
+    def _l2_window(
+        self, service: QueryService, isin: str, window: Sequence[date]
+    ) -> dict[date, AdjustedBar]:
+        """``isin``'s NSE L2 bars on the window's span (no venue fallback), by date."""
+        partition = l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=self._data_root)
+        if not partition.exists():
+            return {}
+        series = service.adjusted_series(
+            AdjustedSeriesRequest(isin=isin, start=window[0], end=window[-1], primary=Exchange.NSE)
+        )
+        return {
+            p.trade_date: AdjustedBar(
+                isin=isin,
+                exchange=p.exchange.value,
+                trade_date=p.trade_date,
+                adj_open=p.adj_open,
+                adj_high=p.adj_high,
+                adj_low=p.adj_low,
+                adj_close=p.adj_close,
+                adj_volume=p.adj_volume,
+                tr_close=p.tr_close,
+                cum_price_factor=p.cum_price_factor,
+                cum_qty_factor=p.cum_qty_factor,
+            )
+            for p in series.points
+            if not p.fell_back
+        }
+
+    def _overlay(self, isins: Iterable[str], window: Sequence[date]) -> dict[str, _IsinOverlay]:
+        """Each ISIN's overlay for the window ``[window[0], window[-1]]``, as of its last session.
+
+        Raises `SourceUnavailableError` when the corporate-action store cannot be read: without
+        it no lagged session can be called CA-correct.
+        """
+        lo, as_of = window[0], window[-1]
+        wanted = sorted(set(isins))
+        todo = [i for i in wanted if (i, lo, as_of) not in self._overlays]
+        if todo:
+            unknown = [i for i in todo if i not in self._tails]
+            if unknown:
+                found = l2_tails(self._con, unknown, data_root=self._data_root)
+                for isin in unknown:
+                    self._tails[isin] = found.get(isin)
+            if self._actions is None:
+                for isin in todo:
+                    self._overlays[(isin, lo, as_of)] = _IsinOverlay(tail=self._tails[isin])
+            else:
+                try:
+                    store = self._actions.ex_between(lo, as_of)
+                except SourceUnavailableError:
+                    raise
+                except Exception as exc:  # any store failure: the overlay cannot be trusted
+                    raise SourceUnavailableError(
+                        "corporate_actions", f"the corporate-action store is unreadable: {exc}"
+                    ) from exc
+                recorded, unreconciled = store.by_isin()
+                curated = {
+                    row.isin
+                    for row in default_manual_actions().actions
+                    if lo < row.ex_date <= as_of
+                }
+                with QueryService(data_root=self._data_root, con=self._con) as service:
+                    for isin in todo:
+                        has_events = isin in recorded or isin in unreconciled or isin in curated
+                        self._overlays[(isin, lo, as_of)] = (
+                            self._plan(
+                                service,
+                                isin,
+                                window,
+                                recorded.get(isin, []),
+                                unreconciled.get(isin, []),
+                            )
+                            if has_events
+                            else _IsinOverlay(tail=self._tails[isin])
+                        )
+        return {i: self._overlays[(i, lo, as_of)] for i in wanted}
+
+    def _plan(
+        self,
+        service: QueryService,
+        isin: str,
+        window: Sequence[date],
+        recorded: Sequence[CorporateAction],
+        unreconciled: Sequence[CorporateAction],
+    ) -> _IsinOverlay:
+        lo, as_of = window[0], window[-1]
+        tail = self._tails[isin]
+        flags: list[OverlayEvent] = []
+        applied: tuple[CorporateAction, ...] = ()
+        if tail is None or tail.last < as_of:
+            after = lo if tail is None else max(lo, tail.last)
+            events = plan_events(
+                isin, recorded=recorded, unreconciled=unreconciled, after=after, as_of=as_of
+            )
+            applied = tuple(
+                e.action for e in events if e.kind is OverlayKind.APPLIED and e.action is not None
+            )
+            flags.extend(e for e in events if e.kind in EXCLUDING_KINDS)
+            if tail is not None and applied:
+                try:
+                    composed_in_l2(isin, applied, tail)
+                except OverlayError as exc:
+                    first = applied[0]
+                    flags.append(
+                        OverlayEvent(
+                            isin=isin,
+                            ex_date=first.ex_date,
+                            action_type=first.action_type,
+                            knowable_date=first.knowable_date,
+                            kind=OverlayKind.UNCOMPUTABLE,
+                            detail=str(exc),
+                        )
+                    )
+                    applied = ()
+        if tail is not None and tail.last > lo:
+            # An action ex inside L2's own span, ingested after L2 was built over it, leaves the
+            # raw step in L2 until the drain rebuilds it. Knowability is the session's, not L2's
+            # last bar's: the feed often learns an action days after its ex-date (INE2FMX01012's
+            # bonus, ex 2026-09-28, knowable 10-06), and that is exactly the case L2 missed.
+            span = tuple(
+                e
+                for e in plan_events(
+                    isin, recorded=recorded, unreconciled=(), after=lo, as_of=as_of
+                )
+                if e.ex_date <= tail.last
+            )
+            if any(e.kind is OverlayKind.APPLIED for e in span):
+                flags.extend(stale_l2_events(isin, span, self._l2_window(service, isin, window)))
+        for flag in flags:
+            _LOG.warning(
+                "commons.source.ca_flagged",
+                isin=isin,
+                as_of=as_of.isoformat(),
+                ex_date=flag.ex_date.isoformat(),
+                action_type=flag.action_type.value,
+                kind=flag.kind.value,
+                detail=flag.detail[:200],
+            )
+        return _IsinOverlay(tail=tail, applied=applied, flags=tuple(flags))
+
+    def corporate_action_flags(
+        self, isins: frozenset[str], sessions: Sequence[date]
+    ) -> dict[str, tuple[OverlayEvent, ...]]:
+        """Each of ``isins`` the overlay cannot make CA-correct on the window, with its events.
+
+        The kinds say whether waiting can help: ``UNCOMPUTABLE`` (a curation, a reconciliation
+        or a rebuild fixes it) against ``BREAK`` / ``UNPRICED`` (the engine never prices them).
+        Raises `SourceUnavailableError` as `price_overlay_notes` does.
+        """
+        if self._actions is None:
+            raise SourceUnavailableError(
+                "corporate_actions",
+                "no corporate-action store is wired; sessions after L2's last are raw L1 closes",
+            )
+        if not isins:
+            return {}
+        overlays = self._overlay(isins, sorted(set(sessions)))
+        return {isin: state.flags for isin, state in sorted(overlays.items()) if state.flags}
+
+    def l2_ends(self, isins: frozenset[str]) -> dict[str, date | None]:
+        """Each ISIN's last NSE session in L2 (``None``: no partition)."""
+        unknown = [i for i in sorted(isins) if i not in self._tails]
+        if unknown:
+            found = l2_tails(self._con, unknown, data_root=self._data_root)
+            for isin in unknown:
+                self._tails[isin] = found.get(isin)
+        return {
+            isin: None if (tail := self._tails[isin]) is None else tail.last
+            for isin in sorted(isins)
+        }
+
+    def price_overlay_notes(
+        self, isins: frozenset[str], sessions: Sequence[date]
+    ) -> Dataset[PriceOverlayNote]:
+        """What the L2-lag overlay did for each of ``isins`` on the window ``sessions``.
+
+        One ``EXCLUDED`` note per ISIN with a corporate action the overlay cannot price inside
+        its window, one ``ADJUSTED`` note per ISIN it composed a factor for, one ``LAGGING`` note
+        per ISIN whose L2 ends before the window's last session. Every note is dated that session.
+        Raises `SourceUnavailableError` when no corporate-action store is wired or it is
+        unreadable: then the lagged sessions are raw, and nothing may call them CA-correct.
+        """
+        if self._actions is None:
+            raise SourceUnavailableError(
+                "corporate_actions",
+                "no corporate-action store is wired; sessions after L2's last are raw L1 closes",
+            )
+        if not isins:
+            return Dataset.declaring("commons.price_overlay", [], knowable_date=lambda n: n.session)
+        window = sorted(set(sessions))
+        as_of = window[-1]
+        notes: list[PriceOverlayNote] = []
+        for isin, state in sorted(self._overlay(isins, window).items()):
+            if state.flags:
+                reason = "; ".join(f.detail for f in state.flags)
+                notes.append(PriceOverlayNote(isin, as_of, PriceOverlayNote.EXCLUDED, reason))
+            elif state.applied:
+                reason = "; ".join(
+                    f"{a.action_type.value} ex {a.ex_date.isoformat()}" for a in state.applied
+                )
+                notes.append(PriceOverlayNote(isin, as_of, PriceOverlayNote.ADJUSTED, reason))
+            if state.tail is None or state.tail.last < as_of:
+                last = "no L2 partition" if state.tail is None else f"L2 ends {state.tail.last}"
+                notes.append(PriceOverlayNote(isin, as_of, PriceOverlayNote.LAGGING, last))
+        return Dataset.declaring("commons.price_overlay", notes, knowable_date=lambda n: n.session)
 
     # ── macro: index levels, India VIX, repo rate ────────────────────────────────────────────
 
@@ -516,7 +791,9 @@ class LakeCommonsSource:
         The same rule as :meth:`adjusted_closes`, for the whole bar: the raw L1 bar is the base,
         and where L2 holds the name's NSE bar for the session (not a fallback from another venue)
         its adjusted high, low, close and volume replace the raw ones. Delivered quantity takes
-        the bar's quantity factor. A raw bar with no high or low takes its close for both.
+        the bar's quantity factor. A raw bar with no high or low takes its close for both. The
+        sessions after a name's last L2 bar, and its L2 history before them, take the corporate
+        actions ex in between (module docstring, "The L2 lag").
         """
         files = self._files_for(sessions)
         if not files:
@@ -550,42 +827,72 @@ class LakeCommonsSource:
                     deliv_pct=None if dp is None else Decimal(dp),
                 ),
             )
-        overlaid = 0
+        overlaid = adjusted = 0
         window = sorted(set(sessions))
+        # The raw bars, kept before L2 replaces them: the overlay recomputes from these.
+        raw: dict[str, list[RawBar]] = {}
+        for (isin, day), bar in sorted(base.items()):
+            raw.setdefault(isin, []).append(
+                RawBar(
+                    isin=isin,
+                    exchange="NSE",
+                    trade_date=day,
+                    open=bar.raw_close,
+                    high=bar.high,
+                    low=bar.low,
+                    close=bar.raw_close,
+                    volume=int(bar.volume),
+                )
+            )
+        overlays = self._overlay(raw, window)
         with QueryService(data_root=self._data_root, con=self._con) as service:
-            for isin in sorted({isin for isin, _ in base}):
-                partition = l2_isin_partition_path(
-                    PRICES_ADJUSTED_DATASET, isin, data_root=self._data_root
-                )
-                if not partition.exists():
-                    continue
-                adjusted = service.adjusted_series(
-                    AdjustedSeriesRequest(
-                        isin=isin, start=window[0], end=window[-1], primary=Exchange.NSE
-                    )
-                )
-                for point in adjusted.points:
-                    key = (isin, point.trade_date)
-                    raw = base.get(key)
-                    if point.fell_back or raw is None:
+            for isin in sorted(raw):
+                l2 = self._l2_window(service, isin, window)
+                state = overlays.get(isin, _NO_OVERLAY)
+                replaced: dict[date, tuple[Decimal, Decimal, Decimal, Decimal, Decimal]] = {
+                    day: (b.adj_high, b.adj_low, b.adj_close, b.adj_volume, b.cum_qty_factor)
+                    for day, b in l2.items()
+                }
+                overlaid += sum(1 for day in replaced if (isin, day) in base)
+                if state.applied:
+                    for out in overlay_bars(
+                        isin, events=state.applied, raw_bars=raw[isin], l2_bars=l2
+                    ):
+                        if out.adjusted:
+                            replaced[out.trade_date] = (
+                                out.adj_high,
+                                out.adj_low,
+                                out.adj_close,
+                                out.adj_volume,
+                                out.cum_qty_factor,
+                            )
+                            adjusted += 1
+                for day, (high, low, close, volume, factor) in replaced.items():
+                    key = (isin, day)
+                    raw_bar = base.get(key)
+                    if raw_bar is None:
                         continue
-                    factor = point.cum_qty_factor
                     base[key] = PriceBar(
                         isin=isin,
-                        trade_date=point.trade_date,
-                        high=point.adj_high,
-                        low=point.adj_low,
-                        close=point.adj_close,
-                        volume=point.adj_volume,
-                        raw_close=raw.raw_close,
-                        traded_value=raw.traded_value,
-                        size=raw.size,
-                        deliv_qty=None if raw.deliv_qty is None else raw.deliv_qty * factor,
-                        deliv_pct=raw.deliv_pct,
+                        trade_date=day,
+                        high=high,
+                        low=low,
+                        close=close,
+                        volume=volume,
+                        raw_close=raw_bar.raw_close,
+                        traded_value=raw_bar.traded_value,
+                        size=raw_bar.size,
+                        deliv_qty=None if raw_bar.deliv_qty is None else raw_bar.deliv_qty * factor,
+                        deliv_pct=raw_bar.deliv_pct,
                     )
-                    overlaid += 1
         _LOG.info(
-            "commons.source.price_bars", sessions=len(files), bars=len(base), overlaid=overlaid
+            "commons.source.price_bars",
+            sessions=len(files),
+            bars=len(base),
+            overlaid=overlaid,
+            ca_adjusted_isins=sum(1 for i in raw if overlays.get(i, _NO_OVERLAY).applied),
+            ca_adjusted_bars=adjusted,
+            ca_flagged=sum(1 for i in raw if overlays.get(i, _NO_OVERLAY).flags),
         )
         return Dataset.declaring(
             "commons.price_bars",
@@ -821,3 +1128,30 @@ def _surveillance_isins(document: object, *, filename: str) -> Iterator[str]:
         # A row with no usable ISIN cannot be joined (invariant #2). It is counted, never guessed
         # from its symbol.
         _LOG.warning("commons.source.surveillance_unkeyed", file=filename, rows=unkeyed)
+
+
+def _raw_bar(
+    isin: str,
+    day: date,
+    close: Any,
+    open_: Any,
+    high: Any,
+    low: Any,
+    qty: Any,
+) -> RawBar:
+    """An L1 row as the `RawBar` L2 is built from; a missing open, high or low takes the close."""
+    price = Decimal(close)
+
+    def leg(value: Any) -> Decimal:
+        return Decimal(value) if value is not None and value > 0 else price
+
+    return RawBar(
+        isin=isin,
+        exchange="NSE",
+        trade_date=day,
+        open=leg(open_),
+        high=leg(high),
+        low=leg(low),
+        close=price,
+        volume=int(qty or 0),
+    )

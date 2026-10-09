@@ -227,21 +227,26 @@ class FactorChain(BaseModel):
     isin: str = Field(pattern=ISIN_PATTERN)
     rows: tuple[FactorRow, ...] = ()
 
-    def price_factor_asof(self, on: date) -> Decimal:
+    def price_factor_asof(self, on: date, *, base: Decimal = _ONE) -> Decimal:
         """Cumulative price factor for a raw price on ``on`` — product of events *after* ``on``.
 
         A price on an ex-date is already in post-event terms, so an event exactly on ``on`` does not
         scale it (only strictly-later events do). Returns ``1`` for the newest segment.
+
+        ``base`` is the running product to fold this chain's factors onto, oldest event first —
+        the cumulative factor an older chain already carries for ``on`` when this chain holds only
+        the events after it (the L2 overlay, ``dataplatform.store.l2_overlay``). The default ``1``
+        is the plain lookup; the multiplication order is the same either way.
         """
-        factor = _ONE
+        factor = base
         for row in self.rows:
             if row.ex_date > on:
                 factor *= row.price_factor
         return factor
 
-    def qty_factor_asof(self, on: date) -> Decimal:
+    def qty_factor_asof(self, on: date, *, base: Decimal = _ONE) -> Decimal:
         """Cumulative quantity factor for a raw quantity on ``on`` (reciprocal of price)."""
-        factor = _ONE
+        factor = base
         for row in self.rows:
             if row.ex_date > on:
                 factor *= row.qty_factor

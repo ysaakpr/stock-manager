@@ -55,7 +55,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import ROUND_HALF_EVEN, Context, Decimal, localcontext
 from itertools import pairwise
-from typing import Any, Final, Protocol, runtime_checkable
+from typing import Any, ClassVar, Final, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -97,6 +97,8 @@ __all__ = [
     "IndexTrend",
     "MacroReading",
     "MarketSheet",
+    "PriceOverlayNote",
+    "PriceOverlaySource",
     "ScalarReading",
     "SectorAssignment",
     "SectorReturn",
@@ -112,7 +114,7 @@ _LOG = get_logger(__name__)
 
 #: Versioned identity of the sheet layout and rules. It is part of the digest, so a changed rule
 #: can never reproduce an old build's digest.
-SHEET_VERSION: Final = "commons-sheets/1"
+SHEET_VERSION: Final = "commons-sheets/2"
 
 #: The decimal context every computation runs in, so a caller's context cannot change a digit.
 _CONTEXT: Final = Context(prec=28, rounding=ROUND_HALF_EVEN)
@@ -257,6 +259,36 @@ class AdjustedClose:
     isin: str
     trade_date: date
     close: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class PriceOverlayNote:
+    """What the L2-lag corporate-action overlay did for one ISIN, as of ``session`` (M17.11).
+
+    ``EXCLUDED``: a corporate action inside the window that the L2 engine cannot price, so a
+    return read across it would be the raw step; the sheets drop the ISIN for the session.
+    ``ADJUSTED``: split/bonus factors composed onto the lagged sessions. ``LAGGING``: L2 ends
+    before the session. ``reason`` names the actions or L2's last session.
+    """
+
+    EXCLUDED: ClassVar[str] = "EXCLUDED"
+    ADJUSTED: ClassVar[str] = "ADJUSTED"
+    LAGGING: ClassVar[str] = "LAGGING"
+
+    isin: str
+    session: date
+    kind: str
+    reason: str
+
+
+@runtime_checkable
+class PriceOverlaySource(Protocol):
+    """A `CommonsSource` that can say what its adjusted prices did across corporate actions."""
+
+    def price_overlay_notes(
+        self, isins: frozenset[str], sessions: Sequence[date]
+    ) -> Dataset[PriceOverlayNote]:
+        """One dated note per ISIN the L2-lag overlay excluded, adjusted, or found lagging."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,7 +653,7 @@ class _Build:
             and median >= self.params.min_median_traded_value_inr
         }
         excluded, flagged = self._surveillance()
-        members = sorted(liquid - (excluded or set()))
+        members = self._corporate_action_exclusions(sorted(liquid - (excluded or set())), calendar)
         closes = self._adjusted(frozenset(members), calendar)
         sectors = self._sectors()
         metrics = self._fundamentals(members, bars)
@@ -735,6 +767,42 @@ class _Build:
             if record.isin in members:
                 out[record.isin][record.trade_date] = record.close
         return dict(out)
+
+    def _corporate_action_exclusions(
+        self, members: list[str], calendar: Sequence[date]
+    ) -> list[str]:
+        """``members`` less every ISIN the price overlay could not make CA-correct (M17.11).
+
+        Each one dropped is a gap naming the action, so no return, mean or screen is read across
+        a raw step. The L2 lag itself is one informational gap. A source that cannot report on
+        its overlay leaves the members as they are, and says so in a gap.
+        """
+        if not members or not isinstance(self.source, PriceOverlaySource):
+            return members
+        try:
+            notes = self.pit.admit(self.source.price_overlay_notes(frozenset(members), calendar))
+        except SourceUnavailableError as exc:
+            self.gap(exc.source, exc.reason)
+            return members
+        dropped: set[str] = set()
+        adjusted = 0
+        lagging: list[PriceOverlayNote] = []
+        for note in notes:
+            if note.kind == PriceOverlayNote.EXCLUDED:
+                dropped.add(note.isin)
+                self.gap(f"corporate_action:{note.isin}", f"excluded this session: {note.reason}")
+            elif note.kind == PriceOverlayNote.ADJUSTED:
+                adjusted += 1
+            elif note.kind == PriceOverlayNote.LAGGING:
+                lagging.append(note)
+        if lagging:
+            self.gap(
+                "prices_adjusted",
+                f"L2 ends before {self.session.isoformat()} for {len(lagging)} of {len(members)} "
+                f"members; the L1 sessions after it carry the engine's split/bonus factors "
+                f"({adjusted} names adjusted, {len(dropped)} excluded)",
+            )
+        return [m for m in members if m not in dropped]
 
     def _surveillance(self) -> tuple[set[str] | None, dict[str, bool]]:
         """The excluded ISINs (``None`` if unknown), and whether each flagged list is known."""
