@@ -24,7 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from analyst.fundmanager import ControlMandate, ManagerMandate, Roster, load_roster
-from analyst.fundmanager.books import BookOrder, FundBook
+from analyst.fundmanager.books import BookError, BookOrder, FundBook
 from analyst.fundmanager.controls import BenchBook, ControlBook, record_mark
 from analyst.fundmanager.digest import digest_path, render_digest, write_digest
 from analyst.fundmanager.scoreboard import (
@@ -37,6 +37,7 @@ from analyst.fundmanager.scoreboard import (
     ControlBuy,
     DecisionAction,
     DecisionOutcome,
+    LastTraded,
     ModelCall,
     OutcomeError,
     OutcomeReason,
@@ -70,7 +71,7 @@ from dataplatform.clock import FrozenClock
 from dataplatform.status.api import app, clock_source, m17_journal_source, m17_roster_source
 from execution.broker import Side
 from execution.recon import RecordingAlerter
-from tests.fm_books_support import ListJournal, open_book, switch_at, weekdays
+from tests.fm_books_support import FmMarket, ListJournal, open_book, switch_at, weekdays
 from tests.fm_scoreboard_support import (
     DictBench,
     MarketPrices,
@@ -527,6 +528,96 @@ def test_a_due_decision_without_a_price_is_loud() -> None:
     prices = MarketPrices(market, DictBench(compounding(SESSIONS, Decimal(0))))
     with pytest.raises(OutcomeError, match="missing"):
         resolve_outcome(_buy(SESSIONS[30]), calendar=SESSIONS, as_of=SESSIONS[40], prices=prices)
+
+
+class Delisted:
+    """A `DelistedNames` where ``name`` last traded on ``last`` and is delisted after it."""
+
+    def __init__(self, market: FmMarket, name: str, last: date) -> None:
+        self.market, self.name, self.last = market, name, last
+
+    def last_traded(self, isin_: str, session: date) -> LastTraded | None:
+        if isin_ != self.name or session <= self.last:
+            return None
+        close = self.market.close(isin_, self.last)
+        assert close is not None
+        return LastTraded(self.last, close, close)
+
+
+def _delisting_market(last: date) -> FmMarket:
+    market = drifting_market(SESSIONS, [isin(1)], drift={isin(1): Decimal("0.01")})
+    for session in SESSIONS:
+        if session > last:
+            del market.bars[(isin(1), session)]
+    return market
+
+
+def test_a_name_that_delists_before_resolving_is_scored_at_its_last_traded_close() -> None:
+    last = SESSIONS[32]
+    market = _delisting_market(last)
+    bench = DictBench(compounding(SESSIONS, Decimal("0.001")))
+    prices = MarketPrices(market, bench)
+    d = _buy(SESSIONS[30], horizon=5)
+    with pytest.raises(OutcomeError, match="missing"):  # without the listing record: loud
+        resolve_outcome(d, calendar=SESSIONS, as_of=SESSIONS[35], prices=prices)
+    outcome = resolve_outcome(
+        d,
+        calendar=SESSIONS,
+        as_of=SESSIONS[35],
+        prices=prices,
+        delisted=Delisted(market, isin(1), last),
+    )
+    assert outcome is not None
+    assert outcome.resolved_on == SESSIONS[35] and outcome.name_last_traded == last
+    n0, n1 = market.close(isin(1), SESSIONS[30]), market.close(isin(1), last)
+    b0, b1 = bench.level(SESSIONS[30]), bench.level(SESSIONS[35])
+    assert n0 is not None and n1 is not None and b0 is not None and b1 is not None
+    assert outcome.name_return == (n1 / n0 - 1).quantize(Decimal("0.00000001"))
+    # The bench runs to the resolution session, not to the name's last print.
+    assert outcome.bench_return == (b1 / b0 - 1).quantize(Decimal("0.00000001"))
+    assert DecisionOutcome.model_validate_json(outcome.record_json()) == outcome
+
+
+def test_a_gap_in_a_listed_name_is_still_loud() -> None:
+    market = drifting_market(SESSIONS, [isin(1)], drift={isin(1): Decimal(0)})
+    del market.bars[(isin(1), SESSIONS[35])]
+    prices = MarketPrices(market, DictBench(compounding(SESSIONS, Decimal(0))))
+    listed = Delisted(market, isin(2), SESSIONS[0])  # some other name delisted; isin(1) listed
+    with pytest.raises(OutcomeError, match="missing"):
+        resolve_outcome(
+            _buy(SESSIONS[30]),
+            calendar=SESSIONS,
+            as_of=SESSIONS[40],
+            prices=prices,
+            delisted=listed,
+        )
+
+
+def test_a_held_delisted_name_is_marked_at_its_last_traded_close(tmp_path: Path) -> None:
+    last = SESSIONS[24]
+    market = _delisting_market(last)
+    clock = FrozenClock(SESSIONS[20])
+    book, account = open_book(
+        MANAGER,
+        market=market,
+        clock=clock,
+        kill_switch=switch_at(tmp_path, clock),
+        journal=ListJournal(),
+    )
+    clock.freeze_at(SESSIONS[20])
+    book.execute(SESSIONS[20])
+    book.decide(SESSIONS[20], [BookOrder(isin(1), Side.BUY, 10, "buy")])
+    for session in SESSIONS[21:25]:
+        clock.freeze_at(session)
+        book.execute(session)
+    assert account.quantities() == {isin(1): 10}
+    after = SESSIONS[26]
+    with pytest.raises(BookError, match="cannot be marked"):
+        mark_book(book, after, execution=None)
+    mark = mark_book(book, after, execution=None, delisted=Delisted(market, isin(1), last))
+    close = market.close(isin(1), last)
+    assert close is not None
+    assert mark.nav == account.cash_value + close * 10 and mark.positions == 1
 
 
 # ── the decision adapter ────────────────────────────────────────────────────────────────────────

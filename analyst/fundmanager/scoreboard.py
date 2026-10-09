@@ -32,6 +32,15 @@ value a hair under a threshold is never rounded across it.
   sold earlier resolves at that exit session instead (``OutcomeReason.EXITED``). The outcome is
   journaled when it resolves (`resolve_outcome` → `outcome_entry`), so the scoreboard never reads
   a price. "Beat" is strict: a tie is a miss.
+- *A name that delists* before its decision resolves (M17.7) is scored at its **last traded
+  close**: the name's return runs from the decision session to that close, the bench's to the
+  resolution session as usual — the capital stayed in the name at that value, which is how the
+  paper path carries it. Likewise `mark_book` values a held, delisted name at its last traded raw
+  close, exactly as the backtests' NAV path carries a name that stopped printing (its last-known
+  close, never zero, never a guess), until a corporate action converts it (a curated cash exit is
+  booked by the account and leaves cash). Only a name whose listing has *ended* is treated so
+  (`DelistedNames`); a listed name with a missing close is still a loud `OutcomeError` /
+  `BookError`, because a gap is a data fault, not a delisting.
 - *Brier* = mean of ``(p - o)^2`` with ``o`` = 1 if the name beat the bench, else 0, over the
   window's resolved decisions (decided in the window and resolved by its last session). Every
   decision carries ``p_beat_bench``, so every resolved decision counts, whatever its action.
@@ -87,7 +96,9 @@ __all__ = [
     "DecisionAction",
     "DecisionLine",
     "DecisionOutcome",
+    "DelistedNames",
     "GroupStat",
+    "LastTraded",
     "ManagerScore",
     "ModelCall",
     "OutcomeError",
@@ -264,6 +275,9 @@ class DecisionOutcome(_Record):
     name_return: Decimal
     bench_return: Decimal
     reason: OutcomeReason
+    #: The name's last traded session when it had delisted before ``resolved_on`` (its return is
+    #: measured to that close); None for a name that printed on ``resolved_on``.
+    name_last_traded: date | None = None
 
     @property
     def beat(self) -> bool:
@@ -956,12 +970,37 @@ def _canonical(document: Any) -> bytes:
 # ── writing the inputs: marks and outcomes ───────────────────────────────────────────────────────
 
 
-def mark_book(book: FundBook, session: date, *, execution: ExecutionReport | None) -> BookMark:
+@dataclass(frozen=True, slots=True)
+class LastTraded:
+    """A delisted name's last traded session, with its raw and adjusted closes there."""
+
+    session: date
+    raw_close: Decimal
+    adjusted_close: Decimal
+
+
+class DelistedNames(Protocol):
+    """Which names' listings have ended, and where they last traded (the listing record)."""
+
+    def last_traded(self, isin: str, session: date) -> LastTraded | None:
+        """For ``isin`` delisted on or before ``session``: its last traded session and closes.
+        None for a name still listed on ``session``."""
+        ...
+
+
+def mark_book(
+    book: FundBook,
+    session: date,
+    *,
+    execution: ExecutionReport | None,
+    delisted: DelistedNames | None = None,
+) -> BookMark:
     """A manager or control book's mark at ``session``'s close.
 
     ``execution`` is the session's `FundBook.execute` report (its fills, costs and interest); None
-    on a session the book did not execute. Raises `BookError` for a held name with no close —
-    a book that cannot be valued is never marked at a guess.
+    on a session the book did not execute. A held name with no close that ``delisted`` says has
+    delisted is valued at its last traded raw close (module docstring). Raises `BookError` for
+    any other held name with no close — a book that cannot be valued is never marked at a guess.
     """
     invested = _ZERO
     positions = 0
@@ -970,10 +1009,13 @@ def mark_book(book: FundBook, session: date, *, execution: ExecutionReport | Non
             continue
         price = book.market.close(isin, session)
         if price is None:
-            raise BookError(
-                f"{book.book_id}: held {isin} has no close on {session.isoformat()}; the book "
-                "cannot be marked"
-            )
+            last = None if delisted is None else delisted.last_traded(isin, session)
+            if last is None:
+                raise BookError(
+                    f"{book.book_id}: held {isin} has no close on {session.isoformat()}; the "
+                    "book cannot be marked"
+                )
+            price = last.raw_close
         invested += price * quantity
         positions += 1
     fills = () if execution is None else tuple(f for f in execution.fills if f.session == session)
@@ -1045,13 +1087,16 @@ def resolve_outcome(
     as_of: date,
     prices: OutcomePrices,
     exited_on: date | None = None,
+    delisted: DelistedNames | None = None,
 ) -> DecisionOutcome | None:
     """``decision``'s outcome if it has resolved by ``as_of``, else None.
 
     It resolves at the session ``horizon_sessions`` after the decision session in ``calendar`` —
     or, for a BUY whose position was fully sold earlier, at ``exited_on``. Both returns are close
-    to close over the same sessions. Raises `OutcomeError` when it is due and a level is missing,
-    and `ScoreboardError` when the decision session is not in ``calendar``.
+    to close over the same sessions — except for a name ``delisted`` says had delisted by the
+    resolution session, whose return runs to its last traded close (module docstring). Raises
+    `OutcomeError` when it is due and a level is missing for any other reason, and
+    `ScoreboardError` when the decision session is not in ``calendar``.
     """
     try:
         index = list(calendar).index(decision.decided_on)
@@ -1071,9 +1116,15 @@ def resolve_outcome(
         resolved_on, reason = exited_on, OutcomeReason.EXITED
     if resolved_on is None or resolved_on > as_of:
         return None
+    final = prices.adjusted_close(decision.isin, resolved_on)
+    last_traded: date | None = None
+    if final is None and delisted is not None:
+        last = delisted.last_traded(decision.isin, resolved_on)
+        if last is not None and decision.decided_on <= last.session < resolved_on:
+            final, last_traded = last.adjusted_close, last.session
     levels = (
         prices.adjusted_close(decision.isin, decision.decided_on),
-        prices.adjusted_close(decision.isin, resolved_on),
+        final,
         prices.bench_level(decision.decided_on),
         prices.bench_level(resolved_on),
     )
@@ -1096,6 +1147,7 @@ def resolve_outcome(
         name_return=_q(name_return, _SCORE),
         bench_return=_q(bench_return, _SCORE),
         reason=reason,
+        name_last_traded=last_traded,
     )
 
 
