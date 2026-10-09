@@ -19,7 +19,7 @@ Offline: synthetic L1 under ``tmp_path``, no database, no network.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -27,6 +27,9 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from analyst.commons.sheets import PriceOverlayNote, SourceUnavailableError
+from analyst.commons.sources import LakeCommonsSource
+from dataplatform.clock import IST, FrozenClock
 from dataplatform.corpactions import (
     ActionType,
     FaceValueTerms,
@@ -39,23 +42,29 @@ from dataplatform.identity.master import Exchange
 from dataplatform.ingest.corp_actions import CorporateAction
 from dataplatform.ingest.models import PriceRow
 from dataplatform.store.l1 import write_prices_raw
-from dataplatform.store.l2 import (
+from dataplatform.store.l2 import (  # the writer's own bytes
+    PRICES_ADJUSTED_DATASET,
     AdjustedBar,
     RawBar,
+    _bars_to_table,
+    _write_table,
     materialize_isin,
     open_connection,
     read_adjusted,
     read_raw_bars_from_l1,
 )
 from dataplatform.store.l2_overlay import (
+    L2Tail,
     OverlaidBar,
+    OverlayActions,
     OverlayError,
     OverlayKind,
-    l2_last_dates,
+    l2_tails,
     overlay_bars,
     plan_events,
     stale_l2_events,
 )
+from dataplatform.store.paths import l2_isin_partition_path
 
 ISIN = "INE0IQ001011"
 OLD_SPLIT = date(2026, 6, 1)
@@ -442,7 +451,7 @@ def test_a_split_inside_l2s_span_without_its_factor_is_uncomputable(tmp_path: Pa
     assert stale_l2_events(ISIN, events, _l2(tmp_path)) == ()
 
 
-def test_l2_last_dates_reads_each_partitions_last_nse_session(tmp_path: Path) -> None:
+def test_l2_tails_read_each_partitions_last_nse_bar(tmp_path: Path) -> None:
     rows = _price_rows(DAYS, _closes(()))
     _write_l1(tmp_path, rows, [d for d in DAYS if d <= L2_LAST])
     materialize_isin(
@@ -450,6 +459,154 @@ def test_l2_last_dates_reads_each_partitions_last_nse_session(tmp_path: Path) ->
     )
     con = open_connection()
     try:
-        assert l2_last_dates(con, [ISIN, "INE002A01018"], data_root=tmp_path) == {ISIN: L2_LAST}
+        assert l2_tails(con, [ISIN, "INE002A01018"], data_root=tmp_path) == {
+            ISIN: L2Tail(L2_LAST, Decimal(1), Decimal(1))
+        }
     finally:
         con.close()
+
+
+# ── through the Commons source: the reads the sheets, screens and dossiers make ──────────────────
+
+
+class _Actions:
+    """`OverlayActionSource` over fixed actions; counts reads, and can be made unreadable."""
+
+    def __init__(
+        self,
+        reconciled: Sequence[CorporateAction],
+        unreconciled: Sequence[CorporateAction] = (),
+        *,
+        broken: bool = False,
+    ) -> None:
+        self.reconciled = tuple(reconciled)
+        self.unreconciled = tuple(unreconciled)
+        self.broken = broken
+        self.reads = 0
+
+    def ex_between(self, after: date, through: date) -> OverlayActions:
+        self.reads += 1
+        if self.broken:
+            raise ConnectionError("store down")
+
+        def inside(a: CorporateAction) -> bool:
+            return after < a.ex_date <= through
+
+        return OverlayActions(
+            after=after,
+            through=through,
+            reconciled=tuple(a for a in self.reconciled if inside(a)),
+            unreconciled=tuple(a for a in self.unreconciled if inside(a)),
+        )
+
+
+def _source(root: Path, actions: _Actions | None) -> LakeCommonsSource:
+    clock = FrozenClock(datetime(2026, 10, 9, 21, 0, tzinfo=IST))
+    return LakeCommonsSource(clock=clock, data_root=root, actions=actions)
+
+
+def test_the_commons_reads_equal_the_rebuild_across_the_lag(tmp_path: Path) -> None:
+    before, _, rebuilt = _scenario(tmp_path, (split(OLD_SPLIT, "10", "2"),), WINDOW, STEPS)
+    # Put L2 back to what the lag left: the partition as it stood before the rebuild.
+    _restore_l2(tmp_path, before)
+    window = [d for d in DAYS if d >= date(2026, 9, 1)]
+    with _source(tmp_path, _Actions(WINDOW)) as source:
+        closes = {
+            r.trade_date: r.close for r in source.adjusted_closes(frozenset({ISIN}), window).records
+        }
+        bars = {b.trade_date: b for b in source.price_bars(frozenset({ISIN}), window, "EQ").records}
+        notes = source.price_overlay_notes(frozenset({ISIN}), window).records
+    expected = {b.trade_date: b for b in rebuilt if b.trade_date >= window[0]}
+    assert closes == {d: b.adj_close for d, b in expected.items()}
+    assert {d: (b.high, b.low, b.close, b.volume) for d, b in bars.items()} == {
+        d: (b.adj_high, b.adj_low, b.adj_close, b.adj_volume) for d, b in expected.items()
+    }
+    kinds = {n.kind for n in notes}
+    # The demerger cannot be priced: the name is excluded for the session, and L2 lags.
+    assert kinds == {PriceOverlayNote.EXCLUDED, PriceOverlayNote.LAGGING}
+    (excluded,) = [n for n in notes if n.kind == PriceOverlayNote.EXCLUDED]
+    assert "DEMERGER ex 2026-10-06" in excluded.reason and excluded.session == SESSION
+
+
+def test_without_the_overlay_the_lagged_split_shows_as_a_return(tmp_path: Path) -> None:
+    """The defect this task fixes, kept visible: no store, and the split is a -50 % session."""
+    window_events = (split(SPLIT, "10", "5"),)
+    before, _, _ = _scenario(tmp_path, (), window_events, ((SPLIT, Decimal("0.5")),))
+    _restore_l2(tmp_path, before)
+    window = [d for d in DAYS if d >= date(2026, 9, 1)]
+    prev = max(d for d in window if d < SPLIT)
+    with _source(tmp_path, None) as source:
+        raw = {
+            r.trade_date: r.close for r in source.adjusted_closes(frozenset({ISIN}), window).records
+        }
+        with pytest.raises(SourceUnavailableError):
+            source.price_overlay_notes(frozenset({ISIN}), window)
+    with _source(tmp_path, _Actions(window_events)) as source:
+        fixed = {
+            r.trade_date: r.close for r in source.adjusted_closes(frozenset({ISIN}), window).records
+        }
+    assert raw[SPLIT] / raw[prev] < Decimal("0.6")
+    assert Decimal("0.9") < fixed[SPLIT] / fixed[prev] < Decimal("1.1")
+
+
+VERANDA = (
+    (date(2026, 9, 29), "223.31"),
+    (date(2026, 9, 30), "220.75"),
+    (date(2026, 10, 1), "213.80"),
+    (date(2026, 10, 5), "212.76"),
+    (date(2026, 10, 6), "29.72"),
+    (date(2026, 10, 7), "31.20"),
+    (date(2026, 10, 8), "32.76"),
+    (date(2026, 10, 9), "34.39"),
+)
+
+
+def test_an_ine0iq001011_shaped_demerger_is_excluded_not_read_as_minus_86_percent(
+    tmp_path: Path,
+) -> None:
+    """2026-10-09 on the real lake: L2 ends 10-01, the demerger went ex 10-06 with unquantified
+    terms, and the Commons showed 212.76 -> 29.72 as a return."""
+    days = [d for d, _ in VERANDA]
+    rows = _price_rows(days, {d: Decimal(c) for d, c in VERANDA})
+    _write_l1(tmp_path, rows, [d for d in days if d <= date(2026, 10, 1)])
+    materialize_isin(
+        ISIN, chain=build_chain_for_isin(ISIN, []), actions=[], data_root=tmp_path, curated=()
+    )
+    _write_l1(tmp_path, rows, [d for d in days if d > date(2026, 10, 1)])
+    store = _Actions([demerger(date(2026, 10, 6), knowable=date(2026, 10, 6))])
+    with _source(tmp_path, store) as source:
+        notes = source.price_overlay_notes(frozenset({ISIN}), days).records
+        closes = {
+            r.trade_date: r.close for r in source.adjusted_closes(frozenset({ISIN}), days).records
+        }
+    (excluded,) = [n for n in notes if n.kind == PriceOverlayNote.EXCLUDED]
+    assert excluded.isin == ISIN and "structural break" in excluded.reason
+    # The level is what the engine says it is (a unit factor): the gap is real, hence the exclusion.
+    assert closes[date(2026, 10, 6)] == Decimal("29.72")
+    # A session before the demerger was knowable sees nothing to exclude.
+    early = [d for d in days if d <= date(2026, 10, 5)]
+    with _source(
+        tmp_path, _Actions([demerger(date(2026, 10, 6), knowable=date(2026, 10, 6))])
+    ) as source:
+        assert not [
+            n
+            for n in source.price_overlay_notes(frozenset({ISIN}), early).records
+            if n.kind == PriceOverlayNote.EXCLUDED
+        ]
+
+
+def test_an_unreadable_store_is_a_source_failure_never_raw_prices(tmp_path: Path) -> None:
+    before, _, _ = _scenario(tmp_path, (), (split(SPLIT, "10", "5"),), ((SPLIT, Decimal("0.5")),))
+    _restore_l2(tmp_path, before)
+    window = [d for d in DAYS if d >= date(2026, 9, 1)]
+    with _source(tmp_path, _Actions((), broken=True)) as source:
+        with pytest.raises(SourceUnavailableError, match="corporate"):
+            source.adjusted_closes(frozenset({ISIN}), window)
+        with pytest.raises(SourceUnavailableError, match="corporate"):
+            source.price_overlay_notes(frozenset({ISIN}), window)
+
+
+def _restore_l2(root: Path, bars: dict[date, AdjustedBar]) -> None:
+    """Write ``bars`` back as the ISIN's partition, as the lagging drain left it."""
+    table = _bars_to_table([bars[d] for d in sorted(bars)])
+    _write_table(table, l2_isin_partition_path(PRICES_ADJUSTED_DATASET, ISIN, data_root=root))

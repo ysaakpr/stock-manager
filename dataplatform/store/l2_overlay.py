@@ -80,6 +80,7 @@ if TYPE_CHECKING:
 __all__ = [
     "EXCLUDING_KINDS",
     "LEVEL_ACTION_TYPES",
+    "L2Tail",
     "OverlaidBar",
     "OverlayActionSource",
     "OverlayActions",
@@ -87,7 +88,8 @@ __all__ = [
     "OverlayEvent",
     "OverlayKind",
     "StoreOverlayActions",
-    "l2_last_dates",
+    "composed_in_l2",
+    "l2_tails",
     "overlay_bars",
     "plan_events",
     "stale_l2_events",
@@ -374,20 +376,10 @@ def overlay_bars(
     """
     chain = with_events(FactorChain(isin=isin), events) if events else FactorChain(isin=isin)
     composed = False
-    if l2_bars and chain.rows:
+    if l2_bars:
         last = l2_bars[max(l2_bars)]
-        held = (last.cum_price_factor, last.cum_qty_factor)
-        if held != (_ONE, _ONE):
-            expected = (
-                quantize_factor(chain.price_factor_asof(last.trade_date)),
-                quantize_factor(chain.qty_factor_asof(last.trade_date)),
-            )
-            if held != expected:
-                raise OverlayError(
-                    f"{isin}: L2's last bar {last.trade_date.isoformat()} carries factors {held} "
-                    f"for events after it, but the overlay's events compose to {expected}"
-                )
-            composed = True
+        tail = L2Tail(last.trade_date, last.cum_price_factor, last.cum_qty_factor)
+        composed = composed_in_l2(isin, events, tail)
     out: list[OverlaidBar] = []
     for raw in sorted(raw_bars, key=lambda b: b.trade_date):
         day = raw.trade_date
@@ -478,26 +470,71 @@ def stale_l2_events(
     return tuple(out)
 
 
-def l2_last_dates(
+@dataclass(frozen=True, slots=True)
+class L2Tail:
+    """An ISIN's last L2 bar on one venue: its date and the cumulative factors it carries.
+
+    A last bar's factors are the product of every event in L2's chain ex *after* it, so they are
+    1 unless L2 was built from a chain that already knew a coming event.
+    """
+
+    last: date
+    cum_price_factor: Decimal
+    cum_qty_factor: Decimal
+
+
+def composed_in_l2(isin: str, events: Sequence[CorporateAction], tail: L2Tail) -> bool:
+    """Whether L2's chain already composes ``events`` (all ex after ``tail.last``).
+
+    ``False`` when the tail carries no factor for later events (the usual lag: L2 knows none of
+    them), ``True`` when it carries exactly their product. Raises `OverlayError` for anything else:
+    L2 then knows of an event the overlay does not, or the reverse, and no honest bar exists.
+    """
+    held = (tail.cum_price_factor, tail.cum_qty_factor)
+    if held == (_ONE, _ONE):
+        return False
+    chain = with_events(FactorChain(isin=isin), events) if events else FactorChain(isin=isin)
+    expected = (
+        quantize_factor(chain.price_factor_asof(tail.last)),
+        quantize_factor(chain.qty_factor_asof(tail.last)),
+    )
+    if held != expected:
+        raise OverlayError(
+            f"{isin}: L2's last bar {tail.last.isoformat()} carries factors "
+            f"{held[0]}/{held[1]} for events after it, but the events ex after it compose to "
+            f"{expected[0]}/{expected[1]}"
+        )
+    return True
+
+
+def l2_tails(
     con: duckdb.DuckDBPyConnection,
     isins: Iterable[str],
     *,
     exchange: str = "NSE",
     data_root: Path | None = None,
-) -> dict[str, date]:
-    """The last ``exchange`` session each ISIN's L2 partition holds; an ISIN with none is absent."""
-    files = {
-        isin: path
+) -> dict[str, L2Tail]:
+    """Each ISIN's last ``exchange`` bar in its L2 partition; an ISIN with none is absent.
+
+    One DuckDB pass over the partitions that exist, reading three columns.
+    """
+    files = [
+        str(path)
         for isin in sorted(set(isins))
         if (
             path := l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=data_root)
         ).exists()
-    }
+    ]
     if not files:
         return {}
     rows = con.execute(
-        "SELECT isin, max(trade_date) FROM read_parquet($files) WHERE exchange = $exchange "
-        "GROUP BY isin",
-        {"files": [str(p) for p in files.values()], "exchange": exchange},
+        "SELECT isin, max(trade_date), arg_max(cum_price_factor, trade_date), "
+        "arg_max(cum_qty_factor, trade_date) FROM read_parquet($files) "
+        "WHERE exchange = $exchange GROUP BY isin",
+        {"files": files, "exchange": exchange},
     ).fetchall()
-    return {str(isin): last for isin, last in rows if last is not None}
+    return {
+        str(isin): L2Tail(last, Decimal(price), Decimal(qty))
+        for isin, last, price, qty in rows
+        if last is not None
+    }
