@@ -13,7 +13,12 @@ its period, and nothing else.
 - a results filing (L1 ``pit_fundamentals``, through :meth:`DigestSource.results_filings`). It is
   identified by its ``filing_id``, and its text is the company-level facts the XBRL parser kept.
 
-Only universe names are digested: a manager can trade nothing else. Each filing's text is
+**Which names.** The daily build (:func:`build_digests`) digests the names it is handed, and the
+Commons hands it the *digest scope* (M17.9): the names on screens S1-S5 and the composite shortlist
+(`CommonsScreens.digest_scope`), not the whole universe. That keeps the daily build to tens of
+model calls rather than hundreds. A name a manager researches outside that scope is digested on
+demand by :func:`digest_for_isins`, with the same schema, the same validation and the same cache:
+a filing already digested by either path is never digested again. Each filing's text is
 bounded (:data:`MAX_FILING_CHARS`, :data:`MAX_RESULT_FACTS`). A truncated input is marked, both in
 the prompt and in the digest.
 
@@ -76,6 +81,7 @@ __all__ = [
     "DIGEST_VERSION",
     "MAX_FILING_CHARS",
     "MAX_RESULT_FACTS",
+    "ON_DEMAND_LOOKBACK_SESSIONS",
     "AnnouncementText",
     "DigestBody",
     "DigestFailure",
@@ -86,8 +92,10 @@ __all__ = [
     "FilingDigest",
     "FilingInput",
     "FilingKind",
+    "OnDemandDigests",
     "build_digests",
     "digest_filing",
+    "digest_for_isins",
     "digest_messages",
     "filing_inputs",
     "opinion_terms",
@@ -588,7 +596,7 @@ def build_digests(
     clock: Clock,
     model: str = DIGEST_MODEL,
 ) -> DigestRun:
-    """Digest every new filing on ``isins`` (the session's universe) and record the run.
+    """Digest every new filing on ``isins`` (the session's digest scope) and record the run.
 
     What it does: refuses a red day or a future session (:class:`CommonsRefusedError`), finds the
     window (module docstring), reads both filing kinds through ``source`` and the PIT guard,
@@ -692,6 +700,117 @@ def build_digests(
         gaps=len(ordered_gaps),
     )
     return run
+
+
+#: How far back an on-demand request looks: the dossier's announcement window (M17.9).
+ON_DEMAND_LOOKBACK_SESSIONS: Final = 20
+
+
+class OnDemandDigests(_Strict):
+    """What :func:`digest_for_isins` returns: the names' digests in the window, and any failure.
+
+    It is not a :class:`DigestRun` and is never recorded as one, so an on-demand request never
+    moves the daily build's window.
+    """
+
+    trading_date: date
+    isins: tuple[str, ...]
+    since: date
+    digests: tuple[FilingDigest, ...]
+    digested: tuple[str, ...]
+    cached: tuple[str, ...]
+    failures: tuple[DigestFailure, ...]
+    gaps: tuple[Gap, ...]
+
+
+def digest_for_isins(
+    isins: Iterable[str],
+    session: date,
+    *,
+    source: DigestSource,
+    llm: LLM,
+    store: DigestStore,
+    gate: GreenGate,
+    clock: Clock,
+    model: str = DIGEST_MODEL,
+    lookback_sessions: int = ON_DEMAND_LOOKBACK_SESSIONS,
+) -> OnDemandDigests:
+    """The digests of every filing on ``isins`` knowable in the last ``lookback_sessions``.
+
+    What it does: the same refusals as :func:`build_digests` (a red day, a future session, no
+    calendar), the same reads through ``source`` and the PIT guard, and the same cache: a filing
+    already in ``store`` is served from it, any other costs one validated model call and is
+    stored. M17.4 calls it for the names a manager asked to research.
+    What it never does: record a :class:`DigestRun` (the daily window is the daily build's), store
+    a refused digest, or let one filing's failure stop the others.
+    """
+    if lookback_sessions < 1:
+        raise ValueError("lookback_sessions must be >= 1")
+    if session > clock.today():
+        raise CommonsRefusedError(f"{session.isoformat()} is after today ({clock.today()})")
+    verdict = gate(session)
+    if not verdict:
+        raise CommonsRefusedError(f"data is red for {session.isoformat()}: {verdict.reason}")
+    wanted = frozenset(isins)
+    pit = PitContext(as_of=session)
+    gaps: list[Gap] = []
+    try:
+        calendar = sorted(set(pit.admit(source.sessions(session, lookback_sessions + 1))))
+    except SourceUnavailableError as exc:
+        raise CommonsRefusedError(f"no session calendar: {exc}") from exc
+    if not calendar or calendar[-1] != session:
+        raise CommonsRefusedError(f"{session.isoformat()} is not an NSE session in the lake")
+    since = calendar[0] if len(calendar) > 1 else session
+    announcements = _read(
+        lambda: source.announcement_texts(since, session), pit, gaps, "announcements"
+    )
+    results = _read(lambda: source.results_filings(since, session), pit, gaps, "results")
+    inputs = filing_inputs(announcements, results, isins=wanted, after=since, through=session)
+
+    digests: list[FilingDigest] = []
+    digested: list[str] = []
+    cached: list[str] = []
+    failures: list[DigestFailure] = []
+    for item in inputs:
+        stored = store.get(item.filing_id)
+        if stored is not None:
+            digests.append(stored)
+            cached.append(item.filing_id)
+            continue
+        try:
+            digest = digest_filing(item, llm=llm, trading_date=session, clock=clock, model=model)
+        except (DigestRefusedError, LLMError) as exc:
+            _LOG.warning(
+                "commons.digest.on_demand_failed",
+                trading_date=session.isoformat(),
+                filing_id=item.filing_id,
+                error=type(exc).__name__,
+                reason=str(exc)[:300],
+            )
+            failures.append(DigestFailure(filing_id=item.filing_id, reason=str(exc)[:500]))
+            continue
+        store.record(digest, recorded_at=clock.now())
+        digests.append(digest)
+        digested.append(item.filing_id)
+    _LOG.info(
+        "commons.digest.on_demand",
+        trading_date=session.isoformat(),
+        isins=len(wanted),
+        filings=len(inputs),
+        digested=len(digested),
+        cached=len(cached),
+        failures=len(failures),
+    )
+    return OnDemandDigests(
+        trading_date=session,
+        isins=tuple(sorted(wanted)),
+        since=since,
+        digests=tuple(digests),
+        digested=tuple(digested),
+        cached=tuple(cached),
+        failures=tuple(failures),
+        gaps=tuple(sorted(gaps, key=lambda g: (g.source, g.reason))),
+    )
 
 
 def _read[R](
