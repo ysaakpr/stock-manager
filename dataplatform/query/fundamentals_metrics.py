@@ -170,6 +170,7 @@ class FundamentalMetrics:
     revenue_yoy: MetricValue
     earnings_yoy: MetricValue
     earnings_ttm_yoy: MetricValue
+    revenue_ttm_yoy: MetricValue
     net_margin_ttm: MetricValue
     net_margin_trend: MetricValue
     shares_outstanding: MetricValue
@@ -474,6 +475,7 @@ def _metrics_for(
         revenue_yoy=_yoy(revenue),
         earnings_yoy=_yoy(earnings),
         earnings_ttm_yoy=_ttm_yoy(earnings),
+        revenue_ttm_yoy=_ttm_yoy(revenue),
         net_margin_ttm=net_margin_ttm,
         net_margin_trend=net_margin_trend,
         shares_outstanding=shares_outstanding,
