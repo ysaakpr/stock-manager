@@ -76,7 +76,7 @@ from analyst.llm import (
     ToolSpec,
     prompt_digest,
 )
-from backtest.book_actions import BookActionCalendar, BookActionSource
+from backtest.book_actions import BookActionCalendar, BookActionSource, RescaleKind, ShareRescale
 from backtest.fm_circuit import CircuitMarket, NoCircuitData
 from backtest.fm_job import (
     DESK_IDS,
@@ -154,6 +154,7 @@ class FakeWorld:
     missing: list[tuple[str, ...]] = field(default_factory=list)
     delisted_names: Any = None
     readiness_calls: int = 0
+    actions: BookActionCalendar = field(default_factory=BookActionCalendar)
 
     def is_session(self, day: date) -> bool:
         return day in self.market.sessions
@@ -177,7 +178,7 @@ class FakeWorld:
         return NoCircuitData()
 
     def corporate_actions(self) -> BookActionSource:
-        return BookActionCalendar()
+        return self.actions
 
     def delisted(self) -> Any:
         return self.delisted_names
@@ -710,6 +711,78 @@ def test_a_stop_inside_the_min_hold_window_is_refused_by_the_rail_not_bypassed(
         e for e in desk.entries() if e.decision is Decision.RAIL_BLOCK and e.trading_date == SESSION
     ]
     assert block.isin == HELD and "MIN_HOLD" in block.payload["rails"]
+
+
+# ── M17.11: a stop across a split moves with the shares, by the split's factor only ─────────────
+
+
+def _split_run(world: World, tmp_path: Path, *, bought: date, ex: date, session_close: str) -> Desk:
+    """Buy HELD at 100 with a 4 % stop (96) on ``bought``; a 2:1 split goes ex on ``ex``; from
+    then the name trades at 50, and closes at ``session_close`` on SESSION."""
+    desk = Desk(tmp_path)
+    roster = mini_roster()
+    manager = roster.managers[0].id
+    post = {
+        (HELD, day): Bar(Decimal("50"), Decimal("49"), Decimal("10000000000"))
+        for day in CALENDAR
+        if day >= ex
+    }
+    post[(HELD, SESSION)] = Bar(Decimal("50"), Decimal(session_close), Decimal("10000000000"))
+    split = ShareRescale(
+        isin=HELD,
+        ex_date=ex,
+        kind=RescaleKind.SPLIT,
+        numerator=Decimal(10),
+        denominator=Decimal(5),
+    )
+    test_world = FakeWorld(flat_market(post), actions=BookActionCalendar([split]))
+    runner = ScriptedRunner(
+        {(manager, bought): [_verdict(_decision(HELD, "BUY", stop_pct=4), quantity=500)]}
+    )
+    builder = Builder(
+        lambda day: SessionCommons(
+            shortlist=shortlist_of(day, NAMES[:2]), manager=_commons(world, tmp_path)
+        )
+    )
+    day = bought
+    while day <= SESSION:
+        if day in CALENDAR:
+            desk.run(day, test_world, builder, PerManagerLLM({}), runner=runner, roster=roster)
+        day += timedelta(days=1)
+    return desk
+
+
+@pytest.mark.parametrize(
+    ("bought", "ex"),
+    [
+        # the split goes ex on the BUY's own fill session: no shares were entitled, so the
+        # account books nothing, but the stop was struck on the pre-split close
+        (date(2026, 10, 2), date(2026, 10, 5)),
+        # the split goes ex while the name is held: the account books the rescale
+        (date(2026, 10, 1), date(2026, 10, 5)),
+    ],
+)
+def test_a_split_rescales_the_stop_and_no_false_stop_exit_fires(
+    world: World, tmp_path: Path, bought: date, ex: date
+) -> None:
+    # 49 after a 2:1 split is 98 before it: above the 96 stop, so no exit.
+    desk = _split_run(world, tmp_path, bought=bought, ex=ex, session_close="49")
+    exits = [e for e in staged(desk) if e.payload.get("event") == STOP_EXIT_EVENT]
+    assert exits == []
+
+
+@pytest.mark.parametrize(
+    ("bought", "ex"),
+    [(date(2026, 10, 2), date(2026, 10, 5)), (date(2026, 10, 1), date(2026, 10, 5))],
+)
+def test_a_rescaled_stop_still_fires_below_the_split_adjusted_level(
+    world: World, tmp_path: Path, bought: date, ex: date
+) -> None:
+    # 47 after the split is 94 before it: below the 96 stop. The rescale must not loosen it.
+    desk = _split_run(world, tmp_path, bought=bought, ex=ex, session_close="47")
+    (exit_line,) = [e for e in staged(desk) if e.payload.get("event") == STOP_EXIT_EVENT]
+    assert exit_line.trading_date == SESSION and exit_line.isin == HELD
+    assert "below the stop 48" in (exit_line.rationale or "")
 
 
 # ── --start S0 ───────────────────────────────────────────────────────────────────────────────────
