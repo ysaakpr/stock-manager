@@ -132,6 +132,7 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "news_capture",
         "failure_alerts",
         "paper_session",
+        "m17_fund_managers",
         "fundamentals_forward",
         "postgres_backup",
         "l0_backup",
@@ -163,6 +164,9 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     # 21:45, after the EOD pipeline and the last tri_evening attempt (21:30): a rebalance reads the
     # session's own published TRI level.
     assert registry.get("paper_session").cron == "45 21 * * mon-fri"
+    # M17.7: 22:00, after the paper session and the last tri_evening attempt (the bench's level);
+    # its budget runs to the 08:30 IST next-session deadline.
+    assert registry.get("m17_fund_managers").cron == "0 22 * * mon-fri"
     # M14.3: 02:00 daily, when neither NSE host is leased by another job (after the 00:30
     # announcements capture, three hours clear of the 06:00 first-Sunday BSE sweep).
     assert registry.get("fundamentals_forward").cron == "0 2 * * *"

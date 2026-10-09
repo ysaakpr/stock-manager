@@ -990,3 +990,24 @@ def test_lake_delisted_names_reads_the_listing_record_not_a_missing_print() -> N
     assert last == LastTraded(date(2026, 10, 7), Decimal("41.5"), Decimal("40"))
     assert names.last_traded(gone, date(2026, 10, 7)) is None  # still listed that day
     assert names.last_traded(gap, date(2026, 10, 9)) is None  # a gap is not a delisting
+
+
+# ── the scheduler registration ───────────────────────────────────────────────────────────────────
+
+
+def test_the_registered_job_runs_the_dry_stream_until_the_go(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataplatform.scheduler import registry
+
+    job = registry.default_registry().get("m17_fund_managers")
+    assert registry.M17_DRY_RUN is True and job.cron == "0 22 * * mon-fri"
+    assert job.timeout >= timedelta(hours=10)  # its budget runs to the 08:30 deadline
+    seen: dict[str, Any] = {}
+
+    def fake(context: Any, *, dry_run: bool = False, **_: Any) -> None:
+        seen["dry_run"] = dry_run
+
+    monkeypatch.setattr("backtest.fm_job.run_m17_job", fake)
+    job.fn(cast(Any, None))
+    assert seen == {"dry_run": True}
