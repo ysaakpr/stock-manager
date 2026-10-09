@@ -140,8 +140,9 @@ __all__ = [
 _LOG = get_logger(__name__)
 
 #: The digest of the table the M17 managers read, pinned once the ranged build has run on the
-#: lake (module docstring). ``None`` until then.
-FROZEN_DIGEST: Final[str | None] = None
+#: lake (module docstring). Built 2026-10-09 IST over 2016-10-03..2026-07-03, 484 sampled sessions,
+#: 360 cells (24 thin); log ~/campaign/m17/base-rates-2026-10-09T1314Z.log.
+FROZEN_DIGEST: Final[str | None] = "1f61027a0f7637443339159d9cba1239b9f5b4b68a41f7c2900841d18b6636c0"
 
 BASE_RATE_VERSION: Final = "commons-base-rates/1"
 HORIZONS: Final[tuple[int, ...]] = (5, 20, 60)
