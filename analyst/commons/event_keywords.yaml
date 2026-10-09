@@ -15,8 +15,10 @@
 # matches, and its `unless` pattern (if any) does not match the text. A category matches when
 # any of its rules does.
 #
-# `[^.|]` keeps a match inside one sentence of one field, so "SEBI (LODR) Regulations ... the
-# Order received from the Directorate" cannot pair a regulation's name with an unrelated order.
+# `[^|]{0,n}` keeps a match inside one field and within n characters. It does not stop at a full
+# stop: NSE text is full of "Mr.", "M/s." and "Co.". So a SEBI rule names who issued the order
+# ("by / of / from SEBI"), never just a "SEBI" somewhere near an "order": the boilerplate "SEBI
+# (LODR) Regulations ... the Order received from the Directorate" must not pair up.
 
 version: commons-event-keywords/1
 
@@ -25,28 +27,28 @@ integrity:
   auditor_resignation:
     - subject: '^\s*resignation\s+of\s+statutory\s+auditors?\s*\.?\s*$'
       unless: '\bsubsidiar'
-    - text: ['\bresign\w*\b[^.|]{0,80}?\bstatutory\s+auditors?\b']
+    - text: ['\bresign\w*\b[^|]{0,80}?\bstatutory\s+auditors?\b']
       unless: '\bsubsidiar|\b(internal|secretarial|cost)\s+auditors?\b'
-    - text: ['\bstatutory\s+auditors?\b[^.|]{0,60}?\bresign']
+    - text: ['\bstatutory\s+auditors?\b[^|]{0,60}?\bresign']
       unless: '\bsubsidiar|\b(internal|secretarial|cost)\s+auditors?\b'
 
   cfo_resignation:
-    - text: ['\bresign\w*\b[^.|]{0,120}?\b(chief\s+financial\s+officer|cfo)\b']
+    - text: ['\bresign\w*\b[^|]{0,120}?\b(chief\s+financial\s+officer|cfo)\b']
       unless: '\bsubsidiar'
-    - text: ['\b(chief\s+financial\s+officer|cfo)\b[^.|]{0,60}?\bresign']
+    - text: ['\b(chief\s+financial\s+officer|cfo)\b[^|]{0,60}?\bresign']
       unless: '\bsubsidiar'
 
   independent_director_resignation:
-    - text: ['\bresign\w*\b[^.|]{0,120}?\bindependent\s+director']
-      unless: '\bsubsidiar'
-    - text: ['\bindependent\s+director\b[^.|]{0,60}?\bresign']
-      unless: '\bsubsidiar'
+    - text: ['\bresign\w*\b[^|]{0,120}?\bindependent\s+director']
+      unless: '\bsubsidiar|\bnon[- ]?independent\b'
+    - text: ['\bindependent\s+director\b[^|]{0,60}?\bresign']
+      unless: '\bsubsidiar|\bnon[- ]?independent\b'
 
   sebi_order:
-    - text: ['\b(orders?|directions?)\b[^.|]{0,60}?\b(passed|issued)\b[^.|]{0,20}?\bby\s+(the\s+)?(sebi|securities\s+and\s+exchange\s+board\s+of\s+india)\b']
+    - text: ['\b(orders?|directions?)\b[^|]{0,60}?\b(passed|issued)\b[^|]{0,20}?\bby\s+(the\s+)?(sebi|securities\s+and\s+exchange\s+board\s+of\s+india)\b']
     - text: ['\b(sebi|securities\s+and\s+exchange\s+board\s+of\s+india)\b\s+(has\s+)?(passed|issued)\s+(an?\s+)?((interim|final|ex[- ]?parte|adjudication|confirmatory|settlement)\s+)?(orders?|directions?)\b']
-    - text: ['\b(interim|final|ex[- ]?parte|adjudication|confirmatory)\s+order\b[^.|]{0,80}?\b(sebi|securities\s+and\s+exchange\s+board)']
-    - text: ['\borders?\b[^.|]{0,30}?\b(received\s+)?from\s+(the\s+)?(sebi|securities\s+and\s+exchange\s+board\s+of\s+india)\b']
+    - text: ['\b(interim|final|ex[- ]?parte|adjudication|confirmatory)\s+order\b[^|]{0,60}?\b(by|of|from)\s+(the\s+)?(sebi|securities\s+and\s+exchange\s+board)']
+    - text: ['\borders?\b[^|]{0,30}?\b(received\s+)?from\s+(the\s+)?(sebi|securities\s+and\s+exchange\s+board\s+of\s+india)\b']
 
   rating_downgrade_sub_ig:
     - text: ['\bissuer\s+not\s+co-?operating\b|\bnon[- ]?co-?operati(ng|on)\b']
@@ -86,8 +88,8 @@ event_watch:
       unless: '\b(tax|gst|commissioner|tribunal|court|nclt|nclat|sebi|penalt\w*|show\s+cause|demand|assessment|adjudicat\w*)\b'
 
   index_change:
-    - text: ['\b(inclusion|included|exclusion|excluded)\b[^.|]{0,60}?\b(index|indices|nifty|sensex)\b']
-    - text: ['\b(nifty|sensex|index|indices)\b[^.|]{0,40}?\b(inclusion|exclusion)\b']
+    - text: ['\b(inclusion|included|exclusion|excluded)\b[^|]{0,60}?\b(index|indices|nifty|sensex)\b']
+    - text: ['\b(nifty|sensex|index|indices)\b[^|]{0,40}?\b(inclusion|exclusion)\b']
 
   results_board_meeting:
     - subject: '^\s*board\s+meeting\s+intimation\s*$'

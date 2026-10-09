@@ -204,14 +204,14 @@ def _top(scores: Mapping[str, Decimal], size: int) -> tuple[ScreenEntry, ...]:
 
 
 def _zscores(values: Mapping[str, Decimal]) -> dict[str, Decimal]:
-    """Cross-sectional z-scores, population stdev. Empty for fewer than two names or no spread."""
+    """Cross-sectional z-scores, population stdev. All 0 for one name or no spread: no signal."""
     n = len(values)
-    if n < 2:
+    if n == 0:
         return {}
     mean = sum(values.values(), _ZERO) / Decimal(n)
     spread = (sum(((v - mean) ** 2 for v in values.values()), _ZERO) / Decimal(n)).sqrt()
     if spread == _ZERO:
-        return {}
+        return dict.fromkeys(values, _ZERO)
     return {isin: (v - mean) / spread for isin, v in values.items()}
 
 
