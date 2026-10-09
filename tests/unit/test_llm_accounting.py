@@ -557,3 +557,21 @@ def test_a_metered_call_uses_the_injected_clocks_date_for_pricing(
     completion = metered.complete(a_question(), model="claude-sonnet-5", purpose="t1_review")
 
     assert completion.priced.cost_inr == Decimal("0.616000")  # introductory rate, from the clock
+
+
+def test_the_m17_roster_models_are_priced_from_the_verified_2026_10_09_card(
+    card: PriceCard,
+) -> None:
+    """Opus 5.5 and Sonnet 5.5 (the M17 roster) price at the rates read off the pricing page."""
+    pricer = TokenPricer(card)
+    usage = Usage(input_tokens=1000, output_tokens=500, cache_write_tokens=0, cache_read_tokens=0)
+    for model, usd in (("claude-opus-5-5", "0.014000"), ("claude-sonnet-5-5", "0.007000")):
+        reply = StubReply(text="…", usage=usage)
+        response = StubLLM({prompt_digest(a_question(), model=model): reply}).complete(
+            a_question(), model=model
+        )
+        priced = pricer.price(response, on=date(2026, 10, 9), purpose="m17_manager")
+        assert priced.cost_usd == Decimal(usd)
+        with pytest.raises(UnknownModelError):
+            pricer.price(response, on=date(2026, 10, 8), purpose="m17_manager")
+    assert card.schedule_for(date(2026, 10, 9)).provenance.value == "verified"
