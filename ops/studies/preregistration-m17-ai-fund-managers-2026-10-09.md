@@ -1,6 +1,6 @@
 # Pre-registration: M17 AI fund managers, forward paper test, 2026-10-09
 
-**Status: DRAFT.** Written before any M17 code exists and before any manager has made a decision. The
+**Status: RATIFIED 2026-10-09 except S0** (owner, chat; §9). Written before any M17 code exists and before any manager has made a decision. The
 owner confirms the items marked **[OWNER]** and records it in §9. M17.8 cannot start the clock until
 §9 is filled in. After session S0 (§6), §2–§7 are frozen. A changed manager (prompt, model, mandate,
 rails or tools) is a **new manager** with a new id and its own clock. It is never a revision of the old
@@ -192,10 +192,10 @@ None. Amendments are additive, dated, and only valid before S0.
 
 | Item | Value | Confirmed |
 |---|---|---|
-| Models (§2) | `claude-opus-5-5` decisions, `claude-sonnet-5-5` digests | — |
-| Pass/fail thresholds (§6) | +3.0 pp / DD + 5 pp / Brier < 0.25 on ≥ 30 | — |
+| Models (§2) | `claude-opus-5-5` decisions, `claude-sonnet-5-5` digests | 2026-10-09 (owner, chat) |
+| Pass/fail thresholds (§6) | +3.0 pp / DD + 5 pp / Brier < 0.25 on ≥ 30 | 2026-10-09 (owner, chat) |
 | Roster and capital (§2) | 4 managers, ₹10 L and ₹1 cr | 2026-10-09 (owner, chat) |
 | Horizons (§2) | 1–4 weeks and 1–3 months | 2026-10-09 (owner, chat) |
 | Web search (§5) | allowed, through the Commons fetcher | 2026-10-09 (owner, chat) |
 | LLM path (§2) | Claude CLI subscription; monthly cap deferred | 2026-10-09 (owner, chat) |
-| S0 | — | — |
+| S0 | the first session after the 5-session dry run (M17.8) passes; owner asked for as soon as it is ready (2026-10-09) | — |
