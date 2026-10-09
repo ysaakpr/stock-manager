@@ -510,7 +510,8 @@ def run_tri_evening_job(context: JobContext) -> None:
     """The scheduler's `tri_evening` job body: today's session's TRI, the same evening (M13.7).
 
     What it does: under the `niftyindices.com` lease, `run_tri_evening` over `EVENING_INDEX_SET`
-    (the defaults plus NIFTY 500 for M17's bench) for the job's own date (the injected clock, B10), committing after each index.
+    (the defaults plus NIFTY 500 for M17's bench) for the job's own date (the injected clock,
+    B10), committing after each index.
     What it assumes: the database is migrated and the network reachable.
     What it never does: touch any host but the TRI endpoint's, or change what the Saturday
     `tri_refresh` does — the two write the same L1 partitions from the same published levels.
