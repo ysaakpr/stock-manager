@@ -90,7 +90,15 @@ from backtest.book_actions import (
     store_book_actions_unless,
 )
 from backtest.cap_tiers import LiquidityRankTiers, TierSleeve, describe_sleeves
-from backtest.cash_interest import CashInterestAccrual, InterestCredit, current_cash_interest
+from backtest.cash_interest import (
+    CashInterestAccrual,
+    InterestCredit,
+    RepoRateSchedule,
+    current_cash_interest,
+    load_repo_rate_schedule,
+)
+from backtest.policies.earnings_surprise import CONCEPTS as EARNINGS_SURPRISE_CONCEPTS
+from backtest.policies.earnings_surprise import EarningsSurprisePanel, NoSignal
 from backtest.policies.fundamentals_value import (
     FundamentalsRecord,
     FundamentalsSignal,
@@ -98,10 +106,16 @@ from backtest.policies.fundamentals_value import (
     FundamentalsValuePolicy,
 )
 from backtest.policies.momentum_v2 import (
+    MomentumV2Data,
     MomentumV2Parameters,
     MomentumV2Policy,
     MomentumV2Record,
     RegimeReading,
+)
+from backtest.policies.momentum_v2_overlays import (
+    ProfitabilityReading,
+    RepoRateReading,
+    ResidualScore,
 )
 from backtest.policies.naive_momentum import (
     MomentumParameters,
@@ -137,6 +151,7 @@ from backtest.run_ledger import (
     run_digest,
     run_spec,
 )
+from backtest.sector_indices import IndustryGatedData, SectorIndexLevels, load_sector_index_map
 from backtest.tax import RunLedger
 from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import Exchange as IdentityExchange
@@ -1302,6 +1317,11 @@ class _L1MomentumV2Data:
 
     Rebalance sessions are computed up front; any other session of the look-back calendar (the
     redeploy follow-up, a daily regime re-entry) is computed on first read and cached.
+
+    The M16.1 overlay seams (:mod:`backtest.policies.momentum_v2_overlays`) are served only when
+    their input is supplied — ``repo_rates`` (A1), ``residual_panel`` (A3), ``profitability`` (A4)
+    — and raise :class:`BacktestError` when asked without it. A run with every overlay off supplies
+    none, so it reads no rate, no index window and no filing beyond what it read before.
     """
 
     def __init__(
@@ -1313,7 +1333,13 @@ class _L1MomentumV2Data:
         signal_closes: SignalCloses | None = None,
         universe_filter: _InvestableUniverse | None = None,
         lookback_sessions: Sequence[date] | None = None,
+        repo_rates: RepoRateSchedule | None = None,
+        residual_panel: ResidualMomentumPanel | None = None,
+        profitability: _L1Profitability | None = None,
     ) -> None:
+        self._repo_rates = repo_rates
+        self._residual_panel = residual_panel
+        self._profitability = profitability
         self._reader = reader
         self._signal_closes: SignalCloses = (
             signal_closes if signal_closes is not None else reader.closes_on
@@ -1360,6 +1386,61 @@ class _L1MomentumV2Data:
         return Dataset.declaring(
             f"regime@{as_of.isoformat()}",
             (reading,),
+            knowable_date=lambda r: r.knowable_date,
+        )
+
+    def repo_rate(self, as_of: date) -> Dataset[RepoRateReading]:
+        """A1: the repo rate in force on ``as_of``, knowable from the day it took effect."""
+        if self._repo_rates is None:
+            raise BacktestError("absolute momentum needs the repo-rate schedule; none was supplied")
+        change = self._repo_rates.change_for(as_of)
+        reading = RepoRateReading(
+            repo_rate=change.repo_rate,
+            effective_from=change.effective_from,
+            knowable_date=change.effective_from,
+        )
+        return Dataset.declaring(
+            f"repo_rate@{as_of.isoformat()}", (reading,), knowable_date=lambda r: r.knowable_date
+        )
+
+    def residual_momentum(self, as_of: date) -> Dataset[ResidualScore]:
+        """A3: the H1 score of every candidate of ``signal(as_of)``, on the same signal closes.
+
+        The window is the panel's own (the 253 published NIFTY 50 sessions before ``as_of``), and
+        each name's closes come from the same seam its 12-1 return does, so a split inside the
+        window is expressed in one share basis. Each score is knowable on the window's last
+        session, ``t-1``.
+        """
+        panel = self._residual_panel
+        if panel is None:
+            raise BacktestError("residual ranking needs the published market series; none supplied")
+        window = panel.window(as_of)
+        isins = sorted(record.isin for record in self.signal(as_of).records)
+        by_session = [(session, self._signal_closes(session)) for session in window]
+        closes = {
+            isin: {
+                session: (float(day[isin]) if isin in day else None) for session, day in by_session
+            }
+            for isin in isins
+        }
+        scores = panel.scores(as_of, closes)
+        records = tuple(ResidualScore(isin, scores[isin], window[-1]) for isin in isins)
+        return Dataset.declaring(
+            f"residual_momentum@{as_of.isoformat()}",
+            records,
+            knowable_date=lambda r: r.knowable_date,
+        )
+
+    def profitability(self, as_of: date) -> Dataset[ProfitabilityReading]:
+        """A4: TTM profit for every candidate of ``signal(as_of)`` with a knowable filing."""
+        if self._profitability is None:
+            raise BacktestError(
+                "the profitability filter needs the PIT fundamentals; none supplied"
+            )
+        isins = frozenset(record.isin for record in self.signal(as_of).records)
+        return Dataset.declaring(
+            f"profitability@{as_of.isoformat()}",
+            self._profitability.readings(as_of, isins),
             knowable_date=lambda r: r.knowable_date,
         )
 
@@ -2121,6 +2202,48 @@ def run_naive_momentum(
         reader.close()
 
 
+@dataclass(frozen=True, slots=True)
+class _V2OverlayInputs:
+    """What the M16.1 overlays switched on in a run read — and nothing for one switched off.
+
+    Loaded only for a switch that is on, so a D13 run opens no repo schedule, market window or
+    fundamentals store it did not open before.
+    """
+
+    repo_rates: RepoRateSchedule | None = None
+    residual_panel: ResidualMomentumPanel | None = None
+    profitability: _L1Profitability | None = None
+
+    @classmethod
+    def for_parameters(
+        cls, params: MomentumV2Parameters, *, through: date, data_root: Path | None
+    ) -> _V2OverlayInputs:
+        panel: ResidualMomentumPanel | None = None
+        if params.residual_ranking:
+            # The pre-registered H1 regresses on the published NIFTY 50 TRI, as the swing leg does.
+            series = read_tri_series(
+                _BENCHMARK_TRI_SLUG, through, method=TRI_METHOD_PUBLISHED, data_root=data_root
+            )
+            if series is None:
+                raise BacktestError(
+                    f"residual ranking regresses on the published {_BENCHMARK_TRI_SLUG!r} TRI, "
+                    f"absent from L1/benchmark_tri through {through.isoformat()}"
+                )
+            panel = ResidualMomentumPanel(
+                [
+                    MarketSession(p.as_of, Decimal(p.tri_value), p.knowable_date)
+                    for p in series.points
+                ]
+            )
+        return cls(
+            repo_rates=load_repo_rate_schedule() if params.absolute_momentum else None,
+            residual_panel=panel,
+            profitability=(
+                _L1Profitability.load(data_root) if params.profitability_filter else None
+            ),
+        )
+
+
 def run_momentum_v2(
     *,
     start: date,
@@ -2188,6 +2311,9 @@ def run_momentum_v2(
             ma_days=v2_parameters.regime_ma_days,
             data_root=data_root,
         )
+        overlays = _V2OverlayInputs.for_parameters(
+            v2_parameters, through=sessions[-1], data_root=data_root
+        )
         data = _L1MomentumV2Data(
             reader,
             sessions,
@@ -2195,6 +2321,9 @@ def run_momentum_v2(
             signal_closes=signal_closes,
             universe_filter=universe_filter,
             lookback_sessions=calendar,
+            repo_rates=overlays.repo_rates,
+            residual_panel=overlays.residual_panel,
+            profitability=overlays.profitability,
         )
         clock = FrozenClock(first_session)
         book = PortfolioBook()
@@ -2219,7 +2348,15 @@ def run_momentum_v2(
         broker = _AccountingBroker(sim, book, nav_sink=sample_nav)
         # One rail policy for both: the gate enforces it, and the policy sizes its buys to it.
         rails_in_force = rail_policy or ratified_backtest_rail_policy()
-        policy = MomentumV2Policy(data, v2_parameters, order_caps=rails_in_force.rails)
+        policy_data: MomentumV2Data = data
+        if v2_parameters.industry_gate:  # M16.2: only a gated run loads the sector index levels
+            index_map = load_sector_index_map()
+            policy_data = IndustryGatedData(
+                data,
+                SectorIndexLevels.from_l1(index_map, through=terminal, data_root=data_root),
+                index_map,
+            )
+        policy = MomentumV2Policy(policy_data, v2_parameters, order_caps=rails_in_force.rails)
 
         engine = ReplayEngine(
             policy=policy,
@@ -2375,6 +2512,10 @@ def backtest_spec(
             extra["investable_universe"] = TURNOVER_FLOOR_UNIVERSE_IDENTITY
         else:
             extra["index_membership"] = INDEX_MEMBERSHIP_IDENTITY
+    if getattr(parameters, "industry_gate", False):
+        # M16.2: a gated run is a function of the reviewed mapping table too; an edited table must
+        # not resume a ledger struck under the old one. Absent when the gate is off (D13 unchanged).
+        extra["sector_index_map"] = load_sector_index_map().sha256
     return run_spec(
         runner,
         start=start,
@@ -4271,6 +4412,51 @@ class _PitFact(NamedTuple):
     value: Decimal
 
 
+def _read_pit_facts(data_root: Path | None, concepts: Iterable[str]) -> list[_PitFact]:
+    """Every company-level PIT fact of ``concepts``, sorted by filing date, then ISIN, then concept.
+
+    The whole history, unfiltered by date: the caller cuts it point-in-time (a prefix by filing
+    date), and the consumers it feeds refuse a later filing as the backstop. Raises when the store
+    has not been built.
+    """
+    root = layer_root(Layer.L1, data_root=data_root) / PIT_FUNDAMENTALS_DATASET
+    if not root.is_dir():
+        raise BacktestError(f"no PIT fundamentals store at {root}; run the M10.4 backfill first")
+    con = open_connection()
+    try:
+        rows = con.execute(
+            "SELECT isin, period_start, period_end, filing_date, filing_id, nature, concept, "
+            "value FROM read_parquet($glob) WHERE segment IS NULL AND concept IN $concepts "
+            "ORDER BY filing_date, isin, concept",
+            {"glob": str(root / "*" / "*.parquet"), "concepts": sorted(concepts)},
+        ).fetchall()
+    finally:
+        con.close()
+    return [
+        _PitFact(
+            isin=str(isin),
+            period_start=period_start,
+            period_end=period_end,
+            filing_date=filing_date,
+            filing_id=str(filing_id),
+            nature=Nature(nature),
+            concept=str(concept),
+            segment=None,
+            value=Decimal(value),
+        )
+        for (
+            isin,
+            period_start,
+            period_end,
+            filing_date,
+            filing_id,
+            nature,
+            concept,
+            value,
+        ) in rows
+    ]
+
+
 class _L1FundamentalsData:
     """The M10.6 policy's :class:`FundamentalsSignalData` over the PIT store and L1 closes.
 
@@ -4321,44 +4507,7 @@ class _L1FundamentalsData:
 
     @staticmethod
     def _load_facts(data_root: Path | None) -> list[_PitFact]:
-        root = layer_root(Layer.L1, data_root=data_root) / PIT_FUNDAMENTALS_DATASET
-        if not root.is_dir():
-            raise BacktestError(
-                f"no PIT fundamentals store at {root}; run the M10.4 backfill first"
-            )
-        con = open_connection()
-        try:
-            rows = con.execute(
-                "SELECT isin, period_start, period_end, filing_date, filing_id, nature, concept, "
-                "value FROM read_parquet($glob) WHERE segment IS NULL AND concept IN $concepts "
-                "ORDER BY filing_date, isin, concept",
-                {"glob": str(root / "*" / "*.parquet"), "concepts": sorted(CONCEPTS_USED)},
-            ).fetchall()
-        finally:
-            con.close()
-        return [
-            _PitFact(
-                isin=str(isin),
-                period_start=period_start,
-                period_end=period_end,
-                filing_date=filing_date,
-                filing_id=str(filing_id),
-                nature=Nature(nature),
-                concept=str(concept),
-                segment=None,
-                value=Decimal(value),
-            )
-            for (
-                isin,
-                period_start,
-                period_end,
-                filing_date,
-                filing_id,
-                nature,
-                concept,
-                value,
-            ) in rows
-        ]
+        return _read_pit_facts(data_root, CONCEPTS_USED)
 
     def is_rebalance(self, session: date) -> bool:
         return session in self._rebalance
@@ -4452,6 +4601,40 @@ class _L1FundamentalsData:
             for isin in base
             if isin in recent and base[isin] > _ZERO
         }
+
+
+class _L1Profitability:
+    """A4's input (M16.1): each name's TTM profit as of a date, off the PIT fundamentals store.
+
+    The facts are loaded once and sorted by filing date, exactly as :class:`_L1FundamentalsData`
+    loads them; a reading as of ``as_of`` hands :func:`compute_metrics` the prefix knowable then,
+    and ``compute_metrics`` itself refuses a later filing (``PitError``) as the backstop. Each
+    reading is dated by its newest filing, which the policy's guard checks again.
+    """
+
+    def __init__(self, facts: Sequence[_PitFact]) -> None:
+        self._facts = sorted(facts, key=lambda fact: fact.filing_date)
+        self._filing_dates = [fact.filing_date for fact in self._facts]
+
+    @classmethod
+    def load(cls, data_root: Path | None) -> _L1Profitability:
+        """Every company-level fact the metrics read, from the PIT store (raises if absent)."""
+        return cls(_L1FundamentalsData._load_facts(data_root))
+
+    def readings(self, as_of: date, isins: frozenset[str]) -> tuple[ProfitabilityReading, ...]:
+        """One reading per ISIN of ``isins`` with any filing knowable on ``as_of``, ISIN order."""
+        cutoff = bisect_right(self._filing_dates, as_of)
+        metrics = compute_metrics(
+            (fact for fact in self._facts[:cutoff] if fact.isin in isins), as_of=as_of
+        )
+        return tuple(
+            ProfitabilityReading(
+                isin=isin,
+                earnings_ttm=m.earnings_ttm if isinstance(m.earnings_ttm, Decimal) else None,
+                knowable_date=m.knowable_date,
+            )
+            for isin, m in sorted(metrics.items())
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -4936,6 +5119,8 @@ class _SwingFeatures:
 
     #: The H1 leg's market panel, or ``None`` when no arm needs it (see :meth:`attach_market`).
     _residual: ResidualMomentumPanel | None = None
+    #: The M16.3 leg's panel, or ``None`` when no arm needs it (see :meth:`attach_earnings`).
+    _earnings: EarningsSurprisePanel | None = None
 
     def __init__(
         self,
@@ -4984,6 +5169,21 @@ class _SwingFeatures:
     def residual_momentum(self) -> bool:
         """Whether records carry the residual-momentum leg (a market series is attached)."""
         return self._residual is not None
+
+    def attach_earnings(self, panel: EarningsSurprisePanel) -> None:
+        """Carry the M16.3 earnings-surprise leg on every record, read off ``panel``.
+
+        Must be called before the first ``load``, for the reason :meth:`attach_market` must: a
+        record materialized without the leg would silently rank as having no signal.
+        """
+        if self._by_date:
+            raise BacktestError("attach the earnings panel before the first load, not after")
+        self._earnings = panel
+
+    @property
+    def earnings_surprise(self) -> bool:
+        """Whether records carry the earnings-surprise leg (a panel is attached)."""
+        return self._earnings is not None
 
     @property
     def delivery_imputed(self) -> int:
@@ -5093,6 +5293,7 @@ class _SwingFeatures:
         for row in rows:
             grouped.setdefault(row[0], []).append(row)
         residual = self._residual_scores(base, grouped)
+        earnings = self._earnings
         for session, day_rows in grouped.items():
             deliveries = sorted(r[4] for r in day_rows if r[4] is not None)
             fallback = deliveries[len(deliveries) // 2] if deliveries else 0.0
@@ -5132,9 +5333,31 @@ class _SwingFeatures:
                         delivery_observed=delivery_observed,
                         delivery_trend_observed=row[10] is not None,
                         residual_momentum=residual.get((session, str(isin))),
+                        earnings_surprise=(
+                            None if earnings is None else earnings.value(str(isin), session)
+                        ),
                     )
                 )
             self._by_date[session] = tuple(records)
+        if earnings is not None:
+            self._log_earnings(earnings, grouped)
+
+    @staticmethod
+    def _log_earnings(
+        panel: EarningsSurprisePanel, grouped: Mapping[date, Sequence[tuple[Any, ...]]]
+    ) -> None:
+        """Count the M16.3 leg's readings and every no-signal reason over the loaded records."""
+        tally: dict[str, int] = {}
+        for session, day_rows in grouped.items():
+            for row in day_rows:
+                found = panel.explain(str(row[1]), session)
+                reason = found.value if isinstance(found, NoSignal) else "scored"
+                tally[reason] = tally.get(reason, 0) + 1
+        _LOG.info(
+            "backtest.swing_earnings_surprise",
+            decision_dates=len(grouped),
+            **{reason.lower(): count for reason, count in sorted(tally.items())},
+        )
 
     def _residual_scores(
         self, base: str, grouped: Mapping[date, Sequence[tuple[Any, ...]]]
@@ -5353,6 +5576,7 @@ def open_swing_lake(
     residual_momentum: bool = False,
     cap_tiers: bool = False,
     universe: str = DEFAULT_UNIVERSE,
+    earnings_surprise: bool = False,
 ) -> SwingLake:
     """Build the shared lake state for a swing sweep over ``[start, end]`` (M12.2).
 
@@ -5366,6 +5590,10 @@ def open_swing_lake(
     ``residual_momentum`` (round 2, H1) attaches the published NIFTY 50 TRI to the features so every
     record carries the residual-momentum leg; off by default, so a lake no arm needs it for does no
     extra pass. With it on and no published series in the lake, it raises — no proxy stands in.
+
+    ``earnings_surprise`` (M16.3) reads the PIT fundamentals store's standalone EPS and share
+    counts once and attaches the earnings-surprise leg to every record; off by default, so a lake
+    no arm needs it for reads no fundamentals. With it on and no PIT store, it raises.
 
     ``band_hits`` (X2 H2) also reads the window's PR-bundle band hits into memory, from far enough
     back that the first session's lookback is full.
@@ -5396,6 +5624,12 @@ def open_swing_lake(
                     "(`uv run python -m dataplatform.ingest.tri_backfill`)"
                 )
             features.attach_market(market)
+        if earnings_surprise:
+            features.attach_earnings(
+                EarningsSurprisePanel(
+                    _read_pit_facts(data_root, EARNINGS_SURPRISE_CONCEPTS), calendar
+                )
+            )
         hits: BandHitIndex | None = None
         if band_hits:
             before = [session for session in calendar if session < sessions[0]]
@@ -5492,12 +5726,19 @@ def run_swing_composite(
             residual_momentum=parameters.weight_residual_momentum != _ZERO,
             cap_tiers=cap_tiers is not None,
             universe=DEFAULT_UNIVERSE if universe is None else universe.universe,
+            earnings_surprise=parameters.weight_earnings_surprise != _ZERO,
         )
     elif parameters.weight_residual_momentum != _ZERO and not lake.features.residual_momentum:
         raise BacktestError(
             "this arm weights residual momentum but the shared lake was opened without it — "
             "open_swing_lake(residual_momentum=True) before loading, or every name ranks as "
             "excluded"
+        )
+    elif parameters.weight_earnings_surprise != _ZERO and not lake.features.earnings_surprise:
+        raise BacktestError(
+            "this arm weights the earnings surprise but the shared lake was opened without it — "
+            "open_swing_lake(earnings_surprise=True) before loading, or every name ranks as "
+            "having no signal"
         )
     elif lake.adjusted != adjusted:
         raise BacktestError(

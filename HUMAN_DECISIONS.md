@@ -594,6 +594,52 @@ recording shipped reality. Both §12 rows now read RATIFIED, and a dated row rec
 Taken: **committed as a proposal — not ratified, not built**. Basis: scope control; it is too large
 to start without the owner. The file carries a header saying so.
 
+D22–D24 below were taken in the same run, during review of PRs #68 and #69. They were recorded in
+the orchestrator's untracked decision log on 2026-10-06 and are entered here on 2026-10-08. Each
+was **taken by the orchestrating agent (polly) on the owner's behalf on 2026-10-06**, under the
+owner's instruction quoted above ("do the end to end task without awaiting on me for anything"), and is **pending the owner's ratification**.
+
+### D22 — Three pre-2011 L2 steps with no sourced terms → **ANSWERED (polly, delegated 2026-10-06, pending ratification): quarantine the pre-event prices.**
+
+M13.4 (PR #68) curated seven unexplained pre-2011 L2 steps. Three have terms that appear in no local
+L0 object: EIH (`INE230A01023`, 2006-09-12), JM Financial (`INE780C01023`, 2008-09-08) and Shah
+Alloys (`INE640C01011`, 2006-02-13). `manual_actions.yaml` forbids inferring a ratio, so they get no
+factor. The independent review asked for more than an allowlist. Taken: **quarantine**. Each step is
+a WARN finding (`UNSOURCED`), never a silent GREEN. Every bar of each ISIN dated before its step
+session is withheld from every backtest and decision read (`PriceQuarantine`, on by default in
+`QueryService` and the backtest readers). The step session is kept as the first bar of the new
+basis. This holds **until a source states the terms**. Then the action is curated with its citation
+and the window is dropped. Basis: "fail loud" and "red data means no trading" (AGENTIC_CONTEXT §6
+#10). Task M13.4.
+
+### D23 — Paper-session regime input must be the backtest's TRI series → **ANSWERED (polly, delegated 2026-10-06, pending ratification): same series or the job ships disabled.**
+
+The D13 regime filter reads the **published NIFTY 50 TRI** for the session itself. When the job was
+built, `tri_refresh` landed that series only on Saturdays, so every live session would have been
+red. The same-evening `nse_index_close_snapshot` was considered as a substitute. Taken: use it
+**only if** it is verified to be the identical series the backtest uses; otherwise **ship the job
+registered but disabled** behind a default-off flag. The check (PR #69, read-only, 3,159
+overlapping sessions) found it is the *price* index: 0 of 3,159 closes match the TRI. So it was
+**not** substituted, and the job shipped with `PAPER_SESSION_ENABLED=false`. The same-evening TRI
+refresh (`tri_evening`, M13.7, PR #73) later supplied the identical series. Switching the regime to
+the price index would remain an owner ratification, with momentum v2 re-run on it first. Tasks
+M13.1, M13.7.
+
+### D24 — Paper-session timing departures from the ratified backtest → **ANSWERED (polly, delegated 2026-10-06, pending ratification): accepted under D13.**
+
+The forward paper session (PR #69) cannot reproduce the backtest's calendar exactly. Taken:
+**accept** these three departures as paper-mode behaviour under D13 and document them:
+
+1. A book that starts mid-month **opens invested**. It does not wait in cash for the next
+   first-of-month.
+2. The rebalance is the first session of the month the book *decides*, so a **red first-of-month
+   moves the rebalance to the next green session**.
+3. **Orders staged for a session the book did not decide (a red day) lapse unfilled**, where a real
+   broker would have filled them.
+
+Basis: PR #69 review nit 6. How a halted day's lapse should compare with real broker fills is
+still open for M8 (`ops/BACKLOG.md`). Task M13.1.
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
