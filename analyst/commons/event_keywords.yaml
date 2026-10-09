@@ -1,0 +1,98 @@
+# A10 · M17.9 — the frozen keyword tables on NSE announcement subject lines.
+#
+# Pre-registration §8 Amendment 1 (b) and study §2 (S5). Frozen at S0: its sha256 is part of the
+# screens rule hash, so an edit here is a new rule, never a tuning of this one.
+#
+# What a pattern is matched against. L1 `announcements.category` is always null. NSE's subject
+# line for one announcement is two fields: `subject` (NSE's `desc`, a fixed vocabulary such as
+# "Resignation" or "Credit Rating- Revision") and `body` (NSE's `attchmntText`, the one-line
+# statement, such as "... has informed the Exchange regarding Resignation of Mr X as Chief
+# Financial Officer"). A rule's `subject` pattern is matched against `subject` alone. Its `text`
+# patterns are matched against "<subject> | <body>". Every pattern is a Python regular
+# expression, matched case-insensitively. The attached PDF is never read.
+#
+# A rule matches when its `subject` pattern (if any) matches, every one of its `text` patterns
+# matches, and its `unless` pattern (if any) does not match the text. A category matches when
+# any of its rules does.
+#
+# `[^.|]` keeps a match inside one sentence of one field, so "SEBI (LODR) Regulations ... the
+# Order received from the Directorate" cannot pair a regulation's name with an unrelated order.
+
+version: commons-event-keywords/1
+
+# ── integrity events (Amendment 1 (b)): each one excludes the ISIN for 60 sessions ──────────────
+integrity:
+  auditor_resignation:
+    - subject: '^\s*resignation\s+of\s+statutory\s+auditors?\s*\.?\s*$'
+      unless: '\bsubsidiar'
+    - text: ['\bresign\w*\b[^.|]{0,80}?\bstatutory\s+auditors?\b']
+      unless: '\bsubsidiar|\b(internal|secretarial|cost)\s+auditors?\b'
+    - text: ['\bstatutory\s+auditors?\b[^.|]{0,60}?\bresign']
+      unless: '\bsubsidiar|\b(internal|secretarial|cost)\s+auditors?\b'
+
+  cfo_resignation:
+    - text: ['\bresign\w*\b[^.|]{0,120}?\b(chief\s+financial\s+officer|cfo)\b']
+      unless: '\bsubsidiar'
+    - text: ['\b(chief\s+financial\s+officer|cfo)\b[^.|]{0,60}?\bresign']
+      unless: '\bsubsidiar'
+
+  independent_director_resignation:
+    - text: ['\bresign\w*\b[^.|]{0,120}?\bindependent\s+director']
+      unless: '\bsubsidiar'
+    - text: ['\bindependent\s+director\b[^.|]{0,60}?\bresign']
+      unless: '\bsubsidiar'
+
+  sebi_order:
+    - text: ['\b(orders?|directions?)\b[^.|]{0,60}?\b(passed|issued)\b[^.|]{0,20}?\bby\s+(the\s+)?(sebi|securities\s+and\s+exchange\s+board\s+of\s+india)\b']
+    - text: ['\b(sebi|securities\s+and\s+exchange\s+board\s+of\s+india)\b\s+(has\s+)?(passed|issued)\s+(an?\s+)?((interim|final|ex[- ]?parte|adjudication|confirmatory|settlement)\s+)?(orders?|directions?)\b']
+    - text: ['\b(interim|final|ex[- ]?parte|adjudication|confirmatory)\s+order\b[^.|]{0,80}?\b(sebi|securities\s+and\s+exchange\s+board)']
+    - text: ['\borders?\b[^.|]{0,30}?\b(received\s+)?from\s+(the\s+)?(sebi|securities\s+and\s+exchange\s+board\s+of\s+india)\b']
+
+  rating_downgrade_sub_ig:
+    - text: ['\bissuer\s+not\s+co-?operating\b|\bnon[- ]?co-?operati(ng|on)\b']
+    - text:
+        - '\bdowngrad'
+        - '\b(crisil|icra|care|ind|bwr|brickwork|acuite|ivr|infomerics)\s*[\[(]?\s*(bb|b|c|d)[+-]?(?![a-z+])'
+
+  default:
+    - text: ['\b(has|have)\s+defaulted\b']
+      unless: '\b(no|nil|not)\s+default|\bnot\s+defaulted\b|\bnil\b'
+    - text: ['\bdefault\s+in\s+(the\s+)?(payment|repayment|servicing)\b']
+      unless: '\b(no|nil|not)\s+default|\bnot\s+defaulted\b|\bnil\b'
+    - text: ['\b(non[- ]?payment|delay\s+in\s+(the\s+)?(payment|repayment|servicing))\s+of\s+(the\s+)?(interest|principal|dues|instal?ments?)\b']
+      unless: '\b(no|nil|not)\s+default|\bnil\b|\bno\s+delay\b'
+    # The event filing under the SEBI default circular; its quarterly nil/aggregate return is not
+    # an event, and says "quarter" when it is that return.
+    - subject: '^\s*defaults\s+on\s+payment\s+of\s+interest\s*/\s*principal\s*\.?\s*$'
+      unless: '\bquarter|\bnil\b|\bno\s+default'
+    # A company admitted to insolvency (CIRP) is in default by construction.
+    - subject: '^\s*corporate\s+insolvency\s+resolution\s+process\s*$'
+
+# ── event watch (study §2, S5): facts, never ranked ────────────────────────────────────────────
+event_watch:
+  buyback:
+    - text: ['\bbuy[- ]?\s?back\b']
+
+  bonus:
+    - subject: '^\s*bonus\s*$'
+    - text: ['\bbonus\s+(issue|shares?|equity\s+shares?|at\s+the\s+ratio)\b|\bapproved\s+(the\s+)?bonus\b']
+
+  split:
+    - text: ['\bsub[- ]?division\b|\bsub[- ]?divide\b|\bstock\s+split\b|\bsplit\s+of\s+(the\s+)?(face\s+value|equity\s+shares?|shares?)\b|\bsplit\s*/\s*sub']
+
+  order_win:
+    - subject: '^\s*(bagging/receiving\s+of\s+orders/contracts|awarding\s+of\s+order\(s\)/contract\(s\))\s*\.?\s*$'
+    - text: ['\b(receipt|receiving|bagging|bagged|bags|secured|secures|won|wins)\s+(of\s+)?(an?\s+|new\s+|the\s+|fresh\s+)?(orders?|contracts?|work\s+orders?|letters?\s+of\s+(award|intent))\b']
+      unless: '\b(tax|gst|commissioner|tribunal|court|nclt|nclat|sebi|penalt\w*|show\s+cause|demand|assessment|adjudicat\w*)\b'
+
+  index_change:
+    - text: ['\b(inclusion|included|exclusion|excluded)\b[^.|]{0,60}?\b(index|indices|nifty|sensex)\b']
+    - text: ['\b(nifty|sensex|index|indices)\b[^.|]{0,40}?\b(inclusion|exclusion)\b']
+
+  results_board_meeting:
+    - subject: '^\s*board\s+meeting\s+intimation\s*$'
+      text: ['\bresults?\b']
+    - text: ['\b(intimat\w*|notice)\b[^|]{0,120}?\bboard\s+meeting\b[^|]{0,200}?\b(financial\s+results|results)\b']
+      unless: '\boutcome\b'
+    - text: ['\bboard\s+meeting\b[^|]{0,60}?\b(to\s+be\s+held|scheduled|proposed)\b[^|]{0,200}?\b(financial\s+results|results)\b']
+      unless: '\boutcome\b'
