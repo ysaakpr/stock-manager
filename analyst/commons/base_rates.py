@@ -52,7 +52,9 @@ not reproduce its digest, or that is not the digest it was asked for.
         > ~/campaign/m17/base-rates-$(date -u +%Y-%m-%d).log 2>&1 &
 
 It reads a year of sessions at a time (plus the 260-session look-back and the 60-session
-horizon) to bound memory, and logs one line per year.
+horizon) to bound memory, and logs one line per year. Then the digest it prints is pinned in
+:data:`FROZEN_DIGEST` (a reviewed one-line commit), and :func:`load_frozen` serves exactly that
+file. Until it is pinned, :func:`load_frozen` refuses: no manager reads an unfrozen table.
 
 What it never does: read a wall clock for a date, call a model, or import `analyst.fundmanager`.
 """
@@ -113,6 +115,7 @@ from dataplatform.query import PitContext, PitError
 __all__ = [
     "ALL",
     "BASE_RATE_VERSION",
+    "FROZEN_DIGEST",
     "HORIZONS",
     "REGIME_KEYS",
     "SAMPLE_EVERY",
@@ -125,14 +128,20 @@ __all__ = [
     "Observation",
     "build_base_rate_table",
     "cell_stats",
+    "load_frozen",
     "load_table",
     "main",
     "observe_session",
+    "table_dir",
     "table_from_observations",
     "write_table",
 ]
 
 _LOG = get_logger(__name__)
+
+#: The digest of the table the M17 managers read, pinned once the ranged build has run on the
+#: lake (module docstring). ``None`` until then.
+FROZEN_DIGEST: Final[str | None] = None
 
 BASE_RATE_VERSION: Final = "commons-base-rates/1"
 HORIZONS: Final[tuple[int, ...]] = (5, 20, 60)
@@ -673,6 +682,19 @@ def load_table(path: Path, *, expected_digest: str | None = None) -> BaseRateTab
     if expected_digest is not None and table.digest != expected_digest:
         raise ValueError(f"{path.name} is table {table.digest[:12]}, not {expected_digest[:12]}")
     return table
+
+
+def load_frozen(data_root: Path, *, digest: str | None = FROZEN_DIGEST) -> BaseRateTable:
+    """The pinned table from ``<data_root>/commons/base_rates/``; refuses when none is pinned."""
+    if digest is None:
+        raise LookupError(
+            "no base-rate table is frozen yet: run the ranged build (module docstring) and pin "
+            "its digest in FROZEN_DIGEST"
+        )
+    found = sorted(table_dir(data_root).glob(f"base_rates_*_{digest[:12]}.json"))
+    if len(found) != 1:
+        raise LookupError(f"expected one table file for {digest[:12]}, found {len(found)}")
+    return load_table(found[0], expected_digest=digest)
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────────────────────────

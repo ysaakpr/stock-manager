@@ -38,9 +38,11 @@ from analyst.commons.base_rates import (
     BaseRateTable,
     build_base_rate_table,
     cell_stats,
+    load_frozen,
     load_table,
     observe_session,
     sample_sessions,
+    table_dir,
     write_table,
 )
 from analyst.commons.features import align
@@ -159,6 +161,15 @@ def test_the_same_lake_rebuilds_the_same_digest(table: BaseRateTable, tmp_path: 
     path.write_text(json.dumps(document))
     with pytest.raises(ValueError, match="reproduce"):
         load_table(path)
+
+
+def test_only_a_pinned_table_is_served(table: BaseRateTable, tmp_path: Path) -> None:
+    with pytest.raises(LookupError, match="frozen"):
+        load_frozen(tmp_path, digest=None)
+    write_table(table, table_dir(tmp_path))
+    assert load_frozen(tmp_path, digest=table.digest).digest == table.digest
+    with pytest.raises(LookupError):
+        load_frozen(tmp_path, digest="f" * 64)
 
 
 def test_the_frozen_fixture_is_what_this_lake_builds(table: BaseRateTable) -> None:
