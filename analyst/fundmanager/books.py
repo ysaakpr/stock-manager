@@ -145,6 +145,8 @@ UNFILLED_UPPER_CIRCUIT_EVENT: Final = "UNFILLED_UPPER_CIRCUIT"
 #: ``payload.event`` when a parent exit worked across sessions is done, or replaced by a decision.
 EXIT_COMPLETE_EVENT: Final = "EXIT_COMPLETE"
 EXIT_SUPERSEDED_EVENT: Final = "EXIT_SUPERSEDED"
+#: The booked corporate actions that move a holding to another ISIN (`BookedCorporateAction.kind`).
+_ISIN_CHANGES: Final = frozenset({"REISSUE", "SWAP"})
 
 
 class BookError(RuntimeError):
@@ -626,6 +628,13 @@ class FundBook:
         """
         for action in run.corporate_actions:
             pending = self.pending_exits.get(action.isin)
+            if (
+                pending is not None
+                and action.status is CorporateActionStatus.BOOKED
+                and action.kind in _ISIN_CHANGES
+            ):
+                self._supersede_on_isin_change(run.session, pending, action)
+                pending = None
             if action.rescale is not None and pending is not None:
                 numerator, denominator = action.rescale
                 floor = int(
@@ -671,6 +680,35 @@ class FundBook:
                     ),
                     source=TripSource.RECON,
                 )
+
+    def _supersede_on_isin_change(
+        self, session: date, pending: PendingExit, action: BookedCorporateAction
+    ) -> None:
+        """A parent exit whose ISIN was reissued or swapped away ends here, journaled: its floor
+        is in shares of an ISIN the book no longer holds, so working it on would complete with
+        nothing sold. The holding now sits under the successor ISIN for the next decision."""
+        del self.pending_exits[pending.isin]
+        self._write(
+            self._entry(
+                session,
+                actor=Actor.EXEC,
+                decision=Decision.HOLD,
+                isin=pending.isin,
+                rationale=(
+                    f"exit {pending.parent_uid} of {pending.parent_quantity} ended after "
+                    f"{pending.children} child order(s): {action.kind.lower()} moved the holding "
+                    f"off {pending.isin} ({action.detail}); the next decision sees the new ISIN"
+                ),
+                payload={
+                    "event": EXIT_SUPERSEDED_EVENT,
+                    "exit_parent": pending.parent_uid,
+                    "exit_parent_quantity": str(pending.parent_quantity),
+                    "exit_children": str(pending.children),
+                    "reason": f"ISIN_CHANGE:{action.kind}",
+                    "action": action.identity,
+                },
+            )
+        )
 
     def _journal_unfilled(self, run: AccountSession) -> None:
         for order in run.unfilled:
