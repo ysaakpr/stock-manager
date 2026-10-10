@@ -33,9 +33,11 @@ from dataplatform.status.models import (
     ArchiveFileOut,
     ArchivesOut,
     CheckCountOut,
+    GraduationOut,
     KillSwitchOut,
     ManagerBookOut,
     ManagerDecisionOut,
+    ManagerResultOut,
     ManagerScoreOut,
     ManagersOut,
     PaperBookStatusOut,
@@ -46,6 +48,7 @@ from dataplatform.status.models import (
     QuarantineOut,
     QuarantineStepOut,
     SeverityCountOut,
+    StyleBookOut,
     SuspendedHoldingOut,
 )
 from dataplatform.store.db import Connection
@@ -374,11 +377,13 @@ def read_managers_status(entries: Sequence[Any], *, roster: Any, as_of: datetime
         error = str(exc)
         scoreboard = build_scoreboard(roster, ScoreboardInputs(s0=None))
     managers: list[ManagerScoreOut] = []
-    for score in scoreboard.managers:
+    for score in scoreboard.book_scores:
         window = score.extension or score.primary
         managers.append(
             ManagerScoreOut(
+                book_id=score.book_id,
                 manager_id=score.manager_id,
+                role=score.role,
                 control_id=score.control_id,
                 phase=score.phase.value,
                 verdict=score.verdict.value,
@@ -409,6 +414,20 @@ def read_managers_status(entries: Sequence[Any], *, roster: Any, as_of: datetime
         scoreboard_error=error,
         books=[ManagerBookOut(**book.model_dump()) for book in scoreboard.books],
         managers=[] if error is not None else managers,
+        manager_results=[]
+        if error is not None
+        else [ManagerResultOut(**r.model_dump()) for r in scoreboard.managers],
+        style_books=[]
+        if error is not None
+        else [StyleBookOut(**b.model_dump()) for b in scoreboard.style_books],
+        graduation=None
+        if error is not None
+        else GraduationOut(
+            **{
+                **scoreboard.graduation.model_dump(),
+                "extension_confirmed": list(scoreboard.graduation.extension_confirmed),
+            }
+        ),
         decisions_session=session,
         decisions=[ManagerDecisionOut(**line.model_dump()) for line in lines],
         suspended_holdings=[SuspendedHoldingOut(**line.model_dump()) for line in suspended],

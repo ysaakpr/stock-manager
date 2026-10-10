@@ -126,7 +126,9 @@ def _blocks(journal: ListJournal) -> list[JournalEntry]:
 def test_every_tradable_book_takes_its_rails_from_the_roster() -> None:
     roster = load_roster()
     mandates = tradable_mandates(roster)
-    assert {m.id for m in mandates} == {m.id for m in (*roster.managers, *roster.controls)}
+    assert {m.id for m in mandates} == {
+        m.id for m in (*roster.manager_books, *roster.controls, *roster.styles)
+    }
     for mandate in mandates:
         rails = book_rails(mandate, roster.rails)
         assert rails.max_position_pct == mandate.max_position_pct
@@ -141,7 +143,7 @@ def test_every_tradable_book_takes_its_rails_from_the_roster() -> None:
 def test_paper_account_ids_are_distinct_paper_session_book_ids() -> None:
     ids = [paper_account_id(m.id) for m in tradable_mandates(load_roster())]
     assert len(set(ids)) == len(ids)
-    assert paper_account_id("FM-SWING-10L") == "m17_fm_swing_10l"
+    assert paper_account_id("FM-SWING-BRK-10L") == "m17_fm_swing_brk_10l"
     for account in ids:
         # The paper_session.book_id CHECK and the kill-switch account shape (0012_paper_session).
         assert account[0].isalpha() and account == account.lower() and len(account) <= 64
@@ -162,7 +164,7 @@ def test_an_oversized_order_in_a_thin_name_is_refused_by_participation_and_journ
     journal = ListJournal()
     switch = switch_at(tmp_path, clock)
     book, account = open_book(
-        "FM-SWING-1CR", market=_market(), clock=clock, kill_switch=switch, journal=journal
+        "FM-SWING-BRK-1CR", market=_market(), clock=clock, kill_switch=switch, journal=journal
     )
     # ₹6 lakh each: 6% of a ₹1 cr book (inside the 10% position cap), but 6% of THIN's ₹1 cr/day
     # median against the 5% participation cap. The liquid name trades ₹1,000 cr/day.
@@ -173,10 +175,10 @@ def test_an_oversized_order_in_a_thin_name_is_refused_by_participation_and_journ
     block = blocks[0]
     assert block.isin == THIN
     assert block.actor is Actor.RAILS
-    assert block.case_id == "FM-SWING-1CR"
+    assert block.case_id == "FM-SWING-BRK-1CR"
     assert block.payload["rails"] == RailId.PARTICIPATION.value
     assert "PARTICIPATION" in (block.rationale or "")
-    assert block.payload["book"] == "FM-SWING-1CR"
+    assert block.payload["book"] == "FM-SWING-BRK-1CR"
     assert [order.isin for order, _ in report.staged] == [LIQ]  # type: ignore[attr-defined]
 
     # Only the liquid order reached the broker, and it fills at the next session's open.
@@ -192,7 +194,7 @@ def test_the_participation_ceiling_is_exact_at_the_boundary(tmp_path: Path) -> N
     clock = FrozenClock(D0)
     journal = ListJournal()
     book, _ = open_book(
-        "FM-SWING-1CR",
+        "FM-SWING-BRK-1CR",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -210,7 +212,7 @@ def test_the_median_is_the_decision_sessions_not_a_later_one(tmp_path: Path) -> 
     clock = FrozenClock(D0)
     journal = ListJournal()
     book, _ = open_book(
-        "FM-SWING-1CR",
+        "FM-SWING-BRK-1CR",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -224,7 +226,7 @@ def test_the_median_is_the_decision_sessions_not_a_later_one(tmp_path: Path) -> 
 def test_a_market_that_answers_with_a_later_session_is_refused(tmp_path: Path) -> None:
     clock = FrozenClock(D0)
     book, _ = open_book(
-        "FM-SWING-1CR",
+        "FM-SWING-BRK-1CR",
         market=_market(leak_future=True),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -240,7 +242,7 @@ def test_a_name_without_a_full_lookback_is_refused(tmp_path: Path) -> None:
     clock = FrozenClock(SESSIONS[18])
     journal = ListJournal()
     book, _ = open_book(
-        "FM-SWING-10L",
+        "FM-SWING-BRK-10L",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -259,7 +261,7 @@ def test_a_sell_inside_the_minimum_hold_is_refused_and_one_after_it_fills(tmp_pa
     clock = FrozenClock(D0)
     journal = ListJournal()
     book, account = open_book(
-        "FM-SWING-10L",
+        "FM-SWING-BRK-10L",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -286,7 +288,7 @@ def test_a_short_sale_is_refused(tmp_path: Path) -> None:
     clock = FrozenClock(D0)
     journal = ListJournal()
     book, _ = open_book(
-        "FM-SWING-10L",
+        "FM-SWING-BRK-10L",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -301,7 +303,7 @@ def test_an_oversell_of_a_held_name_is_refused_as_a_short(tmp_path: Path) -> Non
     clock = FrozenClock(D0)
     journal = ListJournal()
     book, _ = open_book(
-        "FM-SWING-10L",
+        "FM-SWING-BRK-10L",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -318,7 +320,7 @@ def test_a_non_equity_series_is_refused_as_fno(tmp_path: Path) -> None:
     clock = FrozenClock(D0)
     journal = ListJournal()
     book, _ = open_book(
-        "FM-SWING-10L",
+        "FM-SWING-BRK-10L",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -348,11 +350,11 @@ def _proposed(
 
 
 def test_a_buy_beyond_spendable_cash_is_refused_as_margin() -> None:
-    rails, _ = roster_rails("FM-SWING-10L")
+    rails, _ = roster_rails("FM-SWING-BRK-10L")
     # ₹1,00,000 book: ₹99,000 deployed across 11 names, ₹1,000 cash. A ₹5,000 buy (5%) is inside
     # every cap but needs cash the book does not have.
     lots = tuple(Lot(isin(10 + i), f"S{i}", 90, Decimal("100")) for i in range(11))
-    book = Portfolio("FM-SWING-10L", lots, Decimal("1000"))
+    book = Portfolio("FM-SWING-BRK-10L", lots, Decimal("1000"))
     verdict = check_book_order(
         _proposed(isin(40), Side.BUY, 50), book, rails, _facts(spendable_cash=Decimal("1000"))
     )
@@ -364,15 +366,15 @@ def test_a_buy_beyond_spendable_cash_is_refused_as_margin() -> None:
 
 
 def test_position_sector_and_name_caps_bind_a_buy() -> None:
-    rails, _ = roster_rails("FM-SWING-10L")
-    empty = Portfolio("FM-SWING-10L", (), Decimal("1000000"))
+    rails, _ = roster_rails("FM-SWING-BRK-10L")
+    empty = Portfolio("FM-SWING-BRK-10L", (), Decimal("1000000"))
     over_position = check_book_order(_proposed(LIQ, Side.BUY, 1001), empty, rails, _facts())
     assert over_position.breached_rails == (RailId.MAX_POSITION,)
     at_position = check_book_order(_proposed(LIQ, Side.BUY, 1000), empty, rails, _facts())
     assert at_position.allowed
 
     three_it = tuple(Lot(isin(20 + i), "IT", 1000, Decimal("100")) for i in range(3))  # 30% IT
-    sector_full = Portfolio("FM-SWING-10L", three_it, Decimal("700000"))
+    sector_full = Portfolio("FM-SWING-BRK-10L", three_it, Decimal("700000"))
     assert check_book_order(
         _proposed(LIQ, Side.BUY, 1, sector="IT"), sector_full, rails, _facts()
     ).breached_rails == (RailId.MAX_SECTOR,)
@@ -381,7 +383,7 @@ def test_position_sector_and_name_caps_bind_a_buy() -> None:
     ).allowed
 
     full = tuple(Lot(isin(50 + i), f"S{i % 5}", 10, Decimal("100")) for i in range(15))
-    names_full = Portfolio("FM-SWING-10L", full, Decimal("985000"))
+    names_full = Portfolio("FM-SWING-BRK-10L", full, Decimal("985000"))
     assert check_book_order(
         _proposed(LIQ, Side.BUY, 1, sector="NEW"), names_full, rails, _facts()
     ).breached_rails == (RailId.MAX_POSITIONS,)
@@ -392,9 +394,9 @@ def test_position_sector_and_name_caps_bind_a_buy() -> None:
 
 
 def test_a_sell_never_trips_a_buy_cap_and_every_breach_is_reported() -> None:
-    rails, _ = roster_rails("FM-SWING-10L")
+    rails, _ = roster_rails("FM-SWING-BRK-10L")
     lot = Lot(LIQ, "IT", 5000, Decimal("100"))  # 50% of the book, far over every cap
-    book = Portfolio("FM-SWING-10L", (lot,), Decimal("500000"))
+    book = Portfolio("FM-SWING-BRK-10L", (lot,), Decimal("500000"))
     assert check_book_order(
         _proposed(LIQ, Side.SELL, 10), book, rails, _facts(sessions_since_buy_fill=5)
     ).allowed
@@ -422,10 +424,10 @@ def _two_books(tmp_path: Path) -> tuple[FundDesk, FundBook, FundBook, FrozenCloc
     switch = switch_at(tmp_path, clock)
     market = _market()
     manager, _ = open_book(
-        "FM-SWING-10L", market=market, clock=clock, kill_switch=switch, journal=journal
+        "FM-SWING-BRK-10L", market=market, clock=clock, kill_switch=switch, journal=journal
     )
     control, _ = open_book(
-        "CTRL-FM-SWING-10L", market=market, clock=clock, kill_switch=switch, journal=journal
+        "CTRL-FM-SWING-BRK-10L", market=market, clock=clock, kill_switch=switch, journal=journal
     )
     return FundDesk([manager, control], kill_switch=switch), manager, control, clock, journal
 
@@ -437,8 +439,8 @@ def test_two_books_never_share_a_position_cash_or_journal_stream(tmp_path: Path)
     desk.decide(
         D0,
         {
-            "FM-SWING-10L": [_buy(LIQ, 50), _buy(THIN, 60)],  # 5% and 6% of a 10L book
-            "CTRL-FM-SWING-10L": [_buy(OTHER, 70)],
+            "FM-SWING-BRK-10L": [_buy(LIQ, 50), _buy(THIN, 60)],  # 5% and 6% of a 10L book
+            "CTRL-FM-SWING-BRK-10L": [_buy(OTHER, 70)],
         },
     )
     clock.freeze_at(SESSIONS[20])
@@ -448,8 +450,10 @@ def test_two_books_never_share_a_position_cash_or_journal_stream(tmp_path: Path)
     assert control.account.quantities() == {OTHER: 70}
     assert manager.account.cash_value != control.account.cash_value
     capital = Decimal("1000000")
-    spent_manager = sum((f.cost.net_amount for f in reports["FM-SWING-10L"].fills), Decimal(0))
-    spent_control = sum((f.cost.net_amount for f in reports["CTRL-FM-SWING-10L"].fills), Decimal(0))
+    spent_manager = sum((f.cost.net_amount for f in reports["FM-SWING-BRK-10L"].fills), Decimal(0))
+    spent_control = sum(
+        (f.cost.net_amount for f in reports["CTRL-FM-SWING-BRK-10L"].fills), Decimal(0)
+    )
     assert manager.account.cash_value == capital - spent_manager
     assert control.account.cash_value == capital - spent_control
 
@@ -458,20 +462,20 @@ def test_two_books_never_share_a_position_cash_or_journal_stream(tmp_path: Path)
         assert entry.case_id is not None
         assert entry.payload["book"] == entry.case_id
         streams.setdefault(entry.case_id, []).append(entry)
-    assert set(streams) == {"FM-SWING-10L", "CTRL-FM-SWING-10L"}
+    assert set(streams) == {"FM-SWING-BRK-10L", "CTRL-FM-SWING-BRK-10L"}
     traded = {
         book_id: {e.isin for e in entries if e.decision in {Decision.BUY, Decision.SELL}}
         for book_id, entries in streams.items()
     }
-    assert traded == {"FM-SWING-10L": {LIQ, THIN}, "CTRL-FM-SWING-10L": {OTHER}}
+    assert traded == {"FM-SWING-BRK-10L": {LIQ, THIN}, "CTRL-FM-SWING-BRK-10L": {OTHER}}
     # Each book's reconciliation reads its own account: its own cash and positions only.
     recon = {
         e.case_id: e.payload
         for e in journal.entries
         if e.payload.get("event") == RECON_EVENT and e.trading_date == SESSIONS[20]
     }
-    assert recon["FM-SWING-10L"]["positions"] == "2"
-    assert recon["CTRL-FM-SWING-10L"]["positions"] == "1"
+    assert recon["FM-SWING-BRK-10L"]["positions"] == "2"
+    assert recon["CTRL-FM-SWING-BRK-10L"]["positions"] == "1"
 
 
 def test_the_desk_refuses_books_that_share_an_id_an_account_or_a_switch(tmp_path: Path) -> None:
@@ -480,11 +484,11 @@ def test_the_desk_refuses_books_that_share_an_id_an_account_or_a_switch(tmp_path
     market = _market()
     journal = ListJournal()
     book, account = open_book(
-        "FM-SWING-10L", market=market, clock=clock, kill_switch=switch, journal=journal
+        "FM-SWING-BRK-10L", market=market, clock=clock, kill_switch=switch, journal=journal
     )
-    rails, _ = roster_rails("CTRL-FM-SWING-10L")
+    rails, _ = roster_rails("CTRL-FM-SWING-BRK-10L")
     shares_account = FundBook(
-        book_id="CTRL-FM-SWING-10L",
+        book_id="CTRL-FM-SWING-BRK-10L",
         rails=rails,
         account=account,
         market=market,
@@ -495,13 +499,17 @@ def test_the_desk_refuses_books_that_share_an_id_an_account_or_a_switch(tmp_path
     with pytest.raises(BookError, match="share one paper account"):
         FundDesk([book, shares_account], kill_switch=switch)
     twin, _ = open_book(
-        "FM-SWING-10L", market=market, clock=clock, kill_switch=switch, journal=journal
+        "FM-SWING-BRK-10L", market=market, clock=clock, kill_switch=switch, journal=journal
     )
     with pytest.raises(BookError, match="share an id"):
         FundDesk([book, twin], kill_switch=switch)
     other_switch = switch_at(tmp_path / "elsewhere", clock)
     stray, _ = open_book(
-        "CTRL-FM-SWING-10L", market=market, clock=clock, kill_switch=other_switch, journal=journal
+        "CTRL-FM-SWING-BRK-10L",
+        market=market,
+        clock=clock,
+        kill_switch=other_switch,
+        journal=journal,
     )
     with pytest.raises(BookError, match="one M17 kill switch"):
         FundDesk([book, stray], kill_switch=switch)
@@ -512,7 +520,7 @@ def test_a_book_stamps_its_own_id_on_whatever_it_journals(tmp_path: Path) -> Non
     clock.freeze_at(D0)
     manager.execute(D0)
     manager.decide(D0, [])
-    assert {e.case_id for e in journal.entries} == {"FM-SWING-10L"}
+    assert {e.case_id for e in journal.entries} == {"FM-SWING-BRK-10L"}
     assert [e.decision for e in journal.entries] == [Decision.HEARTBEAT, Decision.HOLD]
 
 
@@ -523,24 +531,26 @@ def test_one_switch_halts_every_book_and_lapses_their_orders(tmp_path: Path) -> 
     desk, manager, control, clock, journal = _two_books(tmp_path)
     clock.freeze_at(D0)
     desk.execute(D0)
-    desk.decide(D0, {"FM-SWING-10L": [_buy(LIQ, 10)], "CTRL-FM-SWING-10L": [_buy(OTHER, 10)]})
+    desk.decide(
+        D0, {"FM-SWING-BRK-10L": [_buy(LIQ, 10)], "CTRL-FM-SWING-BRK-10L": [_buy(OTHER, 10)]}
+    )
     assert manager.kill_switch.state.tripped is False
     manager.kill_switch.trip(reason="owner halt drill", source=TripSource.MANUAL)
 
     clock.freeze_at(SESSIONS[20])
     executed = desk.execute(SESSIONS[20])
-    decided = desk.decide(SESSIONS[20], {"FM-SWING-10L": [_buy(THIN, 10)]})
-    for book_id in ("FM-SWING-10L", "CTRL-FM-SWING-10L"):
+    decided = desk.decide(SESSIONS[20], {"FM-SWING-BRK-10L": [_buy(THIN, 10)]})
+    for book_id in ("FM-SWING-BRK-10L", "CTRL-FM-SWING-BRK-10L"):
         assert executed[book_id].halted and executed[book_id].fills == ()
         assert len(executed[book_id].lapsed) == 1
         assert decided[book_id].halted and decided[book_id].staged == ()
     assert manager.account.quantities() == {} and control.account.quantities() == {}
     halts = [e for e in journal.entries if e.payload.get("event") == BOOK_HALTED_EVENT]
     assert {(e.case_id, e.payload["step"]) for e in halts} == {
-        ("FM-SWING-10L", "filled"),
-        ("CTRL-FM-SWING-10L", "filled"),
-        ("FM-SWING-10L", "staged"),
-        ("CTRL-FM-SWING-10L", "staged"),
+        ("FM-SWING-BRK-10L", "filled"),
+        ("CTRL-FM-SWING-BRK-10L", "filled"),
+        ("FM-SWING-BRK-10L", "staged"),
+        ("CTRL-FM-SWING-BRK-10L", "staged"),
     }
     assert all(e.decision is Decision.SKIPPED_DATA_RED for e in halts)
     assert manager.kill_switch.state.source is TripSource.MANUAL
@@ -551,7 +561,9 @@ def test_a_recon_break_in_one_book_halts_the_other(tmp_path: Path) -> None:
     desk, manager, control, clock, journal = _two_books(tmp_path)
     clock.freeze_at(D0)
     desk.execute(D0)
-    desk.decide(D0, {"FM-SWING-10L": [_buy(LIQ, 10)], "CTRL-FM-SWING-10L": [_buy(OTHER, 10)]})
+    desk.decide(
+        D0, {"FM-SWING-BRK-10L": [_buy(LIQ, 10)], "CTRL-FM-SWING-BRK-10L": [_buy(OTHER, 10)]}
+    )
     # Corrupt the manager's accounting book behind the broker's back: a phantom rupee.
     account = manager.account
     assert isinstance(account, M17PaperAccount)
@@ -559,15 +571,18 @@ def test_a_recon_break_in_one_book_halts_the_other(tmp_path: Path) -> None:
     clock.freeze_at(SESSIONS[20])
     executed = desk.execute(SESSIONS[20])
     # Both books' fills were due and happened; the manager's reconciliation broke and tripped.
-    assert executed["FM-SWING-10L"].recon is not None and not executed["FM-SWING-10L"].recon.ok
     assert (
-        executed["CTRL-FM-SWING-10L"].recon is not None and executed["CTRL-FM-SWING-10L"].recon.ok
+        executed["FM-SWING-BRK-10L"].recon is not None and not executed["FM-SWING-BRK-10L"].recon.ok
+    )
+    assert (
+        executed["CTRL-FM-SWING-BRK-10L"].recon is not None
+        and executed["CTRL-FM-SWING-BRK-10L"].recon.ok
     )
     assert manager.kill_switch.is_tripped
     (escalation,) = [e for e in journal.entries if e.payload.get("event") == RECON_BREAK_EVENT]
-    assert escalation.case_id == "FM-SWING-10L" and escalation.decision is Decision.ESCALATE
-    decided = desk.decide(SESSIONS[20], {"CTRL-FM-SWING-10L": [_buy(THIN, 10)]})
-    assert decided["CTRL-FM-SWING-10L"].halted and decided["CTRL-FM-SWING-10L"].staged == ()
+    assert escalation.case_id == "FM-SWING-BRK-10L" and escalation.decision is Decision.ESCALATE
+    decided = desk.decide(SESSIONS[20], {"CTRL-FM-SWING-BRK-10L": [_buy(THIN, 10)]})
+    assert decided["CTRL-FM-SWING-BRK-10L"].halted and decided["CTRL-FM-SWING-BRK-10L"].staged == ()
     assert control.account.quantities() == {OTHER: 10}
 
 
@@ -578,7 +593,7 @@ def test_idle_cash_accrues_repo_less_50bp_and_the_book_still_reconciles(tmp_path
     clock = FrozenClock(SESSIONS[0])
     journal = ListJournal()
     book, account = open_book(
-        "FM-SWING-10L",
+        "FM-SWING-BRK-10L",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -615,7 +630,7 @@ def test_an_account_persists_as_a_paper_session_row_and_continues_exactly(tmp_pa
     switch = switch_at(tmp_path, clock)
     market = _market()
     book, account = open_book(
-        "FM-SWING-10L", market=market, clock=clock, kill_switch=switch, journal=ListJournal()
+        "FM-SWING-BRK-10L", market=market, clock=clock, kill_switch=switch, journal=ListJournal()
     )
     _step(book, clock, D0, [_buy(LIQ, 50)])
     _step(book, clock, SESSIONS[20], [_buy(OTHER, 40)])  # staged, unfilled at persistence time
@@ -650,9 +665,9 @@ def test_an_account_persists_as_a_paper_session_row_and_continues_exactly(tmp_pa
         book_digest=stored.book_digest or "",
         alerter=RecordingAlerter(),
     )
-    rails, _ = roster_rails("FM-SWING-10L")
+    rails, _ = roster_rails("FM-SWING-BRK-10L")
     again = FundBook(
-        book_id="FM-SWING-10L",
+        book_id="FM-SWING-BRK-10L",
         rails=rails,
         account=restored,
         market=market,
@@ -673,7 +688,7 @@ def test_a_tampered_persisted_state_is_refused(tmp_path: Path) -> None:
     clock = FrozenClock(D0)
     switch = switch_at(tmp_path, clock)
     _, account = open_book(
-        "FM-SWING-10L", market=_market(), clock=clock, kill_switch=switch, journal=ListJournal()
+        "FM-SWING-BRK-10L", market=_market(), clock=clock, kill_switch=switch, journal=ListJournal()
     )
     document = account.to_document()
     document["broker"] = {**document["broker"], "cash": "99999999"}

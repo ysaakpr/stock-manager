@@ -42,16 +42,22 @@ from analyst.fundmanager.contract import (
     STOP_MAX_PCT,
     ContractVerdict,
 )
-from analyst.fundmanager.controls import CONTROL_BUY_BUDGET_FRACTION, CONTROL_REBALANCE_BAND
+from analyst.fundmanager.controls import (
+    CONTROL_BUY_BUDGET_FRACTION,
+    CONTROL_REBALANCE_BAND,
+    style_rule_bytes,
+)
 from analyst.fundmanager.mandate import (
     BenchMandate,
     ControlMandate,
     ManagerMandate,
     Roster,
+    StyleMandate,
     canonical_json,
     mandate_hash,
 )
-from analyst.fundmanager.render import SYSTEM_PROMPT, PromptTemplate
+from analyst.fundmanager.mirror import mirror_rule_bytes
+from analyst.fundmanager.render import DESK_ORDER_DOMAIN, SYSTEM_PROMPT, PromptTemplate
 from analyst.fundmanager.schemas import Action, schema_bytes
 from analyst.fundmanager.scoreboard import S0_EVENT
 from analyst.fundmanager.stops import StopBook
@@ -276,26 +282,40 @@ def mandate_fingerprints(
 ) -> dict[str, MandateFingerprint]:
     """Every roster book's `mandate_hash`, as journaled at S0.
 
-    A manager's hash covers its roster entry, the prompt template's bytes, both decision schemas
-    with the system prompt (`schemas.schema_bytes`) and the contract's tolerances, the shortlist
-    and screens rule hashes (the Commons it decides on), and the shared rails. A control's covers
-    its entry, its rebalance constants, the shortlist rule and the rails; the bench's its entry and
+    A manager book's hash — primary or mirror — covers its roster entry (manager, role, style,
+    starting screens and the horizon the style fixes among them), the prompt template's bytes,
+    both decision schemas with the system prompt (`schemas.schema_bytes`), the contract's
+    tolerances and the mirror rule (`mirror.mirror_rule_bytes`: how the manager's decisions reach
+    its second book), the shortlist and screens rule hashes and the desk-order domain (the Commons
+    it decides on, as presented), and the shared rails. A control's covers its entry, its
+    rebalance constants, the shortlist rule and the rails; a style book's its entry, the style
+    rule (`controls.style_rule_bytes`), the screens rule and the rails; the bench's its entry and
     the rails. Any change is a new book id (§7).
     """
     template = template or PromptTemplate.load()
-    rules = f"shortlist:{SHORTLIST_RULE_HASH}\nscreens:{SCREENS_RULE_HASH}".encode("ascii")
+    rules = (
+        f"shortlist:{SHORTLIST_RULE_HASH}\nscreens:{SCREENS_RULE_HASH}\n"
+        f"desk_order:{DESK_ORDER_DOMAIN}"
+    ).encode("ascii")
     rails = canonical_json(roster.rails)
     out: dict[str, MandateFingerprint] = {}
     for book in roster.books:
         if isinstance(book, ManagerMandate):
             prompt = template.raw_bytes
             schema = (
-                schema_bytes(book.rounds, system_prompt=SYSTEM_PROMPT) + b"\n" + (_contract_bytes())
+                schema_bytes(book.rounds, system_prompt=SYSTEM_PROMPT)
+                + b"\n"
+                + _contract_bytes()
+                + b"\n"
+                + mirror_rule_bytes()
             )
             rule = rules
         elif isinstance(book, ControlMandate):
             prompt, schema = b"", _control_bytes()
             rule = f"shortlist:{SHORTLIST_RULE_HASH}".encode("ascii")
+        elif isinstance(book, StyleMandate):
+            prompt, schema = b"", style_rule_bytes()
+            rule = f"screens:{SCREENS_RULE_HASH}".encode("ascii")
         else:
             assert isinstance(book, BenchMandate)
             prompt, schema, rule = b"", b"", b""

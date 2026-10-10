@@ -23,10 +23,23 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from analyst.fundmanager import ControlMandate, ManagerMandate, Roster, load_roster
+from analyst.fundmanager import (
+    ControlMandate,
+    ManagerMandate,
+    Roster,
+    StyleMandate,
+    load_roster,
+)
 from analyst.fundmanager.books import BookError, BookOrder, FundBook
-from analyst.fundmanager.controls import BenchBook, ControlBook, record_mark
+from analyst.fundmanager.controls import BenchBook, ControlBook, RankedTargets, record_mark
 from analyst.fundmanager.digest import digest_path, render_digest, write_digest
+from analyst.fundmanager.mirror import (
+    MirrorState,
+    divergence_entry,
+    plan_mirror,
+    settle_plan,
+    target_weights,
+)
 from analyst.fundmanager.scoreboard import (
     BRIER_BAR,
     DECISION_EVENT,
@@ -77,12 +90,14 @@ from tests.fm_scoreboard_support import (
     MarketPrices,
     compounding,
     drifting_market,
+    flat_marks,
     isin,
     mini_roster,
     shortlist_of,
 )
 
-MANAGER, CONTROL, BENCH = "FM-SWING-10L", "CTRL-FM-SWING-10L", "BENCH-N500"
+MANAGER, CONTROL, BENCH = "FM-SWING-BRK-10L", "CTRL-FM-SWING-BRK-10L", "BENCH-N500"
+MIRROR, MIRROR_CONTROL, STYLE = "FM-SWING-BRK-1CR", "CTRL-FM-SWING-BRK-1CR", "STYLE-FM-SWING-BRK"
 CAPITAL = Decimal(1000000)
 SESSIONS = weekdays(date(2025, 1, 1), 160)
 S0 = SESSIONS[21]
@@ -233,6 +248,12 @@ def _decisions(
     return decisions, outcomes
 
 
+def _with_companions(marks: Sequence[BookMark], window: Sequence[date]) -> tuple[BookMark, ...]:
+    """``marks`` plus flat marks for the mini roster's other books (the mirror, its control, the
+    style book), which every session of a window needs and these tests do not script."""
+    return (*marks, *flat_marks(mini_roster(), window, exclude={MANAGER, CONTROL, BENCH}))
+
+
 def _board(
     *,
     sessions: int = WINDOW_SESSIONS,
@@ -248,10 +269,13 @@ def _board(
     decisions, outcomes = _decisions(window, n=n, p=p, beats=beats)
     inputs = ScoreboardInputs(
         s0=window[0],
-        marks=(
-            *_path(MANAGER, window, final_pct=manager, trough_pct=manager_trough),
-            *_path(CONTROL, window, final_pct=control),
-            *_path(BENCH, window, final_pct="2", trough_pct=bench_trough),
+        marks=_with_companions(
+            (
+                *_path(MANAGER, window, final_pct=manager, trough_pct=manager_trough),
+                *_path(CONTROL, window, final_pct=control),
+                *_path(BENCH, window, final_pct="2", trough_pct=bench_trough),
+            ),
+            window,
         ),
         decisions=tuple(decisions),
         outcomes=tuple(outcomes),
@@ -261,44 +285,47 @@ def _board(
 
 def test_a_manager_ahead_of_its_control_has_positive_excess_and_passes() -> None:
     board = _board(manager="5", control="1")
-    (score,) = board.managers
+    score, mirror = board.book_scores
+    assert (score.book_id, score.control_id) == (MANAGER, CONTROL)
     assert score.primary is not None
     assert score.primary.excess_vs_control_pp == Decimal("4.0000")
     assert score.verdict is ScoreVerdict.PASS and score.phase is Phase.FINAL
-    assert board.passed == 1 and board.k_of_n == "1 of 1 passed"
+    # the flat mirror ties its flat control: no excess, so it does not pass
+    assert mirror.verdict is not ScoreVerdict.PASS
+    assert board.passed == 1 and board.k_of_n == "1 of 2 books passed"
 
 
 def test_the_mirror_image_is_a_clear_fail() -> None:
     board = _board(manager="1", control="5")
-    (score,) = board.managers
+    score = board.book_scores[0]
     assert score.primary is not None
     assert score.primary.excess_vs_control_pp == Decimal("-4.0000")
     assert score.verdict is ScoreVerdict.CLEAR_FAIL
-    assert board.k_of_n == "0 of 1 passed"
+    assert board.k_of_n == "0 of 2 books passed"
 
 
 def test_a_drawdown_past_the_bench_plus_five_blocks_the_pass() -> None:
-    assert _board(manager_trough="9", bench_trough="4").managers[0].verdict is ScoreVerdict.PASS
+    assert _board(manager_trough="9", bench_trough="4").book_scores[0].verdict is ScoreVerdict.PASS
     assert (
-        _board(manager_trough="9.01", bench_trough="4").managers[0].primary.verdict  # type: ignore[union-attr]
+        _board(manager_trough="9.01", bench_trough="4").book_scores[0].primary.verdict  # type: ignore[union-attr]
         is ScoreVerdict.INCONCLUSIVE
     )
 
 
 def test_brier_in_the_scoreboard_is_the_formula_and_flipping_outcomes_fails() -> None:
     # 30 decisions at p = 0.9, 24 right: (24 x 0.01 + 6 x 0.81) / 30 = 0.17 -> pass.
-    good = _board(n=30, p="0.9", beats=24).managers[0]
+    good = _board(n=30, p="0.9", beats=24).book_scores[0]
     assert good.primary is not None and good.primary.brier == Decimal("0.17000000")
     assert good.verdict is ScoreVerdict.PASS
     # The same forecasts with the outcomes the other way round: (6 x 0.01 + 24 x 0.81) / 30 = 0.65.
-    bad = _board(n=30, p="0.9", beats=6).managers[0]
+    bad = _board(n=30, p="0.9", beats=6).book_scores[0]
     assert bad.primary is not None and bad.primary.brier == Decimal("0.65000000")
     assert bad.verdict is ScoreVerdict.CLEAR_FAIL
 
 
 def test_thirty_resolved_decisions_pass_and_twenty_nine_do_not() -> None:
-    assert _board(n=30).managers[0].verdict is ScoreVerdict.PASS
-    score = _board(n=29).managers[0]
+    assert _board(n=30).book_scores[0].verdict is ScoreVerdict.PASS
+    score = _board(n=29).book_scores[0]
     assert score.primary is not None and score.primary.resolved_decisions == 29
     assert score.primary.verdict is ScoreVerdict.INCONCLUSIVE
     assert score.phase is Phase.EXTENSION, "an inconclusive window runs its one extension"
@@ -329,33 +356,36 @@ def test_a_decision_resolving_after_the_window_does_not_count() -> None:
     )
     inputs = ScoreboardInputs(
         s0=window[0],
-        marks=(
-            *_path(MANAGER, window, final_pct="5"),
-            *_path(CONTROL, window, final_pct="1"),
-            *_path(BENCH, window, final_pct="2"),
+        marks=_with_companions(
+            (
+                *_path(MANAGER, window, final_pct="5"),
+                *_path(CONTROL, window, final_pct="1"),
+                *_path(BENCH, window, final_pct="2"),
+            ),
+            window,
         ),
         decisions=(*decisions, late),
         outcomes=(*outcomes, late_outcome),
     )
-    score = build_scoreboard(mini_roster(), inputs).managers[0]
+    score = build_scoreboard(mini_roster(), inputs).book_scores[0]
     assert score.primary is not None
     assert score.primary.resolved_decisions == 30
     assert score.primary.secondary.buys == 1
 
 
 def test_sixty_two_sessions_are_in_progress_and_sixty_three_decide() -> None:
-    early = _board(sessions=WINDOW_SESSIONS - 1).managers[0]
+    early = _board(sessions=WINDOW_SESSIONS - 1).book_scores[0]
     assert early.verdict is ScoreVerdict.IN_PROGRESS and early.phase is Phase.PRIMARY
     assert early.primary is not None and not early.primary.complete
-    done = _board(sessions=WINDOW_SESSIONS).managers[0]
+    done = _board(sessions=WINDOW_SESSIONS).book_scores[0]
     assert done.primary is not None and done.primary.complete and done.primary.sessions == 63
 
 
 def test_an_inconclusive_window_extends_once_to_126_sessions() -> None:
-    mid = _board(sessions=100, manager="2", control="1").managers[0]
+    mid = _board(sessions=100, manager="2", control="1").book_scores[0]
     assert mid.primary is not None and mid.primary.verdict is ScoreVerdict.INCONCLUSIVE
     assert mid.phase is Phase.EXTENSION and mid.verdict is ScoreVerdict.IN_PROGRESS
-    final = _board(sessions=126, manager="2", control="1").managers[0]
+    final = _board(sessions=126, manager="2", control="1").book_scores[0]
     assert final.phase is Phase.FINAL and final.extension is not None
     assert final.extension.sessions == 126
     assert final.verdict is final.extension.verdict is ScoreVerdict.INCONCLUSIVE
@@ -365,21 +395,26 @@ def test_no_s0_means_nothing_counts() -> None:
     window = SESSIONS[21:90]
     inputs = ScoreboardInputs(s0=None, marks=tuple(_path(MANAGER, window, final_pct="9")))
     board = build_scoreboard(mini_roster(), inputs)
-    assert board.managers[0].verdict is ScoreVerdict.NOT_STARTED
-    assert board.k_of_n == "0 of 1 passed"
+    assert board.book_scores[0].verdict is ScoreVerdict.NOT_STARTED
+    assert board.k_of_n == "0 of 2 books passed"
 
 
-def test_the_full_roster_reports_k_of_4() -> None:
+def test_the_full_roster_reports_k_of_8_books() -> None:
     board = build_scoreboard(load_roster(), ScoreboardInputs(s0=None))
-    assert board.k_of_n == "0 of 4 passed" and len(board.managers) == 4
+    assert board.k_of_n == "0 of 8 books passed"
+    assert len(board.book_scores) == 8 and len(board.managers) == 4
+    assert len(board.style_books) == 4 and not board.graduation.met
 
 
 def test_a_missing_mark_or_a_duplicate_is_loud() -> None:
     window = SESSIONS[21:90]
-    marks = (
-        *_path(MANAGER, window, final_pct="5"),
-        *_path(CONTROL, window[:-1], final_pct="1"),
-        *_path(BENCH, window, final_pct="2"),
+    marks = _with_companions(
+        (
+            *_path(MANAGER, window, final_pct="5"),
+            *_path(CONTROL, window[:-1], final_pct="1"),
+            *_path(BENCH, window, final_pct="2"),
+        ),
+        window,
     )
     with pytest.raises(ScoreboardError, match="no mark"):
         build_scoreboard(mini_roster(), ScoreboardInputs(s0=window[0], marks=marks))
@@ -428,10 +463,13 @@ def test_secondary_metrics_amendment_1f() -> None:
         )
     inputs = ScoreboardInputs(
         s0=window[0],
-        marks=(
-            *_path(MANAGER, window, final_pct="5"),
-            *_path(CONTROL, window, final_pct="1"),
-            *_path(BENCH, window, final_pct="2"),
+        marks=_with_companions(
+            (
+                *_path(MANAGER, window, final_pct="5"),
+                *_path(CONTROL, window, final_pct="1"),
+                *_path(BENCH, window, final_pct="2"),
+            ),
+            window,
         ),
         decisions=tuple(decisions),
         outcomes=tuple(outcomes),
@@ -452,7 +490,7 @@ def test_secondary_metrics_amendment_1f() -> None:
             ControlBuy(book_id=CONTROL, session=window[0], isin=isin(9), cap_tier="LARGE"),
         ),
     )
-    secondary = build_scoreboard(mini_roster(), inputs).managers[0].primary.secondary  # type: ignore[union-attr]
+    secondary = build_scoreboard(mini_roster(), inputs).book_scores[0].primary.secondary  # type: ignore[union-attr]
     # Shrunk Brier over the two with a base rate: p' = 0.7 (hit), 0.6 (miss): (0.09 + 0.36) / 2.
     assert secondary.shrunk_brier == Decimal("0.22500000") and secondary.shrunk_brier_n == 2
     assert secondary.buy_hit_rate_p_gt_half.n == 3 and secondary.buy_hit_rate_p_gt_half.hits == 2
@@ -675,7 +713,9 @@ def test_the_decision_adapter_round_trips_every_scored_field() -> None:
 
 
 class _Run:
-    """One scripted M17 run of FM-SWING-10L, its control and the bench, scored in-process."""
+    """One scripted M17 run of FM-SWING-BRK: its primary book (scripted decisions), its mirror
+    (driven by `analyst.fundmanager.mirror`), both controls, its style book and the bench, scored
+    in-process."""
 
     def __init__(self, tmp: Path, sessions: int = 70) -> None:
         self.roster = mini_roster(MANAGER)
@@ -696,6 +736,28 @@ class _Run:
         control_mandate = self.roster.get(CONTROL)
         assert isinstance(control_mandate, ControlMandate)
         self.control = ControlBook(control_mandate, control_book, self.roster.rails)
+        self.mirror, self.mirror_account = open_book(
+            MIRROR, market=self.market, clock=self.clock, kill_switch=switch, journal=self.journal
+        )
+        self.mirror_state = MirrorState()
+        mirror_control_book, _ = open_book(
+            MIRROR_CONTROL,
+            market=self.market,
+            clock=self.clock,
+            kill_switch=switch,
+            journal=self.journal,
+        )
+        mirror_control_mandate = self.roster.get(MIRROR_CONTROL)
+        assert isinstance(mirror_control_mandate, ControlMandate)
+        self.mirror_control = ControlBook(
+            mirror_control_mandate, mirror_control_book, self.roster.rails
+        )
+        style_book, _ = open_book(
+            STYLE, market=self.market, clock=self.clock, kill_switch=switch, journal=self.journal
+        )
+        style_mandate = self.roster.get(STYLE)
+        assert isinstance(style_mandate, StyleMandate)
+        self.style = ControlBook(style_mandate, style_book, self.roster.rails)
         bench_mandate = self.roster.benches[0]
         self.bench = BenchBook(bench_mandate, journal=self.journal, clock=self.clock)
         self.bench.open(self.bench_levels, SESSIONS[20])
@@ -718,6 +780,10 @@ class _Run:
                 self._journal_s0(session)
             m_exec = self.manager.execute(session)
             c_exec = self.control.book.execute(session)
+            others = {
+                book.book_id: book.execute(session)
+                for book in (self.mirror, self.mirror_control.book, self.style.book)
+            }
             for fill in m_exec.fills:
                 if (
                     fill.side is Side.SELL
@@ -747,27 +813,49 @@ class _Run:
                     held = self.manager_account.quantities().get(d.isin, 0)
                     orders.append(BookOrder(d.isin, Side.SELL, held, f"{RATIONALE_MARKER} sell"))
             report = self.manager.decide(session, orders)
-            refusals += [
-                RailRefusal(
-                    book_id=MANAGER,
-                    session=session,
-                    isin=order.isin,
-                    rails=tuple(r.value for r in verdict.breached_rails),
-                )
-                for order, verdict in report.refused
-            ]
+            # the mirror follows the primary's post-decision weights, through its own rails
+            targets = target_weights(self.manager, report, session)
+            plan = plan_mirror(self.mirror, targets, session, self.mirror_state, max_positions=15)
+            mirror_report = self.mirror.decide(session, plan.orders)
+            entry, evidence = divergence_entry(
+                self.mirror,
+                targets,
+                settle_plan(plan, mirror_report, self.mirror),
+                mirror_report,
+                session,
+            )
+            self.journal.append(entry, evidence=evidence)
             ranked = names[day % 7 :] + names[: day % 7]
-            done = self.control.run(session, shortlist_of(session, list(reversed(ranked))), tiers)
-            refusals += [
-                RailRefusal(
-                    book_id=CONTROL,
-                    session=session,
-                    isin=order.isin,
-                    rails=tuple(r.value for r in verdict.breached_rails),
-                )
-                for order, verdict in done.report.refused
-            ]
+            shortlist = shortlist_of(session, list(reversed(ranked)))
+            done = self.control.run(session, shortlist, tiers)
+            mirror_done = self.mirror_control.run(session, shortlist, tiers)
+            style_list = RankedTargets(
+                trading_date=session,
+                isins=tuple(names[:15]),
+                source="commons_screens",
+                digest_label="screens_digest",
+                digest="d" * 64,
+                rule="test style list",
+            )
+            style_done = self.style.run_ranked(session, style_list, tiers)
+            for book_id, refused in (
+                (MANAGER, report.refused),
+                (MIRROR, mirror_report.refused),
+                (CONTROL, done.report.refused),
+                (MIRROR_CONTROL, mirror_done.report.refused),
+                (STYLE, style_done.report.refused),
+            ):
+                refusals += [
+                    RailRefusal(
+                        book_id=book_id,
+                        session=session,
+                        isin=order.isin,
+                        rails=tuple(r.value for r in verdict.breached_rails),
+                    )
+                    for order, verdict in refused
+                ]
             control_buys += done.buys
+            control_buys += mirror_done.buys
             marks.append(
                 record_mark(mark_book(self.manager, session, execution=m_exec), self.manager)
             )
@@ -776,6 +864,10 @@ class _Run:
                     mark_book(self.control.book, session, execution=c_exec), self.control.book
                 )
             )
+            for book in (self.mirror, self.mirror_control.book, self.style.book):
+                marks.append(
+                    record_mark(mark_book(book, session, execution=others[book.book_id]), book)
+                )
             marks.append(self.bench.mark(self.bench_levels, session))
             resolved = {o.decision_key for o in outcomes}
             for d in decisions:
@@ -894,7 +986,15 @@ def test_the_scoreboard_rebuilt_from_the_journal_equals_the_live_one_byte_for_by
     assert rebuilt.digest() == m17_run.live.digest()
 
     # The run is substantive, not an empty board that trivially matches.
-    (score,) = m17_run.live.managers
+    score, mirror = m17_run.live.book_scores
+    assert (score.book_id, mirror.book_id) == (MANAGER, MIRROR)
+    # Brier is the manager's, once: both books read the same figure from the same decisions
+    assert mirror.primary is not None and score.primary is not None
+    assert mirror.primary.brier == score.primary.brier is not None
+    assert mirror.primary.resolved_decisions == score.primary.resolved_decisions
+    (result,) = m17_run.live.managers
+    assert result.decisions == len(m17_run.live_inputs.decisions)
+    assert mirror.primary.secondary.manager_turnover_x > 0, "the mirror traded"
     assert score.primary is not None and score.primary.complete
     assert score.verdict is not ScoreVerdict.IN_PROGRESS or score.phase is Phase.EXTENSION
     assert score.primary.resolved_decisions >= MIN_RESOLVED
@@ -1004,9 +1104,20 @@ def test_status_managers_serves_books_decisions_and_the_scoreboard(m17_run: _Run
     assert body["scoreboard_digest"] == m17_run.live.digest()
     assert body["scoreboard_error"] is None
     assert body["k_of_n"] == m17_run.live.k_of_n
-    assert {b["book_id"] for b in body["books"]} == {MANAGER, CONTROL, BENCH}
+    assert {b["book_id"] for b in body["books"]} == {
+        MANAGER,
+        CONTROL,
+        MIRROR,
+        MIRROR_CONTROL,
+        STYLE,
+        BENCH,
+    }
     assert body["decisions_session"] == m17_run.last.isoformat()
-    assert [m["manager_id"] for m in body["managers"]] == [MANAGER]
+    assert [m["book_id"] for m in body["managers"]] == [MANAGER, MIRROR]
+    assert {m["manager_id"] for m in body["managers"]} == {"FM-SWING-BRK"}
+    assert [r["manager_id"] for r in body["manager_results"]] == ["FM-SWING-BRK"]
+    assert [b["style_id"] for b in body["style_books"]] == [STYLE]
+    assert body["graduation"]["primary_passes_needed"] == 2
     pass_line = [d for d in body["decisions"] if d["event"] == DECISION_EVENT]
     assert pass_line and pass_line[0]["action"] == "PASS" and pass_line[0]["p_beat_bench"]
     # What it never carries: a rationale, a prompt, or a credential-shaped field.
@@ -1051,6 +1162,7 @@ def test_the_daily_digest_is_written_under_the_injected_directory(
     text = path.read_text(encoding="utf-8")
     assert text == render_digest(m17_run.live, session, lines)
     assert m17_run.live.k_of_n in text and MANAGER in text and BENCH in text
+    assert MIRROR in text and STYLE in text and "Graduation floor" in text
     assert RATIONALE_MARKER not in text
     assert not list(target.glob(".*.tmp")), "no half-written page is left behind"
 

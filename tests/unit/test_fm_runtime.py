@@ -273,7 +273,7 @@ def _commons(world: World, tmp_path: Path, *, digests: bool = True) -> ManagerCo
     )
 
 
-def _mandate(book_id: str = "FM-SWING-10L", *, priced: bool = False) -> ManagerMandate:
+def _mandate(book_id: str = "FM-SWING-BRK-10L", *, priced: bool = False) -> ManagerMandate:
     mandate = load_roster().get(book_id)
     assert isinstance(mandate, ManagerMandate)
     if priced:
@@ -282,7 +282,7 @@ def _mandate(book_id: str = "FM-SWING-10L", *, priced: bool = False) -> ManagerM
     return mandate
 
 
-def _book(book_id: str = "FM-SWING-10L", *, stop: Decimal | None = HELD_STOP) -> ManagerBook:
+def _book(book_id: str = "FM-SWING-BRK-10L", *, stop: Decimal | None = HELD_STOP) -> ManagerBook:
     return ManagerBook(
         book_id=book_id,
         nav=NAV,
@@ -542,7 +542,7 @@ def test_a_full_session_runs_four_calls_and_journals_every_decision_and_bundle(
     calls = journal.events(CALL_EVENT)
     assert len(calls) == 4
     for entry in calls:
-        assert entry.case_id == "FM-SWING-10L" and entry.decision is Decision.HEARTBEAT
+        assert entry.case_id == "FM-SWING-BRK-10L" and entry.decision is Decision.HEARTBEAT
         bundle = journal.evidence[entry.evidence_snapshot_ref or ""]
         assert bundle.rendered_prompt in llm.prompts
         assert int(entry.payload["input_tokens"]) > 0 and entry.payload["repair"] == "false"
@@ -1241,35 +1241,49 @@ def test_holdings_are_rendered_without_cost_basis_or_pnl(world: World, tmp_path:
         assert "unrealised" not in prompt.lower() and "unrealized" not in prompt.lower()
 
 
-@pytest.mark.parametrize(
-    ("book_id", "own", "other"),
-    [
-        ("FM-SWING-10L", "Your playbook (swing, 1\u20134 weeks)", "Your playbook (positional"),
-        ("FM-POS-1CR", "Your playbook (positional, 1\u20133 months)", "Your playbook (swing"),
-    ],
-)
+#: Amendment 2 (f): each style's playbook heading in `prompts/manager.md`.
+PLAYBOOKS = {
+    "FM-SWING-BRK-10L": "### Your playbook: swing breakout (1\u20134 weeks)",
+    "FM-SWING-EVT-10L": "### Your playbook: swing event (1\u20134 weeks)",
+    "FM-POS-TREND-10L": "### Your playbook: positional trend (1\u20133 months)",
+    "FM-POS-FUND-10L": "### Your playbook: positional fundamentals (1\u20133 months)",
+}
+
+
+@pytest.mark.parametrize("book_id", list(PLAYBOOKS))
 def test_only_the_managers_own_style_block_and_the_current_round_block_render(
-    world: World, tmp_path: Path, book_id: str, own: str, other: str
+    world: World, tmp_path: Path, book_id: str
 ) -> None:
-    prompts = _all_prompts(world, tmp_path, _mandate(book_id))
+    mandate = _mandate(book_id)
+    own = PLAYBOOKS[book_id]
+    prompts = _all_prompts(world, tmp_path, mandate)
     titles = {
         ROUND_ZERO: "## Your task this round: triage and research requests",
         ROUND_RESEARCH: "## Your task this round: read the evidence",
         ROUND_FINAL: "## Your task this round: decide",
     }
     for key, prompt in prompts.items():
-        assert own in prompt and other not in prompt
+        assert own in prompt
+        assert all(other not in prompt for other in PLAYBOOKS.values() if other != own)
+        assert prompt.count("### Your playbook:") == 1
         assert titles[key] in prompt
         assert all(t not in prompt for k, t in titles.items() if k != key)
         assert "[[" not in prompt and "{{" not in prompt and "<!--" not in prompt
-        assert f"# You are {book_id}," in prompt
+        assert f"# You are {mandate.manager}," in prompt
+        assert f"Style **{mandate.style.value}**" in prompt
+
+
+def test_a_mirror_book_is_never_handed_to_a_manager(world: World, tmp_path: Path) -> None:
+    # Amendment 2 (b): the manager decides on its primary book only; the mirror follows it.
+    with pytest.raises(ValueError, match="decides on its primary book only"):
+        _run(world, tmp_path, [], mandate=_mandate("FM-SWING-BRK-1CR"))
 
 
 def test_a_prompt_never_contains_another_managers_id_book_or_decisions(
     world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
 ) -> None:
     roster = load_roster()
-    own = "FM-SWING-10L"
+    own = "FM-SWING-BRK-10L"
     others = [b.id for b in roster.books if b.id != own]
     # Another manager's session first, into the same snapshot store: its decisions are journaled
     # in its own stream and must not reach this manager's prompts.
@@ -1277,8 +1291,8 @@ def test_a_prompt_never_contains_another_managers_id_book_or_decisions(
         world,
         tmp_path,
         [research([LEADER], ["leader ltd order book"]), research(), final(passed(LEADER), hold())],
-        mandate=_mandate("FM-POS-10L"),
-        book=_book("FM-POS-10L"),
+        mandate=_mandate("FM-POS-TREND-10L"),
+        book=_book("FM-POS-TREND-10L"),
     )
     assert other_journal.events(DECISION_EVENT)
     _, journal, llm = _run(
@@ -1293,7 +1307,7 @@ def test_a_prompt_never_contains_another_managers_id_book_or_decisions(
     for prompt in llm.prompts:
         for other in others:
             assert other not in prompt
-        assert "FM-POS-10L" not in prompt
+        assert "FM-POS-TREND-10L" not in prompt
     assert all(e.case_id == own for e in journal.entries)
     for bundle in journal.evidence.values():
         assert bundle.case_id == own
@@ -1306,7 +1320,7 @@ def test_a_manager_is_never_handed_another_managers_book(world: World, tmp_path:
             _mandate(),
             SESSION,
             _commons(world, tmp_path),
-            _book("FM-POS-10L"),
+            _book("FM-POS-TREND-10L"),
             StubLLM(),
             StubFetcher(),
             journal=ListJournal(),
@@ -1317,10 +1331,13 @@ def test_a_manager_is_never_handed_another_managers_book(world: World, tmp_path:
 def test_the_template_refuses_a_missing_value_and_never_rescans_injected_text() -> None:
     template = PromptTemplate.load()
     with pytest.raises(TemplateError, match="no value for placeholders"):
-        template.render(style="SWING", round_key=ROUND_ZERO, values={})
+        template.render(style="SWING_BREAKOUT", round_key=ROUND_ZERO, values={})
     with pytest.raises(TemplateError, match="STYLE:INDEX"):
         template.render(style="INDEX", round_key=ROUND_ZERO, values={})
+    with pytest.raises(TemplateError, match="STYLE:SWING"):  # the pre-Amendment-2 block is gone
+        template.render(style="SWING", round_key=ROUND_ZERO, values={})
     names = set(re.findall(r"\{\{([a-z_]+)\}\}", template.text))
-    values = dict.fromkeys(names, "x") | {"research_bundles": "{{manager_id}} [[STYLE:POSITIONAL]]"}
-    out = template.render(style="SWING", round_key=ROUND_FINAL, values=values)
-    assert "{{manager_id}} [[STYLE:POSITIONAL]]" in out
+    injected = "{{manager_id}} [[STYLE:POSITIONAL_TREND]]"
+    values = dict.fromkeys(names, "x") | {"research_bundles": injected}
+    out = template.render(style="SWING_BREAKOUT", round_key=ROUND_FINAL, values=values)
+    assert injected in out

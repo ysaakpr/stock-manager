@@ -37,14 +37,19 @@ module is the job's **composition root**: it builds the M17 paper accounts
 6. *Commons build* (`CommonsBuilder`): sheets, shortlist, screens and regime, then the filing
    digests scoped to the screens' names plus the shortlist, and the frozen base-rate table.
 7. *Managers*, one at a time, each in isolation (`analyst.fundmanager.runtime.run_manager`): its
-   own book view (`analyst.fundmanager.job.manager_book`: thesis, invalidations, stop, weight,
-   forced reviews first), its own journal stream, the model behind a `DeadlineLLM` (08:30 IST on
-   the next session; rate limits back off inside it). A manager past the deadline journals
+   own **primary** book view (`analyst.fundmanager.job.manager_book`: thesis, invalidations, stop,
+   weight, forced reviews first), its own journal stream, the model behind a `DeadlineLLM` (08:30
+   IST on the next session; rate limits back off inside it). A manager past the deadline journals
    ``MISSED_SESSION`` and stages nothing of its own; one that raises is journaled
    ``MANAGER_CRASHED``; either way the others still run and its stop exits still stage. Accepted
    decisions become book orders through the M17 rails (`FundBook.decide`); a staged BUY's stop
-   goes into the `StopBook` and its memo beside it.
-8. *Control books* (`ControlBook.run`), on the same shortlist, no model.
+   goes into the `StopBook` and its memo beside it. Then the manager's **mirror** (Amendment 2 b,
+   `analyst.fundmanager.mirror`) is driven toward the primary's post-decision target weights
+   through its own rails — its own stop exits first, the primary's stop percents declared at its
+   own staging close, the primary's tightened levels taken — and journals ``MIRROR_DIVERGENCE``.
+   No model is called for the mirror and the manager never sees it.
+8. *Control books* (`ControlBook.run`), one per manager book, on the same shortlist, no model;
+   then the secondary *style books* on their managers' starting screens (`style_candidates`).
 9. *Persist, score, digest.* The desk's whole state is recorded in ``paper_session`` (one row a
    session under the desk id, the M15.3 ledger, no new schema); the scoreboard is built from the
    desk's own ledger and — when a journal reader is given — rebuilt from the journal and checked
@@ -65,6 +70,7 @@ or let one manager's failure stop another.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import tempfile
@@ -101,7 +107,11 @@ from analyst.fundmanager.controls import (
     BenchState,
     ControlBook,
     ControlState,
+    RankedTargets,
+    quality_from_dossier,
+    rebalance_due,
     record_mark,
+    style_candidates,
 )
 from analyst.fundmanager.digest import write_digest
 from analyst.fundmanager.job import (
@@ -116,6 +126,8 @@ from analyst.fundmanager.job import (
     STREAM_LIVE,
     DeadlineLLM,
     HoldingMemo,
+    StopDeclaration,
+    StopTightening,
     StreamJournal,
     book_entry,
     manager_book,
@@ -126,10 +138,20 @@ from analyst.fundmanager.job import (
 )
 from analyst.fundmanager.mandate import (
     BenchMandate,
+    BookRole,
     ControlMandate,
     ManagerMandate,
+    ManagerStyle,
     Roster,
+    StyleMandate,
     load_roster,
+)
+from analyst.fundmanager.mirror import (
+    MirrorState,
+    divergence_entry,
+    plan_mirror,
+    settle_plan,
+    target_weights,
 )
 from analyst.fundmanager.render import PromptTemplate
 from analyst.fundmanager.runtime import (
@@ -160,7 +182,13 @@ from analyst.fundmanager.scoreboard import (
     suspended_holdings_on,
     todays_decisions,
 )
-from analyst.fundmanager.stops import STOP_EXIT_EVENT, StopBook, StopExit, with_stop_exits
+from analyst.fundmanager.stops import (
+    STOP_EXIT_EVENT,
+    StopBook,
+    StopExit,
+    StopLoosenError,
+    with_stop_exits,
+)
 from analyst.journal.evidence import canonical_bytes, digest_of
 from analyst.journal.models import Actor, Decision, JournalEntry
 from analyst.llm import LLM
@@ -210,9 +238,13 @@ _LOG = get_logger(__name__)
 #: The ``paper_session.book_id`` the desk's state is recorded under, per stream.
 DESK_IDS: Final[Mapping[str, str]] = {
     STREAM_LIVE: "m17_fund_managers",
-    STREAM_DRY: "m17_dry_fund_managers",
+    # M17.14: the dry desk restarts on the Amendment 2 roster under a new id. The desk state of
+    # the 2026-10-09 dry session (the previous roster, m17-desk/1) stays where it is, for the
+    # record; Amendment 2 (g) counts it toward wiring and timing only.
+    STREAM_DRY: "m17_dry2_fund_managers",
 }
-DESK_STATE_VERSION: Final = "m17-desk/1"
+#: /2 (M17.14, Amendment 2): manager books in pairs, the mirror's state, style books.
+DESK_STATE_VERSION: Final = "m17-desk/2"
 #: Every journal entry of a session is stamped at this IST time on the session's date (a frozen
 #: clock), so a session's journal is a pure function of the session, as in every replay.
 JOURNAL_CLOCK_AT: Final = time(22, 0)
@@ -326,7 +358,7 @@ class RunOutcome(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ManagerOutcome:
-    """What one manager's session came to."""
+    """What one manager's session came to: its primary book's, then its mirror's orders."""
 
     book_id: str
     status: str
@@ -336,6 +368,10 @@ class ManagerOutcome:
     stop_exits: int
     seconds: float
     reason: str | None = None
+    mirror_id: str | None = None
+    mirror_staged: int = 0
+    mirror_refused: int = 0
+    mirror_tracking_gap_pp: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,8 +397,11 @@ class M17SessionResult:
 
 @dataclass(slots=True)
 class _ManagerSide:
+    """A manager book's own stops and memos; a mirror's also carries its `MirrorState`."""
+
     stops: StopBook
     memos: dict[str, HoldingMemo]
+    mirror: MirrorState | None = None
 
 
 @dataclass(slots=True)
@@ -398,6 +437,8 @@ class _Desk:
             if side is not None:
                 document["stops"] = side.stops.to_document()
                 document["memos"] = [side.memos[i].to_document() for i in sorted(side.memos)]
+                if side.mirror is not None:
+                    document["mirror"] = side.mirror.to_document()
             if book_id in self.controls:
                 document["control"] = self.controls[book_id].to_document()
             books[book_id] = document
@@ -531,14 +572,20 @@ def _desk(
             else {},
         )
         if isinstance(mandate, ManagerMandate):
+            mirror: MirrorState | None = None
+            if mandate.role is BookRole.MIRROR:
+                mirror = (
+                    MirrorState.from_document(document["mirror"]) if document else MirrorState()
+                )
             managers[mandate.id] = _ManagerSide(
                 stops=StopBook.from_document(document["stops"]) if document else StopBook(),
                 memos={
                     m["isin"]: HoldingMemo.from_document(m)
                     for m in (document["memos"] if document else [])
                 },
+                mirror=mirror,
             )
-        elif isinstance(mandate, ControlMandate):
+        elif isinstance(mandate, ControlMandate | StyleMandate):
             controls[mandate.id] = (
                 ControlState.from_document(document["control"]) if document else ControlState()
             )
@@ -757,8 +804,8 @@ def run_m17_session(
         # 6. the Commons
         built, commons_error = _build_commons(commons, session, book_clock)
         stages.done("commons")
-        # 7. managers, one at a time
-        for mandate in roster.managers:
+        # 7. managers, one at a time: each decides on its primary book, then its mirror follows
+        for mandate in roster.primaries:
             managers.append(
                 _run_one_manager(
                     mandate,
@@ -766,7 +813,7 @@ def run_m17_session(
                     session,
                     built,
                     commons_error,
-                    exits.get(mandate.id, ()),
+                    exits,
                     llm=llm,
                     fetcher=fetcher,
                     clock=clock,
@@ -793,6 +840,14 @@ def run_m17_session(
             desk.controls[control.id] = run.state
             control_buys.extend(run.buys)
         stages.done("controls")
+        # 8b. the secondary style books (Amendment 2 d): never scored for pass/fail
+        for style in roster.styles:
+            style_book = ControlBook(
+                style, desk.books[style.id], roster.rails, state=desk.controls[style.id]
+            )
+            ranked = _style_targets(style, desk, session, built, book_clock)
+            desk.controls[style.id] = style_book.run_ranked(session, ranked, cap_tiers).state
+        stages.done("styles")
 
     # 9. persist, score, digest
     written = journal.written[first:]
@@ -1184,7 +1239,7 @@ def _run_one_manager(
     session: date,
     built: SessionCommons | None,
     commons_error: str | None,
-    exits: Sequence[StopExit],
+    all_exits: Mapping[str, Sequence[StopExit]],
     *,
     llm: LLM,
     fetcher: Fetcher,
@@ -1199,17 +1254,29 @@ def _run_one_manager(
     started = walltime.perf_counter()
     book = desk.books[mandate.id]
     side = desk.managers[mandate.id]
+    exits = all_exits.get(mandate.id, ())
+    mirror_id = desk.roster.mirror_of(mandate.manager).id
     status = "DECIDED"
     reason: str | None = None
     calls = 0
     orders_out: list[BookOrder] = []
-    stops: Sequence[Any] = ()
-    tightenings: Sequence[Any] = ()
+    stops: Sequence[StopDeclaration] = ()
+    tightenings: Sequence[StopTightening] = ()
     memos: Sequence[HoldingMemo] = ()
 
     if book.kill_switch.is_tripped:
         report = book.decide(session, ())
-        return _manager_outcome(mandate.id, "HALTED", 0, report, 0, started, None)
+        mirror_report = desk.books[mirror_id].decide(session, ())
+        return _manager_outcome(
+            mandate.id,
+            "HALTED",
+            0,
+            report,
+            0,
+            started,
+            None,
+            mirror=(mirror_id, mirror_report, None),
+        )
     if commons_error is not None or built is None or built.manager is None:
         status, reason = COMMONS_UNAVAILABLE_EVENT, commons_error or "no Commons"
         _journal_manager_line(
@@ -1352,7 +1419,88 @@ def _run_one_manager(
     for tightening in tightenings:
         if tightening.isin in side.stops.stops:
             side.stops.tighten(tightening.isin, level=tightening.level, session=session)
-    return _manager_outcome(mandate.id, status, calls, report, len(exits), started, reason)
+    declared = [d for d in stops if d.isin in staged_buys]
+    mirror_report, gap = _drive_mirror(
+        desk,
+        mandate,
+        report,
+        session,
+        all_exits.get(mirror_id, ()),
+        declared=declared,
+        tightenings=tightenings,
+    )
+    return _manager_outcome(
+        mandate.id,
+        status,
+        calls,
+        report,
+        len(exits),
+        started,
+        reason,
+        mirror=(mirror_id, mirror_report, gap),
+    )
+
+
+def _drive_mirror(
+    desk: _Desk,
+    primary_mandate: ManagerMandate,
+    primary_report: DecisionReport,
+    session: date,
+    exits: Sequence[StopExit],
+    *,
+    declared: Sequence[StopDeclaration],
+    tightenings: Sequence[StopTightening],
+) -> tuple[DecisionReport, str | None]:
+    """Drive the manager's mirror toward its primary's post-decision weights (Amendment 2 b).
+
+    The mirror's own stop exits go first; its other orders come from `plan_mirror`; the book
+    clears and stages them through its rails. A buy it stages takes the primary's declared stop
+    percent at the mirror's own close; a stop the primary tightened is tightened to the same
+    level (never loosened). The divergence is journaled on the mirror book. Returns the mirror's
+    decision report and its tracking gap in pp (None when halted).
+    """
+    mirror_mandate = desk.roster.mirror_of(primary_mandate.manager)
+    mirror = desk.books[mirror_mandate.id]
+    side = desk.managers[mirror_mandate.id]
+    state = side.mirror
+    if state is None:
+        raise M17JobError(f"{mirror_mandate.id} has no mirror state")
+    for declaration in declared:
+        state.stop_pcts[declaration.isin] = declaration.stop_pct
+    if mirror.kill_switch.is_tripped:
+        return mirror.decide(session, ()), None
+    primary = desk.books[primary_mandate.id]
+    targets = target_weights(primary, primary_report, session)
+    plan = plan_mirror(
+        mirror,
+        targets,
+        session,
+        state,
+        max_positions=mirror_mandate.max_positions,
+        stopped_today=[e.isin for e in exits],
+    )
+    report = mirror.decide(session, with_stop_exits(list(plan.orders), list(exits)))
+    for order, _ in report.staged:
+        if order.side is not Side.BUY:
+            continue
+        pct = state.stop_pcts.get(order.isin)
+        close = mirror.market.close(order.isin, session)
+        if pct is None or close is None:
+            continue
+        # an add-on below the standing stop keeps the standing (higher) stop
+        with contextlib.suppress(StopLoosenError):
+            side.stops.declare(order.isin, stop_pct=pct, reference_price=close, session=session)
+    for tightening in tightenings:
+        standing = side.stops.stops.get(tightening.isin)
+        if standing is not None and tightening.level >= standing.level:
+            side.stops.tighten(tightening.isin, level=tightening.level, session=session)
+    held = {i for i, q in mirror.account.quantities().items() if q > 0}
+    for isin in [i for i in state.stop_pcts if i not in targets.weights and i not in held]:
+        del state.stop_pcts[isin]
+    lines = settle_plan(plan, report, mirror)
+    entry, evidence = divergence_entry(mirror, targets, lines, report, session)
+    mirror.journal.append(entry, evidence=evidence)
+    return report, entry.payload["tracking_gap_pp"]
 
 
 def _journal_missed(
@@ -1397,6 +1545,8 @@ def _manager_outcome(
     stop_exits: int,
     started: float,
     reason: str | None,
+    *,
+    mirror: tuple[str, DecisionReport, str | None] | None = None,
 ) -> ManagerOutcome:
     return ManagerOutcome(
         book_id=book_id,
@@ -1407,7 +1557,76 @@ def _manager_outcome(
         stop_exits=stop_exits,
         seconds=round(walltime.perf_counter() - started, 3),
         reason=reason,
+        mirror_id=None if mirror is None else mirror[0],
+        mirror_staged=0 if mirror is None else len(mirror[1].staged),
+        mirror_refused=0 if mirror is None else len(mirror[1].refused),
+        mirror_tracking_gap_pp=None if mirror is None else mirror[2],
     )
+
+
+#: ``payload.event`` when a style book's ranked list could not be built on a due rebalance.
+STYLE_LIST_UNAVAILABLE_EVENT: Final = "STYLE_LIST_UNAVAILABLE"
+
+
+def _style_targets(
+    style: StyleMandate,
+    desk: _Desk,
+    session: date,
+    built: SessionCommons | None,
+    clock: Clock,
+) -> RankedTargets | None:
+    """The style book's ranked list, or None when it is not due or cannot be built.
+
+    Only a due rebalance builds the list — the FUND list reads a dossier for every S4 name, which
+    is wasted work on a session the book does not rebalance. With no screens at all (the Commons
+    failed, already journaled for every manager) the rebalance waits, exactly as a control's does
+    without a shortlist; a list that cannot be built from screens that exist (the FUND dossiers
+    could not be read) is journaled ``STYLE_LIST_UNAVAILABLE`` in the style book's stream (loud),
+    and the rebalance waits too.
+    """
+    state = desk.controls[style.id]
+    book = desk.books[style.id]
+    last = state.last_rebalance
+    since = None if last is None else book.market.sessions_between(last, session)
+    if not rebalance_due(style, state, session, sessions_since=since):
+        return None
+    manager_style = desk.roster.primary_of(style.style_for).style
+    if built is None or built.screens is None:
+        # The Commons failed: each manager has journaled COMMONS_UNAVAILABLE already, and the
+        # style book waits like a control without a shortlist.
+        _LOG.warning(
+            "fm_controls.rebalance_deferred",
+            book=style.id,
+            session=session.isoformat(),
+            reason="no screens for the session",
+        )
+        return None
+    try:
+        quality = None
+        if manager_style is ManagerStyle.POSITIONAL_FUNDAMENTAL:
+            if built.manager is None:
+                raise M17JobError("no manager Commons to read the S4 names' dossiers from")
+            universe = {r.isin for r in built.manager.sheets.universe}
+            names = [e.isin for e in built.screens.s4 if e.isin in universe]
+            quality = {d.isin: quality_from_dossier(d) for d in built.manager.dossiers(names)}
+        return style_candidates(manager_style, built.screens, quality=quality)
+    except Exception as exc:  # the style book waits; the reason is journaled, never silent
+        reason = f"{type(exc).__name__}: {exc}"
+    _write(
+        book.journal,
+        book_entry(
+            book_id=style.id,
+            session=session,
+            clock=clock,
+            decision=Decision.ESCALATE,
+            event=STYLE_LIST_UNAVAILABLE_EVENT,
+            rationale=f"the {manager_style.value} style list for {session.isoformat()} could not "
+            f"be built ({reason}); the due rebalance waits for the next session",
+            payload={"reason": reason[:500]},
+        ),
+    )
+    _LOG.error("fm_job.style_list_failed", book=style.id, session=session.isoformat(), error=reason)
+    return None
 
 
 # -- step 9 ---------------------------------------------------------------------------------------
@@ -1422,7 +1641,7 @@ def _extend_ledger(
     """Add this session's scoreboard inputs to the desk's ledger, from the objects themselves
     where the job holds them (marks, outcomes — already added — control buys) and from the lines
     it journaled for the rest (decisions, refusals, model calls)."""
-    managers = {m.id for m in desk.roster.managers}
+    managers = {m.id for m in desk.roster.manager_books}
     books = {b.id for b in desk.roster.books}
     ledger = desk.ledger
     ledger["marks"].extend(m.model_dump(mode="json") for m in marks)
@@ -1585,6 +1804,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "refused": m.refused,
                         "stop_exits": m.stop_exits,
                         "seconds": m.seconds,
+                        "mirror": m.mirror_id,
+                        "mirror_staged": m.mirror_staged,
+                        "mirror_refused": m.mirror_refused,
+                        "mirror_tracking_gap_pp": m.mirror_tracking_gap_pp,
                     }
                     for m in result.managers
                 ],
