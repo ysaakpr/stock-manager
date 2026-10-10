@@ -43,6 +43,7 @@ from psycopg.types.json import Json
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger, log_context
+from dataplatform.redaction import mask_and_truncate
 from dataplatform.retry import RetryPendingError
 from dataplatform.scheduler.registry import Job, JobContext, JobRegistry, default_registry
 from dataplatform.store.db import Connection, connection
@@ -51,6 +52,7 @@ __all__ = [
     "ALIVE",
     "DEFAULT_HEARTBEAT_INTERVAL",
     "DEFAULT_SCHEDULER_ID",
+    "JOB_ERROR_CHARS",
     "TICK_JOB_ID",
     "Heartbeat",
     "JobRun",
@@ -75,6 +77,10 @@ ALIVE = "ALIVE"
 #: How often the scheduler proves it is alive when no job is due. A minute is far below any
 #: plausible staleness threshold for a daily pipeline and costs one tiny UPSERT.
 DEFAULT_HEARTBEAT_INTERVAL = timedelta(seconds=60)
+
+#: How much of a failed job's exception `job_run.error` keeps, after masking. Enough to diagnose;
+#: the traceback is in the log line next to it.
+JOB_ERROR_CHARS = 2000
 
 #: Namespace for this module's two-key advisory locks. Postgres keeps the (int4, int4) lock space
 #: separate from the (int8) one the migration runner uses, so the two cannot collide even by
@@ -269,18 +275,18 @@ class SchedulerRunner:
             job.fn(context)
         except Exception as error:
             elapsed = time.monotonic() - started
+            # Masked, then bounded: `job_run.error` is read back by `failure_alerts` and the
+            # status API, and a job's exception can quote anything — a DSN, a CLI's stderr, a
+            # token in a URL (invariant #13). `failure_alerts` masks again before an alert leaves.
+            message = mask_and_truncate(f"{type(error).__name__}: {error}", JOB_ERROR_CHARS)
             log.error(
                 "job.failed",
                 elapsed_s=round(elapsed, 3),
                 error_type=type(error).__name__,
-                error=str(error),
+                error=message,
                 exc_info=True,
             )
-            return (
-                JobState.FAILED,
-                f"{type(error).__name__}: {error}",
-                isinstance(error, RetryPendingError),
-            )
+            return (JobState.FAILED, message, isinstance(error, RetryPendingError))
 
         elapsed = time.monotonic() - started
         if elapsed > budget:

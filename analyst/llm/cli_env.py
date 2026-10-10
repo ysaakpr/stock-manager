@@ -41,6 +41,13 @@ CLAUDE_CLI_ENV_ALLOWLIST: Final[tuple[str, ...]] = (
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
     "XDG_RUNTIME_DIR",
+    # A proxy URL may carry `user:password@`, and it has to reach the child intact: that is how
+    # the CLI authenticates to the proxy. It is the one credential-capable value forwarded. Should
+    # the CLI echo it, the echo is safe only because `mask_secrets`' URL-userinfo rule masks
+    # `user:password@` in every place this repo quotes CLI output — `claude_cli._cli_detail` and
+    # the Commons fetcher's error path — so neither of those may stop masking.
+    "ALL_PROXY",
+    "all_proxy",
     "HTTPS_PROXY",
     "https_proxy",
     "HTTP_PROXY",

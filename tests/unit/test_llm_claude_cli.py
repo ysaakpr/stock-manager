@@ -524,3 +524,19 @@ def test_a_rate_limited_run_is_retryable_and_any_other_failure_is_not(
     with pytest.raises(LLMError) as raised:
         cli.complete(ASK, model="claude-opus-5")
     assert not isinstance(raised.value, LLMRateLimitError)
+
+
+def test_a_proxy_with_userinfo_reaches_the_child_and_never_an_error_message(
+    cli: ClaudeCliLLM, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Proxy auth needs the userinfo in the child; an echo of it in a failure is masked."""
+    proxy = "http://u:" + _fake_secret("proxy") + "@proxy.internal:3128"
+    monkeypatch.setenv("ALL_PROXY", proxy)
+    monkeypatch.setenv("HTTPS_PROXY", proxy)
+    fake = run_with(monkeypatch, "", returncode=1, stderr=f"proxy refused via {proxy}")
+    with pytest.raises(LLMError) as caught:
+        cli.complete(ASK, model="claude-opus-5")
+    assert fake.env is not None
+    assert fake.env["ALL_PROXY"] == proxy and fake.env["HTTPS_PROXY"] == proxy
+    assert _fake_secret("proxy") not in str(caught.value)
+    assert "http://***@proxy.internal:3128" in str(caught.value)
