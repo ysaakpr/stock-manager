@@ -75,6 +75,15 @@ To resolve one you have to decide which claim is wrong, which means looking at t
 * **A recycled symbol with a bad date.** Most common. The old company's window should have closed
   before the new one opened; NSE's rename date is wrong, or the rename is missing from
   `symbolchange.csv` entirely. Fix the window by hand (below).
+* **An ISIN reissued under the same symbol** (face-value split; M18.1). The ingest splits these
+  itself — the old ISIN's window closes the day before the switch, the new one starts on it — when
+  it has evidence for the switch date: an `isin_lineage` edge, else the first dated
+  `EQUITY_L_YYYYMMDD.csv` in L0 that shows the new ISIN where the capture before it showed the
+  old. A conflict naming two ISINs of one issuer (`INE887D01016` / `INE887D01024`) that is still
+  queued means neither exists. Add the edge (`isin_lineage`, `detected_by = 'MANUAL'`) once the
+  switch session is confirmed, then re-run `identity.ingest --from-l0`; do not hand-edit windows.
+  The ingest leaves a new-ISIN window that is already stored from the listing date alone — that
+  is the one-off state `repair_reissues` exists for (below).
 * **A genuine dual claim.** Two live securities with the same symbol on one exchange does not
   happen; if you are looking at one, the ISIN in one of the source rows is wrong. Check the ISIN
   against the exchange's own page before touching anything.
@@ -105,6 +114,29 @@ keeps what it has: a closed window is never moved or reopened, because a past da
 would change under everything that has already resolved against it. Nothing is broken and the
 rest of the ingest landed; decide whether the stored window or the new file is right, and if it
 is the file, correct the row by hand as above.
+
+## 2026-10-10: repair the seven reissue windows (M18.1, one-off)
+
+The 07:00 IST `identity_refresh` on Sat 2026-10-10 ran before the reissue split existed and stored
+seven new-ISIN windows from the original listing date beside the still-open old ones
+(TDPOWERSYS, KIRLPNU, CORDELIA, TCC, TAALTECH, BLSE, BUILDPRO; reconciliation ids 21-27). Nothing
+the ingest does will delete those rows. On the server, from the repo root, after the M18.1 merge:
+
+```bash
+uv run python -m dataplatform.identity.repair_reissues           # dry run, READ ONLY: read the plan
+uv run python -m dataplatform.identity.repair_reissues --apply   # one transaction, then commit
+uv run python -m dataplatform.identity.ingest --from-l0 2026-10-10   # re-derive; no network
+```
+
+* The dry run must show 7 deletes, 7 closes, 7 inserts and every open reconciliation row for
+  the seven pairs (ids 21-27 plus any RESOLVE rows ca_refresh, delivery or deals raised for the
+  same pairs — 28-31 on 2026-10-10). Anything else and it refuses, writing nothing.
+* `--apply` re-run is a no-op ("already applied").
+* The re-derive must report `0 windows inserted, 0 closed`. It still exits 1 and prints ten
+  `AMBIGUOUS` lines: those are the BSE scrip-id collisions (ids 1-10), which predate this repair.
+  Re-detected conflicts are not re-queued.
+* Use `identity.ingest --from-l0`, not `ingest.identity_refresh`: the latter fetches when it is
+  run on a day whose files are not in L0 yet.
 
 ## Health
 
