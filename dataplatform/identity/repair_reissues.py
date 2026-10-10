@@ -14,7 +14,8 @@ it. This command is the one-off that does, in one transaction:
 2. re-derives them from the same day's L0 snapshot through the fixed `ingest_snapshot` logic —
    the new ISIN starts on its evidenced switch date (`isin_lineage`, else the L0 equity-list
    series), the old ISIN's window closes the day before;
-3. marks the matching open `identity_reconciliation` rows resolved, with the reason recorded.
+3. marks the matching open `identity_reconciliation` rows resolved, with the reason recorded —
+   except BLSE's 2026-09-08 RESOLVE row, the only record of a dividend that was never filed.
 
 What it never does: run against a store that is not exactly the expected broken state. Every
 window, every boundary and every reconciliation id is checked against `EXPECTED_2026_10_10` before
@@ -32,11 +33,13 @@ import argparse
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Final
 
-from dataplatform.clock import Clock, SystemClock
+from dataplatform.clock import IST, Clock, SystemClock
 from dataplatform.identity.ingest import (
+    REISSUE_EVIDENCE_EQUITY_LIST,
+    REISSUE_EVIDENCE_LINEAGE,
     ReissueBoundary,
     ReissueEvidence,
     derive_master,
@@ -84,21 +87,42 @@ class ExpectedReissue:
     #: The INGEST-detected `identity_reconciliation` row this repair resolves; `None` in a test
     #: database whose ids are not the live ones.
     reconciliation_id: int | None = None
+    #: The evidence the boundary must come from (`REISSUE_EVIDENCE_*`); `None` accepts either.
+    evidence: str | None = None
+    #: `on_date`s of RESOLVE rows for this pair that must exist and are deliberately left open —
+    #: each is the only record of a corporate action that was held back and never filed.
+    keep_open: tuple[date, ...] = ()
 
 
 #: The snapshot whose ingest stored the bad windows. Its L0 files are what the repair re-derives.
 REPAIR_SNAPSHOT_DATE: Final = date(2026, 10, 10)
 
-#: The seven, as investigated on 2026-10-10. The first four switch dates are `isin_lineage` edges;
-#: the last three are the first L0 `EQUITY_L` capture showing the new ISIN.
+_LINEAGE: Final = REISSUE_EVIDENCE_LINEAGE
+_SERIES: Final = REISSUE_EVIDENCE_EQUITY_LIST
+
+#: The seven, as investigated on 2026-10-10. TDPOWERSYS, KIRLPNU, TCC and CORDELIA have
+#: `isin_lineage` edges; TAALTECH, BLSE and BUILDPRO are dated by the L0 `EQUITY_L` series,
+#: confirmed against the L0 bhavcopy of the switch session.
+#:
+#: BLSE's RESOLVE row on 2026-09-08 (id 28) stays open: ca_refresh held back BLSE's ₹0.50 dividend
+#: with that ex-date, it has left every future scheduled window, and that row is the only visible
+#: record that it was never filed — until an offline re-file from L0 exists.
 EXPECTED_2026_10_10: Final[tuple[ExpectedReissue, ...]] = (
-    ExpectedReissue("TDPOWERSYS", "INE419M01027", "INE419M01035", date(2026, 8, 24), 21),
-    ExpectedReissue("KIRLPNU", "INE811A01020", "INE811A01038", date(2026, 8, 18), 22),
-    ExpectedReissue("BLSE", "INE0NLT01010", "INE0NLT01028", date(2026, 10, 6), 23),
-    ExpectedReissue("BUILDPRO", "INE24OJ01011", "INE24OJ01029", date(2026, 10, 8), 24),
-    ExpectedReissue("TCC", "INE887D01016", "INE887D01024", date(2026, 9, 4), 25),
-    ExpectedReissue("TAALTECH", "INE524T01011", "INE524T01029", date(2026, 9, 22), 26),
-    ExpectedReissue("CORDELIA", "INE0LZF01013", "INE0LZF01039", date(2026, 8, 25), 27),
+    ExpectedReissue("TDPOWERSYS", "INE419M01027", "INE419M01035", date(2026, 8, 24), 21, _LINEAGE),
+    ExpectedReissue("KIRLPNU", "INE811A01020", "INE811A01038", date(2026, 8, 18), 22, _LINEAGE),
+    ExpectedReissue("TCC", "INE887D01016", "INE887D01024", date(2026, 9, 4), 25, _LINEAGE),
+    ExpectedReissue("CORDELIA", "INE0LZF01013", "INE0LZF01039", date(2026, 8, 25), 27, _LINEAGE),
+    ExpectedReissue("TAALTECH", "INE524T01011", "INE524T01029", date(2026, 9, 22), 26, _SERIES),
+    ExpectedReissue(
+        "BLSE",
+        "INE0NLT01010",
+        "INE0NLT01028",
+        date(2026, 10, 6),
+        23,
+        _SERIES,
+        keep_open=(date(2026, 9, 8),),
+    ),
+    ExpectedReissue("BUILDPRO", "INE24OJ01011", "INE24OJ01029", date(2026, 10, 8), 24, _SERIES),
 )
 
 
@@ -110,6 +134,7 @@ class RepairRefusedError(IdentityError):
 class _StoredRow:
     id: int
     window: SymbolWindow
+    recorded_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +156,7 @@ class RepairPlan:
     history: HistoryPlan = field(default_factory=HistoryPlan)
     boundaries: tuple[ReissueBoundary, ...] = ()
     resolutions: tuple[tuple[_OpenConflict, str], ...] = ()
+    kept_open: tuple[_OpenConflict, ...] = ()
 
     def describe(self) -> list[str]:
         """The plan as lines a human reads before saying `--apply`."""
@@ -155,6 +181,14 @@ class RepairPlan:
                 f"on {conflict.on_date} {list(conflict.isins)}"
             )
             lines.append(f"      reason: {reason}")
+        lines.append(
+            f"  leave {len(self.kept_open)} row(s) open (a held-back action, never filed):"
+        )
+        for conflict in self.kept_open:
+            lines.append(
+                f"    = id={conflict.id} {conflict.detected_by} {conflict.symbol} "
+                f"on {conflict.on_date} {list(conflict.isins)}"
+            )
         return lines
 
 
@@ -189,12 +223,13 @@ def plan_repair(
     """
     symbols = [e.symbol for e in expected]
     rows = conn.execute(
-        "SELECT id, isin, symbol, series, valid_from, valid_to, source FROM symbol_history "
+        "SELECT id, isin, symbol, series, valid_from, valid_to, source, recorded_at "
+        "FROM symbol_history "
         "WHERE exchange = %s AND symbol = ANY(%s) ORDER BY symbol, valid_from, isin",
         (Exchange.NSE.value, symbols),
     ).fetchall()
     by_symbol: dict[str, list[_StoredRow]] = {}
-    for row_id, isin, symbol, series, valid_from, valid_to, source in rows:
+    for row_id, isin, symbol, series, valid_from, valid_to, source, recorded_at in rows:
         by_symbol.setdefault(str(symbol), []).append(
             _StoredRow(
                 id=int(row_id),
@@ -207,6 +242,7 @@ def plan_repair(
                     None if series is None else str(series),
                     str(source),
                 ),
+                recorded_at=recorded_at,
             )
         )
 
@@ -214,7 +250,7 @@ def plan_repair(
     repaired = 0
     problems: list[str] = []
     for e in expected:
-        state = _classify(e, by_symbol.get(e.symbol, []))
+        state = _classify(e, by_symbol.get(e.symbol, []), snapshot_date=snapshot_date)
         if isinstance(state, _StoredRow):
             broken.append(state)
         elif state == "repaired":
@@ -271,7 +307,16 @@ def plan_repair(
     if after:
         raise RepairRefusedError(f"repair would still leave conflicts: {[str(c) for c in after]}")
 
-    resolutions = _resolutions(conn, expected, resolution.boundaries)
+    wrong_evidence = [
+        f"{b.symbol}: {b.evidence}"
+        for b in resolution.boundaries
+        for e in expected
+        if e.symbol == b.symbol and e.evidence is not None and e.evidence != b.evidence
+    ]
+    if wrong_evidence:
+        raise RepairRefusedError(f"boundary evidence differs from expected: {wrong_evidence}")
+
+    resolutions, kept_open = _resolutions(conn, expected, resolution.boundaries)
     return RepairPlan(
         snapshot_date=snapshot_date,
         already_applied=False,
@@ -279,6 +324,7 @@ def plan_repair(
         history=history,
         boundaries=resolution.boundaries,
         resolutions=resolutions,
+        kept_open=kept_open,
     )
 
 
@@ -326,8 +372,14 @@ def apply_repair(conn: Connection, plan: RepairPlan, *, clock: Clock) -> RepairC
     return counts
 
 
-def _classify(e: ExpectedReissue, rows: Sequence[_StoredRow]) -> _StoredRow | str:
-    """The stale row to delete when broken, `"repaired"`, or a description of the surprise."""
+def _classify(
+    e: ExpectedReissue, rows: Sequence[_StoredRow], *, snapshot_date: date
+) -> _StoredRow | str:
+    """The stale row to delete when broken, `"repaired"`, or a description of the surprise.
+
+    Broken means the new ISIN's window was written by the `snapshot_date` ingest (its
+    `recorded_at`, in IST, falls on that day) — the one run this repair exists to undo.
+    """
     old = [r for r in rows if r.window.isin == e.old_isin]
     new = [r for r in rows if r.window.isin == e.new_isin]
     other = [r for r in rows if r.window.isin not in (e.old_isin, e.new_isin)]
@@ -340,6 +392,7 @@ def _classify(e: ExpectedReissue, rows: Sequence[_StoredRow]) -> _StoredRow | st
         and n.valid_to is None
         and n.valid_from == o.valid_from < e.switch
         and n.source == _SOURCE
+        and new[0].recorded_at.astimezone(IST).date() == snapshot_date
     ):
         return new[0]
     if (
@@ -355,14 +408,17 @@ def _resolutions(
     conn: Connection,
     expected: Sequence[ExpectedReissue],
     boundaries: Sequence[ReissueBoundary],
-) -> tuple[tuple[_OpenConflict, str], ...]:
-    """Open SYMBOL_TO_ISIN rows naming exactly one expected (symbol, {old, new}), with reasons.
+) -> tuple[tuple[tuple[_OpenConflict, str], ...], tuple[_OpenConflict, ...]]:
+    """Open SYMBOL_TO_ISIN rows naming exactly one expected (symbol, {old, new}): those to
+    resolve, with reasons, and those `keep_open` names, which are left as they are.
 
     The INGEST row must exist (and carry the expected id when one is given). RESOLVE rows the
-    same defect raised later — ca_refresh asking about a held-back action — are resolved too.
+    same defect raised later — ca_refresh asking about a held-back action — are resolved too,
+    except a `keep_open` date, which must be present as exactly one open RESOLVE row.
     """
     by_symbol = {b.symbol: b for b in boundaries}
     out: list[tuple[_OpenConflict, str]] = []
+    kept: list[_OpenConflict] = []
     for e in expected:
         rows = conn.execute(
             "SELECT id, detected_by, on_date FROM identity_reconciliation "
@@ -390,8 +446,16 @@ def _resolutions(
             f"from the switch; {e.old_isin} closed "
             f"{(boundary.effective - timedelta(days=1)).isoformat()}."
         )
-        out.extend((c, reason) for c in conflicts)
-    return tuple(out)
+        for on_date in e.keep_open:
+            held = [c for c in conflicts if c.detected_by == "RESOLVE" and c.on_date == on_date]
+            if len(held) != 1:
+                raise RepairRefusedError(
+                    f"{e.symbol}: expected one open RESOLVE row on {on_date} to leave open, "
+                    f"found {[c.id for c in held]}"
+                )
+            kept.extend(held)
+        out.extend((c, reason) for c in conflicts if c not in kept)
+    return tuple(out), tuple(kept)
 
 
 def _window(w: SymbolWindow) -> str:
@@ -419,7 +483,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     l0 = L0Store(clock=clock)
     equity_list, changes = read_snapshot_from_l0(REPAIR_SNAPSHOT_DATE, store=l0)
     with connection() as conn:
-        if not args.apply:
+        if args.apply:
+            # Held to commit: no ingest or resolve can change either table between the plan
+            # being checked and it being written. Reads (the dry run, resolvers) still proceed.
+            conn.execute(
+                "LOCK TABLE symbol_history, identity_reconciliation IN SHARE ROW EXCLUSIVE MODE"
+            )
+        else:
             conn.execute("SET TRANSACTION READ ONLY")
         try:
             plan = plan_repair(
