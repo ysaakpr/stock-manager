@@ -50,6 +50,7 @@ from analyst.commons.fetch import (
 )
 from analyst.commons.fetch_cli import app
 from analyst.llm.claude_cli import ClaudeCliLLM
+from analyst.llm.cli_env import CLAUDE_CLI_ENV_ALLOWLIST
 from analyst.llm.client import Message, Role, Usage
 from dataplatform.clock import IST, FrozenClock
 
@@ -318,9 +319,11 @@ class FakeRun:
         self.argv: list[str] = []
         self.stdin: str | None = None
         self.cwd: str | None = None
+        self.env: dict[str, str] | None = None
 
     def __call__(self, argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.argv, self.stdin, self.cwd = list(argv), kwargs.get("input"), kwargs.get("cwd")
+        self.env = kwargs.get("env")
         return subprocess.CompletedProcess(argv, self.returncode, self.stdout, self.stderr)
 
 
@@ -401,6 +404,45 @@ def test_a_failed_cli_run_is_a_fetch_error_with_a_redacted_detail(
     monkeypatch.setattr("analyst.commons.fetch.subprocess.run", fake)
     with pytest.raises(FetchError) as caught:
         ClaudeWebFetcher().fetch(FetchRequest.query("q", SESSION))
+    assert secret not in str(caught.value)
+
+
+def test_the_fetcher_cli_is_given_an_allowlisted_env_not_the_parents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A web-browsing child process gets no DATABASE_URL and no *_KEY/*_TOKEN/*_SECRET."""
+    monkeypatch.setattr("analyst.commons.fetch.shutil.which", lambda _: "/usr/bin/claude")
+    leaked = {
+        "DATABASE_URL": "postgresql://u:" + _fake("db", 20) + "@db/x",
+        "KITE_API_SECRET": _fake("kite", 20),
+        "ANTHROPIC_API_KEY": _fake("anthropic", 20),
+        "GITHUB_TOKEN": _fake("gh", 20),
+    }
+    for name, value in leaked.items():
+        monkeypatch.setenv(name, value)
+    fake = FakeRun("", returncode=1, stderr="boom")
+    monkeypatch.setattr("analyst.commons.fetch.subprocess.run", fake)
+    with pytest.raises(FetchError):
+        ClaudeWebFetcher().fetch(FetchRequest.query("q", SESSION))
+    assert fake.env is not None, "subprocess.run inherited the whole environment"
+    assert set(fake.env) <= set(CLAUDE_CLI_ENV_ALLOWLIST)
+    assert {"PATH", "HOME"} <= set(fake.env)
+    assert not any(n.endswith(("_KEY", "_TOKEN", "_SECRET")) for n in fake.env)
+    assert not set(leaked) & set(fake.env)
+
+
+@pytest.mark.parametrize(
+    ("template", "message"),
+    [
+        ("ftp://files.example.com/x?api_key={secret}", "http or https"),
+        ("https:///x?token={secret}", "needs a host"),
+        ("ftp://files.example.com/x/Bearer {secret}", "http or https"),
+    ],
+)
+def test_a_refused_url_does_not_echo_its_credential(template: str, message: str) -> None:
+    secret = _fake("refused-url", 32)
+    with pytest.raises(ValueError, match=message) as caught:
+        FetchRequest.url(template.format(secret=secret), SESSION)
     assert secret not in str(caught.value)
 
 
