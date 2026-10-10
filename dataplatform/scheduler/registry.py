@@ -44,9 +44,12 @@ __all__ = [
     "FAILURE_ALERTS",
     "FBIL_REFERENCE_RATES",
     "FUNDAMENTALS_FORWARD",
+    "INDEX_CLOSE_EVENING",
     "INDEX_PRESS_REFRESH",
     "JOB_NAME",
     "L0_BACKUP",
+    "M17_DRY_RUN",
+    "M17_FUND_MANAGERS",
     "MACRO_RELEASE_CAPTURE",
     "NEWS_CAPTURE",
     "NSE_DAILY_CAPTURE",
@@ -71,8 +74,10 @@ __all__ = [
     "failure_alerts",
     "fbil_reference_rates",
     "fundamentals_forward",
+    "index_close_evening",
     "l0_backup",
     "lag_budgets",
+    "m17_fund_managers",
     "macro_release_capture",
     "news_capture",
     "nse_daily_capture",
@@ -661,6 +666,53 @@ TRI_EVENING = Job(
 )
 
 
+def index_close_evening(context: JobContext) -> None:
+    """Same-evening index levels and India VIX (M17.10): session D's market state on D's evening.
+
+    What it does: lands the NSE close-all snapshot (closing level, P/E, P/B and dividend yield of
+    every NIFTY index) for each expected data date of the last two weeks `sync_state` has not
+    closed — through the M11.2 runner, so a session already published costs no request — and India
+    VIX spot OHLC in one ranged POST from the first session that source lacks, all into
+    `macro_series` dated to the session. See `macro.index_evening.run_index_close_evening`.
+    The M17 Commons (market sheet, regime, screens, sector returns) read these for the session they
+    decide; before this job they stopped at whatever a campaign last fetched.
+    What it assumes: the injected clock and settings are the run's (B10), migrated and networked.
+    What it never does: date a level by the fetch, close tonight's session to retries on a 404
+    (the archive may simply not have it yet), or touch a host other than the NSE archive and
+    niftyindices.com, each under its own lease. The import is deferred like the others'.
+    """
+    from dataplatform.ingest.macro.index_evening import run_index_close_evening_job
+
+    run_index_close_evening_job(context)
+
+
+#: The same-evening index levels. 20:35, 21:10 and 21:45 IST Monday to Friday, each fire with a
+#: 10-minute budget and a 5-minute misfire grace, so even a late start is off both hosts before the
+#: next holder: 20:35 follows `nse_daily_capture` (20:00, 30-minute budget on the NSE archive host)
+#: and `tri_evening`'s 19:50 fire on niftyindices.com, and ends by its 20:50 fire; 21:10 sits
+#: between that fire's budget and the 21:30 one; 21:45 follows the 21:30 one and is over by the
+#: 22:00 M17 desk, which reads what it landed (`fm_world.M17LakeWorld.readiness`). The close-all
+#: file's same-evening publication time is not in the register ("published the evening of the
+#: session"). NSE Indices' TRI for D, from the same end-of-day run, landed on `tri_evening`'s 19:50
+#: fire on 2026-10-07, -08 and -09 (`tri_evening.first_landed`), so 20:35 is the first attempt and
+#: the two later fires are retries. A fire after D landed makes no request. The 22:00 desk then
+#: waits for nothing here, and a late night costs at most the desk's bounded wait.
+INDEX_CLOSE_EVENING = Job(
+    name="index_close_evening",
+    cron="35 20 * * mon-fri; 10 21 * * mon-fri; 45 21 * * mon-fri",
+    fn=index_close_evening,
+    timeout=timedelta(minutes=10),
+    description=(
+        "Weekday same-evening NIFTY index close/PE/PB/yield (close-all) and India VIX spot "
+        "→ macro_series, catching up missed sessions (M17.10)"
+    ),
+    covers=("nse_index_close_snapshot", "nifty_india_vix_history"),
+    # India VIX writes no `sync_state` rows (macro captures never have); the close-all runner does.
+    sync_sources=("nse_index_close_snapshot",),
+    misfire_grace=timedelta(minutes=5),
+)
+
+
 def index_press_refresh(context: JobContext) -> None:
     """The weekly index-change announcement capture (DQ-5): new releases into L0, nothing else.
 
@@ -890,6 +942,53 @@ PAPER_SESSION = Job(
 )
 
 
+def m17_fund_managers(context: JobContext) -> None:
+    """The daily M17 fund-manager desk (M17.7): one session of every manager, control and the bench.
+
+    What it does: for the owed session — after the interlock (data red or the M17 kill switch
+    tripped stages nothing) — fills and reconciles last night's orders, marks every book, resolves
+    due decisions, stages mechanical stop exits, waits (bounded) for same-evening index, VIX, TRI
+    and L2 data, builds the Commons, runs each manager in turn under the 08:30 IST next-session
+    deadline, runs the control books, records the desk, and writes the scoreboard and the owner's
+    digest. See `backtest.fm_job.run_m17_session`.
+    What it assumes: the injected clock and settings are the run's (B10), the EOD pipeline has run
+    for the session (the interlock checks it published), and the configured LLM is the Claude CLI
+    on the subscription (`LLM_PROVIDER`), or the stub.
+    What it never does: touch a real broker (the desk builds `SimBroker` accounts and nothing
+    else), or run the live stream before M17.8's go: it is registered with ``dry_run=True``, so
+    every entry goes to the ``m17-dry`` stream until the owner's go flips it and `--start S0` opens
+    the live one (ops/runbooks/m17-fund-managers.md). The import is deferred like the others'.
+    """
+    from backtest.fm_job import run_m17_job
+
+    run_m17_job(context, dry_run=M17_DRY_RUN)
+
+
+#: Until M17.8's go (pre-registration §6, §9: the 5-session dry run passes, then the owner names
+#: S0), the registered job runs the ``m17-dry`` stream only. The go flips this to False together
+#: with the `--start S0` run, in one reviewed commit.
+M17_DRY_RUN = True
+
+#: The M17 desk (M17.7). 22:00 IST Monday to Friday — after the 18:30 EOD pipeline, the last
+#: `tri_evening` attempt (21:30, which now lands NIFTY 500 for the bench too) and the 21:45 paper
+#: session, so the interlock sees the session published and the bench its level. The budget runs
+#: to the deadline: a manager unfinished by 08:30 IST on the next session misses it, so ten and a
+#: half hours is the most a run can usefully take. A fire the scheduler missed may still start
+#: within two hours (the managers' queue then has eight). It fetches nothing from NSE, so it holds
+#: no host lease; the Commons fetcher and the model run on the Claude CLI subscription.
+M17_FUND_MANAGERS = Job(
+    name="m17_fund_managers",
+    cron="0 22 * * mon-fri",
+    fn=m17_fund_managers,
+    timeout=timedelta(hours=10, minutes=30),
+    description=(
+        "Daily M17 fund-manager desk: interlock, Commons, managers, controls, marks (M17.7); "
+        "the m17-dry stream until M17.8's go"
+    ),
+    misfire_grace=timedelta(hours=2),
+)
+
+
 def fundamentals_forward(context: JobContext) -> None:
     """The nightly fundamentals forward run (M14.3): the integrated results feed, kept current.
 
@@ -1016,11 +1115,9 @@ UNSCHEDULED: dict[str, str] = {
         "fundamentals_backfill campaign's (B1)."
     ),
     "nifty_index_close_snapshot": (
-        "Input to the computed TRI fallback only; the published TRI is live (tri_refresh)."
-    ),
-    "nse_index_close_snapshot": (
-        "History via the M11.2 valuation backfill campaign; the daily valuation job is not wired "
-        "yet (no consumer in the decision path)."
+        "The niftyindices.com copy of the close-all file; the byte-identical NSE archive copy "
+        "(nse_index_close_snapshot) is landed every weekday evening by index_close_evening, so "
+        "this host's copy stays the register's fallback and is not fetched twice."
     ),
     "nse_announcement_attachment": (
         "Per-filing documents fetched on demand by the merger-terms campaign (M3.8); no job yet."
@@ -1074,6 +1171,7 @@ def default_registry() -> JobRegistry:
             IDENTITY_REFRESH,
             TRI_REFRESH,
             TRI_EVENING,
+            INDEX_CLOSE_EVENING,
             INDEX_PRESS_REFRESH,
             CA_REFRESH,
             BSE_CA_SWEEP,
@@ -1085,6 +1183,7 @@ def default_registry() -> JobRegistry:
             NEWS_CAPTURE,
             FAILURE_ALERTS,
             PAPER_SESSION,
+            M17_FUND_MANAGERS,
             FUNDAMENTALS_FORWARD,
             POSTGRES_BACKUP,
             L0_BACKUP,

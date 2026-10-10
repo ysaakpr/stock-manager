@@ -8,6 +8,7 @@ Six endpoints, and every field on every one of them comes out of a query:
     GET /status/gaps?from=&to=  every missing day, with its reason   (sync_state, calendar, L1)
     GET /status/quality         open D7 sentinel flags               (quality_flag)
     GET /archives?date=         the published bundle's manifest      (archive_bundle)
+    GET /status/managers        M17 books, decisions, scoreboard     (decision_journal, M17.6)
 
 An empty database answers all six with empty payloads, and that is the intended answer — the one
 thing this module may never do is fill a hole with a plausible number. §4.4 exists because the
@@ -29,10 +30,10 @@ there is exactly one implementation of each question this API answers.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Annotated
+from typing import Annotated, Any
 
 import psycopg
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
@@ -55,6 +56,7 @@ from dataplatform.status.models import (
     HealthOut,
     JobHealthOut,
     JobsOut,
+    ManagersOut,
     PaperOut,
     QualityOut,
     QuarantineOut,
@@ -67,6 +69,9 @@ from dataplatform.status.models import (
 )
 from dataplatform.status.queries import (
     read_archives,
+    read_m17_journal,
+    read_m17_roster,
+    read_managers_status,
     read_paper_status,
     read_quality,
     read_quarantine_status,
@@ -80,6 +85,8 @@ __all__ = [
     "clock_source",
     "db_connection",
     "gap_scanner",
+    "m17_journal_source",
+    "m17_roster_source",
     "settings_source",
     "sync_store",
 ]
@@ -432,6 +439,37 @@ def status_paper(conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> Paper
     What it never does: report an unreadable switch file as armed.
     """
     return read_paper_status(conn, data_root=settings.data_root, as_of=clock.now())
+
+
+def m17_roster_source() -> Any:
+    """The M17 roster, as a dependency so a test can supply a smaller one."""
+    return read_m17_roster()
+
+
+RosterDep = Annotated[Any, Depends(m17_roster_source)]
+
+
+def m17_journal_source(conn: ConnDep, settings: SettingsDep, roster: RosterDep) -> Sequence[Any]:
+    """The M17 books' journal entries, in append order — a dependency so a test can supply them."""
+    return read_m17_journal(conn, data_root=settings.data_root, roster=roster)
+
+
+@app.get(
+    "/status/managers",
+    summary="M17 fund managers: books, the latest session's decisions, the §6 scoreboard",
+)
+def status_managers(
+    entries: Annotated[Sequence[Any], Depends(m17_journal_source)],
+    roster: RosterDep,
+    clock: ClockDep,
+) -> ManagersOut:
+    """Every M17 book's latest mark, the latest session's decisions and the scoreboard (M17.6).
+
+    The scoreboard is rebuilt from the journal on each request, exactly as the daily job builds
+    it, and reported as "k of 4 passed". What it never carries: a rationale, a prompt, evidence
+    text or a secret — the decisions are their structured fields only.
+    """
+    return read_managers_status(entries, roster=roster, as_of=clock.now())
 
 
 # ── /archives ───────────────────────────────────────────────────────────────────────────────

@@ -111,6 +111,9 @@ __all__ = [
     "open_connection",
     "preload_raw_bars",
     "prune_retired",
+    "quantize_factor",
+    "quantize_price",
+    "quantize_volume",
     "read_adjusted",
     "read_raw_bars_from_l1",
     "rebuild_all",
@@ -1747,14 +1750,14 @@ def _bars_to_table(bars: Sequence[AdjustedBar]) -> pa.Table:
                 "isin": b.isin,
                 "exchange": b.exchange,
                 "trade_date": b.trade_date,
-                "adj_open": _q(b.adj_open, _PRICE_Q),
-                "adj_high": _q(b.adj_high, _PRICE_Q),
-                "adj_low": _q(b.adj_low, _PRICE_Q),
-                "adj_close": _q(b.adj_close, _PRICE_Q),
-                "adj_volume": _q(b.adj_volume, _VOLUME_Q),
-                "tr_close": _q(b.tr_close, _PRICE_Q),
-                "cum_price_factor": _q(b.cum_price_factor, _FACTOR_Q),
-                "cum_qty_factor": _q(b.cum_qty_factor, _FACTOR_Q),
+                "adj_open": quantize_price(b.adj_open),
+                "adj_high": quantize_price(b.adj_high),
+                "adj_low": quantize_price(b.adj_low),
+                "adj_close": quantize_price(b.adj_close),
+                "adj_volume": quantize_volume(b.adj_volume),
+                "tr_close": quantize_price(b.tr_close),
+                "cum_price_factor": quantize_factor(b.cum_price_factor),
+                "cum_qty_factor": quantize_factor(b.cum_qty_factor),
             }
             for b in bars
         ],
@@ -1780,6 +1783,25 @@ def _remove_partition(path: Path) -> bool:
 def _q(value: Decimal, quantum: Decimal) -> Decimal:
     """Quantise to a fixed scale with half-up rounding, so stored values are byte-deterministic."""
     return value.quantize(quantum, rounding=ROUND_HALF_UP)
+
+
+def quantize_price(value: Decimal) -> Decimal:
+    """An adjusted price exactly as the L2 writer stores it (four places, half-up).
+
+    Public so a reader that computes what L2 *will* hold (`store.l2_overlay`) rounds the same way
+    the writer does: one quantization, never a second spelling of it.
+    """
+    return _q(value, _PRICE_Q)
+
+
+def quantize_volume(value: Decimal) -> Decimal:
+    """An adjusted volume exactly as the L2 writer stores it."""
+    return _q(value, _VOLUME_Q)
+
+
+def quantize_factor(value: Decimal) -> Decimal:
+    """A cumulative factor exactly as the L2 writer stores it (eighteen places, half-up)."""
+    return _q(value, _FACTOR_Q)
 
 
 def _write_table(table: pa.Table, path: Path) -> None:

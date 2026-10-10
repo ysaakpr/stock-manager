@@ -20,8 +20,10 @@ ignore the frozen clock a test or a replay set.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -32,6 +34,10 @@ from dataplatform.status.models import (
     ArchivesOut,
     CheckCountOut,
     KillSwitchOut,
+    ManagerBookOut,
+    ManagerDecisionOut,
+    ManagerScoreOut,
+    ManagersOut,
     PaperBookStatusOut,
     PaperOut,
     QualityFlagOut,
@@ -40,6 +46,7 @@ from dataplatform.status.models import (
     QuarantineOut,
     QuarantineStepOut,
     SeverityCountOut,
+    SuspendedHoldingOut,
 )
 from dataplatform.store.db import Connection
 
@@ -314,3 +321,95 @@ def read_paper_status(conn: Connection, *, data_root: Path, as_of: datetime) -> 
             )
         )
     return PaperOut(as_of=as_of, healthy=all(book.healthy for book in books), books=books)
+
+
+# ── /status/managers (M17.6) ───────────────────────────────────────────────────────────────────
+
+
+def read_m17_roster() -> Any:
+    """The M17 roster (`analyst.fundmanager.load_roster`), imported lazily."""
+    from analyst.fundmanager import load_roster
+
+    return load_roster()
+
+
+def read_m17_journal(conn: Connection, *, data_root: Path, roster: Any) -> tuple[Any, ...]:
+    """Every journal entry of the M17 books, in append order (S0 is journaled in each book's
+    stream, beside its mandate hash).
+
+    Read through `analyst.journal.Journal` — the one reader of `decision_journal` — and imported
+    here lazily, like the kill switch above, so importing the status API stays free of System 2.
+    """
+    from analyst.journal import EvidenceStore, Journal, JournalFilter
+
+    journal = Journal(conn, evidence=EvidenceStore(data_root / "evidence"))
+    books = [book.id for book in roster.books]
+    entries = [e for book in books for e in journal.entries(JournalFilter(case_id=book))]
+    return tuple(sorted(entries, key=lambda e: e.id))
+
+
+def read_managers_status(entries: Sequence[Any], *, roster: Any, as_of: datetime) -> ManagersOut:
+    """The `/status/managers` body from the M17 journal ``entries`` (in append order).
+
+    The scoreboard is rebuilt from the entries on every call, the same way the daily job builds
+    it, so the page can never show a number the journal does not reproduce. A journal the
+    scoreboard refuses (a missing mark, a malformed line) is reported in ``scoreboard_error`` with
+    no scores, never papered over with partial numbers; the decisions still show.
+    """
+    from analyst.fundmanager.scoreboard import (
+        ScoreboardError,
+        ScoreboardInputs,
+        build_scoreboard,
+        inputs_from_journal,
+        suspended_holdings_on,
+        todays_decisions,
+    )
+
+    session, lines = todays_decisions(entries, roster)
+    _, suspended = suspended_holdings_on(entries, roster, session=session)
+    error: str | None = None
+    try:
+        scoreboard = build_scoreboard(roster, inputs_from_journal(entries, roster))
+    except ScoreboardError as exc:
+        error = str(exc)
+        scoreboard = build_scoreboard(roster, ScoreboardInputs(s0=None))
+    managers: list[ManagerScoreOut] = []
+    for score in scoreboard.managers:
+        window = score.extension or score.primary
+        managers.append(
+            ManagerScoreOut(
+                manager_id=score.manager_id,
+                control_id=score.control_id,
+                phase=score.phase.value,
+                verdict=score.verdict.value,
+                window=None if window is None else window.label,
+                window_sessions=None if window is None else window.sessions,
+                window_end=None if window is None else window.end,
+                excess_vs_control_pp=None if window is None else window.excess_vs_control_pp,
+                excess_vs_bench_pp=(
+                    None if window is None else window.secondary.excess_vs_bench_pp
+                ),
+                max_drawdown_pp=None if window is None else window.manager_max_drawdown_pp,
+                bench_max_drawdown_pp=None if window is None else window.bench_max_drawdown_pp,
+                brier=None if window is None else window.brier,
+                resolved_decisions=None if window is None else window.resolved_decisions,
+                suspended_resolved_decisions=(
+                    None if window is None else window.suspended_resolved_decisions
+                ),
+            )
+        )
+    return ManagersOut(
+        as_of=as_of,
+        s0=scoreboard.s0,
+        scoreboard_as_of=scoreboard.as_of,
+        sessions_elapsed=scoreboard.sessions_elapsed,
+        k_of_n=scoreboard.k_of_n,
+        passed=scoreboard.passed,
+        scoreboard_digest=None if error is not None else scoreboard.digest(),
+        scoreboard_error=error,
+        books=[ManagerBookOut(**book.model_dump()) for book in scoreboard.books],
+        managers=[] if error is not None else managers,
+        decisions_session=session,
+        decisions=[ManagerDecisionOut(**line.model_dump()) for line in lines],
+        suspended_holdings=[SuspendedHoldingOut(**line.model_dump()) for line in suspended],
+    )

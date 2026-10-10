@@ -436,3 +436,18 @@ def test_selecting_the_cli_provider_without_the_cli_raises_at_startup(
     monkeypatch.setattr("analyst.llm.claude_cli.shutil.which", lambda _: None)
     with pytest.raises(LLMCredentialError):
         build_llm(Settings(llm_provider=LlmProvider.CLAUDE_CLI))
+
+
+def test_a_rate_limited_run_is_retryable_and_any_other_failure_is_not(
+    cli: ClaudeCliLLM, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M17.7 backs off on a subscription limit; it must not back off on a broken invocation."""
+    from analyst.llm import LLMRateLimitError
+
+    run_with(monkeypatch, {**TEXT_RESULT, "is_error": True, "result": "rate limit reached"})
+    with pytest.raises(LLMRateLimitError, match="rate limit reached"):
+        cli.complete(ASK, model="claude-opus-5")
+    run_with(monkeypatch, "", returncode=2, stderr="unknown option --nope")
+    with pytest.raises(LLMError) as raised:
+        cli.complete(ASK, model="claude-opus-5")
+    assert not isinstance(raised.value, LLMRateLimitError)

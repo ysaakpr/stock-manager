@@ -203,6 +203,23 @@ def load_repo_rate_schedule(path: Path = REPO_RATES_PATH) -> RepoRateSchedule:
     through = _text_date(coverage["through"], "coverage.through")
     if through < start:
         raise CashInterestError("coverage.through precedes coverage.from")
+    if "confirmed_through" in coverage:
+        # Carry-forward: past the last confirmed date only up to the eve of the next scheduled
+        # MPC decision, because a decision is the only routine way the rate moves.
+        confirmed = _text_date(coverage["confirmed_through"], "coverage.confirmed_through")
+        if through < confirmed:
+            raise CashInterestError("coverage.through precedes coverage.confirmed_through")
+        if through > confirmed:
+            if "next_mpc_decision" not in coverage:
+                raise CashInterestError(
+                    "coverage.through runs past confirmed_through without a next_mpc_decision"
+                )
+            decision = _text_date(coverage["next_mpc_decision"], "coverage.next_mpc_decision")
+            if through >= decision:
+                raise CashInterestError(
+                    f"coverage.through {through.isoformat()} reaches the next MPC decision "
+                    f"({decision.isoformat()}); add that decision's row before covering it"
+                )
     changes: list[RepoRateChange] = []
     for index, row in enumerate(raw["changes"]):
         where = f"changes[{index}]"
@@ -326,6 +343,45 @@ class CashInterestAccrual:
             period_end=end.isoformat(),
         )
         return credit
+
+    def to_document(self) -> dict[str, Any]:
+        """The accrual's carried state — what a forward runner persists between sessions.
+
+        The last session, the balance earning since it and every month accrued but not yet
+        credited (exact, unrounded), as strings. Past ``credits`` are not state: each is already a
+        ledger line where it was paid. ``from_document`` continues the walk exactly.
+        """
+        return {
+            "last": None if self._last is None else self._last.isoformat(),
+            "balance": str(self._balance),
+            "pending": [
+                [
+                    f"{year:04d}-{month:02d}",
+                    str(entry[0]),
+                    entry[1].isoformat(),
+                    entry[2].isoformat(),
+                ]
+                for (year, month), entry in sorted(self._pending.items())
+            ],
+        }
+
+    @classmethod
+    def from_document(
+        cls, schedule: RepoRateSchedule, document: Mapping[str, Any]
+    ) -> CashInterestAccrual:
+        """An accrual that continues from ``document`` (``to_document``) under ``schedule``."""
+        accrual = cls(schedule)
+        last = document["last"]
+        accrual._last = None if last is None else date.fromisoformat(last)
+        accrual._balance = _text_decimal(document["balance"], "cash interest balance")
+        for month, amount, first, through in document["pending"]:
+            year, number = (int(part) for part in str(month).split("-"))
+            accrual._pending[(year, number)] = [
+                _text_decimal(amount, f"cash interest pending {month}"),
+                date.fromisoformat(first),
+                date.fromisoformat(through),
+            ]
+        return accrual
 
     def close_session(self, session: date, balance: Decimal) -> None:
         """Record ``balance`` — settled cash at the end of ``session`` — as what earns from now.

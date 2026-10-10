@@ -66,6 +66,12 @@ class LLMCredentialError(LLMError):
     """
 
 
+class LLMRateLimitError(LLMError):
+    """The provider (or the subscription behind the Claude CLI) refused the call for rate or usage
+    limits. Retryable after a wait — unlike a credential or a refusal — so a caller with a
+    deadline backs off and asks again rather than failing the session (M17.7)."""
+
+
 class LLMRefusalError(LLMError):
     """The provider declined the request; there is no answer to read.
 
@@ -245,10 +251,11 @@ class LLM(Protocol):
         """Answer a conversation, optionally offering tools, and report what it cost in tokens."""
 
 
-def build_llm(settings: Settings | None = None) -> LLM:
+def build_llm(settings: Settings | None = None, *, provider: LlmProvider | None = None) -> LLM:
     """The `LLM` this configuration selects (§8.1's provider switch).
 
-    What it does: reads `LLM_PROVIDER` and returns the matching implementation.
+    What it does: reads `LLM_PROVIDER` (or ``provider``, for a caller with its own selector, such
+    as the M17 desk's `M17_LLM_PROVIDER`) and returns the matching implementation.
     What it assumes: `STUB` is the default, because no credential exists (B4).
     What it never does: downgrade. Selecting `anthropic` without a key — or `claude_cli` without
     the CLI on PATH — raises here, at startup, rather than producing a process that believes it is
@@ -262,7 +269,8 @@ def build_llm(settings: Settings | None = None) -> LLM:
     from analyst.llm.stub import StubLLM
 
     resolved = get_settings() if settings is None else settings
-    match resolved.llm_provider:
+    chosen = resolved.llm_provider if provider is None else provider
+    match chosen:
         case LlmProvider.STUB:
             return StubLLM()
         case LlmProvider.ANTHROPIC:
@@ -270,7 +278,7 @@ def build_llm(settings: Settings | None = None) -> LLM:
         case LlmProvider.CLAUDE_CLI:
             return ClaudeCliLLM.from_settings(resolved)
         case _:  # pragma: no cover — exhaustive over LlmProvider
-            assert_never(resolved.llm_provider)
+            assert_never(chosen)
 
 
 def prompt_digest(

@@ -253,6 +253,18 @@ def test_ttm_yoy_compares_two_full_trailing_years() -> None:
     assert m.earnings_ttm_yoy == _D("1")  # 80 vs 40
 
 
+def test_revenue_ttm_yoy_compares_two_full_trailing_years() -> None:
+    """M17.1's TTM revenue growth: the same two-trailing-year rule as earnings, on revenue."""
+    rows = _company(
+        pat=["10"] * 8, revenue=["100", "100", "100", "100", "150", "150", "150", "150"]
+    )
+    m = _one(rows, as_of=_Q[7] + timedelta(days=60))
+    assert m.revenue_ttm == _D("600")
+    assert m.revenue_ttm_yoy == _D("0.5")  # 600 vs 400, not inverted (400 vs 600 is -1/3)
+    short = _one(_company(pat=["10"] * 4, revenue=["100"] * 4), as_of=_Q[3] + timedelta(days=60))
+    assert short.revenue_ttm_yoy == Unavailable.INSUFFICIENT_QUARTERS
+
+
 def test_net_margin_and_its_trend() -> None:
     rows = _company(
         pat=["10", "10", "10", "10", "20", "20", "20", "20"],
@@ -382,6 +394,7 @@ def test_every_metric_field_is_a_decimal_or_a_stated_reason() -> None:
         "revenue_yoy",
         "earnings_yoy",
         "earnings_ttm_yoy",
+        "revenue_ttm_yoy",
         "net_margin_ttm",
         "net_margin_trend",
         "shares_outstanding",

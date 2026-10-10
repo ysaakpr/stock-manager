@@ -99,10 +99,21 @@ DEFAULT_INDEX_SET: Final[tuple[IndexSpec, ...]] = (
 
 #: Indices fetched only when named with ``--index`` (X2, 2026-10-05): the size-tier benchmarks the
 #: cap-tier strategies are measured against, so a mid- or small-cap book is not judged against the
-#: NIFTY 50 alone. Opt-in, so the default run stays the three-request campaign above.
+#: NIFTY 50 alone. Opt-in, so the default run stays the three-request campaign above. NIFTY 500
+#: (M17.7) is the series ``BENCH-N500`` (analyst.fundmanager.controls) buys and holds from S0.
 OPT_IN_INDEX_SET: Final[tuple[IndexSpec, ...]] = (
     IndexSpec(name="NIFTY MIDCAP 150", slug="niftymidcap150"),
     IndexSpec(name="NIFTY SMALLCAP 250", slug="niftysmallcap250"),
+    IndexSpec(name="NIFTY 500", slug="nifty500"),
+)
+
+#: The same-evening set (`run_tri_evening_job`): the defaults plus NIFTY 500, which `BENCH-N500`
+#: (M17) marks at every session's close — a bench whose level lands only on Saturday leaves every
+#: weekday's scoreboard waiting for it. One more short-window request per evening, and none once
+#: the session has landed.
+EVENING_INDEX_SET: Final[tuple[IndexSpec, ...]] = (
+    *DEFAULT_INDEX_SET,
+    IndexSpec(name="NIFTY 500", slug="nifty500"),
 )
 
 #: How far behind session D the same-evening window starts, at the latest. The window always
@@ -498,8 +509,9 @@ def run_tri_evening(
 def run_tri_evening_job(context: JobContext) -> None:
     """The scheduler's `tri_evening` job body: today's session's TRI, the same evening (M13.7).
 
-    What it does: under the `niftyindices.com` lease, `run_tri_evening` over `DEFAULT_INDEX_SET`
-    for the job's own date (the injected clock, B10), committing after each index.
+    What it does: under the `niftyindices.com` lease, `run_tri_evening` over `EVENING_INDEX_SET`
+    (the defaults plus NIFTY 500 for M17's bench) for the job's own date (the injected clock,
+    B10), committing after each index.
     What it assumes: the database is migrated and the network reachable.
     What it never does: touch any host but the TRI endpoint's, or change what the Saturday
     `tri_refresh` does — the two write the same L1 partitions from the same published levels.
@@ -524,6 +536,7 @@ def run_tri_evening_job(context: JobContext) -> None:
             register=register,
             commit=conn.commit,
             calendar=calendar,
+            indices=EVENING_INDEX_SET,
         )
     for outcome in outcomes:
         _LOG.info("tri_evening.index", source=TRI_SOURCE_ID, line=outcome.line)

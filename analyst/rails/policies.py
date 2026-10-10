@@ -26,6 +26,7 @@ is no override field on any of these objects, by construction (acceptance criter
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from typing import Final
@@ -33,6 +34,8 @@ from typing import Final
 from execution.broker import OrderRequest, Side
 
 __all__ = [
+    "BookOrderFacts",
+    "BookRails",
     "DrawdownStatus",
     "HouseholdExposure",
     "Lot",
@@ -95,6 +98,29 @@ class RailId(StrEnum):
 
     DRAWDOWN_REVIEW = "DRAWDOWN_REVIEW"
     """Peak-to-trough fall reached `drawdown_review_pct`. Not an order rail — it forces a review."""
+
+    # ── the M17 book rails (pre-registration §4 step 5); `MAX_POSITION`/`MAX_SECTOR` are shared ──
+
+    MAX_POSITIONS = "MAX_POSITIONS"
+    """A buy of a new name would take the book above its mandate's `max_positions` names."""
+
+    PARTICIPATION = "PARTICIPATION"
+    """One order's notional exceeds `participation_max_pct` of the name's median traded value
+    over the `participation_lookback_sessions` sessions ending at the decision session — or that
+    median is not knowable then, which refuses the order rather than guessing a liquidity."""
+
+    MIN_HOLD = "MIN_HOLD"
+    """A sell decided fewer than `min_hold_sessions` sessions after the name's last buy fill."""
+
+    NO_SHORT = "NO_SHORT"
+    """A sell of more shares than the book holds — a short. Never allowed in an M17 book."""
+
+    NO_FNO = "NO_FNO"
+    """A buy of anything but a cash-equity series of the mandate's universe (a future, an option,
+    or any other segment). Never allowed in an M17 book."""
+
+    NO_MARGIN = "NO_MARGIN"
+    """A buy whose notional exceeds the book's spendable cash — it could only fill on margin."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,6 +282,72 @@ class HouseholdExposure:
             raise ValueError("household exposure in an instrument cannot be negative")
         if self.household_total_value < _ZERO:
             raise ValueError("household total value cannot be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class BookRails:
+    """The caps one M17 paper book trades under (pre-registration §4 step 5).
+
+    What it does: carry, exactly, the per-book caps of the book's mandate (position %, sector %,
+    number of names) and the rails every M17 book shares (participation, minimum hold, the
+    cash-equity series a buy may be in). The numbers are *not* defined here: the fund-manager
+    package builds this from its roster (`analyst.fundmanager.books.book_rails`), the one place
+    they are written down, so A8 cannot disagree with the pre-registration.
+    What it never does: carry a switch that turns shorting, F&O or margin on. Those three are
+    prohibitions with no parameter, checked by `check_book_order` on every order.
+    """
+
+    max_position_pct: Decimal
+    max_sector_pct: Decimal
+    max_positions: int
+    participation_max_pct: Decimal
+    participation_lookback_sessions: int
+    min_hold_sessions: int
+    equity_series: frozenset[str]
+
+    def __post_init__(self) -> None:
+        for name in ("max_position_pct", "max_sector_pct", "participation_max_pct"):
+            value = require_decimal(name, getattr(self, name))
+            if not _ZERO < value <= _HUNDRED:
+                raise ValueError(f"{name} must be in (0, 100] percentage points, got {value}")
+        for name in ("max_positions", "participation_lookback_sessions", "min_hold_sessions"):
+            count = getattr(self, name)
+            if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+                raise ValueError(f"{name} must be a whole count of at least 1, got {count!r}")
+        if not self.equity_series or any(not s.strip() for s in self.equity_series):
+            raise ValueError("a book must name the cash-equity series it may buy")
+
+
+@dataclass(frozen=True, slots=True)
+class BookOrderFacts:
+    """What the M17 rails know about one order beyond the book, all as of its decision session.
+
+    What it does: carry the instrument's series on the decision session (``None`` when it is not
+    a listed cash-equity line that day), the median traded value over the participation lookback
+    *ending at* the decision session and how many sessions it spans (``None`` when not enough
+    history is knowable), the sessions elapsed from the name's last buy fill to the decision
+    session (``None`` when the book has no buy fill of it), and the cash the book can still spend
+    this session after the buys already cleared.
+    What it assumes: the caller computed every figure from data knowable at the decision session
+    (invariant #7) — the fund-manager book does, and refuses a market answer dated after it.
+    What it never does: carry an override. Every field is a fact a rail compares; none is a vote.
+    """
+
+    decision_session: date
+    series: str | None
+    median_traded_value: Decimal | None
+    median_sessions: int
+    sessions_since_buy_fill: int | None
+    spendable_cash: Decimal
+
+    def __post_init__(self) -> None:
+        if self.median_traded_value is not None:
+            require_decimal("median_traded_value", self.median_traded_value)
+        require_decimal("spendable_cash", self.spendable_cash)
+        if self.median_sessions < 0:
+            raise ValueError(f"median_sessions cannot be negative, got {self.median_sessions}")
+        if self.sessions_since_buy_fill is not None and self.sessions_since_buy_fill < 0:
+            raise ValueError("sessions_since_buy_fill cannot be negative")
 
 
 @dataclass(frozen=True, slots=True)
