@@ -203,6 +203,23 @@ def load_repo_rate_schedule(path: Path = REPO_RATES_PATH) -> RepoRateSchedule:
     through = _text_date(coverage["through"], "coverage.through")
     if through < start:
         raise CashInterestError("coverage.through precedes coverage.from")
+    if "confirmed_through" in coverage:
+        # Carry-forward: past the last confirmed date only up to the eve of the next scheduled
+        # MPC decision, because a decision is the only routine way the rate moves.
+        confirmed = _text_date(coverage["confirmed_through"], "coverage.confirmed_through")
+        if through < confirmed:
+            raise CashInterestError("coverage.through precedes coverage.confirmed_through")
+        if through > confirmed:
+            if "next_mpc_decision" not in coverage:
+                raise CashInterestError(
+                    "coverage.through runs past confirmed_through without a next_mpc_decision"
+                )
+            decision = _text_date(coverage["next_mpc_decision"], "coverage.next_mpc_decision")
+            if through >= decision:
+                raise CashInterestError(
+                    f"coverage.through {through.isoformat()} reaches the next MPC decision "
+                    f"({decision.isoformat()}); add that decision's row before covering it"
+                )
     changes: list[RepoRateChange] = []
     for index, row in enumerate(raw["changes"]):
         where = f"changes[{index}]"

@@ -97,6 +97,60 @@ def test_a_bare_float_in_the_schedule_is_refused(tmp_path: Path) -> None:
         load_repo_rate_schedule(bad)
 
 
+def _carried(tmp_path: Path, coverage: str) -> Path:
+    path = tmp_path / "carried.yaml"
+    path.write_text(
+        "version: 1\n"
+        "coverage:\n"
+        '  from: "2024-01-01"\n'
+        f"{coverage}"
+        "changes:\n"
+        '  - effective_from: "2024-01-01"\n'
+        '    repo_rate_pct: "6.50"\n'
+        "    provenance: verified\n"
+        '    source: "test"\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_carry_forward_covers_up_to_the_eve_of_the_next_mpc_decision(tmp_path: Path) -> None:
+    path = _carried(
+        tmp_path,
+        '  confirmed_through: "2024-02-01"\n'
+        '  next_mpc_decision: "2024-04-05"\n'
+        '  through: "2024-04-04"\n',
+    )
+    schedule = load_repo_rate_schedule(path)
+    assert schedule.repo_rate(date(2024, 4, 4)) == Decimal("0.065")
+    with pytest.raises(RepoRateCoverageError):
+        schedule.repo_rate(date(2024, 4, 5))
+
+
+def test_carry_forward_may_not_reach_the_decision_day(tmp_path: Path) -> None:
+    path = _carried(
+        tmp_path,
+        '  confirmed_through: "2024-02-01"\n'
+        '  next_mpc_decision: "2024-04-05"\n'
+        '  through: "2024-04-05"\n',
+    )
+    with pytest.raises(CashInterestError, match="reaches the next MPC decision"):
+        load_repo_rate_schedule(path)
+
+
+def test_carry_forward_needs_a_scheduled_decision(tmp_path: Path) -> None:
+    path = _carried(tmp_path, '  confirmed_through: "2024-02-01"\n  through: "2024-03-01"\n')
+    with pytest.raises(CashInterestError, match="without a next_mpc_decision"):
+        load_repo_rate_schedule(path)
+
+
+def test_live_schedule_carries_5_50_to_the_december_2026_mpc() -> None:
+    # RBI prid=63742: "The next meeting of the MPC is scheduled for December 2 to 4, 2026."
+    assert SCHEDULE.repo_rate(date(2026, 12, 3)) == Decimal("0.055")
+    with pytest.raises(RepoRateCoverageError):
+        SCHEDULE.repo_rate(date(2026, 12, 4))
+
+
 def test_known_rate_changes_take_effect_on_their_date() -> None:
     assert SCHEDULE.repo_rate(date(2022, 5, 3)) == Decimal("0.04")
     assert SCHEDULE.repo_rate(date(2022, 5, 4)) == Decimal("0.044")

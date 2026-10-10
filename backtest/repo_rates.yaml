@@ -10,6 +10,12 @@
 # for a date it was not in force, and a run past `through` fails until someone extends this file
 # (after checking whether the MPC has moved the rate since).
 #
+# Carry-forward (owner decision 2026-10-10): `through` may run past `confirmed_through` up to the
+# day BEFORE the next scheduled MPC decision, citing the RBI release that schedules it. The repo
+# rate changes only at an MPC decision, so the latest row is in force until then barring an
+# unscheduled meeting (the last was May 2020). The loader refuses a carried `through` on or after
+# `next_mpc_decision`. After each decision: read RBI's release, add its row, move all four dates.
+#
 # Every rate is a QUOTED STRING, in per cent as RBI quotes it. YAML would parse a bare 6.25 as a
 # float, and the loader rejects one (CLAUDE.md: money-adjacent figures are Decimal).
 #
@@ -37,8 +43,14 @@ coverage:
   # read 2026-10-09 shows "Policy Repo Rate : 5.50%" (the 5-7 Oct 2026 MPC raised it; the Feb,
   # Apr, Jun and Aug 2026 MPCs had held at 5.25%). The next MPC meets 2-4 Dec 2026; extend
   # `through` past that only after checking its decision.
-  through: "2026-10-09"
-  read_on: "2026-10-09"
+  confirmed_through: "2026-10-09"
+  # Carried forward to the eve of the next scheduled decision. RBI's 2026-10-07 release
+  # (prid=63742, read 2026-10-10): "The next meeting of the MPC is scheduled for December 2 to 4,
+  # 2026." The decision is announced on the 4th and takes effect that day, so the 4th is not
+  # covered: a session on or after 2026-12-04 raises until this file is updated.
+  next_mpc_decision: "2026-12-04"
+  through: "2026-12-03"
+  read_on: "2026-10-10"
 
 changes:
   - effective_from: "2005-10-26"

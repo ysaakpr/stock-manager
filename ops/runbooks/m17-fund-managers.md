@@ -147,3 +147,13 @@ Per book (`payload.event`; `decision` in brackets):
 - **`repo_rates.yaml` coverage** ends at the last MPC decision entered; a session past it raises
   `RepoRateCoverageError`. Extend it from RBI's own press release after each MPC meeting.
 - **Holiday calendar** `nse_holidays.yaml` ends 2026-12-31: add the 2027 NSE circular before December.
+
+## Repo rate (idle-cash interest) — after every MPC decision
+
+`backtest/repo_rates.yaml` carries the latest confirmed rate forward only to the eve of the next
+scheduled MPC decision (owner decision 2026-10-10). A session on the decision day raises
+`RepoRateCoverageError` until the file is updated, and that stops the M17 job and the M15.3 paper
+session alike. On the decision day (next: **2026-12-04**), read RBI's press release on rbi.org.in, then:
+add its row (verified, quoted with its prid), set `confirmed_through` to that day, set
+`next_mpc_decision` to the meeting the release schedules, and set `through` to the day before it.
+`uv run pytest tests/unit/test_cash_interest.py -q` checks the shape.
