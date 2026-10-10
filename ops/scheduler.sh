@@ -33,6 +33,24 @@ if [[ ! -x "$uv_bin" ]]; then
     exit 4
 fi
 
+# `claude` (the M17 managers' LLM, M17_LLM_PROVIDER=claude_cli) is an npm install under nvm, which a
+# systemd user unit's PATH does not reach either. Put its directory (it also holds the `node` the
+# CLI runs on) on PATH. Missing is not fatal here: every other job runs without it, and the M17 job
+# itself fails loud per manager when the CLI cannot be found.
+claude_bin="${CLAUDE_BIN:-}"
+if [[ -z "$claude_bin" ]]; then
+    claude_bin="$(command -v claude || true)"
+fi
+if [[ -z "$claude_bin" ]]; then
+    claude_bin="$(ls -1d "$HOME"/.nvm/versions/node/*/bin/claude 2>/dev/null | sort -V | tail -n 1 || true)"
+fi
+if [[ -n "$claude_bin" && -x "$claude_bin" ]]; then
+    export PATH="$(dirname "$claude_bin"):$PATH"
+else
+    echo "scheduler: no claude CLI found (tried \$CLAUDE_BIN, PATH, ~/.nvm); M17 managers will fail." >&2
+    claude_bin="(none)"
+fi
+
 cd "$repo"
-echo "scheduler: repo=$repo DATA_ROOT=$DATA_ROOT uv=$uv_bin"
+echo "scheduler: repo=$repo DATA_ROOT=$DATA_ROOT uv=$uv_bin claude=$claude_bin"
 exec "$uv_bin" run python -m dataplatform.scheduler run
