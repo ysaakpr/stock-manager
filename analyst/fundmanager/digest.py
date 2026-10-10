@@ -5,6 +5,7 @@ manager's §6 numbers against its control and the bench, each book's latest mark
 decisions. It renders a `Scoreboard` and the session's `DecisionLine` rows and nothing else, so it
 holds no rationale, no prompt and no evidence text — what was decided, never what the model read.
 A voided decision shows the contract's reason codes (``Refused for``), never the breach messages.
+A held name suspended on the session (M17.13) is listed as "held, not trading since <date>".
 
 What it never does: read a clock (the session is given), choose its own directory (it is
 injected; `DIGEST_DIR` is the default the daily job passes), or leave a half-written page behind
@@ -19,7 +20,13 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Final
 
-from analyst.fundmanager.scoreboard import DecisionLine, ManagerScore, Scoreboard, WindowScore
+from analyst.fundmanager.scoreboard import (
+    DecisionLine,
+    ManagerScore,
+    Scoreboard,
+    SuspendedHoldingLine,
+    WindowScore,
+)
 from dataplatform.logging import get_logger
 
 __all__ = ["DIGEST_DIR", "digest_path", "render_digest", "write_digest"]
@@ -41,7 +48,7 @@ def _num(value: Decimal | int | date | None, suffix: str = "") -> str:
 
 def _window_row(score: ManagerScore, window: WindowScore | None) -> str:
     if window is None:
-        return f"| {score.manager_id} | {score.verdict.value} | — | — | — | — | — | — |"
+        return f"| {score.manager_id} | {score.verdict.value} | — | — | — | — | — | — | — |"
     cells = (
         score.manager_id,
         score.verdict.value,
@@ -52,6 +59,7 @@ def _window_row(score: ManagerScore, window: WindowScore | None) -> str:
         f"{_num(window.bench_max_drawdown_pp, ' pp')}",
         _num(window.brier),
         str(window.resolved_decisions),
+        str(window.suspended_resolved_decisions),
     )
     return "| " + " | ".join(cells) + " |"
 
@@ -72,7 +80,12 @@ def _decision_row(line: DecisionLine) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
-def render_digest(scoreboard: Scoreboard, session: date, decisions: Sequence[DecisionLine]) -> str:
+def render_digest(
+    scoreboard: Scoreboard,
+    session: date,
+    decisions: Sequence[DecisionLine],
+    suspended: Sequence[SuspendedHoldingLine] = (),
+) -> str:
     """The digest page for ``session`` as markdown text."""
     lines = [
         f"# M17 daily digest — {session.isoformat()}",
@@ -86,8 +99,8 @@ def render_digest(scoreboard: Scoreboard, session: date, decisions: Sequence[Dec
         "## Managers",
         "",
         "| Manager | Verdict | Window | Excess vs control | Excess vs bench | Max DD vs bench "
-        "| Brier | Resolved |",
-        "|---|---|---|---|---|---|---|---|",
+        "| Brier | Resolved | Resolved while suspended |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     for score in scoreboard.managers:
         lines.append(_window_row(score, score.extension or score.primary))
@@ -103,6 +116,19 @@ def render_digest(scoreboard: Scoreboard, session: date, decisions: Sequence[Dec
             f"| {book.book_id} | {book.kind} | {_num(book.latest_session)} | {_num(book.nav)} | "
             f"{_num(book.return_pct, ' %')} | {_num(book.cash)} | {_num(book.positions)} |"
         )
+    if suspended:
+        lines += [
+            "",
+            "## Suspended holdings",
+            "",
+            "| Book | ISIN | Status | Sessions suspended |",
+            "|---|---|---|---|",
+        ]
+        lines += [
+            f"| {h.book_id} | {h.isin} | held, not trading since {h.last_trade_date.isoformat()} "
+            f"| {h.sessions_suspended} |"
+            for h in suspended
+        ]
     lines += [
         "",
         f"## Decisions on {session.isoformat()}",
@@ -126,12 +152,13 @@ def write_digest(
     decisions: Sequence[DecisionLine],
     *,
     directory: Path,
+    suspended: Sequence[SuspendedHoldingLine] = (),
 ) -> Path:
     """Write the digest for ``session`` under ``directory`` (created if missing); its path."""
     directory.mkdir(parents=True, exist_ok=True)
     path = digest_path(directory, session)
     tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(render_digest(scoreboard, session, decisions), encoding="utf-8")
+    tmp.write_text(render_digest(scoreboard, session, decisions, suspended), encoding="utf-8")
     tmp.replace(path)
     _LOG.info(
         "fm_digest.written",
@@ -139,5 +166,6 @@ def write_digest(
         path=str(path),
         scoreboard=scoreboard.digest()[:16],
         decisions=len(decisions),
+        suspended=len(suspended),
     )
     return path

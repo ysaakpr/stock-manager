@@ -30,6 +30,21 @@ layer never names a concrete broker (invariant #5) — and the only account M17 
    per session, each child the most participation allows that session and cleared through every
    rail, until the book holds what the parent leaves (`PendingExit`). A buy is never sliced.
 
+**A suspended holding** (M17.13, owner decision 2026-10-10). A held name that is still listed but
+has no bar on a session that otherwise printed normally (the data interlock is green and the
+session's L1 coverage is at its usual level — `SuspendedNames` says which) is SUSPENDED for that
+session, not a data fault: the book values it at its last traded raw close (the source and
+semantics `DelistedNames` uses), journals ``payload.event = SUSPENDED_HOLDING`` each session it is
+suspended (`journal_suspended_holdings`), and never trades it at a made-up price. A sell of it
+(a manager's SELL/TRIM, a control's exit, a ``STOP_EXIT``) stays unfilled: a staged sell the
+broker could not fill for want of a bar is journaled ``UNFILLED_SUSPENDED``, a sell decided while
+the name has no close is journaled ``SUSPENDED_EXIT_HELD``, and either way it is held over as a
+`PendingExit` and re-offered every session until the name prints again, when it clears the rails
+and is staged at that session's close like any sell. A buy of a name with no close is never
+staged (``UNPRICED``), and the paper broker rejects any order whose fill session has no bar. A
+session whose market data is broadly missing is red data, stopped by the interlock before any
+book is touched; a held gap the suspension test does not cover stays a loud `BookError`.
+
 **One kill switch stops every M17 book** (§4 step 1): `m17_kill_switch` is the single switch file,
 `FundDesk` refuses books that do not share it, and a tripped switch makes every book journal a
 no-op (``payload.event = KILL_SWITCH_TRIPPED``), lapse the orders due that session and stage
@@ -96,6 +111,9 @@ __all__ = [
     "PAPER_MODE",
     "RECON_BREAK_EVENT",
     "RECON_EVENT",
+    "SUSPENDED_EXIT_HELD_EVENT",
+    "SUSPENDED_HOLDING_EVENT",
+    "UNFILLED_SUSPENDED_EVENT",
     "UNFILLED_UPPER_CIRCUIT_EVENT",
     "AccountSession",
     "BookAccount",
@@ -113,6 +131,9 @@ __all__ = [
     "FutureDataError",
     "LastTraded",
     "PendingExit",
+    "RejectedOrder",
+    "SuspendedHolding",
+    "SuspendedNames",
     "UnfilledOrder",
     "book_rails",
     "m17_kill_switch",
@@ -145,6 +166,12 @@ UNFILLED_UPPER_CIRCUIT_EVENT: Final = "UNFILLED_UPPER_CIRCUIT"
 #: ``payload.event`` when a parent exit worked across sessions is done, or replaced by a decision.
 EXIT_COMPLETE_EVENT: Final = "EXIT_COMPLETE"
 EXIT_SUPERSEDED_EVENT: Final = "EXIT_SUPERSEDED"
+#: ``payload.event`` on the line a book journals for each held, suspended name every session.
+SUSPENDED_HOLDING_EVENT: Final = "SUSPENDED_HOLDING"
+#: ``payload.event`` on a staged order the broker left unfilled because its name had no bar.
+UNFILLED_SUSPENDED_EVENT: Final = "UNFILLED_SUSPENDED"
+#: ``payload.event`` on a sell of a suspended name that could not be staged this session.
+SUSPENDED_EXIT_HELD_EVENT: Final = "SUSPENDED_EXIT_HELD"
 #: The booked corporate actions that move a holding to another ISIN (`BookedCorporateAction.kind`).
 _ISIN_CHANGES: Final = frozenset({"REISSUE", "SWAP"})
 
@@ -261,6 +288,22 @@ class UnfilledOrder:
 
 
 @dataclass(frozen=True, slots=True)
+class RejectedOrder:
+    """An order due this session that the paper broker rejected instead of filling.
+
+    ``order_uid`` is the staging uid (the one the order's ``STAGED`` line names) and ``reason``
+    the broker's own words (no bar, no cash, nothing to deliver).
+    """
+
+    order_uid: str
+    isin: str
+    side: Side
+    quantity: int
+    session: date
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class AccountSession:
     """What one session did to a book's paper account: its fills, interest and reconciliation."""
 
@@ -274,6 +317,7 @@ class AccountSession:
     broker_quantities: Mapping[str, int]
     corporate_actions: tuple[BookedCorporateAction, ...] = ()
     unfilled: tuple[UnfilledOrder, ...] = ()
+    rejected: tuple[RejectedOrder, ...] = ()
 
 
 class BookAccount(Protocol):
@@ -353,13 +397,46 @@ class DelistedNames(Protocol):
     M17.7: a held name whose listing has ended is valued at its last traded raw close — by the
     book's caps (`FundBook.valuation_close`), its mark (`scoreboard.mark_book`) and its decision's
     outcome (`scoreboard.resolve_outcome`) — until a corporate action converts it. A listed name
-    with no close is still a loud error: a gap is a data fault, not a delisting.
+    with no close is not a delisting: it is SUSPENDED when `SuspendedNames` says the session
+    otherwise printed normally (M17.13), and a loud error otherwise.
     """
 
     def last_traded(self, isin: str, session: date) -> LastTraded | None:
         """For ``isin`` delisted on or before ``session``: its last traded session and closes.
         None for a name still listed on ``session``."""
         ...
+
+
+class SuspendedNames(Protocol):
+    """Which still-listed names are suspended on a session, and where they last traded.
+
+    M17.13: a held name that is still listed but has no bar on a session that printed normally is
+    SUSPENDED for that session (module docstring). The implementation states its own test for
+    "printed normally" (production: `backtest.fm_world.LakeSuspendedNames`); a market-wide gap is
+    never a suspension — it is red data, and the interlock stops the session.
+    """
+
+    def last_traded(self, isin: str, session: date) -> LastTraded | None:
+        """For ``isin`` still listed, with no bar on ``session``, on a session that printed
+        normally: its last traded session (before ``session``) and closes there. None when the
+        name printed on ``session``, has delisted, never printed, or the session's market data is
+        broadly missing."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class SuspendedHolding:
+    """One held name suspended on ``session``: valued at ``last.raw_close``, never traded there.
+
+    ``sessions_suspended`` counts the sessions in ``(last.session, session]`` — 1 on the first
+    session without a print.
+    """
+
+    isin: str
+    quantity: int
+    session: date
+    last: LastTraded
+    sessions_suspended: int
 
 
 class BookJournal(Protocol):
@@ -456,6 +533,7 @@ class ExecutionReport:
     interest_credited: Decimal = _ZERO
     corporate_actions: tuple[BookedCorporateAction, ...] = ()
     unfilled: tuple[UnfilledOrder, ...] = ()
+    rejected: tuple[RejectedOrder, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,12 +591,20 @@ class FundBook:
     pending_exits: dict[str, PendingExit] = field(default_factory=dict)
     #: The listing record: a held name that delisted is valued at its last traded close.
     delisted: DelistedNames | None = None
+    #: M17.13: a held, still-listed name with no bar on a normal session is valued at its last
+    #: traded close and its sells are held over until it prints (module docstring).
+    suspended: SuspendedNames | None = None
+    #: The sells staged for the next session, by staging uid: (event, rationale). Read once, when
+    #: that session executes, so a sell the broker could not fill on a suspended name is held over
+    #: with the event (``STOP_EXIT``, ``STAGED``) and the rationale it was decided with.
+    staged_sells: dict[str, tuple[str, str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.book_id.strip():
             raise ValueError("a book needs an id")
         self.last_buy_fill = dict(self.last_buy_fill)
         self.pending_exits = dict(self.pending_exits)
+        self.staged_sells = dict(self.staged_sells)
 
     # -- journal stream ---------------------------------------------------------------------------
 
@@ -589,6 +675,7 @@ class FundBook:
     def halt(self, session: date) -> ExecutionReport:
         """A tripped-switch session: the orders due now lapse unfilled and the halt is journaled."""
         lapsed = self.account.lapse(session)
+        self.staged_sells.clear()
         self._journal_halt(session, "filled", lapsed)
         _LOG.warning("fm_books.halted", book=self.book_id, session=session.isoformat())
         return ExecutionReport(self.book_id, session, halted=True, lapsed=lapsed)
@@ -600,6 +687,7 @@ class FundBook:
                 self.last_buy_fill[fill.isin] = fill.session
         self._journal_corporate_actions(run)
         self._journal_unfilled(run)
+        self._hold_over_rejected(run)
         self._journal_recon(run)
         _LOG.info(
             "fm_books.executed",
@@ -618,6 +706,7 @@ class FundBook:
             interest_credited=run.interest_credited,
             corporate_actions=run.corporate_actions,
             unfilled=run.unfilled,
+            rejected=run.rejected,
         )
 
     def _journal_corporate_actions(self, run: AccountSession) -> None:
@@ -736,6 +825,74 @@ class FundBook:
                 )
             )
 
+    def _hold_over_rejected(self, run: AccountSession) -> None:
+        """Journal each order the broker left unfilled on a suspended name; hold its sells over.
+
+        Only an order whose name is suspended this session (`suspension`) is handled here: it is
+        journaled ``UNFILLED_SUSPENDED`` and, for a sell, becomes a `PendingExit` (unless one
+        already works that name — its remainder is re-offered by itself) so it is re-offered every
+        session until the name prints. A buy is not re-offered: the decision that sized it is
+        stale by the time the name trades again.
+        """
+        staged = dict(self.staged_sells)
+        self.staged_sells.clear()
+        for order in run.rejected:
+            last = self.suspension(order.isin, run.session)
+            if last is None:
+                continue
+            selling = order.side is Side.SELL
+            event, rationale = staged.get(
+                order.order_uid, (ORDER_STAGED_EVENT, f"sell of {order.isin}")
+            )
+            held = run.quantities.get(order.isin, 0)
+            exiting = self.pending_exits.get(order.isin)
+            if selling and exiting is None and held > 0:
+                self.pending_exits[order.isin] = PendingExit(
+                    isin=order.isin,
+                    parent_uid=order.order_uid,
+                    decided=run.session,
+                    parent_quantity=order.quantity,
+                    floor=max(held - order.quantity, 0),
+                    rationale=rationale,
+                    event=event,
+                    children=1,
+                )
+            self._write(
+                self._entry(
+                    run.session,
+                    actor=Actor.EXEC,
+                    decision=Decision.HOLD,
+                    isin=order.isin,
+                    rationale=(
+                        f"{order.side.value.lower()} of {order.quantity} {order.isin} left "
+                        f"unfilled: the name is suspended (held, not trading since "
+                        f"{last.session.isoformat()}), so there is no price to fill at; "
+                        + (
+                            "re-offered every session until it prints"
+                            if selling
+                            else "a buy is not re-offered"
+                        )
+                    ),
+                    payload={
+                        "event": UNFILLED_SUSPENDED_EVENT,
+                        "order_id": order.order_uid,
+                        "side": order.side.value,
+                        "quantity": str(order.quantity),
+                        "order_event": event if selling else ORDER_STAGED_EVENT,
+                        "last_trade_date": last.session.isoformat(),
+                        "reoffered": "true" if selling else "false",
+                    },
+                )
+            )
+            _LOG.warning(
+                "fm_books.unfilled_suspended",
+                book=self.book_id,
+                isin=order.isin,
+                side=order.side.value,
+                session=run.session.isoformat(),
+                last_trade_date=last.session.isoformat(),
+            )
+
     def _journal_recon(self, run: AccountSession) -> None:
         items: list[EvidenceItem] = []
         for source, cash, quantities in (
@@ -811,9 +968,13 @@ class FundBook:
         `RAIL_BLOCK` by A8; an order with no close to value it at is journaled `DEFERRED`; a
         staged order is journaled `BUY`/`SELL` with its uid. A session with no orders and no exit
         to work journals a `HOLD`.
+        A sell of a suspended holding (`suspension`) is never staged: it is journaled
+        ``SUSPENDED_EXIT_HELD`` and held over as a `PendingExit`, re-offered every session until
+        the name prints (M17.13).
         Raises `BookError` for two orders in one ISIN (one decision per name), or a held name with
-        no close that has not delisted (the book cannot be valued, so no cap can be checked); a
-        delisted holding is valued at its last traded close (`valuation_close`).
+        no close that is neither delisted nor suspended (the book cannot be valued, so no cap can
+        be checked); a delisted or suspended holding is valued at its last traded close
+        (`valuation_close`).
         """
         if self.kill_switch.is_tripped:
             self._journal_halt(session, "staged")
@@ -893,6 +1054,11 @@ class FundBook:
             spendable -= proposed.value
 
         for order in unpriced:
+            last = self.suspension(order.isin, session) if order.side is Side.SELL else None
+            lot = book.lot(order.isin)
+            if last is not None and lot is not None:
+                self._hold_over_sell(session, order, lot.quantity, last)
+                continue
             self._write(
                 self._entry(
                     session,
@@ -933,6 +1099,47 @@ class FundBook:
             unpriced=tuple(unpriced),
         )
 
+    def _hold_over_sell(self, session: date, order: BookOrder, held: int, last: LastTraded) -> None:
+        """A sell decided on a suspended name: nothing staged, the exit held over (M17.13).
+
+        It becomes a `PendingExit` leaving ``held - quantity`` shares, so `_work_pending_exits`
+        offers it again every session until the name prints and the rails clear it.
+        """
+        parent = f"{self.book_id}:{order.isin}:{session.isoformat()}:held"
+        self.pending_exits[order.isin] = PendingExit(
+            isin=order.isin,
+            parent_uid=parent,
+            decided=session,
+            parent_quantity=order.quantity,
+            floor=max(held - order.quantity, 0),
+            rationale=order.rationale,
+            event=order.event,
+            children=0,
+        )
+        self._journal_exit_held(session, order.isin, parent, order.event, last)
+
+    def _journal_exit_held(
+        self, session: date, isin: str, parent: str, event: str, last: LastTraded
+    ) -> None:
+        self._write(
+            self._entry(
+                session,
+                actor=Actor.EXEC,
+                decision=Decision.DEFERRED,
+                isin=isin,
+                rationale=(
+                    f"{isin} is suspended (held, not trading since {last.session.isoformat()}): "
+                    "the sell is not staged at a made-up price and is offered again next session"
+                ),
+                payload={
+                    "event": SUSPENDED_EXIT_HELD_EVENT,
+                    "exit_parent": parent,
+                    "order_event": event,
+                    "last_trade_date": last.session.isoformat(),
+                },
+            )
+        )
+
     def _stage(
         self,
         order: BookOrder,
@@ -942,6 +1149,8 @@ class FundBook:
         exit_payload: Mapping[str, str] | None = None,
     ) -> str:
         uid = self.account.stage(proposed.request)
+        if order.side is Side.SELL:
+            self.staged_sells[uid] = (order.event, order.rationale)
         payload = {
             "event": order.event,
             "order_uid": uid,
@@ -1014,6 +1223,10 @@ class FundBook:
                 continue
             order = BookOrder(isin, Side.SELL, remainder, pending.rationale, pending.event)
             proposed = self._proposed(order, session)
+            last = None if proposed is not None else self.suspension(isin, session)
+            if last is not None:
+                self._journal_exit_held(session, isin, pending.parent_uid, pending.event, last)
+                continue
             if proposed is None:
                 self._write(
                     self._entry(
@@ -1067,18 +1280,91 @@ class FundBook:
 
     def valuation_close(self, isin: str, session: date) -> Decimal | None:
         """What a held ``isin`` is worth a share at ``session``'s close: its close, or — for a name
-        `delisted` says has delisted — its last traded raw close. None when neither exists.
+        `delisted` says has delisted, or `suspended` says is suspended — its last traded raw
+        close. None when none of them exists.
 
         For valuing the book only (caps, marks, the manager's weights). An order is still priced
-        at the session's own close (`_proposed`), so a delisted name is never offered to the
-        market at a stale price.
+        at the session's own close (`_proposed`), so a delisted or suspended name is never offered
+        to the market at a stale price.
         """
         price = self.market.close(isin, session)
         if price is None and self.delisted is not None:
             last = self.delisted.last_traded(isin, session)
             if last is not None:
                 price = last.raw_close
+        if price is None:
+            suspended = self.suspension(isin, session)
+            if suspended is not None:
+                price = suspended.raw_close
         return price
+
+    def suspension(self, isin: str, session: date) -> LastTraded | None:
+        """Where ``isin`` last traded, if it is suspended on ``session`` (module docstring): no
+        close today, not delisted, and `suspended` says the session otherwise printed normally.
+        None for a name that printed, delisted, or a gap the suspension test does not cover."""
+        if self.suspended is None or self.market.close(isin, session) is not None:
+            return None
+        if self.delisted is not None and self.delisted.last_traded(isin, session) is not None:
+            return None
+        return self.suspended.last_traded(isin, session)
+
+    def suspended_holdings(self, session: date) -> tuple[SuspendedHolding, ...]:
+        """Every held name suspended on ``session``, by ISIN."""
+        out: list[SuspendedHolding] = []
+        for isin, quantity in sorted(self.account.quantities().items()):
+            if quantity <= 0:
+                continue
+            last = self.suspension(isin, session)
+            if last is not None:
+                out.append(
+                    SuspendedHolding(
+                        isin=isin,
+                        quantity=quantity,
+                        session=session,
+                        last=last,
+                        sessions_suspended=self.market.sessions_between(last.session, session),
+                    )
+                )
+        return tuple(out)
+
+    def journal_suspended_holdings(self, session: date) -> tuple[SuspendedHolding, ...]:
+        """Journal ``SUSPENDED_HOLDING`` for every held name suspended on ``session``; them.
+
+        One line per name per session it is suspended (a `HEARTBEAT`: bookkeeping, not a
+        decision), carrying the last trade date, its raw close the book is valued at, and how many
+        sessions it has been suspended.
+        """
+        held = self.suspended_holdings(session)
+        for holding in held:
+            self._write(
+                self._entry(
+                    session,
+                    actor=Actor.EXEC,
+                    decision=Decision.HEARTBEAT,
+                    isin=holding.isin,
+                    rationale=(
+                        f"held, not trading since {holding.last.session.isoformat()}: suspended "
+                        f"for {holding.sessions_suspended} session(s); valued at its last traded "
+                        f"close {holding.last.raw_close}, never traded at a made-up price"
+                    ),
+                    payload={
+                        "event": SUSPENDED_HOLDING_EVENT,
+                        "last_trade_date": holding.last.session.isoformat(),
+                        "last_close": str(holding.last.raw_close),
+                        "quantity": str(holding.quantity),
+                        "sessions_suspended": str(holding.sessions_suspended),
+                    },
+                )
+            )
+            _LOG.warning(
+                "fm_books.suspended_holding",
+                book=self.book_id,
+                isin=holding.isin,
+                session=session.isoformat(),
+                last_trade_date=holding.last.session.isoformat(),
+                sessions_suspended=holding.sessions_suspended,
+            )
+        return held
 
     def _portfolio(self, session: date) -> Portfolio:
         lots: list[Lot] = []
@@ -1088,8 +1374,9 @@ class FundBook:
             price = self.valuation_close(isin, session)
             if price is None:
                 raise BookError(
-                    f"{self.book_id}: held {isin} has no close on {session.isoformat()} and has "
-                    "not delisted; the book cannot be valued, so no cap can be checked"
+                    f"{self.book_id}: held {isin} has no close on {session.isoformat()} and is "
+                    "neither delisted nor suspended on a session that printed normally; the book "
+                    "cannot be valued, so no cap can be checked"
                 )
             lots.append(
                 Lot(isin=isin, sector=self.market.sector(isin), quantity=quantity, price=price)
@@ -1126,6 +1413,15 @@ class FundBook:
             ),
             spendable_cash=spendable,
         )
+
+    def staged_sells_document(self) -> dict[str, list[str]]:
+        """The sells staged for the next session (uid → [event, rationale]), to persist."""
+        return {uid: [event, why] for uid, (event, why) in sorted(self.staged_sells.items())}
+
+    @staticmethod
+    def staged_sells_from(document: Mapping[str, Sequence[str]]) -> dict[str, tuple[str, str]]:
+        """The inverse of `staged_sells_document`."""
+        return {uid: (pair[0], pair[1]) for uid, pair in document.items()}
 
     def buy_fills_document(self) -> dict[str, str]:
         """The last-buy-fill record (ISIN → ISO date): the min-hold rail's state, to persist."""

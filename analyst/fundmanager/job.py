@@ -504,13 +504,15 @@ def manager_book(
 ) -> ManagerBook:
     """``book`` as its manager sees it at ``session``'s close: weights, theses, stops, reviews.
 
-    Each holding is valued at `FundBook.valuation_close` (a delisted name at its last traded
-    close), weighted against the book's value, and carries its memo's thesis and invalidation
-    conditions, its current stop level, ``notes`` as evidence since entry and ``forced`` as its
-    forced review. Forced reviews are listed first (Amendment 1 c). Sessions held count from the
-    memo's decision session.
+    Each holding is valued at `FundBook.valuation_close` (a delisted or suspended name at its last
+    traded close), weighted against the book's value, and carries its memo's thesis and
+    invalidation conditions, its current stop level, ``notes`` as evidence since entry and
+    ``forced`` as its forced review; a suspended holding (M17.13) carries ``suspended_since``.
+    Forced reviews are listed first (Amendment 1 c). Sessions held count from the memo's decision
+    session.
     What it never does: put a cost basis, an entry price or a P&L anywhere in the view.
-    Raises `BookError` (from the valuation) for a held name with no close that has not delisted.
+    Raises `BookError` (from the valuation) for a held name with no close that is neither
+    delisted nor suspended.
     """
     notes = notes or {}
     forced = forced or {}
@@ -520,10 +522,11 @@ def manager_book(
         price = book.valuation_close(isin, session)
         if price is None:
             raise BookError(
-                f"{book.book_id}: held {isin} has no close on {session.isoformat()} and has not "
-                "delisted; the manager's book cannot be valued"
+                f"{book.book_id}: held {isin} has no close on {session.isoformat()} and is neither "
+                "delisted nor suspended; the manager's book cannot be valued"
             )
         values[isin] = price * quantity
+    suspended = {h.isin: h.last.session for h in book.suspended_holdings(session)}
     cash = book.account.cash_value
     nav = cash + sum(values.values(), _ZERO)
     holdings: list[Holding] = []
@@ -546,6 +549,7 @@ def manager_book(
                 stop_price=None if stop is None else stop.level,
                 evidence_since_entry=tuple(notes.get(isin, ())),
                 forced_review=forced.get(isin),
+                suspended_since=suspended.get(isin),
             )
         )
     holdings.sort(key=lambda h: (h.forced_review is None, h.isin))

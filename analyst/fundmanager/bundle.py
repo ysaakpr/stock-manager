@@ -83,6 +83,9 @@ class Holding:
 
     ``weight_pct`` is the position's share of the book at today's close, in percentage points.
     ``stop_price`` is the mechanical stop M17.7 executes, or None if none is set.
+    ``suspended_since`` (M17.13) is the last session a still-listed name traded, when it has no
+    print today: the holding is weighted at that close, shown as "suspended since <date>" with no
+    price, and any sell of it is held until it prints — never traded as if live.
     """
 
     isin: str
@@ -94,6 +97,7 @@ class Holding:
     stop_price: Decimal | None
     evidence_since_entry: tuple[str, ...] = ()
     forced_review: str | None = None
+    suspended_since: date | None = None
 
     def __post_init__(self) -> None:
         if self.weight_pct < _ZERO or self.sessions_held < 0:

@@ -153,6 +153,7 @@ class FakeWorld:
     bench: DictBench = BENCH
     missing: list[tuple[str, ...]] = field(default_factory=list)
     delisted_names: Any = None
+    suspended_names: Any = None
     readiness_calls: int = 0
     actions: BookActionCalendar = field(default_factory=BookActionCalendar)
 
@@ -182,6 +183,9 @@ class FakeWorld:
 
     def delisted(self) -> Any:
         return self.delisted_names
+
+    def suspended(self) -> Any:
+        return self.suspended_names
 
     def adjusted_close(self, isin: str, session: date) -> Decimal | None:
         return self.market.close(isin, session)

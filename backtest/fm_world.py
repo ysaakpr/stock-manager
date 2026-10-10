@@ -16,8 +16,13 @@ M15.3 paper session read it:
 - `LakeDelistedNames` — the `DelistedNames` the marks, the caps and the outcomes read: a name is
   delisted only when the **identity master's listing record** says its listing has ended (every
   exchange delisted it, `store_listing_calendar`); its last trade is its last L1 print on or
-  before the session. A listed name that simply did not print is *not* delisted — a gap is a data
-  fault and stays loud.
+  before the session. A listed name that simply did not print is *not* delisted.
+- `LakeSuspendedNames` — the `SuspendedNames` (M17.13): a still-listed name with no print on a
+  session is SUSPENDED when the session otherwise printed normally — its L1 EQ close count is at
+  least `SUSPENSION_COVERAGE_FLOOR` of the median count over the previous
+  `COVERAGE_LOOKBACK_SESSIONS` sessions (the interlock being green is the job's precondition for
+  asking). Its last trade is read exactly as `LakeDelistedNames` reads it. On a session below the
+  floor nothing is suspended, and a held gap stays a loud error.
 - `LakeCommonsBuilder` — the session's Commons: sheets, shortlist, screens and regime over one
   `LakeCommonsSource`, then filing digests scoped to the screens' names and the shortlist, the
   frozen base-rate table (`base_rates.load_frozen`), and the `ManagerCommons` the managers read.
@@ -67,7 +72,7 @@ from analyst.commons.sheets import (
     CommonsSource,
 )
 from analyst.commons.store import CommonsStore, ShortlistStore
-from analyst.fundmanager.books import LastTraded
+from analyst.fundmanager.books import DelistedNames, LastTraded
 from analyst.fundmanager.controls import BenchmarkUnavailableError, LakeTriBenchmark
 from analyst.fundmanager.job import STREAM_DRY, STREAM_LIVE, StreamJournal
 from analyst.fundmanager.mandate import Roster, load_roster
@@ -108,17 +113,21 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BENCH_SLUG",
+    "COVERAGE_LOOKBACK_SESSIONS",
     "M17_DATASETS",
     "READINESS_INDEX_SERIES",
     "READINESS_SAMPLE",
+    "SUSPENSION_COVERAGE_FLOOR",
     "LakeCommonsBuilder",
     "LakeDelistedNames",
     "LakeM17World",
+    "LakeSuspendedNames",
     "NoLiveFetcher",
     "cli_run",
     "index_level_gaps",
     "m17_provider",
     "overlay_readiness",
+    "printed_normally",
     "production_run",
 ]
 
@@ -132,6 +141,11 @@ M17_DATASETS: Final[tuple[str, ...]] = ("nse_bhavcopy", "nse_delivery")
 BENCH_SLUG: Final = "nifty500"
 #: How many of the session's most liquid names the readiness probe samples (L1 and the overlay).
 READINESS_SAMPLE: Final = 10
+#: M17.13's single-name-versus-market test: a session "printed normally" when its L1 EQ close
+#: count is at least this share of the median count over the previous sessions below. A whole
+#: market that did not print is red data (the interlock), never a list of suspensions.
+SUSPENSION_COVERAGE_FLOOR: Final = Decimal("0.90")
+COVERAGE_LOOKBACK_SESSIONS: Final = 5
 #: An unknown sector groups under this for the sector cap (conservative: one shared bucket).
 UNKNOWN_SECTOR: Final = "UNKNOWN"
 #: How far back the fill market's calendar starts before the session (headroom for restored
@@ -171,6 +185,94 @@ class LakeDelistedNames:
             self._last[session] = self._reader.last_prints(session)
         day = self._last[session].get(isin)
         if day is None:
+            return None
+        raw = self._reader.closes_on(day).get(isin)
+        if raw is None:
+            restricted = self._reader.restricted_close(isin, day)
+            raw = None if restricted is None else restricted[1]
+        if raw is None:
+            return None
+        adjusted = self._adjusted(isin, day)
+        return LastTraded(session=day, raw_close=raw, adjusted_close=adjusted or raw)
+
+
+def printed_normally(printed: int, previous: Sequence[int]) -> bool:
+    """M17.13's test: ``printed`` names on the session against the ``previous`` sessions' counts.
+
+    True when there is a usual level to compare with (at least one earlier session, median above
+    zero) and ``printed`` is at least `SUSPENSION_COVERAGE_FLOOR` of that median. Anything else —
+    no history, an empty session, a thin one — is not a normal session, so no name is suspended.
+    """
+    counts = sorted(previous)
+    if not counts or printed <= 0:
+        return False
+    mid = len(counts) // 2
+    usual = (
+        Decimal(counts[mid])
+        if len(counts) % 2
+        else (Decimal(counts[mid - 1]) + Decimal(counts[mid])) / 2
+    )
+    return usual > 0 and Decimal(printed) >= SUSPENSION_COVERAGE_FLOOR * usual
+
+
+class LakeSuspendedNames:
+    """`SuspendedNames` over the L1 prints (module docstring; M17.13).
+
+    What it does: for a name with no EQ or BE/BZ print on ``session``, not delisted, on a session
+    that printed normally (`printed_normally` over the previous `COVERAGE_LOOKBACK_SESSIONS`
+    sessions of ``sessions_before``), returns its last NSE print before the session — raw close
+    and adjusted close — exactly as `LakeDelistedNames` reads a delisted name's last trade.
+    What it never does: call a session with thin coverage a suspension, read past ``session``, or
+    return a price the name did not trade at.
+    """
+
+    def __init__(
+        self,
+        *,
+        reader: _L1Reader,
+        sessions_before: Callable[[date, int], Sequence[date]],
+        adjusted: Callable[[str, date], Decimal | None],
+        delisted: DelistedNames | None = None,
+    ) -> None:
+        self._reader = reader
+        self._before = sessions_before
+        self._adjusted = adjusted
+        self._delisted = delisted
+        self._normal: dict[date, bool] = {}
+        self._last: dict[date, Mapping[str, date]] = {}
+
+    def printed_normally(self, session: date) -> bool:
+        """Whether ``session``'s L1 coverage is at its usual level (cached per session)."""
+        if session not in self._normal:
+            previous = [
+                len(self._reader.closes_on(day))
+                for day in self._before(session, COVERAGE_LOOKBACK_SESSIONS)
+            ]
+            printed = len(self._reader.closes_on(session))
+            self._normal[session] = printed_normally(printed, previous)
+            if not self._normal[session]:
+                _LOG.warning(
+                    "fm_world.session_not_normal",
+                    session=session.isoformat(),
+                    printed=printed,
+                    previous=previous,
+                    state="NO_SUSPENSIONS",
+                )
+        return self._normal[session]
+
+    def last_traded(self, isin: str, session: date) -> LastTraded | None:
+        if isin in self._reader.closes_on(session):
+            return None
+        if self._reader.restricted_close(isin, session) is not None:
+            return None
+        if self._delisted is not None and self._delisted.last_traded(isin, session) is not None:
+            return None
+        if not self.printed_normally(session):
+            return None
+        if session not in self._last:
+            self._last[session] = self._reader.last_prints(session)
+        day = self._last[session].get(isin)
+        if day is None or day >= session:
             return None
         raw = self._reader.closes_on(day).get(isin)
         if raw is None:
@@ -276,6 +378,12 @@ class LakeM17World:
             if listings is None
             else LakeDelistedNames(listings, reader=self._reader, adjusted=self.adjusted_close)
         )
+        self._suspended = LakeSuspendedNames(
+            reader=self._reader,
+            sessions_before=self._sessions_before,
+            adjusted=self.adjusted_close,
+            delisted=self._delisted,
+        )
 
     def close(self) -> None:
         self._commons.close()
@@ -344,6 +452,13 @@ class LakeM17World:
 
     def delisted(self) -> LakeDelistedNames | None:
         return self._delisted
+
+    def suspended(self) -> LakeSuspendedNames:
+        return self._suspended
+
+    def _sessions_before(self, day: date, count: int) -> Sequence[date]:
+        index = bisect_left(self._sessions, day)
+        return self._sessions[max(0, index - count) : index]
 
     def _query(self) -> QueryService:
         if self._service is None:

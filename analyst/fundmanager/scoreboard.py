@@ -39,8 +39,15 @@ value a hair under a threshold is never rounded across it.
   close, exactly as the backtests' NAV path carries a name that stopped printing (its last-known
   close, never zero, never a guess), until a corporate action converts it (a curated cash exit is
   booked by the account and leaves cash). Only a name whose listing has *ended* is treated so
-  (`DelistedNames`); a listed name with a missing close is still a loud `OutcomeError` /
-  `BookError`, because a gap is a data fault, not a delisting.
+  (`DelistedNames`).
+- *A suspended name* (M17.13, owner decision 2026-10-10) — still listed, no bar on a session that
+  otherwise printed normally (`SuspendedNames`) — is treated the same way for as long as it is
+  suspended: `mark_book` values it at its last traded raw close, and a decision whose horizon
+  resolves while it is suspended is scored at its last traded close, its `DecisionOutcome`
+  carrying ``suspended=True`` (likewise a decision made on a session the name was already
+  suspended starts from that close). Each window reports how many of its resolved decisions were
+  scored so (``WindowScore.suspended_resolved_decisions``). Any other listed name with a missing
+  close is still a loud `OutcomeError` / `BookError`, because a gap is a data fault.
 - *Brier* = mean of ``(p - o)^2`` with ``o`` = 1 if the name beat the bench, else 0, over the
   window's resolved decisions (decided in the window and resolved by its last session). Every
   decision carries ``p_beat_bench``, so every resolved decision counts, whatever its action.
@@ -66,11 +73,13 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from analyst.fundmanager.books import (
     PAPER_MODE,
+    SUSPENDED_HOLDING_EVENT,
     BookError,
     DelistedNames,
     ExecutionReport,
     FundBook,
     LastTraded,
+    SuspendedNames,
 )
 from analyst.fundmanager.mandate import (
     BenchMandate,
@@ -120,6 +129,7 @@ __all__ = [
     "ScoreboardInputs",
     "ScoredDecision",
     "SecondaryMetrics",
+    "SuspendedHoldingLine",
     "WindowScore",
     "apply_rule",
     "brier_score",
@@ -133,6 +143,7 @@ __all__ = [
     "resolve_outcome",
     "scored_decision_from_entry",
     "shrunk_probability",
+    "suspended_holdings_on",
     "todays_decisions",
 ]
 
@@ -154,7 +165,8 @@ MIN_RESOLVED: Final = 30
 #: Amendment 1 (f): the weight on the model's p in the shrunk forecast; the rest is the base rate.
 SHRINK_WEIGHT: Final = Decimal("0.5")
 
-SCOREBOARD_VERSION: Final = "m17-scoreboard/1"
+#: /2 (M17.13): `WindowScore.suspended_resolved_decisions`, `DecisionOutcome.suspended`.
+SCOREBOARD_VERSION: Final = "m17-scoreboard/2"
 
 #: ``payload.event`` values this module writes or reads on the journal.
 MARK_EVENT: Final = "BOOK_MARK"
@@ -285,6 +297,10 @@ class DecisionOutcome(_Record):
     #: The name's last traded session when it had delisted before ``resolved_on`` (its return is
     #: measured to that close); None for a name that printed on ``resolved_on``.
     name_last_traded: date | None = None
+    #: M17.13: the name was suspended (still listed, not trading) at ``resolved_on`` — or on the
+    #: decision session — so its return is measured from or to its last traded close
+    #: (``name_last_traded`` names it when it is the resolution end).
+    suspended: bool = False
 
     @property
     def beat(self) -> bool:
@@ -429,6 +445,8 @@ class WindowScore(_Record):
     bench_max_drawdown_pp: Decimal
     brier: Decimal | None
     resolved_decisions: int
+    #: Of ``resolved_decisions``, how many were scored at a suspended name's last close (M17.13).
+    suspended_resolved_decisions: int
     checks: RuleChecks
     verdict: ScoreVerdict
     secondary: SecondaryMetrics
@@ -799,6 +817,7 @@ def _window_score(
         bench_max_drawdown_pp=_q(b_dd, _PP),
         brier=None if brier is None else _q(brier, _SCORE),
         resolved_decisions=len(resolved),
+        suspended_resolved_decisions=sum(1 for _, o in resolved if o.suspended),
         checks=checks,
         verdict=verdict,
         secondary=secondary,
@@ -983,29 +1002,36 @@ def mark_book(
     *,
     execution: ExecutionReport | None,
     delisted: DelistedNames | None = None,
+    suspended: SuspendedNames | None = None,
 ) -> BookMark:
     """A manager or control book's mark at ``session``'s close.
 
     ``execution`` is the session's `FundBook.execute` report (its fills, costs and interest); None
     on a session the book did not execute. A held name with no close that ``delisted`` (default:
-    the book's own listing record) says has delisted is valued at its last traded raw close
-    (module docstring). Raises `BookError` for any other held name with no close — a book that
-    cannot be valued is never marked at a guess.
+    the book's own listing record) says has delisted, or that ``suspended`` (default: the book's
+    own) says is suspended on a session that otherwise printed normally, is valued at its last
+    traded raw close (module docstring). Raises `BookError` for any other held name with no close
+    — a book that cannot be valued is never marked at a guess.
     """
     invested = _ZERO
     positions = 0
     if delisted is None:
         delisted = book.delisted
+    if suspended is None:
+        suspended = book.suspended
     for isin, quantity in sorted(book.account.quantities().items()):
         if quantity <= 0:
             continue
         price = book.market.close(isin, session)
         if price is None:
             last = None if delisted is None else delisted.last_traded(isin, session)
+            if last is None and suspended is not None:
+                last = suspended.last_traded(isin, session)
             if last is None:
                 raise BookError(
-                    f"{book.book_id}: held {isin} has no close on {session.isoformat()}; the "
-                    "book cannot be marked"
+                    f"{book.book_id}: held {isin} has no close on {session.isoformat()} and is "
+                    "neither delisted nor suspended on a session that printed normally; the book "
+                    "cannot be marked"
                 )
             price = last.raw_close
         invested += price * quantity
@@ -1080,13 +1106,16 @@ def resolve_outcome(
     prices: OutcomePrices,
     exited_on: date | None = None,
     delisted: DelistedNames | None = None,
+    suspended: SuspendedNames | None = None,
 ) -> DecisionOutcome | None:
     """``decision``'s outcome if it has resolved by ``as_of``, else None.
 
     It resolves at the session ``horizon_sessions`` after the decision session in ``calendar`` —
     or, for a BUY whose position was fully sold earlier, at ``exited_on``. Both returns are close
     to close over the same sessions — except for a name ``delisted`` says had delisted by the
-    resolution session, whose return runs to its last traded close (module docstring). Raises
+    resolution session, whose return runs to its last traded close (module docstring), and one
+    ``suspended`` says is suspended there, likewise, with ``suspended=True`` on the outcome; a
+    name already suspended on the decision session starts from its last traded close too. Raises
     `OutcomeError` when it is due and a level is missing for any other reason, and
     `ScoreboardError` when the decision session is not in ``calendar``.
     """
@@ -1109,13 +1138,24 @@ def resolve_outcome(
     if resolved_on is None or resolved_on > as_of:
         return None
     final = prices.adjusted_close(decision.isin, resolved_on)
+    start = prices.adjusted_close(decision.isin, decision.decided_on)
     last_traded: date | None = None
+    was_suspended = False
     if final is None and delisted is not None:
         last = delisted.last_traded(decision.isin, resolved_on)
         if last is not None and decision.decided_on <= last.session < resolved_on:
             final, last_traded = last.adjusted_close, last.session
+    if final is None and suspended is not None:
+        last = suspended.last_traded(decision.isin, resolved_on)
+        if last is not None and last.session < resolved_on:
+            final, last_traded, was_suspended = last.adjusted_close, last.session, True
+    if start is None and suspended is not None:
+        # already suspended when decided: the name's value then was its last traded close
+        opened = suspended.last_traded(decision.isin, decision.decided_on)
+        if opened is not None and opened.session < decision.decided_on:
+            start, was_suspended = opened.adjusted_close, True
     levels = (
-        prices.adjusted_close(decision.isin, decision.decided_on),
+        start,
         final,
         prices.bench_level(decision.decided_on),
         prices.bench_level(resolved_on),
@@ -1140,6 +1180,7 @@ def resolve_outcome(
         bench_return=_q(bench_return, _SCORE),
         reason=reason,
         name_last_traded=last_traded,
+        suspended=was_suspended,
     )
 
 
@@ -1424,4 +1465,51 @@ def todays_decisions(
                 refused_for=entry.payload.get("reason_codes") or None,
             )
         )
+    return day, tuple(lines)
+
+
+# ── suspended holdings (status page, digest) ─────────────────────────────────────────────────────
+
+#: ``payload.event`` on a book's line for a held, suspended name (books.py, M17.13).
+_SUSPENDED_EVENT: Final = SUSPENDED_HOLDING_EVENT
+
+
+class SuspendedHoldingLine(_Record):
+    """One held name an M17 book reported suspended on a session: "held, not trading since"."""
+
+    book_id: str
+    trading_date: date
+    isin: str
+    last_trade_date: date
+    sessions_suspended: int
+
+
+def suspended_holdings_on(
+    entries: Iterable[JournalEntry], roster: Roster, *, session: date | None = None
+) -> tuple[date | None, tuple[SuspendedHoldingLine, ...]]:
+    """The M17 books' ``SUSPENDED_HOLDING`` lines on ``session`` (default: the latest session
+    any book journaled), in journal order. A name that printed again simply has no line."""
+    books = {book.id for book in roster.books}
+    mine = [e for e in entries if e.case_id in books]
+    day = session if session is not None else max((e.trading_date for e in mine), default=None)
+    if day is None:
+        return None, ()
+    lines: list[SuspendedHoldingLine] = []
+    for entry in mine:
+        if entry.trading_date != day or entry.payload.get("event") != _SUSPENDED_EVENT:
+            continue
+        try:
+            lines.append(
+                SuspendedHoldingLine(
+                    book_id=entry.case_id or "",
+                    trading_date=entry.trading_date,
+                    isin=entry.isin or "",
+                    last_trade_date=date.fromisoformat(entry.payload["last_trade_date"]),
+                    sessions_suspended=int(entry.payload["sessions_suspended"]),
+                )
+            )
+        except (KeyError, ValueError) as exc:
+            raise ScoreboardError(
+                f"malformed {_SUSPENDED_EVENT} line for {entry.case_id} on {day.isoformat()}: {exc}"
+            ) from exc
     return day, tuple(lines)
