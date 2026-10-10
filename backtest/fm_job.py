@@ -238,7 +238,10 @@ _LOG = get_logger(__name__)
 #: The ``paper_session.book_id`` the desk's state is recorded under, per stream.
 DESK_IDS: Final[Mapping[str, str]] = {
     STREAM_LIVE: "m17_fund_managers",
-    STREAM_DRY: "m17_dry_fund_managers",
+    # M17.14: the dry desk restarts on the Amendment 2 roster under a new id. The desk state of
+    # the 2026-10-09 dry session (the previous roster, m17-desk/1) stays where it is, for the
+    # record; Amendment 2 (g) counts it toward wiring and timing only.
+    STREAM_DRY: "m17_dry2_fund_managers",
 }
 #: /2 (M17.14, Amendment 2): manager books in pairs, the mirror's state, style books.
 DESK_STATE_VERSION: Final = "m17-desk/2"
