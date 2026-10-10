@@ -15,6 +15,7 @@ plus the data wait, the dry stream's isolation and a held delisted name.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -33,6 +34,7 @@ from analyst.fundmanager.controls import BenchmarkLevels
 from analyst.fundmanager.job import (
     DATA_GAPS_EVENT,
     DATA_WAIT_EVENT,
+    MANAGER_CRASHED_EVENT,
     MISSED_SESSION_EVENT,
     SKIPPED_DATA_RED_EVENT,
     STREAM_DRY,
@@ -1088,3 +1090,64 @@ def test_the_registered_job_runs_the_dry_stream_until_the_go(
     monkeypatch.setattr("backtest.fm_job.run_m17_job", fake)
     job.fn(cast(Any, None))
     assert seen == {"dry_run": True}
+
+
+# ── invariant #13: harness text the desk journals is masked, then bounded ───────────────────────
+
+
+def _fake_secret(seed: str) -> str:
+    """Credential-shaped and built at runtime, so no literal here trips the repo's secret scan."""
+    return hashlib.sha256(seed.encode()).hexdigest()
+
+
+def test_a_manager_crash_is_journaled_masked_and_bounded(world: World, tmp_path: Path) -> None:
+    """Fails before the fix: the crash's `str(exc)` went into rationale and payload verbatim."""
+    desk = Desk(tmp_path)
+    secret = _fake_secret("manager-crash")
+
+    def crashing(*_: Any, **__: Any) -> ManagerSessionResult:
+        raise RuntimeError(f"connect failed: postgresql://u:{secret}@db/x; " + "x" * 5000)
+
+    desk.run(
+        SESSION,
+        FakeWorld(flat_market()),
+        synthetic_commons(world, tmp_path),
+        PerManagerLLM({}),
+        runner=crashing,
+    )
+    crashes = desk.events(MANAGER_CRASHED_EVENT)
+    assert len(crashes) == len(load_roster().managers)
+    for crash in crashes:
+        assert secret not in (crash.rationale or "") and secret not in crash.payload["error"]
+        assert crash.payload["error"].startswith("RuntimeError: connect failed: postgresql://***@")
+        assert len(crash.payload["error"]) <= 1000
+
+
+def test_a_missed_session_reason_is_journaled_masked(world: World, tmp_path: Path) -> None:
+    """Fails before the fix: `result.reason` (the runtime's error text) was cut, never masked."""
+    desk = Desk(tmp_path)
+    clock = evening(SESSION)
+    deadline = datetime.combine(date(2026, 10, 9), time(8, 30), tzinfo=IST)
+    secret = _fake_secret("missed-reason")
+    roster = load_roster()
+    first, second, third, last = (m.id for m in roster.managers)
+
+    def near_deadline() -> Mapping[str, Any]:
+        clock.freeze_at(deadline - timedelta(minutes=3))
+        return NOTHING
+
+    limited = LLMRateLimitError(f"rate limit reached; token={secret}")
+    llm = PerManagerLLM(
+        {
+            first: [limited, limited, research(holdings=False), near_deadline],
+            second: [limited, limited],
+            third: quiet(),
+            last: quiet(),
+        }
+    )
+    desk.run(
+        SESSION, FakeWorld(flat_market()), synthetic_commons(world, tmp_path), llm, clock=clock
+    )
+    (missed,) = desk.events(MISSED_SESSION_EVENT)
+    assert "token=***" in missed.payload["reason"]
+    assert all(secret not in e.model_dump_json() for e in desk.entries())

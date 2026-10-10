@@ -177,6 +177,7 @@ from backtest.paper_session import (
 )
 from dataplatform.clock import IST, Clock, FrozenClock
 from dataplatform.logging import get_logger
+from dataplatform.redaction import mask_and_truncate
 from execution.broker import Side
 from execution.kill_switch import KillSwitch
 from execution.recon import Alerter, LoggingAlerter
@@ -217,6 +218,10 @@ DESK_STATE_VERSION: Final = "m17-desk/1"
 #: clock), so a session's journal is a pure function of the session, as in every replay.
 JOURNAL_CLOCK_AT: Final = time(22, 0)
 #: What the scoreboard ledger holds, by key.
+#: Bounds on harness text the desk journals, applied after masking: a manager crash's exception
+#: text, and a missed session's reason.
+_CRASH_REASON_CHARS: Final = 1000
+_MISSED_REASON_CHARS: Final = 500
 _LEDGER_KEYS: Final = ("marks", "decisions", "outcomes", "refusals", "calls", "control_buys")
 
 
@@ -1276,7 +1281,10 @@ def _run_one_manager(
                 template=template,
             )
         except Exception as exc:  # isolation: one manager's defect never stops another
-            status, reason = MANAGER_CRASHED_EVENT, f"{type(exc).__name__}: {exc}"
+            # Masked, then cut: an exception's text can quote anything (a DSN, a CLI's stderr),
+            # and this line goes to the append-only journal (invariant #13).
+            reason = mask_and_truncate(f"{type(exc).__name__}: {exc}", _CRASH_REASON_CHARS)
+            status = MANAGER_CRASHED_EVENT
             _journal_manager_line(
                 book,
                 session,
@@ -1284,7 +1292,7 @@ def _run_one_manager(
                 event=MANAGER_CRASHED_EVENT,
                 rationale=f"the manager's session raised ({reason}); nothing of its own is "
                 "staged, its stop exits still are",
-                payload={"error": reason[:1000]},
+                payload={"error": reason},
             )
             _LOG.error("fm_job.manager_crashed", book=mandate.id, error=reason)
         else:
@@ -1367,7 +1375,7 @@ def _journal_missed(
     payload = {
         "deadline": deadline.isoformat(),
         "detected_at": clock.now().isoformat(),
-        "reason": (reason or "")[:500],
+        "reason": mask_and_truncate(reason or "", _MISSED_REASON_CHARS),
     }
     if timed is not None:
         payload["rate_limit_retries"] = str(timed.retries)

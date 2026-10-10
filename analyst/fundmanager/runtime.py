@@ -314,6 +314,41 @@ def _log_text(text: str) -> str:
     return masked if len(masked) <= _LOG_TEXT_CHARS else masked[: _LOG_TEXT_CHARS - 1] + "…"
 
 
+def _journal_text(text: str) -> str:
+    """Evidence text bound for the append-only evidence store, secret-masked (invariant #13).
+
+    Defence in depth: what reaches here should already be masked where it was raised (the Claude
+    CLI's errors, the Commons fetcher's pages), but a secret in the journal cannot be taken back,
+    so the last write masks again. URL queries are kept: evidence quotes the manager's fetch
+    targets, which `FetchRequest` has already refused if they looked credential-bearing, and
+    dropping the query would make a shown URL unrecognisable.
+    """
+    return mask_secrets(text, drop_url_queries=False)
+
+
+def _masked_evidence(evidence: EvidenceBundle) -> EvidenceBundle:
+    """`evidence` with its prompt and every item's text and detail through `_journal_text`.
+
+    A bundle with nothing to mask comes back equal, so its content address does not move.
+    """
+    items = tuple(
+        item.model_copy(
+            update={
+                "text": None if item.text is None else _journal_text(item.text),
+                "detail": {k: _journal_text(v) for k, v in item.detail.items()},
+            }
+        )
+        for item in evidence.items
+    )
+    prompt = evidence.rendered_prompt
+    return evidence.model_copy(
+        update={
+            "rendered_prompt": None if prompt is None else _journal_text(prompt),
+            "items": items,
+        }
+    )
+
+
 def _fetch_request(query: QueryItem, session: date) -> FetchRequest:
     if query.kind is QueryKind.URL:
         return FetchRequest.url(query.target, session)
@@ -390,7 +425,19 @@ class _Session:
         evidence_ref: str | None = None,
         model: str | None = None,
         tokens: TokenSpend | None = None,
-    ) -> None:
+    ) -> str | None:
+        """Append one entry; return the evidence ref it cites — the address of what was stored.
+
+        Masked at the last write as well as at the source: the journal is append-only, so the
+        rationale (which quotes harness errors), the payload (which quotes requests, refused
+        targets and decision records) and the bundle are the one place a miss upstream can still
+        be caught before it is permanent. A caller that cites this bundle again later must use the
+        returned ref, never one computed from the bundle it passed in: if masking changed a byte,
+        only the returned address exists in the store.
+        """
+        evidence = None if evidence is None else _masked_evidence(evidence)
+        rationale = None if rationale is None else mask_secrets(rationale)
+        masked_payload = {k: _journal_text(v) for k, v in payload.items()}
         ref = evidence.ref().ref if evidence is not None else evidence_ref
         entry = JournalEntry(
             ts=self.clock.now(),
@@ -404,12 +451,17 @@ class _Session:
             rationale=rationale,
             model=model,
             tokens=tokens,
-            payload={**payload, "book": self.mandate.id, "mode": PAPER_MODE},
+            payload={**masked_payload, "book": self.mandate.id, "mode": PAPER_MODE},
         )
         self.journal.append(entry, evidence=evidence)
+        return ref
 
     def _evidence(self, prompt: str | None) -> EvidenceBundle:
-        """Every input digest shown so far, and the exact prompt when a model call is the reader."""
+        """Every input digest shown so far, and the exact prompt when a model call is the reader.
+
+        Returned already masked (`_masked_evidence`), so the bundle every caller holds — the one a
+        `_ManagerError` carries, the one `_write` stores — is the one whose address is cited.
+        """
         commons = self.commons
         items = [
             EvidenceItem(
@@ -471,13 +523,14 @@ class _Session:
             )
             for s in self.snapshots.values()
         ]
-        return EvidenceBundle(
+        bundle = EvidenceBundle(
             case_id=self.mandate.id,
             trading_date=self.session,
             actor=Actor.T2,
             rendered_prompt=prompt,
             items=tuple(items),
         )
+        return _masked_evidence(bundle)
 
     def _tokens(self, response: LLMResponse) -> tuple[TokenSpend | None, str | None]:
         try:
@@ -528,8 +581,10 @@ class _Session:
             "round": str(self.calls),
             "research_bundles": render_bundles(self.bundles),
         }
-        return self.template.render(
-            style=self.mandate.style.value, round_key=round_key, values=values
+        # Masked by the same rule `_write` applies to the bundle, so the prompt the model is sent
+        # and the one the evidence records stay the same bytes.
+        return _journal_text(
+            self.template.render(style=self.mandate.style.value, round_key=round_key, values=values)
         )
 
     # -- one call ---------------------------------------------------------------------------------
@@ -556,7 +611,7 @@ class _Session:
             raise _ManagerError(stage, f"the {stage} call failed: {exc}", evidence) from exc
         tokens, unpriced = self._tokens(response)
         usage = response.usage
-        self._write(
+        stored_ref = self._write(
             decision=Decision.HEARTBEAT,
             evidence=evidence,
             model=response.model,
@@ -596,7 +651,9 @@ class _Session:
             tokens_cache_read=usage.cache_read_tokens,
             prompt_chars=len(prompt),
         )
-        return response, evidence.ref().ref
+        # The address `_write` stored, which is what a decision citing this call must name.
+        assert stored_ref is not None
+        return response, stored_ref
 
     @staticmethod
     def _arguments(response: LLMResponse, tool: ToolSpec) -> Mapping[str, Any]:
@@ -629,7 +686,9 @@ class _Session:
                 f"malformed {stage} output and the session's one repair retry is spent: {first}",
                 self._evidence(prompt),
             )
-        repair_prompt = prompt + _REPAIR_SUFFIX.format(errors=str(first))
+        # The validation error quotes the model's own answer, which can carry anything; masked by
+        # the same rule as the prompt, so what is sent and what the bundle records stay one text.
+        repair_prompt = _journal_text(prompt + _REPAIR_SUFFIX.format(errors=str(first)))
         response, ref = self._complete(repair_prompt, tool, stage, repair=True)
         try:
             return parse(self._arguments(response, tool)), ref
@@ -782,6 +841,12 @@ class _Session:
             self.snapshots[outcome.snapshot.id] = outcome.snapshot
             fetched.append((query, outcome.snapshot))
 
+        # A reason quotes a harness error (a digest call, a fetch), and from here it is rendered
+        # into every later prompt and written to the journal's payload, so it is masked once, now.
+        # `what` quotes the request, including a URL `FetchRequest` refused as credential-bearing.
+        unfulfilled = [
+            Unfulfilled(_journal_text(u.what), mask_secrets(u.reason)) for u in unfulfilled
+        ]
         # Every round re-shows every bundle so far, so a line already in an earlier bundle is not
         # repeated in this one: a digest source gap recurs on every round that asks for names, and
         # rendering it again costs tokens on every later call and tells the manager nothing new.
