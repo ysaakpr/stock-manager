@@ -46,6 +46,7 @@ from dataplatform.status.models import (
     QuarantineOut,
     QuarantineStepOut,
     SeverityCountOut,
+    SuspendedHoldingOut,
 )
 from dataplatform.store.db import Connection
 
@@ -360,10 +361,12 @@ def read_managers_status(entries: Sequence[Any], *, roster: Any, as_of: datetime
         ScoreboardInputs,
         build_scoreboard,
         inputs_from_journal,
+        suspended_holdings_on,
         todays_decisions,
     )
 
     session, lines = todays_decisions(entries, roster)
+    _, suspended = suspended_holdings_on(entries, roster, session=session)
     error: str | None = None
     try:
         scoreboard = build_scoreboard(roster, inputs_from_journal(entries, roster))
@@ -390,6 +393,9 @@ def read_managers_status(entries: Sequence[Any], *, roster: Any, as_of: datetime
                 bench_max_drawdown_pp=None if window is None else window.bench_max_drawdown_pp,
                 brier=None if window is None else window.brier,
                 resolved_decisions=None if window is None else window.resolved_decisions,
+                suspended_resolved_decisions=(
+                    None if window is None else window.suspended_resolved_decisions
+                ),
             )
         )
     return ManagersOut(
@@ -405,4 +411,5 @@ def read_managers_status(entries: Sequence[Any], *, roster: Any, as_of: datetime
         managers=[] if error is not None else managers,
         decisions_session=session,
         decisions=[ManagerDecisionOut(**line.model_dump()) for line in lines],
+        suspended_holdings=[SuspendedHoldingOut(**line.model_dump()) for line in suspended],
     )

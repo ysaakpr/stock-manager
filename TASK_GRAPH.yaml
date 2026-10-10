@@ -3315,12 +3315,51 @@ tasks:
     - "make check is green"
   verify: "uv run pytest tests/unit/test_fm_provider.py tests/unit/test_fm_runtime.py tests/unit/test_commons_fetch.py tests/unit/test_fm_job.py tests/unit/test_fm_scoreboard.py -q"
 
+- id: M17.13
+  title: Suspended-holding rule — a held, still-listed name with no bar on a normal session
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.12]
+  spec: |
+    Owner decision 2026-10-10. A held name that is still listed but has no close for a session
+    raised `BookError`/`OutcomeError` ("a gap is a data fault") and failed the whole nightly M17
+    job for every book until the name printed. The rule:
+    - Market-wide vs single-name gap. A session whose market data is broadly missing is red data:
+      the existing interlock stops it (unchanged, tested). When the interlock is green and the
+      session's L1 EQ close count is at least 90 % of the median count over the previous 5
+      sessions (`backtest.fm_world.printed_normally`), a held, still-listed name with no bar is
+      SUSPENDED for that session. Below that coverage nothing is suspended and the gap stays loud.
+    - Mark at last close: valued at its last traded close (the `DelistedNames.last_traded`
+      source and semantics), journaled every suspended session as `SUSPENDED_HOLDING` (isin,
+      last_trade_date, sessions_suspended; a HEARTBEAT payload event, no new Decision value, no
+      migration), shown in the daily digest ("held, not trading since <date>") and in
+      `GET /status/managers`.
+    - No pretend trades: a SELL/TRIM/STOP_EXIT on a suspended name stays unfilled (journaled
+      `UNFILLED_SUSPENDED` / `SUSPENDED_EXIT_HELD`), is re-offered each session until the name
+      prints, and is never filled at a made-up price. A buy of a name with no bar is never staged.
+    - Scoring: a decision resolving while its name is suspended is scored at the last close and
+      its `DECISION_OUTCOME` carries `suspended`; each window reports
+      `suspended_resolved_decisions`; the journal rebuild stays byte-identical.
+    - Manager view: the holding shows "suspended since <date>" with no price and no P&L.
+    - Docstrings state the rule; ops/runbooks/m17-fund-managers.md gets a short section.
+  deliverables: [analyst/fundmanager/books.py, analyst/fundmanager/scoreboard.py, analyst/fundmanager/bundle.py, analyst/fundmanager/render.py, analyst/fundmanager/job.py, analyst/fundmanager/digest.py, backtest/fm_job.py, backtest/fm_world.py, backtest/fm_paper.py, dataplatform/status/models.py, dataplatform/status/queries.py, ops/runbooks/m17-fund-managers.md, tests/unit/test_fm_suspended.py]
+  acceptance:
+    - "a held name missing on a normal session is marked at its last close, the job completes, SUSPENDED_HOLDING is journaled and the other books are unaffected"
+    - "a broadly missing session marks nothing: the interlock stops it, and below the coverage floor no name is called suspended"
+    - "a stop exit on a suspended name stays unfilled, is re-offered each session and fills once the name prints"
+    - "a decision resolving during a suspension is scored at the last close with suspended=true, counted on the scoreboard"
+    - "when the name prints again the suspension ends and normal marking resumes"
+    - "the scoreboard rebuilt from the journal is byte-identical to the live one"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_fm_suspended.py tests/unit/test_fm_job.py tests/unit/test_fm_books.py tests/unit/test_fm_scoreboard.py tests/unit/test_fm_runtime.py -q"
+
 - id: M17.8
   title: Five-session dry run, then the forward clock (S0)
   milestone: M17
   module: A10
   autonomy: NEEDS_GO
-  deps: [M17.7, M17.10, M17.11, M17.12]
+  deps: [M17.7, M17.10, M17.11, M17.12, M17.13]
   spec: |
     Run 5 consecutive live sessions in `--dry-run` on the real lake with the Claude CLI. Write
     `ops/gates/M17-dry-run-<date>.md` covering, per manager:

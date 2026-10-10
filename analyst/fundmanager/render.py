@@ -241,6 +241,12 @@ def render_holdings(book: ManagerBook, closes: Mapping[str, Decimal]) -> str:
             f"{h.sessions_held} sessions · {_stop_line(h, closes.get(h.isin))}",
             f"  Opening thesis: {h.opening_thesis}",
         ]
+        if h.suspended_since is not None:
+            lines.append(
+                f"  SUSPENDED: held, not trading since {h.suspended_since.isoformat()}. There is "
+                "no price today; the weight is at its last traded close. A sell is held and "
+                "offered each session until it trades again; it cannot be bought."
+            )
         if h.invalidation:
             lines.append("  Invalidation conditions:")
             lines += [f"  - {i.condition} — status: {i.status}" for i in h.invalidation]

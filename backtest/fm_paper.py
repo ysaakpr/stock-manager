@@ -31,6 +31,11 @@ the account saw on a held name comes back in ``AccountSession.corporate_actions`
 whose fill session is locked at the upper band is cancelled and comes back in
 ``AccountSession.unfilled``.
 
+**Rejected orders** (M17.13): every order due this session that the broker rejected instead of
+filling (no bar for a suspended name, no cash, nothing to deliver) comes back in
+``AccountSession.rejected`` under its staging uid, so the book can hold a suspended name's sell
+over rather than lose it.
+
 **Paper only, structurally.** The one broker this module builds is a ``SimBroker``, checked by
 ``backtest.paper_session.require_paper_broker`` (exactly ``SimBroker``, no subclass) before any
 order reaches it; nothing here takes a broker, reads ``Settings.broker_provider`` or imports
@@ -56,6 +61,7 @@ from analyst.fundmanager.books import (
     AccountSession,
     BookedCorporateAction,
     CorporateActionStatus,
+    RejectedOrder,
     UnfilledOrder,
 )
 from analyst.journal.evidence import canonical_bytes, digest_of
@@ -424,7 +430,13 @@ class M17PaperAccount:
             credited = credit.amount
         actions = self._book_corporate_actions(session)
         unfilled = self._cancel_locked_buys(session)
+        due = [
+            o.order_id
+            for o in self._sim.export_state().staged
+            if o.target_session == session and o.status is OrderStatus.STAGED
+        ]
         executed = self._coordinator.execute(session)
+        rejected = self._rejected(due, session)
         self._accrual.close_session(session, self._sim.interest_bearing_cash)
         recon = self._reconciler.reconcile(session)
         fills = tuple(done.fill for done in executed if done.fill is not None)
@@ -440,7 +452,28 @@ class M17PaperAccount:
             broker_quantities=self.quantities(),
             corporate_actions=actions,
             unfilled=unfilled,
+            rejected=rejected,
         )
+
+    def _rejected(self, due: list[str], session: date) -> tuple[RejectedOrder, ...]:
+        """The orders of ``due`` (broker ids) the broker rejected this session, by staging uid."""
+        uids = {o.broker_order_id: o.order_uid for o in self._orders.all()}
+        out: list[RejectedOrder] = []
+        for order_id in due:
+            order = self._sim.order(order_id)
+            if order.status is not OrderStatus.REJECTED:
+                continue
+            out.append(
+                RejectedOrder(
+                    order_uid=uids.get(order_id, order_id),
+                    isin=order.request.isin,
+                    side=order.request.side,
+                    quantity=order.request.quantity,
+                    session=session,
+                    reason=order.reason or "",
+                )
+            )
+        return tuple(out)
 
     # -- corporate actions ------------------------------------------------------------------------
 

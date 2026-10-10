@@ -60,6 +60,7 @@ __all__ = [
     "SeverityCountOut",
     "SourceStatusOut",
     "SourcesOut",
+    "SuspendedHoldingOut",
     "SyncRowOut",
     "SyncStatusOut",
 ]
@@ -800,6 +801,23 @@ class ManagerScoreOut(BaseModel):
     bench_max_drawdown_pp: Decimal | None
     brier: Decimal | None
     resolved_decisions: int | None
+    suspended_resolved_decisions: int | None = Field(
+        default=None,
+        description="Of the resolved decisions, how many were scored at a suspended name's last "
+        "traded close (M17.13)",
+    )
+
+
+class SuspendedHoldingOut(BaseModel):
+    """One held M17 name that is still listed but did not trade on the session (M17.13)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    book_id: str
+    trading_date: date
+    isin: str
+    last_trade_date: date = Field(description="Held, not trading since this session")
+    sessions_suspended: int
 
 
 class ManagersOut(BaseModel):
@@ -826,3 +844,7 @@ class ManagersOut(BaseModel):
     managers: list[ManagerScoreOut]
     decisions_session: date | None
     decisions: list[ManagerDecisionOut]
+    suspended_holdings: list[SuspendedHoldingOut] = Field(
+        default_factory=list,
+        description="Held names suspended on the latest session, each 'held, not trading since'",
+    )

@@ -19,6 +19,13 @@ module is the job's **composition root**: it builds the M17 paper accounts
    reconciled (`FundDesk.execute`); every book and the bench is marked (``BOOK_MARK``, every book
    every session); each decision whose horizon (or a BUY's exit) has come resolves
    (``DECISION_OUTCOME``). This is pre-registration §4 step 7 for the decisions staged last night.
+   *Suspended holdings* (M17.13, owner decision 2026-10-10): the interlock having passed, a held
+   name that is still listed but has no bar on a session whose L1 coverage is at its usual level
+   (`M17World.suspended`, production `backtest.fm_world.LakeSuspendedNames`) is SUSPENDED, not a
+   data fault — marked at its last traded close, journaled ``SUSPENDED_HOLDING`` in its book's
+   stream, shown to the manager as suspended since that date, and its sells held over until it
+   prints (`analyst.fundmanager.books`). A decision resolving while it is suspended is scored at
+   that close with ``suspended`` set. A market-wide gap is red data and never gets this far.
 4. *Mechanical stops* (Amendment 1 c). Each manager book's `StopBook` judges the close; a close
    below a stop becomes a ``STOP_EXIT`` sell for the next open, ahead of anything the manager
    decides and with no model call (a stopped name's own decision is dropped).
@@ -82,6 +89,7 @@ from analyst.fundmanager.books import (
     ExecutionReport,
     FundBook,
     FundDesk,
+    SuspendedNames,
     book_rails,
     m17_kill_switch,
     paper_account_id,
@@ -130,6 +138,7 @@ from analyst.fundmanager.runtime import (
     SessionStatus,
     run_manager,
 )
+from analyst.fundmanager.schemas import Action
 from analyst.fundmanager.scoreboard import (
     DECISION_EVENT,
     BookMark,
@@ -148,9 +157,10 @@ from analyst.fundmanager.scoreboard import (
     outcome_entry,
     resolve_outcome,
     scored_decision_from_entry,
+    suspended_holdings_on,
     todays_decisions,
 )
-from analyst.fundmanager.stops import StopBook, StopExit, with_stop_exits
+from analyst.fundmanager.stops import STOP_EXIT_EVENT, StopBook, StopExit, with_stop_exits
 from analyst.journal.evidence import canonical_bytes, digest_of
 from analyst.journal.models import Actor, Decision, JournalEntry
 from analyst.llm import LLM
@@ -242,6 +252,11 @@ class M17World(Protocol):
     def corporate_actions(self) -> BookActionSource: ...
 
     def delisted(self) -> DelistedNames | None: ...
+
+    def suspended(self) -> SuspendedNames | None:
+        """Which held, still-listed names with no bar are suspended (M17.13), under the world's
+        stated test for a session that printed normally."""
+        ...
 
     def adjusted_close(self, isin: str, session: date) -> Decimal | None: ...
 
@@ -377,6 +392,7 @@ class _Desk:
                 "account_digest": account.book_digest,
                 "last_buy_fill": book.buy_fills_document(),
                 "pending_exits": book.pending_exits_document(),
+                "staged_sells": book.staged_sells_document(),
             }
             side = self.managers.get(book_id)
             if side is not None:
@@ -428,6 +444,7 @@ class _Wiring:
     actions: BookActionSource
     circuit: CircuitMarket
     delisted: DelistedNames | None
+    suspended: SuspendedNames | None
     alerter: Alerter
 
 
@@ -508,6 +525,10 @@ def _desk(
             if document
             else {},
             delisted=wiring.delisted,
+            suspended=wiring.suspended,
+            staged_sells=FundBook.staged_sells_from(document.get("staged_sells", {}))
+            if document
+            else {},
         )
         if isinstance(mandate, ManagerMandate):
             managers[mandate.id] = _ManagerSide(
@@ -687,6 +708,7 @@ def run_m17_session(
         actions=world.corporate_actions(),
         circuit=world.circuit(),
         delisted=world.delisted(),
+        suspended=world.suspended(),
         alerter=alerter or LoggingAlerter(),
     )
     desk = _desk(roster, wiring, None if prior is None else prior.book_state, session=session)
@@ -708,6 +730,8 @@ def run_m17_session(
         reports = FundDesk(list(desk.books.values()), kill_switch=kill_switch).execute(session)
     _after_fills(desk, world, reports, session)
     marks = _mark_all(desk, world, reports, session)
+    for fund_book in desk.books.values():
+        fund_book.journal_suspended_holdings(session)
     deferred = _resolve_outcomes(desk, world, session, book_clock)
     stages.done("fills_marks_outcomes")
 
@@ -974,6 +998,7 @@ def _resolve_outcomes(desk: _Desk, world: M17World, session: date, clock: Clock)
                 prices=prices,
                 exited_on=exited if exited is not None and exited > decision.decided_on else None,
                 delisted=world.delisted(),
+                suspended=world.suspended(),
             )
         except OutcomeError as exc:
             # A due close not in yet (an L2 refresh behind the session): asked again tomorrow;
@@ -1201,7 +1226,10 @@ def _run_one_manager(
         _journal_missed(book, session, book_clock, deadline, clock, reason, None)
     else:
         held = {i: q for i, q in book.account.quantities().items() if q > 0}
-        stopped = {e.isin for e in exits}
+        # a stop exit held over on a suspended name is still the stop's decision on that name
+        stopped = {e.isin for e in exits} | {
+            isin for isin, p in book.pending_exits.items() if p.event == STOP_EXIT_EVENT
+        }
         notes: dict[str, list[str]] = {}
         for exit_ in exits:
             notes.setdefault(exit_.isin, []).append(
@@ -1218,6 +1246,12 @@ def _run_one_manager(
                         f"DELISTED: last traded {last.session.isoformat()} at {last.raw_close}; "
                         "valued there until a corporate action converts it"
                     )
+        for isin in held:
+            if isin in book.pending_exits and book.suspension(isin, session) is not None:
+                notes.setdefault(isin, []).append(
+                    "a sell of this suspended name is already held over; it is offered each "
+                    "session until the name trades again"
+                )
         view = manager_book(
             book,
             session,
@@ -1267,14 +1301,40 @@ def _run_one_manager(
                         for isin in {v.decision.isin for v in result.accepted}
                         if (price := book.market.close(isin, session)) is not None
                     }
+                    live = [v for v in result.accepted if v.decision.isin not in stopped]
+                    # M17.13: a BUY of a name with no close today is never staged; it goes to the
+                    # book whole, which journals it UNPRICED. A TRIM of a suspended holding is
+                    # sized at its last traded close (the book's own valuation) and held over.
+                    unpriced_buys = [
+                        v
+                        for v in live
+                        if v.decision.action is Action.BUY
+                        and v.decision.isin not in closes
+                        and v.round_trip is not None
+                    ]
+                    for verdict in live:
+                        isin = verdict.decision.isin
+                        if isin not in closes and isin in held:
+                            last = book.suspension(isin, session)
+                            if last is not None:
+                                closes[isin] = last.raw_close
                     planned = orders_from_verdicts(
-                        [v for v in result.accepted if v.decision.isin not in stopped],
+                        [v for v in live if all(v is not u for u in unpriced_buys)],
                         book=view,
                         held=held,
                         closes=closes,
                         session=session,
                     )
-                    orders_out = list(planned.orders)
+                    orders_out = list(planned.orders) + [
+                        BookOrder(
+                            v.decision.isin,
+                            Side.BUY,
+                            v.round_trip.quantity,
+                            v.decision.rationale,
+                        )
+                        for v in unpriced_buys
+                        if v.round_trip is not None
+                    ]
                     stops, tightenings, memos = planned.stops, planned.tightenings, planned.memos
     report = book.decide(session, with_stop_exits(orders_out, list(exits)))
     staged_buys = {o.isin for o, _ in report.staged if o.side is Side.BUY}
@@ -1433,7 +1493,8 @@ def _score_and_digest(
     if digest_dir is not None:
         shown = scoreboard or build_scoreboard(roster, ScoreboardInputs(s0=desk.s0))
         _, lines = todays_decisions(written, roster, session=session)
-        path = write_digest(shown, session, lines, directory=digest_dir)
+        _, suspended = suspended_holdings_on(written, roster, session=session)
+        path = write_digest(shown, session, lines, directory=digest_dir, suspended=suspended)
     return scoreboard, error, rebuilt, path
 
 

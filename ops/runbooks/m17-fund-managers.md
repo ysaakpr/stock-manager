@@ -134,6 +134,9 @@ Per book (`payload.event`; `decision` in brackets):
 | `STAGED` [BUY/SELL] | An order staged for the next open, after the rails. `RAIL_BLOCK` names every rail that refused one. |
 | `EXIT_COMPLETE` / `EXIT_SUPERSEDED` | An over-participation exit worked across sessions finished, or was replaced. |
 | `CONTROL_REBALANCE` [HEARTBEAT] | A control book's rebalance targets. |
+| `SUSPENDED_HOLDING` [HEARTBEAT] | A held, still-listed name with no bar on a normal session: marked at its last close (`last_trade_date`, `sessions_suspended`). |
+| `UNFILLED_SUSPENDED` [HOLD] | An order due to fill on a session its name had no bar; a sell is re-offered (`reoffered=true`), a buy is not. |
+| `SUSPENDED_EXIT_HELD` [DEFERRED] | A sell of a suspended name not staged this session; offered again next session. |
 
 ## When something goes wrong
 
@@ -141,12 +144,33 @@ Per book (`payload.event`; `decision` in brackets):
   cause and rerun the same session: `uv run python -m dataplatform.scheduler run-once m17_fund_managers`
   before 08:30 IST next session, or let the next evening run (the missed session's orders are not
   caught up — they lapse).
-- **A held name with no close that has not delisted** (a suspension) fails the mark loudly by design
-  (a gap is a data fault). Delisted names (identity master listing record) are valued at their last
-  traded close.
+- **A held name with no close** — see *Suspended holdings* below. Delisted names (identity master
+  listing record) are valued at their last traded close.
 - **`repo_rates.yaml` coverage** ends at the last MPC decision entered; a session past it raises
   `RepoRateCoverageError`. Extend it from RBI's own press release after each MPC meeting.
 - **Holiday calendar** `nse_holidays.yaml` ends 2026-12-31: add the 2027 NSE circular before December.
+
+## Suspended holdings (M17.13, owner decision 2026-10-10)
+
+A held name that is still listed but has no bar for a session no longer fails the job.
+
+- **Market-wide or single-name?** A session whose market data is broadly missing is red data: the
+  interlock (`nse_bhavcopy`, `nse_delivery` PUBLISHED and green) stops it before any book is marked.
+  Past a green gate, a held name is SUSPENDED only when the session's L1 EQ close count is at least
+  90 % of the median over the previous 5 sessions (`backtest.fm_world.printed_normally`); below that
+  nothing is suspended and the mark still fails loudly (a gate that let a thin day through).
+- **What happens:** the holding is marked at its last traded close (as a delisted name is), journaled
+  `SUSPENDED_HOLDING` every session, listed in the digest's *Suspended holdings* table ("held, not
+  trading since <date>") and in `/status/managers` `suspended_holdings`, and shown to its manager as
+  suspended since that date with no price.
+- **No pretend trades:** a SELL/TRIM/STOP_EXIT on it stays unfilled (`UNFILLED_SUSPENDED`,
+  `SUSPENDED_EXIT_HELD`) and is re-offered every session; when the name prints it clears the rails
+  and is staged at that close for the next open. A buy of a name with no bar is never staged.
+- **Scoring:** a decision resolving while the name is suspended is scored at its last close with
+  `suspended=true`; each window reports `suspended_resolved_decisions` (digest: *Resolved while
+  suspended*).
+- **Owner action:** none for a short suspension. A name suspended for weeks, or one whose listing
+  has in fact ended, wants the identity master's listing record updated (it then becomes delisted).
 
 ## Repo rate (idle-cash interest) — after every MPC decision
 

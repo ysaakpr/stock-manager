@@ -1227,6 +1227,7 @@ def test_holdings_are_rendered_without_cost_basis_or_pnl(world: World, tmp_path:
         "stop_price",
         "evidence_since_entry",
         "forced_review",
+        "suspended_since",  # M17.13: a date, never a price
     }
     book = _book()
     closes = {r.isin: r.close for r in world.sheets.universe}
