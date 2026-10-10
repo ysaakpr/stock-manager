@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-__all__ = ["MASK", "mask_secrets"]
+__all__ = ["MASK", "mask_and_truncate", "mask_secrets"]
 
 #: What a masked value becomes.
 MASK: Final[str] = "***"
@@ -56,16 +56,23 @@ _WEBHOOK_PATH = re.compile(
 # id has no letters and a hex digest has no upper case, so none of them is. The floor sits above a
 # YouTube channel id (24), which a scraped page carries legitimately and which is not a credential.
 _URL_PATH = re.compile(r"(?P<origin>[a-zA-Z][a-zA-Z0-9+.-]*://[^/\s?#]+)(?P<path>/[^\s?#\"'<>]*)")
+# A segment followed by a document extension is a filename (`AnnualReport2026FinalVersionQ2.pdf`),
+# not a token, and is kept: exchange filings are routinely named that way.
 _PATH_TOKEN = re.compile(
     r"(?<![A-Za-z0-9_-])(?=[A-Za-z0-9]*[a-z])(?=[A-Za-z0-9]*[A-Z])(?=[A-Za-z0-9]*\d)"
     r"[A-Za-z0-9]{28,}(?![A-Za-z0-9_-])"
+    r"(?!\.(?i:pdf|xlsx?|xlsm|csv|docx?|pptx?|html?|xml|json|txt|zip)(?![A-Za-z0-9]))"
 )
 _TELEGRAM_TOKEN = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 _CREDENTIAL_NAME = r"password|passwd|pwd|token|secret|api[_-]?key|apikey|authorization"
 # A quoted pair — JSON's `"api_key": "…"` or a Python repr's `'token': '…'`. The bare rule below
-# cannot see these: the closing quote sits between the name and the colon.
+# cannot see these: the closing quote sits between the name and the colon. The credential word must
+# end the key and start it or follow a `_`/`-`/`.` or a camelCase hump, so `"access_token"`,
+# `"clientSecret"` and `"apiKey"` are masked while `"company_secretary"`, `"input_tokens"`,
+# `"authorization_date"` and `"tokenised_shares"` — fields that are not credentials — are not.
 _QUOTED_PAIR = re.compile(
-    rf"(?P<q>[\"'])(?P<name>[^\"'\s]*(?:{_CREDENTIAL_NAME})[^\"'\s]*)(?P=q)(?P<sep>\s*:\s*)"
+    r"(?P<q>[\"'])(?P<name>(?:[^\"'\s]*(?:[_.-]|(?-i:(?<=[a-z])(?=[A-Z]))))?"
+    rf"(?:{_CREDENTIAL_NAME}))(?P=q)(?P<sep>\s*:\s*)"
     r"(?P<vq>[\"'])(?:\\.|(?!(?P=vq)).)*(?P=vq)",
     re.IGNORECASE,
 )
@@ -104,3 +111,15 @@ def mask_secrets(text: str, *, drop_url_queries: bool = True) -> str:
     text = _TELEGRAM_TOKEN.sub(f"bot{MASK}", text)
     text = _QUOTED_PAIR.sub(rf"\g<q>\g<name>\g<q>\g<sep>\g<vq>{MASK}\g<vq>", text)
     return _CREDENTIAL_PAIR.sub(rf"\g<name>\g<sep>{MASK}", text)
+
+
+def mask_and_truncate(text: str, limit: int) -> str:
+    """`mask_secrets(text)`, then cut to at most `limit` characters (an ellipsis marks a cut).
+
+    What it does: masks first, so a cut can never leave half a credential the patterns no longer
+    recognise, then bounds the result for a store or a message that must stay small.
+    What it assumes: `limit` is at least 1.
+    What it never does: collapse whitespace (`alert_triggers.redact` does, for alert bodies).
+    """
+    masked = mask_secrets(text)
+    return masked if len(masked) <= limit else masked[: limit - 1] + "…"

@@ -226,6 +226,9 @@ class FetchRequest:
             raise ValueError(f"a query is capped at {MAX_QUERY_CHARS} characters")
         if self.kind is FetchKind.URL and len(self.target.encode()) > MAX_URL_BYTES:
             raise ValueError(f"a URL is capped at {MAX_URL_BYTES} bytes")
+        # This also refuses a capability URL — one whose path is the credential, such as a Drive
+        # `/file/d/<id>` share link or a webhook — because the redaction rules mask a token-shaped
+        # path segment. A manager loses that page; the index never holds a working share link.
         if mask_secrets(self.target, drop_url_queries=False) != self.target:
             raise ValueError(
                 "this fetch target looks like it carries a credential; it would be stored in the "

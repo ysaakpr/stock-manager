@@ -690,3 +690,15 @@ def test_the_cli_verify_fails_on_a_tampered_store(tmp_path: Path) -> None:
     path.write_bytes(path.read_bytes() + b" ")
     assert runner.invoke(app, ["verify", "--root", str(root)]).exit_code == 1
     assert runner.invoke(app, ["show", snapshot.id, "--root", str(root)]).exit_code == 1
+
+
+def test_a_capability_url_is_refused_but_a_long_camelcase_pdf_name_is_not() -> None:
+    """The path-token rule refuses a share link whose path is the credential (fetch.py's comment),
+    and keeps a filing whose long mixed-case name ends in a document extension."""
+    share_id = "1" + _fake("drive", 10) + "AbCdEfGhIjKlMnOpQrStUvWxYz"
+    with pytest.raises(ValueError, match="credential"):
+        FetchRequest.url(f"https://drive.google.com/file/d/{share_id}/view", SESSION)
+    pdf = (
+        "https://www.bseindia.com/xml-data/corpfiling/AttachLive/AnnualReport2026FinalVersionQ2.pdf"
+    )
+    assert FetchRequest.url(pdf, SESSION).target == pdf

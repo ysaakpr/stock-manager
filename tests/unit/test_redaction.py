@@ -144,3 +144,43 @@ def test_a_youtube_channel_id_in_a_scraped_page_is_not_a_token() -> None:
     """The one false positive the fixture sweep found at a 24-character floor (RBI's home page)."""
     url = "https://www.youtube.com/channel/UC" + _body("yt", 22)
     assert mask_secrets(url) == url
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["api_key", "access_token", "client_secret", "auth_token", "accessToken", "x-api-key", "pwd"],
+)
+def test_a_quoted_credential_key_is_masked_on_a_word_boundary(name: str) -> None:
+    secret = _body(f"boundary-{name}", 24)
+    assert json.loads(mask_secrets(json.dumps({name: secret}))) == {name: MASK}
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "company_secretary",
+        "input_tokens",
+        "max_tokens",
+        "authorization_date",
+        "tokenised_shares",
+        "secretariat",
+        "tokens",
+    ],
+)
+def test_a_quoted_key_that_only_contains_a_credential_word_is_left_alone(name: str) -> None:
+    document = json.dumps({name: "Ms A. Rao, 1,234 shares", "isin": "INE002A01018"})
+    assert mask_secrets(document) == document
+
+
+@pytest.mark.parametrize("extension", ["pdf", "xlsx", "html", "PDF"])
+def test_a_long_camelcase_document_name_in_a_url_is_a_filename_not_a_token(extension: str) -> None:
+    """A filing named like `AnnualReport2026FinalVersionQ2.pdf` mixes case and digits, but the
+    extension says it is a file; it is kept, and a fetch target naming it is not refused."""
+    url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/AnnualReport2026FinalVersionQ2.{extension}"
+    assert mask_secrets(url) == url
+
+
+def test_the_same_segment_without_an_extension_is_still_masked() -> None:
+    """The documented trade-off: a long mixed-case id with no extension reads as a token."""
+    stem = "AnnualReport2026FinalVersionQ2"
+    assert mask_secrets(f"https://example.com/files/{stem}") == f"https://example.com/files/{MASK}"
