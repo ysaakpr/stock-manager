@@ -1336,6 +1336,29 @@ class FundBook:
         """
         held = self.suspended_holdings(session)
         for holding in held:
+            evidence = EvidenceBundle(
+                case_id=self.book_id,
+                trading_date=session,
+                actor=Actor.EXEC,
+                items=(
+                    EvidenceItem(
+                        kind=EvidenceKind.PRICE,
+                        source="m17_suspended",
+                        label="last_traded_close",
+                        isin=holding.isin,
+                        as_of=holding.last.session,
+                        value=holding.last.raw_close,
+                    ),
+                    EvidenceItem(
+                        kind=EvidenceKind.POSITION,
+                        source="m17_suspended",
+                        label="quantity",
+                        isin=holding.isin,
+                        as_of=session,
+                        value=Decimal(holding.quantity),
+                    ),
+                ),
+            )
             self._write(
                 self._entry(
                     session,
@@ -1354,7 +1377,9 @@ class FundBook:
                         "quantity": str(holding.quantity),
                         "sessions_suspended": str(holding.sessions_suspended),
                     },
-                )
+                    evidence_ref=evidence.ref().ref,
+                ),
+                evidence,
             )
             _LOG.warning(
                 "fm_books.suspended_holding",
