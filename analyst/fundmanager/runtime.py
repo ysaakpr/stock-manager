@@ -314,6 +314,41 @@ def _log_text(text: str) -> str:
     return masked if len(masked) <= _LOG_TEXT_CHARS else masked[: _LOG_TEXT_CHARS - 1] + "…"
 
 
+def _journal_text(text: str) -> str:
+    """Evidence text bound for the append-only evidence store, secret-masked (invariant #13).
+
+    Defence in depth: what reaches here should already be masked where it was raised (the Claude
+    CLI's errors, the Commons fetcher's pages), but a secret in the journal cannot be taken back,
+    so the last write masks again. URL queries are kept: evidence quotes the manager's fetch
+    targets, which `FetchRequest` has already refused if they looked credential-bearing, and
+    dropping the query would make a shown URL unrecognisable.
+    """
+    return mask_secrets(text, drop_url_queries=False)
+
+
+def _masked_evidence(evidence: EvidenceBundle) -> EvidenceBundle:
+    """`evidence` with its prompt and every item's text and detail through `_journal_text`.
+
+    A bundle with nothing to mask comes back equal, so its content address does not move.
+    """
+    items = tuple(
+        item.model_copy(
+            update={
+                "text": None if item.text is None else _journal_text(item.text),
+                "detail": {k: _journal_text(v) for k, v in item.detail.items()},
+            }
+        )
+        for item in evidence.items
+    )
+    prompt = evidence.rendered_prompt
+    return evidence.model_copy(
+        update={
+            "rendered_prompt": None if prompt is None else _journal_text(prompt),
+            "items": items,
+        }
+    )
+
+
 def _fetch_request(query: QueryItem, session: date) -> FetchRequest:
     if query.kind is QueryKind.URL:
         return FetchRequest.url(query.target, session)
@@ -391,6 +426,11 @@ class _Session:
         model: str | None = None,
         tokens: TokenSpend | None = None,
     ) -> None:
+        # Masked at the last write as well as at the source: the journal is append-only, so the
+        # rationale (which quotes harness errors) and the bundle are the one place a miss upstream
+        # can still be caught before it is permanent.
+        evidence = None if evidence is None else _masked_evidence(evidence)
+        rationale = None if rationale is None else mask_secrets(rationale)
         ref = evidence.ref().ref if evidence is not None else evidence_ref
         entry = JournalEntry(
             ts=self.clock.now(),
@@ -528,8 +568,10 @@ class _Session:
             "round": str(self.calls),
             "research_bundles": render_bundles(self.bundles),
         }
-        return self.template.render(
-            style=self.mandate.style.value, round_key=round_key, values=values
+        # Masked by the same rule `_write` applies to the bundle, so the prompt the model is sent
+        # and the one the evidence records stay the same bytes.
+        return _journal_text(
+            self.template.render(style=self.mandate.style.value, round_key=round_key, values=values)
         )
 
     # -- one call ---------------------------------------------------------------------------------
@@ -782,6 +824,9 @@ class _Session:
             self.snapshots[outcome.snapshot.id] = outcome.snapshot
             fetched.append((query, outcome.snapshot))
 
+        # A reason quotes a harness error (a digest call, a fetch), and from here it is rendered
+        # into every later prompt and written to the journal's payload, so it is masked once, now.
+        unfulfilled = [Unfulfilled(u.what, mask_secrets(u.reason)) for u in unfulfilled]
         # Every round re-shows every bundle so far, so a line already in an earlier bundle is not
         # repeated in this one: a digest source gap recurs on every round that asks for names, and
         # rendering it again costs tokens on every later call and tells the manager nothing new.

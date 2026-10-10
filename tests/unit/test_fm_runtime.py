@@ -15,8 +15,10 @@ criteria, each tested here:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import subprocess
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -102,6 +104,7 @@ from analyst.llm import (
     ToolSpec,
     prompt_digest,
 )
+from analyst.llm.claude_cli import ClaudeCliLLM
 from analyst.llm.client import DEFAULT_MAX_TOKENS
 from execution.costs import CostModel, load_rate_card
 from execution.sim_broker import SlippageModel
@@ -1324,3 +1327,101 @@ def test_the_template_refuses_a_missing_value_and_never_rescans_injected_text() 
     values = dict.fromkeys(names, "x") | {"research_bundles": "{{manager_id}} [[STYLE:POSITIONAL]]"}
     out = template.render(style="SWING", round_key=ROUND_FINAL, values=values)
     assert "{{manager_id}} [[STYLE:POSITIONAL]]" in out
+
+
+# ── invariant #13: a harness error never reaches the journal or its evidence unmasked ────────────
+
+
+def _fake_secret(seed: str) -> str:
+    """Credential-shaped and built at runtime, so no literal here trips the repo's secret scan."""
+    return hashlib.sha256(seed.encode()).hexdigest()
+
+
+def _journaled_text(journal: ListJournal) -> str:
+    """Everything the journal and its evidence store would hold, as one searchable string."""
+    rows = [e.model_dump_json() for e in journal.entries]
+    bundles = [b.canonical_bytes().decode() for b in journal.evidence.values()]
+    return "\n".join(rows + bundles)
+
+
+def test_a_claude_cli_failure_never_reaches_the_journal_or_evidence_unmasked(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real `ClaudeCliLLM`, its subprocess stubbed to fail with a secret on stderr.
+
+    Fails on the code before the fix: the CLI's raw stderr went into the `LLMError`, the runtime
+    wrapped it into the manager error, and `_write` journaled it as the rationale verbatim.
+    """
+    secret = _fake_secret("cli-stderr")
+    stderr = f"fatal: request rejected; Authorization: Bearer {secret}\napi_key={secret}"
+    monkeypatch.setattr("analyst.llm.claude_cli.shutil.which", lambda _: "/usr/bin/claude")
+    monkeypatch.setattr(
+        "analyst.llm.claude_cli.subprocess.run",
+        lambda argv, **_: subprocess.CompletedProcess(argv, 1, "", stderr),
+    )
+    mandate = _mandate()
+    journal = ListJournal()
+    result = run_manager(
+        mandate,
+        SESSION,
+        _commons(world, tmp_path),
+        _book(mandate.id),
+        ClaudeCliLLM(),
+        StubFetcher(),
+        journal=journal,
+        clock=clock(),
+    )
+    assert result.status is SessionStatus.MANAGER_ERROR
+    (error,) = journal.events(MANAGER_ERROR_EVENT)
+    assert "fatal: request rejected" in (error.rationale or "")  # still diagnosable
+    assert secret not in _journaled_text(journal)
+
+
+def test_a_raw_error_is_masked_again_at_the_journal_write(world: World, tmp_path: Path) -> None:
+    """Defence in depth: an `LLMError` that skipped masking upstream is masked by `_write`."""
+    secret = _fake_secret("raw-llm-error")
+    result, journal, _ = _run(world, tmp_path, [LLMError(f"boom password={secret}")])
+    assert result.status is SessionStatus.MANAGER_ERROR
+    (error,) = journal.events(MANAGER_ERROR_EVENT)
+    assert "boom password=***" in (error.rationale or "")
+    assert secret not in _journaled_text(journal)
+
+
+def test_a_digest_failure_is_masked_in_the_next_prompt_the_bundle_and_the_payload(
+    world: World, tmp_path: Path
+) -> None:
+    """An on-demand digest error becomes an unfulfilled reason: shown, journaled, never raw."""
+    secret = _fake_secret("digest-error")
+
+    def failing_digests(isins: Sequence[str]) -> OnDemandDigests:
+        raise LLMError(f"the Claude CLI failed: token={secret}")
+
+    commons = ManagerCommons.from_builds(
+        sheets=world.sheets,
+        screens=world.screens,
+        shortlist=world.shortlist,
+        base_rates=world.table,
+        source=FakeScreenSource(screen_world()),
+        snapshots=SnapshotStore(tmp_path / "fetch", clock=clock()),
+        cost_model=CostModel(load_rate_card()),
+        slippage=SlippageModel(),
+        digests=failing_digests,
+    )
+    mandate = _mandate()
+    journal = ListJournal()
+    llm = ScriptedStub([research([LEADER]), research(), final(hold(), passed(LEADER))])
+    run_manager(
+        mandate,
+        SESSION,
+        commons,
+        _book(mandate.id),
+        llm,
+        StubFetcher(),
+        journal=journal,
+        clock=clock(),
+    )
+    (fulfilled, *_) = journal.events(RESEARCH_EVENT)
+    assert "token=***" in fulfilled.payload["unfulfilled"]
+    assert any("token=***" in p for p in llm.prompts[1:])  # the manager is still told why
+    assert not any(secret in p for p in llm.prompts)
+    assert secret not in _journaled_text(journal)

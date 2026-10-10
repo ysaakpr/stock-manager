@@ -24,7 +24,9 @@ returned when this provider was built, trimmed to the fields the code reads.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any
@@ -33,9 +35,11 @@ import pytest
 from structlog.testing import capture_logs
 
 from analyst.llm.claude_cli import CLAUDE_CLI_PROVIDER, ClaudeCliLLM
+from analyst.llm.cli_env import CLAUDE_CLI_ENV_ALLOWLIST
 from analyst.llm.client import (
     LLMCredentialError,
     LLMError,
+    LLMRateLimitError,
     LLMRefusalError,
     Message,
     Role,
@@ -97,10 +101,12 @@ class FakeRun:
         self.returncode = returncode
         self.argv: list[str] = []
         self.stdin: str | None = None
+        self.env: Mapping[str, str] | None = None
 
     def __call__(self, argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         self.argv = list(argv)
         self.stdin = kwargs.get("input")
+        self.env = kwargs.get("env")
         return subprocess.CompletedProcess(
             args=list(argv), returncode=self.returncode, stdout=self.stdout, stderr=self.stderr
         )
@@ -382,6 +388,73 @@ def test_a_nonzero_exit_raises_with_the_stderr_attached(
     run_with(monkeypatch, "", returncode=2, stderr="unknown option --nope")
     with pytest.raises(LLMError, match="unknown option --nope"):
         cli.complete(ASK, model="claude-opus-5")
+
+
+def _fake_secret(seed: str) -> str:
+    """A credential-shaped value built at runtime, so no literal here trips the secret scan."""
+    return hashlib.sha256(seed.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("stream", ["stderr", "stdout"])
+def test_a_failed_run_masks_and_bounds_what_the_cli_printed(
+    cli: ClaudeCliLLM, monkeypatch: pytest.MonkeyPatch, stream: str
+) -> None:
+    """The error is journaled by M17 (rationale, unfulfilled reasons): it must carry no secret.
+
+    Fails if the CLI's raw output is quoted untruncated or unmasked, which is what it was.
+    """
+    secret = _fake_secret(f"cli-{stream}")
+    noise = "config: " + "x" * 5000
+    output = f"request failed; api_key={secret} Authorization: Bearer {secret}\n{noise}"
+    run_with(
+        monkeypatch,
+        "" if stream == "stderr" else output,
+        returncode=1,
+        **({"stderr": output} if stream == "stderr" else {}),
+    )
+    with pytest.raises(LLMError) as caught:
+        cli.complete(ASK, model="claude-opus-5")
+    message = str(caught.value)
+    assert secret not in message
+    assert "request failed" in message  # still diagnosable
+    assert len(message) < 600
+
+
+def test_a_rate_limited_run_masks_what_the_cli_printed(
+    cli: ClaudeCliLLM, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    secret = _fake_secret("cli-rate")
+    run_with(monkeypatch, "", returncode=1, stderr=f"rate limit hit; token={secret}")
+    with pytest.raises(LLMRateLimitError) as caught:
+        cli.complete(ASK, model="claude-opus-5")
+    assert secret not in str(caught.value)
+
+
+def test_the_cli_is_given_an_allowlisted_env_not_the_parents(
+    cli: ClaudeCliLLM, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DATABASE_URL and every *_KEY / *_TOKEN / *_SECRET stay in this process (invariant #13)."""
+    leaked = {
+        "DATABASE_URL": "postgresql://u:" + _fake_secret("db") + "@db/x",
+        "KITE_API_KEY": _fake_secret("kite"),
+        "ANTHROPIC_API_KEY": _fake_secret("anthropic"),
+        "CLAUDE_CODE_OAUTH_TOKEN": _fake_secret("oauth"),
+        "TELEGRAM_BOT_TOKEN": _fake_secret("tg"),
+        "S3_SECRET": _fake_secret("s3"),
+    }
+    for name, value in leaked.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("HOME", "/home/someone")
+    fake = run_with(monkeypatch, TEXT_RESULT)
+    cli.complete(ASK, model="claude-opus-5")
+    assert fake.env is not None, "subprocess.run inherited the whole environment"
+    assert set(fake.env) <= set(CLAUDE_CLI_ENV_ALLOWLIST)
+    assert fake.env["HOME"] == "/home/someone"
+    assert fake.env["PATH"] == os.environ["PATH"]
+    for name in fake.env:
+        assert not name.endswith(("_KEY", "_TOKEN", "_SECRET")), name
+    assert not set(leaked) & set(fake.env)
+    assert not any(v in fake.env.values() for v in leaked.values())
 
 
 def test_an_in_band_error_is_caught_even_on_a_zero_exit(
