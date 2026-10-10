@@ -39,6 +39,7 @@ from dataplatform.identity.ingest import (
     NSE_EQUITY_LIST_SOURCE,
     NSE_SYMBOL_CHANGES_SOURCE,
     IdentityIngestReport,
+    L0EquityListSeries,
     identity_l0_files,
     ingest_snapshot,
     read_snapshot_from_l0,
@@ -76,7 +77,9 @@ class IdentityRefreshReport:
             f"identity refresh {self.snapshot_date.isoformat()}: "
             f"{len(self.refs)} file(s) in L0{reused}, "
             f"{self.ingest.counts.securities} securities changed, "
-            f"{self.ingest.counts.windows_inserted} windows inserted"
+            f"{self.ingest.counts.windows_inserted} windows inserted, "
+            f"{self.ingest.counts.windows_closed} closed, "
+            f"{len(self.ingest.conflicts)} conflict(s)"
         )
 
 
@@ -161,7 +164,11 @@ def refresh_identity(
 
     equity_list, changes = read_snapshot_from_l0(on_date, store=store)
     report = ingest_snapshot(
-        conn, equity_list=equity_list, symbol_changes=changes, snapshot_date=on_date
+        conn,
+        equity_list=equity_list,
+        symbol_changes=changes,
+        snapshot_date=on_date,
+        reissue_evidence=L0EquityListSeries(store),
     )
     if dry_run:
         conn.rollback()
