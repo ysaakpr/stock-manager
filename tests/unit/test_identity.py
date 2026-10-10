@@ -13,6 +13,8 @@ became Zydus Lifesciences on 2022-03-07 without changing ISIN, so a price table 
 
 from __future__ import annotations
 
+import io
+import zipfile
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -680,26 +682,67 @@ def test_pre_switch_rename_history_stays_with_the_old_isin() -> None:
 
 # ── the L0 equity-list series as boundary evidence ──────────────────────────────────────────
 
+_UDIFF_HEADER = (
+    "TradDt,BizDt,Sgmt,Src,FinInstrmTp,FinInstrmId,ISIN,TckrSymb,SctySrs,XpryDt,"
+    "FininstrmActlXpryDt,StrkPric,OptnTp,FinInstrmNm,OpnPric,HghPric,LwPric,ClsPric,LastPric,"
+    "PrvsClsgPric,UndrlygPric,SttlmPric,OpnIntrst,ChngInOpnIntrst,TtlTradgVol,TtlTrfVal,"
+    "TtlNbOfTxsExctd,SsnId,NewBrdLotQty,Rmks,Rsvd1,Rsvd2,Rsvd3,Rsvd4"
+)
 
-def _series_store(tmp_path: Path, by_date: dict[date, str]) -> L0Store:
+
+def _udiff_zip(on_date: date, isins: dict[str, str]) -> tuple[str, bytes]:
+    """A minimal UDiFF cash bhavcopy for one session: `symbol -> ISIN`, one EQ row each."""
+    day = on_date.isoformat()
+    body = "".join(
+        f"{day},{day},CM,NSE,STK,{n},{isin},{symbol},EQ,,,,,{symbol} LTD,10.00,11.00,9.00,"
+        "10.50,10.50,10.00,,10.50,,,100,1050.00,10,F1,1,,,,,\n"
+        for n, (symbol, isin) in enumerate(sorted(isins.items()), start=1)
+    )
+    name = f"BhavCopy_NSE_CM_0_0_0_{on_date.strftime('%Y%m%d')}_F_0000.csv"
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(name, _UDIFF_HEADER + "\n" + body)
+    return name + ".zip", buffer.getvalue()
+
+
+def _series_store(
+    tmp_path: Path,
+    captures: dict[date, str | None],
+    sessions: dict[date, str] | None = None,
+    *,
+    symbol: str = "TCC",
+) -> L0Store:
+    """Equity-list captures (`None`: the symbol is absent that day) and bhavcopy sessions."""
     store = L0Store(clock=FrozenClock(datetime(2026, 10, 10, 7, 0, tzinfo=IST)), data_root=tmp_path)
-    for on_date, isin in by_date.items():
-        text = _equity_list_text(f"TCC,TCC Concept Limited,EQ,25-FEB-2026,1,1,{isin},1")
+    for on_date, isin in captures.items():
+        rows = ["ACME,Acme Limited,EQ,01-JAN-2010,10,1,INE111A01017,10"]
+        if isin is not None:
+            rows.append(f"{symbol},{symbol} Limited,EQ,25-FEB-2026,1,1,{isin},1")
+        text = _equity_list_text(*rows)
         store.put(NSE_EQUITY_LIST_SOURCE, on_date, equity_list_filename(on_date), text.encode())
+    for on_date, isin in (sessions or {}).items():
+        name, payload = _udiff_zip(on_date, {symbol: isin, "ACME": "INE111A01017"})
+        store.put("nse_bhavcopy_udiff", on_date, name, payload)
     return store
 
 
+#: TCC's real shape: captures and sessions agree that 2026-09-04 is the first new-ISIN session.
+_TCC_CAPTURES: dict[date, str | None] = {
+    date(2026, 9, 2): TCC_OLD,
+    date(2026, 9, 3): TCC_OLD,
+    TCC_SWITCH: TCC_NEW,
+    date(2026, 9, 7): TCC_NEW,
+}
+_TCC_SESSIONS = {
+    date(2026, 9, 2): TCC_OLD,
+    date(2026, 9, 3): TCC_OLD,
+    TCC_SWITCH: TCC_NEW,
+    date(2026, 9, 7): TCC_NEW,
+}
+
+
 def test_the_series_names_the_first_list_after_the_old_isin(tmp_path: Path) -> None:
-    store = _series_store(
-        tmp_path,
-        {
-            date(2026, 9, 2): TCC_OLD,
-            date(2026, 9, 3): TCC_OLD,
-            TCC_SWITCH: TCC_NEW,
-            date(2026, 9, 7): TCC_NEW,
-        },
-    )
-    series = L0EquityListSeries(store)
+    series = L0EquityListSeries(_series_store(tmp_path, _TCC_CAPTURES, _TCC_SESSIONS))
     assert series.first_listed("TCC", TCC_OLD, TCC_NEW, through=REISSUE_SNAPSHOT) == TCC_SWITCH
     # Not yet visible on or before the switch's eve.
     assert series.first_listed("TCC", TCC_OLD, TCC_NEW, through=date(2026, 9, 3)) is None
@@ -723,7 +766,108 @@ def test_a_flapping_series_is_not_evidence(tmp_path: Path) -> None:
             TCC_SWITCH: TCC_OLD,
             date(2026, 9, 7): TCC_NEW,
         },
+        _TCC_SESSIONS,
     )
+    assert (
+        L0EquityListSeries(store).first_listed("TCC", TCC_OLD, TCC_NEW, through=REISSUE_SNAPSHOT)
+        is None
+    )
+
+
+def test_a_symbol_absent_between_old_and_new_is_not_a_reissue(tmp_path: Path) -> None:
+    """A capture without the symbol breaks the chain: gone and back is not proven to be one
+    security, even under the same issuer code and with sessions that would agree."""
+    store = _series_store(
+        tmp_path,
+        {
+            date(2026, 9, 8): TCC_OLD,
+            date(2026, 9, 15): None,
+            date(2026, 9, 22): None,
+            date(2026, 10, 1): TCC_NEW,
+        },
+        {date(2026, 9, 8): TCC_OLD, date(2026, 10, 1): TCC_NEW},
+    )
+    assert (
+        L0EquityListSeries(store).first_listed("TCC", TCC_OLD, TCC_NEW, through=REISSUE_SNAPSHOT)
+        is None
+    )
+
+
+def test_another_company_taking_a_vacated_symbol_is_queued_not_split(tmp_path: Path) -> None:
+    """The reviewer's case: A open since 2013, absent from two captures, then an unrelated ISIN
+    under the same symbol. No boundary, and the overlap reaches the reconciliation queue."""
+    old, new = "INE345B01019", "INE9ZZZ01012"
+    stored = (SymbolWindow(Exchange.NSE, "ZED", date(2013, 1, 1), None, old, "EQ"),)
+    store = _series_store(
+        tmp_path,
+        {
+            date(2026, 9, 8): old,
+            date(2026, 9, 15): None,
+            date(2026, 9, 22): None,
+            date(2026, 10, 1): new,
+        },
+        {date(2026, 9, 8): old, date(2026, 10, 1): new},
+        symbol="ZED",
+    )
+    derived = derive_master(
+        parse_equity_list(_equity_list_text(f"ZED,Zed Limited,EQ,01-OCT-2026,1,1,{new},1")),
+        snapshot_date=REISSUE_SNAPSHOT,
+    )
+    resolution = resolve_reissues(
+        derived.windows,
+        stored,
+        listed_isins=frozenset(s.isin for s in derived.securities),
+        lineage={},
+        snapshot_date=REISSUE_SNAPSHOT,
+        evidence=L0EquityListSeries(store),
+    )
+    assert resolution.boundaries == ()
+    assert resolution.unresolved == ((Exchange.NSE, "ZED", old, new),)
+    applied = plan_history(stored, resolution.windows).applied_to(stored)
+    assert [c.isins for c in detect_conflicts(applied, source="test")] == [(old, new)]
+
+
+def test_a_different_issuer_code_is_never_split_on_series_evidence() -> None:
+    """Even a series that names a clean switch date cannot move a window across issuer codes."""
+    other = "INE9ZZZ01012"
+    evidence = _FixedEvidence(TCC_SWITCH)
+    derived = derive_master(
+        parse_equity_list(
+            _equity_list_text(f"TCC,Someone Else Limited,EQ,25-FEB-2026,1,1,{other},1")
+        ),
+        snapshot_date=REISSUE_SNAPSHOT,
+    )
+    resolution = resolve_reissues(
+        derived.windows,
+        _TCC_STORED,
+        listed_isins=frozenset(s.isin for s in derived.securities),
+        lineage={},
+        snapshot_date=REISSUE_SNAPSHOT,
+        evidence=evidence,
+    )
+    assert resolution.boundaries == ()
+    assert resolution.unresolved == ((Exchange.NSE, "TCC", TCC_OLD, other),)
+    applied = plan_history(_TCC_STORED, resolution.windows).applied_to(_TCC_STORED)
+    assert [c.isins for c in detect_conflicts(applied, source="test")] == [(TCC_OLD, other)]
+
+
+def test_a_capture_a_day_early_is_refused_by_the_session(tmp_path: Path) -> None:
+    """The ~19:15 IST capture on 09-03 already lists the new ISIN, but session 09-03 traded the
+    old one. The series and the bhavcopy disagree, so there is no answer — never a day early."""
+    store = _series_store(
+        tmp_path,
+        {date(2026, 9, 2): TCC_OLD, date(2026, 9, 3): TCC_NEW, TCC_SWITCH: TCC_NEW},
+        {date(2026, 9, 2): TCC_OLD, date(2026, 9, 3): TCC_OLD, TCC_SWITCH: TCC_NEW},
+    )
+    assert (
+        L0EquityListSeries(store).first_listed("TCC", TCC_OLD, TCC_NEW, through=REISSUE_SNAPSHOT)
+        is None
+    )
+
+
+def test_a_switch_with_no_session_bhavcopy_is_refused(tmp_path: Path) -> None:
+    sessions = {d: i for d, i in _TCC_SESSIONS.items() if d != TCC_SWITCH}
+    store = _series_store(tmp_path, _TCC_CAPTURES, sessions)
     assert (
         L0EquityListSeries(store).first_listed("TCC", TCC_OLD, TCC_NEW, through=REISSUE_SNAPSHOT)
         is None

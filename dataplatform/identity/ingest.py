@@ -617,45 +617,107 @@ class ReissueEvidence(Protocol):
         ...
 
 
-class L0EquityListSeries:
-    """`ReissueEvidence` read from the dated `EQUITY_L` snapshots already in L0.
+#: The UDiFF cash bhavcopy the series' switch date is cross-checked against (`ingest.nse`).
+_UDIFF_SOURCE: Final = "nse_bhavcopy_udiff"
 
-    What it does: walks every stored equity list in date order and finds the one transition of
-    a symbol from the old ISIN to the new.
-    What it assumes: the series is the daily capture `ingest.daily_snapshot` keeps. A gap in it
-    makes the answer the first capture *after* the switch — later than the truth, never earlier,
-    so the new ISIN's window is never back-dated over sessions the old ISIN traded.
-    What it never does: answer from a series that does not show the old ISIN before the new one
-    (the switch predates the series), or that flips more than once. Both are `None`. It never
-    opens a socket; files are read lazily, re-checksummed by `L0Store.get`, and parsed once.
+
+class L0EquityListSeries:
+    """`ReissueEvidence` read from the dated `EQUITY_L` snapshots already in L0, confirmed
+    against the L0 cash bhavcopies of the sessions either side of the switch.
+
+    What it does: walks every stored equity list in date order and finds the one capture listing
+    the symbol as the new ISIN where the *immediately preceding* capture listed the old — then
+    requires the bhavcopy of that date to trade the symbol as the new ISIN, and the last
+    bhavcopy between the two captures that trades it to show the old one.
+    What it assumes: the series is the daily capture `ingest.daily_snapshot` keeps (~19:15 IST,
+    after the close). The capture can therefore already show the ISIN the *next* session will
+    trade under — a day early — and the bhavcopy check is what catches that: the session must
+    agree, or there is no answer. A missing capture file only makes the answer later.
+    What it never does: bridge a capture where the symbol is absent (a symbol that went away and
+    came back is not proven to be the same security), answer from a series that starts on the new
+    ISIN, flips more than once, or disagrees with the bhavcopy — all `None`, so the overlap is
+    queued. It never opens a socket; files are read lazily, re-checksummed by `L0Store.get`, and
+    parsed once.
     """
 
     def __init__(self, store: L0Store) -> None:
         self._store = store
         self._parsed: dict[date, dict[str, str]] = {}
+        self._sessions: dict[date, dict[str, frozenset[str]] | None] = {}
 
     def first_listed(
         self, symbol: str, old_isin: str, new_isin: str, *, through: date
     ) -> date | None:
         """See `ReissueEvidence.first_listed`."""
-        transitions: list[date] = []
-        previous: str | None = None
+        transitions: list[tuple[date, date]] = []  # (capture showing old, next capture: new)
+        previous: tuple[date, str | None] | None = None
         for on_date, by_symbol in self._series(through):
             current = by_symbol.get(symbol)
-            if previous == old_isin and current == new_isin:
-                transitions.append(on_date)
-            if current is not None:
-                previous = current
-        if len(transitions) > 1:
-            _log.warning(
-                "identity.reissue.flapping_series",
-                source=NSE_EQUITY_LIST_SOURCE,
-                symbol=symbol,
-                old_isin=old_isin,
-                new_isin=new_isin,
-                transitions=[d.isoformat() for d in transitions],
-            )
-        return transitions[0] if len(transitions) == 1 else None
+            if previous is not None and previous[1] == old_isin and current == new_isin:
+                transitions.append((previous[0], on_date))
+            # Every capture moves `previous`, including one without the symbol: an absence
+            # breaks the chain rather than being bridged.
+            previous = (on_date, current)
+        if len(transitions) != 1:
+            if transitions:
+                _log.warning(
+                    "identity.reissue.flapping_series",
+                    source=NSE_EQUITY_LIST_SOURCE,
+                    symbol=symbol,
+                    old_isin=old_isin,
+                    new_isin=new_isin,
+                    transitions=[new.isoformat() for _, new in transitions],
+                )
+            return None
+        last_old, first_new = transitions[0]
+        if not self._sessions_agree(symbol, old_isin, new_isin, last_old, first_new):
+            return None
+        return first_new
+
+    def _sessions_agree(
+        self, symbol: str, old_isin: str, new_isin: str, last_old: date, first_new: date
+    ) -> bool:
+        """Session `first_new` trades `symbol` as `new_isin` only, and the last session in
+        `[last_old, first_new)` that trades it at all shows `old_isin` only. Fails closed."""
+        on_switch = self._session(first_new)
+        before: frozenset[str] | None = None
+        day = first_new - timedelta(days=1)
+        while day >= last_old and before is None:
+            session = self._session(day)
+            if session is not None and symbol in session:
+                before = session[symbol]
+            day -= timedelta(days=1)
+        switch_isins = None if on_switch is None else on_switch.get(symbol)
+        if switch_isins == frozenset({new_isin}) and before == frozenset({old_isin}):
+            return True
+        _log.warning(
+            "identity.reissue.session_disagrees",
+            source=_UDIFF_SOURCE,
+            symbol=symbol,
+            old_isin=old_isin,
+            new_isin=new_isin,
+            capture=first_new.isoformat(),
+            session_isins=None if switch_isins is None else sorted(switch_isins),
+            before_isins=None if before is None else sorted(before),
+        )
+        return False
+
+    def _session(self, on_date: date) -> dict[str, frozenset[str]] | None:
+        """`symbol -> ISINs` traded in the L0 cash bhavcopy for `on_date`; `None` if none stored."""
+        if on_date not in self._sessions:
+            # Imported here, not at module level: `ingest.nse`'s package import reaches the
+            # resolvers, which import this package — a cycle at import time.
+            from dataplatform.ingest.nse.bhavcopy_udiff import parse_l0 as parse_udiff_l0
+
+            refs = list(self._store.iter_refs(_UDIFF_SOURCE, start=on_date, end=on_date))
+            if len(refs) != 1:
+                self._sessions[on_date] = None
+            else:
+                by_symbol: dict[str, set[str]] = {}
+                for row in parse_udiff_l0(self._store, refs[0]):
+                    by_symbol.setdefault(row.symbol.strip().upper(), set()).add(row.isin)
+                self._sessions[on_date] = {k: frozenset(v) for k, v in by_symbol.items()}
+        return self._sessions[on_date]
 
     def _series(self, through: date) -> list[tuple[date, dict[str, str]]]:
         out: list[tuple[date, dict[str, str]]] = []
@@ -701,7 +763,8 @@ def resolve_reissues(
     holds that boundary, B's window is aligned to the stored start so a re-ingest is a no-op.
     What it assumes: `stored` is everything `symbol_history` holds; `listed_isins` is every ISIN
     in this snapshot.
-    What it never does: guess. No evidence, a boundary outside A's window, two open candidates,
+    What it never does: guess. No evidence, series evidence across issuer codes (another company
+    taking the symbol, not a reissue), a boundary outside A's window, two open candidates,
     or B's listing-date window already stored (the 2026-10-10 state, which `repair_reissues`
     owns) — the windows are returned untouched and `detect_conflicts` queues the overlap.
     """
@@ -728,9 +791,14 @@ def resolve_reissues(
 
         if len(open_retired) == 1:
             old = open_retired[0]
+            # Lineage is trusted without an issuer check: a derived edge is only ever built within
+            # one issuer code (`lineage.derive_edges`), and a MANUAL edge is the operator's
+            # reviewed statement — the runbook's remedy for exactly the cases refused below.
             effective = lineage.get((old.isin, window.isin))
             source = REISSUE_EVIDENCE_LINEAGE
-            if effective is None and evidence is not None:
+            if effective is None and evidence is not None and _same_issuer(old.isin, window.isin):
+                # The series alone cannot tell a reissue from another company taking the
+                # symbol; a reissue keeps the issuer code, so a different one is never moved.
                 effective = evidence.first_listed(
                     window.symbol, old.isin, window.isin, through=snapshot_date
                 )
@@ -812,6 +880,11 @@ def resolve_reissues(
     return ReissueResolution(
         windows=tuple(out), boundaries=tuple(boundaries), unresolved=tuple(unresolved)
     )
+
+
+def _same_issuer(old_isin: str, new_isin: str) -> bool:
+    """Whether two ISINs share the issuer code (`IN` + type + four characters): `isin[:7]`."""
+    return old_isin[:7] == new_isin[:7]
 
 
 # ── ingest ───────────────────────────────────────────────────────────────────────────────────
