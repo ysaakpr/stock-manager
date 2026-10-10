@@ -13,25 +13,36 @@ became Zydus Lifesciences on 2022-03-07 without changing ISIN, so a price table 
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+from dataplatform.clock import IST, FrozenClock
 from dataplatform.identity.ingest import (
     EQUITY_LIST_COLUMNS,
+    NSE_EQUITY_LIST_SOURCE,
+    REISSUE_EVIDENCE_EQUITY_LIST,
+    REISSUE_EVIDENCE_LINEAGE,
     ClampedWindow,
+    DerivedMaster,
     IdentityParseError,
+    L0EquityListSeries,
+    ReissueBoundary,
+    ReissueResolution,
     derive_master,
+    equity_list_filename,
     parse_equity_list,
     parse_symbol_changes,
+    resolve_reissues,
 )
 from dataplatform.identity.master import (
     AmbiguousSymbolError,
     ConflictKind,
     DetectedBy,
     Exchange,
+    HistoryPlan,
     IdentityMaster,
     InMemoryReconciliationQueue,
     ListingStatus,
@@ -41,6 +52,7 @@ from dataplatform.identity.master import (
     detect_conflicts,
     plan_history,
 )
+from dataplatform.store.l0 import L0Store
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "nse_equity_list" / "2026-08-08"
 
@@ -431,3 +443,288 @@ def test_applied_to_leaves_windows_the_plan_did_not_mention() -> None:
     bse = SymbolWindow(Exchange.BSE, "OLD", date(2010, 1, 1), None, "INE111A01011")
     plan = plan_history([_OPEN, bse], [_CLOSED, _NEXT])
     assert set(plan.applied_to([_OPEN, bse])) == {bse, _CLOSED, _NEXT}
+
+
+# ── M18.1: an ISIN reissued under an unchanged symbol ─────────────────────────────────────────
+#
+# TCC's face-value split, 2026-09-04: the depository retired INE887D01016 and issued INE887D01024,
+# NSE kept the symbol, and `EQUITY_L.csv` lists the new ISIN with the *original* listing date. The
+# 2026-10-10 ingest stored both windows open from 2026-02-25 and every resolve of TCC raised.
+
+TCC_OLD = "INE887D01016"
+TCC_NEW = "INE887D01024"
+TCC_LISTED = date(2026, 2, 25)
+TCC_SWITCH = date(2026, 9, 4)
+REISSUE_SNAPSHOT = date(2026, 10, 10)
+
+#: What the store held before 2026-10-10: the old ISIN, open, from the listing date.
+_TCC_STORED = (
+    SymbolWindow(Exchange.NSE, "TCC", TCC_LISTED, None, TCC_OLD, "EQ", "nse_equity_list"),
+)
+
+
+def _tcc_derived() -> DerivedMaster:
+    """The 2026-10-10 equity list as far as TCC goes: the new ISIN, the original listing date."""
+    return derive_master(
+        parse_equity_list(
+            _equity_list_text(f"TCC,TCC Concept Limited,EQ,25-FEB-2026,1,1,{TCC_NEW},1")
+        ),
+        snapshot_date=REISSUE_SNAPSHOT,
+    )
+
+
+def _equity_list_text(*rows: str) -> str:
+    return ",".join(EQUITY_LIST_COLUMNS) + "\n" + "".join(f"{row}\n" for row in rows)
+
+
+class _FixedEvidence:
+    """`ReissueEvidence` that answers one date, and records what it was asked."""
+
+    def __init__(self, answer: date | None) -> None:
+        self.answer = answer
+        self.asked: list[tuple[str, str, str, date]] = []
+
+    def first_listed(
+        self, symbol: str, old_isin: str, new_isin: str, *, through: date
+    ) -> date | None:
+        self.asked.append((symbol, old_isin, new_isin, through))
+        return self.answer
+
+
+def _resolve_tcc(
+    *,
+    lineage: dict[tuple[str, str], date] | None = None,
+    evidence: _FixedEvidence | None = None,
+    stored: tuple[SymbolWindow, ...] = _TCC_STORED,
+) -> tuple[ReissueResolution, tuple[SymbolWindow, ...], HistoryPlan]:
+    derived = _tcc_derived()
+    resolution = resolve_reissues(
+        derived.windows,
+        stored,
+        listed_isins=frozenset(s.isin for s in derived.securities),
+        lineage={} if lineage is None else lineage,
+        snapshot_date=REISSUE_SNAPSHOT,
+        evidence=evidence,
+    )
+    plan = plan_history(stored, resolution.windows)
+    return resolution, plan.applied_to(stored), plan
+
+
+def test_current_derivation_alone_makes_a_reissue_ambiguous() -> None:
+    """The defect, pinned: without the reissue step both windows open from the listing date."""
+    plan = plan_history(_TCC_STORED, _tcc_derived().windows)
+    conflicts = detect_conflicts(plan.applied_to(_TCC_STORED), source="test")
+    assert [c.isins for c in conflicts] == [(TCC_OLD, TCC_NEW)]
+
+
+def test_a_reissue_with_a_lineage_edge_splits_at_the_switch() -> None:
+    resolution, applied, plan = _resolve_tcc(lineage={(TCC_OLD, TCC_NEW): TCC_SWITCH})
+
+    assert plan.closes == (
+        SymbolWindow(
+            Exchange.NSE, "TCC", TCC_LISTED, date(2026, 9, 3), TCC_OLD, "EQ", "nse_equity_list"
+        ),
+    )
+    assert [(w.isin, w.valid_from, w.valid_to) for w in plan.inserts] == [
+        (TCC_NEW, TCC_SWITCH, None)
+    ]
+    assert plan.refusals == ()
+    assert detect_conflicts(applied, source="test") == ()
+    assert resolution.boundaries == (
+        ReissueBoundary(
+            Exchange.NSE, "TCC", TCC_OLD, TCC_NEW, TCC_SWITCH, REISSUE_EVIDENCE_LINEAGE
+        ),
+    )
+
+    master = IdentityMaster(applied)
+    assert master.try_resolve("TCC", date(2026, 8, 1)) == TCC_OLD
+    assert master.try_resolve("TCC", date(2026, 9, 3)) == TCC_OLD
+    assert master.try_resolve("TCC", TCC_SWITCH) == TCC_NEW
+    assert master.try_resolve("TCC", date(2026, 10, 1)) == TCC_NEW
+
+
+def test_lineage_wins_over_the_equity_list_series() -> None:
+    evidence = _FixedEvidence(date(2026, 9, 8))
+    resolution, _, _ = _resolve_tcc(lineage={(TCC_OLD, TCC_NEW): TCC_SWITCH}, evidence=evidence)
+    assert resolution.boundaries[0].effective == TCC_SWITCH
+    assert evidence.asked == [], "the series is only read when lineage has no edge"
+
+
+def test_a_reissue_without_lineage_splits_at_the_first_list_showing_the_new_isin() -> None:
+    evidence = _FixedEvidence(TCC_SWITCH)
+    resolution, applied, plan = _resolve_tcc(evidence=evidence)
+
+    assert evidence.asked == [("TCC", TCC_OLD, TCC_NEW, REISSUE_SNAPSHOT)]
+    assert resolution.boundaries[0].evidence == REISSUE_EVIDENCE_EQUITY_LIST
+    assert [w.valid_to for w in plan.closes] == [date(2026, 9, 3)]
+    assert detect_conflicts(applied, source="test") == ()
+    master = IdentityMaster(applied)
+    assert master.try_resolve("TCC", date(2026, 8, 1)) == TCC_OLD
+    assert master.try_resolve("TCC", date(2026, 10, 1)) == TCC_NEW
+
+
+@pytest.mark.parametrize(
+    "evidence", [None, _FixedEvidence(None)], ids=["no-series", "series-silent"]
+)
+def test_a_reissue_with_no_boundary_evidence_is_still_a_conflict(
+    evidence: _FixedEvidence | None,
+) -> None:
+    """Never guess: no evidence leaves the windows as derived, and the overlap is queued."""
+    resolution, applied, plan = _resolve_tcc(evidence=evidence)
+
+    assert resolution.windows == _tcc_derived().windows
+    assert resolution.boundaries == ()
+    assert resolution.unresolved == ((Exchange.NSE, "TCC", TCC_OLD, TCC_NEW),)
+    assert plan.closes == ()
+    conflicts = detect_conflicts(applied, source="test")
+    assert [c.isins for c in conflicts] == [(TCC_OLD, TCC_NEW)]
+    queue = InMemoryReconciliationQueue()
+    with pytest.raises(AmbiguousSymbolError):
+        IdentityMaster(applied, queue=queue).try_resolve("TCC", date(2026, 10, 1))
+    assert len(queue) == 1
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [TCC_LISTED, date(2026, 1, 1), date(2026, 10, 11)],
+    ids=["at-old-start", "before-old-start", "after-snapshot"],
+)
+def test_a_boundary_outside_the_old_window_is_not_trusted(bad: date) -> None:
+    resolution, applied, _ = _resolve_tcc(lineage={(TCC_OLD, TCC_NEW): bad})
+    assert resolution.boundaries == ()
+    assert detect_conflicts(applied, source="test") != ()
+
+
+def test_the_boundary_is_never_inverted() -> None:
+    """Fails if the switch is applied backwards — the new ISIN covering any pre-switch session,
+    or the old one any session from the switch on."""
+    _, applied, _ = _resolve_tcc(lineage={(TCC_OLD, TCC_NEW): TCC_SWITCH})
+    new = [w for w in applied if w.isin == TCC_NEW]
+    old = [w for w in applied if w.isin == TCC_OLD]
+    assert len(new) == 1 and len(old) == 1
+    day = TCC_LISTED
+    while day <= REISSUE_SNAPSHOT:
+        assert new[0].covers(day) == (day >= TCC_SWITCH), day
+        assert old[0].covers(day) == (day < TCC_SWITCH), day
+        day += timedelta(days=1)
+
+
+def test_a_reconciled_reissue_re_ingests_as_a_no_op() -> None:
+    """The next run derives the listing-date window again; it must align, not insert a second."""
+    _, applied, _ = _resolve_tcc(lineage={(TCC_OLD, TCC_NEW): TCC_SWITCH})
+    # A week on, lineage still says it — and with no lineage at all the store alone suffices.
+    for lineage in ({(TCC_OLD, TCC_NEW): TCC_SWITCH}, {}):
+        resolution, again, plan = _resolve_tcc(lineage=lineage, stored=applied)
+        assert plan.is_empty, plan
+        assert plan.refusals == ()
+        assert resolution.boundaries == ()
+        assert again == applied
+
+
+def test_a_stale_listing_date_window_is_left_for_the_repair() -> None:
+    """The 2026-10-10 state — B already stored from the listing date — is not patched around."""
+    stale = SymbolWindow(Exchange.NSE, "TCC", TCC_LISTED, None, TCC_NEW, "EQ", "nse_equity_list")
+    resolution, _, plan = _resolve_tcc(
+        lineage={(TCC_OLD, TCC_NEW): TCC_SWITCH}, stored=(*_TCC_STORED, stale)
+    )
+    assert resolution.boundaries == ()
+    assert plan.is_empty
+
+
+def test_an_old_isin_still_listed_is_not_a_reissue() -> None:
+    """If the old ISIN is in today's file it did not retire — that is a real conflict."""
+    derived = derive_master(
+        parse_equity_list(
+            _equity_list_text(
+                f"TCC,TCC Concept Limited,EQ,25-FEB-2026,1,1,{TCC_NEW},1",
+                f"TCCOLD,TCC Concept Old,EQ,25-FEB-2026,1,1,{TCC_OLD},1",
+            )
+        ),
+        snapshot_date=REISSUE_SNAPSHOT,
+    )
+    resolution = resolve_reissues(
+        derived.windows,
+        _TCC_STORED,
+        listed_isins=frozenset(s.isin for s in derived.securities),
+        lineage={(TCC_OLD, TCC_NEW): TCC_SWITCH},
+        snapshot_date=REISSUE_SNAPSHOT,
+    )
+    assert resolution.boundaries == ()
+    assert resolution.windows == derived.windows
+
+
+def test_pre_switch_rename_history_stays_with_the_old_isin() -> None:
+    """A rename chain walked from the new ISIN describes the old one's past; it is dropped."""
+    derived = derive_master(
+        parse_equity_list(
+            _equity_list_text(f"TCC,TCC Concept Limited,EQ,01-JAN-2010,1,1,{TCC_NEW},1")
+        ),
+        parse_symbol_changes("TCC Concept Limited,OLDTCC,TCC,25-FEB-2026\n"),
+        snapshot_date=REISSUE_SNAPSHOT,
+    )
+    stored = (
+        *_TCC_STORED,
+        SymbolWindow(Exchange.NSE, "OLDTCC", date(2010, 1, 1), date(2026, 2, 24), TCC_OLD),
+    )
+    resolution = resolve_reissues(
+        derived.windows,
+        stored,
+        listed_isins=frozenset(s.isin for s in derived.securities),
+        lineage={(TCC_OLD, TCC_NEW): TCC_SWITCH},
+        snapshot_date=REISSUE_SNAPSHOT,
+    )
+    assert all(w.symbol != "OLDTCC" for w in resolution.windows if w.isin == TCC_NEW)
+    plan = plan_history(stored, resolution.windows)
+    assert detect_conflicts(plan.applied_to(stored), source="test") == ()
+
+
+# ── the L0 equity-list series as boundary evidence ──────────────────────────────────────────
+
+
+def _series_store(tmp_path: Path, by_date: dict[date, str]) -> L0Store:
+    store = L0Store(clock=FrozenClock(datetime(2026, 10, 10, 7, 0, tzinfo=IST)), data_root=tmp_path)
+    for on_date, isin in by_date.items():
+        text = _equity_list_text(f"TCC,TCC Concept Limited,EQ,25-FEB-2026,1,1,{isin},1")
+        store.put(NSE_EQUITY_LIST_SOURCE, on_date, equity_list_filename(on_date), text.encode())
+    return store
+
+
+def test_the_series_names_the_first_list_after_the_old_isin(tmp_path: Path) -> None:
+    store = _series_store(
+        tmp_path,
+        {
+            date(2026, 9, 2): TCC_OLD,
+            date(2026, 9, 3): TCC_OLD,
+            TCC_SWITCH: TCC_NEW,
+            date(2026, 9, 7): TCC_NEW,
+        },
+    )
+    series = L0EquityListSeries(store)
+    assert series.first_listed("TCC", TCC_OLD, TCC_NEW, through=REISSUE_SNAPSHOT) == TCC_SWITCH
+    # Not yet visible on or before the switch's eve.
+    assert series.first_listed("TCC", TCC_OLD, TCC_NEW, through=date(2026, 9, 3)) is None
+
+
+def test_the_series_does_not_date_a_switch_older_than_itself(tmp_path: Path) -> None:
+    """The first capture already shows the new ISIN: the switch is before the series. Unknown."""
+    store = _series_store(tmp_path, {date(2026, 9, 8): TCC_NEW, date(2026, 9, 9): TCC_NEW})
+    assert (
+        L0EquityListSeries(store).first_listed("TCC", TCC_OLD, TCC_NEW, through=REISSUE_SNAPSHOT)
+        is None
+    )
+
+
+def test_a_flapping_series_is_not_evidence(tmp_path: Path) -> None:
+    store = _series_store(
+        tmp_path,
+        {
+            date(2026, 9, 2): TCC_OLD,
+            date(2026, 9, 3): TCC_NEW,
+            TCC_SWITCH: TCC_OLD,
+            date(2026, 9, 7): TCC_NEW,
+        },
+    )
+    assert (
+        L0EquityListSeries(store).first_listed("TCC", TCC_OLD, TCC_NEW, through=REISSUE_SNAPSHOT)
+        is None
+    )

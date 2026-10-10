@@ -40,11 +40,11 @@ import io
 import re
 import sys
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.identity.master import (
@@ -72,13 +72,19 @@ __all__ = [
     "NSE_EQUITY_LIST_SOURCE",
     "NSE_SYMBOL_CHANGES_SOURCE",
     "NSE_SYMBOL_CHANGE_SOURCE",
+    "REISSUE_EVIDENCE_EQUITY_LIST",
+    "REISSUE_EVIDENCE_LINEAGE",
     "SYMBOL_CHANGES_FILENAME",
     "ClampedWindow",
     "DerivedMaster",
     "EquityListRow",
     "IdentityIngestReport",
     "IdentityParseError",
+    "L0EquityListSeries",
     "L0PayloadMissingError",
+    "ReissueBoundary",
+    "ReissueEvidence",
+    "ReissueResolution",
     "SymbolChange",
     "derive_master",
     "equity_list_filename",
@@ -87,6 +93,7 @@ __all__ = [
     "parse_equity_list",
     "parse_symbol_changes",
     "read_snapshot_from_l0",
+    "resolve_reissues",
     "symbol_changes_filename",
 ]
 
@@ -290,6 +297,7 @@ class IdentityIngestReport:
     clamped: tuple[ClampedWindow, ...] = ()
     conflicts: tuple[IdentityConflict, ...] = ()
     refusals: tuple[HistoryRefusal, ...] = ()
+    reissues: tuple[ReissueBoundary, ...] = ()
 
     @property
     def is_clean(self) -> bool:
@@ -564,6 +572,248 @@ def _walk_chain(
     )
 
 
+# ── ISIN reissues under an unchanged symbol ──────────────────────────────────────────────────
+#
+# A face-value split makes the depository retire the ISIN and issue a new one (`INE887D01016` →
+# `INE887D01024` for TCC on 2026-09-04), while NSE keeps the symbol. `EQUITY_L.csv` then lists the
+# new ISIN with the company's *original* `DATE OF LISTING`, so the chain walk derives a window for
+# the new ISIN reaching back over every date the stored window for the old ISIN already covers —
+# and nothing closes the old one, because the old ISIN simply vanishes from the file. Two windows
+# open over the same dates is an `AmbiguousSymbolError` on every resolve (2026-10-10: seven of
+# them, reconciliation ids 21-27; M18.1).
+#
+# `resolve_reissues` places the boundary from evidence — the `isin_lineage` edge, else the first
+# stored equity list that shows the new ISIN where the one before showed the old — and moves both
+# windows to it. With no evidence it changes nothing, and the overlap is queued for a human.
+
+#: Evidence names, recorded on each `ReissueBoundary` so the operator can see what moved it.
+REISSUE_EVIDENCE_LINEAGE: Final = "isin_lineage"
+REISSUE_EVIDENCE_EQUITY_LIST: Final = "nse_equity_list_series"
+
+
+@dataclass(frozen=True, slots=True)
+class ReissueBoundary:
+    """One ISIN reissue under an unchanged symbol, and the date the new ISIN took over.
+
+    `effective` is the new ISIN's first day; the old ISIN's window ends the day before.
+    """
+
+    exchange: Exchange
+    symbol: str
+    old_isin: str
+    new_isin: str
+    effective: date
+    evidence: str
+
+
+class ReissueEvidence(Protocol):
+    """Where a reissue's switch date can be read when `isin_lineage` has no edge for it."""
+
+    def first_listed(
+        self, symbol: str, old_isin: str, new_isin: str, *, through: date
+    ) -> date | None:
+        """The first snapshot date, on or before `through`, listing `symbol` as `new_isin` where
+        the snapshot before it listed `old_isin` — or `None` when the series does not show that."""
+        ...
+
+
+class L0EquityListSeries:
+    """`ReissueEvidence` read from the dated `EQUITY_L` snapshots already in L0.
+
+    What it does: walks every stored equity list in date order and finds the one transition of
+    a symbol from the old ISIN to the new.
+    What it assumes: the series is the daily capture `ingest.daily_snapshot` keeps. A gap in it
+    makes the answer the first capture *after* the switch — later than the truth, never earlier,
+    so the new ISIN's window is never back-dated over sessions the old ISIN traded.
+    What it never does: answer from a series that does not show the old ISIN before the new one
+    (the switch predates the series), or that flips more than once. Both are `None`. It never
+    opens a socket; files are read lazily, re-checksummed by `L0Store.get`, and parsed once.
+    """
+
+    def __init__(self, store: L0Store) -> None:
+        self._store = store
+        self._parsed: dict[date, dict[str, str]] = {}
+
+    def first_listed(
+        self, symbol: str, old_isin: str, new_isin: str, *, through: date
+    ) -> date | None:
+        """See `ReissueEvidence.first_listed`."""
+        transitions: list[date] = []
+        previous: str | None = None
+        for on_date, by_symbol in self._series(through):
+            current = by_symbol.get(symbol)
+            if previous == old_isin and current == new_isin:
+                transitions.append(on_date)
+            if current is not None:
+                previous = current
+        if len(transitions) > 1:
+            _log.warning(
+                "identity.reissue.flapping_series",
+                source=NSE_EQUITY_LIST_SOURCE,
+                symbol=symbol,
+                old_isin=old_isin,
+                new_isin=new_isin,
+                transitions=[d.isoformat() for d in transitions],
+            )
+        return transitions[0] if len(transitions) == 1 else None
+
+    def _series(self, through: date) -> list[tuple[date, dict[str, str]]]:
+        out: list[tuple[date, dict[str, str]]] = []
+        for ref in self._store.iter_refs(NSE_EQUITY_LIST_SOURCE, end=through):
+            if ref.filename != equity_list_filename(ref.logical_date):
+                continue
+            if ref.logical_date not in self._parsed:
+                text = self._store.get(ref).decode("utf-8")
+                self._parsed[ref.logical_date] = {
+                    row.symbol: row.isin for row in parse_equity_list(text)
+                }
+            out.append((ref.logical_date, self._parsed[ref.logical_date]))
+        return sorted(out, key=lambda item: item[0])
+
+
+@dataclass(frozen=True, slots=True)
+class ReissueResolution:
+    """`resolve_reissues`' output: the windows to plan from, and what it moved and why."""
+
+    windows: tuple[SymbolWindow, ...]
+    boundaries: tuple[ReissueBoundary, ...] = ()
+    #: `(exchange, symbol, old isin, new isin)` reissues seen with no usable boundary evidence —
+    #: left exactly as derived, so the overlap reaches the reconciliation queue.
+    unresolved: tuple[tuple[Exchange, str, str, str], ...] = ()
+
+
+def resolve_reissues(
+    derived: Sequence[SymbolWindow],
+    stored: Sequence[SymbolWindow],
+    *,
+    listed_isins: frozenset[str],
+    lineage: Mapping[tuple[str, str], date],
+    snapshot_date: date,
+    evidence: ReissueEvidence | None = None,
+) -> ReissueResolution:
+    """Place the boundary of every ISIN reissue under an unchanged symbol. Pure.
+
+    What it does: for each derived *open* window (ISIN B) whose `(exchange, symbol)` has a stored
+    open window for another ISIN A that this file no longer lists, finds the switch date — the
+    `isin_lineage` edge A→B, else `evidence.first_listed` — and returns A's window closed the day
+    before it and B's window starting on it. B's derived windows that end before the switch
+    (rename-chain history, which is A's) are dropped. On a later run, when the store already
+    holds that boundary, B's window is aligned to the stored start so a re-ingest is a no-op.
+    What it assumes: `stored` is everything `symbol_history` holds; `listed_isins` is every ISIN
+    in this snapshot.
+    What it never does: guess. No evidence, a boundary outside A's window, two open candidates,
+    or B's listing-date window already stored (the 2026-10-10 state, which `repair_reissues`
+    owns) — the windows are returned untouched and `detect_conflicts` queues the overlap.
+    """
+    by_symbol: dict[tuple[Exchange, str], list[SymbolWindow]] = {}
+    for window in stored:
+        by_symbol.setdefault((window.exchange, window.symbol), []).append(window)
+    stored_keys = {window.key for window in stored}
+
+    moved: dict[tuple[Exchange, str], date] = {}  # (exchange, new isin) -> its window's start
+    replacements: dict[tuple[str, Exchange, str, date], SymbolWindow] = {}
+    closes: list[SymbolWindow] = []
+    boundaries: list[ReissueBoundary] = []
+    unresolved: list[tuple[Exchange, str, str, str]] = []
+
+    for window in derived:
+        if window.valid_to is not None or window.key in stored_keys:
+            continue
+        group = by_symbol.get((window.exchange, window.symbol), [])
+        retired = [
+            other for other in group if other.isin != window.isin and other.isin not in listed_isins
+        ]
+        open_retired = [other for other in retired if other.valid_to is None]
+        start: date | None = None
+
+        if len(open_retired) == 1:
+            old = open_retired[0]
+            effective = lineage.get((old.isin, window.isin))
+            source = REISSUE_EVIDENCE_LINEAGE
+            if effective is None and evidence is not None:
+                effective = evidence.first_listed(
+                    window.symbol, old.isin, window.isin, through=snapshot_date
+                )
+                source = REISSUE_EVIDENCE_EQUITY_LIST
+            if (
+                effective is None
+                or not old.valid_from < effective <= snapshot_date
+                or effective < window.valid_from
+            ):
+                unresolved.append((window.exchange, window.symbol, old.isin, window.isin))
+                _log.warning(
+                    "identity.reissue.no_boundary",
+                    source=NSE_EQUITY_LIST_SOURCE,
+                    exchange=window.exchange.value,
+                    symbol=window.symbol,
+                    old_isin=old.isin,
+                    new_isin=window.isin,
+                    candidate=None if effective is None else effective.isoformat(),
+                    snapshot_date=snapshot_date.isoformat(),
+                )
+                continue
+            start = effective
+            closes.append(replace(old, valid_to=effective - timedelta(days=1)))
+            boundaries.append(
+                ReissueBoundary(
+                    exchange=window.exchange,
+                    symbol=window.symbol,
+                    old_isin=old.isin,
+                    new_isin=window.isin,
+                    effective=effective,
+                    evidence=source,
+                )
+            )
+        elif not open_retired and retired:
+            # Already reconciled by an earlier run: B is stored open from the boundary and A
+            # closed the day before it. Re-derive onto the stored start, never a second window.
+            ends = {other.valid_to for other in retired}
+            aligned = [
+                mine
+                for mine in group
+                if mine.isin == window.isin
+                and mine.valid_to is None
+                and mine.valid_from > window.valid_from
+                and mine.valid_from - timedelta(days=1) in ends
+            ]
+            if len(aligned) == 1:
+                start = aligned[0].valid_from
+
+        if start is not None:
+            moved[(window.exchange, window.isin)] = start
+            replacements[window.key] = replace(window, valid_from=start)
+
+    if not moved:
+        return ReissueResolution(windows=tuple(derived), unresolved=tuple(unresolved))
+
+    out: list[SymbolWindow] = []
+    for window in derived:
+        start = moved.get((window.exchange, window.isin))
+        if window.key in replacements:
+            out.append(replacements[window.key])
+        elif start is not None and window.valid_to is not None and window.valid_to < start:
+            continue  # pre-switch rename history: the old ISIN's, already stored under it
+        else:
+            out.append(window)
+    out.extend(closes)
+
+    for boundary in boundaries:
+        _log.info(
+            "identity.reissue.boundary",
+            source=NSE_EQUITY_LIST_SOURCE,
+            exchange=boundary.exchange.value,
+            symbol=boundary.symbol,
+            old_isin=boundary.old_isin,
+            new_isin=boundary.new_isin,
+            effective=boundary.effective.isoformat(),
+            evidence=boundary.evidence,
+            snapshot_date=snapshot_date.isoformat(),
+        )
+    return ReissueResolution(
+        windows=tuple(out), boundaries=tuple(boundaries), unresolved=tuple(unresolved)
+    )
+
+
 # ── ingest ───────────────────────────────────────────────────────────────────────────────────
 
 
@@ -575,12 +825,15 @@ def ingest_snapshot(
     snapshot_date: date | None = None,
     clock: Clock | None = None,
     exchange: Exchange = Exchange.NSE,
+    reissue_evidence: ReissueEvidence | None = None,
 ) -> IdentityIngestReport:
     """Ingest one identity snapshot into the master. Does not commit.
 
     What it does: parses both files, derives the full symbol history, detects every ambiguity
     against what is *already* stored as well as within the snapshot, writes the master rows, and
-    queues each conflict into `identity_reconciliation`.
+    queues each conflict into `identity_reconciliation`. An ISIN reissued under an unchanged
+    symbol is split at its evidenced switch date first (`resolve_reissues`): the `isin_lineage`
+    edge, else `reissue_evidence` — pass `L0EquityListSeries` to read it from the L0 series.
     What it assumes: one writer at a time, and a caller that owns the transaction — commit is the
     caller's call, exactly as `dataplatform.store.db.connection` intends.
     What it never does: raise on an ambiguous symbol. The conflict row and the exception would
@@ -601,7 +854,15 @@ def ingest_snapshot(
 
     store = IdentityStore(conn, clock=clock)
     stored = store.load_windows()
-    plan = plan_history(stored, derived.windows)
+    reissues = resolve_reissues(
+        derived.windows,
+        stored,
+        listed_isins=frozenset(security.isin for security in derived.securities),
+        lineage={(old, new): effective for old, new, effective in store.load_reissues()},
+        snapshot_date=snapshot_date,
+        evidence=reissue_evidence,
+    )
+    plan = plan_history(stored, reissues.windows)
     # Judged on what the store will hold once the plan lands, not on the union of before and
     # after — see `HistoryPlan.applied_to`.
     conflicts = detect_conflicts(
@@ -630,6 +891,7 @@ def ingest_snapshot(
         clamped=derived.clamped,
         conflicts=conflicts,
         refusals=plan.refusals,
+        reissues=reissues.boundaries,
     )
 
     _log.info(
@@ -644,6 +906,8 @@ def ingest_snapshot(
         conflicts=len(conflicts),
         refusals=len(plan.refusals),
         clamped=len(derived.clamped),
+        reissues=len(reissues.boundaries),
+        reissues_unresolved=len(reissues.unresolved),
     )
     for refusal in plan.refusals:
         _log.warning(
@@ -738,9 +1002,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if (args.from_l0 is None) == (args.equity_list is None):
         parser.error("give either --from-l0 SNAPSHOT_DATE or --equity-list PATH, not both")
 
+    evidence: ReissueEvidence | None = None
     if args.from_l0 is not None:
+        l0 = L0Store(clock=SystemClock())
+        evidence = L0EquityListSeries(l0)
         try:
-            equity_list, changes = read_snapshot_from_l0(args.from_l0)
+            equity_list, changes = read_snapshot_from_l0(args.from_l0, store=l0)
         except L0PayloadMissingError as error:
             print(f"identity ingest failed: {error}", file=sys.stderr)
             return 2
@@ -758,6 +1025,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 equity_list=equity_list,
                 symbol_changes=changes,
                 snapshot_date=snapshot_date,
+                reissue_evidence=evidence,
             )
         except IdentityError as error:
             conn.rollback()
@@ -779,6 +1047,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"  clamped: {chain.symbol} ({chain.isin}) listed {chain.listing_date} > "
             f"{chain.clamped_to}"
+        )
+    for reissue in report.reissues:
+        print(
+            f"  reissue: {reissue.symbol} {reissue.old_isin} -> {reissue.new_isin} from "
+            f"{reissue.effective} ({reissue.evidence})"
         )
     for refusal in report.refusals:
         print(f"  refused: {refusal.reason}", file=sys.stderr)

@@ -39,6 +39,7 @@ from dataplatform.identity.ingest import (
     NSE_EQUITY_LIST_SOURCE,
     NSE_SYMBOL_CHANGES_SOURCE,
     IdentityIngestReport,
+    L0EquityListSeries,
     identity_l0_files,
     ingest_snapshot,
     read_snapshot_from_l0,
@@ -161,7 +162,11 @@ def refresh_identity(
 
     equity_list, changes = read_snapshot_from_l0(on_date, store=store)
     report = ingest_snapshot(
-        conn, equity_list=equity_list, symbol_changes=changes, snapshot_date=on_date
+        conn,
+        equity_list=equity_list,
+        symbol_changes=changes,
+        snapshot_date=on_date,
+        reissue_evidence=L0EquityListSeries(store),
     )
     if dry_run:
         conn.rollback()
