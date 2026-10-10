@@ -590,7 +590,7 @@ def index_level_gaps(commons: CommonsSource, session: date) -> tuple[str, ...]:
 def universe_parameters(roster: Roster) -> UniverseParameters:
     """The sheets' universe screen, copied field for field from the roster (every manager shares
     one ``universe`` block; a roster where they differ is refused)."""
-    floors = {m.universe for m in roster.managers}
+    floors = {m.universe for m in roster.manager_books}
     if len(floors) != 1:
         raise M17JobError("the managers' universe blocks differ; one Commons cannot serve them")
     (floor,) = floors
@@ -855,7 +855,7 @@ def _wire(
         snapshots=snapshots,
         universe=universe_parameters(roster),
         recorded_at=clock,
-        digest_model=roster.managers[0].models.digest,
+        digest_model=roster.primaries[0].models.digest,
         actions=functools.partial(StoreOverlayActions, settings),
     )
     stack.callback(builder.close)

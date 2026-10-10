@@ -53,7 +53,7 @@ LOOKBACK = load_roster().rails.participation_lookback_sessions
 FIRST_DECISION = LOOKBACK - 1
 DECISIONS = 8
 SESSIONS = weekdays(date(2025, 3, 3), FIRST_DECISION + DECISIONS + 2)
-BOOK_IDS = tuple(b.id for b in (*load_roster().managers, *load_roster().controls))
+BOOK_IDS = tuple(b.id for b in load_roster().books if b.kind.value != "BENCH")
 SECTORS = ("IT", "BANKS", "AUTO", "PHARMA", "FMCG", "METALS", "ENERGY", "TELECOM")
 
 
@@ -451,7 +451,7 @@ def gauntlet() -> Stream:
         (ids["Y"], buy, 6000),
     )
     d3 = ((ids["A"], sell, 10),)
-    return Stream("FM-SWING-10L", FmMarket(SESSIONS, bars, sectors), (d0, d1, (), d3))
+    return Stream("FM-SWING-BRK-10L", FmMarket(SESSIONS, bars, sectors), (d0, d1, (), d3))
 
 
 M17_RAILS = (

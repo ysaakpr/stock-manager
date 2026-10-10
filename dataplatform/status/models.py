@@ -745,12 +745,12 @@ class PaperOut(BaseModel):
 
 
 class ManagerBookOut(BaseModel):
-    """One M17 book's latest journaled mark: a manager, its control, or the bench."""
+    """One M17 book's latest journaled mark: a manager book, a control, a style book, the bench."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     book_id: str
-    kind: str = Field(description="MANAGER, CONTROL or BENCH")
+    kind: str = Field(description="MANAGER, CONTROL, STYLE or BENCH")
     opening_capital_inr: Decimal
     latest_session: date | None = Field(description="None before the book's first mark")
     nav: Decimal | None
@@ -784,11 +784,14 @@ class ManagerDecisionOut(BaseModel):
 
 
 class ManagerScoreOut(BaseModel):
-    """One manager on the pre-registration §6 scoreboard, over its current window."""
+    """One manager book on the pre-registration §6 scoreboard against its own control, over its
+    current window (Amendment 2 e: the rule applies per book)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    book_id: str = Field(description="The manager book: <manager>-10L (primary) or -1CR (mirror)")
     manager_id: str
+    role: str = Field(description="PRIMARY or MIRROR")
     control_id: str
     phase: str = Field(description="NOT_STARTED, PRIMARY, EXTENSION or FINAL")
     verdict: str = Field(description="NOT_STARTED, IN_PROGRESS, PASS, CLEAR_FAIL or INCONCLUSIVE")
@@ -799,13 +802,62 @@ class ManagerScoreOut(BaseModel):
     excess_vs_bench_pp: Decimal | None
     max_drawdown_pp: Decimal | None
     bench_max_drawdown_pp: Decimal | None
-    brier: Decimal | None
+    brier: Decimal | None = Field(description="The manager's Brier, computed once on its decisions")
     resolved_decisions: int | None
     suspended_resolved_decisions: int | None = Field(
         default=None,
         description="Of the resolved decisions, how many were scored at a suspended name's last "
         "traded close (M17.13)",
     )
+
+
+class ManagerResultOut(BaseModel):
+    """One manager across its two books (Amendment 2 e): passed on both, one or neither."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    manager_id: str
+    primary_book: str
+    mirror_book: str
+    style_book: str
+    primary_verdict: str
+    mirror_verdict: str
+    passed_on: str = Field(description="BOTH, ONE or NEITHER")
+    decisions: int = Field(description="Decisions journaled, counted once (primary stream only)")
+    brier: Decimal | None
+    resolved_decisions: int | None
+    suspended_resolved_decisions: int | None
+    extension_confirmed: bool = Field(
+        description="Its primary book passed across the extension window as well"
+    )
+
+
+class StyleBookOut(BaseModel):
+    """A STYLE-<manager> book over its manager's primary window: secondary, never pass/fail."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    style_id: str
+    manager_id: str
+    primary_book: str
+    window: str | None
+    sessions: int | None
+    style_return_pct: Decimal | None
+    style_max_drawdown_pp: Decimal | None
+    primary_return_pct: Decimal | None
+    primary_excess_vs_style_pp: Decimal | None
+
+
+class GraduationOut(BaseModel):
+    """Amendment 2 (e)'s graduation floor: what the evidence must at least show (decision #8)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rule: str
+    primary_passes: int
+    primary_passes_needed: int
+    extension_confirmed: list[str]
+    met: bool
 
 
 class SuspendedHoldingOut(BaseModel):
@@ -832,8 +884,10 @@ class ManagersOut(BaseModel):
     s0: date | None = Field(description="The journaled S0; None before the clock starts")
     scoreboard_as_of: date | None = Field(description="The latest mark any book journaled")
     sessions_elapsed: int
-    k_of_n: str = Field(description="'k of 4 passed' — never a lone winner (§6)")
-    passed: int
+    k_of_n: str = Field(
+        description="'k of 8 books passed' — never a lone winner (§6, Amendment 2 e)"
+    )
+    passed: int = Field(description="Manager books that passed, of 8")
     scoreboard_digest: str | None = Field(
         description="sha256 of the scoreboard's canonical bytes; None when it could not be built"
     )
@@ -841,7 +895,10 @@ class ManagersOut(BaseModel):
         description="Why the journal could not be scored (a missing mark, a malformed line)"
     )
     books: list[ManagerBookOut]
-    managers: list[ManagerScoreOut]
+    managers: list[ManagerScoreOut] = Field(description="The 8 manager books, each vs its control")
+    manager_results: list[ManagerResultOut] = Field(default_factory=list)
+    style_books: list[StyleBookOut] = Field(default_factory=list)
+    graduation: GraduationOut | None = None
     decisions_session: date | None
     decisions: list[ManagerDecisionOut]
     suspended_holdings: list[SuspendedHoldingOut] = Field(

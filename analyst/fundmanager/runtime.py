@@ -102,6 +102,7 @@ from analyst.fundmanager.render import (
     ROUND_RESEARCH,
     ROUND_ZERO,
     SYSTEM_PROMPT,
+    DeskOrder,
     PromptTemplate,
     render_base_rates,
     render_bundles,
@@ -375,6 +376,8 @@ class _Session:
         self.query_failures: dict[str, str] = {}
         self.shown_unfulfilled: set[tuple[str, str]] = set()
         self.researched: list[str] = []
+        #: Amendment 2 (c): this manager's listing order for the session's screens and shortlist.
+        self.desk = DeskOrder(mandate.manager, session, tuple(mandate.starting_screens))
         self._static = self._static_values()
 
     # -- the journal ------------------------------------------------------------------------------
@@ -499,7 +502,7 @@ class _Session:
         m = self.mandate
         commons = self.commons
         return {
-            "manager_id": m.id,
+            "manager_id": m.manager,
             "opening_capital_inr": f"₹{m.opening_capital_inr:,}",
             "style": m.style.value,
             "horizon_min": str(m.horizon.min_sessions),
@@ -514,8 +517,8 @@ class _Session:
             "regime_definition": REGIME_DEFINITION,
             "holdings": render_holdings(self.book, self.closes),
             "forced_reviews": render_forced_reviews(self.book),
-            "screens": render_screens(commons.screens, self.rows),
-            "shortlist": render_shortlist(commons.shortlist, self.rows),
+            "screens": render_screens(commons.screens, self.rows, self.desk),
+            "shortlist": render_shortlist(commons.shortlist, self.rows, self.desk),
             "base_rate_table": render_base_rates(commons.base_rates, self.cells),
             "cost_hurdles": render_cost_hurdles(self.hurdles),
             "max_isins": str(self.limits.max_isins),
@@ -1092,11 +1095,18 @@ def run_manager(
     renders the manager's prompt for each round, fulfils its research from the Commons (cache
     first), validates its decisions against the contract, and journals every call, bundle,
     truncation, decision, refusal, ``NO_ACTION`` or ``MANAGER_ERROR`` (module docstring).
-    What it assumes: ``book`` is this manager's own book (its ``book_id`` is ``mandate.id``,
-    checked), ``clock`` is frozen on the session's evening, and ``journal`` stores evidence.
+    What it assumes: ``mandate`` is a manager's primary book and ``book`` that book (its
+    ``book_id`` is ``mandate.id``; both checked), ``clock`` is frozen on the session's evening,
+    and ``journal`` stores evidence.
     What it never does: stage an order, retry more than once, exceed ``rounds.max_calls`` calls
-    (repair aside), or render anything about another manager.
+    (repair aside), or render anything about another manager — or about the manager's own mirror
+    book, which it never sees (Amendment 2 b).
     """
+    if not mandate.is_primary:
+        raise ValueError(
+            f"{mandate.id} is {mandate.manager}'s {mandate.role.value} book; a manager decides on "
+            "its primary book only, and the mirror follows it mechanically"
+        )
     if book.book_id != mandate.id:
         raise ValueError(
             f"{mandate.id} was handed the book of {book.book_id!r}; a manager sees only its own"

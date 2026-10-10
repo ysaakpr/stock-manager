@@ -56,7 +56,7 @@ def _ctrl(book_id: str) -> ControlMandate:
 
 
 def _control(
-    book_id: str = "CTRL-FM-SWING-10L",
+    book_id: str = "CTRL-FM-SWING-BRK-10L",
     *,
     market: FmMarket | None = None,
     tmp_path: Path,
@@ -86,14 +86,14 @@ def _session(
 
 def test_the_roster_controls_mirror_their_managers_and_name_their_cadence() -> None:
     roster = load_roster()
-    for manager in roster.managers:
+    for manager in roster.manager_books:  # every manager book, primary and mirror
         control = roster.control_for(manager.id)
         assert control.shortlist_top_n == manager.max_positions
         assert control.opening_capital_inr == manager.opening_capital_inr
 
 
 def test_weekly_cadence_rebalances_on_the_first_session_of_a_new_iso_week() -> None:
-    mandate = _ctrl("CTRL-FM-SWING-10L")
+    mandate = _ctrl("CTRL-FM-SWING-BRK-10L")
     monday = date(2025, 1, 6)
     state = ControlState(last_rebalance=monday)
     assert rebalance_due(mandate, ControlState(), monday, sessions_since=None)
@@ -107,7 +107,7 @@ def test_weekly_cadence_rebalances_on_the_first_session_of_a_new_iso_week() -> N
 
 
 def test_positional_cadence_is_every_21_sessions_exactly() -> None:
-    mandate = _ctrl("CTRL-FM-POS-10L")
+    mandate = _ctrl("CTRL-FM-POS-TREND-10L")
     state = ControlState(last_rebalance=date(2025, 1, 6))
     later = date(2025, 3, 1)
     assert not rebalance_due(mandate, state, later, sessions_since=20)

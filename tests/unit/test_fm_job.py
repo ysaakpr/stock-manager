@@ -253,7 +253,8 @@ class PerManagerLLM:
     """`StubLLM` answering each manager's calls from that manager's own script.
 
     A script step is a structured output, an exception to raise, or a callable (run at call time,
-    e.g. to move the clock) returning either. The manager is the one whose id the prompt names.
+    e.g. to move the clock) returning either. Scripts are keyed by the manager's primary book id;
+    the manager is the one whose id (the book id less its ``-10L``) the prompt names.
     """
 
     def __init__(self, scripts: Mapping[str, Sequence[Effect]]) -> None:
@@ -262,7 +263,7 @@ class PerManagerLLM:
         self.calls: list[str] = []
 
     def _who(self, prompt: str) -> str:
-        found = [m for m in self.scripts if m in prompt]
+        found = [m for m in self.scripts if f"You are {m.removesuffix('-10L')}," in prompt]
         assert len(found) == 1, f"cannot tell the manager from the prompt: {found}"
         return found[0]
 
@@ -399,7 +400,7 @@ def staged(desk: Desk, book: str | None = None) -> list[JournalEntry]:
 def test_a_red_data_day_skips_every_book_and_stages_nothing(tmp_path: Path) -> None:
     desk = Desk(tmp_path)
     roster = load_roster()
-    llm = PerManagerLLM({m.id: [] for m in roster.managers})
+    llm = PerManagerLLM({m.id: [] for m in roster.primaries})
     builder = Builder(lambda _: pytest.fail("no Commons are built on a red day"))
 
     result = desk.run(
@@ -436,7 +437,9 @@ def test_a_status_read_that_fails_is_red_never_green(tmp_path: Path) -> None:
         gate=broken,
     )
     assert result.outcome is RunOutcome.SKIPPED_DATA_RED
-    assert len(desk.events(SKIPPED_DATA_RED_EVENT)) == 3 and not staged(desk)
+    skipped = desk.events(SKIPPED_DATA_RED_EVENT)
+    assert sorted(e.case_id or "" for e in skipped) == sorted(b.id for b in mini_roster().books)
+    assert len(skipped) == 6 and not staged(desk)  # both books, both controls, style, bench
 
 
 # ── acceptance 2: the deadline ───────────────────────────────────────────────────────────────────
@@ -454,7 +457,7 @@ def test_a_manager_past_the_deadline_misses_the_session_and_the_others_still_run
         return research(holdings=False)
 
     roster = load_roster()
-    first, second, third, last = (m.id for m in roster.managers)
+    first, second, third, last = (m.id for m in roster.primaries)
     llm = PerManagerLLM({first: quiet(), second: quiet(), third: quiet(), last: [late]})
 
     result = desk.run(
@@ -474,8 +477,10 @@ def test_a_manager_past_the_deadline_misses_the_session_and_the_others_still_run
     assert not desk.events(DECISION_EVENT, book=last)  # a late answer is never a decision
     for manager in (first, second, third):
         assert len(desk.events(NO_ACTION_EVENT, book=manager)) == 1
-    # the rest of the evening still ran: controls rebalanced, every book marked
-    assert {e.case_id for e in desk.events("CONTROL_REBALANCE")} == {c.id for c in roster.controls}
+    # the rest of the evening still ran: controls and style books rebalanced, every book marked
+    assert {e.case_id for e in desk.events("CONTROL_REBALANCE")} == {
+        c.id for c in (*roster.controls, *roster.styles)
+    }
     assert {e.case_id for e in desk.events(MARK_EVENT)} == {b.id for b in roster.books}
     assert not staged(desk, last)
 
@@ -487,7 +492,7 @@ def test_a_rate_limit_backs_off_inside_the_deadline_and_one_that_cannot_misses(
     clock = evening(SESSION)
     deadline = datetime.combine(date(2026, 10, 9), time(8, 30), tzinfo=IST)
     roster = load_roster()
-    first, second, third, last = (m.id for m in roster.managers)
+    first, second, third, last = (m.id for m in roster.primaries)
 
     def near_deadline() -> Mapping[str, Any]:
         clock.freeze_at(deadline - timedelta(minutes=3))  # a long night of queued calls
@@ -636,7 +641,7 @@ def test_a_stop_breach_stages_a_stop_exit_with_zero_model_calls(
 ) -> None:
     desk = Desk(tmp_path)
     roster = mini_roster()
-    manager = roster.managers[0].id
+    manager = roster.primaries[0].id
     bought = date(2026, 10, 5)
     # bought on 10-05 at 100 with a 4% stop (96); 10-06 fills; 10-08 closes at 80, below it (two
     # sessions after the fill, so the min-hold rail lets the stop's sell through)
@@ -673,7 +678,7 @@ def test_a_stop_breach_stages_a_stop_exit_with_zero_model_calls(
 def test_a_stopped_names_own_decision_is_dropped_for_the_stop(world: World, tmp_path: Path) -> None:
     desk = Desk(tmp_path)
     roster = mini_roster()
-    manager = roster.managers[0].id
+    manager = roster.primaries[0].id
     bought = date(2026, 10, 5)
     market = flat_market(
         {(HELD, SESSION): Bar(Decimal("85"), Decimal("80"), Decimal("10000000000"))}
@@ -700,7 +705,7 @@ def test_a_stop_inside_the_min_hold_window_is_refused_by_the_rail_not_bypassed(
 ) -> None:
     desk = Desk(tmp_path)
     roster = mini_roster()
-    manager = roster.managers[0].id
+    manager = roster.primaries[0].id
     bought = date(2026, 10, 6)  # fills 10-07; a 10-08 stop exit is one session after the fill
     market = flat_market(
         {(HELD, SESSION): Bar(Decimal("85"), Decimal("80"), Decimal("10000000000"))}
@@ -711,10 +716,14 @@ def test_a_stop_inside_the_min_hold_window_is_refused_by_the_rail_not_bypassed(
     builder = Builder(scripted_commons)
     for day in (bought, date(2026, 10, 7), SESSION):
         desk.run(day, FakeWorld(market), builder, PerManagerLLM({}), runner=runner, roster=roster)
-    (block,) = [
+    blocks = [
         e for e in desk.entries() if e.decision is Decision.RAIL_BLOCK and e.trading_date == SESSION
     ]
+    (block,) = [e for e in blocks if e.case_id == manager]
     assert block.isin == HELD and "MIN_HOLD" in block.payload["rails"]
+    # the mirror bought with it, holds the same stop in percent, and is refused the same way
+    (mirror_block,) = [e for e in blocks if e.case_id == roster.mirrors[0].id]
+    assert mirror_block.isin == HELD and "MIN_HOLD" in mirror_block.payload["rails"]
 
 
 # ── M17.11: a stop across a split moves with the shares, by the split's factor only ─────────────
@@ -725,7 +734,7 @@ def _split_run(world: World, tmp_path: Path, *, bought: date, ex: date, session_
     then the name trades at 50, and closes at ``session_close`` on SESSION."""
     desk = Desk(tmp_path)
     roster = mini_roster()
-    manager = roster.managers[0].id
+    manager = roster.primaries[0].id
     post = {
         (HELD, day): Bar(Decimal("50"), Decimal("49"), Decimal("10000000000"))
         for day in CALENDAR
@@ -784,9 +793,15 @@ def test_a_rescaled_stop_still_fires_below_the_split_adjusted_level(
 ) -> None:
     # 47 after the split is 94 before it: below the 96 stop. The rescale must not loosen it.
     desk = _split_run(world, tmp_path, bought=bought, ex=ex, session_close="47")
-    (exit_line,) = [e for e in staged(desk) if e.payload.get("event") == STOP_EXIT_EVENT]
-    assert exit_line.trading_date == SESSION and exit_line.isin == HELD
-    assert "below the stop 48" in (exit_line.rationale or "")
+    exit_lines = [e for e in staged(desk) if e.payload.get("event") == STOP_EXIT_EVENT]
+    # one per book: the primary's, and the mirror's (the same stop percent at the same close)
+    assert sorted(e.case_id or "" for e in exit_lines) == [
+        "FM-SWING-BRK-10L",
+        "FM-SWING-BRK-1CR",
+    ]
+    for exit_line in exit_lines:
+        assert exit_line.trading_date == SESSION and exit_line.isin == HELD
+        assert "below the stop 48" in (exit_line.rationale or "")
 
 
 # ── --start S0 ───────────────────────────────────────────────────────────────────────────────────
@@ -822,9 +837,9 @@ def test_mandate_hashes_cover_the_prompt_and_differ_by_book() -> None:
     assert len({f.mandate_hash for f in base.values()}) == len(roster.books)
     edited = PromptTemplate(PromptTemplate.load().text + "\n<!-- one more byte -->\n")
     changed = mandate_fingerprints(roster, template=edited)
-    for manager in roster.managers:
+    for manager in roster.manager_books:  # primary and mirror: the mirror trades the decisions
         assert changed[manager.id].mandate_hash != base[manager.id].mandate_hash
-    for control in roster.controls:  # a control's policy has no prompt in it
+    for control in (*roster.controls, *roster.styles):  # their policies have no prompt in them
         assert changed[control.id].mandate_hash == base[control.id].mandate_hash
 
 
@@ -845,7 +860,7 @@ def scripted_commons(day: date) -> SessionCommons:
 def test_a_three_session_run_rebuilds_the_same_scoreboard_from_the_journal(tmp_path: Path) -> None:
     desk = Desk(tmp_path, stream=STREAM_DRY)
     roster = mini_roster()
-    manager = roster.managers[0].id
+    manager = roster.primaries[0].id
     s1, s2, s3 = date(2026, 10, 5), date(2026, 10, 6), date(2026, 10, 7)
     names = NAMES
     drift = {isin: Decimal("0.002") * (k - 4) for k, isin in enumerate(names)}
@@ -991,10 +1006,11 @@ def test_a_tripped_kill_switch_halts_every_book_and_calls_no_model(tmp_path: Pat
         SESSION, FakeWorld(flat_market()), builder, PerManagerLLM({}), roster=roster, runner=runner
     )
     assert (
-        result.outcome is RunOutcome.HALTED and (roster.managers[0].id, SESSION) not in runner.asked
+        result.outcome is RunOutcome.HALTED
+        and (roster.primaries[0].id, SESSION) not in runner.asked
     )
     halted = desk.events("KILL_SWITCH_TRIPPED", on=SESSION)
-    assert {e.case_id for e in halted} >= {roster.managers[0].id, roster.controls[0].id}
+    assert {e.case_id for e in halted} >= {roster.primaries[0].id, roster.controls[0].id}
     assert not [e for e in staged(desk) if e.trading_date == SESSION]
     assert {e.case_id for e in desk.events(MARK_EVENT, on=SESSION)} == {b.id for b in roster.books}
 
@@ -1016,7 +1032,7 @@ def test_a_held_delisted_name_is_valued_at_its_last_close_and_never_raises(
 ) -> None:
     desk = Desk(tmp_path)
     roster = mini_roster()
-    manager = roster.managers[0].id
+    manager = roster.primaries[0].id
     bought = date(2026, 10, 6)
     gone = {(HELD, day): None for day in CALENDAR if day >= SESSION}
     market = flat_market()

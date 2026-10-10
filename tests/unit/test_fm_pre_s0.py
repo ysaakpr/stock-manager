@@ -92,7 +92,7 @@ def _bought_liq(tmp_path: Path, actions: GrowingActions, quantity: int = 50):  #
     journal = ListJournal()
     switch = switch_at(tmp_path, clock)
     book, account = open_book(
-        "FM-SWING-10L",
+        "FM-SWING-BRK-10L",
         market=_market(),
         clock=clock,
         kill_switch=switch,
@@ -287,7 +287,7 @@ def _holding_thin(tmp_path: Path, quantity: int):  # type: ignore[no-untyped-def
         bars[(THIN, session)] = Bar(px, px, value)
     market = FmMarket(SESSIONS, bars, {LIQ: "IT", THIN: "AUTO"})
     book, account = open_book(
-        "FM-SWING-1CR",
+        "FM-SWING-BRK-1CR",
         market=market,
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -347,7 +347,7 @@ def test_an_over_participation_buy_is_still_refused_outright(tmp_path: Path) -> 
     clock = FrozenClock(D0)
     journal = ListJournal()
     book, _ = open_book(
-        "FM-SWING-1CR",
+        "FM-SWING-BRK-1CR",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -364,7 +364,7 @@ def test_a_sell_another_rail_refuses_is_not_sliced(tmp_path: Path) -> None:
     clock = FrozenClock(D0)
     journal = ListJournal()
     book, _ = open_book(
-        "FM-SWING-1CR",
+        "FM-SWING-BRK-1CR",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -426,7 +426,7 @@ def test_a_buy_into_an_upper_circuit_lock_is_left_unfilled(tmp_path: Path) -> No
     clock = FrozenClock(D0)
     journal = ListJournal()
     book, account = open_book(
-        "FM-SWING-10L",
+        "FM-SWING-BRK-10L",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
@@ -453,7 +453,7 @@ def test_a_buy_on_the_session_after_the_lock_fills(tmp_path: Path) -> None:
     clock = FrozenClock(D0)
     journal = ListJournal()
     book, account = open_book(
-        "FM-SWING-10L",
+        "FM-SWING-BRK-10L",
         market=_market(),
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),
