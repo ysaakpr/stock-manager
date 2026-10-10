@@ -76,14 +76,19 @@ To resolve one you have to decide which claim is wrong, which means looking at t
   before the new one opened; NSE's rename date is wrong, or the rename is missing from
   `symbolchange.csv` entirely. Fix the window by hand (below).
 * **An ISIN reissued under the same symbol** (face-value split; M18.1). The ingest splits these
-  itself — the old ISIN's window closes the day before the switch, the new one starts on it — when
-  it has evidence for the switch date: an `isin_lineage` edge, else the first dated
-  `EQUITY_L_YYYYMMDD.csv` in L0 that shows the new ISIN where the capture before it showed the
-  old. A conflict naming two ISINs of one issuer (`INE887D01016` / `INE887D01024`) that is still
-  queued means neither exists. Add the edge (`isin_lineage`, `detected_by = 'MANUAL'`) once the
-  switch session is confirmed, then re-run `identity.ingest --from-l0`; do not hand-edit windows.
-  The ingest leaves a new-ISIN window that is already stored from the listing date alone — that
-  is the one-off state `repair_reissues` exists for (below).
+  itself when it has evidence for the switch date. The old ISIN's window closes the day before
+  the switch and the new one starts on it. Evidence is an `isin_lineage` edge, else the first
+  dated `EQUITY_L_YYYYMMDD.csv` in L0 that shows the new ISIN where the capture immediately
+  before it showed the old. Series evidence counts only within one issuer code (`isin[:7]`), and
+  a capture without the symbol breaks it. The L0 bhavcopy of that date must also trade the
+  symbol as the new ISIN, because the ~19:15 IST capture can list the next session's ISIN a day
+  early. A still-queued conflict between two ISINs of one issuer (`INE887D01016` /
+  `INE887D01024`) means that evidence was missing or disagreed. Once the switch session is
+  confirmed, add the edge (`isin_lineage`, `detected_by = 'MANUAL'`), then re-run
+  `identity.ingest --from-l0`. Do not hand-edit windows. Two *different* issuer codes under one
+  symbol are another company taking a vacated symbol, not a reissue; treat it as a recycled
+  symbol (above). The ingest leaves alone a new-ISIN window that is already stored from the
+  listing date. That one-off state is what `repair_reissues` exists for (below).
 * **A genuine dual claim.** Two live securities with the same symbol on one exchange does not
   happen; if you are looking at one, the ISIN in one of the source rows is wrong. Check the ISIN
   against the exchange's own page before touching anything.
@@ -120,23 +125,60 @@ is the file, correct the row by hand as above.
 The 07:00 IST `identity_refresh` on Sat 2026-10-10 ran before the reissue split existed and stored
 seven new-ISIN windows from the original listing date beside the still-open old ones
 (TDPOWERSYS, KIRLPNU, CORDELIA, TCC, TAALTECH, BLSE, BUILDPRO; reconciliation ids 21-27). Nothing
-the ingest does will delete those rows. On the server, from the repo root, after the M18.1 merge:
+the ingest does will delete those rows. Do this on the server after the M18.1 merge, **before
+Mon 2026-10-12 18:30 IST** (`eod_pipeline`'s delivery unit fails every session on TDPOWERSYS until
+then) and in any case **before Sat 2026-10-17 07:00 IST**.
+
+**1. Put the fixed code under the scheduler first.** The scheduler reads code at start. If it is
+still running pre-fix code, the next `identity_refresh` re-derives the listing-date windows and
+re-inserts them, undoing the repair.
+
+```bash
+cd /home/ubuntu/stock-manager
+git pull --ff-only && uv sync
+# Only when no job is running. This must return no rows:
+#   SELECT job_name, started_at FROM job_run WHERE state = 'RUNNING';
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler.service
+XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status scheduler.service
+```
+
+**2. Repair and re-derive** (from `/home/ubuntu/stock-manager`):
 
 ```bash
 uv run python -m dataplatform.identity.repair_reissues           # dry run, READ ONLY: read the plan
-uv run python -m dataplatform.identity.repair_reissues --apply   # one transaction, then commit
+uv run python -m dataplatform.identity.repair_reissues --apply   # locks both tables, one transaction
 uv run python -m dataplatform.identity.ingest --from-l0 2026-10-10   # re-derive; no network
 ```
 
-* The dry run must show 7 deletes, 7 closes, 7 inserts and every open reconciliation row for
-  the seven pairs (ids 21-27 plus any RESOLVE rows ca_refresh, delivery or deals raised for the
-  same pairs — 28-31 on 2026-10-10). Anything else and it refuses, writing nothing.
-* `--apply` re-run is a no-op ("already applied").
+* The dry run must show 7 deletes, 7 closes and 7 inserts. Boundaries: `isin_lineage` for
+  TDPOWERSYS, KIRLPNU, TCC and CORDELIA; `nse_equity_list_series` for TAALTECH, BLSE and BUILDPRO.
+  It must resolve the INGEST rows 21-27 and the RESOLVE rows for the same pairs (29-31 on
+  2026-10-10, plus any that delivery or deals add before you run it). It must show **one row left
+  open: id 28, RESOLVE BLSE 2026-09-08**. Anything else and it refuses, writing nothing.
+* **Row 28 stays open on purpose.** ca_refresh held back BLSE's ₹0.50 dividend (ex-date
+  2026-09-08) on this ambiguity. That ex-date has left every future scheduled ca_refresh window,
+  and the open row is the only visible record that it was never filed. It stays open until an
+  offline re-file from L0 exists. Do not file it with a fetching `ca_refresh` run: that can also
+  send BSE requests, and BSE is parked on 403.
+* Re-running `--apply` is a no-op ("already applied").
 * The re-derive must report `0 windows inserted, 0 closed`. It still exits 1 and prints ten
-  `AMBIGUOUS` lines: those are the BSE scrip-id collisions (ids 1-10), which predate this repair.
+  `AMBIGUOUS` lines. Those are the BSE scrip-id collisions (ids 1-10), which predate this repair.
   Re-detected conflicts are not re-queued.
 * Use `identity.ingest --from-l0`, not `ingest.identity_refresh`: the latter fetches when it is
   run on a day whose files are not in L0 yet.
+
+**3. Check the next scheduled refresh** (Sat 2026-10-17 07:00 IST). It will be `FAILED` while the
+ten BSE collisions stand, but it must not have moved a window:
+
+```sql
+SELECT state, error FROM job_run WHERE job_name = 'identity_refresh'
+ ORDER BY started_at DESC LIMIT 1;
+-- error: "identity refresh 2026-10-17: … 0 windows inserted, 0 closed, 10 conflict(s)"
+```
+
+A reissue that happened during the week is the exception: it adds one close and one insert,
+dated by its evidence, and no conflict. Anything inserted for one of the seven symbols means the
+scheduler was not restarted onto the fix. Stop and re-run step 2's dry run.
 
 ## Health
 

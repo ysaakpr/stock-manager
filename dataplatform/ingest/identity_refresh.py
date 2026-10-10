@@ -77,7 +77,9 @@ class IdentityRefreshReport:
             f"identity refresh {self.snapshot_date.isoformat()}: "
             f"{len(self.refs)} file(s) in L0{reused}, "
             f"{self.ingest.counts.securities} securities changed, "
-            f"{self.ingest.counts.windows_inserted} windows inserted"
+            f"{self.ingest.counts.windows_inserted} windows inserted, "
+            f"{self.ingest.counts.windows_closed} closed, "
+            f"{len(self.ingest.conflicts)} conflict(s)"
         )
 
 
