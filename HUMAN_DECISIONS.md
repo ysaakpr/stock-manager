@@ -640,6 +640,21 @@ The forward paper session (PR #69) cannot reproduce the backtest's calendar exac
 Basis: PR #69 review nit 6. How a halted day's lapse should compare with real broker fills is
 still open for M8 (`ops/BACKLOG.md`). Task M13.1.
 
+### D25 — M16 primary selection floor → **ANSWERED (polly, on the owner's behalf 2026-10-09, pending ratification): ₹10 crore.**
+
+M16.4 (the strategy-exploration campaign) may not start until the pre-registration's primary
+selection floor is confirmed (`ops/studies/preregistration-m16-2026-10-08.md` §4). Taken by polly
+**on the owner's behalf on 2026-10-09**, under the owner's standing instruction "never await on
+me", and **pending the owner's ratification**: the walk-forward chooses its winner at the
+**₹10 crore** median-daily-turnover floor, as pre-registered. The ₹1 crore ranking is still
+computed and reported beside it, informational only; it is not the selection basis. A8's 8-holding
+minimum is left exactly as ratified (the owner has not decided otherwise), so A1 runs under it and
+the report shows every arm's refused sells. Recorded before any M16 run as the pre-registration's
+Amendment 3. Basis: §4's own three reasons (the floor where the fill model's slippage is
+defensible, round 2's only deciding floor, and the only result reachable for real money). Naming
+₹1 crore instead after M16 figures exist would be a re-choice, and the report would have to say
+so. Task M16.4.
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
