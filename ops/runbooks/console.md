@@ -43,7 +43,25 @@ What it does not show, and why:
   through `dataplatform.redaction.mask_and_truncate` before it renders, even when the writer
   already masked it.
 
-Data, Desk and Journal are in the navigation and say "not built yet" until M18.2–M18.4.
+## The Desk page (`/console/desk`, M18.3)
+
+| Panel | What it shows | Where it comes from |
+|---|---|---|
+| Kill-switch banner | red **KILL SWITCH ENGAGED** (or **STATE UNREADABLE** — never shown as armed) naming each book, its trip source, reason and time; green when every paper book's switch is armed | the `kill_switch` fields of `read_paper_status` — the same read as `GET /status/paper` |
+| Broker-session banner | red **BROKER AUTH REQUIRED** when the newest journaled session carries an `AUTH_REQUIRED`, with the streak start, decisions deferred and the re-authenticate line; otherwise CLEAR / NO_LAPSE_RECORDED | `decision_journal` `AUTH_REQUIRED` entries (`queries_desk.read_broker_session`) |
+| Paper books | per book: whether the next session may trade, switch, latest session and outcome, reason, recon (CLEAN/BREAK), and every unresolved escalation or break (`key@terms`) blocking it | `read_paper_status` (`/status/paper`) |
+| Positions | each paper book's holdings and cash after its newest session that recorded an accounting book | `paper_session.expected_book` |
+| M17 fund managers | the mandates (capital, caps, decision model), each book's latest mark, the latest session's decisions with refusals (RAIL_BLOCK, FM_DECISION_REFUSED) in red, suspended holdings, the scoreboard (k of n, per-book verdicts, both/one/neither, style books, graduation floor) | `read_managers_status` (`/status/managers`) and the roster |
+| Orders | the newest 50 `order_` rows (staged, sent, executed, rail-blocked, rejected) with broker and sleeve tags, and each paper book's newest placed orders with their own tag | `order_`, `paper_session.orders` |
+| Model cost | `token_usage` per manager (case), provider, model and IST day over the last 30 days, INR and USD as recorded, with totals | `token_usage` |
+
+Display only: there is no control for the kill switch or the broker session anywhere on the
+console. Trip or reset a switch with `uv run python -m execution.kill_switch` (`ops/runbooks/daily-eod.md`);
+re-authenticate per `ops/runbooks/broker-reauth.md`. The broker-session state is what the journal
+recorded — the interlock journals every dead-session day and nothing on a clear one — not a live
+probe of the broker, which System 1 never imports.
+
+Data and Journal are in the navigation and say "not built yet" until M18.2 and M18.4.
 
 ## Read-only
 
