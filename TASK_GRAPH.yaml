@@ -3354,12 +3354,47 @@ tasks:
     - "make check is green"
   verify: "uv run pytest tests/unit/test_fm_suspended.py tests/unit/test_fm_job.py tests/unit/test_fm_books.py tests/unit/test_fm_scoreboard.py tests/unit/test_fm_runtime.py -q"
 
+- id: M17.14
+  title: Four distinct manager styles, each trading a primary ₹10 L and a mirror ₹1 cr book
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.13]
+  spec: |
+    Pre-registration §8 Amendment 2 (owner decision 2026-10-10). The prompt's four [[STYLE]]
+    playbooks and the amendment text already exist. Wire them:
+    - Roster and mandate: managers FM-SWING-BRK, FM-SWING-EVT, FM-POS-TREND and FM-POS-FUND, each
+      with a style enum value matching its prompt block and its starting screens. Books
+      `<manager>-10L` (primary) and `<manager>-1CR` (mirror), both with max 15 positions. Controls:
+      `CTRL-<book>` (composite top 15) for all 8 books, plus a `STYLE-<manager>` secondary book per
+      manager (Amendment 2 (d)). The loader validates every pairing.
+    - Mirror execution: after each session the mirror is driven toward the primary's post-decision
+      target weights through its own rails (participation slicing allowed). Stops are shared in
+      percent. Divergence is journaled per book. The manager never sees the mirror.
+    - Desk presentation: a deterministic shuffle seeded by (manager id, session) for the shortlist
+      and screen listings, with ranks still shown; the manager's own starting screens are listed
+      first.
+    - Scoreboard: §6 per book against its CTRL; Brier per manager; "k of 8 books" plus per-manager
+      both/one/neither; the Amendment 2 (e) graduation floor; STYLE books reported as secondary.
+      Rebuild-from-journal byte equality is kept.
+    - mandate_hash covers the new roster fields.
+    - Update the runbook, digest and /status/managers for 8 books + 8 controls + 4 style books +
+      bench.
+  deliverables: [analyst/fundmanager/roster.yaml, analyst/fundmanager/mandate.py, analyst/fundmanager/render.py, analyst/fundmanager/controls.py, analyst/fundmanager/scoreboard.py, backtest/fm_job.py, tests/unit/test_fm_styles.py]
+  acceptance:
+    - "each manager's rendered prompt contains only its own STYLE block, and its own screens are listed first"
+    - "a mirror refusal by the participation rail is journaled on the 1CR book only and the 10L book is unaffected"
+    - "the shuffle is deterministic per (manager, session) and differs across managers"
+    - "inverting the per-book comparison or the graduation floor fails a test; rebuild-from-journal equality holds"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_fm_styles.py tests/unit/test_fm_mandate.py tests/unit/test_fm_scoreboard.py tests/unit/test_fm_job.py -q"
+
 - id: M17.8
   title: Five-session dry run, then the forward clock (S0)
   milestone: M17
   module: A10
   autonomy: NEEDS_GO
-  deps: [M17.7, M17.10, M17.11, M17.12, M17.13]
+  deps: [M17.7, M17.10, M17.11, M17.12, M17.13, M17.14]
   spec: |
     Run 5 consecutive live sessions in `--dry-run` on the real lake with the Claude CLI. Write
     `ops/gates/M17-dry-run-<date>.md` covering, per manager:

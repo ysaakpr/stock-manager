@@ -7,7 +7,9 @@ journal already holds, and the roster. `inputs_from_journal` reads every one of 
 the journal stream, so the scoreboard the daily job computed in-process and the one rebuilt later
 from the journal are the same bytes (`Scoreboard.canonical_bytes`) — acceptance 1.
 
-**The §6 rule**, per manager, over the window S0 .. S0 + 62 (63 sessions):
+**The §6 rule**, per manager **book** (pre-registration §8 Amendment 2 e: each of the 8 manager
+books — every manager's primary ₹10 L and mirror ₹1 cr — against its own ``CTRL-<book>``), over
+the window S0 .. S0 + 62 (63 sessions):
 
 - *pass* — all three: excess over its control >= +3.0 pp; max drawdown <= BENCH-N500's + 5 pp;
   Brier score of ``p_beat_bench`` < 0.25 over >= 30 resolved decisions;
@@ -15,9 +17,17 @@ from the journal are the same bytes (`Scoreboard.canonical_bytes`) — acceptanc
 - otherwise *inconclusive*, which runs the one pre-registered extension to S0 + 125 (126 sessions)
   under the same rule, and its verdict is final. There is no second extension.
 
-The result is reported as "*k* of 4 passed", never as a lone winner. Every threshold is a module
-constant compared on the exact `Decimal`; the reported numbers are quantised for display only, so a
-value a hair under a threshold is never rounded across it.
+The result is reported as "*k* of 8 books passed" and, per manager, as passing on both, one or
+neither of its books — never as a lone winner. **Brier is the manager's**, computed once on its
+decisions (they are journaled in its primary book's stream only; the mirror decides nothing), and
+both of its books' rule checks read that one figure. The **graduation floor** (Amendment 2 e,
+replacing §6's) is met when at least 2 of the 4 managers pass on their primary book, or one passes
+on its primary book across the extension window as well — its primary book's verdict is PASS *and*
+the rule run over S0 .. S0 + 125 is PASS too (for a book that passed only at the extension, that is
+the same window). The ``STYLE-<manager>`` books are secondary: their returns over the same window,
+and each primary book's excess over its style book, are reported and never enter a verdict. Every
+threshold is a module constant compared on the exact `Decimal`; the reported numbers are quantised
+for display only, so a value a hair under a threshold is never rounded across it.
 
 **Definitions this module fixes** (a priori, stated once):
 
@@ -54,7 +64,8 @@ value a hair under a threshold is never rounded across it.
 - *Shrunk Brier* (Amendment 1 f) uses ``0.5·p + 0.5·base_rate`` — the weight is fixed here.
 
 What it never does: read a clock, a price or the network; let one manager's decisions into another
-manager's score; or change the §6 rule with an Amendment 1 (f) metric — those are secondary only.
+manager's score; count a decision twice because its manager trades two books; or change the §6
+rule with an Amendment 1 (f) metric or a style book — those are secondary only.
 """
 
 from __future__ import annotations
@@ -82,10 +93,13 @@ from analyst.fundmanager.books import (
     SuspendedNames,
 )
 from analyst.fundmanager.mandate import (
+    AnyMandate,
     BenchMandate,
+    BookRole,
     ControlMandate,
     ManagerMandate,
     Roster,
+    StyleMandate,
 )
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import ISIN_PATTERN, Actor, Decision, JournalEntry
@@ -99,6 +113,7 @@ __all__ = [
     "EXCESS_FAIL_PP",
     "EXCESS_PASS_PP",
     "EXTENSION_SESSIONS",
+    "GRADUATION_MIN_PRIMARY_PASSES",
     "MARK_EVENT",
     "MIN_RESOLVED",
     "OUTCOME_EVENT",
@@ -107,15 +122,18 @@ __all__ = [
     "SHRINK_WEIGHT",
     "WINDOW_SESSIONS",
     "BookMark",
+    "BookScore",
     "BookSummary",
+    "BooksPassed",
     "ControlBuy",
     "DecisionAction",
     "DecisionLine",
     "DecisionOutcome",
     "DelistedNames",
+    "GraduationFloor",
     "GroupStat",
     "LastTraded",
-    "ManagerScore",
+    "ManagerResult",
     "ModelCall",
     "OutcomeError",
     "OutcomePrices",
@@ -129,6 +147,7 @@ __all__ = [
     "ScoreboardInputs",
     "ScoredDecision",
     "SecondaryMetrics",
+    "StyleBookScore",
     "SuspendedHoldingLine",
     "WindowScore",
     "apply_rule",
@@ -165,8 +184,12 @@ MIN_RESOLVED: Final = 30
 #: Amendment 1 (f): the weight on the model's p in the shrunk forecast; the rest is the base rate.
 SHRINK_WEIGHT: Final = Decimal("0.5")
 
+#: Amendment 2 (e): the graduation floor needs at least this many managers passing on their primary.
+GRADUATION_MIN_PRIMARY_PASSES: Final = 2
+
 #: /2 (M17.13): `WindowScore.suspended_resolved_decisions`, `DecisionOutcome.suspended`.
-SCOREBOARD_VERSION: Final = "m17-scoreboard/2"
+#: /3 (M17.14, Amendment 2): per-book scores, per-manager results, style books, graduation floor.
+SCOREBOARD_VERSION: Final = "m17-scoreboard/3"
 
 #: ``payload.event`` values this module writes or reads on the journal.
 MARK_EVENT: Final = "BOOK_MARK"
@@ -452,13 +475,76 @@ class WindowScore(_Record):
     secondary: SecondaryMetrics
 
 
-class ManagerScore(_Record):
+class BookScore(_Record):
+    """One manager book against its own ``CTRL-<book>`` (Amendment 2 e): the §6 rule per book.
+
+    ``confirmation`` is, for a primary book whose primary window passed, the same rule over
+    S0 .. S0 + 125 — what the graduation floor's "across the extension window as well" reads.
+    """
+
+    book_id: str
     manager_id: str
+    role: str
     control_id: str
     phase: Phase
     verdict: ScoreVerdict
     primary: WindowScore | None
     extension: WindowScore | None
+    confirmation: WindowScore | None = None
+
+
+class BooksPassed(StrEnum):
+    """On how many of its two books a manager passed (Amendment 2 e)."""
+
+    BOTH = "BOTH"
+    ONE = "ONE"
+    NEITHER = "NEITHER"
+
+
+class ManagerResult(_Record):
+    """One manager across its books: each book's verdict, both/one/neither, and its Brier — the
+    manager's, computed once on its decisions over its primary book's current window."""
+
+    manager_id: str
+    primary_book: str
+    mirror_book: str
+    style_book: str
+    primary_verdict: ScoreVerdict
+    mirror_verdict: ScoreVerdict
+    passed_on: BooksPassed
+    decisions: int
+    brier: Decimal | None
+    resolved_decisions: int | None
+    #: Of ``resolved_decisions``, how many were scored at a suspended name's last close (M17.13).
+    suspended_resolved_decisions: int | None
+    extension_confirmed: bool
+
+
+class StyleBookScore(_Record):
+    """A ``STYLE-<manager>`` book over its manager's primary book's current window (secondary)."""
+
+    style_id: str
+    manager_id: str
+    primary_book: str
+    window: str | None
+    sessions: int | None
+    style_return_pct: Decimal | None
+    style_max_drawdown_pp: Decimal | None
+    primary_return_pct: Decimal | None
+    primary_excess_vs_style_pp: Decimal | None
+
+
+class GraduationFloor(_Record):
+    """Amendment 2 (e): what the evidence must at least show before the owner may consider
+    graduating any manager (decision #8). Met when ``primary_passes`` reaches
+    ``primary_passes_needed``, or any manager's primary book passed across the extension window as
+    well (``extension_confirmed``)."""
+
+    rule: str
+    primary_passes: int
+    primary_passes_needed: int
+    extension_confirmed: tuple[str, ...]
+    met: bool
 
 
 class BookSummary(_Record):
@@ -475,7 +561,12 @@ class BookSummary(_Record):
 
 
 class Scoreboard(_Record):
-    """The whole M17 scoreboard as of the latest mark. Its canonical bytes are its identity."""
+    """The whole M17 scoreboard as of the latest mark. Its canonical bytes are its identity.
+
+    ``book_scores`` are the 8 manager books' §6 verdicts, ``managers`` the 4 managers' results,
+    ``style_books`` the secondary style books; ``passed`` counts the books that passed and
+    ``k_of_n`` says so ("*k* of 8 books passed").
+    """
 
     version: str
     preregistration: str
@@ -483,9 +574,12 @@ class Scoreboard(_Record):
     as_of: date | None
     sessions_elapsed: int
     books: tuple[BookSummary, ...]
-    managers: tuple[ManagerScore, ...]
+    book_scores: tuple[BookScore, ...]
+    managers: tuple[ManagerResult, ...]
+    style_books: tuple[StyleBookScore, ...]
     passed: int
     k_of_n: str
+    graduation: GraduationFloor
 
     def canonical_bytes(self) -> bytes:
         return _canonical(self.model_dump(mode="json"))
@@ -576,20 +670,42 @@ def build_scoreboard(roster: Roster, inputs: ScoreboardInputs) -> Scoreboard:
         if outcome.decision_key not in decisions:
             raise ScoreboardError(f"an outcome for {outcome.decision_key}, which was never decided")
 
+    for decision in decisions.values():
+        book = next((b for b in roster.books if b.id == decision.book_id), None)
+        if not isinstance(book, ManagerMandate) or not book.is_primary:
+            raise ScoreboardError(
+                f"a decision in {decision.book_id!r}'s stream, which is not a manager's primary "
+                "book; a manager decides on its primary book only, so a decision is never "
+                "counted against a second book"
+            )
+
     bench = _the_bench(roster)
     s0 = inputs.s0
     calendar = (
         sorted({m.session for m in inputs.marks if m.session >= s0}) if s0 is not None else []
     )
-    scores: list[ManagerScore] = []
-    for manager in roster.managers:
-        control = roster.control_for(manager.id)
-        scores.append(
-            _manager_score(
-                manager, control, bench, s0, calendar, marks, decisions, outcomes, inputs
-            )
+    scores: dict[str, BookScore] = {}
+    for book in roster.manager_books:
+        scores[book.id] = _book_score(
+            book,
+            roster.control_for(book.id),
+            roster.primary_of(book.manager).id,
+            bench,
+            s0,
+            calendar,
+            marks,
+            decisions,
+            outcomes,
+            inputs,
         )
-    passed = sum(1 for score in scores if score.verdict is ScoreVerdict.PASS)
+    results = tuple(
+        _manager_result(roster, manager_id, scores, decisions) for manager_id in roster.manager_ids
+    )
+    styles = tuple(
+        _style_score(style, scores[roster.primary_of(style.style_for).id], roster, calendar, marks)
+        for style in roster.styles
+    )
+    passed = sum(1 for score in scores.values() if score.verdict is ScoreVerdict.PASS)
     latest = max((m.session for m in inputs.marks), default=None)
     return Scoreboard(
         version=SCOREBOARD_VERSION,
@@ -598,9 +714,103 @@ def build_scoreboard(roster: Roster, inputs: ScoreboardInputs) -> Scoreboard:
         as_of=latest,
         sessions_elapsed=len(calendar),
         books=tuple(_book_summary(book, marks.get(book.id, {})) for book in roster.books),
-        managers=tuple(scores),
+        book_scores=tuple(scores.values()),
+        managers=results,
+        style_books=styles,
         passed=passed,
-        k_of_n=f"{passed} of {len(scores)} passed",
+        k_of_n=f"{passed} of {len(scores)} books passed",
+        graduation=_graduation(results),
+    )
+
+
+def _manager_result(
+    roster: Roster,
+    manager_id: str,
+    scores: Mapping[str, BookScore],
+    decisions: Mapping[str, ScoredDecision],
+) -> ManagerResult:
+    primary = scores[roster.primary_of(manager_id).id]
+    mirror = scores[roster.mirror_of(manager_id).id]
+    passes = sum(1 for s in (primary, mirror) if s.verdict is ScoreVerdict.PASS)
+    window = primary.extension or primary.primary
+    return ManagerResult(
+        manager_id=manager_id,
+        primary_book=primary.book_id,
+        mirror_book=mirror.book_id,
+        style_book=roster.style_for(manager_id).id,
+        primary_verdict=primary.verdict,
+        mirror_verdict=mirror.verdict,
+        passed_on=(BooksPassed.BOTH, BooksPassed.ONE, BooksPassed.NEITHER)[2 - passes],
+        decisions=sum(1 for d in decisions.values() if d.book_id == primary.book_id),
+        brier=None if window is None else window.brier,
+        resolved_decisions=None if window is None else window.resolved_decisions,
+        suspended_resolved_decisions=(
+            None if window is None else window.suspended_resolved_decisions
+        ),
+        extension_confirmed=_extension_confirmed(primary),
+    )
+
+
+def _extension_confirmed(score: BookScore) -> bool:
+    """Did this book pass across the extension window as well (module docstring)?"""
+    if score.verdict is not ScoreVerdict.PASS:
+        return False
+    across = score.extension or score.confirmation
+    return across is not None and across.complete and across.verdict is ScoreVerdict.PASS
+
+
+def _graduation(results: Sequence[ManagerResult]) -> GraduationFloor:
+    primary_passes = sum(1 for r in results if r.primary_verdict is ScoreVerdict.PASS)
+    confirmed = tuple(r.manager_id for r in results if r.extension_confirmed)
+    return GraduationFloor(
+        rule=(
+            f"at least {GRADUATION_MIN_PRIMARY_PASSES} of {len(results)} managers pass on their "
+            "primary (10 L) book, or one passes on its primary book across the extension window "
+            "as well (pre-registration §8 Amendment 2 e)"
+        ),
+        primary_passes=primary_passes,
+        primary_passes_needed=GRADUATION_MIN_PRIMARY_PASSES,
+        extension_confirmed=confirmed,
+        met=primary_passes >= GRADUATION_MIN_PRIMARY_PASSES or bool(confirmed),
+    )
+
+
+def _style_score(
+    style: StyleMandate,
+    primary: BookScore,
+    roster: Roster,
+    calendar: Sequence[date],
+    marks: Mapping[str, Mapping[date, BookMark]],
+) -> StyleBookScore:
+    window = primary.extension or primary.primary
+    if window is None:
+        return StyleBookScore(
+            style_id=style.id,
+            manager_id=style.style_for,
+            primary_book=primary.book_id,
+            window=None,
+            sessions=None,
+            style_return_pct=None,
+            style_max_drawdown_pp=None,
+            primary_return_pct=None,
+            primary_excess_vs_style_pp=None,
+        )
+    sessions = calendar[: window.sessions]
+    navs = _nav_series(style.id, style.opening_capital_inr, sessions, marks)
+    style_return = _return_pct(navs[-1], style.opening_capital_inr)
+    primary_capital = roster.get(primary.book_id).opening_capital_inr
+    primary_navs = _nav_series(primary.book_id, primary_capital, sessions, marks)
+    primary_return = _return_pct(primary_navs[-1], primary_capital)
+    return StyleBookScore(
+        style_id=style.id,
+        manager_id=style.style_for,
+        primary_book=primary.book_id,
+        window=window.label,
+        sessions=len(sessions),
+        style_return_pct=_q(style_return, _PP),
+        style_max_drawdown_pp=_q(max_drawdown_pp(navs), _PP),
+        primary_return_pct=_q(primary_return, _PP),
+        primary_excess_vs_style_pp=_q(primary_return - style_return, _PP),
     )
 
 
@@ -622,9 +832,7 @@ def _the_bench(roster: Roster) -> BenchMandate:
     return roster.benches[0]
 
 
-def _book_summary(
-    book: ManagerMandate | ControlMandate | BenchMandate, marks: Mapping[date, BookMark]
-) -> BookSummary:
+def _book_summary(book: AnyMandate, marks: Mapping[date, BookMark]) -> BookSummary:
     capital = book.opening_capital_inr
     if not marks:
         return BookSummary(
@@ -650,9 +858,10 @@ def _book_summary(
     )
 
 
-def _manager_score(
-    manager: ManagerMandate,
+def _book_score(
+    book: ManagerMandate,
     control: ControlMandate,
+    decider_id: str,
     bench: BenchMandate,
     s0: date | None,
     calendar: Sequence[date],
@@ -660,18 +869,33 @@ def _manager_score(
     decisions: Mapping[str, ScoredDecision],
     outcomes: Mapping[str, DecisionOutcome],
     inputs: ScoreboardInputs,
-) -> ManagerScore:
-    if s0 is None or not calendar:
-        verdict = ScoreVerdict.NOT_STARTED if s0 is None else ScoreVerdict.IN_PROGRESS
-        phase = Phase.NOT_STARTED if s0 is None else Phase.PRIMARY
-        return ManagerScore(
-            manager_id=manager.id,
+) -> BookScore:
+    """``book`` against ``control``; ``decider_id`` is the book whose stream holds the manager's
+    decisions (its primary), so both of a manager's books read one Brier."""
+
+    def score(
+        phase: Phase,
+        verdict: ScoreVerdict,
+        primary: WindowScore | None = None,
+        extension: WindowScore | None = None,
+        confirmation: WindowScore | None = None,
+    ) -> BookScore:
+        return BookScore(
+            book_id=book.id,
+            manager_id=book.manager,
+            role=book.role.value,
             control_id=control.id,
             phase=phase,
             verdict=verdict,
-            primary=None,
-            extension=None,
+            primary=primary,
+            extension=extension,
+            confirmation=confirmation,
         )
+
+    if s0 is None or not calendar:
+        if s0 is None:
+            return score(Phase.NOT_STARTED, ScoreVerdict.NOT_STARTED)
+        return score(Phase.PRIMARY, ScoreVerdict.IN_PROGRESS)
 
     def window(label: str, length: int) -> WindowScore:
         sessions = calendar[:length]
@@ -679,8 +903,9 @@ def _manager_score(
             label,
             sessions,
             complete=len(calendar) >= length,
-            manager=manager,
+            book=book,
             control=control,
+            decider_id=decider_id,
             bench=bench,
             marks=marks,
             decisions=decisions,
@@ -690,31 +915,22 @@ def _manager_score(
 
     primary = window("primary", WINDOW_SESSIONS)
     if not primary.complete:
-        return ManagerScore(
-            manager_id=manager.id,
-            control_id=control.id,
-            phase=Phase.PRIMARY,
-            verdict=ScoreVerdict.IN_PROGRESS,
-            primary=primary,
-            extension=None,
-        )
+        return score(Phase.PRIMARY, ScoreVerdict.IN_PROGRESS, primary)
     if primary.verdict is not ScoreVerdict.INCONCLUSIVE:
-        return ManagerScore(
-            manager_id=manager.id,
-            control_id=control.id,
-            phase=Phase.FINAL,
-            verdict=primary.verdict,
-            primary=primary,
-            extension=None,
-        )
+        confirmation = None
+        if (
+            primary.verdict is ScoreVerdict.PASS
+            and book.role is BookRole.PRIMARY
+            and len(calendar) > WINDOW_SESSIONS
+        ):
+            confirmation = window("extension", EXTENSION_SESSIONS)
+        return score(Phase.FINAL, primary.verdict, primary, confirmation=confirmation)
     extension = window("extension", EXTENSION_SESSIONS)
-    return ManagerScore(
-        manager_id=manager.id,
-        control_id=control.id,
-        phase=Phase.FINAL if extension.complete else Phase.EXTENSION,
-        verdict=extension.verdict if extension.complete else ScoreVerdict.IN_PROGRESS,
-        primary=primary,
-        extension=extension,
+    return score(
+        Phase.FINAL if extension.complete else Phase.EXTENSION,
+        extension.verdict if extension.complete else ScoreVerdict.IN_PROGRESS,
+        primary,
+        extension,
     )
 
 
@@ -747,8 +963,9 @@ def _window_score(
     sessions: Sequence[date],
     *,
     complete: bool,
-    manager: ManagerMandate,
+    book: ManagerMandate,
     control: ControlMandate,
+    decider_id: str,
     bench: BenchMandate,
     marks: Mapping[str, Mapping[date, BookMark]],
     decisions: Mapping[str, ScoredDecision],
@@ -756,6 +973,7 @@ def _window_score(
     inputs: ScoreboardInputs,
 ) -> WindowScore:
     start, end = sessions[0], sessions[-1]
+    manager = book
     m_nav = _nav_series(manager.id, manager.opening_capital_inr, sessions, marks)
     c_nav = _nav_series(control.id, control.opening_capital_inr, sessions, marks)
     b_nav = _nav_series(bench.id, bench.opening_capital_inr, sessions, marks)
@@ -765,8 +983,9 @@ def _window_score(
     excess = m_ret - c_ret
     m_dd, c_dd, b_dd = max_drawdown_pp(m_nav), max_drawdown_pp(c_nav), max_drawdown_pp(b_nav)
 
+    # the manager's decisions, once: they are in its primary book's stream whichever book this is
     in_window = [
-        d for d in decisions.values() if d.book_id == manager.id and start <= d.decided_on <= end
+        d for d in decisions.values() if d.book_id == decider_id and start <= d.decided_on <= end
     ]
     resolved = [
         (d, outcomes[d.key])
@@ -795,6 +1014,7 @@ def _window_score(
     secondary = _secondary(
         manager=manager,
         control=control,
+        decider_id=decider_id,
         sessions=sessions,
         marks=marks,
         in_window=in_window,
@@ -870,6 +1090,7 @@ def _secondary(
     *,
     manager: ManagerMandate,
     control: ControlMandate,
+    decider_id: str,
     sessions: Sequence[date],
     marks: Mapping[str, Mapping[date, BookMark]],
     in_window: Sequence[ScoredDecision],
@@ -923,7 +1144,7 @@ def _secondary(
                 counts.update(refusal.rails)
         return dict(sorted(counts.items()))
 
-    calls = [c for c in inputs.calls if c.book_id == manager.id and start <= c.session <= end]
+    calls = [c for c in inputs.calls if c.book_id == decider_id and start <= c.session <= end]
 
     # horizon adherence: BUY horizons inside the mandate's band
     band = manager.horizon
@@ -1331,7 +1552,7 @@ def inputs_from_journal(entries: Iterable[JournalEntry], roster: Roster) -> Scor
     line recorded for the name.
     """
     books = {book.id for book in roster.books}
-    managers = {m.id for m in roster.managers}
+    managers = {m.id for m in roster.manager_books}
     controls = {c.id for c in roster.controls}
     s0: date | None = None
     marks: list[BookMark] = []

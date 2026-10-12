@@ -227,7 +227,7 @@ def test_a_held_name_missing_on_a_normal_session_is_marked_at_its_last_close(
     tmp_path: Path,
 ) -> None:
     roster = mini_roster()
-    manager, control = roster.managers[0].id, roster.controls[0].id
+    manager, control = roster.primaries[0].id, roster.controls[0].id
     market = market_without({HELD: [SUSP1, SUSP2]})
     script: dict[Any, Any] = {}
     _buy_held(script, manager)
@@ -238,11 +238,14 @@ def test_a_held_name_missing_on_a_normal_session_is_marked_at_its_last_close(
 
     assert all(r.outcome is RunOutcome.COMPLETED for r in results)
     lines = desk.events(SUSPENDED_HOLDING_EVENT)
+    mirror = roster.mirrors[0].id  # it bought the name with the primary, so it holds it too
     assert [(e.case_id, e.isin, e.trading_date) for e in lines] == [
         (manager, HELD, SUSP1),
+        (mirror, HELD, SUSP1),
         (manager, HELD, SUSP2),
+        (mirror, HELD, SUSP2),
     ]
-    assert [e.payload["sessions_suspended"] for e in lines] == ["1", "2"]
+    assert [e.payload["sessions_suspended"] for e in lines] == ["1", "1", "2", "2"]
     assert {e.payload["last_trade_date"] for e in lines} == {LAST.isoformat()}
     assert all(e.decision is Decision.HEARTBEAT for e in lines)
 
@@ -279,7 +282,7 @@ def test_without_the_rule_the_same_gap_still_fails_the_job_loudly(tmp_path: Path
     roster = mini_roster()
     market = market_without({HELD: [SUSP1]})
     script: dict[Any, Any] = {}
-    _buy_held(script, roster.managers[0].id)
+    _buy_held(script, roster.primaries[0].id)
     desk = Desk(tmp_path)
     _run(desk, [BOUGHT, FILLED, LAST], world_of(market, rule=False), ScriptedRunner(script))
     with pytest.raises(BookError, match="neither delisted nor suspended"):
@@ -295,7 +298,7 @@ def test_without_the_rule_the_same_gap_still_fails_the_job_loudly(tmp_path: Path
 
 def test_status_managers_lists_the_suspended_holding(tmp_path: Path) -> None:
     roster = mini_roster()
-    manager = roster.managers[0].id
+    manager = roster.primaries[0].id
     market = market_without({HELD: [SUSP1]})
     script: dict[Any, Any] = {}
     _buy_held(script, manager)
@@ -304,13 +307,14 @@ def test_status_managers_lists_the_suspended_holding(tmp_path: Path) -> None:
     body = read_managers_status(
         desk.entries(), roster=roster, as_of=datetime(2026, 10, 9, 8, 0, tzinfo=IST)
     )
+    mirror = roster.mirrors[0].id  # the mirror holds the name too
     assert [
         (h.book_id, h.isin, h.last_trade_date, h.sessions_suspended)
         for h in body.suspended_holdings
-    ] == [(manager, HELD, LAST, 1)]
+    ] == [(manager, HELD, LAST, 1), (mirror, HELD, LAST, 1)]
     assert body.managers[0].suspended_resolved_decisions == 0
     session, lines = suspended_holdings_on(desk.entries(), roster)
-    assert session == SUSP1 and len(lines) == 1
+    assert session == SUSP1 and len(lines) == 2
 
 
 # ── 2. a broadly missing session ─────────────────────────────────────────────────────────────────
@@ -320,7 +324,7 @@ def test_a_broadly_missing_session_is_red_and_the_interlock_stops_it(tmp_path: P
     roster = mini_roster()
     market = market_without({i: [SUSP1] for i in UNIVERSE})  # nothing printed
     script: dict[Any, Any] = {}
-    _buy_held(script, roster.managers[0].id)
+    _buy_held(script, roster.primaries[0].id)
     desk = Desk(tmp_path)
     _run(desk, [BOUGHT, FILLED, LAST], world_of(market), ScriptedRunner(script))
     red = desk.run(
@@ -347,7 +351,7 @@ def test_a_thin_session_past_a_green_gate_suspends_nothing_and_marks_nothing(
     roster = mini_roster()
     market = market_without({i: [SUSP1] for i in UNIVERSE[:-4]})
     script: dict[Any, Any] = {}
-    _buy_held(script, roster.managers[0].id)
+    _buy_held(script, roster.primaries[0].id)
     desk = Desk(tmp_path)
     _run(desk, [BOUGHT, FILLED, LAST], world_of(market), ScriptedRunner(script))
     with pytest.raises(BookError, match="neither delisted nor suspended"):
@@ -370,7 +374,7 @@ def test_a_stop_exit_on_a_suspended_name_waits_unfilled_and_fills_when_it_prints
     tmp_path: Path,
 ) -> None:
     roster = mini_roster()
-    manager = roster.managers[0].id
+    manager = roster.primaries[0].id
     breach = Bar(Decimal("85"), Decimal("80"), TV)  # SUSP1 closes below the 96 stop
     stopped, gone1, gone2, back, fill = (
         D(2026, 10, 8),
@@ -425,7 +429,7 @@ def test_without_the_rule_a_stop_exit_on_a_gap_is_lost_or_fails(tmp_path: Path) 
     """The inversion of the test above: with no suspension source the rejected stop exit is not
     held over (and the gap itself fails the job) — so the re-offer above is the rule's doing."""
     roster = mini_roster()
-    manager = roster.managers[0].id
+    manager = roster.primaries[0].id
     market = market_without(
         {HELD: [D(2026, 10, 9)]}, {(HELD, D(2026, 10, 8)): Bar(Decimal("85"), Decimal("80"), TV)}
     )
@@ -449,7 +453,7 @@ def test_a_manager_sell_of_a_suspended_name_is_held_and_a_buy_with_no_bar_never_
     tmp_path: Path,
 ) -> None:
     roster = mini_roster()
-    manager = roster.managers[0].id
+    manager = roster.primaries[0].id
     other = EXTRA[0]  # also dark on SUSP1, never held
     market = market_without({HELD: [SUSP1, SUSP2], other: [SUSP1]})
     script: dict[Any, Any] = {}
@@ -482,7 +486,7 @@ def test_a_decision_resolving_during_a_suspension_is_scored_at_the_last_close(
     tmp_path: Path,
 ) -> None:
     roster = mini_roster()
-    manager = roster.managers[0].id
+    manager = roster.primaries[0].id
     # bought at 100 on BOUGHT; last prints at 110 on LAST; dark on SUSP1, when its horizon ends
     market = market_without({HELD: [SUSP1]}, {(HELD, LAST): Bar(FLAT, Decimal("110"), TV)})
     script: dict[Any, Any] = {}
@@ -497,9 +501,9 @@ def test_a_decision_resolving_during_a_suspension_is_scored_at_the_last_close(
     assert outcome.resolved_on == SUSP1 and outcome.suspended
     assert outcome.name_last_traded == LAST and outcome.name_return == Decimal("0.10000000")
     final = results[-1].scoreboard
-    assert final is not None and final.managers[0].primary is not None
-    assert final.managers[0].primary.suspended_resolved_decisions == 1
-    assert final.managers[0].primary.resolved_decisions == 1
+    assert final is not None and final.book_scores[0].primary is not None
+    assert final.book_scores[0].primary.suspended_resolved_decisions == 1
+    assert final.book_scores[0].primary.resolved_decisions == 1
     digest = (tmp_path / "digest" / f"digest-{SUSP2.isoformat()}.md").read_text()
     assert "Resolved while suspended" in digest
     _assert_rebuilds(desk, results)
@@ -518,7 +522,7 @@ class _Prices:
 
 def test_resolve_outcome_flags_suspension_only_when_the_name_is_suspended() -> None:
     decision = ScoredDecision(
-        book_id="FM-SWING-10L",
+        book_id="FM-SWING-BRK-10L",
         decided_on=BOUGHT,
         isin=HELD,
         action=DecisionAction.HOLD,
@@ -562,13 +566,13 @@ def test_the_rendered_view_says_suspended_since_with_no_price_or_pnl() -> None:
         suspended_since=LAST,
     )
     block = render_holdings(
-        ManagerBook("FM-SWING-10L", Decimal("1000000"), Decimal("95"), (holding,)), {}
+        ManagerBook("FM-SWING-BRK-10L", Decimal("1000000"), Decimal("95"), (holding,)), {}
     )
     assert f"SUSPENDED: held, not trading since {LAST.isoformat()}" in block
     for word in ("cost", "p&l", "pnl", "profit", "loss", "paid", "entry price", "average", "96"):
         assert word not in block.lower()
     live = dataclasses.replace(holding, suspended_since=None)
     plain = render_holdings(
-        ManagerBook("FM-SWING-10L", Decimal("1000000"), Decimal("95"), (live,)), {}
+        ManagerBook("FM-SWING-BRK-10L", Decimal("1000000"), Decimal("95"), (live,)), {}
     )
     assert "SUSPENDED" not in plain

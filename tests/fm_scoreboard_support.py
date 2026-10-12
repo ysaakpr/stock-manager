@@ -7,7 +7,7 @@ inputs and two runs produce the same journal.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
@@ -17,7 +17,8 @@ from analyst.commons.shortlist import (
     Shortlist,
     ShortlistEntry,
 )
-from analyst.fundmanager import Roster, load_roster
+from analyst.fundmanager import AnyMandate, ManagerMandate, Roster, load_roster
+from analyst.fundmanager.scoreboard import BookMark
 from tests.fm_books_support import Bar, FmMarket
 
 _HALF = Decimal("0.5")
@@ -62,11 +63,45 @@ def shortlist_of(session: date, names: Sequence[str]) -> Shortlist:
     )
 
 
-def mini_roster(manager_id: str = "FM-SWING-10L") -> Roster:
-    """The real roster cut to one manager, its control and the bench (a consistent `Roster`)."""
+def mini_roster(manager_id: str = "FM-SWING-BRK-10L") -> Roster:
+    """The real roster cut to one manager (a consistent `Roster`): its primary and mirror books,
+    their two controls, its style book and the bench. ``manager_id`` may name the manager or
+    either of its books."""
     roster = load_roster()
-    books = (roster.get(manager_id), roster.control_for(manager_id), *roster.benches)
+    if manager_id not in roster.manager_ids:
+        book = roster.get(manager_id)
+        assert isinstance(book, ManagerMandate), f"{manager_id} is not a manager book"
+        manager_id = book.manager
+    pair = roster.books_of(manager_id)
+    books: tuple[AnyMandate, ...] = (
+        *pair,
+        *(roster.control_for(b.id) for b in pair),
+        roster.style_for(manager_id),
+        *roster.benches,
+    )
     return Roster(preregistration=roster.preregistration, rails=roster.rails, books=books)
+
+
+def flat_marks(
+    roster: Roster, sessions: Sequence[date], *, exclude: Collection[str] = ()
+) -> list[BookMark]:
+    """A mark at opening capital on every session for every roster book not in ``exclude``: the
+    companions a test does not script (a mirror, its control, a style book) still mark daily."""
+    return [
+        BookMark(
+            book_id=book.id,
+            session=session,
+            nav=book.opening_capital_inr,
+            cash=book.opening_capital_inr,
+            positions=0,
+            turnover=Decimal(0),
+            costs=Decimal(0),
+            interest=Decimal(0),
+        )
+        for book in roster.books
+        if book.id not in exclude
+        for session in sessions
+    ]
 
 
 def drifting_market(

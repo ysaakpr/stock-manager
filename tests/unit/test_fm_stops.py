@@ -127,7 +127,7 @@ def test_a_stop_exit_is_staged_journaled_and_filled_at_the_next_open(tmp_path: P
     bars[(A, falling)] = Bar(px, Decimal(880), Decimal("10000000000"))
     market = FmMarket(SESSIONS, bars, {A: "IT"})
     book, account = open_book(
-        "FM-SWING-10L",
+        "FM-SWING-BRK-10L",
         market=market,
         clock=clock,
         kill_switch=switch_at(tmp_path, clock),

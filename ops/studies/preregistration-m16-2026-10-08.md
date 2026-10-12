@@ -342,6 +342,52 @@ M10.7, so the report merges rows by (cell, arm):
 - two copies of the same run (same digest) are kept once;
 - two different runs claiming one cell are refused.
 
+### Amendment 3 (2026-10-09, before any run)
+
+Computed when this was made: still no M16 campaign figure on any window. No M16 run directory
+exists, and no arm or baseline has been run on the campaign commit. Only the unit tests on
+synthetic runs and count-only checks had been run, plus one read of the NIFTY 500 PIT membership
+history's coverage start (2016-10-24), which is a fact about the lake, not a figure. This
+amendment is additive: §4, §7 and the amendments above are not rewritten.
+
+**(a) The primary selection floor is ₹10 crore (D25).** §4 left the Step 1 floor pending the
+owner's confirmation, and M16.4 may not start before it is recorded. It is recorded here as
+**decision D25** (`HUMAN_DECISIONS.md`). D25 was **taken by polly on the owner's behalf**, under
+the owner's standing instruction "never await on me", and is **pending the owner's
+ratification**. It decides:
+- Step 1's walk-forward choice is made on the selection window, floor-only universe, at the
+  **₹10 crore** median-daily-turnover floor, exactly as §4 states it.
+- The **₹1 crore ranking is still computed and reported** beside it, labelled informational. It
+  is **not the selection basis** and decides nothing.
+
+This is the confirmation M16.4 waits for; it stands in for the §7 entry the task graph names, so
+§7 itself is left as written. If the owner later names ₹1 crore instead, that is a different
+selection rule applied after M16 figures exist, and the report must say so.
+
+**(b) The 8-holding minimum is unchanged.** A8's ratified minimum-holdings rail (8 holdings,
+`backtest.rails`, the rail every D13 run already walks through) stays exactly as it is. The owner
+has not decided otherwise. A1 therefore runs under it, as Amendment 1 (d′) describes: a sell that
+would take the book below 8 holdings is refused, and the name stays held. The report must show
+each arm's refused sells (A8 min-holdings refusals, and all rail blocks by rail), so A1's count is
+visible next to D13's.
+
+**(c) How A2's coverage file is computed.** Amendment 1 (a) requires the unclassified share per
+cell and per year but does not say how the file is built. Fixed now, before any coverage or
+campaign figure is read:
+- A cell is (universe, window, floor). Its **floor universe** is the union of ISINs that pass the
+  engine's own investable screen (`backtest.run._InvestableUniverse.constrain`: the liquidity
+  floor, and PIT NIFTY 500 membership on a `nifty500` cell) at every monthly rebalance session of
+  the window (the first session of each month), over the PIT-listed names (`listing_windows`).
+- The cell's share is the unclassified fraction of that union, computed by
+  `backtest.sector_indices.unclassified_shares`. The per-year share is the same over each
+  calendar year's rebalance sessions within the window.
+- Each sector index's first rankable date comes from `backtest.sector_indices.first_rankable_dates`.
+  An index that is never rankable is listed as such beside the file, since the file holds dates
+  only.
+- The 30% threshold and "unmeasured counts as diluted" are Amendment 1 (a)'s, unchanged.
+
+N stays 75: no arm, grid cell or rule is changed by this amendment.
+
 ## Appendix A — the 68 configurations already run on this lake
 
 **How it was counted (2026-10-08).**
