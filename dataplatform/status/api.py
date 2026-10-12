@@ -466,8 +466,9 @@ def status_managers(
     """Every M17 book's latest mark, the latest session's decisions and the scoreboard (M17.6).
 
     The scoreboard is rebuilt from the journal on each request, exactly as the daily job builds
-    it, and reported as "k of 4 passed". What it never carries: a rationale, a prompt, evidence
-    text or a secret — the decisions are their structured fields only.
+    it, and reported as "k of 8 books passed" with each manager's both/one/neither, the Amendment
+    2 (e) graduation floor and the secondary style books (M17.14). What it never carries: a
+    rationale, a prompt, evidence text or a secret — the decisions are their structured fields only.
     """
     return read_managers_status(entries, roster=roster, as_of=clock.now())
 

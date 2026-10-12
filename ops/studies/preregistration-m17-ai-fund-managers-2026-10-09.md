@@ -243,6 +243,71 @@ the raw `p_beat_bench`:
 (g) **Prompt:** `analyst/fundmanager/prompts/manager.md` v1 is the prompt of every manager. Its bytes
 are in `mandate_hash`.
 
+### Amendment 2 (2026-10-10, before S0): four distinct styles, each trading two capital books
+
+Owner decision 2026-10-10. The first live dry session (2026-10-09) showed the four managers, who
+differed only by horizon and capital, researching largely the same names: 8 of 19 were researched
+by all four. The two managers on each horizon were near-duplicates, since capital matters only
+through the participation rail. This amendment replaces §2's roster and adds to §3, §6 and
+Amendment 1 (g). Everything else stands.
+
+(a) **Roster.** Four managers, each with a distinct style and its own starting screens. All four
+read the full universe and may research any name in it.
+
+| Manager | Horizon | Style | Starting screens |
+|---|---|---|---|
+| `FM-SWING-BRK` | 5–20 sessions | Volume breakouts and pullbacks in leaders | S2, S3 |
+| `FM-SWING-EVT` | 5–20 sessions | Results reactions and event drift | S4, S5 |
+| `FM-POS-TREND` | 20–60 sessions | Persistent trend and sector leadership | S1 |
+| `FM-POS-FUND` | 20–60 sessions | Earnings inflection with quality and reasonable valuation | S4 + dossier fundamentals |
+
+Same model (`claude-opus-5-5`), rails, research limits (12 ISINs, 8 queries, 2 research rounds)
+and decision contract as before.
+
+(b) **One manager, two books.** Each manager's decisions trade a ₹10,00,000 book
+(`<manager>-10L`, the **primary** book) and a ₹1,00,00,000 book (`<manager>-1CR`, the **mirror**):
+8 books in all.
+- The manager sees and decides on its primary book only.
+- After each session, the mirror is driven mechanically toward the primary's target weights, through
+  its own rails. The participation rail may refuse or slice its orders over several sessions. That
+  divergence is the capacity measurement, and it is journaled per book.
+- Stops are declared once, in percent, and apply to both books.
+- Both books hold at most 15 positions, at most 10% per position and at most 30% per sector.
+- No extra model calls: the ₹1 cr book costs only execution.
+
+(c) **Presentation order.** Each manager's desk lists the shortlist and screens in a deterministic
+shuffle seeded by (manager id, session), with every name's rank still shown. This stops four managers
+anchoring on the same top rows. Each manager's playbook names its starting screens first. Nothing is
+hidden.
+
+(d) **Controls.**
+- **Primary, unchanged in kind:** every book has a `CTRL-<book>` equal-weighting the top 15 of the
+  composite shortlist, on the same rails, costs and capital, rebalanced weekly for swing and every 21
+  sessions for positional. 8 control books. BENCH-N500 is unchanged.
+- **Secondary:** one `STYLE-<manager>` book per manager, ₹10 L, equal-weighting up to 15 names from
+  its starting screens:
+  - BRK: S2 ∪ S3, ranked S2 first;
+  - EVT: S4;
+  - TREND: S1;
+  - FUND: S4 names passing the playbook's quality filter.
+
+  Rebalanced on the same cadence. An empty screen means cash. Reported, never used for pass/fail.
+
+(e) **Scoring.**
+- §6's rule applies **per book**, each against its own `CTRL-<book>`.
+- Brier is computed per manager, once, on its decisions.
+- Results are reported as "k of 8 books passed" and, per manager, as passing on both, one or
+  neither book.
+- §6's graduation floor becomes: at least 2 of 4 managers pass on their primary (₹10 L) book, or one
+  passes on its primary book across the extension window as well.
+
+(f) **Prompt.** `manager.md` v1 carries four `[[STYLE]]` playbooks: `SWING_BREAKOUT`, `SWING_EVENT`,
+`POSITIONAL_TREND` and `POSITIONAL_FUNDAMENTAL`. Each replaces the former `SWING` / `POSITIONAL`
+block, and a manager sees only its own. The prompt's bytes stay in `mandate_hash`.
+
+(g) **Dry run.** Dry sessions decided under the previous roster count toward wiring and timing only.
+M17.8's "5 consecutive dry sessions" must include at least 3 on this roster before S0.
+
 ## 9. Owner confirmation
 
 | Item | Value | Confirmed |

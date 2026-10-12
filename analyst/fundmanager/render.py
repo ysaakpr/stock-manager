@@ -17,14 +17,24 @@ the text that fills those placeholders. Every number the manager may cite is pri
 citable id — ``[F:<field_id>]`` for a dossier field, ``market.<field>``, a filing digest, a
 base-rate cell or a cost tier, and ``[S:<snapshot_id>]`` for a web snapshot — so a citation is a
 copy, never a reconstruction. Nothing here renders a cost basis, a P&L, the book's value, or any
-other manager's id, book or decisions (pre-registration §1): none of them is an input.
+other manager's id, book or decisions (pre-registration §1): none of them is an input — nor the
+manager's own mirror book (Amendment 2 b), which the manager never sees.
+
+**Desk order** (Amendment 2 c). The screens and the composite shortlist are listed in a shuffle
+fixed by (manager id, session) — `DeskOrder` — so four managers reading the same Commons do not
+anchor on the same top rows. Every name is still listed, with its rank, and the manager's own
+starting screens come first. The shuffle is a sort on ``sha256(domain | manager | session |
+ISIN)``: deterministic across processes and hash seeds, different for every manager and session,
+and never a draw from a random state.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Final
@@ -51,12 +61,14 @@ from analyst.fundmanager.bundle import (
 )
 
 __all__ = [
+    "DESK_ORDER_DOMAIN",
     "PROMPT_PATH",
     "REGIME_DEFINITION",
     "ROUND_FINAL",
     "ROUND_RESEARCH",
     "ROUND_ZERO",
     "SYSTEM_PROMPT",
+    "DeskOrder",
     "PromptTemplate",
     "TemplateError",
     "render_base_rates",
@@ -97,6 +109,40 @@ _BLOCK: Final = re.compile(
 )
 _PLACEHOLDER: Final = re.compile(r"\{\{([a-z_][a-z0-9_]*)\}\}")
 _MARKER: Final = re.compile(r"\[\[/?(?:STYLE|ROUND)\b")
+
+
+#: The hash domain of the desk shuffle; part of what a changed presentation would change.
+DESK_ORDER_DOMAIN: Final = "m17-desk-order/v1"
+#: Every screen section `render_screens` lists, in the Commons' own order.
+_SECTIONS: Final[tuple[str, ...]] = (*(s.value for s in Screen), "S5")
+
+
+@dataclass(frozen=True, slots=True)
+class DeskOrder:
+    """How one manager's desk lists the shared screens and shortlist on one session.
+
+    ``first_screens`` (the manager's starting screens, in its playbook's order) are listed before
+    the others; within every listing the names are in the (``manager_id``, ``session``) shuffle,
+    each still printed with its rank. Nothing is dropped or added.
+    """
+
+    manager_id: str
+    session: date
+    first_screens: tuple[str, ...] = ()
+
+    def key(self, isin: str) -> str:
+        """The shuffle key of ``isin``: a sha256 over the domain, manager, session and ISIN."""
+        material = f"{DESK_ORDER_DOMAIN}|{self.manager_id}|{self.session.isoformat()}|{isin}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def shuffle[T](self, items: Sequence[T], isin: Callable[[T], str]) -> list[T]:
+        """``items`` in this desk's order (stable for several items of one ISIN)."""
+        return sorted(items, key=lambda item: self.key(isin(item)))
+
+    def sections(self) -> tuple[str, ...]:
+        """The screen sections in listing order: the starting screens first, then the rest."""
+        first = tuple(s for s in self.first_screens if s in _SECTIONS)
+        return (*first, *(s for s in _SECTIONS if s not in first))
 
 
 class TemplateError(ValueError):
@@ -276,25 +322,49 @@ def _row_note(row: UniverseRow | None) -> str:
     return f" · {row.sector or 'sector unknown'} · {row.cap_tier or UNRANKED_TIER}"
 
 
-def render_screens(screens: CommonsScreens, rows: Mapping[str, UniverseRow]) -> str:
+def render_screens(
+    screens: CommonsScreens,
+    rows: Mapping[str, UniverseRow],
+    order: DeskOrder | None = None,
+) -> str:
+    """Every screen, each name with its rank. With ``order``, the manager's starting screens come
+    first and each listing is in its desk shuffle (Amendment 2 c); without, the Commons' order."""
     lines = [f"### Screens ({screens.trading_date}, digest {screens.screens_digest[:12]})"]
+    if order is not None:
+        lines.append(
+            "Each screen lists its names in an order shuffled for your desk; a name's rank on its "
+            "screen is the number after 'rank'. Your starting screens come first."
+        )
     if screens.exclusions.buys_blocked:
         lines.append(
             "**No new BUY is admitted this session**: the newest GSM/ESM list is missing or stale."
         )
-    for screen in Screen:
-        entries = screens.ranked(screen)
-        lines += ["", f"{screen.value}:"]
+    sections = _SECTIONS if order is None else order.sections()
+    for section in sections:
+        if section == "S5":
+            lines += _render_s5(screens, order)
+            continue
+        entries = list(screens.ranked(Screen(section)))
+        if order is not None:
+            entries = order.shuffle(entries, lambda e: e.isin)
+        lines += ["", f"{section}:"]
         if not entries:
             lines.append("- (none)")
         lines += [
-            f"{e.position}. {e.isin}{_row_note(rows.get(e.isin))} (score {_fmt(e.score)})"
+            f"- rank {e.position}: {e.isin}{_row_note(rows.get(e.isin))} (score {_fmt(e.score)})"
             for e in entries
         ]
-    lines += ["", "S5 event watch (facts, unranked):"]
-    if not screens.s5:
+    return "\n".join(lines)
+
+
+def _render_s5(screens: CommonsScreens, order: DeskOrder | None) -> list[str]:
+    lines = ["", "S5 event watch (facts, unranked):"]
+    facts = list(screens.s5)
+    if order is not None:
+        facts = order.shuffle(facts, lambda f: f.isin)
+    if not facts:
         lines.append("- (none)")
-    for fact in screens.s5:
+    for fact in facts:
         detail = fact.subject or (
             f"{fact.side} {fact.quantity} @ {_fmt(fact.price)} by {fact.client_name}"
             if fact.client_name
@@ -305,19 +375,30 @@ def render_screens(screens: CommonsScreens, rows: Mapping[str, UniverseRow]) -> 
             f"{fact.knowable_date}: {detail}"
             + (f" (meeting {fact.meeting_date})" if fact.meeting_date else "")
         )
-    return "\n".join(lines)
+    return lines
 
 
-def render_shortlist(shortlist: Shortlist, rows: Mapping[str, UniverseRow]) -> str:
+def render_shortlist(
+    shortlist: Shortlist,
+    rows: Mapping[str, UniverseRow],
+    order: DeskOrder | None = None,
+) -> str:
+    """The composite shortlist, each name with its rank; in the desk shuffle with ``order``."""
     lines = [
         f"### Composite shortlist ({shortlist.trading_date}, digest "
-        f"{shortlist.shortlist_digest[:12]}; your control book's input)"
+        f"{shortlist.shortlist_digest[:12]}; your control book's input"
+        + ("; listed in your desk's shuffled order, rank shown" if order is not None else "")
+        + ")"
     ]
-    if not shortlist.entries:
+    entries = list(shortlist.entries)
+    if order is not None:
+        entries = order.shuffle(entries, lambda e: e.isin)
+    if not entries:
         lines.append("- (empty)")
     lines += [
-        f"{e.position}. {e.isin}{_row_note(rows.get(e.isin))} (composite {_fmt(e.composite)})"
-        for e in shortlist.entries
+        f"- rank {e.position}: {e.isin}{_row_note(rows.get(e.isin))} (composite "
+        f"{_fmt(e.composite)})"
+        for e in entries
     ]
     return "\n".join(lines)
 

@@ -15,7 +15,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from analyst.fundmanager import ControlMandate, ManagerMandate, load_roster
+from analyst.fundmanager import ControlMandate, ManagerMandate, StyleMandate, load_roster
 from analyst.fundmanager.books import (
     BookJournal,
     FundBook,
@@ -134,10 +134,10 @@ class ListJournal:
 
 
 def roster_rails(book_id: str) -> tuple[BookRails, Decimal]:
-    """The roster's rails and opening capital for ``book_id`` (a manager or control)."""
+    """The roster's rails and opening capital for ``book_id`` (any book but the bench)."""
     roster = load_roster()
     mandate = roster.get(book_id)
-    assert isinstance(mandate, ManagerMandate | ControlMandate), "the bench trades no account"
+    assert isinstance(mandate, ManagerMandate | ControlMandate | StyleMandate), "no bench account"
     return book_rails(mandate, roster.rails), mandate.opening_capital_inr
 
 

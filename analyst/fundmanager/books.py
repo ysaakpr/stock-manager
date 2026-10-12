@@ -77,10 +77,9 @@ from typing import Final, Protocol
 
 from analyst.fundmanager.mandate import (
     BenchMandate,
-    ControlMandate,
     M17Rails,
-    ManagerMandate,
     Roster,
+    TradableMandate,
 )
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, RecordedEntry, Sleeve
@@ -187,8 +186,8 @@ class FutureDataError(BookError):
 # ── configuration: the rails of one book ────────────────────────────────────────────────────────
 
 
-def book_rails(mandate: ManagerMandate | ControlMandate, rails: M17Rails) -> BookRails:
-    """The A8 `BookRails` of one manager or control book: its mandate's caps plus the shared rails.
+def book_rails(mandate: TradableMandate, rails: M17Rails) -> BookRails:
+    """The A8 `BookRails` of one manager, control or style book: its caps plus the shared rails.
 
     The one place the roster's numbers become rail limits — nothing in the rail engine or here
     writes a cap down a second time. The buyable series is the mandate's universe series.
@@ -205,7 +204,9 @@ def book_rails(mandate: ManagerMandate | ControlMandate, rails: M17Rails) -> Boo
 
 
 def paper_account_id(book_id: str) -> str:
-    """The lower snake id of an M17 book's paper account: ``FM-SWING-10L`` → ``m17_fm_swing_10l``.
+    """The lower snake id of an M17 book's paper account.
+
+    ``FM-SWING-BRK-10L`` → ``m17_fm_swing_brk_10l``.
 
     The shape the M15.3 paper-session ledger (``paper_session.book_id``) and the order uids key on,
     so each M17 book is its own row stream there with no new schema.
@@ -1524,6 +1525,7 @@ class FundDesk:
         }
 
 
-def tradable_mandates(roster: Roster) -> tuple[ManagerMandate | ControlMandate, ...]:
-    """The roster's books that trade a paper account: managers and controls, not the bench."""
+def tradable_mandates(roster: Roster) -> tuple[TradableMandate, ...]:
+    """The roster's books that trade a paper account: manager, control and style books, not the
+    bench."""
     return tuple(b for b in roster.books if not isinstance(b, BenchMandate))

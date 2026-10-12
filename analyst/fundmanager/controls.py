@@ -1,10 +1,20 @@
-"""A10 · M17.6 — the no-LLM comparison books: ``CTRL-<manager>`` and ``BENCH-N500`` (§3).
+"""A10 · M17.6 / M17.14 — the no-LLM comparison books: ``CTRL-<book>``, ``STYLE-<manager>`` and
+``BENCH-N500`` (§3, §8 Amendment 2 d).
 
-**``CTRL-<manager>``** holds equal weight across the top *N* names of the same mechanical shortlist
-its manager receives (*N* = the manager's max positions), rebalanced weekly for a swing manager and
-every 21 sessions for a positional one. It is a `FundBook` like its manager's — same rails, same
-paper account, same cost model, same capital — so every order it places clears the M17 rails and
-every refusal is journaled. No model is called anywhere on this path.
+**``CTRL-<book>``** holds equal weight across the top *N* names of the composite shortlist every
+manager receives (*N* = the book's max positions, 15), rebalanced weekly for a swing manager's
+book and every 21 sessions for a positional one's. There is one per manager book — the primary
+₹10 L and the mirror ₹1 cr alike — each on its book's capital. It is a `FundBook` like the book it
+controls — same rails, same paper account, same cost model, same capital — so every order it
+places clears the M17 rails and every refusal is journaled. No model is called anywhere on this
+path.
+
+**``STYLE-<manager>``** (Amendment 2 d, **secondary**: reported, never used for pass/fail) runs the
+very same rule on a different ranked list — up to 15 names from its manager's starting screens
+(`style_candidates`): BRK S2 then S3, S2 first; EVT S4; TREND S1; FUND the S4 names passing the
+playbook's quality filter (`passes_quality`: debt-equity below 1.5 outside financials, and a
+positive TTM profit). Each target is still ``0.98 x mark / 15``, so a screen with fewer names
+leaves the rest in cash, and an empty screen means cash.
 
 The control's rule, fixed here a priori:
 
@@ -51,6 +61,8 @@ from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Context, Decimal, localcontext
 from pathlib import Path
 from typing import Any, Final, Protocol
 
+from analyst.commons.dossier import Dossier
+from analyst.commons.screens import CommonsScreens, Screen
 from analyst.commons.shortlist import Shortlist
 from analyst.fundmanager.books import (
     PAPER_MODE,
@@ -64,7 +76,9 @@ from analyst.fundmanager.mandate import (
     BenchMandate,
     ControlMandate,
     M17Rails,
+    ManagerStyle,
     RebalanceUnit,
+    StyleMandate,
 )
 from analyst.fundmanager.scoreboard import (
     CONTROL_REBALANCE_EVENT,
@@ -83,6 +97,9 @@ __all__ = [
     "BENCHMARK_INDEX_SLUGS",
     "CONTROL_BUY_BUDGET_FRACTION",
     "CONTROL_REBALANCE_BAND",
+    "FINANCIAL_SECTORS",
+    "FUND_MAX_DEBT_EQUITY",
+    "STYLE_RULE_VERSION",
     "BenchBook",
     "BenchJournal",
     "BenchState",
@@ -93,8 +110,15 @@ __all__ = [
     "ControlSession",
     "ControlState",
     "LakeTriBenchmark",
+    "QualityFacts",
+    "RankedTargets",
+    "passes_quality",
+    "quality_from_dossier",
     "rebalance_due",
     "record_mark",
+    "shortlist_targets",
+    "style_candidates",
+    "style_rule_bytes",
 ]
 
 _LOG = get_logger(__name__)
@@ -103,6 +127,13 @@ _LOG = get_logger(__name__)
 CONTROL_BUY_BUDGET_FRACTION: Final = Decimal("0.98")
 #: A held target is traded only when it is this far (as a fraction of its target) off target.
 CONTROL_REBALANCE_BAND: Final = Decimal("0.25")
+#: Amendment 2 (d) / the FUND playbook's quality filter: debt-equity strictly below this, outside
+#: financials (the industries in `FINANCIAL_SECTORS`, NSE's classification, where leverage is the
+#: business and the ratio says nothing about crash risk).
+FUND_MAX_DEBT_EQUITY: Final = Decimal("1.5")
+FINANCIAL_SECTORS: Final = frozenset({"Financial Services"})
+#: The style books' selection rule, versioned: part of every style book's `mandate_hash`.
+STYLE_RULE_VERSION: Final = "m17-style-books/1"
 #: The roster's benchmark label → the ``L1/benchmark_tri`` index slug it names.
 BENCHMARK_INDEX_SLUGS: Final[Mapping[str, str]] = {"nifty500-tri-proxy": "nifty500"}
 
@@ -122,7 +153,159 @@ class BenchmarkUnavailableError(ControlError):
     """The bench's index series is not in the lake, or has no level for the session asked."""
 
 
-# ── CTRL-<manager> ───────────────────────────────────────────────────────────────────────────────
+# ── what a control or style book ranks ───────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class RankedTargets:
+    """One session's ranked list a control or style book equal-weights the top of.
+
+    ``isins`` is in rank order, best first, without repeats; ``source`` and ``digest_label`` name
+    the Commons build it came from and ``digest`` that build's digest, journaled with each
+    rebalance; ``rule`` says how the list was cut from the build.
+    """
+
+    trading_date: date
+    isins: tuple[str, ...]
+    source: str
+    digest_label: str
+    digest: str
+    rule: str
+
+    def __post_init__(self) -> None:
+        if len(set(self.isins)) != len(self.isins):
+            raise ControlError(f"a ranked list repeats a name: {self.isins}")
+
+
+def shortlist_targets(shortlist: Shortlist) -> RankedTargets:
+    """The composite shortlist as a control's ranked list (verified first)."""
+    shortlist.verify()
+    return RankedTargets(
+        trading_date=shortlist.trading_date,
+        isins=tuple(e.isin for e in sorted(shortlist.entries, key=lambda e: e.position)),
+        source="commons_shortlist",
+        digest_label="shortlist_digest",
+        digest=shortlist.shortlist_digest,
+        rule="composite shortlist, by position",
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class QualityFacts:
+    """What the FUND quality filter reads of one name: its dossier's fields (fractions)."""
+
+    isin: str
+    sector: str | None
+    debt_equity: Decimal | None
+    net_margin_ttm: Decimal | None
+    pe_ttm: Decimal | None
+
+
+def quality_from_dossier(dossier: Dossier) -> QualityFacts:
+    """The quality facts of one dossier (a field of the wrong type reads as unknown)."""
+
+    def number(name: str) -> Decimal | None:
+        value = dossier.fields.get(name)
+        return value if isinstance(value, Decimal) else None
+
+    sector = dossier.fields.get("sector")
+    return QualityFacts(
+        isin=dossier.isin,
+        sector=sector if isinstance(sector, str) else None,
+        debt_equity=number("debt_equity"),
+        net_margin_ttm=number("net_margin_ttm"),
+        pe_ttm=number("pe_ttm"),
+    )
+
+
+def passes_quality(facts: QualityFacts) -> bool:
+    """The FUND playbook's quality filter, as the FUND style book applies it.
+
+    - **Positive TTM profit.** The lake states TTM PAT only through ratios whose sign is its sign:
+      the TTM net margin (PAT over positive revenue) and the TTM P/E (positive market cap over
+      PAT, unknown for a non-positive PAT). Either one positive passes; neither known fails.
+    - **Debt-equity below 1.5 outside financials.** A financial name is exempt; any other name
+      with no debt-equity on record fails — an unknown never passes a quality filter.
+    """
+    profitable = any(v is not None and v > _ZERO for v in (facts.net_margin_ttm, facts.pe_ttm))
+    if not profitable:
+        return False
+    if facts.sector in FINANCIAL_SECTORS:
+        return True
+    return facts.debt_equity is not None and facts.debt_equity < FUND_MAX_DEBT_EQUITY
+
+
+#: Each style's ranked list, in words (journaled with every style rebalance, and hashed).
+_STYLE_RULES: Final[Mapping[ManagerStyle, str]] = {
+    ManagerStyle.SWING_BREAKOUT: "S2 by rank, then S3 by rank (names already on S2 skipped)",
+    ManagerStyle.SWING_EVENT: "S4 by rank",
+    ManagerStyle.POSITIONAL_TREND: "S1 by rank",
+    ManagerStyle.POSITIONAL_FUNDAMENTAL: (
+        f"S4 by rank, keeping names with a positive TTM profit and, outside "
+        f"{sorted(FINANCIAL_SECTORS)}, debt-equity below {FUND_MAX_DEBT_EQUITY}"
+    ),
+}
+
+
+def style_rule_bytes() -> bytes:
+    """The style books' selection rule as canonical bytes (part of each style `mandate_hash`)."""
+    return json.dumps(
+        {
+            "version": STYLE_RULE_VERSION,
+            "rules": {style.value: _STYLE_RULES[style] for style in ManagerStyle},
+            "fund_max_debt_equity": str(FUND_MAX_DEBT_EQUITY),
+            "financial_sectors": sorted(FINANCIAL_SECTORS),
+            "buy_budget_fraction": str(CONTROL_BUY_BUDGET_FRACTION),
+            "rebalance_band": str(CONTROL_REBALANCE_BAND),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("ascii")
+
+
+def style_candidates(
+    style: ManagerStyle,
+    screens: CommonsScreens,
+    *,
+    quality: Mapping[str, QualityFacts] | None = None,
+) -> RankedTargets:
+    """A style book's ranked list on the screens' session (Amendment 2 d).
+
+    BRK: S2 then S3, each by rank, a name on both kept at its S2 place. EVT: S4. TREND: S1. FUND:
+    S4 names passing `passes_quality`, judged on ``quality`` (a name absent from it fails —
+    the caller supplies the facts of every S4 name). Raises `ControlError` for a FUND list with
+    no ``quality`` at all, rather than treating the whole screen as failing.
+    """
+    screens.verify()
+
+    def ranked(screen: Screen) -> list[str]:
+        return [e.isin for e in sorted(screens.ranked(screen), key=lambda e: e.position)]
+
+    if style is ManagerStyle.SWING_BREAKOUT:
+        isins = list(dict.fromkeys(ranked(Screen.S2) + ranked(Screen.S3)))
+    elif style is ManagerStyle.SWING_EVENT:
+        isins = ranked(Screen.S4)
+    elif style is ManagerStyle.POSITIONAL_TREND:
+        isins = ranked(Screen.S1)
+    else:
+        if quality is None:
+            raise ControlError("the FUND style list needs the S4 names' quality facts")
+        isins = [
+            isin
+            for isin in ranked(Screen.S4)
+            if (facts := quality.get(isin)) is not None and passes_quality(facts)
+        ]
+    return RankedTargets(
+        trading_date=screens.trading_date,
+        isins=tuple(isins),
+        source="commons_screens",
+        digest_label="screens_digest",
+        digest=screens.screens_digest,
+        rule=f"{style.value}: {_STYLE_RULES[style]}",
+    )
+
+
+# ── CTRL-<book> and STYLE-<manager> ──────────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +348,11 @@ class ControlState:
 
 
 def rebalance_due(
-    mandate: ControlMandate, state: ControlState, session: date, *, sessions_since: int | None
+    mandate: ControlMandate | StyleMandate,
+    state: ControlState,
+    session: date,
+    *,
+    sessions_since: int | None,
 ) -> bool:
     """Is ``session`` a rebalance session for ``mandate``? ``sessions_since`` counts the sessions
     in (last rebalance, session]; it is ignored for a weekly cadence and before the first one."""
@@ -194,20 +381,22 @@ class ControlSession:
 
 
 class ControlBook:
-    """``CTRL-<manager>``: equal weight over the top *N* of the session's shortlist, no LLM.
+    """``CTRL-<book>`` or ``STYLE-<manager>``: equal weight over the top *N* of a ranked list, no
+    LLM — the composite shortlist for a control (`run`), the style's screens for a style book
+    (`run_ranked` with `style_candidates`).
 
-    What it does: decide the control's orders for one session by the rule in the module docstring
+    What it does: decide the book's orders for one session by the rule in the module docstring
     and hand them to its `FundBook`, which clears them through the rails and stages them.
-    What it assumes: ``book`` is this control's own book, built from ``mandate`` (`FundDesk`
-    checks isolation), and its fills for the session were already executed.
-    What it never does: call a model, look outside the shortlist, or resize a refused order.
+    What it assumes: ``book`` is this book's own, built from ``mandate`` (`FundDesk` checks
+    isolation), and its fills for the session were already executed.
+    What it never does: call a model, look outside its ranked list, or resize a refused order.
     """
 
     __slots__ = ("_book", "_mandate", "_rails", "_state")
 
     def __init__(
         self,
-        mandate: ControlMandate,
+        mandate: ControlMandate | StyleMandate,
         book: FundBook,
         rails: M17Rails,
         *,
@@ -228,14 +417,32 @@ class ControlBook:
     def book(self) -> FundBook:
         return self._book
 
+    @property
+    def top_n(self) -> int:
+        """How many names the book equal-weights: the shortlist cut, or the style's max names."""
+        mandate = self._mandate
+        return mandate.shortlist_top_n if isinstance(mandate, ControlMandate) else mandate.max_names
+
     def run(
         self,
         session: date,
         shortlist: Shortlist | None,
         cap_tiers: Mapping[str, str | None],
     ) -> ControlSession:
-        """One session of the control: rebalance if due (and a shortlist exists), then place
-        whatever pending buys fit. ``cap_tiers`` maps the session's universe ISINs to their tier."""
+        """One session of a control: rebalance on the shortlist if due (and one exists), then
+        place whatever pending buys fit. ``cap_tiers`` maps the universe ISINs to their tier."""
+        if not isinstance(self._mandate, ControlMandate):
+            raise ControlError(f"{self._mandate.id} is not a control; it runs on its own list")
+        ranked = None if shortlist is None else shortlist_targets(shortlist)
+        return self.run_ranked(session, ranked, cap_tiers)
+
+    def run_ranked(
+        self,
+        session: date,
+        ranked: RankedTargets | None,
+        cap_tiers: Mapping[str, str | None],
+    ) -> ControlSession:
+        """One session on ``ranked`` (None: the list could not be built, a due rebalance waits)."""
         book = self._book
         if book.kill_switch.is_tripped:
             report = book.decide(session, ())
@@ -248,15 +455,15 @@ class ControlBook:
         held = {isin: q for isin, q in book.account.quantities().items() if q > 0}
         sells: list[BookOrder] = []
         rebalanced = False
-        if due and shortlist is None:
+        if due and ranked is None:
             _LOG.warning(
                 "fm_controls.rebalance_deferred",
                 book=self._mandate.id,
                 session=session.isoformat(),
-                reason="no shortlist for the session",
+                reason="no ranked list for the session",
             )
-        elif due and shortlist is not None:
-            state, sells = self._rebalance(session, shortlist, cap_tiers, held)
+        elif due and ranked is not None:
+            state, sells = self._rebalance(session, ranked, cap_tiers, held)
             rebalanced = True
 
         buys = self._pending_buys(session, state, held, sold={o.isin for o in sells})
@@ -297,18 +504,18 @@ class ControlBook:
     def _rebalance(
         self,
         session: date,
-        shortlist: Shortlist,
+        ranked: RankedTargets,
         cap_tiers: Mapping[str, str | None],
         held: Mapping[str, int],
     ) -> tuple[ControlState, list[BookOrder]]:
-        if shortlist.trading_date != session:
+        if ranked.trading_date != session:
+            what = "shortlist" if ranked.source == "commons_shortlist" else "style list"
             raise ControlError(
-                f"{self._mandate.id}: shortlist of {shortlist.trading_date.isoformat()} offered "
+                f"{self._mandate.id}: {what} of {ranked.trading_date.isoformat()} offered "
                 f"for the {session.isoformat()} rebalance"
             )
-        shortlist.verify()
-        n = self._mandate.shortlist_top_n
-        targets = tuple(e.isin for e in sorted(shortlist.entries, key=lambda e: e.position)[:n])
+        n = self.top_n
+        targets = ranked.isins[:n]
         nav = self._nav(session, held)
         with localcontext(_CONTEXT):
             each = (nav * CONTROL_BUY_BUDGET_FRACTION / Decimal(n)).quantize(
@@ -324,7 +531,7 @@ class ControlBook:
                         Side.SELL,
                         quantity,
                         f"{self._mandate.id} rebalance {session.isoformat()}: {isin} is no longer "
-                        f"in the top {n} of the shortlist",
+                        f"in the top {n} of its list ({ranked.source})",
                     )
                 )
         for isin in targets:
@@ -358,20 +565,20 @@ class ControlBook:
             cap_tiers={isin: cap_tiers.get(isin) for isin in targets},
             pending=tuple(pending),
         )
-        self._journal_rebalance(session, shortlist, state, nav)
+        self._journal_rebalance(session, ranked, state, nav)
         return state, sells
 
     def _journal_rebalance(
-        self, session: date, shortlist: Shortlist, state: ControlState, nav: Decimal
+        self, session: date, ranked: RankedTargets, state: ControlState, nav: Decimal
     ) -> None:
         book = self._book
         items = [
             EvidenceItem(
                 kind=EvidenceKind.POLICY,
-                source="commons_shortlist",
-                label="shortlist_digest",
+                source=ranked.source,
+                label=ranked.digest_label,
                 as_of=session,
-                text=shortlist.shortlist_digest,
+                text=ranked.digest,
             ),
             EvidenceItem(
                 kind=EvidenceKind.POSITION,
@@ -392,14 +599,16 @@ class ControlBook:
             decision=Decision.HEARTBEAT,
             evidence_snapshot_ref=evidence.ref().ref,
             rationale=(
-                f"control rebalance: equal weight across the top {len(state.targets)} of the "
-                f"{session.isoformat()} shortlist, {state.target_value} each"
+                f"{'style' if isinstance(self._mandate, StyleMandate) else 'control'} rebalance: "
+                f"equal weight across the top {len(state.targets)} of the {session.isoformat()} "
+                f"list ({ranked.rule}), {state.target_value} each; at most {self.top_n} names"
             ),
             payload={
                 "event": CONTROL_REBALANCE_EVENT,
                 "book": self._mandate.id,
                 "mode": PAPER_MODE,
-                "shortlist_digest": shortlist.shortlist_digest,
+                ranked.digest_label: ranked.digest,
+                "rule": ranked.rule,
                 "targets": ",".join(state.targets),
                 "target_value": str(state.target_value),
                 "cap_tiers": json.dumps(
@@ -445,8 +654,8 @@ class ControlBook:
                     isin,
                     Side.BUY,
                     quantity,
-                    f"{mandate.id}: equal weight in {isin}, top {mandate.shortlist_top_n} of the "
-                    f"{(state.last_rebalance or session).isoformat()} shortlist",
+                    f"{mandate.id}: equal weight in {isin}, top {self.top_n} of the "
+                    f"{(state.last_rebalance or session).isoformat()} list",
                 )
             )
             budget -= notional
