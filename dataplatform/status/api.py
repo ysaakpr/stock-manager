@@ -30,35 +30,39 @@ there is exactly one implementation of each question this API answers.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import date, timedelta
-from typing import Annotated, Any
+from typing import Annotated
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.requests import Request
 
 from dataplatform.ingest.calendar import CalendarError
 from dataplatform.logging import get_logger
-from dataplatform.quality.gaps import GapReportError, GapScanner, LakeL1Presence
-from dataplatform.scheduler.registry import default_registry, lag_budgets
+from dataplatform.quality.gaps import GapReportError
+from dataplatform.scheduler.registry import default_registry
 from dataplatform.status.console import router as console_router
 from dataplatform.status.deps import (
     ClockDep,
     ConnDep,
+    GapScannerDep,
     HeartbeatDep,
+    M17JournalDep,
+    RosterDep,
     SettingsDep,
     SyncStoreDep,
     clock_source,
     db_connection,
+    gap_scanner,
     heartbeat_source,
+    m17_journal_source,
+    m17_roster_source,
     settings_source,
     sync_store,
 )
 from dataplatform.status.models import (
     ArchivesOut,
-    DeclinedOut,
     GapsOut,
     HealthOut,
     JobsOut,
@@ -68,20 +72,18 @@ from dataplatform.status.models import (
     QuarantineOut,
     ServiceStatus,
     SourcesOut,
-    SourceStatusOut,
     SyncStatusOut,
 )
 from dataplatform.status.queries import (
     assess_health,
     read_archives,
     read_jobs_status,
-    read_m17_journal,
-    read_m17_roster,
     read_managers_status,
     read_paper_status,
     read_quality,
     read_quarantine_status,
 )
+from dataplatform.status.queries_data import read_sources_status, read_sync_status
 from dataplatform.status.sync_state import MalformedSyncSourceError
 from dataplatform.store.paths import PathLayoutError
 
@@ -107,18 +109,6 @@ log = get_logger(__name__)
 
 
 # ── injected dependencies (shared with the console: `dataplatform.status.deps`) ─────────────
-
-
-def gap_scanner(conn: ConnDep, settings: SettingsDep) -> GapScanner:
-    """D7's gap report (M1.11), wired to this request's connection and the configured lake.
-
-    The lake root comes from settings rather than from the process default so a test — and the
-    container, whose `/data` is a bind mount — checks the L1 partitions it actually wrote.
-    """
-    return GapScanner(conn, l1_presence=LakeL1Presence(settings.data_root))
-
-
-GapScannerDep = Annotated[GapScanner, Depends(gap_scanner)]
 
 
 async def _unreachable_database(request: Request, exc: Exception) -> Response:
@@ -202,16 +192,7 @@ def status_sync(
     What it never does: guess which datasets are "core". Green over no datasets would be vacuously
     true, so it is `null` instead — invariant #10 fails closed, here as everywhere.
     """
-    rows = store.rows_for_date(date)
-    kind = store.day_kind(date)
-    green = store.is_green(date, dataset) if dataset else None
-    return SyncStatusOut.of(
-        date,
-        rows,
-        day_kind=None if kind is None else kind.value,
-        expects_data=None if kind is None else kind.expects_data,
-        green=green,
-    )
+    return read_sync_status(store, date, dataset)
 
 
 @app.get("/status/sources", summary="Per-source last success, lag and failure streak")
@@ -226,12 +207,7 @@ def status_sources(store: SyncStoreDep, clock: ClockDep) -> SourcesOut:
     A source the Source Register DECLINED on policy grounds (D12/D19) is listed under `declined`
     whether or not it has rows, and its line, if any, carries the record and is never red.
     """
-    budgets = lag_budgets(default_registry())
-    return SourcesOut(
-        as_of=clock.today(),
-        sources=[SourceStatusOut.of(status) for status in store.source_statuses(budgets)],
-        declined={source: DeclinedOut.of(record) for source, record in store.declined.items()},
-    )
+    return read_sources_status(store, clock.today())
 
 
 @app.get("/status/jobs", summary="Every registered job: on schedule, overdue, failing or never run")
@@ -342,25 +318,12 @@ def status_paper(conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> Paper
     return read_paper_status(conn, data_root=settings.data_root, as_of=clock.now())
 
 
-def m17_roster_source() -> Any:
-    """The M17 roster, as a dependency so a test can supply a smaller one."""
-    return read_m17_roster()
-
-
-RosterDep = Annotated[Any, Depends(m17_roster_source)]
-
-
-def m17_journal_source(conn: ConnDep, settings: SettingsDep, roster: RosterDep) -> Sequence[Any]:
-    """The M17 books' journal entries, in append order — a dependency so a test can supply them."""
-    return read_m17_journal(conn, data_root=settings.data_root, roster=roster)
-
-
 @app.get(
     "/status/managers",
     summary="M17 fund managers: books, the latest session's decisions, the §6 scoreboard",
 )
 def status_managers(
-    entries: Annotated[Sequence[Any], Depends(m17_journal_source)],
+    entries: M17JournalDep,
     roster: RosterDep,
     clock: ClockDep,
 ) -> ManagersOut:

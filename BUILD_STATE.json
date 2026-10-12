@@ -600,6 +600,24 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_console_ops.py tests/unit/test_compose_ports.py -q\n(exit 0)\n...........................................                              [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/fastapi/testclient.py:1\n  /home/ubuntu/stock-manager/.worktrees/console/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n\n$ uv run ruff format --check dataplatform/status/api.py dataplatform/status/console/__init__.py dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/integration/test_console_ops.py tests/unit/test_console_ops.py\n(exit 0)\n7 files already formatted\n\n$ uv run ruff check dataplatform/status/api.py dataplatform/status/console/__init__.py dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/integration/test_console_ops.py tests/unit/test_console_ops.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/status/api.py dataplatform/status/console/__init__.py dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/integration/test_console_ops.py tests/unit/test_console_ops.py\n(exit 0)\nSuccess: no issues found in 7 source files"
     },
+    "M18.2": {
+      "attempts": 0,
+      "commit": "b069195",
+      "finished": "2026-10-12T13:01:30+00:00",
+      "note": "Data page /console/data (sync board, sources, gaps, quality, quarantine, archives) and ISIN lookup /console/data/isin; sync/sources endpoint bodies moved to queries_data and gap_scanner to deps so page and JSON share code; PR #113",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_console_data.py -q\n(exit 0)\n...............................                                          [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/fastapi/testclient.py:1\n  /home/ubuntu/stock-manager/.worktrees/console-m18-2/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n\n$ uv run ruff format --check dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/integration/test_console_data.py tests/unit/test_console_data.py\n(exit 0)\n5 files already formatted\n\n$ uv run ruff check dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/integration/test_console_data.py tests/unit/test_console_data.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/integration/test_console_data.py tests/unit/test_console_data.py\n(exit 0)\nSuccess: no issues found in 5 source files"
+    },
+    "M18.3": {
+      "attempts": 0,
+      "commit": "8ab3217",
+      "finished": "2026-10-12T13:01:49+00:00",
+      "note": "Desk page at /console/desk: paper/managers via read_paper_status/read_managers_status, journal-derived broker session, order_ + paper orders, token_usage cost (strict Decimal); assumption: broker session state is the newest journaled AUTH_REQUIRED (no live probe exists in System 1)",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_console_desk.py -q\n(exit 0)\n...........................                                              [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/fastapi/testclient.py:1\n  /home/ubuntu/stock-manager/.worktrees/console-m18-3/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n\n$ uv run ruff format --check dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/unit/test_console_desk.py\n(exit 0)\n4 files already formatted\n\n$ uv run ruff check dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/unit/test_console_desk.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/unit/test_console_desk.py\n(exit 0)\nSuccess: no issues found in 4 source files"
+    },
     "M18.4": {
       "attempts": 0,
       "commit": "40e678c",
@@ -1368,7 +1386,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-10-12T13:00:46+00:00",
+  "updated_at": "2026-10-12T13:01:49+00:00",
   "version": 1,
   "wave": 1
 }

@@ -13,8 +13,8 @@ here writes.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Annotated
+from collections.abc import Iterator, Sequence
+from typing import Annotated, Any
 
 import psycopg
 from fastapi import Depends
@@ -22,20 +22,27 @@ from fastapi import Depends
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger
+from dataplatform.quality.gaps import GapScanner, LakeL1Presence
 from dataplatform.scheduler import read_heartbeat
-from dataplatform.status.queries import HeartbeatRead
+from dataplatform.status.queries import HeartbeatRead, read_m17_journal, read_m17_roster
 from dataplatform.status.sync_state import SyncStateStore
 from dataplatform.store.db import Connection, connection
 
 __all__ = [
     "ClockDep",
     "ConnDep",
+    "GapScannerDep",
     "HeartbeatDep",
+    "M17JournalDep",
+    "RosterDep",
     "SettingsDep",
     "SyncStoreDep",
     "clock_source",
     "db_connection",
+    "gap_scanner",
     "heartbeat_source",
+    "m17_journal_source",
+    "m17_roster_source",
     "settings_source",
     "sync_store",
 ]
@@ -84,6 +91,19 @@ def sync_store(conn: ConnDep, clock: ClockDep) -> SyncStateStore:
 SyncStoreDep = Annotated[SyncStateStore, Depends(sync_store)]
 
 
+def gap_scanner(conn: ConnDep, settings: SettingsDep) -> GapScanner:
+    """D7's gap report (M1.11), wired to this request's connection and the configured lake.
+
+    The lake root comes from settings rather than from the process default so a test — and the
+    container, whose `/data` is a bind mount — checks the L1 partitions it actually wrote. Moved
+    here from `api.py` (M18.2) so the console's gaps panel declares the same callable.
+    """
+    return GapScanner(conn, l1_presence=LakeL1Presence(settings.data_root))
+
+
+GapScannerDep = Annotated[GapScanner, Depends(gap_scanner)]
+
+
 def heartbeat_source(settings: SettingsDep) -> HeartbeatRead:
     """The freshest scheduler heartbeat, or why it could not be read.
 
@@ -102,3 +122,19 @@ def heartbeat_source(settings: SettingsDep) -> HeartbeatRead:
 
 
 HeartbeatDep = Annotated[HeartbeatRead, Depends(heartbeat_source)]
+
+
+def m17_roster_source() -> Any:
+    """The M17 roster, as a dependency so a test can supply a smaller one."""
+    return read_m17_roster()
+
+
+RosterDep = Annotated[Any, Depends(m17_roster_source)]
+
+
+def m17_journal_source(conn: ConnDep, settings: SettingsDep, roster: RosterDep) -> Sequence[Any]:
+    """The M17 books' journal entries, in append order — a dependency so a test can supply them."""
+    return read_m17_journal(conn, data_root=settings.data_root, roster=roster)
+
+
+M17JournalDep = Annotated[Sequence[Any], Depends(m17_journal_source)]

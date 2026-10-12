@@ -36,7 +36,13 @@ from dataplatform.config import Settings
 from dataplatform.scheduler import Heartbeat
 from dataplatform.scheduler.registry import default_registry
 from dataplatform.status import console
-from dataplatform.status.api import app, clock_source, db_connection, heartbeat_source
+from dataplatform.status.api import (
+    app,
+    clock_source,
+    db_connection,
+    heartbeat_source,
+    m17_journal_source,
+)
 from dataplatform.status.api import settings_source as api_settings_source
 from dataplatform.status.console import READ_METHODS, router
 from dataplatform.status.console.pages import HTMX_FILE, HTMX_PATH
@@ -168,6 +174,14 @@ class StubConnection:
         if "FROM alert_condition WHERE resolved_at IS NULL" in text:
             rank = {"critical": 0, "warning": 1, "info": 2}
             return _Result(sorted(self.alerts, key=lambda a: (rank[a[2]], a[4], a[0])))
+        if text == "SELECT max(trading_date) FROM decision_journal":  # the Desk (M18.3)
+            return _Result([(None,)])
+        if any(
+            table in text
+            for table in ("FROM paper_session", "FROM decision_journal", "FROM order_",
+                          "FROM token_usage")
+        ):  # fmt: skip
+            return _Result([])  # the Desk's reads (M18.3): no paper, M17, order or cost rows
         if "FROM decision_journal" in text or "FROM case_" in text:  # the M18.4 Journal page
             return _Result([])
         raise AssertionError(f"unexpected query against the stub connection: {text}")
@@ -212,6 +226,7 @@ def _client(
     app.dependency_overrides[clock_source] = lambda: FrozenClock(now)
     app.dependency_overrides[db_connection] = lambda: conn
     app.dependency_overrides[heartbeat_source] = lambda: beat
+    app.dependency_overrides[m17_journal_source] = lambda: []  # the Desk (M18.3): no M17 entries
     return TestClient(app)
 
 
