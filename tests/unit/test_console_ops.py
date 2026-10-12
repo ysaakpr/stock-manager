@@ -168,6 +168,8 @@ class StubConnection:
         if "FROM alert_condition WHERE resolved_at IS NULL" in text:
             rank = {"critical": 0, "warning": 1, "info": 2}
             return _Result(sorted(self.alerts, key=lambda a: (rank[a[2]], a[4], a[0])))
+        if "FROM decision_journal" in text or "FROM case_" in text:  # the M18.4 Journal page
+            return _Result([])
         raise AssertionError(f"unexpected query against the stub connection: {text}")
 
 

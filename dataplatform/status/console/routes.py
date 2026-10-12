@@ -23,6 +23,7 @@ from fastapi.responses import HTMLResponse, Response
 
 from dataplatform.logging import get_logger
 from dataplatform.scheduler.registry import default_registry
+from dataplatform.status.console.journal import ROUTES as JOURNAL_ROUTES
 from dataplatform.status.console.pages import (
     HTMX_FILE,
     HTMX_PATH,
@@ -137,3 +138,5 @@ _page_route(f"/static/{HTMX_FILE}", htmx_script, name="console_htmx")
 for _slug, _label, _built in PAGES:
     if not _built:
         _page_route(f"/{_slug}", _not_built(_slug, _label), response_class=HTMLResponse, name=_slug)
+for _path, _endpoint, _name in JOURNAL_ROUTES:  # M18.4
+    _page_route(_path, _endpoint, response_class=HTMLResponse, name=_name)
