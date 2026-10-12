@@ -378,6 +378,8 @@ def test_an_entry_opens_its_payload(client: TestClient) -> None:
         {"kind": "BUYY"},
         {"before": "-5"},
         {"before": "x"},
+        {"before": "²"},
+        {"before": "9" * 19},
         {"date_from": "2026-10-02", "date_to": "2026-10-01"},
     ],
 )

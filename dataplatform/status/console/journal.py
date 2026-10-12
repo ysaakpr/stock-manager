@@ -14,6 +14,7 @@ page saying what was wrong (400), not with a JSON validation error.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from datetime import date
 from typing import Any, Final
@@ -43,6 +44,9 @@ from dataplatform.status.queries_journal import (
 __all__ = ["ROUTES"]
 
 log = get_logger(__name__)
+
+
+_CURSOR: Final = re.compile(r"[0-9]{1,18}")
 
 
 class _BadSearchError(ValueError):
@@ -78,7 +82,9 @@ def _search(
     if decision is not None and decision not in DECISION_KINDS:
         raise _BadSearchError(f"kind must be one of {', '.join(DECISION_KINDS)}, not {decision!r}")
     cursor = _text(before)
-    if cursor is not None and not cursor.isdigit():
+    # ASCII digits within bigint: `str.isdigit` admits "²", and an id past bigint is a 500 from
+    # Postgres rather than an answer.
+    if cursor is not None and _CURSOR.fullmatch(cursor) is None:
         raise _BadSearchError(f"before must be a journal entry id, not {cursor!r}")
     start, end = _day("date_from", date_from), _day("date_to", date_to)
     if start is not None and end is not None and start > end:
