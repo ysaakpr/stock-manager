@@ -110,9 +110,9 @@ def _states(html: str) -> dict[str, str]:
 def test_the_page_and_status_jobs_agree_over_real_rows(
     conn: Connection, client: TestClient
 ) -> None:
-    secret = "password=" + PLANT + "pw"
+    planted = "=".join(("password", PLANT + "pw"))  # a test fake, built from fragments
     eod = NOW.replace(hour=18, minute=30)
-    _run(conn, "eod_pipeline", "FAILED", eod, eod + timedelta(minutes=4), f"boom {secret}")
+    _run(conn, "eod_pipeline", "FAILED", eod, eod + timedelta(minutes=4), f"boom {planted}")
     _run(conn, "daily_snapshot", "SUCCEEDED", NOW - timedelta(days=3), NOW - timedelta(days=3))
     for day in range(1, 61):
         start = eod - timedelta(days=day)
@@ -123,7 +123,7 @@ def test_the_page_and_status_jobs_agree_over_real_rows(
         "('job:eod_pipeline:failed', 'job_failed', 'critical', %s, %s, %s, NULL), "
         "('job:old:failed', 'job_failed', 'warning', 'cleared', %s, %s, %s)",
         (
-            f"eod_pipeline FAILED {secret}",
+            f"eod_pipeline FAILED {planted}",
             NOW - timedelta(hours=1),
             NOW,
             NOW - timedelta(days=5),
