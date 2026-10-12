@@ -20,20 +20,41 @@ ignore the frozen clock a test or a replay set.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
 
+from dataplatform.config import Settings
+from dataplatform.ingest.source_register import Declined
 from dataplatform.quality.quarantine import read_quarantine, step_changes
+from dataplatform.redaction import mask_and_truncate
+from dataplatform.scheduler.health import JobHealth, JobHealthState, read_job_health
+from dataplatform.scheduler.registry import UNSCHEDULED, Job, JobRegistry
+from dataplatform.scheduler.runner import JOB_ERROR_CHARS, Heartbeat
 from dataplatform.status.models import (
+    AlertConditionOut,
+    AlertsOut,
     ArchiveBundleOut,
     ArchiveFileOut,
     ArchivesOut,
+    BackupFileOut,
+    BackupsOut,
+    BackupStreamOut,
     CheckCountOut,
+    DatabaseHealthOut,
+    DeclinedOut,
     GraduationOut,
+    HealthOut,
+    JobHealthOut,
+    JobLineOut,
+    JobRunOut,
+    JobRunsOut,
+    JobsOut,
     KillSwitchOut,
     ManagerBookOut,
     ManagerDecisionOut,
@@ -47,13 +68,32 @@ from dataplatform.status.models import (
     QuarantineCountOut,
     QuarantineOut,
     QuarantineStepOut,
+    SchedulerHealthOut,
+    SchedulerState,
+    ServiceStatus,
     SeverityCountOut,
     StyleBookOut,
     SuspendedHoldingOut,
 )
+from dataplatform.store.backup import BackupError, list_backups, load_sidecar, postgres_dir
 from dataplatform.store.db import Connection
 
-__all__ = ["StatusQueryError", "read_archives", "read_paper_status", "read_quality"]
+__all__ = [
+    "JOB_RUNS_LIMIT",
+    "NO_RESTORE_DRILL_RECORD",
+    "HeartbeatRead",
+    "StatusQueryError",
+    "assess_health",
+    "job_lines",
+    "read_alerts",
+    "read_archives",
+    "read_backups",
+    "read_job_runs",
+    "read_jobs_status",
+    "read_paper_status",
+    "read_quality",
+    "sort_worst_first",
+]
 
 
 class StatusQueryError(RuntimeError):
@@ -431,4 +471,314 @@ def read_managers_status(entries: Sequence[Any], *, roster: Any, as_of: datetime
         decisions_session=session,
         decisions=[ManagerDecisionOut(**line.model_dump()) for line in lines],
         suspended_holdings=[SuspendedHoldingOut(**line.model_dump()) for line in suspended],
+    )
+
+
+# ── /health and the console's health banner ────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class HeartbeatRead:
+    """The outcome of one attempt to read the heartbeat — including the attempt failing.
+
+    Three outcomes, not two: a beat, no beat at all, and no answer. Collapsing the last two into
+    `None` is exactly the conflation `/health` exists to avoid, because "no scheduler has ever
+    run" and "we could not look" have opposite operational meanings.
+    """
+
+    reachable: bool
+    beat: Heartbeat | None = None
+    error: str | None = None
+
+
+def assess_health(read: HeartbeatRead, *, now: datetime, stale_after: int) -> HealthOut:
+    """The `/health` verdict for one heartbeat read, as of the caller's injected `now`.
+
+    What it does: STALE once the newest beat is older than `stale_after` seconds, UNKNOWN when the
+    heartbeat could not be read, NEVER_RAN when the table is empty; DEGRADED for the first two.
+    What it never does: set a status code or log — `/health` does both, and the console's banner
+    renders the same object, so the probe and the page cannot disagree.
+    """
+    database = DatabaseHealthOut(reachable=read.reachable, error=read.error)
+    if read.error is not None:
+        scheduler = SchedulerHealthOut(
+            state=SchedulerState.UNKNOWN, stale_after_seconds=stale_after
+        )
+    elif read.beat is None:
+        scheduler = SchedulerHealthOut(
+            state=SchedulerState.NEVER_RAN, stale_after_seconds=stale_after
+        )
+    else:
+        age = read.beat.age(now).total_seconds()
+        scheduler = SchedulerHealthOut(
+            state=SchedulerState.STALE if age > stale_after else SchedulerState.OK,
+            scheduler_id=read.beat.name,
+            last_beat_at=read.beat.beat_at,
+            age_seconds=age,
+            stale_after_seconds=stale_after,
+        )
+    degraded = read.error is not None or scheduler.state is SchedulerState.STALE
+    return HealthOut(
+        status=ServiceStatus.DEGRADED if degraded else ServiceStatus.OK,
+        checked_at=now,
+        database=database,
+        scheduler=scheduler,
+    )
+
+
+# ── /status/jobs and the console's Ops page ────────────────────────────────────────────────
+
+#: How many attempts the per-job drill-down lists.
+JOB_RUNS_LIMIT: Final = 50
+
+#: Worst first for an operator: what is broken, then what is late, then what never started.
+_STATE_RANK: Final[Mapping[JobHealthState, int]] = {
+    JobHealthState.FAILING: 0,
+    JobHealthState.OVERDUE: 1,
+    JobHealthState.NEVER_RAN: 2,
+    JobHealthState.RUNNING: 3,
+    JobHealthState.OK: 4,
+}
+
+
+def _masked(text: str | None) -> str | None:
+    """`job_run.error` as it may be shown: masked, then bounded (invariant #13).
+
+    The runner masks before it writes, but a row written before it did — or by a by-hand run —
+    is read here too, so every reader masks again rather than trusting the writer.
+    """
+    return None if text is None else mask_and_truncate(text, JOB_ERROR_CHARS)
+
+
+def read_jobs_status(
+    conn: Connection,
+    registry: JobRegistry,
+    *,
+    now: datetime,
+    timezone: ZoneInfo,
+    declined: Mapping[str, Declined],
+) -> JobsOut:
+    """`GET /status/jobs`: every job in `registry` assessed against `job_run` as of `now`.
+
+    Registry order, every registered job whether or not it has rows, the `UNSCHEDULED` ledger and
+    the declined sources. `last_error` is masked on the way out.
+    """
+    jobs = read_job_health(conn, registry, now=now, timezone=timezone)
+    return JobsOut(
+        as_of=now,
+        healthy=all(job.healthy for job in jobs),
+        jobs=[
+            JobHealthOut.of(job).model_copy(update={"last_error": _masked(job.runs.last_error)})
+            for job in jobs
+        ],
+        unscheduled=dict(UNSCHEDULED),
+        declined={source: DeclinedOut.of(record) for source, record in declined.items()},
+    )
+
+
+_NEWEST_ATTEMPT_SQL: Final = """
+SELECT DISTINCT ON (job_name) job_name, started_at, finished_at
+FROM job_run
+ORDER BY job_name, started_at DESC
+"""
+
+
+def _seconds(start: datetime | None, end: datetime | None) -> float | None:
+    return None if start is None or end is None else (end - start).total_seconds()
+
+
+def _line(
+    health: JobHealth, job: Job, finished: datetime | None, *, now: datetime, timezone: ZoneInfo
+) -> JobLineOut:
+    trigger = job.trigger(timezone)
+    return JobLineOut(
+        name=health.name,
+        cron=health.cron,
+        state=health.state,
+        healthy=health.healthy,
+        due_since=health.due_since,
+        last_state=health.runs.last_state,
+        last_started_at=health.runs.last_started_at,
+        last_finished_at=finished,
+        last_duration_seconds=_seconds(health.runs.last_started_at, finished),
+        last_success_at=health.runs.last_success_at,
+        last_error=_masked(health.runs.last_error),
+        next_fire_at=trigger.get_next_fire_time(None, now),
+        timeout_seconds=int(job.timeout.total_seconds()),
+    )
+
+
+def job_lines(
+    conn: Connection, registry: JobRegistry, *, now: datetime, timezone: ZoneInfo
+) -> list[JobLineOut]:
+    """Every registered job's Ops line, in registry order (`sort_worst_first` orders them).
+
+    State comes from `scheduler.health.read_job_health` — the call `/status/jobs` makes — and the
+    newest attempt's `finished_at` from one more read, matched on its `started_at` so a run that
+    began between the two reads is reported as still running rather than given a stale duration.
+    """
+    healths = read_job_health(conn, registry, now=now, timezone=timezone)
+    newest = {str(row[0]): (row[1], row[2]) for row in conn.execute(_NEWEST_ATTEMPT_SQL).fetchall()}
+    lines: list[JobLineOut] = []
+    for health in healths:
+        started, finished = newest.get(health.name, (None, None))
+        if started != health.runs.last_started_at:
+            finished = None
+        job = registry.get(health.name)
+        lines.append(_line(health, job, finished, now=now, timezone=timezone))
+    return lines
+
+
+def sort_worst_first(lines: Sequence[JobLineOut]) -> list[JobLineOut]:
+    """FAILING, then OVERDUE, then NEVER_RAN, RUNNING, OK; by name within a state."""
+    return sorted(lines, key=lambda line: (_STATE_RANK[line.state], line.name))
+
+
+_JOB_RUNS_SQL: Final = """
+SELECT run_id, state, instance, started_at, finished_at, error
+FROM job_run
+WHERE job_name = %s
+ORDER BY started_at DESC
+LIMIT %s
+"""
+
+
+def read_job_runs(
+    conn: Connection, job: Job, *, now: datetime, limit: int = JOB_RUNS_LIMIT
+) -> JobRunsOut:
+    """The newest `limit` `job_run` rows of `job`, newest first, errors masked."""
+    runs = [
+        JobRunOut(
+            run_id=str(row[0]),
+            state=str(row[1]),
+            instance=str(row[2]),
+            started_at=row[3],
+            finished_at=row[4],
+            duration_seconds=_seconds(row[3], row[4]),
+            error=_masked(None if row[5] is None else str(row[5])),
+        )
+        for row in conn.execute(_JOB_RUNS_SQL, (job.name, limit)).fetchall()
+    ]
+    return JobRunsOut(as_of=now, job=job.name, cron=job.cron, runs=runs, limit=limit)
+
+
+# ── alerts ─────────────────────────────────────────────────────────────────────────────────
+
+_OPEN_ALERTS_SQL: Final = """
+SELECT dedup_key, trigger, severity, title, opened_at, last_seen_at
+FROM alert_condition
+WHERE resolved_at IS NULL
+ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END, opened_at, dedup_key
+"""
+
+#: The longest alert title shown; `alert_triggers` keeps titles to one line.
+_TITLE_CHARS: Final = 400
+
+
+def read_alerts(
+    conn: Connection, *, now: datetime, provider: str, failure_alerts: JobLineOut | None
+) -> AlertsOut:
+    """Open `alert_condition` rows (critical first, then oldest), and the alerter's own state.
+
+    `failure_alerts` is that job's Ops line, passed in so the panel shows the same verdict as the
+    jobs table: a condition list is only as current as the last tick that evaluated it.
+    """
+    return AlertsOut(
+        as_of=now,
+        provider=provider,
+        open=[
+            AlertConditionOut(
+                dedup_key=str(row[0]),
+                trigger=str(row[1]),
+                severity=str(row[2]),
+                title=mask_and_truncate(str(row[3]), _TITLE_CHARS),
+                opened_at=row[4],
+                last_seen_at=row[5],
+            )
+            for row in conn.execute(_OPEN_ALERTS_SQL).fetchall()
+        ],
+        failure_alerts=failure_alerts,
+    )
+
+
+# ── backups ────────────────────────────────────────────────────────────────────────────────
+
+#: There is no recorded drill to read: `python -m dataplatform.store.backup drill` prints its
+#: report and exits. Said on the page rather than left blank, because a blank reads as "passed".
+NO_RESTORE_DRILL_RECORD: Final = (
+    "no restore-drill result is recorded: the drill prints its report and writes none"
+)
+
+
+def _count_lines(path: Path) -> int:
+    count = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1 << 20):
+            count += chunk.count(b"\n")
+    return count
+
+
+def _postgres_stream(settings: Settings, now: datetime, line: JobLineOut | None) -> BackupStreamOut:
+    directory = postgres_dir(settings)
+    try:
+        dumps = list_backups(directory, settings.tzinfo)
+        if not dumps:
+            return BackupStreamOut(job="postgres_backup", line=line, newest=None, files=0)
+        stamp = max(dumps)
+        path = dumps[stamp]
+        sha = load_sidecar(path).get("sha256")
+        newest = BackupFileOut(
+            name=path.name,
+            bytes=path.stat().st_size,
+            written_at=stamp,
+            age_seconds=(now - stamp).total_seconds(),
+            sha256=sha if isinstance(sha, str) else None,
+        )
+    except (OSError, BackupError) as error:
+        return BackupStreamOut(
+            job="postgres_backup", line=line, newest=None, files=0, error=str(error)
+        )
+    return BackupStreamOut(job="postgres_backup", line=line, newest=newest, files=len(dumps))
+
+
+def _l0_stream(settings: Settings, now: datetime, line: JobLineOut | None) -> BackupStreamOut:
+    manifest = settings.backup_root / "l0" / "MANIFEST.sha256"
+    try:
+        if not manifest.is_file():
+            return BackupStreamOut(job="l0_backup", line=line, newest=None, files=0)
+        stat = manifest.stat()
+        written = datetime.fromtimestamp(stat.st_mtime, tz=settings.tzinfo)
+        newest = BackupFileOut(
+            name=manifest.name,
+            bytes=stat.st_size,
+            written_at=written,
+            age_seconds=(now - written).total_seconds(),
+            entries=_count_lines(manifest),
+        )
+    except OSError as error:
+        return BackupStreamOut(job="l0_backup", line=line, newest=None, files=0, error=str(error))
+    return BackupStreamOut(job="l0_backup", line=line, newest=newest, files=1)
+
+
+def read_backups(
+    settings: Settings, *, now: datetime, lines: Mapping[str, JobLineOut]
+) -> BackupsOut:
+    """The backup panel: each stream's job line and the newest file it left under BACKUP_ROOT.
+
+    What it does: lists finished dumps the way retention and the drill do
+    (`store.backup.list_backups` — named like ours *and* with a valid sidecar) and stats the L0
+    manifest. `lines` is the Ops page's job lines by name, so "last run" is the jobs table's.
+    What it assumes: nothing about BACKUP_ROOT being mounted. The status container does not see the
+    host's backup directory unless it is bound in, and `root_visible=false` says exactly that
+    instead of reporting "no backups".
+    What it never does: open, verify or restore a dump.
+    """
+    root = settings.backup_root
+    return BackupsOut(
+        as_of=now,
+        backup_root=str(root),
+        root_visible=root.is_dir(),
+        postgres=_postgres_stream(settings, now, lines.get("postgres_backup")),
+        l0=_l0_stream(settings, now, lines.get("l0_backup")),
+        restore_drill=NO_RESTORE_DRILL_RECORD,
     )

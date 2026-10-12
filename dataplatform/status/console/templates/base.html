@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>{{title}} · trading-platform console</title>
+    <!-- Vendored and pinned (M18.1): served from this app, never a CDN, so the console works with
+         no outbound network. The page is complete without it; htmx only refreshes the jobs table. -->
+    <script src="/console/static/{{htmx_file}}" integrity="{{htmx_integrity}}" defer></script>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; line-height: 1.4; color: #1a1a1a; }
+      header { background: #1f2933; color: #f5f7fa; padding: 0.6rem 1.5rem; display: flex; gap: 2rem; align-items: baseline; }
+      header strong { font-size: 1.05rem; }
+      nav a { color: #cbd2d9; margin-right: 1.2rem; text-decoration: none; }
+      nav a.current { color: #fff; border-bottom: 2px solid #fff; }
+      header .asof { margin-left: auto; color: #9aa5b1; font-size: 0.85rem; }
+      main { padding: 1rem 1.5rem 3rem; max-width: 110rem; }
+      h2 { margin: 1.5rem 0 0.4rem; font-size: 1.1rem; }
+      table { border-collapse: collapse; width: 100%; margin: 0.3rem 0 1rem; font-size: 0.88rem; }
+      th, td { border: 1px solid #e4e7eb; padding: 0.3rem 0.5rem; text-align: left; vertical-align: top; }
+      th { background: #f5f7fa; }
+      td.num { text-align: right; font-variant-numeric: tabular-nums; }
+      .muted { color: #7b8794; }
+      .mono, pre { font-family: ui-monospace, monospace; font-size: 0.8rem; }
+      pre { margin: 0; white-space: pre-wrap; word-break: break-word; }
+      .banner { padding: 0.6rem 1rem; border-radius: 6px; margin: 0.5rem 0 1rem; }
+      .banner.ok { background: #e3f9e5; border: 1px solid #57ae5b; }
+      .banner.bad { background: #ffe3e3; border: 1px solid #e12d39; }
+      .banner.warn { background: #fffbea; border: 1px solid #f0b429; }
+      .state { font-weight: 600; padding: 0 0.3rem; border-radius: 3px; white-space: nowrap; }
+      .state-FAILING, .state-FAILED, .state-TIMED_OUT, .state-critical, .state-DEGRADED, .state-STALE, .state-UNKNOWN { background: #ffe3e3; color: #a61b1b; }
+      .state-OVERDUE, .state-NEVER_RAN, .state-warning { background: #fffbea; color: #8d2b0b; }
+      .state-RUNNING, .state-info, .state-SKIPPED_LOCKED { background: #e6f6ff; color: #035388; }
+      .state-OK, .state-SUCCEEDED { background: #e3f9e5; color: #0e5814; }
+      .panel { border: 1px solid #e4e7eb; border-radius: 6px; padding: 0.4rem 1rem 0.6rem; margin: 0.8rem 0; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>trading-platform</strong>
+      <nav>{{nav}}</nav>
+      <span class="asof">as of {{as_of}} · read-only</span>
+    </header>
+    <main>
+      {{body}}
+    </main>
+  </body>
+</html>
