@@ -40,12 +40,13 @@ from starlette.requests import Request
 
 from dataplatform.ingest.calendar import CalendarError
 from dataplatform.logging import get_logger
-from dataplatform.quality.gaps import GapReportError, GapScanner, LakeL1Presence
-from dataplatform.scheduler.registry import default_registry, lag_budgets
+from dataplatform.quality.gaps import GapReportError
+from dataplatform.scheduler.registry import default_registry
 from dataplatform.status.console import router as console_router
 from dataplatform.status.deps import (
     ClockDep,
     ConnDep,
+    GapScannerDep,
     HeartbeatDep,
     M17JournalDep,
     RosterDep,
@@ -53,6 +54,7 @@ from dataplatform.status.deps import (
     SyncStoreDep,
     clock_source,
     db_connection,
+    gap_scanner,
     heartbeat_source,
     m17_journal_source,
     m17_roster_source,
@@ -61,7 +63,6 @@ from dataplatform.status.deps import (
 )
 from dataplatform.status.models import (
     ArchivesOut,
-    DeclinedOut,
     GapsOut,
     HealthOut,
     JobsOut,
@@ -71,7 +72,6 @@ from dataplatform.status.models import (
     QuarantineOut,
     ServiceStatus,
     SourcesOut,
-    SourceStatusOut,
     SyncStatusOut,
 )
 from dataplatform.status.queries import (
@@ -83,6 +83,7 @@ from dataplatform.status.queries import (
     read_quality,
     read_quarantine_status,
 )
+from dataplatform.status.queries_data import read_sources_status, read_sync_status
 from dataplatform.status.sync_state import MalformedSyncSourceError
 from dataplatform.store.paths import PathLayoutError
 
@@ -108,18 +109,6 @@ log = get_logger(__name__)
 
 
 # ── injected dependencies (shared with the console: `dataplatform.status.deps`) ─────────────
-
-
-def gap_scanner(conn: ConnDep, settings: SettingsDep) -> GapScanner:
-    """D7's gap report (M1.11), wired to this request's connection and the configured lake.
-
-    The lake root comes from settings rather than from the process default so a test — and the
-    container, whose `/data` is a bind mount — checks the L1 partitions it actually wrote.
-    """
-    return GapScanner(conn, l1_presence=LakeL1Presence(settings.data_root))
-
-
-GapScannerDep = Annotated[GapScanner, Depends(gap_scanner)]
 
 
 async def _unreachable_database(request: Request, exc: Exception) -> Response:
@@ -203,16 +192,7 @@ def status_sync(
     What it never does: guess which datasets are "core". Green over no datasets would be vacuously
     true, so it is `null` instead — invariant #10 fails closed, here as everywhere.
     """
-    rows = store.rows_for_date(date)
-    kind = store.day_kind(date)
-    green = store.is_green(date, dataset) if dataset else None
-    return SyncStatusOut.of(
-        date,
-        rows,
-        day_kind=None if kind is None else kind.value,
-        expects_data=None if kind is None else kind.expects_data,
-        green=green,
-    )
+    return read_sync_status(store, date, dataset)
 
 
 @app.get("/status/sources", summary="Per-source last success, lag and failure streak")
@@ -227,12 +207,7 @@ def status_sources(store: SyncStoreDep, clock: ClockDep) -> SourcesOut:
     A source the Source Register DECLINED on policy grounds (D12/D19) is listed under `declined`
     whether or not it has rows, and its line, if any, carries the record and is never red.
     """
-    budgets = lag_budgets(default_registry())
-    return SourcesOut(
-        as_of=clock.today(),
-        sources=[SourceStatusOut.of(status) for status in store.source_statuses(budgets)],
-        declined={source: DeclinedOut.of(record) for source, record in store.declined.items()},
-    )
+    return read_sources_status(store, clock.today())
 
 
 @app.get("/status/jobs", summary="Every registered job: on schedule, overdue, failing or never run")

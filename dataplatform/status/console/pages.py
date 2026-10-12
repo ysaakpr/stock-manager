@@ -61,7 +61,7 @@ JOBS_REFRESH_SECONDS: Final = 30
 #: The console's pages in navigation order: (slug, label, built). Later M18 tasks flip `built`.
 PAGES: Final[tuple[tuple[str, str, bool], ...]] = (
     ("ops", "Ops", True),
-    ("data", "Data", False),
+    ("data", "Data", True),
     ("desk", "Desk", True),
     ("journal", "Journal", False),
 )
