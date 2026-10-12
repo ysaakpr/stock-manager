@@ -507,12 +507,20 @@ sells" column above; the total is the scorecard's.
 - **The trades are identical.** For floor-only decade ₹10 cr, the full ledgers were compared: all
   2,015 trades and every dividend, interest and corporate-event line match exactly.
 
-So A1's refusals are not A1's doing. Every one is a sell that D13 itself made and the rail
-refused, so the interaction Amendment 1 (d′) anticipated never arose. The likely reading is that
-the top-20 12-1 basket never contained a name whose 12-1 return fell below the repo-based cash
-hurdle. That reading is not proven here: the saved runs keep trades, not the policy's
-`absolute_momentum_hurdle` evidence, so no rebalance's hurdle can be read back from them. Under the
-rule this changes nothing. A1 ties D13 on criteria 1–4 and fails 5, since an identical Sharpe
+So A1's refusals are not A1's doing. The identical MIN_HOLDINGS refusal counts are D13's own
+regime-parking sells: every one is a sell that D13 itself made and the rail refused, so the
+interaction Amendment 1 (d′) anticipated never arose.
+
+**Why A1 never bound, verified in review.** On the frozen lake, over all 96 risk-on rebalances of
+the floor-only decade at both floors, no name in the top-30 sell band had a 12-1 return at or
+below the hurdle.
+- The closest call was 2019-02-01 at ₹10 cr: the 30th name's 12-1 return was 17.22% against a
+  hurdle of 5.49%, a margin of about 11.7 pp.
+- At ₹1 cr the closest call's 30th name was at 31.5%.
+- On the 24 risk-off rebalances the book parks in cash before A1 runs, so A1 has nothing to act
+  on.
+
+Under the rule this changes nothing. A1 ties D13 on criteria 1–4 and fails 5, since an identical Sharpe
 gives p = 0.0602. Even if A1 had passed, it would not be the Step-1 choice.
 
 ### Run inputs and provenance
@@ -608,6 +616,19 @@ starts.
   to append only. Amendment 3 says it stands in for the §7 entry.
 - **D25 is still pending the owner's ratification.** As shown above, choosing at ₹1 cr instead
   would not change the verdict.
-- **Why A1 never bound is not proven.** A1's equality with D13 is explained above only as far as
-  the saved runs allow. Confirming that the hurdle never bound would take a replay that records
-  the policy evidence. That replay is outside this task, and no new backtest was launched.
+- **A1's hurdle formula differs from the pre-registered one.** The code takes the repo rate in
+  force on the decision date and compounds it over 335 days
+  (`backtest/policies/momentum_v2_overlays.py:127-132`). The pre-registration specifies a simple
+  sum of daily rates over the span. The two differ by at most about 0.2 pp: the hurdle ranges
+  3.21–5.49% as implemented and 3.21–5.69% as pre-registered. Neither came within 11 pp of
+  binding (above), so no result changes.
+
+### Notes on the artifacts
+
+- **`selected` in a run directory's `results.json` is not the verdict.** That field is the
+  driver's own pick, and it ignores A2's dilution. The verdict is the one above, from the rule.
+- **The Step-1 header's "pending owner confirmation" is stale.** The generated text predates D25
+  being recorded. D25 is recorded, and is still pending the owner's ratification.
+- **The frozen lake is reproducible only while live files are never rewritten in place.** It is a
+  hard-link copy, so it shares inodes with the live `data/`. A write that replaces a file (new
+  inode) leaves the copy intact; a write in place would change both.
