@@ -182,6 +182,8 @@ class StubConnection:
                           "FROM token_usage")
         ):  # fmt: skip
             return _Result([])  # the Desk's reads (M18.3): no paper, M17, order or cost rows
+        if "FROM decision_journal" in text or "FROM case_" in text:  # the M18.4 Journal page
+            return _Result([])
         raise AssertionError(f"unexpected query against the stub connection: {text}")
 
 

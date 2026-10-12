@@ -25,6 +25,7 @@ from dataplatform.logging import get_logger
 from dataplatform.scheduler.registry import default_registry
 from dataplatform.status.console.data import ROUTES as DATA_ROUTES
 from dataplatform.status.console.desk import DESK_PATH, desk_page
+from dataplatform.status.console.journal import ROUTES as JOURNAL_ROUTES
 from dataplatform.status.console.pages import (
     HTMX_FILE,
     HTMX_PATH,
@@ -141,4 +142,6 @@ for _slug, _label, _built in PAGES:
     if not _built:
         _page_route(f"/{_slug}", _not_built(_slug, _label), response_class=HTMLResponse, name=_slug)
 for _path, _endpoint, _name in DATA_ROUTES:  # M18.2: /console/data
+    _page_route(_path, _endpoint, response_class=HTMLResponse, name=_name)
+for _path, _endpoint, _name in JOURNAL_ROUTES:  # M18.4
     _page_route(_path, _endpoint, response_class=HTMLResponse, name=_name)

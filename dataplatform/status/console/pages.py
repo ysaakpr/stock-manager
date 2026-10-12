@@ -63,7 +63,7 @@ PAGES: Final[tuple[tuple[str, str, bool], ...]] = (
     ("ops", "Ops", True),
     ("data", "Data", True),
     ("desk", "Desk", True),
-    ("journal", "Journal", False),
+    ("journal", "Journal", True),
 )
 
 _CURRENT: Final = ' class="current"'
