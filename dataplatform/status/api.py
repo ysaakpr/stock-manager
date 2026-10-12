@@ -34,7 +34,7 @@ from datetime import date, timedelta
 from typing import Annotated
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.requests import Request
 
