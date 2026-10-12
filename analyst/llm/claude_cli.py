@@ -38,6 +38,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
+from analyst.llm.cli_env import claude_cli_env
 from analyst.llm.client import (
     DEFAULT_MAX_TOKENS,
     LLMCredentialError,
@@ -54,6 +55,7 @@ from analyst.llm.client import (
 )
 from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger
+from dataplatform.redaction import mask_secrets
 
 __all__ = ["CLAUDE_CLI_PROVIDER", "STRUCTURED_TOOL_CALL_ID", "ClaudeCliLLM"]
 
@@ -84,6 +86,10 @@ _EXECUTABLE: Final[str] = "claude"
 #: this constant was found. With `--tools ""` there is nothing for a second turn to *do* except
 #: emit the structured output, so this bounds the loop without constraining the answer.
 _MAX_TURNS: Final[int] = 2
+
+#: How much of the CLI's own output an error message quotes, after masking — the same bound the
+#: Commons fetcher puts on its stderr.
+_CLI_DETAIL_CHARS: Final[int] = 400
 
 #: CLI stop reasons, mapped to the vocabulary `analyst/` uses. The CLI reports the underlying API
 #: reason, so this is the same table `AnthropicLLM` keeps, minus the ones a single-turn call with
@@ -274,6 +280,7 @@ class ClaudeCliLLM:
                 text=True,
                 timeout=self._timeout_seconds,
                 check=False,
+                env=claude_cli_env(),
             )
         except subprocess.TimeoutExpired as error:
             raise LLMError(
@@ -306,18 +313,34 @@ class ClaudeCliLLM:
             if any(marker in combined for marker in _RATE_LIMIT_MARKERS):
                 raise LLMRateLimitError(
                     f"the Claude CLI was rate limited for {model} (exit {finished.returncode}): "
-                    f"{finished.stderr.strip() or finished.stdout.strip() or '(no output)'}"
+                    f"{_cli_detail(finished.stderr.strip() or finished.stdout.strip())}"
                 )
             raise LLMError(
                 f"the Claude CLI failed for {model} (exit {finished.returncode}): "
-                f"{finished.stderr.strip() or finished.stdout.strip() or '(no output)'}"
+                f"{_cli_detail(finished.stderr.strip() or finished.stdout.strip())}"
             )
         if not isinstance(parsed, dict):
             raise LLMError(
                 f"the Claude CLI returned output that is not a JSON object for {model}: "
-                f"{finished.stdout[:200]!r}"
+                f"{_cli_detail(finished.stdout)!r}"
             )
         return parsed
+
+
+def _cli_detail(output: str) -> str:
+    """The CLI's own output as an error message may quote it: secret-masked, then bounded.
+
+    An `LLMError` does not stay in a log line. The M17 runtime writes it into the journal's
+    rationale and into the next prompt's unfulfilled reasons, both of which land in the
+    append-only journal and its evidence store, so whatever the CLI printed — an echoed header, a
+    config dump, a token in a URL — is masked here, where it is raised, and cut to a size that
+    diagnoses without republishing a transcript. Masking comes first so a cut cannot leave half a
+    secret the patterns no longer recognise.
+    """
+    masked = mask_secrets(output) or "(no output)"
+    if len(masked) <= _CLI_DETAIL_CHARS:
+        return masked
+    return masked[: _CLI_DETAIL_CHARS - 1] + "…"
 
 
 def _render_prompt(messages: Sequence[Message]) -> str:

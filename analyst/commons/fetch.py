@@ -94,6 +94,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
+from analyst.llm.cli_env import claude_cli_env
 from analyst.llm.client import Usage
 from dataplatform.clock import Clock
 from dataplatform.logging import get_logger
@@ -178,14 +179,14 @@ def _normalise_url(url: str) -> str:
     parts = urlsplit(url.strip())
     scheme = parts.scheme.lower()
     if scheme not in {"http", "https"}:
-        raise ValueError(f"a fetch URL must be http or https, got {url!r}")
+        raise ValueError(f"a fetch URL must be http or https, got {mask_secrets(url)!r}")
     if parts.username is not None or parts.password is not None:
         raise ValueError(
             "a fetch URL may not carry userinfo: it would be a credential in the index"
         )
     host = (parts.hostname or "").lower()
     if not host:
-        raise ValueError(f"a fetch URL needs a host, got {url!r}")
+        raise ValueError(f"a fetch URL needs a host, got {mask_secrets(url)!r}")
     port = parts.port
     netloc = (
         host
@@ -225,6 +226,9 @@ class FetchRequest:
             raise ValueError(f"a query is capped at {MAX_QUERY_CHARS} characters")
         if self.kind is FetchKind.URL and len(self.target.encode()) > MAX_URL_BYTES:
             raise ValueError(f"a URL is capped at {MAX_URL_BYTES} bytes")
+        # This also refuses a capability URL — one whose path is the credential, such as a Drive
+        # `/file/d/<id>` share link or a webhook — because the redaction rules mask a token-shaped
+        # path segment. A manager loses that page; the index never holds a working share link.
         if mask_secrets(self.target, drop_url_queries=False) != self.target:
             raise ValueError(
                 "this fetch target looks like it carries a credential; it would be stored in the "
@@ -827,6 +831,7 @@ class ClaudeWebFetcher:
                     timeout=self._timeout_seconds,
                     check=False,
                     cwd=workdir,
+                    env=claude_cli_env(),
                 )
             except subprocess.TimeoutExpired as error:
                 raise FetchError(
