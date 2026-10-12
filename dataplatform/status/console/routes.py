@@ -23,6 +23,7 @@ from fastapi.responses import HTMLResponse, Response
 
 from dataplatform.logging import get_logger
 from dataplatform.scheduler.registry import default_registry
+from dataplatform.status.console.desk import DESK_PATH, desk_page
 from dataplatform.status.console.pages import (
     HTMX_FILE,
     HTMX_PATH,
@@ -134,6 +135,7 @@ _page_route("/ops", ops_page, response_class=HTMLResponse, name="console_ops")
 _page_route("/ops/jobs", jobs_fragment, response_class=HTMLResponse, name="console_jobs")
 _page_route("/ops/jobs/{name}", job_page, response_class=HTMLResponse, name="console_job")
 _page_route(f"/static/{HTMX_FILE}", htmx_script, name="console_htmx")
+_page_route(DESK_PATH, desk_page, response_class=HTMLResponse, name="console_desk")
 for _slug, _label, _built in PAGES:
     if not _built:
         _page_route(f"/{_slug}", _not_built(_slug, _label), response_class=HTMLResponse, name=_slug)
