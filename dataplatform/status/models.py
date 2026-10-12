@@ -36,9 +36,14 @@ from dataplatform.status.sync_state import GreenStatus, SourceStatus, SyncRecord
 type TradingDate = date
 
 __all__ = [
+    "AlertConditionOut",
+    "AlertsOut",
     "ArchiveBundleOut",
     "ArchiveFileOut",
     "ArchivesOut",
+    "BackupFileOut",
+    "BackupStreamOut",
+    "BackupsOut",
     "DatabaseHealthOut",
     "DeclinedOut",
     "GapEntryOut",
@@ -46,6 +51,9 @@ __all__ = [
     "GapsOut",
     "HealthOut",
     "JobHealthOut",
+    "JobLineOut",
+    "JobRunOut",
+    "JobRunsOut",
     "JobsOut",
     "ManagerBookOut",
     "ManagerDecisionOut",
@@ -302,6 +310,133 @@ class JobsOut(BaseModel):
         default_factory=dict,
         description="Source Register ids DECLINED on policy grounds — never scheduled by design, "
         "so neither a gap nor a failure",
+    )
+
+
+# ── the operator console's Ops page (M18.1) ───────────────────────────────────────────────
+# Read by `dataplatform.status.console`; shaped as wire models so a later JSON endpoint can serve
+# the same objects. Every free-text field arrives already masked (`dataplatform.redaction`).
+
+
+class JobLineOut(BaseModel):
+    """One registered job as the Ops page lists it: `/status/jobs`'s line plus its schedule.
+
+    `state`, `due_since` and the `last_*` attempt fields are `scheduler.health`'s verdict verbatim —
+    the same `read_job_health` call `/status/jobs` makes — so the page and the endpoint cannot
+    disagree about whether a job is FAILING or OVERDUE. `next_fire_at` and `timeout_seconds` come
+    from the registry's cron and budget; the duration is the newest attempt's.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    cron: str
+    state: JobHealthState
+    healthy: bool
+    due_since: datetime | None
+    last_state: str | None
+    last_started_at: datetime | None
+    last_finished_at: datetime | None
+    last_duration_seconds: float | None = Field(
+        description="finished_at minus started_at of the newest attempt; null while it runs"
+    )
+    last_success_at: datetime | None
+    last_error: str | None = Field(description="The newest attempt's error, masked and bounded")
+    next_fire_at: datetime | None = Field(description="The cron's next fire after as_of")
+    timeout_seconds: int
+
+
+class JobRunOut(BaseModel):
+    """One `job_run` row: an attempt, its outcome and how long it took."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    run_id: str
+    state: str
+    instance: str
+    started_at: datetime
+    finished_at: datetime | None
+    duration_seconds: float | None = Field(description="null while the attempt is RUNNING")
+    error: str | None = Field(description="Masked and bounded; null unless FAILED or TIMED_OUT")
+
+
+class JobRunsOut(BaseModel):
+    """The newest `limit` attempts of one registered job, newest first."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    as_of: datetime
+    job: str
+    cron: str
+    runs: list[JobRunOut]
+    limit: int
+
+
+class AlertConditionOut(BaseModel):
+    """One open `alert_condition` row (0013): a condition that has paged and not yet cleared."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    dedup_key: str
+    trigger: str
+    severity: str
+    title: str = Field(description="The title the onset paged with, masked")
+    opened_at: datetime
+    last_seen_at: datetime
+
+
+class AlertsOut(BaseModel):
+    """Open alert conditions, worst first, and the state of the machinery that raises them."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    as_of: datetime
+    provider: str = Field(description="ALERT_PROVIDER: the channel an onset is delivered on")
+    open: list[AlertConditionOut]
+    failure_alerts: JobLineOut | None = Field(
+        description="The `failure_alerts` job's line — a stopped evaluator raises no alert at all"
+    )
+
+
+class BackupFileOut(BaseModel):
+    """The newest file of one backup stream under `BACKUP_ROOT`."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str
+    bytes: int
+    written_at: datetime = Field(
+        description="The dump's own IST stamp for Postgres; the file's mtime for the L0 manifest"
+    )
+    age_seconds: float = Field(description="as_of minus written_at")
+    sha256: str | None = Field(default=None, description="From the dump's sidecar, when it has one")
+    entries: int | None = Field(default=None, description="Lines in the L0 manifest")
+
+
+class BackupStreamOut(BaseModel):
+    """One backup job (`postgres_backup` or `l0_backup`): its last run and what it left on disk."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    job: str
+    line: JobLineOut | None = Field(description="The job's Ops line; null if not registered")
+    newest: BackupFileOut | None = Field(description="null when the stream has written nothing")
+    files: int = Field(description="Finished files of this stream under BACKUP_ROOT")
+    error: str | None = Field(default=None, description="Why the directory could not be read")
+
+
+class BackupsOut(BaseModel):
+    """The backup panel: both streams, and whether a restore drill has a recorded result."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    as_of: datetime
+    backup_root: str
+    root_visible: bool = Field(description="BACKUP_ROOT is a directory this process can see")
+    postgres: BackupStreamOut
+    l0: BackupStreamOut
+    restore_drill: str = Field(
+        description="The latest recorded restore-drill result, or why there is none to show"
     )
 
 

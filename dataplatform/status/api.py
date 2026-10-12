@@ -30,8 +30,7 @@ there is exactly one implementation of each question this API answers.
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Sequence
 from datetime import date, timedelta
 from typing import Annotated, Any
 
@@ -40,35 +39,42 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Response
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.requests import Request
 
-from dataplatform.clock import Clock, SystemClock
-from dataplatform.config import Settings, get_settings
 from dataplatform.ingest.calendar import CalendarError
 from dataplatform.logging import get_logger
 from dataplatform.quality.gaps import GapReportError, GapScanner, LakeL1Presence
-from dataplatform.scheduler import Heartbeat, read_heartbeat
-from dataplatform.scheduler.health import read_job_health
-from dataplatform.scheduler.registry import UNSCHEDULED, default_registry, lag_budgets
+from dataplatform.scheduler.registry import default_registry, lag_budgets
+from dataplatform.status.console import router as console_router
+from dataplatform.status.deps import (
+    ClockDep,
+    ConnDep,
+    HeartbeatDep,
+    SettingsDep,
+    SyncStoreDep,
+    clock_source,
+    db_connection,
+    heartbeat_source,
+    settings_source,
+    sync_store,
+)
 from dataplatform.status.models import (
     ArchivesOut,
-    DatabaseHealthOut,
     DeclinedOut,
     GapsOut,
     HealthOut,
-    JobHealthOut,
     JobsOut,
     ManagersOut,
     PaperOut,
     QualityOut,
     QuarantineOut,
-    SchedulerHealthOut,
-    SchedulerState,
     ServiceStatus,
     SourcesOut,
     SourceStatusOut,
     SyncStatusOut,
 )
 from dataplatform.status.queries import (
+    assess_health,
     read_archives,
+    read_jobs_status,
     read_m17_journal,
     read_m17_roster,
     read_managers_status,
@@ -76,8 +82,7 @@ from dataplatform.status.queries import (
     read_quality,
     read_quarantine_status,
 )
-from dataplatform.status.sync_state import MalformedSyncSourceError, SyncStateStore
-from dataplatform.store.db import Connection, connection
+from dataplatform.status.sync_state import MalformedSyncSourceError
 from dataplatform.store.paths import PathLayoutError
 
 __all__ = [
@@ -85,6 +90,7 @@ __all__ = [
     "clock_source",
     "db_connection",
     "gap_scanner",
+    "heartbeat_source",
     "m17_journal_source",
     "m17_roster_source",
     "settings_source",
@@ -100,48 +106,7 @@ app = FastAPI(
 log = get_logger(__name__)
 
 
-# ── injected dependencies ───────────────────────────────────────────────────────────────────
-
-
-def settings_source() -> Settings:
-    """The process settings, as a dependency so a test can point the API at a scratch database."""
-    return get_settings()
-
-
-SettingsDep = Annotated[Settings, Depends(settings_source)]
-
-
-def clock_source(settings: SettingsDep) -> Clock:
-    """The clock the API measures heartbeat age against (B10 — never `datetime.now()`)."""
-    return SystemClock(settings.tzinfo)
-
-
-ClockDep = Annotated[Clock, Depends(clock_source)]
-
-
-def db_connection(settings: SettingsDep) -> Iterator[Connection]:
-    """One connection per request, closed on the way out.
-
-    A dependency rather than a module-level pool: the status API is low-traffic by design (the
-    daily loop calls it once a day), and one honest connection per request keeps a stale handle
-    from outliving a database restart. The integration suite overrides it to reach a scratch DB.
-
-    Never committed — nothing on this surface writes, so a request that ends without a commit has
-    ended exactly the way every request here is meant to.
-    """
-    with connection(settings) as conn:
-        yield conn
-
-
-ConnDep = Annotated[Connection, Depends(db_connection)]
-
-
-def sync_store(conn: ConnDep, clock: ClockDep) -> SyncStateStore:
-    """The §4.4 state machine, wired to this request's connection and clock."""
-    return SyncStateStore(conn, clock=clock)
-
-
-SyncStoreDep = Annotated[SyncStateStore, Depends(sync_store)]
+# ── injected dependencies (shared with the console: `dataplatform.status.deps`) ─────────────
 
 
 def gap_scanner(conn: ConnDep, settings: SettingsDep) -> GapScanner:
@@ -176,98 +141,40 @@ app.add_exception_handler(psycopg.OperationalError, _unreachable_database)
 # ── /health ─────────────────────────────────────────────────────────────────────────────────
 
 
-@dataclass(frozen=True, slots=True)
-class _HeartbeatRead:
-    """The outcome of one attempt to read the heartbeat — including the attempt failing.
-
-    Three outcomes, not two: a beat, no beat at all, and no answer. Collapsing the last two into
-    `None` is exactly the conflation `/health` exists to avoid, because "no scheduler has ever
-    run" and "we could not look" have opposite operational meanings.
-    """
-
-    reachable: bool
-    beat: Heartbeat | None = None
-    error: str | None = None
-
-
-def heartbeat_source(settings: SettingsDep) -> _HeartbeatRead:
-    """The freshest scheduler heartbeat, or why it could not be read.
-
-    Deliberately catches `psycopg.Error` rather than only `OperationalError`: an unmigrated
-    database answers the connection and then fails the query, and a `/health` that turned that
-    into a 500 would hide the single most likely cause of a fresh deployment not working.
-    """
-    try:
-        return _HeartbeatRead(reachable=True, beat=read_heartbeat(settings))
-    except psycopg.OperationalError as error:
-        log.warning("health.database_unreachable", error=str(error).strip())
-        return _HeartbeatRead(reachable=False, error=str(error).strip())
-    except psycopg.Error as error:
-        log.warning("health.heartbeat_unreadable", error=str(error).strip())
-        return _HeartbeatRead(reachable=True, error=str(error).strip())
-
-
 @app.get(
     "/health",
     summary="Liveness and scheduler heartbeat age",
     responses={503: {"model": HealthOut, "description": "Heartbeat stale, or the database down"}},
 )
 def health(
-    settings: SettingsDep,
-    clock: ClockDep,
-    read: Annotated[_HeartbeatRead, Depends(heartbeat_source)],
-    response: Response,
+    settings: SettingsDep, clock: ClockDep, read: HeartbeatDep, response: Response
 ) -> HealthOut:
     """Report that this process is serving, and whether a scheduler is still beating.
 
     What it does: measures the newest heartbeat's age against the injected clock and answers 503
     once that age passes `SCHEDULER_HEARTBEAT_STALE_AFTER_SECONDS`, or when the heartbeat could
     not be read at all. The body carries the same verdict as the status code, so a probe reading
-    one and a dashboard reading the other cannot disagree.
+    one and a dashboard reading the other cannot disagree — and the console's health banner is
+    built by the same `assess_health`, so neither can it.
     What it assumes: the schema is migrated. An empty `scheduler_heartbeat` means no scheduler has
     started yet — reported as `NEVER_RAN`, and not an outage, because a fresh deployment has to be
     able to come up healthy before its scheduler's first tick.
     What it never does: report on evidence it does not have. A heartbeat it could not read is
     `UNKNOWN`, never `NEVER_RAN`, and never a 200.
     """
-    now = clock.now()
-    stale_after = settings.scheduler_heartbeat_stale_after_seconds
-    database = DatabaseHealthOut(reachable=read.reachable, error=read.error)
-
-    if read.error is not None:
-        scheduler = SchedulerHealthOut(
-            state=SchedulerState.UNKNOWN, stale_after_seconds=stale_after
-        )
-    elif read.beat is None:
-        scheduler = SchedulerHealthOut(
-            state=SchedulerState.NEVER_RAN, stale_after_seconds=stale_after
-        )
-    else:
-        age = read.beat.age(now).total_seconds()
-        scheduler = SchedulerHealthOut(
-            state=SchedulerState.STALE if age > stale_after else SchedulerState.OK,
-            scheduler_id=read.beat.name,
-            last_beat_at=read.beat.beat_at,
-            age_seconds=age,
-            stale_after_seconds=stale_after,
-        )
-
-    degraded = read.error is not None or scheduler.state is SchedulerState.STALE
-    if degraded:
+    result = assess_health(
+        read, now=clock.now(), stale_after=settings.scheduler_heartbeat_stale_after_seconds
+    )
+    if result.status is ServiceStatus.DEGRADED:
         response.status_code = 503
         log.warning(
             "status_api.unhealthy",
-            database_reachable=database.reachable,
-            scheduler_state=scheduler.state.value,
-            age_seconds=scheduler.age_seconds,
-            stale_after_seconds=stale_after,
+            database_reachable=result.database.reachable,
+            scheduler_state=result.scheduler.state.value,
+            age_seconds=result.scheduler.age_seconds,
+            stale_after_seconds=result.scheduler.stale_after_seconds,
         )
-    return HealthOut(
-        status=ServiceStatus.DEGRADED if degraded else ServiceStatus.OK,
-        checked_at=now,
-        database=database,
-        scheduler=scheduler,
-    )
+    return result
 
 
 # ── /status ─────────────────────────────────────────────────────────────────────────────────
@@ -339,14 +246,8 @@ def status_jobs(
     `eod_pipeline` sat in, unseen, from M1.10 to the 2026-10-05 audit.
     What it never does: report only the jobs that happen to have rows; the registry is the list.
     """
-    now = clock.now()
-    jobs = read_job_health(conn, default_registry(), now=now, timezone=settings.tzinfo)
-    return JobsOut(
-        as_of=now,
-        healthy=all(job.healthy for job in jobs),
-        jobs=[JobHealthOut.of(job) for job in jobs],
-        unscheduled=dict(UNSCHEDULED),
-        declined={source: DeclinedOut.of(record) for source, record in store.declined.items()},
+    return read_jobs_status(
+        conn, default_registry(), now=clock.now(), timezone=settings.tzinfo, declined=store.declined
     )
 
 
@@ -580,3 +481,8 @@ def archives_download(
             detail=f"file {name!r} is in the manifest for {date.isoformat()} but not on disk",
         )
     return FileResponse(path, filename=entry.name, media_type="application/octet-stream")
+
+
+# ── /console (M18) ──────────────────────────────────────────────────────────────────────────
+# The operator console: server-rendered pages over the same queries as the JSON above.
+app.include_router(console_router)

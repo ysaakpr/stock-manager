@@ -28,6 +28,7 @@ milestones:
   M15: {title: "Real-money readiness prerequisites (run of 2026-10-08)", depends: [M5, M6, M13]}
   M16: {title: "Strategy exploration — seven pre-registered arms against D13", depends: [M9, M12, M14]}
   M17: {title: "AI fund managers — forward paper test on a shared Research Commons", depends: [M5, M6, M15]}
+  M18: {title: "Operator console — one web view of the platform, read-only first", depends: [M5, M15]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -3414,4 +3415,181 @@ tasks:
   escalation:
     question: "Start the M17 forward clock? Confirm models and pass/fail thresholds (pre-registration §9) and name S0."
     why_blocked: "The scored window must not open before the owner ratifies the policy layer (decision #5) and the thresholds are fixed."
+    unblocks: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M18 — Operator console (owner direction 2026-10-12)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# One web view of the running platform for the operator, built the way §8.1 already prescribes
+# (FastAPI + HTMX, server-rendered). It is an *operator* view of D5, not the deferred product UI
+# (§11). Shared rules for every M18 task:
+#   - Lives in `dataplatform/status/console/`, mounted on the existing status app at `/console`:
+#     no new service (decision #13), no new dependency, no import of analyst/execution/backtest —
+#     it reads Postgres and the lake through `dataplatform.status.queries`, the same functions the
+#     JSON endpoints use, so a page can never disagree with `/status/*`.
+#   - Read-only until M18.5: no console route accepts a method other than GET/HEAD.
+#   - Loopback only, like the API (M15.6); reached through an ssh tunnel until M18.6.
+#   - Nothing that can authenticate is ever rendered (invariant #13); free-text error fields go
+#     through the existing mask-then-truncate redaction.
+#   - Every timestamp shown in Asia/Kolkata and labelled IST; the Clock is injected (B10).
+#   - HTMX is vendored and pinned (checked-in file + sha256 asserted in a test), never a CDN: the
+#     page must work with no outbound network.
+
+- id: M18.1
+  title: Console shell and the Operations page
+  milestone: M18
+  module: D5
+  autonomy: AUTO
+  deps: []
+  spec: |
+    Owner direction 2026-10-12. Build the console's skeleton and its first page.
+    - Shell: `dataplatform/status/console/` with a router mounted at `/console` on
+      `dataplatform.status.api:app`; a base layout with navigation for the planned pages (Ops,
+      Data, Desk, Journal — the later ones may show "not built yet"); templates rendered the way
+      `analyst/cases/web.py` does (no template-engine dependency; factor its tiny renderer into a
+      shared place only if that is a clean move, otherwise mirror it); vendored, pinned htmx served
+      from the console's own static route.
+    - Operations page (`/console`, `/console/ops`):
+      * health banner from the same code as `/health` (database, scheduler heartbeat age);
+      * every registered job from the same code as `/status/jobs` — state, cron, last run (IST),
+        next fire, duration — sorted failing/overdue first; HTMX refresh every 30 s;
+      * per-job drill-down: the last 50 `job_run` rows with state, duration and the (already
+        redacted) error text;
+      * open alerts from `alert_condition` and the failure-alert state;
+      * backups: last `postgres_backup` and `l0_backup` run, newest dump file name, size and age
+        under `BACKUP_ROOT`, and the latest restore-drill result if one is recorded.
+    - Add the read functions the page needs to `dataplatform/status/queries.py` (typed models in
+      `models.py`), so a later JSON endpoint can reuse them.
+    - A short `ops/runbooks/console.md`: what it shows, how to reach it (ssh -L to 8000).
+  deliverables: [dataplatform/status/console/__init__.py, dataplatform/status/console/routes.py, dataplatform/status/console/templates/, dataplatform/status/console/static/, dataplatform/status/api.py, dataplatform/status/queries.py, dataplatform/status/models.py, ops/runbooks/console.md, tests/unit/test_console_ops.py, tests/integration/test_console_ops.py]
+  acceptance:
+    - "GET /console renders the health banner, every job in the registry with its state, and the backup panel, from an in-memory/scratch fixture"
+    - "a job the JSON /status/jobs reports FAILING or OVERDUE is shown as such on the page (parity test over the same fixture)"
+    - "a planted credential in job_run.error never appears in any console response"
+    - "every console route rejects POST/PUT/PATCH/DELETE (405), enumerated from the router so a new route is covered automatically"
+    - "the page references no external URL; the vendored htmx file matches its pinned sha256"
+    - "every rendered timestamp is IST-labelled; the clock is injected"
+    - "the compose port test still passes unchanged (loopback only)"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_console_ops.py tests/unit/test_compose_ports.py -q"
+
+- id: M18.2
+  title: Console Data page — sync board, sources, gaps, quality, quarantine, archives, ISIN lookup
+  milestone: M18
+  module: D5
+  autonomy: AUTO
+  deps: [M18.1]
+  spec: |
+    The data platform's state on one page, built on the M18.1 shell and its rules.
+    - Sync board for a chosen logical date (default: the latest trading session): every source's
+      state, from the same code as `/status/sync`; date picker; red/amber/green by state.
+    - Sources table from `/status/sources` (last success IST, lag, failure streak), worst first.
+    - Gaps for a date range from `/status/gaps`, grouped by source, each with its reason.
+    - Open quality flags (`/status/quality`) and the quarantine (`/status/quarantine`).
+    - Archives list (`/archives`) with bundle size and date; links go to the existing endpoint.
+    - ISIN lookup: an ISIN (or a symbol resolved to ISINs through the D2 master — display only,
+      the join key stays the ISIN, invariant #2) shows its security-master row, symbol history,
+      ISIN lineage, corporate actions with adjustment factors, and the pending L2 invalidations.
+  deliverables: [dataplatform/status/console/routes.py, dataplatform/status/console/templates/, dataplatform/status/queries.py, dataplatform/status/models.py, tests/unit/test_console_data.py, tests/integration/test_console_data.py]
+  acceptance:
+    - "for a fixture date the sync board shows exactly the states /status/sync returns (parity test)"
+    - "gaps and quality panels match their JSON endpoints over the same fixture"
+    - "an ISIN lookup shows master, symbol history, lineage and corporate actions; a symbol search lists candidate ISINs and never joins data by symbol"
+    - "all M18.1 shared rules still hold (read-only, no external URL, no secret, IST)"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_console_data.py -q"
+
+- id: M18.3
+  title: Console Desk page — paper books, M17 managers, kill switch, broker session, model cost
+  milestone: M18
+  module: D5
+  autonomy: AUTO
+  deps: [M18.1]
+  spec: |
+    The trading side, read-only, built on the M18.1 shell and its rules.
+    - Paper books from the same code as `/status/paper`: latest session, positions, what blocks
+      the next session, recon result.
+    - M17 desk from the same code as `/status/managers`: each manager's mandate summary, book,
+      latest session's decisions (including refusals and suspended holdings), scoreboard.
+    - Kill-switch state and the broker-session (auth interlock) state, displayed only — no toggle.
+    - Orders: the latest staged / sent / filled / refused orders with their tags.
+    - Model cost from `token_usage`: per manager, model and day, for the last 30 days, in INR or
+      USD as recorded (Decimal, never float).
+  deliverables: [dataplatform/status/console/routes.py, dataplatform/status/console/templates/, dataplatform/status/queries.py, dataplatform/status/models.py, tests/unit/test_console_desk.py]
+  acceptance:
+    - "paper and managers panels match /status/paper and /status/managers over the same fixture"
+    - "kill switch ENGAGED and broker AUTH_REQUIRED fixtures render as unmistakable red banners"
+    - "cost totals are Decimal end to end; a float in the path fails a test"
+    - "all M18.1 shared rules still hold"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_console_desk.py -q"
+
+- id: M18.4
+  title: Console Journal page — decision journal search, cases, evidence packs
+  milestone: M18
+  module: D5
+  autonomy: AUTO
+  deps: [M18.1]
+  spec: |
+    The decision record, read-only, built on the M18.1 shell and its rules.
+    - Decision journal search by date range, case, manager (M17 stream), decision kind —
+      including no-ops (invariant #9); newest first, paginated; each entry opens its payload.
+    - Cases list with lifecycle stage; a case links to its existing ratification page
+      (`/cases/{id}`) rather than re-implementing it.
+    - Evidence packs: list and open the packs A9 has produced.
+    - The journal is append-only: the page reads it and nothing else.
+  deliverables: [dataplatform/status/console/routes.py, dataplatform/status/console/templates/, dataplatform/status/queries.py, dataplatform/status/models.py, tests/unit/test_console_journal.py]
+  acceptance:
+    - "a fixture journal with decisions and no-ops is searchable by date, case, manager and kind, and no-ops are listed"
+    - "pagination is stable (keyset on the journal's sequence), no entry repeated or skipped across pages"
+    - "a payload containing a planted credential is shown masked"
+    - "all M18.1 shared rules still hold"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_console_journal.py -q"
+
+- id: M18.5
+  title: Console actions — run a job now, kill switch, case approval
+  milestone: M18
+  module: D5
+  autonomy: NEEDS_GO
+  deps: [M18.1, M18.3, M18.4]
+  spec: |
+    The first write actions, each through the code path the platform already uses — never a new
+    one: "run now" calls `SchedulerRunner.run_once` (lock, job_run row, timeout as usual); the
+    kill switch uses `execution.kill_switch`; approval links to the existing ratification flow.
+    Each action needs an explicit confirm step, carries a CSRF token, and is journaled with who
+    and when. Rails stay unbypassable: no console action can stage or place an order.
+  deliverables: [dataplatform/status/console/actions.py, tests/unit/test_console_actions.py]
+  acceptance:
+    - "run-now goes through run_once and is refused while the job's lock is held"
+    - "engaging and releasing the kill switch is journaled; no console route can place or stage an order"
+    - "every action without a valid CSRF token and confirm step is refused"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_console_actions.py -q"
+  escalation:
+    question: "Allow write actions in the console (run a job now, engage/release the kill switch)?"
+    why_blocked: "The kill switch and job triggers change live behaviour; the read-only console must prove itself first."
+    unblocks: []
+
+- id: M18.6
+  title: Console remote access through Caddy with authentication
+  milestone: M18
+  module: D5
+  autonomy: NEEDS_GO
+  deps: [M18.1]
+  spec: |
+    Reach the console from a browser without an ssh tunnel: a Caddy route on this host in front
+    of the loopback app, with authentication (owner to choose: Caddy basic auth over TLS, or an
+    identity-aware proxy), restricted to `/console` and the endpoints it calls. The app's own
+    ports stay loopback-only (M15.6). No credential in the repo: the hash lives in Caddy's
+    untracked config.
+  deliverables: [ops/runbooks/console.md]
+  acceptance:
+    - "an unauthenticated request to the public console URL is refused; /status/* is not publicly reachable"
+    - "the compose port test still passes (app ports loopback only)"
+  verify: "uv run pytest tests/unit/test_compose_ports.py -q"
+  escalation:
+    question: "Expose the console publicly through Caddy, and with which authentication?"
+    why_blocked: "The status API has no authentication; making any of it reachable from the internet is an owner decision."
     unblocks: []
