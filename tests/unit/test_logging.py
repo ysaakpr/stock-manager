@@ -146,3 +146,28 @@ def test_an_exception_is_rendered_as_structured_data_in_prod(configured: Configu
     (event,) = emitted(stream)
     assert event["level"] == "error"
     assert event["exception"][0]["exc_type"] == "ValueError"
+
+
+#: Stands in for a value that sits in a failing frame's locals (a DSN inside `Settings`).
+_LOCAL_MARKER = "frame-local-marker-only"
+
+
+def _fail_with_a_secret_in_locals() -> None:
+    dsn = f"postgresql://user:{_LOCAL_MARKER}@db/x"
+    raise RuntimeError(f"connection refused ({len(dsn)} chars)")
+
+
+@pytest.mark.parametrize("app_env", ["prod", "dev"])
+def test_a_traceback_never_renders_frame_locals(configured: Configure, app_env: str) -> None:
+    """Invariant #13: a failing frame's locals (a job's Settings, its DSN) never reach the log."""
+    stream = configured(app_env=app_env)
+
+    try:
+        _fail_with_a_secret_in_locals()
+    except RuntimeError:
+        get_logger().exception("job.failed")
+
+    rendered = stream.getvalue()
+    assert "connection refused" in rendered  # the traceback itself is still there
+    assert "_fail_with_a_secret_in_locals" in rendered
+    assert _LOCAL_MARKER not in rendered
