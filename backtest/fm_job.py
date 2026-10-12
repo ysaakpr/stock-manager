@@ -217,11 +217,11 @@ DESK_STATE_VERSION: Final = "m17-desk/1"
 #: Every journal entry of a session is stamped at this IST time on the session's date (a frozen
 #: clock), so a session's journal is a pure function of the session, as in every replay.
 JOURNAL_CLOCK_AT: Final = time(22, 0)
-#: What the scoreboard ledger holds, by key.
 #: Bounds on harness text the desk journals, applied after masking: a manager crash's exception
 #: text, and a missed session's reason.
 _CRASH_REASON_CHARS: Final = 1000
 _MISSED_REASON_CHARS: Final = 500
+#: What the scoreboard ledger holds, by key.
 _LEDGER_KEYS: Final = ("marks", "decisions", "outcomes", "refusals", "calls", "control_buys")
 
 
@@ -672,7 +672,9 @@ def run_m17_session(
         verdict = gate(session)
         red = None if verdict else (verdict.reason or "data is not green")
     except Exception as exc:  # a status read that failed is red, never green (invariant #10)
-        red = f"the status read failed: {type(exc).__name__}: {exc}"
+        red = mask_and_truncate(
+            f"the status read failed: {type(exc).__name__}: {exc}", _MISSED_REASON_CHARS
+        )
     if red is not None:
         for book in roster.books:
             _write(
@@ -1114,12 +1116,9 @@ def _build_commons(
     try:
         built = builder.build(session, clock=clock)
     except Exception as exc:  # the managers sit out; the job journals why for each of them
-        _LOG.error(
-            "fm_job.commons_failed",
-            session=session.isoformat(),
-            error=f"{type(exc).__name__}: {exc}",
-        )
-        return None, f"{type(exc).__name__}: {exc}"
+        error = mask_and_truncate(f"{type(exc).__name__}: {exc}", _MISSED_REASON_CHARS)
+        _LOG.error("fm_job.commons_failed", session=session.isoformat(), error=error)
+        return None, error
     if built.manager is None:
         return built, "the Commons were built without a manager view"
     return built, None

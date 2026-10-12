@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
+from structlog.testing import capture_logs
 
 from analyst.commons import build_screens, load_table
 from analyst.fundmanager import ManagerMandate, Roster, load_roster
@@ -32,6 +33,7 @@ from analyst.fundmanager.bundle import RoundTrip
 from analyst.fundmanager.contract import ContractVerdict
 from analyst.fundmanager.controls import BenchmarkLevels
 from analyst.fundmanager.job import (
+    COMMONS_UNAVAILABLE_EVENT,
     DATA_GAPS_EVENT,
     DATA_WAIT_EVENT,
     MANAGER_CRASHED_EVENT,
@@ -1151,3 +1153,48 @@ def test_a_missed_session_reason_is_journaled_masked(world: World, tmp_path: Pat
     (missed,) = desk.events(MISSED_SESSION_EVENT)
     assert "token=***" in missed.payload["reason"]
     assert all(secret not in e.model_dump_json() for e in desk.entries())
+
+
+def test_a_status_read_failure_is_journaled_masked(tmp_path: Path) -> None:
+    """Fails before the fix: the status read's exception text went into the journal verbatim."""
+    desk = Desk(tmp_path)
+    secret = _fake_secret("status-read")
+
+    def broken(_: date) -> Verdict:
+        raise ConnectionError(f"status database unreachable; api_key={secret}")
+
+    with capture_logs() as logs:
+        result = desk.run(
+            SESSION,
+            FakeWorld(flat_market()),
+            Builder(lambda _: pytest.fail("never built")),
+            PerManagerLLM({}),
+            roster=mini_roster(),
+            gate=broken,
+        )
+    assert result.outcome is RunOutcome.SKIPPED_DATA_RED and secret not in result.reason
+    skipped = desk.events(SKIPPED_DATA_RED_EVENT)
+    assert len(skipped) == 3
+    assert all("api_key=***" in e.payload["reason"] for e in skipped)
+    assert all(secret not in e.model_dump_json() for e in desk.entries())
+    record = desk.store.get(DESK_IDS[STREAM_DRY], SESSION)
+    assert record is not None and secret not in (record.reason or "")
+    assert logs and all(secret not in repr(entry) for entry in logs)
+
+
+def test_a_commons_failure_is_journaled_masked(tmp_path: Path) -> None:
+    """Fails before the fix: the Commons build's exception text was journaled and logged raw."""
+    desk = Desk(tmp_path)
+    secret = _fake_secret("commons-failed")
+
+    def failing(_: date) -> SessionCommons:
+        raise RuntimeError(f"screen fetch failed; api_key={secret}")
+
+    with capture_logs() as logs:
+        desk.run(SESSION, FakeWorld(flat_market()), Builder(failing), PerManagerLLM({}))
+    unavailable = desk.events(COMMONS_UNAVAILABLE_EVENT)
+    assert len(unavailable) == len(load_roster().managers)
+    assert all("api_key=***" in e.payload["reason"] for e in unavailable)
+    assert all(secret not in e.model_dump_json() for e in desk.entries())
+    assert any(entry["event"] == "fm_job.commons_failed" for entry in logs)
+    assert all(secret not in repr(entry) for entry in logs)
