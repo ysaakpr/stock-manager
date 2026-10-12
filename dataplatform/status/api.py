@@ -30,12 +30,11 @@ there is exactly one implementation of each question this API answers.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from datetime import date, timedelta
-from typing import Annotated, Any
+from typing import Annotated
 
 import psycopg
-from fastapi import Depends, FastAPI, HTTPException, Query, Response
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.requests import Request
 
@@ -49,12 +48,16 @@ from dataplatform.status.deps import (
     ConnDep,
     GapScannerDep,
     HeartbeatDep,
+    M17JournalDep,
+    RosterDep,
     SettingsDep,
     SyncStoreDep,
     clock_source,
     db_connection,
     gap_scanner,
     heartbeat_source,
+    m17_journal_source,
+    m17_roster_source,
     settings_source,
     sync_store,
 )
@@ -75,8 +78,6 @@ from dataplatform.status.queries import (
     assess_health,
     read_archives,
     read_jobs_status,
-    read_m17_journal,
-    read_m17_roster,
     read_managers_status,
     read_paper_status,
     read_quality,
@@ -317,25 +318,12 @@ def status_paper(conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> Paper
     return read_paper_status(conn, data_root=settings.data_root, as_of=clock.now())
 
 
-def m17_roster_source() -> Any:
-    """The M17 roster, as a dependency so a test can supply a smaller one."""
-    return read_m17_roster()
-
-
-RosterDep = Annotated[Any, Depends(m17_roster_source)]
-
-
-def m17_journal_source(conn: ConnDep, settings: SettingsDep, roster: RosterDep) -> Sequence[Any]:
-    """The M17 books' journal entries, in append order — a dependency so a test can supply them."""
-    return read_m17_journal(conn, data_root=settings.data_root, roster=roster)
-
-
 @app.get(
     "/status/managers",
     summary="M17 fund managers: books, the latest session's decisions, the §6 scoreboard",
 )
 def status_managers(
-    entries: Annotated[Sequence[Any], Depends(m17_journal_source)],
+    entries: M17JournalDep,
     roster: RosterDep,
     clock: ClockDep,
 ) -> ManagersOut:

@@ -62,7 +62,7 @@ JOBS_REFRESH_SECONDS: Final = 30
 PAGES: Final[tuple[tuple[str, str, bool], ...]] = (
     ("ops", "Ops", True),
     ("data", "Data", True),
-    ("desk", "Desk", False),
+    ("desk", "Desk", True),
     ("journal", "Journal", False),
 )
 
