@@ -86,25 +86,37 @@ Data and Journal are in the navigation and say "not built yet" until M18.2 and M
 ## The Portfolio page (`/console/portfolio?book=<id>`, M18.7)
 
 One M17 book at a time, as a portfolio of its own (owner, 2026-10-13: every book is a portfolio).
-The selector lists every book the roster records — each manager's 10 L primary and 1 cr mirror,
-the controls, the style books and the bench — grouped by kind; the default is the first manager
-book. An unknown book id is a 404.
+The **book picker** at the top lists every book the roster records — each manager's 10 L primary
+and 1 cr mirror, the controls, the style books and the bench — grouped by kind (Manager, Control,
+Style, Bench), a stem's 10 L and 1 cr side by side on one line (`FM-POS-TREND  10L · 1CR`). One
+click shows a book: each item is a plain link to `/console/portfolio?book=<id>` (works with
+JavaScript off, bookmarkable, back-button friendly); with htmx it fetches the same URL with
+`HX-Request: true`, gets only the portfolio region (picker included, so the highlight follows) and
+pushes the URL. The selected book is highlighted (`aria-current="page"`). Each item shows the
+book's latest NAV (to the rupee) and its NAV change % against the previous mark ("not marked"
+before its first mark), and an amber ● when it has a BUY or SELL staged for the next session.
+The default is the first manager book. An unknown book id is a 404.
 
 - **Stream.** The live stream when it has any entry; until S0 it has none, and the page shows the
   dry stream under a yellow **DRY RUN** banner naming the stream (`m17-dry`) and the desk record
   the holdings came from (`m17_dry2_fund_managers` today). Nothing in the dry stream counts.
-- **Holdings** as of the book's latest `BOOK_MARK`: ISIN (the key) and symbol (display only),
+- **Holdings** as of the book's latest `BOOK_MARK` — only what the book holds, so every row has a
+  quantity (owner, 2026-10-13): ISIN (the key) and symbol (display only),
   quantity, CMP (the NSE L1 close the book was marked at, with its session; a BE/BZ print when
   the name left EQ), average price (cost basis per share, buy charges included), day's change
   against the previous session's close — **per share** (₹), **for the position** (₹, per-share
   change × quantity held) and once as a % (the same for both; owner, 2026-10-13) — current value,
   profit on cost (₹ and %). A suspended holding shows "suspended since <date>", no day's change,
-  and is valued at its last close.
+  and is valued at its last close. A book that holds nothing says "No holdings yet" (with "— first
+  orders fill on <date>" when it has buys staged) instead of an empty table.
 - **Next session**: `BUY n` or `SELL n` only where the book journaled a staging line (an entry
   with an `order_uid`: `STAGED`, `MIRROR_FOLLOW`, `STOP_EXIT`) on that session — those fill at the
-  next open. A trim is a SELL with its quantity. A staged buy of a name not held is its own row
-  with only CMP, the per-share day's change and the BUY; its position cell is empty (no position
-  yet).
+  next open. On a held name it is the last column of its row: a trim or a sale is `SELL n`, an
+  add `BUY n`.
+- **Buying next session (<date>)**: staged BUYs of names the book does not hold yet, in their own
+  compact table below the holdings — symbol, ISIN, quantity to buy, CMP (with its session), day's
+  change % and an estimated cost (quantity × CMP, before charges; the fill is at the next
+  session's price). Omitted when there are none.
 - **Fund**: invested (sum of cost bases), current value of holdings, cash, NAV, total profit
   against the book's opening capital, and the NAV change against the previous mark (not the sum
   of the rows' position changes — fills, charges and cash moves are in the NAV change). NAV and cash

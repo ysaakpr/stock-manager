@@ -356,23 +356,79 @@ def _model(stream: PortfolioStream = PortfolioStream.DRY, book: str | None = PRI
 # ── 1. exactly those rows; BUY/SELL only on the two staged names ───────────────────────────
 
 
+def _buying(html: str) -> dict[str, dict[str, str]]:
+    """Every "buying next session" row's data attributes, by ISIN, in page order."""
+    out: dict[str, dict[str, str]] = {}
+    for tag in re.findall(r"<tr data-buying=\"[^\"]*\"[^>]*>", html):
+        attrs = dict(re.findall(r'data-([a-z0-9-]+)="([^"]*)"', tag))
+        out[attrs.pop("buying")] = attrs
+    return out
+
+
 def test_the_page_shows_the_holdings_and_the_staged_new_name_and_nothing_else(
     client: TestClient,
 ) -> None:
-    rows = _rows(_page(client, PRIMARY))
-    assert list(rows) == [ISIN_A, ISIN_B, ISIN_C, ISIN_D]  # held by ISIN, then the new name
+    html = _page(client, PRIMARY)
+    rows = _rows(html)
+    assert list(rows) == [ISIN_A, ISIN_B, ISIN_C]  # held, by ISIN; the new name is not a holding
     assert {isin: (r["action"], r["action-quantity"]) for isin, r in rows.items()} == {
         ISIN_A: ("", ""),
         ISIN_B: ("SELL", "3"),  # the TRIM shows as SELL with its quantity
         ISIN_C: ("", ""),
-        ISIN_D: ("BUY", "5"),
     }
-    # The staged new name has no holding figures: only CMP, day's change and the BUY.
-    new = rows[ISIN_D]
-    assert new["held"] == "false" and new["quantity"] == ""
-    assert (new["avg"], new["value"], new["profit"], new["profit-pct"]) == ("—",) * 4
-    assert (new["cmp"], new["day-change"], new["day-change-pct"]) == ("1650.00", "10.00", "0.61")
-    assert new["position-day-change"] == ""  # no position yet: the per-share change only
+    # Owner, 2026-10-13: a holdings row always has a quantity.
+    assert all(r["held"] == "true" and r["quantity"] for r in rows.values())
+    # The staged new name is in its own section: quantity to buy, CMP, day's change, est. cost.
+    assert _buying(html) == {
+        ISIN_D: {
+            "quantity": "5",
+            "cmp": "1650.00",
+            "day-change-pct": "0.61",
+            "estimated-cost": "8250.00",  # 5 x 1650.00, before charges
+        }
+    }
+    assert "<h2>Buying next session (2026-10-13)</h2>" in html
+    assert "₹8,250.00" in html and "an estimate before charges" in html
+
+
+def _holdings_section(html: str) -> str:
+    """The holdings panel's HTML: from its opening tag to the next section."""
+    start = html.index('id="holdings"')
+    end = html.find('id="buying"', start)
+    return html[start:] if end < 0 else html[start:end]
+
+
+def test_a_staged_new_buy_never_appears_in_the_holdings_table(client: TestClient) -> None:
+    """Inverted check: a page listing the staged BUY among the holdings (with an empty Qty)
+    fails here, for the primary and for its mirror."""
+    for book in (PRIMARY, MIRROR):
+        html = _page(client, book)
+        holdings = _holdings_section(html)
+        assert holdings and ISIN_D not in holdings
+        assert ISIN_D in _buying(html)
+
+
+def test_the_estimated_cost_is_quantity_times_cmp_to_the_paisa() -> None:
+    closes = {D2: {**CLOSES[D2], ISIN_D: Decimal("1650.005")}, D1: CLOSES[D1]}
+    conn = StubConnection({(DRY_DESK, D2): desk_state()})
+    page = read_portfolio(
+        conn.db, entries=journal(), stream=PortfolioStream.DRY, roster=ROSTER, book_id=MIRROR,
+        prices=FakePrices(closes), as_of=NOW,
+    )  # fmt: skip
+    (row,) = page.rows
+    assert row.estimated_cost == Decimal("82500.250") and isinstance(row.estimated_cost, Decimal)
+    assert paisa(row.estimated_cost) == "82500.25"
+    # A held name's SELL carries no estimate.
+    assert all(r.estimated_cost is None for r in _model().rows if r.held)
+
+
+def test_no_holdings_says_so_and_names_when_the_first_orders_fill(client: TestClient) -> None:
+    mirror = _page(client, MIRROR)
+    assert '<p id="no-holdings">No holdings yet — first orders fill on 2026-10-13.</p>' in mirror
+    assert "<th>Avg price</th>" not in mirror  # no empty holdings table
+    control = _page(client, CONTROL)
+    assert '<p id="no-holdings">No holdings yet.</p>' in control
+    assert 'id="buying"' not in control  # no staged new buy: the section is omitted
 
 
 def test_yesterdays_filled_order_and_the_managers_decision_line_are_not_staged() -> None:
@@ -388,7 +444,7 @@ def test_yesterdays_filled_order_and_the_managers_decision_line_are_not_staged()
 def test_the_symbol_is_display_only_and_the_isin_is_the_key(client: TestClient) -> None:
     html = _page(client, PRIMARY)
     for isin, symbol in SYMBOLS.items():
-        assert f'data-holding="{isin}"' in html
+        assert f'data-holding="{isin}"' in html or f'data-buying="{isin}"' in html
         assert f"<td>{symbol}</td>" in html
 
 
@@ -453,7 +509,7 @@ def test_the_days_change_is_shown_per_share_and_for_the_whole_position(
     multiplying by the staged quantity, fails here."""
     html = _page(client, PRIMARY)
     assert "<th>Day's change / share</th><th>Day's change (position)</th>" in html
-    assert html.count("<th>Day's change %</th>") == 1
+    assert _holdings_section(html).count("<th>Day's change %</th>") == 1
     rows = _rows(html)
     assert (rows[ISIN_A]["day-change"], rows[ISIN_A]["position-day-change"]) == ("49.50", "495.00")
     assert (rows[ISIN_B]["day-change"], rows[ISIN_B]["position-day-change"]) == (
@@ -461,11 +517,10 @@ def test_the_days_change_is_shown_per_share_and_for_the_whole_position(
         "-139.30",
     )
     assert "+₹495.00" in html and "-₹139.30" in html
-    # The staged BUY of D (5 shares, not held) has an empty position cell, not 5 x 10.00.
-    new_row = re.search(rf'<tr data-holding="{ISIN_D}"[^>]*>(.*?)</tr>', html)
+    # The staged BUY of D (5 shares, not held) has no position change, not 5 x 10.00.
+    new_row = re.search(rf'<tr data-buying="{ISIN_D}"[^>]*>(.*?)</tr>', html)
     assert new_row is not None
-    assert "+₹10.00" in new_row.group(1) and "₹50.00" not in new_row.group(1)
-    assert '<td class="num"></td>' in new_row.group(1)
+    assert "+0.61 %" in new_row.group(1) and "₹50.00" not in new_row.group(1)
     page = _model()
     exact = {r.isin: r.position_day_change for r in page.rows}
     assert exact[ISIN_A] == Decimal("495.00") and exact[ISIN_B] == Decimal("-139.30")
@@ -600,24 +655,106 @@ def test_the_stream_choice_and_the_dry_read_are_skipped_once_live() -> None:
 # ── 5. selection: every recorded book on its own; unknown is a 404 ─────────────────────────
 
 
-def test_every_recorded_book_is_selectable_grouped_by_kind(client: TestClient) -> None:
+def _picks(html: str) -> list[dict[str, str]]:
+    """Every book picker link's attributes, in page order."""
+    out = []
+    for tag in re.findall(r"<a href=\"[^\"]*\"[^>]*class=\"pick[^\"]*\"[^>]*>", html):
+        out.append(dict(re.findall(r'([a-z-]+)="([^"]*)"', tag)))
+    return out
+
+
+def test_every_recorded_book_is_one_link_grouped_by_kind(client: TestClient) -> None:
     html = _page(client)
-    options = re.findall(r'<option value="([^"]+)"', html)
-    assert options == [book.id for book in ROSTER.books] and len(options) == 21
-    groups = re.findall(r'<optgroup label="([^"]+)">', html)
+    picks = _picks(html)
+    assert [p["data-book"] for p in picks] == [book.id for book in ROSTER.books]
+    assert len(picks) == 21
+    for pick in picks:
+        # One click: a plain GET link to the book's own URL, and htmx fetches the same URL.
+        assert pick["href"] == f"/console/portfolio?book={pick['data-book']}"
+        assert pick["hx-get"] == pick["href"]
+    groups = re.findall(r'<div class="pick-group" data-kind="[^"]+"><h3>([^<]+)</h3>', html)
     assert groups == ["Manager", "Control", "Style", "Bench"]
-    assert '<form method="get" action="/console/portfolio"' in html
-    # The default is the first manager book.
-    assert re.search(r'<option value="FM-SWING-BRK-10L" selected>', html)
+    # No dropdown and no submit button: selection is the click.
+    assert "<select" not in html and "<button" not in html and "<form" not in html
+    picker = re.search(r'<nav id="book-picker"[^>]*>', html)
+    assert picker is not None
+    assert 'hx-target="#portfolio"' in picker.group(0)
+    assert 'hx-push-url="true"' in picker.group(0)
+    # The default is the first manager book, highlighted.
+    current = [p["data-book"] for p in picks if "aria-current" in p]
+    assert current == ["FM-SWING-BRK-10L"]
     assert 'data-book="FM-SWING-BRK-10L" data-kind="MANAGER"' in html
+
+
+def test_a_managers_primary_and_mirror_share_one_line(client: TestClient) -> None:
+    html = _page(client)
+    line = re.search(
+        r'<div class="pick-line"><span class="pick-stem mono">FM-POS-TREND</span>(.*?)</div>', html
+    )
+    assert line is not None
+    labels = re.findall(r'<span class="mono">([^<]+)</span>', line.group(1))
+    assert labels == ["10L", "1CR"]
+    assert '<span class="pick-stem mono">BENCH-N500</span>' not in html
+
+
+def test_the_selected_book_is_highlighted_with_aria_current(client: TestClient) -> None:
+    picks = _picks(_page(client, MIRROR))
+    current = [p for p in picks if p.get("aria-current") == "page"]
+    assert [p["data-book"] for p in current] == [MIRROR]
+    assert current[0]["class"] == "pick current"
+    assert all(p["class"] == "pick" for p in picks if p["data-book"] != MIRROR)
+
+
+def test_each_pick_shows_its_nav_change_and_a_staged_marker(client: TestClient) -> None:
+    html = _page(client)
+    picks = {p["data-book"]: p for p in _picks(html)}
+    # The primary and its mirror each have an order staged on D2 for D3; nothing else does.
+    assert {b for b, p in picks.items() if p["data-staged"] == "true"} == {PRIMARY, MIRROR}
+    item = re.search(rf'data-book="{PRIMARY}".*?</a>', html)
+    assert item is not None
+    # NAV 999266.26 to the rupee; vs 1001000.00 the day before: -0.17 %.
+    assert "₹9,99,266 · " in item.group(0) and "-0.17 %" in item.group(0)
+    assert 'class="pick-staged"' in item.group(0)
+    unmarked = re.search(rf'data-book="{UNMARKED}".*?</a>', html)
+    assert unmarked is not None and "not marked" in unmarked.group(0)
+    assert 'class="pick-staged"' not in unmarked.group(0)
+
+
+def test_an_htmx_request_gets_the_region_and_a_normal_request_the_page(
+    client: TestClient,
+) -> None:
+    full = client.get("/console/portfolio", params={"book": MIRROR})
+    assert full.status_code == 200 and full.text.lstrip().startswith("<!doctype html>")
+    assert '<div id="portfolio">' in full.text
+    part = client.get("/console/portfolio", params={"book": MIRROR}, headers={"HX-Request": "true"})
+    assert part.status_code == 200 and part.headers["content-type"].startswith("text/html")
+    assert part.text.startswith('<div id="portfolio">')
+    assert "<html" not in part.text and "<body" not in part.text and "<header" not in part.text
+    # The region carries the picker, so the highlight swaps with the book.
+    assert [p["data-book"] for p in _picks(part.text) if "aria-current" in p] == [MIRROR]
+    assert _totals(part.text) == _totals(full.text)
+    assert "HX-Request" in part.headers["vary"]
+    # htmx's history restore swaps the whole body: it gets the full page.
+    restore = client.get(
+        "/console/portfolio",
+        params={"book": MIRROR},
+        headers={"HX-Request": "true", "HX-History-Restore-Request": "true"},
+    )
+    assert restore.text.lstrip().startswith("<!doctype html>")
+
+
+def test_an_unknown_book_is_a_404_for_htmx_too(client: TestClient) -> None:
+    response = client.get(
+        "/console/portfolio", params={"book": "NOPE"}, headers={"HX-Request": "true"}
+    )
+    assert response.status_code == 404
 
 
 def test_a_mirror_is_its_own_portfolio(client: TestClient) -> None:
     html = _page(client, MIRROR)
     assert 'data-book="FM-POS-FUND-1CR" data-kind="MANAGER"' in html
-    assert {k: (v["held"], v["action"], v["action-quantity"]) for k, v in _rows(html).items()} == {
-        ISIN_D: ("false", "BUY", "50")
-    }
+    assert _rows(html) == {}
+    assert _buying(html)[ISIN_D]["quantity"] == "50"
     assert _totals(html)["nav"] == "10000000.00"
 
 
@@ -628,7 +765,7 @@ def test_the_bench_and_a_control_get_the_same_view(client: TestClient) -> None:
     assert _totals(bench)["daily-change"] == "-2006.76"
     control = _page(client, CONTROL)
     assert 'data-kind="CONTROL"' in control and "control for FM-POS-FUND-10L" in control
-    assert f"{CONTROL} has no holdings on 2026-10-12." in control
+    assert "No holdings yet." in control
 
 
 def test_a_book_with_no_mark_says_so(client: TestClient) -> None:

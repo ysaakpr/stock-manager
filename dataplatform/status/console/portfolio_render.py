@@ -8,24 +8,28 @@ what the operator reads.
 
 from __future__ import annotations
 
+import re
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Final
+from urllib.parse import quote
 
 from dataplatform.status.console.pages import _page
 from dataplatform.status.console.render import MISSING, esc, free_text
 from dataplatform.status.models_portfolio import (
     BookChoiceOut,
+    BookGlanceOut,
     FundTotalsOut,
     HoldingRowOut,
     PortfolioOut,
     PortfolioStream,
+    StagedAction,
 )
 
-__all__ = ["paisa", "pct", "render_portfolio"]
+__all__ = ["REGION_ID", "paisa", "pct", "render_portfolio"]
 
 _SLUG: Final = "portfolio"
 _PAISA: Final = Decimal("0.01")
-#: The selector's groups, in this order; a kind the roster adds later gets its own group after.
+#: The picker's groups, in this order; a kind the roster adds later gets its own group after.
 _KIND_LABELS: Final = {
     "MANAGER": "Manager",
     "CONTROL": "Control",
@@ -82,7 +86,7 @@ def _tone(value: Decimal | None) -> str:
     return ' style="color:#0e5814"' if value > 0 else ' style="color:#a61b1b"'
 
 
-# ── the selector and the labels ────────────────────────────────────────────────────────────
+# ── the book picker and the labels ────────────────────────────────────────────────────────────
 
 
 def _owner(book: BookChoiceOut) -> str:
@@ -92,24 +96,83 @@ def _owner(book: BookChoiceOut) -> str:
     return f"{esc(relation.get(book.kind, book.kind.lower()))} {esc(book.manager)}"
 
 
-def _selector(page: PortfolioOut) -> str:
+#: A book id that names a capital variant (``FM-POS-TREND-10L``): the stem and the variant. The
+#: picker puts a stem's variants on one line, so a manager's primary and mirror sit side by side.
+_VARIANT: Final = re.compile(r"^(?P<stem>.+)-(?P<variant>\d+(?:L|CR))$")
+#: Where the picker's htmx swap lands: the whole portfolio region, picker included, so the
+#: highlight always matches the book shown.
+REGION_ID: Final = "portfolio"
+
+
+def _whole_rupees(value: Decimal) -> str:
+    """₹ to the rupee with Indian grouping (``₹10,01,000``) — the picker's compact NAV."""
+    text = str(value.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    negative = text.startswith("-")
+    return f"{'-' if negative else ''}₹{_group_indian(text.lstrip('-'))}"
+
+
+def _glance(glance: BookGlanceOut | None) -> str:
+    if glance is None or glance.nav is None:
+        return '<span class="pick-glance muted">not marked</span>'
+    change = _percent(glance.daily_change_pct)
+    return (
+        f'<span class="pick-glance muted">{_whole_rupees(glance.nav)} · '
+        f"<span{_tone(glance.daily_change_pct)}>{change}</span></span>"
+    )
+
+
+def _pick(book: BookChoiceOut, label: str, page: PortfolioOut) -> str:
+    glance = next((g for g in page.glances if g.book_id == book.book_id), None)
+    href = esc(f"/console/portfolio?book={quote(book.book_id, safe='')}")
+    current = book.book_id == page.book.book_id
+    staged = (
+        ' <span class="pick-staged" title="BUY/SELL staged for the next session">●</span>'
+        if glance is not None and glance.staged
+        else ""
+    )
+    attrs = (
+        f'href="{href}" hx-get="{href}" data-book="{esc(book.book_id)}" '
+        f'data-staged="{str(glance is not None and glance.staged).lower()}" '
+        f'class="pick{" current" if current else ""}"' + (' aria-current="page"' if current else "")
+    )
+    return f'<a {attrs}><span class="mono">{esc(label)}</span>{staged}{_glance(glance)}</a>'
+
+
+def _picker(page: PortfolioOut) -> str:
+    """Every book as a one-click link, grouped by kind; a stem's capital variants share a line.
+
+    Each item is a plain GET link (works with JS off, bookmarkable); with htmx it fetches the
+    same URL and swaps only the portfolio region, pushing the URL to history.
+    """
     kinds = list(_KIND_LABELS) + sorted({b.kind for b in page.books} - set(_KIND_LABELS))
     groups = []
     for kind in kinds:
-        options = "".join(
-            f'<option value="{esc(b.book_id)}"'
-            f"{' selected' if b.book_id == page.book.book_id else ''}>{esc(b.book_id)}</option>"
-            for b in page.books
-            if b.kind == kind
+        books = [b for b in page.books if b.kind == kind]
+        if not books:
+            continue
+        lines: list[tuple[str | None, list[tuple[BookChoiceOut, str]]]] = []
+        for book in books:
+            match = _VARIANT.match(book.book_id)
+            if match is None:
+                lines.append((None, [(book, book.book_id)]))
+            elif lines and lines[-1][0] == match["stem"]:
+                lines[-1][1].append((book, match["variant"]))
+            else:
+                lines.append((match["stem"], [(book, match["variant"])]))
+        items = "".join(
+            '<div class="pick-line">'
+            + ("" if stem is None else f'<span class="pick-stem mono">{esc(stem)}</span>')
+            + "".join(_pick(book, label, page) for book, label in picks)
+            + "</div>"
+            for stem, picks in lines
         )
-        if options:
-            groups.append(
-                f'<optgroup label="{esc(_KIND_LABELS.get(kind, kind))}">{options}</optgroup>'
-            )
+        groups.append(
+            f'<div class="pick-group" data-kind="{esc(kind)}">'
+            f"<h3>{esc(_KIND_LABELS.get(kind, kind))}</h3>{items}</div>"
+        )
     return (
-        '<form method="get" action="/console/portfolio" id="book-select" class="panel">'
-        '<label>Book <select name="book">' + "".join(groups) + "</select></label>"
-        ' <button type="submit">Show</button></form>'
+        f'<nav id="book-picker" class="panel" aria-label="Books" hx-target="#{REGION_ID}" '
+        'hx-swap="outerHTML" hx-push-url="true">' + "".join(groups) + "</nav>"
     )
 
 
@@ -201,14 +264,28 @@ def _row(row: HoldingRowOut) -> str:
 
 
 def _holdings(page: PortfolioOut) -> str:
+    """Only what the book holds: every row has a quantity. A staged BUY of a name not held is in
+    `_buying`, never here."""
     if page.bench_note is not None:
         return (
             f'<div class="panel" id="holdings"><h2>Holdings</h2><p>{esc(page.bench_note)}</p></div>'
         )
-    if not page.rows:
+    if page.session is None:
         return ""
+    held = [row for row in page.rows if row.held]
+    session = page.session.isoformat()
+    if not held:
+        first = (
+            f" — first orders fill on {page.next_session.isoformat()}"
+            if page.next_session is not None
+            and any(r.action is StagedAction.BUY for r in page.rows if not r.held)
+            else ""
+        )
+        return (
+            f'<div class="panel" id="holdings"><h2>Holdings <span class="muted">as marked on '
+            f'{session}</span></h2><p id="no-holdings">No holdings yet{first}.</p></div>'
+        )
     next_session = MISSING if page.next_session is None else page.next_session.isoformat()
-    session = MISSING if page.session is None else page.session.isoformat()
     return (
         '<div class="panel" id="holdings">'
         f'<h2>Holdings <span class="muted">as marked on {session} · next session '
@@ -217,13 +294,50 @@ def _holdings(page: PortfolioOut) -> str:
         "<th>Avg price</th><th>Day's change / share</th><th>Day's change (position)</th>"
         "<th>Day's change %</th><th>Current value</th>"
         "<th>Profit</th><th>Profit %</th><th>Next session</th></tr></thead><tbody>"
-        + "".join(_row(row) for row in page.rows)
+        + "".join(_row(row) for row in held)
         + "</tbody></table>"
         '<p class="muted">CMP is the close the book was marked at; the average price is the cost '
         "basis per share, buy charges included; the day's change is against the previous session's "
         "close, per share and for the whole position (per share x quantity held), and its % is "
-        "the same for both; profit is on cost. Next session shows only an "
-        "order staged for it (a trim shows as SELL with its quantity).</p></div>"
+        "the same for both; profit is on cost. Next session shows only an order staged for it: "
+        "SELL n for a sale or a trim, BUY n for an add.</p></div>"
+    )
+
+
+def _buying_row(row: HoldingRowOut) -> str:
+    attrs = (
+        f'data-buying="{esc(row.isin)}" data-quantity="{row.action_quantity or ""}" '
+        f'data-cmp="{paisa(row.cmp)}" data-day-change-pct="{pct(row.day_change_pct)}" '
+        f'data-estimated-cost="{paisa(row.estimated_cost)}"'
+    )
+    cmp = MISSING
+    if row.cmp is not None and row.cmp_session is not None:
+        cmp = f'{_rupees(row.cmp)} <span class="muted">{row.cmp_session.isoformat()}</span>'
+    note = "" if row.note is None else f'<div class="muted">{free_text(row.note, limit=240)}</div>'
+    symbol = esc(row.symbol) if row.symbol else MISSING
+    return (
+        f'<tr {attrs}><td>{symbol}</td><td class="mono">{esc(row.isin)}</td>'
+        f'<td class="num">{row.action_quantity}</td><td class="num">{cmp}{note}</td>'
+        f'<td class="num"{_tone(row.day_change_pct)}>{_percent(row.day_change_pct)}</td>'
+        f'<td class="num">{_rupees(row.estimated_cost)}</td></tr>'
+    )
+
+
+def _buying(page: PortfolioOut) -> str:
+    """Staged BUYs of names the book does not hold yet; omitted when there are none."""
+    buys = [r for r in page.rows if not r.held and r.action is StagedAction.BUY]
+    if not buys:
+        return ""
+    when = MISSING if page.next_session is None else page.next_session.isoformat()
+    return (
+        f'<div class="panel" id="buying"><h2>Buying next session ({when})</h2>'
+        "<table><thead><tr><th>Symbol</th><th>ISIN</th><th>Qty to buy</th><th>CMP</th>"
+        "<th>Day's change %</th><th>Est. cost</th></tr></thead><tbody>"
+        + "".join(_buying_row(row) for row in buys)
+        + "</tbody></table>"
+        '<p class="muted">Names the book does not hold yet, with a BUY staged for the next '
+        "session. Est. cost is quantity x CMP — an estimate before charges; the order fills at "
+        "the next session's price.</p></div>"
     )
 
 
@@ -279,8 +393,12 @@ def _totals(totals: FundTotalsOut) -> str:
     )
 
 
-def render_portfolio(page: PortfolioOut) -> str:
-    """The Portfolio page for one book: selector, stream label, holdings and fund totals."""
+def render_portfolio(page: PortfolioOut, *, fragment: bool = False) -> str:
+    """The Portfolio page for one book: book picker, stream label, holdings and fund totals.
+
+    With ``fragment`` it is only the portfolio region (picker included) for an htmx swap — no
+    document around it; its ``<title>`` is the one htmx sets on the tab.
+    """
     book = page.book
     label = (
         f'<p id="book-label" data-book="{esc(book.book_id)}" data-kind="{esc(book.kind)}">'
@@ -289,7 +407,7 @@ def render_portfolio(page: PortfolioOut) -> str:
     )
     parts = [
         f'<h1>Portfolio · <span class="mono">{esc(book.book_id)}</span></h1>',
-        _selector(page),
+        _picker(page),
         _stream_banner(page),
         label,
     ]
@@ -307,4 +425,10 @@ def render_portfolio(page: PortfolioOut) -> str:
     if page.totals is not None:
         parts.append(_totals(page.totals))
     parts.append(_holdings(page))
-    return _page(f"Portfolio {book.book_id}", _SLUG, "".join(parts), as_of=page.as_of)
+    parts.append(_buying(page))
+    title = f"Portfolio {book.book_id}"
+    region = "".join(parts)
+    if fragment:
+        head = f"<title>{esc(title)} · trading-platform console</title>"
+        return f'<div id="{REGION_ID}">{head}{region}</div>'
+    return _page(title, _SLUG, f'<div id="{REGION_ID}">{region}</div>', as_of=page.as_of)

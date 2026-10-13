@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "BookChoiceOut",
+    "BookGlanceOut",
     "FundTotalsOut",
     "HoldingRowOut",
     "PortfolioOut",
@@ -64,6 +65,17 @@ class BookChoiceOut(_Frozen):
     opening_capital_inr: Money
 
 
+class BookGlanceOut(_Frozen):
+    """One book at a glance, for the picker: its latest mark's NAV and day's change, and whether
+    it has an order staged for the next session. From the marks the page already parses."""
+
+    book_id: str
+    session: date | None = Field(description="The book's latest marked session; None if unmarked")
+    nav: Money | None
+    daily_change_pct: Money | None = Field(description="NAV against the previous mark's, in %")
+    staged: bool = Field(description="A BUY or SELL staged on that session for the next one")
+
+
 class HoldingRowOut(_Frozen):
     """One instrument on the page: a holding, a name with an order staged, or both.
 
@@ -97,6 +109,10 @@ class HoldingRowOut(_Frozen):
     suspended_since: date | None = Field(description="Held, not trading since this session")
     action: StagedAction | None = Field(description="The order staged for the next session")
     action_quantity: int | None
+    estimated_cost: Money | None = Field(
+        description="action_quantity x CMP for a staged BUY: an estimate before charges (the "
+        "order fills at the next session's price); None for anything else or with no CMP"
+    )
     note: str | None = Field(description="Why a figure is missing, when one is")
 
 
@@ -135,6 +151,10 @@ class PortfolioOut(_Frozen):
     desk_record: str | None = Field(description="The paper_session row the holdings came from")
     book: BookChoiceOut
     books: list[BookChoiceOut] = Field(description="Every selectable book, in roster order")
+    glances: list[BookGlanceOut] = Field(
+        default_factory=list,
+        description="Each book at a glance, for the picker (empty when the journal is unreadable)",
+    )
     session: date | None = Field(description="The book's latest marked session")
     next_session: date | None = Field(description="The session the staged orders fill on")
     rows: list[HoldingRowOut]

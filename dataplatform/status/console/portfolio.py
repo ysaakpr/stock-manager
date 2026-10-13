@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from typing import Annotated, Any, Final
 
-from fastapi import Depends
+from fastapi import Depends, Header
 from fastapi.responses import HTMLResponse
 
 from dataplatform.logging import get_logger
@@ -66,9 +66,15 @@ def portfolio_page(
     roster: RosterDep,
     prices: PricesDep,
     book: str | None = None,
+    hx_request: Annotated[str | None, Header()] = None,
+    hx_history_restore_request: Annotated[str | None, Header()] = None,
 ) -> HTMLResponse:
     """One book's holdings, its next-session BUY/SELL and its fund totals; 404 for an unknown
-    book."""
+    book.
+
+    An htmx request (``HX-Request``) gets only the portfolio region — what the book picker swaps
+    in; a normal request, and htmx's history restore (which swaps the whole body), the full page.
+    """
     now = clock.now()
     stream, entries = choose_stream(live, dry)
     wanted = None if book is None or not book.strip() else book.strip()
@@ -92,7 +98,11 @@ def portfolio_page(
         rows=len(portfolio.rows),
         reconciled=None if portfolio.totals is None else portfolio.totals.reconciled,
     )
-    return HTMLResponse(render_portfolio(portfolio))
+    fragment = hx_request == "true" and hx_history_restore_request != "true"
+    return HTMLResponse(
+        render_portfolio(portfolio, fragment=fragment),
+        headers={"Vary": "HX-Request, HX-History-Restore-Request"},
+    )
 
 
 #: (path, endpoint, name) for `console.routes` to register.

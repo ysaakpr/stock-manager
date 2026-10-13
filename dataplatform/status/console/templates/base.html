@@ -34,6 +34,17 @@
       .state-RUNNING, .state-info, .state-SKIPPED_LOCKED { background: #e6f6ff; color: #035388; }
       .state-OK, .state-SUCCEEDED { background: #e3f9e5; color: #0e5814; }
       .panel { border: 1px solid #e4e7eb; border-radius: 6px; padding: 0.4rem 1rem 0.6rem; margin: 0.8rem 0; }
+      #book-picker { display: flex; flex-wrap: wrap; gap: 0.2rem 1.5rem; }
+      #book-picker h3 { margin: 0.3rem 0 0.2rem; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: #7b8794; }
+      .pick-line { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem; margin: 0.15rem 0; }
+      .pick-stem { min-width: 9.5rem; }
+      a.pick { display: inline-flex; flex-direction: column; padding: 0.1rem 0.45rem; border: 1px solid #e4e7eb; border-radius: 4px; color: #1f2933; text-decoration: none; line-height: 1.25; }
+      a.pick:hover { border-color: #9aa5b1; background: #f5f7fa; }
+      a.pick.current { border-color: #1f2933; background: #1f2933; color: #fff; }
+      a.pick.current .pick-glance, a.pick.current .pick-glance span { color: #cbd2d9 !important; }
+      .pick-glance { font-size: 0.72rem; white-space: nowrap; }
+      .pick-staged { color: #c27c0e; font-size: 0.7rem; }
+      @media (max-width: 30rem) { .pick-stem { min-width: 0; flex-basis: 100%; } }
     </style>
   </head>
   <body>
