@@ -3593,3 +3593,48 @@ tasks:
     question: "Expose the console publicly through Caddy, and with which authentication?"
     why_blocked: "The status API has no authentication; making any of it reachable from the internet is an owner decision."
     unblocks: []
+
+- id: M18.7
+  title: Console Portfolio page — one fund manager's book, holdings and next-session BUY/SELL
+  milestone: M18
+  module: D5
+  autonomy: AUTO
+  deps: [M18.3]
+  spec: |
+    Owner direction 2026-10-13. A deliberately simple, current view of ONE M17 fund manager's
+    portfolio at `/console/portfolio`, built on the M18.1 shell and the shared M18 rules (read-only,
+    no analyst/execution/backtest import from dataplatform, IST, Decimal, masked text, no external
+    URL). A new nav entry "Portfolio".
+    - Selection: one manager at a time (the four roster managers, e.g. FM-SWING-BRK), chosen with a
+      selector (plain GET form, `?manager=`), defaulting to the first. Show the manager's primary
+      (₹10 L) book; a second control switches to its mirror (₹1 cr) book (`?book=`). Control,
+      style and bench books are not selectable here.
+    - Stream: until S0 the desk writes only the dry stream; show the live stream when it has
+      entries, otherwise the most recent dry stream, with an unmistakable "DRY RUN" label naming the
+      stream. Read whatever the M17 job persists (journal entries / book records), the same data
+      the digest (`~/campaign/m17/dry/digest-<session>.md`) and `/status/managers` are built from —
+      reuse those reads; do not recompute differently.
+    - Holdings table, one row per instrument held as of the latest marked session: symbol (display
+      only — ISIN shown and used as the key, invariant #2), quantity, CMP (latest close the book was
+      marked at, with its session date), average purchase price, day's change (CMP vs the previous
+      session's close, ₹ and %), current profit (₹ and %, on cost).
+    - Next-session action column: show `BUY` or `SELL` only for an instrument with an order staged
+      for the next session (from the journal's STAGED / MIRROR_FOLLOW / stop-exit staging lines,
+      not yet filled); a TRIM is shown as SELL with its quantity. Leave the cell empty for
+      everything else. A staged BUY of a name not yet held appears as its own row with no holding
+      figures (only CMP, day's change and the BUY). Nothing else about the next session is shown.
+    - Fund totals: invested (cost of holdings), current value of holdings, funds balance (cash),
+      total (NAV = holdings + cash), total profit (₹ and % vs opening capital), and the fund's daily
+      change (NAV vs the previous session's NAV, ₹ and %).
+    - A suspended holding (M17.13) shows "suspended since <date>" in place of CMP-derived figures.
+    - Empty states say what is missing (no session marked yet; manager has no holdings).
+  deliverables: [dataplatform/status/console/portfolio.py, dataplatform/status/console/portfolio_render.py, dataplatform/status/queries_portfolio.py, dataplatform/status/models_portfolio.py, tests/unit/test_console_portfolio.py, tests/integration/test_console_portfolio.py, ops/runbooks/console.md]
+  acceptance:
+    - "for a fixture journal with holdings, a fill, a staged BUY of a new name and a staged SELL, the page shows exactly those rows, BUY/SELL only on the two staged names and an empty action cell elsewhere"
+    - "CMP, average price, day's change, current profit and every fund total are Decimal end to end and match a hand-computed fixture to the paisa"
+    - "the NAV and holdings on the page equal what the digest/status reads report for the same session (parity test)"
+    - "with no live-stream entries the page shows the latest dry stream labelled DRY RUN; with live entries it shows live"
+    - "only manager books are selectable; an unknown manager or book is a 404"
+    - "all M18.1 shared rules still hold (read-only, no external URL, no secret, IST)"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_console_portfolio.py tests/unit/test_console_ops.py -q"
