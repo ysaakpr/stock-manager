@@ -3605,10 +3605,15 @@ tasks:
     portfolio at `/console/portfolio`, built on the M18.1 shell and the shared M18 rules (read-only,
     no analyst/execution/backtest import from dataplatform, IST, Decimal, masked text, no external
     URL). A new nav entry "Portfolio".
-    - Selection: one manager at a time (the four roster managers, e.g. FM-SWING-BRK), chosen with a
-      selector (plain GET form, `?manager=`), defaulting to the first. Show the manager's primary
-      (₹10 L) book; a second control switches to its mirror (₹1 cr) book (`?book=`). Control,
-      style and bench books are not selectable here.
+    - Selection (owner correction 2026-10-13: "every book is a portfolio, so they should be
+      independently considered"): one BOOK at a time (`?book=<book_id>`, a plain GET form). Every
+      book the M17 desk records is selectable on its own footing — the 8 manager books (each 10 L
+      primary and each 1 cr mirror as separate entries), the 8 control books, the 4 style books
+      and the bench book. The selector is grouped by kind (Manager / Control / Style / Bench) and
+      shows each book's own id; it defaults to the first manager book. No manager→book two-step:
+      a mirror is just another book. Every book gets exactly the same view (holdings, BUY/SELL
+      where that book has an order staged, its own fund totals against its own opening capital),
+      with its kind and its manager (if any) as a small label.
     - Stream: until S0 the desk writes only the dry stream; show the live stream when it has
       entries, otherwise the most recent dry stream, with an unmistakable "DRY RUN" label naming the
       stream. Read whatever the M17 job persists (journal entries / book records), the same data
@@ -3634,7 +3639,7 @@ tasks:
     - "CMP, average price, day's change, current profit and every fund total are Decimal end to end and match a hand-computed fixture to the paisa"
     - "the NAV and holdings on the page equal what the digest/status reads report for the same session (parity test)"
     - "with no live-stream entries the page shows the latest dry stream labelled DRY RUN; with live entries it shows live"
-    - "only manager books are selectable; an unknown manager or book is a 404"
+    - "every recorded book is selectable on its own; an unknown book is a 404"
     - "all M18.1 shared rules still hold (read-only, no external URL, no secret, IST)"
     - "make check is green"
   verify: "uv run pytest tests/unit/test_console_portfolio.py tests/unit/test_console_ops.py -q"
