@@ -90,6 +90,19 @@ services:
       retries: 6
       start_period: 15s
     restart: unless-stopped
+    networks:
+      # `default` is the stack's own network, where `postgres` is. `edge` is the host's shared
+      # front-proxy network (external, owned by /home/ubuntu/caddy): joining it lets Caddy reach the
+      # console as `stock-manager-app:8000` for https://sm.<domain> (M18.6) without publishing
+      # anything beyond loopback. Caddy, not this file, decides what is exposed and behind which
+      # login — only /console*, behind basic auth; see ops/runbooks/console.md.
+      default:
+      edge:
+        aliases: [stock-manager-app]
+
+networks:
+  edge:
+    external: true
 
 volumes:
   pgdata:

@@ -6,8 +6,28 @@ functions the JSON endpoints use, so a page never disagrees with `/status/*`.
 
 ## Reaching it
 
-The status API listens on loopback only (M15.6, `ops/runbooks/loopback-only-ports.md`), so the
-console is reached through an ssh tunnel to port 8000:
+**From a browser: `https://sm.<domain>/console`** (M18.6), behind one shared basic-auth login.
+`<domain>` is the `DOMAIN` in the front proxy's untracked `/home/ubuntu/caddy/.env`.
+
+- The host's shared front proxy (Caddy, its own compose project in `/home/ubuntu/caddy`, outside
+  this repo) has an `sm.{$DOMAIN}` site that proxies **only `/console*`** to the app over the
+  external `edge` network, as `stock-manager-app:8000`. Every other path — `/status/*`, `/health`,
+  `/archives`, `/cases/*` — answers 404 there. The console's "raw JSON" links to `/status/*` work
+  over the tunnel below, not over `sm.`.
+- The app joins `edge` in `ops/docker-compose.yml`; Postgres never does
+  (`tests/unit/test_compose_ports.py`). The app's own port is still published on loopback only.
+- Login: the username and password live in the untracked, mode-600
+  `~/.config/smagent/console-basic-auth` on the server. Caddy holds only the bcrypt hash, inline in
+  its Caddyfile (not a repo, never committed). To rotate: generate a new password into that file,
+  `docker exec -i caddy-caddy-1 caddy hash-password < <(sed -n 's/^password=//p' FILE)` (stdin,
+  never argv), replace the hash in the `sm.` block, validate and reload (below).
+- Edit the Caddyfile **in place** (it is a single-file bind mount; a tool that writes a new file
+  and renames it leaves the container reading the old inode), then
+  `docker exec caddy-caddy-1 caddy validate --config /etc/caddy/Caddyfile` and
+  `docker exec caddy-caddy-1 caddy reload --config /etc/caddy/Caddyfile`. A reload, not a
+  restart: the same Caddy serves every other app on the host.
+
+**Over ssh**, with no login, everything the API serves:
 
 ```bash
 ssh -L 8000:127.0.0.1:8000 <the server>      # host and user from your own ssh config

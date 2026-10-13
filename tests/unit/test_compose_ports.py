@@ -128,6 +128,26 @@ def test_both_services_are_still_published() -> None:
     assert by_service == {"postgres": "127.0.0.1", "app": "127.0.0.1"}
 
 
+def test_only_the_app_joins_the_shared_proxy_network() -> None:
+    """M18.6: Caddy reaches the console over the host's `edge` network, and nothing else does.
+
+    `edge` is shared with every app the front proxy serves, so a service on it is reachable from
+    all of them. The app joins it under the alias Caddy proxies to, and keeps `default`, where
+    Postgres is. Postgres must never join: its dev-default credentials would then be one hop from
+    every other container on the host.
+    """
+    compose = yaml.safe_load((REPO / "ops" / "docker-compose.yml").read_text())
+    services = compose["services"]
+    assert compose["networks"]["edge"] == {"external": True}
+    app_networks = services["app"]["networks"]
+    assert set(app_networks) == {"default", "edge"}
+    assert app_networks["edge"]["aliases"] == ["stock-manager-app"]
+    on_edge = sorted(
+        name for name, svc in services.items() if "edge" in (svc.get("networks") or ())
+    )
+    assert on_edge == ["app"]
+
+
 @pytest.mark.parametrize(
     "spec",
     [
