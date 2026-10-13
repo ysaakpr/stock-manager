@@ -3622,7 +3622,9 @@ tasks:
     - Holdings table, one row per instrument held as of the latest marked session: symbol (display
       only — ISIN shown and used as the key, invariant #2), quantity, CMP (latest close the book was
       marked at, with its session date), average purchase price, day's change (CMP vs the previous
-      session's close, ₹ and %), current profit (₹ and %, on cost).
+      session's close, ₹ and %), current profit (₹ and %, on cost). Follow-up (owner 2026-10-13):
+      day's change shown per share and per position (per share x quantity held; % shown once; a
+      staged BUY of a name not held has an empty position cell).
     - Next-session action column: show `BUY` or `SELL` only for an instrument with an order staged
       for the next session (from the journal's STAGED / MIRROR_FOLLOW / stop-exit staging lines,
       not yet filled); a TRIM is shown as SELL with its quantity. Leave the cell empty for

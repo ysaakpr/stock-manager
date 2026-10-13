@@ -372,6 +372,7 @@ def test_the_page_shows_the_holdings_and_the_staged_new_name_and_nothing_else(
     assert new["held"] == "false" and new["quantity"] == ""
     assert (new["avg"], new["value"], new["profit"], new["profit-pct"]) == ("—",) * 4
     assert (new["cmp"], new["day-change"], new["day-change-pct"]) == ("1650.00", "10.00", "0.61")
+    assert new["position-day-change"] == ""  # no position yet: the per-share change only
 
 
 def test_yesterdays_filled_order_and_the_managers_decision_line_are_not_staged() -> None:
@@ -398,6 +399,7 @@ def test_a_suspended_holding_shows_suspended_since_in_place_of_cmp_figures(
     row = _rows(html)[ISIN_C]
     assert row["suspended-since"] == D0.isoformat()
     assert (row["cmp"], row["day-change"], row["profit"]) == ("—", "—", "—")
+    assert row["position-day-change"] == "—"  # no day's change on a suspended name, as before
     assert row["value"] == "11601.00"  # 4 x its last close 2900.25 — what the book is marked at
     assert row["avg"] == "3000.00"
     assert f"suspended since {D0.isoformat()}" in html
@@ -410,9 +412,11 @@ def test_a_suspended_holding_shows_suspended_since_in_place_of_cmp_figures(
 #: previous NAV 1001000.00; opening capital 10,00,000.
 EXPECTED_ROWS: Final = {
     ISIN_A: {"quantity": "10", "cmp": "2600.00", "avg": "2501.05", "day-change": "49.50",
+             "position-day-change": "495.00",  # 49.50 x 10
              "day-change-pct": "1.94", "value": "26000.00", "profit": "989.50",
              "profit-pct": "3.96"},
     ISIN_B: {"quantity": "7", "cmp": "1490.10", "avg": "1505.05", "day-change": "-19.90",
+             "position-day-change": "-139.30",  # -19.90 x 7: a down day
              "day-change-pct": "-1.32", "value": "10430.70", "profit": "-104.65",
              "profit-pct": "-0.99"},
 }  # fmt: skip
@@ -439,6 +443,35 @@ def test_every_figure_matches_the_hand_computation_to_the_paisa(client: TestClie
     # And as the operator reads them: rupees with Indian grouping, signed changes.
     assert "₹9,99,266.26" in html and "-₹733.74 (-0.07 %)" in html
     assert "-₹1,733.74 (-0.17 %)" in html and "+₹989.50" in html
+
+
+def test_the_days_change_is_shown_per_share_and_for_the_whole_position(
+    client: TestClient,
+) -> None:
+    """Owner, 2026-10-13: both figures, the % once. Inverted check: the position figure is the
+    per-share change times the quantity held — a page printing the per-share figure twice, or
+    multiplying by the staged quantity, fails here."""
+    html = _page(client, PRIMARY)
+    assert "<th>Day's change / share</th><th>Day's change (position)</th>" in html
+    assert html.count("<th>Day's change %</th>") == 1
+    rows = _rows(html)
+    assert (rows[ISIN_A]["day-change"], rows[ISIN_A]["position-day-change"]) == ("49.50", "495.00")
+    assert (rows[ISIN_B]["day-change"], rows[ISIN_B]["position-day-change"]) == (
+        "-19.90",
+        "-139.30",
+    )
+    assert "+₹495.00" in html and "-₹139.30" in html
+    # The staged BUY of D (5 shares, not held) has an empty position cell, not 5 x 10.00.
+    new_row = re.search(rf'<tr data-holding="{ISIN_D}"[^>]*>(.*?)</tr>', html)
+    assert new_row is not None
+    assert "+₹10.00" in new_row.group(1) and "₹50.00" not in new_row.group(1)
+    assert '<td class="num"></td>' in new_row.group(1)
+    page = _model()
+    exact = {r.isin: r.position_day_change for r in page.rows}
+    assert exact[ISIN_A] == Decimal("495.00") and exact[ISIN_B] == Decimal("-139.30")
+    assert exact[ISIN_C] is None and exact[ISIN_D] is None
+    # The fund-level daily change stays NAV against the previous NAV, not the rows' sum.
+    assert page.totals is not None and page.totals.daily_change == Decimal("-1733.74")
 
 
 def test_the_model_carries_exact_decimals_never_floats() -> None:
