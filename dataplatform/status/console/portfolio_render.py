@@ -22,6 +22,7 @@ from dataplatform.status.models_portfolio import (
     HoldingRowOut,
     PortfolioOut,
     PortfolioStream,
+    StagedAction,
 )
 
 __all__ = ["REGION_ID", "paisa", "pct", "render_portfolio"]
@@ -263,14 +264,28 @@ def _row(row: HoldingRowOut) -> str:
 
 
 def _holdings(page: PortfolioOut) -> str:
+    """Only what the book holds: every row has a quantity. A staged BUY of a name not held is in
+    `_buying`, never here."""
     if page.bench_note is not None:
         return (
             f'<div class="panel" id="holdings"><h2>Holdings</h2><p>{esc(page.bench_note)}</p></div>'
         )
-    if not page.rows:
+    if page.session is None:
         return ""
+    held = [row for row in page.rows if row.held]
+    session = page.session.isoformat()
+    if not held:
+        first = (
+            f" — first orders fill on {page.next_session.isoformat()}"
+            if page.next_session is not None
+            and any(r.action is StagedAction.BUY for r in page.rows if not r.held)
+            else ""
+        )
+        return (
+            f'<div class="panel" id="holdings"><h2>Holdings <span class="muted">as marked on '
+            f'{session}</span></h2><p id="no-holdings">No holdings yet{first}.</p></div>'
+        )
     next_session = MISSING if page.next_session is None else page.next_session.isoformat()
-    session = MISSING if page.session is None else page.session.isoformat()
     return (
         '<div class="panel" id="holdings">'
         f'<h2>Holdings <span class="muted">as marked on {session} · next session '
@@ -279,13 +294,50 @@ def _holdings(page: PortfolioOut) -> str:
         "<th>Avg price</th><th>Day's change / share</th><th>Day's change (position)</th>"
         "<th>Day's change %</th><th>Current value</th>"
         "<th>Profit</th><th>Profit %</th><th>Next session</th></tr></thead><tbody>"
-        + "".join(_row(row) for row in page.rows)
+        + "".join(_row(row) for row in held)
         + "</tbody></table>"
         '<p class="muted">CMP is the close the book was marked at; the average price is the cost '
         "basis per share, buy charges included; the day's change is against the previous session's "
         "close, per share and for the whole position (per share x quantity held), and its % is "
-        "the same for both; profit is on cost. Next session shows only an "
-        "order staged for it (a trim shows as SELL with its quantity).</p></div>"
+        "the same for both; profit is on cost. Next session shows only an order staged for it: "
+        "SELL n for a sale or a trim, BUY n for an add.</p></div>"
+    )
+
+
+def _buying_row(row: HoldingRowOut) -> str:
+    attrs = (
+        f'data-buying="{esc(row.isin)}" data-quantity="{row.action_quantity or ""}" '
+        f'data-cmp="{paisa(row.cmp)}" data-day-change-pct="{pct(row.day_change_pct)}" '
+        f'data-estimated-cost="{paisa(row.estimated_cost)}"'
+    )
+    cmp = MISSING
+    if row.cmp is not None and row.cmp_session is not None:
+        cmp = f'{_rupees(row.cmp)} <span class="muted">{row.cmp_session.isoformat()}</span>'
+    note = "" if row.note is None else f'<div class="muted">{free_text(row.note, limit=240)}</div>'
+    symbol = esc(row.symbol) if row.symbol else MISSING
+    return (
+        f'<tr {attrs}><td>{symbol}</td><td class="mono">{esc(row.isin)}</td>'
+        f'<td class="num">{row.action_quantity}</td><td class="num">{cmp}{note}</td>'
+        f'<td class="num"{_tone(row.day_change_pct)}>{_percent(row.day_change_pct)}</td>'
+        f'<td class="num">{_rupees(row.estimated_cost)}</td></tr>'
+    )
+
+
+def _buying(page: PortfolioOut) -> str:
+    """Staged BUYs of names the book does not hold yet; omitted when there are none."""
+    buys = [r for r in page.rows if not r.held and r.action is StagedAction.BUY]
+    if not buys:
+        return ""
+    when = MISSING if page.next_session is None else page.next_session.isoformat()
+    return (
+        f'<div class="panel" id="buying"><h2>Buying next session ({when})</h2>'
+        "<table><thead><tr><th>Symbol</th><th>ISIN</th><th>Qty to buy</th><th>CMP</th>"
+        "<th>Day's change %</th><th>Est. cost</th></tr></thead><tbody>"
+        + "".join(_buying_row(row) for row in buys)
+        + "</tbody></table>"
+        '<p class="muted">Names the book does not hold yet, with a BUY staged for the next '
+        "session. Est. cost is quantity x CMP — an estimate before charges; the order fills at "
+        "the next session's price.</p></div>"
     )
 
 
@@ -373,6 +425,7 @@ def render_portfolio(page: PortfolioOut, *, fragment: bool = False) -> str:
     if page.totals is not None:
         parts.append(_totals(page.totals))
     parts.append(_holdings(page))
+    parts.append(_buying(page))
     title = f"Portfolio {book.book_id}"
     region = "".join(parts)
     if fragment:

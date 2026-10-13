@@ -397,6 +397,7 @@ def _row(
             suspended_since=since,
             action=action,
             action_quantity=action_quantity,
+            estimated_cost=None,
             note=f"no CMP: valued at its last close {last_close} ({since.isoformat()})",
         )
     if cmp is None:
@@ -434,6 +435,11 @@ def _row(
         suspended_since=None,
         action=action,
         action_quantity=action_quantity,
+        estimated_cost=(
+            None
+            if action is not StagedAction.BUY or action_quantity is None or cmp is None
+            else action_quantity * cmp
+        ),
         note="; ".join(notes) or None,
     )
 
@@ -647,8 +653,11 @@ def read_portfolio(
             f"{session.isoformat()} ({mark.positions} position(s), NAV {mark.nav}); the mark's "
             "NAV and cash are shown as the book's figures."
         )
-    if not rows:
-        missing.append(f"{book.book_id} has no holdings on {session.isoformat()}.")
+    for row in rows:
+        if not row.held and row.action is not StagedAction.BUY:
+            missing.append(
+                f"{row.isin}: a {row.action} is staged for a name {book.book_id} does not hold."
+            )
     totals = FundTotalsOut(
         **totals_kw,
         invested=sum((r.cost for r in held_rows if r.cost is not None), Decimal(0)),

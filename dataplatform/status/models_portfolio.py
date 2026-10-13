@@ -109,6 +109,10 @@ class HoldingRowOut(_Frozen):
     suspended_since: date | None = Field(description="Held, not trading since this session")
     action: StagedAction | None = Field(description="The order staged for the next session")
     action_quantity: int | None
+    estimated_cost: Money | None = Field(
+        description="action_quantity x CMP for a staged BUY: an estimate before charges (the "
+        "order fills at the next session's price); None for anything else or with no CMP"
+    )
     note: str | None = Field(description="Why a figure is missing, when one is")
 
 

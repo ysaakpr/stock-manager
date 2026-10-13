@@ -3630,6 +3630,21 @@ tasks:
       not yet filled); a TRIM is shown as SELL with its quantity. Leave the cell empty for
       everything else. A staged BUY of a name not yet held appears as its own row with no holding
       figures (only CMP, day's change and the BUY). Nothing else about the next session is shown.
+      Follow-up (owner 2026-10-13, "why would a folio entry exist without a qty"): the holdings
+      table lists only instruments held as of the latest mark, so Qty is always present; a held
+      name's staged order stays inline (SELL n, or BUY n for an add). Staged BUYs of names not held
+      move to a separate compact "Buying next session (<date>)" section below it — symbol, ISIN,
+      quantity to buy, CMP with its date, day's change % and an estimated cost (qty x CMP, Decimal,
+      before charges) — omitted when empty. No holdings → "No holdings yet" (+ "— first orders
+      fill on <date>" when buys are staged) instead of an empty table.
+    - Book picker (owner 2026-10-13: "the selection should not need an additional button click"):
+      replaces the select + Show button. Every book is one plain link
+      `/console/portfolio?book=<id>`, grouped by kind, a stem's 10L and 1CR on one line; the
+      selected book is highlighted with aria-current="page". htmx progressive enhancement:
+      hx-get the same URL, swap only the portfolio region (picker included), hx-push-url; an
+      HX-Request gets the fragment, a normal request (or a history restore) the full page; GET
+      only. Each item shows the book's NAV and NAV change % from the marks the page already
+      parses, and a marker when it has a BUY/SELL staged for the next session.
     - Fund totals: invested (cost of holdings), current value of holdings, funds balance (cash),
       total (NAV = holdings + cash), total profit (₹ and % vs opening capital), and the fund's daily
       change (NAV vs the previous session's NAV, ₹ and %).

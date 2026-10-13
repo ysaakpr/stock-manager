@@ -162,6 +162,14 @@ def _rows(html: str) -> dict[str, dict[str, str]]:
     return out
 
 
+def _buying(html: str) -> dict[str, dict[str, str]]:
+    out = {}
+    for tag in re.findall(r"<tr data-buying=\"[^\"]*\"[^>]*>", html):
+        attrs = _attrs(tag)
+        out[attrs.pop("buying")] = attrs
+    return out
+
+
 def test_the_dry_stream_reads_back_as_the_books_wrote_it(conn: Connection, tmp_path: Path) -> None:
     _seed(conn)
     written = journal()
@@ -202,14 +210,15 @@ def test_the_page_over_postgres_shows_the_dry_stream_with_the_hand_computed_figu
     rows = _rows(html)
     for isin, expected in EXPECTED_ROWS.items():
         assert {k: rows[isin][k] for k in expected} == expected, isin
-    assert (rows[ISIN_B]["action"], rows[ISIN_D]["action"]) == ("SELL", "BUY")
+    assert rows[ISIN_B]["action"] == "SELL" and ISIN_D not in rows
+    assert _buying(html)[ISIN_D]["quantity"] == "5"
     tag = re.search(r'<table id="totals"[^>]*>', html)
     assert tag is not None and _attrs(tag.group(0)) == EXPECTED_TOTALS
     for symbol in SYMBOLS.values():
         assert f"<td>{symbol}</td>" in html
     assert "OLD" not in html and "-B</td>" not in html
     assert PLANT not in html
-    assert {k: v["action"] for k, v in _rows(mirror).items()} == {ISIN_D: "BUY"}
+    assert _rows(mirror) == {} and list(_buying(mirror)) == [ISIN_D]
 
 
 def test_the_live_stream_wins_once_it_has_entries(
