@@ -627,6 +627,15 @@
       "state": "DONE",
       "verify_output": "$ uv run pytest tests/unit/test_console_journal.py -q\n(exit 0)\n................................................                         [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/fastapi/testclient.py:1\n  /home/ubuntu/stock-manager/.worktrees/console-m18-4/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n\n$ uv run ruff format --check dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/unit/test_console_journal.py\n(exit 0)\n4 files already formatted\n\n$ uv run ruff check dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/unit/test_console_journal.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/status/console/routes.py dataplatform/status/models.py dataplatform/status/queries.py tests/unit/test_console_journal.py\n(exit 0)\nSuccess: no issues found in 4 source files"
     },
+    "M18.7": {
+      "attempts": 0,
+      "commit": "f7fef0e",
+      "finished": "2026-10-13T06:35:52+00:00",
+      "note": "Portfolio page /console/portfolio?book=<id>: every roster book (21) selectable on its own per the owner's 2026-10-13 correction; marks from the scoreboard's BOOK_MARK parse, holdings from the desk record's expected_book, staged BUY/SELL from order_uid staging lines on the latest marked session, CMP from the L1 close; dry stream labelled DRY RUN until live has entries",
+      "previous_state": "PENDING",
+      "state": "DONE",
+      "verify_output": "$ uv run pytest tests/unit/test_console_portfolio.py tests/unit/test_console_ops.py -q\n(exit 0)\n................................................                         [100%]\n=============================== warnings summary ===============================\n.venv/lib/python3.12/site-packages/fastapi/testclient.py:1\n  /home/ubuntu/stock-manager/.worktrees/console-m18-7/.venv/lib/python3.12/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.\n    from starlette.testclient import TestClient as TestClient  # noqa\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n\n$ uv run ruff format --check dataplatform/status/console/portfolio.py dataplatform/status/console/portfolio_render.py dataplatform/status/models_portfolio.py dataplatform/status/queries_portfolio.py tests/integration/test_console_portfolio.py tests/unit/test_console_portfolio.py\n(exit 0)\n6 files already formatted\n\n$ uv run ruff check dataplatform/status/console/portfolio.py dataplatform/status/console/portfolio_render.py dataplatform/status/models_portfolio.py dataplatform/status/queries_portfolio.py tests/integration/test_console_portfolio.py tests/unit/test_console_portfolio.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy dataplatform/status/console/portfolio.py dataplatform/status/console/portfolio_render.py dataplatform/status/models_portfolio.py dataplatform/status/queries_portfolio.py tests/integration/test_console_portfolio.py tests/unit/test_console_portfolio.py\n(exit 0)\nSuccess: no issues found in 6 source files"
+    },
     "M2.1": {
       "attempts": 1,
       "commit": "1941253",
@@ -1386,7 +1395,7 @@
       "verify_output": "$ uv run pytest tests/unit/test_momentum_v2.py -q\n(exit 0)\n..................                                                       [100%]\n\n$ uv run ruff format --check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\n2 files already formatted\n\n$ uv run ruff check backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nAll checks passed!\n\n$ uv run mypy backtest/policies/momentum_v2.py tests/unit/test_momentum_v2.py\n(exit 0)\nSuccess: no issues found in 2 source files"
     }
   },
-  "updated_at": "2026-10-12T13:01:49+00:00",
+  "updated_at": "2026-10-13T06:35:52+00:00",
   "version": 1,
   "wave": 1
 }
