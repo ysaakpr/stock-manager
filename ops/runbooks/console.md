@@ -95,15 +95,19 @@ book. An unknown book id is a 404.
   the holdings came from (`m17_dry2_fund_managers` today). Nothing in the dry stream counts.
 - **Holdings** as of the book's latest `BOOK_MARK`: ISIN (the key) and symbol (display only),
   quantity, CMP (the NSE L1 close the book was marked at, with its session; a BE/BZ print when
-  the name left EQ), average price (cost basis per share, buy charges included), day's change per
-  share against the previous session's close (₹ and %), current value, profit on cost (₹ and %).
-  A suspended holding shows "suspended since <date>" and is valued at its last close.
+  the name left EQ), average price (cost basis per share, buy charges included), day's change
+  against the previous session's close — **per share** (₹), **for the position** (₹, per-share
+  change × quantity held) and once as a % (the same for both; owner, 2026-10-13) — current value,
+  profit on cost (₹ and %). A suspended holding shows "suspended since <date>", no day's change,
+  and is valued at its last close.
 - **Next session**: `BUY n` or `SELL n` only where the book journaled a staging line (an entry
   with an `order_uid`: `STAGED`, `MIRROR_FOLLOW`, `STOP_EXIT`) on that session — those fill at the
   next open. A trim is a SELL with its quantity. A staged buy of a name not held is its own row
-  with only CMP, day's change and the BUY.
+  with only CMP, the per-share day's change and the BUY; its position cell is empty (no position
+  yet).
 - **Fund**: invested (sum of cost bases), current value of holdings, cash, NAV, total profit
-  against the book's opening capital, and the NAV change against the previous mark. NAV and cash
+  against the book's opening capital, and the NAV change against the previous mark (not the sum
+  of the rows' position changes — fills, charges and cash moves are in the NAV change). NAV and cash
   are the mark's own figures — the ones `/status/managers` and the digest print. If the listed
   holdings plus cash do not equal that NAV the page says so in a yellow banner instead of hiding
   it. The bench holds its index as one position: the page says so and shows its fund totals.

@@ -84,7 +84,11 @@ class HoldingRowOut(_Frozen):
     day_change: Money | None = Field(
         description="CMP minus the previous session's close, per share"
     )
-    day_change_pct: Money | None
+    position_day_change: Money | None = Field(
+        description="day_change x quantity held: the day's change on the whole position; None "
+        "for a name not held (a staged BUY) and for a suspended holding"
+    )
+    day_change_pct: Money | None = Field(description="The same for a share and for the position")
     cost: Money | None = Field(description="Cost basis of the shares held, buy charges included")
     average_price: Money | None = Field(description="cost / quantity")
     value: Money | None = Field(description="quantity x CMP (a suspended name: x its last close)")

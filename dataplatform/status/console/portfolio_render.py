@@ -136,9 +136,17 @@ def _stream_banner(page: PortfolioOut) -> str:
 # ── the holdings ───────────────────────────────────────────────────────────────────────────
 
 
+def _position(row: HoldingRowOut) -> str:
+    # A name not held (a staged BUY) has no position: the cell is empty, not a dash or a zero.
+    if not row.held:
+        return ""
+    return _rupees(row.position_day_change, signed=True)
+
+
 def _change_cells(row: HoldingRowOut) -> str:
     return (
         f'<td class="num"{_tone(row.day_change)}>{_rupees(row.day_change, signed=True)}</td>'
+        f'<td class="num"{_tone(row.position_day_change)}>{_position(row)}</td>'
         f'<td class="num"{_tone(row.day_change)}>{_percent(row.day_change_pct)}</td>'
     )
 
@@ -151,6 +159,7 @@ def _row(row: HoldingRowOut) -> str:
         f'data-quantity="{"" if row.quantity is None else row.quantity}" '
         f'data-cmp="{paisa(row.cmp)}" data-avg="{paisa(row.average_price)}" '
         f'data-day-change="{paisa(row.day_change)}" '
+        f'data-position-day-change="{"" if not row.held else paisa(row.position_day_change)}" '
         f'data-day-change-pct="{pct(row.day_change_pct)}" '
         f'data-value="{paisa(row.value)}" data-profit="{paisa(row.profit)}" '
         f'data-profit-pct="{pct(row.profit_pct)}" '
@@ -167,7 +176,7 @@ def _row(row: HoldingRowOut) -> str:
         cmp_cells = (
             f"<td><strong>suspended since {row.suspended_since.isoformat()}</strong></td>"
             f'<td class="num">{_rupees(row.average_price)}</td>'
-            f'<td colspan="2" class="muted">{free_text(row.note, limit=240)}</td>'
+            f'<td colspan="3" class="muted">{free_text(row.note, limit=240)}</td>'
             f'<td class="num">{_rupees(row.value)}</td><td colspan="2">{MISSING}</td>'
         )
     else:
@@ -205,12 +214,15 @@ def _holdings(page: PortfolioOut) -> str:
         f'<h2>Holdings <span class="muted">as marked on {session} · next session '
         f"{next_session}</span></h2>"
         "<table><thead><tr><th>Symbol</th><th>ISIN</th><th>Qty</th><th>CMP</th>"
-        "<th>Avg price</th><th>Day's change</th><th>Day's change %</th><th>Current value</th>"
+        "<th>Avg price</th><th>Day's change / share</th><th>Day's change (position)</th>"
+        "<th>Day's change %</th><th>Current value</th>"
         "<th>Profit</th><th>Profit %</th><th>Next session</th></tr></thead><tbody>"
         + "".join(_row(row) for row in page.rows)
         + "</tbody></table>"
         '<p class="muted">CMP is the close the book was marked at; the average price is the cost '
-        "basis per share, buy charges included; profit is on cost. Next session shows only an "
+        "basis per share, buy charges included; the day's change is against the previous session's "
+        "close, per share and for the whole position (per share x quantity held), and its % is "
+        "the same for both; profit is on cost. Next session shows only an "
         "order staged for it (a trim shows as SELL with its quantity).</p></div>"
     )
 

@@ -386,6 +386,7 @@ def _row(
             previous_close=None,
             previous_session=None,
             day_change=None,
+            position_day_change=None,
             day_change_pct=None,
             cost=None if held is None else held.cost,
             average_price=None if held is None else held.cost / held.quantity,
@@ -416,6 +417,9 @@ def _row(
         previous_close=previous_close,
         previous_session=previous_session,
         day_change=day_change,
+        position_day_change=(
+            None if day_change is None or held is None else day_change * held.quantity
+        ),
         day_change_pct=(
             None
             if day_change is None or previous_close is None
