@@ -64,6 +64,7 @@ PAGES: Final[tuple[tuple[str, str, bool], ...]] = (
     ("data", "Data", True),
     ("desk", "Desk", True),
     ("journal", "Journal", True),
+    ("portfolio", "Portfolio", True),
 )
 
 _CURRENT: Final = ' class="current"'

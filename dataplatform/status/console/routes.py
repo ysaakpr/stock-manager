@@ -36,6 +36,7 @@ from dataplatform.status.console.pages import (
     render_not_found,
     render_ops,
 )
+from dataplatform.status.console.portfolio import ROUTES as PORTFOLIO_ROUTES
 from dataplatform.status.deps import ClockDep, ConnDep, HeartbeatDep, SettingsDep
 from dataplatform.status.models import JobLineOut
 from dataplatform.status.queries import (
@@ -144,4 +145,6 @@ for _slug, _label, _built in PAGES:
 for _path, _endpoint, _name in DATA_ROUTES:  # M18.2: /console/data
     _page_route(_path, _endpoint, response_class=HTMLResponse, name=_name)
 for _path, _endpoint, _name in JOURNAL_ROUTES:  # M18.4
+    _page_route(_path, _endpoint, response_class=HTMLResponse, name=_name)
+for _path, _endpoint, _name in PORTFOLIO_ROUTES:  # M18.7
     _page_route(_path, _endpoint, response_class=HTMLResponse, name=_name)
