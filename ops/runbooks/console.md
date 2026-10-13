@@ -83,6 +83,35 @@ probe of the broker, which System 1 never imports.
 
 Data and Journal are in the navigation and say "not built yet" until M18.2 and M18.4.
 
+## The Portfolio page (`/console/portfolio?book=<id>`, M18.7)
+
+One M17 book at a time, as a portfolio of its own (owner, 2026-10-13: every book is a portfolio).
+The selector lists every book the roster records — each manager's 10 L primary and 1 cr mirror,
+the controls, the style books and the bench — grouped by kind; the default is the first manager
+book. An unknown book id is a 404.
+
+- **Stream.** The live stream when it has any entry; until S0 it has none, and the page shows the
+  dry stream under a yellow **DRY RUN** banner naming the stream (`m17-dry`) and the desk record
+  the holdings came from (`m17_dry2_fund_managers` today). Nothing in the dry stream counts.
+- **Holdings** as of the book's latest `BOOK_MARK`: ISIN (the key) and symbol (display only),
+  quantity, CMP (the NSE L1 close the book was marked at, with its session; a BE/BZ print when
+  the name left EQ), average price (cost basis per share, buy charges included), day's change per
+  share against the previous session's close (₹ and %), current value, profit on cost (₹ and %).
+  A suspended holding shows "suspended since <date>" and is valued at its last close.
+- **Next session**: `BUY n` or `SELL n` only where the book journaled a staging line (an entry
+  with an `order_uid`: `STAGED`, `MIRROR_FOLLOW`, `STOP_EXIT`) on that session — those fill at the
+  next open. A trim is a SELL with its quantity. A staged buy of a name not held is its own row
+  with only CMP, day's change and the BUY.
+- **Fund**: invested (sum of cost bases), current value of holdings, cash, NAV, total profit
+  against the book's opening capital, and the NAV change against the previous mark. NAV and cash
+  are the mark's own figures — the ones `/status/managers` and the digest print. If the listed
+  holdings plus cash do not equal that NAV the page says so in a yellow banner instead of hiding
+  it. The bench holds its index as one position: the page says so and shows its fund totals.
+
+Sources: the journal (`decision_journal`, through `analyst.journal.Journal`, the dry stream read
+back via `StreamJournal.unprefixed`), `paper_session.book_state` (the desk record of the session),
+`symbol_history`, and the L1 `prices_raw` partition of the session and the one before it.
+
 ## Read-only
 
 Every console route answers GET and HEAD only; POST, PUT, PATCH and DELETE are 405. The unit
