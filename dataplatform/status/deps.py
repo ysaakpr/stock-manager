@@ -13,8 +13,8 @@ here writes.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Annotated
+from collections.abc import Iterator, Sequence
+from typing import Annotated, Any
 
 import psycopg
 from fastapi import Depends
@@ -24,7 +24,7 @@ from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger
 from dataplatform.quality.gaps import GapScanner, LakeL1Presence
 from dataplatform.scheduler import read_heartbeat
-from dataplatform.status.queries import HeartbeatRead
+from dataplatform.status.queries import HeartbeatRead, read_m17_journal, read_m17_roster
 from dataplatform.status.sync_state import SyncStateStore
 from dataplatform.store.db import Connection, connection
 
@@ -33,12 +33,16 @@ __all__ = [
     "ConnDep",
     "GapScannerDep",
     "HeartbeatDep",
+    "M17JournalDep",
+    "RosterDep",
     "SettingsDep",
     "SyncStoreDep",
     "clock_source",
     "db_connection",
     "gap_scanner",
     "heartbeat_source",
+    "m17_journal_source",
+    "m17_roster_source",
     "settings_source",
     "sync_store",
 ]
@@ -118,3 +122,19 @@ def heartbeat_source(settings: SettingsDep) -> HeartbeatRead:
 
 
 HeartbeatDep = Annotated[HeartbeatRead, Depends(heartbeat_source)]
+
+
+def m17_roster_source() -> Any:
+    """The M17 roster, as a dependency so a test can supply a smaller one."""
+    return read_m17_roster()
+
+
+RosterDep = Annotated[Any, Depends(m17_roster_source)]
+
+
+def m17_journal_source(conn: ConnDep, settings: SettingsDep, roster: RosterDep) -> Sequence[Any]:
+    """The M17 books' journal entries, in append order — a dependency so a test can supply them."""
+    return read_m17_journal(conn, data_root=settings.data_root, roster=roster)
+
+
+M17JournalDep = Annotated[Sequence[Any], Depends(m17_journal_source)]

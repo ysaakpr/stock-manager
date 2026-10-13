@@ -62,8 +62,8 @@ JOBS_REFRESH_SECONDS: Final = 30
 PAGES: Final[tuple[tuple[str, str, bool], ...]] = (
     ("ops", "Ops", True),
     ("data", "Data", True),
-    ("desk", "Desk", False),
-    ("journal", "Journal", False),
+    ("desk", "Desk", True),
+    ("journal", "Journal", True),
 )
 
 _CURRENT: Final = ' class="current"'
