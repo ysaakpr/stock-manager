@@ -42,6 +42,7 @@ from typing import Any, Final, Protocol
 from dataplatform.redaction import mask_and_truncate
 from dataplatform.status.models_portfolio import (
     BookChoiceOut,
+    BookGlanceOut,
     FundTotalsOut,
     HoldingRowOut,
     PortfolioOut,
@@ -458,6 +459,51 @@ def default_book(choices: Sequence[BookChoiceOut]) -> BookChoiceOut:
     return next((c for c in choices if c.kind == "MANAGER"), choices[0])
 
 
+def _glances(
+    entries: Sequence[Any], marks: Sequence[Any], choices: Sequence[BookChoiceOut]
+) -> list[BookGlanceOut]:
+    """Every book at a glance from its marks and, in one pass over ``entries``, its staging.
+
+    A book is marked as staged when a name nets to a BUY or a SELL on its latest marked session
+    — the same rule the holdings table uses for the action column.
+    """
+    by_book: dict[str, list[Any]] = {}
+    for mark in marks:
+        by_book.setdefault(mark.book_id, []).append(mark)
+    latest: dict[str, tuple[Any, Any]] = {}
+    for book_id, book_marks in by_book.items():
+        book_marks.sort(key=lambda m: m.session)
+        latest[book_id] = (book_marks[-1], book_marks[-2] if len(book_marks) > 1 else None)
+    nets: dict[tuple[str, str], int] = {}
+    for entry in entries:
+        found = latest.get(entry.case_id)
+        if found is None or entry.trading_date != found[0].session or entry.isin is None:
+            continue
+        if entry.decision in ("BUY", "SELL") and "order_uid" in entry.payload:
+            quantity = _whole(
+                entry.payload.get("quantity"),
+                f"staging line {entry.case_id} {entry.trading_date} {entry.isin} quantity",
+            )
+            key = (entry.case_id, entry.isin)
+            nets[key] = nets.get(key, 0) + (quantity if entry.decision == "BUY" else -quantity)
+    staged = {book_id for (book_id, _), net in nets.items() if net}
+    out: list[BookGlanceOut] = []
+    for choice in choices:
+        mark, previous = latest.get(choice.book_id, (None, None))
+        out.append(
+            BookGlanceOut(
+                book_id=choice.book_id,
+                session=None if mark is None else mark.session,
+                nav=None if mark is None else mark.nav,
+                daily_change_pct=None
+                if mark is None or previous is None
+                else _pct(mark.nav - previous.nav, previous.nav),
+                staged=choice.book_id in staged,
+            )
+        )
+    return out
+
+
 def read_portfolio(
     conn: Connection,
     *,
@@ -497,9 +543,14 @@ def read_portfolio(
         inputs = inputs_from_journal(entries, roster)
     except ScoreboardError as error:
         return page(error=mask_and_truncate(str(error), _ERROR_CHARS))
+    glances = _glances(entries, inputs.marks, choices)
+
+    def page_with(**fields: Any) -> PortfolioOut:
+        return page(glances=glances, **fields)
+
     marks = sorted((m for m in inputs.marks if m.book_id == book.book_id), key=lambda m: m.session)
     if not marks:
-        return page(
+        return page_with(
             missing=[
                 f"No session has been marked yet for {book.book_id} in the {stream.value} stream."
             ]
@@ -543,7 +594,7 @@ def read_portfolio(
             unreconciled=None,
             reconciled=True,
         )
-        return page(
+        return page_with(
             desk_record=desk.record_id,
             session=session,
             next_session=prices.next_session(session),
@@ -605,7 +656,7 @@ def read_portfolio(
         unreconciled=None if unreconciled == 0 else unreconciled,
         reconciled=reconciled,
     )
-    return page(
+    return page_with(
         desk_record=desk.record_id,
         session=session,
         next_session=prices.next_session(session),

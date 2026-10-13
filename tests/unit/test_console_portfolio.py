@@ -600,16 +600,99 @@ def test_the_stream_choice_and_the_dry_read_are_skipped_once_live() -> None:
 # ── 5. selection: every recorded book on its own; unknown is a 404 ─────────────────────────
 
 
-def test_every_recorded_book_is_selectable_grouped_by_kind(client: TestClient) -> None:
+def _picks(html: str) -> list[dict[str, str]]:
+    """Every book picker link's attributes, in page order."""
+    out = []
+    for tag in re.findall(r"<a href=\"[^\"]*\"[^>]*class=\"pick[^\"]*\"[^>]*>", html):
+        out.append(dict(re.findall(r'([a-z-]+)="([^"]*)"', tag)))
+    return out
+
+
+def test_every_recorded_book_is_one_link_grouped_by_kind(client: TestClient) -> None:
     html = _page(client)
-    options = re.findall(r'<option value="([^"]+)"', html)
-    assert options == [book.id for book in ROSTER.books] and len(options) == 21
-    groups = re.findall(r'<optgroup label="([^"]+)">', html)
+    picks = _picks(html)
+    assert [p["data-book"] for p in picks] == [book.id for book in ROSTER.books]
+    assert len(picks) == 21
+    for pick in picks:
+        # One click: a plain GET link to the book's own URL, and htmx fetches the same URL.
+        assert pick["href"] == f"/console/portfolio?book={pick['data-book']}"
+        assert pick["hx-get"] == pick["href"]
+    groups = re.findall(r'<div class="pick-group" data-kind="[^"]+"><h3>([^<]+)</h3>', html)
     assert groups == ["Manager", "Control", "Style", "Bench"]
-    assert '<form method="get" action="/console/portfolio"' in html
-    # The default is the first manager book.
-    assert re.search(r'<option value="FM-SWING-BRK-10L" selected>', html)
+    # No dropdown and no submit button: selection is the click.
+    assert "<select" not in html and "<button" not in html and "<form" not in html
+    picker = re.search(r'<nav id="book-picker"[^>]*>', html)
+    assert picker is not None
+    assert 'hx-target="#portfolio"' in picker.group(0)
+    assert 'hx-push-url="true"' in picker.group(0)
+    # The default is the first manager book, highlighted.
+    current = [p["data-book"] for p in picks if "aria-current" in p]
+    assert current == ["FM-SWING-BRK-10L"]
     assert 'data-book="FM-SWING-BRK-10L" data-kind="MANAGER"' in html
+
+
+def test_a_managers_primary_and_mirror_share_one_line(client: TestClient) -> None:
+    html = _page(client)
+    line = re.search(
+        r'<div class="pick-line"><span class="pick-stem mono">FM-POS-TREND</span>(.*?)</div>', html
+    )
+    assert line is not None
+    labels = re.findall(r'<span class="mono">([^<]+)</span>', line.group(1))
+    assert labels == ["10L", "1CR"]
+    assert '<span class="pick-stem mono">BENCH-N500</span>' not in html
+
+
+def test_the_selected_book_is_highlighted_with_aria_current(client: TestClient) -> None:
+    picks = _picks(_page(client, MIRROR))
+    current = [p for p in picks if p.get("aria-current") == "page"]
+    assert [p["data-book"] for p in current] == [MIRROR]
+    assert current[0]["class"] == "pick current"
+    assert all(p["class"] == "pick" for p in picks if p["data-book"] != MIRROR)
+
+
+def test_each_pick_shows_its_nav_change_and_a_staged_marker(client: TestClient) -> None:
+    html = _page(client)
+    picks = {p["data-book"]: p for p in _picks(html)}
+    # The primary and its mirror each have an order staged on D2 for D3; nothing else does.
+    assert {b for b, p in picks.items() if p["data-staged"] == "true"} == {PRIMARY, MIRROR}
+    item = re.search(rf'data-book="{PRIMARY}".*?</a>', html)
+    assert item is not None
+    # NAV 999266.26 to the rupee; vs 1001000.00 the day before: -0.17 %.
+    assert "₹9,99,266 · " in item.group(0) and "-0.17 %" in item.group(0)
+    assert 'class="pick-staged"' in item.group(0)
+    unmarked = re.search(rf'data-book="{UNMARKED}".*?</a>', html)
+    assert unmarked is not None and "not marked" in unmarked.group(0)
+    assert 'class="pick-staged"' not in unmarked.group(0)
+
+
+def test_an_htmx_request_gets_the_region_and_a_normal_request_the_page(
+    client: TestClient,
+) -> None:
+    full = client.get("/console/portfolio", params={"book": MIRROR})
+    assert full.status_code == 200 and full.text.lstrip().startswith("<!doctype html>")
+    assert '<div id="portfolio">' in full.text
+    part = client.get("/console/portfolio", params={"book": MIRROR}, headers={"HX-Request": "true"})
+    assert part.status_code == 200 and part.headers["content-type"].startswith("text/html")
+    assert part.text.startswith('<div id="portfolio">')
+    assert "<html" not in part.text and "<body" not in part.text and "<header" not in part.text
+    # The region carries the picker, so the highlight swaps with the book.
+    assert [p["data-book"] for p in _picks(part.text) if "aria-current" in p] == [MIRROR]
+    assert _totals(part.text) == _totals(full.text)
+    assert "HX-Request" in part.headers["vary"]
+    # htmx's history restore swaps the whole body: it gets the full page.
+    restore = client.get(
+        "/console/portfolio",
+        params={"book": MIRROR},
+        headers={"HX-Request": "true", "HX-History-Restore-Request": "true"},
+    )
+    assert restore.text.lstrip().startswith("<!doctype html>")
+
+
+def test_an_unknown_book_is_a_404_for_htmx_too(client: TestClient) -> None:
+    response = client.get(
+        "/console/portfolio", params={"book": "NOPE"}, headers={"HX-Request": "true"}
+    )
+    assert response.status_code == 404
 
 
 def test_a_mirror_is_its_own_portfolio(client: TestClient) -> None:
