@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any, TextIO
 
 import structlog
+import structlog.tracebacks
 from structlog.typing import EventDict, FilteringBoundLogger, Processor, WrappedLogger
 
 from dataplatform.clock import Clock, SystemClock
@@ -65,13 +66,24 @@ def configure_logging(
         _ClockTimeStamper(clock),
         structlog.processors.StackInfoRenderer(),
     ]
+    # Both traceback renderers default to printing every frame's locals. A job's frame holds its
+    # `JobContext`, whose `Settings` carries the database DSN; with locals on, every failed job
+    # wrote that DSN into the scheduler journal (invariant #13: never enable frame-locals in a
+    # traceback renderer). The frames, lines and exception chain are kept; only the locals go.
     if settings.effective_log_format() is LogFormat.JSON:
         processors += [
-            structlog.processors.dict_tracebacks,
+            structlog.processors.ExceptionRenderer(
+                structlog.tracebacks.ExceptionDictTransformer(show_locals=False)
+            ),
             structlog.processors.JSONRenderer(sort_keys=True),
         ]
     else:
-        processors.append(structlog.dev.ConsoleRenderer(colors=_is_a_terminal(target)))
+        processors.append(
+            structlog.dev.ConsoleRenderer(
+                colors=_is_a_terminal(target),
+                exception_formatter=structlog.dev.RichTracebackFormatter(show_locals=False),
+            )
+        )
 
     structlog.configure(
         processors=processors,
