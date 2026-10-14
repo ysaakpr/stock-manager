@@ -784,9 +784,293 @@ The decision struck at the last session's close (traded at the next session's cl
 | NIFTY Smallcap 250 TRI | 2026-10-01 | 22471.40 | 150 | 21807.81 | +3.04pp | **invested** | 2026-04-17 |
 | NIFTY Smallcap 250 TRI | 2026-10-01 | 22471.40 | 200 | 21495.84 | +4.54pp | **invested** | 2026-04-27 |
 
+## Part 2 — D13's regime gate: 200 vs 50 vs 30 sessions
+
+D13 (`PAPER_RATIFIED_2026_09_06`) parks the momentum book in cash when NIFTY 50 TRI is below its 200-session average on the monthly rebalance session. The parameter already exists (`MomentumV2Parameters.regime_ma_days`, default 200 = D13); the arms set only it:
+
+* **Momentum v2, D13 paper config** — the paper book's configuration (D13): M9.5's toggles without the 15% vol target.
+* **D13 + 30-session regime MA** — the monthly regime gate reads NIFTY 50 TRI against its 30-session average, not 200.
+* **D13 + 50-session regime MA** — the monthly regime gate reads NIFTY 50 TRI against its 50-session average, not 200.
+
+Same harness as `ops/gates/M14.5-regime-reentry-report.md` (`backtest.m12_rerun`, book corporate actions and cash interest on, every order through A8's ratified rails), same mandate: XIRR ÷ max DD; ₹1 cr and ₹10 cr median-turnover floors; decade, six-year, walk-forward; never averaged; bar XIRR > 25%. Columns as in M14.5.
+
+| Run directory | Universe | Commit | Lake last session | Units |
+| --- | --- | --- | --- | --- |
+| `ma-timing-regime-floor-2024ffe` | turnover_floor | `2024ffecff` | 2026-10-13 | walk-forward, decade, six-year |
+
+### Results — floor-only universe
+
+#### decade (2016-09-01 → 2026-08-31)
+
+**₹1 cr/day floor**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Δ XIRR vs D13 | Δ DD vs D13 | Excess vs NIFTY 50 TRI | Parks / re-entries (ledger-confirmed) | Trades | One-way turnover /yr | Charges | A8 min-holdings refusals, all sessions (park sessions) | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Momentum v2, D13 paper config** | 25.06% | 28.71% | **0.87** | — | — | 13.10% | 9 / 9 (9 / 9) | 2235 | 2.43x | ₹2.20L | 241 (24) | yes |
+| 2 | D13 + 50-session regime MA | 22.96% | 27.31% | **0.84** | -2.10pp | -1.40pp | 11.00% | 19 / 19 (19 / 19) | 2048 | 2.38x | ₹1.95L | 410 (40) | no |
+| 3 | D13 + 30-session regime MA | 22.29% | 28.47% | **0.78** | -2.77pp | -0.24pp | 10.32% | 21 / 21 (21 / 21) | 2255 | 2.64x | ₹2.18L | 393 (36) | no |
+
+**₹10 cr/day floor**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Δ XIRR vs D13 | Δ DD vs D13 | Excess vs NIFTY 50 TRI | Parks / re-entries (ledger-confirmed) | Trades | One-way turnover /yr | Charges | A8 min-holdings refusals, all sessions (park sessions) | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Momentum v2, D13 paper config** | 24.14% | 30.05% | **0.80** | — | — | 12.17% | 9 / 9 (9 / 9) | 2015 | 2.32x | ₹1.78L | 234 (24) | no |
+| 2 | D13 + 50-session regime MA | 19.73% | 30.88% | **0.64** | -4.41pp | +0.83pp | 7.77% | 19 / 19 (19 / 19) | 1833 | 2.47x | ₹1.56L | 398 (40) | no |
+| 3 | D13 + 30-session regime MA | 19.00% | 30.14% | **0.63** | -5.14pp | +0.08pp | 7.03% | 21 / 21 (21 / 21) | 2021 | 2.70x | ₹1.75L | 375 (36) | no |
+
+#### six-year (2019-07-01 → 2026-08-31)
+
+**₹1 cr/day floor**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Δ XIRR vs D13 | Δ DD vs D13 | Excess vs NIFTY 50 TRI | Parks / re-entries (ledger-confirmed) | Trades | One-way turnover /yr | Charges | A8 min-holdings refusals, all sessions (park sessions) | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Momentum v2, D13 paper config** | 29.07% | 18.84% | **1.54** | — | — | 17.37% | 7 / 7 (7 / 7) | 1562 | 2.63x | ₹1.45L | 220 (22) | yes |
+| 2 | D13 + 50-session regime MA | 26.44% | 22.39% | **1.18** | -2.62pp | +3.56pp | 14.74% | 13 / 13 (13 / 13) | 1417 | 2.54x | ₹1.27L | 310 (30) | yes |
+| 3 | D13 + 30-session regime MA | 25.48% | 32.58% | **0.78** | -3.59pp | +13.74pp | 13.78% | 15 / 15 (15 / 15) | 1564 | 2.81x | ₹1.42L | 286 (26) | yes |
+
+**₹10 cr/day floor**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Δ XIRR vs D13 | Δ DD vs D13 | Excess vs NIFTY 50 TRI | Parks / re-entries (ledger-confirmed) | Trades | One-way turnover /yr | Charges | A8 min-holdings refusals, all sessions (park sessions) | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Momentum v2, D13 paper config** | 31.08% | 19.87% | **1.56** | — | — | 19.38% | 7 / 7 (7 / 7) | 1478 | 2.43x | ₹1.31L | 214 (22) | yes |
+| 2 | D13 + 50-session regime MA | 26.87% | 23.55% | **1.14** | -4.21pp | +3.68pp | 15.17% | 13 / 13 (13 / 13) | 1411 | 2.54x | ₹1.25L | 299 (30) | yes |
+| 3 | D13 + 30-session regime MA | 23.86% | 30.78% | **0.78** | -7.22pp | +10.91pp | 12.16% | 15 / 15 (15 / 15) | 1528 | 2.85x | ₹1.29L | 278 (26) | no |
+
+#### wf-selection (2016-09-01 → 2021-08-31)
+
+**₹1 cr/day floor**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Δ XIRR vs D13 | Δ DD vs D13 | Excess vs NIFTY 50 TRI | Parks / re-entries (ledger-confirmed) | Trades | One-way turnover /yr | Charges | A8 min-holdings refusals, all sessions (park sessions) | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | D13 + 30-session regime MA | 24.40% | 28.47% | **0.86** | +0.11pp | -0.24pp | 8.66% | 8 / 8 (8 / 8) | 674 | 2.20x | ₹0.45L | 158 (15) | no |
+| 2 | **Momentum v2, D13 paper config** | 24.29% | 28.71% | **0.85** | — | — | 8.55% | 4 / 4 (4 / 4) | 601 | 2.00x | ₹0.41L | 91 (9) | no |
+| 3 | D13 + 50-session regime MA | 22.74% | 27.31% | **0.83** | -1.55pp | -1.40pp | 7.00% | 9 / 9 (9 / 9) | 663 | 2.17x | ₹0.44L | 174 (17) | no |
+
+**₹10 cr/day floor**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Δ XIRR vs D13 | Δ DD vs D13 | Excess vs NIFTY 50 TRI | Parks / re-entries (ledger-confirmed) | Trades | One-way turnover /yr | Charges | A8 min-holdings refusals, all sessions (park sessions) | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | D13 + 30-session regime MA | 20.68% | 30.14% | **0.69** | +1.15pp | +0.08pp | 4.95% | 8 / 8 (8 / 8) | 640 | 2.10x | ₹0.36L | 145 (15) | no |
+| 2 | **Momentum v2, D13 paper config** | 19.54% | 30.05% | **0.65** | — | — | 3.80% | 4 / 4 (4 / 4) | 633 | 1.99x | ₹0.34L | 85 (9) | no |
+| 3 | D13 + 50-session regime MA | 17.83% | 30.88% | **0.58** | -1.70pp | +0.83pp | 2.10% | 9 / 9 (9 / 9) | 633 | 2.17x | ₹0.35L | 166 (17) | no |
+
+#### wf-verification (2021-09-01 → 2026-08-31)
+
+**₹1 cr/day floor**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Δ XIRR vs D13 | Δ DD vs D13 | Excess vs NIFTY 50 TRI | Parks / re-entries (ledger-confirmed) | Trades | One-way turnover /yr | Charges | A8 min-holdings refusals, all sessions (park sessions) | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Momentum v2, D13 paper config** | 33.04% | 17.10% | **1.93** | — | — | 24.65% | 5 / 5 (5 / 5) | 910 | 2.65x | ₹0.70L | 153 (15) | yes |
+| 2 | D13 + 50-session regime MA | 24.10% | 25.15% | **0.96** | -8.94pp | +8.05pp | 15.71% | 10 / 10 (10 / 10) | 826 | 2.69x | ₹0.62L | 245 (23) | no |
+| 3 | D13 + 30-session regime MA | 18.96% | 33.30% | **0.57** | -14.08pp | +16.20pp | 10.56% | 13 / 13 (13 / 13) | 854 | 2.96x | ₹0.62L | 240 (21) | no |
+
+**₹10 cr/day floor**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Δ XIRR vs D13 | Δ DD vs D13 | Excess vs NIFTY 50 TRI | Parks / re-entries (ledger-confirmed) | Trades | One-way turnover /yr | Charges | A8 min-holdings refusals, all sessions (park sessions) | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Momentum v2, D13 paper config** | 28.17% | 23.56% | **1.20** | — | — | 19.78% | 5 / 5 (5 / 5) | 847 | 2.49x | ₹0.62L | 149 (15) | yes |
+| 2 | D13 + 50-session regime MA | 22.23% | 25.71% | **0.86** | -5.94pp | +2.15pp | 13.84% | 10 / 10 (10 / 10) | 857 | 2.84x | ₹0.60L | 235 (23) | no |
+| 3 | D13 + 30-session regime MA | 15.77% | 31.92% | **0.49** | -12.40pp | +8.36pp | 7.37% | 13 / 13 (13 / 13) | 899 | 3.10x | ₹0.58L | 235 (21) | no |
+
+**Walk-forward choice (floor-only universe)**: on the selection window the code (`backtest.verdict.run_walk_forward`, ₹1 cr floor first) chose **D13 + 30-session regime MA**; its verification row is above, read after the choice was frozen.
+
+### Scorecard against D13 (generated)
+
+Counted in code (`backtest.m14_5_report.scorecard`) over every cell (universe, window, floor) that has both the variant and D13. Comparisons are exact.
+
+| Strategy | Cells | XIRR/DD better / tie / worse than D13 | Cells where XIRR/DD is worse | Max DD worse / tie / better | Worst DD increase | XIRR > 25% | One-way turnover /yr | Charges vs D13 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **Momentum v2, D13 paper config** | 8 | — | — | — | — | 5 / 8 | 1.99x to 2.65x | — |
+| D13 + 30-session regime MA | 8 | 2 / 0 / 6 | floor-only decade ₹1 cr; floor-only decade ₹10 cr; floor-only six-year ₹1 cr; floor-only six-year ₹10 cr; floor-only wf-verification ₹1 cr; floor-only wf-verification ₹10 cr | 6 / 0 / 2 | +16.20pp | 1 / 8 | 2.10x to 3.10x | -11% to +10% |
+| D13 + 50-session regime MA | 8 | 0 / 0 / 8 | all 8 | 6 / 0 / 2 | +8.05pp | 2 / 8 | 2.17x to 2.84x | -13% to +8% |
+
+### The regime gate on recent rebalance sessions
+
+D13 reads the gate only on the monthly rebalance session (the first session of the month): risk-on is NIFTY 50 TRI ≥ its N-session average (`RegimeReading.risk_on`). The last row is the lake's last session, for reference (not a rebalance).
+
+| Session | TRI | 200-MA | 200 gate | 50-MA | 50 gate | 30-MA | 30 gate |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-05-04 | 36358.33 | 37752.08 | **risk-off** | 36336.92 | risk-on | 35622.38 | risk-on |
+| 2026-06-01 | 35303.30 | 37603.35 | **risk-off** | 35711.41 | **risk-off** | 36091.57 | **risk-off** |
+| 2026-07-01 | 36358.08 | 37471.44 | **risk-off** | 35979.32 | risk-on | 35834.48 | risk-on |
+| 2026-08-03 | 37622.04 | 37359.98 | risk-on | 36215.13 | risk-on | 36561.85 | risk-on |
+| 2026-09-01 | 36541.61 | 37187.44 | **risk-off** | 36726.95 | **risk-off** | 36856.68 | **risk-off** |
+| 2026-10-01 | 34070.01 | 36792.68 | **risk-off** | 36255.77 | **risk-off** | 35802.72 | **risk-off** |
+| 2026-10-13 (last session) | 34525.83 | 36625.77 | **risk-off** | 35936.09 | **risk-off** | 35210.72 | **risk-off** |
+
+On the latest rebalance (2026-10-01) all three gates read risk-off, so D13 and both shorter-gate arms are parked in cash today alike — the gate length changes nothing about what the book holds now (apart from whatever A8's 8-name minimum-holdings floor refuses to sell on a park).
+
+## Part 3 — stock-level 30-DMA system (the article's per-stock rules)
+
+The owner's follow-up pasted the article's actual system, which is per stock, not index timing. Each vague term is pinned to one rule fixed before any window was run (`backtest/policies/sma30_stock.py`):
+
+* **Trend ("sustainably above")**: the close above SMA30 on each of the last 5 sessions and SMA30 above its value 5 sessions earlier.
+* **Pullback**: the session low within 2% of SMA30 (`low <= SMA30 x 1.02`) without closing more than 1% below it.
+* **Bounce (pullback entry)**: trend true two sessions ago, pullback yesterday, and today closes above yesterday and above SMA30. Signal at today's close, bought at the next session's open (SimBroker), never at the signal close.
+* **Golden cross**: EMA10 crossed above SMA30 in the last 5 sessions and is still above. **Death cross**: EMA10 below SMA30 — the exit for every arm.
+* **Protective exit (P3c)**: a close more than 3% below SMA30.
+* **Regime gate**: no new buys while NIFTY 50 TRI is below its 200-session SMA (D13's index and length). Held names leave on their own exits — the swing composite's gate semantics, not D13's park.
+* **Portfolio**: ₹10 L; at most 20 names; each new name bought at 1/20 of account value (equal weight) or, vol-scaled, at 1/20 x (session median 63-session vol / own vol), capped at 10%; never beyond settled cash or A8's per-order ceiling; no top-ups or trims. When more names signal than slots are free, they are taken in 12-1 momentum order (ties by ISIN). Signals checked every session.
+* **Prices**: every SMA/EMA/low on the swing composite's seam-consistent adjusted price (L2 over raw L1, store split factors before the seam), so a split cannot fake a death cross (`tests/unit/test_sma30_stock.py`); fills and sizing on raw L1.
+* **Universe and rails**: the floor-only PIT investable screen at ₹1 cr and ₹10 cr median daily turnover (as every M12/M14 arm); every order through `RailGate` (A8) and `SimBroker` with the shared cost model; book corporate actions and cash interest on. That set is every NSE EQ-series listing that clears the floor, so it includes exchange-traded fund units (`INF…` ISINs: gold, silver, index ETFs) exactly as D13's does; they are not filtered out here either.
+
+**Overlap check.** No existing arm implements these rules. The M10.7 swing composite is a cross-sectional ranker (its only MA input, `ma_proximity` = close / 50-session mean, is a ranking leg, never a condition; its exits are rank band, re-underwrite and a 25% trailing stop); the M12 'Mean proximity (50d)' and 'Breakout' arms rank on that leg; no arm or screen in the repo computes an EMA. The M17 Commons screen S3 'pullback in a leader' (top-quintile 6-1 momentum, above SMA200, 4-12% off a recent 20-session high, within 3% of SMA20 or SMA50) is a screen evaluated only as forward returns (`analyst/commons/base_rates.py`), not a backtestable policy, and its pullback is to SMA20/50, not SMA30. So the rules were built new, but on the swing composite's own adjusted-price SQL, PIT universe, runner wiring and rails — nothing re-implemented.
+
+Arms:
+
+* **P3a crossover** — buy EMA10 up through SMA30, sell below.
+* **P3a crossover + 200d gate** — P3a; no new buys while NIFTY 50 TRI < its 200-session SMA.
+* **P3b pullback** — uptrend + pullback-bounce entry, death-cross exit.
+* **P3b pullback + 200d gate** — P3b; no new buys while NIFTY 50 TRI < its 200-session SMA.
+* **P3c pullback + 3% stop** — P3b + sell on a close more than 3% below SMA30.
+* **P3c pullback + 3% stop + 200d gate** — P3c; no new buys while NIFTY 50 TRI < its 200-session SMA.
+* **P3c pullback + 3% stop + 200d gate, vol-scaled** — as the gated P3c, vol-scaled.
+
+Columns: XIRR / max DD / **XIRR/DD** (ranked on it) / excess over NIFTY 50 TRI; trades (fills); one-way turnover = (buys + sells) ÷ 2 ÷ mean NAV ÷ years; charges from the shared cost model; A8 refusals by rail (every refused order, any session — a refused exit is re-staged each session while its rule holds, so one stuck exit counts many times); avg names held and % sessions holding nothing, from the fill ledger. **D13** (part two's run, same window and floor) and **buy-and-hold NIFTY 50 TRI** are the comparison rows.
+
+### decade (2016-09-01 → 2026-08-31)
+
+**₹1 cr/day floor** — buy-and-hold NIFTY 50 TRI: XIRR 11.96%, max DD 38.24%, XIRR/DD **0.31**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Excess vs NIFTY 50 TRI | Trades | Turnover /yr | Charges | A8 refusals | Avg names | % sessions in cash | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Momentum v2, D13 paper config** | 25.06% | 28.71% | **0.87** | 13.10% | 2235 | 2.43x | ₹2.20L | 705 (MAX_SECTOR 464, MIN_HOLDINGS 241) | 18.2 | 0.04% | yes |
+| 2 | P3c pullback + 3% stop + 200d gate | 20.96% | 32.64% | **0.64** | 8.99% | 3716 | 4.46x | ₹3.64L | 1021 (MAX_SECTOR 418, MIN_HOLDINGS 603) | 17.4 | 0.61% | no |
+| 3 | P3b pullback | 22.47% | 35.12% | **0.64** | 10.51% | 3914 | 4.66x | ₹3.66L | 616 (MAX_SECTOR 498, MIN_HOLDINGS 118) | 19.3 | 0.04% | no |
+| 4 | P3b pullback + 200d gate | 20.28% | 31.87% | **0.64** | 8.32% | 3448 | 4.34x | ₹3.23L | 1065 (MAX_SECTOR 430, MIN_HOLDINGS 635) | 17.5 | 0.61% | no |
+| 5 | P3c pullback + 3% stop | 22.09% | 35.79% | **0.62** | 10.13% | 4199 | 5.05x | ₹4.00L | 626 (MAX_SECTOR 492, MIN_HOLDINGS 134) | 19.2 | 0.04% | no |
+| 6 | P3a crossover + 200d gate | 20.85% | 35.25% | **0.59** | 8.89% | 2948 | 3.76x | ₹2.92L | 1624 (MAX_SECTOR 701, MIN_HOLDINGS 923) | 17.6 | 0.04% | no |
+| 7 | P3c pullback + 3% stop + 200d gate, vol-scaled | 20.15% | 35.07% | **0.57** | 8.18% | 3602 | 4.46x | ₹3.36L | 1235 (MAX_SECTOR 416, MIN_HOLDINGS 819) | 17.3 | 0.04% | no |
+| 8 | P3a crossover | 20.29% | 36.17% | **0.56** | 8.33% | 3497 | 4.72x | ₹3.47L | 974 (MAX_SECTOR 939, MIN_HOLDINGS 35) | 19.3 | 0.04% | no |
+
+**₹10 cr/day floor** — buy-and-hold NIFTY 50 TRI: XIRR 11.96%, max DD 38.24%, XIRR/DD **0.31**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Excess vs NIFTY 50 TRI | Trades | Turnover /yr | Charges | A8 refusals | Avg names | % sessions in cash | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | P3c pullback + 3% stop + 200d gate, vol-scaled | 20.92% | 21.93% | **0.95** | 8.96% | 3485 | 4.51x | ₹3.49L | 1170 (MAX_SECTOR 69, MIN_HOLDINGS 1101) | 17.1 | 0.04% | no |
+| 2 | **Momentum v2, D13 paper config** | 24.14% | 30.05% | **0.80** | 12.17% | 2015 | 2.32x | ₹1.78L | 318 (MAX_SECTOR 84, MIN_HOLDINGS 234) | 17.8 | 0.04% | no |
+| 3 | P3c pullback + 3% stop + 200d gate | 20.10% | 26.87% | **0.75** | 8.13% | 3594 | 4.77x | ₹3.42L | 1054 (MAX_SECTOR 47, MIN_HOLDINGS 1007) | 17.5 | 0.04% | no |
+| 4 | P3c pullback + 3% stop | 20.48% | 27.63% | **0.74** | 8.52% | 4209 | 5.87x | ₹4.09L | 277 (MAX_SECTOR 41, MIN_HOLDINGS 236) | 19.1 | 0.04% | no |
+| 5 | P3b pullback + 200d gate | 19.07% | 28.57% | **0.67** | 7.11% | 3402 | 4.95x | ₹3.21L | 999 (MAX_SECTOR 40, MIN_HOLDINGS 959) | 17.4 | 0.61% | no |
+| 6 | P3b pullback | 19.39% | 33.79% | **0.57** | 7.42% | 3962 | 6.02x | ₹3.74L | 309 (MAX_SECTOR 44, MIN_HOLDINGS 265) | 19.2 | 0.04% | no |
+| 7 | P3a crossover + 200d gate | 18.02% | 32.86% | **0.55** | 6.05% | 3148 | 4.85x | ₹3.02L | 1361 (MAX_SECTOR 107, MIN_HOLDINGS 1254) | 17.7 | 0.04% | no |
+| 8 | P3a crossover | 17.93% | 32.94% | **0.54** | 5.97% | 3815 | 6.23x | ₹3.72L | 208 (MAX_SECTOR 96, MIN_HOLDINGS 112) | 19.4 | 0.04% | no |
+
+### six-year (2019-07-01 → 2026-08-31)
+
+**₹1 cr/day floor** — buy-and-hold NIFTY 50 TRI: XIRR 11.70%, max DD 38.23%, XIRR/DD **0.31**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Excess vs NIFTY 50 TRI | Trades | Turnover /yr | Charges | A8 refusals | Avg names | % sessions in cash | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | P3c pullback + 3% stop + 200d gate, vol-scaled | 27.71% | 14.75% | **1.88** | 16.01% | 2518 | 4.36x | ₹2.64L | 763 (MAX_SECTOR 216, MIN_HOLDINGS 547) | 17.2 | 0.06% | yes |
+| 2 | P3c pullback + 3% stop + 200d gate | 28.52% | 17.13% | **1.67** | 16.82% | 2448 | 4.13x | ₹2.62L | 603 (MAX_SECTOR 155, MIN_HOLDINGS 448) | 17.3 | 0.90% | yes |
+| 3 | P3b pullback + 200d gate | 27.89% | 17.54% | **1.59** | 16.19% | 2391 | 4.26x | ₹2.51L | 728 (MAX_SECTOR 205, MIN_HOLDINGS 523) | 17.1 | 0.84% | yes |
+| 4 | **Momentum v2, D13 paper config** | 29.07% | 18.84% | **1.54** | 17.37% | 1562 | 2.63x | ₹1.45L | 500 (MAX_SECTOR 280, MIN_HOLDINGS 220) | 16.4 | 0.06% | yes |
+| 5 | P3b pullback | 31.92% | 23.15% | **1.38** | 20.22% | 2764 | 4.48x | ₹2.89L | 283 (MAX_SECTOR 174, MIN_HOLDINGS 109) | 19.5 | 0.06% | yes |
+| 6 | P3c pullback + 3% stop | 30.65% | 23.16% | **1.32** | 18.95% | 2976 | 4.97x | ₹3.14L | 322 (MAX_SECTOR 215, MIN_HOLDINGS 107) | 19.5 | 0.06% | yes |
+| 7 | P3a crossover + 200d gate | 27.01% | 24.32% | **1.11** | 15.31% | 2013 | 3.77x | ₹2.06L | 1105 (MAX_SECTOR 286, MIN_HOLDINGS 819) | 17.3 | 0.06% | yes |
+| 8 | P3a crossover | 26.04% | 30.63% | **0.85** | 14.34% | 2462 | 4.79x | ₹2.44L | 481 (MAX_SECTOR 447, MIN_HOLDINGS 34) | 19.5 | 0.06% | yes |
+
+**₹10 cr/day floor** — buy-and-hold NIFTY 50 TRI: XIRR 11.70%, max DD 38.23%, XIRR/DD **0.31**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Excess vs NIFTY 50 TRI | Trades | Turnover /yr | Charges | A8 refusals | Avg names | % sessions in cash | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | P3c pullback + 3% stop | 28.64% | 17.11% | **1.67** | 16.94% | 3095 | 5.81x | ₹3.28L | 115 (MAX_SECTOR 2, MIN_HOLDINGS 113) | 19.4 | 0.06% | yes |
+| 2 | P3c pullback + 3% stop + 200d gate, vol-scaled | 27.19% | 17.14% | **1.59** | 15.49% | 2424 | 4.68x | ₹2.60L | 907 (MAX_SECTOR 6, MIN_HOLDINGS 901) | 17.0 | 0.06% | yes |
+| 3 | P3b pullback | 29.05% | 18.42% | **1.58** | 17.35% | 2864 | 5.49x | ₹3.03L | 110 (MAX_SECTOR 2, MIN_HOLDINGS 108) | 19.4 | 0.06% | yes |
+| 4 | **Momentum v2, D13 paper config** | 31.08% | 19.87% | **1.56** | 19.38% | 1478 | 2.43x | ₹1.31L | 232 (MAX_SECTOR 18, MIN_HOLDINGS 214) | 17.9 | 0.06% | yes |
+| 5 | P3c pullback + 3% stop + 200d gate | 26.63% | 19.25% | **1.38** | 14.93% | 2534 | 4.87x | ₹2.62L | 870 (MAX_SECTOR 5, MIN_HOLDINGS 865) | 17.2 | 0.06% | yes |
+| 6 | P3b pullback + 200d gate | 27.21% | 20.07% | **1.36** | 15.51% | 2367 | 4.57x | ₹2.48L | 700 (MAX_SECTOR 3, MIN_HOLDINGS 697) | 17.2 | 0.84% | yes |
+| 7 | P3a crossover + 200d gate | 23.02% | 27.84% | **0.83** | 11.32% | 2159 | 4.89x | ₹2.12L | 1069 (MAX_SECTOR 9, MIN_HOLDINGS 1060) | 17.4 | 0.06% | no |
+| 8 | P3a crossover | 22.32% | 32.54% | **0.69** | 10.62% | 2675 | 6.61x | ₹2.65L | 105 (MAX_SECTOR 30, MIN_HOLDINGS 75) | 19.6 | 0.06% | no |
+
+### wf-selection (2016-09-01 → 2021-08-31)
+
+**₹1 cr/day floor** — buy-and-hold NIFTY 50 TRI: XIRR 15.74%, max DD 38.24%, XIRR/DD **0.41**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Excess vs NIFTY 50 TRI | Trades | Turnover /yr | Charges | A8 refusals | Avg names | % sessions in cash | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Momentum v2, D13 paper config** | 24.29% | 28.71% | **0.85** | 8.55% | 601 | 2.00x | ₹0.41L | 305 (MAX_SECTOR 214, MIN_HOLDINGS 91) | 16.9 | 0.08% | no |
+| 2 | P3c pullback + 3% stop + 200d gate | 26.79% | 32.64% | **0.82** | 11.06% | 1797 | 7.18x | ₹1.30L | 677 (MAX_SECTOR 323, MIN_HOLDINGS 354) | 17.2 | 1.21% | yes |
+| 3 | P3c pullback + 3% stop | 25.25% | 35.79% | **0.71** | 9.52% | 2053 | 8.06x | ₹1.38L | 489 (MAX_SECTOR 355, MIN_HOLDINGS 134) | 18.6 | 0.08% | yes |
+| 4 | P3b pullback | 24.15% | 35.12% | **0.69** | 8.42% | 1934 | 7.47x | ₹1.25L | 451 (MAX_SECTOR 333, MIN_HOLDINGS 118) | 18.7 | 0.08% | no |
+| 5 | P3c pullback + 3% stop + 200d gate, vol-scaled | 23.88% | 35.07% | **0.68** | 8.14% | 1788 | 7.23x | ₹1.19L | 847 (MAX_SECTOR 310, MIN_HOLDINGS 537) | 16.9 | 0.08% | no |
+| 6 | P3b pullback + 200d gate | 21.39% | 31.87% | **0.67** | 5.66% | 1745 | 7.03x | ₹1.16L | 654 (MAX_SECTOR 316, MIN_HOLDINGS 338) | 17.4 | 1.21% | no |
+| 7 | P3a crossover + 200d gate | 22.57% | 35.25% | **0.64** | 6.83% | 1468 | 6.01x | ₹1.13L | 1061 (MAX_SECTOR 588, MIN_HOLDINGS 473) | 17.6 | 0.08% | no |
+| 8 | P3a crossover | 22.54% | 36.17% | **0.62** | 6.80% | 1703 | 6.84x | ₹1.28L | 639 (MAX_SECTOR 604, MIN_HOLDINGS 35) | 18.9 | 0.08% | no |
+
+**₹10 cr/day floor** — buy-and-hold NIFTY 50 TRI: XIRR 15.74%, max DD 38.24%, XIRR/DD **0.41**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Excess vs NIFTY 50 TRI | Trades | Turnover /yr | Charges | A8 refusals | Avg names | % sessions in cash | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | P3c pullback + 3% stop + 200d gate, vol-scaled | 24.45% | 21.93% | **1.12** | 8.72% | 1594 | 6.72x | ₹1.20L | 599 (MAX_SECTOR 69, MIN_HOLDINGS 530) | 16.7 | 0.08% | no |
+| 2 | P3c pullback + 3% stop | 22.11% | 27.63% | **0.80** | 6.37% | 1892 | 7.68x | ₹1.28L | 277 (MAX_SECTOR 41, MIN_HOLDINGS 236) | 18.6 | 0.08% | no |
+| 3 | P3c pullback + 3% stop + 200d gate | 20.52% | 26.87% | **0.76** | 4.79% | 1723 | 7.07x | ₹1.18L | 533 (MAX_SECTOR 46, MIN_HOLDINGS 487) | 17.6 | 0.08% | no |
+| 4 | P3a crossover | 20.58% | 29.79% | **0.69** | 4.84% | 1723 | 7.05x | ₹1.24L | 203 (MAX_SECTOR 91, MIN_HOLDINGS 112) | 19.1 | 0.08% | no |
+| 5 | P3b pullback + 200d gate | 18.81% | 28.57% | **0.66** | 3.07% | 1621 | 6.70x | ₹1.08L | 415 (MAX_SECTOR 40, MIN_HOLDINGS 375) | 17.4 | 1.21% | no |
+| 6 | **Momentum v2, D13 paper config** | 19.54% | 30.05% | **0.65** | 3.80% | 633 | 1.99x | ₹0.34L | 156 (MAX_SECTOR 71, MIN_HOLDINGS 85) | 17.3 | 0.08% | no |
+| 7 | P3b pullback | 20.18% | 33.79% | **0.60** | 4.44% | 1828 | 7.47x | ₹1.19L | 306 (MAX_SECTOR 41, MIN_HOLDINGS 265) | 18.7 | 0.08% | no |
+| 8 | P3a crossover + 200d gate | 19.05% | 32.86% | **0.58** | 3.31% | 1527 | 6.40x | ₹1.10L | 518 (MAX_SECTOR 93, MIN_HOLDINGS 425) | 17.9 | 0.08% | no |
+
+### wf-verification (2021-09-01 → 2026-08-31)
+
+**₹1 cr/day floor** — buy-and-hold NIFTY 50 TRI: XIRR 8.39%, max DD 16.43%, XIRR/DD **0.51**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Excess vs NIFTY 50 TRI | Trades | Turnover /yr | Charges | A8 refusals | Avg names | % sessions in cash | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Momentum v2, D13 paper config** | 33.04% | 17.10% | **1.93** | 24.65% | 910 | 2.65x | ₹0.70L | 408 (MAX_SECTOR 255, MIN_HOLDINGS 153) | 15.4 | 0.08% | yes |
+| 2 | P3b pullback + 200d gate | 19.75% | 20.07% | **0.98** | 11.36% | 1591 | 6.30x | ₹1.34L | 845 (MAX_SECTOR 439, MIN_HOLDINGS 406) | 17.0 | 0.08% | no |
+| 3 | P3c pullback + 3% stop | 26.38% | 27.23% | **0.97** | 17.99% | 2044 | 7.95x | ₹1.81L | 537 (MAX_SECTOR 535, MIN_HOLDINGS 2) | 19.2 | 0.08% | yes |
+| 4 | P3a crossover + 200d gate | 26.40% | 28.12% | **0.94** | 18.01% | 1396 | 5.11x | ₹1.31L | 1189 (MAX_SECTOR 655, MIN_HOLDINGS 534) | 17.0 | 0.08% | yes |
+| 5 | P3c pullback + 3% stop + 200d gate | 21.92% | 23.99% | **0.91** | 13.52% | 1680 | 6.67x | ₹1.46L | 958 (MAX_SECTOR 463, MIN_HOLDINGS 495) | 16.8 | 0.08% | no |
+| 6 | P3c pullback + 3% stop + 200d gate, vol-scaled | 20.51% | 22.79% | **0.90** | 12.12% | 1810 | 6.41x | ₹1.32L | 746 (MAX_SECTOR 307, MIN_HOLDINGS 439) | 17.0 | 0.08% | no |
+| 7 | P3b pullback | 25.06% | 29.97% | **0.84** | 16.66% | 1855 | 7.27x | ₹1.67L | 478 (MAX_SECTOR 478) | 19.4 | 0.08% | yes |
+| 8 | P3a crossover | 27.88% | 38.97% | **0.72** | 19.48% | 1627 | 6.10x | ₹1.55L | 850 (MAX_SECTOR 850) | 19.1 | 0.08% | yes |
+
+**₹10 cr/day floor** — buy-and-hold NIFTY 50 TRI: XIRR 8.39%, max DD 16.43%, XIRR/DD **0.51**
+
+| # | Strategy | XIRR | Max DD | **XIRR/DD** | Excess vs NIFTY 50 TRI | Trades | Turnover /yr | Charges | A8 refusals | Avg names | % sessions in cash | >25%? |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | **Momentum v2, D13 paper config** | 28.17% | 23.56% | **1.20** | 19.78% | 847 | 2.49x | ₹0.62L | 175 (MAX_SECTOR 26, MIN_HOLDINGS 149) | 17.1 | 0.08% | yes |
+| 2 | P3b pullback | 26.50% | 24.73% | **1.07** | 18.10% | 1951 | 7.61x | ₹1.65L | 45 (MAX_SECTOR 45) | 19.5 | 0.08% | yes |
+| 3 | P3b pullback + 200d gate | 22.44% | 21.14% | **1.06** | 14.04% | 1635 | 6.36x | ₹1.39L | 594 (MAX_SECTOR 35, MIN_HOLDINGS 559) | 17.2 | 0.08% | no |
+| 4 | P3c pullback + 3% stop | 24.49% | 23.96% | **1.02** | 16.10% | 2134 | 8.44x | ₹1.77L | 27 (MAX_SECTOR 26, MIN_HOLDINGS 1) | 19.4 | 0.08% | no |
+| 5 | P3c pullback + 3% stop + 200d gate, vol-scaled | 20.81% | 22.00% | **0.95** | 12.41% | 1743 | 6.56x | ₹1.38L | 575 (MAX_SECTOR 13, MIN_HOLDINGS 562) | 17.0 | 0.08% | no |
+| 6 | P3c pullback + 3% stop + 200d gate | 19.54% | 21.78% | **0.90** | 11.14% | 1723 | 6.87x | ₹1.43L | 555 (MAX_SECTOR 29, MIN_HOLDINGS 526) | 17.2 | 0.08% | no |
+| 7 | P3a crossover | 15.49% | 38.15% | **0.41** | 7.10% | 1867 | 7.78x | ₹1.32L | 40 (MAX_SECTOR 40) | 19.6 | 0.08% | no |
+| 8 | P3a crossover + 200d gate | 13.44% | 34.96% | **0.38** | 5.04% | 1503 | 6.24x | ₹1.08L | 857 (MAX_SECTOR 26, MIN_HOLDINGS 831) | 17.3 | 0.08% | no |
+
+### Walk-forward
+
+Chosen in code on the selection window (₹1 cr floor, best XIRR/DD among the P3 arms): **P3c pullback + 3% stop + 200d gate** (0.82). Its verification rows:
+
+| Floor | Chosen arm XIRR / DD / ratio | D13 XIRR / DD / ratio |
+| --- | --- | --- |
+| ₹1 cr/day floor | 21.92% / 23.99% / **0.91** | 33.04% / 17.10% / **1.93** |
+| ₹10 cr/day floor | 19.54% / 21.78% / **0.90** | 28.17% / 23.56% / **1.20** |
+
+### What each arm would hold on the lake's last session
+
+From each arm replayed 2026-01-01 → the lake's last session (an event-driven book turns over within weeks, so the opening date barely matters by October). Names are the ISINs marked at the terminal session, shown by NSE symbol. L2 (the adjusted prices the rules read) ends 2026-10-09 in this lake, so the last signals are struck on the 2026-10-09 close; 10-12 and 10-13 carry no new signal for any name. A gated book left holding 8 names in a risk-off market is A8's minimum-holdings floor refusing the exits that would take it below 8 (the refusals column).
+
+| Arm | Floor | Terminal | Names | Holdings |
+| --- | --- | --- | --- | --- |
+| P3a crossover | ₹1 cr/day | 2026-10-12 | 18 | SKYGOLD, SONACOMS, AETHER, AVALON, QPOWER, KIRLOSENG, AEGISLOG, E2E, VENUSREM, CUPID, HFCL, AXISCADES, SILVERTUC, BBOX, SOUTHBANK, CPPLUS, SCHNEIDER, SIGMAADV |
+| P3a crossover | ₹10 cr/day | 2026-10-12 | 20 | SKYGOLD, AEROFLEX, POCL, AVALON, QPOWER, AEGISLOG, USHAMART, E2E, BHEL, UNIVCABLES, GRWRHITECH, CUPID, HFCL, ABDL, AXISCADES, BBOX, ADANIPORTS, CPPLUS, RAIN, PRIVISCL |
+| P3a crossover + 200d gate | ₹1 cr/day | 2026-10-12 | 8 | CRAFTSMAN, AVALON, RISHABH, CHENNPETRO, E2E, UFBL, KINGFA, SEAMECLTD |
+| P3a crossover + 200d gate | ₹10 cr/day | 2026-10-12 | 8 | CRAFTSMAN, AEROFLEX, AVALON, MRPL, CHENNPETRO, E2E, LUMAXTECH, RBLBANK |
+| P3b pullback | ₹1 cr/day | 2026-10-12 | 20 | SONACOMS, STLTECH, CEIGALL, SYRMA, QPOWER, KIRLOSENG, MACPOWER, BHAGYANGR, GANDHAR, SAKAR, SHILPAMED, PREMEXPLN, RPEL, INDSWFTLAB, LAURUSLABS, SANSERA, RBLBANK, DIACABS, LIQUID1, INF666M01IW1 |
+| P3b pullback | ₹10 cr/day | 2026-10-12 | 20 | STLTECH, SYRMA, AVALON, QPOWER, KIRLOSENG, WELCORP, DYNAMATECH, PRECWIRE, AXISCADES, SOUTHBANK, SHILPAMED, LAURUSLABS, SANSERA, RBLBANK, DIACABS, LIQUIDBETF, LIQUIDCASE, CASHIETF, LIQUID1, LIQUIDADD |
+| P3b pullback + 200d gate | ₹1 cr/day | 2026-10-12 | 8 | CHENNPETRO, SOLARINDS, AUROPHARMA, SEAMECLTD, SHILPAMED, INDSWFTLAB, SANSERA, INF666M01IW1 |
+| P3b pullback + 200d gate | ₹10 cr/day | 2026-10-12 | 8 | CHENNPETRO, SOLARINDS, AUROPHARMA, SHILPAMED, NEULANDLAB, SANSERA, LIQUIDCASE, LIQUID1 |
+| P3c pullback + 3% stop | ₹1 cr/day | 2026-10-12 | 20 | SONACOMS, STLTECH, CEIGALL, SYRMA, QPOWER, IBULLSLTD, KIRLOSENG, GRAPHITE, PRECWIRE, AUROPHARMA, BHAGYANGR, CONFIPET, SHILPAMED, RPEL, LAURUSLABS, SANSERA, RBLBANK, LIQUIDCASE, LIQUID1, INF666M01IW1 |
+| P3c pullback + 3% stop | ₹10 cr/day | 2026-10-12 | 20 | SONACOMS, STLTECH, SYRMA, AVALON, QPOWER, DYNAMATECH, GRAPHITE, AUROPHARMA, SOUTHBANK, SHILPAMED, PREMEXPLN, LAURUSLABS, SANSERA, RBLBANK, LIQUIDBETF, LIQUIDCASE, CASHIETF, LIQUID1, LIQUIDADD, LIQUIDPLUS |
+| P3c pullback + 3% stop + 200d gate | ₹1 cr/day | 2026-10-12 | 8 | AZAD, CHENNPETRO, SEAMECLTD, SHILPAMED, NEULANDLAB, INDSWFTLAB, SANSERA, INF666M01IW1 |
+| P3c pullback + 3% stop + 200d gate | ₹10 cr/day | 2026-10-12 | 8 | CHENNPETRO, AUROPHARMA, SHILPAMED, NEULANDLAB, SANSERA, LIQUIDBETF, LIQUIDCASE, LIQUID1 |
+| P3c pullback + 3% stop + 200d gate, vol-scaled | ₹1 cr/day | 2026-10-12 | 8 | CHENNPETRO, SHILPAMED, NEULANDLAB, INDSWFTLAB, SANSERA, LIQUIDCASE, LIQUID1, LIQUIDPLUS |
+| P3c pullback + 3% stop + 200d gate, vol-scaled | ₹10 cr/day | 2026-10-12 | 8 | CHENNPETRO, AUROPHARMA, SHILPAMED, NEULANDLAB, SANSERA, LIQUIDCASE, LIQUID1, LIQUIDADD |
+
 <!-- hand-written analysis below: kept verbatim on re-render -->
-
-
 ## Hand-written analysis (not generated — written after reading the tables above)
 
 ### Part 1 — does a 30-day moving average beat buy-and-hold on Indian indices?
@@ -798,10 +1082,49 @@ The decision struck at the last session's close (traded at the next session's cl
 3. **Tax makes it worse, as expected in India.** Every round trip is short-term (STCG at 15%, then 20% from 2024-07-23), while buy-and-hold defers LTCG to the end. Decade after tax: 3.27% vs 11.16% (NIFTY 50), 5.23% vs 12.47% (NIFTY 500).
 4. **What it does deliver is a smaller drawdown.** Max drawdown falls 59% → 34% (NIFTY 50, full), 67% → 26% (NIFTY 500, full), and 38% → ~19% on both over the decade. Under the mandate's ranking (CAGR/DD) it wins on the full histories (0.26 vs 0.21; 0.49 vs 0.20) and on NIFTY 500 six-year (0.57 vs 0.37). It is level on NIFTY 500 decade (0.37 vs 0.35), loses on NIFTY 50 decade (0.26 vs 0.31), and loses clearly on the 2021-26 verification half on both (0.12 vs 0.51; 0.35 vs 0.60). Not a consistent win, even on the mandate's own measure.
 5. **The episodes show how it behaves.** It gets out early — within days of the 2008 and 2020 peaks, a few percent off the top. It then whipsaws on the way back (24 round trips from the 2008 peak to NIFTY 50's recovery, 61 for NIFTY 500) and is back in for good only well above the trough. In 2024-26 it went to cash on 2024-10-04. On NIFTY 50 it whipsawed 12 times before re-entering on 2025-10-07; on NIFTY 500 it is still out. Its worst years against the index are strong recovery years (2007, 2009, 2012, 2017, 2021), when it sat in cash or kept switching while the index ran. N=30 beat buy-and-hold in only 8 of 27 calendar years on NIFTY 50 and 12 of 32 on NIFTY 500.
-6. **Is 30 special? No.** On NIFTY 50, N=30 ranks 4th-5th of 7 on CAGR/DD in every window; N=100 is the best length on most windows and N=200 on some. On NIFTY 500 it ranks 2nd-3rd on the long windows and 1st only on the 2021-26 verification half, where no N beat buy-and-hold on either measure. The walk-forward choices on the first halves (N=50; N=100 / N=20 on the long split) do not beat buy-and-hold on the second halves.
+6. **Is 30 special? No.** On NIFTY 50, N=30 ranks 4th-5th of 7 on CAGR/DD in every window; N=100 is the best length on most windows and N=200 on some. On NIFTY 500 it ranks 2nd-5th, and 1st only on the 2021-26 verification half — where no length beat buy-and-hold on either measure. The walk-forward choices on the first halves (N=50; N=100 / N=20 on the long split) do not beat buy-and-hold on the second halves.
 7. **Slower reading of the same signal is the robust part — for drawdown, not for return.** Reading the signal weekly or monthly, or adding a ±1-2% band, cuts switching 2-8x. Of the 18 band/cadence variants (N=30 and N=200), 16-18 beat buy-and-hold on CAGR/DD in every window shown. Only 0-3 of 18 beat it on CAGR after costs, and **none** beats it on CAGR after tax in any window where tax is modelled. A variant that "wins" on CAGR in one window (e.g. monthly N=30 on NIFTY 50 six-year, 13.0% vs 11.7%) is one of 18 looked at and is a different variant on the next window. A band or cadence picked from these tables would be a fitted parameter, not evidence.
 8. **Midcap 150 / Smallcap 250 (secondary).** Over 2006→, N=30 does beat buy-and-hold after costs (19.3% vs 15.2%; 19.1% vs 13.6%), with drawdowns of 18-23% against 73-76%. Two cautions apply. These indices' pre-launch history is back-calculated by NSE. And short-horizon trend rules on small/mid-cap indices are flattered by stale prices in thin constituents: that makes the index autocorrelated, and an ETF cannot actually capture the effect. On the decade and six-year windows N=30 loses after costs on both (−3.1 / −5.4pp; −2.4 / −5.3pp). After tax it is level with buy-and-hold even over 2006→ (14.6% vs 14.8%; 13.8% vs 13.2%).
 
 **Data notes.** The `index_name` case variant ('NIFTY 50' on 2025-12-23/24, 'Nifty 50' elsewhere; the same for every index) is a label on the only point for those sessions. There is no second value to disagree with, and the daily moves across those sessions are ordinary. The lake has no FBIL overnight series (only FBIL FX reference rates), so cash earns repo − 50 bp, the repo's convention. Before 2006 that is the 2006-01-01 rate carried back, which likely understates 1995-2001 cash returns.
 
 **What N=30 says today (2026-10-13 close).** Cash on NIFTY 50 (1.95% under its 30-session average, out since the 2026-08-26 close) and on NIFTY 500 (out since 2026-08-31). Midcap 150 and Smallcap 250 are also cash (their series end 2026-10-01). Of the seven lengths on NIFTY 50 / 500, only N=10 is invested, and only from the 2026-10-13 close.
+
+### Part 2 — would a 30-day (or 50-day) regime gate improve D13?
+
+**No. Shortening D13's gate from 200 to 30 or 50 sessions makes the paper strategy worse on 6 of 8 cells (30) and 8 of 8 cells (50) on the mandate's measure.** Same harness and mandate as M14.5. D13's own rows reproduce M14.5's to the basis point on the decade (25.06% / 28.71% at ₹1 cr), so the comparison is like for like.
+
+- **Decade.** XIRR/DD 0.87 → 0.78 (30) and 0.84 (50) at ₹1 cr; 0.80 → 0.63 / 0.64 at ₹10 cr. XIRR falls 2-5 points. Drawdown barely moves: the shorter gate parks more often (21 parks against 9) but does not park earlier in the falls that set the max DD.
+- **Six-year.** XIRR/DD 1.54 → 0.78 (30) at ₹1 cr and 1.56 → 0.78 at ₹10 cr. The 30-session gate's max DD rises to 31-33% from 19-20%. The shorter gate re-entered into bounces that failed, and a monthly-read gate cannot get back out until the next month.
+- **Walk-forward, the honest test.** On the 2016-21 selection half the 30-session gate edges D13 (0.86 vs 0.85 at ₹1 cr), so the code chose it. On 2021-26 verification it collapsed: 0.57 vs D13's 1.93 (₹1 cr) and 0.49 vs 1.20 (₹10 cr), losing 12-14 points of XIRR. A selection-window win of 0.01 is noise, and the verification half shows it.
+- **Cost.** More parks mean more turnover (2.2-3.1x vs 2.0-2.65x) and more A8 min-holdings refusals (~390 vs ~240 on the decade at ₹1 cr): each park leaves the book stuck at A8's 8-name floor. Charges are about the same.
+- **Today.** All three gates read risk-off on the 2026-09-01 and 2026-10-01 rebalances and on the last session (NIFTY 50 TRI 34,526 vs 30-MA 35,211, 50-MA 35,936, 200-MA 36,626). D13, a 30-day gate and a 50-day gate would all be parked today, holding only what A8's floor keeps. A shorter gate would not have changed the paper book's current cash position.
+
+### Part 3 — the article's stock-level 30-DMA system
+
+**It beats buy-and-hold of NIFTY 50 TRI by a wide margin before tax. Against D13 its best arm splits the cells 4-4 and loses the walk-forward verification on both floors. It is not a replacement for D13 on this evidence.**
+
+- **Against buy-and-hold.** Every P3 arm beats NIFTY 50 TRI in every window and on both floors. Decade XIRR is 17.9-22.5% vs 12.0%, excess +6.0 to +10.5 points. XIRR/DD is 0.54-0.95 vs 0.31. On the six-year window the pullback arms clear the 25% bar (26.6-31.9%). This is a real stock-selection effect, consistent with the M12 swing families: buying liquid names in established uptrends on a dip, and cutting them on a death cross, captures momentum.
+- **Against D13 (the bar that matters here).**
+  - **Decade, ₹1 cr.** D13 0.87 vs best P3 0.64. P3 gives up 2.6-4.8 points of XIRR at a larger drawdown (32-36% vs 28.7%).
+  - **Decade, ₹10 cr.** The vol-scaled, gated P3c (0.95, max DD 21.9%) beats D13 (0.80). It is the one decade cell where a P3 arm leads.
+  - **Six-year.** P3 leads on both floors: vol-scaled gated P3c 1.88 vs D13 1.54 (₹1 cr); P3c 1.67 vs 1.56 (₹10 cr).
+  - **Selection half 2016-21.** D13 leads at ₹1 cr (0.85 vs best P3 0.82). The vol-scaled gated P3c leads at ₹10 cr (1.12 vs D13 0.65).
+  - **Walk-forward.** The code chose *P3c + 3% stop + 200d gate* on 2016-21 (0.82, below D13's 0.85). On 2021-26 it made 21.9% / 24.0% DD (0.91) at ₹1 cr and 19.5% / 21.8% (0.90) at ₹10 cr. D13 made 33.0% / 17.1% (1.93) and 28.2% / 23.6% (1.20), and buy-and-hold 0.51.
+  - **In sum.** P3 leads D13 in 4 of the 8 cells: decade ₹10 cr, both six-year cells and the selection half at ₹10 cr. *P3c + 3% stop + 200d gate, vol-scaled* is the leader in three of them, and taken alone it splits 4-4 with D13 (0.57/0.95, 1.88/1.59, 0.68/1.12, 0.90/0.95 vs D13 0.87/0.80, 1.54/1.56, 0.85/0.65, 1.93/1.20 for decade / six-year / selection / verification at ₹1 cr / ₹10 cr). It wins 3 of 4 at ₹10 cr but loses 3 of 4 at ₹1 cr, and it loses both verification cells. It was not the walk-forward's choice: on the ₹1 cr selection cell, where the code chooses, it ranked 4th of the 7 P3 arms. The verification half is where D13 is strongest (1.93 / 1.20) and P3 is weakest.
+- **Which reading of the article did best.** The pullback entries (P3b/P3c) beat the plain crossover (P3a) almost everywhere. The crossover is the classic whipsaw: its max DD reaches 36-39%. The 3% protective exit helps mostly at ₹10 cr. The 200-day market gate lowers drawdown and XIRR alike. A gated book sits at A8's 8-name floor through risk-off spells (600-1,250 min-holdings refusals per decade), because the gate stops buys while A8 refuses the exits that would take the book below 8 names.
+- **Costs and turnover.** One-way turnover is 4-8x a year against D13's 2-2.6x. Charges are ~1.3-1.8x D13's (₹2.9-4.0 L vs ₹2.2 L over the decade at ₹1 cr). Every round trip under a year is STCG for a resident individual, so the after-tax gap to D13 is wider than these pre-tax numbers. After-tax was not computed for the stock-level runs.
+- **Two things a reader should know.**
+  - The PIT investable set is every NSE EQ-series listing above the floor, so it includes ETF units, D13's included. The pullback rule likes **liquid-fund ETFs** (LIQUIDBEES-type: a steadily rising, never-falling price is a permanent "uptrend" whose every tiny dip is a "pullback"). Today's ₹10 cr books hold several. They are effectively cash at a money-market yield, and they flatter the drawdown a little in risk-off spells. A rule that excluded `INF…` units would be a different, untested arm.
+  - L2 ends on 2026-10-09, so the "today" books were struck on 2026-10-09 signals.
+- **Today.** The ungated arms are fully invested, 18-20 names: mid/small industrials, electronics, pharma, cable and wire names, plus 2-6 liquid ETFs in the pullback books. The 200-day-gated arms are frozen at A8's 8-name floor in a risk-off market.
+
+### Recommendation
+
+1. **Index timing on a 30-day average: do not adopt.** After costs it loses to buy-and-hold on CAGR on every mandate window on NIFTY 50 and NIFTY 500, and after tax it loses everywhere tax is modelled. 30 is not a special length. What does survive the tables is that slowly read trend filters (N=100-200, or a weekly or monthly read, or a ±1-2% band) roughly halve the drawdown. That is an argument for a drawdown overlay, judged as one, not a return claim.
+2. **D13's regime gate: keep 200.** A 30- or 50-session gate is worse on 6/8 and 8/8 cells and fails its walk-forward badly. It would hold the same thing today.
+3. **The stock-level 30-DMA system: not a replacement for D13.** It is a credible strategy in its own right: +6 to +10 points a year over NIFTY 50 TRI before tax, and above the 25% bar in the six-year window. But it loses the decade at ₹1 cr and the walk-forward verification on both floors to D13, at roughly twice the turnover. Its best arm (vol-scaled, gated P3c) splits the 8 cells 4-4 with D13, winning 3 of 4 at ₹10 cr and losing 3 of 4 at ₹1 cr. That is worth a pre-registered look at the higher floor, not a switch. If it is pursued, the next step is an `INF…`-excluded rerun and an after-tax read of its best pre-registered arm — not a paper deployment.
+
+Changing the paper strategy is the owner's ratification call; nothing here changes D13.
+
+**Compute note.** Index timing: ~1 minute. Part 2: 24 replays, floor-only universe. The NIFTY 500 PIT-universe rerun M14.5 also did was skipped to fit the box. Part 3: 56 replays plus 14 "today" replays. Three Part 3 arms were cut before any mandate window was read: a 30-session-gate arm and two more vol-scaled rows. Another agent's campaign shared the box: Part 2 was paused while that campaign ran four replays, and each part then ran with one worker. Runs: `~/campaign/ma-timing-regime-floor-2024ffe`, `~/campaign/ma-timing-p3-8032262`, `~/campaign/ma-timing-p3-ab20d99` (today).

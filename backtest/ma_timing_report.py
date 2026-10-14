@@ -822,7 +822,7 @@ def render_d13_part(engine: _Engine, run_dirs: Sequence[Path], today_dir: Path |
     from backtest.sweep import HIGH_FLOOR, LOW_FLOOR
 
     out = [
-        "## Part two — D13's regime gate: 200 vs 50 vs 30 sessions",
+        "## Part 2 — D13's regime gate: 200 vs 50 vs 30 sessions",
         "",
         "D13 (`PAPER_RATIFIED_2026_09_06`) parks the momentum book in cash when NIFTY 50 TRI is "
         "below its 200-session average on the monthly rebalance session. The parameter already "
