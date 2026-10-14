@@ -52,13 +52,18 @@ from tests.unit.test_console_portfolio import (
     ISIN_D,
     MIRROR,
     NOW,
+    PAPER_BOOK,
+    PAPER_ROWS,
+    PAPER_TOTALS,
     PLANT,
     PRIMARY,
     ROSTER,
     SYMBOLS,
     FakePrices,
+    PaperPrices,
     desk_state,
     journal,
+    paper_rows,
 )
 
 pytestmark = pytest.mark.integration
@@ -138,7 +143,9 @@ def _desk(conn: Connection, record: str, on: date, state: Any, recorded: datetim
     )
 
 
-def _client(settings: Settings, conn: Connection, tmp_path: Path) -> TestClient:
+def _client(
+    settings: Settings, conn: Connection, tmp_path: Path, prices: FakePrices | None = None
+) -> TestClient:
     lake = Settings(
         database_url=settings.database_url, backup_root=tmp_path / "b", data_root=tmp_path
     )
@@ -146,7 +153,7 @@ def _client(settings: Settings, conn: Connection, tmp_path: Path) -> TestClient:
     app.dependency_overrides[clock_source] = lambda: FrozenClock(NOW)
     app.dependency_overrides[db_connection] = lambda: conn
     app.dependency_overrides[m17_roster_source] = lambda: ROSTER
-    app.dependency_overrides[portfolio_prices_source] = lambda: FakePrices()
+    app.dependency_overrides[portfolio_prices_source] = lambda: prices or FakePrices()
     return TestClient(app)
 
 
@@ -243,3 +250,40 @@ def test_the_live_stream_wins_once_it_has_entries(
     line = next(b for b in managers["books"] if b["book_id"] == PRIMARY)
     assert line["latest_session"] == D2.isoformat()
     assert paisa(Decimal(line["nav"])) == "999266.26"
+
+
+def test_a_strategy_paper_book_is_read_from_its_own_paper_session_rows(
+    scratch_settings: Settings, conn: Connection, tmp_path: Path
+) -> None:
+    _seed(conn)
+    stream = StreamJournal(Journal(conn, evidence=EvidenceStore(tmp_path / "evidence")), STREAM_DRY)
+    for entry in journal():
+        stream.append(entry)
+    _desk(conn, DRY_DESK, D2, desk_state(), NOW)  # an M17 desk record: never a paper book
+    for row in paper_rows():
+        conn.execute(
+            "INSERT INTO paper_session (book_id, trading_date, outcome, reason, rebalanced, "
+            "orders, journal_digest, book_state, book_digest, expected_book, recorded_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                row.book_id, row.on, row.outcome, row.reason, row.rebalanced, Json([]), "d" * 64,
+                Json(row.state), "b" * 64,
+                None if row.expected is None else Json(row.expected), NOW,
+            ),
+        )  # fmt: skip
+
+    with _client(scratch_settings, conn, tmp_path, PaperPrices()) as client:
+        html = client.get("/console/portfolio", params={"book": PAPER_BOOK}).text
+        desk = client.get("/console/portfolio", params={"book": DRY_DESK})
+    app.dependency_overrides.clear()
+
+    assert desk.status_code == 404
+    picks = re.findall(r'<div class="pick-group" data-kind="PAPER">(.*?)</div></div>', html)
+    assert picks and re.findall(r'data-book="([^"]+)"', picks[0]) == [PAPER_BOOK]
+    assert 'data-stream="paper_session"' in html and "DRY RUN" not in html
+    rows = _rows(html)
+    for isin, expected in PAPER_ROWS.items():
+        assert {k: rows[isin][k] for k in expected} == expected, isin
+    assert list(_buying(html)) == [ISIN_D]
+    tag = re.search(r'<table id="totals"[^>]*>', html)
+    assert tag is not None and _attrs(tag.group(0)) == PAPER_TOTALS

@@ -181,7 +181,9 @@ class StubConnection:
             for table in ("FROM paper_session", "FROM decision_journal", "FROM order_",
                           "FROM token_usage")
         ):  # fmt: skip
-            return _Result([])  # the Desk's reads (M18.3): no paper, M17, order or cost rows
+            # the Desk's reads (M18.3) and the Portfolio page's strategy paper books (M18.7):
+            # no paper, M17, order or cost rows
+            return _Result([])
         if "FROM decision_journal" in text or "FROM case_" in text:  # the M18.4 Journal page
             return _Result([])
         if "FROM symbol_history" in text:  # the M18.7 Portfolio page's display symbols
