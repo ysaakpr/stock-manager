@@ -2,7 +2,8 @@
 
 Every book the desk records is a portfolio of its own (owner, 2026-10-13): a manager's primary
 and its mirror, a control, a style book and the bench are each selectable and each get the same
-view. The route declares the dependencies `/status/managers` declares (`status.deps`: the M17
+view — and so is every strategy paper book the `paper_session` job records (owner, 2026-10-14:
+"every book is a portfolio"), in its own "Paper (strategy)" group. The route declares the dependencies `/status/managers` declares (`status.deps`: the M17
 journal, the roster, the connection, the clock), so an override on the app reaches both; the dry
 stream and the lake's closes are two more dependencies declared here, so a test can supply them.
 
@@ -93,7 +94,7 @@ def portfolio_page(
     log.info(
         "console.portfolio_rendered",
         book=portfolio.book.book_id,
-        stream=stream.value,
+        stream=portfolio.stream.value,
         session=None if portfolio.session is None else portfolio.session.isoformat(),
         rows=len(portfolio.rows),
         reconciled=None if portfolio.totals is None else portfolio.totals.reconciled,

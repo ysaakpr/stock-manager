@@ -24,6 +24,7 @@ __all__ = [
     "BookGlanceOut",
     "FundTotalsOut",
     "HoldingRowOut",
+    "PaperBookOut",
     "PortfolioOut",
     "PortfolioStream",
     "StagedAction",
@@ -44,6 +45,8 @@ class PortfolioStream(StrEnum):
     """The live stream: entries under each book's own id. Empty until S0."""
     DRY = "m17-dry"
     """The dry-run stream: entries under ``m17-dry:<book id>``. Nothing in it counts."""
+    PAPER = "paper_session"
+    """A strategy paper book: its own `paper_session` rows (the real paper stream, not dry)."""
 
 
 class StagedAction(StrEnum):
@@ -58,11 +61,14 @@ class BookChoiceOut(_Frozen):
     """One selectable book: its id, its kind and whom it belongs to (from the roster)."""
 
     book_id: str
-    kind: str = Field(description="MANAGER, CONTROL, STYLE or BENCH")
+    kind: str = Field(description="MANAGER, CONTROL, STYLE, BENCH, or PAPER (a strategy book)")
     manager: str | None = Field(
         description="The manager (a manager or style book), or the book a control controls for"
     )
     opening_capital_inr: Money
+    policy: str | None = Field(
+        default=None, description="A strategy paper book's policy (``momentum v2 (D13)``)"
+    )
 
 
 class BookGlanceOut(_Frozen):
@@ -143,6 +149,21 @@ class FundTotalsOut(_Frozen):
     reconciled: bool
 
 
+class PaperBookOut(_Frozen):
+    """What a strategy paper book's page says about the paper session that runs it."""
+
+    policy: str
+    sessions: int = Field(description="paper_session rows, decided or red")
+    decided_sessions: int
+    first_session: date | None = Field(description="The first decided session")
+    last_rebalance: date | None
+    next_rebalance: date | None = Field(
+        description="Scheduled: the first session of the next month (monthly cycle), or the next "
+        "session when this month has not rebalanced yet"
+    )
+    holdings_from: str = Field(description="expected_book, broker (pre-M15.3), or none")
+
+
 class PortfolioOut(_Frozen):
     """The Portfolio page for one book."""
 
@@ -160,5 +181,8 @@ class PortfolioOut(_Frozen):
     rows: list[HoldingRowOut]
     totals: FundTotalsOut | None
     bench_note: str | None = Field(description="What the bench holds, for the bench book")
+    paper: PaperBookOut | None = Field(
+        default=None, description="The paper session's line, for a strategy paper book"
+    )
     missing: list[str] = Field(description="What is missing, said plainly")
     error: str | None = Field(description="A journal the page could not read, masked")
