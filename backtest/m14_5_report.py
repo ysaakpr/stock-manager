@@ -35,7 +35,7 @@ from typing import Any
 from backtest.m12_rerun import REGIME_DAILY_SET, WINDOWS
 from backtest.policies.momentum_v2 import MomentumV2Parameters, RegimeReading
 from backtest.run import _first_session_of_each_month, _L1Reader, _RegimeSource
-from backtest.sweep import D13_PAPER_BASELINE, HIGH_FLOOR, LOW_FLOOR
+from backtest.sweep import D13_PAPER_BASELINE, HIGH_FLOOR, LOW_FLOOR, Arm
 
 __all__ = ["RunFacts", "Switches", "collect", "main", "render", "scorecard", "switches"]
 
@@ -157,20 +157,22 @@ def _window_of(start: str, end: str) -> str:
     raise ValueError(f"no mandate window is {start}..{end}")
 
 
-def collect(run_dir: Path, *, data_root: Path | None) -> list[RunFacts]:
-    """Every momentum-v2 run in ``run_dir`` whose parameters are an arm of the regime-daily set."""
-    by_repr = {repr(arm.v2): arm for arm in REGIME_DAILY_SET}
+def collect(
+    run_dir: Path, *, data_root: Path | None, arms: Sequence[Arm] = REGIME_DAILY_SET
+) -> list[RunFacts]:
+    """Every momentum-v2 run in ``run_dir`` whose parameters are one of ``arms``.
+
+    Each arm's switches are replayed against the regime at its own ``regime_ma_days`` (200 for
+    every arm of the regime-daily set; the MA-timing study's arms read shorter averages).
+    """
+    by_repr = {repr(arm.v2): arm for arm in arms}
     reader = _L1Reader(data_root=data_root)
     try:
         calendar = reader.all_sessions()
     finally:
         reader.close()
-    regime = _RegimeSource.published(
-        through=calendar[-1],
-        ma_days=D13_PAPER_BASELINE.v2.regime_ma_days if D13_PAPER_BASELINE.v2 else 200,
-        data_root=data_root,
-    )
-    readings: dict[date, RegimeReading] = {}
+    sources: dict[int, _RegimeSource] = {}
+    readings_by_ma: dict[int, dict[date, RegimeReading]] = {}
     facts: list[RunFacts] = []
     for summary_file in sorted((run_dir / "runs").glob("*.json")):
         summary = _load(summary_file)
@@ -193,9 +195,15 @@ def collect(run_dir: Path, *, data_root: Path | None) -> list[RunFacts]:
         first, last = WINDOWS[window]
         years = Decimal((last - first).days) / Decimal("365.25")
         sessions = [s for s in calendar if first <= s <= last]
+        ma_days = arm.v2.regime_ma_days
+        if ma_days not in sources:
+            sources[ma_days] = _RegimeSource.published(
+                through=calendar[-1], ma_days=ma_days, data_root=data_root
+            )
+        readings = readings_by_ma.setdefault(ma_days, {})
         for s in sessions:
             if s not in readings:
-                readings[s] = regime.reading(s)
+                readings[s] = sources[ma_days].reading(s)
         flips = switches(
             arm.v2,
             sessions,
@@ -289,7 +297,7 @@ def _range(values: Sequence[Decimal], fmt: Any) -> str:
     return f"{fmt(min(values))} to {fmt(max(values))}" if values else "—"
 
 
-def scorecard(facts: Sequence[RunFacts]) -> list[str]:
+def scorecard(facts: Sequence[RunFacts], arms: Sequence[Arm] = REGIME_DAILY_SET) -> list[str]:
     """Each variant against D13, cell by cell, counted in code from the same runs as the tables.
 
     A cell is one (universe, window, floor); a variant counts only in cells where D13 also ran.
@@ -298,7 +306,7 @@ def scorecard(facts: Sequence[RunFacts]) -> list[str]:
     base = {
         (f.universe, f.window, f.floor): f for f in facts if f.label == D13_PAPER_BASELINE.label
     }
-    order = [arm.label for arm in REGIME_DAILY_SET]
+    order = [arm.label for arm in arms]
     out = [
         "## Scorecard against D13 (generated)",
         "",
