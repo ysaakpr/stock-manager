@@ -1,11 +1,12 @@
-"""The console's Portfolio page (M18.7): `/console/portfolio?book=<id>`, one M17 book, read-only.
+"""The console's Portfolio page (M18.7): `/console/portfolio?book=<id>`, one book, read-only.
 
 Every book the desk records is a portfolio of its own (owner, 2026-10-13): a manager's primary
 and its mirror, a control, a style book and the bench are each selectable and each get the same
 view — and so is every strategy paper book the `paper_session` job records (owner, 2026-10-14:
-"every book is a portfolio"), in its own "Paper (strategy)" group. The route declares the dependencies `/status/managers` declares (`status.deps`: the M17
-journal, the roster, the connection, the clock), so an override on the app reaches both; the dry
-stream and the lake's closes are two more dependencies declared here, so a test can supply them.
+"every book is a portfolio"), in its own "Paper (strategy)" group. The route declares the
+dependencies `/status/managers` declares (`status.deps`: the M17 journal, the roster, the
+connection, the clock), so an override on the app reaches both; the dry stream and the lake's
+closes are two more dependencies declared here, so a test can supply them.
 
 `ROUTES` is registered by `console.routes` through its read-only `_page_route` (GET and HEAD),
 directly on the console router so the M18.1 walk over `router.routes` covers it.
