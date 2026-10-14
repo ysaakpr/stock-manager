@@ -496,7 +496,7 @@ def panel_check_section(check: Mapping[str, Any] | None) -> list[str]:
     return [
         "## Signal panel check (generated)",
         "",
-        f"The daily candidate sets were served from the panel at `{check['panel']}`. "
+        f"The daily candidate sets were served from the panel `{Path(check['panel']).name}`. "
         f"`backtest.m14_6 verify` recomputed {check['sessions']} sessions on each of "
         f"{check['keys']} floors live with `_L1MomentumV2Data._compute` "
         f"({check['first']} … {check['last']}, "
@@ -504,6 +504,50 @@ def panel_check_section(check: Mapping[str, Any] | None) -> list[str]:
         "(ISIN, both momentum figures, price and volatility, exact Decimal equality).",
         "",
     ]
+
+
+def d13_parity(facts: Sequence[RunFacts], compare_dir: Path | None) -> list[str]:
+    """D13's runs here against the same windows and floors in an earlier, live-computed directory.
+
+    The replay digest is the journal, the final book and the rails in force, byte for byte; equal
+    digests mean the panel-served, M14.6-switch-carrying policy decided exactly what D13 decided.
+    """
+    if compare_dir is None:
+        return []
+    earlier: dict[tuple[str, Decimal], str] = {}
+    for summary_file in sorted((compare_dir / "runs").glob("*.json")):
+        summary = _load(summary_file)
+        spec = summary["spec"]
+        if spec.get("parameters") != repr(D13_PAPER_BASELINE.v2):
+            continue
+        floor = _FLOOR_RE.search(spec["universe"])
+        if floor is not None:
+            key = (_window_of(spec["start"], spec["end"]), Decimal(floor.group(1)))
+            earlier[key] = summary["replay_digest"]
+    rows = sorted(
+        (f for f in facts if f.label == D13_PAPER_BASELINE.label),
+        key=lambda f: (_WINDOW_ORDER.index(f.window), f.floor),
+    )
+    same = sum(1 for f in rows if earlier.get((f.window, f.floor)) == f.replay_digest)
+    out = [
+        "## D13 is unchanged (generated)",
+        "",
+        f"D13's runs here (panel-served candidate sets, the policy with every M14.6 switch off) "
+        f"against the same window and floor in `{compare_dir.name}` (M14.5, candidate sets "
+        f"computed live at an earlier commit): **{same} of {len(rows)}** replay digests — "
+        "journal, final book and rails, byte for byte — are identical.",
+        "",
+        "| Window | Floor | Replay digest here | Earlier | Same? |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for f in rows:
+        prior = earlier.get((f.window, f.floor), "—")
+        out.append(
+            f"| {f.window} | {_floor_short(f.floor)} | `{f.replay_digest[:16]}` "
+            f"| `{prior[:16]}` | {'yes' if prior == f.replay_digest else 'NO'} |"
+        )
+    out.append("")
+    return out
 
 
 def render(
@@ -516,6 +560,7 @@ def render(
     forward: Mapping[str, Any] | None,
     panel_check: Mapping[str, Any] | None,
     hand_written: str,
+    compare_dir: Path | None = None,
 ) -> str:
     """The whole report."""
     out = [
@@ -565,6 +610,7 @@ def render(
         "",
     ]
     out += panel_check_section(panel_check)
+    out += d13_parity(facts, compare_dir)
     out += headline(facts)
     out += scorecard(facts)
     out += exposure_table(facts)
@@ -596,6 +642,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--forward", type=Path, default=None, help="backtest.m14_6 forward JSON")
     parser.add_argument("--panel-check", type=Path, default=None, help="m14_6 verify JSON")
     parser.add_argument("--data-root", type=Path, default=None)
+    parser.add_argument(
+        "--compare-dir", type=Path, default=None, help="an earlier run dir holding D13's runs"
+    )
     parser.add_argument("--out", type=Path, default=REPORT)
     return parser.parse_args(argv)
 
@@ -621,6 +670,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             forward=_load(args.forward) if args.forward else None,
             panel_check=_load(args.panel_check) if args.panel_check else None,
             hand_written=hand_written,
+            compare_dir=args.compare_dir,
         ),
         encoding="utf-8",
     )
