@@ -113,6 +113,12 @@ _PULLBACK_LOW_BAND: Final = Decimal("0.02")
 _PULLBACK_CLOSE_FLOOR: Final = Decimal("0.01")
 _CROSS_FRESH_SESSIONS: Final = 5
 
+#: Process-wide caches, shared by every arm, floor and window a worker runs (all read the same
+#: lake): the trailing median turnover per (start, end) — the expensive half of the liquidity
+#: screen, and floor-independent — and the screened universe per (floor, session).
+_MEDIANS: dict[tuple[date, date], dict[str, Decimal]] = {}
+_UNIVERSE: dict[tuple[Decimal, date], frozenset[str]] = {}
+
 
 @dataclass(frozen=True, slots=True)
 class Sma30Arm:
@@ -333,12 +339,24 @@ class _Sma30Data:
         self._universe_filter = universe_filter
         self._windows = reader.listing_windows()
 
-    def candidates(self, as_of: date) -> Dataset[Sma30Record]:
-        records = self._features.records(as_of)
-        if records:
+    def _universe(self, as_of: date) -> frozenset[str]:
+        floor = (
+            self._universe_filter.params.median_turnover_floor
+            if self._universe_filter is not None
+            else Decimal(-1)
+        )
+        key = (floor, as_of)
+        if key not in _UNIVERSE:
             universe = pit_universe(as_of, InMemoryListingCalendar(self._windows)).isins
             if self._universe_filter is not None:
                 universe = frozenset(self._universe_filter.constrain(as_of, universe))
+            _UNIVERSE[key] = frozenset(universe)
+        return _UNIVERSE[key]
+
+    def candidates(self, as_of: date) -> Dataset[Sma30Record]:
+        records = self._features.records(as_of)
+        if records:
+            universe = self._universe(as_of)
             records = tuple(r for r in records if r.isin in universe)
         return Dataset.declaring(
             f"sma30@{as_of.isoformat()}", records, knowable_date=lambda r: r.knowable_date
@@ -379,6 +397,14 @@ def open_sma30_lake(
 ) -> Sma30Lake:
     """Open the shared lake for ``[start, end]`` and strike the features once."""
     reader = _L1Reader(data_root=data_root)
+    medians = reader.median_turnover_over
+
+    def cached_medians(first: date, last: date) -> dict[str, Decimal]:
+        if (first, last) not in _MEDIANS:
+            _MEDIANS[(first, last)] = medians(first, last)
+        return _MEDIANS[(first, last)]
+
+    reader.median_turnover_over = cached_medians  # type: ignore[method-assign,assignment]
     features = Sma30Features(data_root=data_root, split_factors=current_signal_split_factors())
     sessions = _reserve_fill_headroom(reader.trading_sessions(start, end), reader.all_sessions())
     features.load(sessions[0], sessions[-1])
