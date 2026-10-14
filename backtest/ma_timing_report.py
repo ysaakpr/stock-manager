@@ -732,7 +732,7 @@ def _gate_readings(engine: _Engine) -> list[str]:
     return out
 
 
-def _today_holdings(today_dir: Path) -> list[str]:
+def _today_holdings(today_dir: Path, *, data_root: Path | None, through: date) -> list[str]:
     out = [
         "### What each would hold on the lake's last session",
         "",
@@ -744,7 +744,10 @@ def _today_holdings(today_dir: Path) -> list[str]:
         "| --- | --- | --- | --- | --- | --- |",
     ]
     by_repr = {repr(a.v2): a for a in REGIME_LENGTH_SET}
-    symbols = _symbols(today_dir)
+    held_isins: set[str] = set()
+    for f in (today_dir / "ledgers").glob("*.json"):
+        held_isins |= set(json.loads(f.read_text(encoding="utf-8"))["terminal_prices"])
+    symbols = symbols_for(held_isins, data_root=data_root, through=through)
     for f in sorted((today_dir / "runs").glob("*.json")):
         summary = json.loads(f.read_text(encoding="utf-8"))
         arm = by_repr.get(summary["spec"].get("parameters", ""))
@@ -775,12 +778,17 @@ def _today_holdings(today_dir: Path) -> list[str]:
     return out
 
 
-def _symbols(today_dir: Path) -> dict[str, str]:
-    path = today_dir / "symbols.json"
-    if path.is_file():
-        data: dict[str, str] = json.loads(path.read_text(encoding="utf-8"))
-        return data
-    return {}
+def symbols_for(isins: set[str], *, data_root: Path | None, through: date) -> dict[str, str]:
+    """ISIN -> NSE symbol off the ``through`` session's raw prices — a display label only."""
+    import pyarrow.parquet as pq
+
+    from dataplatform.store.paths import Layer, layer_root
+
+    part = layer_root(Layer.L1, data_root=data_root) / "prices_raw" / f"date={through.isoformat()}"
+    if not part.is_dir() or not isins:
+        return {}
+    table = pq.read_table(part, columns=["isin", "exchange", "symbol"]).to_pylist()
+    return {r["isin"]: r["symbol"] for r in table if r["exchange"] == "NSE" and r["isin"] in isins}
 
 
 def render_d13_part(engine: _Engine, run_dirs: Sequence[Path], today_dir: Path | None) -> list[str]:
@@ -852,7 +860,7 @@ def render_d13_part(engine: _Engine, run_dirs: Sequence[Path], today_dir: Path |
     ]
     out += _gate_readings(engine)
     if today_dir is not None:
-        out += _today_holdings(today_dir)
+        out += _today_holdings(today_dir, data_root=engine.data_root, through=engine.through)
     return out
 
 
@@ -862,8 +870,7 @@ def render_d13_part(engine: _Engine, run_dirs: Sequence[Path], today_dir: Path |
 def run_today(out_dir: Path, *, data_root: Path | None, through: date) -> None:
     """Replay the regime-length arms 2016-09-01 → ``through`` on both floors, persisting each run.
 
-    Resumable (``backtest.run_ledger``). Writes ``symbols.json`` (ISIN → NSE symbol, display only,
-    read by ISIN off the last session's raw prices) for the holdings table.
+    Resumable (``backtest.run_ledger``).
     """
     from backtest.book_actions import corporate_actions_in_force, load_store_book_actions
     from backtest.run_ledger import persist_run_ledgers, refuse_lake_location
@@ -886,25 +893,25 @@ def run_today(out_dir: Path, *, data_root: Path | None, through: date) -> None:
             data_root=data_root,
             universe_name="turnover_floor",
         )
-    _write_symbols(out_dir, data_root=data_root, through=through)
 
 
-def _write_symbols(out_dir: Path, *, data_root: Path | None, through: date) -> None:
-    import pyarrow.parquet as pq
+def _part3(engine: _Engine, run_dir: Path, regime_dirs: Sequence[Path]) -> list[str]:
+    from backtest import sma30_report
+    from backtest.sweep import D13_PAPER_BASELINE
 
-    from dataplatform.store.paths import Layer, layer_root
+    runs = sma30_report.collect(run_dir, sma30_report.arm_labels(), runner="sma30_stock")
+    d13: list[sma30_report.Part3Run] = []
+    labels = {repr(D13_PAPER_BASELINE.v2): D13_PAPER_BASELINE.label}
+    for d in regime_dirs[:1]:  # the floor-only directory
+        d13 += sma30_report.collect(d, labels, runner="momentum_v2")
 
-    isins: set[str] = set()
-    for f in (out_dir / "ledgers").glob("*.json"):
-        isins |= set(json.loads(f.read_text(encoding="utf-8"))["terminal_prices"])
-    part = layer_root(Layer.L1, data_root=data_root) / "prices_raw" / f"date={through.isoformat()}"
-    table = pq.read_table(part, columns=["isin", "exchange", "symbol"]).to_pylist()
-    symbols = {
-        r["isin"]: r["symbol"] for r in table if r["exchange"] == "NSE" and r["isin"] in isins
-    }
-    (out_dir / "symbols.json").write_text(
-        json.dumps(symbols, indent=1, sort_keys=True) + "\n", "utf-8"
-    )
+    def bh_drawdown(window: str) -> Decimal:
+        start, end = WINDOWS[window]
+        return engine.row("nifty50", Window(window, start, end, ""), None).card.max_drawdown
+
+    held = {i for r in runs for i in r.held_at_end}
+    symbols = symbols_for(held, data_root=engine.data_root, through=engine.through)
+    return sma30_report.render(runs, d13, bh_drawdown, symbols)
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────────────────────────
@@ -919,6 +926,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--make-today-runs", action="store_true", help="replay the today runs into --today-runs"
     )
+    parser.add_argument("--part3-runs", type=Path, default=None, help="a backtest.sma30_run dir")
     parser.add_argument("--out", type=Path, default=REPORT)
     return parser.parse_args(argv)
 
@@ -946,6 +954,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     lines += render_index_part(engine)
     if args.regime_runs:
         lines += render_d13_part(engine, args.regime_runs, args.today_runs)
+    if args.part3_runs is not None:
+        lines += _part3(engine, args.part3_runs, args.regime_runs)
     hand = ""
     if args.out.is_file():
         existing = args.out.read_text(encoding="utf-8")
