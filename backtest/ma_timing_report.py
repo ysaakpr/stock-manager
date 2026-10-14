@@ -388,17 +388,30 @@ def _robustness(engine: _Engine) -> list[str]:
                 "| Switches/yr | CAGR after tax |",
                 "| --- | --- | --- | --- | --- | --- | --- | --- |",
             ]
+            rows: list[Row] = []
             for n in (THESIS_N, 200):
                 for cadence in Cadence:
                     for band in BANDS:
                         r = engine.row(slug, w, TimingRule(n, band, cadence))
+                        rows.append(r)
                         out.append(
                             f"| {r.label} | {_p(r.card.cagr)} | {_p(r.gross.cagr)} "
                             f"| {_p(r.card.max_drawdown)} | **{_r(r.card.ratio)}** "
                             f"| {_p(r.card.invested_share)} | {_r(r.card.switches_per_year)} "
                             f"| {_p(r.after_tax)} |"
                         )
-            out.append("")
+            beat_cost = sum(1 for r in rows if r.card.cagr > bh.card.cagr)
+            beat_ratio = sum(1 for r in rows if r.card.ratio > bh.card.ratio)
+            line = (
+                f"Of these {len(rows)} rules, **{beat_cost}** beat buy-and-hold on CAGR after "
+                f"costs and **{beat_ratio}** on CAGR/DD"
+            )
+            if bh.after_tax is not None:
+                beat_tax = sum(
+                    1 for r in rows if r.after_tax is not None and r.after_tax > bh.after_tax
+                )
+                line += f"; **{beat_tax}** on CAGR after tax"
+            out += ["", line + ".", ""]
     return out
 
 

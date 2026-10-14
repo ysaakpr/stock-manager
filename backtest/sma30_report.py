@@ -207,7 +207,10 @@ def render(
         "cross (`tests/unit/test_sma30_stock.py`); fills and sizing on raw L1.",
         "* **Universe and rails**: the floor-only PIT investable screen at ₹1 cr and ₹10 cr "
         "median daily turnover (as every M12/M14 arm); every order through `RailGate` (A8) and "
-        "`SimBroker` with the shared cost model; book corporate actions and cash interest on.",
+        "`SimBroker` with the shared cost model; book corporate actions and cash interest on. "
+        "That set is every NSE EQ-series listing that clears the floor, so it includes "
+        "exchange-traded fund units (`INF…` ISINs: gold, silver, index ETFs) exactly as D13's "
+        "does; they are not filtered out here either.",
         "",
         "**Overlap check.** No existing arm implements these rules. The M10.7 swing composite is "
         "a cross-sectional ranker (its only MA input, `ma_proximity` = close / 50-session mean, "
@@ -302,7 +305,11 @@ def render(
             "",
             "From each arm replayed 2026-01-01 → the lake's last session (an event-driven book "
             "turns over within weeks, so the opening date barely matters by October). Names are "
-            "the ISINs marked at the terminal session, shown by NSE symbol.",
+            "the ISINs marked at the terminal session, shown by NSE symbol. L2 (the adjusted "
+            "prices the rules read) ends 2026-10-09 in this lake, so the last signals are struck "
+            "on the 2026-10-09 close; 10-12 and 10-13 carry no new signal for any name. A gated "
+            "book left holding 8 names in a risk-off market is A8's minimum-holdings floor "
+            "refusing the exits that would take it below 8 (the refusals column).",
             "",
             "| Arm | Floor | Terminal | Names | Holdings |",
             "| --- | --- | --- | --- | --- |",
