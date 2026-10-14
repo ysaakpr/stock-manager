@@ -275,6 +275,6 @@ def test_entry_rules_follow_the_arm() -> None:
 
 def test_arms_are_the_stated_set() -> None:
     labels = [a.label for a in ARMS]
-    assert len(labels) == len(set(labels)) == 10
-    assert {a.params.regime_ma_days for a in ARMS} == {None, 200, 30}
+    assert len(labels) == len(set(labels)) == 7
+    assert {a.params.regime_ma_days for a in ARMS} == {None, 200}
     assert all(a.params.max_names == 20 and a.params.max_weight == Decimal("0.10") for a in ARMS)

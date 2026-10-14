@@ -132,8 +132,10 @@ def _arm(label: str, note: str, **kw: Any) -> Sma30Arm:
 
 
 _STOP = Decimal("0.03")
-#: Every arm, fixed before any window was run. P3a/P3b/P3c x (no gate, 200d gate), equal weight;
-#: the gated three again vol-scaled; P3c with the 30-session index gate of part one.
+#: Every arm, fixed before any window was run: P3a/P3b/P3c x (no gate, 200d gate), equal weight,
+#: and the gated P3c again vol-scaled. (A 30-session-gate arm and two more vol-scaled rows were
+#: cut before any mandate window was read, for compute: the box could not fit 10 arms x 8 units
+#: before the evening paper session.)
 ARMS: Final[tuple[Sma30Arm, ...]] = (
     _arm("P3a crossover", "buy EMA10 up through SMA30, sell below", entry=Entry.CROSSOVER),
     _arm(
@@ -161,27 +163,6 @@ ARMS: Final[tuple[Sma30Arm, ...]] = (
         entry=Entry.PULLBACK,
         protective_exit=_STOP,
         regime_ma_days=200,
-    ),
-    _arm(
-        "P3c pullback + 3% stop + 30d gate",
-        "P3c; no new buys while NIFTY 50 TRI < its 30-session SMA (part one's rule)",
-        entry=Entry.PULLBACK,
-        protective_exit=_STOP,
-        regime_ma_days=30,
-    ),
-    _arm(
-        "P3a crossover + 200d gate, vol-scaled",
-        "as the gated P3a, each name sized 5% x median vol / own vol, capped 10%",
-        entry=Entry.CROSSOVER,
-        regime_ma_days=200,
-        vol_scaled=True,
-    ),
-    _arm(
-        "P3b pullback + 200d gate, vol-scaled",
-        "as the gated P3b, vol-scaled",
-        entry=Entry.PULLBACK,
-        regime_ma_days=200,
-        vol_scaled=True,
     ),
     _arm(
         "P3c pullback + 3% stop + 200d gate, vol-scaled",

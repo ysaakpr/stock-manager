@@ -195,7 +195,7 @@ def render(
         "**Death cross**: EMA10 below SMA30 — the exit for every arm.",
         "* **Protective exit (P3c)**: a close more than 3% below SMA30.",
         "* **Regime gate**: no new buys while NIFTY 50 TRI is below its 200-session SMA (D13's "
-        "index and length; the 30-session gate of part one on one arm). Held names leave on "
+        "index and length). Held names leave on "
         "their own exits — the swing composite's gate semantics, not D13's park.",
         "* **Portfolio**: ₹10 L; at most 20 names; each new name bought at 1/20 of account value "
         "(equal weight) or, vol-scaled, at 1/20 x (session median 63-session vol / own vol), "
