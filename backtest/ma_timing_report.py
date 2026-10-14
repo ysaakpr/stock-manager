@@ -741,7 +741,19 @@ def _gate_readings(engine: _Engine) -> list[str]:
         assert level is not None
         tag = " (last session)" if s == last else ""
         out.append(f"| {s.isoformat()}{tag} | {_r(level)} | {' | '.join(cells)} |")
-    out.append("")
+    latest = max(x for x in sessions if x in rebalances)
+    state = {n: sources[n].reading(latest).risk_on for n in (200, 50, 30)}
+    if not any(state.values()):
+        verdict = (
+            f"On the latest rebalance ({latest.isoformat()}) all three gates read risk-off, so "
+            "D13 and both shorter-gate arms are parked in cash today alike — the gate length "
+            "changes nothing about what the book holds now (apart from whatever A8's "
+            "8-name minimum-holdings floor refuses to sell on a park)."
+        )
+    else:
+        on = ", ".join(f"{n}-session" for n, v in state.items() if v)
+        verdict = f"On the latest rebalance ({latest.isoformat()}) the {on} gate(s) read risk-on."
+    out += ["", verdict, ""]
     return out
 
 
@@ -908,11 +920,15 @@ def run_today(out_dir: Path, *, data_root: Path | None, through: date) -> None:
         )
 
 
-def _part3(engine: _Engine, run_dir: Path, regime_dirs: Sequence[Path]) -> list[str]:
+def _part3(engine: _Engine, run_dirs: Sequence[Path], regime_dirs: Sequence[Path]) -> list[str]:
     from backtest import sma30_report
     from backtest.sweep import D13_PAPER_BASELINE
 
-    runs = sma30_report.collect(run_dir, sma30_report.arm_labels(), runner="sma30_stock")
+    runs = [
+        run
+        for run_dir in run_dirs
+        for run in sma30_report.collect(run_dir, sma30_report.arm_labels(), runner="sma30_stock")
+    ]
     d13: list[sma30_report.Part3Run] = []
     labels = {repr(D13_PAPER_BASELINE.v2): D13_PAPER_BASELINE.label}
     for d in regime_dirs[:1]:  # the floor-only directory
@@ -939,7 +955,9 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--make-today-runs", action="store_true", help="replay the today runs into --today-runs"
     )
-    parser.add_argument("--part3-runs", type=Path, default=None, help="a backtest.sma30_run dir")
+    parser.add_argument(
+        "--part3-runs", type=Path, nargs="*", default=[], help="backtest.sma30_run directories"
+    )
     parser.add_argument("--out", type=Path, default=REPORT)
     return parser.parse_args(argv)
 
@@ -967,7 +985,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     lines += render_index_part(engine)
     if args.regime_runs:
         lines += render_d13_part(engine, args.regime_runs, args.today_runs)
-    if args.part3_runs is not None:
+    if args.part3_runs:
         lines += _part3(engine, args.part3_runs, args.regime_runs)
     hand = ""
     if args.out.is_file():
