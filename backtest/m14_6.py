@@ -50,7 +50,7 @@ from backtest.sweep import HIGH_FLOOR, LOW_FLOOR
 from dataplatform.logging import get_logger
 from dataplatform.query.service import QueryService
 
-__all__ = ["build_panel", "forward_holdings", "main"]
+__all__ = ["build_panel", "forward_holdings", "main", "verify_panel"]
 
 _LOG = get_logger(__name__)
 
@@ -267,6 +267,84 @@ def forward_holdings(
     return out
 
 
+def verify_panel(panel: SignalPanel, *, data_root: Path | None, extra: int = 24) -> dict[str, Any]:
+    """Recompute sessions of ``panel`` live and count those whose candidate set differs.
+
+    Every month-first session of the span (each D13 rebalance) plus ``extra`` evenly spaced
+    others, for every floor the panel holds. Records compare as exact tuples, ISIN-sorted.
+    """
+    reader = _L1Reader(data_root=data_root)
+    service = QueryService(data_root=data_root)
+    mismatches = 0
+    try:
+        calendar = reader.all_sessions()
+        first = date.fromisoformat(panel.manifest["first"])
+        last = date.fromisoformat(panel.manifest["last"])
+        span = [s for s in calendar if first <= s <= last]
+        firsts = set(_first_of_months(span))
+        step = max(1, len(span) // (extra + 1))
+        picked = sorted(firsts | set(span[step::step][:extra]))
+        closes = _AdjustedCloseSource(service, reader)
+        regime = _RegimeSource.published(through=span[-1], ma_days=200, data_root=data_root)
+        keys = panel.manifest["keys"]
+        universe_name = panel.manifest["universe"]
+        for floor in panel.manifest["floors"]:
+            params = UniverseParameters.for_universe(
+                universe_name, median_turnover_floor=Decimal(floor)
+            )
+            key = panel_key(
+                repr(params), adjusted=True, l1_isins_only=False, data_root=reader.data_root_label
+            )
+            if key not in keys:
+                raise CampaignError(f"panel holds no series for floor {floor}")
+            source = _L1MomentumV2Data(
+                reader,
+                (span[0],),
+                regime,
+                signal_closes=closes,
+                universe_filter=_InvestableUniverse(reader, params, data_root=data_root),
+                lookback_sessions=calendar,
+            )
+            for session in picked:
+                live = sorted(_row(r) for r in source.records_on(session))
+                served = panel.lookup(key, session)
+                if served is None or sorted(_row(r) for r in served) != live:
+                    mismatches += 1
+                    _LOG.warning("m14_6.panel_mismatch", floor=floor, session=session.isoformat())
+    finally:
+        service.close()
+        reader.close()
+    return {
+        "panel": str(panel.root),
+        "sessions": len(picked),
+        "keys": len(panel.manifest["floors"]),
+        "first": picked[0].isoformat(),
+        "last": picked[-1].isoformat(),
+        "mismatches": mismatches,
+    }
+
+
+def _row(record: Any) -> tuple[str, Decimal, Decimal, Decimal, Decimal, date]:
+    return (
+        record.isin,
+        record.momentum_0_12,
+        record.momentum_12_1,
+        record.price,
+        record.volatility,
+        record.knowable_date,
+    )
+
+
+def _first_of_months(sessions: Sequence[date]) -> list[date]:
+    seen: set[tuple[int, int]] = set()
+    out: list[date] = []
+    for session in sessions:
+        if (session.year, session.month) not in seen:
+            seen.add((session.year, session.month))
+            out.append(session)
+    return out
+
+
 def _git_commit() -> str:
     from backtest.campaign import _git_commit as commit
 
@@ -282,6 +360,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     panel.add_argument("--from", dest="start", type=date.fromisoformat, required=True)
     panel.add_argument("--to", dest="end", type=date.fromisoformat, required=True)
     panel.add_argument("--workers", type=int, default=2)
+    verify = sub.add_parser("verify", help="recompute sampled panel sessions live and compare")
+    verify.add_argument("--signal-panel", type=Path, required=True)
+    verify.add_argument("--data-root", type=Path, default=None)
+    verify.add_argument("--out", type=Path, required=True, help="JSON file to write")
     forward = sub.add_parser("forward", help="what each arm holds when run forward")
     forward.add_argument("--out", type=Path, required=True, help="JSON file to write")
     forward.add_argument("--data-root", type=Path, default=None)
@@ -306,6 +388,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(f"  panel {built.root}: {built.identity()['first']}..{built.identity()['last']}")
             return 0
+        if args.command == "verify":
+            check = verify_panel(SignalPanel(args.signal_panel), data_root=args.data_root)
+            refuse_lake_location(args.out.parent, args.data_root)
+            args.out.write_text(json.dumps(check, indent=1) + "\n", encoding="utf-8")
+            print(f"  {check['mismatches']} mismatched sessions; written to {args.out}")
+            return 0 if check["mismatches"] == 0 else 1
         panel = SignalPanel(args.signal_panel) if args.signal_panel else None
         result = forward_holdings(
             start=args.start, end=args.end, data_root=args.data_root, panel=panel
