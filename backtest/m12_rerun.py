@@ -71,6 +71,7 @@ from backtest.sweep import (
     LOW_FLOOR,
     PER_STOCK_ARMS,
     REGIME_DAILY_ARMS,
+    REGIME_LENGTH_ARMS,
     Arm,
     SweepResult,
     run_digests,
@@ -84,6 +85,7 @@ __all__ = [
     "LONG",
     "PER_STOCK_SET",
     "REGIME_DAILY_SET",
+    "REGIME_LENGTH_SET",
     "RERUN_ARMS",
     "UNITS",
     "WALK_FORWARD",
@@ -142,6 +144,9 @@ RERUN_ARMS: tuple[Arm, ...] = rerun_arms()
 #: folded into ``RERUN_ARMS``: the M12.R directories' manifests pin their arm lists.
 REGIME_DAILY_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *REGIME_DAILY_ARMS)
 
+#: The MA-timing study's arm set: D13 beside D13 with a 30- and a 50-session regime average.
+REGIME_LENGTH_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *REGIME_LENGTH_ARMS)
+
 #: M14.6's arm set: D13 beside its per-stock entry variants (``backtest.sweep.PER_STOCK_ARMS``).
 PER_STOCK_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *PER_STOCK_ARMS)
 
@@ -176,7 +181,12 @@ class _ArmSets(Mapping[str, tuple[Arm, ...]]):
 
 
 ARM_SETS: Mapping[str, tuple[Arm, ...]] = _ArmSets(
-    {"m12": RERUN_ARMS, "regime-daily": REGIME_DAILY_SET, "per-stock": PER_STOCK_SET},
+    {
+        "m12": RERUN_ARMS,
+        "regime-daily": REGIME_DAILY_SET,
+        "regime-length": REGIME_LENGTH_SET,
+        "per-stock": PER_STOCK_SET,
+    },
     {"m16": m16_arms, "m16-fundamentals": m16_fundamentals_arms},
 )
 
@@ -453,6 +463,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default="m12",
         choices=sorted(ARM_SETS),
         help="m12: the M12 review's arms (default); regime-daily: D13 and its M14.5 variants; "
+        "regime-length: D13 with a 30/50-session regime MA; "
         "per-stock: D13 and its M14.6 per-stock entry variants; "
         "m16: baselines, A1, A2, A3, A7; m16-fundamentals: D13, M10.7, A4, A5 "
         "(six-year and wf-verification only)",

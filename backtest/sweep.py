@@ -125,6 +125,7 @@ __all__ = [
     "PER_STOCK_ARMS",
     "REDEPLOY_ARMS",
     "REGIME_DAILY_ARMS",
+    "REGIME_LENGTH_ARMS",
     "RETIRED_ARMS",
     "SWING_REDEPLOY",
     "SWING_REGIME_REDEPLOY",
@@ -324,6 +325,30 @@ REGIME_DAILY_ARMS: tuple[Arm, ...] = (
             regime_daily_reentry=True,
             regime_daily_band=Decimal("0.02"),
         ),
+    ),
+)
+
+#: Research (2026-10-14, MA-timing study): D13 with a shorter regime moving average and nothing
+#: else changed. ``regime_ma_days`` already exists on ``MomentumV2Parameters`` (default 200, which
+#: is D13); these arms only set it. Kept out of ``ARMS`` and ``REGIME_DAILY_ARMS`` so no existing
+#: manifest or trial set changes. Research configurations only — paper trading runs D13.
+D13_REGIME_MA_30 = "D13 + 30-session regime MA"
+D13_REGIME_MA_50 = "D13 + 50-session regime MA"
+
+REGIME_LENGTH_ARMS: tuple[Arm, ...] = (
+    Arm(
+        label=D13_REGIME_MA_30,
+        family="regime length (MA-timing research)",
+        reference=D13_PAPER_BASELINE.label,
+        note="the monthly regime gate reads NIFTY 50 TRI against its 30-session average, not 200",
+        v2=replace(PAPER_RATIFIED_2026_09_06, regime_ma_days=30),
+    ),
+    Arm(
+        label=D13_REGIME_MA_50,
+        family="regime length (MA-timing research)",
+        reference=D13_PAPER_BASELINE.label,
+        note="the monthly regime gate reads NIFTY 50 TRI against its 50-session average, not 200",
+        v2=replace(PAPER_RATIFIED_2026_09_06, regime_ma_days=50),
     ),
 )
 
