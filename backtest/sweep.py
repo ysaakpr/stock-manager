@@ -60,7 +60,9 @@ from backtest.cash_interest import (
 )
 from backtest.policies.earnings_surprise import M10_7_EARNINGS_SURPRISE
 from backtest.policies.momentum_v2 import (
+    D13_DAILY_BAND_EXIT,
     D13_DAILY_SLOT_FILL,
+    D13_DRIFT_TRIM,
     D13_PER_STOCK_CLOCK,
     D13_PER_STOCK_DAILY_GATE,
     D13_PER_STOCK_DAILY_PARK,
@@ -123,6 +125,7 @@ __all__ = [
     "MULTI_CAP_REDEPLOY",
     "NAIVE_REDEPLOY",
     "PER_STOCK_ARMS",
+    "PER_STOCK_REBALANCE_ARMS",
     "REDEPLOY_ARMS",
     "REGIME_DAILY_ARMS",
     "RETIRED_ARMS",
@@ -374,6 +377,34 @@ PER_STOCK_ARMS: tuple[Arm, ...] = (
         reference=PER_STOCK_V2,
         note="V2 with no regime filter: buy whenever a top-20 name is unheld and a slot is free",
         v2=D13_PER_STOCK_NO_REGIME,
+    ),
+)
+
+#: Per-stock rebalance (``ops/studies/preregistration-per-stock-rebalance-2026-10-15.md``): D13
+#: plus a per-stock rule between its monthly rebalances. Arm 1 sells, every session, any settled
+#: holding that has left the top-30 band; arm 2 trims, every session, any settled holding more than
+#: 25 % above its target value back to target. Research arms only — kept out of ``ARMS`` for the
+#: reason D13 is.
+PER_STOCK_BAND_EXIT = "D13 + daily band exit"
+PER_STOCK_DRIFT_TRIM = "D13 + daily drift trim 25%"
+PER_STOCK_REBALANCE_ARMS: tuple[Arm, ...] = (
+    Arm(
+        label=PER_STOCK_BAND_EXIT,
+        family="per-stock rebalance",
+        reference=D13_PAPER_BASELINE.label,
+        note="D13, plus every non-rebalance session a settled holding outside the top-30 of that "
+        "session's 12-1 ranking is sold in full; proceeds redeployed next session into the last "
+        "rebalance's basket",
+        v2=D13_DAILY_BAND_EXIT,
+    ),
+    Arm(
+        label=PER_STOCK_DRIFT_TRIM,
+        family="per-stock rebalance",
+        reference=D13_PAPER_BASELINE.label,
+        note="D13, plus every session a settled holding marked more than 25% above its target "
+        "value (last rebalance's weight x book value) is trimmed back to target; proceeds "
+        "redeployed next session into the last rebalance's basket",
+        v2=D13_DRIFT_TRIM,
     ),
 )
 

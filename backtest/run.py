@@ -106,6 +106,7 @@ from backtest.policies.fundamentals_value import (
     FundamentalsValuePolicy,
 )
 from backtest.policies.momentum_v2 import (
+    TALLIED_SELL_KINDS,
     MomentumV2Data,
     MomentumV2Parameters,
     MomentumV2Policy,
@@ -2617,6 +2618,7 @@ def _finish_backtest(
         replay_digest=run.result.digest(),
         benchmark_source=run.benchmark_source,
         rail_blocks=rail_blocks_by_rail(run.result.journal),
+        policy_sells=policy_sell_tally(run.result.journal) or None,
     )
     persist_run(spec, ledger, summary, nav=run.nav_path)
     return replace(run, ledger=ledger, digest=digest)
@@ -2690,6 +2692,22 @@ def _max_drawdown(nav_path: Sequence[Decimal]) -> Decimal:
             if drawdown > worst:
                 worst = drawdown
     return worst
+
+
+def policy_sell_tally(journal: Sequence[JournalEntry]) -> dict[str, int]:
+    """SELL decisions per per-stock rebalance kind (daily band exit, drift trim), by rationale.
+
+    Empty for every policy without those switches. Counts what the policy decided, before the
+    rails: a sell the rails refused is in the count and in ``rail_blocks`` too.
+    """
+    counts: dict[str, int] = {}
+    for entry in journal:
+        if entry.decision is not Decision.SELL or not entry.rationale:
+            continue
+        for kind in TALLIED_SELL_KINDS:
+            if entry.rationale.startswith(f"{kind}:"):
+                counts[kind] = counts.get(kind, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _first_session_of_each_month(sessions: Sequence[date]) -> list[date]:

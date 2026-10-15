@@ -76,6 +76,19 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
   ``daily_regime_park`` makes a risk-off session park the whole book as well. Off by default and
   absent from the parameters' ``repr`` while off, so D13's fingerprint is unchanged.
 
+* **Per-stock exits and trims between rebalances** (``band_exit_daily``, ``drift_trim_band``) —
+  research variants on D13 (``ops/studies/preregistration-per-stock-rebalance-2026-10-15.md``)
+  asking whether the book should be rebalanced per stock rather than per portfolio.
+  ``band_exit_daily`` re-ranks the universe on every non-rebalance session (the rebalance's own
+  point-in-time ranking, recomputed from that session's admitted candidates) and sells in full each
+  settled holding that has left the top ``sell_band``; it never buys. ``drift_trim_band`` trims, on
+  every session, a settled holding whose marked value is more than that fraction above its target
+  value — the target weight the last rebalance gave it times the book's value at the session's
+  marks — back to the target. Both skip a book the regime filter has parked, and both hand the
+  proceeds to the next session's redeploy into the last rebalance's basket, exactly as a rebalance's
+  own sells are redeployed (``redeploy_next_session``). Off by default and absent from the
+  parameters' ``repr`` while off, so D13's fingerprint is unchanged.
+
 With **all six toggles off** the policy reproduces the naive top-N decision exactly — that is the
 "naive" baseline the increment report is struck against, and a unit test pins the parity. Every knob
 is a stated parameter, echoed verbatim into the report, so nothing here is silently tuned.
@@ -119,7 +132,9 @@ from execution.broker import Exchange, Holding, OrderRequest, Position, Side
 
 __all__ = [
     "D13_ABS_MOM",
+    "D13_DAILY_BAND_EXIT",
     "D13_DAILY_SLOT_FILL",
+    "D13_DRIFT_TRIM",
     "D13_INDUSTRY_GATE",
     "D13_PER_STOCK_CLOCK",
     "D13_PER_STOCK_DAILY_GATE",
@@ -127,8 +142,10 @@ __all__ = [
     "D13_PER_STOCK_NO_REGIME",
     "D13_PROFIT_FILTER",
     "D13_RESID_MOM",
+    "DRIFT_TRIM_BAND",
     "PAPER_RATIFIED_2026_09_06",
     "PER_STOCK_REVIEW_SESSIONS",
+    "TALLIED_SELL_KINDS",
     "MomentumV2Data",
     "MomentumV2Parameters",
     "MomentumV2Policy",
@@ -145,6 +162,13 @@ _WEIGHT_QUANTUM = Decimal("0.00000001")
 
 #: The evidence label a regime-parking decision files its reading under (:func:`regime_parked`).
 _REGIME_LABEL: Final = "regime_index_vs_ma"
+
+#: How the per-stock rebalance switches open a SELL's rationale. A run tallies its SELL decisions
+#: by these prefixes (``backtest.run``), so a report can say how many exits and trims fired
+#: without replaying anything; a run with none of them records no tally.
+_BAND_EXIT_KIND: Final = "daily band exit"
+_DRIFT_TRIM_KIND: Final = "drift trim"
+TALLIED_SELL_KINDS: Final = (_BAND_EXIT_KIND, _DRIFT_TRIM_KIND)
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +294,10 @@ class MomentumV2Parameters:
       daily regime switches need ``review_sessions`` and ``regime_filter``. Defined on D13's own
       toggles only: none combines with the M14.5 daily regime checks, the vol target or an M16
       overlay. Off by default and out of ``repr`` while off.
+    * ``band_exit_daily`` / ``drift_trim_band`` — per-stock exits and trims between rebalances (see
+      the module docstring). ``drift_trim_band`` is the fraction above target that triggers a trim
+      (``None`` = off). Defined on D13's own toggles only, like the M14.6 switches; off by default
+      and out of ``repr`` while off.
 
     With ``use_12_1``, ``sell_band``, ``regime_filter``, ``vol_scaled``, ``redeploy_next_session``
     and ``vol_target_annual`` all off/``None`` the policy is the naive top-N policy exactly. Every
@@ -300,6 +328,8 @@ class MomentumV2Parameters:
     review_sessions: int | None = field(default=None, repr=False)
     daily_regime_gate: bool = field(default=False, repr=False)
     daily_regime_park: bool = field(default=False, repr=False)
+    band_exit_daily: bool = field(default=False, repr=False)
+    drift_trim_band: Decimal | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -340,6 +370,44 @@ class MomentumV2Parameters:
         if self.regime_daily_band != _ZERO and not daily:
             raise ValueError("regime_daily_band applies only to a daily regime check")
         self._check_per_stock()
+        self._check_per_stock_rebalance()
+
+    def _check_per_stock_rebalance(self) -> None:
+        """The daily band exit and drift trim: a valid band, and only on D13's own toggles."""
+        if self.drift_trim_band is not None:
+            if not isinstance(self.drift_trim_band, Decimal):
+                raise TypeError("drift_trim_band must be a Decimal")
+            if self.drift_trim_band <= _ZERO:
+                raise ValueError(f"drift_trim_band must be positive, got {self.drift_trim_band}")
+        if not self.per_stock_rebalance:
+            return
+        clashing = [
+            name
+            for name in (
+                "regime_daily_reentry",
+                "regime_daily_exit",
+                "industry_gate",
+                "absolute_momentum",
+                "residual_ranking",
+                "profitability_filter",
+                "daily_slot_fill",
+            )
+            if getattr(self, name)
+        ]
+        if self.review_sessions is not None:
+            clashing.append("review_sessions")
+        if self.vol_target_annual is not None:
+            clashing.append("vol_target_annual")
+        if clashing:
+            raise ValueError(
+                "the daily band exit and drift trim are defined on D13's own toggles only; "
+                f"turn off {', '.join(clashing)}"
+            )
+
+    @property
+    def per_stock_rebalance(self) -> bool:
+        """Whether either per-stock rebalance switch (daily band exit, drift trim) is on."""
+        return self.band_exit_daily or self.drift_trim_band is not None
 
     def _check_per_stock(self) -> None:
         """M14.6: the per-stock switches' own dependencies, and what they never combine with."""
@@ -446,6 +514,16 @@ D13_PER_STOCK_DAILY_PARK: Final = replace(D13_PER_STOCK_DAILY_GATE, daily_regime
 #: V4 — V2 with no regime filter at all.
 D13_PER_STOCK_NO_REGIME: Final = replace(D13_PER_STOCK_CLOCK, regime_filter=False)
 
+#: Per-stock rebalance arms on D13 (``ops/studies/preregistration-per-stock-rebalance-2026-10-15
+#: .md``) — research configurations only; paper trading runs D13. The trim band is fixed a priori at
+#: the AI fund managers' control rebalance band (``analyst.fundmanager.controls``
+#: ``CONTROL_REBALANCE_BAND``, 25 %), never swept; a test pins the two equal.
+DRIFT_TRIM_BAND: Final = Decimal("0.25")
+#: Arm 1 — D13, plus a daily sell of any settled holding that has left the top-30 band.
+D13_DAILY_BAND_EXIT: Final = replace(PAPER_RATIFIED_2026_09_06, band_exit_daily=True)
+#: Arm 2 — D13, plus a daily trim of any settled holding more than 25 % above its target value.
+D13_DRIFT_TRIM: Final = replace(PAPER_RATIFIED_2026_09_06, drift_trim_band=DRIFT_TRIM_BAND)
+
 
 @runtime_checkable
 class MomentumV2Data(Protocol):
@@ -496,6 +574,7 @@ class MomentumV2Policy:
         "_data",
         "_entries_placed",
         "_entry_open",
+        "_last_target",
         "_order_caps",
         "_params",
         "_parked",
@@ -555,6 +634,10 @@ class MomentumV2Policy:
         #: up toward its share on later sessions until the name's first review — under V1, until
         #: the next rebalance, which re-sizes the whole basket anyway.
         self._entry_open: set[str] = set()
+        #: The basket weights the last risk-on rebalance chose, as the daily band exit and drift
+        #: trim read them: a name's target value is its weight times the book's value. Cleared by
+        #: a park; a daily exit drops its name. Read only by the per-stock rebalance switches.
+        self._last_target: dict[str, Decimal] | None = None
 
     @property
     def pending(self) -> Mapping[str, Decimal] | None:
@@ -582,11 +665,17 @@ class MomentumV2Policy:
         decided for this book, so resuming and then deciding is the same decision an uninterrupted
         replay would make; likewise ``parked`` (read only under a daily regime check). What it
         never does: invent a target — ``None`` clears it, or resume a per-stock (M14.6) book,
-        whose clocks are research state no forward runner carries — that raises.
+        whose clocks are research state no forward runner carries, or a per-stock rebalance book,
+        whose last basket weights are likewise not carried — those raise.
         """
         if self._params.daily_slot_fill:
             raise NotImplementedError(
                 "the M14.6 per-stock switches are research-only: resume carries no review clocks"
+            )
+        if self._params.per_stock_rebalance:
+            raise NotImplementedError(
+                "the daily band exit and drift trim are research-only: resume carries no basket "
+                "weights for them to read"
             )
         self._pending = None if pending is None else dict(pending)
         self._parked = parked
@@ -610,6 +699,8 @@ class MomentumV2Policy:
             daily = self._daily_regime(ctx)
             if daily is not None:
                 return daily
+        if self._params.per_stock_rebalance:
+            return self._between_rebalances(ctx)
         if self._pending is not None:
             pending, self._pending = self._pending, None
             return self._redeploy(ctx, pending)
@@ -637,6 +728,182 @@ class MomentumV2Policy:
             self._pending = None  # nothing is redeployed into a basket being parked
             return self._park(ctx, reading)
         return None
+
+    # ── per-stock rebalance: daily band exit and drift trim ──────────────────────────────────────
+
+    def _between_rebalances(self, ctx: SessionContext) -> SessionDecision:
+        """A non-rebalance session with a per-stock rebalance switch on.
+
+        The session first does what D13 does off a rebalance — the pending redeploy, else a
+        heartbeat — and then, unless the book is parked or no rebalance has chosen a basket yet,
+        adds the daily band exits (``band_exit_daily``) and the drift trims (``drift_trim_band``).
+        Their sells only *place* orders: the proceeds are not spendable today, so with
+        ``redeploy_next_session`` the next session deploys the free cash into the last rebalance's
+        basket (less any name exited), through the same :meth:`_redeploy` a rebalance's sells use.
+        Every check is filed as evidence, a no-op included, so the journal says it ran.
+        """
+        params = self._params
+        pending, self._pending = self._pending, None
+        sells: list[tuple[OrderRequest, str]] = []
+        items: list[EvidenceItem] = []
+        exited: set[str] = set()
+        if self._parked or self._last_target is None:
+            reason = "book parked by the regime filter" if self._parked else "no basket chosen yet"
+            items.append(
+                EvidenceItem(
+                    kind=EvidenceKind.POSITION,
+                    source="book",
+                    label="per_stock_rebalance",
+                    as_of=ctx.session,
+                    value=_ZERO,
+                    detail={"skipped": reason},
+                    text=f"daily band exit / drift trim not checked: {reason}",
+                )
+            )
+        else:
+            ranked = self._ranked(ctx)
+            if params.band_exit_daily:
+                exits, item = self._daily_band_exits(ctx, ranked)
+                sells.extend(exits)
+                items.append(item)
+                exited = {order.isin for order, _ in exits}
+                # An exited name leaves the basket until the next rebalance re-chooses it.
+                for isin in exited:
+                    self._last_target.pop(isin, None)
+            if params.drift_trim_band is not None and self._last_target:
+                trims, item = self._drift_trims(
+                    ctx,
+                    self._last_target,
+                    {record.isin: record.price for record in ranked},
+                    exclude=exited,
+                )
+                sells.extend(trims)
+                items.append(item)
+        if pending is not None and exited:
+            # Today's redeploy never buys a name it is selling today.
+            pending = _renormalised({i: w for i, w in pending.items() if i not in exited})
+        base = self._redeploy(ctx, pending) if pending else self._heartbeat(ctx)
+        if sells and params.redeploy_next_session and self._last_target:
+            self._pending = _renormalised(self._last_target)
+        evidence = EvidenceBundle(
+            trading_date=ctx.session,
+            actor=Actor.T0,
+            items=(*base.evidence.items, *items),
+        )
+        return SessionDecision(
+            evidence=evidence,
+            orders=(*(order for order, _ in sells), *base.orders),
+            entries=(*(self._entry(ctx, order, note) for order, note in sells), *base.entries),
+        )
+
+    def _daily_band_exits(
+        self, ctx: SessionContext, ranked: Sequence[MomentumV2Record]
+    ) -> tuple[list[tuple[OrderRequest, str]], EvidenceItem]:
+        """Full sells of the settled holdings outside today's ``sell_band``, and the check's record.
+
+        The rule is the rebalance's own (:meth:`_sells`): the band is the top ``sell_band`` of
+        today's admitted ranking, and a held name not in it — ranked lower, or not ranked today
+        at all — is sold in full. Shares still in settlement cannot be delivered and wait for a
+        later session. Never buys.
+        """
+        params = self._params
+        band = params.sell_band if params.sell_band is not None else params.top_n
+        rank = {record.isin: position for position, record in enumerate(ranked, start=1)}
+        held = {holding.isin: holding for holding in ctx.broker.holdings()}
+        exits: list[tuple[OrderRequest, str]] = []
+        for isin in sorted(held):
+            position = rank.get(isin)
+            if position is not None and position <= band:
+                continue
+            quantity = held[isin].quantity
+            where = "unranked today" if position is None else f"rank {position}"
+            exits.append(
+                (
+                    OrderRequest(isin=isin, side=Side.SELL, quantity=quantity, tag="MOMENTUM"),
+                    f"{_BAND_EXIT_KIND}: {where}, outside the top-{band} band; "
+                    f"liquidating {quantity} shares",
+                )
+            )
+        item = EvidenceItem(
+            kind=EvidenceKind.POSITION,
+            source="book",
+            label="daily_band_exit",
+            as_of=ctx.session,
+            value=Decimal(len(exits)),
+            detail={"band": str(band), "held": str(len(held)), "ranked": str(len(ranked))},
+            text=f"daily band exit: settled holdings outside the top-{band} sold in full",
+        )
+        return exits, item
+
+    def _drift_trims(
+        self,
+        ctx: SessionContext,
+        weights: Mapping[str, Decimal],
+        price_of: Mapping[str, Decimal],
+        *,
+        exclude: set[str] | None = None,
+    ) -> tuple[list[tuple[OrderRequest, str]], EvidenceItem]:
+        """Partial sells bringing each name over its drift band back to target, and the record.
+
+        The book's value is its cash, settled or not, plus every lot (settled or in settlement)
+        marked at today's admitted price, or at cost when it has none — the valuation a
+        rebalance's buys and :meth:`_fill` use. A name's target value is its ``weights`` entry
+        times that value; a name with no weight (held inside the band but outside the basket) has
+        no target and is never trimmed, and a name with no price today is never trimmed (its value
+        is not guessed). A name is trimmed only when its marked value is *more than*
+        ``drift_trim_band`` above target; the sell is the whole shares that bring it back to
+        target without going below it, at most its settled quantity, and at least
+        ``MIN_ORDER_VALUE_INR`` (a smaller trim is not placed, as the allocator places no buy
+        below it). The rails clear every trim as any other sell.
+        """
+        band = self._params.drift_trim_band
+        assert band is not None
+        skip = exclude or set()
+        margins = ctx.broker.margins()
+        value = margins.cash_value
+        name_qty: dict[str, int] = {}
+        lots: list[Holding | Position] = [*ctx.broker.holdings(), *ctx.broker.positions()]
+        for lot in lots:
+            value += Decimal(lot.quantity) * price_of.get(lot.isin, lot.average_price)
+            name_qty[lot.isin] = name_qty.get(lot.isin, 0) + lot.quantity
+        held = {holding.isin: holding for holding in ctx.broker.holdings()}
+        trims: list[tuple[OrderRequest, str]] = []
+        below_minimum = 0
+        for isin in sorted(held):
+            weight = weights.get(isin)
+            price = price_of.get(isin)
+            if isin in skip or weight is None or price is None:
+                continue
+            marked = Decimal(name_qty[isin]) * price
+            target = weight * value
+            if marked <= target * (_ONE + band):
+                continue
+            quantity = min(held[isin].quantity, int((marked - target) // price))
+            if quantity <= 0 or Decimal(quantity) * price < MIN_ORDER_VALUE_INR:
+                below_minimum += 1
+                continue
+            trims.append(
+                (
+                    OrderRequest(isin=isin, side=Side.SELL, quantity=quantity, tag="MOMENTUM"),
+                    f"{_DRIFT_TRIM_KIND}: marked {marked} is {(marked / target - _ONE):.2%} above "
+                    f"its target {target.quantize(Decimal('0.01'))} (weight {weight} of book "
+                    f"{value.quantize(Decimal('0.01'))}); trimming {quantity} shares to target",
+                )
+            )
+        item = EvidenceItem(
+            kind=EvidenceKind.POSITION,
+            source="book",
+            label="drift_trim",
+            as_of=ctx.session,
+            value=Decimal(len(trims)),
+            detail={
+                "band": str(band),
+                "book_value": str(value),
+                "below_minimum_order": str(below_minimum),
+            },
+            text=f"drift trim: holdings more than {band:.0%} above target value trimmed to target",
+        )
+        return trims, item
 
     # ── M14.6: per-stock entry and review ────────────────────────────────────────────────────────
 
@@ -999,13 +1266,22 @@ class MomentumV2Policy:
         )
         if trims:
             buys = []  # a book being cut back to its exposure does not also add to it
-        if self._params.redeploy_next_session and target and sells:
+        drift: list[tuple[OrderRequest, str]] = []
+        if self._params.per_stock_rebalance:
+            self._last_target = self._weights_for(target) if target else None
+            if self._params.drift_trim_band is not None and self._last_target is not None:
+                drift, drift_item = self._drift_trims(
+                    ctx, self._last_target, {r.isin: r.price for r in ranked}
+                )
+                overlay_evidence.append(drift_item)
+        if self._params.redeploy_next_session and target and (sells or drift):
             # Only a rebalance that sold something leaves proceeds to deploy tomorrow. Under A1
             # the slot weights go (summing below one), so the redeploy also leaves the cash slots.
             self._pending = self._weights_for(target) if slots is None else slots
 
-        orders = tuple(order for order, _ in (*sells, *trims, *buys))
-        entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *trims, *buys))
+        placed = (*sells, *trims, *drift, *buys)
+        orders = tuple(order for order, _ in placed)
+        entries = tuple(self._entry(ctx, order, note) for order, note in placed)
         evidence = self._evidence(
             ctx.session,
             chosen,
@@ -1026,6 +1302,7 @@ class MomentumV2Policy:
         so the journal row itself says why the book is in cash. It places no order either way.
         """
         self._parked = True
+        self._last_target = None
         held = {holding.isin: holding for holding in ctx.broker.holdings()}
         sells: list[tuple[OrderRequest, str]] = []
         for isin in sorted(held):
@@ -1458,6 +1735,22 @@ class MomentumV2Policy:
 
 
 # ── weighting ───────────────────────────────────────────────────────────────────────────────────
+
+
+def _renormalised(weights: Mapping[str, Decimal]) -> dict[str, Decimal]:
+    """``weights`` scaled to sum to exactly 1 (the last ISIN absorbs the residue); ``{}`` if empty.
+
+    A basket that lost a name between rebalances is redeployed over the names it has left, as a
+    full basket: :meth:`MomentumV2Policy._redeploy` reads weights summing below one as A1's cash
+    slots, which a per-stock exit is not.
+    """
+    if not weights:
+        return {}
+    total = sum(weights.values(), _ZERO)
+    isins = sorted(weights)
+    out = {isin: (weights[isin] / total).quantize(_WEIGHT_QUANTUM) for isin in isins[:-1]}
+    out[isins[-1]] = _ONE - sum(out.values(), _ZERO)
+    return out
 
 
 def _equal_weights(isins: list[str]) -> dict[str, Decimal]:

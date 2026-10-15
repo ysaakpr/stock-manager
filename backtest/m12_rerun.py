@@ -70,6 +70,7 @@ from backtest.sweep import (
     HIGH_FLOOR,
     LOW_FLOOR,
     PER_STOCK_ARMS,
+    PER_STOCK_REBALANCE_ARMS,
     REGIME_DAILY_ARMS,
     Arm,
     SweepResult,
@@ -82,6 +83,7 @@ from dataplatform.logging import get_logger
 __all__ = [
     "ARM_SETS",
     "LONG",
+    "PER_STOCK_REBALANCE_SET",
     "PER_STOCK_SET",
     "REGIME_DAILY_SET",
     "RERUN_ARMS",
@@ -145,6 +147,11 @@ REGIME_DAILY_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *REGIME_DAILY_ARMS)
 #: M14.6's arm set: D13 beside its per-stock entry variants (``backtest.sweep.PER_STOCK_ARMS``).
 PER_STOCK_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *PER_STOCK_ARMS)
 
+#: The per-stock rebalance arm set: D13 beside its daily band exit and daily drift trim
+#: (``backtest.sweep.PER_STOCK_REBALANCE_ARMS``), for the mandate's windows. The pre-registered
+#: decision itself is struck on the fold test windows (``backtest.per_stock_rebalance``).
+PER_STOCK_REBALANCE_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *PER_STOCK_REBALANCE_ARMS)
+
 
 class _ArmSets(Mapping[str, tuple[Arm, ...]]):
     """The named arm sets: fixed tuples, plus sets resolved when asked for.
@@ -176,7 +183,12 @@ class _ArmSets(Mapping[str, tuple[Arm, ...]]):
 
 
 ARM_SETS: Mapping[str, tuple[Arm, ...]] = _ArmSets(
-    {"m12": RERUN_ARMS, "regime-daily": REGIME_DAILY_SET, "per-stock": PER_STOCK_SET},
+    {
+        "m12": RERUN_ARMS,
+        "regime-daily": REGIME_DAILY_SET,
+        "per-stock": PER_STOCK_SET,
+        "per-stock-rebalance": PER_STOCK_REBALANCE_SET,
+    },
     {"m16": m16_arms, "m16-fundamentals": m16_fundamentals_arms},
 )
 
@@ -454,6 +466,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         choices=sorted(ARM_SETS),
         help="m12: the M12 review's arms (default); regime-daily: D13 and its M14.5 variants; "
         "per-stock: D13 and its M14.6 per-stock entry variants; "
+        "per-stock-rebalance: D13, its daily band exit and daily drift trim; "
         "m16: baselines, A1, A2, A3, A7; m16-fundamentals: D13, M10.7, A4, A5 "
         "(six-year and wf-verification only)",
     )

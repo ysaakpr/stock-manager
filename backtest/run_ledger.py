@@ -476,9 +476,16 @@ class RunSummary:
     #: ``RAIL_BLOCK`` count per breached rail over the run (``backtest.rails.rail_blocks_by_rail``);
     #: ``None`` on a summary persisted before it was kept, ``{}`` when no rail blocked anything.
     rail_blocks: Mapping[str, int] | None = None
+    #: SELL decisions per per-stock rebalance kind (``backtest.policies.momentum_v2``
+    #: ``TALLIED_SELL_KINDS``: daily band exits, drift trims) — decided and offered to the rails,
+    #: so a rail-refused one counts too. ``None`` when the run decided none, which keeps every
+    #: other run's summary byte-identical to what it was before the tally existed.
+    policy_sells: Mapping[str, int] | None = None
 
     def to_document(self) -> dict[str, Any]:
         optional: dict[str, Any] = {}
+        if self.policy_sells is not None:
+            optional["policy_sells"] = dict(sorted(self.policy_sells.items()))
         if self.benchmark_source is not None:
             optional["benchmark_source"] = self.benchmark_source
         if self.rail_blocks is not None:
@@ -531,6 +538,11 @@ class RunSummary:
             rail_blocks=(
                 {str(k): int(v) for k, v in doc["rail_blocks"].items()}
                 if doc.get("rail_blocks") is not None
+                else None
+            ),
+            policy_sells=(
+                {str(k): int(v) for k, v in doc["policy_sells"].items()}
+                if doc.get("policy_sells") is not None
                 else None
             ),
         )
