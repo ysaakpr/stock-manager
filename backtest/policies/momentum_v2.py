@@ -62,6 +62,20 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
   without positive TTM profit in a filing at most 200 days old. Off by default and absent from the
   parameters' ``repr`` while off, like the M14.5 switches.
 
+* **Per-stock entry and review** (``daily_slot_fill``, ``review_sessions``, ``daily_regime_gate``,
+  ``daily_regime_park``) — M14.6, research variants on D13 asking whether a whole-book monthly
+  cadence costs the book its exposure. ``daily_slot_fill`` re-ranks the universe every session
+  (the same point-in-time 12-1 ranking a rebalance uses, recomputed from that session's closes) and,
+  while the book holds fewer than ``top_n`` names and the regime gate is open, buys the
+  best-ranked names not held whose rank is within ``top_n`` into the free slots, each sized to its
+  inverse-volatility share of the book it completes. ``review_sessions`` replaces the calendar
+  rebalance with a clock per holding: ``review_sessions`` sessions after its entry (or its last
+  review) a holding is sold if it ranks outside ``sell_band``, else kept, topped up toward its
+  share when it ranks within ``top_n``, and its clock restarted. ``daily_regime_gate`` reads the
+  regime every session and lets risk-off block entries and top-ups without selling anything;
+  ``daily_regime_park`` makes a risk-off session park the whole book as well. Off by default and
+  absent from the parameters' ``repr`` while off, so D13's fingerprint is unchanged.
+
 With **all six toggles off** the policy reproduces the naive top-N decision exactly — that is the
 "naive" baseline the increment report is struck against, and a unit test pins the parity. Every knob
 is a stated parameter, echoed verbatim into the report, so nothing here is silently tuned.
@@ -101,14 +115,20 @@ from backtest.policies.sizing import account_order_ceiling
 from backtest.replay import SessionContext, SessionDecision
 from backtest.sip import MIN_ORDER_VALUE_INR, simulate_sip_instalment
 from dataplatform.query.pit import Dataset
-from execution.broker import Exchange, Holding, OrderRequest, Side
+from execution.broker import Exchange, Holding, OrderRequest, Position, Side
 
 __all__ = [
     "D13_ABS_MOM",
+    "D13_DAILY_SLOT_FILL",
     "D13_INDUSTRY_GATE",
+    "D13_PER_STOCK_CLOCK",
+    "D13_PER_STOCK_DAILY_GATE",
+    "D13_PER_STOCK_DAILY_PARK",
+    "D13_PER_STOCK_NO_REGIME",
     "D13_PROFIT_FILTER",
     "D13_RESID_MOM",
     "PAPER_RATIFIED_2026_09_06",
+    "PER_STOCK_REVIEW_SESSIONS",
     "MomentumV2Data",
     "MomentumV2Parameters",
     "MomentumV2Policy",
@@ -244,6 +264,12 @@ class MomentumV2Parameters:
     * ``absolute_momentum`` / ``residual_ranking`` / ``profitability_filter`` — M16.1 (A1, A3, A4;
       :mod:`backtest.policies.momentum_v2_overlays`). Off by default and out of ``repr`` while off,
       for the same reason. Each needs its data source to serve the matching overlay seam.
+    * ``daily_slot_fill`` / ``review_sessions`` / ``daily_regime_gate`` / ``daily_regime_park`` —
+      M14.6's per-stock entry variants (see the module docstring). ``review_sessions`` needs
+      ``daily_slot_fill`` (a book whose holdings leave one by one must refill one by one), and the
+      daily regime switches need ``review_sessions`` and ``regime_filter``. Defined on D13's own
+      toggles only: none combines with the M14.5 daily regime checks, the vol target or an M16
+      overlay. Off by default and out of ``repr`` while off.
 
     With ``use_12_1``, ``sell_band``, ``regime_filter``, ``vol_scaled``, ``redeploy_next_session``
     and ``vol_target_annual`` all off/``None`` the policy is the naive top-N policy exactly. Every
@@ -270,6 +296,10 @@ class MomentumV2Parameters:
     absolute_momentum: bool = field(default=False, repr=False)
     residual_ranking: bool = field(default=False, repr=False)
     profitability_filter: bool = field(default=False, repr=False)
+    daily_slot_fill: bool = field(default=False, repr=False)
+    review_sessions: int | None = field(default=None, repr=False)
+    daily_regime_gate: bool = field(default=False, repr=False)
+    daily_regime_park: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -309,6 +339,39 @@ class MomentumV2Parameters:
             raise ValueError("the daily regime checks extend regime_filter; turn it on")
         if self.regime_daily_band != _ZERO and not daily:
             raise ValueError("regime_daily_band applies only to a daily regime check")
+        self._check_per_stock()
+
+    def _check_per_stock(self) -> None:
+        """M14.6: the per-stock switches' own dependencies, and what they never combine with."""
+        if self.review_sessions is not None:
+            if self.review_sessions <= 0:
+                raise ValueError(f"review_sessions must be positive, got {self.review_sessions}")
+            if not self.daily_slot_fill:
+                raise ValueError("review_sessions frees slots one by one; turn on daily_slot_fill")
+        if self.daily_regime_gate and (self.review_sessions is None or not self.regime_filter):
+            raise ValueError("daily_regime_gate extends a per-stock book's regime_filter")
+        if self.daily_regime_park and not self.daily_regime_gate:
+            raise ValueError("daily_regime_park extends daily_regime_gate; turn it on")
+        if self.daily_slot_fill:
+            clashing = [
+                name
+                for name in (
+                    "regime_daily_reentry",
+                    "regime_daily_exit",
+                    "industry_gate",
+                    "absolute_momentum",
+                    "residual_ranking",
+                    "profitability_filter",
+                )
+                if getattr(self, name)
+            ]
+            if self.vol_target_annual is not None:
+                clashing.append("vol_target_annual")
+            if clashing:
+                raise ValueError(
+                    "the per-stock switches are defined on D13's own toggles only; "
+                    f"turn off {', '.join(clashing)}"
+                )
 
     @property
     def regime_daily(self) -> bool:
@@ -369,6 +432,20 @@ D13_RESID_MOM: Final = replace(PAPER_RATIFIED_2026_09_06, residual_ranking=True)
 #: A4 — only names with positive TTM profit in a filing at most 200 days old are eligible.
 D13_PROFIT_FILTER: Final = replace(PAPER_RATIFIED_2026_09_06, profitability_filter=True)
 
+#: M14.6's per-stock entry variants on D13 — research configurations only; paper trading runs D13.
+#: The review clock is 21 sessions, D13's monthly cadence expressed in sessions (one trading month).
+PER_STOCK_REVIEW_SESSIONS: Final = 21
+#: V1 — exits exactly as D13 (monthly, sell band 30); free slots refilled every session.
+D13_DAILY_SLOT_FILL: Final = replace(PAPER_RATIFIED_2026_09_06, daily_slot_fill=True)
+#: V2 — a 21-session review clock per holding, free slots refilled daily; regime read as D13 does.
+D13_PER_STOCK_CLOCK: Final = replace(D13_DAILY_SLOT_FILL, review_sessions=PER_STOCK_REVIEW_SESSIONS)
+#: V3 — V2 with the regime read every session; risk-off blocks entries and sells nothing extra.
+D13_PER_STOCK_DAILY_GATE: Final = replace(D13_PER_STOCK_CLOCK, daily_regime_gate=True)
+#: V3b — V3 where a risk-off session also parks the whole book.
+D13_PER_STOCK_DAILY_PARK: Final = replace(D13_PER_STOCK_DAILY_GATE, daily_regime_park=True)
+#: V4 — V2 with no regime filter at all.
+D13_PER_STOCK_NO_REGIME: Final = replace(D13_PER_STOCK_CLOCK, regime_filter=False)
+
 
 @runtime_checkable
 class MomentumV2Data(Protocol):
@@ -413,7 +490,18 @@ class MomentumV2Policy:
     the decision exactly.
     """
 
-    __slots__ = ("_data", "_order_caps", "_params", "_parked", "_pending")
+    __slots__ = (
+        "_clocks",
+        "_cooldown",
+        "_data",
+        "_entries_placed",
+        "_entry_open",
+        "_order_caps",
+        "_params",
+        "_parked",
+        "_pending",
+        "_session_count",
+    )
 
     def __init__(
         self,
@@ -452,6 +540,21 @@ class MomentumV2Policy:
         #: by every risk-on rebalance; read only by the daily regime checks, so a configuration
         #: without them behaves exactly as before it existed.
         self._parked = False
+        #: M14.6 state, read only by the per-stock switches. ``_session_count`` numbers the
+        #: sessions this policy has decided; ``_clocks`` maps each held name to the session number
+        #: of its entry or last review; ``_entries_placed`` are the names an entry buy was placed
+        #: for last session, and ``_cooldown`` the session number until which a name whose entry
+        #: did not fill (a rail refused it, or the market had no bar) is passed over, so one
+        #: unbuyable name cannot hold a free slot empty session after session.
+        self._session_count = 0
+        self._clocks: dict[str, int] = {}
+        self._entries_placed: set[str] = set()
+        self._cooldown: dict[str, int] = {}
+        #: Entrants whose entry is still completing: an entry sized from the cash free on its
+        #: session (sale proceeds settle a session or two later, and A8 caps one order) is topped
+        #: up toward its share on later sessions until the name's first review — under V1, until
+        #: the next rebalance, which re-sizes the whole basket anyway.
+        self._entry_open: set[str] = set()
 
     @property
     def pending(self) -> Mapping[str, Decimal] | None:
@@ -478,8 +581,13 @@ class MomentumV2Policy:
         What it assumes: ``pending`` is exactly what this policy reported after the last session it
         decided for this book, so resuming and then deciding is the same decision an uninterrupted
         replay would make; likewise ``parked`` (read only under a daily regime check). What it
-        never does: invent a target — ``None`` clears it.
+        never does: invent a target — ``None`` clears it, or resume a per-stock (M14.6) book,
+        whose clocks are research state no forward runner carries — that raises.
         """
+        if self._params.daily_slot_fill:
+            raise NotImplementedError(
+                "the M14.6 per-stock switches are research-only: resume carries no review clocks"
+            )
         self._pending = None if pending is None else dict(pending)
         self._parked = parked
 
@@ -488,8 +596,15 @@ class MomentumV2Policy:
 
         With ``redeploy_next_session`` on, the session right after a rebalance is a *deployment*
         session: the cash that rebalance's sells released is put into the basket it chose.
+        With ``review_sessions`` (M14.6) there is no calendar rebalance: every session is a
+        per-stock session (:meth:`_per_stock`). With ``daily_slot_fill`` alone, a session that is
+        neither a rebalance nor a redeploy fills the book's free slots (:meth:`_slot_fill`).
         """
+        self._session_count += 1
+        if self._params.review_sessions is not None:
+            return self._per_stock(ctx)
         if self._data.is_rebalance(ctx.session):
+            self._entry_open = set()
             return self._rebalance(ctx)
         if self._params.regime_daily:
             daily = self._daily_regime(ctx)
@@ -498,6 +613,8 @@ class MomentumV2Policy:
         if self._pending is not None:
             pending, self._pending = self._pending, None
             return self._redeploy(ctx, pending)
+        if self._params.daily_slot_fill:
+            return self._slot_fill(ctx)
         return self._heartbeat(ctx)
 
     def _daily_regime(self, ctx: SessionContext) -> SessionDecision | None:
@@ -520,6 +637,257 @@ class MomentumV2Policy:
             self._pending = None  # nothing is redeployed into a basket being parked
             return self._park(ctx, reading)
         return None
+
+    # ── M14.6: per-stock entry and review ────────────────────────────────────────────────────────
+
+    def _slot_fill(self, ctx: SessionContext) -> SessionDecision:
+        """V1: a non-rebalance session fills the book's free slots, if the regime gate is open.
+
+        The gate is D13's own reading: open unless the last rebalance parked the book. Nothing is
+        sold here — exits stay D13's monthly band.
+        """
+        names = self._names_held(ctx)
+        self._note_unfilled_entries(names)
+        if self._params.regime_filter and self._parked:
+            return self._per_stock_evidence(ctx, held=len(names), due=0, gate="parked")
+        ranked = self._ranked(ctx)
+        slots = self._params.top_n - len(names)
+        buys = self._fill(ctx, ranked, names=names, selling=set(), slots=slots, topups=[])
+        return self._per_stock_decision(ctx, [], buys, held=len(names), due=0, gate="open")
+
+    def _per_stock(self, ctx: SessionContext) -> SessionDecision:
+        """V2-V4: review the holdings that are due, refill free slots, under the regime gate.
+
+        The order of a session: the regime (a park, when the reading calls for one, is the whole
+        decision); then every settled holding whose clock has run ``review_sessions`` sessions is
+        reviewed against today's ranking — sold outside ``sell_band``, else kept with its clock
+        restarted (topped up toward its share when within ``top_n``); then the slots the book has
+        free once today's sells are counted are filled from the top of the ranking. Sale proceeds
+        settle later, so a slot freed today is filled from cash already free, or on a later session.
+        """
+        params = self._params
+        now = self._session_count
+        holdings = {holding.isin: holding for holding in ctx.broker.holdings()}
+        names = self._names_held(ctx)
+        self._note_unfilled_entries(names)
+        # A name that left the book (sold, merged away) drops its clock; one that arrived without an
+        # entry here (a reissued ISIN) starts its clock on the session it is first seen.
+        self._clocks = {isin: start for isin, start in self._clocks.items() if isin in names}
+        for isin in sorted(names - set(self._clocks)):
+            self._clocks[isin] = now
+        self._entry_open &= names
+
+        gate = "open"
+        if params.regime_filter:
+            if params.daily_regime_gate:
+                (reading,) = ctx.pit.admit(self._data.regime(ctx.session))
+                if not reading.risk_on:
+                    gate = "risk-off"
+                    if params.daily_regime_park:
+                        # Park on the first risk-off session, and re-issue on each month's first
+                        # session while risk-off persists (as D13's monthly rule does), so names
+                        # A8's floor kept are offered again monthly rather than daily.
+                        if not self._parked or self._data.is_rebalance(ctx.session):
+                            return self._park(ctx, reading)
+                        return self._per_stock_evidence(ctx, held=len(names), due=0, gate="parked")
+                else:
+                    self._parked = False
+            else:
+                if self._data.is_rebalance(ctx.session):
+                    (reading,) = ctx.pit.admit(self._data.regime(ctx.session))
+                    if not reading.risk_on:
+                        return self._park(ctx, reading)
+                    self._parked = False
+                if self._parked:
+                    return self._per_stock_evidence(ctx, held=len(names), due=0, gate="parked")
+
+        ranked = self._ranked(ctx)
+        rank = {record.isin: position for position, record in enumerate(ranked, start=1)}
+        band = params.sell_band if params.sell_band is not None else params.top_n
+        assert params.review_sessions is not None
+        due = sorted(
+            isin for isin in holdings if now - self._clocks[isin] >= params.review_sessions
+        )
+        sells: list[tuple[OrderRequest, str]] = []
+        topups: list[str] = []
+        for isin in due:
+            # The review happened whatever it decides: a sale A8 refuses is retried at the next
+            # review, never every session. An entry still completing is complete once reviewed.
+            self._clocks[isin] = now
+            self._entry_open.discard(isin)
+            position = rank.get(isin)
+            if position is None or position > band:
+                quantity = holdings[isin].quantity
+                where = "unranked today" if position is None else f"rank {position}"
+                sells.append(
+                    (
+                        OrderRequest(isin=isin, side=Side.SELL, quantity=quantity, tag="MOMENTUM"),
+                        f"per-stock review: {where}, outside the top-{band} band; "
+                        f"liquidating {quantity} shares",
+                    )
+                )
+            elif position <= params.top_n and gate == "open":
+                topups.append(isin)
+        buys: list[tuple[OrderRequest, str]] = []
+        if gate == "open":
+            selling = {order.isin for order, _ in sells}
+            slots = params.top_n - len(names - selling)
+            buys = self._fill(ctx, ranked, names=names, selling=selling, slots=slots, topups=topups)
+        return self._per_stock_decision(ctx, sells, buys, held=len(names), due=len(due), gate=gate)
+
+    def _names_held(self, ctx: SessionContext) -> set[str]:
+        """Every name the book owns: settled holdings and filled buys still in settlement."""
+        return {h.isin for h in ctx.broker.holdings()} | {p.isin for p in ctx.broker.positions()}
+
+    def _note_unfilled_entries(self, names: set[str]) -> None:
+        """Cool down, for one review period, each entry placed last session that never filled."""
+        wait = self._params.review_sessions or PER_STOCK_REVIEW_SESSIONS
+        for isin in sorted(self._entries_placed - names):
+            self._cooldown[isin] = self._session_count + wait
+        self._entries_placed = set()
+        self._cooldown = {
+            i: until for i, until in self._cooldown.items() if until > self._session_count
+        }
+
+    def _ranked(self, ctx: SessionContext) -> list[MomentumV2Record]:
+        """Today's candidates, ranked as a rebalance ranks them: momentum descending, then ISIN."""
+        use_12_1 = self._params.use_12_1
+        candidates = ctx.pit.admit(self._data.signal(ctx.session))
+        return sorted(
+            candidates, key=lambda record: (-record.momentum(use_12_1=use_12_1), record.isin)
+        )
+
+    def _fill(
+        self,
+        ctx: SessionContext,
+        ranked: Sequence[MomentumV2Record],
+        *,
+        names: set[str],
+        selling: set[str],
+        slots: int,
+        topups: Sequence[str],
+    ) -> list[tuple[OrderRequest, str]]:
+        """Entry buys for ``slots`` free slots plus top-ups of ``topups``, sized as D13 sizes.
+
+        Entrants are the best-ranked names within ``top_n`` that the book does not own (and that
+        are not cooling down after an entry that did not fill); earlier entrants whose entry is
+        still completing (``_entry_open``) are topped up alongside them. The book they complete
+        — what is held and not being sold today, plus the entrants — is weighted as a rebalance
+        weights its basket (inverse volatility when ``vol_scaled``), each name's target is its
+        weight of the book's value (cash, settling proceeds and every lot at today's price), and
+        each buy is the gap to that target. Free cash times ``buy_budget_fraction`` caps the
+        total, shared pro rata; A8's per-order ceiling caps each order. Never sells, never buys a
+        name ranked outside ``top_n``.
+        """
+        params = self._params
+        by_isin = {record.isin: record for record in ranked}
+        entrants = (
+            [
+                record.isin
+                for record in ranked[: params.top_n]
+                if record.isin not in names and record.isin not in self._cooldown
+            ][: max(0, slots)]
+            if slots > 0
+            else []
+        )
+        completing = sorted((self._entry_open & names) - selling - set(topups))
+        wanted = [*entrants, *(isin for isin in (*topups, *completing) if isin in by_isin)]
+        if not wanted:
+            return []
+        book = sorted(((names - selling) | set(entrants)) & set(by_isin))
+        weights = self._weights_for({isin: by_isin[isin] for isin in book})
+        price_of = {record.isin: record.price for record in ranked}
+        lots: list[Holding | Position] = [*ctx.broker.holdings(), *ctx.broker.positions()]
+        existing: dict[str, Decimal] = {}
+        value = ctx.broker.margins().cash_value
+        for lot in lots:
+            marked = Decimal(lot.quantity) * price_of.get(lot.isin, lot.average_price)
+            existing[lot.isin] = existing.get(lot.isin, _ZERO) + marked
+            value += marked
+        gaps = {
+            isin: weights[isin] * value - existing.get(isin, _ZERO)
+            for isin in wanted
+            if isin in weights
+        }
+        gaps = {isin: gap for isin, gap in gaps.items() if gap > _ZERO}
+        total = sum(gaps.values(), _ZERO)
+        budget = min(ctx.broker.margins().available * params.buy_budget_fraction, total)
+        if budget <= _ZERO:
+            return []
+        shares = {isin: (gap / total).quantize(_WEIGHT_QUANTUM) for isin, gap in gaps.items()}
+        last = sorted(shares)[-1]
+        shares[last] = _ONE - sum((w for isin, w in shares.items() if isin != last), _ZERO)
+        if shares[last] <= _ZERO:  # quantisation left the last name nothing; drop it
+            del shares[last]
+            if not shares:
+                return []
+            last = sorted(shares)[-1]
+            shares[last] = _ONE - sum((w for isin, w in shares.items() if isin != last), _ZERO)
+        allocation = simulate_sip_instalment(
+            instalment=budget,
+            targets=shares,
+            prices={isin: by_isin[isin].price for isin in shares},
+            min_order_value=MIN_ORDER_VALUE_INR,
+            order_ceiling=account_order_ceiling(self._order_caps, ctx.broker, price_of),
+        )
+        rank = {record.isin: position for position, record in enumerate(ranked, start=1)}
+        entering = set(entrants)
+        buys: list[tuple[OrderRequest, str]] = []
+        for order in allocation.orders:
+            kind = (
+                "entry into a free slot"
+                if order.isin in entering
+                else ("entry completing" if order.isin in completing else "review top-up")
+            )
+            buys.append(
+                (
+                    order.to_order_request(exchange=Exchange.NSE, tag="MOMENTUM"),
+                    f"per-stock {kind}: rank {rank[order.isin]}, 12-1 momentum "
+                    f"{by_isin[order.isin].momentum(use_12_1=params.use_12_1):+}; "
+                    f"buy {order.quantity} @ {order.price}",
+                )
+            )
+            if order.isin in entering:
+                self._entries_placed.add(order.isin)
+                self._entry_open.add(order.isin)
+                self._clocks[order.isin] = self._session_count
+        return buys
+
+    def _per_stock_decision(
+        self,
+        ctx: SessionContext,
+        sells: Sequence[tuple[OrderRequest, str]],
+        buys: Sequence[tuple[OrderRequest, str]],
+        *,
+        held: int,
+        due: int,
+        gate: str,
+    ) -> SessionDecision:
+        orders = tuple(order for order, _ in (*sells, *buys))
+        entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *buys))
+        evidence = self._per_stock_evidence(ctx, held=held, due=due, gate=gate).evidence
+        return SessionDecision(evidence=evidence, orders=orders, entries=entries)
+
+    def _per_stock_evidence(
+        self, ctx: SessionContext, *, held: int, due: int, gate: str
+    ) -> SessionDecision:
+        """The per-stock session's book state as evidence; a heartbeat when nothing is placed."""
+        evidence = EvidenceBundle(
+            trading_date=ctx.session,
+            actor=Actor.T0,
+            items=(
+                EvidenceItem(
+                    kind=EvidenceKind.POSITION,
+                    source="book",
+                    label="per_stock_session",
+                    as_of=ctx.session,
+                    value=Decimal(held),
+                    detail={"reviews_due": str(due), "regime_gate": gate},
+                    text="M14.6 per-stock session: names held, reviews due, regime gate",
+                ),
+            ),
+        )
+        return SessionDecision(evidence=evidence)
 
     # ── branches ──────────────────────────────────────────────────────────────────────────────────
 
