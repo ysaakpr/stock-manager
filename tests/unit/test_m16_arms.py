@@ -33,7 +33,14 @@ _ZERO = Decimal("0")
 
 def test_default_sets_are_unchanged() -> None:
     assert ARM_SETS["m12"] == RERUN_ARMS
-    assert set(ARM_SETS) == {"m12", "regime-daily", "regime-length", "m16", "m16-fundamentals"}
+    assert set(ARM_SETS) == {
+        "m12",
+        "regime-daily",
+        "regime-length",
+        "per-stock",
+        "m16",
+        "m16-fundamentals",
+    }
 
 
 def test_baselines_are_the_existing_arms_exactly() -> None:

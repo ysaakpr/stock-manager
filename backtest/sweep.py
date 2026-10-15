@@ -59,7 +59,15 @@ from backtest.cash_interest import (
     describe_cash_interest,
 )
 from backtest.policies.earnings_surprise import M10_7_EARNINGS_SURPRISE
-from backtest.policies.momentum_v2 import PAPER_RATIFIED_2026_09_06, MomentumV2Parameters
+from backtest.policies.momentum_v2 import (
+    D13_DAILY_SLOT_FILL,
+    D13_PER_STOCK_CLOCK,
+    D13_PER_STOCK_DAILY_GATE,
+    D13_PER_STOCK_DAILY_PARK,
+    D13_PER_STOCK_NO_REGIME,
+    PAPER_RATIFIED_2026_09_06,
+    MomentumV2Parameters,
+)
 from backtest.policies.naive_momentum import MomentumParameters
 from backtest.policies.residual_momentum import with_residual_momentum
 from backtest.policies.swing_composite import SwingCompositeParameters
@@ -114,6 +122,7 @@ __all__ = [
     "H3_RESIDUAL_AND_BAND_HIT",
     "MULTI_CAP_REDEPLOY",
     "NAIVE_REDEPLOY",
+    "PER_STOCK_ARMS",
     "REDEPLOY_ARMS",
     "REGIME_DAILY_ARMS",
     "REGIME_LENGTH_ARMS",
@@ -340,6 +349,56 @@ REGIME_LENGTH_ARMS: tuple[Arm, ...] = (
         reference=D13_PAPER_BASELINE.label,
         note="the monthly regime gate reads NIFTY 50 TRI against its 50-session average, not 200",
         v2=replace(PAPER_RATIFIED_2026_09_06, regime_ma_days=50),
+    ),
+)
+
+#: M14.6: D13 with per-stock entry and review timing (``backtest.policies.momentum_v2``). V1 keeps
+#: D13's monthly exits and refills free slots daily; V2 replaces the calendar rebalance with a
+#: 21-session review clock per holding; V3 and V3b read the regime every session (risk-off blocks
+#: entries; V3b also parks the book); V4 drops the regime filter. Research arms only — kept out of
+#: ``ARMS`` for the reason D13 is.
+PER_STOCK_V1 = "V1 D13 + daily slot fill"
+PER_STOCK_V2 = "V2 per-stock 21-session clock"
+PER_STOCK_V3 = "V3 per-stock clock + daily regime gate"
+PER_STOCK_V3B = "V3b per-stock clock + daily regime park"
+PER_STOCK_V4 = "V4 per-stock clock, no regime filter"
+PER_STOCK_ARMS: tuple[Arm, ...] = (
+    Arm(
+        label=PER_STOCK_V1,
+        family="per-stock timing (M14.6)",
+        reference=D13_PAPER_BASELINE.label,
+        note="D13's monthly exits; each session a book short of 20 names buys the best-ranked "
+        "unheld top-20 names into the free slots while the monthly regime reading is risk-on",
+        v2=D13_DAILY_SLOT_FILL,
+    ),
+    Arm(
+        label=PER_STOCK_V2,
+        family="per-stock timing (M14.6)",
+        reference=PER_STOCK_V1,
+        note="no calendar rebalance: each holding is reviewed 21 sessions after its entry (sold "
+        "outside the top-30, else kept and its clock restarted); regime read monthly, as D13",
+        v2=D13_PER_STOCK_CLOCK,
+    ),
+    Arm(
+        label=PER_STOCK_V3,
+        family="per-stock timing (M14.6)",
+        reference=PER_STOCK_V2,
+        note="the regime read every session; risk-off blocks entries and top-ups, sells nothing",
+        v2=D13_PER_STOCK_DAILY_GATE,
+    ),
+    Arm(
+        label=PER_STOCK_V3B,
+        family="per-stock timing (M14.6)",
+        reference=PER_STOCK_V3,
+        note="as V3, and the first risk-off session parks the whole book (re-issued monthly)",
+        v2=D13_PER_STOCK_DAILY_PARK,
+    ),
+    Arm(
+        label=PER_STOCK_V4,
+        family="per-stock timing (M14.6)",
+        reference=PER_STOCK_V2,
+        note="V2 with no regime filter: buy whenever a top-20 name is unheld and a slot is free",
+        v2=D13_PER_STOCK_NO_REGIME,
     ),
 )
 

@@ -14,7 +14,10 @@ by hand from those numbers. The acceptance criteria, one block each:
 3. NAV and holdings equal what `/status/managers` and the digest report for the same session;
 4. with no live entries the page shows the dry stream labelled DRY RUN; with live entries, live;
 5. every recorded book is selectable on its own; an unknown book is a 404;
-6. the M18.1 shared rules hold: read-only, no external URL, no secret rendered, IST.
+6. the M18.1 shared rules hold: read-only, no external URL, no secret rendered, IST;
+7. a strategy paper book (`paper_session`) is its own picker group with the same view: holdings,
+   staged orders and totals to the paisa, NAV and cash from its latest record, opening capital
+   from its first session, the staged marker, its rebalance dates, and "No holdings yet".
 
 The real SQL (the desk record, the symbols, the dry stream's read-back) is exercised against
 Postgres in `tests/integration/test_console_portfolio.py`.
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Collection, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time
 from decimal import Decimal
 from pathlib import Path
@@ -249,6 +253,19 @@ class FakePrices:
         return {D1: D2, D2: D3}.get(session)
 
 
+@dataclass(frozen=True)
+class PaperRow:
+    """One `paper_session` row of a strategy paper book (the columns the page reads)."""
+
+    book_id: str
+    on: date
+    outcome: str = "COMPLETED"
+    reason: str = "decided"
+    rebalanced: bool = False
+    state: Mapping[str, Any] | None = None
+    expected: Mapping[str, Any] | None = None
+
+
 class _Result:
     def __init__(self, rows: Sequence[tuple[Any, ...]]) -> None:
         self._rows = list(rows)
@@ -263,8 +280,13 @@ class _Result:
 class StubConnection:
     """Answers the Portfolio page's queries from in-memory rows; anything else fails loudly."""
 
-    def __init__(self, desks: Mapping[tuple[str, date], Mapping[str, Any]]) -> None:
+    def __init__(
+        self,
+        desks: Mapping[tuple[str, date], Mapping[str, Any]],
+        paper: Sequence[PaperRow] = (),
+    ) -> None:
         self.desks = dict(desks)
+        self.paper = list(paper)
         self.queries: list[tuple[str, Sequence[Any]]] = []
 
     @property
@@ -285,6 +307,23 @@ class StubConnection:
             return _Result([] if state is None else [(record, state)])
         if "FROM symbol_history" in text:
             return _Result([(i, SYMBOLS[i]) for i in sorted(params[0]) if i in SYMBOLS])
+        if text.startswith("SELECT book_id, trading_date, outcome, reason, rebalanced, book_state"):
+            assert params == (LIVE_DESK_RECORD, DRY_DESK_PATTERN)  # the M17 desk records excluded
+            return _Result(
+                [
+                    (r.book_id, r.on, r.outcome, r.reason, r.rebalanced, r.state is not None)
+                    for r in sorted(self.paper, key=lambda r: (r.book_id, r.on))
+                ]
+            )
+        if text.startswith("SELECT book_id, trading_date, book_state, expected_book"):
+            books, days = params
+            return _Result(
+                [
+                    (r.book_id, r.on, r.state, r.expected)
+                    for r in self.paper
+                    if r.book_id in books and r.on in days and r.state is not None
+                ]
+            )
         raise AssertionError(f"unexpected query against the stub connection: {text}")
 
 
@@ -857,3 +896,242 @@ def test_the_lake_closes_are_nse_eq_first_then_be_bz_never_bse(tmp_path: Path) -
     assert prices.previous_session(D2) == D1
     assert prices.next_session(D2) == D3
     assert prices.next_session(D1) == D2  # Friday → Monday
+
+
+# ── strategy paper books: every book is a portfolio (owner, 2026-10-14) ───────────────────────
+
+PAPER_BOOK: Final = "momentum_v2_paper_2026_09_06"
+#: The first session of November 2026 (Sunday 1 Nov): the next monthly rebalance after October's.
+NOV_FIRST: Final = date(2026, 11, 2)
+
+
+def _broker(cash: str, on: date, staged: Sequence[tuple[str, str, int]] = ()) -> dict[str, Any]:
+    """`paper_session.book_state` as `backtest.paper_session` records it (the parts read)."""
+    return {
+        "broker": {
+            "cash": cash, "released_ahead": "0", "current_session": on.isoformat(),
+            "holdings": [], "pending": [], "receivables": [],
+            "staged": [
+                {"order_id": f"o{i}", "decision_date": on.isoformat(), "target_session": "x",
+                 "isin": isin, "side": side, "quantity": str(quantity), "exchange": "NSE",
+                 "order_type": "MARKET", "limit_price": None, "tag": "momentum"}
+                for i, (isin, side, quantity) in enumerate(staged)
+            ],
+            "next_order_seq": str(len(staged)), "next_ledger_seq": "0",
+        },
+        "session_ledger": [],
+    }  # fmt: skip
+
+
+#: The book D1 and D2 hold: 10 A and 5 B bought on D1 with charges, out of ₹10 L opened on D0.
+PAPER_HELD: Final = {
+    "cash": "966938.99",
+    "positions": [
+        {"isin": ISIN_A, "quantity": "10", "cost_basis": "25510.75"},
+        {"isin": ISIN_B, "quantity": "5", "cost_basis": "7550.26"},
+    ],
+}
+
+
+def paper_rows(opening: str = "1000000") -> list[PaperRow]:
+    """D0 rebalanced (orders staged, nothing filled), D1 filled them, D2 staged a TRIM of B and a
+    BUY of D for D3. D0 recorded no accounting book (its broker cash is the opening capital)."""
+    return [
+        PaperRow(PAPER_BOOK, D0, reason="rebalance", rebalanced=True,
+                 state=_broker(opening, D0, [(ISIN_A, "BUY", 10), (ISIN_B, "BUY", 5)])),
+        PaperRow(PAPER_BOOK, D1, state=_broker("966938.99", D1), expected=PAPER_HELD),
+        PaperRow(PAPER_BOOK, D2, expected=PAPER_HELD,
+                 state=_broker("966938.99", D2, [(ISIN_B, "SELL", 2), (ISIN_D, "BUY", 3)])),
+    ]  # fmt: skip
+
+
+class PaperPrices(FakePrices):
+    """The fixture's calendar, plus the turn of the month."""
+
+    def next_session(self, session: date) -> date | None:
+        return {date(2026, 10, 31): NOV_FIRST}.get(session) or super().next_session(session)
+
+
+#: Worked by hand. NAV D2 = 966938.99 + 10 x 2600.00 + 5 x 1490.10 = 1000389.49; NAV D1 =
+#: 966938.99 + 10 x 2550.50 + 5 x 1510.00 = 999993.99; daily change 395.50 (0.0395 %); profit
+#: vs ₹10 L 389.49 (0.0389 %); invested 25510.75 + 7550.26 = 33061.01; value 26000 + 7450.50.
+PAPER_TOTALS: Final = {
+    "session": D2.isoformat(), "invested": "33061.01", "current-value": "33450.50",
+    "cash": "966938.99", "nav": "1000389.49", "total-profit": "389.49",
+    "total-profit-pct": "0.04", "daily-change": "395.50", "daily-change-pct": "0.04",
+    "reconciled": "true",
+}  # fmt: skip
+PAPER_ROWS: Final = {
+    # avg 25510.75 / 10 = 2551.075 → 2551.08; day 2600 - 2550.50 = 49.50 (1.94 %), x 10 = 495;
+    # profit 26000 - 25510.75 = 489.25 (1.92 %).
+    ISIN_A: {"quantity": "10", "cmp": "2600.00", "avg": "2551.08", "day-change": "49.50",
+             "position-day-change": "495.00", "day-change-pct": "1.94", "value": "26000.00",
+             "profit": "489.25", "profit-pct": "1.92", "action": "", "action-quantity": ""},
+    # avg 1510.052 → 1510.05; day 1490.10 - 1510.00 = -19.90 (-1.32 %), x 5 = -99.50;
+    # profit 7450.50 - 7550.26 = -99.76 (-1.32 %); a TRIM of 2 staged.
+    ISIN_B: {"quantity": "5", "cmp": "1490.10", "avg": "1510.05", "day-change": "-19.90",
+             "position-day-change": "-99.50", "day-change-pct": "-1.32", "value": "7450.50",
+             "profit": "-99.76", "profit-pct": "-1.32", "action": "SELL", "action-quantity": "2"},
+}  # fmt: skip
+
+
+@pytest.fixture
+def paper_client(tmp_path: Path) -> Iterator[TestClient]:
+    conn = StubConnection({(DRY_DESK, D2): desk_state()}, paper=paper_rows())
+    with _client(tmp_path, conn, dry=journal(), prices=PaperPrices()) as live:
+        yield live
+    app.dependency_overrides.clear()
+
+
+def test_a_strategy_paper_book_is_its_own_group_and_selectable(paper_client: TestClient) -> None:
+    html = _page(paper_client)
+    groups = re.findall(r'<div class="pick-group" data-kind="[^"]+"><h3>([^<]+)</h3>', html)
+    assert groups == ["Manager", "Control", "Style", "Bench", "Paper (strategy)"]
+    group = re.search(r'<div class="pick-group" data-kind="PAPER">.*?</div></div>', html)
+    assert group is not None
+    assert [p["data-book"] for p in _picks(group.group(0))] == [PAPER_BOOK]
+    picks = {p["data-book"]: p for p in _picks(html)}
+    assert len(picks) == 22
+    assert picks[PAPER_BOOK]["href"] == f"/console/portfolio?book={PAPER_BOOK}"
+    assert picks[PAPER_BOOK]["hx-get"] == picks[PAPER_BOOK]["href"]
+
+    page = _page(paper_client, PAPER_BOOK)
+    current = [p["data-book"] for p in _picks(page) if p.get("aria-current") == "page"]
+    assert current == [PAPER_BOOK]
+    assert f'data-book="{PAPER_BOOK}" data-kind="PAPER"' in page
+    assert "strategy paper book · momentum v2 (D13)" in page
+    assert "opening capital ₹10,00,000.00" in page
+    # The real paper stream: no DRY RUN banner, no LIVE banner — a small label.
+    assert "DRY RUN" not in page and "<strong>LIVE</strong>" not in page
+    assert 'data-stream="paper_session"' in page
+
+
+def test_a_paper_book_renders_its_holdings_and_staged_orders_to_the_paisa(
+    paper_client: TestClient,
+) -> None:
+    html = _page(paper_client, PAPER_BOOK)
+    rows = _rows(html)
+    assert list(rows) == [ISIN_A, ISIN_B]  # D is staged, not held: never in the holdings
+    for isin, expected in PAPER_ROWS.items():
+        assert {k: rows[isin][k] for k in expected} == expected, isin
+    assert _buying(html) == {
+        ISIN_D: {"quantity": "3", "cmp": "1650.00", "day-change-pct": "0.61",
+                 "estimated-cost": "4950.00"},
+    }  # fmt: skip
+    assert f"Buying next session ({D3.isoformat()})" in html
+    assert _totals(html) == PAPER_TOTALS
+    assert "<td>RELIANCE</td>" in html and "<td>HDFCBANK</td>" in html
+
+
+def test_a_paper_books_nav_and_cash_are_its_latest_paper_session_record() -> None:
+    conn = StubConnection({}, paper=paper_rows())
+    page = read_portfolio(
+        conn.db, entries=journal(), stream=PortfolioStream.DRY, roster=ROSTER,
+        book_id=PAPER_BOOK, prices=PaperPrices(), as_of=NOW,
+    )  # fmt: skip
+    totals = page.totals
+    assert totals is not None and page.session == D2 and page.stream is PortfolioStream.PAPER
+    assert totals.cash == Decimal("966938.99")  # D2's expected_book cash, exact
+    assert totals.current_value is not None
+    assert totals.nav == totals.cash + totals.current_value == Decimal("1000389.49")
+    assert type(totals.nav) is Decimal and totals.positions == 2
+    assert totals.previous_session == D1 and totals.previous_nav == Decimal("999993.99")
+    assert page.paper is not None
+    assert (page.paper.last_rebalance, page.paper.next_rebalance) == (D0, NOV_FIRST)
+    assert page.desk_record == PAPER_BOOK and page.missing == []
+
+
+def test_the_opening_capital_is_read_from_the_first_session_never_assumed() -> None:
+    conn = StubConnection({}, paper=paper_rows(opening="2000000"))
+    page = read_portfolio(
+        conn.db, entries=journal(), stream=PortfolioStream.DRY, roster=ROSTER,
+        book_id=PAPER_BOOK, prices=PaperPrices(), as_of=NOW,
+    )  # fmt: skip
+    assert page.book.opening_capital_inr == Decimal("2000000")
+    assert page.totals is not None
+    assert page.totals.total_profit == Decimal("1000389.49") - Decimal("2000000")
+
+
+def test_the_picker_marks_a_paper_book_with_an_order_staged(tmp_path: Path) -> None:
+    # Through D2 an order is staged for D3; through D1 nothing is (D0's orders filled on D1).
+    # Each glance carries the book's NAV to the rupee and its change on the session before.
+    cases = ((paper_rows(), "true", "₹10,00,389 · "), (paper_rows()[:2], "false", "₹9,99,994 · "))
+    for rows, staged, nav in cases:
+        conn = StubConnection({(DRY_DESK, D2): desk_state()}, paper=rows)
+        with _client(tmp_path, conn, dry=journal(), prices=PaperPrices()) as live:
+            html = _page(live, PRIMARY)
+        app.dependency_overrides.clear()
+        pick = next(p for p in _picks(html) if p["data-book"] == PAPER_BOOK)
+        assert pick["data-staged"] == staged
+        item = re.search(rf'data-book="{PAPER_BOOK}".*?</a>', html)
+        assert item is not None
+        assert ('class="pick-staged"' in item.group(0)) is (staged == "true")
+        assert nav in item.group(0)
+    first = re.search(rf'data-book="{PAPER_BOOK}".*?</a>', _paper_page_html(tmp_path))
+    assert first is not None and "+0.04 %" in first.group(0)
+
+
+def _paper_page_html(tmp_path: Path) -> str:
+    conn = StubConnection({}, paper=paper_rows())
+    with _client(tmp_path, conn, dry=journal(), prices=PaperPrices()) as live:
+        html = _page(live, PAPER_BOOK)
+    app.dependency_overrides.clear()
+    return html
+
+
+def test_a_paper_book_with_no_holdings_says_so_with_its_rebalance_dates(tmp_path: Path) -> None:
+    """What the live book records today: ₹10 L cash, no position, nothing staged."""
+    flat = {"cash": "1000000", "positions": []}
+    rows = [
+        PaperRow(PAPER_BOOK, D0, reason="rebalance", rebalanced=True,
+                 state=_broker("1000000", D0)),
+        PaperRow(PAPER_BOOK, D1, state=_broker("1000000", D1), expected=flat),
+        PaperRow(PAPER_BOOK, D2, state=_broker("1000000", D2), expected=flat),
+    ]  # fmt: skip
+    conn = StubConnection({}, paper=rows)
+    with _client(tmp_path, conn, dry=journal(), prices=PaperPrices()) as live:
+        html = _page(live, PAPER_BOOK)
+    app.dependency_overrides.clear()
+    assert 'id="no-holdings">No holdings yet.</p>' in html
+    assert _rows(html) == {} and _buying(html) == {}
+    assert 'data-last-rebalance="2026-10-07"' in html
+    assert (
+        f'next monthly rebalance <span id="next-rebalance">{NOV_FIRST}</span> (scheduled)' in html
+    )
+    totals = _totals(html)
+    assert (totals["nav"], totals["cash"], totals["total-profit"]) == ("1000000.00",) * 2 + (
+        "0.00",
+    )
+    assert (totals["invested"], totals["daily-change"]) == ("0.00", "0.00")
+
+
+def test_a_red_session_after_the_last_decided_one_is_named(tmp_path: Path) -> None:
+    rows = [*paper_rows(), PaperRow(PAPER_BOOK, D3, outcome="SKIPPED_DATA_RED", reason="red")]
+    conn = StubConnection({}, paper=rows)
+    page = read_portfolio(
+        conn.db, entries=journal(), stream=PortfolioStream.DRY, roster=ROSTER,
+        book_id=PAPER_BOOK, prices=PaperPrices(), as_of=NOW,
+    )  # fmt: skip
+    assert page.session == D2 and page.paper is not None and page.paper.sessions == 4
+    assert page.missing and "SKIPPED_DATA_RED" in page.missing[0]
+
+
+def test_an_unknown_book_is_still_a_404_with_paper_books_recorded(tmp_path: Path) -> None:
+    conn = StubConnection({}, paper=paper_rows())
+    with _client(tmp_path, conn, dry=journal(), prices=PaperPrices()) as live:
+        for book in ("momentum_v2_paper_2026_09_07", "m17_dry2_fund_managers", PAPER_BOOK.upper()):
+            assert live.get("/console/portfolio", params={"book": book}).status_code == 404
+    app.dependency_overrides.clear()
+
+
+def test_a_recon_break_session_is_shown_as_left_and_named() -> None:
+    last = paper_rows()[-1]
+    rows = [*paper_rows()[:-1], PaperRow(**{**last.__dict__, "outcome": "RECON_BREAK",
+                                            "reason": "recon_break"})]  # fmt: skip
+    conn = StubConnection({}, paper=rows)
+    page = read_portfolio(
+        conn.db, entries=journal(), stream=PortfolioStream.DRY, roster=ROSTER,
+        book_id=PAPER_BOOK, prices=PaperPrices(), as_of=NOW,
+    )  # fmt: skip
+    assert page.session == D2 and page.totals is not None
+    assert page.missing and "RECON_BREAK" in page.missing[0]

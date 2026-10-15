@@ -152,6 +152,7 @@ from backtest.run_ledger import (
     run_spec,
 )
 from backtest.sector_indices import IndustryGatedData, SectorIndexLevels, load_sector_index_map
+from backtest.signal_panel import current_signal_panel, panel_key
 from backtest.tax import RunLedger
 from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import Exchange as IdentityExchange
@@ -450,6 +451,11 @@ class _L1Reader:
         self._refbars: dict[date, dict[str, ReferenceBar]] = {}
         self._restricted: dict[date, dict[str, tuple[str, Decimal, ReferenceBar | None]]] = {}
         self._turnover: dict[tuple[date, date], dict[str, Decimal]] = {}
+
+    @property
+    def data_root_label(self) -> str:
+        """The lake root this reader reads, resolved, as a signal panel keys it."""
+        return str(self._data_root.resolve()) if self._data_root is not None else "(configured)"
 
     def _partition(self, session: date) -> str:
         """The single L1 parquet file for one session — read directly, not via a lake scan.
@@ -851,6 +857,11 @@ class _AdjustedCloseSource:
         self._reader = reader
         self._l1_isins_only = l1_isins_only
         self._closes: dict[date, dict[str, Decimal]] = {}
+
+    @property
+    def l1_isins_only(self) -> bool:
+        """Whether the source answers only for the ISINs L1 printed that session."""
+        return self._l1_isins_only
 
     def __call__(self, session: date) -> Mapping[str, Decimal]:
         cached = self._closes.get(session)
@@ -1355,8 +1366,12 @@ class _L1MomentumV2Data:
         self._windows = reader.listing_windows()
         self._signals: dict[date, tuple[MomentumV2Record, ...]] = {}
         self._universe_sizes: dict[date, int] = {}
+        # M14.6: a signal panel in force answers for the sessions it was cut for, for the one
+        # (universe, price basis, lake) series it holds; any other source computes live.
+        self._panel = current_signal_panel()
+        self._panel_key = self._panel_identity(reader, signal_closes, universe_filter)
         for rebalance_date in sorted(self._rebalance):
-            records = self._compute(rebalance_date)
+            records = self._records(rebalance_date)
             self._signals[rebalance_date] = records
             self._universe_sizes[rebalance_date] = len(records)
         # The session after each rebalance is served too: the `redeploy_next_session` toggle
@@ -1371,9 +1386,43 @@ class _L1MomentumV2Data:
     def is_rebalance(self, session: date) -> bool:
         return session in self._rebalance
 
+    @staticmethod
+    def _panel_identity(
+        reader: _L1Reader,
+        signal_closes: SignalCloses | None,
+        universe_filter: _InvestableUniverse | None,
+    ) -> str | None:
+        """This source's :func:`~backtest.signal_panel.panel_key`, or ``None`` if no panel fits.
+
+        Only the two stock close sources are recognised — raw L1 and the L2 adjusted source — so a
+        test's scripted closes never pick up a panel cut from the lake.
+        """
+        if signal_closes is None:
+            adjusted, l1_only = False, False
+        elif isinstance(signal_closes, _AdjustedCloseSource):
+            adjusted, l1_only = True, signal_closes.l1_isins_only
+        else:
+            return None
+        universe = repr(universe_filter.params) if universe_filter is not None else "None"
+        return panel_key(
+            universe, adjusted=adjusted, l1_isins_only=l1_only, data_root=reader.data_root_label
+        )
+
+    def _records(self, as_of: date) -> tuple[MomentumV2Record, ...]:
+        """The candidate set of ``as_of``: from the panel in force when it covers it, else live."""
+        if self._panel is not None and self._panel_key is not None:
+            served = self._panel.lookup(self._panel_key, as_of)
+            if served is not None:
+                return served
+        return self._compute(as_of)
+
+    def records_on(self, as_of: date) -> tuple[MomentumV2Record, ...]:
+        """The candidate set of ``as_of``, computed live and never cached (the panel builder)."""
+        return self._compute(as_of)
+
     def signal(self, as_of: date) -> Dataset[MomentumV2Record]:
         if as_of not in self._signals and as_of in self._calendar:
-            self._signals[as_of] = self._compute(as_of)
+            self._signals[as_of] = self._records(as_of)
         records = self._signals.get(as_of, ())
         return Dataset.declaring(
             f"momentum_v2@{as_of.isoformat()}",

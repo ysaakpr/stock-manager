@@ -35,6 +35,7 @@ _KIND_LABELS: Final = {
     "CONTROL": "Control",
     "STYLE": "Style",
     "BENCH": "Bench",
+    "PAPER": "Paper (strategy)",
 }
 
 
@@ -90,6 +91,8 @@ def _tone(value: Decimal | None) -> str:
 
 
 def _owner(book: BookChoiceOut) -> str:
+    if book.kind == "PAPER":
+        return f"strategy paper book · {esc(book.policy or book.book_id)}"
     if book.kind == "BENCH" or book.manager is None:
         return esc(book.kind.lower())
     relation = {"MANAGER": "manager", "CONTROL": "control for", "STYLE": "style book of"}
@@ -182,6 +185,8 @@ def _stream_banner(page: PortfolioOut) -> str:
         if page.desk_record is None
         else f' · holdings from the desk record <span class="mono">{esc(page.desk_record)}</span>'
     )
+    if page.stream is PortfolioStream.PAPER:
+        return _paper_line(page)
     if page.stream is PortfolioStream.DRY:
         return (
             f'<div class="banner warn" id="stream" data-stream="{esc(page.stream.value)}">'
@@ -194,6 +199,31 @@ def _stream_banner(page: PortfolioOut) -> str:
         f'<strong>LIVE</strong> — the live stream <span class="mono">{esc(page.stream.value)}'
         f"</span>{record}.</div>"
     )
+
+
+def _paper_line(page: PortfolioOut) -> str:
+    """A strategy paper book's line: the record it is read from and its rebalance cycle. Not a
+    banner — the paper session is the real paper stream, not a dry run."""
+    paper = page.paper
+    parts = ['from its own <span class="mono">paper_session</span> rows']
+    if paper is not None:
+        parts.append(f"{paper.decided_sessions} of {paper.sessions} session(s) decided")
+        if paper.first_session is not None:
+            parts[-1] += f" since {paper.first_session.isoformat()}"
+        last = MISSING if paper.last_rebalance is None else paper.last_rebalance.isoformat()
+        parts.append(f'last rebalance <span id="last-rebalance">{last}</span>')
+        if paper.next_rebalance is not None:
+            parts.append(
+                f'next monthly rebalance <span id="next-rebalance">'
+                f"{paper.next_rebalance.isoformat()}</span> (scheduled)"
+            )
+    last_at = "" if paper is None or paper.last_rebalance is None else paper.last_rebalance
+    next_at = "" if paper is None or paper.next_rebalance is None else paper.next_rebalance
+    attrs = (
+        f'id="stream" data-stream="{esc(page.stream.value)}" '
+        f'data-last-rebalance="{last_at}" data-next-rebalance="{next_at}"'
+    )
+    return f'<p class="muted" {attrs}>' + " · ".join(parts) + "</p>"
 
 
 # ── the holdings ───────────────────────────────────────────────────────────────────────────
@@ -344,7 +374,7 @@ def _buying(page: PortfolioOut) -> str:
 # ── the totals ─────────────────────────────────────────────────────────────────────────────
 
 
-def _totals(totals: FundTotalsOut) -> str:
+def _totals(totals: FundTotalsOut, *, paper: bool = False) -> str:
     attrs = (
         f'data-session="{totals.session.isoformat()}" data-invested="{paisa(totals.invested)}" '
         f'data-current-value="{paisa(totals.current_value)}" data-cash="{paisa(totals.cash)}" '
@@ -388,8 +418,14 @@ def _totals(totals: FundTotalsOut) -> str:
     return (
         f'<div class="panel"><h2>Fund <span class="muted">marked {totals.session.isoformat()}'
         f'</span></h2><table id="totals" {attrs} style="width:auto"><tbody>{rows}</tbody></table>'
-        '<p class="muted">NAV and cash are the book\'s own mark (the figures the digest and '
-        "/status/managers report).</p></div>"
+        + (
+            '<p class="muted">Cash is the paper book\'s own accounting book (paper_session); NAV '
+            "is that cash plus each holding at the session's close; total profit is against the "
+            "cash the book opened with.</p></div>"
+            if paper
+            else '<p class="muted">NAV and cash are the book\'s own mark (the figures the digest '
+            "and /status/managers report).</p></div>"
+        )
     )
 
 
@@ -423,7 +459,7 @@ def render_portfolio(page: PortfolioOut, *, fragment: bool = False) -> str:
             + "</div>"
         )
     if page.totals is not None:
-        parts.append(_totals(page.totals))
+        parts.append(_totals(page.totals, paper=page.stream is PortfolioStream.PAPER))
     parts.append(_holdings(page))
     parts.append(_buying(page))
     title = f"Portfolio {book.book_id}"

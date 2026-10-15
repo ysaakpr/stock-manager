@@ -62,12 +62,14 @@ from backtest.run_ledger import (
     refuse_lake_location,
     summary_path,
 )
+from backtest.signal_panel import SignalPanel, signal_panel_in_force
 from backtest.sweep import (
     ARMS,
     D13_PAPER_BASELINE,
     DURATION_ARMS,
     HIGH_FLOOR,
     LOW_FLOOR,
+    PER_STOCK_ARMS,
     REGIME_DAILY_ARMS,
     REGIME_LENGTH_ARMS,
     Arm,
@@ -81,6 +83,7 @@ from dataplatform.logging import get_logger
 __all__ = [
     "ARM_SETS",
     "LONG",
+    "PER_STOCK_SET",
     "REGIME_DAILY_SET",
     "REGIME_LENGTH_SET",
     "RERUN_ARMS",
@@ -144,6 +147,9 @@ REGIME_DAILY_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *REGIME_DAILY_ARMS)
 #: The MA-timing study's arm set: D13 beside D13 with a 30- and a 50-session regime average.
 REGIME_LENGTH_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *REGIME_LENGTH_ARMS)
 
+#: M14.6's arm set: D13 beside its per-stock entry variants (``backtest.sweep.PER_STOCK_ARMS``).
+PER_STOCK_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *PER_STOCK_ARMS)
+
 
 class _ArmSets(Mapping[str, tuple[Arm, ...]]):
     """The named arm sets: fixed tuples, plus sets resolved when asked for.
@@ -175,7 +181,12 @@ class _ArmSets(Mapping[str, tuple[Arm, ...]]):
 
 
 ARM_SETS: Mapping[str, tuple[Arm, ...]] = _ArmSets(
-    {"m12": RERUN_ARMS, "regime-daily": REGIME_DAILY_SET, "regime-length": REGIME_LENGTH_SET},
+    {
+        "m12": RERUN_ARMS,
+        "regime-daily": REGIME_DAILY_SET,
+        "regime-length": REGIME_LENGTH_SET,
+        "per-stock": PER_STOCK_SET,
+    },
     {"m16": m16_arms, "m16-fundamentals": m16_fundamentals_arms},
 )
 
@@ -196,6 +207,9 @@ class RerunPlan:
     #: mandate's decade and selection windows open 2016-09-01, where that screen raises rather than
     #: answer. The floor-only screen is also what the 2026-09-07 reports ran, so rows compare.
     universe: str = UNIVERSE_TURNOVER_FLOOR
+    #: M14.6: a daily signal panel (``backtest.signal_panel``) every run reads its candidate sets
+    #: from. ``None`` (the default) computes them live, as every campaign before it did.
+    signal_panel: Path | None = None
 
     def __post_init__(self) -> None:
         unknown = [u for u in self.units if u not in UNITS]
@@ -223,6 +237,11 @@ def _actions(plan: RerunPlan) -> BookActionSource | None:
     # data_root passed explicitly: the configured default is the checkout's data/, which in a
     # worktree does not exist and would read as "no listing windows" rather than failing.
     return load_store_book_actions(data_root=plan.data_root) if plan.book_actions else None
+
+
+def _panel(plan: RerunPlan) -> SignalPanel | None:
+    # Opened in each worker: a spawned process does not inherit the parent's context variables.
+    return SignalPanel(plan.signal_panel) if plan.signal_panel is not None else None
 
 
 def _sweep(plan: RerunPlan, name: str, floors: Sequence[Decimal] | None = None) -> SweepResult:
@@ -265,6 +284,7 @@ def run_unit(plan: RerunPlan, name: str, floor: Decimal | None = None) -> UnitOu
         corporate_actions_in_force(_actions(plan), apply_to_book=True),
         accrue_cash_interest(_interest(plan)),
         persist_run_ledgers(plan.out_dir),
+        signal_panel_in_force(_panel(plan)),
     ):
         if name == WALK_FORWARD:
             walk = _walk(plan, floors)
@@ -341,6 +361,7 @@ def load_results(plan: RerunPlan) -> tuple[dict[str, SweepResult], str]:
         corporate_actions_in_force(_actions(plan), apply_to_book=True),
         accrue_cash_interest(_interest(plan)),
         persist_run_ledgers(plan.out_dir),
+        signal_panel_in_force(_panel(plan)),
     ):
         for unit in plan.units:
             if unit == WALK_FORWARD:
@@ -374,6 +395,8 @@ def build_manifest(plan: RerunPlan, *, commit: str, last_session: date) -> dict[
         "universe": plan.universe,
         "cash_interest": load_repo_rate_schedule().identity() if plan.cash_interest else None,
     }
+    if plan.signal_panel is not None:  # absent when off, so no earlier directory's manifest moves
+        manifest["signal_panel"] = SignalPanel(plan.signal_panel).identity()
     return manifest
 
 
@@ -441,6 +464,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         choices=sorted(ARM_SETS),
         help="m12: the M12 review's arms (default); regime-daily: D13 and its M14.5 variants; "
         "regime-length: D13 with a 30/50-session regime MA; "
+        "per-stock: D13 and its M14.6 per-stock entry variants; "
         "m16: baselines, A1, A2, A3, A7; m16-fundamentals: D13, M10.7, A4, A5 "
         "(six-year and wf-verification only)",
     )
@@ -453,6 +477,13 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--no-book-corporate-actions", dest="book_actions", action="store_false")
     parser.add_argument("--no-cash-interest", dest="cash_interest", action="store_false")
     parser.add_argument("--universe", default=UNIVERSE_TURNOVER_FLOOR, choices=UNIVERSE_CHOICES)
+    parser.add_argument(
+        "--signal-panel",
+        type=Path,
+        default=None,
+        help="serve momentum-v2 candidate sets from this daily signal panel "
+        "(python -m backtest.m14_6 panel); recorded in the manifest",
+    )
     parser.add_argument(
         "--results-only",
         action="store_true",
@@ -493,6 +524,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             book_actions=args.book_actions,
             cash_interest=args.cash_interest,
             universe=args.universe,
+            signal_panel=args.signal_panel,
         )
         if args.runs_from_commit is not None and not args.results_only:
             raise CampaignError("--runs-from-commit renders only; add --results-only")

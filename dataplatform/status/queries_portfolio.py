@@ -21,6 +21,9 @@ the bench) is shown the same way, from what the M17 job persists and nothing it 
   BE/BZ print), read the way the desk's market reads it (`backtest.fm_world._LakeBookMarket`),
   with the D22 price quarantine applied. The previous session comes from the trading calendar.
 
+**Strategy paper books** (the D13 momentum v2 book, and any later one) are read from their own
+``paper_session`` rows by `queries_portfolio_paper` and shown with the same rows and totals.
+
 **Streams.** Until S0 the desk writes only the dry stream. The page shows the live stream when it
 holds any entry for the roster's books, and the dry stream otherwise, labelled so.
 
@@ -522,19 +525,36 @@ def read_portfolio(
 ) -> PortfolioOut:
     """The Portfolio page for ``book_id`` (default: the first manager book) from ``stream``.
 
-    ``entries`` are that stream's entries for the roster's books, as the books wrote them.
-    Raises `UnknownBookError` for a book the roster does not record. A journal the scoreboard's
-    parse refuses is reported in ``error`` with no figures, never papered over.
+    ``entries`` are that stream's entries for the roster's books, as the books wrote them. Every
+    strategy paper book in ``paper_session`` is selectable too, read from its own rows
+    (`queries_portfolio_paper`). Raises `UnknownBookError` for a book neither records. A journal
+    the scoreboard's parse refuses is reported in ``error`` with no figures, never papered over.
     """
     from analyst.fundmanager.scoreboard import ScoreboardError, inputs_from_journal
+    from dataplatform.status.queries_portfolio_paper import (
+        PAPER_KIND,
+        MemoPrices,
+        paper_choice,
+        paper_figures,
+        paper_glance,
+        read_paper_books,
+    )
 
-    choices = book_choices(roster)
+    prices = MemoPrices(prices)
+    paper_books = {
+        b.book_id: b
+        for b in read_paper_books(conn, live_record=LIVE_DESK_RECORD, dry_pattern=DRY_DESK_PATTERN)
+    }
+    desk_choices = book_choices(roster)
+    choices = desk_choices + [paper_choice(b) for b in paper_books.values()]
     if book_id is None:
         book = default_book(choices)
     else:
         found = [c for c in choices if c.book_id == book_id]
         if not found:
-            raise UnknownBookError(f"no M17 book {book_id!r} in the roster")
+            raise UnknownBookError(
+                f"no M17 book and no strategy paper book {book_id!r} is recorded"
+            )
         book = found[0]
 
     def page(**fields: Any) -> PortfolioOut:
@@ -545,15 +565,32 @@ def read_portfolio(
         }  # fmt: skip
         return PortfolioOut(**{**base, **fields})
 
+    paper_glances = [paper_glance(b, prices) for b in paper_books.values()]
     try:
         inputs = inputs_from_journal(entries, roster)
     except ScoreboardError as error:
-        return page(error=mask_and_truncate(str(error), _ERROR_CHARS))
-    glances = _glances(entries, inputs.marks, choices)
+        if book.kind != PAPER_KIND:
+            return page(glances=paper_glances, error=mask_and_truncate(str(error), _ERROR_CHARS))
+        inputs = None  # the M17 journal is not this book's: its picks just show no glance
+    glances = [] if inputs is None else _glances(entries, inputs.marks, desk_choices)
+    glances += paper_glances
 
     def page_with(**fields: Any) -> PortfolioOut:
         return page(glances=glances, **fields)
 
+    if book.kind == PAPER_KIND:
+        figures = paper_figures(conn, paper_books[book.book_id], prices)
+        return page_with(
+            stream=PortfolioStream.PAPER,
+            desk_record=book.book_id,
+            session=figures.session,
+            next_session=figures.next_session,
+            rows=figures.rows,
+            totals=figures.totals,
+            paper=figures.paper,
+            missing=figures.missing,
+        )
+    assert inputs is not None
     marks = sorted((m for m in inputs.marks if m.book_id == book.book_id), key=lambda m: m.session)
     if not marks:
         return page_with(
