@@ -783,6 +783,10 @@ class MomentumV2Policy:
             # Today's redeploy never buys a name it is selling today.
             pending = _renormalised({i: w for i, w in pending.items() if i not in exited})
         base = self._redeploy(ctx, pending) if pending else self._heartbeat(ctx)
+        selling = {order.isin for order, _ in sells}
+        base, dropped = _without_buys_of(base, selling)
+        if dropped:
+            items.append(_dropped_buys_item(ctx.session, dropped))
         if sells and params.redeploy_next_session and self._last_target:
             self._pending = _renormalised(self._last_target)
         evidence = EvidenceBundle(
@@ -1279,6 +1283,14 @@ class MomentumV2Policy:
             # the slot weights go (summing below one), so the redeploy also leaves the cash slots.
             self._pending = self._weights_for(target) if slots is None else slots
 
+        if drift:
+            # The allocator sizes against settled holdings and the free cash, the trim against the
+            # whole book: it can top up a name the trim is cutting. A name sold today is not bought.
+            trimmed = {order.isin for order, _ in drift}
+            dropped = sorted(order.isin for order, _ in buys if order.isin in trimmed)
+            buys = [(order, note) for order, note in buys if order.isin not in trimmed]
+            if dropped:
+                overlay_evidence.append(_dropped_buys_item(ctx.session, dropped))
         placed = (*sells, *trims, *drift, *buys)
         orders = tuple(order for order, _ in placed)
         entries = tuple(self._entry(ctx, order, note) for order, note in placed)
@@ -1735,6 +1747,48 @@ class MomentumV2Policy:
 
 
 # ── weighting ───────────────────────────────────────────────────────────────────────────────────
+
+
+def _without_buys_of(
+    decision: SessionDecision, isins: set[str]
+) -> tuple[SessionDecision, list[str]]:
+    """``decision`` less its buys (orders and their journal entries) of ``isins``; and those ISINs.
+
+    The per-stock rebalance switches sell on a session whose redeploy also buys. The redeploy's
+    allocator sizes against settled holdings and the free cash only, so it can top up a name a
+    drift trim is cutting on the same session (the pre-registration: a name being sold that
+    session is never bought, and the broker refuses a second staged order for one ISIN). The
+    dropped buy's budget stays in cash; the evidence and every other order are untouched.
+    """
+    if not isins:
+        return decision, []
+    dropped = sorted({o.isin for o in decision.orders if o.side is Side.BUY and o.isin in isins})
+    if not dropped:
+        return decision, []
+    gone = set(dropped)
+    return (
+        SessionDecision(
+            evidence=decision.evidence,
+            orders=tuple(o for o in decision.orders if not (o.side is Side.BUY and o.isin in gone)),
+            entries=tuple(
+                e for e in decision.entries if not (e.decision is Decision.BUY and e.isin in gone)
+            ),
+        ),
+        dropped,
+    )
+
+
+def _dropped_buys_item(session: date, dropped: Sequence[str]) -> EvidenceItem:
+    """The record that buys of names sold this session were dropped (so the journal says why)."""
+    return EvidenceItem(
+        kind=EvidenceKind.POSITION,
+        source="book",
+        label="buys_dropped_sold_today",
+        as_of=session,
+        value=Decimal(len(dropped)),
+        detail={"isins": ",".join(dropped)},
+        text="buys of names this session also sells were not placed",
+    )
 
 
 def _renormalised(weights: Mapping[str, Decimal]) -> dict[str, Decimal]:

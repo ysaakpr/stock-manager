@@ -474,3 +474,35 @@ def test_a_per_stock_rebalance_book_refuses_resume_rather_than_drop_its_basket()
         with pytest.raises(NotImplementedError, match="research-only"):
             policy.resume(None)
     MomentumV2Policy(_Data(), D13).resume(None)  # D13 itself still resumes
+
+
+# ── a name sold this session is never bought this session (study-run bug, 2026-10-15) ────────────
+#
+# The allocator sizes against *settled* holdings and the free cash; the trim values the whole book,
+# shares in settlement included. With 500 settled + 800 in settlement the trim sees 130,000 against
+# a 100,000 target and sells 300, while the allocator sees 50,000 and tops the name up. The broker
+# refuses a second staged order for one ISIN, which stopped the first study run.
+
+
+def test_the_redeploy_never_buys_a_name_the_trim_sells_the_same_session() -> None:
+    data = _Data()
+    policy = _after_rebalance(D13_DRIFT_TRIM, data)
+    policy._pending = dict.fromkeys(NAMES[:20], Decimal("0.05"))  # yesterday's sells to redeploy
+    name = NAMES[0]
+    broker = _Broker(cash="1870000", holdings={name: 500}, positions={name: 800})
+    decision = policy.decide(_ctx(DAY, broker))
+    assert _sold(decision) == {name: 300}
+    assert name not in _bought(decision)
+    assert _bought(decision)  # the rest of the basket is still redeployed
+    assert _labels(decision)["buys_dropped_sold_today"] == Decimal(1)
+    assert all(not (e.decision is Decision.BUY and e.isin == name) for e in decision.entries)
+
+
+def test_the_rebalance_never_buys_a_name_its_drift_trim_sells() -> None:
+    policy = MomentumV2Policy(_Data(), D13_DRIFT_TRIM)
+    name = NAMES[0]
+    broker = _Broker(cash="1870000", holdings={name: 500}, positions={name: 800})
+    decision = policy.decide(_ctx(REBALANCE, broker))
+    assert _sold(decision) == {name: 300}
+    assert name not in _bought(decision)
+    assert _labels(decision)["buys_dropped_sold_today"] == Decimal(1)
