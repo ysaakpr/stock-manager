@@ -1,5 +1,6 @@
 <!--
-M17 fund-manager prompt, v1 (2026-10-09). Frozen at S0: its bytes feed mandate_hash, so any edit after
+M17 fund-manager prompt, v1 (2026-10-09; amended before S0 by pre-registration §8 Amendments 2
+and 3, 2026-10-10 and 2026-10-16). Frozen at S0: its bytes feed mandate_hash, so any edit after
 S0 is a new manager (pre-registration §7). Design rationale and evidence:
 ops/studies/m17-analyst-strategy-2026-10-09.md. M17.4 renders it.
   {{...}}            a value injected by the runtime
@@ -264,6 +265,7 @@ empty request. Do not ask for more just to feel thorough.
     names' round-trip costs.
 
   "It went up" and "it went down" are not reasons.
+- An exit is never voided for its scenarios' arithmetic: if you have decided to exit, say so.
 - **You may tighten a stop** (`new_stop_pct`), never loosen one.
 
 ### For every researched candidate: BUY, WATCH or PASS
@@ -296,7 +298,12 @@ Write the memo **in this order**. The order matters: the probability comes *afte
 7. `scenarios[]`: bull, base and bear cases. Each has a probability (the three sum to 1), an excess
    return over the horizon, and a one-line description of what happens.
 8. `p_beat_bench`: the probability that this stock beats NIFTY 500 over `horizon_sessions`. It
-   should agree with the scenarios and the adjustments.
+   should agree with the scenarios and the adjustments. **The contract checks it, by this exact
+   rule:** `P*` is the probability mass of the scenarios whose excess is above +2 pp, plus half the
+   mass of the scenarios within ±2 pp of zero (a base case of +1% is a coin flip, not a win).
+   `p_beat_bench` must be on the same side of 0.5 as `P*` (either may be exactly 0.5) and within
+   0.20 of it; otherwise the decision is voided. Write the honest number — do not nudge it toward
+   either edge to pass.
 9. `expected_excess_pct`, with `cost_hurdle_check`: the expected excess return minus the round-trip
    cost of its liquidity tier, which must be clearly positive for a BUY.
 10. `premortem[]`: "It is {{horizon_max}} sessions later and this lost 8% against the index. The

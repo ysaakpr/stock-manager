@@ -7,7 +7,8 @@ so every day nobody captured is history destroyed. This module is the scheduled 
 nine, in four jobs (`dataplatform.scheduler.registry`):
 
 * `nse_daily_capture` — FII/DII flows, bulk deals, block deals (perishable) and the current
-  session's F&O bhavcopy (dated, but the historical backfill is a separate campaign's).
+  session's F&O bhavcopy (dated, but the historical backfill is a separate campaign's) with its
+  L2 `fo_aggregates`, and a zero-request heal of any recent session whose L2 was never derived.
 * `shareholding_poll` — the shareholding master (current quarter-end's filings only), daily.
 * `announcements_capture` — NSE and BSE announcements for the previous calendar day, complete.
 * `news_capture` — the ratified curated RSS feeds and a bounded GDELT export sample.
@@ -86,6 +87,7 @@ from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store import fo_aggregates
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Ref, L0Store
+from dataplatform.store.paths import l1_partition_path, l2_partition_path
 
 if TYPE_CHECKING:  # imported lazily by the registry to avoid a scheduler→ingest import cycle
     from dataplatform.scheduler.registry import JobContext
@@ -95,6 +97,7 @@ __all__ = [
     "ANNOUNCEMENT_SOURCES",
     "BSE_MAX_PAGES",
     "CAPTURE_CUTOFF",
+    "FO_L2_HEAL_SESSIONS",
     "NEWS_SOURCES",
     "NSE_DAILY_SOURCES",
     "SHAREHOLDING_SOURCES",
@@ -110,8 +113,10 @@ __all__ = [
     "capture_fo_bhavcopy",
     "capture_news",
     "capture_shareholding",
+    "heal_fo_aggregates",
     "main",
     "owed_session",
+    "rederive_fo_aggregates",
     "rederive_shareholding",
     "run_announcements_capture",
     "run_announcements_capture_job",
@@ -689,10 +694,13 @@ def capture_fo_bhavcopy(ctx: CaptureContext, fetcher: Fetcher, *, owed: date) ->
     What it does: nothing when `owed` is already PUBLISHED (by this job or by the historical
     backfill, which owns every earlier session); reuses the payload when L0 already holds it;
     otherwise one request for the dated file.
+    It also derives the session's L2 `fo_aggregates` from those rows, stock underliers resolved to
+    ISINs through the D2 master (M17.15). Until 2026-10-16 it wrote L1 only, on the stated
+    assumption that L2 "is rebuilt with the rest of L2" — but nothing scheduled ever rebuilt it, so
+    L2 stopped at the last backfilled session (2026-10-05) and every M17 dossier showed F&O
+    unknown. `heal_fo_aggregates` closes any gap that remains.
     What it never does: walk back. A session this job misses stays for the backfill campaign — the
-    archive file is dated and permanent, so a miss here is a delay, not a loss. It does not write
-    the L2 `fo_aggregates` either: that is derived (`fo_aggregates.rebuild_l2_from_l1`) and is
-    rebuilt with the rest of L2, not on a nightly path.
+    archive file is dated and permanent, so a miss here is a delay, not a loss.
     """
     source = fo_bhavcopy.FO_SOURCE_ID
     if owed < fo_bhavcopy.FO_ERA_START or _published(ctx, source, owed):
@@ -723,9 +731,83 @@ def capture_fo_bhavcopy(ctx: CaptureContext, fetcher: Fetcher, *, owed: date) ->
         source,
         owed,
         ref,
-        lambda: _write_count(fo_aggregates.write_l1(rows, data_root=ctx.data_root), len(rows)),
+        partial(_write_fo, ctx, rows),
         requests=requests,
     )
+
+
+#: How many sessions back, through the owed one, the nightly run looks for an L1 `fo_contracts`
+#: partition with no L2 `fo_aggregates` partition beside it (`heal_fo_aggregates`).
+FO_L2_HEAL_SESSIONS: Final = 30
+
+
+def _write_fo(ctx: CaptureContext, rows: Sequence[fo_bhavcopy.FoContractRow]) -> int:
+    """Land one session's contracts in L1 and derive its L2 aggregates from the same rows."""
+    fo_aggregates.write_l1(rows, data_root=ctx.data_root)
+    fo_aggregates.write_l2(
+        fo_aggregates.build_aggregates(rows, master=ctx.master()), data_root=ctx.data_root
+    )
+    return len(rows)
+
+
+def _fo_l2_missing(ctx: CaptureContext, day: date) -> bool:
+    l1 = l1_partition_path(fo_aggregates.FO_CONTRACTS_DATASET, day, data_root=ctx.data_root)
+    l2 = l2_partition_path(fo_aggregates.FO_AGGREGATES_DATASET, day, data_root=ctx.data_root)
+    return l1.exists() and not l2.exists()
+
+
+def rederive_fo_aggregates(
+    ctx: CaptureContext, sessions: Sequence[date], *, only_missing: bool
+) -> list[CaptureOutcome]:
+    """Re-derive L2 `fo_aggregates` from L1 `fo_contracts` for ``sessions`` — zero requests.
+
+    What it does: for each session with an L1 partition (and, when ``only_missing``, no L2 one),
+    `fo_aggregates.rebuild_l2_from_l1` against the D2 master; one outcome per session touched,
+    under the source name ``fo_aggregates``. A session that fails is a FAILED outcome (logged with
+    its date) and the walk goes on.
+    What it never does: open a socket, touch L0 or L1, or change a `sync_state` row — L2 is
+    derived, and the F&O source's own row says whether L1 landed.
+    """
+    source = fo_aggregates.FO_AGGREGATES_DATASET
+    out: list[CaptureOutcome] = []
+    for day in sessions:
+        l1 = l1_partition_path(fo_aggregates.FO_CONTRACTS_DATASET, day, data_root=ctx.data_root)
+        if not l1.exists() or (only_missing and not _fo_l2_missing(ctx, day)):
+            continue
+        try:
+            fo_aggregates.rebuild_l2_from_l1(day, master=ctx.master(), data_root=ctx.data_root)
+            rows = len(fo_aggregates.read_l2(day, data_root=ctx.data_root))
+        except Exception as exc:  # containment: reported per session, the walk goes on
+            error = f"{type(exc).__name__}: {exc}"
+            _LOG.error(
+                "capture.fo_l2_failed",
+                source=source,
+                logical_date=day.isoformat(),
+                error=error,
+                state="FAILED",
+            )
+            out.append(CaptureOutcome(source, day, CaptureStatus.FAILED, detail=error))
+            continue
+        _LOG.info(
+            "capture.fo_l2_derived",
+            source=source,
+            logical_date=day.isoformat(),
+            rows=rows,
+            state="PUBLISHED",
+        )
+        out.append(
+            CaptureOutcome(
+                source, day, CaptureStatus.CAPTURED, rows=rows, detail="L2 derived from L1"
+            )
+        )
+    return out
+
+
+def heal_fo_aggregates(ctx: CaptureContext, owed: date) -> list[CaptureOutcome]:
+    """Derive L2 for each of the last `FO_L2_HEAL_SESSIONS` sessions through ``owed`` that has an
+    L1 `fo_contracts` partition and no L2 one. Zero requests; nothing when there is no gap."""
+    sessions = ctx.calendar.expected_sessions(owed - timedelta(days=FO_L2_HEAL_SESSIONS * 2), owed)
+    return rederive_fo_aggregates(ctx, sessions[-FO_L2_HEAL_SESSIONS:], only_missing=True)
 
 
 def run_nse_daily_capture(ctx: CaptureContext) -> CaptureReport:
@@ -773,6 +855,7 @@ def run_nse_daily_capture(ctx: CaptureContext) -> CaptureReport:
             CaptureOutcome(source, owed, CaptureStatus.ALREADY_PUBLISHED)
             for source in archive_sources
         ]
+    report.outcomes += heal_fo_aggregates(ctx, owed)
     return report
 
 
@@ -1406,11 +1489,13 @@ def run_news_capture_job(context: JobContext) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """`python -m dataplatform.ingest.daily_capture rederive-shareholding [--from D] [--to D]`.
+    """`python -m dataplatform.ingest.daily_capture <command> [--from D] [--to D]`.
 
-    Rebuilds L1 `shareholding` from the master payloads already in L0, against the configured lake
-    and Postgres, with no fetcher at all. Exit 0 when every payload landed, 1 when any failed (each
-    failure is on its `sync_state` row).
+    ``rederive-shareholding`` rebuilds L1 `shareholding` from the master payloads already in L0;
+    ``rederive-fo-aggregates`` rebuilds L2 `fo_aggregates` from L1 `fo_contracts` for every session
+    in the range (both bounds required; one ranged run, not a loop of single dates). Both run
+    against the configured lake and Postgres (read for the D2 master), with no fetcher at all.
+    Exit 0 when every date landed, 1 when any failed.
     """
     parser = argparse.ArgumentParser(
         prog="python -m dataplatform.ingest.daily_capture",
@@ -1422,6 +1507,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     rederive.add_argument("--from", dest="start", type=date.fromisoformat, default=None)
     rederive.add_argument("--to", dest="end", type=date.fromisoformat, default=None)
+    fo = commands.add_parser(
+        "rederive-fo-aggregates", help="rebuild L2 fo_aggregates from L1 fo_contracts (no fetch)"
+    )
+    fo.add_argument("--from", dest="start", type=date.fromisoformat, required=True)
+    fo.add_argument("--to", dest="end", type=date.fromisoformat, required=True)
     args = parser.parse_args(argv)
     configure_logging()
 
@@ -1430,14 +1520,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     from dataplatform.scheduler.registry import JobContext
 
     settings = get_settings()
+    fo_command = args.command == "rederive-fo-aggregates"
     context = JobContext(
-        job_name="shareholding_rederive",
+        job_name="fo_aggregates_rederive" if fo_command else "shareholding_rederive",
         run_id=uuid4(),
         clock=SystemClock(settings.tzinfo),
         settings=settings,
     )
     with _production(context) as ctx:
-        report = rederive_shareholding(ctx, start=args.start, end=args.end)
+        if fo_command:
+            report = CaptureReport(job="fo_aggregates_rederive")
+            sessions = ctx.calendar.expected_sessions(args.start, args.end)
+            report.outcomes += rederive_fo_aggregates(ctx, sessions, only_missing=False)
+        else:
+            report = rederive_shareholding(ctx, start=args.start, end=args.end)
     print(report.summary())
     for outcome in report.failed:
         print(f"FAILED {outcome.source} {outcome.logical_date}: {outcome.detail}", file=sys.stderr)

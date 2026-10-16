@@ -308,6 +308,91 @@ block, and a manager sees only its own. The prompt's bytes stay in `mandate_hash
 (g) **Dry run.** Dry sessions decided under the previous roster count toward wiring and timing only.
 M17.8's "5 consecutive dry sessions" must include at least 3 on this roster before S0.
 
+### Amendment 3 (2026-10-16, before S0): decision-contract and data fixes from the dry run
+
+Owner-approved 2026-10-16. Evidence: the four dry sessions on the Amendment 2 roster (2026-10-12 to
+2026-10-15, the `m17-dry` stream, 785 journal rows) and the review of their buy decisions. Three
+manager BUYs and one SELL went through; the contract voided 33 decisions on the new roster, 25 of
+them for `P_DISAGREES`. §2–§7 and Amendments 1–2 stand, except where this amendment changes them.
+
+(a) **The p-versus-scenarios check (changes the contract and the prompt).** Amendment 1 (d) and
+`contract.py` v1 required `|p_beat_bench − P*| ≤ 0.15`, with `P*` the mass of scenarios whose
+excess is above zero. Almost every memo used BULL 0.30 / BASE 0.40 at +0.5 to +1% / BEAR 0.30, so
+`P*` came to 0.70–0.75 and the check:
+- voided 12 BUYs (all three of FM-SWING-BRK's among them) and one SELL;
+- passed every executed BUY at exactly p = 0.55 against P* = 0.70, the band's edge — whether a buy
+  executed turned on writing 0.54 or 0.55;
+- pushed stated probabilities **up** towards 0.70, against the Brier criterion of §6. A base case of
+  +1% excess, against base-rate IQRs of 20–25 pp, is a coin flip, not a certain win.
+
+The rule from this amendment on, stated verbatim in `manager.md` (final round, step 8):
+
+> `P*` is the probability mass of the scenarios whose excess is above +2 pp, plus half the mass of
+> the scenarios within ±2 pp of zero. `p_beat_bench` must be on the same side of 0.5 as `P*`
+> (either may be exactly 0.5) and within 0.20 of it; otherwise the decision is voided.
+
+Why this rule: the dead band removes the artifact (a near-zero base case counted as a win) while
+keeping a real check; the sign condition is the part that matters — a p that says "beats" against
+scenarios that say "does not" is never consistent — and the band is widened from 0.15 to 0.20 because
+three points are a coarse distribution. Replaying the 25 dry-run `P_DISAGREES` voids under it: all
+25 pass the check (other checks still apply); none of the 28 accepted decisions that carried
+scenarios fails it. The three cost checks of `contract.py` (model's own check, expected excess and
+scenario mean, each net of the round trip) are unchanged and still carry the economics of a BUY.
+
+(b) **One contract repair (changes the runtime).** When the contract voids a decision for
+`P_DISAGREES`, the final call is re-asked once, with each such decision and all its reasons
+appended. Only decisions on the voided names are read from the answer; every first-pass void is
+journaled before it, the repaired decisions carry `contract_repair = true`, and a failed or
+malformed repair journals `FM_CONTRACT_REPAIR_FAILED` and leaves the voids standing. Like the schema
+repair it sits outside the 4-call budget of §4 step 3 and is journaled as an `FM_CALL` with its
+tokens, so a session costs at most 4 calls plus 2 repairs (one schema, one contract).
+
+(c) **Exits are never voided by memo arithmetic (changes the contract).** A `SELL` or `TRIM` is
+not checked against its scenarios (shape, sum to 1, or (a)). EVT's 2026-10-15 SELL of Swaraj
+Engines (INE277A01016), whose stated invalidation (a close below SMA50) had been hit, was voided by
+the v1 check (p 0.48 against P* 0.30) and the position stayed open. An exit must fail safe. Every
+other hard check on an exit stands: the schema (`what_changed` required), the holding existing, its
+citations resolving, its weights, and the rails (min hold included).
+
+(d) **F&O L2 is derived nightly (defect fix, Commons).** The prompt advertises open-interest
+build-up, but every dossier since 2026-10-06 showed `fo_* unknown` ("no partition for the sessions
+asked"): the nightly `nse_daily_capture` landed L1 `fo_contracts` only and nothing scheduled rebuilt
+L2 `fo_aggregates`, which stopped at the last backfilled session (2026-10-05). The capture now
+derives L2 from the same rows, the job heals any recent session with L1 and no L2, and a ranged
+offline rebuild exists. Facts the managers were told they had, not a change of what they are told.
+
+(e) **Unclassified names are not pooled by the sector rail (defect fix, rails).** §4 step 5's sector
+cap grouped every ISIN the NSE industry map does not name under one `UNKNOWN` sector. On
+STYLE-FM-SWING-BRK it refused 6 of 15 orders (`UNKNOWN` at 32.5%) and left the book 41% cash. Each
+unclassified ISIN is now its own bucket (`UNCLASSIFIED:<isin>`), bounded by the 10% position cap
+and the name count; a classified name is always grouped under its own label (a property test holds
+every classified sector within 30% on generated streams); and if no classification can be read at
+all, every name pools under `UNKNOWN` again (fail closed).
+
+(f) **Hashes and the dry run.** (a)–(c) change `prompts/manager.md` and `contract.py`/the runtime,
+so every manager's `mandate_hash` changes. No digest or hash of the prompt is pinned in a file or a
+test (the hash is computed and journaled per session), so nothing pinned needs updating. Dry
+sessions decided before this amendment count toward wiring and timing only: **M17.8's "5
+consecutive dry sessions" must include at least 3 decided under the Amendment 3 mandate hashes
+before S0**, which resets Amendment 2 (g)'s count (4 sessions on the Amendment 2 roster). (d) and
+(e) are defect fixes of the kind §7 allows mid-window; landing them before S0 means no scored
+session is affected.
+
+(g) **Recorded and deferred — not part of this amendment.** The same review recommended these; none
+is adopted here, and each would need its own dated amendment before S0 (or a new manager id after):
+- price invalidations no tighter than about 1.5 × ATR, or confirmed over N closes, enforced in the
+  contract like the stop rule (Apar and Swaraj invalidations sat at 1.3× and 0.9× ATR);
+- a results-date dossier field (`sessions_to_results`) from the NSE board-meetings feed — 36% of web
+  queries went on finding results dates, and S5's `results_board_meeting` category never matches;
+- delivery-share signals: 5- and 20-session delivery share and percentile, results-day delivery,
+  and day-0 volume net of matched bulk deals;
+- the `EARNINGS_MOMENTUM` label only within `sessions_since_day0 ≤ 30`, S4's own window, with that
+  field shown in the dossier;
+- a secondary metric: the invested sleeve's return against CTRL and the average exposure, beside
+  the unchanged primary;
+- a red-flag dossier field classifying each announcement of the last 20 sessions against the
+  integrity / related-party / dilution keyword table.
+
 ## 9. Owner confirmation
 
 | Item | Value | Confirmed |

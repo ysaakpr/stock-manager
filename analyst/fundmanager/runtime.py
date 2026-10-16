@@ -26,6 +26,16 @@ session sits outside that budget: a malformed output (wrong shape, no structured
 truncated answer) is re-asked once with the error appended; a second malformed output — or a
 failed model call — ends the session with ``MANAGER_ERROR`` and nothing accepted.
 
+**One contract repair** (Amendment 3, 2026-10-16), also outside the budget and separate from the
+schema repair: when the contract voids a decision for ``P_DISAGREES`` (its ``p_beat_bench`` and
+its scenarios disagree), the final call is re-asked once with every such decision and all its
+reasons appended. Every first-pass void is journaled first, as always. From the repaired answer,
+only decisions on the names that were voided for ``P_DISAGREES`` are taken (the rest of the first
+answer stands, accepted or voided); each passes the full contract again and is journaled with
+``contract_repair = true``. A repaired answer that is malformed or a failed repair call journals
+``FM_CONTRACT_REPAIR_FAILED`` and leaves the first-pass voids standing — it never ends the session.
+The repair call is an ``FM_CALL`` like any other, so its tokens are counted.
+
 **The journal** (every entry in the manager's own stream, ``case_id`` = its id, tagged ``PAPER``):
 
 - ``FM_CALL`` — one per model call, repair included: its round, the prompt digest, the token
@@ -39,6 +49,7 @@ failed model call — ends the session with ``MANAGER_ERROR`` and nothing accept
   `scoreboard.decision_payload` defines (so `scoreboard.scored_decision_from_entry` reads it back)
   plus the whole decision record, its citations, its round trip and its stop.
 - ``FM_DECISION_REFUSED`` — a voided decision and every reason.
+- ``FM_CONTRACT_REPAIR_FAILED`` — the contract repair call failed or answered malformed.
 - ``NO_ACTION`` — the whole-session "nothing today" and its reason.
 - ``MANAGER_ERROR`` — the session failed; nothing is accepted, so nothing can be staged.
 
@@ -92,6 +103,7 @@ from analyst.fundmanager.contract import (
     ContractVerdict,
     DecisionContext,
     NameFacts,
+    ReasonCode,
     shown_cells,
     validate_decision,
 )
@@ -142,6 +154,8 @@ from execution.costs import CostModel
 
 __all__ = [
     "CALL_EVENT",
+    "CONTRACT_REPAIR_FAILED_EVENT",
+    "CONTRACT_REPAIR_STAGE",
     "FETCH_CONCURRENCY",
     "MANAGER_ERROR_EVENT",
     "NO_ACTION_EVENT",
@@ -165,6 +179,9 @@ CALL_EVENT: Final = "FM_CALL"
 TRUNCATION_EVENT: Final = "FM_RESEARCH_TRUNCATED"
 RESEARCH_EVENT: Final = "FM_RESEARCH_FULFILLED"
 REFUSED_EVENT: Final = "FM_DECISION_REFUSED"
+CONTRACT_REPAIR_FAILED_EVENT: Final = "FM_CONTRACT_REPAIR_FAILED"
+#: The stage name of the contract repair call (Amendment 3).
+CONTRACT_REPAIR_STAGE: Final = "final_contract_repair"
 NO_ACTION_EVENT: Final = "NO_ACTION"
 MANAGER_ERROR_EVENT: Final = "MANAGER_ERROR"
 #: How many Commons fetches one fulfilment runs at once (M17.12). Each is a ~70-90 s CLI run, so
@@ -181,6 +198,18 @@ _REPAIR_SUFFIX: Final = (
     "\n\n## Your previous answer was refused\n\n"
     "It did not match the required schema:\n\n{errors}\n\n"
     "Return the complete answer again, in the required schema. This is the only retry."
+)
+
+_CONTRACT_REPAIR_SUFFIX: Final = (
+    "\n\n## Some of your decisions were voided by the decision contract\n\n"
+    "Their p_beat_bench disagrees with their own scenarios. The rule: P* is the probability mass "
+    "of the scenarios whose excess is above +2 pp, plus half the mass of those within ±2 pp of "
+    "zero; p_beat_bench must be on the same side of 0.5 as P* (or either at 0.5) and within 0.20 "
+    "of it. The voided decisions and every reason:\n\n{voids}\n\n"
+    "Return the complete answer again, in the required schema. Only your decisions on the names "
+    "above are read from it; every other decision stands as first given. Fix the memo honestly — "
+    "the scenarios, the probability or the action — rather than nudging a number to the band's "
+    "edge. This is the only retry."
 )
 
 DossierProvider = Callable[[Sequence[str]], tuple[Dossier, ...]]
@@ -403,6 +432,9 @@ class _Session:
         self.decision_tool = decision_tool()
         self.calls = 0
         self.repairs = 0
+        #: The final round's prompt as first sent (before any schema repair): the contract repair
+        #: re-asks it (Amendment 3).
+        self.final_prompt: str | None = None
         self.bundles: list[ResearchBundle] = []
         self.dossiers: dict[str, Dossier] = {}
         self.digests: dict[str, FilingDigest] = {}
@@ -678,6 +710,8 @@ class _Session:
     ) -> tuple[T, str]:
         """Ask one round's question; repair once if the session has a retry left."""
         prompt = self._prompt(round_key)
+        if round_key == ROUND_FINAL:
+            self.final_prompt = prompt
         response, ref = self._complete(prompt, tool, stage, repair=False)
         try:
             return parse(self._arguments(response, tool)), ref
@@ -1022,17 +1056,103 @@ class _Session:
             else:
                 refused.append(verdict)
                 self._journal_refusal(verdict, evidence_ref)
+        repairable = [v for v in refused if ReasonCode.P_DISAGREES in v.codes]
+        if repairable:
+            repaired = self._contract_repair(repairable)
+            if repaired is not None:
+                retry, retry_ref = repaired
+                wanted = {v.decision.isin for v in repairable}
+                for decision in retry.decisions:
+                    if decision.isin not in wanted:
+                        continue
+                    verdict = validate_decision(decision, ctx)
+                    if verdict.accepted:
+                        accepted.append(verdict)
+                        self._journal_decision(
+                            verdict, ctx.facts.get(decision.isin), retry_ref, repaired=True
+                        )
+                    else:
+                        refused.append(verdict)
+                        self._journal_refusal(verdict, retry_ref, repaired=True)
         _LOG.info(
             "fm.decided",
             book=self.mandate.id,
             session=self.session.isoformat(),
             accepted=len(accepted),
             refused=len(refused),
+            contract_repaired=bool(repairable),
         )
         return self._result(SessionStatus.DECIDED, accepted=accepted, refused=refused)
 
+    def _contract_repair(
+        self, voided: Sequence[ContractVerdict]
+    ) -> tuple[ManagerDecisions, str] | None:
+        """Amendment 3: re-ask the final round once for decisions voided for ``P_DISAGREES``.
+
+        What it does: one repair call (an ``FM_CALL`` with ``repair = true``, its tokens counted)
+        with the voids and all their reasons appended to the final prompt; returns the parsed
+        answer and the call's evidence ref.
+        What it never does: end the session. A failed call, a malformed or a ``NO_ACTION`` answer
+        journals ``FM_CONTRACT_REPAIR_FAILED`` and returns None, so the first-pass voids stand.
+        """
+        assert self.final_prompt is not None
+        voids = "\n".join(
+            f"- {v.decision.action.value} {v.decision.isin}: " + "; ".join(v.reasons)
+            for v in voided
+        )
+        # The reasons can quote the model's own words; masked by the same rule as the prompt, so
+        # what is sent and what the bundle records stay one text.
+        prompt = _journal_text(self.final_prompt + _CONTRACT_REPAIR_SUFFIX.format(voids=voids))
+        try:
+            response, ref = self._complete(
+                prompt, self.decision_tool, CONTRACT_REPAIR_STAGE, repair=True
+            )
+        except _ManagerError as exc:
+            self._contract_repair_failed(str(exc), evidence=exc.evidence)
+            return None
+        try:
+            answer = parse_decisions(
+                self._arguments(response, self.decision_tool),
+                holdings=self.book.isins,
+                researched=self.researched,
+            )
+        except MalformedOutputError as exc:
+            self._contract_repair_failed(str(exc), evidence_ref=ref)
+            return None
+        if answer.no_action:
+            self._contract_repair_failed("it answered NO_ACTION", evidence_ref=ref)
+            return None
+        return answer, ref
+
+    def _contract_repair_failed(
+        self,
+        error: str,
+        *,
+        evidence: EvidenceBundle | None = None,
+        evidence_ref: str | None = None,
+    ) -> None:
+        self._write(
+            decision=Decision.HEARTBEAT,
+            rationale=f"the contract repair failed; the first-pass voids stand: {error}",
+            evidence=evidence,
+            evidence_ref=evidence_ref,
+            model=self.mandate.models.decision,
+            payload={"event": CONTRACT_REPAIR_FAILED_EVENT, "stage": CONTRACT_REPAIR_STAGE},
+        )
+        _LOG.warning(
+            "fm.contract_repair_failed",
+            book=self.mandate.id,
+            session=self.session.isoformat(),
+            error=_log_text(error),
+        )
+
     def _journal_decision(
-        self, verdict: ContractVerdict, facts: NameFacts | None, evidence_ref: str
+        self,
+        verdict: ContractVerdict,
+        facts: NameFacts | None,
+        evidence_ref: str,
+        *,
+        repaired: bool = False,
     ) -> None:
         d = verdict.decision
         kind = {
@@ -1046,10 +1166,16 @@ class _Session:
             rationale=d.rationale,
             evidence_ref=evidence_ref,
             model=self.mandate.models.decision,
-            payload={**self._decision_payload(verdict, facts), "event": DECISION_EVENT},
+            payload={
+                **self._decision_payload(verdict, facts),
+                "event": DECISION_EVENT,
+                **({"contract_repair": "true"} if repaired else {}),
+            },
         )
 
-    def _journal_refusal(self, verdict: ContractVerdict, evidence_ref: str) -> None:
+    def _journal_refusal(
+        self, verdict: ContractVerdict, evidence_ref: str, *, repaired: bool = False
+    ) -> None:
         d = verdict.decision
         self._write(
             decision=Decision.HOLD,
@@ -1065,6 +1191,7 @@ class _Session:
                 "reason_codes": ",".join(dict.fromkeys(c.value for c in verdict.codes)),
                 "record": _canonical(d.model_dump(mode="json")),
                 "schema": SCHEMA_VERSION,
+                **({"contract_repair": "true"} if repaired else {}),
             },
         )
         _LOG.info(
