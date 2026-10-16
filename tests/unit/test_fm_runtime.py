@@ -62,6 +62,7 @@ from analyst.fundmanager.contract import (
     p_consistent,
 )
 from analyst.fundmanager.render import (
+    PROMPT_PATH,
     ROUND_FINAL,
     ROUND_RESEARCH,
     ROUND_ZERO,
@@ -1717,3 +1718,13 @@ def test_a_refused_credential_bearing_url_is_masked_in_the_journal_payload(
     assert "api_key=***" in fulfilled.payload["unfulfilled"]
     assert secret not in _journaled_text(journal)
     assert not any(secret in p for p in llm.prompts[1:])
+
+
+def test_the_prompt_states_the_contracts_probability_rule_with_its_numbers() -> None:
+    """Amendment 3: the model is told the exact rule; fails if prompt and contract drift apart."""
+    text = " ".join(PROMPT_PATH.read_text(encoding="utf-8").split())
+    band = f"{P_DEAD_BAND_PP:f}"
+    assert f"whose excess is above +{band} pp, plus half the mass" in text
+    assert f"within ±{band} pp of zero" in text
+    assert f"same side of 0.5 as `P*` (either may be exactly 0.5) and within {P_TOLERANCE}" in text
+    assert "An exit is never voided for its scenarios' arithmetic" in text
