@@ -52,7 +52,7 @@ from dataplatform.quality.sentinel import QualityFinding
 from dataplatform.status.sync_state import SyncState
 from dataplatform.store import fo_aggregates
 from dataplatform.store.l0 import L0Store
-from dataplatform.store.paths import l1_partition_path
+from dataplatform.store.paths import l1_partition_path, l2_partition_path
 from tests.conftest import SettingsLoader
 from tests.unit.test_daily_snapshot import RecordingTracker, SpyAlerter
 
@@ -368,6 +368,82 @@ def test_the_current_fo_session_lands_in_l1_once(settings: Settings, tmp_path: P
         owed=date(2026, 8, 7),
     )
     assert again.status is CaptureStatus.ALREADY_PUBLISHED and h.urls() == []
+
+
+def _fo_l2(root: Path, day: date) -> Path:
+    return l2_partition_path(fo_aggregates.FO_AGGREGATES_DATASET, day, data_root=root)
+
+
+def test_the_fo_capture_derives_l2_beside_l1(settings: Settings, tmp_path: Path) -> None:
+    """M17.15: the nightly path wrote L1 only and nothing rebuilt L2 (stale from 2026-10-05).
+
+    Fails if the capture stops deriving L2: the dossier's F&O block reads L2 alone.
+    """
+    evening = _ist(2026, 8, 7, 20, 0)
+    h = _harness(settings, tmp_path, evening)
+    day = date(2026, 8, 7)
+    outcome = dc.capture_fo_bhavcopy(
+        h.at(evening, {FO_URL: RecordedResponse(body=FO)}), _fetcher(h), owed=day
+    )
+    assert outcome.status is CaptureStatus.CAPTURED
+    aggregates = fo_aggregates.read_l2(day, data_root=tmp_path)
+    assert aggregates and all(a.trade_date == day for a in aggregates)
+    # The same bytes the L1-only rebuild derives, so the two paths never disagree.
+    first = _fo_l2(tmp_path, day).read_bytes()
+    fo_aggregates.rebuild_l2_from_l1(day, master=h.master, data_root=tmp_path)
+    assert _fo_l2(tmp_path, day).read_bytes() == first
+
+
+def test_the_nightly_run_heals_an_l2_gap_from_l1_with_no_request(
+    settings: Settings, tmp_path: Path
+) -> None:
+    evening = _ist(2026, 8, 7, 20, 0)
+    h = _harness(settings, tmp_path, evening)
+    day = date(2026, 8, 7)
+    dc.capture_fo_bhavcopy(
+        h.at(evening, {FO_URL: RecordedResponse(body=FO)}), _fetcher(h), owed=day
+    )
+    _fo_l2(tmp_path, day).unlink()  # the 2026-10-06..15 state: L1 landed, L2 never derived
+    later = _ist(2026, 8, 10, 20, 0)
+    ctx = h.at(later, {})
+    healed = dc.heal_fo_aggregates(ctx, date(2026, 8, 10))
+    assert [(o.source, o.logical_date, o.status) for o in healed] == [
+        (fo_aggregates.FO_AGGREGATES_DATASET, day, CaptureStatus.CAPTURED)
+    ]
+    assert fo_aggregates.read_l2(day, data_root=tmp_path) and h.urls() == []
+    assert dc.heal_fo_aggregates(ctx, date(2026, 8, 10)) == []  # nothing left to heal
+
+
+def test_nse_daily_capture_runs_the_heal_even_when_every_host_is_busy(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """The scheduled job is what closes the gap; fails if the heal is dropped from it."""
+    evening = _ist(2026, 8, 7, 20, 0)
+    h = _harness(settings, tmp_path, evening)
+    day = date(2026, 8, 7)
+    dc.capture_fo_bhavcopy(
+        h.at(evening, {FO_URL: RecordedResponse(body=FO)}), _fetcher(h), owed=day
+    )
+    _fo_l2(tmp_path, day).unlink()
+    h.busy = {"nsearchives.nseindia.com", "www.nseindia.com"}
+    report = dc.run_nse_daily_capture(h.at(_ist(2026, 8, 10, 20, 0), {}))
+    derived = [o for o in report.outcomes if o.source == fo_aggregates.FO_AGGREGATES_DATASET]
+    assert [(o.logical_date, o.status) for o in derived] == [(day, CaptureStatus.CAPTURED)]
+    assert _fo_l2(tmp_path, day).exists()
+
+
+def test_a_ranged_rederive_rebuilds_every_session_with_l1(
+    settings: Settings, tmp_path: Path
+) -> None:
+    evening = _ist(2026, 8, 7, 20, 0)
+    h = _harness(settings, tmp_path, evening)
+    day = date(2026, 8, 7)
+    ctx = h.at(evening, {FO_URL: RecordedResponse(body=FO)})
+    dc.capture_fo_bhavcopy(ctx, _fetcher(h), owed=day)
+    sessions = ctx.calendar.expected_sessions(date(2026, 8, 3), date(2026, 8, 11))
+    outcomes = dc.rederive_fo_aggregates(ctx, sessions, only_missing=False)
+    # Only the session with an L1 partition is touched; the others have nothing to derive from.
+    assert [(o.logical_date, o.status) for o in outcomes] == [(day, CaptureStatus.CAPTURED)]
 
 
 def test_an_unpublished_fo_file_is_a_retryable_failure(settings: Settings, tmp_path: Path) -> None:
