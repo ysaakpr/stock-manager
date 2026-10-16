@@ -3390,12 +3390,36 @@ tasks:
     - "make check is green"
   verify: "uv run pytest tests/unit/test_fm_styles.py tests/unit/test_fm_mandate.py tests/unit/test_fm_scoreboard.py tests/unit/test_fm_job.py -q"
 
+- id: M17.15
+  title: Pre-registration Amendment 3 — contract probability rule, exits, F&O L2, sector buckets
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.14]
+  spec: |
+    Pre-registration §8 Amendment 3 (owner approved 2026-10-16), from the dry run of 2026-10-12..15:
+    - contract: P* counts a scenario within ±2 pp of zero excess as a coin flip; p_beat_bench must be
+      on P*'s side of 0.5 and within 0.20 of it; the rule is stated verbatim in manager.md; one
+      contract repair re-asks the final round for decisions voided for P_DISAGREES.
+    - exits: a SELL or TRIM is never voided by its scenarios' arithmetic.
+    - F&O: nse_daily_capture derives L2 fo_aggregates beside L1 and heals recent gaps; an offline
+      ranged rederive exists.
+    - sector rail: an unclassified ISIN is its own bucket; no map at all pools (fail closed).
+    The prompt and contract change every mandate_hash, so M17.8 needs >= 3 dry sessions on them.
+  deliverables: [analyst/fundmanager/contract.py, analyst/fundmanager/runtime.py, analyst/fundmanager/prompts/manager.md, backtest/fm_world.py, dataplatform/ingest/daily_capture.py, ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md]
+  acceptance:
+    - "inverting the dead band, the sign rule or the exit exemption fails a test"
+    - "no generated order stream breaches the sector cap with unclassified names; pooling them again fails a test"
+    - "dropping the L2 derivation or the heal from nse_daily_capture fails a test"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_fm_runtime.py tests/unit/test_fm_rails_property.py tests/unit/test_daily_capture.py -q"
+
 - id: M17.8
   title: Five-session dry run, then the forward clock (S0)
   milestone: M17
   module: A10
   autonomy: NEEDS_GO
-  deps: [M17.7, M17.10, M17.11, M17.12, M17.13, M17.14]
+  deps: [M17.7, M17.10, M17.11, M17.12, M17.13, M17.14, M17.15]
   spec: |
     Run 5 consecutive live sessions in `--dry-run` on the real lake with the Claude CLI. Write
     `ops/gates/M17-dry-run-<date>.md` covering, per manager:
