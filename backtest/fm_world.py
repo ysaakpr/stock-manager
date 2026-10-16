@@ -118,6 +118,8 @@ __all__ = [
     "READINESS_INDEX_SERIES",
     "READINESS_SAMPLE",
     "SUSPENSION_COVERAGE_FLOOR",
+    "UNCLASSIFIED_PREFIX",
+    "UNKNOWN_SECTOR",
     "LakeCommonsBuilder",
     "LakeDelistedNames",
     "LakeM17World",
@@ -129,6 +131,7 @@ __all__ = [
     "overlay_readiness",
     "printed_normally",
     "production_run",
+    "sector_bucket",
 ]
 
 _LOG = get_logger(__name__)
@@ -146,8 +149,12 @@ READINESS_SAMPLE: Final = 10
 #: market that did not print is red data (the interlock), never a list of suspensions.
 SUSPENSION_COVERAGE_FLOOR: Final = Decimal("0.90")
 COVERAGE_LOOKBACK_SESSIONS: Final = 5
-#: An unknown sector groups under this for the sector cap (conservative: one shared bucket).
+#: With no sector classification readable at all, every name groups under this one bucket for
+#: the sector cap — fail closed, so a missing source can never switch the cap off.
 UNKNOWN_SECTOR: Final = "UNKNOWN"
+#: Amendment 3 (2026-10-16): a name a loaded classification does not name is its own sector-cap
+#: bucket, ``UNCLASSIFIED:<isin>``. The prefix is reserved; no real label may start with it.
+UNCLASSIFIED_PREFIX: Final = "UNCLASSIFIED:"
 #: How far back the fill market's calendar starts before the session (headroom for restored
 #: orders); it always runs to the end of the holiday calendar.
 _FILL_CALENDAR_BACK: Final = timedelta(days=45)
@@ -294,6 +301,35 @@ def store_listings(settings: Settings) -> ListingCalendar:
         return store_listing_calendar(IdentityStore(conn))
 
 
+# ── the sector-cap bucket ──────────────────────────────────────────────────────────────────────
+
+
+def sector_bucket(isin: str, classification: Mapping[str, str]) -> str:
+    """The bucket the sector cap groups ``isin`` under (pre-registration §8 Amendment 3).
+
+    What it does: a classified name's own sector label; a name the (non-empty) classification does
+    not name gets ``UNCLASSIFIED:<isin>``, a bucket of one — so unclassified names are never pooled
+    into one pseudo-sector that the 30 % cap then binds on (the dry run's STYLE-FM-SWING-BRK book
+    was left 41 % cash by exactly that). An unclassified name is still bounded by the position cap
+    (10 % < 30 %) and the name count.
+    What it assumes: ``classification`` is the whole session's map; an empty one means no map
+    could be read, and then every name pools under `UNKNOWN_SECTOR` (fail closed).
+    What it never does: move a classified name out of its sector — a label that is `UNKNOWN_SECTOR`
+    or starts with the reserved prefix raises `M17JobError` rather than be mistaken for a bucket.
+    """
+    if not classification:
+        return UNKNOWN_SECTOR
+    label = classification.get(isin)
+    if label is None:
+        return f"{UNCLASSIFIED_PREFIX}{isin}"
+    if label == UNKNOWN_SECTOR or label.startswith(UNCLASSIFIED_PREFIX):
+        raise M17JobError(
+            f"sector classification labels {isin} {label!r}, a name reserved for the sector cap's "
+            "unclassified buckets"
+        )
+    return label
+
+
 # ── the market a book reads ──────────────────────────────────────────────────────────────────────
 
 
@@ -322,7 +358,7 @@ class _LakeBookMarket:
         return None if restricted is None else restricted[0]
 
     def sector(self, isin: str) -> str:
-        return self._sectors().get(isin) or UNKNOWN_SECTOR
+        return sector_bucket(isin, self._sectors())
 
     def traded_values(
         self, isin: str, *, through: date, sessions: int

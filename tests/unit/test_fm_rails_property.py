@@ -56,6 +56,8 @@ from analyst.fundmanager import load_roster
 from analyst.fundmanager.books import BookOrder, DecisionReport, FundBook, median_traded_value
 from analyst.journal.models import Decision, JournalEntry
 from analyst.rails import BookRails, RailId
+from backtest.fm_job import M17JobError
+from backtest.fm_world import UNCLASSIFIED_PREFIX, UNKNOWN_SECTOR, sector_bucket
 from dataplatform.clock import FrozenClock
 from execution.broker import Side
 from tests.fm_books_support import Bar, FmMarket, ListJournal, open_book, switch_at, weekdays
@@ -680,3 +682,94 @@ def test_a_slice_one_share_over_participation_makes_the_property_fail(
     monkeypatch.setattr(rails_engine, "participation_child_quantity", oversized)
     with pytest.raises(AssertionError):
         run_stream(thin_exit_stream(), tmp_path)
+
+
+# ── Amendment 3: an unclassified name is a sector bucket of one, never pooled ───────────────────
+
+
+@st.composite
+def partly_classified_streams(draw: st.DrawFn) -> tuple[Stream, dict[str, str]]:
+    """A generated stream whose market groups names the production way (`sector_bucket`), with a
+    random subset of names missing from the classification."""
+    stream = draw(streams())
+    names = sorted(stream.market.sectors)
+    missing = draw(st.sets(st.sampled_from(names)))
+    classification = {n: s for n, s in stream.market.sectors.items() if n not in missing}
+    buckets = {n: sector_bucket(n, classification) for n in names}
+    market = FmMarket(SESSIONS, stream.market.bars, buckets)
+    return Stream(stream.book_id, market, stream.decisions), classification
+
+
+@settings(
+    max_examples=60,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow, HealthCheck.function_scoped_fixture],
+)
+@given(case=partly_classified_streams())
+def test_no_stream_breaches_a_cap_when_some_names_are_unclassified(
+    case: tuple[Stream, dict[str, str]], tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    stream, classification = case
+    # The oracle holds every bucket — each classified sector among them — within the 30 % cap.
+    run_stream(stream, tmp_path_factory.mktemp("unclassified"))
+    # And the bucketing cannot be used to escape a cap: a classified name is in its own sector.
+    for name in stream.market.sectors:
+        bucket = stream.market.sector(name)
+        if name in classification:
+            assert bucket == classification[name]
+        elif classification:
+            assert bucket == f"{UNCLASSIFIED_PREFIX}{name}"
+        else:
+            assert bucket == UNKNOWN_SECTOR  # no map at all: pooled, fail closed
+
+
+def _four_heavy_names(sectors: Callable[[list[str]], dict[str, str]]) -> Stream:
+    """D0: four names at 9.5 % each (38 % together) on a ₹10 lakh book, grouped by ``sectors``."""
+    ids = [isin(300 + n) for n in range(5)]
+    bars = {
+        (name, session): Bar(Decimal(100), Decimal(100), _LIQUID, "EQ")
+        for name in ids
+        for session in SESSIONS
+    }
+    d0 = tuple((name, Side.BUY, 950) for name in ids[:4])
+    return Stream("FM-SWING-BRK-10L", FmMarket(SESSIONS, bars, sectors(ids)), (d0, ()))
+
+
+def test_unclassified_names_are_not_pooled_into_one_capped_sector(tmp_path: Path) -> None:
+    """The dry run's STYLE-FM-SWING-BRK case. Fails if unclassified names are pooled again."""
+    classified_other = {isin(304): "IT"}  # the map loaded; it just does not name the four
+    unclassified = run_stream(
+        _four_heavy_names(lambda ids: {n: sector_bucket(n, classified_other) for n in ids}),
+        tmp_path / "u",
+    )
+    assert RailId.MAX_SECTOR not in unclassified.refusals and unclassified.fills == 4
+    # The same four names in one real sector: the cap binds, so a label is never escaped.
+    same_sector = dict.fromkeys((isin(300 + k) for k in range(5)), "IT")
+    classified = run_stream(
+        _four_heavy_names(lambda ids: {n: sector_bucket(n, same_sector) for n in ids}),
+        tmp_path / "c",
+    )
+    assert classified.refusals.get(RailId.MAX_SECTOR) == 1 and classified.fills == 3
+    # No classification readable at all: the four pool under UNKNOWN and the cap binds.
+    pooled = run_stream(
+        _four_heavy_names(lambda ids: {n: sector_bucket(n, {}) for n in ids}), tmp_path / "p"
+    )
+    assert pooled.refusals.get(RailId.MAX_SECTOR) == 1
+
+
+@pytest.mark.parametrize("label", [UNKNOWN_SECTOR, f"{UNCLASSIFIED_PREFIX}INE000A01010"])
+def test_a_real_label_may_not_collide_with_a_reserved_bucket(label: str) -> None:
+    with pytest.raises(M17JobError, match="reserved"):
+        sector_bucket(isin(1), {isin(1): label})
+
+
+def test_the_desks_market_groups_by_sector_bucket() -> None:
+    """Production's `BookMarket.sector` is `sector_bucket` over the session's classification."""
+    from backtest.fm_world import _LakeBookMarket
+
+    market = _LakeBookMarket(None, None, lambda: {isin(1): "IT"})  # type: ignore[arg-type]
+    assert market.sector(isin(1)) == "IT"
+    assert market.sector(isin(2)) == f"{UNCLASSIFIED_PREFIX}{isin(2)}"
+    assert market.sector(isin(3)) != market.sector(isin(2))
+    empty = _LakeBookMarket(None, None, dict)  # type: ignore[arg-type]
+    assert empty.sector(isin(2)) == empty.sector(isin(3)) == UNKNOWN_SECTOR
