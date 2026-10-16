@@ -54,7 +54,13 @@ from analyst.commons import (
 from analyst.commons.base_rates import BaseRateTable
 from analyst.fundmanager import ManagerMandate, ModelIds, load_roster
 from analyst.fundmanager.bundle import Holding, InvalidationStatus, ManagerBook
-from analyst.fundmanager.contract import P_TOLERANCE, ReasonCode, implied_p_beat
+from analyst.fundmanager.contract import (
+    P_DEAD_BAND_PP,
+    P_TOLERANCE,
+    ReasonCode,
+    implied_p_beat,
+    p_consistent,
+)
 from analyst.fundmanager.render import (
     ROUND_FINAL,
     ROUND_RESEARCH,
@@ -65,6 +71,8 @@ from analyst.fundmanager.render import (
 )
 from analyst.fundmanager.runtime import (
     CALL_EVENT,
+    CONTRACT_REPAIR_FAILED_EVENT,
+    CONTRACT_REPAIR_STAGE,
     FETCH_CONCURRENCY,
     MANAGER_ERROR_EVENT,
     NO_ACTION_EVENT,
@@ -951,61 +959,251 @@ def test_scenarios_not_summing_to_one_are_refused(
     assert "sum to 1.10, not 1" in _reasons(result)
 
 
-def test_p_beat_bench_must_agree_with_the_scenarios_within_the_stated_band(
-    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
-) -> None:
-    implied = implied_p_beat(
-        [
-            Scenario(
-                name=ScenarioName.BULL,
-                probability=Decimal("0.3"),
-                excess_pct=Decimal(10),
-                description="a",
-            ),
-            Scenario(
-                name=ScenarioName.BASE,
-                probability=Decimal("0.45"),
-                excess_pct=Decimal(2),
-                description="b",
-            ),
-            Scenario(
-                name=ScenarioName.BEAR,
-                probability=Decimal("0.25"),
-                excess_pct=Decimal(-6),
-                description="c",
-            ),
-        ]
-    )
-    assert implied == Decimal("0.75")
-    edge = float(implied - P_TOLERANCE)  # 0.60: on the band's edge, consistent
-    result, _ = _one_buy_session(world, tmp_path, buy(atr_pct[LEADER], p_beat_bench=edge))
-    assert LEADER in {v.decision.isin for v in result.accepted}
-    result, _ = _one_buy_session(world, tmp_path / "b", buy(atr_pct[LEADER], p_beat_bench=0.59))
-    assert "disagrees with the scenarios' implied P(excess > 0) of 0.75" in _reasons(result)
-
-
-def test_a_zero_excess_scenario_counts_as_a_coin_flip() -> None:
-    flat = [
+def _scen(bull: str, base: str, bear: str, *, base_x: str = "1") -> list[Scenario]:
+    return [
         Scenario(
             name=ScenarioName.BULL,
-            probability=Decimal("0.2"),
-            excess_pct=Decimal(5),
+            probability=Decimal(bull),
+            excess_pct=Decimal(10),
             description="a",
         ),
         Scenario(
             name=ScenarioName.BASE,
-            probability=Decimal("0.6"),
-            excess_pct=Decimal(0),
+            probability=Decimal(base),
+            excess_pct=Decimal(base_x),
             description="b",
         ),
         Scenario(
             name=ScenarioName.BEAR,
-            probability=Decimal("0.2"),
-            excess_pct=Decimal(-5),
+            probability=Decimal(bear),
+            excess_pct=Decimal(-8),
             description="c",
         ),
     ]
-    assert implied_p_beat(flat) == Decimal("0.5")
+
+
+def test_a_base_case_within_two_pp_of_zero_is_a_coin_flip_not_a_win() -> None:
+    """Amendment 3. Fails if the dead band is removed: v1 counted the +1 % base as a win (0.70)."""
+    pinned = (P_DEAD_BAND_PP, P_TOLERANCE)
+    assert pinned == (Decimal(2), Decimal("0.20"))
+    assert implied_p_beat(_scen("0.3", "0.4", "0.3", base_x="1")) == Decimal("0.50")
+    assert implied_p_beat(_scen("0.3", "0.4", "0.3", base_x="-1")) == Decimal("0.50")
+    assert implied_p_beat(_scen("0.3", "0.4", "0.3", base_x="2")) == Decimal("0.50")
+    # Outside the band the base case counts whole, either way.
+    assert implied_p_beat(_scen("0.3", "0.4", "0.3", base_x="2.5")) == Decimal("0.70")
+    assert implied_p_beat(_scen("0.3", "0.4", "0.3", base_x="-2.5")) == Decimal("0.30")
+
+
+def test_a_zero_excess_scenario_counts_as_a_coin_flip() -> None:
+    assert implied_p_beat(_scen("0.2", "0.6", "0.2", base_x="0")) == Decimal("0.5")
+
+
+def test_p_must_be_on_the_scenarios_side_of_one_half_and_within_the_band() -> None:
+    """Amendment 3's rule; each assertion fails if its half of the rule is inverted or dropped."""
+    # The dry run's template memo: P* = 0.50, and an honest 0.53 now agrees with it.
+    assert p_consistent(Decimal("0.53"), Decimal("0.50"))
+    assert p_consistent(Decimal("0.30"), Decimal("0.50"))  # at P* = 1/2 either side is fine
+    # Sign: within 0.20 but on the other side of 1/2.
+    assert not p_consistent(Decimal("0.48"), Decimal("0.60"))
+    assert not p_consistent(Decimal("0.55"), Decimal("0.40"))
+    assert p_consistent(Decimal("0.52"), Decimal("0.60"))
+    assert p_consistent(Decimal("0.50"), Decimal("0.60"))
+    # Band: same side, but more than 0.20 away.
+    assert not p_consistent(Decimal("0.90"), Decimal("0.60"))
+    assert p_consistent(Decimal("0.80"), Decimal("0.60"))
+
+
+def test_p_beat_bench_must_agree_with_the_scenarios_under_the_amended_rule(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    # scenarios(): BASE +2 is inside the dead band, so P* = 0.3 + 0.45/2 = 0.525.
+    assert implied_p_beat(_scen("0.3", "0.45", "0.25", base_x="2")) == Decimal("0.525")
+    result, _ = _one_buy_session(world, tmp_path, buy(atr_pct[LEADER], p_beat_bench=0.53))
+    assert LEADER in {v.decision.isin for v in result.accepted}, result.refused
+    result, _, _ = _run(
+        world,
+        tmp_path / "b",
+        [
+            research([LEADER]),
+            research(),
+            final(hold(), buy(atr_pct[LEADER], p_beat_bench=0.49)),
+            final(hold(), buy(atr_pct[LEADER], p_beat_bench=0.49)),  # the repair, unchanged
+        ],
+    )
+    assert "implied P* = 0.525" in _reasons(result)
+    assert "same side of 0.5" in _reasons(result)
+
+
+def _sell(**over: Any) -> dict[str, Any]:
+    return hold(
+        action="SELL",
+        what_changed={"kind": "INVALIDATION", "text": "close below the 50-session mean"},
+        **over,
+    )
+
+
+def test_an_exit_is_never_voided_by_its_memo_arithmetic(world: World, tmp_path: Path) -> None:
+    """Amendment 3 (EVT's 2026-10-15 Swaraj sell). Fails if exits are checked like buys."""
+    # P* = 0.3 + 0.45 = 0.75 (BASE +3 is outside the dead band) against p = 0.30, and the
+    # probabilities sum to 1.05: both would void a BUY, neither voids the exit.
+    memo = [
+        {"name": "BULL", "probability": 0.3, "excess_pct": 5, "description": "a"},
+        {"name": "BASE", "probability": 0.45, "excess_pct": 3, "description": "b"},
+        {"name": "BEAR", "probability": 0.3, "excess_pct": -5, "description": "c"},
+    ]
+    result, _, llm = _run(
+        world, tmp_path, [research(), final(_sell(p_beat_bench=0.3, scenarios=memo))]
+    )
+    assert [v.decision.action for v in result.accepted] == [Action.SELL], result.refused
+    assert not result.refused and llm.calls == 2  # no contract repair either
+    trim = _sell(p_beat_bench=0.3, scenarios=memo)
+    trim.update(action="TRIM", target_weight=1)
+    result, _, _ = _run(world, tmp_path / "t", [research(), final(trim)])
+    assert [v.decision.action for v in result.accepted] == [Action.TRIM], result.refused
+
+
+def test_an_exits_other_checks_still_stand(world: World, tmp_path: Path) -> None:
+    """Only the arithmetic is waived: an exit citing something it was never shown is voided."""
+    bad = _sell(rationale=f"Broke down [F:{HELD}.made_up_field].")
+    result, _, _ = _run(world, tmp_path, [research(), final(bad)])
+    assert not result.accepted
+    assert ReasonCode.UNKNOWN_CITATION in result.refused[0].codes
+
+
+# ── Amendment 3: one contract repair for P_DISAGREES ──────────────────────────────────────────────
+
+
+def test_a_p_disagreement_gets_one_contract_repair_and_the_repaired_buy_is_staged(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    disagreeing = buy(atr_pct[LEADER], p_beat_bench=0.45)  # P* = 0.525: the wrong side of 1/2
+    fixed = buy(atr_pct[LEADER], p_beat_bench=0.55)
+    result, journal, llm = _run(
+        world,
+        tmp_path,
+        [research([LEADER]), research(), final(hold(), disagreeing), final(hold(), fixed)],
+    )
+    assert result.status is SessionStatus.DECIDED
+    assert result.calls == 3 and result.repairs == 1 and llm.calls == 4
+    assert "voided by the decision contract" in llm.prompts[-1]
+    assert f"BUY {LEADER}:" in llm.prompts[-1] and "within 0.20" in llm.prompts[-1]
+    # The first-pass void is journaled, then the repaired decision, citing the repair call.
+    (void,) = journal.events(REFUSED_EVENT)
+    assert void.isin == LEADER and "contract_repair" not in void.payload
+    repair_call = journal.events(CALL_EVENT)[-1]
+    assert repair_call.payload["repair"] == "true"
+    assert repair_call.payload["stage"] == CONTRACT_REPAIR_STAGE
+    assert int(repair_call.payload["input_tokens"]) > 0  # its tokens are counted
+    repaired = [e for e in journal.events(DECISION_EVENT) if e.isin == LEADER]
+    assert len(repaired) == 1 and repaired[0].payload["contract_repair"] == "true"
+    assert repaired[0].evidence_snapshot_ref == repair_call.evidence_snapshot_ref
+    assert LEADER in {v.decision.isin for v in result.accepted}
+    _assert_every_ref_resolves(journal)
+
+
+def test_the_contract_repair_reads_only_the_voided_names(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    disagreeing = buy(atr_pct[LEADER], p_beat_bench=0.45)
+    sneaky = _sell()  # the repair also tries to change the accepted HOLD: ignored
+    result, journal, _ = _run(
+        world,
+        tmp_path,
+        [
+            research([LEADER]),
+            research(),
+            final(hold(), disagreeing),
+            final(sneaky, buy(atr_pct[LEADER], p_beat_bench=0.56)),
+        ],
+    )
+    held = [v.decision for v in result.accepted if v.decision.isin == HELD]
+    assert [d.action for d in held] == [Action.HOLD]
+    assert not [e for e in journal.events(DECISION_EVENT) if e.payload.get("action") == "SELL"]
+
+
+def test_a_repair_that_still_disagrees_is_voided_again_and_journaled(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    disagreeing = buy(atr_pct[LEADER], p_beat_bench=0.45)
+    result, journal, llm = _run(
+        world,
+        tmp_path,
+        [research([LEADER]), research(), final(hold(), disagreeing), final(hold(), disagreeing)],
+    )
+    assert llm.calls == 4 and LEADER not in {v.decision.isin for v in result.accepted}
+    voids = journal.events(REFUSED_EVENT)
+    assert [v.payload.get("contract_repair") for v in voids] == [None, "true"]
+
+
+def test_a_malformed_contract_repair_leaves_the_voids_and_never_ends_the_session(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    disagreeing = buy(atr_pct[LEADER], p_beat_bench=0.45)
+    result, journal, _ = _run(
+        world,
+        tmp_path,
+        [research([LEADER]), research(), final(hold(), disagreeing), {"decisions": "nope"}],
+    )
+    assert result.status is SessionStatus.DECIDED
+    assert {v.decision.isin for v in result.accepted} == {HELD}
+    (failed,) = journal.events(CONTRACT_REPAIR_FAILED_EVENT)
+    assert failed.payload["stage"] == CONTRACT_REPAIR_STAGE
+    assert not journal.events(MANAGER_ERROR_EVENT)
+
+
+def test_a_failed_contract_repair_call_is_journaled_not_a_manager_error(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    secret = _fake_secret("contract-repair-call")
+    disagreeing = buy(atr_pct[LEADER], p_beat_bench=0.45)
+    result, journal, _ = _run(
+        world,
+        tmp_path,
+        [
+            research([LEADER]),
+            research(),
+            final(hold(), disagreeing),
+            LLMError(f"cli exited 1 password={secret}"),
+        ],
+    )
+    assert result.status is SessionStatus.DECIDED
+    assert journal.events(CONTRACT_REPAIR_FAILED_EVENT)
+    assert secret not in _journaled_text(journal)
+
+
+def test_a_void_for_any_other_reason_gets_no_contract_repair(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    bad = buy(atr_pct[LEADER], rationale=f"Strong [F:{LEADER}.made_up_field].")
+    result, _, llm = _run(world, tmp_path, [research([LEADER]), research(), final(hold(), bad)])
+    assert llm.calls == 3 and result.repairs == 0
+
+
+def test_the_contract_repair_prompt_is_masked_and_recorded_as_sent(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    """A voided decision's reasons can quote the model (an uncited adjustment's reason)."""
+    secret = _fake_secret("contract-repair-reason")
+    disagreeing = buy(
+        atr_pct[LEADER],
+        p_beat_bench=0.45,
+        adjustments=[
+            {"reason": f"token={secret}", "direction": "UP", "size_pp": 1, "citation": "none"}
+        ],
+    )
+    result, journal, llm = _run(
+        world,
+        tmp_path,
+        [research([LEADER]), research(), final(hold(), disagreeing), final(hold(), passed(LEADER))],
+    )
+    assert result.repairs == 1 and not any(secret in p for p in llm.prompts)
+    repair_call = journal.events(CALL_EVENT)[-1]
+    assert (
+        journal.evidence[repair_call.evidence_snapshot_ref or ""].rendered_prompt
+        == (llm.prompts[-1])
+    )
+    assert secret not in _journaled_text(journal)
+    _assert_every_ref_resolves(journal)
 
 
 def test_an_edge_type_none_buy_is_refused(

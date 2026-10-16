@@ -13,12 +13,20 @@ and the session's other decisions stand. The numbers are fixed here, once:
   the base rate is paid for with a cited reason (prompt, step 6).
 - **Scenarios.** When given, exactly one each of BULL, BASE and BEAR, with probabilities summing
   to 1 within :data:`SCENARIO_SUM_TOLERANCE` (0.01).
-- **p_beat_bench agrees with the scenarios.** The scenario-implied probability of beating the
-  bench is ``P* = Σ p_i·[x_i > 0] + ½·Σ p_i·[x_i = 0]`` over the scenarios' excess returns
-  ``x_i`` — the mass on scenarios that beat, with a scenario exactly at zero counted as a coin
-  flip. ``p_beat_bench`` is consistent iff ``|p_beat_bench - P*| ≤`` :data:`P_TOLERANCE` (0.15).
+- **p_beat_bench agrees with the scenarios** (Amendment 3, 2026-10-16). The scenario-implied
+  probability of beating the bench is ``P* = Σ p_i·[x_i > d] + ½·Σ p_i·[|x_i| ≤ d]`` over the
+  scenarios' excess returns ``x_i``, with the dead band ``d =`` :data:`P_DEAD_BAND_PP` (2 pp): a
+  scenario whose excess is within 2 pp of zero is a coin flip, not a win or a loss — at a base-rate
+  IQR of 20-25 pp a +1 % base case is a 50/50 outcome, and counting its whole mass as a win (the
+  v1 rule, ``d = 0``) made a memo with p = 0.53 "disagree" with its own +1 % base case.
+  ``p_beat_bench`` is consistent iff both hold:
+
+  1. **sign** — it is not on the other side of ½ from P*: ``(p - ½)·(P* - ½) ≥ 0``;
+  2. **band** — ``|p - P*| ≤`` :data:`P_TOLERANCE` (0.20).
+
   Three points are a coarse distribution, hence the band; a p on the other side of the scenarios'
-  own verdict is not inside it.
+  own verdict is never consistent. **Exits are exempt**: a SELL or TRIM is never voided by its
+  scenarios' arithmetic (shape, sum or this check) — an exit fails safe; its other checks stand.
 - **edge_type NONE never buys** (forces PASS/WATCH/HOLD; a SELL or TRIM of a name with no edge left
   is the consequence, not a breach).
 - **The cost hurdle.** A BUY's round trip is the shared cost model plus SimBroker slippage on that
@@ -74,6 +82,7 @@ from execution.costs import CostModel
 
 __all__ = [
     "CITATION_PATTERN",
+    "P_DEAD_BAND_PP",
     "P_TOLERANCE",
     "QUOTE_TOLERANCE",
     "SCENARIO_SUM_TOLERANCE",
@@ -87,13 +96,17 @@ __all__ = [
     "ReasonCode",
     "citations_of",
     "implied_p_beat",
+    "p_consistent",
     "scenario_mean",
     "shown_cells",
     "validate_decision",
 ]
 
 SCENARIO_SUM_TOLERANCE: Final = Decimal("0.01")
-P_TOLERANCE: Final = Decimal("0.15")
+#: Amendment 3: v1 was 0.15 with no dead band and no sign rule.
+P_TOLERANCE: Final = Decimal("0.20")
+#: Amendment 3: a scenario excess within this many pp of zero counts as a coin flip in P*.
+P_DEAD_BAND_PP: Final = Decimal("2")
 QUOTE_TOLERANCE: Final = Decimal("0.0005")
 STOP_ATR_MIN: Final = Decimal("1.5")
 STOP_ATR_MAX: Final = Decimal("3")
@@ -109,6 +122,8 @@ _HALF: Final = Decimal("0.5")
 _HUNDRED: Final = Decimal(100)
 _ALL: Final = "ALL"
 _RANKED_SCREENS: Final = frozenset({"S1", "S2", "S3", "S4"})
+#: Amendment 3: the risk-reducing actions, which no memo arithmetic may void.
+_EXITS: Final = frozenset({Action.SELL, Action.TRIM})
 
 
 class ReasonCode(StrEnum):
@@ -209,10 +224,16 @@ def _malformed_refs(decision: ManagerDecision) -> list[str]:
 
 
 def implied_p_beat(scenarios: Sequence[Scenario]) -> Decimal:
-    """``Σ p_i·[x_i > 0] + ½·Σ p_i·[x_i = 0]`` (module docstring)."""
-    beat = sum((s.probability for s in scenarios if s.excess_pct > _ZERO), _ZERO)
-    tied = sum((s.probability for s in scenarios if s.excess_pct == _ZERO), _ZERO)
+    """``Σ p_i·[x_i > d] + ½·Σ p_i·[|x_i| ≤ d]`` with ``d = P_DEAD_BAND_PP`` (module docstring)."""
+    beat = sum((s.probability for s in scenarios if s.excess_pct > P_DEAD_BAND_PP), _ZERO)
+    tied = sum((s.probability for s in scenarios if abs(s.excess_pct) <= P_DEAD_BAND_PP), _ZERO)
     return beat + _HALF * tied
+
+
+def p_consistent(p_beat_bench: Decimal, implied: Decimal) -> bool:
+    """Amendment 3's rule: same side of ½ as ``implied`` (or either at ½) and within the band."""
+    same_side = (p_beat_bench - _HALF) * (implied - _HALF) >= _ZERO
+    return same_side and abs(p_beat_bench - implied) <= P_TOLERANCE
 
 
 def scenario_mean(scenarios: Sequence[Scenario]) -> Decimal:
@@ -222,7 +243,8 @@ def scenario_mean(scenarios: Sequence[Scenario]) -> Decimal:
 
 def _scenario_breaches(decision: ManagerDecision) -> list[_Breach]:
     scenarios = decision.scenarios
-    if not scenarios:
+    if not scenarios or decision.action in _EXITS:
+        # Amendment 3: an exit is never voided by its memo's arithmetic; it fails safe.
         return []
     out: list[_Breach] = []
     names = sorted(s.name.value for s in scenarios)
@@ -243,12 +265,13 @@ def _scenario_breaches(decision: ManagerDecision) -> list[_Breach]:
             )
         )
     implied = implied_p_beat(scenarios)
-    if abs(decision.p_beat_bench - implied) > P_TOLERANCE:
+    if not p_consistent(decision.p_beat_bench, implied):
         out.append(
             _b(
                 ReasonCode.P_DISAGREES,
                 f"p_beat_bench {decision.p_beat_bench} disagrees with the scenarios' implied "
-                f"P(excess > 0) of {implied} by more than {P_TOLERANCE}",
+                f"P* = {implied} (a scenario within ±{P_DEAD_BAND_PP} pp of zero counts ½): it "
+                f"must be on the same side of 0.5 as P* and within {P_TOLERANCE} of it",
             )
         )
     return out
