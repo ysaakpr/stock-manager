@@ -31,13 +31,14 @@ from datetime import date
 from decimal import Decimal
 from typing import Final
 
-from backtest.xirr import Cashflow, XIRRError, xirr
+from backtest.xirr import Cashflow, XIRRError, npv, xirr
 
 __all__ = [
     "Z90",
     "anchor_sessions",
     "chain_growth",
     "growth",
+    "highest_root",
     "horizon_end",
     "independent_windows",
     "longest_under_water",
@@ -305,3 +306,51 @@ def _median(values: Sequence[float]) -> float:
     n = len(ordered)
     mid = n // 2
     return ordered[mid] if n % 2 else (ordered[mid - 1] + ordered[mid]) / 2
+
+
+def highest_root(flows: Sequence[Cashflow]) -> Decimal | None:
+    """The economically meaningful rate of a deposit-then-proceeds stream the solver missed.
+
+    ``backtest.xirr`` documents the case it cannot bracket: a small tax paid *after* the terminal
+    value makes NPV negative near -100 % as well as at high rates, so a stream with a deep
+    short-window loss has two roots and no bracket straddles the real one. Scanning down from a
+    high rate, the first sign change of NPV (negative above, positive below) is the rate the
+    stream would have without the late tax's distortion near -100 %; it is then bisected. ``None``
+    when no sign change exists above -99.99 %. Used only where ``xirr`` raised.
+    """
+    ordered = sorted(flows, key=lambda flow: flow.when)
+
+    def value(rate: float) -> float | None:
+        try:
+            return npv(rate, ordered)
+        except (ArithmeticError, ValueError):
+            return None
+
+    upper = 10.0
+    upper_value = value(upper)
+    if upper_value is None or upper_value >= 0:
+        return None
+    # Step down in (1 + r) by a constant ratio: fine near -100 %, coarse at high rates.
+    growth_step = 0.98
+    rate = upper
+    while rate > -0.9999:
+        lower = (1.0 + rate) * growth_step - 1.0
+        lower_value = value(lower)
+        if lower_value is None:
+            return None
+        if lower_value >= 0:
+            lo, hi = lower, rate
+            for _ in range(200):
+                mid = (lo + hi) / 2
+                mid_value = value(mid)
+                if mid_value is None:
+                    return None
+                if mid_value >= 0:
+                    lo = mid
+                else:
+                    hi = mid
+                if hi - lo < 1e-10:
+                    break
+            return Decimal(repr((lo + hi) / 2)).quantize(Decimal("0.00000001"))
+        rate = lower
+    return None

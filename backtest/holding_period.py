@@ -79,6 +79,7 @@ from backtest.holding_period_stats import (
     anchor_sessions,
     chain_growth,
     growth,
+    highest_root,
     horizon_end,
     independent_windows,
     longest_under_water,
@@ -116,6 +117,7 @@ from backtest.run_ledger import (
 from backtest.signal_panel import SignalPanel, signal_panel_in_force
 from backtest.sweep import D13_PAPER_BASELINE, HIGH_FLOOR, LOW_FLOOR, Arm, run_sweep
 from backtest.tax import (
+    AfterTaxResult,
     GrandfatheringPrices,
     RunLedger,
     TaxError,
@@ -828,12 +830,16 @@ class Market:
                 repo=self.repo,
                 decided=parked,
             )
-            cash_taxed = after_tax(cash, schedule=self.schedule)
+            cash_taxed = after_tax_rate(
+                after_tax(cash, schedule=self.schedule),
+                [Cashflow(cash.start, -cash.opening), Cashflow(cash.end, cash.nav[-1][1])],
+                liquidated=True,
+            )
             self._bench[key] = (
                 _single_deposit_xirr(tri),
                 self._tri_walkaway(tri),
                 _single_deposit_xirr(cash),
-                cash_taxed.after_tax_xirr_liquidated,
+                cash_taxed,
             )
         return self._bench[key]
 
@@ -848,11 +854,15 @@ class Market:
                 Trade(ETF_ISIN, when, Side.SELL, run.terminal_units, price)
             )
             proceeds = charged.net_amount
+        walk_nav = terminal_cash + proceeds
         taxed = after_tax(
-            replace(run, nav=(*run.nav[:-1], (run.end, terminal_cash + proceeds))),
-            schedule=self.schedule,
+            replace(run, nav=(*run.nav[:-1], (run.end, walk_nav))), schedule=self.schedule
         )
-        return taxed.after_tax_xirr_liquidated
+        return after_tax_rate(
+            taxed,
+            [Cashflow(run.start, -run.opening), Cashflow(run.end, walk_nav)],
+            liquidated=True,
+        )
 
     def index_drawdown(self, session: date) -> Decimal:
         """The NIFTY 500 TRI's distance below its running all-time high on ``session``."""
@@ -871,6 +881,24 @@ class Market:
             return None
         last = max(known)
         return self.pe[last] if (session - last).days <= 7 else None
+
+
+def after_tax_rate(
+    taxed: AfterTaxResult, base: Sequence[Cashflow], *, liquidated: bool
+) -> Decimal | None:
+    """The after-tax XIRR of ``taxed`` — the tax layer's own figure, or, where its solver did not
+    converge (a deep short-window loss with a tax paid after the terminal value), the highest root
+    of the very same stream (:func:`~backtest.holding_period_stats.highest_root`). ``None`` when
+    the figure was withheld for any other reason (a missing Sec 55(2)(ac) FMV)."""
+    rate = taxed.after_tax_xirr_liquidated if liquidated else taxed.after_tax_xirr_realised
+    if rate is not None:
+        return rate
+    error = taxed.liquidation_error if liquidated else taxed.realised_xirr_error
+    if error is None or "XIRR" not in error:
+        return None
+    fy = taxed.fy_taxes_liquidated if liquidated else taxed.fy_taxes
+    flows = [*base, *(Cashflow(f.payment_date, -f.total) for f in fy if f.total > _ZERO)]
+    return highest_root(flows)
 
 
 def _single_deposit_xirr(run: SimResult) -> Decimal:
@@ -936,9 +964,21 @@ def outcome(run: RunData, end: date, market: Market) -> Outcome:
             schedule=market.schedule,
             fmv=market.fmv,
         )
-        realised = realised_run.after_tax_xirr_realised
-        walkaway = walk_run.after_tax_xirr_liquidated
-        error = walk_run.liquidation_error or realised_run.realised_xirr_error
+        realised = after_tax_rate(
+            realised_run,
+            [*trunc.external_flows, Cashflow(end, terminal_nav)],
+            liquidated=False,
+        )
+        walkaway = after_tax_rate(
+            walk_run,
+            [*trunc.external_flows, Cashflow(end, terminal_nav - exit_charges)],
+            liquidated=True,
+        )
+        error = (
+            None
+            if walkaway is not None and realised is not None
+            else walk_run.liquidation_error or realised_run.realised_xirr_error
+        )
     except (TaxError, XIRRError) as failure:
         error = str(failure)
     sessions = [d for d, _ in points]

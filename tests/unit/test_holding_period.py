@@ -32,6 +32,7 @@ from backtest.holding_period_stats import (
     anchor_sessions,
     chain_growth,
     growth,
+    highest_root,
     horizon_end,
     independent_windows,
     longest_under_water,
@@ -45,7 +46,7 @@ from backtest.holding_period_stats import (
     wilson_interval,
 )
 from backtest.tax import DividendCredit, InterestIncome, RunLedger, SplitEvent, TaxTrade
-from backtest.xirr import Cashflow
+from backtest.xirr import Cashflow, XIRRError, xirr
 from execution.broker import Side
 
 
@@ -321,3 +322,29 @@ def test_charts_are_well_formed_svg() -> None:
     assert box.startswith("<svg") and box.rstrip().endswith("</svg>")
     prob = probability_svg({"a": [(1, 0.5), (12, 0.9)], "b": [(1, 0.2), (12, 1.0)]}, title="D13")
     assert prob.count("<path") >= 2
+
+
+def test_highest_root_recovers_the_rate_the_solver_misses() -> None:
+    deposit = Cashflow(date(2020, 1, 17), Decimal("-1000000"))
+    terminal = Cashflow(date(2020, 4, 16), Decimal("733881.82"))
+    late_tax = Cashflow(date(2021, 3, 31), Decimal("-150"))
+    with pytest.raises(XIRRError):
+        xirr([deposit, terminal, late_tax])
+    rate = highest_root([deposit, terminal, late_tax])
+    plain = xirr([deposit, terminal])
+    assert rate is not None
+    # The late tax lowers the rate a little; it never flips it to the spurious root near -100 %.
+    assert plain - Decimal("0.02") < rate <= plain
+    assert rate > Decimal("-0.9")
+
+
+def test_highest_root_agrees_with_xirr_on_an_ordinary_stream() -> None:
+    flows = [
+        Cashflow(date(2020, 1, 1), Decimal("-100")),
+        Cashflow(date(2021, 1, 1), Decimal("112")),
+        Cashflow(date(2021, 3, 31), Decimal("-1")),
+    ]
+    rate = highest_root(flows)
+    assert rate is not None
+    assert abs(rate - xirr(flows)) < Decimal("0.000001")
+    assert highest_root([Cashflow(date(2020, 1, 1), Decimal("-1"))]) is None
