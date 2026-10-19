@@ -131,7 +131,7 @@ def test_d13_must_match_the_earlier_frozen_record(tmp_path: Path) -> None:
     reference = tmp_path / "frozen.json"
     reference.write_text(json.dumps({"runs": [_record()]}))
     assert compare_reference({"runs": [_record()]}, reference) == ["F1 test @100000000: identical"]
-    with pytest.raises(StudyError, match="ledger_sha256 differ"):
-        compare_reference({"runs": [_record(ledger_sha256="x")]}, reference)
+    moved = compare_reference({"runs": [_record(ledger_sha256="x")]}, reference)
+    assert moved == ["F1 test @100000000: DIFFERS: ledger_sha256"]
     with pytest.raises(StudyError, match="not in"):
         compare_reference({"runs": [_record(fold="F2")]}, reference)

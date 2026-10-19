@@ -375,30 +375,46 @@ def verify_frozen(plan: StudyPlan) -> dict[str, Any]:
     return dict(frozen)
 
 
-def compare_reference(frozen: Mapping[str, Any], reference: Path) -> list[str]:
-    """Each D13 run against an earlier study's frozen D13 record: same digest and file hashes.
+def compare_reference(
+    frozen: Mapping[str, Any], reference: Path, *, out_dir: Path | None = None
+) -> list[str]:
+    """Each D13 run against an earlier study's frozen D13 record: same digest and file hashes?
 
-    Returns one line per run (``identical`` or what differs); raises ``StudyError`` on any
-    difference — a D13 that moved is a different baseline, not this study's to explain away.
+    Informational: returns one line per run, ``identical`` or what differs, and for a differing run
+    whose summaries are both on disk (``out_dir`` and the reference's directory) the run-spec fields
+    that differ — a D13 whose spec moved is the same code on different data (the book's
+    corporate-action calendar is part of the spec). Raises ``StudyError`` only when a run is missing
+    from the reference. The study's own frozen record, struck on the current data, is the baseline
+    every arm is judged against.
     """
     other = json.loads(reference.read_text(encoding="utf-8"))
     theirs = {(r["fold"], r["role"], r["floor"]): r for r in other["runs"]}
     lines: list[str] = []
-    problems: list[str] = []
+    missing: list[str] = []
     keys = ("digest", "summary_sha256", "ledger_sha256", "nav_sha256")
     for run in frozen["runs"]:
         key = (run["fold"], run["role"], run["floor"])
         match = theirs.get(key)
         where = f"{run['fold']} {run['role']} @{run['floor']}"
         if match is None:
-            problems.append(f"{where}: not in {reference.name}")
+            missing.append(f"{where}: not in {reference.name}")
             continue
         differ = [k for k in keys if match[k] != run[k]]
-        if differ:
-            problems.append(f"{where}: {', '.join(differ)} differ")
-        lines.append(f"{where}: {'identical' if not differ else 'DIFFERS: ' + ', '.join(differ)}")
-    if problems:
-        raise StudyError("D13 is not the earlier frozen D13: " + "; ".join(problems[:6]))
+        if not differ:
+            lines.append(f"{where}: identical")
+            continue
+        detail = f"DIFFERS: {', '.join(differ)}"
+        if out_dir is not None:
+            mine = summary_path(out_dir, run["digest"])
+            old = summary_path(reference.parent, match["digest"])
+            if mine.is_file() and old.is_file():
+                a = json.loads(old.read_text(encoding="utf-8")).get("spec", {})
+                b = json.loads(mine.read_text(encoding="utf-8")).get("spec", {})
+                moved = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+                detail += f"; run-spec fields that differ: {', '.join(moved) or 'none'}"
+        lines.append(f"{where}: {detail}")
+    if missing:
+        raise StudyError("D13 runs absent from the earlier record: " + "; ".join(missing[:6]))
     return lines
 
 
@@ -847,10 +863,11 @@ def render_part_a(
         "",
         *verdict_table(verdicts),
         "",
-        "### D13 re-verified on this commit",
+        "### D13 against the per-stock rebalance study's frozen D13 (lake through 2026-10-14)",
         "",
-        "Every D13 run of this study against the per-stock rebalance study's frozen D13 record "
-        "(digest and the sha256 of its summary, ledger and NAV files):",
+        "Every D13 run of this study against that record (digest and the sha256 of its summary, "
+        "ledger and NAV files). Every arm here is judged against this study's own D13, frozen on "
+        "the current lake before any arm ran:",
         "",
         *(f"- {line}" for line in reference_lines),
         "",
@@ -1072,7 +1089,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             verify_frozen(base)
             print(f"  baseline frozen: {out_dir / FROZEN_NAME}")
             if args.reference_frozen is not None:
-                for line in compare_reference(frozen, args.reference_frozen):
+                for line in compare_reference(frozen, args.reference_frozen, out_dir=out_dir):
                     print(f"  D13 {line}")
             if run_units(arms, workers=args.workers):
                 raise StudyError("an arm run failed; re-run to retry")
@@ -1081,7 +1098,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise StudyError(f"--trials is at least {PREREGISTERED_MIN_TRIALS}")
         frozen = verify_frozen(base)
         reference_lines = (
-            compare_reference(frozen, args.reference_frozen)
+            compare_reference(frozen, args.reference_frozen, out_dir=out_dir)
             if args.reference_frozen is not None
             else ["(no earlier record named)"]
         )
