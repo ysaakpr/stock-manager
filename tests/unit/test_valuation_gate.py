@@ -125,8 +125,11 @@ def test_cheap_is_strictly_below_the_trailing_mean() -> None:
 def test_the_reading_refuses_floats_and_non_positive_figures() -> None:
     with pytest.raises(TypeError):
         ValuationReading(
-            pe=20.0, trailing_mean=Decimal("20"), mean_days=21, knowable_date=REBALANCE
-        )  # type: ignore[arg-type]
+            pe=20.0,  # type: ignore[arg-type]
+            trailing_mean=Decimal("20"),
+            mean_days=21,
+            knowable_date=REBALANCE,
+        )
     with pytest.raises(ValueError, match="positive"):
         _valuation("0")
     with pytest.raises(ValueError, match="mean_days"):
@@ -187,7 +190,7 @@ def test_replace_parks_when_rich_even_with_the_price_regime_on_inversion() -> No
     assert regime_parked(decision.evidence)
     (item,) = decision.evidence.items
     assert item.detail["pe_cheap"] == "false" and item.detail["price_risk_on"] == "true"
-    assert all("P/E 22 >= 21-session mean 20" in e.rationale for e in decision.entries)
+    assert all("P/E 22 >= 21-session mean 20" in (e.rationale or "") for e in decision.entries)
 
 
 def test_replace_parks_at_exactly_the_mean() -> None:
@@ -237,7 +240,9 @@ def test_entry_gate_still_parks_on_the_price_regime_whatever_the_pe() -> None:
     )
     assert regime_parked(decision.evidence)
     assert _sells(decision) == {A}
-    assert all(e.rationale.startswith("regime risk-off (index 90") for e in decision.entries)
+    assert all(
+        (e.rationale or "").startswith("regime risk-off (index 90") for e in decision.entries
+    )
 
 
 def test_entry_gate_keeps_a_parked_empty_book_in_cash_while_rich() -> None:
