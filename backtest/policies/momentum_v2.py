@@ -76,6 +76,25 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
   ``daily_regime_park`` makes a risk-off session park the whole book as well. Off by default and
   absent from the parameters' ``repr`` while off, so D13's fingerprint is unchanged.
 
+* **Valuation gate** (``valuation_gate``, ``valuation_mean_days``, ``valuation_splice``) — research
+  (``ops/studies/preregistration-pe-timing-2026-10-19.md``): the market P/E (NIFTY 500, published
+  by NSE) read against its own trailing ``valuation_mean_days``-session mean, *cheap* when strictly
+  below it. It is a second reading on the same regime seam (:class:`ValuationReading` rides on the
+  :class:`RegimeReading`), read on the same monthly rebalance session, and it acts in one of three
+  ways (:class:`ValuationGate`): ``ENTRY`` keeps the price regime for parking and re-entry and
+  blocks every buy of a rebalance that reads *rich*; ``REPLACE`` parks and re-enters on the P/E
+  reading instead of the price regime; ``BOTH`` holds the basket only while the price regime is on
+  *and* the P/E reads cheap. Off by default and absent from the parameters' ``repr`` while off.
+
+* **Drawdown-study comparators** (``valuation_series``, ``regime_monthly_band``,
+  ``exposure_fraction``) — research (``ops/studies/preregistration-pe-drawdown-2026-10-19.md``).
+  ``valuation_series`` points the valuation gate at another published series (NIFTY 50 P/E, or the
+  NIFTY 500 close itself for the price-only analogue). ``regime_monthly_band`` makes the monthly
+  regime stricter: the basket is held only while the index is at or above ``MA * (1 + band)``.
+  ``exposure_fraction`` caps the basket at a constant share of capital on every rebalance (and
+  its next-session redeploy), the rest in cash — D13 at a fixed lower exposure, with no timing
+  information of its own. Off by default and absent from the parameters' ``repr`` while off.
+
 With **all six toggles off** the policy reproduces the naive top-N decision exactly — that is the
 "naive" baseline the increment report is struck against, and a unit test pins the parity. Every knob
 is a stated parameter, echoed verbatim into the report, so nothing here is silently tuned.
@@ -96,6 +115,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
+from enum import StrEnum
 from typing import Final, Protocol, runtime_checkable
 
 from analyst.cases import RiskRails
@@ -129,12 +149,16 @@ __all__ = [
     "D13_RESID_MOM",
     "PAPER_RATIFIED_2026_09_06",
     "PER_STOCK_REVIEW_SESSIONS",
+    "PE_GATE_MEAN_DAYS",
     "MomentumV2Data",
     "MomentumV2Parameters",
     "MomentumV2Policy",
     "MomentumV2Record",
     "RegimeReading",
+    "ValuationGate",
+    "ValuationReading",
     "basket_volatility_annual",
+    "d13_valuation_gate",
     "inverse_vol_weights",
     "regime_parked",
 ]
@@ -193,6 +217,66 @@ class MomentumV2Record:
         return self.momentum_12_1 if use_12_1 else self.momentum_0_12
 
 
+class ValuationGate(StrEnum):
+    """How the P/E reading acts on the momentum book (pre-registration, PE timing, §3).
+
+    * ``ENTRY`` — the price regime parks and re-enters exactly as D13; a rebalance that reads *rich*
+      places no buy at all (no new name, no top-up, no next-session redeploy). Its band sells
+      still happen, and the proceeds wait in cash.
+    * ``REPLACE`` — the P/E reading parks (rich) and re-enters (cheap) instead of the price regime.
+    * ``BOTH`` — the basket is held only while the price regime is on *and* the P/E reads cheap;
+      either turning parks it.
+    """
+
+    ENTRY = "entry"
+    REPLACE = "replace"
+    BOTH = "both"
+
+
+@dataclass(frozen=True, slots=True)
+class ValuationReading:
+    """The market P/E as of a session against its own trailing simple mean.
+
+    ``pe`` is the published index P/E for the session; ``trailing_mean`` the simple mean of the last
+    ``mean_days`` published P/Es knowable by the session, the session's own included.
+    ``spliced`` says the pre-2021-03-31 points in that window were rescaled across NSE's switch
+    from standalone to consolidated earnings (``backtest.valuation_gate``). ``knowable_date`` is the
+    session the figures were published for — knowable that evening, as an index close is.
+
+    **Cheap** is strictly below the mean: equal reads rich.
+    """
+
+    pe: Decimal
+    trailing_mean: Decimal
+    mean_days: int
+    knowable_date: date
+    spliced: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("pe", "trailing_mean"):
+            if not isinstance(getattr(self, name), Decimal):
+                raise TypeError(f"{name} must be a Decimal — never float (CLAUDE.md)")
+            if getattr(self, name) <= _ZERO:
+                raise ValueError(f"{name} must be positive, got {getattr(self, name)}")
+        if self.mean_days <= 0:
+            raise ValueError(f"mean_days must be positive, got {self.mean_days}")
+
+    @property
+    def cheap(self) -> bool:
+        """Whether the P/E is strictly below its trailing mean."""
+        return self.pe < self.trailing_mean
+
+    def detail(self) -> dict[str, str]:
+        """The reading as evidence/journal detail strings."""
+        return {
+            "pe": str(self.pe),
+            "pe_trailing_mean": str(self.trailing_mean),
+            "pe_mean_days": str(self.mean_days),
+            "pe_cheap": "true" if self.cheap else "false",
+            "pe_spliced": "true" if self.spliced else "false",
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class RegimeReading:
     """The market regime as of a session: the index level and its own moving average.
@@ -209,6 +293,8 @@ class RegimeReading:
     index_level: Decimal
     moving_average: Decimal
     knowable_date: date
+    #: The market P/E against its own trailing mean (the valuation gate), when a gate reads it.
+    valuation: ValuationReading | None = None
 
     def __post_init__(self) -> None:
         for name in ("index_level", "moving_average"):
@@ -216,6 +302,17 @@ class RegimeReading:
                 raise TypeError(f"{name} must be a Decimal — never float (CLAUDE.md)")
             if getattr(self, name) <= _ZERO:
                 raise ValueError(f"{name} must be positive, got {getattr(self, name)}")
+
+    @property
+    def knowable_through(self) -> date:
+        """The latest date anything in the reading became knowable — what the PIT guard checks.
+
+        The price reading's own date, or the valuation reading's if that is later, so a P/E dated
+        past the session trips the guard even when the price reading would not.
+        """
+        if self.valuation is None:
+            return self.knowable_date
+        return max(self.knowable_date, self.valuation.knowable_date)
 
     @property
     def risk_on(self) -> bool:
@@ -300,6 +397,12 @@ class MomentumV2Parameters:
     review_sessions: int | None = field(default=None, repr=False)
     daily_regime_gate: bool = field(default=False, repr=False)
     daily_regime_park: bool = field(default=False, repr=False)
+    valuation_gate: ValuationGate | None = field(default=None, repr=False)
+    valuation_mean_days: int | None = field(default=None, repr=False)
+    valuation_splice: bool = field(default=False, repr=False)
+    valuation_series: str | None = field(default=None, repr=False)
+    regime_monthly_band: Decimal = field(default=Decimal("0"), repr=False)
+    exposure_fraction: Decimal | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -340,6 +443,82 @@ class MomentumV2Parameters:
         if self.regime_daily_band != _ZERO and not daily:
             raise ValueError("regime_daily_band applies only to a daily regime check")
         self._check_per_stock()
+        self._check_valuation()
+        self._check_drawdown_comparators()
+
+    def _check_valuation(self) -> None:
+        """The valuation gate's own dependencies, and what it never combines with."""
+        if self.valuation_gate is None:
+            if self.valuation_mean_days is not None or self.valuation_splice:
+                raise ValueError("valuation_mean_days and valuation_splice need a valuation_gate")
+            return
+        if not isinstance(self.valuation_gate, ValuationGate):
+            raise TypeError("valuation_gate must be a ValuationGate")
+        if not self.regime_filter:
+            raise ValueError("the valuation gate is read on the regime seam; turn on regime_filter")
+        if self.valuation_mean_days is None or self.valuation_mean_days <= 0:
+            raise ValueError(
+                f"valuation_mean_days must be positive, got {self.valuation_mean_days}"
+            )
+        clashing = [
+            name
+            for name in ("regime_daily_reentry", "regime_daily_exit", "daily_slot_fill")
+            if getattr(self, name)
+        ]
+        if clashing:
+            raise ValueError(
+                "the valuation gate is read on D13's monthly rebalance only; "
+                f"turn off {', '.join(clashing)}"
+            )
+
+    def _check_drawdown_comparators(self) -> None:
+        """The PE-drawdown study's switches: their dependencies, and what they never join."""
+        if self.valuation_series is not None:
+            if self.valuation_gate is None:
+                raise ValueError("valuation_series needs a valuation_gate")
+            if not isinstance(self.valuation_series, str) or not self.valuation_series:
+                raise TypeError("valuation_series must be a non-empty series id")
+        if not isinstance(self.regime_monthly_band, Decimal):
+            raise TypeError("regime_monthly_band must be a Decimal")
+        if not (_ZERO <= self.regime_monthly_band < _ONE):
+            raise ValueError(
+                f"regime_monthly_band must be in [0, 1), got {self.regime_monthly_band}"
+            )
+        if self.regime_monthly_band != _ZERO:
+            if not self.regime_filter:
+                raise ValueError("regime_monthly_band tightens regime_filter; turn it on")
+            if self.regime_daily or self.valuation_gate is not None:
+                raise ValueError(
+                    "regime_monthly_band is a monthly price-only rule; turn off the daily regime "
+                    "checks and the valuation gate"
+                )
+        if self.exposure_fraction is None:
+            return
+        if not isinstance(self.exposure_fraction, Decimal):
+            raise TypeError("exposure_fraction must be a Decimal")
+        if not (_ZERO < self.exposure_fraction < _ONE):
+            raise ValueError(f"exposure_fraction must be in (0, 1), got {self.exposure_fraction}")
+        clashing = [
+            name
+            for name in (
+                "absolute_momentum",
+                "daily_slot_fill",
+                "regime_daily_reentry",
+                "regime_daily_exit",
+            )
+            if getattr(self, name)
+        ]
+        if self.vol_target_annual is not None:
+            clashing.append("vol_target_annual")
+        if self.review_sessions is not None:
+            clashing.append("review_sessions")
+        if self.valuation_gate is not None:
+            clashing.append("valuation_gate")
+        if clashing:
+            raise ValueError(
+                "exposure_fraction is a constant cap on D13's own book; turn off "
+                + ", ".join(clashing)
+            )
 
     def _check_per_stock(self) -> None:
         """M14.6: the per-stock switches' own dependencies, and what they never combine with."""
@@ -445,6 +624,26 @@ D13_PER_STOCK_DAILY_GATE: Final = replace(D13_PER_STOCK_CLOCK, daily_regime_gate
 D13_PER_STOCK_DAILY_PARK: Final = replace(D13_PER_STOCK_DAILY_GATE, daily_regime_park=True)
 #: V4 — V2 with no regime filter at all.
 D13_PER_STOCK_NO_REGIME: Final = replace(D13_PER_STOCK_CLOCK, regime_filter=False)
+
+#: PE timing (``ops/studies/preregistration-pe-timing-2026-10-19.md``): the trailing-mean lengths
+#: fixed before any run — about a month, a quarter, and the 200 sessions D13's price regime uses.
+PE_GATE_MEAN_DAYS: Final = (21, 63, 200)
+
+
+def d13_valuation_gate(
+    gate: ValuationGate, mean_days: int, *, splice: bool = False, series: str | None = None
+) -> MomentumV2Parameters:
+    """D13 with the valuation gate on — a research configuration only; paper runs D13.
+
+    ``series`` names another published series for the gate (``None``: the NIFTY 500 P/E).
+    """
+    return replace(
+        PAPER_RATIFIED_2026_09_06,
+        valuation_gate=gate,
+        valuation_mean_days=mean_days,
+        valuation_splice=splice,
+        valuation_series=series,
+    )
 
 
 @runtime_checkable
@@ -915,11 +1114,18 @@ class MomentumV2Policy:
         # basket is not held at all — sell everything and park in the liquid sleeve (invariant #7:
         # the reading is admitted, so a future-dated regime trips the guard rather than leaking).
         self._pending = None
+        reading: RegimeReading | None = None
         if self._params.regime_filter:
             (reading,) = ctx.pit.admit(self._data.regime(ctx.session))
-            if not reading.risk_on:
+            if not self._invested(reading):
                 return self._park(ctx, reading)
         self._parked = False
+        # ENTRY valuation gate: the price regime kept the basket, but a rich P/E blocks every buy.
+        entries_blocked = (
+            reading is not None
+            and self._params.valuation_gate is ValuationGate.ENTRY
+            and not self._valuation(reading).cheap
+        )
 
         candidates = ctx.pit.admit(self._data.signal(ctx.session))
         gate = None
@@ -987,6 +1193,9 @@ class MomentumV2Policy:
             vol_exposure = self._exposure(target)
             exposure = vol_exposure if slots is None else (exposure * vol_exposure)
             trims = self._trims(held, target, prices, exposure, ctx, ranked)
+        if self._params.exposure_fraction is not None and target:
+            exposure = self._params.exposure_fraction
+            trims = self._trims(held, target, prices, exposure, ctx, ranked)
         buys, drifts_note = self._buys(
             ctx,
             held,
@@ -999,10 +1208,20 @@ class MomentumV2Policy:
         )
         if trims:
             buys = []  # a book being cut back to its exposure does not also add to it
-        if self._params.redeploy_next_session and target and sells:
+        if entries_blocked:
+            buys = []  # valuation rich: no new name, no top-up, and nothing redeployed tomorrow
+        if reading is not None and self._params.valuation_gate is not None:
+            overlay_evidence.append(
+                self._valuation_evidence(ctx.session, self._valuation(reading), entries_blocked)
+            )
+        if self._params.redeploy_next_session and target and sells and not entries_blocked:
             # Only a rebalance that sold something leaves proceeds to deploy tomorrow. Under A1
             # the slot weights go (summing below one), so the redeploy also leaves the cash slots.
             self._pending = self._weights_for(target) if slots is None else slots
+            if self._params.exposure_fraction is not None:
+                # The redeploy fills the basket up to the cap's share of capital, never past it.
+                fraction = self._params.exposure_fraction
+                self._pending = {isin: w * fraction for isin, w in self._pending.items()}
 
         orders = tuple(order for order, _ in (*sells, *trims, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *trims, *buys))
@@ -1033,8 +1252,7 @@ class MomentumV2Policy:
             sells.append(
                 (
                     OrderRequest(isin=isin, side=Side.SELL, quantity=quantity, tag="MOMENTUM"),
-                    f"regime risk-off (index {reading.index_level} < {self._params.regime_ma_days}"
-                    f"d MA {reading.moving_average}); parking {quantity} shares to liquid sleeve",
+                    f"{self._park_reason(reading)}; parking {quantity} shares to liquid sleeve",
                 )
             )
         orders = tuple(order for order, _ in sells)
@@ -1044,6 +1262,20 @@ class MomentumV2Policy:
             # the journal row says so itself rather than falling through to the engine's bare
             # HEARTBEAT (invariant #9). A HOLD of the parking sleeve places no order.
             entries = (self._regime_hold(ctx, reading),)
+        detail = {
+            "moving_average": str(reading.moving_average),
+            "ma_days": str(self._params.regime_ma_days),
+            "risk_on": "false",
+        }
+        text = "index below its moving average — basket parked to the liquid sleeve"
+        if self._params.valuation_gate is not None:
+            detail = {
+                **detail,
+                "price_risk_on": "true" if reading.risk_on else "false",
+                "valuation_gate": self._params.valuation_gate.value,
+                **self._valuation(reading).detail(),
+            }
+            text = f"{self._park_reason(reading)} — basket parked to the liquid sleeve"
         evidence = EvidenceBundle(
             trading_date=ctx.session,
             actor=Actor.T0,
@@ -1054,16 +1286,84 @@ class MomentumV2Policy:
                     label=_REGIME_LABEL,
                     as_of=ctx.session,
                     value=reading.index_level,
-                    detail={
-                        "moving_average": str(reading.moving_average),
-                        "ma_days": str(self._params.regime_ma_days),
-                        "risk_on": "false",
-                    },
-                    text="index below its moving average — basket parked to the liquid sleeve",
+                    detail=detail,
+                    text=text,
                 ),
             ),
         )
         return SessionDecision(evidence=evidence, orders=orders, entries=entries)
+
+    # ── the valuation gate (PE timing) ───────────────────────────────────────────────────────────
+
+    def _valuation(self, reading: RegimeReading) -> ValuationReading:
+        """The P/E reading a valuation gate needs — a source that did not serve one fails loud."""
+        if reading.valuation is None:
+            raise ValueError(
+                f"the valuation gate is on but the regime reading for {reading.knowable_date} "
+                "carries no P/E reading; the source must serve one"
+            )
+        return reading.valuation
+
+    def _price_on(self, reading: RegimeReading) -> bool:
+        """The monthly price regime: at or above the MA, or ``MA * (1 + band)`` when banded."""
+        band = self._params.regime_monthly_band
+        return reading.risk_on if band == _ZERO else reading.clears_above(band)
+
+    def _invested(self, reading: RegimeReading) -> bool:
+        """Whether the rebalance holds the basket: D13's price regime, or the valuation gate's."""
+        gate = self._params.valuation_gate
+        if gate is None or gate is ValuationGate.ENTRY:
+            return self._price_on(reading)
+        cheap = self._valuation(reading).cheap
+        if gate is ValuationGate.REPLACE:
+            return cheap
+        return self._price_on(reading) and cheap
+
+    def _park_reason(self, reading: RegimeReading) -> str:
+        """Why a rebalance parks — D13's own words when no valuation gate parks it."""
+        price = (
+            f"index {reading.index_level} < {self._params.regime_ma_days}d MA "
+            f"{reading.moving_average}"
+        )
+        if self._params.regime_monthly_band != _ZERO:
+            price += f" x (1 + {self._params.regime_monthly_band})"
+        gate = self._params.valuation_gate
+        if gate is None or gate is ValuationGate.ENTRY:
+            return f"regime risk-off ({price})"
+        valuation = self._valuation(reading)
+        pe = (
+            f"P/E {valuation.pe} >= {valuation.mean_days}-session mean "
+            f"{valuation.trailing_mean.quantize(Decimal('0.0001'))}"
+        )
+        reasons = []
+        if gate is ValuationGate.BOTH and not reading.risk_on:
+            reasons.append(price)
+        if not valuation.cheap:
+            reasons.append(pe)
+        return f"valuation gate ({gate.value}) off ({'; '.join(reasons)})"
+
+    def _valuation_evidence(
+        self, session: date, valuation: ValuationReading, entries_blocked: bool
+    ) -> EvidenceItem:
+        """The P/E reading a rebalance considered, and whether it blocked the buys (inv. #9)."""
+        assert self._params.valuation_gate is not None
+        return EvidenceItem(
+            kind=EvidenceKind.PRICE,
+            source="valuation",
+            label="valuation_gate",
+            as_of=session,
+            value=valuation.pe,
+            detail={
+                "valuation_gate": self._params.valuation_gate.value,
+                "entries_blocked": "true" if entries_blocked else "false",
+                **valuation.detail(),
+            },
+            text=(
+                "market P/E at or above its trailing mean — no buys this rebalance"
+                if entries_blocked
+                else "market P/E read against its trailing mean"
+            ),
+        )
 
     # ── sells ─────────────────────────────────────────────────────────────────────────────────────
 
@@ -1227,8 +1527,12 @@ class MomentumV2Policy:
             trims.append(
                 (
                     OrderRequest(isin=isin, side=Side.SELL, quantity=quantity, tag="MOMENTUM"),
-                    f"vol target {self._params.vol_target_annual}: basket exposure cut to "
-                    f"{exposure} of capital; trimming {quantity} shares",
+                    (
+                        f"vol target {self._params.vol_target_annual}: basket exposure cut to "
+                        if self._params.vol_target_annual is not None
+                        else "exposure cap: basket exposure cut to "
+                    )
+                    + f"{exposure} of capital; trimming {quantity} shares",
                 )
             )
         return trims
@@ -1281,7 +1585,7 @@ class MomentumV2Policy:
             capital = self._capital(ctx, held, prices, tuple(records.values()))
             budget = min(budget, max(_ZERO, capital * share - in_basket))
             if budget <= _ZERO:
-                return self._redeploy_heartbeat(ctx, budget, reason="basket at its A1 cash cap")
+                return self._redeploy_heartbeat(ctx, budget, reason="basket at its cash cap")
         allocation = simulate_sip_instalment(
             instalment=budget,
             targets=weights_norm,
@@ -1380,13 +1684,25 @@ class MomentumV2Policy:
             actor=Actor.T0,
             decision=Decision.HOLD,
             sleeve=self._params.parking_sleeve,
-            rationale="regime risk-off; holding cash",
+            rationale=(
+                "regime risk-off; holding cash"
+                if self._params.valuation_gate is None
+                else f"{self._park_reason(reading)}; holding cash"
+            ),
             payload={
                 "regime": "risk_off",
                 "index_level": str(reading.index_level),
                 "moving_average": str(reading.moving_average),
                 "ma_days": str(self._params.regime_ma_days),
                 "risk_on": "false",
+                **(
+                    {}
+                    if self._params.valuation_gate is None
+                    else {
+                        "valuation_gate": self._params.valuation_gate.value,
+                        **self._valuation(reading).detail(),
+                    }
+                ),
             },
         )
 
@@ -1451,6 +1767,17 @@ class MomentumV2Policy:
                         "assumed_correlation": str(self._params.assumed_correlation),
                     },
                     text="share of capital the basket may occupy under the volatility target",
+                )
+            )
+        if self._params.exposure_fraction is not None:
+            items.append(
+                EvidenceItem(
+                    kind=EvidenceKind.POSITION,
+                    source="book",
+                    label="exposure_cap",
+                    as_of=session,
+                    value=exposure,
+                    text="constant share of capital the basket may occupy (equal-exposure D13)",
                 )
             )
         items.extend(extra)

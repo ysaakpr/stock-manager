@@ -154,6 +154,7 @@ from backtest.run_ledger import (
 from backtest.sector_indices import IndustryGatedData, SectorIndexLevels, load_sector_index_map
 from backtest.signal_panel import current_signal_panel, panel_key
 from backtest.tax import RunLedger
+from backtest.valuation_gate import ValuationSource
 from dataplatform.clock import FrozenClock
 from dataplatform.identity.master import Exchange as IdentityExchange
 from dataplatform.identity.master import ListingStatus
@@ -1237,6 +1238,13 @@ class _RegimeSource:
         ]
         self._by_session = {p.as_of: level for p, level in zip(points, self._levels, strict=True)}
         self._as_of = [p.as_of for p in points]
+        #: The valuation gate's P/E source (PE timing), attached only when a gate is on, so every
+        #: other configuration reads exactly the reading it always did.
+        self._valuation: ValuationSource | None = None
+
+    def attach_valuation(self, source: ValuationSource) -> None:
+        """Serve the valuation gate's P/E reading on every regime reading from now on."""
+        self._valuation = source
 
     @classmethod
     def published(
@@ -1290,7 +1298,10 @@ class _RegimeSource:
             )
         moving_average = sum(window, _ZERO) / Decimal(len(window))
         return RegimeReading(
-            index_level=current, moving_average=moving_average, knowable_date=as_of
+            index_level=current,
+            moving_average=moving_average,
+            knowable_date=as_of,
+            valuation=None if self._valuation is None else self._valuation.reading(as_of),
         )
 
 
@@ -1435,7 +1446,7 @@ class _L1MomentumV2Data:
         return Dataset.declaring(
             f"regime@{as_of.isoformat()}",
             (reading,),
-            knowable_date=lambda r: r.knowable_date,
+            knowable_date=lambda r: r.knowable_through,
         )
 
     def repo_rate(self, as_of: date) -> Dataset[RepoRateReading]:
@@ -2360,6 +2371,21 @@ def run_momentum_v2(
             ma_days=v2_parameters.regime_ma_days,
             data_root=data_root,
         )
+        if v2_parameters.valuation_gate is not None:
+            assert v2_parameters.valuation_mean_days is not None
+            regime_source.attach_valuation(
+                ValuationSource.published(
+                    through=sessions[-1],
+                    mean_days=v2_parameters.valuation_mean_days,
+                    splice=v2_parameters.valuation_splice,
+                    data_root=data_root,
+                    **(
+                        {}
+                        if v2_parameters.valuation_series is None
+                        else {"series": v2_parameters.valuation_series}
+                    ),
+                )
+            )
         overlays = _V2OverlayInputs.for_parameters(
             v2_parameters, through=sessions[-1], data_root=data_root
         )

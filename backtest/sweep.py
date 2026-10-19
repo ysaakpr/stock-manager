@@ -66,7 +66,10 @@ from backtest.policies.momentum_v2 import (
     D13_PER_STOCK_DAILY_PARK,
     D13_PER_STOCK_NO_REGIME,
     PAPER_RATIFIED_2026_09_06,
+    PE_GATE_MEAN_DAYS,
     MomentumV2Parameters,
+    ValuationGate,
+    d13_valuation_gate,
 )
 from backtest.policies.naive_momentum import MomentumParameters
 from backtest.policies.residual_momentum import with_residual_momentum
@@ -123,6 +126,7 @@ __all__ = [
     "MULTI_CAP_REDEPLOY",
     "NAIVE_REDEPLOY",
     "PER_STOCK_ARMS",
+    "PE_TIMING_ARMS",
     "REDEPLOY_ARMS",
     "REGIME_DAILY_ARMS",
     "REGIME_LENGTH_ARMS",
@@ -400,6 +404,47 @@ PER_STOCK_ARMS: tuple[Arm, ...] = (
         note="V2 with no regime filter: buy whenever a top-20 name is unheld and a slot is free",
         v2=D13_PER_STOCK_NO_REGIME,
     ),
+)
+
+
+def pe_timing_label(gate: ValuationGate, mean_days: int, *, splice: bool) -> str:
+    """The sweep label of one PE-timing arm (pre-registration, PE timing, §3)."""
+    label = {
+        ValuationGate.ENTRY: f"D13 + PE<{mean_days}d mean entry gate",
+        ValuationGate.REPLACE: f"D13, PE<{mean_days}d mean replaces price regime",
+        ValuationGate.BOTH: f"D13 + price regime AND PE<{mean_days}d mean",
+    }[gate]
+    return f"{label} (spliced P/E)" if splice else label
+
+
+def _pe_timing_arm(gate: ValuationGate, mean_days: int, *, splice: bool) -> Arm:
+    what = {
+        ValuationGate.ENTRY: "D13's price regime parks and re-enters; a rebalance reading the "
+        "NIFTY 500 P/E at or above its trailing mean places no buy",
+        ValuationGate.REPLACE: "parks when the NIFTY 500 P/E is at or above its trailing mean and "
+        "re-enters when below it, instead of D13's price regime",
+        ValuationGate.BOTH: "holds the basket only while D13's price regime is on and the NIFTY "
+        "500 P/E is below its trailing mean",
+    }[gate]
+    basis = "spliced at the 2021-03-31 earnings-basis break" if splice else "raw"
+    return Arm(
+        label=pe_timing_label(gate, mean_days, splice=splice),
+        family="pe timing",
+        reference=D13_PAPER_BASELINE.label,
+        note=f"D13, but {what}; mean over {mean_days} sessions, P/E {basis}; read monthly",
+        v2=d13_valuation_gate(gate, mean_days, splice=splice),
+    )
+
+
+#: PE timing (``ops/studies/preregistration-pe-timing-2026-10-19.md``): D13 with the valuation gate
+#: in each of its three modes for each pre-registered mean length, on the raw P/E series and on the
+#: series spliced across NSE's 2021-03-31 earnings-basis change. Research arms only — kept out of
+#: ``ARMS`` for the reason D13 is.
+PE_TIMING_ARMS: tuple[Arm, ...] = tuple(
+    _pe_timing_arm(gate, days, splice=splice)
+    for splice in (False, True)
+    for days in PE_GATE_MEAN_DAYS
+    for gate in ValuationGate
 )
 
 #: M16.3, arm A5: M10.7 with the earnings-surprise (PEAD) leg as an equal fourth leg. Kept out of
