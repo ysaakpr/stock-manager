@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 import random
+from bisect import bisect_left
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from decimal import Decimal
@@ -98,10 +99,10 @@ def horizon_end(
     target = anchors.get(key)
     if target is None or target > span_end:
         return None
-    before = [s for s in sessions if s < target]
-    if not before or before[-1] < start:
+    position = bisect_left(sessions, target)
+    if position == 0 or sessions[position - 1] < start:
         return None
-    return before[-1]
+    return sessions[position - 1]
 
 
 def growth(rate: Decimal, start: date, end: date) -> Decimal:

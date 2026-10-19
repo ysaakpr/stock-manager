@@ -49,6 +49,7 @@ import hashlib
 import json
 import sys
 import time
+from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import ExitStack
@@ -781,9 +782,8 @@ class Market:
     def mark(self, isin: str, session: date, floor: date) -> Decimal | None:
         """``isin``'s last close (EQ, else BE/BZ) on or before ``session`` and not before
         ``floor`` — the run's own terminal-price rule (``backtest.run._terminal_prices``)."""
-        for day in reversed(self.sessions):
-            if day > session:
-                continue
+        for position in range(bisect_right(self.sessions, session) - 1, -1, -1):
+            day = self.sessions[position]
             if day < floor:
                 break
             price = self.closes(day).get(isin)
