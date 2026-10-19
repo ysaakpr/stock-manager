@@ -185,6 +185,13 @@ class ValuationSource:
     def spliced(self) -> bool:
         return self._factor is not None
 
+    @property
+    def first_full_session(self) -> date | None:
+        """The first session with ``mean_days`` points knowable — the earliest possible reading."""
+        if len(self._points) < self._mean_days:
+            return None
+        return self._knowable[self._mean_days - 1]
+
     def has(self, session: date) -> bool:
         """Whether a P/E is published for ``session``."""
         return session in self._by_session
