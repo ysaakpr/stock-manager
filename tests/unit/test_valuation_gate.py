@@ -300,7 +300,7 @@ def test_a_missing_or_short_series_fails_loud() -> None:
     source = ValuationSource(_points(["10", "12"]), mean_days=3)
     with pytest.raises(ValuationSourceError, match="short of the 3-session mean"):
         source.reading(date(2021, 1, 5))
-    with pytest.raises(ValuationSourceError, match="no P/E for"):
+    with pytest.raises(ValuationSourceError, match="has no figure for"):
         source.reading(date(2022, 1, 5))
 
 

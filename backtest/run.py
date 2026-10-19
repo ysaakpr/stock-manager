@@ -2379,6 +2379,11 @@ def run_momentum_v2(
                     mean_days=v2_parameters.valuation_mean_days,
                     splice=v2_parameters.valuation_splice,
                     data_root=data_root,
+                    **(
+                        {}
+                        if v2_parameters.valuation_series is None
+                        else {"series": v2_parameters.valuation_series}
+                    ),
                 )
             )
         overlays = _V2OverlayInputs.for_parameters(

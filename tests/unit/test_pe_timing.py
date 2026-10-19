@@ -65,7 +65,7 @@ def test_pe_states_fail_loud_on_a_missing_month_end_pe() -> None:
     days = _weekdays(date(2024, 1, 1), 45)
     jan_end = max(d for d in days if d.month == 1)
     points = [PePoint(d, d, Decimal("20")) for d in days if d != jan_end]
-    with pytest.raises(Exception, match="no P/E for"):
+    with pytest.raises(Exception, match="has no figure for"):
         pe_states(_series(days), ValuationSource(points, mean_days=3))
 
 

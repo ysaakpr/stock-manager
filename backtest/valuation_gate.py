@@ -44,6 +44,7 @@ from dataplatform.store.macro_series import series_history
 
 __all__ = [
     "CLOSE_SERIES",
+    "NIFTY50_PE_SERIES",
     "PE_METHODOLOGY_BREAK",
     "PE_SERIES",
     "PePoint",
@@ -57,8 +58,11 @@ _LOG = get_logger(__name__)
 
 #: The gate's series: NSE's published NIFTY 500 P/E (``IN.NSE.NIFTY_500.PE``, a pure multiple).
 PE_SERIES: Final = "IN.NSE.NIFTY_500.PE"
-#: The same index's close, read only for the splice's implied-earnings ratio.
+#: The same index's close, read for the splice's implied-earnings ratio — and, in the PE-drawdown
+#: study, as the gate's own series for the price-only analogue of the P/E rule.
 CLOSE_SERIES: Final = "IN.NSE.NIFTY_500.CLOSE"
+#: The NIFTY 50 P/E, the PE-drawdown study's robustness series (raw only: no splice is defined).
+NIFTY50_PE_SERIES: Final = "IN.NSE.NIFTY_50.PE"
 #: The first snapshot on consolidated earnings (standalone before it) — read off the data: the one
 #: session where both NIFTY 50 and NIFTY 500 P/E fell ~17 % on a flat index.
 PE_METHODOLOGY_BREAK: Final = date(2021, 3, 31)
@@ -137,6 +141,7 @@ class ValuationSource:
         mean_days: int,
         factor: Decimal | None = None,
         break_session: date = PE_METHODOLOGY_BREAK,
+        series: str = PE_SERIES,
     ) -> None:
         if mean_days <= 0:
             raise ValueError(f"mean_days must be positive, got {mean_days}")
@@ -144,6 +149,7 @@ class ValuationSource:
             raise ValueError(f"splice factor must be positive, got {factor}")
         ordered = sorted(points, key=lambda p: (p.knowable, p.session))
         self._mean_days = mean_days
+        self._series = series
         self._factor = factor
         self._break = break_session
         self._knowable = [p.knowable for p in ordered]
@@ -158,9 +164,16 @@ class ValuationSource:
         mean_days: int,
         splice: bool,
         data_root: Path | None = None,
+        series: str = PE_SERIES,
     ) -> ValuationSource:
-        """The NIFTY 500 P/E through ``through``, raw or spliced at :data:`PE_METHODOLOGY_BREAK`."""
-        points = load_pe_points(PE_SERIES, through=through, data_root=data_root)
+        """``series`` (the NIFTY 500 P/E by default) through ``through``, raw or spliced.
+
+        The splice at :data:`PE_METHODOLOGY_BREAK` is defined for the NIFTY 500 P/E only; asking
+        for it on another series raises ``ValueError``.
+        """
+        if splice and series != PE_SERIES:
+            raise ValueError(f"the splice is defined for {PE_SERIES} only, not {series}")
+        points = load_pe_points(series, through=through, data_root=data_root)
         factor: Decimal | None = None
         if splice and through >= PE_METHODOLOGY_BREAK:
             closes = load_pe_points(CLOSE_SERIES, through=through, data_root=data_root)
@@ -171,7 +184,7 @@ class ValuationSource:
             )
         _LOG.info(
             "backtest.valuation_source",
-            series=PE_SERIES,
+            series=series,
             points=len(points),
             first_point=points[0].session.isoformat(),
             last_point=points[-1].session.isoformat(),
@@ -179,7 +192,7 @@ class ValuationSource:
             splice=splice,
             factor=None if factor is None else str(factor),
         )
-        return cls(points, mean_days=mean_days, factor=factor)
+        return cls(points, mean_days=mean_days, factor=factor, series=series)
 
     @property
     def spliced(self) -> bool:
@@ -201,15 +214,15 @@ class ValuationSource:
         current = self._by_session.get(as_of)
         if current is None:
             raise ValuationSourceError(
-                f"{PE_SERIES} has no P/E for {as_of.isoformat()}; the valuation gate does not "
-                "carry a stale figure"
+                f"{self._series} has no figure for {as_of.isoformat()}; the valuation gate does "
+                "not carry a stale figure"
             )
         cutoff = bisect_right(self._knowable, as_of)
         window = self._points[max(0, cutoff - self._mean_days) : cutoff]
         if len(window) < self._mean_days:
             raise ValuationSourceError(
-                f"{PE_SERIES} has {len(window)} points knowable by {as_of.isoformat()}, short of "
-                f"the {self._mean_days}-session mean"
+                f"{self._series} has {len(window)} points knowable by {as_of.isoformat()}, "
+                f"short of the {self._mean_days}-session mean"
             )
         factor = self._factor if as_of >= self._break else None
         values = [
