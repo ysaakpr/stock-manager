@@ -203,6 +203,7 @@ def test_mix_path_endpoints() -> None:
 
 def test_invested_fractions_from_ledger_and_nav(tmp_path: Path) -> None:
     digest = "d" * 64
+    paid = Decimal("1")  # the ledger records what the broker charged; no rate is defined here
     days = [date(2020, 1, 1), date(2020, 1, 2), date(2020, 1, 3)]
     ledger = RunLedger(
         source="synthetic",
@@ -213,7 +214,7 @@ def test_invested_fractions_from_ledger_and_nav(tmp_path: Path) -> None:
                 side=Side.BUY,
                 quantity=60,
                 net_amount=Decimal("600"),
-                stt=Decimal("1"),
+                stt=paid,
                 stt_known=True,
             ),
         ),
