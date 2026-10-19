@@ -726,7 +726,7 @@ def _scan_trials(
 ) -> list[TrialRatio]:
     """Trial ratios of runs under ``directory`` whose parameters ``repr`` is in ``labels``."""
     by_arm: dict[str, dict[date, Path]] = {}
-    starts = {w.start for w in fold_windows}
+    pairs = {(w.start, w.end) for w in fold_windows}
     for summary in sorted((directory / "runs").glob("*.json")):
         doc = json.loads(summary.read_text(encoding="utf-8"))
         spec = doc.get("spec", {})
@@ -734,7 +734,7 @@ def _scan_trials(
         if label is None or str(HIGH_FLOOR) not in spec.get("universe", ""):
             continue
         start = date.fromisoformat(spec["start"])
-        if start in starts and any(date.fromisoformat(spec["end"]) == w.end for w in fold_windows):
+        if (start, date.fromisoformat(spec["end"])) in pairs:
             by_arm.setdefault(label, {})[start] = directory / "navs" / f"{doc['digest']}.json"
     out: list[TrialRatio] = []
     for label, files in sorted(by_arm.items()):
