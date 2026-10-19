@@ -24,7 +24,7 @@ NIFTY 500 TRI gave 12.9 % and cash 3.9 %, both after tax.
 | To expect … | with 75 % confidence | with 90 % confidence | in every window (worst case) | Settled? |
 |---|---|---|---|---|
 | **not to lose money** | 9 months | **2 years** (21 months on the dense grid) | **4 years** | yes: every test agrees |
-| **to beat cash** (repo − 50 bp, after tax) | 18 months | **3 to 4 years** (see §3) | 6 to 7 years | the grids disagree at 36 m vs 48 m (§3) |
+| **to beat cash** (repo − 50 bp, after tax) | 18 months | **3 years** on 2 of 3 start days, **4 years** on the 1st (§3) | 6 to 7 years | **not settled** at 36 m vs 48 m: the month-start grid sits at 89.6 % at 36 m |
 | **to beat the NIFTY 500 TRI** over the same window | 7 years (≈ 75 % from 3 years on) | not within 7 years | not within 7 years | the 90 % answer ("never") holds on every grid |
 | **12 % a year** | 5 years (≈ 75 % from 2½ years on) | not within 7 years | not within 7 years | the 90 % answer ("never") holds on every grid |
 | **15 % a year** | not within 7 years (best: 69 % at 3 years) | not within 7 years | not within 7 years | yes |
@@ -90,7 +90,7 @@ compared with the per-stock rebalance study's frozen D13 (lake through 2026-10-1
   differs before it. **D13 was re-frozen on the current store**
   (`~/campaign/holding-period-c5f5cef/frozen-baseline.json`). The P/E study's stop on the same check
   had the same cause.
-- Every one of the 422 runs used one store state.
+- Every one of the 592 runs (422 before the day-8 grid, then 170 more) used one store state.
 
 ## 3. Minimum holding period and stability
 
@@ -101,7 +101,7 @@ exact-vs-approximation comparison.
 | Hurdle | 90 % horizon (month-start) | S1: other start days | S3: exact vs slice (pre-tax) | S4: dense horizons | Verdict |
 |---|---|---|---|---|---|
 | E (18.0 %) | not within 84 m | same | same | same | **stable** |
-| Cash | 48 m | mid-month **36 m** · day-8 [DAY8_CASH] · pooled [DAY8_POOLED] | 48 / 48 | 42 m (consistent) | [DAY8_VERDICT] |
+| Cash | 48 m | mid-month **36 m** · day-8 **36 m** · all three pooled **36 m** | 48 / 48 | 42 m (consistent) | **not stable** (S1), after the day-8 grid too |
 | NIFTY 500 TRI | not within 84 m | same | **60 m / 84 m** | same | not stable (S3 only) |
 | No loss | 24 m | 24 m | 18 / 18 | 21 m | **stable** |
 | 12 % | not within 84 m | same | **84 m / not within 84 m** | same | not stable (S3 only) |
@@ -111,7 +111,7 @@ What the instabilities mean:
 
 - **Cash.** At 36 months, 121 of 135 month-start windows beat cash (89.6 %, just under the bar). On
   the mid-month grid, 36 months clears it. The honest answer is **"between 3 and 4 years"**: from
-  42 months on, 97–100 % of windows on every grid beat cash. [DAY8_SENTENCE]
+  42 months on, 97–100 % of windows on every grid beat cash. The pre-registered day-8 grid (§6 of the pre-registration) was run because of this. It gives 36 months (123 of 134 windows, 92 %), as do the mid-month grid and all three pooled. Only the month-start grid misses, by one window. The 90 % cash horizon therefore did not settle on one grid horizon: it is 36 months on two of three start days and 48 months on the third.
 - **TRI and 12 %.** These fail only S3. S3 is a pre-tax test of whether slicing the one continuous run
   would have given the same answer as the fresh starts; it does not. On the after-tax figure the
   answer, "never at 90 % within 7 years", is the same on every grid. The disagreement is about the
@@ -275,7 +275,7 @@ points differing, identical fill counts and a 0.00 bp gap** (`tables.md`, "Valid
   stands out on worst case or on P(≥ TRI).
 - **Day of month:** starting on the first session on or after the 15th instead of the 1st changes the
   paired median by +2.2 pp at 1 month, +0.7 pp at 3 months, and |≤ 0.7| pp from 6 months on. The
-  probabilities track within a few points at every horizon (`tables.md`). [DAY8_DAY]
+  probabilities track within a few points at every horizon (`tables.md`). The day-8 grid (every month's first session on or after the 8th) agrees: paired median differences against the month-start grid are +3.2 pp at 1 month, +1.8 pp at 3 months and ≤ 0.7 pp from 6 months on. Its medians are 14.2 % at 12 months, 21.3 % at 36 and 16.6 % at 60, against 14.0 %, 21.5 % and 16.4 % on the month-start grid.
 
 ## 9. In and out vs staying invested; SIP vs lump sum
 
@@ -323,7 +323,7 @@ the later instalments carry the most money into whatever the market does last.
   NIFTY 500 TRI over N19 came back blank on the first render. Leaving such cells unscored would drop the
   worst windows, so they are now solved for the highest root of the same flows
   (`holding_period_stats.highest_root`, commit `79543e9`). No definition changed.
-- **Withheld cells.** 7 mid-month cells (one start, 2017-05-15) have no walk-away figure: a reissued
+- **Withheld cells.** 7 mid-month cells (one start, 2017-05-15) and 7 day-8 cells (one start, 2017-05-08) have no walk-away figure: a reissued
   ISIN (INE353G01020) lacks the Sec 55(2)(ac) grandfathering price, so the tax layer withholds the deemed
   sale. As pre-registered, they are counted, not scored. At ₹1 crore (information only), five long named
   runs (N01, N02, N36, N37, N40) are withheld for the same reason.
