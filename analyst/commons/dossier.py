@@ -21,6 +21,12 @@ TTM revenue and PAT growth, ROE, the net-margin trend, the SUE and EAR of the la
 debt-equity ratio (the only leverage field XBRL carries), announcements of the last 20 sessions
 (subject lines), corporate actions due, the cap tier, the screens it is on and any exclusion.
 
+**Amendment 4 (M17.16)** adds, with the definitions of `analyst.commons.volume_quality`: the next
+and last results dates from NSE board-meeting intimations knowable by the session; the 5- and
+20-session mean delivery %; the results day's delivery % and its volume ratio, gross and net of
+matched bulk/block round trips; and the session's matched quantity, its volume net of it, and that
+volume's ratio.
+
 **OI build-up** from the day's F&O aggregate against the previous session's: the underlier's
 spot change and the total open-interest change give LONG_BUILDUP (price up, OI up),
 SHORT_BUILDUP (down, up), SHORT_COVERING (up, down), LONG_UNWINDING (down, down), or NEUTRAL when
@@ -44,11 +50,22 @@ from typing import Any, Final
 from pydantic import BaseModel, ConfigDict
 
 from analyst.commons.events import KeywordTable, classify, load_event_keywords, subject_line
-from analyst.commons.features import FEATURE_FIELDS, feature_values
-from analyst.commons.inputs import ScreenSource
+from analyst.commons.features import FEATURE_FIELDS, align, feature_values
+from analyst.commons.inputs import BoardMeetingNotice, DealRecord, PriceBar, ScreenSource
 from analyst.commons.regime import RegimeReading
 from analyst.commons.screens import CommonsScreens
 from analyst.commons.sheets import CommonsSheets, Gap, SourceUnavailableError, canonical_bytes
+from analyst.commons.volume_quality import (
+    DELIVERY_AVG_SESSIONS,
+    RESULTS_VOLUME_BASE_SESSIONS,
+    deal_sessions,
+    delivery_average,
+    matched_round_trip_qty,
+    raw_to_bar_quantity,
+    results_dates,
+    results_day_index,
+    volume_ratio,
+)
 from dataplatform.query import Dataset, PitContext
 from dataplatform.query.fundamentals_metrics import compute_metrics
 
@@ -76,6 +93,12 @@ _CA_LOOKBACK_DAYS: Final = 120
 _FO_SESSIONS: Final = 5
 _Q: Final = Decimal("0.00000001")
 _MAX_SUBJECT: Final = 300
+#: How far back (calendar days, by knowable date) the dossier reads board-meeting intimations: a
+#: half-yearly reporter's last results meeting can be six months old.
+_RESULTS_LOOKBACK_DAYS: Final = 400
+#: The longest bar window the Amendment 4 fields read: a results day up to ~200 sessions back,
+#: plus the 50 sessions before it.
+_QUALITY_MAX_SESSIONS: Final = 261
 
 FieldValue = Decimal | bool | int | str | date | None
 
@@ -114,6 +137,17 @@ _EXTRA_FIELDS: Final[tuple[str, ...]] = (
     "results_filing_date",
     "results_day0",
     "results_day0_volume_ratio",
+    "next_results_date",
+    "last_results_date",
+    "deliv_pct_avg_5",
+    "deliv_pct_avg_20",
+    "results_day",
+    "results_day_deliv_pct",
+    "results_day_volume_ratio",
+    "results_day_volume_ratio_ex_matched",
+    "matched_deal_qty",
+    "volume_ex_matched",
+    "volume_ratio_day0_ex_matched",
     "fo_listed",
     "fo_session",
     "fo_oi_buildup",
@@ -238,6 +272,102 @@ def resolve_field(
         if dossier.isin == owner:
             return dossier.resolve(field_id)
     raise UnknownFieldError(field_id)
+
+
+# ── Amendment 4: results dates, delivery and volume quality ─────────────────────────────────────
+
+
+class _Quality:
+    """What the Amendment 4 fields read, once per dossier build (`volume_quality` definitions)."""
+
+    def __init__(
+        self,
+        notices: Sequence[BoardMeetingNotice] | None,
+        windows: dict[str, list[PriceBar | None]] | None,
+        calendar: Sequence[date],
+        deals: Sequence[DealRecord] | None,
+    ) -> None:
+        self.notices = notices
+        self.windows = windows
+        self.calendar = list(calendar)
+        self.deals = deals
+        self.covered = deal_sessions(deals) if deals is not None else frozenset()
+
+    def last_results(self, isin: str, session: date) -> date | None:
+        return results_dates(self.notices or (), isin, session)[1]
+
+    def _matched(self, isin: str, bar: PriceBar) -> tuple[int, Decimal] | None:
+        if self.deals is None or bar.trade_date not in self.covered:
+            return None
+        raw = matched_round_trip_qty(self.deals, isin, bar.trade_date)
+        return raw, raw_to_bar_quantity(raw, bar)
+
+    def values(self, isin: str, session: date) -> dict[str, FieldValue]:
+        out: dict[str, FieldValue] = {}
+        nxt, last = (
+            results_dates(self.notices, isin, session) if self.notices is not None else (None, None)
+        )
+        out["next_results_date"], out["last_results_date"] = nxt, last
+        window = (self.windows or {}).get(isin)
+        if not window or window[-1] is None:
+            return out
+        for n in DELIVERY_AVG_SESSIONS:
+            out[f"deliv_pct_avg_{n}"] = delivery_average(window, n)
+        today = window[-1]
+        matched = self._matched(isin, today)
+        if matched is not None:
+            out["matched_deal_qty"] = matched[0]
+            out["volume_ex_matched"] = _decimal(max(today.volume - matched[1], Decimal(0)))
+            out["volume_ratio_day0_ex_matched"] = volume_ratio(window, len(window) - 1, matched[1])
+        at = results_day_index(window, self.calendar, last)
+        bar = window[at] if at is not None else None
+        if at is None or bar is None:
+            return out
+        out["results_day"] = bar.trade_date
+        out["results_day_deliv_pct"] = _decimal(bar.deliv_pct)
+        out["results_day_volume_ratio"] = volume_ratio(window, at)
+        on_day = self._matched(isin, bar)
+        if on_day is not None:
+            out["results_day_volume_ratio_ex_matched"] = volume_ratio(window, at, on_day[1])
+        return out
+
+
+def _quality_inputs(
+    wanted: Sequence[str],
+    *,
+    session: date,
+    sheets: CommonsSheets,
+    source: ScreenSource,
+    pit: PitContext,
+    gaps: list[Gap],
+) -> _Quality:
+    """Read the intimations, the bar window and the deals the Amendment 4 fields need."""
+    notices = _admit(
+        lambda: source.board_meetings(session - timedelta(days=_RESULTS_LOOKBACK_DAYS), session),
+        pit,
+        gaps,
+        "board_meetings",
+    )
+    calendar_read = _admit(
+        lambda: source.sessions(session, _QUALITY_MAX_SESSIONS), pit, gaps, "quality_sessions"
+    )
+    calendar = sorted(set(calendar_read or ()))
+    if not calendar or calendar[-1] != session:
+        return _Quality(notices, None, (), None)
+    # Read back only as far as the earliest last-results date needs (plus the 50-session base).
+    lasts = [d for i in wanted if (d := results_dates(notices or (), i, session)[1]) is not None]
+    reach = max(DELIVERY_AVG_SESSIONS)
+    if lasts:
+        first = next((k for k, day in enumerate(calendar) if day >= min(lasts)), len(calendar))
+        reach = max(reach, len(calendar) - first + RESULTS_VOLUME_BASE_SESSIONS)
+    window = calendar[-min(reach, len(calendar)) :]
+    series = str(sheets.parameters["universe"]["series"])
+    bars = _admit(
+        lambda: source.price_bars(frozenset(wanted), window, series), pit, gaps, "quality_bars"
+    )
+    deals = _admit(lambda: source.deals(window[0], session), pit, gaps, "quality_deals")
+    windows = align(bars, window) if bars is not None else None
+    return _Quality(notices, windows, window, deals)
 
 
 # ── the builder ──────────────────────────────────────────────────────────────────────────────────
@@ -368,6 +498,9 @@ def build_dossiers(
     deal_start = calendar[-_DEAL_SESSIONS] if len(calendar) >= _DEAL_SESSIONS else calendar[0]
     deals = _admit(lambda: source.deals(deal_start, session), pit, gaps, "deals")
     keywords = load_event_keywords()
+    quality = _quality_inputs(
+        wanted, session=session, sheets=sheets, source=source, pit=pit, gaps=gaps
+    )
 
     ordered_gaps = tuple(sorted(gaps, key=lambda g: (g.source, g.reason)))
     out: list[Dossier] = []
@@ -390,6 +523,7 @@ def build_dossiers(
         values["results_filing_date"] = e.filing_date if e is not None else None
         values["results_day0"] = e.day0 if e is not None else None
         values["results_day0_volume_ratio"] = e.day0_volume_ratio if e is not None else None
+        values.update(quality.values(isin, session))
         today, prev = fo_today.get(isin), fo_prev.get(isin)
         values["fo_listed"] = None if fo is None else today is not None
         values["fo_session"] = today.trade_date if today is not None else None

@@ -17,6 +17,7 @@ from typing import Any
 
 from analyst.commons.digests import AnnouncementText
 from analyst.commons.inputs import (
+    BoardMeetingNotice,
     CorporateActionNotice,
     DealRecord,
     FoReading,
@@ -178,6 +179,7 @@ class ScreenWorld:
     deals: list[DealRecord] = field(default_factory=list)
     fo: list[FoReading] = field(default_factory=list)
     actions: list[CorporateActionNotice] = field(default_factory=list)
+    board_meetings: list[BoardMeetingNotice] = field(default_factory=list)
 
 
 class FakeScreenSource:
@@ -259,6 +261,10 @@ class FakeScreenSource:
     def corporate_actions(self, start: date, through: date) -> Dataset[CorporateActionNotice]:
         return self._serve("corporate_actions", self.world.actions, lambda n: n.knowable_date)
 
+    def board_meetings(self, start: date, through: date) -> Dataset[BoardMeetingNotice]:
+        rows = [n for n in self.world.board_meetings if n.knowable_date >= start]
+        return self._serve("board_meetings", rows, lambda n: n.knowable_date)
+
 
 def index_levels(calendar: Sequence[date], growth: str = "1.0005") -> list[IndexLevel]:
     g = Decimal(growth)
@@ -309,6 +315,41 @@ def screen_world() -> ScreenWorld:
             CALENDAR[-30],
             "Appointment",
             "Leader Ltd has informed the Exchange regarding Appointment of Mr A as CFO.",
+        ),
+    ]
+    world.board_meetings = [
+        BoardMeetingNotice(
+            isin=BREAKOUT,
+            meeting_date=FUTURE_SESSIONS[3],
+            purpose="Financial Results",
+            description="To consider and approve the financial results",
+            is_results=True,
+            knowable_date=CALENDAR[-2],
+        ),
+        BoardMeetingNotice(
+            isin=BREAKOUT,
+            meeting_date=FUTURE_SESSIONS[3],
+            purpose="Board Meeting Intimation",
+            description="Breakout Ltd has informed the Exchange about Board Meeting",
+            is_results=True,
+            knowable_date=CALENDAR[-2],
+        ),
+        # The last results meeting, and a fund-raising meeting that is not results.
+        BoardMeetingNotice(
+            isin=LEADER,
+            meeting_date=CALENDAR[-60],
+            purpose="Financial Results",
+            description=None,
+            is_results=True,
+            knowable_date=CALENDAR[-70],
+        ),
+        BoardMeetingNotice(
+            isin=LEADER,
+            meeting_date=FUTURE_SESSIONS[1],
+            purpose="Fund Raising",
+            description=None,
+            is_results=False,
+            knowable_date=CALENDAR[-3],
         ),
     ]
     outsider = _isin(999)
