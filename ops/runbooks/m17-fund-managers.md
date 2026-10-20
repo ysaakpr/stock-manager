@@ -43,6 +43,7 @@ kill-switch path; nothing here can reach a real broker. All times are **IST**.
 |---|---|---|
 | 09:15–15:30 | Market session D. Last night's staged orders fill at D's open (paper, `SimBroker`). | — |
 | 18:30 | EOD pipeline publishes D (the interlock reads it). | `eod_pipeline` |
+| 20:00 (retry 23:00) | NSE flows, bulk/block deals, F&O and, since Amendment 4, the board-meeting intimations (results dates) for meetings D−7 … D+90, merged into L1 `board_meetings`. | `nse_daily_capture` |
 | 19:50 / 20:50 / 21:30 | Same-evening TRI, **now including NIFTY 500** (the bench). | `tri_evening` |
 | 20:35 / 21:10 / 21:45 | Same-evening index close/PE/PB/yield (NSE close-all file) and India VIX into `macro_series`, catching up any missed session; a fire after D landed makes no request (M17.10). | `index_close_evening` |
 | 21:45 | The D13 momentum paper session (unrelated book). | `paper_session` |
@@ -130,14 +131,55 @@ with a new id (§7) — never edit a running one.
   Meeting it is what the evidence must at least show; graduating is the owner's call (decision #8);
 - `style_books[]`: each style book's return and drawdown over its manager's current window, and the
   primary's excess over it — secondary, never in a verdict;
+- in each `managers[]` row, the **invested sleeve** (Amendment 4 c — secondary, reported only,
+  never in a verdict): `sleeve_return_pct` is the book's return on the capital it had in names, net
+  of costs and without cash or its interest, chained over the sessions it held any
+  (`sleeve_sessions`); `sleeve_control_return_pct` is its control's NAV return over those same
+  sessions; `sleeve_excess_vs_control_pp` their difference; `average_exposure_pct` the mean share
+  of NAV in names over the window. A book 96–100 % in cash can beat its control on the primary
+  rule by holding cash; this says whether the names it did hold beat the control. Per session:
+  `P = nav − nav_prev − interest`, capital at work `E = (nav − cash) − P`, a session with `E > 0`
+  counts, and the sleeve chains `1 + P/E`;
 - `scoreboard_error`: the journal could not be scored (a missing mark, a malformed line) — no
   numbers are shown rather than partial ones;
 - `decisions[]`: the latest session's decision lines (what, never why — no rationale or prompt).
 
 The digest `~/campaign/m17/digest-<session>.md` holds the same numbers (a *Managers* table, a
-*Books against their controls* table, the graduation floor line and the *Style books* table) plus
+*Books against their controls* table, the graduation floor line, the *Style books* table and the
+*Invested sleeve against the control* table, with the same secondary figures) plus
 that session's decision table, mirror orders and refusals included. The job also checks its own ledger against a rebuild from the journal every session;
 a disagreement is logged `fm_job.scoreboard_mismatch` and reported as `scoreboard_error`.
+
+## Results dates, delivery and volume quality (Amendment 4)
+
+Every dossier carries, as of the session's evening (pre-registration §8 Amendment 4):
+
+- `next_results_date` / `last_results_date` — results board meetings the company intimated to
+  NSE, from L1 `board_meetings` (source `nse_board_meetings`, the feed behind NSE's Board Meetings
+  page). An intimation disseminated at or after 20:00 IST (the capture's fire) is knowable the
+  next day. S5's `results_board_meeting` facts (kind `BOARD_MEETING`) read the same rows: one per
+  name and meeting dated in the next 10 sessions.
+- `deliv_pct_avg_5`, `deliv_pct_avg_20` — mean daily delivery %, all sessions present.
+- `results_day`, `results_day_deliv_pct`, `results_day_volume_ratio`,
+  `results_day_volume_ratio_ex_matched` — the heavier-volume of the first session on or after the
+  last results meeting and the next one; ratios over the median of the 50 sessions before it.
+- `matched_deal_qty`, `volume_ex_matched`, `volume_ratio_day0_ex_matched` — the session's
+  bulk/block round trips (one client buying and selling the same name the same day,
+  `2 × min(bought, sold)`) taken out of its volume. L1 `deals` starts 2026-10-05: a session before
+  it, or one with no deal of any name captured, shows these as unknown, never zero.
+
+Operations:
+
+- **Nightly**: `nse_daily_capture` lands the feed with the flows on `www.nseindia.com`; its
+  `sync_state` row is `nse_board_meetings` per owed session (`/status/sources`, `/status/jobs`).
+  A FAILED row is retried by the 23:00 fire and then by the next evening (the window re-serves
+  every intimation, so a missed night is a delay, not a loss).
+- **Backfill / rebuild**: one ranged run, one request per calendar month under one lease —
+  `uv run python -m dataplatform.ingest.daily_capture backfill-board-meetings --from 2026-04-01 --to 2027-01-31`
+  (run on 2026-10-20: 10 requests, meetings 2026-04-01 … 2027-01-31). Never loop it per month.
+  L1 `board_meetings` is derived: if it must be rebuilt, move the dataset aside and re-run the
+  backfill for the same day (a window already in L0 that day costs no request), then let the
+  nightly capture re-merge its own payloads.
 
 ## The kill switch
 

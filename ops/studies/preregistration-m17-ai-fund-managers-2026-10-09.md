@@ -393,6 +393,125 @@ is adopted here, and each would need its own dated amendment before S0 (or a new
 - a red-flag dossier field classifying each announcement of the last 20 sessions against the
   integrity / related-party / dilution keyword table.
 
+### Amendment 4 (2026-10-20, before S0): results dates, delivery and volume quality, invested sleeve
+
+Owner-approved 2026-10-20. Evidence: the review of the dry-run buy decisions of 2026-10-12 to
+2026-10-15 (the `m17-dry` stream), which also gave Amendment 3. This amendment adopts three items
+from Amendment 3 (g)'s deferred list; nothing else. §2–§7 and Amendments 1–3 stand, except where
+this amendment adds to them. No playbook, threshold, judgment rule or decision contract changes.
+
+(a) **Results dates (new source, Commons, prompt).**
+
+*Evidence.* About 67 of the managers' 187 web queries (36 %), and 35 of FM-SWING-BRK's 53 (66 %),
+went on finding results dates, and BRK's "no results within 3 sessions" check became paralysis in
+results season. S5's `results_board_meeting` category never fired: 0 of 8,743 NSE announcements in
+L1 for 2026 were board-meeting intimations, because NSE publishes them on a separate feed.
+
+*Source.* `nse_board_meetings`: `www.nseindia.com/api/corporate-board-meetings`, the feed behind
+NSE's own Board Meetings page (verified 2026-10-20; frozen fixture
+`tests/fixtures/nse_board_meetings/json_v1/`). One record per intimation: ISIN, meeting date,
+purpose, the company's one-line statement and NSE's dissemination time. The date parameters filter
+on the meeting date. `nse_daily_capture` lands it every weekday evening (20:00 IST, retry 23:00)
+for meetings dated D − 7 … D + 90, into L0 and then L1 `board_meetings`, with a `sync_state` row
+per owed session (status API). Backfill: one ranged run on 2026-10-20, meetings 2026-04-01 …
+2027-01-31, one request per calendar month (10 requests, 13,835 rows), so every name's last results
+meeting is in the lake (a half-yearly reporter's last one was in May).
+
+*Definitions.*
+- An intimation is **knowable** on its dissemination date (IST), or on the next day when NSE
+  disseminated it at or after 20:00 IST, the capture's fire time. L1 is partitioned by that date and
+  every read crosses the PIT guard as of the session, so a dossier field is what was known by the
+  session's evening, and a replay reads the same rows.
+- A **results meeting** is one whose purpose or statement says "financial result(s)" (about half
+  carry NSE's generic purpose "Board Meeting Intimation" and say it only in the statement).
+- `next_results_date` = the earliest results-meeting date after the session; `last_results_date` =
+  the latest on or before it; `None` when none was intimated.
+- Known limitation: the feed lists the current state, and a company that moves a meeting keeps its
+  earlier intimation in L1, so `next_results_date` can show a date the company has since
+  postponed. The prompt says a company can still move a meeting.
+- **S5** lists one `BOARD_MEETING` fact per eligible name and results meeting dated in the next
+  `S5_MEETING_SESSIONS` (10) sessions, read from this source (earliest intimation; a specific
+  purpose preferred for the text). An announcement no longer feeds the category. This is S5's
+  study §2 rule, made to read the data that exists. On 2026-10-19 it lists 232 meetings, and the
+  digest scope (screens ∪ shortlist) grows from 140 to 355 names during results season.
+- **Prompt.** `manager.md` names `next_results_date` and `last_results_date` as facts in each
+  dossier (and drops "confirmed results dates" from the list of what the lake cannot say). No rule
+  refers to them.
+
+(b) **Delivery and volume quality (Commons, prompt).**
+
+*Evidence.* Delivery share is the strongest single leg of the M10.7 composite: +3.46 % over the full
+window (t 6.0), though only t 1.8 since 2023. The dossier carried only the session's `deliv_pct`
+and a delivered-quantity z-score. Swaraj Engines (INE277A01016), bought by FM-SWING-EVT on
+2026-10-13: its results-day volume was 214 × the 50-session median, with delivery at 5.0 % (9.5 %
+the next day), and one client (BLITZQUANT RESEARCH LLP) bought and sold 70,956 shares each side in
+bulk deals that day. S4's "day-0 volume ≥ 2 ×" passed on churn. Netting is one case and a
+hypothesis; on Swaraj it removes a tenth of the volume (214.0 × → 192.5 ×), and the delivery
+figure is the louder signal. Both are shown, neither is a rule.
+
+*Definitions* (`analyst/commons/volume_quality.py`; all over the name's split/bonus-adjusted bars
+aligned to NSE sessions, all PIT as of the session):
+- `deliv_pct_avg_5`, `deliv_pct_avg_20`: the arithmetic mean of the daily delivery % (NSE
+  `deliv_pct`, in percent) over the last **5** and **20** sessions, the session included; every one
+  must have printed with a delivery figure, or `None`. The two windows are pre-registered here.
+- `results_day`: of the first session on or after `last_results_date` and the session after it,
+  the one with the larger traded volume (the earlier on a tie); both must have printed by the
+  session. `results_day_deliv_pct` is its delivery %; `results_day_volume_ratio` its volume over
+  the median volume of the 50 sessions before it (all 50 present).
+- A **matched round trip**: a bulk or block deal client (name upper-cased, whitespace collapsed)
+  that both bought and sold the name on the same session; it put `2 × min(bought, sold)` shares on
+  the tape. A raw deal quantity is put on the bar's adjusted basis by `raw_close / close`.
+- `matched_deal_qty` (raw shares), `volume_ex_matched` and `volume_ratio_day0_ex_matched` (over the
+  same 50-session median as `volume_ratio_day0`) for the session;
+  `results_day_volume_ratio_ex_matched` for the results day.
+- Deals are known for a session only when L1 `deals` holds a deal of any name on it. L1 `deals`
+  starts on 2026-10-05 (the nightly capture's first evening; NSE serves the current session only),
+  so for a results day before then the net figure is `None`, never the gross one. No series was
+  invented to fill it.
+- **Prompt.** The research round's description of a dossier names these fields as facts. No rule
+  refers to them.
+
+(c) **Secondary metric: the invested sleeve against the control (reporting only).**
+
+*Evidence.* The manager books were 96–100 % cash over the four dry sessions, and every one "beat"
+its control by about 3 pp from 2026-10-12 to 2026-10-15 (control −3.19 %) without picking a stock.
+The primary rule then measures a cash bet, not selection.
+
+*Definition* (`analyst/fundmanager/scoreboard.py`, per manager book and window). On each session
+`t`, `P_t = nav_t − nav_{t−1} − interest_t` (the session's P&L outside cash interest: prices,
+dividends, costs; `nav` before S0 is the opening capital) and `E_t = (nav_t − cash_t) − P_t` (the
+capital in names after the open's fills). A session with `E_t > 0` is invested.
+`sleeve_return_pct` chains `1 + P_t / E_t` over the invested sessions;
+`sleeve_control_return_pct` chains the control book's `nav_t / nav_{t−1}` over the same sessions;
+`sleeve_excess_vs_control_pp` is the difference. `average_exposure_pct` is the mean of
+`(nav_t − cash_t) / nav_t` over the window's sessions, reported beside it so the sleeve can be read.
+With no invested session the sleeve figures are `None`.
+
+*Status.* **Reported only, never in a verdict.** It is in the daily digest (*Invested sleeve
+against the control*) and in each `/status/managers` `managers[]` row. §6's rule, its thresholds,
+Brier and the graduation floor are unchanged and do not read it.
+
+(d) **Hashes and the dry run.** (a) and (b) change `prompts/manager.md`, and (a) changes the S5 rule,
+so `SCREENS_RULE_HASH` and every manager's `mandate_hash` change. S1–S4, the features and the
+regime are byte-identical, so the pinned base-rate table (digest `1f61027a…`, cells keyed on
+S1–S4, COMPOSITE and NONE) is still valid and is not rebuilt; the screens rule hash recorded inside
+it is the pre-amendment one. Dry sessions decided before this amendment count toward wiring and
+timing only: **M17.8's "5 consecutive dry sessions" must include at least 3 consecutive sessions
+decided under the Amendment 4 mandate hashes before S0**, which resets Amendment 3 (f)'s count.
+2026-10-20 is an NSE holiday (Dussehra), so the first three are 2026-10-21, 22 and 23, and the
+earliest S0 is 2026-10-26, on the owner's go.
+
+(e) **Recorded and deferred — not part of this amendment.** Still open from the review, each
+needing its own dated amendment before S0 (or a new manager id after):
+- price invalidations no tighter than about 1.5 × ATR, or confirmed over N closes, enforced in the
+  contract like the stop rule;
+- the `EARNINGS_MOMENTUM` label only within `sessions_since_day0 ≤ 30`, S4's own window, with that
+  field shown in the dossier;
+- a red-flag dossier field classifying each announcement of the last 20 sessions against the
+  integrity / related-party / dilution keyword table;
+- a `sessions_to_results` count and a delivery-share percentile against the name's own year (the
+  review's wider forms of (a) and (b); only the dates and the means are adopted here).
+
 ## 9. Owner confirmation
 
 | Item | Value | Confirmed |
