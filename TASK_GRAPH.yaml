@@ -3414,12 +3414,42 @@ tasks:
     - "make check is green"
   verify: "uv run pytest tests/unit/test_fm_runtime.py tests/unit/test_fm_rails_property.py tests/unit/test_daily_capture.py -q"
 
+- id: M17.16
+  title: Pre-registration Amendment 4 — results dates, delivery and volume quality, invested-sleeve metric
+  milestone: M17
+  module: A10
+  autonomy: AUTO
+  deps: [M17.15]
+  spec: |
+    Pre-registration §8 Amendment 4 (owner approved 2026-10-20), from the 2026-10-16 buy review:
+    - source: NSE board-meeting intimations (`nse_board_meetings`, www.nseindia.com
+      corporate-board-meetings), landed nightly by nse_daily_capture into L0 and L1 by knowable date
+      (dissemination date, next day from 20:00 IST), sync_state per owed session, frozen fixture,
+      and a ranged backfill (one request per month under one lease).
+    - dossier: next_results_date and last_results_date per ISIN, as known by the session; S5's
+      results_board_meeting category reads the new source.
+    - dossier: deliv_pct_avg_5 / _20, results-day delivery share, and volume net of matched
+      bulk/block round trips (same client, same day, both sides) on the session and on results day.
+    - secondary metric (reported only, never in a verdict): each manager book's invested sleeve
+      against its control over the same days, in the digest and /status/managers.
+    Items 1-2 change the dossier and the prompt, so every mandate_hash changes; M17.8 needs >= 3
+    dry sessions under the Amendment 4 hashes.
+  deliverables: [dataplatform/ingest/nse/board_meetings.py, dataplatform/ingest/daily_capture.py, analyst/commons/dossier.py, analyst/commons/screens.py, analyst/fundmanager/scoreboard.py, analyst/fundmanager/prompts/manager.md, ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md, ops/runbooks/m17-fund-managers.md]
+  acceptance:
+    - "an intimation disseminated after the 20:00 IST capture is knowable only the next day; dropping the cut-off fails a test"
+    - "the dossier's results dates never read an intimation knowable after the session; inverting the PIT bound fails a test"
+    - "S5 lists a results meeting from the board-meetings source"
+    - "matched bulk/block round trips are removed from session volume; counting one side only fails a test"
+    - "the invested-sleeve metric is reported and never changes a verdict"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_nse_board_meetings.py tests/unit/test_daily_capture.py tests/unit/test_commons_screens.py tests/unit/test_fm_scoreboard.py -q"
+
 - id: M17.8
   title: Five-session dry run, then the forward clock (S0)
   milestone: M17
   module: A10
   autonomy: NEEDS_GO
-  deps: [M17.7, M17.10, M17.11, M17.12, M17.13, M17.14, M17.15]
+  deps: [M17.7, M17.10, M17.11, M17.12, M17.13, M17.14, M17.15, M17.16]
   spec: |
     Run 5 consecutive live sessions in `--dry-run` on the real lake with the Claude CLI. Write
     `ops/gates/M17-dry-run-<date>.md` covering, per manager:

@@ -50,8 +50,11 @@ decision.
   already in the price. A thesis built on news has to explain why the *rest* of the move hasn't
   happened yet. Drift after news is most plausible in smaller, less-covered names and after bad news.
 - **The lake cannot tell you these things:** promoter pledge levels, MF/FII/DII holdings, cash flow,
-  absolute debt, consensus estimates, and confirmed results dates. When one of them matters to a
-  thesis, spend a web query on it or treat it as unknown. Never assume it.
+  absolute debt and consensus estimates. When one of them matters to a thesis, spend a web query on
+  it or treat it as unknown. Never assume it.
+- **Results dates are in each dossier.** `next_results_date` and `last_results_date` are the board
+  meetings to consider financial results that the company intimated to NSE, as known by this
+  session's evening; `None` means none was intimated. A company can still move a meeting.
 
 ## What the evidence says works at your horizons
 
@@ -235,7 +238,13 @@ You will receive the dossiers and snapshots next round.
 The dossiers and snapshots you requested are below. Each dossier is the platform's computed view of
 one stock: price and volume structure, momentum, delivery, F&O positioning where it applies,
 fundamentals and their trend, earnings surprise and the results-day reaction, recent announcements,
-and corporate actions due.
+and corporate actions due. It also carries the last and next results dates; the mean delivery %
+over 5 and 20 sessions (`deliv_pct_avg_5`, `deliv_pct_avg_20`, in percent like `deliv_pct`); the
+results day's delivery % and volume ratio (`results_day`, `results_day_deliv_pct`,
+`results_day_volume_ratio`); and volume net of matched bulk/block round trips, where one client
+bought and sold the same shares that session (`matched_deal_qty`, `volume_ex_matched`,
+`volume_ratio_day0_ex_matched`, `results_day_volume_ratio_ex_matched`). Deals are captured from
+2026-10-05; a session before that, or one with no captured deals, shows these as unknown.
 
 {{research_bundles}}
 

@@ -3,7 +3,8 @@
 One markdown page per session: where the test stands (S0, "*k* of 8 books passed", the Amendment 2
 (e) graduation floor), each manager book's §6 numbers against its own control and the bench, each
 manager's both/one/neither and its Brier (once, on its decisions), the secondary style books, each
-book's latest mark, and the session's decisions. It renders a `Scoreboard` and the session's
+manager book's invested sleeve against its control (Amendment 4 c, secondary), each book's latest
+mark, and the session's decisions. It renders a `Scoreboard` and the session's
 `DecisionLine` rows and nothing else, so it holds no rationale, no prompt and no evidence text —
 what was decided, never what the model read. A voided decision shows the contract's reason codes
 (``Refused for``), never the breach messages. A held name suspended on the session (M17.13) is
@@ -95,6 +96,23 @@ def _style_row(style: StyleBookScore) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
+def _sleeve_row(score: BookScore, window: WindowScore | None) -> str:
+    if window is None:
+        return f"| {score.book_id} | {score.control_id} | " + " | ".join(("—",) * 6) + " |"
+    sec = window.secondary
+    cells = (
+        score.book_id,
+        score.control_id,
+        f"{window.label} {window.sessions}/{window.end.isoformat()}",
+        str(sec.sleeve_sessions),
+        _num(sec.average_exposure_pct, " %"),
+        _num(sec.sleeve_return_pct, " %"),
+        _num(sec.sleeve_control_return_pct, " %"),
+        _num(sec.sleeve_excess_vs_control_pp, " pp"),
+    )
+    return "| " + " | ".join(cells) + " |"
+
+
 def _decision_row(line: DecisionLine) -> str:
     event = "" if line.event is None else f" ({line.event})"
     cells = (
@@ -164,6 +182,20 @@ def render_digest(
         "|---|---|---|---|---|---|---|",
     ]
     lines += [_style_row(style) for style in scoreboard.style_books]
+    lines += [
+        "",
+        "## Invested sleeve against the control (secondary — never used for pass/fail)",
+        "",
+        "The book's return on the capital it had in names, net of costs and without cash or its "
+        "interest, chained over the sessions it held any; the control's NAV return over those same "
+        "sessions (pre-registration Amendment 4 c).",
+        "",
+        "| Book | Control | Window | Invested sessions | Mean exposure | Sleeve return "
+        "| Control, same sessions | Sleeve excess vs control |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for score in scoreboard.book_scores:
+        lines.append(_sleeve_row(score, score.extension or score.primary))
     lines += [
         "",
         "## Books",

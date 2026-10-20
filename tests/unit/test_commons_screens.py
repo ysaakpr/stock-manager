@@ -879,3 +879,80 @@ def test_the_fo_block_reads_the_aggregates(dossiers: Any) -> None:
     assert fields["fo_oi_buildup"] == "LONG_BUILDUP"  # spot 100 -> 101, OI +500
     assert fields["fo_pcr_oi"] == Decimal("0.9") and fields["fo_rollover_pct"] == Decimal("0.2")
     assert dossiers[1].fields["fo_listed"] is False
+
+
+# ── Amendment 4 (M17.16): results dates, S5 from board meetings, delivery and volume quality ─────
+
+
+def test_s5_lists_one_results_meeting_from_the_board_meeting_feed(built: CommonsScreens) -> None:
+    meetings = [e for e in built.s5 if "results_board_meeting" in e.categories]
+    # Two intimations of one meeting are one fact; the fund-raising meeting is not results; the
+    # keyword-matched announcement 9003 no longer feeds the category.
+    assert [(e.isin, e.kind.value, e.meeting_date) for e in meetings] == [
+        (BREAKOUT, "BOARD_MEETING", FUTURE_SESSIONS[3])
+    ]
+    assert meetings[0].subject is not None and meetings[0].subject.startswith("Financial Results")
+    assert not any(e.ref == "9003" for e in built.s5)
+
+
+def test_s5_without_the_board_meeting_feed_is_a_gap() -> None:
+    screens = _build(missing=frozenset({"board_meetings"}))
+    assert "board_meetings:board_meetings" in {g.source for g in screens.gaps}
+    assert not any("results_board_meeting" in e.categories for e in screens.s5)
+
+
+def test_a_future_dated_board_meeting_intimation_trips_the_pit_guard() -> None:
+    world = screen_world()
+    world.board_meetings.append(
+        replace(world.board_meetings[0], knowable_date=SESSION + timedelta(days=1))
+    )
+    with pytest.raises(PitError):
+        _build(world)
+
+
+def test_the_dossier_carries_the_results_dates_known_by_the_session(dossiers: Any) -> None:
+    leader = dossiers[0].fields
+    assert leader["last_results_date"] == CALENDAR[-60]
+    assert leader["next_results_date"] is None  # the only future meeting is fund raising
+    assert dossiers[1].fields["next_results_date"] is None
+
+
+def test_a_meeting_intimated_after_the_session_is_not_in_the_dossier(
+    built: CommonsScreens,
+) -> None:
+    """Fails if the dossier reads past the session: the PIT guard must refuse the intimation."""
+    world = screen_world()
+    world.board_meetings.append(
+        replace(
+            world.board_meetings[2],
+            meeting_date=FUTURE_SESSIONS[5],
+            knowable_date=SESSION + timedelta(days=1),
+        )
+    )
+    with pytest.raises(PitError):
+        build_dossiers(
+            [LEADER], screens=built, sheets=sheets_for(world), source=FakeScreenSource(world)
+        )
+
+
+def test_the_dossier_carries_delivery_and_volume_quality(built: CommonsScreens) -> None:
+    world = screen_world()
+    # A matched round trip on the session: one client buys and sells 30,000 shares.
+    for side in ("BUY", "SELL"):
+        world.deals.append(
+            replace(world.deals[0], client_name="ROUND  trip llp", side=side, quantity=30_000)
+        )
+    (leader,) = build_dossiers(
+        [LEADER], screens=built, sheets=sheets_for(world), source=FakeScreenSource(world)
+    )
+    f = leader.fields
+    assert f["deliv_pct_avg_5"] == Decimal("40") and f["deliv_pct_avg_20"] == Decimal("40")
+    assert f["results_day"] == CALENDAR[-60]  # equal volumes: the first session on/after
+    assert f["results_day_deliv_pct"] == Decimal("40")
+    assert f["results_day_volume_ratio"] == Decimal("1")
+    # No deals were captured on the results day: unknown, never zero.
+    assert f["results_day_volume_ratio_ex_matched"] is None
+    # 200,000 traded; the round trip put 60,000 on the tape (the one-sided bulk buy does not count).
+    assert f["matched_deal_qty"] == 60_000
+    assert f["volume_ex_matched"] == Decimal("140000")
+    assert f["volume_ratio_day0_ex_matched"] == Decimal("0.7")

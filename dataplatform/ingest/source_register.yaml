@@ -1366,6 +1366,53 @@ sources:
     candidate_alternatives: []
     owner_task: M3.8
 
+  - id: nse_board_meetings
+    plan_row: "Corporate announcements"
+    description: >-
+      NSE board-meeting intimations (meeting date, purpose, company statement, dissemination
+      time) for equities - the feed behind NSE's own Board Meetings page. Results meetings are
+      not on nse_announcements (M17.16, pre-registration Amendment 4).
+    host: www.nseindia.com
+    method: GET
+    url_template: "https://www.nseindia.com/api/corporate-board-meetings?index=equities&from_date={DD-MM-YYYY}&to_date={DD-MM-YYYY}"
+    verified_url: "https://www.nseindia.com/api/corporate-board-meetings?index=equities&from_date=20-10-2026&to_date=20-11-2026"
+    cadence: daily
+    era: {start: null, end: null}
+    fallback: []
+    required_headers:
+      User-Agent: browser
+      Referer: "https://www.nseindia.com/"
+      Accept: "application/json, text/plain, */*"
+      X-Requested-With: XMLHttpRequest
+    needs_session_cookie: true
+    parser: {id: dataplatform.ingest.nse.board_meetings, task: M17.16}
+    robots_notes: www.nseindia.com allows / except /market-data-test.
+    pit_notes: >-
+      Natural PIT - bm_timestamp is the exchange dissemination time to the second. The date
+      window filters on the meeting date (bm_date), not the filing date, so each capture
+      re-serves every intimation for meetings in the window; L1 merges by knowable date
+      (dissemination date, or the next day from 20:00 IST, the nightly capture's fire time).
+      A rescheduled meeting keeps its earlier intimation row as well.
+    status: VERIFIED
+    verified_at: 2026-10-20T09:37:23+05:30
+    last_http_status: 200
+    sample_bytes: 777612
+    content_type: application/json; charset=utf-8
+    sample_sha256: 162675a589e1081bac40ab1af227769b2390d67a0eef50a31aeaf78f2833b1c1
+    parse_check: >-
+      JSON array, 1,001 records for meetings 20-Oct..20-Nov-2026 (763 + 238 when split at
+      1-Nov, so no row cap); keys bm_symbol, bm_date, bm_purpose, bm_desc, sm_isin,
+      bm_timestamp, sm_name, sm_indusrty, attachment, ixbrl, oriiginalMeetingDate,
+      proposedMeetingDate. ISIN native on every row. Purpose "Board Meeting Intimation" carries
+      "financial results" only in bm_desc on about half the results rows.
+    fixture:
+      frozen: true
+      task: M17.16
+      path: "tests/fixtures/nse_board_meetings/json_v1/corporate_board_meetings_20261020_20261120.json"
+    failure_note: null
+    candidate_alternatives: []
+    owner_task: M17.16
+
   - id: bse_announcements
     plan_row: "Corporate announcements"
     description: BSE announcements feed, paged by date.

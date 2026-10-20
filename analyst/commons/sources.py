@@ -55,6 +55,7 @@ import pyarrow.dataset as pads
 
 from analyst.commons.digests import AnnouncementText
 from analyst.commons.inputs import (
+    BoardMeetingNotice,
     CorporateActionNotice,
     DealRecord,
     FoReading,
@@ -79,6 +80,7 @@ from dataplatform.identity.master import Exchange
 from dataplatform.ingest.announcements import ANNOUNCEMENTS_DATASET, iter_l1
 from dataplatform.ingest.indices import parse_constituents
 from dataplatform.ingest.models import ISIN_PATTERN
+from dataplatform.ingest.nse import board_meetings as nse_board_meetings
 from dataplatform.ingest.nse.deals import DEALS_DATASET
 from dataplatform.ingest.pr_bundle_l1 import CA_BROADCASTS_DATASET, load_session_identity
 from dataplatform.ingest.xbrl.models import Nature
@@ -1100,6 +1102,33 @@ class LakeCommonsSource:
         )
         return Dataset.declaring(
             "commons.corporate_actions", records, knowable_date=lambda n: n.knowable_date
+        )
+
+    def board_meetings(self, start: date, through: date) -> Dataset[BoardMeetingNotice]:
+        """Every NSE board-meeting intimation knowable in ``[start, through]`` (M17.16).
+
+        Read through `board_meetings.read_pit`, whose knowable-date partitions are the PIT guard:
+        a partition dated after ``through`` is never opened.
+        """
+        try:
+            rows = nse_board_meetings.read_pit(through, start=start, data_root=self._data_root)
+        except FileNotFoundError as exc:
+            raise SourceUnavailableError(
+                nse_board_meetings.BOARD_MEETINGS_DATASET, str(exc)
+            ) from exc
+        notices = [
+            BoardMeetingNotice(
+                isin=row.isin,
+                meeting_date=row.meeting_date,
+                purpose=row.purpose,
+                description=row.description,
+                is_results=row.is_results,
+                knowable_date=row.knowable_date,
+            )
+            for row in rows
+        ]
+        return Dataset.declaring(
+            "commons.board_meetings", notices, knowable_date=lambda n: n.knowable_date
         )
 
 

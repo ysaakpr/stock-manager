@@ -8,7 +8,9 @@ nine, in four jobs (`dataplatform.scheduler.registry`):
 
 * `nse_daily_capture` — FII/DII flows, bulk deals, block deals (perishable) and the current
   session's F&O bhavcopy (dated, but the historical backfill is a separate campaign's) with its
-  L2 `fo_aggregates`, and a zero-request heal of any recent session whose L2 was never derived.
+  L2 `fo_aggregates`, and a zero-request heal of any recent session whose L2 was never derived;
+  and, since M17.16, the board-meeting intimations for meetings around the session (results
+  dates for the M17 dossier), merged into L1 by knowable date.
 * `shareholding_poll` — the shareholding master (current quarter-end's filings only), daily.
 * `announcements_capture` — NSE and BSE announcements for the previous calendar day, complete.
 * `news_capture` — the ratified curated RSS feeds and a bounded GDELT export sample.
@@ -78,7 +80,7 @@ from dataplatform.ingest.fetcher import Fetcher, FetchHTTPError, leased_fetcher
 from dataplatform.ingest.lease import HostBusyError
 from dataplatform.ingest.models import IngestError, ParseError
 from dataplatform.ingest.news import NewsBatch, write_l1_merged
-from dataplatform.ingest.nse import deals, fii_dii, fo_bhavcopy
+from dataplatform.ingest.nse import board_meetings, deals, fii_dii, fo_bhavcopy
 from dataplatform.ingest.source_register import Source, SourceRegister, Status
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.logging import configure_logging, get_logger
@@ -107,7 +109,9 @@ __all__ = [
     "CaptureStatus",
     "DailyCaptureError",
     "FetcherFactory",
+    "backfill_board_meetings",
     "capture_announcements",
+    "capture_board_meetings",
     "capture_deals",
     "capture_fii_dii",
     "capture_fo_bhavcopy",
@@ -142,6 +146,7 @@ NSE_DAILY_SOURCES: Final[tuple[str, ...]] = (
     deals.BULK_SOURCE_ID,
     deals.BLOCK_SOURCE_ID,
     fo_bhavcopy.FO_SOURCE_ID,
+    board_meetings.SOURCE_ID,
 )
 SHAREHOLDING_SOURCES: Final[tuple[str, ...]] = (shareholding.SOURCE_ID,)
 ANNOUNCEMENT_SOURCES: Final[tuple[str, ...]] = (ann.NSE_SOURCE_ID, ann.BSE_SOURCE_ID)
@@ -810,8 +815,157 @@ def heal_fo_aggregates(ctx: CaptureContext, owed: date) -> list[CaptureOutcome]:
     return rederive_fo_aggregates(ctx, sessions[-FO_L2_HEAL_SESSIONS:], only_missing=True)
 
 
+# ── board-meeting intimations (M17.16) ─────────────────────────────────────────────────────────
+
+
+def capture_board_meetings(ctx: CaptureContext, fetcher: Fetcher, *, owed: date) -> CaptureOutcome:
+    """Land the board-meeting intimations for meetings around ``owed`` and publish ``owed``.
+
+    What it does: nothing when ``owed`` is already PUBLISHED; otherwise one request for meetings
+    dated ``owed - CAPTURE_DAYS_BEFORE`` .. ``owed + CAPTURE_DAYS_AFTER`` (reused from L0 when
+    held), parsed and merged into L1 by knowable date (`board_meetings.merge_l1`). The feed is a
+    current-state list, so tonight's payload also re-serves every earlier intimation in the window;
+    the merge keeps what is held and adds what is new.
+    What it never does: re-date an intimation (its dissemination time fixes its knowable date), or
+    drop a row an earlier capture landed.
+    """
+    source = board_meetings.SOURCE_ID
+    if _published(ctx, source, owed):
+        return CaptureOutcome(source, owed, CaptureStatus.ALREADY_PUBLISHED)
+    start = owed - timedelta(days=board_meetings.CAPTURE_DAYS_BEFORE)
+    end = owed + timedelta(days=board_meetings.CAPTURE_DAYS_AFTER)
+    filename = board_meetings.l0_filename(owed, start, end)
+    try:
+        ref, requests = _fetch_or_reuse(
+            ctx,
+            fetcher,
+            source,
+            board_meetings.board_meetings_url(start, end, ctx.register),
+            owed,
+            filename,
+        )
+    except Exception as exc:
+        return _fail(ctx, source, owed, f"{type(exc).__name__}: {exc}")
+    try:
+        rows = board_meetings.parse_l0(ctx.l0, ref)
+    except Exception as exc:
+        return _fail(ctx, source, owed, f"{type(exc).__name__}: {exc}", requests=requests)
+    return _land(
+        ctx,
+        source,
+        owed,
+        ref,
+        lambda: _merge_board_meetings(rows, ctx, ref),
+        requests=requests,
+    )
+
+
+def _merge_board_meetings(
+    rows: Sequence[board_meetings.BoardMeetingRow], ctx: CaptureContext, ref: L0Ref
+) -> int:
+    added = board_meetings.merge_l1(rows, data_root=ctx.data_root)
+    _LOG.info(
+        "capture.board_meetings_merged",
+        source=board_meetings.SOURCE_ID,
+        l0_key=ref.key,
+        rows=len(rows),
+        added=added,
+        results=sum(1 for row in rows if row.is_results),
+        state="NORMALIZED",
+    )
+    return len(rows)
+
+
+def _month_windows(start: date, end: date) -> list[tuple[date, date]]:
+    windows: list[tuple[date, date]] = []
+    cursor = start
+    while cursor <= end:
+        nxt = date(cursor.year + cursor.month // 12, cursor.month % 12 + 1, 1)
+        windows.append((cursor, min(end, nxt - timedelta(days=1))))
+        cursor = nxt
+    return windows
+
+
+def backfill_board_meetings(ctx: CaptureContext, start: date, end: date) -> CaptureReport:
+    """One ranged backfill of meetings dated ``start``..``end``: one request per calendar month.
+
+    What it does: under one lease of ``www.nseindia.com`` (one fetcher, so the register's request
+    spacing holds across the whole range), fetches each month's window into L0 under today's date
+    (a window already in L0 today costs nothing), parses it and merges it into L1 by knowable date.
+    What it never does: write a `sync_state` row (the nightly job owns those, per owed session),
+    or loop processes — a shell loop of single-month runs would reset the rate limiter each time.
+    """
+    report = CaptureReport(job="board_meetings_backfill")
+    source = board_meetings.SOURCE_ID
+    today = ctx.clock.today()
+    windows = _month_windows(start, end)
+
+    def body(fetcher: Fetcher) -> list[CaptureOutcome]:
+        out: list[CaptureOutcome] = []
+        for first, last in windows:
+            filename = f"board_meetings_backfill_{first:%Y%m%d}-{last:%Y%m%d}.json"
+            try:
+                ref, spent = _fetch_or_reuse(
+                    ctx,
+                    fetcher,
+                    source,
+                    board_meetings.board_meetings_url(first, last, ctx.register),
+                    today,
+                    filename,
+                )
+                rows = board_meetings.parse_l0(ctx.l0, ref)
+                added = board_meetings.merge_l1(rows, data_root=ctx.data_root)
+            except Exception as exc:  # containment: reported per window, the range goes on
+                _LOG.error(
+                    "capture.board_meetings_backfill_failed",
+                    source=source,
+                    window=f"{first.isoformat()}..{last.isoformat()}",
+                    error=f"{type(exc).__name__}: {exc}",
+                    state="FAILED",
+                )
+                out.append(
+                    CaptureOutcome(
+                        source, first, CaptureStatus.FAILED, detail=f"{type(exc).__name__}: {exc}"
+                    )
+                )
+                continue
+            _LOG.info(
+                "capture.board_meetings_backfilled",
+                source=source,
+                window=f"{first.isoformat()}..{last.isoformat()}",
+                l0_key=ref.key,
+                rows=len(rows),
+                added=added,
+                state="NORMALIZED",
+            )
+            out.append(
+                CaptureOutcome(
+                    source,
+                    first,
+                    CaptureStatus.CAPTURED,
+                    rows=len(rows),
+                    requests=spent,
+                    detail=f"{added} new row(s), meetings {first:%Y-%m-%d}..{last:%Y-%m-%d}",
+                )
+            )
+        return out
+
+    try:
+        with ctx.fetchers(
+            _hosts(ctx.register, source),
+            f"board meetings backfill {start.isoformat()}..{end.isoformat()}",
+        ) as fetcher:
+            report.outcomes += body(fetcher)
+    except HostBusyError as exc:
+        report.outcomes.append(
+            CaptureOutcome(source, start, CaptureStatus.FAILED, detail=f"HostBusyError: {exc}")
+        )
+    return report
+
+
 def run_nse_daily_capture(ctx: CaptureContext) -> CaptureReport:
-    """`nse_daily_capture`: flows on www.nseindia.com, deals and F&O on the archive host.
+    """`nse_daily_capture`: flows and board meetings on www.nseindia.com, deals and F&O on the
+    archive host.
 
     Each host is leased on its own, so a campaign holding the archive host fails the deals and F&O
     rows for tonight and leaves the flows — the most perishable of the four — to land regardless.
@@ -820,8 +974,11 @@ def run_nse_daily_capture(ctx: CaptureContext) -> CaptureReport:
     owed = owed_session(ctx.calendar, ctx.clock.now())
     command = f"nse daily capture {owed.isoformat()}"
 
-    def flows(fetcher: Fetcher) -> list[CaptureOutcome]:
-        return [capture_fii_dii(ctx, fetcher, owed=owed)]
+    def www(fetcher: Fetcher) -> list[CaptureOutcome]:
+        return [
+            capture_fii_dii(ctx, fetcher, owed=owed),
+            capture_board_meetings(ctx, fetcher, owed=owed),
+        ]
 
     def archive(fetcher: Fetcher) -> list[CaptureOutcome]:
         return [
@@ -830,18 +987,19 @@ def run_nse_daily_capture(ctx: CaptureContext) -> CaptureReport:
         ]
 
     archive_sources = (deals.BULK_SOURCE_ID, deals.BLOCK_SOURCE_ID, fo_bhavcopy.FO_SOURCE_ID)
-    if not _published(ctx, fii_dii.SOURCE_ID, owed):
+    www_sources = (fii_dii.SOURCE_ID, board_meetings.SOURCE_ID)
+    if not all(_published(ctx, source, owed) for source in www_sources):
         report.outcomes += _with_fetcher(
             ctx,
-            _hosts(ctx.register, fii_dii.SOURCE_ID),
+            _hosts(ctx.register, *www_sources),
             command,
-            [(fii_dii.SOURCE_ID, owed)],
-            flows,
+            [(source, owed) for source in www_sources if not _published(ctx, source, owed)],
+            www,
         )
     else:
-        report.outcomes.append(
-            CaptureOutcome(fii_dii.SOURCE_ID, owed, CaptureStatus.ALREADY_PUBLISHED)
-        )
+        report.outcomes += [
+            CaptureOutcome(source, owed, CaptureStatus.ALREADY_PUBLISHED) for source in www_sources
+        ]
     if not all(_published(ctx, source, owed) for source in archive_sources):
         report.outcomes += _with_fetcher(
             ctx,
@@ -1495,11 +1653,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     ``rederive-fo-aggregates`` rebuilds L2 `fo_aggregates` from L1 `fo_contracts` for every session
     in the range (both bounds required; one ranged run, not a loop of single dates). Both run
     against the configured lake and Postgres (read for the D2 master), with no fetcher at all.
+    ``backfill-board-meetings`` is the one fetching command: meetings dated ``--from``..``--to``,
+    one request per calendar month under a single lease of ``www.nseindia.com`` (M17.16).
     Exit 0 when every date landed, 1 when any failed.
     """
     parser = argparse.ArgumentParser(
         prog="python -m dataplatform.ingest.daily_capture",
-        description="Offline re-derivation of daily-capture datasets from L0 (zero requests).",
+        description=(
+            "Offline re-derivation of daily-capture datasets from L0 (zero requests), and the "
+            "ranged board-meetings backfill (M17.16)."
+        ),
     )
     commands = parser.add_subparsers(dest="command", required=True)
     rederive = commands.add_parser(
@@ -1512,6 +1675,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     fo.add_argument("--from", dest="start", type=date.fromisoformat, required=True)
     fo.add_argument("--to", dest="end", type=date.fromisoformat, required=True)
+    bm = commands.add_parser(
+        "backfill-board-meetings",
+        help="one ranged fetch of NSE board-meeting intimations by meeting date (M17.16)",
+    )
+    bm.add_argument("--from", dest="start", type=date.fromisoformat, required=True)
+    bm.add_argument("--to", dest="end", type=date.fromisoformat, required=True)
     args = parser.parse_args(argv)
     configure_logging()
 
@@ -1521,14 +1690,23 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     settings = get_settings()
     fo_command = args.command == "rederive-fo-aggregates"
+    bm_command = args.command == "backfill-board-meetings"
     context = JobContext(
-        job_name="fo_aggregates_rederive" if fo_command else "shareholding_rederive",
+        job_name=(
+            "board_meetings_backfill"
+            if bm_command
+            else "fo_aggregates_rederive"
+            if fo_command
+            else "shareholding_rederive"
+        ),
         run_id=uuid4(),
         clock=SystemClock(settings.tzinfo),
         settings=settings,
     )
     with _production(context) as ctx:
-        if fo_command:
+        if bm_command:
+            report = backfill_board_meetings(ctx, args.start, args.end)
+        elif fo_command:
             report = CaptureReport(job="fo_aggregates_rederive")
             sessions = ctx.calendar.expected_sessions(args.start, args.end)
             report.outcomes += rederive_fo_aggregates(ctx, sessions, only_missing=False)

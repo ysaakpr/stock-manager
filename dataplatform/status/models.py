@@ -944,6 +944,24 @@ class ManagerScoreOut(BaseModel):
         description="Of the resolved decisions, how many were scored at a suspended name's last "
         "traded close (M17.13)",
     )
+    # Amendment 4 (c): secondary, reported only, never in a verdict
+    sleeve_return_pct: Decimal | None = Field(
+        default=None,
+        description="Return on the capital the book had in names, net of costs, without cash or "
+        "its interest, chained over the sessions it held any (secondary; never in a verdict)",
+    )
+    sleeve_control_return_pct: Decimal | None = Field(
+        default=None, description="The control book's NAV return over those same sessions"
+    )
+    sleeve_excess_vs_control_pp: Decimal | None = Field(
+        default=None, description="sleeve_return_pct less sleeve_control_return_pct"
+    )
+    sleeve_sessions: int | None = Field(
+        default=None, description="Sessions of the window on which the book held any name"
+    )
+    average_exposure_pct: Decimal | None = Field(
+        default=None, description="Mean share of NAV in names over the window's sessions"
+    )
 
 
 class ManagerResultOut(BaseModel):

@@ -25,6 +25,7 @@ from analyst.commons.sheets import EquityBar, FilingFact, IndexLevel, Surveillan
 from dataplatform.query import Dataset
 
 __all__ = [
+    "BoardMeetingNotice",
     "CorporateActionNotice",
     "DealRecord",
     "FoReading",
@@ -108,6 +109,23 @@ class CorporateActionNotice:
     knowable_date: date
 
 
+@dataclass(frozen=True, slots=True)
+class BoardMeetingNotice:
+    """One NSE board-meeting intimation (M17.16): the meeting a company scheduled, and when known.
+
+    ``knowable_date`` is the dissemination date, or the next day for an intimation disseminated at
+    or after the nightly capture's 20:00 IST fire (`dataplatform.ingest.nse.board_meetings`).
+    ``is_results`` says the meeting is to consider financial results.
+    """
+
+    isin: str
+    meeting_date: date
+    purpose: str
+    description: str | None
+    is_results: bool
+    knowable_date: date
+
+
 @runtime_checkable
 class ScreenSource(Protocol):
     """Where the M17.9 builders read the lake. Every answer is a dated :class:`Dataset`."""
@@ -149,3 +167,6 @@ class ScreenSource(Protocol):
 
     def corporate_actions(self, start: date, through: date) -> Dataset[CorporateActionNotice]:
         """Every corporate-action broadcast knowable in ``[start, through]``."""
+
+    def board_meetings(self, start: date, through: date) -> Dataset[BoardMeetingNotice]:
+        """Every NSE board-meeting intimation knowable in ``[start, through]`` (M17.16)."""

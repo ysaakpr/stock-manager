@@ -32,9 +32,12 @@ Score: the SUE percentile plus the EAR percentile, both ranked among the names t
 **S5 Event watch.** Unranked facts about eligible names knowable in the last
 :data:`S5_EVENT_SESSIONS` sessions: bulk and block deals (client, side, quantity, price and the
 share of equity, from the latest PIT share count), and announcements the frozen event-watch
-table matches (`analyst.commons.events`). A results board-meeting intimation is listed when the
-meeting it names falls in the next :data:`S5_MEETING_SESSIONS` sessions of the published NSE
-calendar, or, when it names no date, when it was itself made in the last 5 sessions.
+table matches (`analyst.commons.events`). A results board meeting is listed when its meeting date
+falls in the next :data:`S5_MEETING_SESSIONS` sessions of the published NSE calendar. Since
+Amendment 4 (M17.16) the meeting is read from NSE's board-meeting intimations
+(`ScreenSource.board_meetings`), one fact per name and meeting date: NSE never puts those
+intimations on the announcements feed, so the keyword category ``results_board_meeting`` matched
+none of 8,743 announcements in 2026, and an announcement no longer feeds it.
 
 **The universe** is the M17.1 sheet's, less the Amendment 1 (b) exclusions
 (`analyst.commons.exclusions`). ``buys_blocked`` carries the stale-list rule to M17.4.
@@ -73,7 +76,6 @@ from analyst.commons.events import (
     KeywordTable,
     classify,
     load_event_keywords,
-    meeting_date,
     subject_line,
 )
 from analyst.commons.exclusions import Exclusions, compute_exclusions
@@ -85,7 +87,7 @@ from analyst.commons.features import (
     earnings_features,
     name_features,
 )
-from analyst.commons.inputs import DealRecord, PriceBandEntry, ScreenSource
+from analyst.commons.inputs import BoardMeetingNotice, DealRecord, PriceBandEntry, ScreenSource
 from analyst.commons.regime import REGIME_INDEX_SERIES, RegimeIndex, RegimeReading
 from analyst.commons.sheets import (
     CommonsRefusedError,
@@ -162,6 +164,9 @@ S4_EAR_MIN: Final = Decimal(0)
 S4_DAY0_VOLUME_MIN: Final = Decimal(2)
 S5_EVENT_SESSIONS: Final = 5
 S5_MEETING_SESSIONS: Final = 10
+#: How far back (calendar days, by knowable date) S5 reads board-meeting intimations: a meeting in
+#: the next 10 sessions is commonly intimated 1-6 weeks ahead, and at most ~65 days.
+_S5_NOTICE_LOOKBACK_DAYS: Final = 120
 #: How far ahead the published calendar is read: the integrity window's last session.
 _FUTURE_SESSIONS: Final = _exclusions.INTEGRITY_EXCLUSION_SESSIONS
 
@@ -332,6 +337,7 @@ def s4_earnings_momentum(
 
 class EventKind(StrEnum):
     ANNOUNCEMENT = "ANNOUNCEMENT"
+    BOARD_MEETING = "BOARD_MEETING"
     BULK_DEAL = "BULK_DEAL"
     BLOCK_DEAL = "BLOCK_DEAL"
 
@@ -359,42 +365,27 @@ def _announcement_events(
     eligible: frozenset[str],
     recent_after: date,
     session: date,
-    meeting_until: date | None,
     keywords: KeywordTable,
 ) -> list[EventFact]:
     out: list[EventFact] = []
     for row in rows:
-        if row.isin not in eligible:
+        if row.isin not in eligible or not recent_after < row.knowable_date <= session:
             continue
-        found = list(classify(row.subject, row.body, keywords).event_watch)
+        # Results meetings come from the board-meeting intimations (`_board_meeting_events`).
+        found = sorted(
+            set(classify(row.subject, row.body, keywords).event_watch) - {"results_board_meeting"}
+        )
         if not found:
             continue
-        recent = recent_after < row.knowable_date <= session
-        categories = set(found)
-        when: date | None = None
-        if "results_board_meeting" in categories:
-            when = meeting_date(subject_line(row.subject, row.body))
-            upcoming = (
-                when is not None and meeting_until is not None and session < when <= meeting_until
-            )
-            if not (upcoming or (when is None and recent)):
-                categories.discard("results_board_meeting")
-                when = None
-        if not recent:
-            # An older announcement is listed only as the intimation of an upcoming meeting.
-            categories &= {"results_board_meeting"}
-        if not categories:
-            continue
-        found = sorted(categories)
         out.append(
             EventFact(
                 isin=row.isin,
                 kind=EventKind.ANNOUNCEMENT,
-                categories=tuple(sorted(found)),
+                categories=tuple(found),
                 knowable_date=row.knowable_date,
                 ref=row.ref,
                 subject=subject_line(row.subject, row.body)[:300],
-                meeting_date=when,
+                meeting_date=None,
                 client_name=None,
                 side=None,
                 quantity=None,
@@ -403,6 +394,55 @@ def _announcement_events(
             )
         )
     return out
+
+
+def _board_meeting_events(
+    notices: Sequence[BoardMeetingNotice],
+    *,
+    eligible: frozenset[str],
+    session: date,
+    meeting_until: date | None,
+) -> list[EventFact]:
+    """One S5 fact per eligible name and results meeting dated in ``(session, meeting_until]``.
+
+    Of the intimations naming one meeting, the earliest disseminated is listed (its knowable date
+    is when the meeting was first known), with a specific purpose preferred over NSE's generic
+    "Board Meeting Intimation" for the text.
+    """
+    if meeting_until is None:
+        return []
+    chosen: dict[tuple[str, date], BoardMeetingNotice] = {}
+    for notice in notices:
+        if notice.isin not in eligible or not notice.is_results:
+            continue
+        if not session < notice.meeting_date <= meeting_until:
+            continue
+        key = (notice.isin, notice.meeting_date)
+        held = chosen.get(key)
+        rank = (notice.knowable_date, notice.purpose == "Board Meeting Intimation", notice.purpose)
+        if held is None or rank < (
+            held.knowable_date,
+            held.purpose == "Board Meeting Intimation",
+            held.purpose,
+        ):
+            chosen[key] = notice
+    return [
+        EventFact(
+            isin=notice.isin,
+            kind=EventKind.BOARD_MEETING,
+            categories=("results_board_meeting",),
+            knowable_date=notice.knowable_date,
+            ref=f"bm:{notice.meeting_date.isoformat()}",
+            subject=" | ".join(p for p in (notice.purpose, notice.description) if p)[:300],
+            meeting_date=notice.meeting_date,
+            client_name=None,
+            side=None,
+            quantity=None,
+            price=None,
+            pct_equity=None,
+        )
+        for _, notice in sorted(chosen.items())
+    ]
 
 
 def _deal_events(
@@ -470,6 +510,7 @@ def screens_rule_source() -> bytes:
             s3_pullback,
             s4_earnings_momentum,
             _announcement_events,
+            _board_meeting_events,
             _deal_events,
             latest_share_counts,
             percentile_ranks,
@@ -762,18 +803,31 @@ def build_screens(
         meeting_until = (
             future[S5_MEETING_SESSIONS - 1] if len(future) >= S5_MEETING_SESSIONS else None
         )
-        events = _announcement_events(
-            announcements or (),
-            eligible=eligible_set,
-            recent_after=recent_after,
-            session=session,
-            meeting_until=meeting_until,
-            keywords=table,
-        ) + _deal_events(
-            deals,
-            eligible=eligible_set,
-            recent_after=recent_after,
-            shares=latest_share_counts(facts),
+        notices = _admit(
+            lambda: source.board_meetings(
+                date.fromordinal(session.toordinal() - _S5_NOTICE_LOOKBACK_DAYS), session
+            ),
+            pit,
+            gaps,
+            "board_meetings",
+        )
+        events = (
+            _announcement_events(
+                announcements or (),
+                eligible=eligible_set,
+                recent_after=recent_after,
+                session=session,
+                keywords=table,
+            )
+            + _board_meeting_events(
+                notices or (), eligible=eligible_set, session=session, meeting_until=meeting_until
+            )
+            + _deal_events(
+                deals,
+                eligible=eligible_set,
+                recent_after=recent_after,
+                shares=latest_share_counts(facts),
+            )
         )
         events.sort(
             key=lambda e: (e.knowable_date, e.isin, e.kind.value, e.ref or "", e.client_name or "")
