@@ -386,6 +386,7 @@ _NSE_DAILY_CAPTURE_SOURCES: tuple[str, ...] = (
     "nse_bulk_deals",
     "nse_block_deals",
     "nse_fo_bhavcopy",
+    "nse_board_meetings",
 )
 _SHAREHOLDING_SOURCES: tuple[str, ...] = ("nse_shareholding_pattern",)
 _ANNOUNCEMENT_SOURCES: tuple[str, ...] = ("nse_announcements", "bse_announcements")
@@ -399,7 +400,9 @@ def nse_daily_capture(context: JobContext) -> None:
     the latest session only, so a night this does not run is history destroyed — and the current
     session's F&O bhavcopy, each into L0 and L1 with a `sync_state` row per (source, session).
     Each host is leased on its own, so a campaign holding the archive host costs the deals and F&O
-    for the night and never the flows. See `daily_capture.run_nse_daily_capture`.
+    for the night and never the flows. Since M17.16 it also lands the NSE board-meeting
+    intimations (results dates for the M17 dossier) on the flows' host, before the 22:00 M17
+    session reads them. See `daily_capture.run_nse_daily_capture`.
     What it assumes: the injected clock and settings are the run's (B10).
     What it never does: backfill F&O (the historical campaign owns every earlier session), publish
     an intraday copy, or file one session's payload under another session's date. The import is
@@ -421,7 +424,9 @@ NSE_DAILY_CAPTURE = Job(
     cron="0 20,23 * * mon-fri",
     fn=nse_daily_capture,
     timeout=timedelta(minutes=30),
-    description="Nightly FII/DII flows, bulk/block deals, current-session F&O → L0 + L1",
+    description=(
+        "Nightly FII/DII flows, bulk/block deals, current-session F&O, board meetings → L0 + L1"
+    ),
     covers=_NSE_DAILY_CAPTURE_SOURCES,
     sync_sources=_NSE_DAILY_CAPTURE_SOURCES,
 )

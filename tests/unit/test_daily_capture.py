@@ -23,7 +23,7 @@ import socket
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
@@ -46,7 +46,7 @@ from dataplatform.ingest.fetcher import (
 )
 from dataplatform.ingest.lease import HostBusyError, LeaseHolder
 from dataplatform.ingest.news import NEWS_DATASET
-from dataplatform.ingest.nse import deals, fii_dii
+from dataplatform.ingest.nse import board_meetings, deals, fii_dii
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.quality.sentinel import QualityFinding
 from dataplatform.status.sync_state import SyncState
@@ -187,11 +187,26 @@ def test_the_evening_run_owes_tonight_and_a_daytime_run_owes_the_last_session() 
 FLOWS: Final = "nse_flows/json_v1/fiidiiTradeReact_20260807.json"
 
 
-def _flows_script(body: bytes | None = None) -> Script:
+def _flows_script(body: bytes | None = None, *, owed: date = date(2026, 8, 7)) -> Script:
+    """The www.nseindia.com leg of `nse_daily_capture`: the flows and the board meetings."""
     return {
         WARM: RecordedResponse(status_code=403),
         _url(fii_dii.SOURCE_ID): RecordedResponse(body=body or _fixture(FLOWS)),
+        _bm_url(owed): RecordedResponse(body=BOARD_MEETINGS),
     }
+
+
+BOARD_MEETINGS: Final = _fixture(
+    "nse_board_meetings/json_v1/corporate_board_meetings_20261020_20261120.json"
+)
+
+
+def _bm_url(owed: date) -> str:
+    return board_meetings.board_meetings_url(
+        owed - timedelta(days=board_meetings.CAPTURE_DAYS_BEFORE),
+        owed + timedelta(days=board_meetings.CAPTURE_DAYS_AFTER),
+        REGISTER,
+    )
 
 
 def test_flows_land_under_the_session_they_state_and_a_rerun_makes_no_request(
@@ -475,6 +490,108 @@ def test_a_campaign_on_the_archive_host_costs_deals_and_fo_but_never_the_flows(
         record = h.tracker.get(source, date(2026, 8, 7))
         assert record is not None and "HostBusyError" in (record.last_error or "")
     assert len(report.failed) == 3
+
+
+# ── board meetings (M17.16): landed on the flows' host, merged by knowable date ────────────────
+
+
+def test_board_meetings_land_on_the_evening_run_and_a_rerun_makes_no_request(
+    settings: Settings, tmp_path: Path
+) -> None:
+    evening = _ist(2026, 10, 19, 20, 0)
+    owed = date(2026, 10, 19)
+    h = _harness(settings, tmp_path, evening)
+    report = dc.run_nse_daily_capture(h.at(evening, _flows_script(owed=owed)))
+    by_source = {o.source: o for o in report.outcomes}
+    assert by_source[board_meetings.SOURCE_ID].status is CaptureStatus.CAPTURED
+    assert by_source[board_meetings.SOURCE_ID].rows == 17
+    assert h.state(board_meetings.SOURCE_ID, owed) is SyncState.PUBLISHED
+    # The window asked is the owed session minus a week through 90 days ahead.
+    assert _bm_url(owed) in h.urls()
+    assert "from_date=12-10-2026&to_date=17-01-2027" in _bm_url(owed)
+    # Every row lands under its knowable date: MPHASIS' intimations of 21-Sep (20:25 and 20:34,
+    # after the 20:00 capture) are knowable on 22-Sep.
+    held = board_meetings.read_pit(owed, data_root=tmp_path)
+    assert len(held) == 17
+    mphasis = [r for r in held if r.symbol == "MPHASIS"]
+    assert {r.knowable_date for r in mphasis} == {date(2026, 9, 22)}
+
+    rerun = dc.run_nse_daily_capture(h.at(_ist(2026, 10, 19, 23, 0), _flows_script(owed=owed)))
+    again = [o for o in rerun.outcomes if o.source == board_meetings.SOURCE_ID]
+    assert again[0].status is CaptureStatus.ALREADY_PUBLISHED
+    assert h.urls().count(_bm_url(owed)) == 0  # the 23:00 transport saw no board-meetings request
+
+
+def test_a_later_capture_never_drops_an_intimation_an_earlier_one_landed(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """The feed is a current-state list: a row it no longer serves stays in L1."""
+    first = _ist(2026, 10, 19, 20, 0)
+    h = _harness(settings, tmp_path, first)
+    dc.capture_board_meetings(
+        h.at(first, _flows_script(owed=date(2026, 10, 19))), _fetcher(h), owed=date(2026, 10, 19)
+    )
+    payload = json.loads(BOARD_MEETINGS)
+    shrunk = json.dumps([r for r in payload if r["bm_symbol"] != "INFY"]).encode()
+    later = _ist(2026, 10, 21, 20, 0)
+    script = {
+        WARM: RecordedResponse(status_code=403),
+        _bm_url(date(2026, 10, 21)): RecordedResponse(body=shrunk),
+    }
+    outcome = dc.capture_board_meetings(h.at(later, script), _fetcher(h), owed=date(2026, 10, 21))
+    assert outcome.status is CaptureStatus.CAPTURED
+    held = board_meetings.read_pit(date(2026, 10, 21), data_root=tmp_path)
+    assert len(held) == 17 and any(r.symbol == "INFY" for r in held)
+
+
+def test_a_bad_board_meetings_payload_fails_its_own_row_and_leaves_the_flows(
+    settings: Settings, tmp_path: Path
+) -> None:
+    evening = _ist(2026, 10, 19, 20, 0)
+    owed = date(2026, 10, 19)
+    h = _harness(settings, tmp_path, evening)
+    script = dict(_flows_script(owed=owed))
+    script[_bm_url(owed)] = RecordedResponse(body=b'{"error": "not an array"}')
+    h.busy = {"nsearchives.nseindia.com"}
+    report = dc.run_nse_daily_capture(h.at(evening, script))
+    by_source = {o.source: o for o in report.outcomes}
+    assert by_source[board_meetings.SOURCE_ID].failed
+    record = h.tracker.get(board_meetings.SOURCE_ID, owed)
+    assert record is not None and record.state is SyncState.FAILED and record.retryable
+    assert "JSON array" in (record.last_error or "")
+
+
+def test_the_backfill_is_one_lease_and_one_request_per_month(
+    settings: Settings, tmp_path: Path
+) -> None:
+    now = _ist(2026, 10, 20, 10, 0)
+    h = _harness(settings, tmp_path, now)
+    windows = [
+        (date(2026, 9, 15), date(2026, 9, 30)),
+        (date(2026, 10, 1), date(2026, 10, 31)),
+        (date(2026, 11, 1), date(2026, 11, 20)),
+    ]
+    script: dict[str, Any] = {WARM: RecordedResponse(status_code=403)}
+    for first, last in windows:
+        script[board_meetings.board_meetings_url(first, last, REGISTER)] = RecordedResponse(
+            body=BOARD_MEETINGS if first.month == 10 else b"[]"
+        )
+    leases: list[tuple[str, ...]] = []
+    ctx = h.at(now, script)
+    inner = ctx.fetchers
+
+    def counting(hosts: Sequence[str], command: str) -> AbstractContextManager[Fetcher]:
+        leases.append(tuple(hosts))
+        return inner(hosts, command)
+
+    report = dc.backfill_board_meetings(
+        replace(ctx, fetchers=counting), date(2026, 9, 15), date(2026, 11, 20)
+    )
+    assert leases == [("www.nseindia.com",)]
+    assert [o.status for o in report.outcomes] == [CaptureStatus.CAPTURED] * 3
+    assert h.urls() == [board_meetings.board_meetings_url(a, b, REGISTER) for a, b in windows]
+    assert len(board_meetings.read_pit(date(2026, 10, 20), data_root=tmp_path)) == 17
+    assert h.tracker.get(board_meetings.SOURCE_ID, date(2026, 10, 20)) is None  # no sync row
 
 
 # ── shareholding: a later poll never drops an earlier filing ──────────────────────────────────
