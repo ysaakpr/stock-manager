@@ -66,6 +66,7 @@ from analyst.fundmanager.scoreboard import (
     build_scoreboard,
     decision_payload,
     inputs_from_journal,
+    invested_sleeve,
     mark_book,
     max_drawdown_pp,
     outcome_entry,
@@ -389,6 +390,88 @@ def test_an_inconclusive_window_extends_once_to_126_sessions() -> None:
     assert final.phase is Phase.FINAL and final.extension is not None
     assert final.extension.sessions == 126
     assert final.verdict is final.extension.verdict is ScoreVerdict.INCONCLUSIVE
+
+
+def _mark(
+    book_id: str, on: date, nav: str, cash: str, *, costs: str = "0", interest: str = "0"
+) -> BookMark:
+    return BookMark(
+        book_id=book_id,
+        session=on,
+        nav=Decimal(nav),
+        cash=Decimal(cash),
+        positions=0 if Decimal(cash) == Decimal(nav) else 1,
+        turnover=Decimal(0),
+        costs=Decimal(costs),
+        interest=Decimal(interest),
+    )
+
+
+def test_the_invested_sleeve_reads_only_the_capital_in_names_net_of_costs() -> None:
+    """Amendment 4 (c). Session 1 all cash (interest only); session 2 buys 500,000 at the open
+    for 50 of costs and the names close up 2 %. The sleeve earns 9,950 on 500,050 at work; the
+    control is chained over session 2 only, the one session the book held names."""
+    one, two = SESSIONS[0], SESSIONS[1]
+    book = [
+        _mark(MANAGER, one, "1000100", "1000100", interest="100"),
+        _mark(MANAGER, two, "1010100", "500100", costs="50", interest="50"),
+    ]
+    control = [_mark(CONTROL, one, "1010000", "0"), _mark(CONTROL, two, "1030200", "0")]
+    sleeve, ctrl, n, exposure = invested_sleeve(
+        book, control, book_capital=CAPITAL, control_capital=CAPITAL
+    )
+    assert n == 1
+    tiny = Decimal("1e-20")
+    assert sleeve is not None and ctrl is not None and exposure is not None
+    assert sleeve.quantize(tiny) == (Decimal(9950) / Decimal(500050) * 100).quantize(tiny)
+    assert ctrl == Decimal(2)  # session 2 alone; the whole-window return would be 3.02 %
+    assert exposure.quantize(tiny) == (Decimal(510000) / Decimal(1010100) * 50).quantize(tiny)
+    # A book that never held a name has no sleeve.
+    flat = [_mark(MANAGER, one, "1000000", "1000000"), _mark(MANAGER, two, "1000000", "1000000")]
+    assert invested_sleeve(flat, control, book_capital=CAPITAL, control_capital=CAPITAL)[:3] == (
+        None,
+        None,
+        0,
+    )
+
+
+def test_the_invested_sleeve_is_reported_and_never_changes_a_verdict() -> None:
+    """A book 10 % in names that rose 20 % beats its control's 1 % by far on the sleeve, but its
+    total excess is only about 1 pp: the §6 verdict reads the total, so it does not pass."""
+    window = SESSIONS[21 : 21 + WINDOW_SESSIONS]
+    marks: list[BookMark] = []
+    for i, on in enumerate(window):
+        gain = Decimal(20) * Decimal(i + 1) / Decimal(len(window))  # the names' cumulative %
+        names = Decimal(100000) * (1 + gain / 100)
+        marks.append(_mark(MANAGER, on, str(Decimal(900000) + names), "900000"))
+    inputs = ScoreboardInputs(
+        s0=window[0],
+        marks=_with_companions(
+            (
+                *marks,
+                *_path(CONTROL, window, final_pct="1"),
+                *_path(BENCH, window, final_pct="2", trough_pct="4"),
+            ),
+            window,
+        ),
+    )
+    score = build_scoreboard(mini_roster(), inputs).book_scores[0]
+    assert score.primary is not None
+    sec = score.primary.secondary
+    assert sec.sleeve_excess_vs_control_pp is not None and sec.sleeve_excess_vs_control_pp > 15
+    assert sec.sleeve_sessions == WINDOW_SESSIONS
+    assert sec.average_exposure_pct is not None and sec.average_exposure_pct < 11
+    assert score.primary.excess_vs_control_pp == Decimal("1.0000")
+    assert score.verdict is not ScoreVerdict.PASS
+
+
+def test_a_fully_invested_book_has_its_total_return_as_its_sleeve() -> None:
+    score = _board(manager="5", control="1").book_scores[0]
+    assert score.primary is not None
+    sec = score.primary.secondary
+    assert sec.sleeve_return_pct == score.primary.manager_return_pct
+    assert sec.sleeve_control_return_pct == score.primary.control_return_pct
+    assert sec.sleeve_excess_vs_control_pp == score.primary.excess_vs_control_pp
 
 
 def test_no_s0_means_nothing_counts() -> None:
@@ -1118,6 +1201,8 @@ def test_status_managers_serves_books_decisions_and_the_scoreboard(m17_run: _Run
     assert [r["manager_id"] for r in body["manager_results"]] == ["FM-SWING-BRK"]
     assert [b["style_id"] for b in body["style_books"]] == [STYLE]
     assert body["graduation"]["primary_passes_needed"] == 2
+    for key in ("sleeve_return_pct", "sleeve_control_return_pct", "sleeve_excess_vs_control_pp"):
+        assert all(key in m for m in body["managers"]), key
     pass_line = [d for d in body["decisions"] if d["event"] == DECISION_EVENT]
     assert pass_line and pass_line[0]["action"] == "PASS" and pass_line[0]["p_beat_bench"]
     # What it never carries: a rationale, a prompt, or a credential-shaped field.
@@ -1163,6 +1248,7 @@ def test_the_daily_digest_is_written_under_the_injected_directory(
     assert text == render_digest(m17_run.live, session, lines)
     assert m17_run.live.k_of_n in text and MANAGER in text and BENCH in text
     assert MIRROR in text and STYLE in text and "Graduation floor" in text
+    assert "## Invested sleeve against the control (secondary" in text
     assert RATIONALE_MARKER not in text
     assert not list(target.glob(".*.tmp")), "no half-written page is left behind"
 

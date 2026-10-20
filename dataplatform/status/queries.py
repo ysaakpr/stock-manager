@@ -441,6 +441,17 @@ def read_managers_status(entries: Sequence[Any], *, roster: Any, as_of: datetime
                 suspended_resolved_decisions=(
                     None if window is None else window.suspended_resolved_decisions
                 ),
+                sleeve_return_pct=None if window is None else window.secondary.sleeve_return_pct,
+                sleeve_control_return_pct=(
+                    None if window is None else window.secondary.sleeve_control_return_pct
+                ),
+                sleeve_excess_vs_control_pp=(
+                    None if window is None else window.secondary.sleeve_excess_vs_control_pp
+                ),
+                sleeve_sessions=None if window is None else window.secondary.sleeve_sessions,
+                average_exposure_pct=(
+                    None if window is None else window.secondary.average_exposure_pct
+                ),
             )
         )
     return ManagersOut(

@@ -62,6 +62,16 @@ for display only, so a value a hair under a threshold is never rounded across it
   window's resolved decisions (decided in the window and resolved by its last session). Every
   decision carries ``p_beat_bench``, so every resolved decision counts, whatever its action.
 - *Shrunk Brier* (Amendment 1 f) uses ``0.5·p + 0.5·base_rate`` — the weight is fixed here.
+- *The invested sleeve* (Amendment 4 (c), secondary, reported only, never in a verdict): on each
+  session ``t`` of the window, the book's P&L outside cash interest is
+  ``P_t = nav_t - nav_{t-1} - interest_t`` (price moves, dividends and costs; ``nav_{S0-1}`` is the
+  opening capital) and the capital at work in names is ``E_t = (nav_t - cash_t) - P_t`` (the
+  close's invested value less the session's P&L: what was in names after the open's fills). A
+  session with ``E_t > 0`` is *invested*. ``sleeve_return_pct`` chains ``1 + P_t / E_t`` over the
+  invested sessions; ``sleeve_control_return_pct`` chains the control book's NAV return
+  ``nav_t / nav_{t-1}`` over the **same** sessions; ``sleeve_excess_vs_control_pp`` is their
+  difference. ``average_exposure_pct`` is the mean of ``(nav_t - cash_t) / nav_t`` over every
+  session of the window. With no invested session the sleeve figures are ``None``.
 
 What it never does: read a clock, a price or the network; let one manager's decisions into another
 manager's score; count a decision twice because its manager trades two books; or change the §6
@@ -155,6 +165,7 @@ __all__ = [
     "build_scoreboard",
     "decision_payload",
     "inputs_from_journal",
+    "invested_sleeve",
     "mark_book",
     "mark_entry",
     "max_drawdown_pp",
@@ -449,6 +460,12 @@ class SecondaryMetrics(_Record):
     cap_tier_mix_buys: dict[str, int]
     cap_tier_mix_control_buys: dict[str, int]
     hit_rate_by_edge_type: tuple[GroupStat, ...]
+    # Amendment 4 (c): the invested sleeve against the control, same sessions (module docstring)
+    sleeve_return_pct: Decimal | None = None
+    sleeve_control_return_pct: Decimal | None = None
+    sleeve_excess_vs_control_pp: Decimal | None = None
+    sleeve_sessions: int = 0
+    average_exposure_pct: Decimal | None = None
 
 
 class WindowScore(_Record):
@@ -1086,6 +1103,42 @@ def _session_sum(
     return total
 
 
+def invested_sleeve(
+    book: Sequence[BookMark],
+    control: Sequence[BookMark],
+    *,
+    book_capital: Decimal,
+    control_capital: Decimal,
+) -> tuple[Decimal | None, Decimal | None, int, Decimal | None]:
+    """``(sleeve %, control % same sessions, invested sessions, mean exposure %)``.
+
+    ``book`` and ``control`` are the two books' marks on the window's sessions, in order, one each
+    per session (module docstring, "The invested sleeve"). Exact; the caller quantises.
+    """
+    if len(book) != len(control):
+        raise ScoreboardError("the sleeve needs one mark of each book per session")
+    sleeve = _ONE
+    ctrl = _ONE
+    invested = 0
+    exposure = _ZERO
+    prev_nav, prev_ctrl = book_capital, control_capital
+    with localcontext(_CONTEXT):
+        for mark, cmark in zip(book, control, strict=True):
+            pnl = mark.nav - prev_nav - mark.interest
+            at_work = (mark.nav - mark.cash) - pnl
+            if mark.nav > _ZERO:
+                exposure += (mark.nav - mark.cash) / mark.nav
+            if at_work > _ZERO and prev_ctrl > _ZERO:
+                invested += 1
+                sleeve *= _ONE + pnl / at_work
+                ctrl *= cmark.nav / prev_ctrl
+            prev_nav, prev_ctrl = mark.nav, cmark.nav
+        mean_exposure = exposure / Decimal(len(book)) * _HUNDRED if book else None
+        if invested == 0:
+            return None, None, 0, mean_exposure
+        return (sleeve - _ONE) * _HUNDRED, (ctrl - _ONE) * _HUNDRED, invested, mean_exposure
+
+
 def _secondary(
     *,
     manager: ManagerMandate,
@@ -1128,6 +1181,12 @@ def _secondary(
             _session_sum(control.id, sessions, marks, "costs") / control.opening_capital_inr * _BP
         )
     m_turn = _turnover_x(m_nav, _session_sum(manager.id, sessions, marks, "turnover"))
+    sleeve, sleeve_ctrl, sleeve_n, exposure = invested_sleeve(
+        [marks[manager.id][s] for s in sessions],
+        [marks[control.id][s] for s in sessions],
+        book_capital=manager.opening_capital_inr,
+        control_capital=control.opening_capital_inr,
+    )
     c_turn = _turnover_x(c_nav, _session_sum(control.id, sessions, marks, "turnover"))
 
     # BUYs from outside the shortlist
@@ -1200,6 +1259,13 @@ def _secondary(
         cap_tier_mix_buys=dict(sorted(tiers.items())),
         cap_tier_mix_control_buys=dict(sorted(control_tiers.items())),
         hit_rate_by_edge_type=tuple(_group(k, v) for k, v in sorted(by_edge.items())),
+        sleeve_return_pct=None if sleeve is None else _q(sleeve, _PP),
+        sleeve_control_return_pct=None if sleeve_ctrl is None else _q(sleeve_ctrl, _PP),
+        sleeve_excess_vs_control_pp=(
+            None if sleeve is None or sleeve_ctrl is None else _q(sleeve - sleeve_ctrl, _PP)
+        ),
+        sleeve_sessions=sleeve_n,
+        average_exposure_pct=None if exposure is None else _q(exposure, _PP),
     )
 
 
