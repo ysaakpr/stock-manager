@@ -52,8 +52,9 @@ module is the job's **composition root**: it builds the M17 paper accounts
    then the secondary *style books* on their managers' starting screens (`style_candidates`).
 9. *Persist, score, digest.* The desk's whole state is recorded in ``paper_session`` (one row a
    session under the desk id, the M15.3 ledger, no new schema); the scoreboard is built from the
-   desk's own ledger and — when a journal reader is given — rebuilt from the journal and checked
-   byte-for-byte against it; the owner's digest is written.
+   desk's own ledger and — when a journal reader is given — rebuilt from the journal's entries of
+   this desk's period (from ``opened_on``: a restarted desk shares its stream with the retired
+   one) and checked byte-for-byte against it; the owner's digest is written.
 
 **Streams.** ``--dry-run`` files every entry under ``m17-dry:<book>`` (`StreamJournal`) and the
 desk state under its own desk id, so a rehearsal never touches the live books. ``--start S0``
@@ -205,7 +206,7 @@ from backtest.paper_session import (
 )
 from dataplatform.clock import IST, Clock, FrozenClock
 from dataplatform.logging import get_logger
-from dataplatform.redaction import mask_and_truncate
+from dataplatform.redaction import mask_and_truncate, mask_secrets
 from execution.broker import Side
 from execution.kill_switch import KillSwitch
 from execution.recon import Alerter, LoggingAlerter
@@ -390,8 +391,12 @@ class M17SessionResult:
     managers: tuple[ManagerOutcome, ...] = ()
     timings: Mapping[str, float] = field(default_factory=dict)
     scoreboard: Scoreboard | None = None
+    #: the ledger's scoreboard refused, or the journal's rebuild differs from it
     scoreboard_error: str | None = None
+    #: the journal's rebuild digest (None when it was not run or it refused)
     rebuilt_digest: str | None = None
+    #: why the journal's rebuild refused, in full and masked (never a digest mismatch)
+    rebuild_refused: str | None = None
     digest_path: Path | None = None
     data_gaps: tuple[str, ...] = ()
     deferred_outcomes: tuple[str, ...] = ()
@@ -894,10 +899,11 @@ def run_m17_session(
         reason="halted" if halted else "decided",
         managers=tuple(managers),
         timings=dict(stages.seconds),
-        scoreboard=result[0],
-        scoreboard_error=result[1],
-        rebuilt_digest=result[2],
-        digest_path=result[3],
+        scoreboard=result.scoreboard,
+        scoreboard_error=result.error,
+        rebuilt_digest=result.rebuilt,
+        rebuild_refused=result.rebuild_refused,
+        digest_path=result.path,
         data_gaps=gaps,
         deferred_outcomes=tuple(deferred),
     )
@@ -1686,6 +1692,29 @@ def _extend_ledger(
             )
 
 
+@dataclass(frozen=True, slots=True)
+class _Scored:
+    """Step 9's scoreboard, its cross-check against the journal, and the digest file."""
+
+    scoreboard: Scoreboard | None
+    error: str | None
+    rebuilt: str | None
+    rebuild_refused: str | None
+    path: Path | None
+
+
+def _desk_period(entries: Iterable[JournalEntry], desk: _Desk) -> list[JournalEntry]:
+    """The stream's entries from the desk's own period: those dated on or after ``opened_on``.
+
+    A desk restarted under a new id (M17.14's ``m17_dry2_fund_managers``) keeps writing to the
+    stream its predecessor wrote to, and the journal is append-only, so the retired desk's lines
+    stay in it — an ``M17_S0`` and marks the new desk's ledger never held. Every session a desk
+    runs is on or after the session it opened on, and a retired desk's sessions all come before
+    it, so the date is what separates them; the entries carry no desk id to scope by.
+    """
+    return [e for e in entries if e.trading_date >= desk.opened_on]
+
+
 def _score_and_digest(
     desk: _Desk,
     journal: StreamJournal,
@@ -1694,7 +1723,19 @@ def _score_and_digest(
     *,
     entries_reader: Callable[[], Sequence[JournalEntry]] | None,
     digest_dir: Path | None,
-) -> tuple[Scoreboard | None, str | None, str | None, Path | None]:
+) -> _Scored:
+    """Strike the scoreboard from the desk's ledger, check it against a rebuild from the journal,
+    and write the session's digest.
+
+    What it does: builds the scoreboard from the ledger (``paper_session``); when
+    ``entries_reader`` is given, rebuilds it from the stream's entries of this desk's period
+    (`_desk_period`) and compares the two digests. A rebuild the scoreboard refuses is reported as
+    ``fm_job.scoreboard_rebuild_refused`` with its full (masked) reason; two scoreboards that
+    differ as ``fm_job.scoreboard_mismatch`` with both digests — never one disguised as the other.
+    What it assumes: ``desk.opened_on`` is the first session this desk ran.
+    What it never does: score from the journal (the ledger's scoreboard is the one used), or let a
+    failed cross-check stop the session — the check reports, the run completes.
+    """
     roster = desk.roster
     error: str | None = None
     scoreboard: Scoreboard | None = None
@@ -1704,25 +1745,43 @@ def _score_and_digest(
         error = str(exc)
         _LOG.error("fm_job.scoreboard_refused", session=session.isoformat(), error=error)
     rebuilt: str | None = None
+    refused: str | None = None
     if entries_reader is not None:
-        entries = [journal.unprefixed(e) for e in entries_reader()]
+        entries = _desk_period((journal.unprefixed(e) for e in entries_reader()), desk)
         try:
             rebuilt = build_scoreboard(roster, inputs_from_journal(entries, roster)).digest()
         except ScoreboardError as exc:
-            rebuilt = f"refused: {exc}"
-        if scoreboard is not None and rebuilt != scoreboard.digest():
+            # masked, not cut: the whole reason is what says which line the journal lacks
+            refused = mask_secrets(str(exc))
+            _LOG.error(
+                "fm_job.scoreboard_rebuild_refused",
+                session=session.isoformat(),
+                stream=journal.stream,
+                opened_on=desk.opened_on.isoformat(),
+                entries=len(entries),
+                error=refused,
+            )
+        if scoreboard is not None and rebuilt is not None and rebuilt != scoreboard.digest():
             error = (
                 f"the journal rebuilds scoreboard {rebuilt[:16]}, not the job's "
                 f"{scoreboard.digest()[:16]}: the journal and the desk ledger disagree"
             )
-            _LOG.error("fm_job.scoreboard_mismatch", session=session.isoformat(), error=error)
+            _LOG.error(
+                "fm_job.scoreboard_mismatch",
+                session=session.isoformat(),
+                stream=journal.stream,
+                opened_on=desk.opened_on.isoformat(),
+                ledger_digest=scoreboard.digest(),
+                rebuilt_digest=rebuilt,
+                error=error,
+            )
     path: Path | None = None
     if digest_dir is not None:
         shown = scoreboard or build_scoreboard(roster, ScoreboardInputs(s0=desk.s0))
         _, lines = todays_decisions(written, roster, session=session)
         _, suspended = suspended_holdings_on(written, roster, session=session)
         path = write_digest(shown, session, lines, directory=digest_dir, suspended=suspended)
-    return scoreboard, error, rebuilt, path
+    return _Scored(scoreboard, error, rebuilt, refused, path)
 
 
 # ── the scheduler and the CLI ────────────────────────────────────────────────────────────────────
@@ -1822,6 +1881,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "data_gaps": list(result.data_gaps),
                 "scoreboard": None if result.scoreboard is None else result.scoreboard.k_of_n,
                 "scoreboard_error": result.scoreboard_error,
+                "rebuild_refused": result.rebuild_refused,
                 "digest": None if result.digest_path is None else str(result.digest_path),
             },
             indent=2,
