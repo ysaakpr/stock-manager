@@ -684,6 +684,72 @@ def test_rederive_rebuilds_l1_from_l0_with_no_fetcher(settings: Settings, tmp_pa
     assert len(shareholding.read_pit(poll, data_root=tmp_path)) == 30
 
 
+#: A record-verbatim cut of the 2026-10-21 master: 41 records, two with a malformed ISIN.
+BAD_ISIN_MASTER: Final = _fixture(
+    "nse_shareholding/master_2026_10/corporate-share-holdings-master_20261021_subset.json"
+)
+
+
+def test_rederive_recovers_a_poll_a_malformed_isin_failed(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """2026-10-16..21: one bad ISIN failed the whole poll. L0 holds it, so recovery re-parses."""
+    now = _ist(2026, 10, 22, 13, 0)
+    h = _harness(settings, tmp_path, now)
+    poll = date(2026, 10, 21)
+    h.l0.put(shareholding.SOURCE_ID, poll, shareholding.l0_filename(poll), BAD_ISIN_MASTER)
+
+    def no_fetchers(hosts: Sequence[str], command: str) -> AbstractContextManager[Fetcher]:
+        raise AssertionError(f"rederive asked for a fetcher for {hosts}")
+
+    raised: list[QualityFinding] = []
+    ctx = replace(h.at(now, {}), fetchers=no_fetchers, raise_findings=raised.extend)
+    h.tracker.begin(shareholding.SOURCE_ID, poll)
+    h.tracker.mark_failed(
+        shareholding.SOURCE_ID,
+        poll,
+        "ParseError: corporate-share-holdings-master_20261021.json: record 982: 1 validation "
+        "error for ShareholdingRow",
+    )
+
+    report = dc.rederive_shareholding(ctx)
+    assert [(o.status, o.rows) for o in report.outcomes] == [(CaptureStatus.CAPTURED, 38)]
+    assert report.requests == 0
+    assert h.state(shareholding.SOURCE_ID, poll) is SyncState.PUBLISHED
+    assert len(shareholding.read_pit(poll, data_root=tmp_path)) == 38
+    bad = [f for f in raised if f.check_name == shareholding.BAD_ISIN_CHECK]
+    assert sorted(str(f.detail["raw_isin"]) for f in bad) == ["INE 439A0401", "INE07180108"]
+    assert {f.detail["l0_key"] for f in bad} == {
+        f"{shareholding.SOURCE_ID}/2026-10-21/corporate-share-holdings-master_20261021.json"
+    }
+
+
+def test_a_master_over_the_bad_isin_threshold_fails_the_day_and_writes_nothing(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Every ISIN lower-cased is a format change: the date is FAILED and L1 is not touched."""
+    now = _ist(2026, 10, 22, 18, 5)
+    h = _harness(settings, tmp_path, now)
+    poll = date(2026, 10, 22)
+    lowered = [
+        {**r, "isin": r["isin"].lower()} if isinstance(r["isin"], str) else r
+        for r in json.loads(BAD_ISIN_MASTER)
+    ]
+    h.l0.put(
+        shareholding.SOURCE_ID, poll, shareholding.l0_filename(poll), json.dumps(lowered).encode()
+    )
+    raised: list[QualityFinding] = []
+    ctx = replace(h.at(now, {}), raise_findings=raised.extend)
+
+    outcome = dc.capture_shareholding(ctx, _fetcher(h), poll_date=poll)
+    assert outcome.status is CaptureStatus.FAILED
+    assert "malformed 'isin'" in outcome.detail
+    assert h.state(shareholding.SOURCE_ID, poll) is SyncState.FAILED
+    assert h.urls() == []  # the payload was already in L0
+    assert shareholding.read_pit(poll, data_root=tmp_path) == ()
+    assert raised == []
+
+
 # ── announcements: two exchanges, one partition ───────────────────────────────────────────────
 
 NSE_ANN: Final = _fixture("announcements/nse/2026-08-07/corporate-announcements.json")

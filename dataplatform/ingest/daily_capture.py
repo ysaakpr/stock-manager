@@ -1055,7 +1055,7 @@ def capture_shareholding(
 
 
 def _write_shareholding(ctx: CaptureContext, snapshot: shareholding.ShareholdingSnapshot) -> int:
-    """Merge a poll into L1 and raise its BC3 / no-ISIN findings (D17: never silent)."""
+    """Merge a poll into L1 and raise its BC3 / no-ISIN / bad-ISIN findings (D17: never silent)."""
     shareholding.merge_l1(snapshot, data_root=ctx.data_root)
     ctx.raise_findings(shareholding.quality_findings(snapshot))
     return len(snapshot.rows)

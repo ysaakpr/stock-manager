@@ -29,6 +29,51 @@ What it shows about the live era, all of which the parser now reads:
 
 Free-text remark fields are exchange-published filing notes, kept as served.
 
+## `master_2026_10/corporate-share-holdings-master_20261021_subset.json` — live, a record-verbatim cut
+
+A **subset** of the real payload, records unedited: cut from
+`data/L0/nse_shareholding_pattern/2026/10/corporate-share-holdings-master_20261021.json`, captured
+by `shareholding_poll` at `2026-10-21T18:05:09+05:30` (L0 sidecar `fetched_at`), 2,438,321 bytes,
+2,272 records, sha256 `fc764ed42e42796d76cd5b47872fba1610f32bf878d45f5cedcce9614ef6743c` (the
+sidecar's, re-verified when cut). No network request; L0 was read, never written.
+
+How it was cut: `json.loads` the payload, keep records **0-38 and 982 and 1084** in payload order
+(41 records), and write them with `json.dumps(..., separators=(",", ":"), ensure_ascii=False)`.
+That serialisation reproduces the whole L0 payload byte for byte, so every record here is the exact
+byte sequence NSE served; only the array around them is shorter. Result: 48,762 bytes, sha256
+`a88e7c0f4ede7ebd61f7e449f025665e51f2cc7ad84fffeb057a9084acfd5a56`, asserted by
+`tests/unit/test_shareholding_bad_isin.py`.
+
+What it carries:
+
+* Records 39 and 40 (L0 records 982 and 1084) are the two filings NSE published with a malformed
+  ISIN, in every poll from 2026-10-16 on: `ASAHIINDIA` with `isin: "INE 439A0401"` (an embedded
+  space) and `PGHL` with `isin: "INE07180108"` (eleven characters). Both for `30-SEP-2026`,
+  broadcast 16-Oct. Record 982's was the `ParseError` that failed `shareholding_poll` 2026-10-16..21.
+* Record 2 (`SPIC`) has `isin: null` — the existing no-ISIN path.
+* The other 38 are well-formed and publish.
+
+Why 41 records and not fewer: the parser fails a file whose malformed-ISIN share is over
+`MAX_BAD_ISIN_PCT` (5%), so carrying both real malformed records under it takes at least 40. 41
+keeps the main case off the boundary; the tests drop one and two well-formed records to pin it
+(2 of 40 publishes, 2 of 39 fails).
+
+## `master_2026_10/corporate-share-holdings-master_20261021_aareydrugs_pair.json` — live, two records
+
+Two records of the same 2026-10-21 L0 payload (sha256 `fc764ed4…f6743c`, above), cut the same way:
+**L0 records 4 and 386**, in payload order, written with the same serialisation, so each record is
+the exact bytes NSE served. 1,657 bytes, sha256
+`0389a01d055031991c3af6afedbfec1f261ac86c0282a789a0426a8c83abe5c9`, asserted by
+`tests/unit/test_shareholding_refiling.py`.
+
+Both are AAREYDRUGS (`INE198H01019`, Aarey Drugs & Pharmaceuticals) for the `30-SEP-2026` quarter,
+neither marked revised, with every number equal. They differ only in filing metadata —
+`broadcastDate`, `submissionDate`, `systemDate`, `recordId`, `xbrl`, `xbrlFileSize`. Record 0 (L0
+record 4) was filed `21-OCT-2026 18:02:52`; record 1 (L0 record 386) was filed `19-OCT-2026
+19:21:15`, so the later filing is listed first. Record 0 is also L0 record 4 inside the subset
+fixture above. This pair is the re-filing the snapshot refused as "listed more than once", which
+kept the 2026-10-21 poll failing after the malformed ISINs were excluded.
+
 ## `json_v1/corporate-share-holdings-master_20260807.json` — synthetic, the M3.6 build era
 
 A **format-faithful synthetic fixture** written at M3.6 to the key set then believed to be served

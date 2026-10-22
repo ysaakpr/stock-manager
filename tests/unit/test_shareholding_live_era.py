@@ -245,9 +245,11 @@ def test_a_record_published_without_an_isin_is_skipped_counted_and_flagged(
     assert len({f.fingerprint for f in quality_findings(live)}) == len(quality_findings(live))
 
 
-def test_a_blank_isin_is_withheld_but_a_malformed_one_fails() -> None:
+def test_a_blank_isin_is_withheld_and_a_lone_malformed_one_fails_the_file() -> None:
+    """A malformed ISIN is excluded only while it is a small share of the file: one record of one
+    is 100%, over `MAX_BAD_ISIN_PCT`, so the file still fails (`test_shareholding_bad_isin.py`)."""
     assert parse(_body(_live_record(isin="  ")), filename="x.json").skipped_no_isin
-    with pytest.raises(ParseError, match="isin"):
+    with pytest.raises(ParseError, match=r"1 of 1 records .* malformed 'isin'"):
         parse(_body(_live_record(isin="IMFA")), filename="x.json")
 
 

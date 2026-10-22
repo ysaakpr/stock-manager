@@ -544,11 +544,17 @@ def test_a_missing_required_field_names_what_was_there() -> None:
         parse(_record(pr_and_prgrp=None), filename="x.json")
 
 
-def test_a_company_listed_twice_for_one_quarter_is_rejected() -> None:
+def test_a_company_listed_twice_for_one_quarter_with_different_numbers_is_rejected() -> None:
+    """A restatement in one payload is refused whole. (The same numbers filed twice collapse to the
+    earliest filing instead — `test_shareholding_refiling.py`.)"""
     body = json.dumps(
         [
             json.loads(_record().decode())[0],
-            json.loads(_record().decode())[0],
+            json.loads(
+                _record(
+                    pr_and_prgrp="50.40", public_prcnt="49.60", broadcastDate="08-May-2026"
+                ).decode()
+            )[0],
         ]
     ).encode("utf-8")
     with pytest.raises(ParseError, match="more than once"):
