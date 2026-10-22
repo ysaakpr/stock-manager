@@ -44,7 +44,12 @@ converted exactly, and `NaN`/`Infinity` are parse failures, not percentages that
 than a hundred. Identity is ISIN (invariant #2): the payload carries it natively, so nothing here
 joins on a symbol. The live master leaves `isin` null on the odd record; that record is skipped and
 counted (`ShareholdingSnapshot.skipped_no_isin`, and a WARN `quality_flag`), never resolved from
-its symbol — the same rule the BSE scrip master follows for a blank ISIN.
+its symbol — the same rule the BSE scrip master follows for a blank ISIN. It also, since
+2026-10-16, states a malformed one on the odd record (`'INE 439A0401'`, `'INE07180108'`): that
+record is excluded the same way (`skipped_bad_isin`, a WARN under `BAD_ISIN_CHECK` carrying the raw
+literal and the record number) and never repaired into an ISIN. A file where more than
+`MAX_BAD_ISIN_PCT` of the records are malformed still fails whole — that is a format change in the
+identifier, not a few bad filings, and must not publish as a near-empty day.
 
 Offline by construction: this module takes bytes, or an `L0Ref` it reads back through `L0Store`.
 `ingest_snapshot` is the one function that drives a fetch, and it does so through the crawl engine,
@@ -82,13 +87,16 @@ from dataplatform.store.l0 import L0Ref, L0Store
 from dataplatform.store.paths import Layer, l1_partition_path, layer_root, partition_date_of
 
 __all__ = [
+    "BAD_ISIN_CHECK",
     "BC3_CHECK",
+    "MAX_BAD_ISIN_PCT",
     "NO_ISIN_CHECK",
     "PLEDGE_BREACH_PCT",
     "SHAREHOLDING_DATASET",
     "SOURCE_ID",
     "Bc3Status",
     "FormatEra",
+    "MalformedIsinFiling",
     "ShareholdingRow",
     "ShareholdingSnapshot",
     "SkippedFiling",
@@ -126,6 +134,24 @@ BC3_CHECK: Final = "shareholding_bc3"
 
 #: The `quality_flag.check_name` a record the source published without an ISIN is filed under.
 NO_ISIN_CHECK: Final = "shareholding_no_isin"
+
+#: The `quality_flag.check_name` a record whose stated ISIN is malformed is filed under. A sibling
+#: of `NO_ISIN_CHECK` rather than the same check: "the exchange did not identify this company" and
+#: "the exchange identified it with something that is not an ISIN" are chased differently.
+BAD_ISIN_CHECK: Final = "shareholding_bad_isin"
+
+#: Above this share of a payload's records (percent, strict `>`) carrying a malformed ISIN, the
+#: whole file fails rather than publishing what is left. Measured on the 2026-10 L0 masters: the
+#: worst file is 2 of 1,430 records (0.14%, 2026-10-16), the same two filings in every poll since,
+#: and no other poll has any. 5% is 35x that, and a change in how the identifier is written (case,
+#: separator, length) knocks every record off the pattern at once — ~100%, twenty times the line.
+#: It still lets one bad record through any file of 20 or more records, which includes the
+#: smallest poll on record (32 records, 2026-10-06). A smaller file with one fails loud: the
+#: conservative side, and the cumulative master passes 20 records within days of a quarter's start.
+#: The same form as `delivery_coverage.DEFAULT_FLOOR_PCT` (a measured share, as a `Decimal`). A
+#: record with no ISIN at all (`NO_ISIN_CHECK`) is not counted: that runs at a steady ~3% of the
+#: live master and reached 6.25% on the 32-record poll, a known property of the source.
+MAX_BAD_ISIN_PCT: Final = Decimal(5)
 
 
 class Bc3Status(StrEnum):
@@ -172,6 +198,10 @@ _FILING_DATE = re.compile(
 #: `Decimal` itself accepts `NaN`/`Infinity`, and a mis-framed field that spells one of those must
 #: not become a percentage that compares greater than a hundred.
 _DECIMAL_LITERAL = re.compile(r"^[+-]?\d+(\.\d+)?$")
+
+#: The model's own ISIN pattern, compiled — the exclusion test and `ShareholdingRow.isin` read the
+#: same constant, so "excluded as malformed" and "would fail the row" cannot drift apart.
+_ISIN: Final = re.compile(ISIN_PATTERN)
 
 #: The payload keys this parser reads, named once so a source rename is one edit. `period_end` and
 #: `filing_date` come from two *different* keys on purpose — neither is inferred from the other
@@ -294,6 +324,36 @@ class SkippedFiling(BaseModel):
     filing_date: date
 
 
+class MalformedIsinFiling(BaseModel):
+    """A record whose stated ISIN is not an ISIN — excluded from `rows`, counted and flagged.
+
+    What it does: keep the literal exactly as the source published it (`raw_isin`) and where it sat
+    (`record`, its 0-based index in the payload, as `ParseError` messages number records), so a
+    human can find the filing and have the exchange correct it.
+    What it never does: hold a well-formed ISIN — validation raises, so a record that would have
+    made a valid row can never be dropped through this path — or offer a repaired one. Nothing
+    joins on `raw_isin`, `symbol` or `name`.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    record: int = Field(ge=0, description="0-based index of the record in the payload")
+    raw_isin: str = Field(min_length=1, description="the `isin` literal as published, unrepaired")
+    symbol: str | None = Field(default=None, description="exchange symbol, for display only")
+    name: str = Field(min_length=1, description="company name as filed, for display only")
+    period_end: date
+    filing_date: date
+
+    @model_validator(mode="after")
+    def _not_a_valid_isin(self) -> MalformedIsinFiling:
+        if _ISIN.match(self.raw_isin.strip()):
+            raise ValueError(
+                f"record {self.record}: {self.raw_isin!r} is a well-formed ISIN; it belongs in "
+                "`rows`, never in the excluded set"
+            )
+        return self
+
+
 class ShareholdingSnapshot(BaseModel):
     """One master payload's worth of filings — every company's latest pattern at one poll.
 
@@ -312,6 +372,9 @@ class ShareholdingSnapshot(BaseModel):
     rows: tuple[ShareholdingRow, ...] = Field(description="one row per company/quarter, sorted")
     skipped_no_isin: tuple[SkippedFiling, ...] = Field(
         default=(), description="records the source published with no ISIN; not in `rows`"
+    )
+    skipped_bad_isin: tuple[MalformedIsinFiling, ...] = Field(
+        default=(), description="records whose stated ISIN is malformed; not in `rows`"
     )
 
     @model_validator(mode="after")
@@ -349,25 +412,33 @@ def parse(payload: bytes, *, filename: str, l0_key: str | None = None) -> Shareh
 
     A record whose `isin` is present but null or blank is skipped into `skipped_no_isin` — counted,
     logged, and flagged by `quality_findings` — rather than failing the whole poll for one company
-    the exchange did not identify.
+    the exchange did not identify. A record whose `isin` is a string that fails the ISIN pattern is
+    excluded the same way into `skipped_bad_isin`, with the literal as published and its record
+    number; it is never repaired, and its other identifying fields (name, both dates) must still
+    parse. A well-formed ISIN always goes to `rows` and is never excluded.
 
     Raises `ParseError`, naming the file, for anything that is not this format: an HTML soft-404, a
     non-array body, a record of neither era or of a different era from its neighbours, a record
-    missing a required field (including `isin` itself), a malformed ISIN, a percentage that is not
-    a plain decimal or that sits outside 0-100, an unknown `revisedData` marker, a filing that does
-    not fall after its quarter, or a company listed twice for one quarter. Never returns a partial
-    or repaired snapshot.
+    missing a required field (including `isin` itself), an `isin` that is not a string, more than
+    `MAX_BAD_ISIN_PCT` of the records with a malformed ISIN, a percentage that is not a plain
+    decimal or that sits outside 0-100, an unknown `revisedData` marker, a filing that does not
+    fall after its quarter, or a company listed twice for one quarter. Never returns a repaired
+    snapshot.
     """
     text = _decode(payload, filename=filename)
     records = _records(text, filename=filename)
     era = _era(records, filename=filename)
     rows: list[ShareholdingRow] = []
     skipped: list[SkippedFiling] = []
+    malformed: list[MalformedIsinFiling] = []
     for index, record in enumerate(records):
         if _isin_withheld(record, index=index, filename=filename):
             skipped.append(_skipped(record, index=index, filename=filename))
+        elif (raw := _malformed_isin(record)) is not None:
+            malformed.append(_malformed(record, raw, index=index, filename=filename))
         else:
             rows.append(_row(record, era=era, index=index, l0_key=l0_key, filename=filename))
+    _check_malformed_share(malformed, total=len(records), filename=filename)
     try:
         snapshot = ShareholdingSnapshot(
             source=SOURCE_ID,
@@ -376,10 +447,20 @@ def parse(payload: bytes, *, filename: str, l0_key: str | None = None) -> Shareh
             skipped_no_isin=tuple(
                 sorted(skipped, key=lambda s: (s.filing_date, s.symbol or "", s.name))
             ),
+            skipped_bad_isin=tuple(malformed),
         )
     except ValidationError as exc:
         raise ParseError(str(exc), filename=filename) from exc
 
+    if snapshot.skipped_bad_isin:
+        _LOG.warning(
+            "shareholding.skipped_bad_isin",
+            source=SOURCE_ID,
+            filename=filename,
+            skipped=len(snapshot.skipped_bad_isin),
+            records=[(m.record, m.raw_isin, m.symbol) for m in snapshot.skipped_bad_isin],
+            state="VALIDATED",
+        )
     if snapshot.skipped_no_isin:
         _LOG.warning(
             "shareholding.skipped_no_isin",
@@ -398,6 +479,7 @@ def parse(payload: bytes, *, filename: str, l0_key: str | None = None) -> Shareh
         breaching=len(snapshot.breaching()),
         bc3_not_applicable=len(snapshot.bc3_not_applicable()),
         skipped_no_isin=len(snapshot.skipped_no_isin),
+        skipped_bad_isin=len(snapshot.skipped_bad_isin),
         state="VALIDATED",
     )
     return snapshot
@@ -513,6 +595,59 @@ def _skipped(record: Mapping[str, Any], *, index: int, filename: str) -> Skipped
         )
     except ValidationError as exc:
         raise ParseError(f"record {index}: {exc}", filename=filename) from exc
+
+
+def _malformed_isin(record: Mapping[str, Any]) -> str | None:
+    """The `isin` literal when it is a non-blank string that is not an ISIN; `None` otherwise.
+
+    Tested on the stripped value, exactly as `_row` hands it to the model, so only a record the
+    model would have rejected on `isin` is excluded. A non-string `isin` returns `None` and fails
+    in `_row` like any other mistyped field: a type change is the format moving, not one bad filing.
+    """
+    value = record[_KEY_ISIN]
+    if isinstance(value, str) and not _ISIN.match(value.strip()):
+        return value
+    return None
+
+
+def _malformed(
+    record: Mapping[str, Any], raw_isin: str, *, index: int, filename: str
+) -> MalformedIsinFiling:
+    """A malformed-ISIN record, kept as published and only as far as a human needs to chase it."""
+    symbol = record.get(_KEY_SYMBOL)
+    try:
+        return MalformedIsinFiling(
+            record=index,
+            raw_isin=raw_isin,
+            symbol=symbol.strip() if isinstance(symbol, str) and symbol.strip() else None,
+            name=_text(record, _KEY_NAME, index=index, filename=filename),
+            period_end=_period_end(record, index=index, filename=filename),
+            filing_date=_filing_date(record, index=index, filename=filename),
+        )
+    except ValidationError as exc:
+        raise ParseError(f"record {index}: {exc}", filename=filename) from exc
+
+
+def _check_malformed_share(
+    malformed: list[MalformedIsinFiling], *, total: int, filename: str
+) -> None:
+    """Fail the file when malformed ISINs are more than `MAX_BAD_ISIN_PCT` of its records.
+
+    Exact `Decimal` arithmetic and a strict `>`, so a file at exactly the threshold publishes and
+    the boundary is the one the constant states. The message names the count, the share and the
+    first few literals, so the failure on `/status/sources` says what the identifier now looks like.
+    """
+    if not malformed:
+        return
+    share = Decimal(100) * len(malformed) / total
+    if share > MAX_BAD_ISIN_PCT:
+        sample = ", ".join(f"record {m.record}: {m.raw_isin!r}" for m in malformed[:3])
+        raise ParseError(
+            f"{len(malformed)} of {total} records ({share.quantize(Decimal('0.01'))}%) state a "
+            f"malformed 'isin', above the {MAX_BAD_ISIN_PCT}% a file may exclude — a format "
+            f"change in the identifier, not a few bad filings ({sample})",
+            filename=filename,
+        )
 
 
 def _row(
@@ -907,7 +1042,8 @@ def _to_record(row: ShareholdingRow) -> dict[str, Any]:
 def quality_findings(snapshot: ShareholdingSnapshot) -> tuple[QualityFinding, ...]:
     """The `quality_flag` rows a snapshot owes `GET /status/quality`, deterministically ordered.
 
-    What it does: one finding per row whose BC3 is not CLEAR, and one per skipped no-ISIN record:
+    What it does: one finding per row whose BC3 is not CLEAR, and one per record excluded for its
+    ISIN (absent or malformed):
 
     * BC3 BREACH → WARN under `BC3_CHECK`, observed pledge against the 50% threshold. The data is
       fine — the *company* tripped an integrity condition — so it does not gate trading the dataset
@@ -916,12 +1052,18 @@ def quality_findings(snapshot: ShareholdingSnapshot) -> tuple[QualityFinding, ..
       "explicit, never silent": the row is in L1 but its BC3 was never evaluated, and the status
       surface says so per company and filing date.
     * no ISIN → WARN under `NO_ISIN_CHECK`, with the symbol and name for the human who chases it.
+    * malformed ISIN → WARN under `BAD_ISIN_CHECK`, with the raw literal as published, the record
+      number and the L0 payload it sits in. The literal is in `detail`, never in `isin`: it is not
+      an ISIN, and the column is for instruments.
 
     Each finding is dated by the filing date (the date the fact became knowable) and fingerprinted
     by (check, BC3 status, quarter, ISIN or symbol, filing date), so re-deriving the same polls
     raises nothing new, while a breach found after a not_applicable flag is a new finding rather
     than a duplicate of it, and two quarters filed on one date are two findings. An open
     not_applicable flag is not auto-resolved when a later poll evaluates BC3; it stays for a human.
+    A malformed-ISIN finding is fingerprinted by its raw literal, symbol and quarter but not its
+    record number, which moves as the cumulative master grows: the daily polls that repeat one bad
+    filing raise one flag, which names the record and payload of the poll that first raised it.
     What it never does: write anything, or emit a finding for a CLEAR row.
     """
     findings: list[QualityFinding] = []
@@ -978,6 +1120,31 @@ def quality_findings(snapshot: ShareholdingSnapshot) -> tuple[QualityFinding, ..
                     f"{NO_ISIN_CHECK}/{label}/{skipped.period_end.isoformat()}",
                     None,
                     skipped.filing_date,
+                ),
+            )
+        )
+    for bad in snapshot.skipped_bad_isin:
+        findings.append(
+            QualityFinding(
+                logical_date=bad.filing_date,
+                check_name=BAD_ISIN_CHECK,
+                severity="WARN",
+                source=SOURCE_ID,
+                detail={
+                    "raw_isin": bad.raw_isin,
+                    "record": bad.record,
+                    "symbol": bad.symbol,
+                    "name": bad.name,
+                    "period_end": bad.period_end.isoformat(),
+                    "l0_key": snapshot.l0_key,
+                    "reason": "the source published this filing with a malformed ISIN; it is not "
+                    "in L1, and the ISIN is not repaired or guessed",
+                },
+                fingerprint=finding_fingerprint(
+                    f"{BAD_ISIN_CHECK}/{bad.raw_isin}/{bad.symbol or bad.name}/"
+                    f"{bad.period_end.isoformat()}",
+                    None,
+                    bad.filing_date,
                 ),
             )
         )
