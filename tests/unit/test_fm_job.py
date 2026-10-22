@@ -16,6 +16,7 @@ plus the data wait, the dry stream's isolation and a held delisted name.
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
@@ -44,6 +45,7 @@ from analyst.fundmanager.job import (
     DeadlineLLM,
     StreamJournal,
     mandate_fingerprints,
+    s0_entry,
 )
 from analyst.fundmanager.render import PromptTemplate
 from analyst.fundmanager.runtime import (
@@ -59,11 +61,14 @@ from analyst.fundmanager.scoreboard import (
     MARK_EVENT,
     OUTCOME_EVENT,
     S0_EVENT,
+    BookMark,
     DecisionAction,
+    ScoreboardError,
     ScoredDecision,
     build_scoreboard,
     decision_payload,
     inputs_from_journal,
+    mark_entry,
 )
 from analyst.fundmanager.stops import STOP_EXIT_EVENT
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
@@ -944,6 +949,176 @@ def test_a_rerun_of_a_completed_session_is_a_no_op(tmp_path: Path) -> None:
         SESSION, FakeWorld(flat_market()), builder, PerManagerLLM({}), roster=roster, runner=runner
     )
     assert again.outcome is RunOutcome.ALREADY_DONE and len(desk.sink.entries) == before
+
+
+# ── the journal cross-check of a restarted desk ──────────────────────────────────────────────────
+
+#: The live dates: the retired dry desk ran once on 2026-10-09; M17.14's desk opened 2026-10-12.
+RETIRED_ON, OPENED_ON, NEXT = date(2026, 10, 9), date(2026, 10, 12), date(2026, 10, 13)
+_REFUSED, _MISMATCH = "fm_job.scoreboard_rebuild_refused", "fm_job.scoreboard_mismatch"
+
+
+def _flat_mark(book_id: str, capital: Decimal, session: date) -> BookMark:
+    zero = Decimal(0)
+    return BookMark(
+        book_id=book_id,
+        session=session,
+        nav=capital,
+        cash=capital,
+        positions=0,
+        turnover=zero,
+        costs=zero,
+        interest=zero,
+    )
+
+
+def _leave_retired_desk_lines(desk: Desk, roster: Roster) -> None:
+    """What the retired 2026-10-09 dry desk left in the stream M17.14's desk writes to: the
+    bench's ``M17_S0`` and its ``BOOK_MARK`` (live entries 12 and 29) — the one book id the two
+    rosters share, so the only lines of it the new roster's reader sees."""
+    (bench,) = roster.benches
+    clock = evening(RETIRED_ON)
+    mark = _flat_mark(bench.id, bench.opening_capital_inr, RETIRED_ON)
+    s0 = s0_entry(mandate_fingerprints(roster)[bench.id], session=RETIRED_ON, clock=clock)
+    for entry, evidence in (s0, mark_entry(mark, clock=clock)):
+        desk.journal.append(entry, evidence=evidence)
+
+
+def _run_scripted(
+    desk: Desk, roster: Roster, day: date, *, start: bool = False
+) -> M17SessionResult:
+    return desk.run(
+        day,
+        FakeWorld(flat_market()),
+        Builder(scripted_commons),
+        PerManagerLLM({}),
+        roster=roster,
+        runner=ScriptedRunner({}),
+        start=start,
+    )
+
+
+@pytest.mark.parametrize("started", [False, True], ids=["no-start", "start"])
+def test_a_restarted_desk_rebuilds_its_ledger_scoreboard_past_the_retired_desk_lines(
+    tmp_path: Path, started: bool
+) -> None:
+    """Fails before the fix: the rebuild read the retired desk's S0 and bench mark, took S0 as
+    2026-10-09 and refused ("no mark on 2026-10-09"), so every session logged a mismatch. Fails
+    too if the desk-period filter is inverted (the rebuild then sees only those two lines)."""
+    desk = Desk(tmp_path, stream=STREAM_DRY)
+    roster = mini_roster()
+    _leave_retired_desk_lines(desk, roster)
+
+    with capture_logs() as logs:
+        results = [
+            _run_scripted(desk, roster, day, start=started and day == OPENED_ON)
+            for day in (OPENED_ON, NEXT)
+        ]
+
+    # the stream as a whole still holds the live failure; the job's check no longer reads it so
+    with pytest.raises(ScoreboardError, match=f"has no mark on {RETIRED_ON.isoformat()}"):
+        build_scoreboard(roster, inputs_from_journal(desk.entries(), roster))
+    for result in results:
+        assert result.outcome is RunOutcome.COMPLETED
+        assert result.scoreboard is not None
+        assert result.scoreboard.s0 == (OPENED_ON if started else None)
+        assert result.rebuilt_digest == result.scoreboard.digest()
+        assert result.scoreboard_error is None and result.rebuild_refused is None
+    assert not [log for log in logs if log["event"] in (_REFUSED, _MISMATCH)]
+    record = desk.store.get(DESK_IDS[STREAM_DRY], NEXT)
+    assert record is not None and record.book_state is not None
+    assert record.book_state["opened_on"] == OPENED_ON.isoformat()
+
+
+def test_a_real_disagreement_inside_the_desk_period_is_still_a_mismatch(tmp_path: Path) -> None:
+    """The check still compares: an ``M17_S0`` journaled inside the desk's period that the ledger
+    never took (a stray ``--start``) opens the journal's scoring window and not the ledger's.
+
+    Fails if the check always agrees (no mismatch), if the filter is inverted or dropped (the
+    rebuild then takes the retired S0 and refuses instead of differing), or if a mismatch is
+    reported as a refusal.
+    """
+    desk = Desk(tmp_path, stream=STREAM_DRY)
+    roster = mini_roster()
+    _leave_retired_desk_lines(desk, roster)
+    _run_scripted(desk, roster, OPENED_ON)
+    for fingerprint in mandate_fingerprints(roster).values():
+        entry, evidence = s0_entry(fingerprint, session=OPENED_ON, clock=evening(OPENED_ON))
+        desk.journal.append(entry, evidence=evidence)
+
+    with capture_logs() as logs:
+        result = _run_scripted(desk, roster, NEXT)
+
+    in_period = [e for e in desk.entries() if e.trading_date >= OPENED_ON]
+    journal_side = build_scoreboard(roster, inputs_from_journal(in_period, roster))
+    assert journal_side.s0 == OPENED_ON and journal_side.sessions_elapsed == 2
+    assert result.outcome is RunOutcome.COMPLETED
+    assert result.scoreboard is not None and result.scoreboard.s0 is None
+    ledger_digest = result.scoreboard.digest()
+    assert result.rebuilt_digest == journal_side.digest() != ledger_digest
+    assert result.rebuild_refused is None
+    assert result.scoreboard_error == (
+        f"the journal rebuilds scoreboard {journal_side.digest()[:16]}, not the job's "
+        f"{ledger_digest[:16]}: the journal and the desk ledger disagree"
+    )
+    (mismatch,) = [log for log in logs if log["event"] == _MISMATCH]
+    assert mismatch["rebuilt_digest"] == journal_side.digest()
+    assert mismatch["ledger_digest"] == ledger_digest
+    assert not [log for log in logs if log["event"] == _REFUSED]
+
+
+def test_a_rebuild_the_scoreboard_refuses_is_reported_as_a_refusal_in_full(
+    tmp_path: Path,
+) -> None:
+    """Fails before the fix: a refusal was folded into the mismatch line as ``refused: <16 chars>``.
+    A second bench mark on a session of the desk's period, which the ledger holds once."""
+    desk = Desk(tmp_path, stream=STREAM_DRY)
+    roster = mini_roster()
+    _leave_retired_desk_lines(desk, roster)
+    _run_scripted(desk, roster, OPENED_ON)
+    (bench,) = roster.benches
+    mark = _flat_mark(bench.id, bench.opening_capital_inr, OPENED_ON)
+    entry, evidence = mark_entry(mark, clock=evening(OPENED_ON))
+    desk.journal.append(entry, evidence=evidence)
+
+    with capture_logs() as logs:
+        result = _run_scripted(desk, roster, NEXT)
+
+    reason = f"two marks for {bench.id} on {OPENED_ON.isoformat()}"
+    assert result.outcome is RunOutcome.COMPLETED
+    assert result.scoreboard is not None and result.scoreboard_error is None
+    assert result.rebuilt_digest is None and result.rebuild_refused == reason
+    (refused,) = [log for log in logs if log["event"] == _REFUSED]
+    assert refused["error"] == reason and refused["opened_on"] == OPENED_ON.isoformat()
+    assert not [log for log in logs if log["event"] == _MISMATCH]
+
+
+def test_a_rebuild_refusal_is_logged_masked(tmp_path: Path) -> None:
+    """A malformed line's refusal quotes the line's input; a credential in it is masked, never
+    logged or returned verbatim."""
+    desk = Desk(tmp_path, stream=STREAM_DRY)
+    roster = mini_roster()
+    _run_scripted(desk, roster, OPENED_ON)
+    (bench,) = roster.benches
+    secret = _fake_secret("rebuild-refused")
+    entry, evidence = mark_entry(
+        _flat_mark(bench.id, bench.opening_capital_inr, OPENED_ON), clock=evening(OPENED_ON)
+    )
+    record = {**json.loads(entry.payload["record"]), "nav": f"api_key={secret}"}
+    malformed = entry.model_copy(
+        update={"payload": {**entry.payload, "record": json.dumps(record)}}
+    )
+    desk.journal.append(malformed, evidence=evidence)
+
+    with capture_logs() as logs:
+        result = _run_scripted(desk, roster, NEXT)
+
+    assert result.rebuild_refused is not None and secret not in result.rebuild_refused
+    assert result.rebuild_refused.startswith(f"malformed BOOK_MARK line for {bench.id} on ")
+    assert "api_key=***" in result.rebuild_refused
+    (refused,) = [log for log in logs if log["event"] == _REFUSED]
+    assert refused["error"] == result.rebuild_refused
+    assert all(secret not in repr(log) for log in logs)
 
 
 # ── waiting for data ─────────────────────────────────────────────────────────────────────────────

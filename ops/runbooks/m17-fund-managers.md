@@ -147,8 +147,13 @@ with a new id (§7) — never edit a running one.
 The digest `~/campaign/m17/digest-<session>.md` holds the same numbers (a *Managers* table, a
 *Books against their controls* table, the graduation floor line, the *Style books* table and the
 *Invested sleeve against the control* table, with the same secondary figures) plus
-that session's decision table, mirror orders and refusals included. The job also checks its own ledger against a rebuild from the journal every session;
-a disagreement is logged `fm_job.scoreboard_mismatch` and reported as `scoreboard_error`.
+that session's decision table, mirror orders and refusals included. The job also checks its own ledger against a rebuild from the journal every session.
+The rebuild reads only the desk's own period — entries dated on or after the desk state's
+`opened_on` — because a desk restarted under a new id (the dry desk at M17.14) writes to the same
+stream as the one it replaced, whose lines the append-only journal keeps. Two digests that differ
+are logged `fm_job.scoreboard_mismatch` (with both digests) and reported as `scoreboard_error`; a
+rebuild the scoreboard refuses is logged `fm_job.scoreboard_rebuild_refused` with its full, masked
+reason and reported as `rebuild_refused`.
 
 ## Results dates, delivery and volume quality (Amendment 4)
 
