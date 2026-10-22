@@ -51,6 +51,12 @@ literal and the record number) and never repaired into an ISIN. A file where mor
 `MAX_BAD_ISIN_PCT` of the records are malformed still fails whole — that is a format change in the
 identifier, not a few bad filings, and must not publish as a near-empty day.
 
+One company can appear twice for one quarter: NSE lists a re-filing as a second record (AAREYDRUGS,
+30-Sep-2026, filed 19-Oct and again 21-Oct with the same numbers). When every published field but
+the filing date agrees, the two are one row dated to the *earliest* filing — when the numbers first
+became public — and the collapse is logged. When any number differs it is a restatement, and the
+payload still fails whole: which filing to believe is a human's call, not the parser's.
+
 Offline by construction: this module takes bytes, or an `L0Ref` it reads back through `L0Store`.
 `ingest_snapshot` is the one function that drives a fetch, and it does so through the crawl engine,
 which is still the only thing in the platform that opens a socket.
@@ -65,7 +71,7 @@ from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any, Final, Protocol
+from typing import Annotated, Any, Final, NamedTuple, Protocol
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -191,7 +197,7 @@ _MONTHS: Final[Mapping[str, int]] = {
 #: date is all this dataset keeps — §4.1 speaks of a filing *date* — but the clock is tolerated so a
 #: `broadcastDate` of `07-May-2026 18:30:00` is not rejected for the time it states.
 _FILING_DATE = re.compile(
-    r"^\s*(\d{1,2})-([A-Za-z]{3})-(\d{4})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?\s*$"
+    r"^\s*(\d{1,2})-([A-Za-z]{3})-(\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?\s*$"
 )
 
 #: A plain decimal literal, optionally signed. Checked before `Decimal()` sees the text because
@@ -359,8 +365,9 @@ class ShareholdingSnapshot(BaseModel):
 
     What it does: hold the rows one `corporate-share-holdings-master` response yielded, together
     with the L0 payload they came from, so an L1 partition can name its lineage.
-    What it assumes: each `(isin, period_end)` appears once in a payload; a company listing the same
-    quarter twice is a broken response, not two rows.
+    What it assumes: each `(isin, period_end)` appears once in a payload. `parse` collapses a
+    company that filed the same numbers for one quarter twice to its earliest filing before this is
+    built; two filings of one quarter with different numbers are a restatement, and refused here.
     What it never does: exist with a duplicate `(isin, period_end)` — validation raises, so a
     snapshot that exists is one every partition writer can trust.
     """
@@ -417,18 +424,22 @@ def parse(payload: bytes, *, filename: str, l0_key: str | None = None) -> Shareh
     number; it is never repaired, and its other identifying fields (name, both dates) must still
     parse. A well-formed ISIN always goes to `rows` and is never excluded.
 
+    A company that filed the same quarter more than once with every published field equal — only
+    when it filed differs — is one row, dated to its earliest filing (`_collapse_refilings`): that
+    is when the numbers first became public, so it is the PIT-honest date.
+
     Raises `ParseError`, naming the file, for anything that is not this format: an HTML soft-404, a
     non-array body, a record of neither era or of a different era from its neighbours, a record
     missing a required field (including `isin` itself), an `isin` that is not a string, more than
     `MAX_BAD_ISIN_PCT` of the records with a malformed ISIN, a percentage that is not a plain
     decimal or that sits outside 0-100, an unknown `revisedData` marker, a filing that does not
-    fall after its quarter, or a company listed twice for one quarter. Never returns a repaired
-    snapshot.
+    fall after its quarter, or a company listed twice for one quarter with anything but its filing
+    date different (a restatement). Never returns a repaired snapshot.
     """
     text = _decode(payload, filename=filename)
     records = _records(text, filename=filename)
     era = _era(records, filename=filename)
-    rows: list[ShareholdingRow] = []
+    parsed: list[_Parsed] = []
     skipped: list[SkippedFiling] = []
     malformed: list[MalformedIsinFiling] = []
     for index, record in enumerate(records):
@@ -437,8 +448,11 @@ def parse(payload: bytes, *, filename: str, l0_key: str | None = None) -> Shareh
         elif (raw := _malformed_isin(record)) is not None:
             malformed.append(_malformed(record, raw, index=index, filename=filename))
         else:
-            rows.append(_row(record, era=era, index=index, l0_key=l0_key, filename=filename))
+            row = _row(record, era=era, index=index, l0_key=l0_key, filename=filename)
+            filed = _filing_field(record, index=index, filename=filename)
+            parsed.append(_Parsed(record=index, filed=filed, row=row))
     _check_malformed_share(malformed, total=len(records), filename=filename)
+    rows = _collapse_refilings(parsed, filename=filename)
     try:
         snapshot = ShareholdingSnapshot(
             source=SOURCE_ID,
@@ -650,6 +664,77 @@ def _check_malformed_share(
         )
 
 
+class _Parsed(NamedTuple):
+    """One publishable record on its way to `rows`: the row, plus where it sat and when it filed."""
+
+    record: int
+    filed: str
+    row: ShareholdingRow
+
+
+#: What a re-filing may differ in and still be the same numbers: only when it was filed. Every other
+#: published field — every percentage, the name, the `revisedData` marker — must be equal, or the
+#: second filing is a restatement and the snapshot refuses the payload as before.
+_FILING_ONLY: Final[set[str]] = {"filing_date"}
+
+
+def _collapse_refilings(parsed: list[_Parsed], *, filename: str) -> list[ShareholdingRow]:
+    """One row per company-quarter where the duplicates are the same numbers filed again.
+
+    What it does: groups the rows by `(isin, period_end)`. A group whose rows agree on every field
+    but `filing_date` becomes its earliest filing — by filing timestamp, then record order — and
+    the collapse is logged with every filing timestamp and the one kept. NSE lists such a re-filing
+    as a second record (AAREYDRUGS, 30-Sep-2026: 19-Oct and 21-Oct, same numbers, neither marked
+    revised), and the numbers were public from the first, so the earliest is the PIT date.
+    What it never does: pick between filings whose numbers differ. That group is returned whole and
+    `ShareholdingSnapshot` refuses it, exactly as before this rule existed; a restatement is for a
+    human, never resolved here. Distinct quarters of one company are distinct groups.
+    """
+    groups: dict[tuple[str, date], list[_Parsed]] = {}
+    for item in parsed:
+        groups.setdefault((item.row.isin, item.row.period_end), []).append(item)
+    rows: list[ShareholdingRow] = []
+    for (isin, period_end), group in groups.items():
+        if len(group) == 1:
+            rows.append(group[0].row)
+            continue
+        ordered = sorted(
+            group,
+            key=lambda item: (item.row.filing_date, _filing_clock(item.filed), item.record),
+        )
+        kept = ordered[0]
+        numbers = kept.row.model_dump(exclude=_FILING_ONLY)
+        if any(item.row.model_dump(exclude=_FILING_ONLY) != numbers for item in ordered[1:]):
+            rows.extend(item.row for item in group)
+            continue
+        _LOG.info(
+            "shareholding.refiling_collapsed",
+            source=SOURCE_ID,
+            filename=filename,
+            isin=isin,
+            period_end=period_end.isoformat(),
+            filings=[item.filed for item in ordered],
+            records=[item.record for item in ordered],
+            kept=kept.filed,
+            kept_record=kept.record,
+            filing_date=kept.row.filing_date.isoformat(),
+            state="VALIDATED",
+        )
+        rows.append(kept.row)
+    return rows
+
+
+def _filing_clock(value: str) -> tuple[int, int, int]:
+    """The `HH:MM[:SS]` a filing timestamp states, as numbers; `(0, 0, 0)` when it states none.
+
+    Orders two filings made on one date. Compared as integers, so `9:05` sorts before `18:02`.
+    """
+    match = _FILING_DATE.match(value)
+    if match is None or match.group(4) is None:
+        return (0, 0, 0)
+    return (int(match.group(4)), int(match.group(5)), int(match.group(6) or 0))
+
+
 def _row(
     record: Mapping[str, Any],
     *,
@@ -811,7 +896,7 @@ def _filing_or_period_date(value: str, *, key: str, index: int, filename: str) -
     match = _FILING_DATE.match(value)
     if match is None:
         raise ParseError(f"record {index}: {key} {value!r} is not DD-Mon-YYYY", filename=filename)
-    day, month_name, year = match.groups()
+    day, month_name, year = match.group(1, 2, 3)
     month = _MONTHS.get(month_name.upper())
     if month is None:
         raise ParseError(
