@@ -46,7 +46,14 @@ from dataplatform.status.console.data_render import (
     render_unreadable,
 )
 from dataplatform.status.console.pages import render_not_found
-from dataplatform.status.deps import ClockDep, ConnDep, GapScannerDep, SettingsDep, SyncStoreDep
+from dataplatform.status.deps import (
+    ClockDep,
+    ConnDep,
+    GapScannerDep,
+    JudgeDep,
+    SettingsDep,
+    SyncStoreDep,
+)
 from dataplatform.status.models import GapsOut
 from dataplatform.status.queries import read_quality, read_quarantine_status
 from dataplatform.status.queries_data import (
@@ -114,6 +121,7 @@ def data_page(
     settings: SettingsDep,
     store: SyncStoreDep,
     scanner: GapScannerDep,
+    judge: JudgeDep,
     date_: Annotated[str | None, Query(alias="date")] = None,
     from_: Annotated[str | None, Query(alias="from")] = None,
     to: Annotated[str | None, Query(alias="to")] = None,
@@ -143,18 +151,18 @@ def data_page(
         )
 
     def sources() -> str:
-        payload = read_sources_status(store, today)
+        payload = read_sources_status(store, today, judge=judge)
         return render_sources(payload, sort_sources_worst_first(payload.sources))
 
     def gaps() -> str:
         if gaps_start > gaps_end:
             raise ValueError(f"from={gaps_start.isoformat()} is after to={gaps_end.isoformat()}")
         report = scanner.report(gaps_start, gaps_end)
-        return render_gaps(GapsOut.of(report, limit=GAPS_LIMIT))
+        return render_gaps(GapsOut.of(report, limit=GAPS_LIMIT, judge=judge))
 
     def quality() -> str:
         return render_quality(
-            read_quality(conn, as_of=now, limit=settings.status_quality_flag_limit)
+            read_quality(conn, as_of=now, limit=settings.status_quality_flag_limit, judge=judge)
         )
 
     def quarantine() -> str:

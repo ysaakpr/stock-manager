@@ -21,9 +21,16 @@ from decimal import Decimal
 from typing import Final
 from urllib.parse import urlencode
 
-from dataplatform.status.console.pages import _page, _state
+from dataplatform.status.console.pages import (
+    ACCEPTED,
+    _page,
+    _state,
+    deviation_attrs,
+    deviation_note,
+)
 from dataplatform.status.console.render import MISSING, esc, free_text, human_bytes, ist
 from dataplatform.status.models import (
+    CheckCountOut,
     GapEntryOut,
     GapsOut,
     QualityOut,
@@ -99,9 +106,15 @@ def sync_rag(state: SyncState, *, expects_data: bool | None) -> str:
 
 
 def source_health(line: SourceStatusOut) -> tuple[str, str]:
-    """A `/status/sources` line's one-word verdict and colour, from its own fields only."""
+    """A `/status/sources` line's one-word verdict and colour, from its own fields only.
+
+    An unhealthy line an accepted deviation covers is `ACCEPTED`, amber — a known, agreed failure,
+    not news. Its `healthy` is still false; only the colour and the word change.
+    """
     if line.declined is not None:
         return "DECLINED", Rag.GREEN
+    if not line.healthy and line.deviation is not None and line.deviation.accepted:
+        return ACCEPTED, Rag.AMBER
     if line.failure_streak > 0:
         return "FAILING", Rag.RED
     if line.last_success_date is None:
@@ -258,8 +271,9 @@ def _source_row(line: SourceStatusOut) -> str:
         error = f"declined: {_text(line.declined.reason, limit=_CELL_TEXT)}"
     return (
         f'<tr data-source="{source}" data-health="{esc(verdict)}" '
-        f'data-healthy="{"true" if line.healthy else "false"}">'
-        f'<td class="mono">{source}</td><td>{_rag(verdict, colour)}</td>'
+        f'data-healthy="{"true" if line.healthy else "false"}"{deviation_attrs(line.deviation)}>'
+        f'<td class="mono">{source}</td><td>{_rag(verdict, colour)}'
+        f"{deviation_note(line.deviation)}</td>"
         f"<td>{_opt(line.last_success_date)}</td><td>{ist(line.last_success_at)}</td>"
         f'<td class="num">{_lag(line)}</td><td class="num">{_opt(line.lag_days)}</td>'
         f'<td class="num">{line.failure_streak}</td><td>{_opt(line.last_failure_date)}</td>'
@@ -268,8 +282,15 @@ def _source_row(line: SourceStatusOut) -> str:
 
 
 def render_sources(sources: SourcesOut, ordered: Sequence[SourceStatusOut]) -> str:
-    """`/status/sources`, worst first: last success (IST), lag, failure streak."""
-    unhealthy = sum(1 for line in ordered if not line.healthy)
+    """`/status/sources`, worst first: last success (IST), lag, failure streak.
+
+    The heading counts errors and accepted deviations apart, from the lines shown.
+    """
+    unhealthy = [line for line in ordered if not line.healthy]
+    accepted = sum(
+        1 for line in unhealthy if line.deviation is not None and line.deviation.accepted
+    )
+    errors = len(unhealthy) - accepted
     rows = "".join(_source_row(line) for line in ordered)
     table = (
         "<table><thead><tr><th>Source</th><th>Health</th><th>Last success date</th>"
@@ -280,8 +301,9 @@ def render_sources(sources: SourcesOut, ordered: Sequence[SourceStatusOut]) -> s
         else '<p class="muted">no source has a sync_state row yet</p>'
     )
     return (
-        f'<div class="panel" id="sources"><h2>Sources <span class="muted">{len(ordered)} '
-        f"recorded, {unhealthy} not healthy · lag measured against "
+        f'<div class="panel" id="sources" data-errors="{errors}" data-accepted="{accepted}">'
+        f'<h2>Sources <span class="muted">{len(ordered)} recorded, {len(unhealthy)} not healthy: '
+        f"{errors} error{'' if errors == 1 else 's'}, {accepted} accepted · lag measured against "
         f"{esc(sources.as_of.isoformat())}</span></h2>{table}</div>"
     )
 
@@ -292,9 +314,16 @@ def render_sources(sources: SourcesOut, ordered: Sequence[SourceStatusOut]) -> s
 def _gap_row(entry: GapEntryOut) -> str:
     key = f"{entry.source}|{entry.date.isoformat()}"
     state = MISSING if entry.state is None else esc(entry.state.value)
+    accepted = entry.deviation is not None and entry.deviation.accepted
+    reason = (
+        f'{_rag(ACCEPTED, Rag.AMBER)} <span class="muted">{esc(entry.reason.value)}</span>'
+        if accepted
+        else _rag(entry.reason.value, Rag.RED)
+    )
     return (
-        f'<tr data-gap="{esc(key)}" data-reason="{esc(entry.reason.value)}">'
-        f"<td>{esc(entry.date.isoformat())}</td><td>{_rag(entry.reason.value, Rag.RED)}</td>"
+        f'<tr data-gap="{esc(key)}" data-reason="{esc(entry.reason.value)}"'
+        f"{deviation_attrs(entry.deviation)}>"
+        f"<td>{esc(entry.date.isoformat())}</td><td>{reason}{deviation_note(entry.deviation)}</td>"
         f"<td>{esc(entry.day_kind)}</td><td>{state}</td>"
         f'<td class="num">{entry.attempts}</td>'
         f"<td>{_text(entry.detail, limit=_CELL_TEXT)}</td>"
@@ -321,11 +350,16 @@ def render_gaps(gaps: GapsOut) -> str:
         for source, entries in sorted(by_source.items())
     )
     reasons = ", ".join(f"{esc(c.reason.value)} {c.count}" for c in gaps.counts) or MISSING
-    verdict = (
-        _rag("fully explained", Rag.GREEN)
-        if gaps.fully_explained
-        else _rag(f"{gaps.unexplained_total} unexplained", Rag.RED)
-    )
+    errors = gaps.unexplained_total - gaps.accepted_total
+    if gaps.fully_explained:
+        verdict = _rag("fully explained", Rag.GREEN)
+    else:
+        # Errors and accepted deviations apart: "22 unexplained, 13 accepted", never one number
+        # that the known ones keep high. Both stay unexplained to the M1 gate (`fully_explained`).
+        parts = [_rag(f"{errors} unexplained", Rag.RED)] if errors else []
+        if gaps.accepted_total:
+            parts.append(_rag(f"{gaps.accepted_total} accepted", Rag.AMBER))
+        verdict = " ".join(parts)
     truncated = (
         f" — showing the first {len(gaps.unexplained)}"
         if gaps.unexplained_total > len(gaps.unexplained)
@@ -333,7 +367,8 @@ def render_gaps(gaps: GapsOut) -> str:
     )
     examined = ", ".join(esc(source) for source in gaps.sources) or "none tracked"
     return (
-        f'<div class="panel" id="gaps" data-from="{esc(start)}" data-to="{esc(end)}">'
+        f'<div class="panel" id="gaps" data-from="{esc(start)}" data-to="{esc(end)}" '
+        f'data-errors="{errors}" data-accepted="{gaps.accepted_total}">'
         f'<h2>Gaps {esc(start)} … {esc(end)} <span class="muted">{verdict}{truncated}</span></h2>'
         f"<p>{gaps.pairs_examined} pairs examined over sources {examined} · "
         f"{gaps.complete} complete · {gaps.explained_total} explained · "
@@ -347,14 +382,22 @@ def render_gaps(gaps: GapsOut) -> str:
 # ── quality ────────────────────────────────────────────────────────────────────────────────
 
 
+def _check_severity(check: CheckCountOut) -> str:
+    if check.deviation is not None and check.deviation.accepted:
+        return f'{_rag(ACCEPTED, Rag.AMBER)} <span class="muted">{esc(check.severity.value)}</span>'
+    return esc(check.severity.value)
+
+
 def render_quality(quality: QualityOut) -> str:
     """Open D7 flags: totals by severity and by check, then the newest flags."""
     severities = (
         " · ".join(f"{esc(c.severity.value)} {c.count}" for c in quality.counts) or "none open"
     )
     checks = "".join(
-        f'<tr data-check="{esc(c.check_name)}"><td class="mono">{esc(c.check_name)}</td>'
-        f'<td>{esc(c.severity.value)}</td><td class="num">{c.count}</td>'
+        f'<tr data-check="{esc(c.check_name)}"{deviation_attrs(c.deviation)}>'
+        f'<td class="mono">{esc(c.check_name)}{deviation_note(c.deviation)}</td>'
+        f"<td>{_check_severity(c)}</td>"
+        f'<td class="num">{c.count}</td>'
         f"<td>{esc(c.first_date.isoformat())}</td><td>{esc(c.last_date.isoformat())}</td>"
         f'<td class="num">{c.raised_today}</td><td class="num">{c.raised_last_7_days}</td></tr>'
         for c in quality.by_check

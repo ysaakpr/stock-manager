@@ -48,12 +48,15 @@ from dataplatform.status.deps import (
     ConnDep,
     GapScannerDep,
     HeartbeatDep,
+    JudgeDep,
     M17JournalDep,
     RosterDep,
     SettingsDep,
     SyncStoreDep,
     clock_source,
     db_connection,
+    deviation_judge,
+    deviation_registry,
     gap_scanner,
     heartbeat_source,
     m17_journal_source,
@@ -61,6 +64,7 @@ from dataplatform.status.deps import (
     settings_source,
     sync_store,
 )
+from dataplatform.status.deviations import default_deviations
 from dataplatform.status.models import (
     ArchivesOut,
     GapsOut,
@@ -91,6 +95,8 @@ __all__ = [
     "app",
     "clock_source",
     "db_connection",
+    "deviation_judge",
+    "deviation_registry",
     "gap_scanner",
     "heartbeat_source",
     "m17_journal_source",
@@ -106,6 +112,11 @@ app = FastAPI(
 )
 
 log = get_logger(__name__)
+
+# The accepted-deviation registry is read and validated now, at startup: a malformed entry stops
+# the API from coming up, naming the entry, rather than rendering a page that silently shows a
+# known failure red — or a new one amber. `make check` loads the same file, so it cannot ship.
+default_deviations()
 
 
 # ── injected dependencies (shared with the console: `dataplatform.status.deps`) ─────────────
@@ -196,7 +207,7 @@ def status_sync(
 
 
 @app.get("/status/sources", summary="Per-source last success, lag and failure streak")
-def status_sources(store: SyncStoreDep, clock: ClockDep) -> SourcesOut:
+def status_sources(store: SyncStoreDep, clock: ClockDep, judge: JudgeDep) -> SourcesOut:
     """Per-source last success, lag and failure streak (§4.4).
 
     Lists the sources the platform has actually recorded a row for. A source that has never been
@@ -206,13 +217,17 @@ def status_sources(store: SyncStoreDep, clock: ClockDep) -> SourcesOut:
 
     A source the Source Register DECLINED on policy grounds (D12/D19) is listed under `declined`
     whether or not it has rows, and its line, if any, carries the record and is never red.
+
+    A failing source an accepted-deviation entry recognises carries that entry's verdict in
+    `deviation`, and is counted in `accepted` rather than `errors`. Its `healthy` stays false:
+    the registry changes how a failure is shown, never whether it is one.
     """
-    return read_sources_status(store, clock.today())
+    return read_sources_status(store, clock.today(), judge=judge)
 
 
 @app.get("/status/jobs", summary="Every registered job: on schedule, overdue, failing or never run")
 def status_jobs(
-    conn: ConnDep, store: SyncStoreDep, clock: ClockDep, settings: SettingsDep
+    conn: ConnDep, store: SyncStoreDep, clock: ClockDep, settings: SettingsDep, judge: JudgeDep
 ) -> JobsOut:
     """Each registered job against its own cron, and the live sources no job keeps current.
 
@@ -220,10 +235,17 @@ def status_jobs(
     FAILING, OVERDUE, RUNNING or OK (`scheduler.health.assess`), plus the registry's `UNSCHEDULED`
     ledger. A job registered in code that no process ever fires is NEVER_RAN here — the state
     `eod_pipeline` sat in, unseen, from M1.10 to the 2026-10-05 audit.
+    A FAILING job whose failure an accepted-deviation entry recognises carries the verdict in
+    `deviation`; `accepted` and `errors` split the unhealthy count. `healthy` is unchanged.
     What it never does: report only the jobs that happen to have rows; the registry is the list.
     """
     return read_jobs_status(
-        conn, default_registry(), now=clock.now(), timezone=settings.tzinfo, declined=store.declined
+        conn,
+        default_registry(),
+        now=clock.now(),
+        timezone=settings.tzinfo,
+        declined=store.declined,
+        judge=judge,
     )
 
 
@@ -231,6 +253,7 @@ def status_jobs(
 def status_gaps(
     scanner: GapScannerDep,
     clock: ClockDep,
+    judge: JudgeDep,
     from_date: Annotated[
         date | None, Query(alias="from", description="Inclusive. Defaults to today.")
     ] = None,
@@ -279,7 +302,7 @@ def status_gaps(
         PathLayoutError,
     ) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return GapsOut.of(report, limit=limit)
+    return GapsOut.of(report, limit=limit, judge=judge)
 
 
 @app.get("/status/quality", summary="Open D7 sentinel flags")
@@ -287,6 +310,7 @@ def status_quality(
     conn: ConnDep,
     clock: ClockDep,
     settings: SettingsDep,
+    judge: JudgeDep,
     limit: Annotated[
         int | None, Query(ge=1, le=1000, description="Defaults to STATUS_QUALITY_FLAG_LIMIT.")
     ] = None,
@@ -301,6 +325,7 @@ def status_quality(
         conn,
         as_of=clock.now(),
         limit=settings.status_quality_flag_limit if limit is None else limit,
+        judge=judge,
     )
 
 

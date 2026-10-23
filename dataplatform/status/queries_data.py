@@ -26,6 +26,7 @@ from typing import Final
 from dataplatform.ingest.calendar import CalendarCoverageError, TradingCalendar
 from dataplatform.ingest.models import ISIN_PATTERN
 from dataplatform.scheduler.registry import default_registry, lag_budgets
+from dataplatform.status.deviations import DeviationJudge
 from dataplatform.status.models import (
     DeclinedOut,
     SourcesOut,
@@ -45,6 +46,7 @@ from dataplatform.status.models_data import (
     SymbolSearchOut,
     SymbolWindowOut,
 )
+from dataplatform.status.queries import split_accepted
 from dataplatform.status.sync_state import SyncStateStore
 from dataplatform.store.db import Connection
 
@@ -99,16 +101,28 @@ def read_sync_status(
     )
 
 
-def read_sources_status(store: SyncStateStore, as_of: date) -> SourcesOut:
+def read_sources_status(
+    store: SyncStateStore, as_of: date, *, judge: DeviationJudge | None = None
+) -> SourcesOut:
     """`GET /status/sources` — each recorded source's last success, lag and failure streak.
 
     Lag budgets are the production registry's (`lag_budgets`), so a source a job keeps current is
-    `overdue` once it is more sessions behind than that job allows.
+    `overdue` once it is more sessions behind than that job allows. With a `judge`, an unhealthy
+    source carries its accepted-deviation verdict and `accepted`/`errors` split the unhealthy
+    count; every line's `healthy` is the store's, unchanged.
     """
     budgets = lag_budgets(default_registry())
+    statuses = store.source_statuses(budgets)
+    verdicts = [None if judge is None else judge.source(status) for status in statuses]
+    accepted, errors = split_accepted([status.healthy for status in statuses], verdicts)
     return SourcesOut(
         as_of=as_of,
-        sources=[SourceStatusOut.of(status) for status in store.source_statuses(budgets)],
+        sources=[
+            SourceStatusOut.of(status, verdict)
+            for status, verdict in zip(statuses, verdicts, strict=True)
+        ],
+        accepted=accepted,
+        errors=errors,
         declined={source: DeclinedOut.of(record) for source, record in store.declined.items()},
     )
 
@@ -116,14 +130,16 @@ def read_sources_status(store: SyncStateStore, as_of: date) -> SourcesOut:
 def sort_sources_worst_first(sources: Sequence[SourceStatusOut]) -> list[SourceStatusOut]:
     """Unhealthy before healthy, then longest failure streak, then most sessions behind.
 
-    A lag the calendar cannot measure (`None`) sorts as the worst lag: "we cannot tell" must not
-    round down to "fine". Declined sources are healthy by definition and land with the healthy.
+    An unhealthy source an accepted deviation covers sorts after every unaccepted one, so a new
+    red is at the top. A lag the calendar cannot measure (`None`) sorts as the worst lag: "we
+    cannot tell" must not round down to "fine". Declined sources land with the healthy.
     """
 
     def rank(line: SourceStatusOut) -> tuple[int, int, int, int, str]:
         lag = line.lag_sessions
+        accepted = line.deviation is not None and line.deviation.accepted
         return (
-            0 if not line.healthy else 1,
+            2 if line.healthy else (1 if accepted else 0),
             -line.failure_streak,
             0 if line.overdue else 1,
             -(10**9 if lag is None else lag),

@@ -26,13 +26,23 @@ restart is not a reason to page about a five-day-old streak again.
 A trigger whose evaluation fails resolves nothing (absence of evidence is not a cleared alarm) and
 the job raises after the others have run — which makes `failure_alerts` itself a FAILED job, and
 the next tick pages about that.
+
+**Accepted deviations** (`dataplatform.status.deviations`, M18.1). A condition an entry of the
+accepted-deviation registry recognises — the api.bseindia.com 403 block, D26 — opens at WARNING
+instead of CRITICAL, with the entry's remark in the body, so CRITICAL (the `[CRITICAL]` subject and
+the critical log level every channel gives it) is kept for what deviated from the agreed plan. An
+open row whose severity changes is re-graded: lowered silently when the condition becomes
+accepted, raised with a page when it stops being accepted (a new failure mode, or `review_by`
+passed). Alerting only: no trigger's *condition* changes, so nothing opens or resolves because of
+the registry. A registry that cannot be read or evaluated accepts nothing — every condition keeps
+its own severity — and fails the run, so a broken registry can never silence a page.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Iterable, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from enum import StrEnum
 from functools import partial
@@ -46,6 +56,13 @@ from dataplatform.ingest.calendar import load as load_calendar
 from dataplatform.logging import get_logger
 from dataplatform.redaction import mask_secrets
 from dataplatform.status import SourceStatus, SyncStateStore
+from dataplatform.status.deviations import (
+    DeviationJudge,
+    DeviationOut,
+    DeviationRegistry,
+    accepted_note,
+    default_deviations,
+)
 from dataplatform.store.db import Connection, connection
 
 if TYPE_CHECKING:  # the scheduler imports this module lazily; keep the edge one-way at runtime
@@ -63,6 +80,7 @@ __all__ = [
     "Trigger",
     "TriggerEvaluationError",
     "TriggerEvaluator",
+    "apply_acceptance",
     "calendar_expiry_conditions",
     "failed_job_conditions",
     "failed_streak_conditions",
@@ -452,6 +470,23 @@ class ConditionLedger:
         ).fetchall()
         return {str(row[0]): str(row[1]) for row in rows}
 
+    def open_severities(self, trigger: Trigger) -> dict[str, str]:
+        """Open condition keys of `trigger`, mapped to the severity they are recorded at."""
+        rows = self._conn.execute(
+            "SELECT dedup_key, severity FROM alert_condition "
+            "WHERE trigger = %s AND resolved_at IS NULL",
+            (trigger.value,),
+        ).fetchall()
+        return {str(row[0]): str(row[1]) for row in rows}
+
+    def set_severity(self, key: str, severity: Severity, at: datetime) -> None:
+        """Re-grade an open condition (an accepted deviation began or ended); keeps `opened_at`."""
+        self._conn.execute(
+            "UPDATE alert_condition SET severity = %s, last_seen_at = %s "
+            "WHERE dedup_key = %s AND resolved_at IS NULL",
+            (severity.value, at, key),
+        )
+
     def open(self, condition: AlertCondition, at: datetime) -> None:
         """Record an onset: a new open row, or a resolved row reopened as a fresh episode."""
         self._conn.execute(
@@ -497,6 +532,8 @@ class TickReport:
     opened: list[str] = field(default_factory=list)
     still_open: list[str] = field(default_factory=list)
     resolved: list[str] = field(default_factory=list)
+    escalated: list[str] = field(default_factory=list)
+    deescalated: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -541,6 +578,8 @@ def reconcile(
     repeats = [key for key in current if key in open_rows]
     ledger.touch(repeats, at)
     report.still_open.extend(repeats)
+    if repeats:
+        _regrade(trigger, [current[key] for key in repeats], ledger, alerter, at, report)
 
     for key, condition in current.items():
         if key in open_rows:
@@ -575,6 +614,105 @@ def reconcile(
         ):
             report.resolved.append(key)
             log.info("alert_trigger.resolved", trigger=trigger.value, dedup_key=key)
+
+
+#: Severity order, for telling an escalation from a de-escalation. An unknown recorded severity
+#: ranks as critical, so a re-grade from it is never mistaken for an escalation that must page.
+_RANK: Final = {Severity.INFO.value: 0, Severity.WARNING.value: 1, Severity.CRITICAL.value: 2}
+
+
+def _regrade(
+    trigger: Trigger,
+    repeats: Sequence[AlertCondition],
+    ledger: ConditionLedger,
+    alerter: Alerter,
+    at: datetime,
+    report: TickReport,
+) -> None:
+    """Bring open rows to their condition's current severity.
+
+    Up (an accepted deviation no longer covers it): written and paged together, like an onset —
+    the page is the news that a known failure turned into a new one. Down (it became accepted):
+    written without a page; the log and the console say why.
+    """
+    recorded = ledger.open_severities(trigger)
+    for condition in repeats:
+        key = condition.dedup_key
+        was = recorded.get(key)
+        if was is None or was == condition.severity.value:
+            continue
+        if _RANK[condition.severity.value] > _RANK.get(was, 2):
+            body = (
+                f"{condition.body}\nEscalated from {was}: no accepted deviation covers this "
+                "condition any more (a new failure mode, or the acceptance's review_by passed)."
+            )
+            if _write_then_send(
+                partial(ledger.set_severity, key, condition.severity, at),
+                partial(alerter.send, condition.severity, condition.title, body, key),
+                ledger=ledger,
+                key=key,
+                what="escalation alert",
+                report=report,
+            ):
+                report.escalated.append(key)
+                log.warning("alert_trigger.escalated", trigger=trigger.value, dedup_key=key)
+            continue
+        try:
+            with ledger.transaction():
+                ledger.set_severity(key, condition.severity, at)
+        except Exception as error:
+            report.errors.append(f"{key}: re-grade not written: {type(error).__name__}")
+            log.error("alert_trigger.regrade_failed", dedup_key=key, error=type(error).__name__)
+            continue
+        report.deescalated.append(key)
+        log.info(
+            "alert_trigger.deescalated",
+            trigger=trigger.value,
+            dedup_key=key,
+            severity=condition.severity.value,
+            was=was,
+        )
+
+
+def apply_acceptance(
+    conditions: Iterable[AlertCondition],
+    judge: Callable[[str], DeviationOut | None] | None,
+    errors: list[str],
+) -> list[AlertCondition]:
+    """Each CRITICAL condition an accepted deviation covers, lowered to WARNING with its remark.
+
+    What it does: asks `judge` (`DeviationJudge.alert`) about each condition's key; an ACCEPTED
+    verdict turns a CRITICAL condition into a WARNING one whose body names the entry and its
+    basis. An EXPIRED verdict, or none, leaves the condition as it is.
+    What it never does: drop, add or re-key a condition — the set of conditions, and therefore
+    what opens and what resolves, is the trigger's alone — or lower anything when the judge fails:
+    that condition keeps its severity and the failure is appended to `errors`, which fails the run.
+    """
+    accepted: list[AlertCondition] = []
+    for condition in conditions:
+        verdict: DeviationOut | None = None
+        if judge is not None:
+            try:
+                verdict = judge(condition.dedup_key)
+            except Exception as error:
+                errors.append(
+                    f"{condition.dedup_key}: accepted deviation not evaluated: "
+                    f"{type(error).__name__}"
+                )
+                log.error(
+                    "alert_trigger.acceptance_failed",
+                    dedup_key=condition.dedup_key,
+                    error_type=type(error).__name__,
+                    error=redact(str(error)),
+                )
+        if verdict is not None and verdict.accepted and condition.severity is Severity.CRITICAL:
+            condition = replace(
+                condition,
+                severity=Severity.WARNING,
+                body=f"{condition.body}\n{accepted_note(verdict)}",
+            )
+        accepted.append(condition)
+    return accepted
 
 
 def _write_then_send(
@@ -654,6 +792,8 @@ def tick(
         opened=report.opened,
         still_open=len(report.still_open),
         resolved=report.resolved,
+        escalated=report.escalated,
+        deescalated=report.deescalated,
         errors=len(report.errors),
     )
     return report
@@ -668,6 +808,7 @@ def run_failure_alerts(
     job_names: Sequence[str],
     calendar_loader: Callable[[], TradingCalendar] | None = None,
     retry_deadline: RetryDeadline | None = None,
+    deviations: Callable[[], DeviationRegistry] | None = None,
 ) -> TickReport:
     """Evaluate all four triggers once against the database and page what changed.
 
@@ -680,24 +821,39 @@ def run_failure_alerts(
       evaluator, for the same reason.
     - The failed-job trigger holds a retry-pending failure while `retry_deadline` says a later fire
       the same day is still due (None: every failure pages; production passes the registry's).
+    - The streak, quality and failed-job triggers' conditions pass through `apply_acceptance`
+      with the accepted-deviation registry (`deviations`, default the checked-in one): a covered
+      condition is a WARNING. The calendar trigger is never accepted.
     What it assumes: `conn` is autocommit and migrated through 0013; `clock` is the run's (B10).
     What it never does: raise for a failed trigger (`run_failure_alerts_job` turns errors into a
-    FAILED run), or read the wall clock.
+    FAILED run), or read the wall clock. A registry it cannot load or evaluate is such an error:
+    the tick runs with nothing accepted, and the run fails.
     """
     today = clock.today()
     threshold = settings.alert_failure_streak_threshold
     lead_days = settings.alert_calendar_lead_days
+    acceptance_errors: list[str] = []
+    judge = _deviation_judge(
+        conn, clock, default_deviations if deviations is None else deviations, acceptance_errors
+    )
+
+    def accept(conditions: list[AlertCondition]) -> list[AlertCondition]:
+        return apply_acceptance(
+            conditions, None if judge is None else judge.alert, acceptance_errors
+        )
 
     def streaks() -> list[AlertCondition]:
         store = SyncStateStore(conn, clock=clock, calendar=trading_calendar())
-        return failed_streak_conditions(store.source_statuses(), threshold=threshold)
+        return accept(failed_streak_conditions(store.source_statuses(), threshold=threshold))
 
     def failed_jobs() -> list[AlertCondition]:
-        return failed_job_conditions(
-            read_last_attempts(conn, job_names),
-            now=clock.now(),
-            retry_deadline=retry_deadline,
-            already_open=ConditionLedger(conn).open_keys(Trigger.JOB_FAILED),
+        return accept(
+            failed_job_conditions(
+                read_last_attempts(conn, job_names),
+                now=clock.now(),
+                retry_deadline=retry_deadline,
+                already_open=ConditionLedger(conn).open_keys(Trigger.JOB_FAILED),
+            )
         )
 
     def expiry() -> list[AlertCondition]:
@@ -708,11 +864,37 @@ def run_failure_alerts(
 
     evaluators: list[TriggerEvaluator] = [
         (Trigger.INGEST_FAILED_STREAK, streaks),
-        (Trigger.QUALITY_RED, lambda: quality_red_conditions(read_red_quality_checks(conn))),
+        (
+            Trigger.QUALITY_RED,
+            lambda: accept(quality_red_conditions(read_red_quality_checks(conn))),
+        ),
         (Trigger.CALENDAR_EXPIRY, expiry),
         (Trigger.JOB_FAILED, failed_jobs),
     ]
-    return tick(evaluators, ledger=ConditionLedger(conn), alerter=alerter, at=clock.now())
+    report = tick(evaluators, ledger=ConditionLedger(conn), alerter=alerter, at=clock.now())
+    report.errors.extend(acceptance_errors)
+    return report
+
+
+def _deviation_judge(
+    conn: Connection,
+    clock: Clock,
+    load: Callable[[], DeviationRegistry],
+    errors: list[str],
+) -> DeviationJudge | None:
+    """The accepted-deviation judge for this tick, or None (nothing accepted) when it cannot be."""
+    try:
+        registry = load()
+        store = SyncStateStore(conn, clock=clock, calendar=trading_calendar())
+    except Exception as error:
+        errors.append(f"accepted deviations unavailable: {type(error).__name__}: {error}")
+        log.error(
+            "alert_trigger.deviations_unavailable",
+            error_type=type(error).__name__,
+            error=redact(str(error)),
+        )
+        return None
+    return DeviationJudge(registry, conn, store, clock.today())
 
 
 def run_failure_alerts_job(context: JobContext) -> None:
