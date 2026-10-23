@@ -13,7 +13,7 @@ suspended scrip. Offline: no network, no database.
 from __future__ import annotations
 
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
@@ -197,3 +197,28 @@ def test_the_close_never_touches_a_listed_an_nse_or_a_same_day_window(
 
 def test_derive_master_is_still_exported_from_the_module() -> None:
     assert scrip_master.derive_master is derive_master
+
+
+# ── the offline re-derive reads the snapshot back out of L0, whole ──────────────────────────────
+
+
+def test_the_snapshot_is_read_back_from_l0_whole_or_not_at_all(tmp_path: Path) -> None:
+    from dataplatform.clock import IST, FrozenClock
+    from dataplatform.ingest.bse_scrip_refresh import (
+        SCRIP_STATUSES,
+        SOURCE_ID,
+        read_snapshot_from_l0,
+    )
+    from dataplatform.store.l0 import L0Store
+
+    l0 = L0Store(clock=FrozenClock(datetime(2026, 9, 6, 20, 41, tzinfo=IST)), data_root=tmp_path)
+    for status in SCRIP_STATUSES[:2]:
+        name = f"ListofScripData_{status}.json"
+        l0.put(SOURCE_ID, SNAPSHOT, name, (FIXTURE / name).read_bytes())
+    with pytest.raises(FileNotFoundError, match="Delisted"):
+        read_snapshot_from_l0(l0, SNAPSHOT)
+
+    name = "ListofScripData_Delisted.json"
+    l0.put(SOURCE_ID, SNAPSHOT, name, (FIXTURE / name).read_bytes())
+    combined = json.loads(read_snapshot_from_l0(l0, SNAPSHOT))
+    assert [r["Status"] for r in combined] == ["Active"] * 11 + ["Suspended"] + ["Delisted"] * 11
