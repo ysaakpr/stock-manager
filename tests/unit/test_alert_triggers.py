@@ -108,6 +108,10 @@ class MemoryLedger(ConditionLedger):
     def touch(self, keys: Sequence[str], at: datetime) -> None:
         pass
 
+    def retitle(self, key: str, title: str) -> None:
+        trigger, _, resolved = self.rows[key]
+        self.rows[key] = (trigger, title, resolved)
+
     def resolve(self, key: str, at: datetime) -> None:
         trigger, title, _ = self.rows[key]
         self.rows[key] = (trigger, title, True)
@@ -675,3 +679,17 @@ def test_an_undelivered_escalation_is_retried_next_tick() -> None:
     alerter.fail = False
     retried = _tick(_bse_streak(), ledger, alerter)
     assert retried.escalated == [BSE_KEY]
+
+
+def test_a_repeat_refreshes_the_title_without_paging() -> None:
+    """The ledger title tracks the condition: 192 open ERROR yesterday, 194 today, no new page."""
+    alerter, ledger = RecordingAlerter(FrozenClock(NOW)), MemoryLedger()
+    _tick(
+        failed_streak_conditions([_status("nse_bhavcopy", streak=3)], threshold=3), ledger, alerter
+    )
+    assert ledger.rows["ingest:nse_bhavcopy:failed_streak"][1].startswith("nse_bhavcopy: 3 ")
+    _tick(
+        failed_streak_conditions([_status("nse_bhavcopy", streak=5)], threshold=3), ledger, alerter
+    )
+    assert ledger.rows["ingest:nse_bhavcopy:failed_streak"][1].startswith("nse_bhavcopy: 5 ")
+    assert len(alerter.sent) == 1, "a growing streak is the same news"
