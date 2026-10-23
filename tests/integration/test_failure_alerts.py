@@ -218,11 +218,10 @@ def test_a_repeat_brings_the_open_title_up_to_date(
     _flag(conn)
     _sync(conn, date(2026, 11, 13), "FAILED", error="HTTP 503 again")
     _, alerter = _tick(conn, scratch_settings, BROKEN_NOW + timedelta(hours=1))
-    titles = dict(
-        conn.execute(
-            "SELECT dedup_key, title FROM alert_condition WHERE resolved_at IS NULL"
-        ).fetchall()
-    )
+    rows = conn.execute(
+        "SELECT dedup_key, title FROM alert_condition WHERE resolved_at IS NULL"
+    ).fetchall()
+    titles = {str(row[0]): str(row[1]) for row in rows}
     assert titles["quality:price_spike:red"] == "quality check price_spike is red (2 open ERROR)"
     assert titles[f"ingest:{SOURCE}:failed_streak"].startswith(f"{SOURCE}: 4 consecutive")
     assert alerter.sent == []
