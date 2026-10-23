@@ -430,3 +430,18 @@ def test_the_judge_opens_no_connection_of_its_own() -> None:
         app.dependency_overrides.clear()
     assert response.status_code == 200, response.text
     assert response.json()["sources"] == []
+
+
+def test_a_recovered_source_shows_no_stale_error() -> None:
+    """nifty_index_constituents is OK, but its last failure (2026-10-05) is history, not a fault."""
+    recovered = _source("nifty_index_constituents", streak=0).model_copy(
+        update={"healthy": True, "last_success_date": date(2026, 10, 22)}
+    )
+    failing = _source("nse_xbrl_filing", streak=2)
+    html = data_render.render_sources(
+        SourcesOut(as_of=date(2026, 10, 23), sources=[recovered, failing]), [failing, recovered]
+    )
+    ok = _row(html, "data-source", "nifty_index_constituents")
+    assert "returned 403" not in ok
+    assert "<td>2026-10-22</td>" in ok  # the last failure date stays in its own column
+    assert "returned 403" in _row(html, "data-source", "nse_xbrl_filing")
