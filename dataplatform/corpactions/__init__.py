@@ -67,6 +67,7 @@ from dataplatform.corpactions.recompute import (
 # in `dataplatform.ingest.corp_actions`, which imports back into this package's submodules.
 from dataplatform.corpactions.reconcile import (
     CA_RECONCILIATION_CHECK,
+    DEFAULT_EX_DATE_MISMATCH_WINDOW_DAYS,
     DEFAULT_EX_DATE_TOLERANCE_DAYS,
     PersistCounts,
     QualityFlagRecord,
@@ -103,6 +104,7 @@ from dataplatform.corpactions.taxonomy import (
 
 __all__ = [
     "CA_RECONCILIATION_CHECK",
+    "DEFAULT_EX_DATE_MISMATCH_WINDOW_DAYS",
     "DEFAULT_EX_DATE_TOLERANCE_DAYS",
     "MANUAL_ACTIONS_PATH",
     "MANUAL_SOURCE",
