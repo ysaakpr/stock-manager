@@ -8,21 +8,27 @@ would each break an assertion here. Offline: synthetic L2 under `tmp_path`, no P
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Any, cast
 
+import pytest
+
+from dataplatform.clock import FrozenClock
 from dataplatform.corpactions.factors import FactorChain
 from dataplatform.identity.master import Exchange
 from dataplatform.ingest.models import PriceRow
 from dataplatform.quality.l2_continuity import (
     CHECK_NAME,
     AdjustedStep,
+    L2ContinuityReport,
     StepClass,
     classify_steps,
     findings,
     scan,
 )
+from dataplatform.quality.sentinel import FindingScope, QualityFinding, persist_findings
 from dataplatform.store.l1 import write_prices_raw
 from dataplatform.store.l2 import materialize_isin
 
@@ -159,3 +165,91 @@ def test_scan_of_an_empty_lake_passes(tmp_path: Path) -> None:
     report = scan(None, survivor_of=lambda i: i, data_root=tmp_path)
     assert report.passed
     assert report.partitions == 0
+
+
+# ── a later scan closes the flags it no longer raises — within its scope only ──────────────────
+
+
+def test_scan_limited_to_some_isins_covers_them_only(tmp_path: Path) -> None:
+    """A partial scan neither sees nor speaks for a partition outside its ISINs."""
+    days = _sessions(13)
+    rows = [(STOCK, d, "1000", 5_000) for d in days[:-1]] + [(STOCK, days[-1], "100", 80_000)]
+    rows += [(i, days[0], "50", 10) for i in (RETIRED, SURVIVOR)]
+    _write(tmp_path, rows)
+    for isin in (STOCK, RETIRED, SURVIVOR):
+        materialize_isin(
+            isin,
+            chain=FactorChain(isin=isin, rows=()),
+            actions=(),
+            data_root=tmp_path,
+            infer_splits=False,
+        )
+
+    def survivor_of(isin: str) -> str:
+        return SURVIVOR if isin == RETIRED else isin
+
+    only_retired = scan(None, survivor_of=survivor_of, data_root=tmp_path, isins=[RETIRED])
+    assert only_retired.unexplained == ()  # STOCK's step is outside the scan
+    assert only_retired.retired_partitions == (RETIRED,)
+    assert only_retired.partitions == 1
+    assert only_retired.resolution_scope == FindingScope(
+        check_name=CHECK_NAME, isins=frozenset({RETIRED})
+    )
+
+    only_stock = scan(None, survivor_of=survivor_of, data_root=tmp_path, isins=[STOCK])
+    assert [s.isin for s in only_stock.unexplained] == [STOCK]
+    assert only_stock.retired_partitions == ()
+
+
+def _report(**overrides: Any) -> L2ContinuityReport:
+    fields: dict[str, Any] = {
+        "threshold": Decimal(2),
+        "max_gap_days": 5,
+        "partitions": 1,
+        "steps": (),
+        "retired_partitions": (),
+    }
+    fields.update(overrides)
+    return L2ContinuityReport(**fields)
+
+
+def test_a_full_default_scan_speaks_for_every_flag_of_the_check() -> None:
+    assert _report().resolution_scope == FindingScope(check_name=CHECK_NAME, isins=None)
+
+
+def test_a_non_default_scan_closes_nothing() -> None:
+    """A 3x scan does not re-raise a 2x step; it must not close that step's flag for it."""
+    assert _report(threshold=Decimal(3)).resolution_scope is None
+    assert _report(max_gap_days=10).resolution_scope is None
+
+
+def test_a_retired_partition_keeps_one_flag_across_scans() -> None:
+    """Dated by the scan day, its fingerprint changed daily: each scan stacked another flag (and,
+    with resolution, would have closed and re-raised it). It is about the partition, not a day."""
+    report = _report(retired_partitions=(RETIRED,))
+    (first,) = findings(report, logical_date=date(2026, 10, 5))
+    (later,) = findings(report, logical_date=date(2026, 10, 23))
+    assert first.fingerprint == later.fingerprint
+    assert later.logical_date == date(2026, 10, 23)
+
+
+class _NoSql:
+    def execute(self, sql: str, params: Any = ()) -> Any:
+        raise AssertionError(f"nothing may be written: {sql}")
+
+
+def test_a_scope_never_closes_another_checks_flags_on_this_ones_evidence() -> None:
+    finding = QualityFinding(
+        logical_date=date(2026, 10, 5),
+        check_name="sentinel_move",
+        severity="ERROR",
+        isin=STOCK,
+        fingerprint="f" * 32,
+    )
+    with pytest.raises(ValueError, match="sentinel_move"):
+        persist_findings(
+            cast("Any", _NoSql()),
+            [finding],
+            clock=FrozenClock(datetime(2026, 10, 23, 17, 0, tzinfo=UTC)),
+            resolve_scope=FindingScope(check_name=CHECK_NAME),
+        )
