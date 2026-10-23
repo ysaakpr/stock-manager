@@ -1,0 +1,217 @@
+# Accepted deviations — failures the owner has knowingly accepted. Read by
+# dataplatform.status.deviations; validated at the status API's startup and by
+# tests/unit/test_deviations.py, so a malformed entry fails the gate and the deploy, not a page.
+#
+# The owner's rule: an ERROR on the operator surfaces must mean something deviated from an agreed
+# plan. An item an entry here recognises is shown as ACCEPTED (amber) with `remark` beside it, and
+# its failure_alerts condition opens or stays at warning, never critical. Everything else stays red.
+#
+# DISPLAY AND ALERTING ONLY. Nothing here changes a gate: sync_state.is_green and "red data means
+# no trading" (invariant #10), the kill switch, paper/M17 session gating, job_run's record of a run,
+# and /health all ignore this file. An accepted item is still `healthy: false` on the JSON surface.
+#
+# Rules for an entry (enforced by the loader):
+#   * `kind` + `target`: what it applies to — source (a sync_state source id), job (a registered
+#     job), alert (an alert_condition dedup key), quality (a check name), gap (a source's
+#     unexplained /status/gaps entries).
+#   * `match` must recognise the known cause only. Never a name alone:
+#       source   every FAILED row of the current failure streak is one of `errors` (and, with
+#                `max_age_days`, dated within N days: a warning while retried, an error after);
+#                a stuck row, a lag with no failures, or any other error keeps it red.
+#       job      the newest finished run FAILED with one of `error_classes`, AND every condition
+#                given: `legs` (the rows the run wrote on those sources are PUBLISHED/GAP or an
+#                accepted `source` failure, at least one FAILED), `reported_legs` (the error's own
+#                `source@date=STATE` list agrees), `published_on_run_date`, `error_pattern`,
+#                `identity_conflicts` (a known set of open conflicts, by id and/or ISIN).
+#       alert    `while_accepted`: the entry for the alert's subject accepts it right now.
+#       quality  every open ERROR flag of the check is in the given set (fingerprints / ids /
+#                isins / raised_before / dated_before — all given criteria hold for every flag).
+#       gap      the entry's reason is in `reasons`, and its error / date is in the known set.
+#     `errors` alternatives name the exception class read from the stored text's `ClassName: `
+#     prefix (`class: null` for text stored without one), a regex searched in the message, and
+#     optionally `dated_from`/`dated_to` (the row's logical date) for a cause true only then.
+#   * `remark` is what the page shows. `basis` says who agreed, when, and where it is written down.
+#   * `review_by` (optional): after that date the entry stops matching, the item turns red again and
+#     the page says the acceptance expired. The seeds below carry none: the owner set no date.
+#   * Public repository: no secret, no host or address of this deployment, no personal data.
+#
+# Adding an acceptance is a YAML edit here; it reaches the running API after the app container is
+# rebuilt, and the failure_alerts evaluator after the scheduler restarts.
+
+version: 1
+
+# The 403 shapes the fetcher writes for api.bseindia.com (dataplatform/ingest/fetcher.py). Anchored
+# on the exact wording, so a changed message — a new failure mode — turns the item red again.
+x-bse-spike: &bse_spike
+  class: ForbiddenSpikeError
+  pattern: '^(?:ingestion from api\.bseindia\.com is hard-stopped after a 403 spike;|\d+ consecutive 403s from api\.bseindia\.com within )'
+
+# BSE's soft block before the 403s: the scrip master answered an empty array, 2026-09-08..09-23.
+# Accepted on those dates only; the same message on any other date is a new failure.
+x-bse-soft-block: &bse_soft_block
+  class: null
+  pattern: '^bse_scrip_master: expected a non-empty JSON array'
+  dated_from: 2026-09-08
+  dated_to: 2026-09-23
+
+x-bse-basis: &bse_basis
+  agreed_by: owner
+  agreed_on: 2026-10-12
+  recorded_in:
+    - "HUMAN_DECISIONS.md D26 (owner, 2026-10-12: 'Ignore BSE for now')"
+    - "AGENTIC_CONTEXT.md §8: a 403 is never worked around (no user-agent rotation, no proxy)"
+
+x-bse-remark: &bse_remark >-
+  api.bseindia.com has refused this server (HTTP 403) since 2026-09-24; the owner chose on
+  2026-10-12 to ignore BSE for now, and AGENTIC_CONTEXT §8 forbids working around a refusal.
+
+deviations:
+  # ── sources ─────────────────────────────────────────────────────────────────────────────────
+  - id: bse-403-source-announcements
+    kind: source
+    target: bse_announcements
+    match:
+      errors:
+        - class: ForbiddenError
+          pattern: '^bse_announcements: https://api\.bseindia\.com/\S* returned 403 \('
+        - *bse_spike
+    remark: *bse_remark
+    basis: *bse_basis
+    since: 2026-09-24
+
+  - id: bse-403-source-corp-actions
+    kind: source
+    target: bse_corp_actions
+    match:
+      errors:
+        - class: ForbiddenError
+          pattern: '^bse_corp_actions: https://api\.bseindia\.com/\S* returned 403 \('
+        - *bse_spike
+        # The CA backfill records the unit that tripped the spike as str(spike), with no class
+        # prefix (dataplatform/ingest/corp_actions_backfill.py).
+        - class: null
+          pattern: '^\d+ consecutive 403s from api\.bseindia\.com within '
+    remark: *bse_remark
+    basis: *bse_basis
+    since: 2026-09-24
+
+  - id: bse-403-source-scrip-master
+    kind: source
+    target: bse_scrip_master
+    match:
+      errors:
+        - class: ForbiddenError
+          pattern: '^bse_scrip_master: https://api\.bseindia\.com/\S* returned 403 \('
+        - *bse_spike
+        - *bse_soft_block
+    remark: *bse_remark
+    basis: *bse_basis
+    since: 2026-09-08
+
+  # ── jobs: mixed NSE + BSE runs, accepted only when every failed leg is an accepted BSE 403 ─────
+  - id: bse-403-job-ca-refresh
+    kind: job
+    target: ca_refresh
+    match:
+      error_classes: [CaRefreshError]
+      legs: [nse_corp_actions, bse_corp_actions]
+      published_on_run_date: [nse_corp_actions/refresh]
+    remark: >-
+      NSE corporate actions refreshed and rebuilt; only BSE per-scrip requests were refused (403).
+    basis: *bse_basis
+    since: 2026-09-24
+
+  - id: bse-403-job-announcements-capture
+    kind: job
+    target: announcements_capture
+    match:
+      error_classes: [DailyCaptureError]
+      legs: [nse_announcements, bse_announcements]
+      reported_legs: true
+    remark: Only the BSE leg fails (403); NSE announcements land nightly.
+    basis: *bse_basis
+    since: 2026-09-24
+
+  # ── the failure_alerts conditions of the same causes: warning, not critical ─────────────────
+  - id: bse-403-alert-announcements-streak
+    kind: alert
+    target: ingest:bse_announcements:failed_streak
+    match: {while_accepted: bse-403-source-announcements}
+    remark: *bse_remark
+    basis: *bse_basis
+    since: 2026-09-24
+
+  - id: bse-403-alert-corp-actions-streak
+    kind: alert
+    target: ingest:bse_corp_actions:failed_streak
+    match: {while_accepted: bse-403-source-corp-actions}
+    remark: *bse_remark
+    basis: *bse_basis
+    since: 2026-09-24
+
+  - id: bse-403-alert-scrip-master-streak
+    kind: alert
+    target: ingest:bse_scrip_master:failed_streak
+    match: {while_accepted: bse-403-source-scrip-master}
+    remark: *bse_remark
+    basis: *bse_basis
+    since: 2026-09-24
+
+  - id: bse-403-alert-ca-refresh
+    kind: alert
+    target: job:ca_refresh:failed
+    match: {while_accepted: bse-403-job-ca-refresh}
+    remark: *bse_remark
+    basis: *bse_basis
+    since: 2026-09-24
+
+  - id: bse-403-alert-announcements-capture
+    kind: alert
+    target: job:announcements_capture:failed
+    match: {while_accepted: bse-403-job-announcements-capture}
+    remark: *bse_remark
+    basis: *bse_basis
+    since: 2026-09-24
+
+  # ── /status/gaps: the FAILED days those 403s left, one entry each, on the same evidence ─────
+  - id: bse-403-gaps-announcements
+    kind: gap
+    target: bse_announcements
+    match:
+      reasons: [FAILED]
+      errors:
+        - class: ForbiddenError
+          pattern: '^bse_announcements: https://api\.bseindia\.com/\S* returned 403 \('
+        - *bse_spike
+    remark: *bse_remark
+    basis: *bse_basis
+    since: 2026-09-24
+
+  - id: bse-403-gaps-corp-actions
+    kind: gap
+    target: bse_corp_actions
+    match:
+      reasons: [FAILED]
+      errors:
+        - class: ForbiddenError
+          pattern: '^bse_corp_actions: https://api\.bseindia\.com/\S* returned 403 \('
+        - *bse_spike
+        - class: null
+          pattern: '^\d+ consecutive 403s from api\.bseindia\.com within '
+    remark: *bse_remark
+    basis: *bse_basis
+    since: 2026-09-24
+
+  - id: bse-403-gaps-scrip-master
+    kind: gap
+    target: bse_scrip_master
+    match:
+      reasons: [FAILED]
+      errors:
+        - class: ForbiddenError
+          pattern: '^bse_scrip_master: https://api\.bseindia\.com/\S* returned 403 \('
+        - *bse_spike
+        - *bse_soft_block
+    remark: *bse_remark
+    basis: *bse_basis
+    since: 2026-09-08
