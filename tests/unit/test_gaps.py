@@ -946,6 +946,37 @@ def test_the_directory_fallback_never_answers_for_a_unit_row(tmp_path: Path) -> 
     assert presence.holds(["nse_xbrl_filing"], SESSION, None, per_session=True) is True
 
 
+def test_a_failed_unit_of_a_per_session_source_is_not_called_present_in_l0() -> None:
+    """GDELT 2026-10-20: slot 06:45 answered 404 and was never fetched, but the day's directory
+    held the other slots' payloads, so the report called it L0_PRESENT_L1_ABSENT ("a parser fix,
+    not a re-fetch"). A unit row is judged by its own payload, even under a per-session source.
+    """
+    gdelt = "gdelt_v2_event_files"
+    failed = SyncRecord(
+        source=f"{gdelt}/20261020064500",
+        logical_date=SESSION,
+        state=SyncState.FAILED,
+        updated_at=AT,
+        attempts=1,
+        retryable=True,
+        last_error="FetchHTTPError: gdelt_v2_event_files: .../20261020064500.export.CSV.zip "
+        "returned 404",
+    )
+    report = build_report(
+        SESSION,
+        SESSION,
+        sources=[gdelt],
+        records={},
+        unit_records=[failed],
+        expectations={gdelt: SourceExpectation(source=gdelt, l1_dataset=gdelt)},
+        l0_presence=_StubL0Presence((gdelt, SESSION)),  # other slots' payloads are on disk
+    )
+    unit_entries = [entry for entry in report.unexplained if entry.unit]
+    assert [(entry.unit, entry.reason) for entry in unit_entries] == [
+        ("20261020064500", GapReason.FAILED)
+    ]
+
+
 def test_the_recorded_l0_key_is_resolved_through_the_lake_layout(tmp_path: Path) -> None:
     """`L0Ref.key` is `<source>/<iso-date>/<file>`; the lake shards by year and month.
 

@@ -900,7 +900,9 @@ def build_report(
             record.logical_date,
             kind,
             record,
-            l0_present=_l0_lookup(per_source[key.base], record.logical_date, record, l0_presence),
+            l0_present=_l0_lookup(
+                per_source[key.base], record.logical_date, record, l0_presence, unit=True
+            ),
             unit=key.unit,
         )
         if entry is None:
@@ -927,12 +929,17 @@ def _l0_lookup(
     logical_date: date,
     record: SyncRecord | None,
     l0_presence: L0Presence | None,
+    *,
+    unit: bool = False,
 ) -> bool:
     """Whether this pair's payload is on disk, asked only when the answer changes the verdict.
 
     Only a FAILED pair's reason depends on it, so the probe is skipped for every other state —
     otherwise a decade of weekends would cost ten thousand pointless `stat` calls for an answer
-    nothing reads.
+    nothing reads. A unit row (one GDELT slot, one feed poll, one filing) is never answered by the
+    per-session directory fallback, even under a per-session source: the day's directory holds the
+    *other* units' payloads, and "something for that day is on disk" said a 404'd GDELT export
+    (2026-10-20, slot 06:45) was "in L0, so a parser fix" when it was never fetched at all.
     """
     if l0_presence is None or record is None or record.state is not SyncState.FAILED:
         return False
@@ -940,7 +947,7 @@ def _l0_lookup(
         expectation.l0_trees(),
         logical_date,
         record.l0_path,
-        per_session=expectation.per_session,
+        per_session=expectation.per_session and not unit,
     )
 
 
