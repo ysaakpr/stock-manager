@@ -650,12 +650,16 @@ def reconcile(
             by_source[left_source], by_source[right_source], tolerance
         )
 
+        paired_days: list[date] = []
+        disputed_days: list[date] = []
         for left, right in pairs:
+            paired_days.extend((left.ex_date, right.ex_date))
             if _terms_agree(left.terms, right.terms):
                 reconciled.append(_reconcile_pair(left, right))
             elif (filled := _quantified_fill(left.terms, right.terms)) is not None:
                 reconciled.append(_reconcile_pair(left, right, terms=filled))
             else:
+                disputed_days.extend((left.ex_date, right.ex_date))
                 queue.append(
                     ReconciliationConflict(
                         reason=ReconciliationReason.RATIO_MISMATCH,
@@ -664,6 +668,35 @@ def reconcile(
                         records=tuple(sorted((left, right), key=lambda a: a.source)),
                     )
                 )
+
+        # A same-day extra: one feed itemized a further dividend on a day the two feeds already
+        # paired (NSE's `Dividend Rs 10 + Special Dividend Rs 7.5` beside BSE's one record). It is
+        # not a candidate misdating of anything — the day is accounted for — so it never joins the
+        # leftovers below, where one extra beside an old one-feed dividend would make "leftovers
+        # on both sides" and queue every old dividend that ACCEPT had admitted. It is single-source
+        # under the policy, unless a pair that day disagreed: then it is queued with that dispute.
+        def same_day(action: CorporateAction, days: Sequence[date]) -> bool:
+            return any(abs(action.ex_date - day) <= tolerance for day in days)
+
+        extras = (
+            [a for a in (*unmatched_left, *unmatched_right) if same_day(a, paired_days)]
+            if action_type is ActionType.DIVIDEND
+            else []
+        )
+        unmatched_left = [a for a in unmatched_left if a not in extras]
+        unmatched_right = [a for a in unmatched_right if a not in extras]
+        for action in extras:
+            if same_day(action, disputed_days):
+                queue.append(
+                    ReconciliationConflict(
+                        reason=ReconciliationReason.SINGLE_SOURCE,
+                        isin=isin,
+                        action_type=action_type,
+                        records=(action,),
+                    )
+                )
+            else:
+                file_single_source(action, isin, action_type)
 
         if len(unmatched_left) == 1 and len(unmatched_right) == 1:
             queue.append(
