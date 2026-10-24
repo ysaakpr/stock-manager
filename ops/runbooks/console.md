@@ -97,6 +97,22 @@ written down (normally a HUMAN_DECISIONS entry). The loader refuses a matcher th
 target, and a malformed file stops the API at startup and fails `make check`. It reaches the
 console after the app container is rebuilt, and `failure_alerts` after the scheduler restarts.
 
+## States that are not failures
+
+- **Job `NOT_YET_DUE`** (blue): no run yet, and no fire has come due since the job was registered
+  (`Job.registered_at`, e.g. `bse_ca_sweep` merged after its first-Sunday fire). It becomes
+  `NEVER_RAN` the moment a fire is due and unrun. Health looks back 42 days, longer than any
+  registered cron's widest gap.
+- **Gap `NOT_YET_DUE`** (explained): a day whose covering scheduled fire — the fire for *that*
+  date, plus its budget and 15 minutes — has not passed yet, e.g. today's announcements before the
+  00:30 run tomorrow. After that time a day with no row is `NEVER_ATTEMPTED`.
+- **Sub-unit days**: `curated_rss` (feed × each news poll) and `nifty_tri_history` (each evening
+  index) are judged per expected sub-unit; a missing one is listed by name. `gdelt_v2_event_files`
+  is not: its slot names are GDELT's, not ours to list.
+- **Capture-only sources** (`final_state: FETCHED` in the register, e.g.
+  `nifty_index_press_releases`) succeed at FETCHED on the sources table.
+- A recovered source's old error is not shown; its last-failure date stays in its column.
+
 ## The Desk page (`/console/desk`, M18.3)
 
 | Panel | What it shows | Where it comes from |
