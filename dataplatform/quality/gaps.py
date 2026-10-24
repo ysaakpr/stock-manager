@@ -61,6 +61,8 @@ from dataplatform.store.schemas import PRICES_RAW_DATASET
 
 __all__ = [
     "PER_SESSION_CADENCES",
+    "DueSchedule",
+    "ExpectedUnit",
     "GapEntry",
     "GapReason",
     "GapReport",
@@ -107,6 +109,16 @@ class GapReason(StrEnum):
 
     The legacy and UDiFF bhavcopies split on 2024-07-08; without this reason every session on the
     far side of a cutover would read as a missing day for the source that never served it.
+    """
+
+    NOT_YET_DUE = "NOT_YET_DUE"
+    """A trading day whose covering scheduled fire, budget and grace included, has not yet passed.
+
+    Owed, but not yet: `announcements_capture` lands day D at 00:30 on D+1, so before then D has no
+    row and none is late. Decided from the job's cron for *that* date (`DueSchedule`), never from
+    its next fire — a job that missed its run always has a next fire in the future, and keying on
+    it would excuse the miss forever. Once the covering fire's time passes with no row the pair is
+    `NEVER_ATTEMPTED`, exactly as before.
     """
 
     NEVER_ATTEMPTED = "NEVER_ATTEMPTED"
@@ -159,7 +171,7 @@ class GapReason(StrEnum):
 #: The reasons that close a missing day honestly: the exchange was shut, or this source did not
 #: serve that era. Everything else in `GapReason` is a day someone owes an answer for.
 _EXPLAINED: Final[frozenset[GapReason]] = frozenset(
-    {GapReason.WEEKEND, GapReason.HOLIDAY, GapReason.OUTSIDE_SOURCE_ERA}
+    {GapReason.WEEKEND, GapReason.HOLIDAY, GapReason.OUTSIDE_SOURCE_ERA, GapReason.NOT_YET_DUE}
 )
 
 #: `DayKind` → the reason a closed day is explained by. Sessions never appear here.
@@ -539,6 +551,40 @@ def _expectation_for(
     return expectations.get(source, SourceExpectation(source=source, l1_dataset=source))
 
 
+# ── the schedule: when a pair becomes owed ─────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class ExpectedUnit:
+    """One sub-unit a day owes (a feed poll, an index slug) and when its covering fire is past."""
+
+    unit: str
+    due_at: datetime
+
+
+class DueSchedule(Protocol):
+    """When a `(source, date)` pair is owed, read from the scheduler's crons (injected).
+
+    Injected so the rules stay a pure function of their inputs; `gap_schedule.RegistrySchedule`
+    is the production answer, built from the job registry.
+    """
+
+    def due_at(self, source: str, logical_date: date) -> datetime | None:
+        """When the scheduled fire that covers `logical_date`, plus budget and grace, has passed.
+
+        None when no registered job covers the source — the pair is then owed at once, as before.
+        """
+        ...
+
+    def expected_units(self, source: str, logical_date: date) -> tuple[ExpectedUnit, ...] | None:
+        """The sub-units a day of a unit-keyed source owes, each with its own due instant.
+
+        None when the source is not unit-keyed, or its set cannot be listed from configuration —
+        then the day is judged by its whole-source row, as before. Never a guessed set.
+        """
+        ...
+
+
 # ── one pair's verdict ───────────────────────────────────────────────────────────────────────
 
 
@@ -839,6 +885,8 @@ def build_report(
     expectations: Mapping[str, SourceExpectation] | None = None,
     l1_presence: L1Presence | None = None,
     l0_presence: L0Presence | None = None,
+    schedule: DueSchedule | None = None,
+    now: datetime | None = None,
 ) -> GapReport:
     """Classify every `(source, date)` pair in an inclusive range.
 
@@ -854,8 +902,17 @@ def build_report(
     filing, index slug, chunk or scrip — and those are walked separately: a unit exists only
     because something discovered it, so its absence is not a question the calendar can ask and
     only its *state* can be wrong. Their sources still need to be in `sources` to be examined.
+    With a `schedule` and the instant `now` (both or neither), a pair with no row is judged
+    against the scheduler: it is NOT_YET_DUE while `now` is before its covering fire's due instant
+    (`DueSchedule.due_at`), and NEVER_ATTEMPTED after — never excused by a future fire. A
+    unit-keyed source whose sub-units the schedule can list (`DueSchedule.expected_units`) is
+    judged per sub-unit: its day is complete only when every expected sub-unit is PUBLISHED, and
+    each one with no row is its own entry, naming it — NOT_YET_DUE before its own fire, otherwise
+    NEVER_ATTEMPTED. A sub-unit row in any other state is reported by the unit walk below, as
+    before. Without a schedule nothing here changes.
     What it never does: guess outside the calendar. A range that leaves C.2's coverage raises
-    `CalendarCoverageError` from the calendar itself rather than resolving to "no holidays".
+    `CalendarCoverageError` from the calendar itself rather than resolving to "no holidays". Nor
+    does it count "some sub-unit row is present" as the day landing.
 
     Raises `GapReportError` on an inverted range.
     """
@@ -865,12 +922,20 @@ def build_report(
             f"a gap report needs a range that runs forwards"
         )
 
+    if (schedule is None) != (now is None):
+        raise GapReportError("a gap report's schedule and its `now` come together, or neither")
     resolved_calendar = trading_calendar() if calendar is None else calendar
     resolved_expectations = (
         {entry.source: entry for entry in _registered()} if expectations is None else expectations
     )
     wanted = tuple(dict.fromkeys(sources))
     per_source = {source: _expectation_for(source, resolved_expectations) for source in wanted}
+    units_by_day: dict[tuple[str, date], dict[str, SyncRecord]] = {}
+    for unit_record in unit_records:
+        unit_key = SyncKey.parse(unit_record.source)
+        units_by_day.setdefault((unit_key.base, unit_record.logical_date), {})[unit_key.unit] = (
+            unit_record
+        )
 
     entries: list[GapEntry] = []
     by_reason: dict[GapReason, int] = {}
@@ -889,6 +954,18 @@ def build_report(
             if claims_data and (l1 is None or l1.check is L1Check.NO_DATASET):
                 l1_unchecked += 1
             entry = classify_pair(expectation, day, kind, record, l1=l1, l0_present=l0_present)
+            due: tuple[list[GapEntry], bool] | None = None
+            if entry is not None and entry.reason is GapReason.NEVER_ATTEMPTED:
+                due = _against_schedule(
+                    entry, expectation, kind, units_by_day.get((source, day), {}), schedule, now
+                )
+            if due is not None:
+                replaced, landed = due
+                complete += int(landed)
+                for unit_entry in replaced:
+                    entries.append(unit_entry)
+                    by_reason[unit_entry.reason] = by_reason.get(unit_entry.reason, 0) + 1
+                continue
             if entry is None:
                 complete += int(claims_data)
                 continue
@@ -949,6 +1026,63 @@ def build_report(
         l1_unchecked=l1_unchecked,
         _by_reason=by_reason,
     )
+
+
+def _against_schedule(
+    entry: GapEntry,
+    expectation: SourceExpectation,
+    day_kind: DayKind,
+    present: Mapping[str, SyncRecord],
+    schedule: DueSchedule | None,
+    now: datetime | None,
+) -> tuple[list[GapEntry], bool] | None:
+    """A NEVER_ATTEMPTED pair re-judged against the scheduler, or None to keep it as it is.
+
+    Returns the entries that replace it and whether the day landed (every expected sub-unit
+    PUBLISHED), or None when the schedule has nothing to say (no schedule, no covering job, or a
+    whole-source pair whose covering fire is already past).
+    """
+    if schedule is None or now is None:
+        return None
+    day = entry.logical_date
+    expected = schedule.expected_units(expectation.source, day)
+    if expected:
+        out: list[GapEntry] = []
+        for unit in expected:
+            if unit.unit in present:
+                continue  # PUBLISHED is complete; any other state is the unit walk's entry
+            if now < unit.due_at:
+                reason = GapReason.NOT_YET_DUE
+                detail = (
+                    f"{expectation.source}/{unit.unit} for {day.isoformat()} is due by "
+                    f"{unit.due_at.isoformat()} (its scheduled fire, budget and grace); not yet"
+                )
+            else:
+                reason = GapReason.NEVER_ATTEMPTED
+                detail = (
+                    f"{expectation.source}/{unit.unit} for {day.isoformat()} has no sync_state "
+                    f"row, and its scheduled fire was due by {unit.due_at.isoformat()} — the "
+                    "day is not complete while one expected sub-unit is missing"
+                )
+            out.append(_entry(expectation, day, day_kind, reason, detail, None, unit=unit.unit))
+        landed = all(
+            unit.unit in present and present[unit.unit].state is SyncState.PUBLISHED
+            for unit in expected
+        )
+        return out, landed
+    due_at = schedule.due_at(expectation.source, day)
+    if due_at is None or now >= due_at:
+        return None
+    return [
+        replace(
+            entry,
+            reason=GapReason.NOT_YET_DUE,
+            detail=(
+                f"{day.isoformat()} is a {day_kind.value} and {expectation.source} has no row "
+                f"yet; the scheduled fire that covers it is due by {due_at.isoformat()}"
+            ),
+        )
+    ], False
 
 
 def _l0_lookup(
@@ -1019,7 +1153,13 @@ class GapScanner:
         expectations: Mapping[str, SourceExpectation] | None = None,
         l1_presence: L1Presence | None = None,
         l0_presence: L0Presence | None = None,
+        schedule: DueSchedule | None = None,
+        now: datetime | None = None,
     ) -> None:
+        if (schedule is None) != (now is None):
+            raise GapReportError("a gap scanner's schedule and its `now` come together, or neither")
+        self._schedule = schedule
+        self._now = now
         self._store = SyncStateStore(conn, calendar=calendar)
         self._calendar = self._store.calendar
         self._expectations = expectations
@@ -1060,6 +1200,8 @@ class GapScanner:
             expectations=self._expectations,
             l1_presence=self._l1_presence,
             l0_presence=self._l0_presence,
+            schedule=self._schedule,
+            now=self._now,
         )
         _log.info(
             "gaps.report",

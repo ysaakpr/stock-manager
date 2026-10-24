@@ -154,6 +154,11 @@ class Job:
     #: due: a job merged after its last fire is NOT_YET_DUE until its first eligible fire, not
     #: NEVER_RAN. `None` (every job registered before this field) changes nothing.
     registered_at: datetime | None = None
+    #: How many days before its fire's date the logical date a fire captures is: 0 for a job that
+    #: lands its own day (the 18:30 EOD run lands D), 1 for one that lands the previous calendar
+    #: day (`announcements_capture` at 00:30 lands D-1). The gap report's NOT_YET_DUE uses it to
+    #: find the fire that covers a given date (`quality.gap_schedule`).
+    logical_date_lag_days: int = 0
 
     def __post_init__(self) -> None:
         if not JOB_NAME.match(self.name):
@@ -170,6 +175,8 @@ class Job:
             raise ValueError(f"job {self.name!r} needs a positive misfire_grace")
         if self.registered_at is not None and self.registered_at.tzinfo is None:
             raise ValueError(f"job {self.name!r} needs a tz-aware registered_at")
+        if self.logical_date_lag_days < 0:
+            raise ValueError(f"job {self.name!r} needs a non-negative logical_date_lag_days")
         self.trigger()  # validate the cron now, not on the morning it was supposed to fire
 
     @property
@@ -503,6 +510,7 @@ ANNOUNCEMENTS_CAPTURE = Job(
     covers=_ANNOUNCEMENT_SOURCES,
     sync_sources=_ANNOUNCEMENT_SOURCES,
     max_lag_sessions=2,
+    logical_date_lag_days=1,  # the 00:30 fire on D+1 lands day D
 )
 
 
