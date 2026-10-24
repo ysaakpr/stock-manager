@@ -214,9 +214,11 @@ def test_status_sources_marks_the_bse_block_accepted_and_nothing_else(client: Te
     for source in ("bse_announcements", "bse_scrip_master", "bse_corp_actions"):
         assert lines[source]["healthy"] is False, source
         assert lines[source]["deviation"]["status"] == "ACCEPTED", source
+        # D29 paused them; D26's verdict still stands underneath, and they count as paused.
+        assert lines[source]["paused"]["decision"].startswith("HUMAN_DECISIONS D29"), source
     assert lines["nse_xbrl_filing"]["deviation"] is None
     assert lines["nse_xbrl_filing"]["healthy"] is False
-    assert body["accepted"] == 3
+    assert body["paused"] == 3 and body["accepted"] == 0
     assert body["errors"] == sum(1 for line in lines.values() if not line["healthy"]) - 3
 
 
@@ -256,7 +258,7 @@ def test_the_console_shows_the_bse_block_amber_and_the_rest_red(client: TestClie
     identity = re.search(r'<tr data-job="identity_refresh"[^>]*>', ops)
     assert identity is not None and "data-deviation" not in identity.group(0)
     data = client.get("/console/data").text
-    assert re.search(r'<tr data-source="bse_scrip_master" data-health="ACCEPTED"', data)
+    assert re.search(r'<tr data-source="bse_scrip_master" data-health="PAUSED"', data)  # D29
     assert re.search(r'<tr data-source="nse_xbrl_filing" data-health="FAILING"', data)
 
 
