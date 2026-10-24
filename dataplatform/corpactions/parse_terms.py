@@ -42,6 +42,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from itertools import pairwise
 from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -71,8 +72,10 @@ __all__ = [
     "ManualQueueReason",
     "ParseOutcome",
     "classify",
+    "names_several_dividends",
     "parse_purpose",
     "split_compound",
+    "split_dividends",
 ]
 
 _LOG: Final[FilteringBoundLogger] = get_logger(__name__)
@@ -185,6 +188,54 @@ def split_compound(subject: str) -> tuple[str, ...]:
     """
     pieces = tuple(part.strip() for part in _COMPOUND_SEPARATOR_RE.split(subject) if part.strip())
     return pieces or (subject,)
+
+
+#: Where one dividend phrase starts: the word itself, with the kind words that qualify it
+#: (`Special Interim Dividend`, `Final Dividend`). Each phrase in a line is one distribution.
+_DIVIDEND_PHRASE_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:\b(?:special|interim|final)\b[\s-]*)*\bdividends?\b", re.IGNORECASE
+)
+
+#: Words that make a line a breakdown of one distribution rather than a list of several —
+#: `Rs 12.71 Per Unit Consisting Of Rs 11.22 Taxable Dividend & Rs 1.38 Exempt Dividend`. Split
+#: there, the parts would be counted beside the whole they make up.
+_BREAKDOWN_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:consist\w*|includ\w*|inclusive|comprising|of\s+which)\b", re.IGNORECASE
+)
+
+
+def split_dividends(segment: str) -> tuple[str, ...]:
+    """The dividends one segment names, one piece each — the segment itself when it names one.
+
+    What it does: NSE writes a regular and a special dividend declared together as one line,
+    joined by `&`, `+`, `And` or nothing at all (`Dividend - Rs 8 Per Share & Special Dividend Rs 5
+    Per Share`, `Interim Dividend - Rs 9 Per Share Special Dividend - Rs 18 Per Share`).
+    `split_compound` only knows the feed's `/`, so `parse_purpose` saw two amounts in one dividend
+    and kept neither. This cuts the segment at each dividend phrase, so each distribution is parsed
+    — and stored — on its own.
+    What it never does: split a breakdown (a line saying the parts *consist of*/*include* each
+    other), split where text before the first phrase already states an amount (the whole is
+    stated first), or split into a piece stating two amounts. Any of those returns the segment
+    whole, and `parse_purpose` queues it as before.
+    """
+    starts = [match.start() for match in _DIVIDEND_PHRASE_RE.finditer(segment)]
+    if len(starts) < 2 or _BREAKDOWN_RE.search(segment):
+        return (segment,)
+    if _money_values(_normalize(segment[: starts[0]])):
+        return (segment,)
+    bounds = [0, *starts[1:], len(segment)]
+    pieces = tuple(segment[a:b].strip() for a, b in pairwise(bounds))
+    for piece in pieces:
+        normalized = _normalize(piece)
+        if len(_money_values(normalized)) + len(_percents(normalized)) > 1:
+            return (segment,)
+    return pieces
+
+
+def names_several_dividends(text: str) -> bool:
+    """Whether a published line names more than one dividend phrase — the lines `split_dividends`
+    and the `/` compound split turn into several rows that share one raw text."""
+    return len(_DIVIDEND_PHRASE_RE.findall(text)) > 1
 
 
 # ── classification ───────────────────────────────────────────────────────────────────────────

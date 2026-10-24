@@ -36,10 +36,12 @@ from dataplatform.corpactions.parse_terms import (
     ManualEntryQueue,
     ManualQueueEntry,
     ManualQueueReason,
+    classify,
     parse_purpose,
     split_compound,
+    split_dividends,
 )
-from dataplatform.corpactions.taxonomy import ParsedAction
+from dataplatform.corpactions.taxonomy import ActionType, ParsedAction
 from dataplatform.identity.lineage import LineageResolver
 from dataplatform.identity.master import (
     AmbiguousSymbolError,
@@ -50,6 +52,7 @@ from dataplatform.ingest.corp_actions import (
     CaParseResult,
     CorporateAction,
     UnresolvedIdentity,
+    dividend_components,
     month_from_name,
 )
 from dataplatform.ingest.models import ParseError
@@ -229,10 +232,12 @@ def _one(
         return
 
     isin, filed_against = resolution
-    for action in parsed:
+    components = dividend_components([action.terms for action in parsed])
+    for action, component in zip(parsed, components, strict=True):
         actions.append(
             CorporateAction.from_parsed(
                 action,
+                component=component,
                 isin=isin,
                 filed_against_isin=filed_against,
                 source=SOURCE_ID,
@@ -260,8 +265,18 @@ def _parse_subject(subject: str) -> tuple[list[ParsedAction], list[ManualQueueEn
     A segment with no action keyword beside one that has (`Annual General Meeting/Dividend …`) is
     an event that is not a corporate action, not a defect — it is not queued. A line where *no*
     segment names an action is queued once, as a plain unrecognised subject would be.
+
+    A dividend segment naming several dividends (`Dividend - Rs 8 Per Share & Special Dividend Rs
+    5 Per Share`) is cut into one segment per dividend (`split_dividends`), so each becomes its own
+    action — and, through its component, its own row.
     """
-    segments = split_compound(subject)
+    segments = tuple(
+        piece
+        for segment in split_compound(subject)
+        for piece in (
+            split_dividends(segment) if classify(segment) == (ActionType.DIVIDEND,) else (segment,)
+        )
+    )
     if len(segments) <= 1:
         outcome = parse_purpose(subject, source=SOURCE_ID)
         return (

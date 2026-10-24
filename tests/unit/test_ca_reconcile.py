@@ -530,7 +530,7 @@ class _FakeConn:
 
     def __init__(self, seed: Sequence[CorporateAction]) -> None:
         # corporate_actions keyed by the table's natural key, each with a `reconciled` flag.
-        self._ca: dict[tuple[str, date, str, str], dict[str, Any]] = {}
+        self._ca: dict[tuple[str, date, str, str, str], dict[str, Any]] = {}
         for action in seed:
             self._ca[self._key(action)] = {
                 "action": action,
@@ -541,13 +541,26 @@ class _FakeConn:
         self._next_id = 1
 
     @staticmethod
-    def _key(action: CorporateAction) -> tuple[str, date, str, str]:
-        return (action.isin, action.ex_date, action.action_type.value, action.source)
+    def _key(action: CorporateAction) -> tuple[str, date, str, str, str]:
+        return (
+            action.isin,
+            action.ex_date,
+            action.action_type.value,
+            action.source,
+            action.component,
+        )
 
     def set_reconciled(
-        self, isin: str, ex_date: date, action_type: ActionType, source: str, *, value: bool
+        self,
+        isin: str,
+        ex_date: date,
+        action_type: ActionType,
+        source: str,
+        *,
+        value: bool,
+        component: str = "",
     ) -> None:
-        self._ca[(isin, ex_date, action_type.value, source)]["reconciled"] = value
+        self._ca[(isin, ex_date, action_type.value, source, component)]["reconciled"] = value
 
     def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> _FakeCursor:
         if sql.startswith("UPDATE quality_flag SET resolved = true"):
@@ -572,15 +585,15 @@ class _FakeConn:
             return _FakeCursor([], rowcount=closed)
         p = tuple(params)
         if sql.startswith("UPDATE corporate_actions SET reconciled = true"):
-            note, isin, ex_date, action_type, source = p
-            row = self._ca.get((isin, ex_date, action_type, source))
+            note, isin, ex_date, action_type, source, component = p
+            row = self._ca.get((isin, ex_date, action_type, source, component))
             if row is not None:
                 row["reconciled"] = True
                 row["note"] = note
             return _FakeCursor([])
         if sql.startswith("UPDATE corporate_actions SET reconciled = false"):
-            isin, ex_date, action_type, source = p
-            row = self._ca.get((isin, ex_date, action_type, source))
+            isin, ex_date, action_type, source, component = p
+            row = self._ca.get((isin, ex_date, action_type, source, component))
             if row is not None:
                 row["reconciled"] = False
             return _FakeCursor([])
@@ -681,9 +694,10 @@ class _FakeConn:
                         action.source_ref,
                         action.raw_text,
                         action.l0_key,
+                        action.component,
                     )
                 )
-            ca_rows.sort(key=lambda r: (r[0], r[1], r[2], r[7]))
+            ca_rows.sort(key=lambda r: (r[0], r[1], r[2], r[7], r[11]))
             return _FakeCursor(ca_rows)
         raise AssertionError(f"_FakeConn does not know this SQL: {sql!r}")
 
