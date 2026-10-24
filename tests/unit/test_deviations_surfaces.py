@@ -390,3 +390,43 @@ def test_an_accepted_quality_check_is_amber() -> None:
     quality = QualityOut(as_of=NOW, open_total=194, counts=[], by_check=[check], flags=[], limit=50)
     html = data_render.render_quality(quality)
     assert 'data-deviation="ACCEPTED"' in html and "rag-amber" in html
+
+
+def test_the_judge_opens_no_connection_of_its_own() -> None:
+    """`/status/sources` reads the store and nothing else; the judge must not add a database.
+
+    CI caught this (run 40000579070): the judge declared `db_connection`, so a test that overrides
+    only `sync_store` reached for Postgres. Here `db_connection` raises, so any route whose judge
+    opens its own connection fails, with or without a database on the machine.
+    """
+    from fastapi.testclient import TestClient
+
+    from dataplatform.clock import FrozenClock
+    from dataplatform.status.api import app, clock_source, db_connection, sync_store
+    from dataplatform.status.sync_state import SyncStateStore
+
+    class _Rows:
+        def fetchall(self) -> list[tuple[object, ...]]:
+            return []
+
+        def fetchone(self) -> tuple[object, ...] | None:
+            return None
+
+    class _Conn:
+        def execute(self, sql: str, params: object = ()) -> _Rows:
+            return _Rows()
+
+    def no_database() -> object:
+        raise AssertionError("a route opened a database connection of its own")
+
+    store = SyncStateStore(_Conn(), clock=FrozenClock(NOW), declined={})  # type: ignore[arg-type]
+    app.dependency_overrides[sync_store] = lambda: store
+    app.dependency_overrides[clock_source] = lambda: FrozenClock(NOW)
+    app.dependency_overrides[db_connection] = no_database
+    try:
+        with TestClient(app) as client:
+            response = client.get("/status/sources")
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200, response.text
+    assert response.json()["sources"] == []

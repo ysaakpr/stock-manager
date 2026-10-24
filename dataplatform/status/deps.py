@@ -109,10 +109,16 @@ DeviationsDep = Annotated[DeviationRegistry, Depends(deviation_registry)]
 
 
 def deviation_judge(
-    registry: DeviationsDep, conn: ConnDep, store: SyncStoreDep, clock: ClockDep
+    registry: DeviationsDep, store: SyncStoreDep, clock: ClockDep
 ) -> DeviationJudge:
-    """The registry bound to this request's connection, store and the injected clock's today."""
-    return DeviationJudge(registry, conn, store, clock.today())
+    """The registry bound to this request's store, its connection, and the injected clock's today.
+
+    Reads through the store's own connection rather than declaring `ConnDep`: an endpoint that
+    reads only the store (`/status/sources`) must not gain a second dependency on the database
+    because it shows deviation verdicts — a test, or a deployment, that overrides the store alone
+    would otherwise reach for a database the route never needed.
+    """
+    return DeviationJudge(registry, store.connection, store, clock.today())
 
 
 JudgeDep = Annotated[DeviationJudge, Depends(deviation_judge)]

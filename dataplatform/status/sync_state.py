@@ -686,6 +686,12 @@ class SyncStateStore:
         return self._declined
 
     @property
+    def connection(self) -> Connection:
+        """The connection this store reads through — for a reader answering about the same rows
+        (the accepted-deviation judge) in the same request, rather than opening a second one."""
+        return self._conn
+
+    @property
     def calendar(self) -> TradingCalendar:
         """The calendar this store classifies dates against (C.2)."""
         return self._calendar
