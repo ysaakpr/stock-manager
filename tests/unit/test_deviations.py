@@ -211,20 +211,30 @@ def test_the_checked_in_registry_loads_and_holds_the_bse_seeds() -> None:
         "bse-403-alert-announcements-capture",
     } <= ids
     for entry in registry.deviations:
-        assert "D26" in entry.basis.summary(), entry.id
+        decision = {"bse-": "D26", "d27-": "D27", "d28-": "D28"}[entry.id[:4]]
+        assert f"HUMAN_DECISIONS.md {decision}" in entry.basis.summary(), entry.id
         assert entry.basis.agreed_by == "owner"
     assert default_deviations() == registry
 
 
-def test_no_seed_targets_a_non_bse_item() -> None:
-    """Only the BSE block is seeded: every target names a BSE source or a job with a BSE leg."""
+def test_every_entry_targets_what_its_decision_named() -> None:
+    """D26 is the BSE block, D27 the ca_reconciliation backlog, D28 two retrying sources only."""
+    allowed = {
+        "bse-": lambda target: (
+            "bse" in target
+            or target
+            in (
+                "ca_refresh",
+                "announcements_capture",
+                "job:ca_refresh:failed",
+                "job:announcements_capture:failed",
+            )
+        ),
+        "d27-": lambda target: target in ("ca_reconciliation", "quality:ca_reconciliation:red"),
+        "d28-": lambda target: target in ("nse_xbrl_filing", "gdelt_v2_event_files"),
+    }
     for entry in load_deviations().deviations:
-        assert "bse" in entry.target or entry.target in (
-            "ca_refresh",
-            "announcements_capture",
-            "job:ca_refresh:failed",
-            "job:announcements_capture:failed",
-        ), entry.id
+        assert allowed[entry.id[:4]](entry.target), entry.id
 
 
 # ── a malformed entry fails loud, naming itself ───────────────────────────────────────────
@@ -700,7 +710,7 @@ def test_a_job_alert_follows_the_jobs_newest_finished_attempt() -> None:
 def test_an_alert_with_no_entry_is_not_accepted_and_costs_no_read() -> None:
     conn = FakeConn()
     assert _judge(SEEDS, conn=conn).alert("job:identity_refresh:failed") is None
-    assert _judge(SEEDS, conn=conn).alert("quality:ca_reconciliation:red") is None
+    assert _judge(SEEDS, conn=conn).alert("quality:l2_continuity:red") is None
     assert conn.queries == []
 
 

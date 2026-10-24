@@ -74,10 +74,13 @@ __all__ = [
     "JobAttempt",
     "OpenConflict",
     "OpenFlag",
+    "QualityEntry",
+    "RetryWindow",
     "accepted_note",
     "conflicts_known",
     "default_deviations",
     "error_class",
+    "flag_in_set",
     "flags_known",
     "gap_matches",
     "load_deviations",
@@ -241,6 +244,24 @@ def _young(logical_date: date, today: date, max_age_days: int | None) -> bool:
     return max_age_days is None or (today - logical_date).days <= max_age_days
 
 
+class RetryWindow(_Strict):
+    """A failure accepted only while it is still being retried (D28).
+
+    Structured, from the `sync_state` row itself: `retryable` must be true (a closed failure is
+    never "still retrying"), and fewer than `days` whole days may have passed since the row's
+    `first_attempt_at` (IST date) — on day `days` it is an error again. A row with no first
+    attempt recorded is not in any window.
+    """
+
+    days: int = Field(ge=1)
+
+    def holds(self, retryable: bool | None, first_attempt_at: datetime | None, today: date) -> bool:
+        """Whether a row with these fields is still inside the window on `today`."""
+        if retryable is not True or first_attempt_at is None:
+            return False
+        return (today - first_attempt_at.astimezone(IST).date()).days < self.days
+
+
 class SourceMatch(_Strict):
     """A source is accepted while every FAILED row of its current streak is one of `errors`.
 
@@ -251,6 +272,7 @@ class SourceMatch(_Strict):
 
     errors: tuple[ErrorPattern, ...] = Field(min_length=1)
     max_age_days: int | None = Field(default=None, ge=0)
+    retrying: RetryWindow | None = None
 
 
 class IdentityConflictSet(_Strict):
@@ -371,6 +393,7 @@ class GapMatch(_Strict):
     dates: frozenset[date] | None = None
     before: date | None = None
     max_age_days: int | None = Field(default=None, ge=0)
+    retrying: RetryWindow | None = None
 
     @model_validator(mode="after")
     def _bounded(self) -> GapMatch:
@@ -611,6 +634,8 @@ class GapItem:
     logical_date: date
     reason: str
     last_error: str | None
+    retryable: bool | None = None
+    first_attempt_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -705,9 +730,13 @@ class DeviationJudge:
                 rows=len(streak),
             )
             return False  # the evidence and the summary disagree: do not guess
+        retrying = entry.match.retrying
         return all(
             _any(entry.match.errors, row.last_error, row.logical_date)
             and _young(row.logical_date, self.today, entry.match.max_age_days)
+            and (
+                retrying is None or retrying.holds(row.retryable, row.first_attempt_at, self.today)
+            )
             for row in streak
         )
 
@@ -731,6 +760,10 @@ class DeviationJudge:
             and not entry.expired(self.today)
             and _any(entry.match.errors, row.last_error, row.logical_date)
             and _young(row.logical_date, self.today, entry.match.max_age_days)
+            and (
+                entry.match.retrying is None
+                or entry.match.retrying.holds(row.retryable, row.first_attempt_at, self.today)
+            )
             for entry in self.registry.entries(DeviationKind.SOURCE, base)
         )
 
@@ -840,6 +873,29 @@ class DeviationJudge:
             if isinstance(entry, QualityEntry) and flags_known(entry.match, flags)
         )
 
+    def quality_flag(self, check_name: str, flag: OpenFlag) -> DeviationOut | None:
+        """The verdict on one open ERROR flag of a check, from the flag's own fields (no read).
+
+        A flag is accepted when an entry for its check holds it in its set — whatever the check's
+        other flags are. The check as a whole (`quality`) is accepted only when all of them are.
+        """
+        return _first(
+            _verdict(entry, self.today)
+            for entry in self.registry.entries(DeviationKind.QUALITY, check_name)
+            if isinstance(entry, QualityEntry) and flag_in_set(entry.match, flag)
+        )
+
+    def quality_accepted(self, check_name: str) -> int:
+        """How many of a check's open ERROR flags an in-date entry accepts (0, reading nothing,
+        when no entry targets the check)."""
+        if not self.registry.entries(DeviationKind.QUALITY, check_name):
+            return 0
+        return sum(
+            1
+            for flag in self._open_flags(check_name)
+            if (verdict := self.quality_flag(check_name, flag)) is not None and verdict.accepted
+        )
+
     def _open_flags(self, check_name: str) -> list[OpenFlag]:
         if check_name not in self._flags:
             self._flags[check_name] = [
@@ -905,22 +961,22 @@ class DeviationJudge:
         return None
 
 
+def flag_in_set(match: QualityMatch, flag: OpenFlag) -> bool:
+    """Whether one open ERROR flag satisfies every criterion the matcher gives."""
+    if match.fingerprints and flag.fingerprint not in match.fingerprints:
+        return False
+    if match.ids and flag.id not in match.ids:
+        return False
+    if match.isins and (flag.isin is None or flag.isin not in match.isins):
+        return False
+    if match.raised_before is not None and flag.raised_at >= match.raised_before:
+        return False
+    return not (match.dated_before is not None and flag.logical_date >= match.dated_before)
+
+
 def flags_known(match: QualityMatch, flags: Sequence[OpenFlag]) -> bool:
     """At least one open ERROR flag, and every one inside the set (every given criterion)."""
-    if not flags:
-        return False
-    for flag in flags:
-        if match.fingerprints and flag.fingerprint not in match.fingerprints:
-            return False
-        if match.ids and flag.id not in match.ids:
-            return False
-        if match.isins and (flag.isin is None or flag.isin not in match.isins):
-            return False
-        if match.raised_before is not None and flag.raised_at >= match.raised_before:
-            return False
-        if match.dated_before is not None and flag.logical_date >= match.dated_before:
-            return False
-    return True
+    return bool(flags) and all(flag_in_set(match, flag) for flag in flags)
 
 
 def conflicts_known(match: IdentityConflictSet, conflicts: Sequence[OpenConflict]) -> bool:
@@ -946,6 +1002,10 @@ def gap_matches(match: GapMatch, item: GapItem, today: date) -> bool:
     if match.dates is not None and item.logical_date not in match.dates:
         return False
     if match.before is not None and item.logical_date >= match.before:
+        return False
+    if match.retrying is not None and not match.retrying.holds(
+        item.retryable, item.first_attempt_at, today
+    ):
         return False
     return _young(item.logical_date, today, match.max_age_days)
 
