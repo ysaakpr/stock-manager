@@ -52,6 +52,7 @@ from dataplatform.ingest.source_register import load as load_register
 from dataplatform.status.sync_state import SyncState
 from dataplatform.store.db import Connection
 from dataplatform.store.l0 import L0Store
+from tests.register_support import unpaused
 
 REPO_ROOT: Final = Path(__file__).resolve().parents[2]
 FIXTURES: Final = REPO_ROOT / "tests" / "fixtures" / "corp_actions"
@@ -142,7 +143,8 @@ def _fetcher(transport: RecordedTransport, settings: Settings) -> Fetcher:
         l0=L0Store(clock=CLOCK, data_root=settings.data_root),
         alerter=build_alerter(settings, clock=CLOCK),
         clock=CLOCK,
-        register=load_register(),
+        # Un-paused (D29): the backfill's BSE units as they run once the owner lifts the pause.
+        register=unpaused(load_register()),
         settings=settings,
         sleep=lambda _seconds: None,
     )

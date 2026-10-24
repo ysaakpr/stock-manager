@@ -594,14 +594,17 @@ def identity_refresh(context: JobContext) -> None:
     accumulated series can ever reconstruct the symbol history one snapshot cannot show
     (`pit_notes` on both register rows).
     """
-    from dataplatform.ingest.identity_refresh import refresh_identity
+    from dataplatform.ingest.identity_refresh import refresh_failure, refresh_identity
+    from dataplatform.ingest.source_register import paused_sources
     from dataplatform.store.db import connection
 
     with connection(context.settings) as conn:
         report = refresh_identity(conn=conn, clock=context.clock, settings=context.settings)
         conn.commit()
-    if not report.ingest.is_clean:
-        raise RuntimeError(report.summary())
+    # A conflict on a paused exchange (D29: BSE) is held, not failed on — see refresh_failure.
+    failure = refresh_failure(report, paused_sources())
+    if failure is not None:
+        raise RuntimeError(failure)
 
 
 #: The weekly identity refresh. 07:00 IST on Saturday — after the week's last session, before the

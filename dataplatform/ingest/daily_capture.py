@@ -178,6 +178,10 @@ class CaptureStatus(StrEnum):
     SKIPPED = "SKIPPED"
     """Nothing owed or nothing attributable — e.g. an empty deals file outside the evening run."""
 
+    PAUSED = "PAUSED"
+    """The source is paused by the owner (register `paused`, HUMAN_DECISIONS D29): not requested,
+    nothing owed, never a failure. No sync_state row is written; the gap report explains it."""
+
     FAILED = "FAILED"
     """The owed date did not land. Its `sync_state` row is FAILED with the reason."""
 
@@ -1251,7 +1255,11 @@ def _held_announcement_refs(ctx: CaptureContext, source: str, day: date) -> list
 
 
 def capture_announcements(
-    ctx: CaptureContext, fetchers: Mapping[str, Fetcher | HostBusyError], *, day: date
+    ctx: CaptureContext,
+    fetchers: Mapping[str, Fetcher | HostBusyError],
+    *,
+    day: date,
+    sources: Sequence[str] = ANNOUNCEMENT_SOURCES,
 ) -> list[CaptureOutcome]:
     """Land one calendar day of NSE and BSE announcements into that day's one L1 partition.
 
@@ -1259,11 +1267,12 @@ def capture_announcements(
     held, else fetched — one NSE request, one BSE request per page); then writes the partition from
     both exchanges' payloads, so landing BSE after NSE never erases NSE. BSE scrips resolve to ISIN
     through the D2 master; one it does not know is quarantined and counted.
-    What it assumes: `day` is complete — the job captures yesterday, after midnight.
+    What it assumes: `day` is complete — the job captures yesterday, after midnight. `sources` are
+    the exchanges to capture (a paused one is left out by the caller, D29).
     """
     fresh: dict[str, tuple[list[L0Ref], int]] = {}
     outcomes: list[CaptureOutcome] = []
-    for source in ANNOUNCEMENT_SOURCES:
+    for source in sources:
         if _published(ctx, source, day):
             outcomes.append(CaptureOutcome(source, day, CaptureStatus.ALREADY_PUBLISHED))
             continue
@@ -1340,32 +1349,52 @@ def run_announcements_capture(ctx: CaptureContext) -> CaptureReport:
     report = CaptureReport(job="announcements_capture")
     today = ctx.clock.today()
     days = [today - timedelta(days=back) for back in range(ANNOUNCEMENT_LOOKBACK_DAYS, 0, -1)]
-    owed = [
-        day
-        for day in days
-        if not all(_published(ctx, source, day) for source in ANNOUNCEMENT_SOURCES)
-    ]
-    if not owed:
+    paused = _paused_sources(ctx, ANNOUNCEMENT_SOURCES, job=report.job)
+    sources = tuple(source for source in ANNOUNCEMENT_SOURCES if source not in paused)
+    report.outcomes += [CaptureOutcome(source, days[-1], CaptureStatus.PAUSED) for source in paused]
+    owed = [day for day in days if not all(_published(ctx, source, day) for source in sources)]
+    if not sources or not owed:
         report.outcomes += [
-            CaptureOutcome(source, days[-1], CaptureStatus.ALREADY_PUBLISHED)
-            for source in ANNOUNCEMENT_SOURCES
+            CaptureOutcome(source, days[-1], CaptureStatus.ALREADY_PUBLISHED) for source in sources
         ]
         return report
     command = f"announcements capture {owed[0].isoformat()}..{owed[-1].isoformat()}"
-    with _announcement_fetchers(ctx, command) as fetchers:
+    with _announcement_fetchers(ctx, command, sources) as fetchers:
         for day in owed:
-            report.outcomes += capture_announcements(ctx, fetchers, day=day)
+            report.outcomes += capture_announcements(ctx, fetchers, day=day, sources=sources)
     return report
+
+
+def _paused_sources(ctx: CaptureContext, sources: Sequence[str], *, job: str) -> tuple[str, ...]:
+    """The sources the owner has paused (register `paused`, D29) — each skip logged, no request."""
+    paused = []
+    for source in sources:
+        record = _entry(ctx.register, source).paused
+        if record is None:
+            continue
+        _LOG.info(
+            "capture.source_paused",
+            job=job,
+            source=source,
+            since=record.since.isoformat(),
+            decision=record.decision,
+            state="PAUSED",
+        )
+        paused.append(source)
+    return tuple(paused)
 
 
 @contextmanager
 def _announcement_fetchers(
-    ctx: CaptureContext, command: str
+    ctx: CaptureContext, command: str, sources: Sequence[str] = ANNOUNCEMENT_SOURCES
 ) -> Iterator[dict[str, Fetcher | HostBusyError]]:
-    """One fetcher per announcement host, each leased on its own; a busy one is the error."""
+    """One fetcher per announcement host, each leased on its own; a busy one is the error.
+
+    Only `sources`' hosts are leased: a paused exchange's host is neither requested nor held.
+    """
     by_host: dict[str, Fetcher | HostBusyError] = {}
     with ExitStack() as stack:
-        for source in ANNOUNCEMENT_SOURCES:
+        for source in sources:
             host = _entry(ctx.register, source).host
             if host in by_host:
                 continue
@@ -1373,9 +1402,7 @@ def _announcement_fetchers(
                 by_host[host] = stack.enter_context(ctx.fetchers((host,), command))
             except HostBusyError as exc:
                 by_host[host] = exc
-        yield {
-            source: by_host[_entry(ctx.register, source).host] for source in ANNOUNCEMENT_SOURCES
-        }
+        yield {source: by_host[_entry(ctx.register, source).host] for source in sources}
 
 
 # ── news: curated RSS + a bounded GDELT sample ────────────────────────────────────────────────

@@ -47,6 +47,7 @@ from dataplatform.ingest.fetcher import (
 from dataplatform.ingest.lease import HostBusyError, LeaseHolder
 from dataplatform.ingest.news import NEWS_DATASET
 from dataplatform.ingest.nse import board_meetings, deals, fii_dii
+from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.quality.sentinel import QualityFinding
 from dataplatform.status.sync_state import SyncState
@@ -54,11 +55,13 @@ from dataplatform.store import fo_aggregates
 from dataplatform.store.l0 import L0Store
 from dataplatform.store.paths import l1_partition_path, l2_partition_path
 from tests.conftest import SettingsLoader
+from tests.register_support import unpaused
 from tests.unit.test_daily_snapshot import RecordingTracker, SpyAlerter
 
 FIXTURES: Final = Path("tests/fixtures")
 WARM: Final = "https://www.nseindia.com/"
-REGISTER: Final = load_register()
+#: Un-paused (D29): these tests drive the BSE legs as they run once the pause is lifted.
+REGISTER: Final = unpaused(load_register())
 
 
 def _url(source_id: str) -> str:
@@ -110,6 +113,8 @@ class Harness:
             )
         )
         self.scrip_index = {"543210": "INE0ROBO1018", "500325": "INE002A01018"}
+        #: Un-paused by default; a pause test sets the checked-in register (D29).
+        self.register: SourceRegister = REGISTER
 
     def at(self, now: datetime, script: Script) -> CaptureContext:
         """The context for one run at `now`, answering from `script`."""
@@ -136,7 +141,7 @@ class Harness:
                 l0=self.l0,
                 alerter=SpyAlerter(),
                 clock=self.clock,
-                register=REGISTER,
+                register=self.register,
                 settings=self.settings,
                 sleep=lambda _seconds: None,
             )
@@ -146,7 +151,7 @@ class Harness:
             tracker=self.tracker,
             calendar=trading_calendar(),
             clock=self.clock,
-            register=REGISTER,
+            register=self.register,
             fetchers=fetchers,
             alerter=self.alerter,
             master=lambda: self.master,
@@ -936,4 +941,63 @@ def test_only_ratified_feeds_are_polled(settings: Settings, tmp_path: Path) -> N
     assert not any("business-standard" in url for url in h.urls())
     assert [feed.id for feed in dc._ratified_feeds(h.at(_ist(2026, 9, 2, 12, 15), {}))] == [
         "rbi_press_releases"
+    ]
+
+
+# ── D29: a paused announcement source is skipped before any request; the job is not red ─────
+
+
+def test_a_paused_bse_announcement_leg_is_skipped_and_the_run_is_not_red(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """With the checked-in register (bse_announcements paused, D29): no BSE request, no BSE host
+    lease, no BSE sync_state row, a PAUSED outcome — and NSE owes and lands its day as before.
+
+    Inverted by `test_nse_and_bse_land_in_one_partition_whichever_lands_second`, where the same
+    leg on the un-paused register is requested and lands.
+    """
+    from structlog.testing import capture_logs
+
+    from dataplatform.status.sync_state import SyncRecord
+
+    day = date(2026, 8, 7)
+    nse_url, bse_url = _ann_urls(day)
+    h = _harness(settings, tmp_path, _ist(2026, 8, 8, 0, 30))
+    h.register = load_register()
+    for back in range(2, dc.ANNOUNCEMENT_LOOKBACK_DAYS + 1):  # NSE already holds the older days
+        earlier = day - timedelta(days=back - 1)
+        h.tracker.rows[(ann.NSE_SOURCE_ID, earlier)] = SyncRecord(
+            source=ann.NSE_SOURCE_ID,
+            logical_date=earlier,
+            state=SyncState.PUBLISHED,
+            attempts=1,
+            retryable=True,
+            updated_at=_ist(2026, 8, 1, 0, 31),
+        )
+    leased: list[tuple[str, ...]] = []
+    ctx = h.at(
+        _ist(2026, 8, 8, 0, 30),
+        {WARM: RecordedResponse(status_code=403), nse_url: RecordedResponse(body=NSE_ANN)},
+    )
+    inner = ctx.fetchers
+
+    @contextmanager
+    def recording(hosts: Sequence[str], command: str) -> Iterator[Fetcher]:
+        leased.append(tuple(hosts))
+        with inner(hosts, command) as fetcher:
+            yield fetcher
+
+    ctx = replace(ctx, fetchers=recording)
+    with capture_logs() as logs:
+        report = dc.run_announcements_capture(ctx)
+
+    assert bse_url not in h.urls() and all("bseindia" not in url for url in h.urls())
+    assert all("api.bseindia.com" not in hosts for hosts in leased)
+    assert report.failed == ()
+    statuses = {o.source: o.status for o in report.outcomes}
+    assert statuses[ann.BSE_SOURCE_ID] is CaptureStatus.PAUSED
+    assert statuses[ann.NSE_SOURCE_ID] is CaptureStatus.CAPTURED
+    assert h.state(ann.BSE_SOURCE_ID, day) is None
+    assert [e["source"] for e in logs if e["event"] == "capture.source_paused"] == [
+        ann.BSE_SOURCE_ID
     ]

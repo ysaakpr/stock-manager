@@ -616,6 +616,31 @@ def _entry(source_id: str, register: SourceRegister) -> Source:
     return entry
 
 
+def _unpaused(
+    specs: Sequence[SnapshotSpec], register: SourceRegister, *, as_of: date
+) -> list[SnapshotSpec]:
+    """The specs whose source is not paused (register `paused`, D29); each skip is logged.
+
+    A paused source is not requested, not leased, and gets no sync_state row — not even a GAP on a
+    closed day: the gap report explains its days as PAUSED.
+    """
+    kept = []
+    for spec in specs:
+        record = _entry(spec.source_id, register).paused
+        if record is None:
+            kept.append(spec)
+            continue
+        _LOG.info(
+            "snapshot.source_paused",
+            source=spec.source_id,
+            as_of=as_of.isoformat(),
+            since=record.since.isoformat(),
+            decision=record.decision,
+            state="PAUSED",
+        )
+    return kept
+
+
 def _snapshot_url(spec: SnapshotSpec, entry: Source) -> str:
     """The register's URL for this spec, its choice tokens filled, refused if any brace remains.
 
@@ -688,6 +713,7 @@ def run_daily_snapshot(
             f"assertion."
         )
 
+    specs = _unpaused(specs, loaded, as_of=as_of)
     day_kind = calendar.classify(as_of)
     if not day_kind.expects_data:
         for spec in specs:
@@ -1004,7 +1030,11 @@ def run_daily_snapshot_job(context: JobContext) -> None:
     alerter = build_alerter(settings, clock=clock)
     calendar = trading_calendar()
     hosts = sorted(
-        {_entry(spec.source_id, register).host for spec in DEFAULT_SNAPSHOT_SET}
+        {
+            _entry(spec.source_id, register).host
+            for spec in DEFAULT_SNAPSHOT_SET
+            if _entry(spec.source_id, register).paused is None
+        }
         | {_entry("nifty_index_constituents", register).host}
     )
 

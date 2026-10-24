@@ -75,6 +75,7 @@ from dataplatform.query.announcement_search import (
 from dataplatform.status.sync_state import SyncRecord, SyncState, SyncStateStore
 from dataplatform.store.l0 import L0Store
 from tests.conftest import SettingsLoader
+from tests.register_support import unpaused
 
 NSE_FIXTURE: Final = Path(
     "tests/fixtures/announcements/nse/2026-08-07/corporate-announcements.json"
@@ -217,7 +218,7 @@ def bse_bytes(repo_root: Path) -> bytes:
 @pytest.fixture
 def register() -> SourceRegister:
     """The real, checked-in Source Register (C.1). Read for its shape, never for its hosts."""
-    return load_register()
+    return unpaused(load_register())  # the BSE leg as it runs once D29's pause is lifted
 
 
 @pytest.fixture

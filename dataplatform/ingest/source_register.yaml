@@ -665,6 +665,15 @@ sources:
     failure_note: null
     candidate_alternatives: []
     owner_task: M2.2
+    # api.bseindia.com has refused this deployment (HTTP 403) since 2026-09-24. Paused by the owner
+    # until the block lifts: no job leg requests it, and lifting the pause is the owner's call
+    # (delete this record, restart the scheduler — ops/runbooks/daily-eod.md).
+    paused:
+      reason: >-
+        api.bseindia.com has answered this deployment with HTTP 403 since 2026-09-24; paused until the
+        block lifts. No workaround is allowed (AGENTIC_CONTEXT §8).
+      since: 2026-10-24
+      decision: HUMAN_DECISIONS D29 (owner, 2026-10-24)
 
   # §4.1 row 5 (second NSE surface) — the daily PR report bundle, W2 Phase 1.
   - id: nse_pr_bundle
@@ -856,6 +865,15 @@ sources:
     failure_note: null
     candidate_alternatives: []
     owner_task: M3.1
+    # api.bseindia.com has refused this deployment (HTTP 403) since 2026-09-24. Paused by the owner
+    # until the block lifts: no job leg requests it, and lifting the pause is the owner's call
+    # (delete this record, restart the scheduler — ops/runbooks/daily-eod.md).
+    paused:
+      reason: >-
+        api.bseindia.com has answered this deployment with HTTP 403 since 2026-09-24; paused until the
+        block lifts. No workaround is allowed (AGENTIC_CONTEXT §8).
+      since: 2026-10-24
+      decision: HUMAN_DECISIONS D29 (owner, 2026-10-24)
 
   # §4.1 row 7 — index constituents
   - id: nifty_index_constituents
@@ -1454,6 +1472,15 @@ sources:
     failure_note: null
     candidate_alternatives: []
     owner_task: M3.8
+    # api.bseindia.com has refused this deployment (HTTP 403) since 2026-09-24. Paused by the owner
+    # until the block lifts: no job leg requests it, and lifting the pause is the owner's call
+    # (delete this record, restart the scheduler — ops/runbooks/daily-eod.md).
+    paused:
+      reason: >-
+        api.bseindia.com has answered this deployment with HTTP 403 since 2026-09-24; paused until the
+        block lifts. No workaround is allowed (AGENTIC_CONTEXT §8).
+      since: 2026-10-24
+      decision: HUMAN_DECISIONS D29 (owner, 2026-10-24)
 
   - id: nse_announcement_attachment
     plan_row: "Corporate announcements"
