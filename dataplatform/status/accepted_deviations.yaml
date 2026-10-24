@@ -65,6 +65,40 @@ x-bse-remark: &bse_remark >-
   api.bseindia.com has refused this server (HTTP 403) since 2026-09-24; the owner chose on
   2026-10-12 to ignore BSE for now, and AGENTIC_CONTEXT §8 forbids working around a refusal.
 
+# D27 (owner, 2026-10-24): the old cross-feed corporate-action disagreements, awaiting a human.
+x-d27-basis: &d27_basis
+  agreed_by: owner
+  agreed_on: 2026-10-24
+  recorded_in:
+    - "HUMAN_DECISIONS.md D27 (owner, 2026-10-24: 'agree')"
+    - "M2.3: a cross-feed disagreement is a human's adjudication, never resolved by code"
+
+x-d27-remark: &d27_remark >-
+  Cross-feed disagreement from before 2026-10-07, awaiting human adjudication (M2.3); accepted so
+  it doesn't hide new ones.
+
+# D28 (owner, 2026-10-24): failures still being retried show amber, red once 7 days old.
+x-d28-basis: &d28_basis
+  agreed_by: owner
+  agreed_on: 2026-10-24
+  recorded_in:
+    - "HUMAN_DECISIONS.md D28 (owner, 2026-10-24: 'agree')"
+
+x-d28-retrying: &d28_retrying
+  days: 7
+
+x-xbrl-retrying-errors: &xbrl_errors
+  - class: FetchHTTPError
+    pattern: '^nse_xbrl_filing: https://nsearchives\.nseindia\.com/corporate/xbrl/\S+\.xml returned 404\b'
+  # The fundamentals backfill records a parse failure as `parse failed: <exc>`, with no class
+  # prefix (dataplatform/ingest/fundamentals_backfill.py).
+  - class: null
+    pattern: '^parse failed: \S+\.xml: empty response body$'
+
+x-gdelt-retrying-errors: &gdelt_errors
+  - class: FetchHTTPError
+    pattern: '^gdelt_v2_event_files: http://data\.gdeltproject\.org/gdeltv2/\d{14}\.export\.CSV\.zip returned 404\b'
+
 deviations:
   # ── sources ─────────────────────────────────────────────────────────────────────────────────
   - id: bse-403-source-announcements
@@ -215,3 +249,113 @@ deviations:
     remark: *bse_remark
     basis: *bse_basis
     since: 2026-09-08
+
+  # ── D27: ca_reconciliation ERROR flags raised before 2026-10-07, by frozen fingerprint ───────
+  # The exact set, computed read-only on 2026-10-24 from the open ERROR flags raised before
+  # 2026-10-07 IST (192): minus the 9 EX_DATE_MISMATCH (#133 fixes them), minus 147 dividend
+  # RATIO_MISMATCH whose ex-date carries >=2 distinct dividend rows in one feed's own L0 payload
+  # (the one-dividend-per-feed-per-day key drops the second; being fixed separately), minus 5 whose
+  # stored row states two dividends in one line. A flag outside this list — any new disagreement —
+  # stays red. Each line: fingerprint (detail->>'fingerprint'), reason, ISIN, ex-date.
+  - id: d27-ca-reconciliation-backlog
+    kind: quality
+    target: ca_reconciliation
+    match:
+      fingerprints:
+        - fa424e5f2c8c4c801aa4d309c8137b12  # RATIO_MISMATCH INE109C01017 2016-09-12
+        - 51c143b58909dab6c90227b4ebdb03fd  # RATIO_MISMATCH INE844O01030 2016-09-21
+        - 9a9f0a89e5dbac09f4b5df5c86e1ab7d  # RATIO_MISMATCH INE029A01011 2017-03-24
+        - 4061d5bb710b19c7188af37ad28fdcfb  # RATIO_MISMATCH INE121E01018 2017-06-30
+        - 408e48df624fc53269964e69c11eb797  # RATIO_MISMATCH INE180C01042 2017-07-05
+        - faae8005b605a8d34cb6e71c0524af8d  # RATIO_MISMATCH INE372C01037 2017-08-10
+        - 69102f228404b6f9cbe237d4bf3d38b1  # RATIO_MISMATCH INE558D01021 2017-09-06
+        - 42fc80180d68920ade63f8c7c51ba787  # RATIO_MISMATCH INE094A01015 2018-02-28
+        - 6ed5fd4ef883990d2585280c836efe4a  # RATIO_MISMATCH INE177A01018 2018-05-24
+        - 661bd87e805bf36ca51e8cc645c34f08  # RATIO_MISMATCH INE259A01022 2018-05-29
+        - 196d7e4ae5ce1184a0524a82f72fb209  # RATIO_MISMATCH INE688A01022 2018-11-13
+        - db8815182c58a9c246c138f6ef6a123f  # RATIO_MISMATCH INE233B01017 2019-07-22
+        - 2930b25321039286316bce9e02247a16  # RATIO_MISMATCH INE927C01020 2019-09-19
+        - c039c5f54fc93e575fbf228e8d345663  # RATIO_MISMATCH INE100A01010 2019-11-04
+        - fc66728f99ff1099e6adb275b93d6b4b  # RATIO_MISMATCH INE347G01014 2019-11-07
+        - 3328a8fbcc3d6e6bd23cd26aef9548c0  # RATIO_MISMATCH INE012A01025 2020-03-27
+        - 47ac5ed5cabd2a0ca48a1201631594f7  # RATIO_MISMATCH INE573A01042 2020-09-14
+        - 8e826ccf0e618851498f5bf52fe383ef  # RATIO_MISMATCH INE068L01024 2021-02-12
+        - 590624860a1cc8ce838d6eb350efd4bb  # RATIO_MISMATCH INE755Q01025 2021-02-18
+        - 8bbb965a3d559db1fb775addb28d4dc0  # RATIO_MISMATCH INE054A01027 2022-03-08
+        - 413d67db24bd7175840ec2bc1adb7404  # RATIO_MISMATCH INE205A01025 2022-03-09
+        - acaa1dbc73f772a14ef8b4a0c1b00a8e  # RATIO_MISMATCH INE0FS801015 2022-08-12
+        - 5cac6b7eb5d8112df80a759837de32b5  # RATIO_MISMATCH INE760L01018 2022-08-19
+        - 60fa749cf57ff33aa0ac170a1811a646  # RATIO_MISMATCH INE228I01012 2022-09-22
+        - 657c931c3bebaff0c4a3b099cd723340  # RATIO_MISMATCH INE386A01023 2023-04-26
+        - b18466ecb704ce4504a2dab7a6ae96f3  # RATIO_MISMATCH INE083C01022 2023-06-23
+        - f0952788384a268736be64c12c17d35e  # RATIO_MISMATCH INE256C01024 2023-09-01
+        - d53c2e0e05ffeb1cadef9ef34578b2f8  # RATIO_MISMATCH INE032B01021 2024-06-20
+        - 7610041b839b5fa55f9fb0074e4bcf8f  # RATIO_MISMATCH INE076B01028 2024-07-15
+        - 79c74d91c67b5e28c0c8de7832a54955  # RATIO_MISMATCH INE976R01033 2025-03-19
+        - 8c8fac0ad26f33b777fc94552e9cabb0  # RATIO_MISMATCH INE258A01024 2026-09-22
+    remark: *d27_remark
+    basis: *d27_basis
+    since: 2026-09-07
+    review_by: 2027-01-31
+
+  # The check's own alert is a warning only while every open ERROR flag is in the set above.
+  - id: d27-ca-reconciliation-alert
+    kind: alert
+    target: quality:ca_reconciliation:red
+    match: {while_accepted: d27-ca-reconciliation-backlog}
+    remark: *d27_remark
+    basis: *d27_basis
+    since: 2026-09-07
+    review_by: 2027-01-31
+
+  # ── D28: failures still being retried — amber for 7 days from the first attempt, then red ───
+  - id: d28-xbrl-filing-retrying
+    kind: gap
+    target: nse_xbrl_filing
+    match:
+      reasons: [FAILED]
+      errors: *xbrl_errors
+      retrying: *d28_retrying
+    remark: >-
+      NSE has not published this XBRL filing yet (404 or an empty body); it is retried, and turns
+      red 7 days after its first attempt.
+    basis: *d28_basis
+    since: 2026-10-24
+
+  - id: d28-xbrl-filing-retrying-source
+    kind: source
+    target: nse_xbrl_filing
+    match:
+      errors: *xbrl_errors
+      retrying: *d28_retrying
+    remark: >-
+      Only filings NSE has not published yet (404 or an empty body), still within 7 days of their
+      first attempt.
+    basis: *d28_basis
+    since: 2026-10-24
+
+  - id: d28-gdelt-retrying
+    kind: gap
+    # L0_PRESENT_L1_ABSENT too: before the unit-row L0 fix the same 404 carried that label.
+    target: gdelt_v2_event_files
+    match:
+      reasons: [FAILED, L0_PRESENT_L1_ABSENT]
+      errors: *gdelt_errors
+      retrying: *d28_retrying
+    remark: >-
+      GDELT's manifest named an export file that does not exist (404); it is retried, and turns
+      red 7 days after its first attempt.
+    basis: *d28_basis
+    since: 2026-10-24
+
+  - id: d28-gdelt-retrying-source
+    kind: source
+    target: gdelt_v2_event_files
+    match:
+      errors: *gdelt_errors
+      retrying: *d28_retrying
+    remark: >-
+      Only export files GDELT's manifest named but never served (404), still within 7 days of
+      their first attempt.
+    basis: *d28_basis
+    since: 2026-10-24
