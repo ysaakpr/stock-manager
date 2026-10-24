@@ -63,6 +63,7 @@ if TYPE_CHECKING:
 __all__ = [
     "CloseToCloseMove",
     "ExchangeClose",
+    "FindingScope",
     "PersistFindingCounts",
     "QualityFinding",
     "SentinelInput",
@@ -341,6 +342,33 @@ _INSERT_FLAG_SQL: Final = (
 )
 
 
+#: Close a check's open flags that a run covering them no longer raised. Scoped twice: to the
+#: check, and — for a run over some instruments only — to those ISINs, so a partial run never
+#: closes a flag about something it did not look at. A flag still raised is excluded by its
+#: fingerprint and keeps its original `raised_at`. A flag with no ISIN is in a partial scope never.
+_RESOLVE_UNRAISED_SQL: Final = (
+    "UPDATE quality_flag SET resolved = true, resolved_at = %(now)s, resolution = %(resolution)s "
+    "WHERE check_name = %(check_name)s AND NOT resolved "
+    "  AND (%(every_isin)s OR isin = ANY(%(isins)s::text[])) "
+    "  AND NOT (COALESCE(detail->>'fingerprint', '') = ANY(%(fingerprints)s::text[]))"
+)
+
+
+class FindingScope(BaseModel):
+    """What one run of a check covered: the open flags it may close when it no longer raises them.
+
+    `isins=None` is a full run — every instrument the check could flag, so every open flag of
+    `check_name` is in scope. A set is a partial run over those ISINs only: a flag about any other
+    ISIN, or about none, is out of scope however stale it looks. A caller that cannot vouch its run
+    would have re-raised a flag (a non-default threshold, say) passes no scope at all.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    check_name: str = Field(min_length=1)
+    isins: frozenset[str] | None = None
+
+
 class PersistFindingCounts(BaseModel):
     """What `persist_findings` changed. `skipped` are findings already open from a prior run."""
 
@@ -348,10 +376,16 @@ class PersistFindingCounts(BaseModel):
 
     written: int = 0
     skipped: int = 0
+    #: Open flags in the run's `resolve_scope` it no longer raised, closed as superseded.
+    resolved: int = 0
 
 
 def persist_findings(
-    conn: Connection, findings: Iterable[QualityFinding], *, clock: Clock
+    conn: Connection,
+    findings: Iterable[QualityFinding],
+    *,
+    clock: Clock,
+    resolve_scope: FindingScope | None = None,
 ) -> PersistFindingCounts:
     """Write sentinel findings to `quality_flag`, one row each, skipping ones already open.
 
@@ -360,7 +394,21 @@ def persist_findings(
     fingerprint is folded into `detail` so the store's `detail->>'fingerprint'` predicate (the same
     one `read_quality` neighbours) can find it. `raised_at` comes from the injected clock, never the
     wall clock. Does not commit: the caller owns the transaction.
+
+    With `resolve_scope`, also closes every open flag in that scope whose fingerprint this run did
+    not raise: the run looked and the defect is gone (a curation, a rebuild). Without it nothing is
+    closed — the default, for a run that does not cover what its earlier flags were about (the
+    sentinel's one session, the L0 sweep's one day). Every finding must belong to the scope's check;
+    a scope naming another would close flags this run never judged, so that raises `ValueError`.
     """
+    findings = tuple(findings)
+    if resolve_scope is not None:
+        strays = sorted({f.check_name for f in findings} - {resolve_scope.check_name})
+        if strays:
+            raise ValueError(
+                f"findings of {strays} cannot be persisted under a {resolve_scope.check_name!r} "
+                "resolve scope: it would close that check's flags on another check's evidence"
+            )
     written = 0
     skipped = 0
     now = clock.now()
@@ -388,11 +436,38 @@ def persist_findings(
         )
         written += 1
 
-    counts = PersistFindingCounts(written=written, skipped=skipped)
+    resolved = 0
+    if resolve_scope is not None:
+        cursor = conn.execute(
+            _RESOLVE_UNRAISED_SQL,
+            {
+                "now": now,
+                "resolution": (
+                    f"superseded: not raised by a later {resolve_scope.check_name} run "
+                    + (
+                        "over every instrument"
+                        if resolve_scope.isins is None
+                        else f"over {len(resolve_scope.isins)} ISIN(s) including this one"
+                    )
+                ),
+                "check_name": resolve_scope.check_name,
+                "every_isin": resolve_scope.isins is None,
+                "isins": sorted(resolve_scope.isins or ()),
+                "fingerprints": sorted({f.fingerprint for f in findings}),
+            },
+        )
+        resolved = cursor.rowcount
+
+    counts = PersistFindingCounts(written=written, skipped=skipped, resolved=resolved)
     _LOG.info(
         "sentinel.persisted",
         written=counts.written,
         skipped=counts.skipped,
+        resolved=counts.resolved,
+        check=None if resolve_scope is None else resolve_scope.check_name,
+        scope=None
+        if resolve_scope is None
+        else ("all" if resolve_scope.isins is None else len(resolve_scope.isins)),
         state="FLAGGED",
     )
     return counts
