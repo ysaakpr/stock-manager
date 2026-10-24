@@ -26,7 +26,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from dataplatform.ingest.source_register import Declined
+from dataplatform.ingest.source_register import Declined, Paused
 from dataplatform.quality.gaps import GapEntry, GapReason, GapReport
 from dataplatform.scheduler.health import JobHealth, JobHealthState
 from dataplatform.status.deviations import DeviationJudge, DeviationOut, GapItem
@@ -72,6 +72,7 @@ __all__ = [
     "ManagerDecisionOut",
     "ManagerScoreOut",
     "ManagersOut",
+    "PausedOut",
     "QualityFlagOut",
     "QualityOut",
     "QualitySeverity",
@@ -206,6 +207,25 @@ class DeclinedOut(BaseModel):
         )
 
 
+class PausedOut(BaseModel):
+    """Why a source is paused by the owner (register `paused`, HUMAN_DECISIONS D29), as served.
+
+    Paused is its own state — not failed, not healthy: nothing is requested until the owner lifts
+    it, its old failures stay on record, and no gate counts it as fresh or published.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: str
+    since: date
+    decision: str
+
+    @classmethod
+    def of(cls, record: Paused) -> PausedOut:
+        """Project a register pause record onto the wire contract."""
+        return cls(reason=record.reason, since=record.since, decision=record.decision)
+
+
 class SourceStatusOut(BaseModel):
     """One source's line in `GET /status/sources`: last success, lag, failure streak."""
 
@@ -236,6 +256,11 @@ class SourceStatusOut(BaseModel):
         "`final_state`), whose FETCHED rows are its successes, not rows stuck mid-pipeline",
     )
     deviation: DeviationOut | None = _deviation_field()
+    paused: PausedOut | None = Field(
+        default=None,
+        description="Set while the owner has paused the source (D29): not requested, shown as "
+        "PAUSED, never counted as fresh or published. `healthy` is unchanged",
+    )
     declined: DeclinedOut | None = Field(
         default=None,
         description="Set when the register DECLINED this source on policy grounds: never "
@@ -262,6 +287,7 @@ class SourceStatusOut(BaseModel):
             healthy=status.healthy,
             final_state=status.final_state,
             deviation=deviation,
+            paused=None if status.paused is None else PausedOut.of(status.paused),
             declined=None if status.declined is None else DeclinedOut.of(status.declined),
             counts=dict(status.counts),
         )
@@ -279,6 +305,9 @@ class SourcesOut(BaseModel):
     )
     errors: int = Field(
         default=0, description="Sources not healthy and not accepted — the ones that are news"
+    )
+    paused: int = Field(
+        default=0, description="Sources not healthy because the owner paused them (D29); apart"
     )
     declined: dict[str, DeclinedOut] = Field(
         default_factory=dict,
