@@ -349,3 +349,62 @@ def test_the_judge_reads_nothing_for_an_item_no_entry_targets(conn: Connection) 
     judge = DeviationJudge(default_deviations(), conn, SyncStateStore(conn), NOW.date())
     assert judge.job("identity_refresh") is None
     assert judge.alert("job:identity_refresh:failed") is None
+
+
+# ── D27 / D28 (owner, 2026-10-24) ────────────────────────────────────────────────────────────
+
+D27_KNOWN: Final = "fa424e5f2c8c4c801aa4d309c8137b12"
+
+
+def _ca_flag(conn: Connection, fingerprint: str, raised: datetime) -> None:
+    conn.execute(
+        "INSERT INTO quality_flag (logical_date, check_name, severity, isin, source, detail, "
+        "raised_at) VALUES (%s, 'ca_reconciliation', 'ERROR', 'INE109C01017', "
+        "'bse_corp_actions', %s::jsonb, %s)",
+        (
+            date(2016, 9, 12),
+            f'{{"reason": "RATIO_MISMATCH", "fingerprint": "{fingerprint}"}}',
+            raised,
+        ),
+    )
+
+
+def test_d27_marks_the_known_flag_and_keeps_a_new_one_red(
+    client: TestClient, conn: Connection
+) -> None:
+    _ca_flag(conn, D27_KNOWN, datetime(2026, 9, 7, 14, 24, tzinfo=IST))
+    _ca_flag(conn, "0123456789abcdef0123456789abcdef", datetime(2026, 10, 20, 9, 0, tzinfo=IST))
+    body = client.get("/status/quality").json()
+    (check,) = [c for c in body["by_check"] if c["check_name"] == "ca_reconciliation"]
+    assert check["count"] == 2 and check["accepted"] == 1 and check["deviation"] is None
+    verdicts = {
+        flag["detail"]["fingerprint"]: flag["deviation"]
+        for flag in body["flags"]
+        if flag["check_name"] == "ca_reconciliation"
+    }
+    assert verdicts[D27_KNOWN]["id"] == "d27-ca-reconciliation-backlog"
+    assert verdicts["0123456789abcdef0123456789abcdef"] is None
+
+
+def test_d28_marks_a_recent_retrying_xbrl_404_on_the_gaps_page(
+    client: TestClient, conn: Connection
+) -> None:
+    error = (
+        "FetchHTTPError: nse_xbrl_filing: https://nsearchives.nseindia.com/corporate/xbrl/"
+        "INTEGRATED_FILING_INDAS_1_2_WEB.xml returned 404, which no retry would change"
+    )
+    for unit, first in (("IF1", NOW - timedelta(days=2)), ("IF2", NOW - timedelta(days=9))):
+        conn.execute(
+            "INSERT INTO sync_state (source, unit, logical_date, state, attempts, retryable, "
+            "last_error, first_attempt_at, updated_at) "
+            "VALUES ('nse_xbrl_filing', %s, %s, 'FAILED', 3, true, %s, %s, %s)",
+            (unit, date(2026, 10, 21), error, first, NOW - timedelta(hours=1)),
+        )
+    body = client.get(
+        "/status/gaps",
+        params={"from": "2026-10-21", "to": "2026-10-21", "source": "nse_xbrl_filing"},
+    ).json()
+    by_error_age = [e["deviation"] for e in body["unexplained"]]
+    assert len(by_error_age) == 2
+    assert sum(1 for d in by_error_age if d is not None and d["status"] == "ACCEPTED") == 1
+    assert body["accepted_total"] == 1 and body["fully_explained"] is False
