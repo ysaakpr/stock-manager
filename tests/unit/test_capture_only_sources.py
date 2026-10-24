@@ -100,3 +100,39 @@ def test_the_interlock_still_requires_published() -> None:
     )
     green = evaluate_green(DAY, (PRESS,), {PRESS: fetched}, day_kind=None, open_error_flags=0)
     assert not green.green
+
+
+def test_the_gap_report_counts_a_capture_only_fetched_row_complete() -> None:
+    """The same rule on /status/gaps: a FETCHED press release is landed; elsewhere it is stuck."""
+    from dataplatform.ingest.calendar import trading_calendar
+    from dataplatform.quality.gaps import GapReason, build_report, expectations_from_register
+
+    expectations = expectations_from_register()
+    assert expectations[PRESS].final_state is SyncState.FETCHED
+    release = SyncRecord(
+        source=f"{PRESS}/ind_prs12102026",
+        logical_date=DAY,
+        state=SyncState.FETCHED,
+        attempts=1,
+        retryable=True,
+        updated_at=AT,
+    )
+    stuck = SyncRecord(
+        source="nse_xbrl_filing/IF1",
+        logical_date=DAY,
+        state=SyncState.FETCHED,
+        attempts=1,
+        retryable=True,
+        updated_at=AT,
+    )
+    report = build_report(
+        DAY,
+        DAY,
+        sources=[PRESS, "nse_xbrl_filing"],
+        records={},
+        unit_records=[release, stuck],
+        calendar=trading_calendar(),
+        expectations=expectations,
+    )
+    stuck_entries = [(e.source, e.reason) for e in report.unexplained if e.unit]
+    assert stuck_entries == [("nse_xbrl_filing", GapReason.IN_PROGRESS)]

@@ -350,6 +350,9 @@ class SourceExpectation:
     l1_dataset: str | None = None
     #: The register ids whose L0 trees hold this source's payloads, when they are not its own id.
     l0_sources: tuple[str, ...] = ()
+    #: The state a successful attempt ends in (register `final_state`): FETCHED for a capture-only
+    #: source, whose FETCHED rows are complete rather than stuck mid-pipeline.
+    final_state: SyncState = SyncState.PUBLISHED
 
     def l0_trees(self) -> tuple[str, ...]:
         """The L0 source trees a payload for this source could be in.
@@ -479,6 +482,7 @@ def expectations_from_register(
             era_start=entry.era.start,
             era_end=entry.era.end,
             l1_dataset=_l1_dataset_for(entry.plan_row, entry.id, entry.cadence),
+            final_state=SyncState(entry.final_state),
         )
         for entry in loaded.sources
     }
@@ -757,6 +761,9 @@ def _classify(
             record,
         )
 
+    if record.state is expectation.final_state:
+        return None  # a capture-only source's FETCHED row is its success, not a stuck one
+
     return _entry(
         expectation,
         logical_date,
@@ -1010,7 +1017,7 @@ def build_report(
             unit=key.unit,
         )
         if entry is None:
-            complete += int(record.state is SyncState.PUBLISHED)
+            complete += int(record.state in (SyncState.PUBLISHED, per_source[key.base].final_state))
             continue
         entries.append(entry)
         by_reason[entry.reason] = by_reason.get(entry.reason, 0) + 1
