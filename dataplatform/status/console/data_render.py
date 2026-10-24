@@ -266,7 +266,9 @@ def _lag(line: SourceStatusOut) -> str:
 def _source_row(line: SourceStatusOut) -> str:
     verdict, colour = source_health(line)
     source = esc(line.source)
-    error = _text(line.last_error, limit=_CELL_TEXT)
+    # `last_error` is the newest failure ever recorded; once the source has recovered (no streak)
+    # it is history, and shown beside an OK it read as a live fault. The date stays in its column.
+    error = _text(line.last_error, limit=_CELL_TEXT) if line.failure_streak > 0 else MISSING
     if line.declined is not None:
         error = f"declined: {_text(line.declined.reason, limit=_CELL_TEXT)}"
     return (

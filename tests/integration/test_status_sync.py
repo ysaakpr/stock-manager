@@ -539,3 +539,23 @@ def test_lag_never_goes_negative_for_a_future_dated_publish(store: SyncStateStor
     publish(store, BHAVCOPY, NOW.date() + timedelta(days=7))
     status = next(s for s in store.source_statuses() if s.source == BHAVCOPY)
     assert status.lag_days == 0 and status.lag_sessions == 0
+
+
+def test_a_capture_only_source_succeeds_at_fetched(store: SyncStateStore) -> None:
+    """`nifty_index_press_releases` ends at FETCHED by design (register `final_state`).
+
+    Its FETCHED rows are its successes on /status/sources — last success set, healthy — while the
+    same rows under a source that publishes are still a row stuck mid-pipeline. The interlock is
+    untouched: `is_green` still asks for PUBLISHED.
+    """
+    press = "nifty_index_press_releases"
+    for source in (press, FLOWS):
+        store.begin(source, SESSION)
+        store.mark_fetched(source, SESSION, checksum="sha", l0_path=f"{source}/x.pdf")
+
+    by_source = {s.source: s for s in store.source_statuses()}
+    assert by_source[press].last_success_date == SESSION
+    assert by_source[press].healthy is True
+    assert by_source[FLOWS].last_success_date is None
+    assert by_source[FLOWS].healthy is False
+    assert not store.is_green(SESSION, [press]).green

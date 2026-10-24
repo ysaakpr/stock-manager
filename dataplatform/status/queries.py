@@ -563,7 +563,8 @@ _STATE_RANK: Final[Mapping[JobHealthState, int]] = {
     JobHealthState.OVERDUE: 1,
     JobHealthState.NEVER_RAN: 2,
     JobHealthState.RUNNING: 3,
-    JobHealthState.OK: 4,
+    JobHealthState.NOT_YET_DUE: 4,
+    JobHealthState.OK: 5,
 }
 
 

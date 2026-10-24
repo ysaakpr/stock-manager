@@ -228,8 +228,12 @@ class _StubConnection:
     def execute(self, _sql: str, _params: object = None) -> _Result:
         def row(source: str) -> tuple[Any, ...]:
             # source, last_success_date, last_success_at, latest_date, pending, fetched, validated,
-            # normalized, published, failed, gap, streak, last_failure date/error/retryable
-            return (source, None, None, SESSION, 0, 0, 0, 0, 0, 2, 0, 2, SESSION, "boom", False)
+            # normalized, published, failed, gap, streak, last_failure date/error/retryable,
+            # last FETCHED date/instant
+            return (
+                source, None, None, SESSION, 0, 0, 0, 0, 0, 2, 0, 2, SESSION, "boom", False, None,
+                None,
+            )  # fmt: skip
 
         return _Result([row("bse_eod"), row(SCREENER)])
 

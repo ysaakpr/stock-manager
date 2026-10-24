@@ -22,6 +22,7 @@ from fastapi import Depends
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger
+from dataplatform.quality.gap_schedule import RegistrySchedule
 from dataplatform.quality.gaps import GapScanner, LakeL1Presence
 from dataplatform.scheduler import read_heartbeat
 from dataplatform.status.deviations import DeviationJudge, DeviationRegistry, default_deviations
@@ -124,14 +125,23 @@ def deviation_judge(
 JudgeDep = Annotated[DeviationJudge, Depends(deviation_judge)]
 
 
-def gap_scanner(conn: ConnDep, settings: SettingsDep) -> GapScanner:
+def gap_scanner(conn: ConnDep, settings: SettingsDep, clock: ClockDep) -> GapScanner:
     """D7's gap report (M1.11), wired to this request's connection and the configured lake.
 
     The lake root comes from settings rather than from the process default so a test — and the
     container, whose `/data` is a bind mount — checks the L1 partitions it actually wrote. Moved
     here from `api.py` (M18.2) so the console's gaps panel declares the same callable.
+
+    The scanner judges a pair with no row against the scheduler's crons (`RegistrySchedule`) at
+    the injected instant: NOT_YET_DUE until the fire that covers its date has passed, and the
+    configured sub-units of a unit-keyed source one by one.
     """
-    return GapScanner(conn, l1_presence=LakeL1Presence(settings.data_root))
+    return GapScanner(
+        conn,
+        l1_presence=LakeL1Presence(settings.data_root),
+        schedule=RegistrySchedule(settings.tzinfo),
+        now=clock.now(),
+    )
 
 
 GapScannerDep = Annotated[GapScanner, Depends(gap_scanner)]

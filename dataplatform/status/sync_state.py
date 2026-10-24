@@ -42,7 +42,7 @@ from dataplatform.ingest.calendar import (
     TradingCalendar,
     trading_calendar,
 )
-from dataplatform.ingest.source_register import Declined, declined_sources
+from dataplatform.ingest.source_register import Declined, capture_only_sources, declined_sources
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection, connection
 
@@ -548,6 +548,9 @@ class SourceStatus:
     #: Set when the register DECLINED this source on policy grounds (D12/D19). Its rows are
     #: history from before the decision; it is not owed anything, so it is never overdue or red.
     declined: Declined | None = None
+    #: The state a successful attempt ends in (`Source.final_state`): FETCHED for a capture-only
+    #: source, whose FETCHED rows are its successes rather than rows stuck mid-pipeline.
+    final_state: SyncState = SyncState.PUBLISHED
 
     @property
     def overdue(self) -> bool:
@@ -574,6 +577,7 @@ class SourceStatus:
         in_flight = sum(
             self.counts.get(state, 0)
             for state in (SyncState.FETCHED, SyncState.VALIDATED, SyncState.NORMALIZED)
+            if state is not self.final_state
         )
         return (
             self.last_success_date is not None
@@ -614,6 +618,8 @@ _SOURCE_STATUS_SQL: Final[str] = """
         SELECT source,
                max(logical_date) FILTER (WHERE state = 'PUBLISHED') AS last_success_date,
                max(updated_at)   FILTER (WHERE state = 'PUBLISHED') AS last_success_at,
+               max(logical_date) FILTER (WHERE state = 'FETCHED')   AS last_fetched_date,
+               max(updated_at)   FILTER (WHERE state = 'FETCHED')   AS last_fetched_at,
                max(logical_date)                                    AS latest_date,
                count(*) FILTER (WHERE state = 'PENDING')            AS pending,
                count(*) FILTER (WHERE state = 'FETCHED')            AS fetched,
@@ -645,7 +651,8 @@ _SOURCE_STATUS_SQL: Final[str] = """
            agg.pending, agg.fetched, agg.validated, agg.normalized, agg.published,
            agg.failed, agg.gap,
            COALESCE(streak.failure_streak, 0),
-           last_failure.logical_date, last_failure.last_error, last_failure.retryable
+           last_failure.logical_date, last_failure.last_error, last_failure.retryable,
+           agg.last_fetched_date, agg.last_fetched_at
     FROM agg
     LEFT JOIN streak       ON streak.source = agg.source
     LEFT JOIN last_failure ON last_failure.source = agg.source
@@ -672,11 +679,15 @@ class SyncStateStore:
         clock: Clock | None = None,
         calendar: TradingCalendar | None = None,
         declined: Mapping[str, Declined] | None = None,
+        capture_only: Collection[str] | None = None,
     ) -> None:
         self._conn = conn
         self._clock = SystemClock() if clock is None else clock
         self._calendar = trading_calendar() if calendar is None else calendar
         self._declined: Mapping[str, Declined] | None = declined
+        self._capture_only: frozenset[str] | None = (
+            None if capture_only is None else frozenset(capture_only)
+        )
 
     @property
     def declined(self) -> Mapping[str, Declined]:
@@ -690,6 +701,13 @@ class SyncStateStore:
         """The connection this store reads through — for a reader answering about the same rows
         (the accepted-deviation judge) in the same request, rather than opening a second one."""
         return self._conn
+
+    @property
+    def capture_only(self) -> frozenset[str]:
+        """Sources whose success is FETCHED (`Source.final_state`); the register's by default."""
+        if self._capture_only is None:
+            self._capture_only = _checked_in_capture_only()
+        return self._capture_only
 
     @property
     def calendar(self) -> TradingCalendar:
@@ -1053,10 +1071,20 @@ class SyncStateStore:
         self, row: tuple[Any, ...], *, as_of: date, budget: int | None = None
     ) -> SourceStatus:
         last_success: date | None = row[1]
+        last_success_at: datetime | None = row[2]
+        capture_only = str(row[0]) in self.capture_only
+        fetched_date, fetched_at = row[15], row[16]
+        if (
+            capture_only
+            and fetched_date is not None
+            and (last_success is None or fetched_date > last_success)
+        ):
+            # A capture-only source succeeds at FETCHED: its newest FETCHED row is its last success.
+            last_success, last_success_at = fetched_date, fetched_at
         return SourceStatus(
             source=str(row[0]),
             last_success_date=last_success,
-            last_success_at=row[2],
+            last_success_at=last_success_at,
             latest_date=row[3],
             lag_days=None if last_success is None else max((as_of - last_success).days, 0),
             lag_sessions=self._lag_sessions(last_success, as_of),
@@ -1074,6 +1102,7 @@ class SyncStateStore:
                 SyncState.GAP: int(row[10]),
             },
             max_lag_sessions=budget,
+            final_state=SyncState.FETCHED if capture_only else SyncState.PUBLISHED,
         )
 
     def _lag_sessions(self, last_success: date | None, as_of: date) -> int | None:
@@ -1090,6 +1119,12 @@ class SyncStateStore:
             return len(self._calendar.expected_data_dates(last_success + timedelta(days=1), as_of))
         except CalendarCoverageError:
             return None
+
+
+@lru_cache(maxsize=1)
+def _checked_in_capture_only() -> frozenset[str]:
+    """The checked-in register's capture-only sources, read once per process (as `declined`)."""
+    return capture_only_sources()
 
 
 @lru_cache(maxsize=1)

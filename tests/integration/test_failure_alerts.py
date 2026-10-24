@@ -209,6 +209,24 @@ def test_a_longer_streak_is_not_a_new_onset(conn: Connection, scratch_settings: 
     assert alerter.sent == []
 
 
+def test_a_repeat_brings_the_open_title_up_to_date(
+    conn: Connection, scratch_settings: Settings
+) -> None:
+    """A stale title ("192 open ERROR" while 194 are open) is refreshed on the next tick."""
+    _break_everything(conn)
+    _tick(conn, scratch_settings, BROKEN_NOW)
+    _flag(conn)
+    _sync(conn, date(2026, 11, 13), "FAILED", error="HTTP 503 again")
+    _, alerter = _tick(conn, scratch_settings, BROKEN_NOW + timedelta(hours=1))
+    rows = conn.execute(
+        "SELECT dedup_key, title FROM alert_condition WHERE resolved_at IS NULL"
+    ).fetchall()
+    titles = {str(row[0]): str(row[1]) for row in rows}
+    assert titles["quality:price_spike:red"] == "quality check price_spike is red (2 open ERROR)"
+    assert titles[f"ingest:{SOURCE}:failed_streak"].startswith(f"{SOURCE}: 4 consecutive")
+    assert alerter.sent == []
+
+
 def test_clearing_sends_one_resolution_per_condition(
     conn: Connection, scratch_settings: Settings
 ) -> None:

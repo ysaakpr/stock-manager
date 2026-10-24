@@ -28,7 +28,7 @@ from collections.abc import Iterator, Sequence
 from datetime import date, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Final, Self
+from typing import Final, Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -256,6 +256,12 @@ class Source(BaseModel):
     candidate_alternatives: list[str] = Field(default_factory=list)
     owner_task: str | None = None
     declined: Declined | None = None
+    #: The `sync_state` state a successful attempt ends in. PUBLISHED for every source that lands
+    #: an L1 dataset; FETCHED for a capture-only source, whose payload is kept in L0 and parsed on
+    #: demand (`nifty_index_press_releases`: `index_history_backfill` marks FETCHED and nothing on
+    #: that path ever publishes). Read by `/status/sources` to tell "landed" from "stuck"; the
+    #: trading interlock (`is_green`) ignores it and still requires PUBLISHED.
+    final_state: Literal["PUBLISHED", "FETCHED"] = "PUBLISHED"
 
     @model_validator(mode="after")
     def _declined_pairs_with_its_record(self) -> Self:
@@ -348,6 +354,10 @@ class SourceRegister(BaseModel):
         """Source id → its decline record, for every source declined on policy grounds."""
         return {s.id: s.decline() for s in self.sources if s.is_declined}
 
+    def capture_only(self) -> frozenset[str]:
+        """Ids of the sources whose successful attempt ends at FETCHED (`Source.final_state`)."""
+        return frozenset(s.id for s in self.sources if s.final_state == "FETCHED")
+
 
 def reprobe_candidates(reg: SourceRegister) -> list[Source]:
     """The rows a re-probe sweep should re-examine: FAILED and BLOCKED_CREDENTIAL, never DECLINED.
@@ -361,6 +371,11 @@ def reprobe_candidates(reg: SourceRegister) -> list[Source]:
 def declined_sources(path: Path = REGISTER_PATH) -> dict[str, Declined]:
     """The checked-in register's declined sources (id → record). Loads the file each call."""
     return load(path).declined()
+
+
+def capture_only_sources(path: Path = REGISTER_PATH) -> frozenset[str]:
+    """The checked-in register's capture-only sources (final state FETCHED). Loads each call."""
+    return load(path).capture_only()
 
 
 def load(path: Path = REGISTER_PATH) -> SourceRegister:
