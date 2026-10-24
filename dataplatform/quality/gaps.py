@@ -52,6 +52,7 @@ from dataplatform.ingest.calendar import (
     TradingCalendar,
     trading_calendar,
 )
+from dataplatform.ingest.nse import eras as nse_eras
 from dataplatform.logging import get_logger
 from dataplatform.status.sync_state import SyncKey, SyncRecord, SyncState, SyncStateStore
 from dataplatform.store.db import Connection
@@ -403,6 +404,31 @@ _PRICE_STATE_SOURCES: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
+#: `sync_state` sources that are one *era* of a register row rather than a register row of their own
+#: (the register lists fetchable surfaces; these are a fetchable surface's sub-era, tracked apart).
+#: Without an expectation they fell to the loud default and owed a file every session to today.
+#:
+#: `nse_bhavcopy_pre_isin` (`legacy_backfill.NSE_BHAVCOPY_PRE_ISIN`) is `nse_bhavcopy_legacy`'s
+#: archive before the file carried an ISIN, published under its own name so the interlock can never
+#: read a 2008 date as priced. Its era ends on `nse.eras.PRE_ISIN_ERA_LAST_SESSION`, 2011-06-21,
+#: and three records agree: the last pre-ISIN payload in L0 is
+#: `nse_bhavcopy_legacy/2011/06/cm21JUN2011bhav.csv.zip` (11 columns; 2011-06-22 has 13, with ISIN,
+#: and is published as `nse_bhavcopy` — ops/studies/multi-fund-data-study-2026-09-07.md, "pinned to
+#: the day by probe"); it is the last of the 1,357 sessions this name published, 2006-01-02 →
+#: 2011-06-21 (HUMAN_DECISIONS D14 (2026-10-06)). It owes no L1 dataset: its rows never reach
+#: `prices_raw`, so a PUBLISHED pair is checked against L0 only.
+_ERA_STATE_SOURCES: Final[dict[str, SourceExpectation]] = {
+    "nse_bhavcopy_pre_isin": SourceExpectation(
+        source="nse_bhavcopy_pre_isin",
+        per_session=True,
+        era_start=nse_eras.ARCHIVE_START,
+        era_end=nse_eras.PRE_ISIN_ERA_LAST_SESSION,
+        l1_dataset=None,
+        l0_sources=("nse_bhavcopy_legacy",),
+    ),
+}
+
+
 #: Sources the register calls `daily` — truthfully, the endpoint answers for any date — but which
 #: ingest fetches as dated *ranges*, checkpointing one `sync_state` row per range rather than per
 #: session. `cadence` describes how often the source publishes; `per_session` asks whether ingest
@@ -445,6 +471,7 @@ def expectations_from_register(
         for entry in loaded.sources
     }
     expectations.update(_price_state_expectations(loaded))
+    expectations.update(_ERA_STATE_SOURCES)
     return expectations
 
 

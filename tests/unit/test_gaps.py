@@ -994,3 +994,49 @@ def test_the_recorded_l0_key_is_resolved_through_the_lake_layout(tmp_path: Path)
     key = f"{SOURCE}/{SESSION.isoformat()}/payload.csv"
     assert presence.holds([SOURCE], SESSION, key, per_session=False) is True
     assert presence.holds([SOURCE], SESSION, f"{SOURCE}/x/missing.csv", per_session=False) is False
+
+
+# ── era state sources: nse_bhavcopy_pre_isin ends on its measured last session ─────────────────
+
+PRE_ISIN = "nse_bhavcopy_pre_isin"
+
+
+def _pre_isin_report(day: date, *records: SyncRecord) -> list[GapEntry]:
+    report = build_report(
+        day,
+        day,
+        sources=[PRE_ISIN],
+        records=rows(*records),
+        calendar=trading_calendar(),
+        expectations=expectations_from_register(),
+    )
+    return list(report.entries)
+
+
+def test_the_pre_isin_era_ends_on_its_measured_last_session() -> None:
+    from dataplatform.ingest.nse import eras
+
+    expectation = expectations_from_register()[PRE_ISIN]
+    assert expectation.era_end == date(2011, 6, 21) == eras.PRE_ISIN_ERA_LAST_SESSION
+    assert date(2011, 6, 22) == eras.ISIN_ERA_START
+    assert expectation.l1_dataset is None and expectation.l0_trees() == ("nse_bhavcopy_legacy",)
+
+
+def test_a_pre_isin_session_with_no_row_stays_unexplained() -> None:
+    """Inside the era a missing file is still a miss: the era rule explains only what is outside."""
+    (entry,) = _pre_isin_report(date(2011, 6, 21))
+    assert entry.reason is GapReason.NEVER_ATTEMPTED and not entry.explained
+
+
+def test_a_session_after_the_pre_isin_era_is_not_owed() -> None:
+    """2011-06-22 onwards is `nse_bhavcopy`'s; before this row the report owed it every session."""
+    for day in (date(2011, 6, 22), date(2026, 10, 23)):
+        (entry,) = _pre_isin_report(day)
+        assert entry.reason is GapReason.OUTSIDE_SOURCE_ERA and entry.explained, day
+
+
+def test_a_published_pre_isin_session_is_complete() -> None:
+    day = date(2011, 6, 21)
+    assert (
+        _pre_isin_report(day, record(SyncState.PUBLISHED, source=PRE_ISIN, logical_date=day)) == []
+    )
