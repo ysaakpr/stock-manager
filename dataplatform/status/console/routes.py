@@ -37,10 +37,12 @@ from dataplatform.status.console.pages import (
     render_ops,
 )
 from dataplatform.status.console.portfolio import ROUTES as PORTFOLIO_ROUTES
-from dataplatform.status.deps import ClockDep, ConnDep, HeartbeatDep, SettingsDep
+from dataplatform.status.deps import ClockDep, ConnDep, HeartbeatDep, JudgeDep, SettingsDep
+from dataplatform.status.deviations import DeviationJudge
 from dataplatform.status.models import JobLineOut
 from dataplatform.status.queries import (
     assess_health,
+    is_accepted,
     job_lines,
     read_alerts,
     read_backups,
@@ -62,17 +64,22 @@ def _page_route(path: str, endpoint: Callable[..., Any], **kwargs: Any) -> None:
     router.add_api_route(path, endpoint, methods=list(READ_METHODS), **kwargs)
 
 
-def _lines(conn: ConnDep, now: datetime, settings: SettingsDep) -> list[JobLineOut]:
-    """Every registered job's line, worst first — the same `read_job_health` as `/status/jobs`."""
-    return sort_worst_first(job_lines(conn, default_registry(), now=now, timezone=settings.tzinfo))
+def _lines(
+    conn: ConnDep, now: datetime, settings: SettingsDep, judge: DeviationJudge
+) -> list[JobLineOut]:
+    """Every registered job's line, worst first — the same `read_job_health` as `/status/jobs`,
+    and the same accepted-deviation verdicts."""
+    return sort_worst_first(
+        job_lines(conn, default_registry(), now=now, timezone=settings.tzinfo, judge=judge)
+    )
 
 
 def ops_page(
-    conn: ConnDep, clock: ClockDep, settings: SettingsDep, heartbeat: HeartbeatDep
+    conn: ConnDep, clock: ClockDep, settings: SettingsDep, heartbeat: HeartbeatDep, judge: JudgeDep
 ) -> HTMLResponse:
     """The Operations page: health, every registered job, open alerts, backups."""
     now = clock.now()
-    lines = _lines(conn, now, settings)
+    lines = _lines(conn, now, settings, judge)
     by_name = {line.name: line for line in lines}
     page = render_ops(
         health=assess_health(
@@ -84,21 +91,31 @@ def ops_page(
             now=now,
             provider=settings.alert_provider.value,
             failure_alerts=by_name.get("failure_alerts"),
+            judge=judge,
         ),
         backups=read_backups(settings, now=now, lines=by_name),
         as_of=now,
     )
-    log.info("console.ops_rendered", jobs=len(lines), unhealthy=sum(not x.healthy for x in lines))
+    log.info(
+        "console.ops_rendered",
+        jobs=len(lines),
+        unhealthy=sum(not x.healthy for x in lines),
+        accepted=sum(not x.healthy and is_accepted(x) for x in lines),
+    )
     return HTMLResponse(page)
 
 
-def jobs_fragment(conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> HTMLResponse:
+def jobs_fragment(
+    conn: ConnDep, clock: ClockDep, settings: SettingsDep, judge: JudgeDep
+) -> HTMLResponse:
     """The jobs table alone — what the Ops page's htmx refresh swaps in."""
     now = clock.now()
-    return HTMLResponse(render_jobs_table(_lines(conn, now, settings), as_of=now))
+    return HTMLResponse(render_jobs_table(_lines(conn, now, settings, judge), as_of=now))
 
 
-def job_page(name: str, conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> HTMLResponse:
+def job_page(
+    name: str, conn: ConnDep, clock: ClockDep, settings: SettingsDep, judge: JudgeDep
+) -> HTMLResponse:
     """One registered job's newest `job_run` rows; 404 for a name the registry does not hold."""
     now = clock.now()
     registry = default_registry()
@@ -106,7 +123,7 @@ def job_page(name: str, conn: ConnDep, clock: ClockDep, settings: SettingsDep) -
         return HTMLResponse(
             render_not_found(f"no registered job named {name!r}", as_of=now), status_code=404
         )
-    lines = job_lines(conn, registry, now=now, timezone=settings.tzinfo)
+    lines = job_lines(conn, registry, now=now, timezone=settings.tzinfo, judge=judge)
     line = next(item for item in lines if item.name == name)
     return HTMLResponse(render_job_runs(line, read_job_runs(conn, registry.get(name), now=now)))
 

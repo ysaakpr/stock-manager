@@ -22,13 +22,26 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from dataplatform.ingest.source_register import Declined
 from dataplatform.quality.gaps import GapEntry, GapReason, GapReport
 from dataplatform.scheduler.health import JobHealth, JobHealthState
+from dataplatform.status.deviations import DeviationJudge, DeviationOut, GapItem
 from dataplatform.status.sync_state import GreenStatus, SourceStatus, SyncRecord, SyncState
+
+
+def _deviation_field() -> Any:
+    """The `deviation` field every item that can be accepted carries — one wording for all."""
+    return Field(
+        default=None,
+        description="Set when an accepted-deviation entry recognises this item: ACCEPTED (a known, "
+        "agreed failure — shown as a warning, with the remark) or EXPIRED (it was, but its "
+        "review_by date has passed). Display only: `healthy` keeps its strict meaning",
+    )
+
 
 #: `datetime.date` under a second name. Several models here carry a field called `date` — the
 #: §4.4 query parameter is spelled that way on the wire — and a field shadows the type of the same
@@ -217,6 +230,7 @@ class SourceStatusOut(BaseModel):
     )
     overdue: bool = Field(description="More sessions behind than its scheduled budget")
     healthy: bool = Field(description="Not failing and not behind; always true when declined")
+    deviation: DeviationOut | None = _deviation_field()
     declined: DeclinedOut | None = Field(
         default=None,
         description="Set when the register DECLINED this source on policy grounds: never "
@@ -225,8 +239,8 @@ class SourceStatusOut(BaseModel):
     counts: dict[SyncState, int]
 
     @classmethod
-    def of(cls, status: SourceStatus) -> SourceStatusOut:
-        """Project a computed source status onto the wire contract."""
+    def of(cls, status: SourceStatus, deviation: DeviationOut | None = None) -> SourceStatusOut:
+        """Project a computed source status (and its deviation verdict) onto the wire contract."""
         return cls(
             source=status.source,
             last_success_date=status.last_success_date,
@@ -241,6 +255,7 @@ class SourceStatusOut(BaseModel):
             max_lag_sessions=status.max_lag_sessions,
             overdue=status.overdue,
             healthy=status.healthy,
+            deviation=deviation,
             declined=None if status.declined is None else DeclinedOut.of(status.declined),
             counts=dict(status.counts),
         )
@@ -253,6 +268,12 @@ class SourcesOut(BaseModel):
 
     as_of: date = Field(description="The trading date lag is measured against (injected clock)")
     sources: list[SourceStatusOut]
+    accepted: int = Field(
+        default=0, description="Sources not healthy, but an accepted deviation (a warning)"
+    )
+    errors: int = Field(
+        default=0, description="Sources not healthy and not accepted — the ones that are news"
+    )
     declined: dict[str, DeclinedOut] = Field(
         default_factory=dict,
         description="Every Source Register id DECLINED on policy grounds, whether or not it has "
@@ -272,6 +293,7 @@ class JobHealthOut(BaseModel):
     cron: str
     state: JobHealthState
     healthy: bool
+    deviation: DeviationOut | None = _deviation_field()
     due_since: datetime | None = Field(
         description="The newest fire whose budget has elapsed — the run a success must postdate"
     )
@@ -301,7 +323,16 @@ class JobsOut(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     as_of: datetime
-    healthy: bool = Field(description="Every registered job is OK or RUNNING")
+    healthy: bool = Field(
+        description="Every registered job is OK or RUNNING. Strict: an accepted failure is still "
+        "a failure here; `accepted` and `errors` split the rest"
+    )
+    accepted: int = Field(
+        default=0, description="Jobs not healthy, but an accepted deviation (a warning)"
+    )
+    errors: int = Field(
+        default=0, description="Jobs not healthy and not accepted — the ones that are news"
+    )
     jobs: list[JobHealthOut]
     unscheduled: dict[str, str] = Field(
         description="Source Register ids no registered job covers, with the recorded reason"
@@ -333,6 +364,7 @@ class JobLineOut(BaseModel):
     cron: str
     state: JobHealthState
     healthy: bool
+    deviation: DeviationOut | None = _deviation_field()
     due_since: datetime | None
     last_state: str | None
     last_started_at: datetime | None
@@ -383,6 +415,7 @@ class AlertConditionOut(BaseModel):
     title: str = Field(description="The title the onset paged with, masked")
     opened_at: datetime
     last_seen_at: datetime
+    deviation: DeviationOut | None = _deviation_field()
 
 
 class AlertsOut(BaseModel):
@@ -393,6 +426,7 @@ class AlertsOut(BaseModel):
     as_of: datetime
     provider: str = Field(description="ALERT_PROVIDER: the channel an onset is delivered on")
     open: list[AlertConditionOut]
+    accepted: int = Field(default=0, description="Open conditions an accepted deviation covers")
     failure_alerts: JobLineOut | None = Field(
         description="The `failure_alerts` job's line — a stopped evaluator raises no alert at all"
     )
@@ -549,10 +583,11 @@ class GapEntryOut(BaseModel):
     l1_partition: str | None = Field(
         description="The L1 partition that was checked; null when the lake was not the problem"
     )
+    deviation: DeviationOut | None = _deviation_field()
 
     @classmethod
-    def of(cls, entry: GapEntry) -> GapEntryOut:
-        """Project a classified entry onto the wire contract."""
+    def of(cls, entry: GapEntry, deviation: DeviationOut | None = None) -> GapEntryOut:
+        """Project a classified entry (and its deviation verdict) onto the wire contract."""
         return cls(
             source=entry.source,
             date=entry.logical_date,
@@ -567,6 +602,7 @@ class GapEntryOut(BaseModel):
             first_attempt_at=entry.first_attempt_at,
             updated_at=entry.updated_at,
             l1_partition=entry.l1_partition,
+            deviation=deviation,
         )
 
 
@@ -605,6 +641,11 @@ class GapsOut(BaseModel):
     unexplained_total: int = Field(
         description="Every unexplained pair in the range, counted before the limit truncated"
     )
+    accepted_total: int = Field(
+        default=0,
+        description="Of `unexplained_total`, the pairs an accepted deviation covers (a warning). "
+        "They stay unexplained: `fully_explained` is the M1 gate and does not read this",
+    )
     explained_total: int = Field(
         description="Absences the calendar or the source register accounts for (weekend, holiday, "
         "outside this source's era)"
@@ -620,15 +661,36 @@ class GapsOut(BaseModel):
     limit: int = Field(description="How many unexplained entries this response was allowed to hold")
 
     @classmethod
-    def of(cls, report: GapReport, *, limit: int) -> GapsOut:
-        """Project a gap report onto the wire, truncating only the enumeration."""
+    def of(cls, report: GapReport, *, limit: int, judge: DeviationJudge | None = None) -> GapsOut:
+        """Project a gap report onto the wire, truncating only the enumeration.
+
+        With a `judge`, every unexplained entry — the truncated ones included, so the count is
+        true — carries its accepted-deviation verdict. Nothing about `fully_explained` changes.
+        """
         unexplained = report.unexplained
+        verdicts = [
+            None
+            if judge is None
+            else judge.gap(
+                GapItem(
+                    source=entry.source,
+                    logical_date=entry.logical_date,
+                    reason=entry.reason.value,
+                    last_error=entry.last_error,
+                )
+            )
+            for entry in unexplained
+        ]
         return cls(
             from_date=report.from_date,
             to_date=report.to_date,
             sources=list(report.sources),
-            unexplained=[GapEntryOut.of(entry) for entry in unexplained[:limit]],
+            unexplained=[
+                GapEntryOut.of(entry, verdict)
+                for entry, verdict in zip(unexplained[:limit], verdicts, strict=False)
+            ],
             unexplained_total=len(unexplained),
+            accepted_total=sum(1 for v in verdicts if v is not None and v.accepted),
             explained_total=len(report.explained),
             complete=report.complete,
             pairs_examined=report.pairs_examined,
@@ -701,6 +763,7 @@ class CheckCountOut(BaseModel):
     last_date: date = Field(description="Latest logical date any open flag of this check names")
     raised_today: int = Field(description="Raised since midnight on the injected clock's today")
     raised_last_7_days: int
+    deviation: DeviationOut | None = _deviation_field()
 
 
 class QualityOut(BaseModel):

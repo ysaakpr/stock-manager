@@ -24,6 +24,7 @@ from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger
 from dataplatform.quality.gaps import GapScanner, LakeL1Presence
 from dataplatform.scheduler import read_heartbeat
+from dataplatform.status.deviations import DeviationJudge, DeviationRegistry, default_deviations
 from dataplatform.status.queries import HeartbeatRead, read_m17_journal, read_m17_roster
 from dataplatform.status.sync_state import SyncStateStore
 from dataplatform.store.db import Connection, connection
@@ -31,14 +32,18 @@ from dataplatform.store.db import Connection, connection
 __all__ = [
     "ClockDep",
     "ConnDep",
+    "DeviationsDep",
     "GapScannerDep",
     "HeartbeatDep",
+    "JudgeDep",
     "M17JournalDep",
     "RosterDep",
     "SettingsDep",
     "SyncStoreDep",
     "clock_source",
     "db_connection",
+    "deviation_judge",
+    "deviation_registry",
     "gap_scanner",
     "heartbeat_source",
     "m17_journal_source",
@@ -89,6 +94,34 @@ def sync_store(conn: ConnDep, clock: ClockDep) -> SyncStateStore:
 
 
 SyncStoreDep = Annotated[SyncStateStore, Depends(sync_store)]
+
+
+def deviation_registry() -> DeviationRegistry:
+    """The checked-in accepted-deviation registry (loaded and validated once, at startup).
+
+    A dependency so a test can hand the status surfaces a registry of its own. Display only: what
+    it returns decides how an item is *shown*, never whether it is healthy.
+    """
+    return default_deviations()
+
+
+DeviationsDep = Annotated[DeviationRegistry, Depends(deviation_registry)]
+
+
+def deviation_judge(
+    registry: DeviationsDep, store: SyncStoreDep, clock: ClockDep
+) -> DeviationJudge:
+    """The registry bound to this request's store, its connection, and the injected clock's today.
+
+    Reads through the store's own connection rather than declaring `ConnDep`: an endpoint that
+    reads only the store (`/status/sources`) must not gain a second dependency on the database
+    because it shows deviation verdicts — a test, or a deployment, that overrides the store alone
+    would otherwise reach for a database the route never needed.
+    """
+    return DeviationJudge(registry, store.connection, store, clock.today())
+
+
+JudgeDep = Annotated[DeviationJudge, Depends(deviation_judge)]
 
 
 def gap_scanner(conn: ConnDep, settings: SettingsDep) -> GapScanner:

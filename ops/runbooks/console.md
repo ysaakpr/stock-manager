@@ -63,6 +63,40 @@ What it does not show, and why:
   through `dataplatform.redaction.mask_and_truncate` before it renders, even when the writer
   already masked it.
 
+## Accepted deviations: amber is known, red is news
+
+**Rule (owner):** an ERROR on these pages means something deviated from an agreed plan. A failure
+the owner has knowingly accepted is shown as **ACCEPTED** (amber, dashed edge) with the reason
+beside it; hover it for the entry id, since/review dates and basis, or open the job's drill-down.
+The agreements are `dataplatform/status/accepted_deviations.yaml`, read by
+`dataplatform.status.deviations`. Today it holds the api.bseindia.com 403 block (HUMAN_DECISIONS
+D26): the three BSE sources, the BSE legs of `ca_refresh` and `announcements_capture`, their
+`failure_alerts` conditions and the BSE FAILED gap days.
+
+- **Narrow by design.** A source is accepted only while *every* FAILED row of its current streak
+  is the known error; a job only while its run raised the known exception and every leg it failed
+  is an accepted source failure (an NSE leg failing keeps it red); an alert only while its subject
+  is accepted right now. A new failure mode on an accepted source or job stays red, and sorts above
+  the accepted ones.
+- **Expiry.** An entry with `review_by` stops matching the day after: the item turns red again and
+  says *acceptance … expired — review it*.
+- **Counts.** Headings and `/status/*` split `errors` from `accepted`; `/status/gaps` adds
+  `accepted_total`. Every `healthy`, and `fully_explained`, keep their strict meaning — an
+  accepted failure is still `healthy: false`.
+- **Alerts.** `failure_alerts` opens an accepted condition at **warning**, not critical, with the
+  remark in its body; an open critical that becomes accepted is lowered without a page, and an
+  accepted one that stops being accepted is raised back to critical **with** a page. The fetcher's
+  own hard-stop alert on a 403 spike (`ingest:403-spike:<host>`) is sent by the ingestion process,
+  not by `failure_alerts`, and is not affected.
+- **Display and alerting only.** No gate reads the registry: not `is_green` / "red data means no
+  trading", the kill switch, paper or M17 gating, `job_run`, or `/health`
+  (`tests/unit/test_deviations_surfaces.py` fails if a gate module imports it).
+
+**Adding or ending an acceptance** is a YAML edit with a `basis` that names where the decision is
+written down (normally a HUMAN_DECISIONS entry). The loader refuses a matcher that names only a
+target, and a malformed file stops the API at startup and fails `make check`. It reaches the
+console after the app container is rebuilt, and `failure_alerts` after the scheduler restarts.
+
 ## The Desk page (`/console/desk`, M18.3)
 
 | Panel | What it shows | Where it comes from |

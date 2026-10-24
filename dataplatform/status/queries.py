@@ -36,6 +36,7 @@ from dataplatform.redaction import mask_and_truncate
 from dataplatform.scheduler.health import JobHealth, JobHealthState, read_job_health
 from dataplatform.scheduler.registry import UNSCHEDULED, Job, JobRegistry
 from dataplatform.scheduler.runner import JOB_ERROR_CHARS, Heartbeat
+from dataplatform.status.deviations import DeviationJudge, DeviationOut
 from dataplatform.status.models import (
     AlertConditionOut,
     AlertsOut,
@@ -65,6 +66,7 @@ from dataplatform.status.models import (
     PaperOut,
     QualityFlagOut,
     QualityOut,
+    QualitySeverity,
     QuarantineCountOut,
     QuarantineOut,
     QuarantineStepOut,
@@ -84,6 +86,8 @@ __all__ = [
     "HeartbeatRead",
     "StatusQueryError",
     "assess_health",
+    "is_accepted",
+    "job_deviation",
     "job_lines",
     "read_alerts",
     "read_archives",
@@ -93,6 +97,7 @@ __all__ = [
     "read_paper_status",
     "read_quality",
     "sort_worst_first",
+    "split_accepted",
 ]
 
 
@@ -143,12 +148,15 @@ WHERE logical_date = %s
 """
 
 
-def read_quality(conn: Connection, as_of: datetime, limit: int) -> QualityOut:
+def read_quality(
+    conn: Connection, as_of: datetime, limit: int, *, judge: DeviationJudge | None = None
+) -> QualityOut:
     """Open D7 sentinel flags, newest first, plus the totals the limit would otherwise hide.
 
     Grouped by check as well as by severity, because "how many are open" is not the operational
     question — "is today worse than yesterday" is, and a permanently saturated queue answers the
     first one identically every day. `raised_today`/`raised_last_7_days` are that difference.
+    With a `judge`, a check's ERROR row carries its accepted-deviation verdict (display only).
     """
     midnight = datetime.combine(as_of.date(), time.min, tzinfo=as_of.tzinfo)
     week_ago = midnight - timedelta(days=7)
@@ -168,6 +176,13 @@ def read_quality(conn: Connection, as_of: datetime, limit: int) -> QualityOut:
         )
         for row in conn.execute(_QUALITY_BY_CHECK_SQL, (midnight, week_ago)).fetchall()
     ]
+    if judge is not None:
+        by_check = [
+            check.model_copy(update={"deviation": judge.quality(check.check_name)})
+            if check.severity is QualitySeverity.ERROR
+            else check
+            for check in by_check
+        ]
     flags = [
         QualityFlagOut(
             id=int(row[0]),
@@ -561,6 +576,31 @@ def _masked(text: str | None) -> str | None:
     return None if text is None else mask_and_truncate(text, JOB_ERROR_CHARS)
 
 
+def job_deviation(judge: DeviationJudge | None, health: JobHealth) -> DeviationOut | None:
+    """A FAILING job's accepted-deviation verdict about its newest attempt, or None.
+
+    Only a newest attempt that FAILED can be a known cause: OVERDUE, NEVER_RAN and TIMED_OUT are
+    other failure modes, and a healthy job needs no verdict. Display only.
+    """
+    if judge is None or health.state is not JobHealthState.FAILING:
+        return None
+    if health.runs.last_state != "FAILED":
+        return None
+    return judge.job(health.name, started_at=health.runs.last_started_at)
+
+
+def split_accepted(
+    healthy: Sequence[bool], verdicts: Sequence[DeviationOut | None]
+) -> tuple[int, int]:
+    """(accepted, errors) among the items that are not healthy."""
+    accepted = sum(
+        1
+        for ok, v in zip(healthy, verdicts, strict=True)
+        if not ok and v is not None and v.accepted
+    )
+    return accepted, sum(1 for ok in healthy if not ok) - accepted
+
+
 def read_jobs_status(
     conn: Connection,
     registry: JobRegistry,
@@ -568,19 +608,28 @@ def read_jobs_status(
     now: datetime,
     timezone: ZoneInfo,
     declined: Mapping[str, Declined],
+    judge: DeviationJudge | None = None,
 ) -> JobsOut:
     """`GET /status/jobs`: every job in `registry` assessed against `job_run` as of `now`.
 
     Registry order, every registered job whether or not it has rows, the `UNSCHEDULED` ledger and
-    the declined sources. `last_error` is masked on the way out.
+    the declined sources. `last_error` is masked on the way out. With a `judge`, a FAILING job
+    carries its accepted-deviation verdict and `accepted`/`errors` split the unhealthy count;
+    `healthy` is computed exactly as before, from the jobs alone.
     """
     jobs = read_job_health(conn, registry, now=now, timezone=timezone)
+    verdicts = [job_deviation(judge, job) for job in jobs]
+    accepted, errors = split_accepted([job.healthy for job in jobs], verdicts)
     return JobsOut(
         as_of=now,
         healthy=all(job.healthy for job in jobs),
+        accepted=accepted,
+        errors=errors,
         jobs=[
-            JobHealthOut.of(job).model_copy(update={"last_error": _masked(job.runs.last_error)})
-            for job in jobs
+            JobHealthOut.of(job).model_copy(
+                update={"last_error": _masked(job.runs.last_error), "deviation": verdict}
+            )
+            for job, verdict in zip(jobs, verdicts, strict=True)
         ],
         unscheduled=dict(UNSCHEDULED),
         declined={source: DeclinedOut.of(record) for source, record in declined.items()},
@@ -599,7 +648,13 @@ def _seconds(start: datetime | None, end: datetime | None) -> float | None:
 
 
 def _line(
-    health: JobHealth, job: Job, finished: datetime | None, *, now: datetime, timezone: ZoneInfo
+    health: JobHealth,
+    job: Job,
+    finished: datetime | None,
+    *,
+    now: datetime,
+    timezone: ZoneInfo,
+    deviation: DeviationOut | None = None,
 ) -> JobLineOut:
     trigger = job.trigger(timezone)
     return JobLineOut(
@@ -607,6 +662,7 @@ def _line(
         cron=health.cron,
         state=health.state,
         healthy=health.healthy,
+        deviation=deviation,
         due_since=health.due_since,
         last_state=health.runs.last_state,
         last_started_at=health.runs.last_started_at,
@@ -620,13 +676,19 @@ def _line(
 
 
 def job_lines(
-    conn: Connection, registry: JobRegistry, *, now: datetime, timezone: ZoneInfo
+    conn: Connection,
+    registry: JobRegistry,
+    *,
+    now: datetime,
+    timezone: ZoneInfo,
+    judge: DeviationJudge | None = None,
 ) -> list[JobLineOut]:
     """Every registered job's Ops line, in registry order (`sort_worst_first` orders them).
 
     State comes from `scheduler.health.read_job_health` — the call `/status/jobs` makes — and the
     newest attempt's `finished_at` from one more read, matched on its `started_at` so a run that
     began between the two reads is reported as still running rather than given a stale duration.
+    The accepted-deviation verdict is `job_deviation`'s, the same as `/status/jobs`'.
     """
     healths = read_job_health(conn, registry, now=now, timezone=timezone)
     newest = {str(row[0]): (row[1], row[2]) for row in conn.execute(_NEWEST_ATTEMPT_SQL).fetchall()}
@@ -636,13 +698,28 @@ def job_lines(
         if started != health.runs.last_started_at:
             finished = None
         job = registry.get(health.name)
-        lines.append(_line(health, job, finished, now=now, timezone=timezone))
+        deviation = job_deviation(judge, health)
+        lines.append(_line(health, job, finished, now=now, timezone=timezone, deviation=deviation))
     return lines
 
 
+def is_accepted(item: JobLineOut | AlertConditionOut) -> bool:
+    """Whether an item carries an ACCEPTED deviation verdict (an EXPIRED one does not count)."""
+    return item.deviation is not None and item.deviation.accepted
+
+
 def sort_worst_first(lines: Sequence[JobLineOut]) -> list[JobLineOut]:
-    """FAILING, then OVERDUE, then NEVER_RAN, RUNNING, OK; by name within a state."""
-    return sorted(lines, key=lambda line: (_STATE_RANK[line.state], line.name))
+    """Errors first — FAILING, OVERDUE, NEVER_RAN — then accepted deviations, then RUNNING, OK.
+
+    An accepted failure sorts below every unaccepted one, so a new red is the top line however
+    many known ones there are. By name within a state.
+    """
+
+    def rank(line: JobLineOut) -> tuple[int, int, str]:
+        bucket = 2 if line.healthy else (1 if is_accepted(line) else 0)
+        return bucket, _STATE_RANK[line.state], line.name
+
+    return sorted(lines, key=rank)
 
 
 _JOB_RUNS_SQL: Final = """
@@ -687,27 +764,37 @@ _TITLE_CHARS: Final = 400
 
 
 def read_alerts(
-    conn: Connection, *, now: datetime, provider: str, failure_alerts: JobLineOut | None
+    conn: Connection,
+    *,
+    now: datetime,
+    provider: str,
+    failure_alerts: JobLineOut | None,
+    judge: DeviationJudge | None = None,
 ) -> AlertsOut:
     """Open `alert_condition` rows (critical first, then oldest), and the alerter's own state.
 
     `failure_alerts` is that job's Ops line, passed in so the panel shows the same verdict as the
-    jobs table: a condition list is only as current as the last tick that evaluated it.
+    jobs table: a condition list is only as current as the last tick that evaluated it. With a
+    `judge`, each row carries its accepted-deviation verdict — the same `DeviationJudge.alert` the
+    evaluator asks — and accepted rows sort after every unaccepted one.
     """
+    rows = [
+        AlertConditionOut(
+            dedup_key=str(row[0]),
+            trigger=str(row[1]),
+            severity=str(row[2]),
+            title=mask_and_truncate(str(row[3]), _TITLE_CHARS),
+            opened_at=row[4],
+            last_seen_at=row[5],
+            deviation=None if judge is None else judge.alert(str(row[0])),
+        )
+        for row in conn.execute(_OPEN_ALERTS_SQL).fetchall()
+    ]
     return AlertsOut(
         as_of=now,
         provider=provider,
-        open=[
-            AlertConditionOut(
-                dedup_key=str(row[0]),
-                trigger=str(row[1]),
-                severity=str(row[2]),
-                title=mask_and_truncate(str(row[3]), _TITLE_CHARS),
-                opened_at=row[4],
-                last_seen_at=row[5],
-            )
-            for row in conn.execute(_OPEN_ALERTS_SQL).fetchall()
-        ],
+        open=sorted(rows, key=is_accepted),
+        accepted=sum(1 for item in rows if is_accepted(item)),
         failure_alerts=failure_alerts,
     )
 

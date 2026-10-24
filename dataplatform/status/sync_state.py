@@ -686,6 +686,12 @@ class SyncStateStore:
         return self._declined
 
     @property
+    def connection(self) -> Connection:
+        """The connection this store reads through — for a reader answering about the same rows
+        (the accepted-deviation judge) in the same request, rather than opening a second one."""
+        return self._conn
+
+    @property
     def calendar(self) -> TradingCalendar:
         """The calendar this store classifies dates against (C.2)."""
         return self._calendar
@@ -774,6 +780,47 @@ class SyncStateStore:
             f"WHERE logical_date BETWEEN %s AND %s AND unit <> ''{clause} "
             f"ORDER BY logical_date, source, unit",
             (from_date, to_date, *extra),
+        ).fetchall()
+        return tuple(_record(row) for row in rows)
+
+    def failure_streak_rows(self, source: str) -> tuple[SyncRecord, ...]:
+        """The FAILED rows behind `source`'s `failure_streak`, newest first.
+
+        The same predicate as the `streak` CTE of `_SOURCE_STATUS_SQL`: FAILED rows dated after the
+        newest row that is neither FAILED nor GAP, every unit included. So the length of this
+        tuple is the streak `/status/sources` reports, and a caller can tell when the two disagree.
+        Read by the accepted-deviation registry (display only), which must see every failure in
+        the streak — not just the last one `SourceStatus.last_error` carries — before it may call
+        a streak a known cause.
+        """
+        rows = self._conn.execute(
+            f"SELECT {_COLUMNS} FROM sync_state s "
+            "WHERE s.source = %s AND s.state = 'FAILED' "
+            "AND s.logical_date > COALESCE(("
+            "    SELECT max(t.logical_date) FROM sync_state t "
+            "    WHERE t.source = s.source AND t.state NOT IN ('FAILED', 'GAP')"
+            "), '-infinity'::date) "
+            "ORDER BY s.logical_date DESC, s.unit",
+            (source,),
+        ).fetchall()
+        return tuple(_record(row) for row in rows)
+
+    def rows_updated_between(
+        self, sources: Sequence[str], start: datetime, end: datetime
+    ) -> tuple[SyncRecord, ...]:
+        """Rows of `sources` (register ids) last written inside `[start, end]`, any state.
+
+        What one job run left behind: a run writes each row it attempts, so the rows whose
+        `updated_at` falls inside the run's own start and finish are that run's legs. Read by the
+        accepted-deviation registry to see *which* legs of a failed run failed (display only).
+        """
+        if not sources:
+            return ()
+        rows = self._conn.execute(
+            f"SELECT {_COLUMNS} FROM sync_state "
+            "WHERE source = ANY(%s) AND updated_at BETWEEN %s AND %s "
+            "ORDER BY source, logical_date, unit",
+            (list(sources), start, end),
         ).fetchall()
         return tuple(_record(row) for row in rows)
 

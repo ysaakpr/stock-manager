@@ -655,6 +655,21 @@ defensible, round 2's only deciding floor, and the only result reachable for rea
 ₹1 crore instead after M16 figures exist would be a re-choice, and the report would have to say
 so. Task M16.4.
 
+### D26 — The api.bseindia.com 403 block → **ANSWERED (owner, 2026-10-12): "Ignore BSE for now".**
+
+`api.bseindia.com` has answered this deployment with HTTP 403 since 2026-09-24 (it returned empty
+arrays 2026-09-08..09-23 first); `www.bseindia.com`, which serves the BSE bhavcopy, still works.
+Every BSE source on that host fails nightly: `bse_announcements`, `bse_corp_actions` and
+`bse_scrip_master`, and with them the BSE legs of `announcements_capture` and `ca_refresh`. The
+owner said on 2026-10-12: **"Ignore BSE for now."** Nothing works around the block — no user-agent
+rotation, no proxy, no faster retry (AGENTIC_CONTEXT §8); the fetcher keeps hard-stopping on the
+spike and the failures stay recorded in `sync_state` and `job_run`. The NSE legs of the same jobs
+continue, and a red BSE source blocks neither the paper session nor the M17 desk. Recorded
+2026-10-23 as the basis of the BSE entries in `dataplatform/status/accepted_deviations.yaml`, which
+show these failures as ACCEPTED warnings on the console and alert them at warning, not critical —
+display and alerting only; no gate reads it. A new failure mode on these sources, or any non-BSE
+failure, stays an error. Task M18.1.
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes

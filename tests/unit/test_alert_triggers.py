@@ -25,6 +25,7 @@ from dataplatform.alert_triggers import (
     RetryDeadline,
     TickReport,
     Trigger,
+    apply_acceptance,
     calendar_expiry_conditions,
     failed_job_conditions,
     failed_streak_conditions,
@@ -42,6 +43,7 @@ from dataplatform.ingest.models import IngestError
 from dataplatform.retry import RetryPendingError
 from dataplatform.scheduler.registry import TRI_EVENING, JobRegistry
 from dataplatform.status import SourceStatus, SyncState
+from dataplatform.status.deviations import DeviationKind, DeviationOut, DeviationStatus
 
 NOW = datetime(2026, 11, 2, 9, 0, tzinfo=IST)
 
@@ -69,16 +71,17 @@ class MemoryLedger(ConditionLedger):
 
     def __init__(self, *, broken_writes: bool = False) -> None:
         self.rows: dict[str, tuple[Trigger, str, bool]] = {}
+        self.severity: dict[str, str] = {}
         self.broken_writes = broken_writes
 
     @contextmanager
     def transaction(self) -> Iterator[object]:
         """Postgres semantics: a block that raises leaves the rows as they were."""
-        snapshot = dict(self.rows)
+        snapshot, severity = dict(self.rows), dict(self.severity)
         try:
             yield self
         except BaseException:
-            self.rows = snapshot
+            self.rows, self.severity = snapshot, severity
             raise
 
     def open_keys(self, trigger: Trigger) -> dict[str, str]:
@@ -88,10 +91,19 @@ class MemoryLedger(ConditionLedger):
             if row_trigger is trigger and not resolved
         }
 
+    def open_severities(self, trigger: Trigger) -> dict[str, str]:
+        return {key: self.severity[key] for key in self.open_keys(trigger)}
+
     def open(self, condition: AlertCondition, at: datetime) -> None:
         if self.broken_writes:
             raise OSError("ledger write failed")
         self.rows[condition.dedup_key] = (condition.trigger, condition.title, False)
+        self.severity[condition.dedup_key] = condition.severity.value
+
+    def set_severity(self, key: str, severity: Severity, at: datetime) -> None:
+        if self.broken_writes:
+            raise OSError("ledger write failed")
+        self.severity[key] = severity.value
 
     def touch(self, keys: Sequence[str], at: datetime) -> None:
         pass
@@ -555,3 +567,111 @@ def test_a_ledger_read_failure_in_one_trigger_does_not_abort_the_rest() -> None:
     )
     assert report.opened == ["job:eod_pipeline:failed"]
     assert report.errors == ["quality_red: not reconciled: OSError"]
+
+
+# ── accepted deviations: warning, never critical ─────────────────────────────────────────────
+
+
+def _verdict(status: DeviationStatus = DeviationStatus.ACCEPTED) -> DeviationOut:
+    return DeviationOut(
+        id="bse-403-alert-scrip-master-streak",
+        kind=DeviationKind.ALERT,
+        target="ingest:bse_scrip_master:failed_streak",
+        status=status,
+        remark="api.bseindia.com has refused this server (HTTP 403) since 2026-09-24",
+        basis="owner, 2026-10-12 — HUMAN_DECISIONS.md D26",
+        since=date(2026, 9, 24),
+        review_by=None,
+    )
+
+
+BSE_KEY = "ingest:bse_scrip_master:failed_streak"
+
+
+def _bse_streak() -> list[AlertCondition]:
+    return failed_streak_conditions(
+        [_status("bse_scrip_master", streak=4, error="ForbiddenError: ... returned 403")],
+        threshold=3,
+    )
+
+
+def test_an_accepted_condition_is_lowered_to_warning_with_its_remark() -> None:
+    errors: list[str] = []
+    (condition,) = apply_acceptance(_bse_streak(), lambda key: _verdict(), errors)
+    assert condition.severity is Severity.WARNING
+    assert "bse-403-alert-scrip-master-streak" in condition.body and "D26" in condition.body
+    assert condition.dedup_key == BSE_KEY and errors == []
+
+
+@pytest.mark.parametrize(
+    "verdict", [None, _verdict(DeviationStatus.EXPIRED)], ids=["no entry", "expired"]
+)
+def test_an_unaccepted_or_expired_condition_stays_critical(verdict: DeviationOut | None) -> None:
+    (condition,) = apply_acceptance(_bse_streak(), lambda key: verdict, [])
+    assert condition.severity is Severity.CRITICAL
+
+
+def test_a_judge_that_fails_lowers_nothing_and_fails_the_run() -> None:
+    def broken(key: str) -> DeviationOut | None:
+        raise RuntimeError("registry read failed")
+
+    errors: list[str] = []
+    (condition,) = apply_acceptance(_bse_streak(), broken, errors)
+    assert condition.severity is Severity.CRITICAL
+    assert errors and "RuntimeError" in errors[0]
+
+
+def test_acceptance_never_adds_drops_or_rekeys_a_condition() -> None:
+    conditions = _bse_streak() + failed_streak_conditions(
+        [_status("nse_bhavcopy", streak=3)], threshold=3
+    )
+    out = apply_acceptance(conditions, lambda key: _verdict() if key == BSE_KEY else None, [])
+    assert [c.dedup_key for c in out] == [c.dedup_key for c in conditions]
+    assert [c.severity for c in out] == [Severity.WARNING, Severity.CRITICAL]
+
+
+def test_an_accepted_onset_pages_at_warning_never_critical() -> None:
+    alerter, ledger = RecordingAlerter(FrozenClock(NOW)), MemoryLedger()
+    accepted = apply_acceptance(_bse_streak(), lambda key: _verdict(), [])
+    report = _tick(accepted, ledger, alerter)
+    assert report.opened == [BSE_KEY]
+    assert [sent[0] for sent in alerter.sent] == [Severity.WARNING]
+    assert ledger.severity[BSE_KEY] == "warning"
+    _tick(accepted, ledger, alerter)
+    assert Severity.CRITICAL not in [sent[0] for sent in alerter.sent]
+
+
+def test_an_open_critical_that_becomes_accepted_is_lowered_without_a_page() -> None:
+    alerter, ledger = RecordingAlerter(FrozenClock(NOW)), MemoryLedger()
+    _tick(_bse_streak(), ledger, alerter)  # paged critical before the registry existed
+    assert ledger.severity[BSE_KEY] == "critical" and len(alerter.sent) == 1
+
+    report = _tick(apply_acceptance(_bse_streak(), lambda key: _verdict(), []), ledger, alerter)
+    assert report.deescalated == [BSE_KEY] and report.opened == [] and report.resolved == []
+    assert ledger.severity[BSE_KEY] == "warning"
+    assert len(alerter.sent) == 1, "lowering a known failure is not news"
+
+
+def test_an_accepted_condition_that_stops_being_accepted_pages_critical_once() -> None:
+    alerter, ledger = RecordingAlerter(FrozenClock(NOW)), MemoryLedger()
+    _tick(apply_acceptance(_bse_streak(), lambda key: _verdict(), []), ledger, alerter)
+    assert [sent[0] for sent in alerter.sent] == [Severity.WARNING]
+
+    for _ in range(3):  # a new failure mode on the source: the verdict is gone
+        report = _tick(apply_acceptance(_bse_streak(), lambda key: None, []), ledger, alerter)
+    assert [sent[0] for sent in alerter.sent] == [Severity.WARNING, Severity.CRITICAL]
+    assert "Escalated from warning" in alerter.sent[-1][2]
+    assert ledger.severity[BSE_KEY] == "critical"
+    assert report.escalated == [] and report.still_open == [BSE_KEY]
+
+
+def test_an_undelivered_escalation_is_retried_next_tick() -> None:
+    alerter, ledger = RecordingAlerter(FrozenClock(NOW)), MemoryLedger()
+    _tick(apply_acceptance(_bse_streak(), lambda key: _verdict(), []), ledger, alerter)
+    alerter.fail = True
+    failed = _tick(_bse_streak(), ledger, alerter)
+    assert failed.escalated == [] and failed.errors
+    assert ledger.severity[BSE_KEY] == "warning", "an escalation that did not page is not recorded"
+    alerter.fail = False
+    retried = _tick(_bse_streak(), ledger, alerter)
+    assert retried.escalated == [BSE_KEY]

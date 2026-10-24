@@ -26,6 +26,7 @@ from dataplatform.status.console.render import (
     ist,
     seconds,
 )
+from dataplatform.status.deviations import DeviationOut, DeviationStatus
 from dataplatform.status.models import (
     AlertsOut,
     BackupsOut,
@@ -38,10 +39,14 @@ from dataplatform.status.models import (
 )
 
 __all__ = [
+    "ACCEPTED",
     "HTMX_FILE",
     "HTMX_PATH",
     "JOBS_REFRESH_SECONDS",
     "PAGES",
+    "deviation_attrs",
+    "deviation_badge",
+    "deviation_note",
     "htmx_integrity",
     "render_job_runs",
     "render_jobs_table",
@@ -103,6 +108,57 @@ def _state(value: object) -> str:
     return f'<span class="state state-{text}">{text}</span>'
 
 
+# ── accepted deviations (display only) ─────────────────────────────────────────────────────
+
+#: The badge an accepted failure shows instead of its red state: amber, never red.
+ACCEPTED: Final = "ACCEPTED"
+
+
+def _accepted(deviation: DeviationOut | None) -> bool:
+    return deviation is not None and deviation.status is DeviationStatus.ACCEPTED
+
+
+def deviation_attrs(deviation: DeviationOut | None) -> str:
+    """`data-deviation*` attributes for a row: what a test (or a script) reads off the page."""
+    if deviation is None:
+        return ""
+    status, entry = esc(deviation.status.value), esc(deviation.id)
+    return f' data-deviation="{status}" data-deviation-id="{entry}"'
+
+
+def _hover(deviation: DeviationOut) -> str:
+    review = "" if deviation.review_by is None else f" · review by {deviation.review_by}"
+    return esc(f"{deviation.id} · since {deviation.since}{review} · basis: {deviation.basis}")
+
+
+def deviation_badge(state_html: str, deviation: DeviationOut | None) -> str:
+    """The state cell: `ACCEPTED` (amber) beside the muted real state, or the state as it was.
+
+    The real state is still printed — an accepted FAILING job is FAILING — but it is no longer the
+    badge. The entry id, since/review dates and basis are on hover.
+    """
+    if not _accepted(deviation):
+        return state_html
+    assert deviation is not None
+    return (
+        f'<span class="state state-{ACCEPTED}" title="{_hover(deviation)}">{ACCEPTED}</span> '
+        f'<span class="muted">{state_html}</span>'
+    )
+
+
+def deviation_note(deviation: DeviationOut | None) -> str:
+    """The remark under an accepted item, or the expiry notice under one whose review is due."""
+    if deviation is None:
+        return ""
+    if _accepted(deviation):
+        return f'<span class="remark" title="{_hover(deviation)}">{esc(deviation.remark)}</span>'
+    return (
+        f'<span class="remark expired" title="{_hover(deviation)}">acceptance '
+        f'<span class="mono">{esc(deviation.id)}</span> expired after {esc(deviation.review_by)}'
+        f" — review it: {esc(deviation.remark)}</span>"
+    )
+
+
 # ── health banner ──────────────────────────────────────────────────────────────────────────
 
 
@@ -139,10 +195,12 @@ def _job_row(line: JobLineOut) -> str:
     last_run = MISSING
     if line.last_started_at is not None:
         last_run = f"{ist(line.last_started_at)} {_state(line.last_state)}"
+    state = deviation_badge(_state(line.state.value), line.deviation)
     return (
-        f'<tr data-job="{name}" data-state="{esc(line.state.value)}">'
+        f'<tr data-job="{name}" data-state="{esc(line.state.value)}"'
+        f"{deviation_attrs(line.deviation)}>"
         f'<td><a href="/console/ops/jobs/{name}">{name}</a></td>'
-        f"<td>{_state(line.state.value)}</td>"
+        f"<td>{state}{deviation_note(line.deviation)}</td>"
         f'<td class="mono">{esc(line.cron)}</td>'
         f"<td>{last_run}</td>"
         f'<td class="num">{seconds(line.last_duration_seconds)}</td>'
@@ -155,13 +213,20 @@ def _job_row(line: JobLineOut) -> str:
 
 
 def render_jobs_table(lines: Sequence[JobLineOut], *, as_of: datetime) -> str:
-    """The jobs table, worst first as given — also the fragment htmx swaps in every 30 s."""
-    unhealthy = sum(1 for line in lines if not line.healthy)
+    """The jobs table, worst first as given — also the fragment htmx swaps in every 30 s.
+
+    The heading counts errors and accepted deviations apart: "2 errors, 2 accepted", not
+    "4 not healthy", so a new failure is not one more in a number that is always high.
+    """
+    unhealthy = [line for line in lines if not line.healthy]
+    accepted = sum(1 for line in unhealthy if _accepted(line.deviation))
+    errors = len(unhealthy) - accepted
     rows = "".join(_job_row(line) for line in lines)
     return (
         f'<div id="jobs" hx-get="/console/ops/jobs" hx-trigger="every {JOBS_REFRESH_SECONDS}s" '
-        'hx-swap="outerHTML">'
-        f'<h2>Jobs <span class="muted">{len(lines)} registered, {unhealthy} not healthy · '
+        f'hx-swap="outerHTML" data-errors="{errors}" data-accepted="{accepted}">'
+        f'<h2>Jobs <span class="muted">{len(lines)} registered, '
+        f"{_count(errors, 'error')}, {accepted} accepted · "
         f"read {ist(as_of)}, refreshes every {JOBS_REFRESH_SECONDS} s</span></h2>"
         "<table><thead><tr><th>Job</th><th>State</th><th>Cron</th><th>Last run</th>"
         "<th>Duration</th><th>Last success</th><th>Due since</th><th>Next fire</th>"
@@ -186,12 +251,16 @@ def _alerts_panel(alerts: AlertsOut) -> str:
             f"last tick {ist(evaluator.last_started_at)}"
         )
     rows = "".join(
-        f'<tr data-alert="{esc(item.dedup_key)}"><td>{_state(item.severity)}</td>'
-        f"<td>{esc(item.trigger)}</td><td>{free_text(item.title, limit=400)}</td>"
+        f'<tr data-alert="{esc(item.dedup_key)}" data-severity="{esc(item.severity)}"'
+        f"{deviation_attrs(item.deviation)}>"
+        f"<td>{deviation_badge(_state(item.severity), item.deviation)}</td>"
+        f"<td>{esc(item.trigger)}</td><td>{free_text(item.title, limit=400)}"
+        f"{deviation_note(item.deviation)}</td>"
         f'<td class="mono">{free_text(item.dedup_key, limit=200)}</td>'
         f"<td>{ist(item.opened_at)}</td><td>{ist(item.last_seen_at)}</td></tr>"
         for item in alerts.open
     )
+    errors = len(alerts.open) - alerts.accepted
     table = (
         "<table><thead><tr><th>Severity</th><th>Trigger</th><th>Title</th><th>Key</th>"
         f"<th>Opened</th><th>Last seen</th></tr></thead><tbody>{rows}</tbody></table>"
@@ -199,8 +268,9 @@ def _alerts_panel(alerts: AlertsOut) -> str:
         else '<p class="muted">no open alert condition</p>'
     )
     return (
-        f'<div class="panel" id="alerts"><h2>Alerts <span class="muted">{len(alerts.open)} open'
-        f"</span></h2><p>{provider} · {tick}</p>{table}</div>"
+        f'<div class="panel" id="alerts" data-errors="{errors}" data-accepted="{alerts.accepted}">'
+        f'<h2>Alerts <span class="muted">{len(alerts.open)} open: {_count(errors, "error")}, '
+        f"{alerts.accepted} accepted</span></h2><p>{provider} · {tick}</p>{table}</div>"
     )
 
 
@@ -290,11 +360,14 @@ def render_job_runs(line: JobLineOut, runs: JobRunsOut) -> str:
         f'<td class="mono">{esc(run.instance)}</td><td><pre>{free_text(run.error)}</pre></td></tr>'
         for run in runs.runs
     )
+    state = deviation_badge(_state(line.state.value), line.deviation)
     body = (
         f'<p><a href="/console/ops">← Operations</a></p><h1 class="mono">{esc(line.name)}</h1>'
-        f'<p>{_state(line.state.value)} · cron <span class="mono">{esc(line.cron)}</span> · '
+        f"<p{deviation_attrs(line.deviation)}>{state}"
+        f' · cron <span class="mono">{esc(line.cron)}</span> · '
         f"budget {seconds(line.timeout_seconds)} · next fire {ist(line.next_fire_at)} · "
         f"due since {ist(line.due_since)} · last success {ist(line.last_success_at)}</p>"
+        f"{_deviation_block(line.deviation)}"
         f"<h2>Newest {len(runs.runs)} of at most {runs.limit} attempts</h2>"
         + (
             "<table><thead><tr><th>Started</th><th>Finished</th><th>State</th><th>Duration</th>"
@@ -304,6 +377,25 @@ def render_job_runs(line: JobLineOut, runs: JobRunsOut) -> str:
         )
     )
     return _page(line.name, "ops", body, as_of=runs.as_of)
+
+
+def _count(n: int, noun: str) -> str:
+    return f"{n} {noun}" + ("" if n == 1 else "s")
+
+
+def _deviation_block(deviation: DeviationOut | None) -> str:
+    """The drill-down's full account of an accepted (or expired) deviation."""
+    if deviation is None:
+        return ""
+    css = "warn" if _accepted(deviation) else "bad"
+    review = MISSING if deviation.review_by is None else esc(deviation.review_by.isoformat())
+    return (
+        f'<div class="banner {css}" id="deviation">'
+        f"<strong>{esc(deviation.status.value)}</strong> — {esc(deviation.remark)}"
+        f'<div class="muted">entry <span class="mono">{esc(deviation.id)}</span> · since '
+        f"{esc(deviation.since.isoformat())} · review by {review} · basis: "
+        f"{esc(deviation.basis)} · display only: the run is still recorded as it ran</div></div>"
+    )
 
 
 def render_not_built(slug: str, label: str, *, as_of: datetime) -> str:
