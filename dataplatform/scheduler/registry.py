@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Collection, Iterable, Iterator
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Any
 from uuid import UUID
@@ -29,7 +29,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 
-from dataplatform.clock import Clock
+from dataplatform.clock import IST, Clock
 from dataplatform.config import Settings
 from dataplatform.ingest.source_register import declined_sources
 from dataplatform.logging import get_logger
@@ -149,6 +149,11 @@ class Job:
     #: How late a missed fire may still start. `None` is the job's own budget (the default the
     #: runner has always used); a job that must be off its hosts by a fixed hour sets it shorter.
     misfire_grace: timedelta | None = None
+    #: When this job was first deployed (the merge that registered it), tz-aware. A fire before
+    #: this instant is one no scheduler could have run, so `scheduler.health` does not count it as
+    #: due: a job merged after its last fire is NOT_YET_DUE until its first eligible fire, not
+    #: NEVER_RAN. `None` (every job registered before this field) changes nothing.
+    registered_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not JOB_NAME.match(self.name):
@@ -163,6 +168,8 @@ class Job:
             raise ValueError(f"job {self.name!r} needs a non-negative max_lag_sessions")
         if self.misfire_grace is not None and self.misfire_grace <= timedelta(0):
             raise ValueError(f"job {self.name!r} needs a positive misfire_grace")
+        if self.registered_at is not None and self.registered_at.tzinfo is None:
+            raise ValueError(f"job {self.name!r} needs a tz-aware registered_at")
         self.trigger()  # validate the cron now, not on the morning it was supposed to fire
 
     @property
@@ -811,6 +818,9 @@ BSE_CA_SWEEP = Job(
     covers=("bse_corp_actions",),
     sync_sources=("bse_corp_actions",),
     max_lag_sessions=27,
+    # PR #52 (faf72b3) merged 2026-10-05 23:56 IST, after the Sunday 2026-10-04 06:00 fire: its
+    # first eligible fire is Sunday 2026-11-01, and until then it is not yet due, not NEVER_RAN.
+    registered_at=datetime(2026, 10, 5, 23, 56, 31, tzinfo=IST),
 )
 
 
