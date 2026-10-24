@@ -99,14 +99,15 @@ def _sync_rows() -> list[Sync]:
 def _source_aggregate() -> list[tuple[Any, ...]]:
     """`_SOURCE_STATUS_SQL`'s rows: source, last_success_date, last_success_at, latest_date,
     pending, fetched, validated, normalized, published, failed, gap, streak, last failure
-    date/error/retryable."""
+    date/error/retryable, last FETCHED date/instant."""
     return [
-        (ALPHA, FRIDAY, AT, FRIDAY, 0, 0, 0, 1, 3, 1, 0, 0, date(2026, 10, 7), PLANTED_ERROR, True),
-        (BETA, None, None, FRIDAY, 1, 0, 0, 0, 0, 0, 1, 0, None, None, None),
+        (ALPHA, FRIDAY, AT, FRIDAY, 0, 0, 0, 1, 3, 1, 0, 0, date(2026, 10, 7), PLANTED_ERROR, True,
+         None, None),
+        (BETA, None, None, FRIDAY, 1, 0, 0, 0, 0, 0, 1, 0, None, None, None, None, None),
         (GAMMA, date(2026, 9, 30), AT - timedelta(days=9), FRIDAY,
-         0, 0, 0, 0, 5, 3, 0, 3, FRIDAY, "HTTP 503 from the exchange", True),
+         0, 0, 0, 0, 5, 3, 0, 3, FRIDAY, "HTTP 503 from the exchange", True, None, None),
         (SCREENER, date(2026, 8, 7), AT - timedelta(days=63), FRIDAY,
-         0, 0, 1, 0, 1, 0, 0, 0, None, None, None),
+         0, 0, 1, 0, 1, 0, 0, 0, None, None, None, None, None),
     ]  # fmt: skip
 
 
