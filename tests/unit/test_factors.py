@@ -523,9 +523,10 @@ class _FakeConn:
                     action.source_ref,
                     action.raw_text,
                     action.l0_key,
+                    action.component,
                 )
             )
-        rows.sort(key=lambda r: (r[0], r[1], r[2], r[7]))
+        rows.sort(key=lambda r: (r[0], r[1], r[2], r[7], r[11]))
         return _FakeCursor(rows)
 
 

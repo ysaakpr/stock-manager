@@ -160,3 +160,20 @@ def test_the_reparse_replaces_the_stale_bare_row_and_adds_the_missing_one(conn: 
     # New rows were knowable when their stored sibling was, not on the day of the re-parse.
     assert {a.knowable_date for a in nse} == {date(2025, 7, 24)}
     assert Path(MIGRATIONS_DIR / "0020_ca_dividend_component.sql").is_file()
+
+
+def test_a_dividend_without_a_component_is_refused_at_the_table(conn: Connection) -> None:
+    """An INSERT that predates 0020 cannot slip a '' dividend in beside its kind-keyed twin."""
+    with pytest.raises(psycopg.errors.CheckViolation):
+        conn.execute(
+            "INSERT INTO corporate_actions (isin, ex_date, action_type, ratio_terms, "
+            "knowable_date, source, raw_text, recorded_at) VALUES (%s, %s, 'DIVIDEND', %s, %s, "
+            "'bse_corp_actions', 'Final Dividend', %s)",
+            (
+                LINDE,
+                date(2024, 8, 1),
+                json.dumps({"kind": "dividend", "dividend_kind": "FINAL", "amount_inr": "1"}),
+                date(2024, 7, 1),
+                CLOCK.now(),
+            ),
+        )

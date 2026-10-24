@@ -36,6 +36,15 @@ ALTER TABLE corporate_actions
     ADD CONSTRAINT corporate_actions_unique
     UNIQUE (isin, ex_date, action_type, source, component);
 
+-- A dividend always names its component and nothing else does. Enforced here, not only in
+-- `CorporateAction`, because a row written without the column (any INSERT predating this file)
+-- would otherwise land as '' beside the kind-keyed row for the same dividend — a duplicate the
+-- key cannot see — and then fail every load that validates it. Every stored dividend carries a
+-- kind (44,023 of 44,023 on 2026-10-24), so the backfill above satisfies it.
+ALTER TABLE corporate_actions
+    ADD CONSTRAINT corporate_actions_dividend_component
+    CHECK ((action_type = 'DIVIDEND') = (component <> ''));
+
 COMMENT ON COLUMN corporate_actions.component IS
     'D3 · Which of one feed''s same-day dividends this row is: the dividend kind (FINAL, SPECIAL, '
     'INTERIM, UNSPECIFIED), KIND#n for a further dividend of the same kind in one published line, '
