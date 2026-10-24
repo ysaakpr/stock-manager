@@ -220,13 +220,15 @@ def test_the_checked_in_registry_loads_and_holds_the_bse_seeds() -> None:
 def test_every_entry_targets_what_its_decision_named() -> None:
     """D26 is the BSE block, D27 the ca_reconciliation backlog, D28 two retrying sources only."""
     allowed = {
-        "bse-": lambda target: "bse" in target
-        or target
-        in (
-            "ca_refresh",
-            "announcements_capture",
-            "job:ca_refresh:failed",
-            "job:announcements_capture:failed",
+        "bse-": lambda target: (
+            "bse" in target
+            or target
+            in (
+                "ca_refresh",
+                "announcements_capture",
+                "job:ca_refresh:failed",
+                "job:announcements_capture:failed",
+            )
         ),
         "d27-": lambda target: target in ("ca_reconciliation", "quality:ca_reconciliation:red"),
         "d28-": lambda target: target in ("nse_xbrl_filing", "gdelt_v2_event_files"),
