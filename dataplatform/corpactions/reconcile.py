@@ -52,6 +52,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dataplatform.clock import Clock
 from dataplatform.corpactions.factors import PRICE_EVENT_TYPES
+from dataplatform.corpactions.parse_terms import names_non_equity_bonus
 from dataplatform.corpactions.taxonomy import (
     TERMS_ADAPTER,
     ActionType,
@@ -564,11 +565,24 @@ def reconcile(
     tolerance = timedelta(days=ex_date_tolerance_days)
     mismatch_window = timedelta(days=ex_date_mismatch_window_days)
     grouped: dict[tuple[str, ActionType], list[CorporateAction]] = defaultdict(list)
-    for action in actions:
-        grouped[(action.isin, action.action_type)].append(action)
-
     reconciled: list[ReconciledAction] = []
     queue: list[ReconciliationConflict] = []
+    for action in actions:
+        if action.action_type in PRICE_EVENT_TYPES and names_non_equity_bonus(action.raw_text):
+            # A row parsed before the parser knew better: TVS Holdings' `Bonus Ncrps 1:116` stored
+            # as an equity bonus. It is a distribution of preference shares, so it is never paired
+            # and never admitted — whatever the policy — and a re-parse files it as the scheme of
+            # arrangement it is (`ingest.ca_reparse_non_equity`).
+            queue.append(
+                ReconciliationConflict(
+                    reason=ReconciliationReason.SINGLE_SOURCE,
+                    isin=action.isin,
+                    action_type=action.action_type,
+                    records=(action,),
+                )
+            )
+            continue
+        grouped[(action.isin, action.action_type)].append(action)
 
     def file_single_source(action: CorporateAction, isin: str, action_type: ActionType) -> None:
         """File one action no second feed published: accept it or queue it, per the policy."""
