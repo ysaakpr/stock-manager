@@ -935,6 +935,10 @@ sources:
     failure_note: null
     candidate_alternatives: []
     owner_task: M10.2
+    # Capture-only: index_press_refresh lands each release in L0 and marks it FETCHED; the M10.2
+    # parser reads L0 on demand and nothing on this path publishes an L1 dataset. FETCHED is
+    # therefore this source's success, not a row stuck mid-pipeline (/status/sources).
+    final_state: FETCHED
 
   # §4.1 row 8 — benchmark TRI (the published series, VERIFIED at D8's corrected path; the
   # computed-proxy input below is retained as §4.1's documented fallback, not as a substitute)

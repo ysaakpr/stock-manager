@@ -507,6 +507,13 @@ class ConditionLedger:
             ),
         )
 
+    def retitle(self, key: str, title: str) -> None:
+        """Bring an open condition's title up to date ("192 open ERROR" → "194"); never pages."""
+        self._conn.execute(
+            "UPDATE alert_condition SET title = %s WHERE dedup_key = %s AND resolved_at IS NULL",
+            (title, key),
+        )
+
     def touch(self, keys: Sequence[str], at: datetime) -> None:
         """Record that open conditions are still present at `at`."""
         if keys:
@@ -578,6 +585,11 @@ def reconcile(
     repeats = [key for key in current if key in open_rows]
     ledger.touch(repeats, at)
     report.still_open.extend(repeats)
+    # The title is the condition's current wording ("194 open ERROR", "5 consecutive sessions"),
+    # so a repeat refreshes it; the dedup key, not the title, is what makes it the same news.
+    for key in repeats:
+        if current[key].title != open_rows[key]:
+            ledger.retitle(key, current[key].title)
     if repeats:
         _regrade(trigger, [current[key] for key in repeats], ledger, alerter, at, report)
 

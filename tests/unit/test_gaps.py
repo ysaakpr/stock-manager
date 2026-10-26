@@ -946,6 +946,37 @@ def test_the_directory_fallback_never_answers_for_a_unit_row(tmp_path: Path) -> 
     assert presence.holds(["nse_xbrl_filing"], SESSION, None, per_session=True) is True
 
 
+def test_a_failed_unit_of_a_per_session_source_is_not_called_present_in_l0() -> None:
+    """GDELT 2026-10-20: slot 06:45 answered 404 and was never fetched, but the day's directory
+    held the other slots' payloads, so the report called it L0_PRESENT_L1_ABSENT ("a parser fix,
+    not a re-fetch"). A unit row is judged by its own payload, even under a per-session source.
+    """
+    gdelt = "gdelt_v2_event_files"
+    failed = SyncRecord(
+        source=f"{gdelt}/20261020064500",
+        logical_date=SESSION,
+        state=SyncState.FAILED,
+        updated_at=AT,
+        attempts=1,
+        retryable=True,
+        last_error="FetchHTTPError: gdelt_v2_event_files: .../20261020064500.export.CSV.zip "
+        "returned 404",
+    )
+    report = build_report(
+        SESSION,
+        SESSION,
+        sources=[gdelt],
+        records={},
+        unit_records=[failed],
+        expectations={gdelt: SourceExpectation(source=gdelt, l1_dataset=gdelt)},
+        l0_presence=_StubL0Presence((gdelt, SESSION)),  # other slots' payloads are on disk
+    )
+    unit_entries = [entry for entry in report.unexplained if entry.unit]
+    assert [(entry.unit, entry.reason) for entry in unit_entries] == [
+        ("20261020064500", GapReason.FAILED)
+    ]
+
+
 def test_the_recorded_l0_key_is_resolved_through_the_lake_layout(tmp_path: Path) -> None:
     """`L0Ref.key` is `<source>/<iso-date>/<file>`; the lake shards by year and month.
 
@@ -963,3 +994,49 @@ def test_the_recorded_l0_key_is_resolved_through_the_lake_layout(tmp_path: Path)
     key = f"{SOURCE}/{SESSION.isoformat()}/payload.csv"
     assert presence.holds([SOURCE], SESSION, key, per_session=False) is True
     assert presence.holds([SOURCE], SESSION, f"{SOURCE}/x/missing.csv", per_session=False) is False
+
+
+# ── era state sources: nse_bhavcopy_pre_isin ends on its measured last session ─────────────────
+
+PRE_ISIN = "nse_bhavcopy_pre_isin"
+
+
+def _pre_isin_report(day: date, *records: SyncRecord) -> list[GapEntry]:
+    report = build_report(
+        day,
+        day,
+        sources=[PRE_ISIN],
+        records=rows(*records),
+        calendar=trading_calendar(),
+        expectations=expectations_from_register(),
+    )
+    return list(report.entries)
+
+
+def test_the_pre_isin_era_ends_on_its_measured_last_session() -> None:
+    from dataplatform.ingest.nse import eras
+
+    expectation = expectations_from_register()[PRE_ISIN]
+    assert expectation.era_end == date(2011, 6, 21) == eras.PRE_ISIN_ERA_LAST_SESSION
+    assert date(2011, 6, 22) == eras.ISIN_ERA_START
+    assert expectation.l1_dataset is None and expectation.l0_trees() == ("nse_bhavcopy_legacy",)
+
+
+def test_a_pre_isin_session_with_no_row_stays_unexplained() -> None:
+    """Inside the era a missing file is still a miss: the era rule explains only what is outside."""
+    (entry,) = _pre_isin_report(date(2011, 6, 21))
+    assert entry.reason is GapReason.NEVER_ATTEMPTED and not entry.explained
+
+
+def test_a_session_after_the_pre_isin_era_is_not_owed() -> None:
+    """2011-06-22 onwards is `nse_bhavcopy`'s; before this row the report owed it every session."""
+    for day in (date(2011, 6, 22), date(2026, 10, 23)):
+        (entry,) = _pre_isin_report(day)
+        assert entry.reason is GapReason.OUTSIDE_SOURCE_ERA and entry.explained, day
+
+
+def test_a_published_pre_isin_session_is_complete() -> None:
+    day = date(2011, 6, 21)
+    assert (
+        _pre_isin_report(day, record(SyncState.PUBLISHED, source=PRE_ISIN, logical_date=day)) == []
+    )

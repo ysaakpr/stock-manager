@@ -35,16 +35,19 @@ __all__ = [
     "read_job_health",
 ]
 
-#: How far back `last_due_fire` searches. Every registered cron fires at least weekly, so a month
-#: always finds one; a job whose schedule is rarer than that has no "due" fire and cannot be
-#: OVERDUE, only NEVER_RAN — which is the honest answer for a schedule this module cannot see.
-LOOKBACK: Final = timedelta(days=31)
+#: How far back `last_due_fire` searches. It must exceed the longest gap between two fires of any
+#: registered cron, or a job between two distant fires has no "due" fire at all: `bse_ca_sweep`
+#: fires on the first Sunday of the month, and two first Sundays can be 35 days apart (2026-11-01
+#: → 2026-12-06), which the old 31 days did not reach. `test_scheduler_health` holds every
+#: registered cron's longest gap against this.
+LOOKBACK: Final = timedelta(days=42)
 
 
 class JobHealthState(StrEnum):
     """One job's standing, worst-first in what an operator should do about it."""
 
     NEVER_RAN = "NEVER_RAN"  # no job_run row at all: scheduled in code, never fired anywhere
+    NOT_YET_DUE = "NOT_YET_DUE"  # no run, and no fire due since it was registered: nothing owed
     FAILING = "FAILING"  # the newest attempt failed or overran
     OVERDUE = "OVERDUE"  # no success since a fire that should have finished by now
     RUNNING = "RUNNING"  # an attempt is in flight and the last due fire is covered or pending
@@ -71,7 +74,7 @@ class JobHealth:
 
     @property
     def healthy(self) -> bool:
-        return self.state in (JobHealthState.OK, JobHealthState.RUNNING)
+        return self.state in (JobHealthState.OK, JobHealthState.RUNNING, JobHealthState.NOT_YET_DUE)
 
 
 def last_due_fire(job: Job, now: datetime, timezone: ZoneInfo) -> datetime | None:
@@ -96,16 +99,21 @@ def last_due_fire(job: Job, now: datetime, timezone: ZoneInfo) -> datetime | Non
 def assess(job: Job, runs: LastRuns, *, now: datetime, timezone: ZoneInfo) -> JobHealth:
     """Classify one job from its newest attempt and newest success.
 
-    What it does: NEVER_RAN with no attempt at all; FAILING when the newest attempt is FAILED or
-    TIMED_OUT; OVERDUE when no success started at or after the newest due fire; RUNNING when an
-    attempt is in flight; OK otherwise. A SKIPPED_LOCKED newest attempt is judged by the success
-    behind it — another process held the lock, which is the job running, not the job broken.
-    What it never does: read a clock (`now` is the caller's injected instant).
+    What it does: with no attempt at all, NEVER_RAN once a fire has come due since the job was
+    registered, NOT_YET_DUE before; FAILING when the newest attempt is FAILED or TIMED_OUT;
+    OVERDUE when no success started at or after the newest due fire; RUNNING when an attempt is in
+    flight; OK otherwise. A SKIPPED_LOCKED newest attempt is judged by the success behind it —
+    another process held the lock, which is the job running, not the job broken. A fire before
+    `Job.registered_at` is not due: no scheduler held the job then.
+    What it never does: read a clock (`now` is the caller's injected instant), or call a job that
+    has had a due fire and no run anything but NEVER_RAN.
     """
     due = last_due_fire(job, now, timezone)
+    if due is not None and job.registered_at is not None and due < job.registered_at:
+        due = None
     state: JobHealthState
     if runs.last_state is None:
-        state = JobHealthState.NEVER_RAN
+        state = JobHealthState.NEVER_RAN if due is not None else JobHealthState.NOT_YET_DUE
     elif runs.last_state in ("FAILED", "TIMED_OUT"):
         state = JobHealthState.FAILING
     elif due is not None and (runs.last_success_at is None or runs.last_success_at < due):

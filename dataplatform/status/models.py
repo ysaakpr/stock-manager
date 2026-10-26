@@ -230,6 +230,11 @@ class SourceStatusOut(BaseModel):
     )
     overdue: bool = Field(description="More sessions behind than its scheduled budget")
     healthy: bool = Field(description="Not failing and not behind; always true when declined")
+    final_state: SyncState = Field(
+        default=SyncState.PUBLISHED,
+        description="The state a success ends in: FETCHED for a capture-only source (register "
+        "`final_state`), whose FETCHED rows are its successes, not rows stuck mid-pipeline",
+    )
     deviation: DeviationOut | None = _deviation_field()
     declined: DeclinedOut | None = Field(
         default=None,
@@ -255,6 +260,7 @@ class SourceStatusOut(BaseModel):
             max_lag_sessions=status.max_lag_sessions,
             overdue=status.overdue,
             healthy=status.healthy,
+            final_state=status.final_state,
             deviation=deviation,
             declined=None if status.declined is None else DeclinedOut.of(status.declined),
             counts=dict(status.counts),
