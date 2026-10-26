@@ -683,6 +683,8 @@ class GapsOut(BaseModel):
                     logical_date=entry.logical_date,
                     reason=entry.reason.value,
                     last_error=entry.last_error,
+                    retryable=entry.retryable,
+                    first_attempt_at=entry.first_attempt_at,
                 )
             )
             for entry in unexplained
@@ -742,6 +744,7 @@ class QualityFlagOut(BaseModel):
         default=None, description="Check-specific context, as the sentinel recorded it"
     )
     raised_at: datetime
+    deviation: DeviationOut | None = _deviation_field()
 
 
 class SeverityCountOut(BaseModel):
@@ -769,6 +772,11 @@ class CheckCountOut(BaseModel):
     last_date: date = Field(description="Latest logical date any open flag of this check names")
     raised_today: int = Field(description="Raised since midnight on the injected clock's today")
     raised_last_7_days: int
+    accepted: int = Field(
+        default=0,
+        description="Of `count`, the open ERROR flags an accepted deviation holds in its set; the "
+        "rest are errors. `deviation` is set on the check only when all of them are",
+    )
     deviation: DeviationOut | None = _deviation_field()
 
 

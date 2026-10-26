@@ -670,6 +670,29 @@ show these failures as ACCEPTED warnings on the console and alert them at warnin
 display and alerting only; no gate reads it. A new failure mode on these sources, or any non-BSE
 failure, stays an error. Task M18.1.
 
+### D27 — Old cross-feed corporate-action disagreements → **ANSWERED (owner, 2026-10-24): "agree".**
+
+The `ca_reconciliation` check had 194 open ERROR flags, and its alert said the check was red
+every day, so a new disagreement between the NSE and BSE corporate-action feeds would add one to a
+number nobody reads. The owner agreed to the recommendation: the open ERROR flags raised before
+2026-10-07 that nobody has adjudicated show as ACCEPTED (amber) while they await a human
+(M2.3 — a cross-feed disagreement is adjudicated, never resolved by code), **except** the 11
+EX_DATE_MISMATCH flags (#133 fixes them) and the dividend RATIO_MISMATCH flags caused by the
+one-dividend-per-feed-per-day key (being fixed separately), which stay red. The set is frozen by
+fingerprint — computed read-only on 2026-10-24: 31 of the 192 flags raised before 2026-10-07 —
+so any new disagreement stays red; the acceptance is reviewed by 2027-01-31. Display and
+alerting only (`dataplatform/status/accepted_deviations.yaml`, `d27-*`). Task M18.2.
+
+### D28 — Source failures still being retried → **ANSWERED (owner, 2026-10-24): "agree".**
+
+Two sources fail a few units a week for a reason outside the platform: `nse_xbrl_filing` (NSE
+answers 404, or an empty body, for a filing its index already lists) and
+`gdelt_v2_event_files` (GDELT's manifest names an export file that does not exist). Each is retried.
+The owner agreed: such a failure shows as ACCEPTED (amber) while it is still retryable and less
+than 7 days past its first attempt, and red after that. The matcher is those two sources and those
+error shapes only (`d28-*` in `dataplatform/status/accepted_deviations.yaml`). Display and alerting
+only. Task M18.2.
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
