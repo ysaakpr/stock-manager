@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 from datetime import date, datetime, time, timedelta
+from itertools import pairwise
 from pathlib import Path
 from typing import Final
 
@@ -32,9 +33,16 @@ from dataplatform.ingest.eod import DAILY_NSE_SOURCES
 from dataplatform.ingest.fundamentals_backfill import LEASED_HOSTS as FUNDAMENTALS_HOSTS
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.scheduler import SchedulerRunner, build_scheduler
-from dataplatform.scheduler.health import JobHealthState, LastRuns, assess, last_due_fire
+from dataplatform.scheduler.health import (
+    LOOKBACK,
+    JobHealthState,
+    LastRuns,
+    assess,
+    last_due_fire,
+)
 from dataplatform.scheduler.registry import (
     ANNOUNCEMENTS_CAPTURE,
+    BSE_CA_SWEEP,
     DAILY_SNAPSHOT,
     EOD_PIPELINE,
     FUNDAMENTALS_FORWARD,
@@ -471,6 +479,60 @@ def test_a_job_that_never_ran_is_never_ran() -> None:
     health = assess(EOD_PIPELINE, LastRuns(), now=MONDAY_EVENING, timezone=IST)
     assert health.state is JobHealthState.NEVER_RAN
     assert not health.healthy
+
+
+def test_a_job_registered_after_its_last_fire_is_not_yet_due_until_its_next() -> None:
+    """`bse_ca_sweep` merged 2026-10-05 23:56 IST, the evening after its first-Sunday fire.
+
+    With no run it was NEVER_RAN for a month though nothing was ever owed; it is NOT_YET_DUE until
+    Sunday 2026-11-01 06:00 IST plus its budget, and NEVER_RAN the moment that fire is due and
+    unrun — the state a missed fire must still reach.
+    """
+    october = datetime(2026, 10, 24, 9, 0, tzinfo=IST)
+    pending = assess(BSE_CA_SWEEP, LastRuns(), now=october, timezone=IST)
+    assert pending.state is JobHealthState.NOT_YET_DUE and pending.healthy
+    assert pending.due_since is None
+
+    after_first_fire = datetime(2026, 11, 1, 16, 1, tzinfo=IST)  # 06:00 + 10 h budget, passed
+    missed = assess(BSE_CA_SWEEP, LastRuns(), now=after_first_fire, timezone=IST)
+    assert missed.state is JobHealthState.NEVER_RAN and not missed.healthy
+
+    # Without the registration instant the 2026-10-04 fire counts, as it always did.
+    unregistered = Job(
+        name="bse_ca_sweep_copy", cron=BSE_CA_SWEEP.cron, fn=BSE_CA_SWEEP.fn,
+        timeout=BSE_CA_SWEEP.timeout,
+    )  # fmt: skip
+    assert assess(unregistered, LastRuns(), now=october, timezone=IST).state is (
+        JobHealthState.NEVER_RAN
+    )
+
+
+def test_the_lookback_reaches_past_every_registered_crons_longest_gap() -> None:
+    """Two first Sundays can be 35 days apart; a 31-day lookback lost `bse_ca_sweep`'s due fire."""
+    start = datetime(2026, 1, 1, tzinfo=IST)
+    end = start + timedelta(days=2 * 366)
+    for job in default_registry():
+        trigger = job.trigger(IST)
+        fires: list[datetime] = []
+        previous: datetime | None = None
+        cursor = start
+        while True:
+            fire = trigger.get_next_fire_time(previous, cursor)
+            if fire is None or fire > end:
+                break
+            fires.append(fire)
+            previous, cursor = fire, fire + timedelta(seconds=1)
+        gaps = [later - earlier for earlier, later in pairwise(fires)]
+        assert max(gaps) + job.timeout < LOOKBACK, job.name
+
+
+def test_a_sunday_sweep_between_distant_fires_still_has_a_due_fire() -> None:
+    """2026-12-05 is 34 days after the 2026-11-01 fire: still due, so a failure can be OVERDUE."""
+    ran = datetime(2026, 11, 1, 6, 0, 2, tzinfo=IST)
+    runs = LastRuns(last_state="SUCCEEDED", last_started_at=ran, last_success_at=ran)
+    late = datetime(2026, 12, 5, 12, 0, tzinfo=IST)
+    assert last_due_fire(BSE_CA_SWEEP, late, IST) == datetime(2026, 11, 1, 6, 0, tzinfo=IST)
+    assert assess(BSE_CA_SWEEP, runs, now=late, timezone=IST).state is JobHealthState.OK
 
 
 def test_a_job_whose_last_success_predates_its_due_fire_is_overdue() -> None:

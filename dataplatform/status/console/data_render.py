@@ -33,6 +33,7 @@ from dataplatform.status.models import (
     CheckCountOut,
     GapEntryOut,
     GapsOut,
+    QualityFlagOut,
     QualityOut,
     QuarantineOut,
     SourcesOut,
@@ -266,7 +267,9 @@ def _lag(line: SourceStatusOut) -> str:
 def _source_row(line: SourceStatusOut) -> str:
     verdict, colour = source_health(line)
     source = esc(line.source)
-    error = _text(line.last_error, limit=_CELL_TEXT)
+    # `last_error` is the newest failure ever recorded; once the source has recovered (no streak)
+    # it is history, and shown beside an OK it read as a live fault. The date stays in its column.
+    error = _text(line.last_error, limit=_CELL_TEXT) if line.failure_streak > 0 else MISSING
     if line.declined is not None:
         error = f"declined: {_text(line.declined.reason, limit=_CELL_TEXT)}"
     return (
@@ -382,6 +385,19 @@ def render_gaps(gaps: GapsOut) -> str:
 # ── quality ────────────────────────────────────────────────────────────────────────────────
 
 
+def _check_count(check: CheckCountOut) -> str:
+    """The open count, with the accepted part said apart: "194 · 31 accepted"."""
+    if not check.accepted:
+        return str(check.count)
+    return f'{check.count} <span class="muted">· {check.accepted} accepted</span>'
+
+
+def _flag_severity(flag: QualityFlagOut) -> str:
+    if flag.deviation is not None and flag.deviation.accepted:
+        return f'{_rag(ACCEPTED, Rag.AMBER)} <span class="muted">{esc(flag.severity.value)}</span>'
+    return esc(flag.severity.value)
+
+
 def _check_severity(check: CheckCountOut) -> str:
     if check.deviation is not None and check.deviation.accepted:
         return f'{_rag(ACCEPTED, Rag.AMBER)} <span class="muted">{esc(check.severity.value)}</span>'
@@ -397,15 +413,17 @@ def render_quality(quality: QualityOut) -> str:
         f'<tr data-check="{esc(c.check_name)}"{deviation_attrs(c.deviation)}>'
         f'<td class="mono">{esc(c.check_name)}{deviation_note(c.deviation)}</td>'
         f"<td>{_check_severity(c)}</td>"
-        f'<td class="num">{c.count}</td>'
+        f'<td class="num">{_check_count(c)}</td>'
         f"<td>{esc(c.first_date.isoformat())}</td><td>{esc(c.last_date.isoformat())}</td>"
         f'<td class="num">{c.raised_today}</td><td class="num">{c.raised_last_7_days}</td></tr>'
         for c in quality.by_check
     )
     flags = "".join(
-        f'<tr data-flag="{flag.id}" data-severity="{esc(flag.severity.value)}">'
+        f'<tr data-flag="{flag.id}" data-severity="{esc(flag.severity.value)}"'
+        f"{deviation_attrs(flag.deviation)}>"
         f'<td>{esc(flag.date.isoformat())}</td><td class="mono">{esc(flag.check_name)}</td>'
-        f"<td>{esc(flag.severity.value)}</td><td>{_isin_link(flag.isin)}</td>"
+        f"<td>{_flag_severity(flag)}{deviation_note(flag.deviation)}</td>"
+        f"<td>{_isin_link(flag.isin)}</td>"
         f'<td class="mono">{_opt(flag.source)}</td><td class="num">{_num(flag.observed_value)}'
         f'</td><td class="num">{_num(flag.threshold)}</td>'
         f"<td><pre>{_text(_json(flag.detail), limit=_CELL_TEXT)}</pre></td>"

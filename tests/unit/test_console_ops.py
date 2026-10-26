@@ -294,7 +294,7 @@ def test_ops_renders_health_every_registered_job_and_the_backup_panel(client: Te
 
 def test_jobs_are_sorted_failing_then_overdue_first(client: TestClient) -> None:
     states = list(_job_states(client.get("/console").text).values())
-    rank = ["FAILING", "OVERDUE", "NEVER_RAN", "RUNNING", "OK"]
+    rank = ["FAILING", "OVERDUE", "NEVER_RAN", "RUNNING", "NOT_YET_DUE", "OK"]
     assert states == sorted(states, key=rank.index)
     assert states[0] == "FAILING"
 

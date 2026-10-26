@@ -72,6 +72,7 @@ __all__ = [
     "ManualQueueReason",
     "ParseOutcome",
     "classify",
+    "names_non_equity_bonus",
     "names_several_dividends",
     "parse_purpose",
     "split_compound",
@@ -248,7 +249,7 @@ _TYPE_PATTERNS: Final[tuple[tuple[ActionType, re.Pattern[str]], ...]] = (
     # `\bmerger\b` cannot match inside "demerger" — there is no word boundary between "de" and
     # "merger" — so the two patterns do not collide.
     (ActionType.SPLIT, re.compile(r"\bsplit\b|\bsub[\s-]?division\b|\bconsolidation\b")),
-    (ActionType.BONUS, re.compile(r"\bbonus\b")),
+    (ActionType.BONUS, _BONUS_RE := re.compile(r"\bbonus\b")),
     (ActionType.DIVIDEND, re.compile(r"\bdividend\b")),
     # "rights" only counts as a rights issue when it says so or is followed by a ratio; otherwise
     # "differential voting rights" would be one.
@@ -295,14 +296,38 @@ _TERMS_REQUIRED: Final[frozenset[ActionType]] = frozenset(
 )
 
 
+#: An instrument that is not an equity share: redeemable or convertible preference shares (NCRPS,
+#: CRPS, OCRPS, CCPS, RPS), debentures, NCDs, bonds, warrants. A "bonus" of one of these is a
+#: distribution of that instrument, not of shares — the share count does not change.
+_NON_EQUITY_INSTRUMENT_RE: Final[re.Pattern[str]] = re.compile(
+    r"\b(?:n?c?rps|ocrps|ccps|preference|pref\.?|debentures?|ncds?|bonds?|warrants?)\b"
+)
+
+
+def names_non_equity_bonus(text: str) -> bool:
+    """Whether `text` is a bonus of a non-equity instrument (`Bonus Ncrps 1:116`).
+
+    NSE files TVS Holdings' 2023 distribution of non-convertible redeemable preference shares as
+    `Bonus Ncrps 1:116`; read as an equity bonus it was a 116:117 factor on ten years of a price
+    the company never split, and one share in 116 the books never received. These are issued under
+    a scheme of arrangement — BSE files the same day as `Scheme of Arrangement` — and that is how
+    `parse_purpose` records them: a structural event the equity factor chain does not price.
+    """
+    normalized = _normalize(text)
+    return bool(_BONUS_RE.search(normalized) and _NON_EQUITY_INSTRUMENT_RE.search(normalized))
+
+
 def classify(text: str) -> tuple[ActionType, ...]:
     """The action types a purpose string names, after umbrella types yield to specific ones.
 
     Returns empty for an unrecognised string and more than one for a genuinely ambiguous one;
-    callers treat both as queue conditions rather than picking a winner.
+    callers treat both as queue conditions rather than picking a winner. A bonus of a non-equity
+    instrument (`names_non_equity_bonus`) is a scheme of arrangement, never a BONUS.
     """
     normalized = _normalize(text)
     matched = {action for action, pattern in _TYPE_PATTERNS if pattern.search(normalized)}
+    if ActionType.BONUS in matched and names_non_equity_bonus(normalized):
+        matched = (matched - {ActionType.BONUS}) | {ActionType.SCHEME_OF_ARRANGEMENT}
     survivors = {
         action
         for action in matched
@@ -643,7 +668,20 @@ def parse_purpose(raw: str, *, source: str) -> ParseOutcome:
         )
 
     action_type = candidates[0]
-    terms, reason, detail = _extract_terms(action_type, normalized, _collapse(raw))
+    terms: Terms
+    reason: ManualQueueReason | None
+    if names_non_equity_bonus(normalized):
+        # Its ratio is units of the instrument per share, not an exchange of shares: read as
+        # `ExchangeRatioTerms` it would be a replacement of the equity. Unquantified, and queued
+        # once so a human sees it, exactly as BSE's bare "Scheme of Arrangement" for the same day.
+        terms, reason, detail = (
+            UnquantifiedTerms(),
+            ManualQueueReason.TERMS_NOT_STATED,
+            "a bonus of a non-equity instrument, not of shares: recorded as a scheme of "
+            "arrangement the equity factor chain does not price",
+        )
+    else:
+        terms, reason, detail = _extract_terms(action_type, normalized, _collapse(raw))
     action = ParsedAction(action_type=action_type, terms=terms, raw_text=raw, source=source)
 
     # Missing detail only blocks when the type's adjustment factor depends on it.

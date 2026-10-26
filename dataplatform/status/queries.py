@@ -36,7 +36,7 @@ from dataplatform.redaction import mask_and_truncate
 from dataplatform.scheduler.health import JobHealth, JobHealthState, read_job_health
 from dataplatform.scheduler.registry import UNSCHEDULED, Job, JobRegistry
 from dataplatform.scheduler.runner import JOB_ERROR_CHARS, Heartbeat
-from dataplatform.status.deviations import DeviationJudge, DeviationOut
+from dataplatform.status.deviations import DeviationJudge, DeviationOut, OpenFlag
 from dataplatform.status.models import (
     AlertConditionOut,
     AlertsOut,
@@ -178,7 +178,12 @@ def read_quality(
     ]
     if judge is not None:
         by_check = [
-            check.model_copy(update={"deviation": judge.quality(check.check_name)})
+            check.model_copy(
+                update={
+                    "deviation": judge.quality(check.check_name),
+                    "accepted": judge.quality_accepted(check.check_name),
+                }
+            )
             if check.severity is QualitySeverity.ERROR
             else check
             for check in by_check
@@ -198,6 +203,8 @@ def read_quality(
         )
         for row in conn.execute(_QUALITY_FLAGS_SQL, (limit,)).fetchall()
     ]
+    if judge is not None:
+        flags = [_flag_verdict(flag, judge) for flag in flags]
     return QualityOut(
         as_of=as_of,
         open_total=sum(entry.count for entry in counts),
@@ -206,6 +213,21 @@ def read_quality(
         flags=flags,
         limit=limit,
     )
+
+
+def _flag_verdict(flag: QualityFlagOut, judge: DeviationJudge) -> QualityFlagOut:
+    """One listed flag with its own accepted-deviation verdict (ERROR flags only)."""
+    if flag.severity is not QualitySeverity.ERROR:
+        return flag
+    fingerprint = flag.detail.get("fingerprint") if isinstance(flag.detail, dict) else None
+    open_flag = OpenFlag(
+        id=flag.id,
+        fingerprint=None if fingerprint is None else str(fingerprint),
+        isin=flag.isin,
+        logical_date=flag.date,
+        raised_at=flag.raised_at,
+    )
+    return flag.model_copy(update={"deviation": judge.quality_flag(flag.check_name, open_flag)})
 
 
 def read_archives(conn: Connection, logical_date: date) -> ArchivesOut:
@@ -563,7 +585,8 @@ _STATE_RANK: Final[Mapping[JobHealthState, int]] = {
     JobHealthState.OVERDUE: 1,
     JobHealthState.NEVER_RAN: 2,
     JobHealthState.RUNNING: 3,
-    JobHealthState.OK: 4,
+    JobHealthState.NOT_YET_DUE: 4,
+    JobHealthState.OK: 5,
 }
 
 

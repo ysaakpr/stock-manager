@@ -38,6 +38,7 @@ import pytest
 
 from dataplatform.clock import FrozenClock
 from dataplatform.corpactions import (
+    DEFAULT_EX_DATE_MISMATCH_WINDOW_DAYS,
     ActionType,
     FaceValueTerms,
     RatioTerms,
@@ -197,7 +198,10 @@ def test_a_ratio_disagreement_lands_in_the_queue() -> None:
 
 def test_an_exdate_disagreement_lands_in_the_queue() -> None:
     nse = split(INFY, NSE, date(2024, 1, 25), "10", "2", "FV SPLIT 10 TO 2")
-    bse = split(INFY, BSE, date(2024, 3, 25), "10", "2", "Split 10 to 2")  # months apart
+    # Two weeks apart: past the 2-day tolerance, inside the 30-day mismatch window. (This was
+    # "months apart" — 60 days — until the window was bounded on 2026-10-23; two lone rows that far
+    # apart are now two single-source events, `test_lone_leftovers_years_apart_*` below.)
+    bse = split(INFY, BSE, date(2024, 2, 8), "10", "2", "Split 10 to 2")
 
     (conflict,) = reconcile([nse, bse]).queue
     assert conflict.reason is ReconciliationReason.EX_DATE_MISMATCH
@@ -284,7 +288,9 @@ def test_accept_never_touches_leftovers_on_both_sides() -> None:
     matched_nse = split(INFY, NSE, date(2024, 1, 25), "10", "2", "FV SPLIT 10 TO 2")
     matched_bse = split(INFY, BSE, date(2024, 1, 25), "10", "2", "Split 10 to 2")
     nse_only = split(INFY, NSE, date(2018, 7, 11), "100", "10", "FV SPLIT 100 TO 10")
-    bse_only = split(INFY, BSE, date(2018, 9, 20), "100", "10", "Split 100 to 10")  # 71 days off
+    # 14 days off: inside the mismatch window, so possibly one event (71 days until 2026-10-23,
+    # when the window was bounded and a gap that wide stopped being a candidate misdating).
+    bse_only = split(INFY, BSE, date(2018, 7, 25), "100", "10", "Split 100 to 10")
 
     one_each = reconcile(
         [matched_nse, matched_bse, nse_only, bse_only],
@@ -936,3 +942,134 @@ def test_the_kind_fill_never_reconciles_different_money() -> None:
     )
     assert result.reconciled == ()
     assert [c.reason for c in result.queue] == [ReconciliationReason.RATIO_MISMATCH]
+
+
+# ── the mismatch window: lone leftovers years apart are two events, not one misdated ───────────
+#
+# Until 2026-10-23 one lone unpaired row per feed was always queued as an EX_DATE_MISMATCH,
+# however far apart. All 11 open EX_DATE_MISMATCH flags in the live store were such pairs, 2 to 25
+# years apart, and each one unreconciled *both* actions — including the older one ACCEPT had
+# already admitted. The rows below are the live store's own (ISIN, ex-date, raw text).
+
+BHAGYANGR = "INE458B01036"  # Bhagyanagar India
+RAMKY = "INE874I01013"  # Ramky Infrastructure
+
+
+def _demerger(source: str, ex: date, raw: str) -> CorporateAction:
+    return ca(
+        isin=BHAGYANGR,
+        source=source,
+        ex_date=ex,
+        action_type=ActionType.DEMERGER,
+        terms=UnquantifiedTerms(),
+        raw_text=raw,
+    )
+
+
+BHAGYANGR_BSE_2017 = _demerger(BSE, date(2017, 3, 10), "Spin Off")
+BHAGYANGR_NSE_2026 = _demerger(NSE, date(2026, 10, 8), "Demerger")
+
+
+def test_lone_leftovers_years_apart_are_two_single_source_actions_not_a_mismatch() -> None:
+    """NSE's 2026 demerger is not BSE's 2017 spin-off: each is single-source, never paired."""
+    result = reconcile([BHAGYANGR_BSE_2017, BHAGYANGR_NSE_2026])
+
+    assert not result.reconciled, "QUEUE still never admits a single feed"
+    assert [c.reason for c in result.queue] == [ReconciliationReason.SINGLE_SOURCE] * 2
+    assert sorted(c.records[0].ex_date for c in result.queue) == [
+        date(2017, 3, 10),
+        date(2026, 10, 8),
+    ]
+    assert all(len(c.records) == 1 for c in result.queue)
+    assert all(c.severity == "WARN" for c in result.queue)
+
+
+def test_accept_admits_both_lone_leftovers_years_apart() -> None:
+    """The live policy: both are admitted as single-source — the 2017 spin-off is no longer pulled
+    out of the factor chain because a different action arrived nine years later."""
+    result = reconcile(
+        [BHAGYANGR_BSE_2017, BHAGYANGR_NSE_2026], single_source_policy=SingleSourcePolicy.ACCEPT
+    )
+
+    assert not result.queue
+    by_date = {r.ex_date: r for r in result.reconciled}
+    assert set(by_date) == {date(2017, 3, 10), date(2026, 10, 8)}
+    assert all(not r.cross_verified for r in result.reconciled)
+    assert by_date[date(2017, 3, 10)].source_ids == (BSE,)
+    assert by_date[date(2026, 10, 8)].source_ids == (NSE,)
+
+
+def test_accept_admits_a_recent_dividend_its_old_lone_counterpart_used_to_block() -> None:
+    """RAMKY: BSE's ₹4.50 of 2011 and NSE's ₹1 of 2026 are two dividends, each booked."""
+    bse = _dividend(
+        RAMKY, BSE, date(2011, 8, 4), "4.5", DividendKind.UNSPECIFIED, "Dividend - Rs. - 4.5000"
+    )
+    nse = _dividend(
+        RAMKY, NSE, date(2026, 9, 18), "1", DividendKind.UNSPECIFIED, "Dividend - Re 1 Per Share"
+    )
+
+    result = reconcile([bse, nse], single_source_policy=SingleSourcePolicy.ACCEPT)
+
+    assert not result.queue
+    assert sorted((r.ex_date, r.terms) for r in result.reconciled) == [
+        (date(2011, 8, 4), bse.terms),
+        (date(2026, 9, 18), nse.terms),
+    ]
+
+
+@pytest.mark.parametrize("policy", list(SingleSourcePolicy))
+def test_the_mismatch_window_is_the_exact_boundary(policy: SingleSourcePolicy) -> None:
+    """At the window a lone pair is one queued EX_DATE_MISMATCH; a day past it, two events.
+
+    Fails if the window is removed (31 days would pair) or inverted (30 days would split), under
+    either policy — a disagreement inside the window is queued even under ACCEPT.
+    """
+    nse = split(INFY, NSE, date(2024, 1, 1), "10", "2", "FV SPLIT FROM RS.10/- TO RS.2/-")
+    at_window = split(INFY, BSE, date(2024, 1, 31), "10", "2", "Stock Split From Rs.10/- to Rs.2/-")
+    past_window = split(
+        INFY, BSE, date(2024, 2, 1), "10", "2", "Stock Split From Rs.10/- to Rs.2/-"
+    )
+    assert (at_window.ex_date - nse.ex_date).days == DEFAULT_EX_DATE_MISMATCH_WINDOW_DAYS == 30
+
+    inside = reconcile([nse, at_window], single_source_policy=policy)
+    assert not inside.reconciled
+    (conflict,) = inside.queue
+    assert conflict.reason is ReconciliationReason.EX_DATE_MISMATCH
+    assert {r.ex_date for r in conflict.records} == {date(2024, 1, 1), date(2024, 1, 31)}
+
+    outside = reconcile([nse, past_window], single_source_policy=policy)
+    assert ReconciliationReason.EX_DATE_MISMATCH not in {c.reason for c in outside.queue}
+    if policy is SingleSourcePolicy.QUEUE:
+        assert [c.reason for c in outside.queue] == [ReconciliationReason.SINGLE_SOURCE] * 2
+        assert not outside.reconciled
+    else:
+        assert not outside.queue
+        assert len(outside.reconciled) == 2
+
+
+def test_the_mismatch_window_is_a_parameter() -> None:
+    """A wider window pairs the 2017/2026 rows into one EX_DATE_MISMATCH again: the knob is real."""
+    gap = (BHAGYANGR_NSE_2026.ex_date - BHAGYANGR_BSE_2017.ex_date).days
+    wide = reconcile([BHAGYANGR_BSE_2017, BHAGYANGR_NSE_2026], ex_date_mismatch_window_days=gap)
+    (conflict,) = wide.queue
+    assert conflict.reason is ReconciliationReason.EX_DATE_MISMATCH
+
+
+def test_the_next_pass_resolves_an_unbounded_pairing_flag() -> None:
+    """The live recovery: the stale EX_DATE_MISMATCH flag closes, the actions are reconciled."""
+    conn = _FakeConn([BHAGYANGR_BSE_2017, BHAGYANGR_NSE_2026])
+    clock = FrozenClock(NOW)
+    pair = [BHAGYANGR_BSE_2017, BHAGYANGR_NSE_2026]
+
+    # What the unbounded rule raised (reproduced with a window wide enough to pair them).
+    gap = (BHAGYANGR_NSE_2026.ex_date - BHAGYANGR_BSE_2017.ex_date).days
+    stale = reconcile(pair, ex_date_mismatch_window_days=gap)
+    persist_reconciliation(cast("Connection", conn), stale, clock=clock)
+    assert _open_count(conn, clock) == 1
+
+    fixed = reconcile(pair, single_source_policy=SingleSourcePolicy.ACCEPT)
+    counts = persist_reconciliation(cast("Connection", conn), fixed, clock=clock)
+    assert counts.flags_resolved == 1
+    assert counts.flags_written == 0
+    assert counts.rows_marked_reconciled == 2
+    assert _open_count(conn, clock) == 0
