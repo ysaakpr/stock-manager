@@ -31,11 +31,12 @@ Money is `Decimal`. Dates are `datetime.date`. `recorded_at` comes from an injec
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Final, cast
+from typing import Any, Final, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -62,6 +63,7 @@ __all__ = [
     "IngestCounts",
     "UnresolvedIdentity",
     "build_scrip_index",
+    "dividend_components",
     "load_corporate_actions",
     "month_from_name",
     "write_corporate_actions",
@@ -154,6 +156,41 @@ class CorporateAction(BaseModel):
     l0_key: str | None = Field(
         default=None, description="`source/date/filename` of the L0 payload this was derived from"
     )
+    component: str = Field(
+        default="",
+        description="which of a feed's same-day dividends this is: the dividend kind (`FINAL`, "
+        "`SPECIAL`, …), `#n` for a further one of that kind in the same line; '' for any other "
+        "action. Part of the table's unique key, so a regular and a special dividend declared on "
+        "one ex-date are two rows, not one",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _default_component(cls, data: Any) -> Any:
+        """A dividend not told its component is the first of its kind, as in a one-dividend line."""
+        if isinstance(data, dict) and "component" not in data:
+            return {**data, "component": dividend_component(data.get("terms"))}
+        return data
+
+    @model_validator(mode="after")
+    def _component_matches_terms(self) -> CorporateAction:
+        """`component` is the dividend's own kind (and ordinal), and nothing for anything else.
+
+        Checked because it is part of the stored key: a component that disagreed with the terms
+        would let one dividend be written twice under two names, or a non-dividend acquire a key
+        no other feed row could ever share.
+        """
+        expected = dividend_component(self.terms)
+        if not expected:
+            if self.component:
+                raise ValueError(f"only a dividend has a component, not {self.action_type}")
+            return self
+        match = _COMPONENT_RE.fullmatch(self.component)
+        if match is None or match.group(1) != expected:
+            raise ValueError(
+                f"dividend component {self.component!r} does not name its kind {expected!r}"
+            )
+        return self
 
     @model_validator(mode="after")
     def _terms_are_legal_for_type(self) -> CorporateAction:
@@ -183,6 +220,7 @@ class CorporateAction(BaseModel):
         announcement_date: date | None = None,
         source_ref: str | None = None,
         l0_key: str | None = None,
+        component: str | None = None,
     ) -> CorporateAction:
         """Build a row from a normalizer `ParsedAction` plus the feed row's identity and dates.
 
@@ -204,6 +242,7 @@ class CorporateAction(BaseModel):
             announcement_date=announcement_date,
             source_ref=source_ref,
             l0_key=l0_key,
+            component=dividend_component(parsed.terms) if component is None else component,
         )
 
     @property
@@ -225,6 +264,43 @@ class CorporateAction(BaseModel):
     def describe(self) -> str:
         """This action as one human-readable sentence (the M2.1 renderer)."""
         return describe(self.action_type, self.terms)
+
+
+#: A stored dividend component: its kind, then `#n` for the n-th dividend of that kind in one line.
+_COMPONENT_RE: Final[re.Pattern[str]] = re.compile(r"([A-Z]+)(?:#([2-9]|[1-9]\d+))?")
+
+
+def dividend_component(terms: object) -> str:
+    """The first-of-its-kind component of a dividend's terms (its kind); '' for any other terms.
+
+    Accepts the terms model or the stored jsonb blob, so a row read back and a row built from a
+    parse agree on the key without a round trip. `0020_ca_dividend_component.sql` backfills the
+    existing rows with exactly this: `ratio_terms->>'dividend_kind'`.
+    """
+    if isinstance(terms, DividendTerms):
+        return terms.dividend_kind.value
+    if isinstance(terms, Mapping) and terms.get("kind") == "dividend":
+        return str(terms.get("dividend_kind") or "")
+    return ""
+
+
+def dividend_components(terms: Sequence[object]) -> tuple[str, ...]:
+    """The component of each of one published line's actions, in line order.
+
+    The first dividend of a kind is that kind; a second of the same kind in the same line (a REIT's
+    `Taxable Dividend … / Exempt Dividend …`, both unspecified) is `KIND#2`, and so on — positional
+    within the line, so a re-read of the same line yields the same keys. Non-dividends get ''.
+    """
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for item in terms:
+        kind = dividend_component(item)
+        if not kind:
+            out.append("")
+            continue
+        seen[kind] = seen.get(kind, 0) + 1
+        out.append(kind if seen[kind] == 1 else f"{kind}#{seen[kind]}")
+    return tuple(out)
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,7 +395,8 @@ def write_corporate_actions(
 ) -> IngestCounts:
     """Persist normalized corporate actions; return how many rows were new.
 
-    Idempotent per `(isin, ex_date, action_type, source)` — the table's unique key. A row that
+    Idempotent per `(isin, ex_date, action_type, source, component)` — the table's unique key
+    (`component` tells a feed's same-day dividends apart; '' for every other action). A row that
     already exists is left exactly as it was (`ON CONFLICT DO NOTHING`), so re-ingesting a feed
     that has not changed writes nothing and does not even restamp `recorded_at`. That is what lets
     a daily-forward run and a backfill overlap safely, and what makes the round-trip test's
@@ -339,9 +416,9 @@ def write_corporate_actions(
             "INSERT INTO corporate_actions "
             "(isin, filed_against_isin, ex_date, action_type, ratio_terms, "
             " dividend_amount_inr, record_date, announcement_date, knowable_date, source, "
-            " source_ref, raw_text, l0_key, recorded_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-            "ON CONFLICT (isin, ex_date, action_type, source) DO NOTHING RETURNING id",
+            " source_ref, raw_text, l0_key, recorded_at, component) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "ON CONFLICT (isin, ex_date, action_type, source, component) DO NOTHING RETURNING id",
             (
                 action.isin,
                 action.filed_against_isin,
@@ -357,6 +434,7 @@ def write_corporate_actions(
                 action.raw_text,
                 action.l0_key,
                 recorded_at,
+                action.component,
             ),
         ).fetchone()
         if row is not None:
@@ -384,7 +462,7 @@ def load_corporate_actions(
     """
     sql = (
         "SELECT isin, ex_date, action_type, ratio_terms, record_date, announcement_date, "
-        "knowable_date, source, source_ref, raw_text, l0_key FROM corporate_actions"
+        "knowable_date, source, source_ref, raw_text, l0_key, component FROM corporate_actions"
     )
     clauses: list[str] = []
     params: list[object] = []
@@ -396,7 +474,7 @@ def load_corporate_actions(
         params.append(source)
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
-    sql += " ORDER BY isin, ex_date, action_type, source"
+    sql += " ORDER BY isin, ex_date, action_type, source, component"
 
     rows = conn.execute(sql, tuple(params)).fetchall()
     return tuple(
@@ -412,6 +490,7 @@ def load_corporate_actions(
             source_ref=None if row[8] is None else str(row[8]),
             raw_text=str(row[9]),
             l0_key=None if row[10] is None else str(row[10]),
+            component=str(row[11]),
         )
         for row in rows
     )

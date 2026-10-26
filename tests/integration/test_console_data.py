@@ -138,7 +138,8 @@ def _identity(conn: Connection) -> None:
     assert row is not None
     conn.execute(
         "INSERT INTO corporate_actions (isin, ex_date, action_type, dividend_amount_inr, "
-        "knowable_date, source, recorded_at) VALUES (%s, %s, 'DIVIDEND', 7.5, %s, 'nse_ca', %s)",
+        "knowable_date, source, recorded_at, component) "
+        "VALUES (%s, %s, 'DIVIDEND', 7.5, %s, 'nse_ca', %s, 'UNSPECIFIED')",
         (C, date(2024, 8, 2), date(2024, 7, 20), AT),
     )
     conn.execute(

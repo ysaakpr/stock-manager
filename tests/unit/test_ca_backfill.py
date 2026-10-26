@@ -443,7 +443,7 @@ class _FakeConn:
     """
 
     def __init__(self) -> None:
-        self._ca: dict[tuple[str, date, str, str], dict[str, Any]] = {}
+        self._ca: dict[tuple[str, date, str, str, str], dict[str, Any]] = {}
         self._flags: list[dict[str, Any]] = []
         self._factors: dict[tuple[str, date], dict[str, Any]] = {}
         self._invalidations: list[dict[str, Any]] = []
@@ -466,14 +466,14 @@ class _FakeConn:
         if sql.startswith("SELECT isin, ex_date, action_type, ratio_terms"):
             return self._select_ca(sql, p)
         if sql.startswith("UPDATE corporate_actions SET reconciled = true"):
-            note, isin, ex_date, action_type, source = p
-            row = self._ca.get((isin, ex_date, action_type, source))
+            note, isin, ex_date, action_type, source, component = p
+            row = self._ca.get((isin, ex_date, action_type, source, component))
             if row is not None:
                 row["reconciled"], row["note"] = True, note
             return _FakeCursor([])
         if sql.startswith("UPDATE corporate_actions SET reconciled = false"):
-            isin, ex_date, action_type, source = p
-            row = self._ca.get((isin, ex_date, action_type, source))
+            isin, ex_date, action_type, source, component = p
+            row = self._ca.get((isin, ex_date, action_type, source, component))
             if row is not None:
                 row["reconciled"] = False
             return _FakeCursor([])
@@ -558,8 +558,9 @@ class _FakeConn:
             raw_text,
             l0_key,
             _recorded_at,
+            component,
         ) = p
-        key = (isin, ex_date, action_type, source)
+        key = (isin, ex_date, action_type, source, component)
         if key in self._ca:  # ON CONFLICT DO NOTHING
             return _FakeCursor([])
         self._ca[key] = {
@@ -575,6 +576,7 @@ class _FakeConn:
             "source_ref": source_ref,
             "raw_text": raw_text,
             "l0_key": l0_key,
+            "component": component,
             "reconciled": False,
             "note": None,
         }
@@ -604,9 +606,10 @@ class _FakeConn:
                     row["source_ref"],
                     row["raw_text"],
                     row["l0_key"],
+                    row["component"],
                 )
             )
-        rows.sort(key=lambda r: (r[0], r[1], r[2], r[7]))
+        rows.sort(key=lambda r: (r[0], r[1], r[2], r[7], r[11]))
         return _FakeCursor(rows)
 
 

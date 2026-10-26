@@ -52,7 +52,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dataplatform.clock import Clock
 from dataplatform.corpactions.factors import PRICE_EVENT_TYPES
-from dataplatform.corpactions.parse_terms import names_non_equity_bonus
+from dataplatform.corpactions.parse_terms import names_non_equity_bonus, names_several_dividends
 from dataplatform.corpactions.taxonomy import (
     TERMS_ADAPTER,
     ActionType,
@@ -196,6 +196,7 @@ def _record_view(action: CorporateAction) -> dict[str, object]:
         "described": describe(action.action_type, action.terms),
         "knowable_date": action.knowable_date.isoformat(),
         "l0_key": action.l0_key,
+        "component": action.component,
     }
 
 
@@ -309,10 +310,19 @@ class ReconciliationConflict(BaseModel):
         things that make two runs the same disagreement. It deliberately excludes anything a
         re-parse might improve, so a genuinely changed disagreement gets a new flag while an
         unchanged one is recognised and skipped.
+
+        A record cut from a line naming several dividends adds its component: the regular and the
+        special dividend of `Dividend - Rs 8 & Special Dividend Rs 5` share every other part, and
+        without it their two disagreements would be one flag. A one-dividend line adds nothing, so
+        the flags raised before components existed keep their fingerprints.
         """
         parts = [self.isin, self.action_type.value, self.reason.value]
-        for action in sorted(self.records, key=lambda a: (a.source, a.ex_date, a.raw_text)):
+        for action in sorted(
+            self.records, key=lambda a: (a.source, a.ex_date, a.raw_text, a.component)
+        ):
             parts.extend((action.source, action.ex_date.isoformat(), action.raw_text))
+            if action.component and names_several_dividends(action.raw_text):
+                parts.append(action.component)
         digest = hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
         return digest[:32]
 
@@ -462,6 +472,57 @@ def _match_by_ex_date(
 
     unmatched_right = [c for i, c in enumerate(remaining) if i not in claimed]
     return pairs, unmatched_left, unmatched_right
+
+
+def _rows_agree(left: CorporateAction, right: CorporateAction) -> bool:
+    return _terms_agree(left.terms, right.terms)
+
+
+def _rows_fill(left: CorporateAction, right: CorporateAction) -> bool:
+    return _quantified_fill(left.terms, right.terms) is not None
+
+
+def _match(
+    left: Sequence[CorporateAction],
+    right: Sequence[CorporateAction],
+    tolerance: timedelta,
+) -> tuple[
+    list[tuple[CorporateAction, CorporateAction]], list[CorporateAction], list[CorporateAction]
+]:
+    """Pair one `(ISIN, type)`'s rows across the feeds: dividends by component, others by date.
+
+    A feed can carry several dividends on one ex-date — a regular and a special declared together
+    — and nearest-date matching alone pairs them by row order, so NSE's ₹8 regular met BSE's ₹5
+    special and both read as a ratio mismatch. Dividends are therefore paired in three passes,
+    each within `tolerance`: rows whose terms agree; then rows one feed's silence fills
+    (`_quantified_fill`: the same money, one feed naming the kind); then whatever is left, by date,
+    exactly as before — a pair formed there that disagrees is still a `RATIO_MISMATCH`. Every
+    other type has at most one row per feed and date, and keeps `_match_by_ex_date` unchanged.
+    """
+    if not any(action.action_type is ActionType.DIVIDEND for action in (*left, *right)):
+        return _match_by_ex_date(left, right, tolerance)
+    pending_left = sorted(left, key=lambda a: (a.ex_date, a.component))
+    pending_right = sorted(right, key=lambda a: (a.ex_date, a.component))
+    pairs: list[tuple[CorporateAction, CorporateAction]] = []
+    for accepts in (_rows_agree, _rows_fill):
+        for action in list(pending_left):
+            candidates = [
+                other
+                for other in pending_right
+                if abs(other.ex_date - action.ex_date) <= tolerance and accepts(action, other)
+            ]
+            if not candidates:
+                continue
+            best = min(
+                candidates, key=lambda o: (abs(o.ex_date - action.ex_date), o.ex_date, o.component)
+            )
+            pairs.append((action, best))
+            pending_left.remove(action)
+            pending_right.remove(best)
+    rest, unmatched_left, unmatched_right = _match_by_ex_date(
+        pending_left, pending_right, tolerance
+    )
+    return [*pairs, *rest], unmatched_left, unmatched_right
 
 
 def _reconcile_pair(
@@ -617,16 +678,20 @@ def reconcile(
             continue
 
         left_source, right_source = sorted(by_source)
-        pairs, unmatched_left, unmatched_right = _match_by_ex_date(
+        pairs, unmatched_left, unmatched_right = _match(
             by_source[left_source], by_source[right_source], tolerance
         )
 
+        paired_days: list[date] = []
+        disputed_days: list[date] = []
         for left, right in pairs:
+            paired_days.extend((left.ex_date, right.ex_date))
             if _terms_agree(left.terms, right.terms):
                 reconciled.append(_reconcile_pair(left, right))
             elif (filled := _quantified_fill(left.terms, right.terms)) is not None:
                 reconciled.append(_reconcile_pair(left, right, terms=filled))
             else:
+                disputed_days.extend((left.ex_date, right.ex_date))
                 queue.append(
                     ReconciliationConflict(
                         reason=ReconciliationReason.RATIO_MISMATCH,
@@ -635,6 +700,35 @@ def reconcile(
                         records=tuple(sorted((left, right), key=lambda a: a.source)),
                     )
                 )
+
+        # A same-day extra: one feed itemized a further dividend on a day the two feeds already
+        # paired (NSE's `Dividend Rs 10 + Special Dividend Rs 7.5` beside BSE's one record). It is
+        # not a candidate misdating of anything — the day is accounted for — so it never joins the
+        # leftovers below, where one extra beside an old one-feed dividend would make "leftovers
+        # on both sides" and queue every old dividend that ACCEPT had admitted. It is single-source
+        # under the policy, unless a pair that day disagreed: then it is queued with that dispute.
+        def same_day(action: CorporateAction, days: Sequence[date]) -> bool:
+            return any(abs(action.ex_date - day) <= tolerance for day in days)
+
+        extras = (
+            [a for a in (*unmatched_left, *unmatched_right) if same_day(a, paired_days)]
+            if action_type is ActionType.DIVIDEND
+            else []
+        )
+        unmatched_left = [a for a in unmatched_left if a not in extras]
+        unmatched_right = [a for a in unmatched_right if a not in extras]
+        for action in extras:
+            if same_day(action, disputed_days):
+                queue.append(
+                    ReconciliationConflict(
+                        reason=ReconciliationReason.SINGLE_SOURCE,
+                        isin=isin,
+                        action_type=action_type,
+                        records=(action,),
+                    )
+                )
+            else:
+                file_single_source(action, isin, action_type)
 
         one_each = len(unmatched_left) == 1 and len(unmatched_right) == 1
         if (
@@ -702,12 +796,12 @@ def collapse_reconciled_rows(
     the first store with both (the server, 2026-09-07) squared 548 split/bonus events on 412 ISINs.
 
     Pairs the rows exactly as `reconcile` paired them — same `(ISIN, type)` grouping, same
-    nearest-ex-date matching within the same tolerance — and folds each pair into one action with
-    the reconciliation's canonical fields: the earlier ex-date, the later knowable date, the first
-    stated record and announcement dates, and the terms the feeds agreed on or the one feed that
-    stated them (`_quantified_fill`). The row carrying those terms carries the event — its source,
-    raw text and L0 key — so a factor built on it still points at real evidence. A row with no
-    counterpart passes through untouched.
+    `_match` (dividends component by component) within the same tolerance — and folds each pair
+    into one action with the reconciliation's canonical fields: the earlier ex-date, the later
+    knowable date, the first stated record and announcement dates, and the terms the feeds agreed
+    on or the one feed that stated them (`_quantified_fill`). The row carrying those terms
+    carries the event — its source, raw text and L0 key — so a factor built on it still points at
+    real evidence. A row with no counterpart passes through untouched.
 
     What it never does: pick between two reconciled rows that *contradict*. Two rows marked
     reconciled whose terms neither agree nor fill can only mean the marks are stale relative to the
@@ -733,14 +827,14 @@ def collapse_reconciled_rows(
             folded.extend(group)
             continue
         left_source, right_source = sorted(by_source)
-        pairs, unmatched_left, unmatched_right = _match_by_ex_date(
+        pairs, unmatched_left, unmatched_right = _match(
             by_source[left_source], by_source[right_source], tolerance
         )
         folded.extend(_fold_pair(left, right) for left, right in pairs)
         folded.extend(unmatched_left)
         folded.extend(unmatched_right)
 
-    folded.sort(key=lambda a: (a.isin, a.ex_date, a.action_type.value, a.source))
+    folded.sort(key=lambda a: (a.isin, a.ex_date, a.action_type.value, a.source, a.component))
     return tuple(folded)
 
 
@@ -797,12 +891,12 @@ def eligible_for_factor_chain(result: ReconciliationResult) -> tuple[ReconciledA
 
 _MARK_RECONCILED_SQL: Final = (
     "UPDATE corporate_actions SET reconciled = true, reconciliation_note = %s "
-    "WHERE isin = %s AND ex_date = %s AND action_type = %s AND source = %s"
+    "WHERE isin = %s AND ex_date = %s AND action_type = %s AND source = %s AND component = %s"
 )
 
 _MARK_UNRECONCILED_SQL: Final = (
     "UPDATE corporate_actions SET reconciled = false "
-    "WHERE isin = %s AND ex_date = %s AND action_type = %s AND source = %s"
+    "WHERE isin = %s AND ex_date = %s AND action_type = %s AND source = %s AND component = %s"
 )
 
 _FLAG_EXISTS_SQL: Final = (
@@ -829,13 +923,13 @@ _RESOLVE_SUPERSEDED_SQL: Final = (
 
 _LOAD_RECONCILED_SQL: Final = (
     "SELECT isin, ex_date, action_type, ratio_terms, record_date, announcement_date, "
-    "knowable_date, source, source_ref, raw_text, l0_key FROM corporate_actions "
+    "knowable_date, source, source_ref, raw_text, l0_key, component FROM corporate_actions "
     "WHERE reconciled = true"
 )
 
 _LOAD_UNRECONCILED_SQL: Final = (
     "SELECT isin, ex_date, action_type, ratio_terms, record_date, announcement_date, "
-    "knowable_date, source, source_ref, raw_text, l0_key FROM corporate_actions "
+    "knowable_date, source, source_ref, raw_text, l0_key, component FROM corporate_actions "
     "WHERE reconciled = false"
 )
 
@@ -861,10 +955,11 @@ def persist_reconciliation(
     """Write a reconciliation pass to the store: mark rows, and queue the disagreements.
 
     For each `ReconciledAction`, sets `reconciled = true` on **both** of its source rows (matched
-    by the table's natural key `(isin, ex_date, action_type, source)`) with the reconciliation
-    note. For each `ReconciliationConflict`, forces the involved rows back to `reconciled = false`
-    — an unreconciled action must never be left marked reconciled from a prior run — and writes one
-    `quality_flag`, unless an open flag with the same fingerprint already exists (idempotent).
+    by the table's natural key `(isin, ex_date, action_type, source, component)`) with the
+    reconciliation note. For each `ReconciliationConflict`, forces the involved rows back to
+    `reconciled = false` — an unreconciled action must never be left marked reconciled from a prior
+    run — and writes one `quality_flag`, unless an open flag with the same fingerprint already
+    exists (idempotent).
 
     Does not commit or roll back: the caller owns the transaction, exactly as M2.2's writer does.
     """
@@ -879,6 +974,7 @@ def persist_reconciliation(
                     action.ex_date,
                     action.action_type.value,
                     action.source,
+                    action.component,
                 ),
             )
             rows_marked += 1
@@ -890,7 +986,13 @@ def persist_reconciliation(
         for action in conflict.records:
             conn.execute(
                 _MARK_UNRECONCILED_SQL,
-                (action.isin, action.ex_date, action.action_type.value, action.source),
+                (
+                    action.isin,
+                    action.ex_date,
+                    action.action_type.value,
+                    action.source,
+                    action.component,
+                ),
             )
         flag = conflict.as_quality_flag(clock=clock)
         exists = conn.execute(_FLAG_EXISTS_SQL, (flag.check_name, flag.fingerprint)).fetchone()
@@ -984,7 +1086,7 @@ def load_reconciled_actions(
     if ex_through is not None:
         sql += " AND ex_date <= %s"
         params.append(ex_through)
-    sql += " ORDER BY isin, ex_date, action_type, source"
+    sql += " ORDER BY isin, ex_date, action_type, source, component"
     rows = conn.execute(sql, tuple(params)).fetchall()
     return collapse_reconciled_rows(_action_from_row(row) for row in rows)
 
@@ -1009,7 +1111,7 @@ def load_unreconciled_actions(
     rows = conn.execute(
         _LOAD_UNRECONCILED_SQL
         + " AND ex_date > %s AND ex_date <= %s AND action_type = ANY(%s)"
-        + " ORDER BY isin, ex_date, action_type, source",
+        + " ORDER BY isin, ex_date, action_type, source, component",
         (ex_after, ex_through, types),
     ).fetchall()
     return tuple(_action_from_row(row) for row in rows)
@@ -1031,6 +1133,7 @@ def _action_from_row(row: Sequence[Any]) -> CorporateAction:
         source_ref=None if row[8] is None else str(row[8]),
         raw_text=str(row[9]),
         l0_key=None if row[10] is None else str(row[10]),
+        component=str(row[11]),
     )
 
 
