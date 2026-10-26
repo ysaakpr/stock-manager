@@ -52,6 +52,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dataplatform.clock import Clock
 from dataplatform.corpactions.factors import PRICE_EVENT_TYPES
+from dataplatform.corpactions.parse_terms import names_non_equity_bonus
 from dataplatform.corpactions.taxonomy import (
     TERMS_ADAPTER,
     ActionType,
@@ -70,6 +71,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CA_RECONCILIATION_CHECK",
+    "DEFAULT_EX_DATE_MISMATCH_WINDOW_DAYS",
     "DEFAULT_EX_DATE_TOLERANCE_DAYS",
     "PersistCounts",
     "QualityFlagRecord",
@@ -94,6 +96,20 @@ _LOG = get_logger(__name__)
 #: only to absorb the occasional off-by-one, and a difference wider than this is itself reported
 #: (`EX_DATE_MISMATCH`) rather than silently bridged.
 DEFAULT_EX_DATE_TOLERANCE_DAYS: Final = 2
+
+#: How far apart two *leftovers* — one row per feed of one `(ISIN, type)`, neither matched within
+#: the tolerance above — may sit and still be queued as one event the feeds dated differently
+#: (`EX_DATE_MISMATCH`). Further apart they are two different events, each single-source.
+#:
+#: Why 30. The feeds agree on the ex-date to the day in 13,255 of the store's 13,256 cross-feed
+#: pairs (2026-10-23), and the one exception is a day out; a real misdating is a revised record
+#: date — a fresh LODR Reg. 42 intimation days to weeks after the first — not a different year.
+#: The upper bound is the shortest gap at which one ISIN repeats a type in earnest: quarterly
+#: interim dividends sit ~90 days apart, so 30 never pairs two of them. Unbounded, the window paired
+#: any lone leftover with any other: all 11 open EX_DATE_MISMATCH flags were pairs 2 to 25 years
+#: apart (BHAGYANGR's 2026 demerger against its 2017 spin-off), and each one unreconciled both
+#: actions — including the older one ACCEPT had already admitted.
+DEFAULT_EX_DATE_MISMATCH_WINDOW_DAYS: Final = 30
 
 #: The `quality_flag.check_name` every reconciliation disagreement is filed under. One name so a
 #: human filtering `/status/quality` sees the whole reconciliation queue with one predicate.
@@ -124,8 +140,9 @@ class ReconciliationReason(StrEnum):
     one: picking a side would rewrite the ISIN's adjusted history the wrong way."""
 
     EX_DATE_MISMATCH = "EX_DATE_MISMATCH"
-    """Both exchanges announced an action of this type for this ISIN, but on ex-dates too far
-    apart to be confidently the same event."""
+    """Both exchanges announced an action of this type for this ISIN, on ex-dates too far apart
+    to be confidently the same event yet close enough (`DEFAULT_EX_DATE_MISMATCH_WINDOW_DAYS`)
+    that they may be."""
 
     SINGLE_SOURCE = "SINGLE_SOURCE"
     """Only one exchange published this action. Often benign (a single-listed security), but never
@@ -527,15 +544,17 @@ def reconcile(
     actions: Iterable[CorporateAction],
     *,
     ex_date_tolerance_days: int = DEFAULT_EX_DATE_TOLERANCE_DAYS,
+    ex_date_mismatch_window_days: int = DEFAULT_EX_DATE_MISMATCH_WINDOW_DAYS,
     single_source_policy: SingleSourcePolicy = SingleSourcePolicy.QUEUE,
 ) -> ReconciliationResult:
     """Reconcile a set of corporate actions across exchanges into agreements and a queue.
 
     What it does: groups the actions by `(ISIN, action_type)`, and within each group pairs the two
     feeds by ex-date. A pair whose terms agree becomes a `ReconciledAction`; a pair whose terms
-    differ becomes a `RATIO_MISMATCH`; an action with a same-type counterpart it could not be
-    paired to becomes an `EX_DATE_MISMATCH`; an action with no counterpart at all becomes a
-    `SINGLE_SOURCE`.
+    differ becomes a `RATIO_MISMATCH`; a lone unpaired action on each side, no more than
+    `ex_date_mismatch_window_days` apart, becomes one `EX_DATE_MISMATCH`; an action with no
+    counterpart at all — including one whose only candidate is further away than that window —
+    is single-source, accepted or queued as `SINGLE_SOURCE` per `single_source_policy`.
 
     What it assumes: at most two distinct sources per `(ISIN, type)` — the platform has exactly two
     corporate-action feeds. Three or more is a malformed input, not a data disagreement, and raises
@@ -544,12 +563,26 @@ def reconcile(
     What it never does: pick a winner between disagreeing feeds, read a clock, or touch a database.
     """
     tolerance = timedelta(days=ex_date_tolerance_days)
+    mismatch_window = timedelta(days=ex_date_mismatch_window_days)
     grouped: dict[tuple[str, ActionType], list[CorporateAction]] = defaultdict(list)
-    for action in actions:
-        grouped[(action.isin, action.action_type)].append(action)
-
     reconciled: list[ReconciledAction] = []
     queue: list[ReconciliationConflict] = []
+    for action in actions:
+        if action.action_type in PRICE_EVENT_TYPES and names_non_equity_bonus(action.raw_text):
+            # A row parsed before the parser knew better: TVS Holdings' `Bonus Ncrps 1:116` stored
+            # as an equity bonus. It is a distribution of preference shares, so it is never paired
+            # and never admitted — whatever the policy — and a re-parse files it as the scheme of
+            # arrangement it is (`ingest.ca_reparse_non_equity`).
+            queue.append(
+                ReconciliationConflict(
+                    reason=ReconciliationReason.SINGLE_SOURCE,
+                    isin=action.isin,
+                    action_type=action.action_type,
+                    records=(action,),
+                )
+            )
+            continue
+        grouped[(action.isin, action.action_type)].append(action)
 
     def file_single_source(action: CorporateAction, isin: str, action_type: ActionType) -> None:
         """File one action no second feed published: accept it or queue it, per the policy."""
@@ -603,7 +636,11 @@ def reconcile(
                     )
                 )
 
-        if len(unmatched_left) == 1 and len(unmatched_right) == 1:
+        one_each = len(unmatched_left) == 1 and len(unmatched_right) == 1
+        if (
+            one_each
+            and abs(unmatched_left[0].ex_date - unmatched_right[0].ex_date) <= mismatch_window
+        ):
             queue.append(
                 ReconciliationConflict(
                     reason=ReconciliationReason.EX_DATE_MISMATCH,
@@ -614,7 +651,7 @@ def reconcile(
                     ),
                 )
             )
-        elif unmatched_left and unmatched_right:
+        elif unmatched_left and unmatched_right and not one_each:
             # Leftovers on both sides: some may be one event the two feeds dated differently, and
             # which ones is a guess. A disagreement is queued whatever the policy.
             for action in (*unmatched_left, *unmatched_right):
@@ -633,6 +670,10 @@ def reconcile(
             # that type was one feed's — UNOMINDA's 2:1 bonus of 2018 (BSE-only, NSE's line was a
             # compound string the parser refused) stayed unadjusted because NSE had published the
             # 2016 and 2022 bonuses. Same event, same evidence, different verdict by accident.
+            # Also one leftover per side further apart than the mismatch window: no misdating
+            # spans that, so they are two events each feed alone published. Pairing them anyway
+            # (until 2026-10-23) unreconciled both, so a new action retroactively pulled an old
+            # accepted one — BHAGYANGR's 2017 spin-off — out of the factor chain and the books.
             for action in (*unmatched_left, *unmatched_right):
                 file_single_source(action, isin, action_type)
 
