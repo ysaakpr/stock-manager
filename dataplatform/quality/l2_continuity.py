@@ -46,8 +46,17 @@ Pure core (`classify_steps`, `L2ContinuityReport`) and a DuckDB/Postgres seam (`
 reads; `findings` turns a report into `QualityFinding`s for `persist_findings`, which only the
 CLI's `--persist` calls, with the clock injected at that boundary (B10).
 
+**A flag closes when a later scan no longer raises it.** `--persist` hands `persist_findings` the
+report's `resolution_scope`, so every open `l2_continuity` flag the scan covered and did not raise
+again is resolved — a curation or a rebuild answered it. Until 2026-10-23 nothing closed them: the
+14 ERROR flags raised at 22:21 IST on 2026-10-05, 33 minutes after commit `29ce597` curated all 14
+steps, were still open weeks later against a lake that scanned 0 unexplained. A scan over some
+ISINs (`--isin`) covers those ISINs only and never closes a flag about another; a scan at a
+non-default threshold or gap covers nothing, since it cannot say what the default one would raise.
+
     uv run python -m dataplatform.quality.l2_continuity             # report; exit 1 if it fails
-    uv run python -m dataplatform.quality.l2_continuity --persist   # also raise quality_flag rows
+    uv run python -m dataplatform.quality.l2_continuity --persist   # raise new flags, close stale
+    uv run python -m dataplatform.quality.l2_continuity --persist --isin INE...  # those ISINs only
 """
 
 from __future__ import annotations
@@ -63,11 +72,13 @@ from typing import Final
 
 from dataplatform.corpactions.manual_actions import ManualActions, default_manual_actions
 from dataplatform.logging import get_logger
-from dataplatform.quality.sentinel import QualityFinding, finding_fingerprint
+from dataplatform.quality.sentinel import FindingScope, QualityFinding, finding_fingerprint
 from dataplatform.store.db import Connection
 
 __all__ = [
     "CHECK_NAME",
+    "DEFAULT_MAX_GAP_DAYS",
+    "DEFAULT_THRESHOLD",
     "AdjustedStep",
     "L2ContinuityReport",
     "StepClass",
@@ -83,6 +94,15 @@ CHECK_NAME: Final = "l2_continuity"
 
 #: The dataset findings are scoped to, so an ERROR gates L2 readers and not the whole market.
 _DATASET: Final = "prices_adjusted"
+
+#: The check as configured: a step past 2x either way, between bars at most five days apart. A
+#: scan run any other way is a probe — it may raise flags, but it closes none (`resolution_scope`).
+DEFAULT_THRESHOLD: Final = Decimal(2)
+DEFAULT_MAX_GAP_DAYS: Final = 5
+
+#: The date a retired-partition finding's fingerprint carries. The finding is about the partition,
+#: not a day, so every scan must find the flag the first one raised rather than open another.
+_RETIRED_FINGERPRINT_DATE: Final = date(1970, 1, 1)
 
 #: A recorded dividend at least this fraction of the raw close before it explains a step.
 _LARGE_DIVIDEND: Final = Decimal("0.25")
@@ -140,6 +160,8 @@ class L2ContinuityReport:
     partitions: int
     steps: tuple[tuple[AdjustedStep, StepClass], ...]
     retired_partitions: tuple[str, ...]
+    #: The ISINs the scan was limited to; `None` for a scan of every partition.
+    isins: frozenset[str] | None = None
 
     def of_class(self, cls: StepClass) -> tuple[AdjustedStep, ...]:
         return tuple(step for step, c in self.steps if c is cls)
@@ -155,6 +177,18 @@ class L2ContinuityReport:
     @property
     def passed(self) -> bool:
         return not self.unexplained and not self.retired_partitions
+
+    @property
+    def resolution_scope(self) -> FindingScope | None:
+        """The open flags `persist_findings` may close if this scan did not raise them again.
+
+        Every `l2_continuity` flag for a full scan; those about the scanned ISINs for a partial
+        one; none for a scan run at a non-default threshold or gap, which cannot speak for the
+        check as configured — it would close a 2x step's flag just for looking at 3x.
+        """
+        if self.threshold != DEFAULT_THRESHOLD or self.max_gap_days != DEFAULT_MAX_GAP_DAYS:
+            return None
+        return FindingScope(check_name=CHECK_NAME, isins=self.isins)
 
 
 def classify_steps(
@@ -209,7 +243,7 @@ def findings(report: L2ContinuityReport, *, logical_date: date) -> tuple[Quality
     quarantined in the query layer (D22), so it is a WARN (kind `unsourced_action_step`): visible
     on the status API until a source lets it be adjusted, without turning the check red. A step's
     finding is dated by the step's own session, so a re-scan finds the flag it raised before
-    rather than stacking another.
+    rather than stacking another; a retired partition's is not dated at all, for the same reason.
     """
     out: list[QualityFinding] = []
     for step in report.unexplained:
@@ -267,7 +301,9 @@ def findings(report: L2ContinuityReport, *, logical_date: date) -> tuple[Quality
                 isin=isin,
                 source=_DATASET,
                 detail={"kind": "retired_isin_partition"},
-                fingerprint=finding_fingerprint(f"{CHECK_NAME}:retired", isin, logical_date),
+                fingerprint=finding_fingerprint(
+                    f"{CHECK_NAME}:retired", isin, _RETIRED_FINGERPRINT_DATE
+                ),
             )
         )
     return tuple(out)
@@ -281,18 +317,21 @@ def scan(
     *,
     survivor_of: Callable[[str], str],
     data_root: Path | None = None,
-    threshold: Decimal = Decimal(2),
-    max_gap_days: int = 5,
+    threshold: Decimal = DEFAULT_THRESHOLD,
+    max_gap_days: int = DEFAULT_MAX_GAP_DAYS,
     curated: ManualActions | None = None,
+    isins: Iterable[str] | None = None,
 ) -> L2ContinuityReport:
     """Scan the materialized L2 for steps past `threshold`x and for retired-ISIN partitions.
 
-    Read-only: one DuckDB window pass over every partition, and (when `conn` is given) one
-    Postgres read of the reconciled structural breaks — without it only a curated break makes a
-    step `STRUCTURAL`. `curated` (default: the repo's file) supplies the curated breaks and the
+    Read-only: one DuckDB window pass over every partition — or only `isins`' partitions, when
+    given, which the report records as its scope — and (when `conn` is given) one Postgres read
+    of the reconciled structural breaks; without it only a curated break makes a step
+    `STRUCTURAL`. `curated` (default: the repo's file) supplies the curated breaks and the
     explained-move allowlist.
     """
     curated = default_manual_actions() if curated is None else curated
+    scope = None if isins is None else frozenset(isins)
     from dataplatform.store.l2 import (
         materialized_isins,
         open_connection,
@@ -300,6 +339,8 @@ def scan(
     )
 
     partitions = materialized_isins(data_root=data_root)
+    if scope is not None:
+        partitions = partitions & scope
     retired = tuple(sorted(i for i in partitions if survivor_of(i) != i))
     con = open_connection()
     try:
@@ -316,11 +357,12 @@ def scan(
                            lag(tr_close) OVER w AS ptr,
                            lag(cum_price_factor) OVER w AS pf
                     FROM prices_adjusted
+                    WHERE $every OR list_contains($isins, isin)
                     WINDOW w AS (PARTITION BY isin, exchange ORDER BY trade_date)
                 )
                 WHERE pd IS NOT NULL AND (adj_close > $t * pc OR adj_close * $t < pc)
                 """,
-                {"t": threshold},
+                {"t": threshold, "every": scope is None, "isins": sorted(scope or ())},
             ).fetchall()
             if partitions
             else []
@@ -393,6 +435,7 @@ def scan(
             max_gap_days=max_gap_days,
         ),
         retired_partitions=retired,
+        isins=scope,
     )
     _LOG.info(
         "quality.l2_continuity",
@@ -428,9 +471,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     from dataplatform.store.db import connect
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--threshold", type=Decimal, default=Decimal(2))
-    parser.add_argument("--max-gap-days", type=int, default=5)
-    parser.add_argument("--persist", action="store_true", help="raise quality_flag rows")
+    parser.add_argument("--threshold", type=Decimal, default=DEFAULT_THRESHOLD)
+    parser.add_argument("--max-gap-days", type=int, default=DEFAULT_MAX_GAP_DAYS)
+    parser.add_argument(
+        "--persist",
+        action="store_true",
+        help="raise quality_flag rows, and close the open ones this scan covered and did not raise",
+    )
+    parser.add_argument(
+        "--isin",
+        action="append",
+        default=None,
+        help="scan only this ISIN's partition (repeatable); --persist then closes its flags only",
+    )
     args = parser.parse_args(argv)
     settings = get_settings()
     clock = SystemClock()
@@ -442,10 +495,25 @@ def main(argv: Sequence[str] | None = None) -> int:
             data_root=settings.data_root,
             threshold=args.threshold,
             max_gap_days=args.max_gap_days,
+            isins=args.isin,
         )
         if args.persist:
-            persist_findings(conn, findings(report, logical_date=clock.today()), clock=clock)
+            counts = persist_findings(
+                conn,
+                findings(report, logical_date=clock.today()),
+                clock=clock,
+                resolve_scope=report.resolution_scope,
+            )
             conn.commit()
+            closing = (
+                "none (non-default threshold or gap)"
+                if report.resolution_scope is None
+                else str(counts.resolved)
+            )
+            print(
+                f"persisted: {counts.written} raised, {counts.skipped} already open, "
+                f"{closing} closed"
+            )
     print(f"{'partitions':<22} {report.partitions}")
     for cls in StepClass:
         print(f"{cls.value.lower():<22} {len(report.of_class(cls))}")
