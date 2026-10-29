@@ -127,7 +127,9 @@ DELIVERY_COLUMNS: Final = (
 #: 2026-10-10). Five rows admits a reissue with room for a second, and refuses the broken-refresh
 #: shape. A broken master scales with the number of symbols it mangles, not with the file's length,
 #: so the bar is absolute; on a 2,000-3,600-row file five rows is 0.14-0.25 %, under the 0.5 % a
-#: proportional bar would allow.
+#: proportional bar would allow. Against the 2026-10-29 master, all 573 UDiFF-era sessions in L0
+#: resolve with no row left ambiguous (569 of them have one the session settles: the
+#: INFIBEAM/CCAVENUE windows overlap back to 2016), so the bar is nowhere near today's reality.
 MAX_AMBIGUOUS_QUARANTINED: Final = 5
 
 #: The marker the exchange writes where a series does not report delivery. Modelled as `None`.
