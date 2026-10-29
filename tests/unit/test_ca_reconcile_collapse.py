@@ -211,8 +211,11 @@ class _FakeConn:
                 r.source_ref,
                 r.raw_text,
                 r.l0_key,
+                r.component,
             )
-            for r in sorted(rows, key=lambda r: (r.isin, r.ex_date, r.action_type.value, r.source))
+            for r in sorted(
+                rows, key=lambda r: (r.isin, r.ex_date, r.action_type.value, r.source, r.component)
+            )
         ]
         return self
 

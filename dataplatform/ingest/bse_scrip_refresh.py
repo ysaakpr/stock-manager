@@ -47,6 +47,7 @@ __all__ = [
     "SCRIP_STATUSES",
     "STATUS_TOKEN",
     "BseScripRefreshReport",
+    "read_snapshot_from_l0",
     "refresh_bse_scrip_master",
 ]
 
@@ -168,6 +169,28 @@ def refresh_bse_scrip_master(
         conn.commit()
     _LOG.info("bse_scrip.merged", summary=_merged_summary(report), clean=report.is_clean)
     return BseScripRefreshReport(snapshot_date, counts, reused, report)
+
+
+def read_snapshot_from_l0(l0: L0Store, snapshot_date: date) -> str:
+    """One snapshot's three statuses read back out of L0 as the one JSON array the merge takes.
+
+    What it does: reads (and re-checksums, through `L0Store.get`) the Active, Suspended and
+    Delisted payloads `refresh_bse_scrip_master` landed for `snapshot_date`, concatenated in the
+    order the merge uses. This is how a re-derive reaches the snapshot without a request.
+    What it never does: fetch, or return a partial snapshot — a missing status raises
+    `FileNotFoundError` naming it, for the reason the refresh refuses to merge one.
+    """
+    payloads: dict[str, str] = {}
+    for status in SCRIP_STATUSES:
+        filename = f"ListofScripData_{status}.json"
+        if not l0.exists(SOURCE_ID, snapshot_date, filename):
+            raise FileNotFoundError(
+                f"L0 holds no {SOURCE_ID} {filename} for {snapshot_date.isoformat()}; a snapshot "
+                "is merged whole or not at all"
+            )
+        ref = l0.ref_for(SOURCE_ID, snapshot_date, filename)
+        payloads[status] = l0.get(ref).decode("utf-8")
+    return _concatenate(payloads)
 
 
 def _concatenate(payloads: dict[str, str]) -> str:

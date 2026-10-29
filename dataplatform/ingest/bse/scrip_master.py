@@ -24,11 +24,22 @@ What this module produces, and how it stays out of NSE's way:
 Two deliberate limits, both honest about what the file does and does not say:
 
 * **BSE gives no listing history.** The scrip master is a snapshot: it names today's symbol
-  (`scrip_id`) for each scrip, with no rename history and no start date. So each scrip yields one
-  open `SymbolWindow` (`valid_from = snapshot_date`, `valid_to = None`). Unlike NSE (M1.7), there
-  is no `symbolchange.csv` to walk, so no earlier windows are invented — a resolve for a BSE symbol
-  before this snapshot returns "unknown", which is true. Deeper BSE history is a later concern that
-  accumulates snapshot over snapshot, exactly as NSE's does.
+  (`scrip_id`) for each scrip, with no rename history and no start date. So each *listed* scrip
+  (Active or Suspended) yields one open `SymbolWindow` (`valid_from = snapshot_date`, `valid_to =
+  None`). Unlike NSE (M1.7), there is no `symbolchange.csv` to walk, so no earlier windows are
+  invented — a resolve for a BSE symbol before this snapshot returns "unknown", which is true.
+  Deeper BSE history is a later concern that accumulates snapshot over snapshot, exactly as NSE's
+  does.
+
+* **A delisted scrip opens no window.** Its `scrip_id` is the symbol it *last* traded under, at
+  some date the file does not give; on the snapshot date it is not current. An open window would
+  claim it is, and BSE reuses a dead scrip's ticker: on 2026-09-06 ten delisted scrips shared
+  theirs with a live ISIN (IDEA was Ideaspace Solutions before it was Vodafone Idea), so the
+  symbol resolved two ways and every Saturday's `identity_refresh` failed on the overlap. The
+  delisted scrip still yields its `Security` and its `Listing` — the `SC_CODE → ISIN` fact the
+  pre-2024 bhavcopy era resolves through — and a window an *earlier* snapshot opened for it while it
+  was listed is closed the day before the snapshot that reports it delisted
+  (`close_delisted_windows`), the same bound a rename closes on.
 
 * **A scrip without a usable ISIN is skipped and counted, never guessed.** `status=Active` rows
   carry an ISIN, but the delisted/suspended pulls (`pit_notes`) include the occasional blank; such a
@@ -46,7 +57,7 @@ import json
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Final
 
@@ -74,6 +85,8 @@ __all__ = [
     "BseScripDerivedMaster",
     "BseScripIngestReport",
     "BseScripParseError",
+    "close_delisted_windows",
+    "delisted_isins",
     "derive_master",
     "ingest_scrip_master",
     "parse_scrip_master",
@@ -271,11 +284,13 @@ def derive_master(
 ) -> BseScripDerivedMaster:
     """Turn one scrip-master snapshot into BSE securities, listings and symbol windows.
 
-    What it does: emits one `Security` (`primary_exchange = BSE`), one `Listing` (`exchange = BSE`,
-    `security_code = SC_CODE`) and one open `SymbolWindow` per scrip. The window is open because the
-    snapshot names today's symbol and BSE publishes no rename history — no earlier window invented.
-    What it never does: date a window from anything but the snapshot, or set a `valid_to` the file
-    does not support.
+    What it does: emits one `Security` (`primary_exchange = BSE`) and one `Listing` (`exchange =
+    BSE`, `security_code = SC_CODE`) per ISIN, and one open `SymbolWindow` per ISIN that is still
+    listed. The window is open because the snapshot names today's symbol and BSE publishes no rename
+    history — no earlier window invented.
+    What it never does: date a window from anything but the snapshot, set a `valid_to` the file
+    does not support, or open a window for a DELISTED scrip — its symbol is not current on the
+    snapshot date, and BSE hands dead tickers to new scrips (see the module docstring).
 
     Note that `primary_exchange = BSE` is only *asserted* for a BSE-only ISIN: `write_securities`
     sets `primary_exchange` once, on the row's first sight, so a security already written by the NSE
@@ -327,6 +342,9 @@ def derive_master(
             source=BSE_SCRIP_MASTER_SOURCE,
         )
         for scrip in canonical
+        # The canonical scrip is the most-live one, so DELISTED here means the ISIN has no listed
+        # BSE scrip at all — a buyback counter that died beside a live one never gets this far.
+        if scrip.status is not ListingStatus.DELISTED
     )
     _log.info(
         "bse.scrip_master.derived",
@@ -365,6 +383,56 @@ def _canonical_by_isin(scrips: Sequence[BseScrip]) -> tuple[BseScrip, ...]:
     return tuple(best[isin] for isin in sorted(best))
 
 
+def delisted_isins(scrips: Iterable[BseScrip]) -> frozenset[str]:
+    """The ISINs a snapshot lists *only* as DELISTED — no Active or Suspended scrip carries them.
+
+    An ISIN with a live scrip beside a dead one (a buyback counter) is listed, and not in here.
+    """
+    return frozenset(
+        scrip.isin
+        for scrip in _canonical_by_isin(tuple(scrips))
+        if scrip.status is ListingStatus.DELISTED
+    )
+
+
+def close_delisted_windows(
+    stored: Iterable[SymbolWindow],
+    scrips: Iterable[BseScrip],
+    *,
+    snapshot_date: date,
+) -> tuple[SymbolWindow, ...]:
+    """Closed copies of the stored open BSE windows of ISINs this snapshot reports delisted.
+
+    What it does: for every stored BSE window still open whose ISIN `delisted_isins` names, returns
+    the same window (same key) with `valid_to = snapshot_date - 1` — fed to `plan_history` beside
+    the derived windows, that is a *close*, the one mutation history permits. The previous snapshot
+    saw the scrip listed and this one does not; the day before this snapshot is the bound a new
+    scrip's window, opened on this snapshot's date, can follow without overlapping.
+    What it assumes: `stored` is what the store holds now.
+    What it never does: touch an NSE window, a closed window, or a window that opens on or after
+    `snapshot_date` — that one was never current at all, and closing it before it starts is not a
+    close but a defect for a human (`identity.repair_bse_delisted` removes the 2026-09-06 ones).
+    """
+    gone = delisted_isins(scrips)
+    last_listed = snapshot_date - timedelta(days=1)
+    return tuple(
+        SymbolWindow(
+            exchange=window.exchange,
+            symbol=window.symbol,
+            valid_from=window.valid_from,
+            valid_to=last_listed,
+            isin=window.isin,
+            series=window.series,
+            source=window.source,
+        )
+        for window in stored
+        if window.exchange is Exchange.BSE
+        and window.valid_to is None
+        and window.isin in gone
+        and window.valid_from < snapshot_date
+    )
+
+
 # ── ingest ───────────────────────────────────────────────────────────────────────────────────
 
 
@@ -377,7 +445,8 @@ def ingest_scrip_master(
 ) -> BseScripIngestReport:
     """Merge one BSE scrip-master snapshot into the identity master. Does not commit.
 
-    What it does: parses the JSON, derives BSE securities/listings/windows, detects every ambiguity
+    What it does: parses the JSON, derives BSE securities/listings/windows, closes the open window
+    of any ISIN the snapshot reports delisted (`close_delisted_windows`), detects every ambiguity
     against what is already stored as well as within the snapshot, and writes through the same
     `IdentityStore` the NSE ingest uses — so BSE listings land as new `(isin, exchange)` rows
     without touching NSE's, and a dual-listed ISIN keeps its NSE-set `primary_exchange`.
@@ -408,7 +477,8 @@ def ingest_scrip_master(
 
     store = IdentityStore(conn, clock=clock)
     stored = store.load_windows()
-    plan = plan_history(stored, derived.windows)
+    closes = close_delisted_windows(stored, scrips, snapshot_date=snapshot_date)
+    plan = plan_history(stored, (*derived.windows, *closes))
     conflicts = detect_conflicts(
         plan.applied_to(stored), source=BSE_SCRIP_MASTER_SOURCE, detected_by=DetectedBy.INGEST
     )

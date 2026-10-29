@@ -435,8 +435,8 @@ def _insert_action(conn: object, action: CorporateAction, amount: Decimal | None
     conn.execute(  # type: ignore[attr-defined]
         "INSERT INTO corporate_actions "
         "(isin, ex_date, action_type, ratio_terms, dividend_amount_inr, knowable_date, "
-        " source, raw_text, reconciled, recorded_at) "
-        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, true, %s)",
+        " source, raw_text, reconciled, recorded_at, component) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, true, %s, %s)",
         (
             action.isin,
             action.ex_date,
@@ -447,6 +447,7 @@ def _insert_action(conn: object, action: CorporateAction, amount: Decimal | None
             action.source,
             action.raw_text,
             INGESTED_AT,
+            action.component,
         ),
     )
 
