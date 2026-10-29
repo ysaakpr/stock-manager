@@ -330,6 +330,9 @@ class EodPipeline:
             commit=self._conn.commit,
             register=self._register,
             master=master,
+            # A delivery row quarantined as ambiguous raises an ERROR flag in the session's own
+            # transaction (`backfill.ambiguity_findings`), so it commits with the session.
+            findings=lambda found: persist_findings(self._conn, found, clock=self._clock),
         )
         backfill_report = runner.run(plan)
 

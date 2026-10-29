@@ -91,6 +91,13 @@ class PriceQuarantineReason:
     #: The row resolved to an ISIN, but no price row in the session carried that `(isin, series)`.
     NO_MATCHING_PRICE: Final = "no_matching_price"
 
+    #: The identity master names *several* ISINs for the delivery row's `(symbol, date)` and the
+    #: session's own bhavcopy did not settle it (`delivery.AmbiguousDeliveryRow`). Distinct from
+    #: `SYMBOL_UNRESOLVED` on purpose: "we know two contradictory ISINs" is a master defect queued
+    #: for reconciliation, "we know none" is a coverage gap, and the two have different fixes.
+    #: `isin` is `None` — choosing a candidate is the guess this reason refuses.
+    SYMBOL_AMBIGUOUS: Final = "symbol_ambiguous"
+
     #: A *price* row, not a delivery one: the bhavcopy carried a placeholder where the ISIN
     #: belongs (`bhavcopy_legacy.PLACEHOLDER_ISINS`). ISIN is the only join key, so the row cannot
     #: enter `prices_raw` — and the session must not be refused for it either, which is what
@@ -179,9 +186,10 @@ class PricesRawQuarantineRow(BaseModel):
     """A delivery row the writer could not place on a price row — quarantined, counted, not dropped.
 
     Either the identity master could not resolve its `(symbol, date)` to an ISIN
-    (`SYMBOL_UNRESOLVED`, `isin` is `None`), or it resolved but no price row in the session carried
-    that `(isin, series)` (`NO_MATCHING_PRICE`). Both are visible gaps a downstream check can act
-    on, which is the whole point of quarantining rather than silently discarding them.
+    (`SYMBOL_UNRESOLVED`, `isin` is `None`), or the master named several ISINs and the session did
+    not settle it (`SYMBOL_AMBIGUOUS`, `isin` is `None`), or it resolved but no price row in the
+    session carried that `(isin, series)` (`NO_MATCHING_PRICE`). All are visible gaps a downstream
+    check can act on, which is the whole point of quarantining rather than silently discarding them.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
