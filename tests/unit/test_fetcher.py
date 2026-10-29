@@ -54,6 +54,7 @@ from dataplatform.ingest.policy import (
     RobotsDisallowedError,
     RobotsPolicy,
     SourceDeclinedError,
+    SourcePausedError,
     UnknownSourceError,
     resolve_policy,
 )
@@ -289,7 +290,7 @@ def test_a_403_spike_trips_a_hard_stop_and_alerts(
     assert not fetcher.is_stopped(ARCHIVES)
     assert alerter.sent == []
 
-    with pytest.raises(ForbiddenSpikeError, match="stopped for the life of this process"):
+    with pytest.raises(ForbiddenSpikeError, match="This fetcher will not request this host again"):
         fetcher.fetch("nse_bhavcopy_udiff", UDIFF, TRADE_DATE)
 
     assert fetcher.is_stopped(ARCHIVES)
@@ -524,8 +525,25 @@ def test_the_decline_refusal_is_the_status_and_nothing_else(
         resolve_policy("screener_company_fundamentals", register, settings)
     assert resolve_policy("screener_company_fundamentals", undeclined_register, settings)
     for source in register.sources:
-        if not source.is_declined:
+        if not source.is_declined and not source.is_paused:
             resolve_policy(source.id, register, settings)
+
+
+def test_a_paused_source_is_refused_before_any_request_and_only_while_paused(
+    register: SourceRegister, undeclined_register: SourceRegister, settings: Settings
+) -> None:
+    """D29: the three api.bseindia.com sources are paused; the refusal is the pause, nothing else.
+
+    Inverted: the same rows un-paused resolve, and bse_bhavcopy_udiff (www.bseindia.com, not
+    paused) is never refused.
+    """
+    paused = sorted(s.id for s in register.sources if s.is_paused)
+    assert paused == ["bse_announcements", "bse_corp_actions", "bse_scrip_master"]
+    for source_id in paused:
+        with pytest.raises(SourcePausedError, match="D29"):
+            resolve_policy(source_id, register, settings)
+        assert resolve_policy(source_id, undeclined_register, settings)
+    assert resolve_policy("bse_bhavcopy_udiff", register, settings).host == "www.bseindia.com"
 
 
 def test_the_permitted_screener_surface_is_still_allowed(

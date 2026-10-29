@@ -559,3 +559,12 @@ def test_a_capture_only_source_succeeds_at_fetched(store: SyncStateStore) -> Non
     assert by_source[FLOWS].last_success_date is None
     assert by_source[FLOWS].healthy is False
     assert not store.is_green(SESSION, [press]).green
+
+
+def test_a_paused_source_is_red_to_the_interlock(store: SyncStateStore) -> None:
+    """D29 is display only: on a session, a paused dataset with no row is missing, not exempt —
+    `is_green` never sets a paused source aside the way it sets aside a DECLINED one."""
+    assert "bse_announcements" in store.paused and "bse_announcements" not in store.declined
+    status = store.is_green(SESSION, ["bse_announcements"])
+    assert not status.green
+    assert "bse_announcements" in status.missing and not status.declined

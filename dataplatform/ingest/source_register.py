@@ -131,6 +131,30 @@ class Declined(BaseModel):
         return int(match.group(1))
 
 
+class Paused(BaseModel):
+    """Why a working source is deliberately not fetched for now, since when, and who decided.
+
+    Orthogonal to `status`, which records what the sweep established about the pattern: a paused
+    row stays VERIFIED (the evidence is still true) and is simply not requested — every job leg
+    skips it before any request, and `policy.resolve_policy` refuses it as a backstop. Lifting a
+    pause is the owner's decision (AGENTIC_CONTEXT §8: restart deliberately): delete the record
+    and restart the scheduler. `decision` must cite a HUMAN_DECISIONS entry, as a decline does.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    reason: str = Field(min_length=1)
+    since: date
+    decision: str = Field(min_length=1, pattern=DECISION_REF.pattern)
+
+    @field_validator("reason", "decision")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must state something, not whitespace")
+        return value
+
+
 class Era(BaseModel):
     """Half-open date range a URL pattern is valid for; `None` means unbounded."""
 
@@ -262,6 +286,9 @@ class Source(BaseModel):
     #: that path ever publishes). Read by `/status/sources` to tell "landed" from "stuck"; the
     #: trading interlock (`is_green`) ignores it and still requires PUBLISHED.
     final_state: Literal["PUBLISHED", "FETCHED"] = "PUBLISHED"
+    #: Set while the owner has paused this source (HUMAN_DECISIONS D29): never requested, shown as
+    #: PAUSED rather than red, and never counted as fresh or published by any gate.
+    paused: Paused | None = None
 
     @model_validator(mode="after")
     def _declined_pairs_with_its_record(self) -> Self:
@@ -276,7 +303,14 @@ class Source(BaseModel):
             raise ValueError(
                 f"{self.id}: carries a `declined` record but its status is {self.status}"
             )
+        if self.paused is not None and self.status is Status.DECLINED:
+            raise ValueError(f"{self.id}: DECLINED is permanent; it cannot also be paused")
         return self
+
+    @property
+    def is_paused(self) -> bool:
+        """True while the owner has paused this source — no job leg requests it."""
+        return self.paused is not None
 
     @property
     def is_declined(self) -> bool:
@@ -354,6 +388,10 @@ class SourceRegister(BaseModel):
         """Source id → its decline record, for every source declined on policy grounds."""
         return {s.id: s.decline() for s in self.sources if s.is_declined}
 
+    def paused(self) -> dict[str, Paused]:
+        """Source id → its pause record, for every source the owner has paused."""
+        return {s.id: s.paused for s in self.sources if s.paused is not None}
+
     def capture_only(self) -> frozenset[str]:
         """Ids of the sources whose successful attempt ends at FETCHED (`Source.final_state`)."""
         return frozenset(s.id for s in self.sources if s.final_state == "FETCHED")
@@ -371,6 +409,11 @@ def reprobe_candidates(reg: SourceRegister) -> list[Source]:
 def declined_sources(path: Path = REGISTER_PATH) -> dict[str, Declined]:
     """The checked-in register's declined sources (id → record). Loads the file each call."""
     return load(path).declined()
+
+
+def paused_sources(path: Path = REGISTER_PATH) -> dict[str, Paused]:
+    """The checked-in register's paused sources (id → record). Loads the file each call."""
+    return load(path).paused()
 
 
 def capture_only_sources(path: Path = REGISTER_PATH) -> frozenset[str]:

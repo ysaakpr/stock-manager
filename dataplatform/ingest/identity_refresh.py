@@ -29,6 +29,7 @@ their checksums, and then `identity.ingest` reading them back out. The fixtures 
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from typing import Final
@@ -44,14 +45,25 @@ from dataplatform.identity.ingest import (
     ingest_snapshot,
     read_snapshot_from_l0,
 )
+from dataplatform.identity.master import Exchange
 from dataplatform.ingest.fetcher import Fetcher, leased_fetcher
-from dataplatform.ingest.source_register import SourceRegister
+from dataplatform.ingest.source_register import Paused, SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection, connection
 from dataplatform.store.l0 import L0Ref, L0Store
 
-__all__ = ["IDENTITY_SOURCES", "IdentityRefreshReport", "fetch_identity_files", "refresh_identity"]
+__all__ = [
+    "IDENTITY_SOURCES",
+    "IdentityRefreshReport",
+    "fetch_identity_files",
+    "refresh_failure",
+    "refresh_identity",
+]
+
+#: The source whose ingest writes an exchange's symbol windows. While it is paused (D29) nothing
+#: can add, close or repair that exchange's windows, so its standing conflicts cannot change.
+_EXCHANGE_IDENTITY_SOURCE: Final[dict[Exchange, str]] = {Exchange.BSE: "bse_scrip_master"}
 
 _LOG = get_logger(__name__)
 
@@ -81,6 +93,36 @@ class IdentityRefreshReport:
             f"{self.ingest.counts.windows_closed} closed, "
             f"{len(self.ingest.conflicts)} conflict(s)"
         )
+
+
+def refresh_failure(report: IdentityRefreshReport, paused: Mapping[str, Paused]) -> str | None:
+    """Why the weekly refresh failed, or None when it is trustworthy.
+
+    What it does: fails on every history refusal and every conflict — except a conflict on an
+    exchange whose identity source is paused (register `paused`, D29). The NSE refresh re-detects
+    the whole stored master, BSE windows included, so the ten 2026-09-06 BSE scrip-master conflicts
+    failed it every Saturday; while `bse_scrip_master` is paused no BSE window can be written, so
+    those conflicts can neither grow nor be repaired by this job. They are logged here and stay in
+    `identity_reconciliation` for a human, unchanged.
+    What it never does: hold a conflict on an exchange whose source is live, or a refusal.
+    """
+    held_exchanges = {
+        exchange for exchange, source in _EXCHANGE_IDENTITY_SOURCE.items() if source in paused
+    }
+    held = [c for c in report.ingest.conflicts if c.exchange in held_exchanges]
+    blocking = [c for c in report.ingest.conflicts if c.exchange not in held_exchanges]
+    if held:
+        _LOG.info(
+            "identity.conflicts_held_by_pause",
+            snapshot_date=report.snapshot_date.isoformat(),
+            held=len(held),
+            exchanges=sorted(e.value for e in held_exchanges),
+            symbols=sorted({symbol for c in held for symbol in c.symbols}),
+            state="HELD",
+        )
+    if report.ingest.refusals or blocking:
+        return report.summary()
+    return None
 
 
 def fetch_identity_files(

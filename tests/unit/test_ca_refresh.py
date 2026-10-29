@@ -42,12 +42,14 @@ from dataplatform.ingest.ca_refresh import (
     unmatched_nse_isins,
 )
 from dataplatform.ingest.fetcher import RecordedResponse, RecordedTransport
+from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.scheduler.registry import BSE_CA_SWEEP, CA_REFRESH, JobContext
 from dataplatform.status.sync_state import SyncState
 from dataplatform.store.db import Connection
 from dataplatform.store.l0 import L0Store
 from tests.conftest import SettingsLoader
+from tests.register_support import unpaused
 from tests.unit.test_ca_backfill import (
     CLOCK,
     NSE_FIXTURE,
@@ -95,8 +97,10 @@ def _refresh(
     to_date: date = TO,
     bse: dict[str, bytes] | None = None,
     drained: list[int] | None = None,
+    register: SourceRegister | None = None,
 ) -> tuple[CaRefreshReport, RecordedTransport]:
-    register = load_register()
+    if register is None:
+        register = unpaused(load_register())  # the BSE leg as it runs once D29 is lifted
     unit = build_nse_refresh_unit(FROM, to_date, register=register)
     transport = _transport([unit.url], _bse_payloads() if bse is None else bse)
     settings = _settings(tmp_path)
@@ -308,3 +312,35 @@ def test_a_failed_unit_fails_the_job(
     )
     with pytest.raises(CaRefreshError, match="500470"):
         CA_REFRESH.fn(context)
+
+
+# ── D29: a paused BSE feed is skipped before any request, and the refresh still succeeds ────
+
+
+def test_a_paused_bse_feed_is_never_requested_and_the_refresh_succeeds(tmp_path: Path) -> None:
+    """With the checked-in register (bse_corp_actions paused, D29) the NSE leg, the finalize and
+    the drain all run; not one BSE request is made, the skip is logged, and nothing is a failure.
+
+    Inverted by every test above: the same refresh on the un-paused register asks BSE.
+    """
+    from structlog.testing import capture_logs
+
+    from dataplatform.ingest.ca_refresh import _hosts
+
+    register = load_register()
+    drained: list[int] = []
+    with capture_logs() as logs:
+        report, transport = _refresh(
+            tmp_path, _FakeConn(), _FakeSync(), drained=drained, register=register
+        )
+    assert _bse_requests(transport) == []
+    assert transport.requests, "the NSE leg still ran"
+    assert report.clean and report.failures == [] and report.bse_paused
+    assert "BSE paused" in report.summary()
+    assert drained == [1]
+    (event,) = [e for e in logs if e["event"] == "ca_refresh.source_paused"]
+    assert event["source"] == "bse_corp_actions" and event["decision"].startswith(
+        "HUMAN_DECISIONS D29"
+    )
+    assert "api.bseindia.com" not in _hosts(register)
+    assert "api.bseindia.com" in _hosts(unpaused(register))

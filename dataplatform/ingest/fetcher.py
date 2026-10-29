@@ -366,7 +366,7 @@ class Fetcher:
         return policy
 
     def is_stopped(self, host: str) -> bool:
-        """Whether a 403 spike has hard-stopped this host for the life of the process."""
+        """Whether a 403 spike has hard-stopped this host for the rest of this fetcher's life."""
         return self._watch.stopped(host)
 
     def fetch(
@@ -577,13 +577,19 @@ class Fetcher:
         )
 
     def _hard_stop(self, policy: CrawlPolicy, host: str, url: str, streak: int) -> NoReturn:
-        """Stop this process fetching from `host`, and wake a human (§4.1, §8.1)."""
+        """Stop this fetcher requesting `host`, and wake a human (§4.1, §8.1).
+
+        The stop is per fetcher (`self._watch`): every job run builds its own fetcher, so the next
+        run may request the host again — which is why a source the owner has agreed to leave alone
+        is paused in the register (D29) rather than left to trip this every night.
+        """
         message = (
             f"{streak} consecutive 403s from {host} within {self._watch.window} "
-            f"(latest: {policy.source_id} {url}). Ingestion from this host is stopped for the "
-            "life of this process. Do not work around it: no user-agent rotation, no proxy, no "
-            "faster retry (AGENTIC_CONTEXT §8). Check whether the source changed its access "
-            "rules, then restart ingestion deliberately."
+            f"(latest: {policy.source_id} {url}). This fetcher will not request this host again "
+            "(a later job run starts a new fetcher). Do not work around it: no user-agent "
+            "rotation, no proxy, no faster retry (AGENTIC_CONTEXT §8). Check whether the source "
+            "changed its access rules; if it stays blocked, the owner may pause it in the Source "
+            "Register."
         )
         _LOG.critical(
             "fetch.hard_stop",
@@ -606,11 +612,12 @@ class Fetcher:
         raise ForbiddenSpikeError(message)
 
     def _guard(self, host: str) -> None:
-        """Refuse, without a request, to touch a host this process has hard-stopped."""
+        """Refuse, without a request, to touch a host this fetcher has hard-stopped."""
         if self._watch.stopped(host):
             raise ForbiddenSpikeError(
-                f"ingestion from {host} is hard-stopped after a 403 spike; this process will not "
-                "request it again. Restart only after the block is understood (AGENTIC_CONTEXT §8)"
+                f"ingestion from {host} is hard-stopped after a 403 spike; this fetcher will not "
+                "request it again (a later job run starts a new one). Restart only after the "
+                "block is understood (AGENTIC_CONTEXT §8)"
             )
 
 

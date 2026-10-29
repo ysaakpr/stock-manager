@@ -114,7 +114,11 @@ def read_sources_status(
     budgets = lag_budgets(default_registry())
     statuses = store.source_statuses(budgets)
     verdicts = [None if judge is None else judge.source(status) for status in statuses]
-    accepted, errors = split_accepted([status.healthy for status in statuses], verdicts)
+    # A paused source is counted apart (D29), neither an error nor an accepted deviation.
+    live = [(status, verdict) for status, verdict in zip(statuses, verdicts, strict=True)
+            if status.paused is None]  # fmt: skip
+    accepted, errors = split_accepted([s.healthy for s, _ in live], [v for _, v in live])
+    paused = sum(1 for status in statuses if status.paused is not None and not status.healthy)
     return SourcesOut(
         as_of=as_of,
         sources=[
@@ -123,6 +127,7 @@ def read_sources_status(
         ],
         accepted=accepted,
         errors=errors,
+        paused=paused,
         declined={source: DeclinedOut.of(record) for source, record in store.declined.items()},
     )
 
@@ -139,7 +144,7 @@ def sort_sources_worst_first(sources: Sequence[SourceStatusOut]) -> list[SourceS
         lag = line.lag_sessions
         accepted = line.deviation is not None and line.deviation.accepted
         return (
-            2 if line.healthy else (1 if accepted else 0),
+            2 if line.healthy else (1 if accepted or line.paused is not None else 0),
             -line.failure_streak,
             0 if line.overdue else 1,
             -(10**9 if lag is None else lag),

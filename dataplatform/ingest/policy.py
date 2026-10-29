@@ -55,6 +55,7 @@ __all__ = [
     "RobotsPolicy",
     "Sleeper",
     "SourceDeclinedError",
+    "SourcePausedError",
     "UnknownSourceError",
     "resolve_policy",
     "robots_for",
@@ -94,6 +95,15 @@ class SourceDeclinedError(PolicyError):
     """The source is `DECLINED` in the register: we chose, on policy grounds, never to fetch it
     (HUMAN_DECISIONS D12/D19). Not retryable and not overridable — undoing it is a new decision
     recorded in the register, never a flag at the call site."""
+
+
+class SourcePausedError(PolicyError):
+    """The source is paused by the owner (register `paused`, HUMAN_DECISIONS D29): not requested.
+
+    The backstop behind every job leg's own skip: a leg that forgot to check the pause fails here,
+    loud and before any socket exists, rather than spending a request on a host we agreed to
+    leave alone.
+    """
 
 
 class MissingHostPolicyError(PolicyError):
@@ -235,9 +245,9 @@ def resolve_policy(
     host's own recorded minimum — because each is a claim about a lower bound and the binding one
     is whichever is largest. The rest comes straight from the row.
 
-    Raises `SourceDeclinedError` for a `DECLINED` row: this is the one place every fetch path
-    (the fetcher, the per-source crawlers) obtains its policy, so refusing here means a declined
-    source cannot be fetched by any of them.
+    Raises `SourceDeclinedError` for a `DECLINED` row and `SourcePausedError` for a paused one:
+    this is the one place every fetch path (the fetcher, the per-source crawlers) obtains its
+    policy, so refusing here means neither can be fetched by any of them.
     """
     settings = get_settings() if settings is None else settings
     source = next((entry for entry in register.sources if entry.id == source_id), None)
@@ -250,6 +260,12 @@ def resolve_policy(
         raise SourceDeclinedError(
             f"source {source_id} is DECLINED on policy grounds ({source.decline().decision}); "
             "it is never fetched"
+        )
+    if source.paused is not None:
+        raise SourcePausedError(
+            f"source {source_id} is paused since {source.paused.since.isoformat()} "
+            f"({source.paused.decision}): {source.paused.reason.strip()} — no request is made "
+            "until the owner lifts the pause"
         )
     record = register.host_policy(source.host)
     if record is None:

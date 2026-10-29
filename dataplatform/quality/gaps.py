@@ -111,6 +111,14 @@ class GapReason(StrEnum):
     far side of a cutover would read as a missing day for the source that never served it.
     """
 
+    PAUSED = "PAUSED"
+    """The owner paused this source (register `paused`, HUMAN_DECISIONS D29) on or before this date.
+
+    Explained the way OUTSIDE_SOURCE_ERA is: nothing is requested while a source is paused, so no
+    file was owed. Only for a pair with no row on or after the pause's `since` — a row written
+    before the pause took effect keeps its own classification (a FAILED stays FAILED).
+    """
+
     NOT_YET_DUE = "NOT_YET_DUE"
     """A trading day whose covering scheduled fire, budget and grace included, has not yet passed.
 
@@ -171,7 +179,13 @@ class GapReason(StrEnum):
 #: The reasons that close a missing day honestly: the exchange was shut, or this source did not
 #: serve that era. Everything else in `GapReason` is a day someone owes an answer for.
 _EXPLAINED: Final[frozenset[GapReason]] = frozenset(
-    {GapReason.WEEKEND, GapReason.HOLIDAY, GapReason.OUTSIDE_SOURCE_ERA, GapReason.NOT_YET_DUE}
+    {
+        GapReason.WEEKEND,
+        GapReason.HOLIDAY,
+        GapReason.OUTSIDE_SOURCE_ERA,
+        GapReason.NOT_YET_DUE,
+        GapReason.PAUSED,
+    }
 )
 
 #: `DayKind` → the reason a closed day is explained by. Sessions never appear here.
@@ -353,6 +367,8 @@ class SourceExpectation:
     #: The state a successful attempt ends in (register `final_state`): FETCHED for a capture-only
     #: source, whose FETCHED rows are complete rather than stuck mid-pipeline.
     final_state: SyncState = SyncState.PUBLISHED
+    #: The day the owner's pause took effect (register `paused.since`, D29); None when not paused.
+    paused_since: date | None = None
 
     def l0_trees(self) -> tuple[str, ...]:
         """The L0 source trees a payload for this source could be in.
@@ -483,6 +499,7 @@ def expectations_from_register(
             era_end=entry.era.end,
             l1_dataset=_l1_dataset_for(entry.plan_row, entry.id, entry.cadence),
             final_state=SyncState(entry.final_state),
+            paused_since=None if entry.paused is None else entry.paused.since,
         )
         for entry in loaded.sources
     }
@@ -792,6 +809,15 @@ def _absent(
 
     if not expectation.per_session:
         return None
+    if expectation.paused_since is not None and logical_date >= expectation.paused_since:
+        return _entry(
+            expectation,
+            logical_date,
+            day_kind,
+            GapReason.PAUSED,
+            f"{expectation.source} is paused since {expectation.paused_since.isoformat()} "
+            "(D29): nothing is requested, so no file was owed",
+        )
     if not expectation.in_era(logical_date):
         return _entry(
             expectation,

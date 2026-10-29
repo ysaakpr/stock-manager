@@ -693,6 +693,27 @@ than 7 days past its first attempt, and red after that. The matcher is those two
 error shapes only (`d28-*` in `dataplatform/status/accepted_deviations.yaml`). Display and alerting
 only. Task M18.2.
 
+### D29 — Pause the api.bseindia.com sources until the block lifts → **ANSWERED (owner, 2026-10-24): "agree".**
+
+`api.bseindia.com` has refused this deployment (HTTP 403) since 2026-09-24 (D26). Every night the
+BSE legs of `announcements_capture`, `ca_refresh` and the scrip-master snapshot still asked, tripped
+the fetcher's 403 hard stop, and recorded another failure; `bse_ca_sweep` would do the same monthly.
+The owner agreed to pause the three sources on that host — `bse_announcements`, `bse_corp_actions`,
+`bse_scrip_master` — until the block lifts. `bse_bhavcopy` comes from `www.bseindia.com`, which
+still works, and keeps running.
+
+What the pause is: a `paused` record (reason, since 2026-10-24, this decision) on each register row,
+whose `status` stays VERIFIED. Every job leg skips a paused source before any request, and logs it;
+the fetch policy refuses one as a backstop; a job whose only problem is a paused leg succeeds; the
+status pages show PAUSED (grey, with the reason) rather than red; the gap report explains a paused
+source's days from the pause date as PAUSED, as the source-era rule does; and `identity_refresh`
+holds — logs, keeps in `identity_reconciliation`, does not fail on — conflicts on the BSE exchange,
+whose windows nothing can write while the scrip master is paused. What it never does: count a paused
+source as fresh or published for any gate (`is_green`, "red data means no trading", paper and M17
+gating) — a paused dataset is simply missing. Lifting it is the owner's decision, never a workaround
+(AGENTIC_CONTEXT §8): delete the `paused` records and restart the scheduler
+(`ops/runbooks/daily-eod.md`). Task M18.2.
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
