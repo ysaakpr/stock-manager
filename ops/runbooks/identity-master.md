@@ -180,6 +180,38 @@ A reissue that happened during the week is the exception: it adds one close and 
 dated by its evidence, and no conflict. Anything inserted for one of the seven symbols means the
 scheduler was not restarted onto the fix. Stop and re-run step 2's dry run.
 
+## 2026-10-29: repair the AvenuesAI reissue (one-off, `repair_avenuesai`)
+
+AvenuesAI Ltd (NSE INFIBEAM, CCAVENUE from 2026-02-03) had its ISIN reissued INE483S01020 →
+INE483S01038 across a suspension: the L0 bhavcopy of 2026-10-12 trades CCAVENUE as the old ISIN,
+13-16 Oct do not trade it, 2026-10-19 trades it as the new one; the `EQUITY_L` captures of 13-17
+Oct omit it. A capture without the symbol breaks the series evidence, and there was no edge, so
+the 2026-10-24 `identity_refresh` stored the new ISIN's windows from the listing date
+(`symbol_history` 11602 CCAVENUE, 11607 INFIBEAM) and queued reconciliation 72 and 73. Every
+CCAVENUE resolve raised from then on, and `nse_delivery` failed with it.
+
+This is the first MANUAL `isin_lineage` edge, and it is recorded by the repair itself, in the same
+transaction, after re-reading that L0 evidence — not by a hand-written INSERT:
+
+```bash
+uv run python -m dataplatform.identity.repair_avenuesai           # dry run, READ ONLY
+uv run python -m dataplatform.identity.repair_avenuesai --apply   # locks three tables, one transaction
+```
+
+* The dry run must list 13 L0 payloads (six bhavcopies, seven captures), then: 1 edge
+  INE483S01020 → INE483S01038 effective 2026-10-19 (MANUAL, DERIVED, gap 4), delete 11607 and
+  11602, close INE483S01020 CCAVENUE at 2026-10-18, insert INE483S01038 CCAVENUE from 2026-10-19,
+  resolve 72 and 73. Anything else and it refuses, writing nothing. A second `--apply` is a no-op.
+* INE483S01020's BSE window (CCAVENUE, from 2026-09-06) is not touched: BSE is parked.
+* With the edge in place, the weekly ingest re-derives CCAVENUE onto the stored 2026-10-19 start
+  (`resolve_reissues`, the "already reconciled" branch) and drops the INFIBEAM rename history from
+  the new ISIN, so neither deleted window comes back.
+* **Known follow-up — `lineage_rebuild`.** L1 contiguity will derive the same pair, and
+  `LineageStore.replace_derived` inserts derived edges without skipping a predecessor that already
+  holds a MANUAL row, so the next manual `identity.lineage_rebuild` stops on the unique index for
+  INE483S01020. It fails loudly and rolls back; nothing scheduled calls it. Fix `replace_derived`
+  to skip such an edge before the next rebuild. Do not delete the MANUAL row to get past it.
+
 ## Health
 
 * Every stored window names the file it came from: `symbol_history.source` is `nse_equity_list`
