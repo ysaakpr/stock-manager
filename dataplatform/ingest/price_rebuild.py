@@ -106,6 +106,7 @@ class PriceRebuildReport:
     delivery_via_lineage: int = 0
     delivery_via_session: int = 0
     delivery_session_disagrees: int = 0
+    delivery_ambiguity_resolved_by_session: int = 0
     missing: list[date] = field(default_factory=list)
     failures: list[tuple[date, str]] = field(default_factory=list)
 
@@ -125,6 +126,9 @@ class PriceRebuildReport:
         self.delivery_via_lineage += write_report.delivery_via_lineage
         self.delivery_via_session += write_report.delivery_via_session
         self.delivery_session_disagrees += write_report.delivery_session_disagrees
+        self.delivery_ambiguity_resolved_by_session += (
+            write_report.delivery_ambiguity_resolved_by_session
+        )
 
 
 class PriceRebuilder:
@@ -174,6 +178,7 @@ class PriceRebuilder:
             delivery_via_lineage=report.delivery_via_lineage,
             delivery_via_session=report.delivery_via_session,
             delivery_session_disagrees=report.delivery_session_disagrees,
+            delivery_ambiguity_resolved_by_session=report.delivery_ambiguity_resolved_by_session,
         )
         return report
 
@@ -323,7 +328,8 @@ def _run(
     print(
         f"  placed via reissue lineage {report.delivery_via_lineage}, via the session's own "
         f"bhavcopy {report.delivery_via_session}; master contradicts the session on "
-        f"{report.delivery_session_disagrees}"
+        f"{report.delivery_session_disagrees}; ambiguous master settled by the session on "
+        f"{report.delivery_ambiguity_resolved_by_session}"
     )
     if report.missing:
         shown = ", ".join(day.isoformat() for day in report.missing[:5])
