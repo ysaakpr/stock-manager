@@ -49,7 +49,7 @@ from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from dataplatform.identity.master import Exchange, IdentityMaster
+from dataplatform.identity.master import AmbiguousSymbolError, Exchange, IdentityMaster
 from dataplatform.identity.session import SessionIdentity
 from dataplatform.ingest.models import ParseError
 from dataplatform.logging import get_logger
@@ -215,16 +215,19 @@ class DeliveryResolution:
     `unresolved` holds the rows whose `(symbol, date)` neither the master nor the session's own
     statement could place — quarantined and counted rather than dropped, so a delivery file naming
     a security nothing has identified is a visible gap, not silent data loss (the M1.8 contract).
-    An *ambiguous* symbol is not quarantined here: `IdentityMaster.resolve` raises
-    `AmbiguousSymbolError` and queues the conflict, because "we know two contradictory ISINs" is a
-    different fact from "we know none".
+    An *ambiguous* symbol — the master holds two windows naming two ISINs that day — is a
+    different fact from an unknown one ("we know two contradictory ISINs", not "we know none"),
+    and `IdentityMaster.try_resolve` queues it for reconciliation whatever happens next.
 
-    The three counters say *how* the resolved rows were placed, so a coverage change can be traced
-    to the identity source that caused it: `via_lineage` rows had the master's ISIN moved along a
+    The counters say *how* the resolved rows were placed, so a coverage change can be traced to
+    the identity source that caused it: `via_lineage` rows had the master's ISIN moved along a
     reissue edge to the one in force that session; `via_session` rows the master did not know and
     the session's bhavcopy did; `session_disagrees` rows the master would have placed on an ISIN
     other than the one the session's bhavcopy states for that `(symbol, series)` — placed on the
-    bhavcopy's, and counted, because each one is a master defect worth reading.
+    bhavcopy's, and counted, because each one is a master defect worth reading;
+    `ambiguity_resolved_by_session` rows the master found ambiguous and the session's bhavcopy
+    settled by stating exactly one of the master's candidate ISINs for that `(symbol, series)` —
+    placed on it, counted, and still a queued master conflict.
     """
 
     resolved: tuple[ResolvedDeliveryRow, ...]
@@ -232,6 +235,7 @@ class DeliveryResolution:
     via_lineage: int = 0
     via_session: int = 0
     session_disagrees: int = 0
+    ambiguity_resolved_by_session: int = 0
 
 
 def parse(
@@ -371,16 +375,26 @@ def resolve(
     the equity INE039A01010 whatever the series, so the delivery row for IFCI's debenture series
     `NE` — INE039A07777 in that session's own bhavcopy — would land on no price row. The exchange's
     statement for that exact `(symbol, series, session)` is the more specific fact.
+
+    The same rule settles an *ambiguous* master. When two windows name two ISINs for the symbol
+    that day (`AmbiguousSymbolError`, already queued for reconciliation by the master) and the
+    session's bhavcopy states one ISIN for `(symbol, series)` that is one of those candidates, the
+    row is placed on it and counted in `ambiguity_resolved_by_session`. This is not a tie-break:
+    the exchange's own file for that session names the instrument, and the candidate set only
+    bounds what that statement may pick. CCAVENUE from 2026-10-26 is the case — two open windows
+    after the INE483S01020 → INE483S01038 reissue, and each session's bhavcopy stating 01038.
     What it assumes: `row.trade_date` is the session the symbol should be read as-of; a symbol is
     never resolved by name alone, because a recycled symbol resolves to different ISINs on
     different dates. `session`, when given, is that same session's statement on `exchange`.
-    What it never does: guess an ISIN, or read a session statement across sessions. An unknown
-    `(symbol, date)` is quarantined into `unresolved` and counted; an ambiguous one raises
-    `AmbiguousSymbolError` from the master.
+    What it never does: guess an ISIN, read a session statement across sessions, take a session
+    statement naming an ISIN outside an ambiguous master's candidates, or edit the master — the
+    conflict stays queued for a human. An unknown `(symbol, date)` is quarantined into
+    `unresolved` and counted; an ambiguous one the session cannot settle raises the master's
+    `AmbiguousSymbolError`.
     """
     resolved: list[ResolvedDeliveryRow] = []
     unresolved: list[DeliveryRow] = []
-    via_lineage = via_session = disagrees = 0
+    via_lineage = via_session = disagrees = settled = 0
     disagreeing: list[str] = []
     for row in rows:
         stated = (
@@ -388,7 +402,25 @@ def resolve(
             if session is None
             else session.try_resolve(row.symbol, row.series, row.trade_date, exchange=exchange)
         )
-        windowed = master.try_resolve(row.symbol, row.trade_date, exchange=exchange)
+        try:
+            windowed = master.try_resolve(row.symbol, row.trade_date, exchange=exchange)
+        except AmbiguousSymbolError as ambiguous:
+            candidates = ambiguous.conflict.isins
+            if stated is None or stated not in candidates:
+                raise
+            settled += 1
+            _LOG.warning(
+                "delivery.ambiguity_resolved_by_session",
+                source=DELIVERY_SOURCE_ID,
+                exchange=exchange.value,
+                symbol=row.symbol,
+                series=row.series,
+                trade_date=row.trade_date.isoformat(),
+                candidates=list(candidates),
+                chosen=stated,
+            )
+            resolved.append(_resolved(row, stated))
+            continue
         if windowed is None:
             isin = stated
             via_session += isin is not None
@@ -402,16 +434,7 @@ def resolve(
         if isin is None:
             unresolved.append(row)
             continue
-        resolved.append(
-            ResolvedDeliveryRow(
-                isin=isin,
-                symbol=row.symbol,
-                series=row.series,
-                trade_date=row.trade_date,
-                deliv_qty=row.deliv_qty,
-                deliv_pct=row.deliv_pct,
-            )
-        )
+        resolved.append(_resolved(row, isin))
     if unresolved:
         _LOG.warning(
             "delivery.unresolved",
@@ -434,6 +457,19 @@ def resolve(
         via_lineage=via_lineage,
         via_session=via_session,
         session_disagrees=disagrees,
+        ambiguity_resolved_by_session=settled,
+    )
+
+
+def _resolved(row: DeliveryRow, isin: str) -> ResolvedDeliveryRow:
+    """`row` placed on `isin` — the one shape every resolve branch produces."""
+    return ResolvedDeliveryRow(
+        isin=isin,
+        symbol=row.symbol,
+        series=row.series,
+        trade_date=row.trade_date,
+        deliv_qty=row.deliv_qty,
+        deliv_pct=row.deliv_pct,
     )
 
 

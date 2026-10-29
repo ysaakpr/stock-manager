@@ -31,9 +31,11 @@ Three properties this module exists to guarantee, each mapped to an acceptance c
 * **Nothing is dropped silently.** A delivery row whose symbol the master cannot resolve, or which
   resolves but matches no price row that session, is written to the `prices_raw_quarantine` dataset
   with a reason and counted in the returned report — a visible gap, not data loss. An *ambiguous*
-  symbol is not quarantined: `IdentityMaster.resolve` raises `AmbiguousSymbolError`, because "we
-  know two contradictory ISINs" is a different fact from "we know none", and only the human-review
-  queue may settle it.
+  symbol — the master holds two ISINs for it that day — is placed only where the session's own
+  bhavcopy states one of the master's candidates for that `(symbol, series)`; otherwise
+  `IdentityMaster.resolve` raises `AmbiguousSymbolError`, because "we know two contradictory
+  ISINs" is a different fact from "we know none", and only the human-review queue may settle the
+  master itself.
 
 Offline by construction: this module takes parsed rows (or reads bytes back through `L0Store`) and
 never fetches. `write_prices_raw` is the pure rows→partition core; `rebuild_prices_raw_from_l0` is
@@ -118,6 +120,8 @@ class PricesRawWriteReport:
     delivery_via_lineage: int = 0
     delivery_via_session: int = 0
     delivery_session_disagrees: int = 0
+    #: Rows the master found ambiguous and the session's bhavcopy settled (one of the candidates).
+    delivery_ambiguity_resolved_by_session: int = 0
 
     @property
     def quarantined(self) -> int:
@@ -233,6 +237,7 @@ def write_prices_raw(
         delivery_via_lineage=resolution.via_lineage,
         delivery_via_session=resolution.via_session,
         delivery_session_disagrees=resolution.session_disagrees,
+        delivery_ambiguity_resolved_by_session=resolution.ambiguity_resolved_by_session,
     )
     _LOG.info(
         "l1.prices_raw_written",
@@ -249,6 +254,7 @@ def write_prices_raw(
         delivery_via_lineage=report.delivery_via_lineage,
         delivery_via_session=report.delivery_via_session,
         delivery_session_disagrees=report.delivery_session_disagrees,
+        delivery_ambiguity_resolved_by_session=report.delivery_ambiguity_resolved_by_session,
         state="PUBLISHED",
     )
     return report
@@ -351,7 +357,8 @@ def _resolve_delivery(
     Delegates to `delivery.resolve`, which asks the master for the ISIN in force that session and,
     only for a symbol the master has never seen, the session's own bhavcopy statement — built here
     from `price_rows`, the same file's `(symbol, series, isin)` for this exchange and date. An
-    unknown `(symbol, date)` lands in `unresolved`; an *ambiguous* one raises from the master. Also
+    unknown `(symbol, date)` lands in `unresolved`; an *ambiguous* one is placed where that same
+    statement names one of the master's candidates, and otherwise raises from the master. Also
     guards that the delivery file's own session matches the prices' session — a mismatched delivery
     file joined here would scatter one date's delivery figures onto another's prices.
     """
