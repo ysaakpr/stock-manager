@@ -39,6 +39,7 @@ __all__ = [
     "LogFormat",
     "LogLevel",
     "Settings",
+    "WebResearchPath",
     "get_settings",
 ]
 
@@ -67,6 +68,19 @@ class LogFormat(StrEnum):
     AUTO = "auto"
     JSON = "json"
     CONSOLE = "console"
+
+
+class WebResearchPath(StrEnum):
+    """How a Bedrock desk's Commons fetcher retrieves the web (pre-registration Amendment 5 (d)).
+
+    `WEBSEARCH` is our own layer (`analyst.websearch`): a Bedrock tool loop over Brave, Tavily and
+    Firecrawl, with the Claude CLI's web tools as the per-request backup when Bedrock is
+    unavailable. `CLAUDE_CLI` keeps the Claude CLI's own web search and fetch for every request —
+    the rollback that needs no code change. A desk on the Claude CLI always researches there.
+    """
+
+    WEBSEARCH = "websearch"
+    CLAUDE_CLI = "claude_cli"
 
 
 class LlmProvider(StrEnum):
@@ -275,8 +289,8 @@ class Settings(BaseSettings):
     m17_llm_provider: LlmProvider = Field(
         default=LlmProvider.CLAUDE_CLI,
         description=(
-            "the M17 desk's managers and digests: stub | anthropic | claude_cli | bedrock; the web "
-            "fetcher stays on the Claude CLI for every provider but the stub"
+            "the M17 desk's managers and digests: stub | anthropic | claude_cli | bedrock; on "
+            "bedrock the web fetcher follows M17_WEB_RESEARCH, otherwise it is the Claude CLI's"
         ),
     )
     #: The provider a M17 call is re-asked on when `m17_llm_provider` could not serve it — not
@@ -287,6 +301,13 @@ class Settings(BaseSettings):
     m17_llm_fallback: LlmProvider | None = Field(
         default=LlmProvider.CLAUDE_CLI,
         description="the M17 desk's backup provider, per call: none | anthropic | claude_cli",
+    )
+    #: Read only while `m17_llm_provider` is bedrock: Bedrock has no web tools of its own.
+    m17_web_research: WebResearchPath = Field(
+        default=WebResearchPath.WEBSEARCH,
+        description=(
+            "a Bedrock desk's web research: websearch (our own vendors, CLI backup) | claude_cli"
+        ),
     )
     bedrock_region: str | None = Field(
         default=None,

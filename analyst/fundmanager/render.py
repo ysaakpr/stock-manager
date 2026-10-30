@@ -49,6 +49,7 @@ from analyst.commons import (
     RegimeReading,
     Screen,
     Shortlist,
+    Snapshot,
     UniverseRow,
 )
 from analyst.commons.dossier import DOSSIER_FIELDS, MARKET_FIELDS
@@ -59,6 +60,7 @@ from analyst.fundmanager.bundle import (
     ManagerBook,
     ResearchBundle,
 )
+from analyst.websearch import UNTRUSTED_CONTENT_RULE, wrap_untrusted
 
 __all__ = [
     "DESK_ORDER_DOMAIN",
@@ -88,10 +90,14 @@ ROUND_RESEARCH: Final = "RESEARCH"
 ROUND_FINAL: Final = "FINAL"
 
 #: The system prompt of every manager call. Fixed, and part of `schemas.schema_bytes`.
+#: The system text of every manager call. It carries `UNTRUSTED_CONTENT_RULE` (Amendment 5 (d)):
+#: a fetched page reaches the manager inside `<web_content>` (`_render_snapshot`), and the page is
+#: data, never an instruction. It is a `mandate_hash` input (`schemas.schema_bytes`).
 SYSTEM_PROMPT: Final = (
     "You are the fund manager the user message describes, in a forward paper test. The user "
     "message is your whole brief: your mandate, your own book and the evidence bundle. Answer "
-    "only through the structured output you are given, and cite every number from the bundle."
+    "only through the structured output you are given, and cite every number from the bundle. "
+    + UNTRUSTED_CONTENT_RULE
 )
 
 #: Study §4's three-state rule, as `analyst.commons.regime` computes it.
@@ -488,6 +494,19 @@ def _render_digest(g: FilingDigest) -> list[str]:
     return lines
 
 
+def _render_snapshot(snapshot: Snapshot) -> str:
+    """A snapshot's pages inside `<web_content>`, every copy of the tag in the text defused, so a
+    page can neither close the wrapper early nor pass for the brief. Never cut: the Commons store
+    has already bounded it."""
+    text = snapshot.text or "(no pages)"
+    wrapped, _ = wrap_untrusted(
+        text,
+        attributes={"snapshot": f"S:{snapshot.id}", "fetcher": snapshot.fetcher},
+        max_chars=len(text),
+    )
+    return wrapped
+
+
 def render_bundles(bundles: Sequence[ResearchBundle]) -> str:
     """Every fulfilled bundle so far, oldest first, with the requests that produced it."""
     if not bundles:
@@ -513,7 +532,7 @@ def render_bundles(bundles: Sequence[ResearchBundle]) -> str:
                 f"#### [S:{snapshot.id}] {query.kind.value} {snapshot.request.target!r}, fetched "
                 f"{snapshot.fetched_at.isoformat()}, {len(snapshot.pages)} page(s)"
                 + (" — truncated" if snapshot.truncated else ""),
-                snapshot.text or "(no pages)",
+                _render_snapshot(snapshot),
             ]
         if b.unfulfilled:
             lines += ["", "Not fulfilled:"]

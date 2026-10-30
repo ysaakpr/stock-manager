@@ -41,6 +41,21 @@ def _settings(monkeypatch: pytest.MonkeyPatch, **env: str) -> Settings:
     return Settings(_env_file=None)  # type: ignore[call-arg]
 
 
+def _desk_fetcher(provider: LlmProvider, settings: Settings) -> object:
+    """`fm_world._fetcher` as a ``--memory`` run calls it: no ledger, nothing persisted."""
+    with ExitStack() as stack:
+        return fm_world._fetcher(
+            provider,
+            settings=settings,
+            clock=FrozenClock(datetime(2026, 10, 30, 18, 0, tzinfo=IST)),
+            fetch_root=Path("/nonexistent/commons/fetch"),
+            session=datetime(2026, 10, 30, tzinfo=IST).date(),
+            ledger=None,
+            memory=True,
+            stack=stack,
+        )
+
+
 @pytest.fixture
 def fake_claude(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A ``claude`` on PATH that is never executed: construction only checks it exists."""
@@ -69,14 +84,14 @@ def test_the_desk_follows_its_own_setting_never_the_global_one(
     provider = m17_provider(settings, stub=False, memory=False)
     assert provider is LlmProvider.CLAUDE_CLI
     assert isinstance(fm_world._llm(settings, provider), ClaudeCliLLM)
-    assert isinstance(fm_world._fetcher(provider), ClaudeWebFetcher)
+    assert isinstance(_desk_fetcher(provider, settings), ClaudeWebFetcher)
 
     # And the other way round: a global CLI does not drag the desk off its own setting.
     settings = _settings(monkeypatch, LLM_PROVIDER="claude_cli", M17_LLM_PROVIDER="stub")
     provider = m17_provider(settings, stub=False, memory=True)
     assert provider is LlmProvider.STUB
     assert isinstance(fm_world._llm(settings, provider), StubLLM)
-    assert isinstance(fm_world._fetcher(provider), NoLiveFetcher)
+    assert isinstance(_desk_fetcher(provider, settings), NoLiveFetcher)
 
 
 def test_stub_llm_overrides_the_setting_for_a_memory_rehearsal(
@@ -86,7 +101,7 @@ def test_stub_llm_overrides_the_setting_for_a_memory_rehearsal(
     provider = m17_provider(settings, stub=True, memory=True)
     assert provider is LlmProvider.STUB
     assert isinstance(fm_world._llm(settings, provider), StubLLM)
-    assert isinstance(fm_world._fetcher(provider), NoLiveFetcher)
+    assert isinstance(_desk_fetcher(provider, settings), NoLiveFetcher)
 
 
 @pytest.mark.parametrize(

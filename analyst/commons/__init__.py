@@ -44,6 +44,8 @@ from analyst.commons.events import (
 )
 from analyst.commons.exclusions import Exclusion, ExclusionReason, Exclusions
 from analyst.commons.fetch import (
+    MAX_PAGE_BYTES,
+    MAX_PAGES_PER_REQUEST,
     FetchedPage,
     Fetcher,
     FetchError,
@@ -101,6 +103,8 @@ __all__ = [
     "DIGEST_MODEL",
     "DIGEST_OUTPUT_SCHEMA",
     "EVENT_KEYWORDS_DIGEST",
+    "MAX_PAGES_PER_REQUEST",
+    "MAX_PAGE_BYTES",
     "SCREENS_RULE_HASH",
     "SHORTLIST_RULE_HASH",
     "SHORTLIST_SIZE",

@@ -17,8 +17,10 @@ CLI, and every call lands in `token_usage` with the provider that answered it.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -374,15 +376,79 @@ def test_build_llm_refuses_the_stub_as_a_backup() -> None:
         build_llm(_settings(), provider=LlmProvider.BEDROCK, fallback=LlmProvider.STUB)
 
 
-def test_the_commons_web_research_stays_on_the_claude_cli_under_bedrock(
-    monkeypatch: pytest.MonkeyPatch,
+def _desk_fetcher(provider: LlmProvider, settings: Settings, root: Path) -> object:
+    with ExitStack() as stack:
+        return fm_world._fetcher(
+            provider,
+            settings=settings,
+            clock=FrozenClock(datetime(2026, 10, 30, 18, 0, tzinfo=IST)),
+            fetch_root=root / "commons" / "fetch",
+            session=date(2026, 10, 30),
+            ledger=None,
+            memory=True,
+            stack=stack,
+        )
+
+
+_VENDOR_KEYS: dict[str, Any] = {
+    "brave_search_api_key": "brave-test-key-not-real",
+    "tavily_api_key": "tvly-test-key-not-real",
+    "firecrawl_api_key": "fc-test-key-not-real",
+}
+
+
+def test_bedrock_research_runs_on_our_own_search_layer_with_the_cli_behind_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Bedrock has no web tools: the decision path moved, the fetcher did not."""
+    """Amendment 5 (d): Bedrock has no web tools, so the desk's fetcher is our own tool loop."""
+    from analyst.commons.fetch import ClaudeWebFetcher
+    from analyst.websearch import BedrockWebFetcher
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    settings = _settings(
+        aws_bearer_token_bedrock=FAKE_KEY, bedrock_region="us-east-1", **_VENDOR_KEYS
+    )
+    fetcher = _desk_fetcher(LlmProvider.BEDROCK, settings, tmp_path)
+    assert isinstance(fetcher, BedrockWebFetcher)
+    assert fetcher.name == "bedrock+websearch:claude-sonnet-5-5"
+    assert isinstance(fetcher._backup, ClaudeWebFetcher)
+    # The tool results live in their own store, never in the desk's (a nested lock would hang).
+    assert fetcher.research._store is not None
+    assert fetcher.research._store.root == tmp_path / "commons" / "websearch"
+
+    # No CLI backup when the desk has none.
+    settings = _settings(
+        aws_bearer_token_bedrock=FAKE_KEY,
+        bedrock_region="us-east-1",
+        m17_llm_fallback=None,
+        **_VENDOR_KEYS,
+    )
+    fetcher = _desk_fetcher(LlmProvider.BEDROCK, settings, tmp_path)
+    assert isinstance(fetcher, BedrockWebFetcher) and fetcher._backup is None
+
+
+def test_bedrock_research_stays_on_the_cli_when_asked_or_when_it_cannot_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from analyst.commons.fetch import ClaudeWebFetcher
 
     monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
-    assert isinstance(fm_world._fetcher(LlmProvider.BEDROCK), ClaudeWebFetcher)
-    assert isinstance(fm_world._fetcher(LlmProvider.STUB), fm_world.NoLiveFetcher)
+    bedrock = {"aws_bearer_token_bedrock": FAKE_KEY, "bedrock_region": "us-east-1"}
+    # The rollback: M17_WEB_RESEARCH=claude_cli.
+    asked = _settings(m17_web_research="claude_cli", **bedrock, **_VENDOR_KEYS)
+    assert isinstance(_desk_fetcher(LlmProvider.BEDROCK, asked, tmp_path), ClaudeWebFetcher)
+    # No Bedrock key: the research cannot run on Bedrock, so it runs on the CLI, not not at all.
+    assert isinstance(
+        _desk_fetcher(LlmProvider.BEDROCK, _settings(**_VENDOR_KEYS), tmp_path), ClaudeWebFetcher
+    )
+    # No vendor key at all: the same.
+    assert isinstance(
+        _desk_fetcher(LlmProvider.BEDROCK, _settings(**bedrock), tmp_path), ClaudeWebFetcher
+    )
+    # A desk on the Claude CLI always researches there; a stub desk never researches live.
+    cli = _settings(**bedrock, **_VENDOR_KEYS)
+    assert isinstance(_desk_fetcher(LlmProvider.CLAUDE_CLI, cli, tmp_path), ClaudeWebFetcher)
+    assert isinstance(_desk_fetcher(LlmProvider.STUB, cli, tmp_path), fm_world.NoLiveFetcher)
 
 
 # ── usage: every call in token_usage, priced for whoever answered ─────────────────────────────────
