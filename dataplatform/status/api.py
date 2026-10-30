@@ -88,6 +88,7 @@ from dataplatform.status.queries import (
     read_quarantine_status,
 )
 from dataplatform.status.queries_data import read_sources_status, read_sync_status
+from dataplatform.status.queries_websearch import WebsearchOut, read_websearch_usage
 from dataplatform.status.sync_state import MalformedSyncSourceError
 from dataplatform.store.paths import PathLayoutError
 
@@ -360,6 +361,13 @@ def status_managers(
     rationale, a prompt, evidence text or a secret — the decisions are their structured fields only.
     """
     return read_managers_status(entries, roster=roster, as_of=clock.now())
+
+
+@app.get("/status/websearch", summary="M17 web research: month-to-date spend per vendor")
+def status_websearch(conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> WebsearchOut:
+    """Each web research vendor's units this IST month against its budget, its place in the
+    search and fetch order, and whether its key is configured (a boolean; never the key)."""
+    return read_websearch_usage(conn, settings, as_of=clock.now())
 
 
 # ── /archives ───────────────────────────────────────────────────────────────────────────────

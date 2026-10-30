@@ -130,3 +130,35 @@ def test_the_tables_refuse_a_bad_month_and_an_unknown_vendor(scratch: Settings) 
             conn.execute(
                 "INSERT INTO websearch_vendor_month VALUES ('bing', DATE '2026-10-01', 0, now())"
             )
+
+
+def test_status_websearch_reports_month_to_date_without_keys(
+    scratch: Settings, ledger: PostgresUsageLedger
+) -> None:
+    from pydantic import SecretStr
+
+    from dataplatform.status.api import app
+    from dataplatform.status.queries_websearch import read_websearch_usage
+
+    key = "brave-status-test-key-not-real"
+    settings = scratch.model_copy(
+        update={
+            "brave_search_api_key": SecretStr(key),
+            "tavily_api_key": None,
+            "websearch_budget_brave": 10,
+        }
+    )
+    ledger.reserve_month(VendorName.BRAVE, OCTOBER, 3, 10, at=AT)
+    ledger.reserve_month(VendorName.BRAVE, NOVEMBER, 1, 10, at=AT)
+    ledger.reserve_month(VendorName.DIRECT, OCTOBER, 1, None, at=AT)
+    with connect(scratch) as conn:
+        out = read_websearch_usage(conn, settings, as_of=AT)
+    vendors = {v.vendor: v for v in out.vendors}
+    assert out.month == OCTOBER
+    assert (vendors["brave"].used, vendors["brave"].remaining) == (3, 7)
+    assert vendors["brave"].configured and vendors["brave"].search_rank == 1
+    assert (vendors["direct"].used, vendors["direct"].budget) == (1, None)
+    assert vendors["direct"].fetch_rank == 3 and vendors["direct"].search_rank is None
+    assert vendors["tavily"].used == 0 and not vendors["tavily"].configured
+    assert key not in out.model_dump_json()
+    assert any(getattr(r, "path", None) == "/status/websearch" for r in app.routes)
