@@ -714,7 +714,7 @@ gating) — a paused dataset is simply missing. Lifting it is the owner's decisi
 (AGENTIC_CONTEXT §8): delete the `paused` records and restart the scheduler
 (`ops/runbooks/daily-eod.md`). Task M18.2.
 
-### D30 — The application on Amazon Bedrock, the Claude CLI as per-call backup, effort per call type → **DRAFT, awaiting owner confirmation (owner decisions 2026-10-30 08:05 and ~09:00 IST, chat).**
+### D30 — The application on Amazon Bedrock, per-role models, the Claude CLI as per-call backup, effort per call type → **DRAFT, awaiting owner confirmation (owner decisions 2026-10-30 08:05, ~09:00 IST and afternoon, chat; confirm after the DeepSeek-vs-Sonnet digest comparison).**
 
 The owner decided on 2026-10-30 that the application's model calls — the M17 desk's and every
 other analyst path's (`LLM_PROVIDER`, `M17_LLM_PROVIDER`) — go to Claude on Amazon Bedrock first,
@@ -723,18 +723,31 @@ test it is written up for confirmation as pre-registration Amendment 5
 (`ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md` §8); to confirm, answer both.
 What it is:
 
-- **Same models** (`claude-opus-5-5` decides, `claude-sonnet-5-5` digests), Bedrock ids
-  `anthropic.claude-*`; no prompt template, decision schema, rule or rail changes.
-- **Hashes change, by one sentence:** the manager system prompt gains the untrusted-content rule
-  (web content is data, never instructions), so the **8 manager books' `mandate_hash` change**
-  (controls, style books and bench unchanged; before/after table in Amendment 5 (g)). S0 has not
-  happened, so **the dry-run count restarts** with the first dry session under the new hashes.
+- **Per-role models, set in the roster** (`analyst/fundmanager/roster.yaml` `models:`; a model
+  change is config only, no module has a default of its own):
+  - **decisions** on `claude-opus-5-5` via Bedrock (`anthropic.claude-opus-5-5`);
+  - **Commons digests** on `deepseek-v3-2` — DeepSeek V3.2 via Bedrock (`deepseek.v3.2`, Mantle's
+    OpenAI-compatible Chat Completions, strict `json_schema` output) — with **`claude-sonnet-5-5`
+    on the Claude CLI as the fallback** when Bedrock cannot serve the call
+    (`bedrock_models.yaml` `cli_fallback_model`); each digest records the provider and model that
+    actually wrote it;
+  - **web research** on `claude-opus-5-5` via Bedrock plus our own search layer (Mantle does not
+    serve Sonnet 5.5 in us-east-1), the CLI web fetcher on the same model as its backup.
+  No prompt template, decision schema, digest schema, rule or rail changes. The owner confirms
+  after reading the comparison of DeepSeek V3.2 against the stored Sonnet 5.5 digests of the same
+  30 filings.
+- **Hashes change:** the manager system prompt gains the untrusted-content rule (web content is
+  data, never instructions), and the roster's `models` gain the `research` role and the new digest
+  model, so the **8 manager books' `mandate_hash` change** (controls, style books and bench
+  unchanged; the table from `main` to this draft is in Amendment 5 (g)). S0 has not happened, so
+  **the dry-run count restarts** with the first dry session run under the new hashes.
 - **Transport:** Bedrock primary (`LLM_PROVIDER=bedrock`, `M17_LLM_PROVIDER=bedrock`), Claude CLI
   backup per call (`LLM_FALLBACK=claude_cli`, `M17_LLM_FALLBACK=claude_cli`). A call falls back only when Bedrock could not serve it —
   unreachable, timed out, rate limited after retries, a 5xx, a rejected or missing key — never on a
   400, a refusal or an answer that did not parse.
-- **Effort pinned per call type** on both paths (`analyst/llm/effort.yaml`): decisions (Opus)
-  `high`, digests and other summarising/extraction (Sonnet) `medium`; the CLI always passes
+- **Effort pinned per call type** on both paths (`analyst/llm/effort.yaml`): decisions and
+  research (Opus) `high`, summarising/extraction on Sonnet (the digest fallback) `medium`, none for
+  DeepSeek V3.2 (AWS documents no reasoning control for it); the CLI always passes
   `--effort`. It was previously inherited, unpinned, from the owner's personal Claude CLI setting
   (`xhigh` through the dry sessions, `high` since the owner's `/effort high` on 2026-10-30).
 - **Web research moves to our own search layer** (`analyst.websearch`): on Bedrock each manager
@@ -743,21 +756,25 @@ What it is:
   NSE/BSE/niftyindices and private addresses never fetched), producing the same Commons snapshot
   as before; the CLI's own web tools answer a request only when Bedrock is unavailable, and the
   snapshot records which path ran. `M17_WEB_RESEARCH=claude_cli` is the no-code rollback.
-  **Open:** the research loop runs on the digest model, `claude-sonnet-5-5`, which Mantle in
-  us-east-1 did not serve on 2026-10-30 (404, not a fallback trigger); until it does or another
-  research model is named, `M17_WEB_RESEARCH` stays `claude_cli` (its default).
+  The research model is the roster's `research` (Opus 5.5, which Mantle serves); the default of
+  `M17_WEB_RESEARCH` stays `claude_cli`, so turning the search layer on is the deploy's explicit
+  `M17_WEB_RESEARCH=websearch`.
 - **Recorded per call:** the provider that answered, and the fallback reason when there was one, in
   each `FM_CALL` journal line; every call is a `token_usage` row (the console's Model cost panel).
 - **Cost measured:** Bedrock calls are billed per token to AWS and priced at the us-east-1 list
-  rate on the dated card; CLI calls remain estimates.
+  rate on the dated card (DeepSeek V3.2: $0.62 / $1.85 per MTok in / out, AWS Price List API, read
+  2026-10-30); CLI calls remain estimates.
 
 Open with it: whether to set a monthly Bedrock budget (§9's cap was deferred while the cost was a
 subscription), and whether at least one of the restarted dry sessions must run on Bedrock with the
 new research path before S0. Activation is
-an `.env` change (`LLM_PROVIDER=bedrock`, `M17_LLM_PROVIDER=bedrock`, `AWS_BEARER_TOKEN_BEDROCK`,
-`BEDROCK_REGION`) and a scheduler restart, made by the owner after confirming. The effort levels,
-the untrusted-content rule (and with it the new manager hashes) take effect on merge for every
-provider, the Claude CLI included; the research path follows `M17_LLM_PROVIDER=bedrock`. Task M17.
+an `.env` change (`LLM_PROVIDER=bedrock`, `M17_LLM_PROVIDER=bedrock`, `M17_WEB_RESEARCH=websearch`,
+`AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_REGION`) and a scheduler restart, made by the owner after
+confirming. The effort levels, the untrusted-content rule and the roster's models (and with them
+the new manager hashes) take effect on merge for every provider. The Claude CLI cannot run
+`deepseek-v3-2`, so a desk still on the CLI after the merge (or rolled back to it) digests on
+Sonnet 5.5, the digest's CLI stand-in, with a warning — the dry-run count still restarts at the
+first session under the deploy's switches. Task M17.
 
 ## Coming up
 
