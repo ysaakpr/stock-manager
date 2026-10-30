@@ -67,6 +67,11 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-trading}:${POSTGRES_PASSWORD:-trading}@postgres:5432/${POSTGRES_DB:-trading}
       DATA_ROOT: /data
       TZ: Asia/Kolkata
+      # The status API never calls a model, so it is not handed the Bedrock key the repo-root
+      # .env carries for the M17 desk (which runs on the host, not here). `environment` wins over
+      # `env_file`, and Settings reads a blank as "not configured". tests/unit/test_llm_bedrock.py
+      # holds this line in place.
+      AWS_BEARER_TOKEN_BEDROCK: ""
     env_file:
       # Optional so a fresh clone starts with no secrets on disk. Anything the owner puts in
       # the repo-root .env reaches the app; the two settings above still win, because their
