@@ -15,6 +15,7 @@ criteria, each tested here:
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import re
@@ -103,6 +104,7 @@ from analyst.fundmanager.scoreboard import (
 from analyst.journal.evidence import EvidenceBundle
 from analyst.journal.models import Decision, JournalEntry
 from analyst.llm import (
+    Fallback,
     LLMError,
     LLMResponse,
     Message,
@@ -111,6 +113,7 @@ from analyst.llm import (
     StubReply,
     ToolCall,
     ToolSpec,
+    UnavailableReason,
     prompt_digest,
 )
 from analyst.llm.claude_cli import ClaudeCliLLM
@@ -734,6 +737,57 @@ def test_token_usage_is_journaled_per_call_priced_when_the_card_knows_the_model(
             int(call.payload["output_tokens"]) > 0
             and "claude-opus-5-5" in call.payload["unpriced_reason"]
         )
+
+
+class FellBackStub(ScriptedStub):
+    """`ScriptedStub` whose answers arrive as a `FallbackLLM`'s backup would deliver them."""
+
+    def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        tools: Sequence[ToolSpec] = (),
+        system: str | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> LLMResponse:
+        response = super().complete(
+            messages, model=model, tools=tools, system=system, max_tokens=max_tokens
+        )
+        return dataclasses.replace(
+            response,
+            provider="claude_cli",
+            fallback=Fallback(from_provider="bedrock", reason=UnavailableReason.RATE_LIMIT),
+        )
+
+
+def test_a_call_the_backup_answered_journals_which_provider_failed_and_why(
+    world: World, tmp_path: Path
+) -> None:
+    """The FM_CALL line of a fallback says the backup answered, which primary failed, and why;
+    a call the primary answered carries no fallback fields at all."""
+    mandate = _mandate()
+    journal = ListJournal()
+    run_manager(
+        mandate,
+        SESSION,
+        _commons(world, tmp_path),
+        _book(mandate.id),
+        FellBackStub([research(), final(hold())]),
+        StubFetcher(),
+        journal=journal,
+        clock=clock(),
+    )
+    calls = journal.events(CALL_EVENT)
+    assert calls
+    for call in calls:
+        assert call.payload["provider"] == "claude_cli"
+        assert call.payload["fallback_from"] == "bedrock"
+        assert call.payload["fallback_reason"] == "rate_limit"
+
+    _, direct, _ = _run(world, tmp_path / "d", [research(), final(hold())])
+    for call in direct.events(CALL_EVENT):
+        assert "fallback_from" not in call.payload and "fallback_reason" not in call.payload
 
 
 class ConcurrencyProbe(StubFetcher):

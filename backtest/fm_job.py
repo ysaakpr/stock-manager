@@ -84,7 +84,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
-from accounting import TokenPricer
+from accounting import LedgeredLLM, TokenLedger, TokenPricer, load_price_card
 from analyst.commons import CommonsScreens, CommonsSheets, Fetcher, Shortlist
 from analyst.fundmanager.books import (
     BookJournal,
@@ -156,6 +156,7 @@ from analyst.fundmanager.mirror import (
 )
 from analyst.fundmanager.render import PromptTemplate
 from analyst.fundmanager.runtime import (
+    TOKEN_PURPOSE,
     ManagerCommons,
     ManagerSessionResult,
     SessionStatus,
@@ -229,6 +230,7 @@ __all__ = [
     "SessionCommons",
     "WaitPolicy",
     "desk_kill_switch",
+    "ledgered",
     "main",
     "owed_m17_session",
     "run_m17_job",
@@ -684,8 +686,12 @@ def run_m17_session(
     digest_dir: Path | None = None,
     entries_reader: Callable[[], Sequence[JournalEntry]] | None = None,
     alerter: Alerter | None = None,
+    ledger: TokenLedger | None = None,
 ) -> M17SessionResult:
     """Run the M17 desk for ``session`` (module docstring, steps 1-9).
+
+    With a ``ledger``, every manager call also lands in `token_usage` under the book's stream case
+    (`ledgered`), priced for the provider that answered it.
 
     What it assumes: ``session``'s EOD has run; ``clock`` is the real (injected) clock — the
     deadline and the data wait read it — while every journal entry is stamped by a clock frozen
@@ -826,7 +832,15 @@ def run_m17_session(
                     built,
                     commons_error,
                     exits,
-                    llm=llm,
+                    llm=ledgered(
+                        llm,
+                        ledger=ledger,
+                        pricer=pricer,
+                        session=session,
+                        purpose=TOKEN_PURPOSE,
+                        case_id=journal.case_id(mandate.id),
+                        clock=clock,
+                    ),
                     fetcher=fetcher,
                     clock=clock,
                     book_clock=book_clock,
@@ -1240,6 +1254,36 @@ def _journal_manager_line(
             rationale=rationale,
             payload=payload,
         ),
+    )
+
+
+def ledgered(
+    llm: LLM,
+    *,
+    ledger: TokenLedger | None,
+    pricer: TokenPricer | None,
+    session: date,
+    purpose: str,
+    case_id: str | None,
+    clock: Clock,
+) -> LLM:
+    """``llm`` with every call it answers written to ``ledger`` (`token_usage`), or ``llm`` itself.
+
+    What it does: wraps in `accounting.LedgeredLLM`, priced on ``session``'s card and filed under
+    ``purpose`` and ``case_id`` — what the console's Model cost panel groups by.
+    What it never does: change an answer, or ledger anything when there is no ledger (a
+    ``--memory`` rehearsal, a test).
+    """
+    if ledger is None:
+        return llm
+    return LedgeredLLM(
+        llm,
+        ledger=ledger,
+        pricer=pricer or TokenPricer(load_price_card()),
+        purpose=purpose,
+        on=session,
+        case_id=case_id,
+        clock=clock,
     )
 
 
