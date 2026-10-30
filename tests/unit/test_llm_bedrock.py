@@ -52,7 +52,7 @@ from analyst.llm.bedrock import (
     structured_output_schema,
 )
 from analyst.llm.effort import EffortPolicy, load_effort_policy
-from dataplatform.config import REPO_ROOT, LlmEffort, Settings
+from dataplatform.config import REPO_ROOT, LlmEffort, LlmProvider, Settings
 
 #: A key-shaped value with no prefix any generic masking pattern knows — the case the module masks
 #: by value. Not a credential: tests never reach the network.
@@ -663,3 +663,16 @@ def test_the_status_app_container_is_not_handed_the_bedrock_key() -> None:
     app = compose["services"]["app"]
     assert any(str(e.get("path", e)).endswith(".env") for e in app["env_file"])
     assert app["environment"]["AWS_BEARER_TOKEN_BEDROCK"] == ""
+
+
+def test_the_startup_wiring_line_says_set_or_not_set_never_the_key() -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        llm_provider=LlmProvider.BEDROCK,
+        m17_llm_provider=LlmProvider.BEDROCK,
+        aws_bearer_token_bedrock=SecretStr(FAKE_KEY),
+    )
+    wiring = settings.llm_wiring()
+    assert wiring["llm_provider"] == "bedrock" and wiring["llm_fallback"] == "claude_cli"
+    assert wiring["bedrock_key_set"] is True and wiring["bedrock_region_set"] is False
+    assert FAKE_KEY not in json.dumps(wiring)
