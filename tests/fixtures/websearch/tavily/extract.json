@@ -1,0 +1,12 @@
+{
+  "results": [
+    {
+      "url": "https://news.example.org/economy/rbi-policy-october",
+      "raw_content": "# RBI keeps repo rate unchanged\n\nThe Monetary Policy Committee voted to keep the policy repo rate unchanged.",
+      "images": []
+    }
+  ],
+  "failed_results": [],
+  "response_time": 0.5,
+  "request_id": "123e4567-e89b-12d3-a456-426614174111"
+}

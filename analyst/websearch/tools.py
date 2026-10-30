@@ -206,7 +206,7 @@ class WebTools:
         }
         text = snapshot.text
         if snapshot.truncated:
-            text += "\n[the stored snapshot is itself cut at the Commons page bound]"
+            text = "[the stored snapshot is itself cut at the Commons page bound]\n\n" + text
         content, _ = wrap_untrusted(
             text, attributes=attributes, max_chars=self._research.config.max_result_chars
         )

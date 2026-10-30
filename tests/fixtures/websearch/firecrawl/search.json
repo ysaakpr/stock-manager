@@ -1,0 +1,22 @@
+{
+  "success": true,
+  "data": {
+    "web": [
+      {
+        "url": "https://explainers.example.net/repo-rate",
+        "title": "Repo rate explained",
+        "description": "What the repo rate is.",
+        "position": 2
+      },
+      {
+        "url": "https://news.example.org/economy/rbi-policy-october",
+        "title": "RBI keeps repo rate unchanged",
+        "description": "The central bank held rates.",
+        "position": 1
+      }
+    ]
+  },
+  "warning": null,
+  "id": "8a3c2b1e-0000-4000-8000-000000000001",
+  "creditsUsed": 2
+}

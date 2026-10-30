@@ -167,7 +167,10 @@ class UrlGuard:
     def check(self, url: str) -> None:
         """Steps 1-3. Raises `UrlRefusedError` naming the first rule the URL breaks."""
         host = self.check_form(url)
-        addresses = self._resolver(host)
+        try:
+            addresses: Sequence[str] = [str(ipaddress.ip_address(host))]
+        except ValueError:
+            addresses = self._resolver(host)
         if not addresses:
             raise UrlRefusedError(f"the host {host!r} does not resolve")
         for address in addresses:
