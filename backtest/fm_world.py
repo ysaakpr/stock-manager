@@ -831,7 +831,7 @@ def _fetcher(
 ) -> Any:
     """The desk's Commons fetcher for ``provider`` (see `_LIVE_FETCH_PROVIDERS`).
 
-    On Bedrock with ``M17_WEB_RESEARCH=websearch`` (the default) it is a `BedrockWebFetcher`: the
+    On Bedrock with ``M17_WEB_RESEARCH=websearch`` (the default is ``claude_cli``) it is a `BedrockWebFetcher`: the
     research model is the digest model on Bedrock, the vendors share the load under their budgets
     (counted in Postgres, migration 0021, or in memory for a ``--memory`` rehearsal), the tool
     results are snapshots in their own store beside ``fetch_root``, every loop's cost is a

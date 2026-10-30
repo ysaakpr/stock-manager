@@ -303,8 +303,10 @@ class Settings(BaseSettings):
         description="the M17 desk's backup provider, per call: none | anthropic | claude_cli",
     )
     #: Read only while `m17_llm_provider` is bedrock: Bedrock has no web tools of its own.
+    #: `claude_cli` until the owner names a research model Mantle serves (`claude-sonnet-5-5`
+    #: answered 404 in us-east-1 on 2026-10-30, and a 404 is not a fallback trigger).
     m17_web_research: WebResearchPath = Field(
-        default=WebResearchPath.WEBSEARCH,
+        default=WebResearchPath.CLAUDE_CLI,
         description=(
             "a Bedrock desk's web research: websearch (our own vendors, CLI backup) | claude_cli"
         ),

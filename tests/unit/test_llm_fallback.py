@@ -409,7 +409,10 @@ def test_bedrock_research_runs_on_our_own_search_layer_with_the_cli_behind_it(
 
     monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
     settings = _settings(
-        aws_bearer_token_bedrock=FAKE_KEY, bedrock_region="us-east-1", **_VENDOR_KEYS
+        aws_bearer_token_bedrock=FAKE_KEY,
+        bedrock_region="us-east-1",
+        m17_web_research="websearch",
+        **_VENDOR_KEYS,
     )
     fetcher = _desk_fetcher(LlmProvider.BEDROCK, settings, tmp_path)
     assert isinstance(fetcher, BedrockWebFetcher)
@@ -424,6 +427,7 @@ def test_bedrock_research_runs_on_our_own_search_layer_with_the_cli_behind_it(
         aws_bearer_token_bedrock=FAKE_KEY,
         bedrock_region="us-east-1",
         m17_llm_fallback=None,
+        m17_web_research="websearch",
         **_VENDOR_KEYS,
     )
     fetcher = _desk_fetcher(LlmProvider.BEDROCK, settings, tmp_path)
@@ -437,12 +441,19 @@ def test_bedrock_research_stays_on_the_cli_when_asked_or_when_it_cannot_run(
 
     monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
     bedrock = {"aws_bearer_token_bedrock": FAKE_KEY, "bedrock_region": "us-east-1"}
-    # The rollback: M17_WEB_RESEARCH=claude_cli.
-    asked = _settings(m17_web_research="claude_cli", **bedrock, **_VENDOR_KEYS)
-    assert isinstance(_desk_fetcher(LlmProvider.BEDROCK, asked, tmp_path), ClaudeWebFetcher)
+    # The default, until the research model is served on Bedrock: M17_WEB_RESEARCH=claude_cli.
+    default = _settings(**bedrock, **_VENDOR_KEYS)
+    assert default.m17_web_research.value == "claude_cli"
+    assert isinstance(_desk_fetcher(LlmProvider.BEDROCK, default, tmp_path), ClaudeWebFetcher)
+    bedrock["m17_web_research"] = "websearch"
     # No Bedrock key: the research cannot run on Bedrock, so it runs on the CLI, not not at all.
     assert isinstance(
-        _desk_fetcher(LlmProvider.BEDROCK, _settings(**_VENDOR_KEYS), tmp_path), ClaudeWebFetcher
+        _desk_fetcher(
+            LlmProvider.BEDROCK,
+            _settings(m17_web_research="websearch", **_VENDOR_KEYS),
+            tmp_path,
+        ),
+        ClaudeWebFetcher,
     )
     # No vendor key at all: the same.
     assert isinstance(

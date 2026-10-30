@@ -745,7 +745,7 @@ What it is:
   snapshot records which path ran. `M17_WEB_RESEARCH=claude_cli` is the no-code rollback.
   **Open:** the research loop runs on the digest model, `claude-sonnet-5-5`, which Mantle in
   us-east-1 did not serve on 2026-10-30 (404, not a fallback trigger); until it does or another
-  research model is named, keep `M17_WEB_RESEARCH=claude_cli`.
+  research model is named, `M17_WEB_RESEARCH` stays `claude_cli` (its default).
 - **Recorded per call:** the provider that answered, and the fallback reason when there was one, in
   each `FM_CALL` journal line; every call is a `token_usage` row (the console's Model cost panel).
 - **Cost measured:** Bedrock calls are billed per token to AWS and priced at the us-east-1 list

@@ -554,7 +554,8 @@ thinking cannot truncate an answer.
 (d) **Web research moves to our own search layer** (owner, 2026-10-30, "Do it all now"; was "stays
 on the Claude CLI" in the first draft of this amendment). Bedrock has no web search or web fetch,
 so on Bedrock §5's Commons fetcher is `analyst.websearch.BedrockWebFetcher`
-(`M17_WEB_RESEARCH=websearch`, the default): each query or URL a manager names is one bounded
+(`M17_WEB_RESEARCH=websearch`; the default stays `claude_cli` until the open point below is
+settled): each query or URL a manager names is one bounded
 client-side tool loop on Bedrock (`claude-sonnet-5-5` at `medium`, the transcription model the CLI
 fetcher used) whose only tools are our own `web_search` and `web_fetch`, served by Brave, Tavily
 and Firecrawl — one vendor per call, picked by remaining monthly budget, at most one fallback
