@@ -51,6 +51,7 @@ from analyst.llm.bedrock import (
     load_bedrock_models,
     structured_output_schema,
 )
+from analyst.llm.effort import EffortPolicy, load_effort_policy
 from dataplatform.config import REPO_ROOT, LlmEffort, Settings
 
 #: A key-shaped value with no prefix any generic masking pattern knows — the case the module masks
@@ -196,7 +197,7 @@ def bedrock(endpoint: Endpoint, *, max_retries: int = 0, **kwargs: Any) -> Bedro
 
 def test_the_request_carries_the_bedrock_id_the_schema_the_effort_and_adaptive_thinking() -> None:
     endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER))))
-    bedrock(endpoint, effort=LlmEffort.XHIGH).complete(
+    bedrock(endpoint).complete(
         ASK, model="claude-opus-5-5", tools=(VERDICT,), system="You are a fund manager."
     )
 
@@ -205,7 +206,7 @@ def test_the_request_carries_the_bedrock_id_the_schema_the_effort_and_adaptive_t
     assert request.url == "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages"
     assert body["model"] == "anthropic.claude-opus-5-5"
     assert body["thinking"] == {"type": "adaptive"}
-    assert body["output_config"]["effort"] == "xhigh"
+    assert body["output_config"]["effort"] == "high"  # a decision call (effort.yaml)
     assert body["output_config"]["format"] == {
         "type": "json_schema",
         "schema": structured_output_schema(VERDICT.input_schema),
@@ -217,13 +218,44 @@ def test_the_request_carries_the_bedrock_id_the_schema_the_effort_and_adaptive_t
     assert request.headers["authorization"] == f"Bearer {FAKE_KEY}"
 
 
-def test_the_effort_is_the_configured_one_not_a_constant() -> None:
+def test_a_summary_call_is_sent_at_medium() -> None:
+    """Sonnet serves the digests: the `summary` call type, `medium` (owner, 2026-10-30)."""
     endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER))))
-    bedrock(endpoint, effort=LlmEffort.LOW).complete(
-        ASK, model="claude-sonnet-5-5", tools=(VERDICT,)
-    )
-    assert endpoint.body["output_config"]["effort"] == "low"
+    bedrock(endpoint).complete(ASK, model="claude-sonnet-5-5", tools=(VERDICT,))
+    assert endpoint.body["output_config"]["effort"] == "medium"
     assert endpoint.body["model"] == "anthropic.claude-sonnet-5-5"
+
+
+def test_the_effort_is_the_policys_not_a_constant() -> None:
+    policy = EffortPolicy(
+        version=1,
+        call_types={"decision": LlmEffort.LOW, "summary": LlmEffort.MAX},
+        models={"claude-opus-5-5": "decision", "claude-sonnet-5-5": "summary"},
+    )
+    endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER))))
+    bedrock(endpoint, efforts=policy).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+    assert endpoint.body["output_config"]["effort"] == "low"
+
+
+def test_the_checked_in_policy_pins_decisions_high_and_summaries_medium() -> None:
+    policy = load_effort_policy()
+    assert policy.effort_for("claude-opus-5-5") is LlmEffort.HIGH
+    assert policy.effort_for("claude-opus-5") is LlmEffort.HIGH
+    assert policy.effort_for("claude-sonnet-5-5") is LlmEffort.MEDIUM
+    with pytest.raises(LLMError, match="no call type"):
+        policy.effort_for("claude-unknown-9")
+
+
+def test_a_model_without_adaptive_thinking_or_effort_is_sent_neither() -> None:
+    """Haiku 4.5 accepts neither; sending them would be a 400, not a fallback."""
+    endpoint = Endpoint(
+        streamed(message_stream(json.dumps(ANSWER), model="anthropic.claude-haiku-4-5"))
+    )
+    bedrock(endpoint).complete(ASK, model="claude-haiku-4-5", tools=(VERDICT,))
+    body = endpoint.body
+    assert body["model"] == "anthropic.claude-haiku-4-5"
+    assert "thinking" not in body
+    assert "effort" not in body["output_config"] and "format" in body["output_config"]
 
 
 def test_a_callers_small_ceiling_is_raised_so_thinking_cannot_truncate_the_answer() -> None:
@@ -246,7 +278,7 @@ def test_the_ceiling_never_exceeds_the_models_own() -> None:
 def test_an_unmapped_model_is_refused_before_any_request() -> None:
     endpoint = Endpoint(streamed(message_stream("{}")))
     with pytest.raises(LLMError, match="not mapped to Bedrock") as raised:
-        bedrock(endpoint).complete(ASK, model="claude-haiku-4-5")
+        bedrock(endpoint).complete(ASK, model="claude-sonnet-5")
     assert not isinstance(raised.value, LLMUnavailableError)  # a config bug, never a fallback
     assert endpoint.requests == []
 
@@ -339,7 +371,7 @@ def test_each_call_is_logged_with_its_usage_and_latency() -> None:
     assert event["provider"] == "bedrock"
     assert event["served_model"] == "anthropic.claude-opus-5-5"
     assert event["input_tokens"] == 1_200
-    assert event["effort"] == "xhigh"
+    assert event["effort"] == "high"
     assert isinstance(event["latency_ms"], int)
 
 

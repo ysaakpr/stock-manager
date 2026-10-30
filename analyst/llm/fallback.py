@@ -1,4 +1,4 @@
-"""X3: a primary provider with a per-call backup — the M17 desk's Bedrock-then-Claude-CLI transport.
+"""X3: a primary provider with a per-call backup — Bedrock first, the Claude CLI behind it.
 
 The owner's 2026-10-30 decision: Bedrock answers, and the Claude CLI subscription answers instead
 whenever Bedrock *could not*. The rule for "could not" is one exception class,

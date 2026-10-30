@@ -19,7 +19,15 @@ from analyst.llm.anthropic import (
     TRIAGE_MODEL,
     AnthropicLLM,
 )
-from analyst.llm.bedrock import BEDROCK_PROVIDER, BedrockLLM
+from analyst.llm.bedrock import (
+    BEDROCK_PROVIDER,
+    BedrockLLM,
+    ToolExecutionError,
+    ToolExecutor,
+    ToolLoopExhaustedError,
+    ToolLoopResult,
+    ToolOutcome,
+)
 from analyst.llm.cli_env import CLAUDE_CLI_ENV_ALLOWLIST, claude_cli_env
 from analyst.llm.client import (
     DEFAULT_MAX_TOKENS,
@@ -43,6 +51,7 @@ from analyst.llm.client import (
     build_llm,
     prompt_digest,
 )
+from analyst.llm.effort import EffortPolicy, effort_for, load_effort_policy
 from analyst.llm.fallback import FallbackLLM, UnconfiguredLLM
 from analyst.llm.stub import (
     STUB_PROVIDER,
@@ -63,6 +72,7 @@ __all__ = [
     "TRIAGE_MODEL",
     "AnthropicLLM",
     "BedrockLLM",
+    "EffortPolicy",
     "Fallback",
     "FallbackLLM",
     "LLMCredentialError",
@@ -80,6 +90,11 @@ __all__ = [
     "StubLLM",
     "StubReply",
     "ToolCall",
+    "ToolExecutionError",
+    "ToolExecutor",
+    "ToolLoopExhaustedError",
+    "ToolLoopResult",
+    "ToolOutcome",
     "ToolSpec",
     "UnavailableReason",
     "UnconfiguredLLM",
@@ -87,5 +102,7 @@ __all__ = [
     "Usage",
     "build_llm",
     "claude_cli_env",
+    "effort_for",
+    "load_effort_policy",
     "prompt_digest",
 ]

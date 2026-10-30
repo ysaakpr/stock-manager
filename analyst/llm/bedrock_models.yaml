@@ -14,7 +14,13 @@
 # `bedrock_id` is the id the request carries (Bedrock prefixes Claude with `anthropic.`), and the
 # id `accounting/model_prices.yaml` prices a Bedrock call under, so Bedrock and first-party rates
 # can differ without a provider column on the card. `max_output_tokens` is the model's own output
-# ceiling: the request's `max_tokens` (thinking included) is clamped to it.
+# ceiling: the request's `max_tokens` (thinking included) is clamped to it. `adaptive_thinking` and
+# `effort` (default true) say whether the model accepts `thinking: {type: adaptive}` and
+# `output_config.effort`; Haiku 4.5 accepts neither, so it is sent neither rather than a 400.
+#
+# Listed: the M17 roster's models, and the models the older analyst paths name (`claude-opus-5`,
+# the T1/T2 reviews' and the thesis and mapper engines' default; `claude-haiku-4-5`, triage), so
+# LLM_PROVIDER=bedrock serves every consumer in the application.
 
 version: 1
 
@@ -27,3 +33,13 @@ models:
     adapter: anthropic_messages
     bedrock_id: anthropic.claude-sonnet-5-5
     max_output_tokens: 128000
+  claude-opus-5:
+    adapter: anthropic_messages
+    bedrock_id: anthropic.claude-opus-5
+    max_output_tokens: 128000
+  claude-haiku-4-5:
+    adapter: anthropic_messages
+    bedrock_id: anthropic.claude-haiku-4-5
+    max_output_tokens: 64000
+    adaptive_thinking: false
+    effort: false

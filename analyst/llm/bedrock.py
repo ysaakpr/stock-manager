@@ -1,10 +1,11 @@
 """X3: the `LLM` backed by Claude on Amazon Bedrock — the Mantle endpoint, billed per token to AWS.
 
-The M17 desk's primary transport from the owner's 2026-10-30 decision, with the Claude CLI as the
-per-call backup (`analyst.llm.fallback`). It answers the same protocol `ClaudeCliLLM` does, in the
-same shape, so no call site changes: one offered `ToolSpec` becomes a demand for structured output
-(`output_config.format`, the CLI's `--json-schema`) and comes back as one `ToolCall` carrying the
-parsed object.
+The application's primary transport from the owner's 2026-10-30 decision, with the Claude CLI as
+the per-call backup (`analyst.llm.fallback`). It answers the same protocol `ClaudeCliLLM` does, in
+the same shape, so no call site changes: one offered `ToolSpec` becomes a demand for structured
+output (`output_config.format`, the CLI's `--json-schema`) and comes back as one `ToolCall`
+carrying the parsed object. Beyond the protocol, `run_tools` is a bounded client-side tool loop
+(the model calls tools the caller passes in, the caller's code runs them), which the CLI cannot do.
 
 Four things are pinned here rather than left to a default, each because the default is wrong:
 
@@ -13,14 +14,15 @@ Four things are pinned here rather than left to a default, each because the defa
   — and on a box whose environment holds AWS settings for the S3 mirror, an ambient lookup is how
   a call would silently go out on the wrong account. The key is handed to the SDK explicitly, the
   endpoint URL is built from `BEDROCK_REGION`, and nothing ambient is consulted.
-- **Effort** (`output_config.effort`) comes from `LLM_EFFORT`, default `xhigh`: what the desk has
-  actually run at since S0, inherited until now from the owner's personal CLI setting. Thinking is
-  adaptive; on Opus 5.5 and Sonnet 5.5 it cannot be switched off.
+- **Effort** (`output_config.effort`) comes from `effort.yaml`, per call type — the same value the
+  Claude CLI is given as `--effort`, so the primary and the backup reason equally hard. Thinking is
+  adaptive where the model supports it; on Opus 5.5 and Sonnet 5.5 it cannot be switched off.
 - **`max_tokens`** counts thinking, so a caller's 2,000-token digest ceiling would truncate an
-  `xhigh` answer before it began. The request carries `max(asked, BEDROCK_MAX_TOKENS)`, clamped to
-  the model's own ceiling, and always streams: the SDK refuses a non-streaming request whose
-  ceiling could outlast its ten-minute limit.
-- **The model id** comes from `bedrock_models.yaml`. An unmapped model raises before any request.
+  answer before it began. The request carries `max(asked, BEDROCK_MAX_TOKENS)`, clamped to the
+  model's own ceiling, and always streams: the SDK refuses a non-streaming request whose ceiling
+  could outlast its ten-minute limit.
+- **The model id and what the model accepts** come from `bedrock_models.yaml`. An unmapped model
+  raises before any request.
 
 Every failure becomes an `LLMError`, sorted by whose fault it is. The provider's — unreachable,
 timed out, throttled after the SDK's retries, a 5xx or an error event mid-stream, a rejected key
@@ -33,7 +35,8 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -63,17 +66,24 @@ from analyst.llm.client import (
     UnavailableReason,
     Usage,
 )
-from dataplatform.config import LlmEffort, Settings, get_settings
+from analyst.llm.effort import EffortPolicy, load_effort_policy
+from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger
 from dataplatform.redaction import MASK, mask_secrets
 
 __all__ = [
     "BEDROCK_MODELS_PATH",
     "BEDROCK_PROVIDER",
+    "DEFAULT_TOOL_ROUNDS",
     "BedrockAdapter",
     "BedrockLLM",
     "BedrockModelMap",
     "BedrockModelRoute",
+    "ToolExecutionError",
+    "ToolExecutor",
+    "ToolLoopExhaustedError",
+    "ToolLoopResult",
+    "ToolOutcome",
     "load_bedrock_models",
     "structured_output_schema",
 ]
@@ -91,8 +101,11 @@ BEDROCK_MODELS_PATH: Final[Path] = Path(__file__).with_name("bedrock_models.yaml
 #: correlates by id sees one value whichever provider answered.
 STRUCTURED_TOOL_CALL_ID: Final[str] = "structured_output"
 
-#: Wall-clock ceiling per read of the stream, matching the other implementations' 600 s: an
-#: `xhigh` answer on a full evidence pack legitimately thinks for minutes before its first token.
+#: Model calls a `run_tools` loop may make unless the caller bounds it tighter.
+DEFAULT_TOOL_ROUNDS: Final[int] = 8
+
+#: Wall-clock ceiling per read of the stream, matching the other implementations' 600 s: a hard
+#: answer on a full evidence pack legitimately thinks for minutes before its first token.
 _TIMEOUT_SECONDS: Final[float] = 600.0
 
 #: Retries the SDK performs on connection errors, 408/409/429 and 5xx before this module sees the
@@ -137,8 +150,9 @@ class BedrockAdapter(StrEnum):
 
     `ANTHROPIC_MESSAGES` is Claude on the Mantle endpoint's Anthropic Messages API — the only
     adapter built. A model served through bedrock-runtime Converse or Mantle's OpenAI-compatible
-    Chat Completions would add a value here and a branch in `BedrockLLM.complete`, its own request
-    and response mapping beside `_messages`; the map in `bedrock_models.yaml` routes each model.
+    Chat Completions would add a value here and a branch in `BedrockLLM.complete` (and
+    `run_tools`), its own request and response mapping beside `_stream`; the map in
+    `bedrock_models.yaml` routes each model.
     """
 
     ANTHROPIC_MESSAGES = "anthropic_messages"
@@ -149,11 +163,15 @@ class _Frozen(BaseModel):
 
 
 class BedrockModelRoute(_Frozen):
-    """One model's route: the adapter that speaks to it, its Bedrock id, its output ceiling."""
+    """One model's route: its adapter and Bedrock id, its output ceiling, what it accepts."""
 
     adapter: BedrockAdapter
     bedrock_id: str = Field(min_length=1)
     max_output_tokens: int = Field(ge=1)
+    #: `thinking: {type: adaptive}` and `output_config.effort` are accepted (Opus/Sonnet 5.x);
+    #: a model without them (Haiku 4.5) is sent neither, rather than a 400.
+    adaptive_thinking: bool = True
+    effort: bool = True
 
 
 class BedrockModelMap(_Frozen):
@@ -184,17 +202,18 @@ def load_bedrock_models(path: Path = BEDROCK_MODELS_PATH) -> BedrockModelMap:
         return BedrockModelMap.model_validate(yaml.safe_load(handle))
 
 
-# ── the schema a structured output can compile ───────────────────────────────────────────────────
+# ── the schema a structured output or a strict tool can compile ──────────────────────────────────
 
 
 def structured_output_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
-    """``schema`` as `output_config.format` accepts it: the same shape, uncompiled bounds moved.
+    """``schema`` as `output_config.format` (or a `strict` tool) accepts it, bounds moved aside.
 
     What it does: walks the schema and moves every keyword structured outputs cannot compile
     (`_UNCOMPILED_KEYWORDS`, and a `minItems` above 1) out of its node and into that node's
     description as ``{maxLength: 500, minLength: 1}``, the same rendering the SDK's own
-    `transform_schema` uses. Everything else — types, enums, patterns, `anyOf`, `required`,
-    `additionalProperties: false` — is kept as it was.
+    `transform_schema` uses; and closes an object that left `additionalProperties` unsaid, which
+    strict decoding requires. Everything else — types, enums, patterns, `anyOf`, `required`, an
+    explicit `additionalProperties: false` — is kept as it was.
     What it assumes: the caller validates the answer against the *original* schema, as every M17
     parser does (a bound the model ignored is a `MalformedOutputError` and the session's repair).
     What it never does: change a property's name, type or requiredness, or touch the input.
@@ -217,11 +236,71 @@ def structured_output_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
             node[key] = {name: structured_output_schema(sub) for name, sub in value.items()}
         else:
             node[key] = value
+    if node.get("type") == "object" and "additionalProperties" not in node:
+        node["additionalProperties"] = False
     if moved:
         bounds = "{" + ", ".join(f"{key}: {value}" for key, value in sorted(moved.items())) + "}"
         description = node.get("description")
         node["description"] = bounds if not description else f"{description}\n\n{bounds}"
     return node
+
+
+# ── the client-side tool loop's vocabulary ───────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class ToolOutcome:
+    """What a tool returned, as the model will read it. ``is_error`` marks a failed run."""
+
+    content: str
+    is_error: bool = False
+
+
+class ToolExecutionError(Exception):
+    """A tool could not do its job (a search API down, a page that would not load).
+
+    Raised by a caller's executor; `run_tools` hands its message to the model as an error result,
+    so the model can try another source. Any other exception from an executor is a defect in the
+    caller's code and propagates.
+    """
+
+
+#: Runs one tool call the model made. Receives the call (name and parsed arguments).
+ToolExecutor = Callable[[ToolCall], ToolOutcome]
+
+
+@dataclass(frozen=True, slots=True)
+class ToolLoopResult:
+    """A finished tool loop: the final answer, and everything it took to get there.
+
+    ``response.usage`` is the sum over every round — what the whole loop was billed — so a caller
+    that meters ``response`` (`accounting.TokenPricer`) records all of it; ``round_usage`` keeps
+    the per-round split.
+    """
+
+    response: LLMResponse
+    rounds: int
+    tool_calls: tuple[ToolCall, ...]
+    round_usage: tuple[Usage, ...]
+
+
+class ToolLoopExhaustedError(LLMError):
+    """The model still wanted a tool after the last round the caller allowed. Carries the usage
+    of every round, because they were all billed."""
+
+    def __init__(self, message: str, *, usage: Usage, rounds: int) -> None:
+        super().__init__(message)
+        self.usage = usage
+        self.rounds = rounds
+
+
+def _sum(usages: Sequence[Usage]) -> Usage:
+    return Usage(
+        input_tokens=sum(u.input_tokens for u in usages),
+        output_tokens=sum(u.output_tokens for u in usages),
+        cache_write_tokens=sum(u.cache_write_tokens for u in usages),
+        cache_read_tokens=sum(u.cache_read_tokens for u in usages),
+    )
 
 
 # ── the client ───────────────────────────────────────────────────────────────────────────────────
@@ -233,17 +312,18 @@ class BedrockLLM:
     What it does: one streamed Messages call per `complete`, with the mapped Bedrock id, adaptive
     thinking, the pinned effort, a thinking-sized output ceiling and — when a tool is offered —
     structured output against its schema; returns the text or the parsed object and the usage.
+    `run_tools` runs a bounded client-side tool loop on the same request settings.
     What it assumes: the key and the region came from `Settings`; the caller validates a
     structured answer against the schema it offered.
     What it never does: read a credential or region from the environment, fall back to another
-    provider (that is `FallbackLLM`'s job), give the model a tool, or return a refusal, a
-    truncation or an unparsable answer as though it were one.
+    provider (that is `FallbackLLM`'s job), force a tool choice, or return a refusal, a truncation
+    or an unparsable answer as though it were one.
     """
 
     __slots__ = (
         "_api_key",
         "_client",
-        "_effort",
+        "_efforts",
         "_http_client",
         "_max_retries",
         "_max_tokens",
@@ -257,7 +337,7 @@ class BedrockLLM:
         api_key: SecretStr | None,
         region: str | None,
         *,
-        effort: LlmEffort = LlmEffort.XHIGH,
+        efforts: EffortPolicy | None = None,
         max_tokens: int = 64_000,
         models: BedrockModelMap | None = None,
         timeout_seconds: float = _TIMEOUT_SECONDS,
@@ -273,8 +353,8 @@ class BedrockLLM:
         if missing:
             raise LLMCredentialError(
                 f"BedrockLLM is not configured: set {' and '.join(missing)} in .env. There is no "
-                "silent substitute — with M17_LLM_FALLBACK set, every call goes to the backup and "
-                "says so; without it, nothing runs."
+                "silent substitute — with a fallback configured, every call goes to the backup "
+                "and says so; without one, nothing runs."
             )
         if max_tokens <= 0:
             raise ValueError(f"max_tokens must be positive, got {max_tokens}")
@@ -285,7 +365,7 @@ class BedrockLLM:
         assert api_key is not None and region is not None  # narrowed by `missing` above
         self._api_key = api_key
         self._region = region
-        self._effort = effort
+        self._efforts = load_effort_policy() if efforts is None else efforts
         self._max_tokens = max_tokens
         self._models = load_bedrock_models() if models is None else models
         self._timeout_seconds = timeout_seconds
@@ -295,7 +375,7 @@ class BedrockLLM:
 
     def __repr__(self) -> str:
         # The key is a SecretStr and is never interpolated; a repr in a log must stay safe.
-        return f"{type(self).__name__}(region={self._region!r}, effort={self._effort.value!r})"
+        return f"{type(self).__name__}(region={self._region!r})"
 
     @classmethod
     def from_settings(
@@ -306,7 +386,6 @@ class BedrockLLM:
         return cls(
             resolved.aws_bearer_token_bedrock,
             resolved.bedrock_region,
-            effort=resolved.llm_effort,
             max_tokens=resolved.bedrock_max_tokens,
             http_client=http_client,
         )
@@ -330,6 +409,8 @@ class BedrockLLM:
             )
         return self._client
 
+    # -- the protocol -----------------------------------------------------------------------------
+
     def complete(
         self,
         messages: Sequence[Message],
@@ -352,51 +433,223 @@ class BedrockLLM:
             raise ValueError(f"max_tokens must be positive, got {max_tokens}")
         if len(tools) > 1:
             raise ValueError(
-                f"BedrockLLM expresses one structured-output schema per call, not {len(tools)} "
-                "tools (the same contract as the Claude CLI, so the two stay interchangeable)"
+                f"BedrockLLM.complete expresses one structured-output schema per call, not "
+                f"{len(tools)} tools (the Claude CLI's contract, so the two stay interchangeable); "
+                "a model that calls tools is `run_tools`"
             )
+        route = self._models.route(model)
+        tool = tools[0] if tools else None
+        match route.adapter:
+            case BedrockAdapter.ANTHROPIC_MESSAGES:
+                ceiling = self._ceiling(route, max_tokens)
+                raw, usage, latency_ms = self._stream(
+                    [_message_param(m) for m in messages],
+                    model=model,
+                    route=route,
+                    system=system,
+                    ceiling=ceiling,
+                    output=tool,
+                    tools=None,
+                )
+                self._check_stop(raw, model=model, route=route, ceiling=ceiling, usage=usage)
+                _LOG.info(
+                    "llm.bedrock.call",
+                    **self._fields(raw, model, route, ceiling, usage, latency_ms),
+                )
+                return self._final(raw, model=model, route=route, output=tool, usage=usage)
+            case _:  # pragma: no cover — exhaustive over BedrockAdapter
+                assert_never(route.adapter)
+
+    # -- the client-side tool loop ----------------------------------------------------------------
+
+    def run_tools(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        tools: Sequence[ToolSpec],
+        execute: ToolExecutor,
+        system: str | None = None,
+        max_rounds: int = DEFAULT_TOOL_ROUNDS,
+        output: ToolSpec | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> ToolLoopResult:
+        """Let the model call ``tools``, run each call with ``execute``, until it answers.
+
+        What it does: each round is one streamed request offering ``tools`` as `strict` tools with
+        `tool_choice: auto`. When the model stops for `tool_use`, every call is run through
+        ``execute`` and the results go back in the next round (thinking blocks included, as the
+        API requires); when it stops with an answer, that is the result — structured against
+        ``output`` if one is given (`output_config.format`). Usage is summed over every round.
+        What it assumes: ``execute`` is the caller's own code (a search or fetch client); a
+        `ToolExecutionError` it raises is shown to the model as an error result.
+        What it never does: force a tool (`any`/`tool` choice is a 400 on Opus 5.5 / Sonnet 5.5),
+        run a tool the caller did not offer, exceed ``max_rounds`` model calls, or fall back to
+        another provider — the CLI cannot run client tools.
+        """
+        if not messages:
+            raise ValueError("run_tools() needs at least one message")
+        if not tools:
+            raise ValueError("run_tools() needs at least one tool; a plain call is complete()")
+        names = [t.name for t in tools]
+        if len(set(names)) != len(names):
+            raise ValueError(f"tool names must be unique, got {names}")
+        if max_rounds < 1:
+            raise ValueError(f"max_rounds must be at least 1, got {max_rounds}")
+        if max_tokens <= 0:
+            raise ValueError(f"max_tokens must be positive, got {max_tokens}")
         route = self._models.route(model)
         match route.adapter:
             case BedrockAdapter.ANTHROPIC_MESSAGES:
-                return self._messages(
+                return self._messages_tool_loop(
                     messages,
                     model=model,
                     route=route,
-                    tool=tools[0] if tools else None,
+                    tools=tools,
+                    execute=execute,
                     system=system,
-                    max_tokens=max_tokens,
+                    max_rounds=max_rounds,
+                    output=output,
+                    ceiling=self._ceiling(route, max_tokens),
                 )
             case _:  # pragma: no cover — exhaustive over BedrockAdapter
                 assert_never(route.adapter)
 
-    # -- the Anthropic Messages adapter ----------------------------------------------------------
-
-    def _messages(
+    def _messages_tool_loop(
         self,
         messages: Sequence[Message],
         *,
         model: str,
         route: BedrockModelRoute,
-        tool: ToolSpec | None,
+        tools: Sequence[ToolSpec],
+        execute: ToolExecutor,
         system: str | None,
-        max_tokens: int,
-    ) -> LLMResponse:
-        ceiling = min(route.max_output_tokens, max(max_tokens, self._max_tokens))
-        output_config: dict[str, Any] = {"effort": self._effort.value}
-        if tool is not None:
+        max_rounds: int,
+        output: ToolSpec | None,
+        ceiling: int,
+    ) -> ToolLoopResult:
+        offered = {t.name for t in tools}
+        tool_params = [
+            {
+                "name": t.name,
+                "description": t.description,
+                "input_schema": structured_output_schema(t.input_schema),
+                "strict": True,
+            }
+            for t in tools
+        ]
+        conversation: list[Any] = [_message_param(m) for m in messages]
+        usages: list[Usage] = []
+        called: list[ToolCall] = []
+        for round_number in range(1, max_rounds + 1):
+            raw, usage, latency_ms = self._stream(
+                conversation,
+                model=model,
+                route=route,
+                system=system,
+                ceiling=ceiling,
+                output=output,
+                tools=tool_params,
+            )
+            usages.append(usage)
+            fields = self._fields(raw, model, route, ceiling, usage, latency_ms)
+            _LOG.info("llm.bedrock.tool_round", round=round_number, **fields)
+            if raw.stop_reason != "tool_use":
+                total = _sum(usages)
+                self._check_stop(raw, model=model, route=route, ceiling=ceiling, usage=total)
+                final = self._final(raw, model=model, route=route, output=output, usage=total)
+                _LOG.info(
+                    "llm.bedrock.tool_loop",
+                    model=model,
+                    rounds=round_number,
+                    tool_calls=len(called),
+                    input_tokens=total.input_tokens,
+                    output_tokens=total.output_tokens,
+                    cache_write_tokens=total.cache_write_tokens,
+                    cache_read_tokens=total.cache_read_tokens,
+                )
+                return ToolLoopResult(
+                    response=final,
+                    rounds=round_number,
+                    tool_calls=tuple(called),
+                    round_usage=tuple(usages),
+                )
+            calls = [
+                ToolCall(id=block.id, name=block.name, arguments=_arguments(block.input))
+                for block in raw.content
+                if block.type == "tool_use"
+            ]
+            called.extend(calls)
+            # The assistant turn goes back whole — thinking blocks and their signatures included —
+            # because the API requires the thinking that led to a tool call alongside it.
+            conversation.append(
+                {
+                    "role": "assistant",
+                    "content": [
+                        block.model_dump(mode="json", exclude_none=True) for block in raw.content
+                    ],
+                }
+            )
+            conversation.append(
+                {"role": "user", "content": [_tool_result(c, execute, offered) for c in calls]}
+            )
+        total = _sum(usages)
+        _LOG.error(
+            "llm.bedrock.tool_loop_exhausted",
+            model=model,
+            rounds=max_rounds,
+            tool_calls=len(called),
+            input_tokens=total.input_tokens,
+            output_tokens=total.output_tokens,
+        )
+        raise ToolLoopExhaustedError(
+            f"{model} on Bedrock still wanted a tool after {max_rounds} rounds "
+            f"({len(called)} tool calls); the loop is bounded and there is no answer",
+            usage=total,
+            rounds=max_rounds,
+        )
+
+    # -- one streamed request ---------------------------------------------------------------------
+
+    def _ceiling(self, route: BedrockModelRoute, asked: int) -> int:
+        return min(route.max_output_tokens, max(asked, self._max_tokens))
+
+    def _stream(
+        self,
+        conversation: Sequence[Any],
+        *,
+        model: str,
+        route: BedrockModelRoute,
+        system: str | None,
+        ceiling: int,
+        output: ToolSpec | None,
+        tools: Sequence[Mapping[str, Any]] | None,
+    ) -> tuple[SdkMessage, Usage, int]:
+        """One streamed Messages request; the final message, its usage and its latency."""
+        output_config: dict[str, Any] = {}
+        if route.effort:
+            output_config["effort"] = self._efforts.effort_for(model).value
+        if output is not None:
             output_config["format"] = {
                 "type": "json_schema",
-                "schema": structured_output_schema(tool.input_schema),
+                "schema": structured_output_schema(output.input_schema),
             }
+        extra: dict[str, Any] = {}
+        if output_config:
+            extra["output_config"] = output_config
+        if route.adaptive_thinking:
+            extra["thinking"] = {"type": "adaptive"}
+        if tools:
+            extra["tools"] = list(tools)
+            extra["tool_choice"] = {"type": "auto"}
         started = time.monotonic()
         try:
             with self._sdk.messages.stream(
                 model=route.bedrock_id,
                 max_tokens=ceiling,
-                messages=[_message_param(message) for message in messages],
+                messages=cast("Any", list(conversation)),
                 system=anthropic.omit if system is None else system,
-                thinking={"type": "adaptive"},
-                output_config=cast("Any", output_config),
+                **extra,
             ) as stream:
                 raw = stream.get_final_message()
         except anthropic.APIError as exc:
@@ -412,32 +665,28 @@ class BedrockLLM:
                 reason, model=model, detail=f"{type(exc).__name__}: {exc}"
             ) from exc
         latency_ms = round((time.monotonic() - started) * 1000)
-        return self._response(
-            raw, model=model, route=route, tool=tool, ceiling=ceiling, latency_ms=latency_ms
-        )
-
-    def _response(
-        self,
-        raw: SdkMessage,
-        *,
-        model: str,
-        route: BedrockModelRoute,
-        tool: ToolSpec | None,
-        ceiling: int,
-        latency_ms: int,
-    ) -> LLMResponse:
         usage = Usage(
             input_tokens=raw.usage.input_tokens,
             output_tokens=raw.usage.output_tokens,
             cache_write_tokens=raw.usage.cache_creation_input_tokens or 0,
             cache_read_tokens=raw.usage.cache_read_input_tokens or 0,
         )
-        served = raw.model if raw.model and raw.model.strip() else route.bedrock_id
-        fields = {
+        return raw, usage, latency_ms
+
+    def _fields(
+        self,
+        raw: SdkMessage,
+        model: str,
+        route: BedrockModelRoute,
+        ceiling: int,
+        usage: Usage,
+        latency_ms: int,
+    ) -> dict[str, Any]:
+        return {
             "provider": BEDROCK_PROVIDER,
             "model": model,
-            "served_model": served,
-            "effort": self._effort.value,
+            "served_model": _served(raw, route),
+            "effort": self._efforts.effort_for(model).value if route.effort else None,
             "max_tokens": ceiling,
             "stop_reason": raw.stop_reason,
             "input_tokens": usage.input_tokens,
@@ -446,32 +695,61 @@ class BedrockLLM:
             "cache_read_tokens": usage.cache_read_tokens,
             "latency_ms": latency_ms,
         }
+
+    def _check_stop(
+        self,
+        raw: SdkMessage,
+        *,
+        model: str,
+        route: BedrockModelRoute,
+        ceiling: int,
+        usage: Usage,
+    ) -> None:
+        """Raise unless the message ended as an answer. ``usage`` is logged: it was billed."""
+        billed = {
+            "provider": BEDROCK_PROVIDER,
+            "model": model,
+            "stop_reason": raw.stop_reason,
+            "input_tokens": usage.input_tokens,
+            "output_tokens": usage.output_tokens,
+            "cache_write_tokens": usage.cache_write_tokens,
+            "cache_read_tokens": usage.cache_read_tokens,
+        }
         if raw.stop_reason == "refusal":
-            _LOG.warning("llm.bedrock.refused", **fields)
+            _LOG.warning("llm.bedrock.refused", **billed)
             category = None if raw.stop_details is None else raw.stop_details.category
             raise LLMRefusalError(
                 f"{model} on Bedrock declined the request (category {category!r}); there is no "
                 "answer to act on. Do not retry the same prompt — journal the refusal and escalate."
             )
         if raw.stop_reason == "max_tokens":
-            # Billed all the same; the usage is logged so a truncation is never invisible spend.
-            _LOG.error("llm.bedrock.truncated", **fields)
+            _LOG.error("llm.bedrock.truncated", max_tokens=ceiling, **billed)
             raise LLMError(
                 f"{model} on Bedrock hit its {ceiling}-token output ceiling before it finished — "
                 "thinking counts against that ceiling — so the answer is incomplete and is not "
                 "used. Raise BEDROCK_MAX_TOKENS (up to the model's "
-                f"{route.max_output_tokens}) or lower LLM_EFFORT."
+                f"{route.max_output_tokens}) or lower the call type's effort in effort.yaml."
             )
         if raw.stop_reason not in ("end_turn", "stop_sequence"):
-            _LOG.error("llm.bedrock.unexpected_stop", **fields)
+            _LOG.error("llm.bedrock.unexpected_stop", **billed)
             raise LLMError(
-                f"{model} on Bedrock stopped with {raw.stop_reason!r}, which a single-turn call "
-                "with no tools cannot complete on; treating it as an answer could accept half one"
+                f"{model} on Bedrock stopped with {raw.stop_reason!r}, which this call cannot "
+                "complete on; treating it as an answer could accept half of one"
             )
-        _LOG.info("llm.bedrock.call", **fields)
 
+    def _final(
+        self,
+        raw: SdkMessage,
+        *,
+        model: str,
+        route: BedrockModelRoute,
+        output: ToolSpec | None,
+        usage: Usage,
+    ) -> LLMResponse:
+        """The answer as an `LLMResponse`: text, or one structured `ToolCall` for ``output``."""
+        served = _served(raw, route)
         text = "".join(block.text for block in raw.content if block.type == "text")
-        if tool is None:
+        if output is None:
             if not text.strip():
                 raise LLMRefusalError(
                     f"{model} on Bedrock returned an empty completion; there is no answer to act "
@@ -493,7 +771,7 @@ class BedrockLLM:
             tool_calls=(
                 ToolCall(
                     id=STRUCTURED_TOOL_CALL_ID,
-                    name=tool.name,
+                    name=output.name,
                     arguments=_structured(text, model=model),
                 ),
             ),
@@ -571,10 +849,42 @@ def _status_reason(exc: anthropic.APIStatusError) -> UnavailableReason | None:
     return None
 
 
+def _served(raw: SdkMessage, route: BedrockModelRoute) -> str:
+    """The model id Bedrock reports serving, or the mapped id when it reports none."""
+    return raw.model if raw.model and raw.model.strip() else route.bedrock_id
+
+
 def _message_param(message: Message) -> MessageParam:
     """One turn in the SDK's wire shape."""
     role: Literal["user", "assistant"] = "user" if message.role is Role.USER else "assistant"
     return MessageParam(role=role, content=message.content)
+
+
+def _arguments(value: object) -> dict[str, Any]:
+    """A tool call's arguments as a mapping; strict tools guarantee an object."""
+    if not isinstance(value, dict):
+        raise LLMError(f"tool call arguments must be an object, got {type(value).__name__}")
+    return {str(key): item for key, item in value.items()}
+
+
+def _tool_result(call: ToolCall, execute: ToolExecutor, offered: set[str]) -> dict[str, Any]:
+    """Run one tool call and shape its outcome as a `tool_result` block."""
+    if call.name not in offered:
+        outcome = ToolOutcome(f"no tool named {call.name!r} was offered", is_error=True)
+    else:
+        try:
+            outcome = execute(call)
+        except ToolExecutionError as exc:
+            outcome = ToolOutcome(str(exc) or type(exc).__name__, is_error=True)
+    _LOG.info("llm.bedrock.tool_call", tool=call.name, is_error=outcome.is_error)
+    block: dict[str, Any] = {
+        "type": "tool_result",
+        "tool_use_id": call.id,
+        "content": outcome.content,
+    }
+    if outcome.is_error:
+        block["is_error"] = True
+    return block
 
 
 def _structured(text: str, *, model: str) -> dict[str, Any]:

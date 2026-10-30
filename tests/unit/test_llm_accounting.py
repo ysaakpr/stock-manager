@@ -252,8 +252,14 @@ def test_the_live_client_never_resolves_an_ambient_credential(
 
 @pytest.mark.usefixtures("clean_env")
 def test_build_llm_refuses_anthropic_without_a_key_rather_than_downgrading() -> None:
-    """`build_llm` picks the provider but never returns a stub where anthropic was asked."""
-    settings = Settings(llm_provider=LlmProvider.ANTHROPIC, anthropic_api_key=None, _env_file=None)  # type: ignore[call-arg]
+    """`build_llm` picks the provider but never returns a stub where anthropic was asked (with no
+    backup configured; with one, `test_llm_fallback` pins the logged per-call fallback)."""
+    settings = Settings(
+        llm_provider=LlmProvider.ANTHROPIC,
+        anthropic_api_key=None,
+        llm_fallback=None,
+        _env_file=None,  # type: ignore[call-arg]
+    )
 
     with pytest.raises(LLMCredentialError):
         build_llm(settings)
@@ -273,6 +279,7 @@ def test_build_llm_returns_the_live_client_once_a_key_is_present() -> None:
     settings = Settings(
         llm_provider=LlmProvider.ANTHROPIC,
         anthropic_api_key=SecretStr("sk-ant-test-not-a-real-key"),
+        llm_fallback=None,
         _env_file=None,  # type: ignore[call-arg]
     )
 

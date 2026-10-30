@@ -191,7 +191,7 @@ def test_a_failure_of_the_request_never_falls_back(make: Callable[[], Any]) -> N
 def test_an_unmapped_model_never_falls_back() -> None:
     backup = Backup()
     with pytest.raises(LLMError, match="not mapped"):
-        desk(bedrock(Endpoint(streamed(b""))), backup).complete(ASK, model="claude-haiku-4-5")
+        desk(bedrock(Endpoint(streamed(b""))), backup).complete(ASK, model="claude-sonnet-5")
     assert backup.calls == []
 
 
@@ -273,7 +273,8 @@ def test_the_m17_defaults_keep_the_cli_and_name_it_the_backup() -> None:
     settings = _settings()
     assert settings.m17_llm_provider is LlmProvider.CLAUDE_CLI  # unchanged until the owner flips it
     assert settings.m17_llm_fallback is LlmProvider.CLAUDE_CLI
-    assert settings.llm_effort.value == "xhigh"
+    assert settings.llm_provider is LlmProvider.STUB  # B4: the tests' and a fresh clone's default
+    assert settings.llm_fallback is LlmProvider.CLAUDE_CLI
     assert settings.bedrock_max_tokens == 64_000
 
 
@@ -331,6 +332,41 @@ def test_an_unconfigured_primary_answers_nothing_on_its_own() -> None:
 def test_a_backup_equal_to_the_primary_is_no_backup(cli_backup: Backup) -> None:
     llm = build_llm(_settings(), provider=LlmProvider.CLAUDE_CLI, fallback=LlmProvider.CLAUDE_CLI)
     assert llm is cli_backup
+
+
+def test_the_application_path_puts_bedrock_in_front_of_the_cli(cli_backup: Backup) -> None:
+    """`build_llm(settings)` with no provider: LLM_PROVIDER backed by LLM_FALLBACK, same rules."""
+    settings = _settings(
+        llm_provider="bedrock",
+        aws_bearer_token_bedrock=SecretStr(FAKE_KEY),
+        bedrock_region="us-east-1",
+    )
+    llm = build_llm(settings)
+    assert isinstance(llm, FallbackLLM)
+    assert isinstance(llm._primary, BedrockLLM)
+    assert llm._backup is cli_backup
+
+
+def test_the_application_path_without_a_key_falls_back_on_every_call(cli_backup: Backup) -> None:
+    llm = build_llm(_settings(llm_provider="bedrock"))
+    with capture_logs() as logs:
+        response = ask(llm)
+    assert response.fallback is not None
+    assert response.fallback.reason is UnavailableReason.NOT_CONFIGURED
+    assert [e["reason"] for e in logs if e["event"] == "llm.fallback"] == ["not_configured"]
+
+
+def test_the_application_path_honours_no_fallback() -> None:
+    with pytest.raises(LLMCredentialError):
+        build_llm(_settings(llm_provider="bedrock", llm_fallback="none"))
+
+
+def test_the_stub_default_never_builds_a_backup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """B4: the default needs no credential and no CLI, though LLM_FALLBACK names the CLI."""
+    from analyst.llm import StubLLM
+
+    monkeypatch.setattr("analyst.llm.claude_cli.shutil.which", lambda _: None)
+    assert isinstance(build_llm(_settings()), StubLLM)
 
 
 def test_build_llm_refuses_the_stub_as_a_backup() -> None:

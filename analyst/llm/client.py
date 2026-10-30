@@ -335,19 +335,22 @@ def build_llm(
     provider: LlmProvider | None = None,
     fallback: LlmProvider | None = None,
 ) -> LLM:
-    """The `LLM` this configuration selects (§8.1's provider switch).
+    """The `LLM` this configuration selects (§8.1's provider switch), with its per-call backup.
 
-    What it does: reads `LLM_PROVIDER` (or ``provider``, for a caller with its own selector, such
-    as the M17 desk's `M17_LLM_PROVIDER`) and returns the matching implementation. With
-    ``fallback`` (the M17 desk's `M17_LLM_FALLBACK`) it returns a `FallbackLLM` that re-asks that
-    provider, per call, when the primary could not serve it (`LLMUnavailableError`).
-    What it assumes: `STUB` is the default, because no credential exists (B4).
+    What it does: with no ``provider``, the application's own selector — `LLM_PROVIDER`, backed by
+    `LLM_FALLBACK`. With ``provider`` (a caller with its own selector, such as the M17 desk's
+    `M17_LLM_PROVIDER`), that provider backed by ``fallback``. When the backup differs from the
+    primary it returns a `FallbackLLM` that re-asks the backup, per call, when the primary could
+    not serve it (`LLMUnavailableError`); the owner's 2026-10-30 setup is Bedrock backed by the
+    Claude CLI, application-wide.
+    What it assumes: `STUB` is the default, because the tests and a fresh clone have no
+    credential (B4). The stub never has a backup: it cannot be unavailable, and it is never one.
     What it never does: downgrade silently. Selecting a provider without its credential — or
     `claude_cli` without the CLI on PATH — raises here, at startup, rather than producing a
     process that believes it is calling a model and is not. The one exception is a primary with a
     configured backup: then the missing credential is logged as a warning here and every call is
-    a logged, recorded fallback, because that is what the owner configured the backup for. The
-    backup itself must build; there is no fallback from a fallback, and never to the stub.
+    a logged, recorded fallback, because that is what the backup is configured for. The backup
+    itself must build; there is no fallback from a fallback.
 
     The implementations are imported inside the function on purpose: they import this module for
     the protocol and the value types, so importing them at the top would be a cycle.
@@ -356,24 +359,25 @@ def build_llm(
 
     resolved = get_settings() if settings is None else settings
     chosen = resolved.llm_provider if provider is None else provider
-    if fallback is None or fallback is chosen:
+    backup = resolved.llm_fallback if provider is None and fallback is None else fallback
+    if chosen is LlmProvider.STUB or backup is None or backup is chosen:
         return _build_one(resolved, chosen)
-    if fallback is LlmProvider.STUB:
+    if backup is LlmProvider.STUB:
         raise ValueError("the stub is never a fallback: it cannot decide, it can only look like it")
-    backup = _build_one(resolved, fallback)
+    backup_llm = _build_one(resolved, backup)
     try:
         primary = _build_one(resolved, chosen)
     except LLMCredentialError as exc:
         _LOG.warning(
             "llm.primary_unconfigured",
             provider=chosen.value,
-            backup=fallback.value,
+            backup=backup.value,
             reason=UnavailableReason.NOT_CONFIGURED.value,
             detail=str(exc),
         )
         primary = UnconfiguredLLM(chosen.value, str(exc))
     return FallbackLLM(
-        primary, backup, primary_provider=chosen.value, backup_provider=fallback.value
+        primary, backup_llm, primary_provider=chosen.value, backup_provider=backup.value
     )
 
 

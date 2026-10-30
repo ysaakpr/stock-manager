@@ -47,7 +47,7 @@ from analyst.llm.client import (
     ToolSpec,
     build_llm,
 )
-from dataplatform.config import LlmEffort, LlmProvider, Settings
+from dataplatform.config import LlmProvider, Settings
 
 # ── captured shapes ──────────────────────────────────────────────────────────────────────────
 
@@ -542,32 +542,36 @@ def test_a_proxy_with_userinfo_reaches_the_child_and_never_an_error_message(
     assert "http://***@proxy.internal:3128" in str(caught.value)
 
 
-# ── effort: pinned from configuration, the same value Bedrock sends ──────────────────────────
+# ── effort: pinned per call type, the same value Bedrock sends ───────────────────────────────
 
 
-def test_the_effort_from_settings_is_passed_as_a_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`LLM_EFFORT` reaches the CLI, so it no longer inherits the user's personal setting."""
-    monkeypatch.setattr("analyst.llm.claude_cli.shutil.which", lambda _: "/usr/bin/claude")
-    settings = Settings(_env_file=None, llm_effort=LlmEffort.HIGH)  # type: ignore[call-arg]
+@pytest.mark.parametrize(
+    ("model", "effort"),
+    [("claude-opus-5-5", "high"), ("claude-opus-5", "high"), ("claude-sonnet-5-5", "medium")],
+)
+def test_every_call_passes_the_effort_its_call_type_pins(
+    cli: ClaudeCliLLM, monkeypatch: pytest.MonkeyPatch, model: str, effort: str
+) -> None:
+    """Always explicit: the CLI never inherits the logged-in user's `/effort` setting."""
     fake = run_with(monkeypatch, TEXT_RESULT)
-    ClaudeCliLLM.from_settings(settings).complete(
-        [Message(Role.USER, "q")], model="claude-opus-5-5"
-    )
-    assert fake.argv[fake.argv.index("--effort") + 1] == "high"
+    cli.complete([Message(Role.USER, "q")], model=model)
+    assert fake.argv.count("--effort") == 1
+    assert fake.argv[fake.argv.index("--effort") + 1] == effort
 
 
-def test_the_default_effort_from_settings_is_xhigh(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_from_settings_pins_the_effort_too(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("analyst.llm.claude_cli.shutil.which", lambda _: "/usr/bin/claude")
     fake = run_with(monkeypatch, TEXT_RESULT)
     ClaudeCliLLM.from_settings(Settings(_env_file=None)).complete(  # type: ignore[call-arg]
         [Message(Role.USER, "q")], model="claude-opus-5-5"
     )
-    assert fake.argv[fake.argv.index("--effort") + 1] == "xhigh"
+    assert fake.argv[fake.argv.index("--effort") + 1] == "high"
 
 
-def test_a_cli_built_without_an_effort_passes_none(
+def test_a_model_with_no_pinned_effort_is_refused_before_the_cli_runs(
     cli: ClaudeCliLLM, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake = run_with(monkeypatch, TEXT_RESULT)
-    cli.complete([Message(Role.USER, "q")], model="claude-opus-5-5")
-    assert "--effort" not in fake.argv
+    with pytest.raises(LLMError, match="no call type"):
+        cli.complete([Message(Role.USER, "q")], model="claude-unknown-9")
+    assert fake.argv == []

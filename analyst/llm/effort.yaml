@@ -1,0 +1,35 @@
+# How hard a model thinks, pinned per call type (owner decision 2026-10-30, ~09:00 IST).
+#
+# One file read by every path that can set it — `BedrockLLM` sends it as `output_config.effort`,
+# `ClaudeCliLLM` and the Commons web fetcher as `--effort` — so the primary and its backup reason
+# equally hard, and no call inherits whatever the logged-in user last chose with `/effort`. It is
+# versioned here rather than set in .env because, for the M17 desk, effort is part of what the
+# pre-registration fixes (Amendment 5).
+#
+# `call_types`: the effort for each kind of call. `decision` is judgment on evidence — the M17
+# managers' rounds, T1/T2 reviews, thesis drafting. `summary` is summarising and extraction — the
+# Commons filing digests, the web fetcher's transcription, triage.
+#
+# `models`: which call type a model serves. Keyed by model because in this system the model *is*
+# the call type: the roster decides on Opus and digests on Sonnet, and the older analyst paths use
+# Opus for review and Haiku for triage. A call that needs a different effort on the same model would
+# need its own argument on the `LLM` protocol, not a second entry here. An unlisted model is refused
+# by every path that sends an effort: guessing one is exactly the inheritance this file ends. The
+# CLI's own aliases are listed so a caller using one still pins its effort.
+
+version: 1
+
+call_types:
+  decision: high
+  summary: medium
+
+models:
+  claude-opus-5-5: decision
+  claude-opus-5: decision
+  claude-opus-4-8: decision
+  opus: decision
+  claude-sonnet-5-5: summary
+  claude-sonnet-5: summary
+  sonnet: summary
+  claude-haiku-4-5: summary
+  haiku: summary

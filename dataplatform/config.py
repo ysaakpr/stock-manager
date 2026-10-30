@@ -88,9 +88,10 @@ class LlmProvider(StrEnum):
 class LlmEffort(StrEnum):
     """How hard a model thinks (`output_config.effort` on the API, `--effort` on the Claude CLI).
 
-    Pinned in configuration rather than left to a default, because the default is not one thing:
-    the API's depends on the model, and the CLI's is whatever the logged-in user last chose in
-    their personal settings — which is how the M17 desk ran at `xhigh` before anyone decided it.
+    Pinned per call type in `analyst/llm/effort.yaml` rather than left to a default, because the
+    default is not one thing: the API's depends on the model, and the CLI's is whatever the
+    logged-in user last chose with `/effort` — which is how the M17 desk ran at `xhigh` before
+    anyone decided it.
     """
 
     LOW = "low"
@@ -259,6 +260,12 @@ class Settings(BaseSettings):
     llm_provider: LlmProvider = Field(
         default=LlmProvider.STUB, description="stub | anthropic | claude_cli | bedrock"
     )
+    #: The backup `build_llm` asks per call when `llm_provider` could not serve it — the same rule
+    #: as `m17_llm_fallback` (`analyst.llm.fallback`). Ignored while the provider is the stub.
+    llm_fallback: LlmProvider | None = Field(
+        default=LlmProvider.CLAUDE_CLI,
+        description="the analyst's backup provider, per call: none | anthropic | claude_cli",
+    )
     broker_provider: BrokerProvider = Field(default=BrokerProvider.STUB, description="stub | kite")
     #: The M17 desk's own provider (M17.12): its managers, its on-demand digests and its web
     #: fetcher follow this and never `llm_provider`, so switching the desk to the Claude CLI does
@@ -280,13 +287,6 @@ class Settings(BaseSettings):
     m17_llm_fallback: LlmProvider | None = Field(
         default=LlmProvider.CLAUDE_CLI,
         description="the M17 desk's backup provider, per call: none | anthropic | claude_cli",
-    )
-    llm_effort: LlmEffort = Field(
-        default=LlmEffort.XHIGH,
-        description=(
-            "reasoning effort pinned on every Bedrock and Claude CLI call: low | medium | high | "
-            "xhigh | max"
-        ),
     )
     bedrock_region: str | None = Field(
         default=None,
@@ -398,21 +398,21 @@ class Settings(BaseSettings):
             )
         return value
 
-    @field_validator("m17_llm_fallback", mode="before")
+    @field_validator("llm_fallback", "m17_llm_fallback", mode="before")
     @classmethod
     def _no_fallback(cls, value: object) -> object:
-        """`M17_LLM_FALLBACK=` or `=none` means "no backup", not a provider called "none"."""
+        """`LLM_FALLBACK=` or `=none` means "no backup", not a provider called "none"."""
         if isinstance(value, str) and value.strip().lower() in ("", "none"):
             return None
         return value
 
-    @field_validator("m17_llm_fallback")
+    @field_validator("llm_fallback", "m17_llm_fallback")
     @classmethod
     def _fallback_can_decide(cls, value: LlmProvider | None) -> LlmProvider | None:
         """A stub cannot decide, so it is never a backup: a fallback to it would journal a desk of
         manager errors that read as a model outage (`backtest.fm_world.m17_provider`)."""
         if value is LlmProvider.STUB:
-            raise ValueError("m17_llm_fallback cannot be stub: a stub cannot decide; use none")
+            raise ValueError("a fallback cannot be stub: a stub cannot decide; use none")
         return value
 
     @field_validator("timezone")
