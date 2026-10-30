@@ -223,6 +223,35 @@ class HistoricalDepth(BaseModel):
     note: str = ""
 
 
+class TlsExtraChain(BaseModel):
+    """Public CA certificates one host's server fails to send, pinned so its chain can be built.
+
+    For a host whose certificate is valid but whose server omits the intermediates (browsers fill
+    the gap through AIA; OpenSSL does not). `dataplatform.ingest.tls` reads `pem` — a path under
+    `dataplatform/ingest/` — and refuses it unless it holds exactly the certificates `sha256`
+    names, in order, none of them self-signed. `anchor` names the root, already in certifi, the
+    chain must end at; `review_by` is when the pin is due for removal or re-verification, and a
+    fetcher built after it logs a warning. Verification is never relaxed by this record: it only
+    adds certificates OpenSSL may use to reach a root it already trusts.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pem: str = Field(min_length=1)
+    sha256: list[str] = Field(min_length=1)
+    anchor: str = Field(min_length=1)
+    review_by: date
+    reason: str = Field(min_length=1)
+
+    @field_validator("sha256")
+    @classmethod
+    def _hex_fingerprints(cls, value: list[str]) -> list[str]:
+        for fingerprint in value:
+            if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+                raise ValueError(f"{fingerprint!r} is not a lower-case hex SHA-256 fingerprint")
+        return value
+
+
 class HostPolicy(BaseModel):
     """What one host's robots.txt says, and how fast we are allowed to talk to it.
 
@@ -240,6 +269,9 @@ class HostPolicy(BaseModel):
     permits: str
     disallow: list[str] = Field(default_factory=list)
     min_spacing_seconds: float
+    #: Extra chain certificates for this host alone (see `TlsExtraChain`); absent for every host
+    #: that serves its own chain, which is all but one.
+    tls_extra_chain: TlsExtraChain | None = None
 
 
 class Source(BaseModel):
