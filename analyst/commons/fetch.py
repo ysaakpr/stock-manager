@@ -96,6 +96,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from analyst.llm.cli_env import claude_cli_env
 from analyst.llm.client import Usage
+from analyst.llm.effort import effort_for
 from dataplatform.clock import Clock
 from dataplatform.logging import get_logger
 from dataplatform.redaction import mask_secrets
@@ -802,6 +803,9 @@ class ClaudeWebFetcher:
             "--verbose",
             "--model",
             self._model,
+            # Pinned per call type (effort.yaml), never the logged-in user's /effort setting.
+            "--effort",
+            effort_for(self._model).value,
             "--tools",
             tools,
             "--allowedTools",

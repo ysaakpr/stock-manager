@@ -375,6 +375,8 @@ def test_the_fetcher_argv_holds_web_search_and_fetch_and_nothing_else(
     assert argv[argv.index("--permission-prompts") + 1] == "none"
     assert "--no-session-persistence" in argv
     assert argv[argv.index("--output-format") + 1] == "stream-json"
+    # Effort pinned per call type (effort.yaml): the Sonnet transcription is a summary, medium.
+    assert argv[argv.index("--effort") + 1] == "medium"
     assert "--dangerously-skip-permissions" not in argv and "--permission-mode" not in argv
     # The request travels on stdin, never argv, and the run never sits in the repository.
     assert all(request.target not in arg for arg in argv)
