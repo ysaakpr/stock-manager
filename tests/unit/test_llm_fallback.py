@@ -67,6 +67,7 @@ from tests.unit.test_llm_bedrock import (
     sse,
     streamed,
 )
+from tests.unit.test_websearch import ALL_KEYS as ALL_VENDOR_KEYS
 
 SYSTEM = "You are a fund manager."
 
@@ -390,11 +391,13 @@ def _desk_fetcher(provider: LlmProvider, settings: Settings, root: Path) -> obje
         )
 
 
-_VENDOR_KEYS: dict[str, Any] = {
-    "brave_search_api_key": "brave-test-key-not-real",
-    "tavily_api_key": "tvly-test-key-not-real",
-    "firecrawl_api_key": "fc-test-key-not-real",
-}
+_VENDOR_KEYS: dict[str, Any] = dict(
+    zip(
+        ("brave_search_api_key", "tavily_api_key", "firecrawl_api_key"),
+        ALL_VENDOR_KEYS,
+        strict=True,
+    )
+)
 
 
 def test_bedrock_research_runs_on_our_own_search_layer_with_the_cli_behind_it(

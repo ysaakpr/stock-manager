@@ -196,6 +196,14 @@ def test_status_websearch_reports_month_to_date_without_keys(
     assert (vendors["direct"].requests, vendors["direct"].budget) == (1, None)
     assert vendors["direct"].in_fetch_rotation and not vendors["direct"].in_search_rotation
     assert (out.total_requests, out.monthly_request_cap, out.remaining_requests) == (4, 3000, 2996)
-    assert vendors["tavily"].used == 0 and not vendors["tavily"].configured
+    assert vendors["tavily"].used == 0 and vendors["tavily"].configured is False
     assert key not in out.model_dump_json()
+    # The status app holds no vendor key (docker-compose.yml blanks them): "unknown", not false.
+    keyless = scratch.model_copy(
+        update={"brave_search_api_key": None, "tavily_api_key": None, "firecrawl_api_key": None}
+    )
+    with connect(scratch) as conn:
+        blind = {v.vendor: v for v in read_websearch_usage(conn, keyless, as_of=AT).vendors}
+    assert [blind[v].configured for v in ("brave", "tavily", "firecrawl")] == [None, None, None]
+    assert blind["direct"].configured is True and blind["brave"].used == 3
     assert any(getattr(r, "path", None) == "/status/websearch" for r in app.routes)

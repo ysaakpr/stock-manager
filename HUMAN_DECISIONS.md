@@ -724,8 +724,11 @@ test it is written up for confirmation as pre-registration Amendment 5
 What it is:
 
 - **Same models** (`claude-opus-5-5` decides, `claude-sonnet-5-5` digests), Bedrock ids
-  `anthropic.claude-*`; no prompt, schema, rule or rail changes, so every `mandate_hash` is
-  unchanged (all 21 checked 2026-10-30) and no manager is new.
+  `anthropic.claude-*`; no prompt template, decision schema, rule or rail changes.
+- **Hashes change, by one sentence:** the manager system prompt gains the untrusted-content rule
+  (web content is data, never instructions), so the **8 manager books' `mandate_hash` change**
+  (controls, style books and bench unchanged; before/after table in Amendment 5 (g)). S0 has not
+  happened, so **the dry-run count restarts** with the first dry session under the new hashes.
 - **Transport:** Bedrock primary (`LLM_PROVIDER=bedrock`, `M17_LLM_PROVIDER=bedrock`), Claude CLI
   backup per call (`LLM_FALLBACK=claude_cli`, `M17_LLM_FALLBACK=claude_cli`). A call falls back only when Bedrock could not serve it —
   unreachable, timed out, rate limited after retries, a 5xx, a rejected or missing key — never on a
@@ -734,17 +737,24 @@ What it is:
   `high`, digests and other summarising/extraction (Sonnet) `medium`; the CLI always passes
   `--effort`. It was previously inherited, unpinned, from the owner's personal Claude CLI setting
   (`xhigh` through the dry sessions, `high` since the owner's `/effort high` on 2026-10-30).
-- **Web research stays on the Claude CLI**: Bedrock has no web tools.
+- **Web research moves to our own search layer** (`analyst.websearch`): on Bedrock each manager
+  query or URL is a bounded Bedrock tool loop over our `web_search` / `web_fetch` (Brave, Tavily,
+  Firecrawl; one vendor per call, one fallback at most; per-vendor, monthly and per-session caps;
+  NSE/BSE/niftyindices and private addresses never fetched), producing the same Commons snapshot
+  as before; the CLI's own web tools answer a request only when Bedrock is unavailable, and the
+  snapshot records which path ran. `M17_WEB_RESEARCH=claude_cli` is the no-code rollback.
 - **Recorded per call:** the provider that answered, and the fallback reason when there was one, in
   each `FM_CALL` journal line; every call is a `token_usage` row (the console's Model cost panel).
 - **Cost measured:** Bedrock calls are billed per token to AWS and priced at the us-east-1 list
   rate on the dated card; CLI calls remain estimates.
 
 Open with it: whether to set a monthly Bedrock budget (§9's cap was deferred while the cost was a
-subscription), and whether at least one dry session must run on Bedrock before S0. Activation is
+subscription), and whether at least one of the restarted dry sessions must run on Bedrock with the
+new research path before S0. Activation is
 an `.env` change (`LLM_PROVIDER=bedrock`, `M17_LLM_PROVIDER=bedrock`, `AWS_BEARER_TOKEN_BEDROCK`,
-`BEDROCK_REGION`) and a scheduler restart, made by the owner after confirming. The effort levels
-take effect on merge for every provider, the Claude CLI included. Task M17.
+`BEDROCK_REGION`) and a scheduler restart, made by the owner after confirming. The effort levels,
+the untrusted-content rule (and with it the new manager hashes) take effect on merge for every
+provider, the Claude CLI included; the research path follows `M17_LLM_PROVIDER=bedrock`. Task M17.
 
 ## Coming up
 

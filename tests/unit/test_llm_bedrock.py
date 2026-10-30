@@ -663,3 +663,6 @@ def test_the_status_app_container_is_not_handed_the_bedrock_key() -> None:
     app = compose["services"]["app"]
     assert any(str(e.get("path", e)).endswith(".env") for e in app["env_file"])
     assert app["environment"]["AWS_BEARER_TOKEN_BEDROCK"] == ""
+    # Nor the web research vendors' keys: /status/websearch needs none of them.
+    for key in ("BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "FIRECRAWL_API_KEY"):
+        assert app["environment"][key] == ""

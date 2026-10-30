@@ -2,7 +2,9 @@
 
 Reads migration 0021's `websearch_vendor_month` and `websearch_month_total` for the IST calendar
 month of `as_of`, and the budgets, the monthly cap and the rotations from `Settings`
-(WEBSEARCH_*). Reports whether each vendor's key is configured — a boolean, never the key. The
+(WEBSEARCH_*). Reports whether each vendor's key is configured — a boolean, never the key — when
+this process holds any vendor key, and `null` when it holds none: the status app container is never
+handed the keys (ops/docker-compose.yml blanks them), so there it cannot know. The
 counters are written by `analyst.websearch.ledger`; this module only reads them (no import of
 `analyst`, which sits above the platform).
 """
@@ -25,7 +27,12 @@ class WebsearchVendorOut(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     vendor: str
-    configured: bool = Field(description="A key is set (always true for direct, which needs none)")
+    configured: bool | None = Field(
+        description=(
+            "A key is set (always true for direct, which needs none); null when this process holds "
+            "no vendor key at all, as the status app never does"
+        )
+    )
     used: int = Field(description="Units reserved this month, in the vendor's billing unit")
     requests: int = Field(description="Calls sent this month, fallbacks included")
     budget: int | None = Field(description="Monthly budget; None for direct, which is uncapped")
@@ -72,10 +79,16 @@ def read_websearch_usage(conn: Connection, settings: Settings, *, as_of: datetim
         "firecrawl": settings.websearch_budget_firecrawl,
         "direct": None,
     }
-    configured = {
+    held = {
         "brave": settings.brave_search_api_key is not None,
         "tavily": settings.tavily_api_key is not None,
         "firecrawl": settings.firecrawl_api_key is not None,
+    }
+    # No key at all is the status app's normal state (it is never handed them), not a desk with
+    # every vendor unconfigured: say "unknown" rather than three false negatives.
+    knows = any(held.values())
+    configured: dict[str, bool | None] = {
+        **{vendor: (key if knows else None) for vendor, key in held.items()},
         "direct": True,
     }
     search = _order(settings.websearch_search_vendors)
