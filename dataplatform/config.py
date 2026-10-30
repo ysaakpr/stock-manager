@@ -287,7 +287,76 @@ class Settings(BaseSettings):
         default=None, description="required only when ALERT_PROVIDER=telegram"
     )
 
+    # ── M17 web research (analyst.websearch): vendors, routing, budgets, limits ───────────────
+    #: Vendors tried in order for a web search. A vendor with no key, over its monthly budget, or
+    #: refusing us (401/403/429) is skipped; so is one failing this call (5xx, timeout).
+    websearch_search_vendors: str = Field(
+        default="brave,tavily,firecrawl",
+        description="comma-separated search vendors, tried in order: brave | tavily | firecrawl",
+    )
+    #: Vendors tried in order for a page fetch. `direct` is our own HTTP fetch, with no vendor
+    #: quota, and is the last resort on purpose.
+    websearch_fetch_vendors: str = Field(
+        default="firecrawl,tavily,direct",
+        description="comma-separated fetch vendors, tried in order: firecrawl | tavily | direct",
+    )
+    #: Monthly budgets, in each vendor's own billing unit (credits; one request is one credit
+    #: except a Firecrawl search, which costs two). Taken from each vendor's published free
+    #: allowance as read on 2026-10-30; the three sum to the owner's ~3,000 a month:
+    #: - Brave: https://brave.com/search/api/ — Search plan, "$5 in free credits every month" at
+    #:   "$5 per 1,000 requests", i.e. 1,000 requests a month.
+    #: - Tavily: https://docs.tavily.com/documentation/api-credits — Researcher (free) plan,
+    #:   1,000 credits a month; a basic search is 1 credit, a basic extract 1 credit per 5 URLs.
+    #: - Firecrawl: https://www.firecrawl.dev/pricing — Free plan, 1,000 credits a month; a scrape
+    #:   is 1 credit, a search 2 credits per 10 results.
+    websearch_budget_brave: Annotated[int, Field(ge=0)] = Field(
+        default=1000, description="Brave Search API requests per calendar month (IST)"
+    )
+    websearch_budget_tavily: Annotated[int, Field(ge=0)] = Field(
+        default=1000, description="Tavily credits per calendar month (IST)"
+    )
+    websearch_budget_firecrawl: Annotated[int, Field(ge=0)] = Field(
+        default=1000, description="Firecrawl credits per calendar month (IST)"
+    )
+    #: Per M17 session, across every manager: 4 managers x `rounds.max_queries` (8) in
+    #: analyst/fundmanager/roster.yaml. A cache hit costs nothing and is not counted.
+    websearch_session_max_searches: Annotated[int, Field(ge=0)] = Field(
+        default=32, description="web searches one M17 session may send to vendors"
+    )
+    websearch_session_max_fetches: Annotated[int, Field(ge=0)] = Field(
+        default=32, description="page fetches one M17 session may send to vendors"
+    )
+    websearch_timeout_seconds: Annotated[float, Field(gt=0, le=120)] = Field(
+        default=30.0, description="per-request timeout of a vendor call or a direct fetch"
+    )
+    websearch_max_fetch_bytes: Annotated[int, Field(ge=1024)] = Field(
+        default=2 * 1024 * 1024,
+        description="most bytes read from one response body; the rest is never downloaded",
+    )
+    websearch_max_redirects: Annotated[int, Field(ge=0, le=10)] = Field(
+        default=5, description="most redirects a direct fetch follows, each one re-checked"
+    )
+    websearch_max_result_chars: Annotated[int, Field(ge=500)] = Field(
+        default=16_000, description="most characters of one tool result handed to the model"
+    )
+    #: Hosts the scheduler owns (their own leases and request budgets; BSE is paused, D29). The
+    #: fetch tool refuses each one and every subdomain of it; search results may still name them.
+    websearch_blocked_hosts: str = Field(
+        default="nseindia.com,nsearchives.nseindia.com,bseindia.com,api.bseindia.com,"
+        "niftyindices.com",
+        description="comma-separated hosts the web fetch tool refuses, subdomains included",
+    )
+
     # ── credentials (absent by default; never logged — SecretStr masks its repr) ──────────────
+    brave_search_api_key: SecretStr | None = Field(
+        default=None, description="Brave Search API subscription token; unset skips Brave"
+    )
+    tavily_api_key: SecretStr | None = Field(
+        default=None, description="Tavily API key; unset skips Tavily"
+    )
+    firecrawl_api_key: SecretStr | None = Field(
+        default=None, description="Firecrawl API key; unset skips Firecrawl"
+    )
     anthropic_api_key: SecretStr | None = Field(
         default=None, description="required only when LLM_PROVIDER=anthropic"
     )
@@ -320,6 +389,12 @@ class Settings(BaseSettings):
     @classmethod
     def _blank_is_absent(cls, value: object) -> object:
         """`KEY=` in a .env means "not configured", not a credential that is the empty string."""
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("brave_search_api_key", "tavily_api_key", "firecrawl_api_key", mode="before")
+    @classmethod
+    def _blank_vendor_key_is_absent(cls, value: object) -> object:
+        """`KEY=` means the vendor is not configured, and the router skips it."""
         return None if isinstance(value, str) and not value.strip() else value
 
     @field_validator("timezone")
