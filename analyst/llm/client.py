@@ -30,23 +30,31 @@ from typing import Any, Final, Protocol, assert_never, runtime_checkable
 
 from analyst.journal import canonical_bytes, digest_of
 from dataplatform.config import LlmProvider, Settings, get_settings
+from dataplatform.logging import get_logger
 
 __all__ = [
     "DEFAULT_MAX_TOKENS",
     "LLM",
+    "Fallback",
     "LLMCredentialError",
     "LLMError",
     "LLMRefusalError",
     "LLMResponse",
+    "LLMUnavailableCredentialError",
+    "LLMUnavailableError",
+    "LLMUnavailableRateLimitError",
     "Message",
     "Role",
     "StopReason",
     "ToolCall",
     "ToolSpec",
+    "UnavailableReason",
     "Usage",
     "build_llm",
     "prompt_digest",
 ]
+
+_LOG = get_logger(__name__)
 
 #: Output ceiling used when a caller does not name one. Generous on purpose: a truncated analysis
 #: is a decision made on half an argument, and the failure is silent in the text and only visible
@@ -79,6 +87,58 @@ class LLMRefusalError(LLMError):
     that reads `content[0]` gets a plausible-looking nothing. This package raises instead: a
     decision made on a refusal is a decision made on no evidence.
     """
+
+
+class UnavailableReason(StrEnum):
+    """Why a provider could not serve a call — the vocabulary of `LLMUnavailableError`.
+
+    Each value names a failure of the *provider*, never of the question: the same request sent to
+    another provider could be answered. That is the whole test for membership, and the reason a
+    bad request, a refusal or an answer that did not parse have no value here.
+    """
+
+    CONNECTION = "connection"
+    """The endpoint could not be reached, or the connection broke mid-answer."""
+
+    TIMEOUT = "timeout"
+    """The endpoint did not answer in time."""
+
+    RATE_LIMIT = "rate_limit"
+    """Throttled, after the SDK's own retries."""
+
+    SERVER_ERROR = "server_error"
+    """A 5xx, an overload, or an error event mid-stream that the provider owns."""
+
+    AUTH = "auth"
+    """The credential was rejected (401) or lacks a permission (403): expired, revoked, or an IAM
+    policy missing an action. Someone has to replace or re-grant it."""
+
+    NOT_CONFIGURED = "not_configured"
+    """No credential or region was configured, so the provider was never built."""
+
+
+class LLMUnavailableError(LLMError):
+    """The provider could not serve this call; the question itself was never judged.
+
+    The one exception `analyst.llm.fallback.FallbackLLM` re-asks a backup on. Everything else an
+    `LLM` raises — a 400, a refusal, a truncation, an answer that did not parse — propagates,
+    because those are about the request and another provider would only hide them.
+    """
+
+    def __init__(self, message: str, *, provider: str, reason: UnavailableReason) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.reason = reason
+
+
+class LLMUnavailableRateLimitError(LLMUnavailableError, LLMRateLimitError):
+    """Throttled after retries: a fallback trigger, and still a rate limit to a caller that backs
+    off on `LLMRateLimitError` (`analyst.fundmanager.job.DeadlineLLM`) when no backup is wired."""
+
+
+class LLMUnavailableCredentialError(LLMUnavailableError, LLMCredentialError):
+    """The credential was rejected or is absent: a fallback trigger, and still a credential error
+    to a caller that has no backup."""
 
 
 class Role(StrEnum):
@@ -202,6 +262,22 @@ class Usage:
 
 
 @dataclass(frozen=True, slots=True)
+class Fallback:
+    """Why a response came from the backup provider rather than the primary.
+
+    Carried on the response so the record of the call — the journal line, the log — says which
+    provider answered *and* that it was not the one configured to, with the reason class.
+    """
+
+    from_provider: str
+    reason: UnavailableReason
+
+    def __post_init__(self) -> None:
+        if not self.from_provider.strip():
+            raise ValueError("a fallback must name the provider that could not answer")
+
+
+@dataclass(frozen=True, slots=True)
 class LLMResponse:
     """One completed call: what came back, and what it consumed.
 
@@ -217,6 +293,8 @@ class LLMResponse:
     usage: Usage
     stop_reason: StopReason = StopReason.END_TURN
     tool_calls: tuple[ToolCall, ...] = field(default_factory=tuple)
+    fallback: Fallback | None = None
+    """Set only when a `FallbackLLM`'s backup answered; `provider` is then the backup's."""
 
     def __post_init__(self) -> None:
         if not self.provider.strip():
@@ -251,34 +329,72 @@ class LLM(Protocol):
         """Answer a conversation, optionally offering tools, and report what it cost in tokens."""
 
 
-def build_llm(settings: Settings | None = None, *, provider: LlmProvider | None = None) -> LLM:
+def build_llm(
+    settings: Settings | None = None,
+    *,
+    provider: LlmProvider | None = None,
+    fallback: LlmProvider | None = None,
+) -> LLM:
     """The `LLM` this configuration selects (§8.1's provider switch).
 
     What it does: reads `LLM_PROVIDER` (or ``provider``, for a caller with its own selector, such
-    as the M17 desk's `M17_LLM_PROVIDER`) and returns the matching implementation.
+    as the M17 desk's `M17_LLM_PROVIDER`) and returns the matching implementation. With
+    ``fallback`` (the M17 desk's `M17_LLM_FALLBACK`) it returns a `FallbackLLM` that re-asks that
+    provider, per call, when the primary could not serve it (`LLMUnavailableError`).
     What it assumes: `STUB` is the default, because no credential exists (B4).
-    What it never does: downgrade. Selecting `anthropic` without a key — or `claude_cli` without
-    the CLI on PATH — raises here, at startup, rather than producing a process that believes it is
-    calling a model and is not.
+    What it never does: downgrade silently. Selecting a provider without its credential — or
+    `claude_cli` without the CLI on PATH — raises here, at startup, rather than producing a
+    process that believes it is calling a model and is not. The one exception is a primary with a
+    configured backup: then the missing credential is logged as a warning here and every call is
+    a logged, recorded fallback, because that is what the owner configured the backup for. The
+    backup itself must build; there is no fallback from a fallback, and never to the stub.
 
-    The implementations are imported inside the function on purpose: both import this module for
+    The implementations are imported inside the function on purpose: they import this module for
     the protocol and the value types, so importing them at the top would be a cycle.
     """
-    from analyst.llm.anthropic import AnthropicLLM
-    from analyst.llm.claude_cli import ClaudeCliLLM
-    from analyst.llm.stub import StubLLM
+    from analyst.llm.fallback import FallbackLLM, UnconfiguredLLM
 
     resolved = get_settings() if settings is None else settings
     chosen = resolved.llm_provider if provider is None else provider
-    match chosen:
+    if fallback is None or fallback is chosen:
+        return _build_one(resolved, chosen)
+    if fallback is LlmProvider.STUB:
+        raise ValueError("the stub is never a fallback: it cannot decide, it can only look like it")
+    backup = _build_one(resolved, fallback)
+    try:
+        primary = _build_one(resolved, chosen)
+    except LLMCredentialError as exc:
+        _LOG.warning(
+            "llm.primary_unconfigured",
+            provider=chosen.value,
+            backup=fallback.value,
+            reason=UnavailableReason.NOT_CONFIGURED.value,
+            detail=str(exc),
+        )
+        primary = UnconfiguredLLM(chosen.value, str(exc))
+    return FallbackLLM(
+        primary, backup, primary_provider=chosen.value, backup_provider=fallback.value
+    )
+
+
+def _build_one(settings: Settings, provider: LlmProvider) -> LLM:
+    """One implementation, no fallback. Raises `LLMCredentialError` when it cannot exist."""
+    from analyst.llm.anthropic import AnthropicLLM
+    from analyst.llm.bedrock import BedrockLLM
+    from analyst.llm.claude_cli import ClaudeCliLLM
+    from analyst.llm.stub import StubLLM
+
+    match provider:
         case LlmProvider.STUB:
             return StubLLM()
         case LlmProvider.ANTHROPIC:
-            return AnthropicLLM.from_settings(resolved)
+            return AnthropicLLM.from_settings(settings)
         case LlmProvider.CLAUDE_CLI:
-            return ClaudeCliLLM.from_settings(resolved)
+            return ClaudeCliLLM.from_settings(settings)
+        case LlmProvider.BEDROCK:
+            return BedrockLLM.from_settings(settings)
         case _:  # pragma: no cover — exhaustive over LlmProvider
-            assert_never(chosen)
+            assert_never(provider)
 
 
 def prompt_digest(

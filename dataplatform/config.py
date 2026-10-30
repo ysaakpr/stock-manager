@@ -11,6 +11,7 @@ parsing and validation, and it must stay that way so unit tests can build one of
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -24,11 +25,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 #: (a `make` target, a container whose WORKDIR is /app, or pytest run from a subdirectory).
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: An AWS region name (`us-east-1`, `ap-south-1`, `us-gov-west-1`): it is interpolated into the
+#: Bedrock endpoint's host name, so anything else is refused at startup rather than at a DNS error.
+_AWS_REGION = re.compile(r"[a-z]{2}(-[a-z]+)+-[0-9]+")
+
 __all__ = [
     "REPO_ROOT",
     "AlertProvider",
     "AppEnv",
     "BrokerProvider",
+    "LlmEffort",
     "LlmProvider",
     "LogFormat",
     "LogLevel",
@@ -69,11 +75,29 @@ class LlmProvider(StrEnum):
     `CLAUDE_CLI` needs no credential *in this repo* either: it shells out to the Claude CLI, which
     holds its own login. That is the difference from `ANTHROPIC`, which wants `ANTHROPIC_API_KEY`
     and bills per token — the CLI route runs on a subscription and reports an estimated cost.
+    `BEDROCK` is Claude on Amazon Bedrock (the Mantle endpoint), billed per token to the AWS
+    account behind `AWS_BEARER_TOKEN_BEDROCK` in `BEDROCK_REGION`.
     """
 
     STUB = "stub"
     ANTHROPIC = "anthropic"
     CLAUDE_CLI = "claude_cli"
+    BEDROCK = "bedrock"
+
+
+class LlmEffort(StrEnum):
+    """How hard a model thinks (`output_config.effort` on the API, `--effort` on the Claude CLI).
+
+    Pinned in configuration rather than left to a default, because the default is not one thing:
+    the API's depends on the model, and the CLI's is whatever the logged-in user last chose in
+    their personal settings — which is how the M17 desk ran at `xhigh` before anyone decided it.
+    """
+
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    XHIGH = "xhigh"
+    MAX = "max"
 
 
 class BrokerProvider(StrEnum):
@@ -233,7 +257,7 @@ class Settings(BaseSettings):
 
     # ── provider selectors (B4: no credential exists, so both default to a stub) ──────────────
     llm_provider: LlmProvider = Field(
-        default=LlmProvider.STUB, description="stub | anthropic | claude_cli"
+        default=LlmProvider.STUB, description="stub | anthropic | claude_cli | bedrock"
     )
     broker_provider: BrokerProvider = Field(default=BrokerProvider.STUB, description="stub | kite")
     #: The M17 desk's own provider (M17.12): its managers, its on-demand digests and its web
@@ -243,7 +267,40 @@ class Settings(BaseSettings):
     #: `--memory` rehearsal may decide with the stub.
     m17_llm_provider: LlmProvider = Field(
         default=LlmProvider.CLAUDE_CLI,
-        description="the M17 desk's managers, digests and fetcher: stub | anthropic | claude_cli",
+        description=(
+            "the M17 desk's managers and digests: stub | anthropic | claude_cli | bedrock; the web "
+            "fetcher stays on the Claude CLI for every provider but the stub"
+        ),
+    )
+    #: The provider a M17 call is re-asked on when `m17_llm_provider` could not serve it — not
+    #: reachable, rate limited after retries, a 5xx, a rejected credential, or not configured
+    #: (`analyst.llm.fallback`). Never on a bad request, a refusal or an answer that did not
+    #: parse: those are the question's fault, and another provider would only hide them. `none`
+    #: (or blank) disables it; one equal to the primary is ignored.
+    m17_llm_fallback: LlmProvider | None = Field(
+        default=LlmProvider.CLAUDE_CLI,
+        description="the M17 desk's backup provider, per call: none | anthropic | claude_cli",
+    )
+    llm_effort: LlmEffort = Field(
+        default=LlmEffort.XHIGH,
+        description=(
+            "reasoning effort pinned on every Bedrock and Claude CLI call: low | medium | high | "
+            "xhigh | max"
+        ),
+    )
+    bedrock_region: str | None = Field(
+        default=None,
+        description=(
+            "AWS region of the Bedrock Mantle endpoint; required only when a provider is bedrock. "
+            "Deliberately not AWS_REGION, which the S3 mirror's AWS tooling reads"
+        ),
+    )
+    bedrock_max_tokens: Annotated[int, Field(ge=1_024, le=128_000)] = Field(
+        default=64_000,
+        description=(
+            "output ceiling of a Bedrock call, thinking included; a caller asking for less gets "
+            "this, so thinking at a high effort cannot truncate the answer"
+        ),
     )
 
     # ── alerting (§8.1: FAILED streaks, red quality, reconciliation breaks) ───────────────────
@@ -291,6 +348,13 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = Field(
         default=None, description="required only when LLM_PROVIDER=anthropic"
     )
+    aws_bearer_token_bedrock: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Amazon Bedrock API key; required only when a provider is bedrock. Handed to the SDK "
+            "explicitly, never through the process environment"
+        ),
+    )
     kite_api_key: SecretStr | None = Field(
         default=None, description="required only when BROKER_PROVIDER=kite"
     )
@@ -305,6 +369,8 @@ class Settings(BaseSettings):
 
     @field_validator(
         "anthropic_api_key",
+        "aws_bearer_token_bedrock",
+        "bedrock_region",
         "kite_api_key",
         "kite_api_secret",
         "alert_smtp_host",
@@ -321,6 +387,33 @@ class Settings(BaseSettings):
     def _blank_is_absent(cls, value: object) -> object:
         """`KEY=` in a .env means "not configured", not a credential that is the empty string."""
         return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("bedrock_region")
+    @classmethod
+    def _aws_region_name(cls, value: str | None) -> str | None:
+        """The region becomes the endpoint's host name, so it must look like one (`us-east-1`)."""
+        if value is not None and _AWS_REGION.fullmatch(value) is None:
+            raise ValueError(
+                f"bedrock_region must be an AWS region name like us-east-1, got {value!r}"
+            )
+        return value
+
+    @field_validator("m17_llm_fallback", mode="before")
+    @classmethod
+    def _no_fallback(cls, value: object) -> object:
+        """`M17_LLM_FALLBACK=` or `=none` means "no backup", not a provider called "none"."""
+        if isinstance(value, str) and value.strip().lower() in ("", "none"):
+            return None
+        return value
+
+    @field_validator("m17_llm_fallback")
+    @classmethod
+    def _fallback_can_decide(cls, value: LlmProvider | None) -> LlmProvider | None:
+        """A stub cannot decide, so it is never a backup: a fallback to it would journal a desk of
+        manager errors that read as a model outage (`backtest.fm_world.m17_provider`)."""
+        if value is LlmProvider.STUB:
+            raise ValueError("m17_llm_fallback cannot be stub: a stub cannot decide; use none")
+        return value
 
     @field_validator("timezone")
     @classmethod

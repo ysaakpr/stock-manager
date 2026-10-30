@@ -1,0 +1,29 @@
+# Which Amazon Bedrock adapter serves each model a caller may name, and under which Bedrock id.
+#
+# Keyed by the model name callers already use — the M17 roster's `claude-opus-5-5` and
+# `claude-sonnet-5-5` — so a call site never learns Bedrock's naming. `analyst.llm.bedrock` refuses
+# a model that is not listed here, loudly, before any request is made: a guessed id is a 400 at
+# best and a different model at worst.
+#
+# `adapter` is the seam for models that are not Claude. Claude on Bedrock speaks the Anthropic
+# Messages API on the Mantle endpoint (`anthropic_messages`, the only adapter implemented). A
+# model served through bedrock-runtime Converse or Mantle's OpenAI-compatible Chat Completions
+# would get a new adapter value and its own request/response code beside `BedrockLLM`'s, chosen
+# here per model — never an `if model.startswith(...)` in the code.
+#
+# `bedrock_id` is the id the request carries (Bedrock prefixes Claude with `anthropic.`), and the
+# id `accounting/model_prices.yaml` prices a Bedrock call under, so Bedrock and first-party rates
+# can differ without a provider column on the card. `max_output_tokens` is the model's own output
+# ceiling: the request's `max_tokens` (thinking included) is clamped to it.
+
+version: 1
+
+models:
+  claude-opus-5-5:
+    adapter: anthropic_messages
+    bedrock_id: anthropic.claude-opus-5-5
+    max_output_tokens: 128000
+  claude-sonnet-5-5:
+    adapter: anthropic_messages
+    bedrock_id: anthropic.claude-sonnet-5-5
+    max_output_tokens: 128000
