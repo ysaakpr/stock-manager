@@ -302,9 +302,11 @@ class Settings(BaseSettings):
         default=LlmProvider.CLAUDE_CLI,
         description="the M17 desk's backup provider, per call: none | anthropic | claude_cli",
     )
-    #: Read only while `m17_llm_provider` is bedrock: Bedrock has no web tools of its own.
-    #: `claude_cli` until the owner names a research model Mantle serves (`claude-sonnet-5-5`
-    #: answered 404 in us-east-1 on 2026-10-30, and a 404 is not a fallback trigger).
+    #: Read only while `m17_llm_provider` is bedrock: Bedrock has no web tools of its own. The
+    #: research model is the roster's `models.research` (Amendment 5: `claude-opus-5-5`, which
+    #: Mantle serves in us-east-1; `claude-sonnet-5-5` answered 404 there on 2026-10-30). The
+    #: default stays `claude_cli` so that turning our own search layer on is an explicit deploy
+    #: step (`M17_WEB_RESEARCH=websearch`), taken with `M17_LLM_PROVIDER=bedrock`.
     m17_web_research: WebResearchPath = Field(
         default=WebResearchPath.CLAUDE_CLI,
         description=(

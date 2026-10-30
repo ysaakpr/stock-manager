@@ -376,8 +376,19 @@ def build_llm(
             detail=str(exc),
         )
         primary = UnconfiguredLLM(chosen.value, str(exc))
+    backup_model = None
+    if chosen is LlmProvider.BEDROCK:
+        from analyst.llm.bedrock import load_bedrock_models
+
+        # A Bedrock model the Claude-only backup cannot run (DeepSeek) is re-asked as the Claude
+        # model its route names (`cli_fallback_model`); a Claude model maps to itself.
+        backup_model = load_bedrock_models().backup_model
     return FallbackLLM(
-        primary, backup_llm, primary_provider=chosen.value, backup_provider=backup.value
+        primary,
+        backup_llm,
+        primary_provider=chosen.value,
+        backup_provider=backup.value,
+        backup_model=backup_model,
     )
 
 

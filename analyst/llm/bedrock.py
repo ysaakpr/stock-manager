@@ -47,7 +47,7 @@ import httpx
 import yaml
 from anthropic.types import Message as SdkMessage
 from anthropic.types import MessageParam
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from analyst.llm.client import (
     DEFAULT_MAX_TOKENS,
@@ -67,6 +67,7 @@ from analyst.llm.client import (
     Usage,
 )
 from analyst.llm.effort import EffortPolicy, load_effort_policy
+from analyst.llm.openai_chat import OpenAIChatClient
 from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger
 from dataplatform.redaction import MASK, mask_secrets
@@ -148,14 +149,15 @@ _STREAM_ERROR_REASONS: Final[dict[str, UnavailableReason]] = {
 class BedrockAdapter(StrEnum):
     """How a Bedrock model is spoken to. The seam for models that are not Claude.
 
-    `ANTHROPIC_MESSAGES` is Claude on the Mantle endpoint's Anthropic Messages API — the only
-    adapter built. A model served through bedrock-runtime Converse or Mantle's OpenAI-compatible
-    Chat Completions would add a value here and a branch in `BedrockLLM.complete` (and
-    `run_tools`), its own request and response mapping beside `_stream`; the map in
-    `bedrock_models.yaml` routes each model.
+    `ANTHROPIC_MESSAGES` is Claude on the Mantle endpoint's Anthropic Messages API.
+    `OPENAI_CHAT` is Mantle's OpenAI-compatible Chat Completions (`analyst.llm.openai_chat`), which
+    serves the models the Messages path refuses — DeepSeek V3.2. A model served some other way
+    (bedrock-runtime Converse) would add a value here and a branch in `BedrockLLM.complete`; the map
+    in `bedrock_models.yaml` routes each model.
     """
 
     ANTHROPIC_MESSAGES = "anthropic_messages"
+    OPENAI_CHAT = "openai_chat"
 
 
 class _Frozen(BaseModel):
@@ -172,6 +174,11 @@ class BedrockModelRoute(_Frozen):
     #: a model without them (Haiku 4.5) is sent neither, rather than a 400.
     adaptive_thinking: bool = True
     effort: bool = True
+    #: The Claude model a Claude-only backup (the Claude CLI) answers in this model's place when
+    #: Bedrock could not serve it. Unset for a Claude model, which falls back to itself; required
+    #: for any other (the map refuses an `openai_chat` route without one), because the CLI cannot
+    #: run DeepSeek and asking it to would turn every outage into a second, confusing failure.
+    cli_fallback_model: str | None = Field(default=None, min_length=1)
 
 
 class BedrockModelMap(_Frozen):
@@ -179,6 +186,34 @@ class BedrockModelMap(_Frozen):
 
     version: int
     models: dict[str, BedrockModelRoute] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _fallbacks_are_claude(self) -> BedrockModelMap:
+        for name, route in self.models.items():
+            target = route.cli_fallback_model
+            if route.adapter is not BedrockAdapter.ANTHROPIC_MESSAGES and target is None:
+                raise ValueError(
+                    f"{name} is not a Claude model, so it needs a cli_fallback_model: the Claude "
+                    "CLI backup cannot run it"
+                )
+            if target is not None:
+                backup = self.models.get(target)
+                if backup is None or backup.adapter is not BedrockAdapter.ANTHROPIC_MESSAGES:
+                    raise ValueError(
+                        f"{name}'s cli_fallback_model {target!r} must be a Claude model in this map"
+                    )
+        return self
+
+    def backup_model(self, model: str) -> str:
+        """The model a Claude-only backup is asked for in ``model``'s place.
+
+        ``model`` itself for a Claude route or an unmapped name (the backup then judges it, as it
+        did before this map existed); the route's `cli_fallback_model` otherwise.
+        """
+        route = self.models.get(model)
+        if route is None or route.cli_fallback_model is None:
+            return model
+        return route.cli_fallback_model
 
     def route(self, model: str) -> BedrockModelRoute:
         """The route for ``model``, or an `LLMError` naming the models that are mapped.
@@ -322,6 +357,7 @@ class BedrockLLM:
 
     __slots__ = (
         "_api_key",
+        "_chat",
         "_client",
         "_efforts",
         "_http_client",
@@ -372,6 +408,7 @@ class BedrockLLM:
         self._max_retries = max_retries
         self._http_client = http_client
         self._client: anthropic.AnthropicBedrockMantle | None = None
+        self._chat: OpenAIChatClient | None = None
 
     def __repr__(self) -> str:
         # The key is a SecretStr and is never interpolated; a repr in a log must stay safe.
@@ -408,6 +445,20 @@ class BedrockLLM:
                 http_client=self._http_client,
             )
         return self._client
+
+    @property
+    def _openai_chat(self) -> OpenAIChatClient:
+        """The Chat Completions client for `openai_chat` routes, on the same key and transport."""
+        if self._chat is None:
+            self._chat = OpenAIChatClient(
+                self._api_key,
+                self._region,
+                provider=BEDROCK_PROVIDER,
+                timeout_seconds=self._timeout_seconds,
+                max_retries=self._max_retries,
+                http_client=self._http_client,
+            )
+        return self._chat
 
     # -- the protocol -----------------------------------------------------------------------------
 
@@ -457,6 +508,19 @@ class BedrockLLM:
                     **self._fields(raw, model, route, ceiling, usage, latency_ms),
                 )
                 return self._final(raw, model=model, route=route, output=tool, usage=usage)
+            case BedrockAdapter.OPENAI_CHAT:
+                return self._openai_chat.complete(
+                    messages,
+                    model=model,
+                    bedrock_id=route.bedrock_id,
+                    system=system,
+                    output=tool,
+                    output_schema=(
+                        None if tool is None else structured_output_schema(tool.input_schema)
+                    ),
+                    ceiling=self._ceiling(route, max_tokens),
+                    effort=self._efforts.effort_for(model).value if route.effort else None,
+                )
             case _:  # pragma: no cover — exhaustive over BedrockAdapter
                 assert_never(route.adapter)
 
@@ -511,6 +575,13 @@ class BedrockLLM:
                     max_rounds=max_rounds,
                     output=output,
                     ceiling=self._ceiling(route, max_tokens),
+                )
+            case BedrockAdapter.OPENAI_CHAT:
+                # Not built: research runs on a Claude model (roster `research`), and a tool loop
+                # in the Chat Completions shape is its own translation. Refused, never faked.
+                raise LLMError(
+                    f"{model} is routed {route.adapter.value}, which has no client-side tool loop; "
+                    "run_tools needs an anthropic_messages model"
                 )
             case _:  # pragma: no cover — exhaustive over BedrockAdapter
                 assert_never(route.adapter)

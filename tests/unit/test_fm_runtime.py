@@ -292,7 +292,9 @@ def _mandate(book_id: str = "FM-SWING-BRK-10L", *, priced: bool = False) -> Mana
     mandate = load_roster().get(book_id)
     assert isinstance(mandate, ManagerMandate)
     if priced:
-        models = ModelIds(decision="claude-opus-5", digest=mandate.models.digest)
+        models = ModelIds(
+            decision="claude-opus-5", digest=mandate.models.digest, research=mandate.models.research
+        )
         mandate = mandate.model_copy(update={"models": models})
     return mandate
 

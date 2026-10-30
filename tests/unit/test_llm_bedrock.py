@@ -567,16 +567,23 @@ def test_the_m17_schemas_keep_every_field_type_and_requirement() -> None:
             assert f'"{keyword}"' not in text
 
 
-def test_the_model_map_routes_the_roster_models_through_the_messages_adapter() -> None:
+def test_the_model_map_routes_every_roster_model_and_its_cli_backup() -> None:
+    """Amendment 5: decisions and research on Opus 5.5 (Messages), digests on DeepSeek V3.2
+    (Chat Completions) whose Claude CLI backup is Sonnet 5.5 — and every role is mapped."""
     from analyst.fundmanager.mandate import load_roster
 
     models = load_bedrock_models()
     roster = load_roster()
     for book in roster.primaries:
-        for name in (book.models.decision, book.models.digest):
+        for name in (book.models.decision, book.models.research):
             route = models.route(name)
             assert route.adapter is BedrockAdapter.ANTHROPIC_MESSAGES
             assert route.bedrock_id == f"anthropic.{name}"
+            assert models.backup_model(name) == name
+        digest = models.route(book.models.digest)
+        assert digest.adapter is BedrockAdapter.OPENAI_CHAT
+        assert digest.bedrock_id == "deepseek.v3.2"
+        assert models.backup_model(book.models.digest) == "claude-sonnet-5-5"
 
 
 def test_an_unknown_adapter_in_the_map_is_a_load_error() -> None:
@@ -604,9 +611,10 @@ def test_every_bedrock_id_is_priced_on_the_card_in_force() -> None:
     schedule = load_price_card().schedule_for(date(2026, 10, 30))
     for route in load_bedrock_models().models.values():
         price = schedule.price_for(route.bedrock_id)
-        # Bedrock's in-region rate is its own figure, not the first-party one.
-        first_party = schedule.price_for(route.bedrock_id.removeprefix("anthropic."))
-        assert price.input > first_party.input
+        if route.adapter is BedrockAdapter.ANTHROPIC_MESSAGES:
+            # Bedrock's in-region rate for Claude is its own figure, not the first-party one.
+            first_party = schedule.price_for(route.bedrock_id.removeprefix("anthropic."))
+            assert price.input > first_party.input
 
 
 # ── 4. secret hygiene ────────────────────────────────────────────────────────────────────────────

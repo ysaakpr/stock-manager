@@ -29,6 +29,7 @@ from pydantic import SecretStr, ValidationError
 from structlog.testing import capture_logs
 
 from accounting import LedgeredLLM, TokenLedger, TokenPricer, load_price_card
+from analyst.fundmanager import load_roster
 from analyst.llm import (
     DEFAULT_MAX_TOKENS,
     BedrockLLM,
@@ -377,6 +378,10 @@ def test_build_llm_refuses_the_stub_as_a_backup() -> None:
         build_llm(_settings(), provider=LlmProvider.BEDROCK, fallback=LlmProvider.STUB)
 
 
+#: The roster's research model (Amendment 5: Opus 5.5), the one every research path runs on.
+RESEARCH_MODEL = load_roster().primaries[0].models.research
+
+
 def _desk_fetcher(provider: LlmProvider, settings: Settings, root: Path) -> object:
     with ExitStack() as stack:
         return fm_world._fetcher(
@@ -388,6 +393,7 @@ def _desk_fetcher(provider: LlmProvider, settings: Settings, root: Path) -> obje
             ledger=None,
             memory=True,
             stack=stack,
+            research_model=RESEARCH_MODEL,
         )
 
 
@@ -416,8 +422,10 @@ def test_bedrock_research_runs_on_our_own_search_layer_with_the_cli_behind_it(
     )
     fetcher = _desk_fetcher(LlmProvider.BEDROCK, settings, tmp_path)
     assert isinstance(fetcher, BedrockWebFetcher)
-    assert fetcher.name == "bedrock+websearch:claude-sonnet-5-5"
+    assert RESEARCH_MODEL == "claude-opus-5-5"
+    assert fetcher.name == "bedrock+websearch:claude-opus-5-5"
     assert isinstance(fetcher._backup, ClaudeWebFetcher)
+    assert fetcher._backup.name == "claude_cli:claude-opus-5-5"  # the backup researches on Opus too
     # The tool results live in their own store, never in the desk's (a nested lock would hang).
     assert fetcher.research._store is not None
     assert fetcher.research._store.root == tmp_path / "commons" / "websearch"
@@ -461,7 +469,8 @@ def test_bedrock_research_stays_on_the_cli_when_asked_or_when_it_cannot_run(
     )
     # A desk on the Claude CLI always researches there; a stub desk never researches live.
     cli = _settings(**bedrock, **_VENDOR_KEYS)
-    assert isinstance(_desk_fetcher(LlmProvider.CLAUDE_CLI, cli, tmp_path), ClaudeWebFetcher)
+    on_cli = _desk_fetcher(LlmProvider.CLAUDE_CLI, cli, tmp_path)
+    assert isinstance(on_cli, ClaudeWebFetcher) and on_cli.name == f"claude_cli:{RESEARCH_MODEL}"
     assert isinstance(_desk_fetcher(LlmProvider.STUB, cli, tmp_path), fm_world.NoLiveFetcher)
 
 

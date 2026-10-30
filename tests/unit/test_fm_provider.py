@@ -53,6 +53,7 @@ def _desk_fetcher(provider: LlmProvider, settings: Settings) -> object:
             ledger=None,
             memory=True,
             stack=stack,
+            research_model="claude-opus-5-5",
         )
 
 

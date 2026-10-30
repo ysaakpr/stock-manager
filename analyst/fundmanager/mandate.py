@@ -183,10 +183,16 @@ class UniverseFloor(_Frozen):
 
 
 class ModelIds(_Frozen):
-    """The model behind the manager's decisions and the one behind Commons digests (§2, §9)."""
+    """The model per role (§2, §9; Amendment 5): decisions, Commons digests, web research.
+
+    Names as callers use them (`analyst/llm/bedrock_models.yaml` keys); the provider is the desk's
+    `M17_LLM_PROVIDER`, and a model's Bedrock route says how it is spoken to and what the Claude CLI
+    backup answers in its place. Part of the mandate hash: changing a model is a new manager (§7).
+    """
 
     decision: StrictStr = Field(min_length=1)
     digest: StrictStr = Field(min_length=1)
+    research: StrictStr = Field(min_length=1)
 
 
 class RoundLimits(_Frozen):

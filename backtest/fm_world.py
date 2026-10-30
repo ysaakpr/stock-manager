@@ -806,6 +806,30 @@ def _llm(settings: Settings, provider: LlmProvider) -> LLM:
     return build_llm(settings, provider=provider, fallback=settings.m17_llm_fallback)
 
 
+def _digest_model(provider: LlmProvider, model: str) -> str:
+    """The digest model ``provider`` can run: the roster's, or its Claude stand-in off Bedrock.
+
+    The roster's digest model (Amendment 5: `deepseek-v3-2`) is served only by Bedrock. A desk on
+    the Claude CLI or the first-party API — before the deploy flips `M17_LLM_PROVIDER`, or after a
+    rollback — digests on the model `bedrock_models.yaml` names as its `cli_fallback_model`
+    (Sonnet 5.5), the same stand-in a Bedrock outage gets, with a warning; each digest records the
+    model that wrote it. The stub answers any name, so it keeps the roster's.
+    """
+    if provider in (LlmProvider.BEDROCK, LlmProvider.STUB):
+        return model
+    from analyst.llm.bedrock import load_bedrock_models
+
+    stand_in = load_bedrock_models().backup_model(model)
+    if stand_in != model:
+        _LOG.warning(
+            "fm_world.digest_model_stand_in",
+            provider=provider.value,
+            roster_model=model,
+            model=stand_in,
+        )
+    return stand_in
+
+
 #: The providers whose desk researches the web live: the Claude CLI with its own web tools, and
 #: Bedrock — through our own search layer (`analyst.websearch.BedrockWebFetcher`, Amendment 5 (d))
 #: unless ``M17_WEB_RESEARCH=claude_cli`` keeps it on the CLI. Every other provider gets none.
@@ -828,11 +852,15 @@ def _fetcher(
     ledger: TokenLedger | None,
     memory: bool,
     stack: ExitStack,
+    research_model: str,
 ) -> Any:
     """The desk's Commons fetcher for ``provider`` (see `_LIVE_FETCH_PROVIDERS`).
 
+    ``research_model`` is the roster's ``models.research`` (Amendment 5: Opus 5.5) on every path —
+    the CLI's web fetcher, the Bedrock tool loop and that loop's CLI backup.
+
     On Bedrock with ``M17_WEB_RESEARCH=websearch`` (not the default, which is ``claude_cli``) it
-    is a `BedrockWebFetcher`: the research model is the digest model on Bedrock, the vendors
+    is a `BedrockWebFetcher`: the research model runs the tool loop on Bedrock, the vendors
     share the load under their budgets (counted in Postgres, migration 0021, or in memory for a
     ``--memory`` rehearsal), the tool results are snapshots in their own store beside
     ``fetch_root``, every loop's cost is a ``token_usage`` row under `FETCH_TOKEN_PURPOSE`, and
@@ -847,7 +875,7 @@ def _fetcher(
     if provider is not LlmProvider.BEDROCK or (
         settings.m17_web_research is WebResearchPath.CLAUDE_CLI
     ):
-        return ClaudeWebFetcher()
+        return ClaudeWebFetcher(model=research_model)
     return _bedrock_fetcher(
         settings=settings,
         clock=clock,
@@ -856,6 +884,7 @@ def _fetcher(
         ledger=ledger,
         memory=memory,
         stack=stack,
+        research_model=research_model,
     )
 
 
@@ -868,10 +897,11 @@ def _bedrock_fetcher(
     ledger: TokenLedger | None,
     memory: bool,
     stack: ExitStack,
+    research_model: str,
 ) -> Any:
     from accounting import AccountingError, TokenPricer, load_price_card
     from analyst.commons import SnapshotStore
-    from analyst.commons.fetch import DEFAULT_FETCH_MODEL, ClaudeWebFetcher, FetchError
+    from analyst.commons.fetch import ClaudeWebFetcher, FetchError
     from analyst.llm import LLMCredentialError, LLMResponse
     from analyst.llm.bedrock import BedrockLLM, load_bedrock_models
     from analyst.websearch import (
@@ -888,7 +918,7 @@ def _bedrock_fetcher(
         model = BedrockLLM.from_settings(settings)
     except LLMCredentialError as exc:
         _LOG.warning("fm_world.web_research_on_cli", reason="bedrock_unconfigured", detail=str(exc))
-        return ClaudeWebFetcher()
+        return ClaudeWebFetcher(model=research_model)
     usage: UsageLedger
     if memory:
         usage = InMemoryUsageLedger()
@@ -904,11 +934,11 @@ def _bedrock_fetcher(
     )
     if not research.search_vendors and not research.fetch_vendors:
         _LOG.warning("fm_world.web_research_on_cli", reason="no_vendor_configured")
-        return ClaudeWebFetcher()
+        return ClaudeWebFetcher(model=research_model)
     backup = None
     if settings.m17_llm_fallback is LlmProvider.CLAUDE_CLI:
         try:
-            backup = ClaudeWebFetcher()
+            backup = ClaudeWebFetcher(model=research_model)
         except FetchError as exc:
             _LOG.warning("fm_world.web_research_no_backup", detail=str(exc))
     meter = None
@@ -935,7 +965,7 @@ def _bedrock_fetcher(
     _LOG.info(
         "fm_world.web_research",
         path="websearch",
-        model=DEFAULT_FETCH_MODEL,
+        model=research_model,
         search_vendors=[v.name.value for v in research.search_vendors],
         fetch_vendors=[v.name.value for v in research.fetch_vendors],
         backup=None if backup is None else backup.name,
@@ -944,7 +974,7 @@ def _bedrock_fetcher(
     return BedrockWebFetcher(
         model,
         research,
-        model_id=DEFAULT_FETCH_MODEL,
+        model_id=research_model,
         backup=backup,
         meter=meter,
         bedrock_model_id=lambda name: models.route(name).bedrock_id,
@@ -1037,6 +1067,7 @@ def _wire(
         ledger=ledger,
         memory=memory,
         stack=stack,
+        research_model=roster.primaries[0].models.research,
     )
     journal = StreamJournal(sink, stream)
     builder = LakeCommonsBuilder(
@@ -1057,7 +1088,7 @@ def _wire(
         snapshots=snapshots,
         universe=universe_parameters(roster),
         recorded_at=clock,
-        digest_model=roster.primaries[0].models.digest,
+        digest_model=_digest_model(provider, roster.primaries[0].models.digest),
         actions=functools.partial(StoreOverlayActions, settings),
     )
     stack.callback(builder.close)

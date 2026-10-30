@@ -13,7 +13,6 @@ This package never imports `analyst.fundmanager`, directly or through anything i
 
 from analyst.commons.base_rates import BaseRateCell, BaseRateTable, load_table
 from analyst.commons.digests import (
-    DIGEST_MODEL,
     DIGEST_OUTPUT_SCHEMA,
     AnnouncementText,
     DigestBody,
@@ -100,7 +99,6 @@ from analyst.commons.store import (
 )
 
 __all__ = [
-    "DIGEST_MODEL",
     "DIGEST_OUTPUT_SCHEMA",
     "EVENT_KEYWORDS_DIGEST",
     "MAX_PAGES_PER_REQUEST",
