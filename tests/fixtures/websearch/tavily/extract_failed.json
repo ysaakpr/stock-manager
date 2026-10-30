@@ -1,0 +1,8 @@
+{
+  "results": [],
+  "failed_results": [
+    {"url": "https://news.example.org/economy/rbi-policy-october", "error": "Failed to retrieve content"}
+  ],
+  "response_time": 0.5,
+  "request_id": "123e4567-e89b-12d3-a456-426614174111"
+}

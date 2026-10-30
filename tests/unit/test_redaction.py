@@ -51,6 +51,8 @@ _PREFIXED = [
     ("gitlab", "gl" + "pat-" + _body("gitlab", 20)),
     ("hugging face", "hf" + "_" + _body("hf", 34)),
     ("npm", "np" + "m_" + _body("npm", 36)),
+    ("tavily", "tv" + "ly-dev-" + _body("tavily", 32)),
+    ("firecrawl", "f" + "c-" + _body("firecrawl", 32, "0123456789abcdef")),
     ("jwt", _jwt()),
 ]
 
