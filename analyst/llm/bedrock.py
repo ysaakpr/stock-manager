@@ -746,8 +746,22 @@ class BedrockLLM:
         output: ToolSpec | None,
         usage: Usage,
     ) -> LLMResponse:
-        """The answer as an `LLMResponse`: text, or one structured `ToolCall` for ``output``."""
-        served = _served(raw, route)
+        """The answer as an `LLMResponse`: text, or one structured `ToolCall` for ``output``.
+
+        The response names the Bedrock id it asked for, not the id Bedrock reports: Mantle reports
+        the bare first-party name (measured 2026-10-30, `claude-opus-5-5` for
+        `anthropic.claude-opus-5-5`), which would price a Bedrock call at the first-party rate and
+        make it indistinguishable on the card. A reported model that is neither is logged.
+        """
+        reported = _served(raw, route)
+        if reported not in (model, route.bedrock_id):
+            _LOG.warning(
+                "llm.bedrock.served_other_model",
+                model=model,
+                bedrock_id=route.bedrock_id,
+                served_model=reported,
+            )
+        served = route.bedrock_id
         text = "".join(block.text for block in raw.content if block.type == "text")
         if output is None:
             if not text.strip():
@@ -850,7 +864,7 @@ def _status_reason(exc: anthropic.APIStatusError) -> UnavailableReason | None:
 
 
 def _served(raw: SdkMessage, route: BedrockModelRoute) -> str:
-    """The model id Bedrock reports serving, or the mapped id when it reports none."""
+    """The model id Bedrock reports serving, or the mapped id when it reports none (for logs)."""
     return raw.model if raw.model and raw.model.strip() else route.bedrock_id
 
 
