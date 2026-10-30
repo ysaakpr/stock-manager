@@ -124,6 +124,8 @@ class CaRefreshReport:
     nse: CaBackfillReport
     bse: CaBackfillReport
     bse_scrips: int
+    #: Set when the BSE feed is paused (register `paused`, D29): its units were not requested.
+    bse_paused: bool = False
     finalize: FinalizeCounts | None = None
     l2_rebuilt: int = 0
     failures: list[tuple[str, str]] = field(default_factory=list)
@@ -140,6 +142,8 @@ class CaRefreshReport:
             f"{self.nse.actions_persisted} new actions; BSE {self.bse.published} of "
             f"{self.bse_scrips} scrips, {self.bse.actions_persisted} new actions"
         )
+        if self.bse_paused:
+            line += f" (BSE paused: {self.bse_scrips} scrips not requested)"
         if self.finalize is not None:
             line += (
                 f"; recomputed {self.finalize.isins_recomputed} ISINs, "
@@ -252,6 +256,9 @@ def refresh_corporate_actions(
         wanted |= set(sweep_isins)
     scrips = bse_scrips_for_isins(master, wanted)
     bse_units = build_bse_refresh_units(scrips, as_of=to_date, register=register)
+    bse_paused = _paused(register, bse_ca.SOURCE_ID, scrips=len(scrips), to_date=to_date)
+    if bse_paused:
+        bse_units = []
     if nse_report.parked:
         # The NSE host refused us; the BSE host is a different budget, but a park is a human's
         # call and the run says so rather than carrying on half-blind.
@@ -264,6 +271,7 @@ def refresh_corporate_actions(
         nse=nse_report,
         bse=bse_report,
         bse_scrips=len(scrips),
+        bse_paused=bse_paused,
         failures=[*nse_report.failures, *bse_report.failures],
     )
     for parked in (nse_report, bse_report):
@@ -296,10 +304,31 @@ def refresh_corporate_actions(
     return report
 
 
+def _paused(register: SourceRegister, source_id: str, *, scrips: int, to_date: date) -> bool:
+    """Whether a feed is paused (register `paused`, D29) — logged, so the skip is on the record."""
+    entry = next((s for s in register.sources if s.id == source_id), None)
+    if entry is None or entry.paused is None:
+        return False
+    _LOG.info(
+        "ca_refresh.source_paused",
+        source=source_id,
+        to_date=to_date.isoformat(),
+        scrips_not_requested=scrips,
+        since=entry.paused.since.isoformat(),
+        decision=entry.paused.decision,
+        state="SKIPPED",
+    )
+    return True
+
+
 def _hosts(register: SourceRegister) -> list[str]:
-    """The hosts a refresh talks to, read from the register rows of the two feeds."""
+    """The hosts a refresh talks to, read from the register rows of the two feeds.
+
+    A paused feed's host is not leased: the refresh will not request it (D29), so it must not hold
+    that host's request budget either.
+    """
     wanted = {nse_ca.SOURCE_ID, bse_ca.SOURCE_ID}
-    return sorted({s.host for s in register.sources if s.id in wanted})
+    return sorted({s.host for s in register.sources if s.id in wanted and not s.is_paused})
 
 
 def _run(

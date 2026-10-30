@@ -117,10 +117,36 @@ transport.
    re-driven. Confirm with `/status/sources`.
 2. **A source keeps failing.** Read the `last_error` in `/status/sources`. A parser or URL change
    is a source-register (C.1) fix; a transient upstream 5xx heals on its own next run.
-3. **A 403 spike hard-stopped a host.** The fetcher stops talking to that host for the life of the
-   process and sends a CRITICAL alert. **Do not work around it** — no user-agent rotation, no proxy,
-   no faster retry (AGENTIC_CONTEXT §8). Find out why the source started refusing us, then restart
-   the scheduler deliberately.
+3. **A 403 spike hard-stopped a host.** That run's fetcher stops talking to the host (the next
+   job run builds a new fetcher) and sends a CRITICAL alert. **Do not work around it** — no
+   user-agent rotation, no proxy, no faster retry (AGENTIC_CONTEXT §8). Find out why the source
+   started refusing us. If the block persists, the owner may **pause** the source (below) rather
+   than let every run trip it again.
+
+### Paused sources (HUMAN_DECISIONS D29)
+
+A source with a `paused` record in `dataplatform/ingest/source_register.yaml` (reason, `since`,
+the HUMAN_DECISIONS entry) is not requested by any job: each leg skips it before any request and
+logs `ca_refresh.source_paused`, `capture.source_paused` or `snapshot.source_paused`; the fetch
+policy refuses it as a backstop (`SourcePausedError`). A job whose only problem is a paused leg
+succeeds. `/status/sources` and the Data page show it as **PAUSED** (grey, with the reason), the
+gap report explains its days from `since` as `PAUSED`, and `identity_refresh` holds conflicts on
+the paused exchange instead of failing. No gate ever counts a paused source as fresh or published:
+a paused dataset is simply missing to `is_green`.
+
+Since 2026-10-24 the three `api.bseindia.com` sources are paused (`bse_announcements`,
+`bse_corp_actions`, `bse_scrip_master`); `bse_bhavcopy` (`www.bseindia.com`) keeps running.
+
+**Lifting a pause is the owner's decision**, made deliberately once the block is understood —
+never a workaround (AGENTIC_CONTEXT §8). It is one register edit plus a restart:
+
+1. Delete the source's `paused:` record in `source_register.yaml`, and record the decision in
+   `HUMAN_DECISIONS.md`.
+2. Merge it, pull it on the server, and restart the scheduler
+   (`XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler.service`) and rebuild
+   the app container so the status pages read the same register.
+3. Watch the source's next run on `/status/sources`; the first fetches will show whether the host
+   answers again.
 4. **Calendar coverage error.** `today` is past the holiday file's coverage. Extend
    `dataplatform/ingest/data/nse_holidays.yaml` and re-run.
 

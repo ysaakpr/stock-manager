@@ -164,7 +164,11 @@ _HTTP_NOT_FOUND: Final = 404
 #: Quarantine reasons a delivery write legitimately replaces: they are re-derived from the MTO
 #: payload and the identity master on every write, so a re-promotion supersedes them by design.
 _DELIVERY_REASONS: Final = frozenset(
-    {PriceQuarantineReason.SYMBOL_UNRESOLVED, PriceQuarantineReason.NO_MATCHING_PRICE}
+    {
+        PriceQuarantineReason.SYMBOL_UNRESOLVED,
+        PriceQuarantineReason.SYMBOL_AMBIGUOUS,
+        PriceQuarantineReason.NO_MATCHING_PRICE,
+    }
 )
 
 

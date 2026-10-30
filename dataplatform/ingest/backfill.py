@@ -63,22 +63,26 @@ from dataplatform.ingest.models import BhavcopyParse, ParseError, PriceRow, Unid
 from dataplatform.ingest.nse import bhavcopy, delivery, mto
 from dataplatform.ingest.nse.bhavcopy_legacy import LEGACY_SOURCE_ID
 from dataplatform.ingest.nse.bhavcopy_udiff import UDIFF_SOURCE_ID
-from dataplatform.ingest.nse.delivery import DeliveryRow
+from dataplatform.ingest.nse.delivery import AmbiguousDeliveryRow, DeliveryRow
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.logging import get_logger
+from dataplatform.quality.sentinel import QualityFinding, finding_fingerprint, persist_findings
 from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Ref, L0Store
-from dataplatform.store.l1 import write_prices_raw
-from dataplatform.store.schemas import PriceQuarantineReason
+from dataplatform.store.l1 import PricesRawWriteReport, write_prices_raw
+from dataplatform.store.schemas import PRICES_RAW_QUARANTINE_DATASET, PriceQuarantineReason
 
 __all__ = [
+    "AMBIGUOUS_DELIVERY_CHECK",
     "SOURCE_SETS",
     "BackfillReport",
     "BackfillRunner",
     "FetchRequest",
+    "FindingsSink",
     "SourceSet",
+    "ambiguity_findings",
     "build_plan",
     "main",
     "sample_dates",
@@ -132,6 +136,14 @@ class WriteContext:
     data_root: Path | None
     master: IdentityMaster | None
     register: SourceRegister
+    #: Where a write's D7 findings go — `persist_findings` on the runner's connection, inside the
+    #: session's transaction, so a flag commits with the session it is about and rolls back with
+    #: it. `None` for a context with no database (a unit test, a lake-only rebuild).
+    findings: FindingsSink | None = None
+
+
+#: Receives the D7 findings one session's write raised. See `WriteContext.findings`.
+type FindingsSink = Callable[[Sequence[QualityFinding]], object]
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,9 +469,37 @@ def _write_delivery(rows: Sequence[DeliveryRow], ctx: WriteContext) -> object:
     Raises rather than writing a partition with delivery silently missing: a `prices_raw` session
     that quietly lost its prices because its bhavcopy could not be read would be far worse than a
     failed session, which the runner records and a later run retries.
+
+    A delivery row the identity master finds ambiguous, and the session's bhavcopy does not settle,
+    is quarantined by the write (`symbol_ambiguous`) and raised here as an ERROR quality flag
+    through `ctx.findings` — in the session's transaction — so one reissued ISIN reaches
+    `/status/quality` and `/status/quarantine` without failing the other rows. Past the threshold
+    the write raises `delivery.AmbiguousDeliveryFileError` and the session fails as before.
     """
     if not rows:
         raise ValueError("delivery file parsed to zero rows; refusing to rewrite the partition")
+    report = _write_delivery_partition(rows, ctx)
+    if report.delivery_ambiguous_rows:
+        findings = ambiguity_findings(report.delivery_ambiguous_rows, exchange=Exchange.NSE)
+        if ctx.findings is None:
+            # The rows are in `prices_raw_quarantine` (so `/status/quarantine` shows them) either
+            # way; this says the ERROR flags were not raised because no database was wired.
+            _LOG.error(
+                "delivery.ambiguous_flags_not_persisted",
+                source=NSE_DELIVERY,
+                date=report.trade_date.isoformat(),
+                findings=len(findings),
+                reason="no findings sink in the write context",
+            )
+        else:
+            ctx.findings(findings)
+    return report
+
+
+def _write_delivery_partition(
+    rows: Sequence[DeliveryRow], ctx: WriteContext
+) -> PricesRawWriteReport:
+    """The partition rebuild behind `_write_delivery`: the stored bhavcopy plus this delivery."""
     trade_date = rows[0].trade_date
     # L0 keys by the *fetching* source, so a legacy session and a UDiFF one live under different
     # directories. Both the source id and the filename are taken from the same request builder the
@@ -478,6 +518,56 @@ def _write_delivery(rows: Sequence[DeliveryRow], ctx: WriteContext) -> object:
         master=ctx.master,
         data_root=ctx.data_root,
     )
+
+
+#: The `quality_flag.check_name` for a delivery row quarantined because the identity master named
+#: several ISINs for its symbol and the session's bhavcopy did not settle which.
+AMBIGUOUS_DELIVERY_CHECK: Final = "delivery_symbol_ambiguous"
+
+
+def ambiguity_findings(
+    held: Sequence[AmbiguousDeliveryRow], *, exchange: Exchange
+) -> tuple[QualityFinding, ...]:
+    """One ERROR finding per delivery row quarantined as ambiguous — what `/status/quality` shows.
+
+    What it does: carries everything a human needs to fix the master — the symbol and series, the
+    session, the candidate ISINs, what the session's bhavcopy stated (if anything) and why that did
+    not settle it — under `AMBIGUOUS_DELIVERY_CHECK`. ERROR because it is a real identity defect,
+    not noise. Fingerprinted by `(check, exchange, symbol, series, session)`, so the next night's
+    retry of the same file finds the open flag instead of stacking another.
+    What it assumes: the rows came out of one `delivery.resolve`.
+    What it never does: name an ISIN in the flag's `isin` column — there is no one ISIN to name.
+    `source` is `prices_raw_quarantine`, the dataset the row went to, as the quarantine step-change
+    flags do (`quality.quarantine.findings_from_steps`): an ERROR scoped to `nse_delivery` would
+    make that session red for the interlock, and the point of quarantining one row is that it
+    does not unpublish the other ~3,500 (a file past the threshold still fails outright).
+    """
+    findings = [
+        QualityFinding(
+            logical_date=h.row.trade_date,
+            check_name=AMBIGUOUS_DELIVERY_CHECK,
+            severity="ERROR",
+            source=PRICES_RAW_QUARANTINE_DATASET,
+            detail={
+                "exchange": exchange.value,
+                "symbol": h.row.symbol,
+                "series": h.row.series,
+                "trade_date": h.row.trade_date.isoformat(),
+                "candidates": list(h.candidates),
+                "session_isin": h.session_isin,
+                "quarantine_reason": PriceQuarantineReason.SYMBOL_AMBIGUOUS,
+                "reason": h.reason,
+            },
+            fingerprint=finding_fingerprint(
+                f"{AMBIGUOUS_DELIVERY_CHECK}/{exchange.value}/{h.row.symbol}/{h.row.series}",
+                None,
+                h.row.trade_date,
+            ),
+        )
+        for h in held
+    ]
+    findings.sort(key=lambda f: (f.logical_date, f.fingerprint))
+    return tuple(findings)
 
 
 SOURCE_SETS: Final[dict[str, SourceSet[Any]]] = {
@@ -608,6 +698,7 @@ class BackfillRunner:
         register: SourceRegister,
         master: IdentityMaster | None = None,
         should_stop: Callable[[], bool] = lambda: False,
+        findings: FindingsSink | None = None,
     ) -> None:
         if source_set.needs_master and master is None:
             raise ValueError(
@@ -621,7 +712,9 @@ class BackfillRunner:
         self._sync = sync
         self._commit = commit
         self._should_stop = should_stop
-        self._ctx = WriteContext(l0=l0, data_root=l0.data_root, master=master, register=register)
+        self._ctx = WriteContext(
+            l0=l0, data_root=l0.data_root, master=master, register=register, findings=findings
+        )
 
     def run(self, requests: Sequence[FetchRequest]) -> BackfillReport:
         """Process every request in order, resuming, checkpointing and stopping per the class doc.
@@ -923,6 +1016,7 @@ def _run_live(
             register=register,
             master=master,
             should_stop=lambda: stop_state["stop"],
+            findings=lambda found: persist_findings(conn, found, clock=clock),
         )
         report = runner.run(plan)
 

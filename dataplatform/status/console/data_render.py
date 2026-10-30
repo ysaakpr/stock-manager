@@ -63,11 +63,12 @@ _CELL_TEXT: Final = 240
 
 
 class Rag:
-    """The three colours a state renders in on this page."""
+    """The colours a state renders in on this page. GREY is the owner's pause (D29): not red."""
 
     RED: Final = "red"
     AMBER: Final = "amber"
     GREEN: Final = "green"
+    GREY: Final = "grey"
 
 
 #: Red/amber/green by state. A pipeline step in flight is amber: not published, not broken.
@@ -87,6 +88,7 @@ _STYLE: Final = (
     ".rag-red { background: #ffe3e3; color: #a61b1b; }"
     ".rag-amber { background: #fffbea; color: #8d2b0b; }"
     ".rag-green { background: #e3f9e5; color: #0e5814; }"
+    ".rag-grey { background: #e4e7eb; color: #3e4c59; }"
     "form.inline { display: inline; margin-right: 1rem; }"
     "h3 { margin: 0.8rem 0 0.2rem; font-size: 0.95rem; }"
     "</style>"
@@ -114,6 +116,8 @@ def source_health(line: SourceStatusOut) -> tuple[str, str]:
     """
     if line.declined is not None:
         return "DECLINED", Rag.GREEN
+    if line.paused is not None:
+        return "PAUSED", Rag.GREY  # the owner's pause (D29): not requested, not red, not fresh
     if not line.healthy and line.deviation is not None and line.deviation.accepted:
         return ACCEPTED, Rag.AMBER
     if line.failure_streak > 0:
@@ -272,6 +276,11 @@ def _source_row(line: SourceStatusOut) -> str:
     error = _text(line.last_error, limit=_CELL_TEXT) if line.failure_streak > 0 else MISSING
     if line.declined is not None:
         error = f"declined: {_text(line.declined.reason, limit=_CELL_TEXT)}"
+    if line.paused is not None:
+        error = (
+            f"paused since {esc(line.paused.since.isoformat())} ({esc(line.paused.decision)}): "
+            f"{_text(line.paused.reason, limit=_CELL_TEXT)}"
+        )
     return (
         f'<tr data-source="{source}" data-health="{esc(verdict)}" '
         f'data-healthy="{"true" if line.healthy else "false"}"{deviation_attrs(line.deviation)}>'
@@ -290,10 +299,13 @@ def render_sources(sources: SourcesOut, ordered: Sequence[SourceStatusOut]) -> s
     The heading counts errors and accepted deviations apart, from the lines shown.
     """
     unhealthy = [line for line in ordered if not line.healthy]
+    paused = sum(1 for line in unhealthy if line.paused is not None)
     accepted = sum(
-        1 for line in unhealthy if line.deviation is not None and line.deviation.accepted
+        1
+        for line in unhealthy
+        if line.paused is None and line.deviation is not None and line.deviation.accepted
     )
-    errors = len(unhealthy) - accepted
+    errors = len(unhealthy) - accepted - paused
     rows = "".join(_source_row(line) for line in ordered)
     table = (
         "<table><thead><tr><th>Source</th><th>Health</th><th>Last success date</th>"
@@ -304,9 +316,11 @@ def render_sources(sources: SourcesOut, ordered: Sequence[SourceStatusOut]) -> s
         else '<p class="muted">no source has a sync_state row yet</p>'
     )
     return (
-        f'<div class="panel" id="sources" data-errors="{errors}" data-accepted="{accepted}">'
+        f'<div class="panel" id="sources" data-errors="{errors}" data-accepted="{accepted}" '
+        f'data-paused="{paused}">'
         f'<h2>Sources <span class="muted">{len(ordered)} recorded, {len(unhealthy)} not healthy: '
-        f"{errors} error{'' if errors == 1 else 's'}, {accepted} accepted · lag measured against "
+        f"{errors} error{'' if errors == 1 else 's'}, {accepted} accepted, {paused} paused · lag "
+        "measured against "
         f"{esc(sources.as_of.isoformat())}</span></h2>{table}</div>"
     )
 

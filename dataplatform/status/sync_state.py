@@ -42,7 +42,13 @@ from dataplatform.ingest.calendar import (
     TradingCalendar,
     trading_calendar,
 )
-from dataplatform.ingest.source_register import Declined, capture_only_sources, declined_sources
+from dataplatform.ingest.source_register import (
+    Declined,
+    Paused,
+    capture_only_sources,
+    declined_sources,
+    paused_sources,
+)
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection, connection
 
@@ -551,6 +557,10 @@ class SourceStatus:
     #: The state a successful attempt ends in (`Source.final_state`): FETCHED for a capture-only
     #: source, whose FETCHED rows are its successes rather than rows stuck mid-pipeline.
     final_state: SyncState = SyncState.PUBLISHED
+    #: Set while the owner has paused the source (register `paused`, HUMAN_DECISIONS D29). Display
+    #: only: it is shown as PAUSED rather than red, and changes nothing else — `healthy` keeps its
+    #: strict meaning, and `is_green` never treats a paused source as published or set aside.
+    paused: Paused | None = None
 
     @property
     def overdue(self) -> bool:
@@ -680,6 +690,7 @@ class SyncStateStore:
         calendar: TradingCalendar | None = None,
         declined: Mapping[str, Declined] | None = None,
         capture_only: Collection[str] | None = None,
+        paused: Mapping[str, Paused] | None = None,
     ) -> None:
         self._conn = conn
         self._clock = SystemClock() if clock is None else clock
@@ -688,6 +699,7 @@ class SyncStateStore:
         self._capture_only: frozenset[str] | None = (
             None if capture_only is None else frozenset(capture_only)
         )
+        self._paused: Mapping[str, Paused] | None = paused
 
     @property
     def declined(self) -> Mapping[str, Declined]:
@@ -701,6 +713,13 @@ class SyncStateStore:
         """The connection this store reads through — for a reader answering about the same rows
         (the accepted-deviation judge) in the same request, rather than opening a second one."""
         return self._conn
+
+    @property
+    def paused(self) -> Mapping[str, Paused]:
+        """Source id → pause record (register `paused`, D29), unless injected. Display only."""
+        if self._paused is None:
+            self._paused = _checked_in_paused()
+        return self._paused
 
     @property
     def capture_only(self) -> frozenset[str]:
@@ -1063,6 +1082,7 @@ class SyncStateStore:
             replace(
                 self._source_status(row, as_of=as_of, budget=budgets.get(str(row[0]))),
                 declined=self.declined.get(str(row[0])),
+                paused=self.paused.get(str(row[0])),
             )
             for row in rows
         )
@@ -1119,6 +1139,12 @@ class SyncStateStore:
             return len(self._calendar.expected_data_dates(last_success + timedelta(days=1), as_of))
         except CalendarCoverageError:
             return None
+
+
+@lru_cache(maxsize=1)
+def _checked_in_paused() -> Mapping[str, Paused]:
+    """The checked-in register's paused sources, read once per process (as `declined`)."""
+    return paused_sources()
 
 
 @lru_cache(maxsize=1)

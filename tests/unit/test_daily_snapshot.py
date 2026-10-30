@@ -48,11 +48,12 @@ from dataplatform.ingest.fetcher import (
     RecordedTransport,
     ScriptedOutcome,
 )
-from dataplatform.ingest.source_register import Status
+from dataplatform.ingest.source_register import SourceRegister, Status
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.status.sync_state import SyncRecord, SyncState, SyncStateStore
 from dataplatform.store.l0 import L0Store
 from tests.conftest import SettingsLoader
+from tests.register_support import unpaused
 
 FIXTURES: Final = Path("tests/fixtures/nse_market_structure/2026-09-08")
 
@@ -259,7 +260,7 @@ def build(clock: FrozenClock, settings: Settings, tmp_path: Path) -> Build:
     The transport comes back too, so a test can assert exactly which URLs were and were not
     requested — the evidence for the idempotence claim, which is otherwise unfalsifiable.
     """
-    register = load_register()
+    register = unpaused(load_register())  # the scrip master as fetched once D29 is lifted
 
     def _build(
         script: dict[str, ScriptedOutcome | list[ScriptedOutcome]],
@@ -290,6 +291,7 @@ def _sweep(
     l0: L0Store | None = None,
     expect_lake_root: Path | None = None,
     specs: tuple[SnapshotSpec, ...] = SPECS,
+    register: SourceRegister | None = None,
 ) -> Any:
     fetcher, store, transport = build(script if script is not None else _script())
     report = run_daily_snapshot(
@@ -301,6 +303,8 @@ def _sweep(
         calendar=trading_calendar(),
         specs=specs,
         expect_lake_root=expect_lake_root,
+        # The scrip master as swept once D29 is lifted, unless a pause test passes the real one.
+        register=unpaused(load_register()) if register is None else register,
     )
     return report, store, transport
 
@@ -706,3 +710,32 @@ def test_no_snapshot_url_is_sent_with_an_unfilled_token(
     (row,) = tracker.rows.values()
     assert row.state is SyncState.FAILED
     assert row.last_error is not None and "unfilled token" in row.last_error
+
+
+# ── D29: a paused source is skipped before any request — and on a closed day, too ───────────
+
+
+def test_a_paused_scrip_master_is_never_requested_and_files_no_row(
+    build: Build, tracker: RecordingTracker, alerter: SpyAlerter
+) -> None:
+    """With the checked-in register (bse_scrip_master paused, D29) the sweep runs every other
+    source and neither requests nor journals the paused one; the skip is logged. Inverted by
+    `test_the_bse_scrip_master_is_requested_with_its_status_filled_in` on the un-paused register.
+    """
+    from structlog.testing import capture_logs
+
+    spec = next(s for s in DEFAULT_SNAPSHOT_SET if s.source_id == "bse_scrip_master")
+    with capture_logs() as logs:
+        report, _store, transport = _sweep(
+            build, tracker, alerter, specs=(*SPECS, spec), register=load_register()
+        )
+    assert all("bseindia" not in request.url for request in transport.requests)
+    assert "bse_scrip_master" not in {outcome.source_id for outcome in report.outcomes}
+    assert all(source != "bse_scrip_master" for source, _day in tracker.rows)
+    assert len(report.outcomes) == len(SPECS)
+    (event,) = [e for e in logs if e["event"] == "snapshot.source_paused"]
+    assert event["source"] == "bse_scrip_master"
+
+    sunday = date(2026, 9, 6)
+    _sweep(build, tracker, alerter, specs=(*SPECS, spec), register=load_register(), as_of=sunday)
+    assert ("bse_scrip_master", sunday) not in tracker.rows  # not even a GAP: the gap report says

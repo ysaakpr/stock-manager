@@ -49,3 +49,20 @@ offline beside the other two pairs: legacy + MTO (2011-06-22) and UDiFF + `sec_b
 (2026-08-07). `tests/unit/test_delivery_identity_eras.py` joins all three against a master built
 from the real 2026-08-08 `EQUITY_L.csv` — which backdates today's ISIN to the listing date and
 lists no ETF — to pin the 2026-10-05 audit's two delivery-join defects (reissued ISINs, ETFs).
+
+## 2026-10-26 — an ambiguous master the session settles (added 2026-10-29)
+
+`ccavenue_reissue_26102026/` holds **excerpts**, not whole files: the header and three data lines
+of each, copied byte-for-byte (line endings included) from the lake's L0 payloads for the session.
+Nothing in a kept line was edited; lines were only dropped.
+
+| Excerpt | Copied from (L0) | L0 sha256 | Lines kept |
+|---|---|---|---|
+| `sec_bhavdata_full_26102026_EXCERPT.csv` | `nse_sec_bhavdata_full/2026/10/sec_bhavdata_full_26102026.csv` (398,036 bytes, 3,526 data rows) | `0a6079a40b17a3bbfaeace9c5d8dfcefe2e8dbd6d4a139433c52451de2d3c235` | header, `20MICRONS` EQ, `3IINFOLTD` BE (`-` delivery), `CCAVENUE` EQ |
+| `BhavCopy_NSE_CM_0_0_0_20261026_F_0000_EXCERPT.csv` | the single CSV member of `nse_bhavcopy_udiff/2026/10/BhavCopy_NSE_CM_0_0_0_20261026_F_0000.csv.zip` | `723bee076946c104b9cd56d09ca9b3776b062f19c136acc289c7c279290377e3` (the zip) | header and the same three `(symbol, series)` |
+
+AvenuesAI's ISIN was reissued INE483S01020 → INE483S01038 (switch 2026-10-19). The 2026-10-24
+identity refresh left two open `CCAVENUE` windows (reconciliation ids 72/73), so the master
+answers `AmbiguousSymbolError` for the symbol, while the session's own bhavcopy states
+`INE483S01038` for `(CCAVENUE, EQ)`. `nse_delivery` failed on this file for 2026-10-26 .. 10-28.
+`tests/unit/test_delivery_ambiguity.py` pins how `delivery.resolve` handles it.

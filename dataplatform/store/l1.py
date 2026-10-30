@@ -31,9 +31,12 @@ Three properties this module exists to guarantee, each mapped to an acceptance c
 * **Nothing is dropped silently.** A delivery row whose symbol the master cannot resolve, or which
   resolves but matches no price row that session, is written to the `prices_raw_quarantine` dataset
   with a reason and counted in the returned report — a visible gap, not data loss. An *ambiguous*
-  symbol is not quarantined: `IdentityMaster.resolve` raises `AmbiguousSymbolError`, because "we
-  know two contradictory ISINs" is a different fact from "we know none", and only the human-review
-  queue may settle it.
+  symbol — the master holds two ISINs for it that day — is placed only where the session's own
+  bhavcopy states one of the master's candidates for that `(symbol, series)`; otherwise it is
+  quarantined under its own reason (`symbol_ambiguous`, never `symbol_unresolved`: "we know two
+  contradictory ISINs" is a different fact from "we know none"), and only the human-review queue
+  may settle the master itself. Past `delivery.MAX_AMBIGUOUS_QUARANTINED` such rows the write
+  fails instead: that many is a broken master, not one reissue.
 
 Offline by construction: this module takes parsed rows (or reads bytes back through `L0Store`) and
 never fetches. `write_prices_raw` is the pure rows→partition core; `rebuild_prices_raw_from_l0` is
@@ -57,7 +60,7 @@ from dataplatform.identity.session import SessionIdentity
 from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
 from dataplatform.ingest.models import BhavcopyParse, PriceRow, UnidentifiedRow
 from dataplatform.ingest.nse import bhavcopy, delivery
-from dataplatform.ingest.nse.delivery import DeliveryRow, ResolvedDeliveryRow
+from dataplatform.ingest.nse.delivery import AmbiguousDeliveryRow, DeliveryRow, ResolvedDeliveryRow
 from dataplatform.logging import get_logger
 from dataplatform.store.l0 import L0Ref, L0Store
 from dataplatform.store.paths import Layer, l1_partition_path, partition_path
@@ -95,9 +98,10 @@ class PricesRawWriteReport:
     """The outcome of writing one `(prices_raw, date)` partition — the counts a caller must see.
 
     `path` is the canonical partition; `quarantine_path` is the sidecar dataset partition, present
-    only when something was quarantined. The four delivery counts reconcile:
-    `delivery_rows == delivery_joined + delivery_unresolved + delivery_orphaned`, so a caller can
-    assert no delivery row was lost — the M1.8 "never dropped silently" contract made checkable.
+    only when something was quarantined. The five delivery counts reconcile:
+    `delivery_rows == delivery_joined + delivery_unresolved + delivery_ambiguous +
+    delivery_orphaned`, so a caller can assert no delivery row was lost — the M1.8 "never dropped
+    silently" contract made checkable.
     """
 
     trade_date: date
@@ -118,11 +122,18 @@ class PricesRawWriteReport:
     delivery_via_lineage: int = 0
     delivery_via_session: int = 0
     delivery_session_disagrees: int = 0
+    #: Rows the master found ambiguous and the session's bhavcopy settled (one of the candidates).
+    delivery_ambiguity_resolved_by_session: int = 0
+    #: Rows the master found ambiguous and the session did not settle: quarantined as
+    #: `symbol_ambiguous`, and part of the reconciliation above. The rows themselves ride along so
+    #: the caller that owns a database can raise their quality flags (`backfill._write_delivery`).
+    delivery_ambiguous: int = 0
+    delivery_ambiguous_rows: tuple[AmbiguousDeliveryRow, ...] = ()
 
     @property
     def quarantined(self) -> int:
-        """Total delivery rows quarantined (unresolved plus resolved-but-orphaned)."""
-        return self.delivery_unresolved + self.delivery_orphaned
+        """Total delivery rows quarantined (unresolved, ambiguous and resolved-but-orphaned)."""
+        return self.delivery_unresolved + self.delivery_ambiguous + self.delivery_orphaned
 
 
 def write_prices_raw(
@@ -210,6 +221,7 @@ def write_prices_raw(
         unresolved,
         orphaned,
         unidentified,
+        ambiguous=resolution.ambiguous,
         exchange=exchange,
         trade_date=trade_date,
         data_root=data_root,
@@ -233,6 +245,9 @@ def write_prices_raw(
         delivery_via_lineage=resolution.via_lineage,
         delivery_via_session=resolution.via_session,
         delivery_session_disagrees=resolution.session_disagrees,
+        delivery_ambiguity_resolved_by_session=resolution.ambiguity_resolved_by_session,
+        delivery_ambiguous=len(resolution.ambiguous),
+        delivery_ambiguous_rows=resolution.ambiguous,
     )
     _LOG.info(
         "l1.prices_raw_written",
@@ -245,10 +260,12 @@ def write_prices_raw(
         delivery_rows=report.delivery_rows,
         delivery_joined=report.delivery_joined,
         delivery_unresolved=report.delivery_unresolved,
+        delivery_ambiguous=report.delivery_ambiguous,
         delivery_orphaned=report.delivery_orphaned,
         delivery_via_lineage=report.delivery_via_lineage,
         delivery_via_session=report.delivery_via_session,
         delivery_session_disagrees=report.delivery_session_disagrees,
+        delivery_ambiguity_resolved_by_session=report.delivery_ambiguity_resolved_by_session,
         state="PUBLISHED",
     )
     return report
@@ -351,7 +368,9 @@ def _resolve_delivery(
     Delegates to `delivery.resolve`, which asks the master for the ISIN in force that session and,
     only for a symbol the master has never seen, the session's own bhavcopy statement — built here
     from `price_rows`, the same file's `(symbol, series, isin)` for this exchange and date. An
-    unknown `(symbol, date)` lands in `unresolved`; an *ambiguous* one raises from the master. Also
+    unknown `(symbol, date)` lands in `unresolved`; an *ambiguous* one is placed where that same
+    statement names one of the master's candidates, and otherwise lands in `ambiguous` (or, past
+    the threshold, fails the write — `delivery.AmbiguousDeliveryFileError`). Also
     guards that the delivery file's own session matches the prices' session — a mismatched delivery
     file joined here would scatter one date's delivery figures onto another's prices.
     """
@@ -469,6 +488,7 @@ def _write_quarantine(
     unidentified_reason: str = PriceQuarantineReason.ISIN_NOT_PUBLISHED,
     unidentified_reasons: Sequence[str] | None = None,
     reasoned: Sequence[tuple[UnidentifiedRow, str]] = (),
+    ambiguous: Sequence[AmbiguousDeliveryRow] = (),
 ) -> Path | None:
     """Replace `exchange`'s rows in the session's quarantine partition with what this write refused.
 
@@ -500,7 +520,7 @@ def _write_quarantine(
     )
     others = [record for record in stored if record["exchange"] != exchange.value]
     cleared = len(stored) - len(others)
-    if not unresolved and not orphaned and not unidentified and not reasoned:
+    if not unresolved and not orphaned and not unidentified and not reasoned and not ambiguous:
         if cleared:
             if others:
                 _write_quarantine_table(others, path)
@@ -528,6 +548,23 @@ def _write_quarantine(
                 "reason": PriceQuarantineReason.SYMBOL_UNRESOLVED,
             }
             for row in unresolved
+        ]
+        + [
+            {
+                "symbol": held.row.symbol,
+                "series": held.row.series,
+                "trade_date": held.row.trade_date,
+                "exchange": exchange.value,
+                # No ISIN: the master named several and nothing settled which. The candidates
+                # travel on the ERROR quality flag (`backfill.ambiguity_findings`), not here.
+                "isin": None,
+                "deliv_qty": held.row.deliv_qty,
+                "deliv_pct": (
+                    _q(held.row.deliv_pct, _PCT_Q) if held.row.deliv_pct is not None else None
+                ),
+                "reason": PriceQuarantineReason.SYMBOL_AMBIGUOUS,
+            }
+            for held in ambiguous
         ]
         + [
             {
