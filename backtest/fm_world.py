@@ -831,13 +831,14 @@ def _fetcher(
 ) -> Any:
     """The desk's Commons fetcher for ``provider`` (see `_LIVE_FETCH_PROVIDERS`).
 
-    On Bedrock with ``M17_WEB_RESEARCH=websearch`` (the default is ``claude_cli``) it is a `BedrockWebFetcher`: the
-    research model is the digest model on Bedrock, the vendors share the load under their budgets
-    (counted in Postgres, migration 0021, or in memory for a ``--memory`` rehearsal), the tool
-    results are snapshots in their own store beside ``fetch_root``, every loop's cost is a
-    ``token_usage`` row under `FETCH_TOKEN_PURPOSE`, and the Claude CLI's web fetcher is the backup
-    when ``M17_LLM_FALLBACK`` is the CLI. When Bedrock or every vendor is unconfigured, the desk
-    researches on the CLI, with a warning, rather than not at all.
+    On Bedrock with ``M17_WEB_RESEARCH=websearch`` (not the default, which is ``claude_cli``) it
+    is a `BedrockWebFetcher`: the research model is the digest model on Bedrock, the vendors
+    share the load under their budgets (counted in Postgres, migration 0021, or in memory for a
+    ``--memory`` rehearsal), the tool results are snapshots in their own store beside
+    ``fetch_root``, every loop's cost is a ``token_usage`` row under `FETCH_TOKEN_PURPOSE`, and
+    the Claude CLI's web fetcher is the backup when ``M17_LLM_FALLBACK`` is the CLI. When Bedrock
+    or every vendor is unconfigured, the desk researches on the CLI, with a warning, rather than
+    not at all.
     """
     if provider not in _LIVE_FETCH_PROVIDERS:
         return NoLiveFetcher()
