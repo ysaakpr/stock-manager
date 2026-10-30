@@ -52,7 +52,7 @@ from analyst.llm.bedrock import (
     structured_output_schema,
 )
 from analyst.llm.effort import EffortPolicy, load_effort_policy
-from dataplatform.config import REPO_ROOT, LlmEffort, Settings
+from dataplatform.config import REPO_ROOT, LlmEffort, LlmProvider, Settings
 
 #: A key-shaped value with no prefix any generic masking pattern knows — the case the module masks
 #: by value. Not a credential: tests never reach the network.
@@ -666,3 +666,35 @@ def test_the_status_app_container_is_not_handed_the_bedrock_key() -> None:
     # Nor the web research vendors' keys: /status/websearch needs none of them.
     for key in ("BRAVE_SEARCH_API_KEY", "TAVILY_API_KEY", "FIRECRAWL_API_KEY"):
         assert app["environment"][key] == ""
+
+
+def test_the_startup_wiring_line_says_set_or_not_set_never_the_key() -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        llm_provider=LlmProvider.BEDROCK,
+        m17_llm_provider=LlmProvider.BEDROCK,
+        aws_bearer_token_bedrock=SecretStr(FAKE_KEY),
+    )
+    wiring = settings.llm_wiring()
+    assert wiring["llm_provider"] == "bedrock" and wiring["llm_fallback"] == "claude_cli"
+    assert wiring["bedrock_key_set"] is True and wiring["bedrock_region_set"] is False
+    assert FAKE_KEY not in json.dumps(wiring)
+
+
+def test_the_response_names_the_bedrock_id_even_when_mantle_reports_the_bare_name() -> None:
+    """Measured live 2026-10-30: Mantle reports `claude-opus-5-5`. The record must still say
+    `anthropic.claude-opus-5-5`, so the call prices at the Bedrock rate, not first-party."""
+    endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER), model="claude-opus-5-5")))
+    with capture_logs() as logs:
+        response = bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+    assert response.model == "anthropic.claude-opus-5-5"
+    assert not [e for e in logs if e["event"] == "llm.bedrock.served_other_model"]
+
+
+def test_a_different_served_model_is_logged() -> None:
+    endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER), model="claude-opus-9")))
+    with capture_logs() as logs:
+        response = bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+    assert response.model == "anthropic.claude-opus-5-5"
+    [event] = [e for e in logs if e["event"] == "llm.bedrock.served_other_model"]
+    assert event["served_model"] == "claude-opus-9"

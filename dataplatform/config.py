@@ -564,6 +564,24 @@ class Settings(BaseSettings):
         """`alert_email_to` as addresses. Empty when nothing is configured, never `('',)`."""
         return tuple(part.strip() for part in self.alert_email_to.split(",") if part.strip())
 
+    def llm_wiring(self) -> dict[str, str | bool | int | None]:
+        """Which LLM providers this process wires, for a startup log line — never a secret.
+
+        The credential and the region are reported as set or not set only; the key's value never
+        leaves its `SecretStr`.
+        """
+        return {
+            "llm_provider": self.llm_provider.value,
+            "llm_fallback": None if self.llm_fallback is None else self.llm_fallback.value,
+            "m17_llm_provider": self.m17_llm_provider.value,
+            "m17_llm_fallback": None
+            if self.m17_llm_fallback is None
+            else self.m17_llm_fallback.value,
+            "bedrock_key_set": self.aws_bearer_token_bedrock is not None,
+            "bedrock_region_set": self.bedrock_region is not None,
+            "bedrock_max_tokens": self.bedrock_max_tokens,
+        }
+
     def effective_log_format(self) -> LogFormat:
         """Resolve `AUTO`: JSON in prod so the log is queryable, console elsewhere so it reads."""
         if self.log_format is not LogFormat.AUTO:

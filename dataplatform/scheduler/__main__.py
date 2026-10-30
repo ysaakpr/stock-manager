@@ -131,6 +131,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(run.error, file=sys.stderr)
         return _EXIT_CODES[run.state]
 
+    # Which model providers the jobs will build (M17's desk, the analyst paths), so a restart's log
+    # says whether Bedrock is primary and configured — set/not set only, never the key.
+    log.info("scheduler.llm_wiring", **runner.settings.llm_wiring())
     return _run_forever(runner)
 
 
