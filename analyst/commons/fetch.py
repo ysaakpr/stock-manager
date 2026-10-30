@@ -84,8 +84,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unicodedata
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -94,6 +95,7 @@ from pathlib import Path
 from typing import Any, Final, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
+from analyst.llm import run_claude_cli
 from analyst.llm.cli_env import claude_cli_env
 from analyst.llm.client import Usage
 from dataplatform.clock import Clock
@@ -765,10 +767,11 @@ class ClaudeWebFetcher:
     What it assumes: the machine's Claude CLI is logged in. The credential is the CLI's to hold, and
     this class never reads, copies or logs it.
     What it never does: run inside the repository, put the request in argv, or accept a run that
-    held or used a tool outside `ALLOWED_WEB_TOOLS`.
+    held or used a tool outside `ALLOWED_WEB_TOOLS`. A launch that found no executable (an npm
+    reinstall's gap) is relaunched by `run_claude_cli`; a run that started is never repeated.
     """
 
-    __slots__ = ("_executable", "_model", "_timeout_seconds")
+    __slots__ = ("_executable", "_model", "_sleep", "_timeout_seconds")
 
     def __init__(
         self,
@@ -776,6 +779,7 @@ class ClaudeWebFetcher:
         model: str = DEFAULT_FETCH_MODEL,
         executable: str = "claude",
         timeout_seconds: float = _TIMEOUT_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError(f"timeout_seconds must be positive, got {timeout_seconds}")
@@ -786,6 +790,7 @@ class ClaudeWebFetcher:
         self._executable = executable
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._sleep = sleep
 
     @property
     def name(self) -> str:
@@ -823,15 +828,13 @@ class ClaudeWebFetcher:
         with tempfile.TemporaryDirectory(prefix="commons-fetch-") as workdir:
             try:
                 # argv is built here and never shell-interpreted; the request is stdin.
-                finished = subprocess.run(
+                finished = run_claude_cli(
                     self.command(),
-                    input=_prompt(request),
-                    capture_output=True,
-                    text=True,
-                    timeout=self._timeout_seconds,
-                    check=False,
-                    cwd=workdir,
+                    stdin=_prompt(request),
+                    timeout_seconds=self._timeout_seconds,
                     env=claude_cli_env(),
+                    cwd=workdir,
+                    sleep=self._sleep,
                 )
             except subprocess.TimeoutExpired as error:
                 raise FetchError(

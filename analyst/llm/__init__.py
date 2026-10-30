@@ -17,6 +17,11 @@ from analyst.llm.anthropic import (
     AnthropicLLM,
 )
 from analyst.llm.cli_env import CLAUDE_CLI_ENV_ALLOWLIST, claude_cli_env
+from analyst.llm.cli_launch import (
+    CLI_LAUNCH_RETRY_DELAYS_SECONDS,
+    is_cli_launch_gap,
+    run_claude_cli,
+)
 from analyst.llm.client import (
     DEFAULT_MAX_TOKENS,
     LLM,
@@ -45,6 +50,7 @@ from analyst.llm.stub import (
 __all__ = [
     "ANTHROPIC_PROVIDER",
     "CLAUDE_CLI_ENV_ALLOWLIST",
+    "CLI_LAUNCH_RETRY_DELAYS_SECONDS",
     "DEFAULT_MAX_TOKENS",
     "DEFAULT_MODEL",
     "LLM",
@@ -68,5 +74,7 @@ __all__ = [
     "Usage",
     "build_llm",
     "claude_cli_env",
+    "is_cli_launch_gap",
     "prompt_digest",
+    "run_claude_cli",
 ]
