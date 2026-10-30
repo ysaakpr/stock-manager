@@ -25,8 +25,9 @@ CREATE TABLE websearch_vendor_month (
 );
 
 COMMENT ON TABLE websearch_vendor_month IS
-    'M17 web research: units spent per vendor per IST calendar month, reserved before each request '
-    '(analyst.websearch.ledger). Budgets are configuration (WEBSEARCH_BUDGET_*), not stored here.';
+    'A10 · M17 web research: units spent per vendor per IST calendar month, reserved before '
+    'each request (analyst.websearch.ledger). Budgets are configuration (WEBSEARCH_BUDGET_*), '
+    'not stored here.';
 
 CREATE TABLE websearch_session_usage (
     session     date        NOT NULL,
@@ -37,5 +38,5 @@ CREATE TABLE websearch_session_usage (
 );
 
 COMMENT ON TABLE websearch_session_usage IS
-    'M17 web research: requests sent per M17 session per capability, against '
+    'A10 · M17 web research: requests sent per M17 session per capability, against '
     'WEBSEARCH_SESSION_MAX_SEARCHES / _FETCHES. Cache hits are never counted.';
