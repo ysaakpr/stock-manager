@@ -308,6 +308,16 @@ class WebResearch:
     def guard(self) -> UrlGuard:
         return self._guard
 
+    @property
+    def search_vendors(self) -> tuple[SearchVendor, ...]:
+        """The configured search vendors that have a key, in routing order."""
+        return self._search
+
+    @property
+    def fetch_vendors(self) -> tuple[FetchVendor, ...]:
+        """The configured fetch vendors that can run (key set, or direct), in routing order."""
+        return self._fetch
+
     # ── the public calls ─────────────────────────────────────────────────────────────────────
 
     def search(self, query: str, session: date) -> FetchOutcome:
