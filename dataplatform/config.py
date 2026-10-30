@@ -288,17 +288,23 @@ class Settings(BaseSettings):
     )
 
     # ── M17 web research (analyst.websearch): vendors, routing, budgets, limits ───────────────
-    #: Vendors tried in order for a web search. A vendor with no key, over its monthly budget, or
-    #: refusing us (401/403/429) is skipped; so is one failing this call (5xx, timeout).
+    #: The vendors that share search requests. Each request goes to ONE of them, picked by a
+    #: rotation weighted by each one's remaining monthly budget; if it fails or finds nothing,
+    #: exactly one other is tried, never a third. A vendor with no key, no budget left, or one
+    #: that refused us (401/403/429, never retried) is out of the rotation.
     websearch_search_vendors: str = Field(
         default="brave,tavily,firecrawl",
-        description="comma-separated search vendors, tried in order: brave | tavily | firecrawl",
+        description="comma-separated search rotation: brave | tavily | firecrawl",
     )
-    #: Vendors tried in order for a page fetch. `direct` is our own HTTP fetch, with no vendor
-    #: quota, and is the last resort on purpose.
     websearch_fetch_vendors: str = Field(
-        default="firecrawl,tavily,direct",
-        description="comma-separated fetch vendors, tried in order: firecrawl | tavily | direct",
+        default="firecrawl,tavily",
+        description="comma-separated fetch rotation: firecrawl | tavily",
+    )
+    #: Our own HTTP fetch has no vendor quota. It is used only as a fetch's single fallback, and
+    #: only when no fetch vendor has budget left.
+    websearch_direct_fallback: bool = Field(
+        default=True,
+        description="allow the direct fetch as the one fallback when no fetch vendor has budget",
     )
     #: Monthly budgets, in each vendor's own billing unit (credits; one request is one credit
     #: except a Firecrawl search, which costs two). Taken from each vendor's published free
@@ -317,6 +323,11 @@ class Settings(BaseSettings):
     )
     websearch_budget_firecrawl: Annotated[int, Field(ge=0)] = Field(
         default=1000, description="Firecrawl credits per calendar month (IST)"
+    )
+    #: The owner's overall allowance: every vendor call, fallbacks included, counts one. The
+    #: direct fetch is not a vendor call and does not count. At the cap a call is refused, loudly.
+    websearch_monthly_request_cap: Annotated[int, Field(ge=0)] = Field(
+        default=3000, description="vendor requests per calendar month (IST), all vendors together"
     )
     #: Per M17 session, across every manager: 4 managers x `rounds.max_queries` (8) in
     #: analyst/fundmanager/roster.yaml. A cache hit costs nothing and is not counted.

@@ -4,10 +4,12 @@
 
 Reports, per vendor key, only *set* or *not set* (never a value). Then, for each search vendor
 with a key, one search for a neutral query, and for each fetch vendor with a key, one fetch of a
-public news page: at most six requests. Each is reserved against the vendor's monthly budget first
-(`--ledger postgres`, the default, needs migration 0021 applied; `memory` counts in-process only),
-and the result count or byte count, the latency and the HTTP status are printed. Vendors without a
-key are skipped and said so. The direct fetcher is not probed: it has no key and no quota.
+public news page: at most five requests. This probes connectivity and keys, so it deliberately
+bypasses the rotation and asks every keyed vendor once. Each call is reserved against the vendor's
+budget and the monthly total first (`--ledger postgres`, the default, needs migration 0021
+applied; `memory` counts in-process only), and the result or byte count, the latency and the HTTP
+status are printed. Vendors without a key are skipped and said so. The direct fetcher is not
+probed: it has no key and no quota.
 
 Nothing is stored in the Research Commons: this is a probe, not research.
 """
@@ -19,7 +21,12 @@ from typing import Annotated
 
 import typer
 
-from analyst.websearch.ledger import InMemoryUsageLedger, PostgresUsageLedger, UsageLedger
+from analyst.websearch.ledger import (
+    InMemoryUsageLedger,
+    PostgresUsageLedger,
+    Reservation,
+    UsageLedger,
+)
 from analyst.websearch.models import VendorName, month_of
 from analyst.websearch.research import SEARCH_RESULT_COUNT, WebResearch
 from analyst.websearch.vendors import VendorError
@@ -70,8 +77,10 @@ def main(
     def admitted(vendor: VendorName, units: int, capability: str) -> bool:
         now = clock.now()
         budget = research.config.budget_of(vendor)
-        if usage.reserve_month(vendor, month_of(now), units, budget, at=now) is None:
-            typer.echo(f"{vendor.value} {capability}: over budget, not sent")
+        cap = research.config.monthly_request_cap
+        outcome = usage.reserve_call(vendor, month_of(now), units, budget, cap, at=now)
+        if outcome is not Reservation.OK:
+            typer.echo(f"{vendor.value} {capability}: {outcome.value}, not sent")
             return False
         return True
 

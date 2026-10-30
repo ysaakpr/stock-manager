@@ -363,10 +363,11 @@ def status_managers(
     return read_managers_status(entries, roster=roster, as_of=clock.now())
 
 
-@app.get("/status/websearch", summary="M17 web research: month-to-date spend per vendor")
+@app.get("/status/websearch", summary="M17 web research: month-to-date use per vendor and in total")
 def status_websearch(conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> WebsearchOut:
-    """Each web research vendor's units this IST month against its budget, its place in the
-    search and fetch order, and whether its key is configured (a boolean; never the key)."""
+    """Each web research vendor's units and requests this IST month against its budget, the total
+    against the monthly cap, the rotations, and whether each key is configured (a boolean; never
+    the key)."""
     return read_websearch_usage(conn, settings, as_of=clock.now())
 
 

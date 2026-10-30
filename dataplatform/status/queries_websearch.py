@@ -1,9 +1,10 @@
-"""`GET /status/websearch`: month-to-date web research spend per vendor against its budget.
+"""`GET /status/websearch`: month-to-date web research use per vendor and in total.
 
-Reads migration 0021's `websearch_vendor_month` for the IST calendar month of `as_of`, and the
-budgets and routing order from `Settings` (WEBSEARCH_*). Reports whether each vendor's key is
-configured — a boolean, never the key. The counters are written by `analyst.websearch.ledger`;
-this module only reads them (no import of `analyst`, which sits above the platform).
+Reads migration 0021's `websearch_vendor_month` and `websearch_month_total` for the IST calendar
+month of `as_of`, and the budgets, the monthly cap and the rotations from `Settings`
+(WEBSEARCH_*). Reports whether each vendor's key is configured — a boolean, never the key. The
+counters are written by `analyst.websearch.ledger`; this module only reads them (no import of
+`analyst`, which sits above the platform).
 """
 
 from __future__ import annotations
@@ -25,11 +26,12 @@ class WebsearchVendorOut(BaseModel):
 
     vendor: str
     configured: bool = Field(description="A key is set (always true for direct, which needs none)")
-    used: int = Field(description="Units reserved this month: requests, or credits for Firecrawl")
+    used: int = Field(description="Units reserved this month, in the vendor's billing unit")
+    requests: int = Field(description="Calls sent this month, fallbacks included")
     budget: int | None = Field(description="Monthly budget; None for direct, which is uncapped")
     remaining: int | None
-    search_rank: int | None = Field(description="1-based place in the search order, if listed")
-    fetch_rank: int | None = Field(description="1-based place in the fetch order, if listed")
+    in_search_rotation: bool
+    in_fetch_rotation: bool = Field(description="For direct: allowed as the last-resort fallback")
 
 
 class WebsearchOut(BaseModel):
@@ -40,6 +42,9 @@ class WebsearchOut(BaseModel):
     as_of: datetime
     month: date = Field(description="First day of the IST calendar month reported")
     vendors: list[WebsearchVendorOut]
+    total_requests: int = Field(description="Vendor requests this month, all vendors (not direct)")
+    monthly_request_cap: int
+    remaining_requests: int
     session_max_searches: int
     session_max_fetches: int
 
@@ -52,9 +57,15 @@ def read_websearch_usage(conn: Connection, settings: Settings, *, as_of: datetim
     """Month-to-date usage per vendor. A vendor with no row this month has used 0."""
     month = as_of.astimezone(settings.tzinfo).date().replace(day=1)
     rows = conn.execute(
-        "SELECT vendor, used FROM websearch_vendor_month WHERE month = %s", (month,)
+        "SELECT vendor, used, requests FROM websearch_vendor_month WHERE month = %s", (month,)
     ).fetchall()
-    used = {str(vendor): int(count) for vendor, count in rows}
+    used = {str(vendor): int(units) for vendor, units, _ in rows}
+    requests = {str(vendor): int(calls) for vendor, _, calls in rows}
+    total_row = conn.execute(
+        "SELECT requests FROM websearch_month_total WHERE month = %s", (month,)
+    ).fetchone()
+    total = 0 if total_row is None else int(total_row[0])
+    cap = settings.websearch_monthly_request_cap
     budgets: dict[str, int | None] = {
         "brave": settings.websearch_budget_brave,
         "tavily": settings.websearch_budget_tavily,
@@ -77,16 +88,22 @@ def read_websearch_usage(conn: Connection, settings: Settings, *, as_of: datetim
                 vendor=vendor,
                 configured=configured[vendor],
                 used=spent,
+                requests=requests.get(vendor, 0),
                 budget=budget,
                 remaining=None if budget is None else max(budget - spent, 0),
-                search_rank=search.index(vendor) + 1 if vendor in search else None,
-                fetch_rank=fetch.index(vendor) + 1 if vendor in fetch else None,
+                in_search_rotation=vendor in search,
+                in_fetch_rotation=(
+                    settings.websearch_direct_fallback if vendor == "direct" else vendor in fetch
+                ),
             )
         )
     return WebsearchOut(
         as_of=as_of,
         month=month,
         vendors=vendors,
+        total_requests=total,
+        monthly_request_cap=cap,
+        remaining_requests=max(cap - total, 0),
         session_max_searches=settings.websearch_session_max_searches,
         session_max_fetches=settings.websearch_session_max_fetches,
     )

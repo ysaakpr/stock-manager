@@ -1,8 +1,9 @@
 """M17 web research: our own `web_search` and `web_fetch`, over Brave, Tavily, Firecrawl and a
 direct fetch, for a model that has no server-side web tools (Claude on Amazon Bedrock).
 
-- `research.WebResearch` routes one search or fetch across the configured vendors, under monthly
-  per-vendor budgets and a per-session cap, and stores every answer as a Research Commons snapshot
+- `research.WebResearch` sends each search or fetch to ONE vendor, picked by a rotation weighted
+  by remaining monthly budget, with at most one fallback, under per-vendor budgets, a monthly
+  total and a per-session cap, and stores every answer as a Research Commons snapshot
   (`analyst.commons.SnapshotStore`), so the evidence trail is the one the Claude CLI fetcher left.
 - `tools.WebTools` is the pair of LLM tools (`analyst.llm.ToolSpec` shape) and their handlers.
 - `guard.UrlGuard` is the SSRF and scheduler-host gate every fetched URL and redirect passes.
@@ -23,7 +24,12 @@ from analyst.websearch.http import (
     WebTimeoutError,
     WebTransportError,
 )
-from analyst.websearch.ledger import InMemoryUsageLedger, PostgresUsageLedger, UsageLedger
+from analyst.websearch.ledger import (
+    InMemoryUsageLedger,
+    PostgresUsageLedger,
+    Reservation,
+    UsageLedger,
+)
 from analyst.websearch.models import (
     CallOutcome,
     Capability,
@@ -35,7 +41,16 @@ from analyst.websearch.models import (
     month_of,
     within_budget,
 )
-from analyst.websearch.research import SEARCH_RESULT_COUNT, WebResearch, WebResearchConfig
+from analyst.websearch.research import (
+    MAX_CALLS_PER_REQUEST,
+    MIN_PAGE_CHARS,
+    SEARCH_RESULT_COUNT,
+    NoResultError,
+    WebResearch,
+    WebResearchConfig,
+    usable_page,
+    usable_results,
+)
 from analyst.websearch.tools import (
     UNTRUSTED_CONTENT_RULE,
     WEB_FETCH,
@@ -47,6 +62,8 @@ from analyst.websearch.tools import (
 from analyst.websearch.vendors import FetchVendor, SearchVendor, VendorError
 
 __all__ = [
+    "MAX_CALLS_PER_REQUEST",
+    "MIN_PAGE_CHARS",
     "SEARCH_RESULT_COUNT",
     "UNTRUSTED_CONTENT_RULE",
     "WEB_FETCH",
@@ -59,8 +76,10 @@ __all__ = [
     "HttpReply",
     "HttpxClient",
     "InMemoryUsageLedger",
+    "NoResultError",
     "PostgresUsageLedger",
     "RecordedHttpClient",
+    "Reservation",
     "SearchResult",
     "SearchResults",
     "SearchVendor",
@@ -79,6 +98,8 @@ __all__ = [
     "host_is_blocked",
     "ip_refusal",
     "month_of",
+    "usable_page",
+    "usable_results",
     "within_budget",
     "wrap_untrusted",
 ]

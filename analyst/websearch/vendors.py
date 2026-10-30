@@ -33,7 +33,8 @@ forbids. Pinned to `basic`, a site that refuses Firecrawl refuses us.
 - the *page's own site* refusing (a 401/403/429 the vendor reports for the target, or robots.txt
   disallowing the direct fetcher) is `TARGET_REFUSED`, which ends the fetch: another vendor
   asking the same site again is the workaround §8 forbids;
-- nothing usable (no hits, an empty page, a 404) is `EMPTY`.
+- nothing usable (an empty page, a 404) is `EMPTY`; zero hits and near-empty pages are judged
+  by the router (`research.usable_results`, `usable_page`), which owns the one fallback.
 
 What this module never does: put a key anywhere but its request header, log a key, retry, or
 fetch a URL the `UrlGuard` has not passed.
@@ -265,8 +266,7 @@ def _results(
                 rank=len(hits) + 1,
             )
         )
-    if not hits:
-        raise VendorError(f"{vendor.value} found nothing", outcome=CallOutcome.EMPTY)
+    # No hits is returned, not raised: whether a result is usable is the router's one decision.
     return SearchResults(query=query, vendor=vendor, results=tuple(hits))
 
 

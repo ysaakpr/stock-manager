@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict
 from analyst.commons import FetchError, Snapshot
 from analyst.llm import ToolSpec
 from analyst.websearch.guard import UrlRefusedError
-from analyst.websearch.research import WebResearch
+from analyst.websearch.research import NoResultError, WebResearch
 from dataplatform.logging import get_logger
 from dataplatform.redaction import mask_secrets
 
@@ -148,7 +148,9 @@ class WebTools:
     types), runs the search or fetch through `WebResearch` (cache, routing, caps, snapshot), and
     renders the stored snapshot for the model.
     What it never does: raise for a failed or refused call — the model gets an `is_error` result
-    naming the reason, and the run goes on — or show the model anything the snapshot does not hold.
+    naming the reason (a cap, a refused URL), or an empty, non-error result naming why when neither
+    the vendor asked nor its one fallback had anything — or show the model anything the snapshot
+    does not hold.
     """
 
     def __init__(self, research: WebResearch, *, session: date) -> None:
@@ -173,6 +175,8 @@ class WebTools:
             return query
         try:
             outcome = self._research.search(query, self._session)
+        except NoResultError as exc:
+            return self._empty("web_search", exc)
         except (FetchError, ValueError) as exc:
             return self._error("web_search", exc)
         return self._render("web_search", outcome.snapshot, outcome.cache_hit)
@@ -183,6 +187,8 @@ class WebTools:
             return url
         try:
             outcome = self._research.fetch_page(url, self._session)
+        except NoResultError as exc:
+            return self._empty("web_fetch", exc)
         except (FetchError, ValueError) as exc:
             return self._error("web_fetch", exc)
         return self._render("web_fetch", outcome.snapshot, outcome.cache_hit)
@@ -194,6 +200,14 @@ class WebTools:
             "websearch.tool_error", tool=tool, session=self._session.isoformat(), reason=reason
         )
         return ToolResult(content=f"{tool} failed: {reason}", is_error=True)
+
+    def _empty(self, tool: str, exc: NoResultError) -> ToolResult:
+        """Nothing usable from the vendor asked or its one fallback: an empty result, with why."""
+        reason = mask_secrets(str(exc))[:500]
+        _LOG.info(
+            "websearch.tool_empty", tool=tool, session=self._session.isoformat(), reason=reason
+        )
+        return ToolResult(content=f"{tool} returned no result: {reason}", is_error=False)
 
     def _render(self, tool: str, snapshot: Snapshot, cache_hit: bool) -> ToolResult:
         vendor = snapshot.fetcher.split(":", 1)[0]

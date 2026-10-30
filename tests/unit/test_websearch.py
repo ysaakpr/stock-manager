@@ -7,6 +7,7 @@ Offline: every vendor answer is a frozen fixture in the vendor's documented shap
 from __future__ import annotations
 
 import json
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -19,12 +20,15 @@ from structlog.testing import capture_logs
 
 from analyst.commons import FetchError, FetchRequest, SnapshotStore
 from analyst.websearch import (
+    MAX_CALLS_PER_REQUEST,
+    MIN_PAGE_CHARS,
     WEB_FETCH,
     WEB_SEARCH,
-    CallOutcome,
     Capability,
+    FetchedDocument,
     HttpReply,
     InMemoryUsageLedger,
+    NoResultError,
     RecordedHttpClient,
     UrlGuard,
     UrlRefusedError,
@@ -35,6 +39,7 @@ from analyst.websearch import (
     host_is_blocked,
     ip_refusal,
     month_of,
+    usable_page,
     within_budget,
     wrap_untrusted,
 )
@@ -63,6 +68,11 @@ BRAVE_KEY = "brave-test-key-not-real-7f3a"
 TAVILY_KEY = "tvly-test-key-not-real-91c2"
 FIRECRAWL_KEY = "fc-test-key-not-real-5d8e"
 ALL_KEYS = (BRAVE_KEY, TAVILY_KEY, FIRECRAWL_KEY)
+#: No fetch vendor in the rotation, so the direct fetch is a fetch's one call.
+NO_FETCH_VENDOR: dict[str, Any] = {
+    "websearch_fetch_vendors": "firecrawl",
+    "firecrawl_api_key": None,
+}
 
 BRAVE_URL = f"{BRAVE_SEARCH_URL}?{urlencode({'q': TARGET, 'count': SEARCH_RESULT_COUNT})}"
 DNS: dict[str, list[str]] = {
@@ -206,7 +216,7 @@ def test_firecrawl_scrape_pins_basic_proxy_and_records_the_final_url(tmp_path: P
 
 
 def test_tavily_extract_with_status_not_reported(tmp_path: Path) -> None:
-    settings = _settings(websearch_fetch_vendors="tavily,direct")
+    settings = _settings(websearch_fetch_vendors="tavily")
     world = World(
         tmp_path, {TAVILY_EXTRACT_URL: _json(_fixture("tavily", "extract.json"))}, settings=settings
     )
@@ -224,33 +234,80 @@ def test_html_to_text_keeps_the_article_and_drops_the_chrome() -> None:
         assert absent not in text
 
 
-# ── routing order and skipping ─────────────────────────────────────────────────────────────────
+# ── routing: one vendor per request, a rotation weighted by remaining budget ───────────────────
+
+#: Only Brave has a key: the search rotation is one vendor, so budget effects are unambiguous.
+ONLY_BRAVE: dict[str, Any] = {"tavily_api_key": None, "firecrawl_api_key": None}
+EMPTY_BRAVE = (
+    b'{"type": "search", "query": {"original": "x"}, "web": {"type": "search", "results": []}}'
+)
 
 
-def test_first_vendor_in_order_answers_and_later_ones_are_not_called(tmp_path: Path) -> None:
-    world = World(
-        tmp_path,
-        {
-            BRAVE_URL: _json(_fixture("brave", "web_search.json")),
-            TAVILY_SEARCH_URL: _json(_fixture("tavily", "search.json")),
-        },
-    )
-    world.research.search(QUERY, SESSION)
+def _queries(n: int) -> list[str]:
+    return [f"rbi question {i}" for i in range(n)]
+
+
+def _brave_script(queries: list[str]) -> dict[str, HttpReply | Exception]:
+    body = _json(_fixture("brave", "web_search.json"))
+    return {
+        f"{BRAVE_SEARCH_URL}?{urlencode({'q': q, 'count': SEARCH_RESULT_COUNT})}": body
+        for q in queries
+    }
+
+
+def _all_search(queries: list[str]) -> dict[str, HttpReply | Exception]:
+    return {
+        **_brave_script(queries),
+        TAVILY_SEARCH_URL: _json(_fixture("tavily", "search.json")),
+        FIRECRAWL_SEARCH_URL: _json(_fixture("firecrawl", "search.json")),
+    }
+
+
+def _served(world: World, queries: list[str], session: date = SESSION) -> list[str]:
+    return [world.research.search(q, session).snapshot.fetcher.split(":")[0] for q in queries]
+
+
+def test_each_request_goes_to_exactly_one_vendor(tmp_path: Path) -> None:
+    world = World(tmp_path, _all_search([TARGET]))
+    assert world.research.search(QUERY, SESSION).snapshot.fetcher == "brave:search"
     assert world.http.urls() == [BRAVE_URL]
 
 
-def test_configured_order_is_respected(tmp_path: Path) -> None:
-    settings = _settings(websearch_search_vendors="tavily,brave")
-    world = World(
-        tmp_path,
-        {
-            BRAVE_URL: _json(_fixture("brave", "web_search.json")),
-            TAVILY_SEARCH_URL: _json(_fixture("tavily", "search.json")),
-        },
-        settings=settings,
+def test_equal_budgets_interleave_rather_than_drain_the_first(tmp_path: Path) -> None:
+    queries = _queries(9)
+    # Firecrawl's search costs 2 credits, so 2,000 credits is the same 1,000 calls as the others.
+    settings = _settings(websearch_budget_firecrawl=2000, websearch_session_max_searches=100)
+    world = World(tmp_path, _all_search(queries), settings=settings)
+    served = _served(world, queries)
+    assert served[:3] == ["brave", "tavily", "firecrawl"]
+    assert Counter(served) == {"brave": 3, "tavily": 3, "firecrawl": 3}
+
+
+def test_the_rotation_spreads_requests_in_proportion_to_remaining_budget(tmp_path: Path) -> None:
+    """Brave 600 calls, Tavily 300, Firecrawl 600 credits = 300 calls: a 2:1:1 split."""
+    queries = _queries(40)
+    settings = _settings(
+        websearch_budget_brave=600,
+        websearch_budget_tavily=300,
+        websearch_budget_firecrawl=600,
+        websearch_session_max_searches=100,
     )
-    assert world.research.search(QUERY, SESSION).snapshot.fetcher == "tavily:search"
-    assert world.http.urls() == [TAVILY_SEARCH_URL]
+    world = World(tmp_path, _all_search(queries), settings=settings)
+    counts = Counter(_served(world, queries))
+    assert abs(counts["brave"] - 20) <= 1
+    assert abs(counts["tavily"] - 10) <= 1
+    assert abs(counts["firecrawl"] - 10) <= 1
+
+
+def test_the_weight_is_what_is_left_not_what_was_granted(tmp_path: Path) -> None:
+    queries = _queries(21)
+    settings = _settings(websearch_budget_firecrawl=2000, websearch_session_max_searches=100)
+    world = World(tmp_path, _all_search(queries), settings=settings)
+    for _ in range(900):  # Brave has spent 900 of its 1,000 this month: 100 left vs 1,000 each.
+        world.ledger.reserve_call(VendorName.BRAVE, month_of(NOW), 1, 1000, 3000, at=NOW)
+    counts = Counter(_served(world, queries))
+    assert counts["brave"] <= 2
+    assert counts["tavily"] >= 9 and counts["firecrawl"] >= 9
 
 
 @pytest.mark.parametrize(
@@ -258,84 +315,170 @@ def test_configured_order_is_respected(tmp_path: Path) -> None:
     [_status(503), _status(500), WebTimeoutError("timed out"), _json(b"not json")],
     ids=["503", "500", "timeout", "bad-body"],
 )
-def test_a_failing_vendor_is_skipped_for_the_next(
-    tmp_path: Path, failure: HttpReply | Exception
-) -> None:
-    world = World(
-        tmp_path,
-        {BRAVE_URL: failure, TAVILY_SEARCH_URL: _json(_fixture("tavily", "search.json"))},
-    )
+def test_a_failing_vendor_gets_one_fallback(tmp_path: Path, failure: HttpReply | Exception) -> None:
+    script = {**_all_search([TARGET]), BRAVE_URL: failure}
+    world = World(tmp_path, script)
     with capture_logs() as logs:
         snapshot = world.research.search(QUERY, SESSION).snapshot
     assert snapshot.fetcher == "tavily:search"
     outcomes = [(e["vendor"], e["outcome"]) for e in logs if e["event"] == "websearch.call"]
     assert outcomes == [("brave", "failed"), ("tavily", "ok")]
-    # A failed request was still sent, so it still counts against the budget.
+    # A failed request was still sent, so it still counts: against Brave and the monthly total.
     assert world.used(VendorName.BRAVE) == 1
+    assert world.ledger.month_total(month_of(NOW)) == 2
 
 
-def test_a_vendor_without_a_key_is_skipped_with_one_warning(
+def test_an_empty_search_triggers_exactly_one_fallback(tmp_path: Path) -> None:
+    """Fails if `usable_results` is inverted: Brave's empty answer must not be stored."""
+    script = {**_all_search([TARGET]), BRAVE_URL: _json(EMPTY_BRAVE)}
+    world = World(tmp_path, script)
+    snapshot = world.research.search(QUERY, SESSION).snapshot
+    assert snapshot.fetcher == "tavily:search"
+    assert world.http.urls() == [BRAVE_URL, TAVILY_SEARCH_URL]
+
+
+def test_a_near_empty_page_triggers_exactly_one_fallback(tmp_path: Path) -> None:
+    """Fails if `usable_page` is inverted: a 40-character page is not a usable result."""
+    stub = json.loads(_fixture("firecrawl", "scrape.json"))
+    stub["data"]["markdown"] = "Please enable JavaScript to continue."
+    world = World(
+        tmp_path,
+        {
+            FIRECRAWL_SCRAPE_URL: _json(json.dumps(stub).encode()),
+            TAVILY_EXTRACT_URL: _json(_fixture("tavily", "extract.json")),
+        },
+    )
+    snapshot = world.research.fetch_page(PAGE, SESSION).snapshot
+    assert snapshot.fetcher == "tavily:fetch"
+    assert world.http.urls() == [FIRECRAWL_SCRAPE_URL, TAVILY_EXTRACT_URL]
+    assert usable_page(
+        FetchedDocument(
+            requested_url=PAGE,
+            final_url=PAGE,
+            status=200,
+            content_type="text/html",
+            bytes=MIN_PAGE_CHARS,
+            text="x" * MIN_PAGE_CHARS,
+            vendor=VendorName.DIRECT,
+        )
+    )
+
+
+def test_there_is_never_a_third_vendor(tmp_path: Path) -> None:
+    script = {
+        **_all_search([TARGET]),
+        BRAVE_URL: _json(EMPTY_BRAVE),
+        TAVILY_SEARCH_URL: _status(503),
+    }
+    world = World(tmp_path, script)
+    with pytest.raises(NoResultError) as raised:
+        world.research.search(QUERY, SESSION)
+    assert world.http.urls() == [BRAVE_URL, TAVILY_SEARCH_URL]
+    assert FIRECRAWL_SEARCH_URL not in world.http.urls()
+    assert "brave: empty" in str(raised.value) and "tavily: failed" in str(raised.value)
+    assert world.store.lookup(FetchRequest.query(QUERY, SESSION)) is None
+    assert len(world.http.calls) == MAX_CALLS_PER_REQUEST
+
+
+def test_no_result_reaches_the_model_as_an_empty_result_with_its_reason(tmp_path: Path) -> None:
+    script = {
+        **_all_search([TARGET]),
+        BRAVE_URL: _json(EMPTY_BRAVE),
+        TAVILY_SEARCH_URL: _status(503),
+    }
+    tools = WebTools(World(tmp_path, script).research, session=SESSION)
+    result = tools.handle("web_search", {"query": QUERY})
+    assert not result.is_error and result.snapshot is None
+    assert result.content.startswith("web_search returned no result: ")
+    assert "brave: empty" in result.content and "tavily: failed" in result.content
+
+
+def test_direct_is_not_used_while_another_fetch_vendor_has_budget(tmp_path: Path) -> None:
+    world = World(
+        tmp_path,
+        {
+            FIRECRAWL_SCRAPE_URL: _status(503),
+            TAVILY_EXTRACT_URL: _json(_fixture("tavily", "extract_failed.json")),
+            "https://news.example.org/robots.txt": _status(404),
+            PAGE: _html(_fixture("direct", "article.html")),
+        },
+    )
+    with pytest.raises(NoResultError):
+        world.research.fetch_page(PAGE, SESSION)
+    assert world.http.urls() == [FIRECRAWL_SCRAPE_URL, TAVILY_EXTRACT_URL]
+
+
+def test_direct_is_the_fallback_when_no_other_fetch_vendor_has_budget(tmp_path: Path) -> None:
+    world = World(
+        tmp_path,
+        {
+            FIRECRAWL_SCRAPE_URL: _status(503),
+            "https://news.example.org/robots.txt": _status(404),
+            PAGE: _html(_fixture("direct", "article.html")),
+        },
+        settings=_settings(websearch_budget_tavily=0),
+    )
+    snapshot = world.research.fetch_page(PAGE, SESSION).snapshot
+    assert snapshot.fetcher == "direct:fetch"
+    assert TAVILY_EXTRACT_URL not in world.http.urls()
+    # The direct fetch is counted for the status page, never in the vendor total.
+    assert world.ledger.month_requests(month_of(NOW))[VendorName.DIRECT] == 1
+    assert world.ledger.month_total(month_of(NOW)) == 1  # Firecrawl's call only
+
+
+def test_direct_fallback_can_be_switched_off(tmp_path: Path) -> None:
+    world = World(
+        tmp_path,
+        {FIRECRAWL_SCRAPE_URL: _status(503)},
+        settings=_settings(websearch_budget_tavily=0, websearch_direct_fallback=False),
+    )
+    with pytest.raises(NoResultError):
+        world.research.fetch_page(PAGE, SESSION)
+    assert world.http.urls() == [FIRECRAWL_SCRAPE_URL]
+
+
+def test_a_vendor_without_a_key_is_out_of_the_rotation_with_one_warning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from analyst.websearch import research as module
 
     monkeypatch.setattr(module, "_warned_unconfigured", set())
-    settings = _settings(brave_search_api_key="")
+    settings = _settings(brave_search_api_key="", firecrawl_api_key=None)
     script = {TAVILY_SEARCH_URL: _json(_fixture("tavily", "search.json"))}
     with capture_logs() as logs:
         World(tmp_path / "a", script, settings=settings)
         world = World(tmp_path / "b", script, settings=settings)
         world.research.search(QUERY, SESSION)
     warnings = [e for e in logs if e["event"] == "websearch.vendor_unconfigured"]
-    assert [(w["vendor"], w["setting"]) for w in warnings] == [("brave", "BRAVE_SEARCH_API_KEY")]
+    assert sorted((w["vendor"], w["setting"]) for w in warnings) == [
+        ("brave", "BRAVE_SEARCH_API_KEY"),
+        ("firecrawl", "FIRECRAWL_API_KEY"),
+    ]
     assert world.http.urls() == [TAVILY_SEARCH_URL]
-
-
-def test_no_vendor_able_to_serve_raises_and_stores_nothing(tmp_path: Path) -> None:
-    world = World(
-        tmp_path,
-        {
-            BRAVE_URL: _status(502),
-            TAVILY_SEARCH_URL: _status(500),
-            FIRECRAWL_SEARCH_URL: _status(504),
-        },
-    )
-    with pytest.raises(FetchError, match="no search vendor"):
-        world.research.search(QUERY, SESSION)
-    assert world.store.lookup(FetchRequest.query(QUERY, SESSION)) is None
 
 
 def test_an_unknown_vendor_in_config_is_refused_at_startup(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown vendor 'bing'"):
         World(tmp_path, {}, settings=_settings(websearch_search_vendors="brave,bing"))
     with pytest.raises(ValueError, match="direct cannot be used"):
-        World(tmp_path, {}, settings=_settings(websearch_search_vendors="direct"))
+        World(tmp_path, {}, settings=_settings(websearch_fetch_vendors="firecrawl,direct"))
 
 
-# ── refusals: 401/403/429 skip the vendor and are never retried ────────────────────────────────
+# ── refusals: 401/403/429 take the vendor out of the rotation and are never retried ────────────
 
 
 @pytest.mark.parametrize("status", [401, 403, 429, 402, 432])
-def test_a_refusing_vendor_is_skipped_and_never_asked_again(tmp_path: Path, status: int) -> None:
-    world = World(
-        tmp_path,
-        {
-            BRAVE_URL: _status(status, {"retry-after": "1"}),
-            TAVILY_SEARCH_URL: _json(_fixture("tavily", "search.json")),
-            f"{BRAVE_SEARCH_URL}?{urlencode({'q': 'rbi mpc', 'count': SEARCH_RESULT_COUNT})}": (
-                _json(_fixture("brave", "web_search.json"))
-            ),
-        },
-    )
+def test_a_refusing_vendor_is_never_asked_again(tmp_path: Path, status: int) -> None:
+    queries = [TARGET, "rbi mpc", "rbi minutes", "rbi inflation"]
+    script = {**_all_search(queries), BRAVE_URL: _status(status, {"retry-after": "1"})}
+    world = World(tmp_path, script)
     with capture_logs() as logs:
-        assert world.research.search(QUERY, SESSION).snapshot.fetcher == "tavily:search"
-        # A different query: Brave would answer it, but it refused us and is not asked again.
-        assert world.research.search("RBI MPC", SESSION).snapshot.fetcher == "tavily:search"
-    assert world.http.urls().count(BRAVE_URL) == 1
-    assert all("rbi+mpc" not in url or "brave" not in url for url in world.http.urls())
+        served = _served(world, queries)
+    assert served[0] == "tavily"  # the one fallback
+    assert "brave" not in served
+    assert sum("api.search.brave.com" in url for url in world.http.urls()) == 1
     refusals = [e for e in logs if e["event"] == "websearch.call" and e["vendor"] == "brave"]
-    assert [e["outcome"] for e in refusals] == ["refusing", "refusing"]
-    assert refusals[0]["status"] == status
+    assert [(e["outcome"], e["status"]) for e in refusals] == [("refusing", status)]
 
 
 def test_the_page_refusing_stops_the_fetch_without_another_route(tmp_path: Path) -> None:
@@ -352,7 +495,7 @@ def test_the_page_refusing_stops_the_fetch_without_another_route(tmp_path: Path)
 
 
 def test_direct_fetch_does_not_retry_a_403(tmp_path: Path) -> None:
-    settings = _settings(websearch_fetch_vendors="direct")
+    settings = _settings(**NO_FETCH_VENDOR)
     world = World(
         tmp_path,
         {"https://news.example.org/robots.txt": _status(404), PAGE: _status(403)},
@@ -364,7 +507,7 @@ def test_direct_fetch_does_not_retry_a_403(tmp_path: Path) -> None:
 
 
 def test_direct_fetch_honours_robots_txt(tmp_path: Path) -> None:
-    settings = _settings(websearch_fetch_vendors="direct")
+    settings = _settings(**NO_FETCH_VENDOR)
     robots = HttpReply(
         status=200,
         url="",
@@ -382,7 +525,7 @@ def test_direct_fetch_honours_robots_txt(tmp_path: Path) -> None:
 
 
 def test_direct_fetch_reads_html_through_the_guard(tmp_path: Path) -> None:
-    settings = _settings(websearch_fetch_vendors="direct")
+    settings = _settings(**NO_FETCH_VENDOR)
     world = World(
         tmp_path,
         {
@@ -397,7 +540,7 @@ def test_direct_fetch_reads_html_through_the_guard(tmp_path: Path) -> None:
     assert world.http.calls[-1].headers["User-Agent"] == Settings(_env_file=None).http_user_agent  # type: ignore[call-arg]
 
 
-# ── budgets: exhaustion, the inverted check, the monthly rollover ──────────────────────────────
+# ── budgets: per vendor, the monthly total, the rollover, the session cap ─────────────────────
 
 
 def test_within_budget_is_inclusive_at_the_cap() -> None:
@@ -406,58 +549,34 @@ def test_within_budget_is_inclusive_at_the_cap() -> None:
     assert within_budget(0, 2, 1) is False
 
 
-def _queries(n: int) -> list[str]:
-    return [f"rbi question {i}" for i in range(n)]
-
-
-def _brave_script(queries: list[str]) -> dict[str, HttpReply | Exception]:
-    body = _json(_fixture("brave", "web_search.json"))
-    return {
-        f"{BRAVE_SEARCH_URL}?{urlencode({'q': q, 'count': SEARCH_RESULT_COUNT})}": body
-        for q in queries
-    }
-
-
-def test_an_exhausted_vendor_is_skipped_and_the_next_one_serves(tmp_path: Path) -> None:
-    """Fails if the budget check is inverted: Brave must serve exactly its 2, then Tavily."""
+def test_an_exhausted_vendor_leaves_the_rotation(tmp_path: Path) -> None:
+    """Fails if the budget check is inverted: Brave serves exactly its 2 calls, then nothing."""
     queries = _queries(3)
-    script = {
-        **_brave_script(queries),
-        TAVILY_SEARCH_URL: _json(_fixture("tavily", "search.json")),
-    }
-    world = World(tmp_path, script, settings=_settings(websearch_budget_brave=2))
-    served = [world.research.search(q, SESSION).snapshot.fetcher for q in queries]
-    assert served == ["brave:search", "brave:search", "tavily:search"]
-    assert world.used(VendorName.BRAVE) == 2
-    assert sum("api.search.brave.com" in url for url in world.http.urls()) == 2
+    settings = _settings(websearch_budget_brave=2, **ONLY_BRAVE)
+    world = World(tmp_path, _brave_script(queries), settings=settings)
+    assert _served(world, queries[:2]) == ["brave", "brave"]
+    with pytest.raises(NoResultError, match="no search vendor has a key and budget left"):
+        world.research.search(queries[2], SESSION)
+    assert world.used(VendorName.BRAVE) == 2 and len(world.http.calls) == 2
 
 
 def test_a_zero_budget_vendor_is_never_called(tmp_path: Path) -> None:
-    script = {
-        **_brave_script([TARGET]),
-        TAVILY_SEARCH_URL: _json(_fixture("tavily", "search.json")),
-    }
-    world = World(tmp_path, script, settings=_settings(websearch_budget_brave=0))
-    with capture_logs() as logs:
-        world.research.search(QUERY, SESSION)
-    assert world.http.urls() == [TAVILY_SEARCH_URL]
-    skipped = [e for e in logs if e["event"] == "websearch.call" and e["vendor"] == "brave"]
-    assert skipped[0]["outcome"] == CallOutcome.OVER_BUDGET.value
-    assert skipped[0]["remaining_budget"] == 0
+    queries = _queries(4)
+    world = World(tmp_path, _all_search(queries), settings=_settings(websearch_budget_brave=0))
+    assert "brave" not in _served(world, queries)
+    assert not any("api.search.brave.com" in url for url in world.http.urls())
 
 
 def test_the_budget_restarts_at_midnight_ist_on_the_first(tmp_path: Path) -> None:
     queries = _queries(3)
-    script = {
-        **_brave_script(queries),
-        TAVILY_SEARCH_URL: _json(_fixture("tavily", "search.json")),
-    }
     clock = FrozenClock(datetime(2026, 10, 31, 23, 58, tzinfo=IST))
-    world = World(tmp_path, script, settings=_settings(websearch_budget_brave=1), clock=clock)
-    assert world.research.search(queries[0], SESSION).snapshot.fetcher == "brave:search"
-    assert world.research.search(queries[1], SESSION).snapshot.fetcher == "tavily:search"
+    settings = _settings(websearch_budget_brave=1, **ONLY_BRAVE)
+    world = World(tmp_path, _brave_script(queries), settings=settings, clock=clock)
+    assert _served(world, queries[:1]) == ["brave"]
+    with pytest.raises(NoResultError):
+        world.research.search(queries[1], SESSION)
     clock.freeze_at(datetime(2026, 11, 1, 0, 0, tzinfo=IST))
-    assert world.research.search(queries[2], date(2026, 11, 2)).snapshot.fetcher == "brave:search"
+    assert _served(world, queries[2:], date(2026, 11, 2)) == ["brave"]
     assert world.ledger.month_usage(date(2026, 10, 1))[VendorName.BRAVE] == 1
     assert world.ledger.month_usage(date(2026, 11, 1))[VendorName.BRAVE] == 1
 
@@ -469,11 +588,34 @@ def test_month_of_is_the_ist_calendar_month() -> None:
     assert month_of(datetime(2026, 10, 31, 19, 0, tzinfo=UTC).astimezone(IST)) == date(2026, 11, 1)
 
 
+def test_the_monthly_cap_stops_calls(tmp_path: Path) -> None:
+    queries = _queries(3)
+    world = World(
+        tmp_path, _all_search(queries), settings=_settings(websearch_monthly_request_cap=2)
+    )
+    _served(world, queries[:2])
+    with capture_logs() as logs, pytest.raises(FetchError, match="monthly web research cap of 2"):
+        world.research.search(queries[2], SESSION)
+    assert len(world.http.calls) == 2
+    (warning,) = [e for e in logs if e["event"] == "websearch.monthly_cap"]
+    assert warning["log_level"] == "warning" and warning["cap"] == 2
+    # The model is told why, as an error result.
+    result = WebTools(world.research, session=SESSION).handle("web_search", {"query": "other"})
+    assert result.is_error and "monthly web research cap" in result.content
+
+
+def test_a_fallback_counts_toward_the_monthly_cap(tmp_path: Path) -> None:
+    script = {**_all_search([TARGET]), BRAVE_URL: _status(503)}
+    world = World(tmp_path, script, settings=_settings(websearch_monthly_request_cap=1))
+    with pytest.raises(FetchError, match="monthly web research cap of 1"):
+        world.research.search(QUERY, SESSION)
+    assert world.http.urls() == [BRAVE_URL]
+
+
 def test_the_session_cap_stops_new_requests_but_not_cache_hits(tmp_path: Path) -> None:
     queries = _queries(2)
-    world = World(
-        tmp_path, _brave_script(queries), settings=_settings(websearch_session_max_searches=1)
-    )
+    settings = _settings(websearch_session_max_searches=1, **ONLY_BRAVE)
+    world = World(tmp_path, _brave_script(queries), settings=settings)
     first = world.research.search(queries[0], SESSION)
     again = world.research.search(queries[0], SESSION)
     assert again.cache_hit and again.snapshot.id == first.snapshot.id
@@ -577,7 +719,7 @@ def test_the_guard_refuses(url: str, reason: str) -> None:
 def test_a_redirect_to_the_metadata_service_is_refused_and_never_requested(
     tmp_path: Path,
 ) -> None:
-    settings = _settings(websearch_fetch_vendors="direct")
+    settings = _settings(**NO_FETCH_VENDOR)
     metadata = "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
     world = World(
         tmp_path,
@@ -594,20 +736,20 @@ def test_a_redirect_to_the_metadata_service_is_refused_and_never_requested(
 
 
 def test_a_relative_redirect_is_followed_and_capped(tmp_path: Path) -> None:
-    settings = _settings(websearch_fetch_vendors="direct", websearch_max_redirects=2)
+    settings = _settings(**NO_FETCH_VENDOR, websearch_max_redirects=2)
     hops = [f"https://news.example.org/hop{i}" for i in range(4)]
     script: dict[str, Any] = {"https://news.example.org/robots.txt": _status(404)}
     script[PAGE] = _status(301, {"location": "/hop0"})
     for i in range(3):
         script[hops[i]] = _status(301, {"location": f"/hop{i + 1}"})
     world = World(tmp_path, script, settings=settings)
-    with pytest.raises(FetchError, match="no fetch vendor"):
+    with pytest.raises(NoResultError, match="no usable fetch result"):
         world.research.fetch_page(PAGE, SESSION)
     assert world.http.urls().count(hops[2]) == 0  # 1 page + 2 redirects, then stop
 
 
 def test_dns_rebinding_is_caught_at_the_connected_peer(tmp_path: Path) -> None:
-    settings = _settings(websearch_fetch_vendors="direct")
+    settings = _settings(**NO_FETCH_VENDOR)
     world = World(
         tmp_path,
         {
@@ -796,7 +938,7 @@ def test_a_page_cannot_close_the_wrapper() -> None:
 
 
 def test_direct_body_is_capped_at_max_bytes(tmp_path: Path) -> None:
-    settings = _settings(websearch_fetch_vendors="direct", websearch_max_fetch_bytes=2048)
+    settings = _settings(**NO_FETCH_VENDOR, websearch_max_fetch_bytes=2048)
     big = b"<html><body><p>" + b"A" * 10_000 + b"</p></body></html>"
     world = World(
         tmp_path,
@@ -825,7 +967,7 @@ def test_keys_never_reach_logs_reprs_snapshots_or_errors(tmp_path: Path) -> None
             TAVILY_SEARCH_URL: _status(503),
             FIRECRAWL_SEARCH_URL: _json(_fixture("firecrawl", "search.json")),
             FIRECRAWL_SCRAPE_URL: WebTimeoutError("POST api.firecrawl.dev timed out after 30s"),
-            TAVILY_EXTRACT_URL: _json(_fixture("tavily", "extract_failed.json")),
+            TAVILY_EXTRACT_URL: _json(_fixture("tavily", "extract.json")),
             "https://news.example.org/robots.txt": _status(404),
             PAGE: _html(_fixture("direct", "article.html")),
         },

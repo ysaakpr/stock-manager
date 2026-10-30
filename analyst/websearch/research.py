@@ -1,29 +1,41 @@
-"""The router: one search or one fetch, across the configured vendors, into a Commons snapshot.
+"""The router: one search or one fetch, to one vendor, into a Commons snapshot.
 
 `WebResearch` is a `analyst.commons.Fetcher`, so every result goes through
 `SnapshotStore.get_or_fetch` exactly as the Claude CLI fetcher's do: cache first (a hit costs no
-request and no budget), else routed once, bounded, redacted, written content-addressed and
-indexed. The snapshot records the request (`kind` query or url, the normalised target, the
-session), `fetched_at` from the injected clock, and `fetcher` = `<vendor>:<capability>` — e.g.
+request and no budget), else routed, bounded, redacted, written content-addressed and indexed. The
+snapshot records the request (`kind` query or url, the normalised target, the session),
+`fetched_at` from the injected clock, and `fetcher` = `<vendor>:<capability>` — e.g.
 `brave:search`, `firecrawl:fetch`, `direct:fetch` — and its id is the sha256 of its bytes. A
 manager citing it produces the same `commons_fetch` evidence item as before (id, kind, target,
 `knowable_at` = `fetched_at`), so the evidence trail is unchanged by the switch of fetcher.
 
-**Routing, per call.** Vendors are tried in the configured order (`WEBSEARCH_SEARCH_VENDORS`,
-`WEBSEARCH_FETCH_VENDORS`). A vendor is skipped when it has no key (warned once per process), when
-it refused us earlier in this process (401/403/429/plan limit: never retried until a restart, the
-way `ForbiddenWatch` stops a source), or when its monthly budget would be exceeded. Then it is
-called once; a refusal or a failure (5xx, timeout, bad body) moves on to the next vendor, and a
-vendor with nothing to say (no hits, empty page) does too. Two outcomes end the call at once,
-without trying anyone else: the page's own site refusing (401/403/429 or robots.txt), and a URL
-the guard refuses (SSRF, a scheduler host, a redirect into either). Asking again by another route
-is the workaround AGENTIC_CONTEXT §8 forbids.
+**Vendors share the load; they do not cross-check each other** (owner, 2026-10-30). Each request
+goes to ONE vendor, picked by a smooth weighted round robin over the vendors in the capability's
+rotation (`WEBSEARCH_SEARCH_VENDORS`, `WEBSEARCH_FETCH_VENDORS`) that have a key, have not refused
+us, and have budget left. Each vendor's weight is its remaining monthly budget in requests, read
+from the ledger at every pick, so the share each vendor gets follows what it has left and every
+vendor lasts to the end of the month instead of the first one draining.
+
+**At most one fallback.** If the chosen vendor fails (5xx, timeout, bad body), refuses us (401,
+402, 403, 429 or a plan limit — that vendor then leaves the rotation for the rest of the process,
+never retried), or returns nothing usable (no hits; a page under `MIN_PAGE_CHARS` of text), exactly
+one other vendor is picked from the rotation and asked. If that one also gives nothing, the request
+ends with `NoResultError`, naming both reasons; the tool returns that to the model as an empty
+result. A third vendor is never called for one request. The direct fetch has no quota: it is a
+fetch's single fallback only, and only when no fetch vendor in the rotation has budget left (and,
+with every fetch vendor exhausted, the one call). Two outcomes end a request at once with no
+fallback at all: the page's own site refusing (401/403/429, or robots.txt on the direct fetch) and
+a URL the guard refuses — asking again by another route is the workaround AGENTIC_CONTEXT §8
+forbids.
 
 **Caps.** Before any vendor is asked, one request is reserved against the session's cap for the
-capability (`WEBSEARCH_SESSION_MAX_SEARCHES` / `_FETCHES`), and before each vendor call its units
-are reserved against its monthly budget (`WEBSEARCH_BUDGET_*`). Every vendor call logs one
-`websearch.call` event: vendor, capability, outcome, units, remaining budget, status, latency.
-Keys never appear in an event, a repr or an error.
+capability (`WEBSEARCH_SESSION_MAX_SEARCHES` / `_FETCHES`). Each vendor call then reserves, in one
+atomic step, one request against the owner's monthly total for all vendors
+(`WEBSEARCH_MONTHLY_REQUEST_CAP`, fallbacks included) and its units against the vendor's own
+budget (`WEBSEARCH_BUDGET_*`). At the monthly total the request is refused with a
+`websearch.monthly_cap` WARN event. Every vendor call logs one `websearch.call` event: vendor,
+capability, outcome, units, remaining vendor budget, remaining monthly total, status, latency. Keys
+never appear in an event, a repr or an error.
 
 **Which vendor answered** is per call, and the store reads `name` after `fetch` returns on the
 same thread, so the name is kept thread-locally: the M17 runtime fetches on up to three threads
@@ -36,7 +48,7 @@ import threading
 import time
 from collections.abc import Sequence
 from datetime import date
-from typing import Final
+from typing import Final, cast
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -58,7 +70,7 @@ from analyst.websearch.guard import (
     system_resolver,
 )
 from analyst.websearch.http import HttpClient, HttpxClient
-from analyst.websearch.ledger import UsageLedger
+from analyst.websearch.ledger import Reservation, UsageLedger
 from analyst.websearch.models import (
     CallOutcome,
     Capability,
@@ -67,6 +79,7 @@ from analyst.websearch.models import (
     VendorName,
     VendorUsage,
     month_of,
+    within_budget,
 )
 from analyst.websearch.vendors import (
     BraveSearch,
@@ -85,27 +98,54 @@ from dataplatform.config import Settings
 from dataplatform.ingest.policy import RateLimiter, Sleeper
 from dataplatform.logging import get_logger
 
-__all__ = ["SEARCH_RESULT_COUNT", "WebResearch", "WebResearchConfig"]
+__all__ = [
+    "MAX_CALLS_PER_REQUEST",
+    "MIN_PAGE_CHARS",
+    "SEARCH_RESULT_COUNT",
+    "NoResultError",
+    "WebResearch",
+    "WebResearchConfig",
+    "usable_page",
+    "usable_results",
+]
 
 _LOG = get_logger(__name__)
 
 #: Hits asked of a search vendor. Fixed rather than chosen per call because the snapshot cache
 #: key is (query, session): two counts for one query would be one cache entry.
 SEARCH_RESULT_COUNT: Final[int] = 8
+#: A fetched page with less text than this is "near-empty": a cookie wall, a JS shell, an error
+#: stub. It is not a usable result, so it triggers the fallback.
+MIN_PAGE_CHARS: Final[int] = 200
+#: The chosen vendor and at most one fallback. Never a third.
+MAX_CALLS_PER_REQUEST: Final[int] = 2
 
 _SEARCHERS: Final[frozenset[VendorName]] = frozenset(
     {VendorName.BRAVE, VendorName.TAVILY, VendorName.FIRECRAWL}
 )
-_FETCHERS: Final[frozenset[VendorName]] = frozenset(
-    {VendorName.FIRECRAWL, VendorName.TAVILY, VendorName.DIRECT}
-)
-#: Outcomes that move on to the next vendor; the rest end the call.
-_NEXT: Final[frozenset[CallOutcome]] = frozenset(
+_FETCHERS: Final[frozenset[VendorName]] = frozenset({VendorName.FIRECRAWL, VendorName.TAVILY})
+#: Outcomes after which the one fallback is tried; the rest end the request.
+_FALL_BACK_ON: Final[frozenset[CallOutcome]] = frozenset(
     {CallOutcome.REFUSING, CallOutcome.FAILED, CallOutcome.EMPTY}
 )
 
 _warned_unconfigured: set[VendorName] = set()
 _warn_lock = threading.Lock()
+
+
+class NoResultError(FetchError):
+    """Neither the chosen vendor nor the one fallback produced a usable result (or no vendor had
+    budget). Not a failure of the tool: the model is told there is nothing, and why."""
+
+
+def usable_results(results: SearchResults) -> bool:
+    """A search answer worth storing: at least one hit."""
+    return len(results.results) > 0
+
+
+def usable_page(document: FetchedDocument) -> bool:
+    """A fetched page worth storing: at least `MIN_PAGE_CHARS` characters of text."""
+    return len(document.text.strip()) >= MIN_PAGE_CHARS
 
 
 def _vendor_list(raw: str, allowed: frozenset[VendorName], what: str) -> tuple[VendorName, ...]:
@@ -131,7 +171,9 @@ class WebResearchConfig(BaseModel):
 
     search_vendors: tuple[VendorName, ...]
     fetch_vendors: tuple[VendorName, ...]
+    direct_fallback: bool
     budgets: dict[VendorName, int]
+    monthly_request_cap: int = Field(ge=0)
     session_max_searches: int = Field(ge=0)
     session_max_fetches: int = Field(ge=0)
     max_result_chars: int = Field(ge=500)
@@ -152,11 +194,13 @@ class WebResearchConfig(BaseModel):
             fetch_vendors=_vendor_list(
                 settings.websearch_fetch_vendors, _FETCHERS, "WEBSEARCH_FETCH_VENDORS"
             ),
+            direct_fallback=settings.websearch_direct_fallback,
             budgets={
                 VendorName.BRAVE: settings.websearch_budget_brave,
                 VendorName.TAVILY: settings.websearch_budget_tavily,
                 VendorName.FIRECRAWL: settings.websearch_budget_firecrawl,
             },
+            monthly_request_cap=settings.websearch_monthly_request_cap,
             session_max_searches=settings.websearch_session_max_searches,
             session_max_fetches=settings.websearch_session_max_fetches,
             max_result_chars=settings.websearch_max_result_chars,
@@ -184,19 +228,25 @@ def _warn_unconfigured(vendor: VendorName, setting: str) -> None:
         "websearch.vendor_unconfigured",
         vendor=vendor.value,
         setting=setting,
-        detail="no key configured; this vendor is skipped",
+        detail="no key configured; this vendor is out of the rotation",
     )
+
+
+#: Anything the router can call: a search vendor or a fetch vendor.
+_Vendor = SearchVendor | FetchVendor
 
 
 class WebResearch:
     """Search and fetch across vendors, cached and evidenced through the Commons snapshot store.
 
     What it does: `search(query, session)` and `fetch_page(url, session)` return the Commons
-    snapshot for that request — the stored one, or one routed, stored and returned now. As a
-    `Fetcher` it can also stand in for `ClaudeWebFetcher` wherever a `SnapshotStore` is given one.
-    What it assumes: one instance per process (or per M17 run); the refusing-vendor set lives on it.
-    What it never does: retry a vendor, try another vendor after the page's own site refused, fetch
-    a URL the guard refused, or exceed a budget or a session cap.
+    snapshot for that request — the stored one, or one routed to one vendor (at most one fallback),
+    stored and returned now. As a `Fetcher` it can also stand in for `ClaudeWebFetcher` wherever a
+    `SnapshotStore` is given one.
+    What it assumes: one instance per process (or per M17 run); the rotation state and the
+    refusing-vendor set live on it.
+    What it never does: retry a vendor, call a third vendor for one request, try another vendor
+    after the page's own site refused, fetch a URL the guard refused, or exceed a budget or a cap.
     """
 
     def __init__(
@@ -208,6 +258,7 @@ class WebResearch:
         guard: UrlGuard,
         search_vendors: Sequence[SearchVendor],
         fetch_vendors: Sequence[FetchVendor],
+        direct: DirectFetch | None = None,
         store: SnapshotStore | None = None,
     ) -> None:
         self._config = config
@@ -216,8 +267,13 @@ class WebResearch:
         self._guard = guard
         self._search = tuple(search_vendors)
         self._fetch = tuple(fetch_vendors)
+        self._direct = direct
         self._store = store
         self._refusing: set[tuple[VendorName, Capability]] = set()
+        self._rotation: dict[Capability, dict[VendorName, int]] = {
+            Capability.SEARCH: {},
+            Capability.FETCH: {},
+        }
         self._lock = threading.Lock()
         self._local = threading.local()
 
@@ -233,8 +289,8 @@ class WebResearch:
         resolver: Resolver = system_resolver,
         sleep: Sleeper = time.sleep,
     ) -> WebResearch:
-        """The router this configuration describes. A vendor without a key is left out (warned
-        once per process); the direct fetcher needs none."""
+        """The router this configuration describes. A vendor without a key is left out of the
+        rotation (warned once per process); the direct fetcher needs none."""
         config = WebResearchConfig.from_settings(settings)
         client: HttpClient = (
             http if http is not None else HttpxClient(httpx.Client(follow_redirects=False))
@@ -269,20 +325,6 @@ class WebResearch:
                 searchers.append(FirecrawlSearch(key, api(vendor)))
         fetchers: list[FetchVendor] = []
         for vendor in config.fetch_vendors:
-            if vendor is VendorName.DIRECT:
-                fetchers.append(
-                    DirectFetch(
-                        client,
-                        guard,
-                        limiter,
-                        user_agent=config.user_agent,
-                        min_interval_seconds=config.direct_min_interval_seconds,
-                        timeout=config.timeout_seconds,
-                        max_bytes=config.max_fetch_bytes,
-                        max_redirects=config.max_redirects,
-                    )
-                )
-                continue
             key, setting = keys[vendor]
             if key is None:
                 _warn_unconfigured(vendor, setting)
@@ -290,6 +332,20 @@ class WebResearch:
                 fetchers.append(TavilyExtract(key, api(vendor)))
             else:
                 fetchers.append(FirecrawlScrape(key, api(vendor)))
+        direct = (
+            DirectFetch(
+                client,
+                guard,
+                limiter,
+                user_agent=config.user_agent,
+                min_interval_seconds=config.direct_min_interval_seconds,
+                timeout=config.timeout_seconds,
+                max_bytes=config.max_fetch_bytes,
+                max_redirects=config.max_redirects,
+            )
+            if config.direct_fallback
+            else None
+        )
         return cls(
             config=config,
             clock=clock,
@@ -297,6 +353,7 @@ class WebResearch:
             guard=guard,
             search_vendors=searchers,
             fetch_vendors=fetchers,
+            direct=direct,
             store=store,
         )
 
@@ -310,25 +367,26 @@ class WebResearch:
 
     @property
     def search_vendors(self) -> tuple[SearchVendor, ...]:
-        """The configured search vendors that have a key, in routing order."""
+        """The search vendors in the rotation (those with a key)."""
         return self._search
 
     @property
     def fetch_vendors(self) -> tuple[FetchVendor, ...]:
-        """The configured fetch vendors that can run (key set, or direct), in routing order."""
+        """The fetch vendors in the rotation (those with a key); the direct fetch is not one."""
         return self._fetch
 
     # ── the public calls ─────────────────────────────────────────────────────────────────────
 
     def search(self, query: str, session: date) -> FetchOutcome:
-        """The snapshot of a web search for `query` on `session`. Raises `FetchError` when no
-        vendor could serve it, and ValueError on a query the Commons refuses."""
+        """The snapshot of a web search for `query` on `session`. Raises `NoResultError` when
+        neither vendor asked had a usable answer, another `FetchError` when the request was
+        refused (a cap), and ValueError on a query the Commons refuses."""
         return self._require_store().get_or_fetch(FetchRequest.query(query, session), self)
 
     def fetch_page(self, url: str, session: date) -> FetchOutcome:
         """The snapshot of `url` on `session`. Raises `UrlRefusedError` (a ValueError) for a URL
-        the guard refuses — before the cache is consulted — and `FetchError` when no vendor could
-        serve it."""
+        the guard refuses — before the cache is consulted — `NoResultError` when neither vendor
+        asked returned a usable page, and another `FetchError` for a refusal or a cap."""
         self._guard.check_form(url)
         return self._require_store().get_or_fetch(FetchRequest.url(url, session), self)
 
@@ -358,10 +416,53 @@ class WebResearch:
         """Route one Commons request. Raises `FetchError` when nothing could be stored."""
         self._local.served = None
         if request.kind is FetchKind.QUERY:
-            return self._route_search(request)
-        return self._route_fetch(request)
+            return self._route(request, Capability.SEARCH)
+        try:
+            self._guard.check(request.target)
+        except UrlRefusedError as exc:
+            raise FetchError(f"refused: {exc.reason}") from exc
+        return self._route(request, Capability.FETCH)
 
-    # ── routing ──────────────────────────────────────────────────────────────────────────────
+    # ── the rotation ─────────────────────────────────────────────────────────────────────────
+
+    def _pool(self, capability: Capability) -> tuple[_Vendor, ...]:
+        return self._search if capability is Capability.SEARCH else self._fetch
+
+    def _remaining_calls(self, vendor: _Vendor, used: dict[VendorName, int]) -> int:
+        """How many more calls the vendor's monthly budget allows; 0 when it allows none."""
+        budget = self._config.budget_of(vendor.name)
+        spent = used.get(vendor.name, 0)
+        if budget is None or not within_budget(spent, vendor.units, budget):
+            return 0
+        return (budget - spent) // vendor.units
+
+    def _pick(self, capability: Capability, exclude: set[VendorName]) -> _Vendor | None:
+        """The next vendor by smooth weighted round robin, weighted by remaining budget.
+
+        Each pick adds every eligible vendor's weight to its running credit, takes the vendor
+        with the most credit (ties to the configured order), and charges it the total weight.
+        Over many picks each vendor's share is its weight over the total, and the sequence is
+        interleaved rather than bursty — and deterministic, which keeps a replay a replay.
+        """
+        used = self._ledger.month_usage(month_of(self._clock.now()))
+        with self._lock:
+            eligible = [
+                (v, self._remaining_calls(v, used))
+                for v in self._pool(capability)
+                if v.name not in exclude and (v.name, capability) not in self._refusing
+            ]
+            eligible = [(v, w) for v, w in eligible if w > 0]
+            if not eligible:
+                return None
+            credit = self._rotation[capability]
+            total = sum(w for _, w in eligible)
+            for vendor, weight in eligible:
+                credit[vendor.name] = credit.get(vendor.name, 0) + weight
+            chosen = max(eligible, key=lambda vw: credit[vw[0].name])[0]
+            credit[chosen.name] -= total
+            return chosen
+
+    # ── one request ──────────────────────────────────────────────────────────────────────────
 
     def _reserve_session(self, request: FetchRequest, capability: Capability) -> None:
         limit = (
@@ -384,6 +485,139 @@ class WebResearch:
                 f"the session's {capability.value} cap ({limit}) is reached; nothing was sent"
             )
 
+    def _monthly_cap_reached(self, request: FetchRequest, capability: Capability) -> FetchError:
+        cap = self._config.monthly_request_cap
+        _LOG.warning(
+            "websearch.monthly_cap",
+            capability=capability.value,
+            cap=cap,
+            month=month_of(self._clock.now()).isoformat(),
+            session=request.session.isoformat(),
+            key=request.key,
+        )
+        return FetchError(
+            f"the monthly web research cap of {cap} vendor requests is reached; nothing was sent"
+        )
+
+    def _route(self, request: FetchRequest, capability: Capability) -> FetchResponse:
+        self._reserve_session(request, capability)
+        month = month_of(self._clock.now())
+        if not within_budget(self._ledger.month_total(month), 1, self._config.monthly_request_cap):
+            raise self._monthly_cap_reached(request, capability)
+        reasons: list[str] = []
+        asked: set[VendorName] = set()
+        calls = 0
+        while calls < MAX_CALLS_PER_REQUEST:
+            vendor: _Vendor | DirectFetch | None = self._pick(capability, asked)
+            if vendor is None and capability is Capability.FETCH and self._direct is not None:
+                # No fetch vendor has budget left: the direct fetch is the one fallback (or,
+                # with every fetch vendor exhausted, the one call).
+                vendor = self._direct if VendorName.DIRECT not in asked else None
+            if vendor is None:
+                if not reasons:
+                    reasons.append(f"no {capability.value} vendor has a key and budget left")
+                break
+            asked.add(vendor.name)
+            reservation = self._reserve(vendor)
+            if reservation is Reservation.OVER_MONTHLY_CAP:
+                raise self._monthly_cap_reached(request, capability)
+            if reservation is Reservation.OVER_VENDOR_BUDGET:
+                # Lost a race for the vendor's last unit: nothing was sent, so not a call.
+                self._event(request, vendor.name, capability, CallOutcome.OVER_BUDGET)
+                continue
+            calls += 1
+            response, reason = self._call(request, capability, vendor)
+            if response is not None:
+                return response
+            reasons.append(f"{vendor.name.value}: {reason}")
+        raise NoResultError(f"no usable {capability.value} result ({'; '.join(reasons)})")
+
+    def _reserve(self, vendor: _Vendor | DirectFetch) -> Reservation:
+        now = self._clock.now()
+        direct = vendor.name is VendorName.DIRECT
+        return self._ledger.reserve_call(
+            vendor.name,
+            month_of(now),
+            vendor.units,
+            None if direct else self._config.budget_of(vendor.name),
+            None if direct else self._config.monthly_request_cap,
+            at=now,
+        )
+
+    def _call(
+        self, request: FetchRequest, capability: Capability, vendor: _Vendor | DirectFetch
+    ) -> tuple[FetchResponse | None, str]:
+        """One vendor call: the response, or None and why it is not usable.
+
+        Raises `FetchError` for the outcomes that end the request with no fallback: the page's
+        own site refused, or the URL (or where it redirected) is refused by the guard.
+        """
+        started = time.perf_counter()
+        try:
+            page, status = self._produce(request, capability, vendor)
+        except UrlRefusedError as exc:
+            self._event(
+                request,
+                vendor.name,
+                capability,
+                CallOutcome.TARGET_REFUSED,
+                units=vendor.units,
+                started=started,
+                detail=exc.reason,
+            )
+            raise FetchError(f"refused: {exc.reason}") from exc
+        except VendorError as exc:
+            if exc.outcome is CallOutcome.REFUSING:
+                with self._lock:
+                    self._refusing.add((vendor.name, capability))
+            self._event(
+                request,
+                vendor.name,
+                capability,
+                exc.outcome,
+                units=vendor.units,
+                status=exc.status,
+                started=started,
+                detail=str(exc),
+            )
+            if exc.outcome not in _FALL_BACK_ON:
+                raise FetchError(f"{vendor.name.value}: {exc}") from exc
+            return None, f"{exc.outcome.value} ({exc})"
+        self._event(
+            request,
+            vendor.name,
+            capability,
+            CallOutcome.OK,
+            units=vendor.units,
+            status=status,
+            started=started,
+        )
+        self._local.served = f"{vendor.name.value}:{capability.value}"
+        return FetchResponse(pages=(page,)), ""
+
+    def _produce(
+        self, request: FetchRequest, capability: Capability, vendor: _Vendor | DirectFetch
+    ) -> tuple[FetchedPage, int | None]:
+        """Ask the vendor; the Commons page, or `VendorError(EMPTY)` when the answer is unusable.
+
+        `usable_results` / `usable_page` are the one place "nothing usable" is decided, and an
+        unusable answer is what triggers the single fallback.
+        """
+        if capability is Capability.SEARCH:
+            results = cast(SearchVendor, vendor).search(request.target, SEARCH_RESULT_COUNT)
+            if not usable_results(results):
+                raise VendorError("no results", outcome=CallOutcome.EMPTY)
+            return _results_page(results), None
+        document = cast(FetchVendor, vendor).fetch(request.target)
+        self._check_final(document)
+        if not usable_page(document):
+            raise VendorError(
+                f"near-empty page ({len(document.text.strip())} characters of text)",
+                outcome=CallOutcome.EMPTY,
+                status=document.status,
+            )
+        return _document_page(document), document.status
+
     def _event(
         self,
         request: FetchRequest,
@@ -396,17 +630,20 @@ class WebResearch:
         started: float | None = None,
         detail: str | None = None,
     ) -> None:
+        month = month_of(self._clock.now())
         budget = self._config.budget_of(vendor)
         remaining: int | None = None
         if budget is not None:
-            used = self._ledger.month_usage(month_of(self._clock.now())).get(vendor, 0)
-            remaining = max(budget - used, 0)
+            remaining = max(budget - self._ledger.month_usage(month).get(vendor, 0), 0)
         fields: dict[str, object] = {
             "vendor": vendor.value,
             "capability": capability.value,
             "outcome": outcome.value,
             "units": units,
             "remaining_budget": remaining,
+            "remaining_monthly_requests": max(
+                self._config.monthly_request_cap - self._ledger.month_total(month), 0
+            ),
             "session": request.session.isoformat(),
             "key": request.key,
         }
@@ -419,128 +656,12 @@ class WebResearch:
         log = _LOG.info if outcome is CallOutcome.OK else _LOG.warning
         log("websearch.call", **fields)
 
-    def _admit(
-        self, request: FetchRequest, vendor: VendorName, capability: Capability, units: int
-    ) -> bool:
-        """Whether this vendor may be called now; reserves its units when it may."""
-        with self._lock:
-            refusing = (vendor, capability) in self._refusing
-        if refusing:
-            self._event(
-                request,
-                vendor,
-                capability,
-                CallOutcome.REFUSING,
-                detail="refused earlier in this process; skipped until restart",
-            )
-            return False
-        now = self._clock.now()
-        reserved = self._ledger.reserve_month(
-            vendor, month_of(now), units, self._config.budget_of(vendor), at=now
-        )
-        if reserved is None:
-            self._event(request, vendor, capability, CallOutcome.OVER_BUDGET)
-            return False
-        return True
-
-    def _failed(
-        self,
-        request: FetchRequest,
-        vendor: VendorName,
-        capability: Capability,
-        error: VendorError,
-        units: int,
-        started: float,
-    ) -> None:
-        if error.outcome is CallOutcome.REFUSING:
-            with self._lock:
-                self._refusing.add((vendor, capability))
-        self._event(
-            request,
-            vendor,
-            capability,
-            error.outcome,
-            units=units,
-            status=error.status,
-            started=started,
-            detail=str(error),
-        )
-
-    def _route_search(self, request: FetchRequest) -> FetchResponse:
-        self._reserve_session(request, Capability.SEARCH)
-        tried: list[str] = []
-        for vendor in self._search:
-            if not self._admit(request, vendor.name, Capability.SEARCH, vendor.units):
-                tried.append(f"{vendor.name.value}: skipped")
-                continue
-            started = time.perf_counter()
-            try:
-                results = vendor.search(request.target, SEARCH_RESULT_COUNT)
-            except VendorError as exc:
-                self._failed(request, vendor.name, Capability.SEARCH, exc, vendor.units, started)
-                tried.append(f"{vendor.name.value}: {exc.outcome.value}")
-                continue
-            self._event(
-                request,
-                vendor.name,
-                Capability.SEARCH,
-                CallOutcome.OK,
-                units=vendor.units,
-                started=started,
-            )
-            self._local.served = f"{vendor.name.value}:{Capability.SEARCH.value}"
-            return FetchResponse(pages=(_results_page(results),))
-        raise FetchError(f"no search vendor could serve the query ({'; '.join(tried) or 'none'})")
-
-    def _route_fetch(self, request: FetchRequest) -> FetchResponse:
-        url = request.target
-        try:
-            self._guard.check(url)
-        except UrlRefusedError as exc:
-            raise FetchError(f"refused: {exc.reason}") from exc
-        self._reserve_session(request, Capability.FETCH)
-        tried: list[str] = []
-        for vendor in self._fetch:
-            if not self._admit(request, vendor.name, Capability.FETCH, vendor.units):
-                tried.append(f"{vendor.name.value}: skipped")
-                continue
-            started = time.perf_counter()
-            try:
-                document = vendor.fetch(url)
-                self._check_final(document)
-            except UrlRefusedError as exc:
-                self._event(
-                    request,
-                    vendor.name,
-                    Capability.FETCH,
-                    CallOutcome.TARGET_REFUSED,
-                    units=vendor.units,
-                    started=started,
-                    detail=exc.reason,
-                )
-                raise FetchError(f"refused: {exc.reason}") from exc
-            except VendorError as exc:
-                self._failed(request, vendor.name, Capability.FETCH, exc, vendor.units, started)
-                if exc.outcome not in _NEXT:
-                    raise FetchError(f"{vendor.name.value}: {exc}") from exc
-                tried.append(f"{vendor.name.value}: {exc.outcome.value}")
-                continue
-            self._event(
-                request,
-                vendor.name,
-                Capability.FETCH,
-                CallOutcome.OK,
-                units=vendor.units,
-                status=document.status,
-                started=started,
-            )
-            self._local.served = f"{vendor.name.value}:{Capability.FETCH.value}"
-            return FetchResponse(pages=(_document_page(document),))
-        raise FetchError(f"no fetch vendor could serve the page ({'; '.join(tried) or 'none'})")
-
     def _check_final(self, document: FetchedDocument) -> None:
         """A vendor that followed a redirect onto a scheduler host has fetched a page we refuse."""
-        host = httpx.URL(document.final_url).host if document.final_url else ""
+        try:
+            host = httpx.URL(document.final_url).host if document.final_url else ""
+        except httpx.InvalidURL:
+            host = ""
         if host and host_is_blocked(host, self._guard.blocked_hosts):
             raise UrlRefusedError(
                 f"the page redirected to {host}, which the data scheduler owns; not used"
