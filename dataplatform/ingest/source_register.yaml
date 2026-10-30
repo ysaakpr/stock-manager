@@ -250,6 +250,19 @@ hosts:
       directives exist. We fetch the WPI download page and the one monthly file it links, weekly.
     disallow: []
     min_spacing_seconds: 3.0
+    tls_extra_chain:
+      pem: certs/eaindustry.nic.in.pem
+      sha256:
+        - 13949634d99cd6fd6aa80bc034fefacceb1969feef986586713ecdbb05758d3f  # YR1
+        - 072639d0b140d5bffae16ad9c3f6cc6086040621f51ee61a6d46a8915c07cf76  # Root YR by ISRG Root X1
+      anchor: ISRG Root X1
+      review_by: 2027-01-26
+      reason: >-
+        Renewed 2026-10-28 to a Let's Encrypt leaf issued by YR1 and serves the leaf alone, so
+        OpenSSL cannot build a chain (CERTIFICATE_VERIFY_FAILED, 2026-10-29). YR1's issuer, ISRG
+        Root YR, is not in certifi 2026.07.22, so its ISRG Root X1 cross-signature is pinned with it.
+        Owner-approved 2026-10-29; remove once certifi ships ISRG Root YR or the site serves its
+        chain. review_by is the leaf's expiry.
 
   - host: www.gst.gov.in
     robots_url: https://www.gst.gov.in/robots.txt

@@ -63,6 +63,12 @@ from dataplatform.ingest.policy import (
 )
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
+from dataplatform.ingest.tls import (
+    ExtraChain,
+    extra_chain_mounts,
+    load_extra_chains,
+    warn_if_review_overdue,
+)
 from dataplatform.logging import get_logger
 from dataplatform.store.l0 import DEFAULT_CONTENT_TYPE, L0Ref, L0Store
 
@@ -190,14 +196,33 @@ class HttpxTransport:
     """The real network. The only socket on the ingestion path.
 
     What it does: issues one request on a shared `httpx.Client`, follows redirects, and returns
-    the status, body and headers whatever they are.
+    the status, body and headers whatever they are. A host with pinned extra chain certificates
+    (`dataplatform.ingest.tls`) gets its own mount for `https://<host>`; every other host goes
+    through the client's default transport, untouched. The first request to a pinned host logs
+    `fetch.tls_extra_chain`, so a run that leaned on a pin says so.
     What it assumes: the client is long-lived, because its cookie jar *is* the warm NSE session.
-    What it never does: retry, sleep, decide anything about the response, or add a header the
-    policy did not ask for.
+    What it never does: retry, sleep, decide anything about the response, add a header the policy
+    did not ask for, or relax certificate verification for any host.
     """
 
-    def __init__(self, *, client: httpx.Client | None = None) -> None:
-        self._client = httpx.Client(follow_redirects=True) if client is None else client
+    def __init__(
+        self,
+        *,
+        client: httpx.Client | None = None,
+        extra_chains: Sequence[ExtraChain] = (),
+    ) -> None:
+        if client is not None and extra_chains:
+            raise ValueError(
+                "pass extra_chains or a client, not both: a caller-built client would silently "
+                "drop the pinned chains"
+            )
+        self._extra_chains = {chain.host: chain for chain in extra_chains}
+        self._announced: set[str] = set()
+        self._client = (
+            httpx.Client(follow_redirects=True, mounts=extra_chain_mounts(extra_chains))
+            if client is None
+            else client
+        )
 
     def request(
         self,
@@ -209,6 +234,7 @@ class HttpxTransport:
         payload: bytes | None = None,
     ) -> FetchResponse:
         """Issue one request, translating every "no response" outcome into `TransportError`."""
+        self._announce_extra_chain(url)
         try:
             response = self._client.request(
                 method, url, headers=dict(headers), timeout=timeout, content=payload
@@ -225,6 +251,23 @@ class HttpxTransport:
     def close(self) -> None:
         """Close the underlying client and, with it, the session."""
         self._client.close()
+
+    def _announce_extra_chain(self, url: str) -> None:
+        """Log, once per host, that a request is going out under that host's pinned chain."""
+        parts = urlsplit(url)
+        host = parts.hostname
+        chain = self._extra_chains.get(host) if host is not None else None
+        if chain is None or parts.scheme != "https" or chain.host in self._announced:
+            return
+        self._announced.add(chain.host)
+        _LOG.info(
+            "fetch.tls_extra_chain",
+            host=chain.host,
+            anchor=chain.anchor,
+            certificates=list(chain.sha256),
+            review_by=chain.review_by.isoformat(),
+            state="EXTRA_CHAIN",
+        )
 
     def __enter__(self) -> HttpxTransport:
         return self
@@ -698,10 +741,19 @@ def build_fetcher(
     fetcher a replay cannot reproduce (B10). It takes no host lease: `leased_fetcher` is the entry
     point a *driver* uses, and keeping the two separate is what lets the offline suite build a
     fetcher without a file lock.
+
+    The real transport carries the register's pinned extra chain certificates (each checked
+    against its fingerprints here, so a bad pin stops the build rather than a fetch), and a pin
+    past its `review_by` logs a warning on every build.
     """
     settings = get_settings() if settings is None else settings
+    register = load_register() if register is None else register
+    if transport is None:
+        extra_chains = load_extra_chains(register)
+        warn_if_review_overdue(extra_chains, clock=clock)
+        transport = HttpxTransport(extra_chains=extra_chains)
     return Fetcher(
-        transport=HttpxTransport() if transport is None else transport,
+        transport=transport,
         l0=L0Store(clock=clock) if l0 is None else l0,
         alerter=build_alerter(settings, clock=clock) if alerter is None else alerter,
         clock=clock,
