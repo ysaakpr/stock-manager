@@ -668,6 +668,16 @@ class _Session:
                 "stop_reason": response.stop_reason.value,
                 "priced": "false" if tokens is None else "true",
                 **({"unpriced_reason": unpriced} if unpriced is not None else {}),
+                # The configured provider could not serve this call and the backup answered it
+                # (`analyst.llm.fallback`): which one failed, and the reason class.
+                **(
+                    {
+                        "fallback_from": response.fallback.from_provider,
+                        "fallback_reason": response.fallback.reason.value,
+                    }
+                    if response.fallback is not None
+                    else {}
+                ),
             },
         )
         _LOG.info(

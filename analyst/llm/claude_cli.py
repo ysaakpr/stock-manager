@@ -55,6 +55,7 @@ from analyst.llm.client import (
     ToolSpec,
     Usage,
 )
+from analyst.llm.effort import EffortPolicy, load_effort_policy
 from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger
 from dataplatform.redaction import mask_secrets
@@ -143,7 +144,7 @@ class ClaudeCliLLM:
     is never repeated.
     """
 
-    __slots__ = ("_executable", "_sleep", "_timeout_seconds")
+    __slots__ = ("_efforts", "_executable", "_sleep", "_timeout_seconds")
 
     def __init__(
         self,
@@ -151,6 +152,7 @@ class ClaudeCliLLM:
         executable: str = _EXECUTABLE,
         timeout_seconds: float = _TIMEOUT_SECONDS,
         sleep: Callable[[float], None] = time.sleep,
+        efforts: EffortPolicy | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError(f"timeout_seconds must be positive, got {timeout_seconds}")
@@ -165,6 +167,9 @@ class ClaudeCliLLM:
         self._executable = executable
         self._timeout_seconds = timeout_seconds
         self._sleep = sleep
+        # Every call passes --effort from the per-call-type policy (effort.yaml): without it the
+        # CLI uses whatever the logged-in user last chose with /effort.
+        self._efforts = load_effort_policy() if efforts is None else efforts
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(executable={self._executable!r})"
@@ -178,9 +183,9 @@ class ClaudeCliLLM:
     ) -> ClaudeCliLLM:
         """Build from configuration.
 
-        Takes `Settings` for symmetry with `AnthropicLLM.from_settings` and for the day a setting
-        belongs here; it reads none today, because the CLI owns the credential and the model is a
-        per-call argument. Raises `LLMCredentialError` when the CLI is absent.
+        Takes `Settings` for symmetry with `AnthropicLLM.from_settings`; it reads none, because the
+        CLI owns the credential, the model is a per-call argument and the effort is pinned per call
+        type in `effort.yaml`. Raises `LLMCredentialError` when the CLI is absent.
         """
         get_settings() if settings is None else settings
         return cls(timeout_seconds=timeout_seconds)
@@ -264,6 +269,8 @@ class ClaudeCliLLM:
             "none",
             "--no-session-persistence",
         ]
+        # The same per-call-type effort BedrockLLM sends; an unplaced model raises before the run.
+        command += ["--effort", self._efforts.effort_for(model).value]
         if system is not None:
             command += ["--system-prompt", system]
         if tools:

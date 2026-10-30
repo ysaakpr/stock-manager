@@ -45,6 +45,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
+from accounting import TokenLedger
 from analyst.commons import (
     DigestStore,
     FetchError,
@@ -87,6 +88,7 @@ from backtest.fm_job import (
     SessionCommons,
     WaitPolicy,
     desk_kill_switch,
+    ledgered,
     owed_m17_session,
     run_m17_session,
 )
@@ -784,22 +786,37 @@ def m17_provider(settings: Settings, *, stub: bool, memory: bool) -> LlmProvider
         how = "--stub-llm" if stub else "M17_LLM_PROVIDER=stub"
         raise M17JobError(
             f"the M17 desk resolved to the stub LLM ({how}) on a persisted run; a stub cannot "
-            "decide, so nothing runs. Set M17_LLM_PROVIDER=claude_cli (the default), or rehearse "
-            "with --memory"
+            "decide, so nothing runs. Set M17_LLM_PROVIDER=claude_cli (the default) or bedrock, "
+            "or rehearse with --memory"
         )
     return provider
 
 
 def _llm(settings: Settings, provider: LlmProvider) -> LLM:
+    """The desk's model: ``provider``, with ``M17_LLM_FALLBACK`` as its per-call backup.
+
+    The stub never has a backup (a ``--memory`` rehearsal decides on the stub or not at all).
+    Otherwise `build_llm` wires a `FallbackLLM` when the backup differs from the primary — the
+    owner's 2026-10-30 setup is Bedrock with the Claude CLI behind it.
+    """
     if provider is LlmProvider.STUB:
         return StubLLM()
     from analyst.llm import build_llm
 
-    return build_llm(settings, provider=provider)
+    return build_llm(settings, provider=provider, fallback=settings.m17_llm_fallback)
+
+
+#: The providers whose desk researches the web through the Claude CLI's `ClaudeWebFetcher`. Bedrock
+#: is one of them because Bedrock has no web tools: the decision path moved to Bedrock, the
+#: Commons research did not (the owner's 2026-10-30 decision keeps it on the CLI).
+_CLI_FETCH_PROVIDERS: Final = frozenset({LlmProvider.CLAUDE_CLI, LlmProvider.BEDROCK})
+
+#: ``token_usage.purpose`` of an on-demand filing digest the desk's Commons asks for.
+DIGEST_TOKEN_PURPOSE: Final = "m17_digest"
 
 
 def _fetcher(provider: LlmProvider) -> Any:
-    if provider is not LlmProvider.CLAUDE_CLI:
+    if provider not in _CLI_FETCH_PROVIDERS:
         return NoLiveFetcher()
     from analyst.commons.fetch import ClaudeWebFetcher
 
@@ -857,6 +874,7 @@ def _wire(
         digest_dir = root / "digest"
         reader: Callable[[], Sequence[Any]] | None = lambda: list(sink.entries)  # noqa: E731
         conn = None
+        ledger: TokenLedger | None = None
     else:
         from analyst.commons import (
             PostgresCommonsStore,
@@ -868,6 +886,9 @@ def _wire(
 
         conn = stack.enter_context(connection(settings))
         sink = Journal(conn, clock=clock, evidence=EvidenceStore(data_root / EVIDENCE_DIRNAME))
+        # Every model call of a persisted run lands in `token_usage` (the console's Model cost),
+        # in this transaction, priced for the provider that answered it.
+        ledger = TokenLedger(conn, clock=clock)
         store = PostgresPaperSessionStore(conn)
         digest_store = PostgresDigestStore(conn)
         commons_store = PostgresCommonsStore(conn)
@@ -884,7 +905,15 @@ def _wire(
     builder = LakeCommonsBuilder(
         data_root=data_root,
         gate=gate,
-        digest_llm=llm,
+        digest_llm=ledgered(
+            llm,
+            ledger=ledger,
+            pricer=None,
+            session=owed,
+            purpose=DIGEST_TOKEN_PURPOSE,
+            case_id=None,
+            clock=clock,
+        ),
         digest_store=digest_store,
         commons_store=commons_store,
         shortlist_store=shortlist_store,
@@ -911,6 +940,7 @@ def _wire(
         wait=WaitPolicy(max_wait=timedelta(0)) if no_wait else WaitPolicy(),
         digest_dir=digest_dir,
         entries_reader=reader,
+        ledger=ledger,
     )
     if conn is not None:
         conn.commit()

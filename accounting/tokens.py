@@ -61,6 +61,7 @@ __all__ = [
     "AccountingError",
     "CardMeta",
     "LedgerError",
+    "LedgeredLLM",
     "MeteredCompletion",
     "MeteredLLM",
     "ModelPrice",
@@ -550,3 +551,78 @@ class MeteredLLM:
             else self._ledger.record(priced, ts=moment, case_id=case_id)
         )
         return MeteredCompletion(response=response, priced=priced, usage_id=usage_id)
+
+
+class LedgeredLLM:
+    """An `LLM` that writes one `token_usage` row for every call it answers, and is still an `LLM`.
+
+    `MeteredLLM` is the metered client for a caller written against it; this is for a caller
+    written against the plain protocol — the M17 desk, whose runtime, digests and deadline wrapper
+    all take an `LLM` and journal the call themselves. Wrapping their model here puts each call in
+    the ledger the console's Model cost panel reads, with the provider that actually answered (a
+    Bedrock call, or the Claude CLI when it was the fallback) and the dated card's price for that
+    provider's model id, without changing a call site.
+
+    What it does: delegates, prices the response on the card in force on ``on``, records it under
+    ``purpose`` and ``case_id``, and returns the response unchanged.
+    What it assumes: the caller owns the transaction, as for `TokenLedger`; ``on`` is the trading
+    date the spend belongs to.
+    What it never does: change the answer, or fail a call because its model is not on the card —
+    that is logged as ``token_usage.unpriced`` and the call's own journal line already records
+    ``priced=false`` (the M17 runtime's rule); a ledger *write* that fails does raise.
+    """
+
+    __slots__ = ("_case_id", "_clock", "_inner", "_ledger", "_on", "_pricer", "_purpose")
+
+    def __init__(
+        self,
+        inner: LLM,
+        *,
+        ledger: TokenLedger,
+        pricer: TokenPricer,
+        purpose: str,
+        on: date,
+        case_id: str | None = None,
+        clock: Clock | None = None,
+    ) -> None:
+        if not purpose.strip():
+            raise ValueError("a ledgered call needs a purpose: the burn report groups by it")
+        self._inner = inner
+        self._ledger = ledger
+        self._pricer = pricer
+        self._purpose = purpose
+        self._on = on
+        self._case_id = case_id
+        self._clock = SystemClock() if clock is None else clock
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}(inner={self._inner!r}, purpose={self._purpose!r})"
+
+    def complete(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        tools: Sequence[ToolSpec] = (),
+        system: str | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> LLMResponse:
+        """The wrapped client's answer, after its cost is in `token_usage`."""
+        moment = self._clock.now()
+        response = self._inner.complete(
+            messages, model=model, tools=tools, system=system, max_tokens=max_tokens
+        )
+        try:
+            priced = self._pricer.price(response, on=self._on, purpose=self._purpose)
+        except AccountingError as exc:
+            _LOG.warning(
+                "token_usage.unpriced",
+                provider=response.provider,
+                model=response.model,
+                purpose=self._purpose,
+                case_id=self._case_id,
+                reason=str(exc),
+            )
+            return response
+        self._ledger.record(priced, ts=moment, case_id=self._case_id)
+        return response

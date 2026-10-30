@@ -512,6 +512,68 @@ needing its own dated amendment before S0 (or a new manager id after):
 - a `sessions_to_results` count and a delivery-share percentile against the name's own year (the
   review's wider forms of (a) and (b); only the dates and the means are adopted here).
 
+### Amendment 5 (2026-10-30, before S0): Bedrock transport, Claude CLI backup, pinned effort
+
+**DRAFT, awaiting owner confirmation.** The owner decided at 08:05 IST on 2026-10-30 (chat) to run
+the desk — and the whole application — on Amazon Bedrock with the Claude CLI subscription as the
+backup, and at about 09:00 IST to pin effort per call type; this is that decision, as it touches
+the M17 test, written down for confirmation (HUMAN_DECISIONS D30). Until it is confirmed, `M17_LLM_PROVIDER`
+stays `claude_cli` and nothing below is in force. §2–§7 and Amendments 1–4 stand, except where this
+amendment adds to them. No model, prompt, schema, rule, rail or contract changes.
+
+(a) **Models: unchanged.** `claude-opus-5-5` decides and `claude-sonnet-5-5` digests (§2, §9). On
+Bedrock they are the same models under their Bedrock ids, `anthropic.claude-opus-5-5` and
+`anthropic.claude-sonnet-5-5` (`analyst/llm/bedrock_models.yaml`); the roster keeps the names it
+has.
+
+(b) **Transport: Bedrock primary, Claude CLI backup, per call** (supersedes §2's "through the Claude
+CLI" and §9's "LLM path" row once confirmed). Every manager and digest call goes to Claude on Amazon
+Bedrock (the Mantle endpoint, `analyst.llm.bedrock`, `M17_LLM_PROVIDER=bedrock`). A call Bedrock
+*could not serve* is asked again, identically, on the Claude CLI (`analyst.llm.fallback`,
+`M17_LLM_FALLBACK=claude_cli`): a connection error or timeout, a rate limit after the SDK's
+retries, a 5xx or overload, a rejected key (401/403), or a key or region not configured. A call
+Bedrock *refused* is never re-asked elsewhere: a 400, a refusal, a truncated answer, or an answer
+that is not the object the schema asks for fails as it does today (a manager error, or the
+contract's one repair). The structured-output schema is the same one the CLI is given; Bedrock
+compiles its types, enums, patterns and required fields, and the numeric and length bounds it
+cannot compile are stated in the field descriptions and enforced, as now, by the parser.
+
+(c) **Effort: pinned per call type, on both paths** (owner, 2026-10-30 about 09:00 IST). Manager
+decision calls (`claude-opus-5-5`) run at `high`; Commons filing digests and the other summarising
+and extraction calls (`claude-sonnet-5-5`, the web fetcher's transcription included) at `medium`.
+The levels live in the versioned `analyst/llm/effort.yaml` and are sent as `output_config.effort`
+on Bedrock and as an explicit `--effort` on every Claude CLI call. Until now the desk set no effort:
+every M17 call inherited the owner's personal Claude CLI setting, which was `xhigh`
+(`~/.claude/settings.json`) through the dry sessions and changed to `high` when the owner ran
+`/effort high` on 2026-10-30. That inheritance ends here; the effort is a property of the test,
+the same on the primary and the backup. Thinking is adaptive. A Bedrock call's output ceiling
+(thinking included) is at least `BEDROCK_MAX_TOKENS` (64,000), whatever the caller asks for, so
+thinking cannot truncate an answer.
+
+(d) **Web research stays on the Claude CLI.** Bedrock has no web search or web fetch, so §5's
+Commons fetcher (`ClaudeWebFetcher`, `claude -p` with web search and fetch only) is unchanged and
+still runs on the subscription. Moving it is a separate decision.
+
+(e) **Recorded per call.** Each `FM_CALL` journal line already names the `provider` that answered
+(`bedrock` or `claude_cli`); when the backup answered it also carries `fallback_from` and
+`fallback_reason`. Every manager and digest call of a persisted run is also a `token_usage` row
+(provider, model id, tokens, cost) under the book's case — the console's Model cost panel — and
+every fallback is a warning in the log (an error when the key was rejected).
+
+(f) **Cost is now measured, not estimated.** A Bedrock call is billed per token to the AWS account,
+priced on the dated card at the AWS list rate for us-east-1 (`accounting/model_prices.yaml`,
+schedule `bedrock-claude-5-5-us-east-1`: Opus 5.5 $4.40 / $22.00, Sonnet 5.5 $2.20 / $11.00 per
+MTok in / out, in-region; the global cross-region rates are 10 % lower, and the card is corrected if
+the AWS bill shows those). A CLI call stays a list-price estimate on the subscription. §9's
+"monthly cap deferred" now caps real money: **[OWNER]** whether to set a monthly Bedrock budget.
+
+(g) **Hashes and the dry run.** The transport and the effort are not inputs of `mandate_hash`
+(mandate, prompt template, schemas and system prompt, contract, mirror rule, Commons rules, rails),
+and the models are unchanged, so **every book's `mandate_hash` is unchanged** — printed before and
+after this change on 2026-10-30, all 21 identical — and no manager is new (preamble). M17.8's dry-run
+count is not reset. **[OWNER]** whether at least one dry session must run on Bedrock before S0, to
+measure its wiring and timing the way Amendments 2–4 required for theirs.
+
 ## 9. Owner confirmation
 
 | Item | Value | Confirmed |
@@ -522,4 +584,5 @@ needing its own dated amendment before S0 (or a new manager id after):
 | Horizons (§2) | 1–4 weeks and 1–3 months | 2026-10-09 (owner, chat) |
 | Web search (§5) | allowed, through the Commons fetcher | 2026-10-09 (owner, chat) |
 | LLM path (§2) | Claude CLI subscription; monthly cap deferred | 2026-10-09 (owner, chat) |
+| LLM path (Amendment 5) | Bedrock primary, Claude CLI backup per call; effort `high` for decisions and `medium` for digests, on both; web research on the CLI | DRAFT — owner decision 2026-10-30 08:05 IST (chat), awaiting confirmation |
 | S0 | the first session after the 5-session dry run (M17.8) passes; owner asked for as soon as it is ready (2026-10-09) | — |
