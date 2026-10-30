@@ -53,7 +53,7 @@ from analyst.llm.client import (
     ToolSpec,
     Usage,
 )
-from dataplatform.config import Settings, get_settings
+from dataplatform.config import LlmEffort, Settings, get_settings
 from dataplatform.logging import get_logger
 from dataplatform.redaction import mask_secrets
 
@@ -139,13 +139,14 @@ class ClaudeCliLLM:
     or return an empty completion as though it were an answer.
     """
 
-    __slots__ = ("_executable", "_timeout_seconds")
+    __slots__ = ("_effort", "_executable", "_timeout_seconds")
 
     def __init__(
         self,
         *,
         executable: str = _EXECUTABLE,
         timeout_seconds: float = _TIMEOUT_SECONDS,
+        effort: LlmEffort | None = None,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError(f"timeout_seconds must be positive, got {timeout_seconds}")
@@ -159,6 +160,9 @@ class ClaudeCliLLM:
             )
         self._executable = executable
         self._timeout_seconds = timeout_seconds
+        # None passes no --effort, so the CLI falls back to the logged-in user's own setting;
+        # from_settings always pins one (LLM_EFFORT), which is what the M17 desk runs on.
+        self._effort = effort
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(executable={self._executable!r})"
@@ -172,12 +176,13 @@ class ClaudeCliLLM:
     ) -> ClaudeCliLLM:
         """Build from configuration.
 
-        Takes `Settings` for symmetry with `AnthropicLLM.from_settings` and for the day a setting
-        belongs here; it reads none today, because the CLI owns the credential and the model is a
-        per-call argument. Raises `LLMCredentialError` when the CLI is absent.
+        Reads `LLM_EFFORT`, passed as `--effort` on every call so the effort is configuration, not
+        whatever the logged-in user last chose (the same value `BedrockLLM` sends). The CLI owns
+        the credential and the model is a per-call argument. Raises `LLMCredentialError` when the
+        CLI is absent.
         """
-        get_settings() if settings is None else settings
-        return cls(timeout_seconds=timeout_seconds)
+        resolved = get_settings() if settings is None else settings
+        return cls(timeout_seconds=timeout_seconds, effort=resolved.llm_effort)
 
     def complete(
         self,
@@ -258,6 +263,8 @@ class ClaudeCliLLM:
             "none",
             "--no-session-persistence",
         ]
+        if self._effort is not None:
+            command += ["--effort", self._effort.value]
         if system is not None:
             command += ["--system-prompt", system]
         if tools:

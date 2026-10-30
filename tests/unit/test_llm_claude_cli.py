@@ -47,7 +47,7 @@ from analyst.llm.client import (
     ToolSpec,
     build_llm,
 )
-from dataplatform.config import LlmProvider, Settings
+from dataplatform.config import LlmEffort, LlmProvider, Settings
 
 # ── captured shapes ──────────────────────────────────────────────────────────────────────────
 
@@ -540,3 +540,34 @@ def test_a_proxy_with_userinfo_reaches_the_child_and_never_an_error_message(
     assert fake.env["ALL_PROXY"] == proxy and fake.env["HTTPS_PROXY"] == proxy
     assert _fake_secret("proxy") not in str(caught.value)
     assert "http://***@proxy.internal:3128" in str(caught.value)
+
+
+# ── effort: pinned from configuration, the same value Bedrock sends ──────────────────────────
+
+
+def test_the_effort_from_settings_is_passed_as_a_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`LLM_EFFORT` reaches the CLI, so it no longer inherits the user's personal setting."""
+    monkeypatch.setattr("analyst.llm.claude_cli.shutil.which", lambda _: "/usr/bin/claude")
+    settings = Settings(_env_file=None, llm_effort=LlmEffort.HIGH)  # type: ignore[call-arg]
+    fake = run_with(monkeypatch, TEXT_RESULT)
+    ClaudeCliLLM.from_settings(settings).complete(
+        [Message(Role.USER, "q")], model="claude-opus-5-5"
+    )
+    assert fake.argv[fake.argv.index("--effort") + 1] == "high"
+
+
+def test_the_default_effort_from_settings_is_xhigh(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("analyst.llm.claude_cli.shutil.which", lambda _: "/usr/bin/claude")
+    fake = run_with(monkeypatch, TEXT_RESULT)
+    ClaudeCliLLM.from_settings(Settings(_env_file=None)).complete(  # type: ignore[call-arg]
+        [Message(Role.USER, "q")], model="claude-opus-5-5"
+    )
+    assert fake.argv[fake.argv.index("--effort") + 1] == "xhigh"
+
+
+def test_a_cli_built_without_an_effort_passes_none(
+    cli: ClaudeCliLLM, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = run_with(monkeypatch, TEXT_RESULT)
+    cli.complete([Message(Role.USER, "q")], model="claude-opus-5-5")
+    assert "--effort" not in fake.argv
