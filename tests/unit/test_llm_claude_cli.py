@@ -24,6 +24,7 @@ returned when this provider was built, trimmed to the fields the code reads.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -484,6 +485,69 @@ def test_a_timeout_raises_rather_than_hanging_the_daily_loop(
     monkeypatch.setattr("analyst.llm.claude_cli.subprocess.run", timeout)
     with pytest.raises(LLMError, match="did not answer within"):
         cli.complete(ASK, model="claude-opus-5")
+
+
+class LaunchGap:
+    """`subprocess.run` while npm relinks the CLI: ENOENT `gaps` times, then `then`."""
+
+    def __init__(self, gaps: int, then: FakeRun) -> None:
+        self.gaps, self.then, self.calls = gaps, then, 0
+
+    def __call__(self, argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        self.calls += 1
+        if self.calls <= self.gaps:
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), "claude")
+        return self.then(argv, **kwargs)
+
+
+def _gapped_cli(
+    monkeypatch: pytest.MonkeyPatch, gaps: int, then: FakeRun
+) -> tuple[ClaudeCliLLM, LaunchGap, list[float]]:
+    monkeypatch.setattr("analyst.llm.claude_cli.shutil.which", lambda _: "/usr/bin/claude")
+    gap = LaunchGap(gaps, then)
+    monkeypatch.setattr("analyst.llm.claude_cli.subprocess.run", gap)
+    sleeps: list[float] = []
+    return ClaudeCliLLM(sleep=sleeps.append), gap, sleeps
+
+
+def test_a_cli_missing_mid_reinstall_is_relaunched_and_the_call_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2026-10-29: npm retired `bin/claude` a second before the LLM stages and every call died.
+    Fails if the retry is removed — the first ENOENT would be an LLMError."""
+    then = FakeRun(json.dumps(TEXT_RESULT))
+    cli, gap, sleeps = _gapped_cli(monkeypatch, 2, then)
+    with capture_logs() as logs:
+        response = cli.complete(ASK, model="claude-opus-5")
+
+    assert response.text == TEXT_RESULT["result"]
+    assert gap.calls == 3 and then.stdin == ASK[0].content
+    assert sleeps == [5.0, 10.0]
+    retries = [e for e in logs if e["event"] == "llm.cli_missing_retry"]
+    assert [(e["attempt"], e["delay_seconds"]) for e in retries] == [(1, 5.0), (2, 10.0)]
+
+
+def test_a_cli_that_stays_missing_is_the_same_llm_error_after_the_bounded_attempts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli, gap, sleeps = _gapped_cli(monkeypatch, 99, FakeRun(json.dumps(TEXT_RESULT)))
+    with pytest.raises(LLMError, match=r"could not run the Claude CLI: \[Errno 2\]") as raised:
+        cli.complete(ASK, model="claude-opus-5")
+
+    assert type(raised.value) is LLMError
+    assert gap.calls == 4 and sleeps == [5.0, 10.0, 20.0]
+
+
+def test_a_cli_that_ran_and_exited_nonzero_is_not_relaunched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A process that started may have reached the model; asking twice is not this layer's call."""
+    cli, gap, sleeps = _gapped_cli(
+        monkeypatch, 0, FakeRun("", returncode=1, stderr="error: unknown option --nope")
+    )
+    with pytest.raises(LLMError, match="unknown option --nope"):
+        cli.complete(ASK, model="claude-opus-5")
+    assert gap.calls == 1 and sleeps == []
 
 
 def test_no_messages_is_a_programming_error(cli: ClaudeCliLLM) -> None:

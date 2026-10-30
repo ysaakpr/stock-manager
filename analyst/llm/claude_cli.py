@@ -35,10 +35,12 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final
 
 from analyst.llm.cli_env import claude_cli_env
+from analyst.llm.cli_launch import run_claude_cli
 from analyst.llm.client import (
     DEFAULT_MAX_TOKENS,
     LLMCredentialError,
@@ -137,16 +139,19 @@ class ClaudeCliLLM:
     What it assumes: someone has logged this machine in (`claude setup-token` or `claude login`);
     the credential is the CLI's to hold and this module never reads, copies or logs it.
     What it never does: let the model use a tool, persist a session, fall back to another provider,
-    or return an empty completion as though it were an answer.
+    or return an empty completion as though it were an answer. A launch that failed because the
+    executable was briefly missing is relaunched (`cli_launch.run_claude_cli`); a run that started
+    is never repeated.
     """
 
-    __slots__ = ("_efforts", "_executable", "_timeout_seconds")
+    __slots__ = ("_efforts", "_executable", "_sleep", "_timeout_seconds")
 
     def __init__(
         self,
         *,
         executable: str = _EXECUTABLE,
         timeout_seconds: float = _TIMEOUT_SECONDS,
+        sleep: Callable[[float], None] = time.sleep,
         efforts: EffortPolicy | None = None,
     ) -> None:
         if timeout_seconds <= 0:
@@ -161,6 +166,7 @@ class ClaudeCliLLM:
             )
         self._executable = executable
         self._timeout_seconds = timeout_seconds
+        self._sleep = sleep
         # Every call passes --effort from the per-call-type policy (effort.yaml): without it the
         # CLI uses whatever the logged-in user last chose with /effort.
         self._efforts = load_effort_policy() if efforts is None else efforts
@@ -276,18 +282,18 @@ class ClaudeCliLLM:
 
         The prompt goes in on stdin rather than as an argv element: a thesis and its evidence
         bundle routinely exceed what a shell will accept as one argument, and an evidence pack
-        truncated by `ARG_MAX` would be a decision made on half its evidence.
+        truncated by `ARG_MAX` would be a decision made on half its evidence. A launch that found no
+        executable is retried inside `run_claude_cli` (an npm reinstall leaves a gap of a second or
+        two); only when every attempt failed does it reach the `OSError` branch here.
         """
         try:
             # argv is built in this module and never shell-interpreted; the prompt is stdin.
-            finished = subprocess.run(
-                list(command),
-                input=prompt,
-                capture_output=True,
-                text=True,
-                timeout=self._timeout_seconds,
-                check=False,
+            finished = run_claude_cli(
+                command,
+                stdin=prompt,
+                timeout_seconds=self._timeout_seconds,
                 env=claude_cli_env(),
+                sleep=self._sleep,
             )
         except subprocess.TimeoutExpired as error:
             raise LLMError(

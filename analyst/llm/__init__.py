@@ -29,6 +29,11 @@ from analyst.llm.bedrock import (
     ToolOutcome,
 )
 from analyst.llm.cli_env import CLAUDE_CLI_ENV_ALLOWLIST, claude_cli_env
+from analyst.llm.cli_launch import (
+    CLI_LAUNCH_RETRY_DELAYS_SECONDS,
+    is_cli_launch_gap,
+    run_claude_cli,
+)
 from analyst.llm.client import (
     DEFAULT_MAX_TOKENS,
     LLM,
@@ -65,6 +70,7 @@ __all__ = [
     "ANTHROPIC_PROVIDER",
     "BEDROCK_PROVIDER",
     "CLAUDE_CLI_ENV_ALLOWLIST",
+    "CLI_LAUNCH_RETRY_DELAYS_SECONDS",
     "DEFAULT_MAX_TOKENS",
     "DEFAULT_MODEL",
     "LLM",
@@ -103,6 +109,8 @@ __all__ = [
     "build_llm",
     "claude_cli_env",
     "effort_for",
+    "is_cli_launch_gap",
     "load_effort_policy",
     "prompt_digest",
+    "run_claude_cli",
 ]

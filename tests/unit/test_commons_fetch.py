@@ -17,8 +17,10 @@ run, and every planted credential is assembled at runtime so this file trips no 
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import subprocess
 import threading
 import time
@@ -454,6 +456,63 @@ def test_runaway_cli_output_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("analyst.commons.fetch.subprocess.run", fake)
     with pytest.raises(FetchError, match="exceeded"):
         ClaudeWebFetcher().fetch(FetchRequest.query("q", SESSION))
+
+
+class LaunchGap:
+    """`subprocess.run` while npm relinks the CLI: ENOENT `gaps` times, then `then`."""
+
+    def __init__(self, gaps: int, then: FakeRun) -> None:
+        self.gaps, self.then, self.calls = gaps, then, 0
+
+    def __call__(self, argv: Sequence[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        self.calls += 1
+        if self.calls <= self.gaps:
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), "claude")
+        return self.then(argv, **kwargs)
+
+
+def _gapped_fetcher(
+    monkeypatch: pytest.MonkeyPatch, gaps: int, then: FakeRun
+) -> tuple[ClaudeWebFetcher, LaunchGap, list[float]]:
+    monkeypatch.setattr("analyst.commons.fetch.shutil.which", lambda _: "/usr/bin/claude")
+    gap = LaunchGap(gaps, then)
+    monkeypatch.setattr("analyst.commons.fetch.subprocess.run", gap)
+    sleeps: list[float] = []
+    return ClaudeWebFetcher(sleep=sleeps.append), gap, sleeps
+
+
+def test_the_fetcher_relaunches_a_cli_missing_mid_reinstall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fails if the fetcher launches the CLI without the shared retry."""
+    then = FakeRun(_stream())
+    fetcher, gap, sleeps = _gapped_fetcher(monkeypatch, 2, then)
+    request = FetchRequest.query("q", SESSION)
+    with capture_logs() as logs:
+        response = fetcher.fetch(request)
+
+    assert response.pages and gap.calls == 3 and sleeps == [5.0, 10.0]
+    assert then.stdin is not None and request.target in then.stdin
+    assert then.cwd is not None and not Path(then.cwd).resolve().is_relative_to(REPO)
+    assert [e["attempt"] for e in logs if e["event"] == "llm.cli_missing_retry"] == [1, 2]
+
+
+def test_the_fetcher_fails_loud_when_the_cli_stays_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher, gap, sleeps = _gapped_fetcher(monkeypatch, 99, FakeRun(_stream()))
+    with pytest.raises(FetchError, match="could not run the Claude CLI"):
+        fetcher.fetch(FetchRequest.query("q", SESSION))
+    assert gap.calls == 4 and sleeps == [5.0, 10.0, 20.0]
+
+
+def test_the_fetcher_does_not_relaunch_a_cli_that_ran_and_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fetcher, gap, sleeps = _gapped_fetcher(monkeypatch, 0, FakeRun("", returncode=1, stderr="x"))
+    with pytest.raises(FetchError, match="exit 1"):
+        fetcher.fetch(FetchRequest.query("q", SESSION))
+    assert gap.calls == 1 and sleeps == []
 
 
 def test_a_missing_cli_fails_at_construction(monkeypatch: pytest.MonkeyPatch) -> None:
