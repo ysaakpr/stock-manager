@@ -24,7 +24,8 @@ _PRIVATE_KEY = re.compile(
 )
 # Prefix-identified tokens: Anthropic/OpenAI-style `sk-…`, GitHub `ghp_…` and friends, Slack
 # `xox?-…`, AWS access key ids, Google `AIza…` keys, Stripe secret and restricted keys, GitLab
-# personal access tokens, Hugging Face `hf_…`, npm `npm_…`. Each prefix is distinctive enough that
+# personal access tokens, Hugging Face `hf_…`, npm `npm_…`, Tavily `tvly-…` and Firecrawl `fc-…`
+# (the M17 web research vendors). Each prefix is distinctive enough that
 # prose does not match.
 _PREFIXED_TOKEN = re.compile(
     r"\b(?:sk-(?:ant-)?[A-Za-z0-9_-]{20,}"
@@ -35,7 +36,9 @@ _PREFIXED_TOKEN = re.compile(
     r"|[sr]k_(?:live|test)_[0-9A-Za-z]{16,}"
     r"|glpat-[0-9A-Za-z_-]{20,}"
     r"|hf_[A-Za-z0-9]{30,}"
-    r"|npm_[A-Za-z0-9]{30,})"
+    r"|npm_[A-Za-z0-9]{30,}"
+    r"|tvly-[A-Za-z0-9_-]{20,}"
+    r"|fc-[0-9a-f]{32})"
 )
 # A JWT: three base64url segments, the first a JSON header (`{"` encodes to `eyJ`). The signature
 # may be empty (`alg: none`), which is still a bearer credential to whatever accepts it.
