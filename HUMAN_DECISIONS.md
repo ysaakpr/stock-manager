@@ -714,22 +714,26 @@ gating) — a paused dataset is simply missing. Lifting it is the owner's decisi
 (AGENTIC_CONTEXT §8): delete the `paused` records and restart the scheduler
 (`ops/runbooks/daily-eod.md`). Task M18.2.
 
-### D30 — M17 desk on Amazon Bedrock, the Claude CLI as per-call backup → **DRAFT, awaiting owner confirmation (owner decision 2026-10-30 08:05 IST, chat).**
+### D30 — The application on Amazon Bedrock, the Claude CLI as per-call backup, effort per call type → **DRAFT, awaiting owner confirmation (owner decisions 2026-10-30 08:05 and ~09:00 IST, chat).**
 
-The owner decided on 2026-10-30 that the M17 desk's model calls go to Claude on Amazon Bedrock
-first, with the Claude CLI subscription as the backup. Written up for confirmation as
-pre-registration Amendment 5 (`ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md` §8);
-to confirm, answer both. What it is:
+The owner decided on 2026-10-30 that the application's model calls — the M17 desk's and every
+other analyst path's (`LLM_PROVIDER`, `M17_LLM_PROVIDER`) — go to Claude on Amazon Bedrock first,
+with the Claude CLI subscription as the backup, and that effort is pinned per call type. For the M17
+test it is written up for confirmation as pre-registration Amendment 5
+(`ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md` §8); to confirm, answer both.
+What it is:
 
 - **Same models** (`claude-opus-5-5` decides, `claude-sonnet-5-5` digests), Bedrock ids
   `anthropic.claude-*`; no prompt, schema, rule or rail changes, so every `mandate_hash` is
   unchanged (all 21 checked 2026-10-30) and no manager is new.
-- **Transport:** Bedrock primary (`M17_LLM_PROVIDER=bedrock`), Claude CLI backup per call
-  (`M17_LLM_FALLBACK=claude_cli`). A call falls back only when Bedrock could not serve it —
+- **Transport:** Bedrock primary (`LLM_PROVIDER=bedrock`, `M17_LLM_PROVIDER=bedrock`), Claude CLI
+  backup per call (`LLM_FALLBACK=claude_cli`, `M17_LLM_FALLBACK=claude_cli`). A call falls back only when Bedrock could not serve it —
   unreachable, timed out, rate limited after retries, a 5xx, a rejected or missing key — never on a
   400, a refusal or an answer that did not parse.
-- **Effort pinned at `xhigh`** on both paths (`LLM_EFFORT`). It was previously inherited, unpinned,
-  from the owner's personal `~/.claude/settings.json`.
+- **Effort pinned per call type** on both paths (`analyst/llm/effort.yaml`): decisions (Opus)
+  `high`, digests and other summarising/extraction (Sonnet) `medium`; the CLI always passes
+  `--effort`. It was previously inherited, unpinned, from the owner's personal Claude CLI setting
+  (`xhigh` through the dry sessions, `high` since the owner's `/effort high` on 2026-10-30).
 - **Web research stays on the Claude CLI**: Bedrock has no web tools.
 - **Recorded per call:** the provider that answered, and the fallback reason when there was one, in
   each `FM_CALL` journal line; every call is a `token_usage` row (the console's Model cost panel).
@@ -738,8 +742,9 @@ to confirm, answer both. What it is:
 
 Open with it: whether to set a monthly Bedrock budget (§9's cap was deferred while the cost was a
 subscription), and whether at least one dry session must run on Bedrock before S0. Activation is
-an `.env` change (`M17_LLM_PROVIDER=bedrock`, `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_REGION`) and a
-scheduler restart, made by the owner after confirming. Task M17.
+an `.env` change (`LLM_PROVIDER=bedrock`, `M17_LLM_PROVIDER=bedrock`, `AWS_BEARER_TOKEN_BEDROCK`,
+`BEDROCK_REGION`) and a scheduler restart, made by the owner after confirming. The effort levels
+take effect on merge for every provider, the Claude CLI included. Task M17.
 
 ## Coming up
 

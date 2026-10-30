@@ -515,8 +515,9 @@ needing its own dated amendment before S0 (or a new manager id after):
 ### Amendment 5 (2026-10-30, before S0): Bedrock transport, Claude CLI backup, pinned effort
 
 **DRAFT, awaiting owner confirmation.** The owner decided at 08:05 IST on 2026-10-30 (chat) to run
-the desk on Amazon Bedrock with the Claude CLI subscription as the backup; this is that decision
-written down for confirmation (HUMAN_DECISIONS D30). Until it is confirmed, `M17_LLM_PROVIDER`
+the desk — and the whole application — on Amazon Bedrock with the Claude CLI subscription as the
+backup, and at about 09:00 IST to pin effort per call type; this is that decision, as it touches
+the M17 test, written down for confirmation (HUMAN_DECISIONS D30). Until it is confirmed, `M17_LLM_PROVIDER`
 stays `claude_cli` and nothing below is in force. §2–§7 and Amendments 1–4 stand, except where this
 amendment adds to them. No model, prompt, schema, rule, rail or contract changes.
 
@@ -537,13 +538,17 @@ contract's one repair). The structured-output schema is the same one the CLI is 
 compiles its types, enums, patterns and required fields, and the numeric and length bounds it
 cannot compile are stated in the field descriptions and enforced, as now, by the parser.
 
-(c) **Effort: pinned at `xhigh` on both paths** (`LLM_EFFORT`, sent as `output_config.effort` on
-Bedrock and `--effort` on the CLI). Until now the desk set no effort: every M17 call inherited the
-owner's personal Claude CLI setting (`effortLevel: xhigh` in `~/.claude/settings.json`), so the dry
-sessions ran at `xhigh` by accident of that file. Pinning the same value makes it a property of the
-test, not of a settings file, and makes the primary and the backup reason equally hard. Thinking is
-adaptive. A Bedrock call's output ceiling (thinking included) is at least `BEDROCK_MAX_TOKENS`
-(64,000), whatever the caller asks for, so thinking cannot truncate an answer.
+(c) **Effort: pinned per call type, on both paths** (owner, 2026-10-30 about 09:00 IST). Manager
+decision calls (`claude-opus-5-5`) run at `high`; Commons filing digests and the other summarising
+and extraction calls (`claude-sonnet-5-5`, the web fetcher's transcription included) at `medium`.
+The levels live in the versioned `analyst/llm/effort.yaml` and are sent as `output_config.effort`
+on Bedrock and as an explicit `--effort` on every Claude CLI call. Until now the desk set no effort:
+every M17 call inherited the owner's personal Claude CLI setting, which was `xhigh`
+(`~/.claude/settings.json`) through the dry sessions and changed to `high` when the owner ran
+`/effort high` on 2026-10-30. That inheritance ends here; the effort is a property of the test,
+the same on the primary and the backup. Thinking is adaptive. A Bedrock call's output ceiling
+(thinking included) is at least `BEDROCK_MAX_TOKENS` (64,000), whatever the caller asks for, so
+thinking cannot truncate an answer.
 
 (d) **Web research stays on the Claude CLI.** Bedrock has no web search or web fetch, so §5's
 Commons fetcher (`ClaudeWebFetcher`, `claude -p` with web search and fetch only) is unchanged and
@@ -579,5 +584,5 @@ measure its wiring and timing the way Amendments 2–4 required for theirs.
 | Horizons (§2) | 1–4 weeks and 1–3 months | 2026-10-09 (owner, chat) |
 | Web search (§5) | allowed, through the Commons fetcher | 2026-10-09 (owner, chat) |
 | LLM path (§2) | Claude CLI subscription; monthly cap deferred | 2026-10-09 (owner, chat) |
-| LLM path (Amendment 5) | Bedrock primary, Claude CLI backup per call; effort `xhigh` on both; web research on the CLI | DRAFT — owner decision 2026-10-30 08:05 IST (chat), awaiting confirmation |
+| LLM path (Amendment 5) | Bedrock primary, Claude CLI backup per call; effort `high` for decisions and `medium` for digests, on both; web research on the CLI | DRAFT — owner decision 2026-10-30 08:05 IST (chat), awaiting confirmation |
 | S0 | the first session after the 5-session dry run (M17.8) passes; owner asked for as soon as it is ready (2026-10-09) | — |
