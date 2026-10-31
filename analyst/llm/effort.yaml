@@ -11,9 +11,9 @@
 # Commons filing digests, the web fetcher's transcription, triage.
 #
 # `models`: which call type a model serves. Keyed by model because in this system the model *is*
-# the call type: the older analyst paths use Opus for review and Haiku for triage. The M17 roster
-# runs every role on Opus 5.5 (Amendment 5), so its digests and research run at `decision` effort,
-# `high`, like its decisions. A call that needs a different effort on the same model would
+# the call type: the M17 roster decides on Opus and digests and researches on Sonnet (Amendment 5),
+# and the older analyst paths use Opus for review and Haiku for triage. A call that needs a
+# different effort on the same model would
 # need its own argument on the `LLM` protocol, not a second entry here. An unlisted model is refused
 # by every path that sends an effort: guessing one is exactly the inheritance this file ends. The
 # CLI's own aliases are listed so a caller using one still pins its effort.

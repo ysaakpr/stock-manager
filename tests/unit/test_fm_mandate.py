@@ -118,8 +118,8 @@ def test_each_manager_book_matches_amendment_2(book_id: str) -> None:
     assert set(universe.excluded_surveillance) == {"GSM", "ESM"}
     assert universe.flagged_surveillance == ("ASM",)
     assert manager.models.decision == "claude-opus-5-5"
-    assert manager.models.digest == "claude-opus-5-5"  # Amendment 5 (owner, 2026-10-31)
-    assert manager.models.research == "claude-opus-5-5"
+    assert manager.models.digest == "claude-sonnet-5-5"  # §2, unchanged by Amendment 5
+    assert manager.models.research == "claude-sonnet-5-5"
     assert manager.prompt_path == "analyst/fundmanager/prompts/manager.md"
     assert (manager.rounds.max_isins, manager.rounds.max_queries) == (12, 8)
     assert manager.rounds.max_research_rounds == 2
@@ -558,7 +558,7 @@ def test_mandate_hash_changes_with_the_rails(update: dict[str, Any]) -> None:
         ),
         # Amendment 5: the research model is a role of its own, hashed like the other two
         lambda m: m.model_copy(
-            update={"models": m.models.model_copy(update={"research": "claude-sonnet-5-5"})}
+            update={"models": m.models.model_copy(update={"research": "claude-opus-5-5"})}
         ),
         lambda m: m.model_copy(update={"rounds": m.rounds.model_copy(update={"max_isins": 13})}),
         lambda m: m.model_copy(update={"rounds": m.rounds.model_copy(update={"max_queries": 9})}),

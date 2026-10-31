@@ -378,7 +378,7 @@ def test_build_llm_refuses_the_stub_as_a_backup() -> None:
         build_llm(_settings(), provider=LlmProvider.BEDROCK, fallback=LlmProvider.STUB)
 
 
-#: The roster's research model (Amendment 5: Opus 5.5), the one every research path runs on.
+#: The roster's research model (Amendment 5: Sonnet 5.5), the one every research path runs on.
 RESEARCH_MODEL = load_roster().primaries[0].models.research
 
 
@@ -422,10 +422,10 @@ def test_bedrock_research_runs_on_our_own_search_layer_with_the_cli_behind_it(
     )
     fetcher = _desk_fetcher(LlmProvider.BEDROCK, settings, tmp_path)
     assert isinstance(fetcher, BedrockWebFetcher)
-    assert RESEARCH_MODEL == "claude-opus-5-5"
-    assert fetcher.name == "bedrock+websearch:claude-opus-5-5"
+    assert RESEARCH_MODEL == "claude-sonnet-5-5"
+    assert fetcher.name == "bedrock+websearch:claude-sonnet-5-5"
     assert isinstance(fetcher._backup, ClaudeWebFetcher)
-    assert fetcher._backup.name == "claude_cli:claude-opus-5-5"  # the backup researches on Opus too
+    assert fetcher._backup.name == "claude_cli:claude-sonnet-5-5"  # the backup on Sonnet too
     # The tool results live in their own store, never in the desk's (a nested lock would hang).
     assert fetcher.research._store is not None
     assert fetcher.research._store.root == tmp_path / "commons" / "websearch"

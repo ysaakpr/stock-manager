@@ -52,7 +52,7 @@ from analyst.llm import (
     UnavailableReason,
     build_llm,
 )
-from analyst.llm.bedrock import BedrockAdapter, BedrockModelMap, load_bedrock_models
+from analyst.llm.bedrock import BedrockModelMap, load_bedrock_models
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import LlmProvider, Settings
 from tests.unit.test_llm_bedrock import ASK, FAKE_KEY, VERDICT
@@ -518,7 +518,8 @@ def test_the_map_refuses_a_non_claude_model_without_a_claude_backup(
 
 
 def test_the_roster_names_each_roles_model_and_each_is_routed() -> None:
-    """A model change is the roster's (config only): Amendment 5's three roles, all Opus 5.5.
+    """A model change is the roster's (config only): Amendment 5's three roles, the
+    pre-registered models (Opus decisions, Sonnet digests and research).
 
     Every role is a Claude model, so a desk on the Claude CLI (before the deploy, or rolled back)
     runs the roster's own models and a Bedrock call that falls back is asked of the same model.
@@ -527,9 +528,9 @@ def test_the_roster_names_each_roles_model_and_each_is_routed() -> None:
     models = load_bedrock_models()
     for book in load_roster().primaries:
         roles = (book.models.decision, book.models.digest, book.models.research)
-        assert roles == ("claude-opus-5-5",) * 3
+        assert roles == ("claude-opus-5-5", "claude-sonnet-5-5", "claude-sonnet-5-5")
         for name in roles:
-            assert models.route(name).adapter is BedrockAdapter.ANTHROPIC_MESSAGES
+            assert models.route(name).adapter.is_claude
             assert models.backup_model(name) == name
         assert DEEPSEEK not in roles
 

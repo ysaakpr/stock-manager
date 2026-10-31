@@ -832,7 +832,7 @@ def _fetcher(
 ) -> Any:
     """The desk's Commons fetcher for ``provider`` (see `_LIVE_FETCH_PROVIDERS`).
 
-    ``research_model`` is the roster's ``models.research`` (Amendment 5: Opus 5.5) on every path —
+    ``research_model`` is the roster's ``models.research`` (Amendment 5: Sonnet 5.5) on every path —
     the CLI's web fetcher, the Bedrock tool loop and that loop's CLI backup.
 
     On Bedrock with ``M17_WEB_RESEARCH=websearch`` (not the default, which is ``claude_cli``) it

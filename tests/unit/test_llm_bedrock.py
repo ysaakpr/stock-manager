@@ -150,8 +150,56 @@ def message_stream(
 ANSWER = {"intact": True, "reason": "guidance held", "note": None, "score": 0.7, "refs": ["e1"]}
 
 
+def invoked(stream: bytes) -> dict[str, Any]:
+    """The message a scripted SSE stream describes, as bedrock-runtime's `InvokeModel` returns it
+    in one JSON body: `message_start`'s envelope, every content block with its deltas applied, and
+    `message_delta`'s stop reason and usage."""
+    message: dict[str, Any] = {}
+    blocks: dict[int, dict[str, Any]] = {}
+    for chunk in stream.decode().split("\n\n"):
+        data = next((line[6:] for line in chunk.splitlines() if line.startswith("data: ")), None)
+        if data is None:
+            continue
+        event = json.loads(data)
+        match event["type"]:
+            case "message_start":
+                message = dict(event["message"])
+            case "content_block_start":
+                blocks[event["index"]] = dict(event["content_block"])
+            case "content_block_delta":
+                block, delta = blocks[event["index"]], event["delta"]
+                match delta["type"]:
+                    case "text_delta":
+                        block["text"] = block.get("text", "") + delta["text"]
+                    case "thinking_delta":
+                        block["thinking"] = block.get("thinking", "") + delta["thinking"]
+                    case "signature_delta":
+                        block["signature"] = delta["signature"]
+                    case "input_json_delta":
+                        block["_json"] = block.get("_json", "") + delta["partial_json"]
+            case "message_delta":
+                message.update(event["delta"])
+                message.pop("type", None)
+                message["usage"] = {**message.get("usage", {}), **event["usage"]}
+    for block in blocks.values():
+        if "_json" in block:
+            block["input"] = json.loads(block.pop("_json") or "{}")
+    message["type"] = "message"
+    message["content"] = [blocks[i] for i in sorted(blocks)]
+    return message
+
+
+def _is_runtime_invoke(request: httpx.Request) -> bool:
+    return request.url.host.startswith("bedrock-runtime.") and request.url.path.endswith("/invoke")
+
+
 class Endpoint:
-    """The Mantle endpoint as a `MockTransport` handler: records requests, plays a script."""
+    """The Bedrock endpoints as a `MockTransport` handler: records requests, plays a script.
+
+    The script is written as Mantle streams it (SSE). A bedrock-runtime `invoke` (the
+    `anthropic_runtime` adapter, Sonnet 5.5) gets the same scripted message as one JSON body, which
+    is how that endpoint answers; an error response is played as it is on either endpoint.
+    """
 
     def __init__(self, *responses: httpx.Response | Callable[[httpx.Request], httpx.Response]):
         self.script = list(responses)
@@ -160,7 +208,14 @@ class Endpoint:
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
         step = self.script.pop(0) if len(self.script) > 1 else self.script[0]
-        return step(request) if callable(step) else step
+        response = step(request) if callable(step) else step
+        if (
+            _is_runtime_invoke(request)
+            and response.status_code == 200
+            and response.headers.get("content-type", "").startswith("text/event-stream")
+        ):
+            return httpx.Response(200, json=invoked(response.read()))
+        return response
 
     @property
     def body(self) -> dict[str, Any]:
@@ -223,7 +278,128 @@ def test_a_summary_call_is_sent_at_medium() -> None:
     endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER))))
     bedrock(endpoint).complete(ASK, model="claude-sonnet-5-5", tools=(VERDICT,))
     assert endpoint.body["output_config"]["effort"] == "medium"
-    assert endpoint.body["model"] == "anthropic.claude-sonnet-5-5"
+    assert endpoint.requests[0].url.path == "/model/global.anthropic.claude-sonnet-5-5/invoke"
+
+
+# ── 1b. the bedrock-runtime adapter (Sonnet 5.5 on the Global inference profile) ─────────────────
+
+
+def test_sonnet_goes_to_bedrock_runtime_with_the_same_body_and_the_key_as_a_bearer() -> None:
+    """`anthropic_runtime`: the Messages body Mantle gets — schema, effort, adaptive thinking,
+    thinking-sized ceiling, system — sent once to `/model/<global id>/invoke`, the model in the
+    URL rather than the body, Bedrock's `anthropic_version`, the key as a Bearer and nothing
+    else."""
+    endpoint = Endpoint(
+        streamed(message_stream(json.dumps(ANSWER), model="claude-sonnet-5-5", cache_read=0))
+    )
+    response = bedrock(endpoint).complete(
+        ASK,
+        model="claude-sonnet-5-5",
+        tools=(VERDICT,),
+        system="Digest the filing.",
+        max_tokens=2_000,
+    )
+
+    request = endpoint.requests[0]
+    body = endpoint.body
+    assert str(request.url) == (
+        "https://bedrock-runtime.us-east-1.amazonaws.com/model/global.anthropic.claude-sonnet-5-5/invoke"
+    )
+    assert "model" not in body and "stream" not in body
+    assert body["anthropic_version"] == "bedrock-2023-05-31"
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["output_config"] == {
+        "effort": "medium",
+        "format": {"type": "json_schema", "schema": structured_output_schema(VERDICT.input_schema)},
+    }
+    assert body["max_tokens"] == 64_000
+    assert body["system"] == "Digest the filing."
+    assert request.headers["authorization"] == f"Bearer {FAKE_KEY}"
+    assert not any(h.lower().startswith("x-amz-") for h in request.headers)  # no SigV4
+
+    assert response.provider == BEDROCK_PROVIDER
+    assert response.model == "global.anthropic.claude-sonnet-5-5"  # the id the card prices
+    assert response.tool_calls[0].arguments == ANSWER
+    assert (response.usage.input_tokens, response.usage.output_tokens) == (1_200, 640)
+
+
+def test_the_model_map_sends_sonnet_to_runtime_and_opus_to_mantle() -> None:
+    models = load_bedrock_models()
+    sonnet, opus = models.route("claude-sonnet-5-5"), models.route("claude-opus-5-5")
+    assert (sonnet.adapter, sonnet.bedrock_id) == (
+        BedrockAdapter.ANTHROPIC_RUNTIME,
+        "global.anthropic.claude-sonnet-5-5",
+    )
+    assert (opus.adapter, opus.bedrock_id) == (
+        BedrockAdapter.ANTHROPIC_MESSAGES,
+        "anthropic.claude-opus-5-5",
+    )
+    assert sonnet.adapter.is_claude and opus.adapter.is_claude
+    assert models.backup_model("claude-sonnet-5-5") == "claude-sonnet-5-5"
+
+    opus_endpoint = Endpoint(streamed(message_stream("fine")))
+    bedrock(opus_endpoint).complete(ASK, model="claude-opus-5-5")
+    assert opus_endpoint.requests[0].url.host == "bedrock-mantle.us-east-1.api.aws"
+    sonnet_endpoint = Endpoint(streamed(message_stream("fine", model="claude-sonnet-5-5")))
+    bedrock(sonnet_endpoint).complete(ASK, model="claude-sonnet-5-5")
+    assert sonnet_endpoint.requests[0].url.host == "bedrock-runtime.us-east-1.amazonaws.com"
+
+
+@pytest.mark.parametrize(
+    ("status", "kind"),
+    [
+        (400, "ValidationException"),
+        (404, "ResourceNotFoundException"),
+        (413, "ValidationException"),
+        (422, "ValidationException"),
+    ],
+)
+def test_a_runtime_request_error_is_never_a_fallback(status: int, kind: str) -> None:
+    endpoint = Endpoint(api_error(status, kind))
+    with pytest.raises(LLMError) as raised:
+        bedrock(endpoint).complete(ASK, model="claude-sonnet-5-5")
+    assert not isinstance(raised.value, LLMUnavailableError)
+    assert len(endpoint.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "kind", "reason"),
+    [
+        (401, "UnrecognizedClientException", UnavailableReason.AUTH),
+        (403, "AccessDeniedException", UnavailableReason.AUTH),
+        (408, "ModelTimeoutException", UnavailableReason.TIMEOUT),
+        (424, "ModelErrorException", UnavailableReason.SERVER_ERROR),
+        (429, "ThrottlingException", UnavailableReason.RATE_LIMIT),
+        (500, "InternalServerException", UnavailableReason.SERVER_ERROR),
+        (503, "ServiceUnavailableException", UnavailableReason.SERVER_ERROR),
+    ],
+)
+def test_a_runtime_provider_failure_is_unavailable(
+    status: int, kind: str, reason: UnavailableReason
+) -> None:
+    endpoint = Endpoint(api_error(status, kind))
+    with pytest.raises(LLMUnavailableError) as raised:
+        bedrock(endpoint).complete(ASK, model="claude-sonnet-5-5")
+    assert raised.value.reason is reason
+    assert FAKE_KEY not in str(raised.value)
+
+
+def test_a_runtime_connection_failure_is_unavailable() -> None:
+    def refuse(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    with pytest.raises(LLMUnavailableError) as raised:
+        bedrock(Endpoint(refuse)).complete(ASK, model="claude-sonnet-5-5")
+    assert raised.value.reason is UnavailableReason.CONNECTION
+
+
+def test_a_runtime_throttle_is_retried_by_the_sdk_before_it_is_a_fallback() -> None:
+    endpoint = Endpoint(
+        api_error(429, "ThrottlingException"),
+        streamed(message_stream("fine", model="claude-sonnet-5-5")),
+    )
+    response = bedrock(endpoint, max_retries=1).complete(ASK, model="claude-sonnet-5-5")
+    assert response.text == "fine" and len(endpoint.requests) == 2
 
 
 def test_the_effort_is_the_policys_not_a_constant() -> None:
@@ -568,18 +744,24 @@ def test_the_m17_schemas_keep_every_field_type_and_requirement() -> None:
 
 
 def test_the_model_map_routes_every_roster_model_and_its_cli_backup() -> None:
-    """Amendment 5: decisions, digests and research all on Opus 5.5 (Messages), each falling back
-    to itself on the Claude CLI — and DeepSeek V3.2 stays routed (Chat Completions, Sonnet 5.5 as
-    its CLI stand-in) as capability the roster does not use."""
+    """Amendment 5: decisions on Opus 5.5 over Mantle, digests and research on Sonnet 5.5 over
+    bedrock-runtime's Global inference profile, each falling back to itself on the Claude CLI —
+    and DeepSeek V3.2 stays routed (Chat Completions, Sonnet 5.5 as its CLI stand-in) as
+    capability the roster does not use."""
     from analyst.fundmanager.mandate import load_roster
 
     models = load_bedrock_models()
     roster = load_roster()
     for book in roster.primaries:
-        for name in (book.models.decision, book.models.digest, book.models.research):
+        decision = models.route(book.models.decision)
+        assert decision.adapter is BedrockAdapter.ANTHROPIC_MESSAGES
+        assert decision.bedrock_id == "anthropic.claude-opus-5-5"
+        for name in (book.models.digest, book.models.research):
             route = models.route(name)
-            assert route.adapter is BedrockAdapter.ANTHROPIC_MESSAGES
-            assert route.bedrock_id == f"anthropic.{name}"
+            assert route.adapter is BedrockAdapter.ANTHROPIC_RUNTIME
+            assert route.bedrock_id == "global.anthropic.claude-sonnet-5-5"
+        for name in (book.models.decision, book.models.digest, book.models.research):
+            assert models.route(name).adapter.is_claude
             assert models.backup_model(name) == name
     deepseek = models.route("deepseek-v3-2")
     assert deepseek.adapter is BedrockAdapter.OPENAI_CHAT
