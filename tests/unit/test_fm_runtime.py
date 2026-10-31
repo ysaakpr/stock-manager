@@ -352,6 +352,7 @@ class ScriptedStub:
         self.prompts: list[str] = []
         self.tools: list[str] = []
         self.breaks: list[tuple[int, ...]] = []
+        self.schemas: list[Mapping[str, Any]] = []
 
     def complete(
         self,
@@ -365,6 +366,7 @@ class ScriptedStub:
         self.prompts.append(messages[-1].content)
         self.tools.append(tools[0].name)
         self.breaks.append(messages[-1].cache_breaks)
+        self.schemas.append(tools[0].input_schema)
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -1943,8 +1945,46 @@ def test_every_round_tells_the_manager_the_text_limits_the_schema_enforces(
     prompts = {k: " ".join(v.split()) for k, v in _all_prompts(world, tmp_path, _mandate()).items()}
     short = f"at most {MAX_SHORT_CHARS:,} characters"
     for key in (ROUND_ZERO, ROUND_RESEARCH):
-        assert short in prompts[key] and "`note`" in prompts[key], key
+        assert short in prompts[key] and "`claim`" in prompts[key], key
+    assert "`note`" in prompts[ROUND_ZERO]
     assert "Do this working in your thinking" in prompts[ROUND_RESEARCH]
+    assert "no holdings triage this round" in prompts[ROUND_RESEARCH]
     final_text = prompts[ROUND_FINAL]
     assert f"at most {MAX_TEXT_CHARS:,} characters each" in final_text
     assert f"`no_action_reason` — at most {MAX_SHORT_CHARS:,}" in final_text
+
+
+def test_only_round_zero_is_offered_a_holdings_triage(world: World, tmp_path: Path) -> None:
+    """Triage is round 0's step; the research rounds' schema has no ``holdings`` at all, so a
+    manager cannot pour its per-name analysis into notes it would overrun (2026-10-31: 510 and 539
+    characters on Bedrock, which cannot enforce ``maxLength``). Requests and queries keep exactly
+    round 0's shape and caps."""
+    result, _, llm = _run(
+        world,
+        tmp_path,
+        [
+            research([LEADER], ["q one"]),
+            research([BREAKOUT], ["q two"]),
+            research(),
+            final(hold(), passed(LEADER), passed(BREAKOUT)),
+        ],
+    )
+    assert result.status is SessionStatus.DECIDED
+    round0, research1, research2, final_schema = llm.schemas
+    assert "holdings" in round0["properties"] and "holdings" in round0["required"]
+    for followup in (research1, research2):
+        assert "holdings" not in followup["properties"]
+        assert "holdings" not in followup["required"]
+        assert followup["additionalProperties"] is False
+        for key in ("requests", "queries"):
+            assert followup["properties"][key] == round0["properties"][key]
+    assert "decisions" in final_schema["properties"]
+
+
+def test_the_followup_schema_is_hashed_with_the_others() -> None:
+    from analyst.fundmanager.schemas import schema_bytes
+
+    limits = _mandate().rounds
+    document = json.loads(schema_bytes(limits, system_prompt="s"))
+    assert document["research_followup"] == research_schema(limits, triage=False)
+    assert "holdings" not in document["research_followup"]["properties"]

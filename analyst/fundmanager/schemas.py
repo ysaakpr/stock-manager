@@ -363,16 +363,24 @@ def _object(properties: Mapping[str, Any]) -> dict[str, Any]:
 _ISIN_SCHEMA: Final = {"type": "string", "pattern": ISIN_PATTERN}
 
 
-def research_schema(limits: RoundLimits) -> dict[str, Any]:
-    """The research-request JSON Schema, capped at the mandate's ``max_isins``/``max_queries``."""
+def research_schema(limits: RoundLimits, *, triage: bool = True) -> dict[str, Any]:
+    """The research-request JSON Schema, capped at the mandate's ``max_isins``/``max_queries``.
+
+    ``triage`` (round 0) includes the holdings triage; the research rounds' follow-up schema
+    (``triage=False``) has only requests and queries. Triage is round 0's step (pre-registration
+    §4 step 3) and nothing reads a later one; offered it anyway, a manager on Bedrock wrote its
+    per-name analysis into the holdings' notes and overran their 500 characters (2026-10-31:
+    510 and 539), which structured output there cannot prevent and which cost two sessions.
+    """
+    holdings = {
+        "holdings": {
+            "type": "array",
+            "items": _object({"isin": _ISIN_SCHEMA, "triage": _enum(Triage), "note": _string()}),
+        }
+    }
     return _object(
         {
-            "holdings": {
-                "type": "array",
-                "items": _object(
-                    {"isin": _ISIN_SCHEMA, "triage": _enum(Triage), "note": _string()}
-                ),
-            },
+            **(holdings if triage else {}),
             "requests": {
                 "type": "array",
                 "maxItems": limits.max_isins,
@@ -396,7 +404,19 @@ def research_schema(limits: RoundLimits) -> dict[str, Any]:
     )
 
 
-def research_tool(limits: RoundLimits) -> ToolSpec:
+def research_tool(limits: RoundLimits, *, triage: bool = True) -> ToolSpec:
+    """Round 0's research tool (``triage``), or the research rounds' follow-up without triage."""
+    if not triage:
+        return ToolSpec(
+            name=RESEARCH_TOOL_NAME,
+            description=(
+                "Return this round's research requests, if one more would change a decision: the "
+                "names to deep-dive, each with its claim and kill test, and any web queries or "
+                "URLs. Return empty requests and queries when more research would not change a "
+                "decision."
+            ),
+            input_schema=research_schema(limits, triage=False),
+        )
     return ToolSpec(
         name=RESEARCH_TOOL_NAME,
         description=(
@@ -751,7 +771,7 @@ def parse_decisions(
 
 
 def schema_bytes(limits: RoundLimits, *, system_prompt: str) -> bytes:
-    """The canonical bytes of both schemas, the system prompt and the shape version.
+    """The canonical bytes of the three schemas, the system prompt and the shape version.
 
     What `mandate_hash` takes as ``schema_bytes`` for a manager (pre-registration §7): any change
     to a field, a cap or the system prompt is a new manager.
@@ -759,6 +779,7 @@ def schema_bytes(limits: RoundLimits, *, system_prompt: str) -> bytes:
     document = {
         "version": SCHEMA_VERSION,
         "research": research_schema(limits),
+        "research_followup": research_schema(limits, triage=False),
         "decision": decision_schema(),
         "system_prompt": system_prompt,
     }

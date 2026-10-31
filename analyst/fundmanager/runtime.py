@@ -17,6 +17,8 @@ one manager, in isolation:
    already failed this session — which is not re-fetched).
 3. **Research rounds** — at most ``rounds.max_research_rounds`` (2) calls, each showing every
    bundle so far and allowed one more request within the same caps; an empty request ends them.
+   They answer with the follow-up schema (`schemas.research_tool` with ``triage=False``):
+   requests and queries only, the holdings triage being round 0's.
 4. **Final call** — one call with `schemas.decision_tool`. Each well-formed decision then passes
    `contract.validate_decision`; one that fails is voided (journaled ``FM_DECISION_REFUSED``,
    never staged) and the rest stand.
@@ -453,6 +455,8 @@ class _Session:
             slippage=commons.slippage,
         )
         self.research_tool = research_tool(self.limits)
+        #: The research rounds' tool: requests and queries only — triage is round 0's.
+        self.followup_tool = research_tool(self.limits, triage=False)
         self.decision_tool = decision_tool()
         self.calls = 0
         self.repairs = 0
@@ -870,7 +874,10 @@ class _Session:
 
     def _research(self, round_key: str, stage: str) -> ResearchRequest:
         (request, truncation), _ = self._ask(
-            round_key, self.research_tool, stage, lambda a: parse_research(a, self.limits)
+            round_key,
+            self.research_tool if round_key == ROUND_ZERO else self.followup_tool,
+            stage,
+            lambda a: parse_research(a, self.limits),
         )
         if truncation.truncated:
             self._write(
