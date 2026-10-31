@@ -349,6 +349,10 @@ _CITATION_RULE: Final = (
     "The citation this adjustment rests on: [F:<field_id>] or [S:<snapshot_id>] "
     f"(at most {_MAX_SHORT:,} characters)."
 )
+_QUERY_TARGET_RULE: Final = (
+    "The search terms — specific: the company, the topic and the period — or one URL "
+    f"(at most {_MAX_SHORT:,} characters)."
+)
 _CELL_ID_RULE: Final = (
     f"The base-rate cell's id exactly as the table shows it (at most {_MAX_SHORT:,} characters)."
 )
@@ -412,7 +416,7 @@ def research_schema(limits: RoundLimits, *, triage: bool = True) -> dict[str, An
                 "items": _object(
                     {
                         "kind": _enum(QueryKind),
-                        "target": _string(),
+                        "target": _string(description=_QUERY_TARGET_RULE),
                         "isin": {"type": ["string", "null"], "pattern": ISIN_PATTERN},
                         "purpose": _string(),
                     }

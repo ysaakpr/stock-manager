@@ -2000,7 +2000,10 @@ def test_identifier_fields_are_described_as_identifiers_never_as_prose(
     ref = item["evidence_refs"]["items"]["description"]
     cell = item["base_rate_cell"]["anyOf"][0]["properties"]["cell_id"]["description"]
     citation = item["adjustments"]["items"]["properties"]["citation"]["description"]
-    for text in (ref, cell, citation):
+    target = research_schema(_mandate().rounds)["properties"]["queries"]["items"]["properties"][
+        "target"
+    ]["description"]
+    for text in (ref, cell, citation, target):
         assert "words" not in text and "text" not in text.lower()
         assert f"at most {MAX_SHORT_CHARS:,} characters" in text
     assert "[F:<field_id>] or [S:<snapshot_id>]" in ref and "nothing else" in ref
