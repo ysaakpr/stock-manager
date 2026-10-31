@@ -76,6 +76,7 @@ __all__ = [
     "ScenarioName",
     "Triage",
     "TriageItem",
+    "Violation",
     "WhatChanged",
     "WhatChangedKind",
     "decision_schema",
@@ -104,8 +105,42 @@ _MAX_PREMORTEM: Final = 3
 _MAX_HORIZON: Final = 260
 
 
+@dataclass(frozen=True, slots=True)
+class Violation:
+    """One constraint a structured answer broke: where, which rule, the rule's limit, and the size
+    of what the answer put there — never the answer's text, so it is safe in a log line.
+
+    ``constraint`` is pydantic's error type (``string_too_long``, ``too_long``, ``missing``,
+    ``string_pattern_mismatch``, ``value_error`` …); ``limit`` the bound it names, as
+    ``max_length=500``; ``actual`` the offending value's length (strings and lists only).
+    """
+
+    path: str
+    constraint: str
+    limit: str | None = None
+    actual: int | None = None
+
+    def compact(self) -> str:
+        """``path constraint [limit] [actual=N]`` — the form `fm.call_malformed` logs."""
+        parts = [self.path, self.constraint]
+        if self.limit is not None:
+            parts.append(self.limit)
+        if self.actual is not None:
+            parts.append(f"actual={self.actual}")
+        return " ".join(parts)
+
+
 class MalformedOutputError(ValueError):
-    """The model's structured output does not have the shape the schema promises."""
+    """The model's structured output does not have the shape the schema promises.
+
+    ``violations`` names each broken constraint by field path and rule (empty when the failure
+    is not a field's, e.g. no structured output at all), so the runtime can log *why* without
+    logging the answer.
+    """
+
+    def __init__(self, message: str, violations: Sequence[Violation] = ()) -> None:
+        super().__init__(message)
+        self.violations: tuple[Violation, ...] = tuple(violations)
 
 
 # ── vocabulary ───────────────────────────────────────────────────────────────────────────────────
@@ -345,12 +380,47 @@ def research_tool(limits: RoundLimits) -> ToolSpec:
     )
 
 
+#: How many violations a refusal names: enough for any real answer, bounded for the repair prompt.
+_MAX_VIOLATIONS: Final = 20
+
+
+def _violations(exc: ValidationError) -> tuple[Violation, ...]:
+    """Each pydantic error as a `Violation`: path, rule, the rule's bound, the value's length."""
+    out: list[Violation] = []
+    for err in exc.errors()[:_MAX_VIOLATIONS]:
+        ctx = err.get("ctx") or {}
+        bounds = [
+            f"{key}={ctx[key]}"
+            for key in ("max_length", "min_length", "pattern", "ge", "le", "gt", "lt")
+            if key in ctx
+        ]
+        value = err.get("input")
+        out.append(
+            Violation(
+                path=".".join(str(p) for p in err["loc"]) or "(root)",
+                constraint=err["type"],
+                limit=",".join(bounds) or None,
+                actual=len(value) if isinstance(value, str | list | tuple) else None,
+            )
+        )
+    return tuple(out)
+
+
 def _validation_message(exc: ValidationError) -> str:
+    """What the repair prompt quotes: each field, the rule it broke, and — for a length rule —
+    how long the answer's value was, so the model knows by how much to cut."""
     lines = []
-    for err in exc.errors()[:20]:
-        where = ".".join(str(p) for p in err["loc"]) or "(root)"
-        lines.append(f"{where}: {err['msg']}")
+    for err, violation in zip(exc.errors()[:_MAX_VIOLATIONS], _violations(exc), strict=True):
+        line = f"{violation.path}: {err['msg']}"
+        if violation.actual is not None and err["type"] in _LENGTH_ERRORS:
+            unit = "characters" if isinstance(err.get("input"), str) else "items"
+            line += f" (yours has {violation.actual} {unit})"
+        lines.append(line)
     return "; ".join(lines)
+
+
+#: Pydantic's length-rule error types, for which the repair message adds the actual length.
+_LENGTH_ERRORS: Final = frozenset({"string_too_long", "string_too_short", "too_long", "too_short"})
 
 
 def parse_research(
@@ -368,7 +438,8 @@ def parse_research(
         request = ResearchRequest.model_validate(dict(arguments))
     except ValidationError as exc:
         raise MalformedOutputError(
-            f"the research request does not match the schema: {_validation_message(exc)}"
+            f"the research request does not match the schema: {_validation_message(exc)}",
+            _violations(exc),
         ) from exc
     seen_isins: set[str] = set()
     unique_requests: list[ResearchItem] = []
@@ -637,14 +708,16 @@ def parse_decisions(
         answer = ManagerDecisions.model_validate(dict(arguments))
     except ValidationError as exc:
         raise MalformedOutputError(
-            f"the decisions do not match the schema: {_validation_message(exc)}"
+            f"the decisions do not match the schema: {_validation_message(exc)}",
+            _violations(exc),
         ) from exc
     if not answer.no_action:
         decided = {d.isin for d in answer.decisions}
         missing = [i for i in dict.fromkeys([*holdings, *researched]) if i not in decided]
         if missing:
             raise MalformedOutputError(
-                f"every holding and every researched candidate needs a decision; missing {missing}"
+                f"every holding and every researched candidate needs a decision; missing {missing}",
+                [Violation(path="decisions", constraint="missing_decision", actual=len(missing))],
             )
     return answer
 

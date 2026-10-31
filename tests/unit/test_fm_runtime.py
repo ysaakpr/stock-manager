@@ -1425,6 +1425,46 @@ def test_the_repair_is_one_per_session_not_one_per_call(world: World, tmp_path: 
     assert journal.events(MANAGER_ERROR_EVENT)[0].payload["stage"] == "final"
 
 
+def _long_claim(text: str) -> dict[str, Any]:
+    answer = research([LEADER])
+    answer["requests"][0]["claim"] = text
+    return answer
+
+
+def test_why_an_answer_was_refused_is_logged_by_field_and_rule_never_by_its_text(
+    world: World, tmp_path: Path
+) -> None:
+    """A refused answer names the field path, the broken rule, its bound and the value's length on
+    the ``fm.call_malformed`` line, the repair's ``fm.call`` line, the ``fm.manager_error`` line
+    and the MANAGER_ERROR payload — and none of them carries the answer's text."""
+    secret_ish = "Z" * 610
+    with capture_logs() as logs:
+        result, journal, llm = _run(
+            world, tmp_path, [_long_claim(secret_ish), _long_claim(secret_ish + "Z")]
+        )
+    assert result.status is SessionStatus.MANAGER_ERROR and llm.calls == 2
+    malformed = [e for e in logs if e["event"] == "fm.call_malformed"]
+    assert [e["violations"] for e in malformed] == [
+        ["requests.0.claim string_too_long max_length=500 actual=610"],
+        ["requests.0.claim string_too_long max_length=500 actual=611"],
+    ]
+    assert [e["repair"] for e in malformed] == [False, True]
+    (repair_call,) = [e for e in logs if e["event"] == "fm.call" and e["repair"]]
+    assert repair_call["repair_violations"] == [
+        "requests.0.claim string_too_long max_length=500 actual=610"
+    ]
+    (error_line,) = [e for e in logs if e["event"] == "fm.manager_error"]
+    assert error_line["violations"] == [
+        "requests.0.claim string_too_long max_length=500 actual=611"
+    ]
+    assert "at most 500 characters" in error_line["reason"]
+    (error,) = journal.events(MANAGER_ERROR_EVENT)
+    assert json.loads(error.payload["violations"]) == error_line["violations"]
+    # The repair prompt tells the model by how much it overshot.
+    assert "(yours has 610 characters)" in llm.prompts[-1]
+    assert not any("ZZZZZZZZZZ" in json.dumps(e, default=str) for e in logs)
+
+
 def test_a_failed_model_call_is_a_manager_error(world: World, tmp_path: Path) -> None:
     result, journal, _ = _run(world, tmp_path, [LLMError("cli exited 1")])
     assert result.status is SessionStatus.MANAGER_ERROR and result.calls == 1
