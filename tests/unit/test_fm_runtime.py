@@ -88,11 +88,15 @@ from analyst.fundmanager.runtime import (
     run_manager,
 )
 from analyst.fundmanager.schemas import (
+    MAX_SHORT_CHARS,
+    MAX_TEXT_CHARS,
     Action,
     MalformedOutputError,
     Scenario,
     ScenarioName,
+    decision_schema,
     parse_decisions,
+    parse_research,
     research_schema,
 )
 from analyst.fundmanager.scoreboard import (
@@ -1872,3 +1876,75 @@ def test_the_prompt_states_the_contracts_probability_rule_with_its_numbers() -> 
     assert f"within ±{band} pp of zero" in text
     assert f"same side of 0.5 as `P*` (either may be exactly 0.5) and within {P_TOLERANCE}" in text
     assert "An exit is never voided for its scenarios' arithmetic" in text
+
+
+# ── text-length limits the model can see (2026-10-31: notes of 510 chars on Bedrock) ────────────
+
+
+def _bounded_strings(node: Any, path: str = "") -> list[tuple[str, dict[str, Any]]]:
+    """Every schema node that is a string with a ``maxLength``, with its path."""
+    out: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(node, dict):
+        kind = node.get("type")
+        if "maxLength" in node and (kind == "string" or "string" in (kind or [])):
+            out.append((path, node))
+        for key, value in node.items():
+            out += _bounded_strings(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            out += _bounded_strings(value, f"{path}[{i}]")
+    return out
+
+
+@pytest.mark.parametrize("which", ["research", "decision"])
+def test_every_bounded_text_field_states_its_own_limit_where_bedrock_can_read_it(
+    which: str,
+) -> None:
+    """Bedrock's structured output cannot compile ``maxLength``, so the limit must reach the model
+    as words in the description — the same number the parser enforces, on every bounded field,
+    and still there after the Bedrock transform. Dropping or changing either side fails here."""
+    from analyst.llm.bedrock import structured_output_schema
+
+    schema = research_schema(_mandate().rounds) if which == "research" else decision_schema()
+    bounded = _bounded_strings(schema)
+    assert len(bounded) >= (5 if which == "research" else 12)
+    sent = json.dumps(structured_output_schema(schema))
+    for path, node in bounded:
+        limit = node["maxLength"]
+        assert limit in (MAX_SHORT_CHARS, MAX_TEXT_CHARS), path
+        assert f"at most {limit:,} characters" in node["description"], path
+        assert json.dumps(node["description"])[1:-1] in sent, path
+
+
+def test_the_bound_is_enforced_exactly_and_never_by_truncation() -> None:
+    """A value at the limit is kept byte for byte; one character over is refused with the field,
+    the rule and the length — never cut to fit (a cut note or claim changes what was asked)."""
+    limits = _mandate().rounds
+    at_limit = "n" * MAX_SHORT_CHARS
+    answer = research([LEADER])
+    answer["holdings"][0]["note"] = at_limit
+    request, _ = parse_research(answer, limits)
+    assert request.holdings[0].note == at_limit
+    answer["holdings"][0]["note"] = at_limit + "n"
+    with pytest.raises(MalformedOutputError) as refused:
+        parse_research(answer, limits)
+    (violation,) = refused.value.violations
+    assert (violation.path, violation.constraint, violation.actual) == (
+        "holdings.0.note",
+        "string_too_long",
+        MAX_SHORT_CHARS + 1,
+    )
+    assert violation.limit == f"max_length={MAX_SHORT_CHARS}"
+
+
+def test_every_round_tells_the_manager_the_text_limits_the_schema_enforces(
+    world: World, tmp_path: Path
+) -> None:
+    prompts = {k: " ".join(v.split()) for k, v in _all_prompts(world, tmp_path, _mandate()).items()}
+    short = f"at most {MAX_SHORT_CHARS:,} characters"
+    for key in (ROUND_ZERO, ROUND_RESEARCH):
+        assert short in prompts[key] and "`note`" in prompts[key], key
+    assert "Do this working in your thinking" in prompts[ROUND_RESEARCH]
+    final_text = prompts[ROUND_FINAL]
+    assert f"at most {MAX_TEXT_CHARS:,} characters each" in final_text
+    assert f"`no_action_reason` — at most {MAX_SHORT_CHARS:,}" in final_text

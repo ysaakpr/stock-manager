@@ -128,6 +128,8 @@ from analyst.fundmanager.render import (
     render_shortlist,
 )
 from analyst.fundmanager.schemas import (
+    MAX_SHORT_CHARS,
+    MAX_TEXT_CHARS,
     SCHEMA_VERSION,
     Action,
     MalformedOutputError,
@@ -631,6 +633,8 @@ class _Session:
             "cost_hurdles": render_cost_hurdles(self.hurdles),
             "max_isins": str(self.limits.max_isins),
             "max_queries": str(self.limits.max_queries),
+            "max_short_chars": f"{MAX_SHORT_CHARS:,}",
+            "max_text_chars": f"{MAX_TEXT_CHARS:,}",
         }
 
     def _prompt(self, round_key: str) -> str:

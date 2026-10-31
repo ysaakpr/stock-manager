@@ -57,6 +57,8 @@ __all__ = [
     "CANDIDATE_ACTIONS",
     "DECISION_TOOL_NAME",
     "HOLDING_ACTIONS",
+    "MAX_SHORT_CHARS",
+    "MAX_TEXT_CHARS",
     "RESEARCH_TOOL_NAME",
     "SCHEMA_VERSION",
     "Action",
@@ -81,6 +83,7 @@ __all__ = [
     "WhatChangedKind",
     "decision_schema",
     "decision_tool",
+    "length_rule",
     "parse_decisions",
     "parse_research",
     "research_schema",
@@ -97,6 +100,9 @@ DECISION_TOOL_NAME: Final = "manager_decisions"
 
 _MAX_TEXT: Final = 2_000
 _MAX_SHORT: Final = 500
+#: The two text-length limits, as the prompt states them (the schema's own ``maxLength``).
+MAX_TEXT_CHARS: Final = _MAX_TEXT
+MAX_SHORT_CHARS: Final = _MAX_SHORT
 _MAX_LIST: Final = 5
 _MAX_ADJUSTMENTS: Final = 8
 _MAX_PREMORTEM: Final = 3
@@ -306,8 +312,28 @@ class ResearchTruncation:
         return bool(self.isins_dropped or self.queries_dropped)
 
 
+def length_rule(max_length: int, *, nullable: bool = False) -> str:
+    """A text field's length limit in words a model reads (the schema's own ``maxLength``).
+
+    Bedrock's structured output cannot compile ``maxLength``, so the bound reaches the model only
+    as a description; ``{maxLength: 500}`` alone was not read as a limit (2026-10-31: research
+    notes of 510 characters, two managers lost to MANAGER_ERROR). Stated here, it is in every
+    provider's schema, and the parser still enforces the bound exactly.
+    """
+    what = "Null, or a non-empty text" if nullable else "Non-empty text"
+    return (
+        f"{what} of at most {max_length:,} characters (about {max_length * 16 // 100} words); "
+        "a longer value is refused."
+    )
+
+
 def _string(max_length: int = _MAX_SHORT) -> dict[str, Any]:
-    return {"type": "string", "minLength": 1, "maxLength": max_length}
+    return {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": max_length,
+        "description": length_rule(max_length),
+    }
 
 
 def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
@@ -315,6 +341,8 @@ def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
     kind = out["type"]
     out["type"] = [kind, "null"] if isinstance(kind, str) else [*kind, "null"]
     out.pop("minLength", None)
+    if "maxLength" in out:
+        out["description"] = length_rule(out["maxLength"], nullable=True)
     return out
 
 
