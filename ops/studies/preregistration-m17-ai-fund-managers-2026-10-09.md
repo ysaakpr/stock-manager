@@ -523,9 +523,11 @@ found served on Bedrock through its Global inference profile — to keep the pre
 (`.env`: `M17_LLM_PROVIDER=bedrock`, `M17_WEB_RESEARCH=websearch`). This is that decision, as it
 touches the M17 test, written down for confirmation (HUMAN_DECISIONS D30); the dry sessions run
 under it from the deploy, and the owner confirms it before S0. §2–§7 and Amendments 1–4 stand,
-except where this amendment adds to them. No prompt template, decision schema, rule, rail, contract
-or model changes; the manager's system prompt gains one sentence, the untrusted-content rule of
-(d), and the roster names the research model as a role of its own (a).
+except where this amendment adds to them. No rule, rail, contract, model or schema field changes;
+the manager's system prompt gains one sentence, the untrusted-content rule of (d), the roster names
+the research model as a role of its own (a), and — added 2026-10-31 afternoon — the prompt template
+and both schemas state the text-length limits the parser already enforced (h), and the template's
+round line moves to the end of each round block (i).
 
 (a) **Models: one per role, set in the roster — the pre-registered ones.** The roster's `models:`
 now names three roles, and a model change is a roster edit, never code — no module carries a
@@ -649,19 +651,20 @@ the hashes come out exactly as the rule-only column below). So **the eight manag
 `mandate_hash` changes** (the eight control books, four style books and the bench are unchanged:
 8 of 21 changed; printed on 2026-10-31):
 
-| Book | `main` 8bafdf8 (in force) | Rule only (first draft) | DeepSeek digests (PR #147 at b4f7a8b) | This draft (rule + `research`) |
-|---|---|---|---|---|
-| `FM-POS-FUND-10L` | `d52645654199b7b8` | `f2767a99fe228f23` | `48aad03e87ee5f4d` | `431ff6ce9c259d9b` |
-| `FM-POS-FUND-1CR` | `64d273a2be8e6b27` | `ec87caa2475f89a4` | `0aaa86ab53a963e5` | `98b728dc788fec28` |
-| `FM-POS-TREND-10L` | `bcb545000b90aa18` | `29f43451d6e5945b` | `a80d3135beddabe6` | `88af5bb2886ad53f` |
-| `FM-POS-TREND-1CR` | `3ceff88b34ad5fef` | `f8a2dfe524f71e3f` | `63a5abf7e5a2fd43` | `29c9bb823d8025f4` |
-| `FM-SWING-BRK-10L` | `31f1f72ffcab8956` | `077166ed09e44141` | `92839a37a96bedc4` | `752176d43187dde9` |
-| `FM-SWING-BRK-1CR` | `cc6a7067f4659d07` | `9136027709dfdf4c` | `073fca0b0cafe66c` | `99be11b9b843daa8` |
-| `FM-SWING-EVT-10L` | `b7a1aad9e289c4a4` | `e5deef56a2137d61` | `5907665c2d63e460` | `5f412d204d0fcbce` |
-| `FM-SWING-EVT-1CR` | `0f0fbbd4e7bce247` | `87816e83ea7303f2` | `36be694b20b46268` | `5e50cc349aa3a4ee` |
+| Book | `main` 8bafdf8 (in force) | Rule only (first draft) | DeepSeek digests (PR #147 at b4f7a8b) | This draft (rule + `research`) | This draft, 2026-10-31 PM (+ (h), (i)) |
+|---|---|---|---|---|---|
+| `FM-POS-FUND-10L` | `d52645654199b7b8` | `f2767a99fe228f23` | `48aad03e87ee5f4d` | `431ff6ce9c259d9b` | `89941098fd7a6cc4` |
+| `FM-POS-FUND-1CR` | `64d273a2be8e6b27` | `ec87caa2475f89a4` | `0aaa86ab53a963e5` | `98b728dc788fec28` | `bdbe11c6b0b3b461` |
+| `FM-POS-TREND-10L` | `bcb545000b90aa18` | `29f43451d6e5945b` | `a80d3135beddabe6` | `88af5bb2886ad53f` | `bf031e69c2d8d161` |
+| `FM-POS-TREND-1CR` | `3ceff88b34ad5fef` | `f8a2dfe524f71e3f` | `63a5abf7e5a2fd43` | `29c9bb823d8025f4` | `af88b91df11c2f3b` |
+| `FM-SWING-BRK-10L` | `31f1f72ffcab8956` | `077166ed09e44141` | `92839a37a96bedc4` | `752176d43187dde9` | `fc1e47caa876121d` |
+| `FM-SWING-BRK-1CR` | `cc6a7067f4659d07` | `9136027709dfdf4c` | `073fca0b0cafe66c` | `99be11b9b843daa8` | `a11ac47f6783e24d` |
+| `FM-SWING-EVT-10L` | `b7a1aad9e289c4a4` | `e5deef56a2137d61` | `5907665c2d63e460` | `5f412d204d0fcbce` | `0f0f35ee5b6ede5e` |
+| `FM-SWING-EVT-1CR` | `0f0fbbd4e7bce247` | `87816e83ea7303f2` | `36be694b20b46268` | `5e50cc349aa3a4ee` | `8b96e52cfbfc09c2` |
 
-None of the draft columns was ever in force: PR #147 was not merged under them. The right-hand
-column is the one S0 starts from.
+None of the first three draft columns was ever in force: PR #147 was not merged under them. The
+"rule + `research`" column was deployed with PR #147 on 2026-10-31 (11:25 IST) but no counted dry
+session ran under it; the right-hand column adds (h) and (i), and is the one S0 starts from.
 These are the first 16 hex digits; the full hashes are journaled at S0. Each changed hash is a new
 manager under §7, and S0 has not happened, so **M17.8's dry-run count restarts with the first dry
 session run under the new hashes**; the earlier dry sessions stay journaled under the old ones and
@@ -673,6 +676,43 @@ the first under the new hashes, and on Bedrock with the new research path, so th
 sessions measure that path's wiring and timing the way Amendments 2–4 required for theirs. A desk
 rolled back to the Claude CLI runs the same models there and keeps the hashes.
 
+(h) **Text-length limits stated where the model can read them** (2026-10-31 afternoon). The
+2026-10-31 rehearsal of the 2026-10-30 session on Bedrock lost two of four managers to
+`MANAGER_ERROR`: FM-SWING-BRK-10L at research1 (the answer and its repair both refused), and
+FM-POS-TREND-10L at research2, after research1 had spent the session's one repair. Reproduced live
+for FM-SWING-BRK-10L with every structured answer captured: research1 returned a holding's `note`
+of 510 characters against the schema's 500 (`string_too_long`), its other notes at 492, 452, 444
+and 405; the repaired answer and research2 passed with their longest notes at 463 and exactly 500.
+The research round asks the manager to work through each name (what changed, the economics, what
+is priced in); under Bedrock's constrained decoding of the structured output that analysis lands in
+the notes, and the limit reached the model only as an opaque `{maxLength: 500, minLength: 1}` in
+the field descriptions, because Bedrock cannot compile `maxLength` — the CLI had sent it as a real
+schema keyword. Nothing a manager may do changes: the limits (500 and 2,000 characters), the one
+schema repair per session and the parser's exact enforcement stand, and nothing is truncated (a cut
+note or claim would change what was asked). What changes is that the limits are stated: every
+bounded text field's schema description says, in words, "at most 500 characters (about 80 words);
+a longer value is refused" (2,000 for the long fields), and each round's instructions state the
+limits, the research round adding that the working belongs in the model's thinking and the request
+carries only its conclusions. A refused answer now names each violated field, rule, bound and
+length in the log (`fm.call_malformed`, the repair's `fm.call`, `fm.manager_error`) and in the
+`MANAGER_ERROR` payload, and the repair prompt tells the model the length it wrote. The schema and
+template bytes change, so the 8 manager hashes change again (g).
+
+(i) **Prompt caching on Bedrock** (2026-10-31 afternoon; transport, not a hash input). Every
+manager call on Bedrock was sent uncached (78k–190k-token prompts, about $13–20 a night). Each call
+now marks cache breakpoints at the session's shared header and at the end of each research bundle
+(`Message.cache_breaks`, outside the prompt text and its digest; 5-minute TTL), so a research round
+reads the header and the bundles the round before it wrote, and a repair reads its original. A
+live check on 2026-10-31 confirmed Mantle (Opus 5.5) reads the cache and bedrock-runtime (Sonnet
+5.5) writes it; it also showed the structured-output schema is part of the cached prefix, so the
+final call (decision schema) cannot read the research rounds' entries and writes its own. Cache
+tokens are priced on the card at the Bedrock rates (Opus 5.5 in-region write $5.50, read $0.22 per
+MTok; AWS Price List, as (f)). The transport alone leaves every hash unchanged; for the header to be
+one prefix, the template's line "**Today:** session …, round N of at most M." moves unchanged from
+the header to the end of each round block, which is a template change and part of (g)'s
+right-hand column. Replayed over the 2026-10-31 rehearsal's calls, the expected saving is about a
+third of the decision calls' input cost (about $3 of $9.40 that night).
+
 ## 9. Owner confirmation
 
 | Item | Value | Confirmed |
@@ -683,5 +723,5 @@ rolled back to the Claude CLI runs the same models there and keeps the hashes.
 | Horizons (§2) | 1–4 weeks and 1–3 months | 2026-10-09 (owner, chat) |
 | Web search (§5) | allowed, through the Commons fetcher | 2026-10-09 (owner, chat) |
 | LLM path (§2) | Claude CLI subscription; monthly cap deferred | 2026-10-09 (owner, chat) |
-| LLM path and models (Amendment 5) | Bedrock primary, Claude CLI backup per call (each model falls back to itself); per-role models in the roster, the pre-registered ones — decisions `claude-opus-5-5` (Mantle us-east-1, effort `high`), digests and research `claude-sonnet-5-5` (bedrock-runtime, Global inference profile, which may route to any AWS commercial region; effort `medium`), research over our own search layer (Brave/Tavily/Firecrawl, CLI backup); DeepSeek V3.2 compared less faithful and stays unused capability; untrusted-content rule and `research` role added, 8 manager hashes change, dry-run count restarts with the first run under them (Mon 2026-11-02, 22:00 IST) | DRAFT — owner decisions 2026-10-30 08:05 IST and afternoon, 2026-10-31 morning (Sonnet via the Global profile, deploy approved; chat); owner confirms before S0 |
+| LLM path and models (Amendment 5) | Bedrock primary, Claude CLI backup per call (each model falls back to itself); per-role models in the roster, the pre-registered ones — decisions `claude-opus-5-5` (Mantle us-east-1, effort `high`), digests and research `claude-sonnet-5-5` (bedrock-runtime, Global inference profile, which may route to any AWS commercial region; effort `medium`), research over our own search layer (Brave/Tavily/Firecrawl, CLI backup); DeepSeek V3.2 compared less faithful and stays unused capability; untrusted-content rule and `research` role added; text-length limits stated (h) and the round line moved for prompt caching (i), 2026-10-31 afternoon; 8 manager hashes change, dry-run count restarts with the first run under them (Mon 2026-11-02, 22:00 IST) | DRAFT — owner decisions 2026-10-30 08:05 IST and afternoon, 2026-10-31 morning (Sonnet via the Global profile, deploy approved; chat); owner confirms before S0 |
 | S0 | the first session after the 5-session dry run (M17.8) passes; owner asked for as soon as it is ready (2026-10-09) | — |
