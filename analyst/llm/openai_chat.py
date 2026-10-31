@@ -1,9 +1,10 @@
 """X3: Bedrock models that speak OpenAI Chat Completions on the Mantle endpoint (not Claude).
 
 `BedrockLLM` routes a model here when `bedrock_models.yaml` gives it ``adapter: openai_chat`` —
-DeepSeek V3.2 (`deepseek.v3.2`) is the first, the M17 Commons digest model from Amendment 5. Mantle
-serves those models at ``/v1/chat/completions`` only: the Anthropic Messages path answers them 400
-("does not support the '/anthropic/v1/messages' API", measured 2026-10-30).
+DeepSeek V3.2 (`deepseek.v3.2`) is the first; no caller names it today (Amendment 5 keeps the M17
+digests on Opus 5.5), so this adapter is dormant capability. Mantle serves those models at
+``/v1/chat/completions`` only: the Anthropic Messages path answers them 400 ("does not support the
+'/anthropic/v1/messages' API", measured 2026-10-30).
 
 The translation keeps the `LLM` protocol's contract exactly as `BedrockLLM`'s Claude path does:
 

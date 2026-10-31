@@ -518,14 +518,20 @@ def test_the_map_refuses_a_non_claude_model_without_a_claude_backup(
 
 
 def test_the_roster_names_each_roles_model_and_each_is_routed() -> None:
-    """A model change is the roster's (config only): Amendment 5's three roles."""
+    """A model change is the roster's (config only): Amendment 5's three roles, all Opus 5.5.
+
+    Every role is a Claude model, so a desk on the Claude CLI (before the deploy, or rolled back)
+    runs the roster's own models and a Bedrock call that falls back is asked of the same model.
+    DeepSeek is routed but named by no role: a non-Claude role would need a CLI stand-in again.
+    """
     models = load_bedrock_models()
     for book in load_roster().primaries:
-        assert book.models.decision == "claude-opus-5-5"
-        assert book.models.digest == DEEPSEEK
-        assert book.models.research == "claude-opus-5-5"
-        assert models.route(book.models.digest).adapter is BedrockAdapter.OPENAI_CHAT
-        assert models.route(book.models.research).adapter is BedrockAdapter.ANTHROPIC_MESSAGES
+        roles = (book.models.decision, book.models.digest, book.models.research)
+        assert roles == ("claude-opus-5-5",) * 3
+        for name in roles:
+            assert models.route(name).adapter is BedrockAdapter.ANTHROPIC_MESSAGES
+            assert models.backup_model(name) == name
+        assert DEEPSEEK not in roles
 
 
 def test_the_digest_module_has_no_model_of_its_own() -> None:
@@ -581,21 +587,3 @@ def test_the_message_turns_keep_their_roles() -> None:
     turns = [Message(Role.USER, "a"), Message(Role.ASSISTANT, "b"), Message(Role.USER, "c")]
     bedrock(endpoint).complete(turns, model=DEEPSEEK)
     assert [m["role"] for m in endpoint.body["messages"]] == ["user", "assistant", "user"]
-
-
-def test_a_desk_off_bedrock_digests_on_the_claude_stand_in_never_on_deepseek() -> None:
-    """The CLI cannot run DeepSeek: a desk left on it (before the deploy, or rolled back) digests
-    on Sonnet 5.5, loudly; on Bedrock — or the stub — it is the roster's model."""
-    from backtest import fm_world
-
-    with capture_logs() as logs:
-        assert fm_world._digest_model(LlmProvider.CLAUDE_CLI, DEEPSEEK) == "claude-sonnet-5-5"
-    assert [e["event"] for e in logs] == ["fm_world.digest_model_stand_in"]
-    assert fm_world._digest_model(LlmProvider.ANTHROPIC, DEEPSEEK) == "claude-sonnet-5-5"
-    assert fm_world._digest_model(LlmProvider.BEDROCK, DEEPSEEK) == DEEPSEEK
-    assert fm_world._digest_model(LlmProvider.STUB, DEEPSEEK) == DEEPSEEK
-    with capture_logs() as logs:
-        assert (
-            fm_world._digest_model(LlmProvider.CLAUDE_CLI, "claude-opus-5-5") == "claude-opus-5-5"
-        )
-    assert logs == []

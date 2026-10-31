@@ -24,10 +24,11 @@
 # `output_config.effort` (`reasoning_effort` on `openai_chat`); Haiku 4.5 accepts neither, so it is
 # sent neither rather than a 400.
 #
-# Listed: the M17 roster's models, and the models the older analyst paths name (`claude-opus-5`,
-# the T1/T2 reviews' and the thesis and mapper engines' default; `claude-haiku-4-5`, triage), so
-# LLM_PROVIDER=bedrock serves every consumer in the application; and `deepseek-v3-2`, the M17
-# Commons digest model from Amendment 5 (roster `models.digest`).
+# Listed: the M17 roster's models (Amendment 5: `claude-opus-5-5` for every role), and the models
+# the older analyst paths name (`claude-opus-5`, the T1/T2 reviews' and the thesis and mapper
+# engines' default; `claude-haiku-4-5`, triage), so LLM_PROVIDER=bedrock serves every consumer in
+# the application; and `deepseek-v3-2`, routed and priced but named by no caller (the owner kept
+# digests on Opus after the 2026-10-30 faithfulness comparison) — capability, not configuration.
 
 version: 1
 

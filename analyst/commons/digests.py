@@ -38,7 +38,7 @@ never stored. The run records it as a failure with the reason.
 
 **Metered.** One call per uncached filing, through :mod:`analyst.llm` (so `StubLLM` drives the
 tests), on the model the caller names — the M17 roster's ``models.digest`` (Amendment 5:
-`deepseek-v3-2` on Bedrock, Sonnet 5.5 on the Claude CLI when Bedrock cannot serve it). There is no
+`claude-opus-5-5` on Bedrock, the same model on the Claude CLI when Bedrock cannot serve it). There is no
 default model here: a model change is the roster's, never a constant's. Each digest records the
 provider and the model that actually answered, the prompt digest and the token usage.
 

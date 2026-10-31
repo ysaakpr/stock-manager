@@ -16,9 +16,9 @@ not the primary.
 
 A model the backup cannot run — DeepSeek on Bedrock, behind the Claude CLI — is re-asked as the
 model the primary's configuration names for it (`backup_model`, from `bedrock_models.yaml`'s
-`cli_fallback_model`: DeepSeek V3.2's digests fall back to Sonnet 5.5). The response then names the
-backup's provider and model, so a digest records who actually wrote it. A Claude model maps to
-itself.
+`cli_fallback_model`: a DeepSeek V3.2 call falls back to Sonnet 5.5). The response then names the
+backup's provider and model, so a digest records who actually wrote it. A Claude model — every
+model the M17 roster names — maps to itself.
 
 There is no fallback from the fallback. If the backup fails too, its error is raised — chained to
 the primary's, so both are in the traceback — and the caller handles it as it would without a

@@ -806,30 +806,6 @@ def _llm(settings: Settings, provider: LlmProvider) -> LLM:
     return build_llm(settings, provider=provider, fallback=settings.m17_llm_fallback)
 
 
-def _digest_model(provider: LlmProvider, model: str) -> str:
-    """The digest model ``provider`` can run: the roster's, or its Claude stand-in off Bedrock.
-
-    The roster's digest model (Amendment 5: `deepseek-v3-2`) is served only by Bedrock. A desk on
-    the Claude CLI or the first-party API — before the deploy flips `M17_LLM_PROVIDER`, or after a
-    rollback — digests on the model `bedrock_models.yaml` names as its `cli_fallback_model`
-    (Sonnet 5.5), the same stand-in a Bedrock outage gets, with a warning; each digest records the
-    model that wrote it. The stub answers any name, so it keeps the roster's.
-    """
-    if provider in (LlmProvider.BEDROCK, LlmProvider.STUB):
-        return model
-    from analyst.llm.bedrock import load_bedrock_models
-
-    stand_in = load_bedrock_models().backup_model(model)
-    if stand_in != model:
-        _LOG.warning(
-            "fm_world.digest_model_stand_in",
-            provider=provider.value,
-            roster_model=model,
-            model=stand_in,
-        )
-    return stand_in
-
-
 #: The providers whose desk researches the web live: the Claude CLI with its own web tools, and
 #: Bedrock — through our own search layer (`analyst.websearch.BedrockWebFetcher`, Amendment 5 (d))
 #: unless ``M17_WEB_RESEARCH=claude_cli`` keeps it on the CLI. Every other provider gets none.
@@ -1088,7 +1064,7 @@ def _wire(
         snapshots=snapshots,
         universe=universe_parameters(roster),
         recorded_at=clock,
-        digest_model=_digest_model(provider, roster.primaries[0].models.digest),
+        digest_model=roster.primaries[0].models.digest,
         actions=functools.partial(StoreOverlayActions, settings),
     )
     stack.callback(builder.close)

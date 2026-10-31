@@ -43,7 +43,7 @@ books:
       flagged_surveillance: [ASM]
     models: &models                                  # per role (Amendment 5); keys of bedrock_models.yaml
       decision: claude-opus-5-5                      # manager rounds, Bedrock (CLI backup: itself)
-      digest: deepseek-v3-2                          # Commons digests, Bedrock (CLI backup: Sonnet 5.5)
+      digest: claude-opus-5-5                        # Commons digests, Bedrock (CLI backup: itself)
       research: claude-opus-5-5                      # web research tool loop, Bedrock + analyst.websearch
     prompt_path: analyst/fundmanager/prompts/manager.md
     rounds: &rounds
