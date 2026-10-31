@@ -759,7 +759,7 @@ What it is:
   digest models are unchanged, but the new key is in the hashed bytes), and the template and both
   schemas change with the two items above, so the **8 manager books'
   `mandate_hash` change** (controls, style books and bench unchanged; the full table is in
-  Amendment 5 (g)): `FM-POS-FUND-10L` `28f17e17202eeb0d`, `FM-POS-FUND-1CR` `d2c0ed83f6dddaf6`, `FM-POS-TREND-10L` `f09aafb9c609cc76`, `FM-POS-TREND-1CR` `c0bb3e527ac46292`, `FM-SWING-BRK-10L` `589644b378ba24ec`, `FM-SWING-BRK-1CR` `2086831f310a35ad`, `FM-SWING-EVT-10L` `9744c08eb7d8d862`, `FM-SWING-EVT-1CR` `c192a3b1c1c64497` (first 16 hex). S0 has not happened, so **the dry-run count restarts**
+  Amendment 5 (g)): `FM-POS-FUND-10L` `ada1808ce2d9e320`, `FM-POS-FUND-1CR` `7ed8b122c0b7e627`, `FM-POS-TREND-10L` `c364921fb5170211`, `FM-POS-TREND-1CR` `9c1bffac08d640c1`, `FM-SWING-BRK-10L` `6ac92f102e2b20a5`, `FM-SWING-BRK-1CR` `0b34b3ed01d90486`, `FM-SWING-EVT-10L` `816082f5b2d506f5`, `FM-SWING-EVT-1CR` `e5c08d2581a4c04d` (first 16 hex). S0 has not happened, so **the dry-run count restarts**
   with the first dry session under them: the session of Monday 2026-11-02, run at 22:00 IST.
 - **Transport:** Bedrock primary (`LLM_PROVIDER=bedrock`, `M17_LLM_PROVIDER=bedrock`), Claude CLI
   backup per call (`LLM_FALLBACK=claude_cli`, `M17_LLM_FALLBACK=claude_cli`). A call falls back only when Bedrock could not serve it —
