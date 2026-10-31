@@ -514,36 +514,42 @@ needing its own dated amendment before S0 (or a new manager id after):
 
 ### Amendment 5 (2026-10-30, before S0): Bedrock transport, per-role models, Claude CLI backup, pinned effort
 
-**DRAFT, awaiting owner confirmation.** The owner decided at 08:05 IST on 2026-10-30 (chat) to run
-the desk — and the whole application — on Amazon Bedrock with the Claude CLI subscription as the
-backup, at about 09:00 IST to pin effort per call type, and in the afternoon to run the Commons
-digests on DeepSeek V3.2 and web research on Opus 5.5 (both on Bedrock); this is that decision, as
-it touches the M17 test, written down for confirmation (HUMAN_DECISIONS D30). The owner confirms it
-after reading the DeepSeek-vs-Sonnet digest comparison. Until it is confirmed, `M17_LLM_PROVIDER`
-stays `claude_cli` and nothing below is in force. §2–§7 and Amendments 1–4 stand, except where this
-amendment adds to them. No prompt template, decision schema, rule, rail or contract changes; the
-manager's system prompt gains one sentence, the untrusted-content rule of (d); the digest and
-research models change (a).
+**DRAFT, awaiting owner confirmation before S0.** The owner decided at 08:05 IST on 2026-10-30
+(chat) to run the desk — and the whole application — on Amazon Bedrock with the Claude CLI
+subscription as the backup, at about 09:00 IST to pin effort per call type, in the afternoon to run
+web research on Opus 5.5 over our own search layer, and on 2026-10-31 (morning, chat), after the
+DeepSeek-vs-Sonnet digest comparison, to run the Commons digests on Opus 5.5 as well — every role
+on `claude-opus-5-5` — and to deploy the Bedrock path that day (`.env`: `M17_LLM_PROVIDER=bedrock`,
+`M17_WEB_RESEARCH=websearch`). This is that decision, as it touches the M17 test, written down for
+confirmation (HUMAN_DECISIONS D30); the dry sessions run under it from the deploy, and the owner
+confirms it before S0. §2–§7 and Amendments 1–4 stand, except where this amendment adds to them.
+No prompt template, decision schema, rule, rail or contract changes; the manager's system prompt
+gains one sentence, the untrusted-content rule of (d); the digest model changes and a research
+model is named (a).
 
-(a) **Models: one per role, set in the roster** (supersedes §2's and §9's "`claude-sonnet-5-5`
-digests" once confirmed). The roster's `models:` now names three roles, and a model change is a
-roster edit, never code — no module carries a default model of its own:
+(a) **Models: one per role, set in the roster, all Opus 5.5** (supersedes §2's and §9's
+"`claude-sonnet-5-5` digests" once confirmed). The roster's `models:` now names three roles, and a
+model change is a roster edit, never code — no module carries a default model of its own:
 
 | Role | Model (roster name) | On Bedrock | When Bedrock cannot serve it |
 |---|---|---|---|
 | `decision` — manager rounds | `claude-opus-5-5` | `anthropic.claude-opus-5-5`, Anthropic Messages | the same model on the Claude CLI |
-| `digest` — Commons filing digests | `deepseek-v3-2` | `deepseek.v3.2`, OpenAI-compatible Chat Completions (`analyst/llm/openai_chat.py`), strict `json_schema` output | `claude-sonnet-5-5` on the Claude CLI |
+| `digest` — Commons filing digests | `claude-opus-5-5` | `anthropic.claude-opus-5-5`, Anthropic Messages | the same model on the Claude CLI |
 | `research` — the web research loop of (d) | `claude-opus-5-5` | `anthropic.claude-opus-5-5`, client-side tool loop over our own search layer | the Claude CLI's own web fetcher, on `claude-opus-5-5` |
 
-Each model's Bedrock id, adapter, output ceiling and CLI stand-in live in
-`analyst/llm/bedrock_models.yaml` (`cli_fallback_model`: the CLI cannot run DeepSeek, so a DeepSeek
-call that falls back is asked of Sonnet 5.5, the digest model of §2). Every digest records the
-provider *and* the model that actually wrote it (`bedrock` / `deepseek.v3.2`, or `claude_cli` /
-`claude-sonnet-5-5` with the fallback reason), so the two authors can always be told apart. The
+Why Opus for the digests: §2's digest model, Sonnet 5.5, is not served on Bedrock's Mantle endpoint
+in us-east-1 (404; Opus 5.5 is, verified live 2026-10-30). The cheaper candidate, DeepSeek V3.2 on
+Bedrock, was compared on 30 filings against the stored Sonnet 5.5 digests of the same inputs: it
+misread one revenue figure (5,039.6 for 5,030.6 cr), left stated numbers out of `figures`, wrote
+empty headlines and repeated promotional claims as fact — to save about $8 a month — so the owner
+kept the digest on a Claude model. Each model's Bedrock id, adapter and output ceiling live in
+`analyst/llm/bedrock_models.yaml`; a Claude model falls back to itself on the CLI. Every digest
+records the provider *and* the model that actually wrote it (`bedrock` /
+`anthropic.claude-opus-5-5`, or `claude_cli` / `claude-opus-5-5` with the fallback reason). The
 digest's prompt, schema, validation (no opinion field, the opinion-term filter) and ceiling are
-unchanged; DeepSeek V3.2 is not a reasoning-controlled model on Bedrock (no effort is sent) and
-its output is capped at its 8K model-card limit. The comparison the owner reads before confirming:
-DeepSeek V3.2 against the stored Sonnet 5.5 digests of the same 30 filings, field by field.
+unchanged. **DeepSeek V3.2 stays as unused capability:** its route (`deepseek.v3.2`, the
+OpenAI-compatible Chat Completions adapter `analyst/llm/openai_chat.py`, Sonnet 5.5 as its CLI
+stand-in) and its price stay in the code and on the card, and no role of this test names it.
 
 (b) **Transport: Bedrock primary, Claude CLI backup, per call** (supersedes §2's "through the Claude
 CLI" and §9's "LLM path" row once confirmed). Every manager and digest call goes to Claude on Amazon
@@ -557,10 +563,11 @@ contract's one repair). The structured-output schema is the same one the CLI is 
 compiles its types, enums, patterns and required fields, and the numeric and length bounds it
 cannot compile are stated in the field descriptions and enforced, as now, by the parser.
 
-(c) **Effort: pinned per call type, on both paths** (owner, 2026-10-30 about 09:00 IST). Manager
-decision calls and the research loop (`claude-opus-5-5`) run at `high`; the Claude summarising and
-extraction calls (`claude-sonnet-5-5` — the digest fallback included) at `medium`. DeepSeek V3.2 is
-sent no effort: AWS documents no reasoning control for it on Bedrock.
+(c) **Effort: pinned per call type, on both paths** (owner, 2026-10-30 about 09:00 IST). The effort
+file places each model in a call type — Opus in `decision` (`high`), Sonnet and Haiku in `summary`
+(`medium`) — so with every role on `claude-opus-5-5` the manager decisions, the research loop **and
+the digests** all run at `high`. Digests at `medium` on Opus would need an effort argument on the
+`LLM` protocol, which this amendment does not add; **[OWNER]** whether that is wanted.
 The levels live in the versioned `analyst/llm/effort.yaml` and are sent as `output_config.effort`
 on Bedrock and as an explicit `--effort` on every Claude CLI call. Until now the desk set no effort:
 every M17 call inherited the owner's personal Claude CLI setting, which was `xhigh`
@@ -614,40 +621,47 @@ MTok in / out, in-region; the global cross-region rates are 10 % lower, and the 
 the AWS bill shows those; DeepSeek V3.2 $0.62 / $1.85 per MTok, in-region only, no cache discount —
 AWS Price List API, offer AmazonBedrock, us-east-1, read 2026-10-30). A CLI call stays a list-price estimate on the subscription. §9's
 "monthly cap deferred" now caps real money: **[OWNER]** whether to set a monthly Bedrock budget.
+Expected, before the first Bedrock session measures it: an Opus digest costs about **$0.015**
+(the comparison's 30 filings: mean 400 input tokens, mean 605 output tokens as Sonnet wrote them, at
+$4.40 / $22.00; thinking at `high` can add to the output). At the first 13 dry sessions' mean of 57
+new digests a session that is about $0.9 a session, about $18 a month; in results season (235 and
+607 new digests on the 2026-10-29 and 2026-10-30 sessions) about $3.5–9 a session. The manager
+calls of the 2026-10-30 dry session (16 calls, 3.59 M input and 0.17 M output tokens on the CLI,
+whose own overhead is in those counts) would cost about $20 at the Bedrock Opus rate — an upper
+bound for the decisions. Research is about 30–36 requests a session, each one Opus tool loop plus
+its vendor requests (inside the vendors' free tiers).
 
 (g) **Hashes and the dry run.** The transport and the effort are not inputs of `mandate_hash`
 (mandate, prompt template, schemas and system prompt, contract, mirror rule, Commons rules, rails).
 Two things in this amendment are: the untrusted-content rule of (d) — it is in the system prompt,
-which the schema bytes carry — and the roster's `models` (a), now with a `research` role and a new
-`digest` model. So **the eight manager books' `mandate_hash` changes** (the eight control books, four
-style books and the bench are unchanged: 8 of 21 changed, printed on 2026-10-30 from `main` at
-`8bafdf8`, from PR #147's first draft — the rule alone — and from this draft):
+which the schema bytes carry — and the roster's `models` (a), now with a `research` role and the
+digest on Opus. So **the eight manager books' `mandate_hash` changes** (the eight control books, four
+style books and the bench are unchanged: 8 of 21 changed; printed on 2026-10-31 from `main` at
+`8bafdf8`, from PR #147's DeepSeek draft and from this draft):
 
-| Book | `main` (in force) | First draft (rule only) | This draft (rule + models) |
+| Book | `main` (in force) | DeepSeek draft (never in force) | This draft (rule + Opus roles) |
 |---|---|---|---|
-| `FM-POS-FUND-10L` | `d52645654199b7b8` | `f2767a99fe228f23` | `48aad03e87ee5f4d` |
-| `FM-POS-FUND-1CR` | `64d273a2be8e6b27` | `ec87caa2475f89a4` | `0aaa86ab53a963e5` |
-| `FM-POS-TREND-10L` | `bcb545000b90aa18` | `29f43451d6e5945b` | `a80d3135beddabe6` |
-| `FM-POS-TREND-1CR` | `3ceff88b34ad5fef` | `f8a2dfe524f71e3f` | `63a5abf7e5a2fd43` |
-| `FM-SWING-BRK-10L` | `31f1f72ffcab8956` | `077166ed09e44141` | `92839a37a96bedc4` |
-| `FM-SWING-BRK-1CR` | `cc6a7067f4659d07` | `9136027709dfdf4c` | `073fca0b0cafe66c` |
-| `FM-SWING-EVT-10L` | `b7a1aad9e289c4a4` | `e5deef56a2137d61` | `5907665c2d63e460` |
-| `FM-SWING-EVT-1CR` | `0f0fbbd4e7bce247` | `87816e83ea7303f2` | `36be694b20b46268` |
+| `FM-POS-FUND-10L` | `d52645654199b7b8` | `48aad03e87ee5f4d` | `7d8f3605361b0a7a` |
+| `FM-POS-FUND-1CR` | `64d273a2be8e6b27` | `0aaa86ab53a963e5` | `e5391cb58be813db` |
+| `FM-POS-TREND-10L` | `bcb545000b90aa18` | `a80d3135beddabe6` | `f487a2dd3055d3a5` |
+| `FM-POS-TREND-1CR` | `3ceff88b34ad5fef` | `63a5abf7e5a2fd43` | `a0dd58218502aaca` |
+| `FM-SWING-BRK-10L` | `31f1f72ffcab8956` | `92839a37a96bedc4` | `f129ab0be3a21211` |
+| `FM-SWING-BRK-1CR` | `cc6a7067f4659d07` | `073fca0b0cafe66c` | `7473e4a2b7b86df0` |
+| `FM-SWING-EVT-10L` | `b7a1aad9e289c4a4` | `5907665c2d63e460` | `dc7b11ee6fde7d01` |
+| `FM-SWING-EVT-1CR` | `0f0fbbd4e7bce247` | `36be694b20b46268` | `09f12ac2e33d7350` |
 
-The first-draft hashes were never in force (PR #147 was not merged under them); the right-hand
-column is the one S0 starts from.
+The earlier draft hashes (the rule alone, then the rule with DeepSeek digests) were never in force:
+PR #147 was not merged under them. The right-hand column is the one S0 starts from.
 These are the first 16 hex digits; the full hashes are journaled at S0. Each changed hash is a new
 manager under §7, and S0 has not happened, so **M17.8's dry-run count restarts with the first dry
 session run under the new hashes**; the earlier dry sessions stay journaled under the old ones and
-do not count towards the five. Unlike the transport, the rule, the `<web_content>` wrapper and the
-roster's models are in the code from the merge of PR #147 whatever `M17_LLM_PROVIDER` says, so
-every session from then on — on the Claude CLI too — runs under the new hashes. The first counted
-dry session is the first one run after that merge under the deploy's `.env` switches
-(`M17_LLM_PROVIDER=bedrock`, `M17_WEB_RESEARCH=websearch`). The Claude CLI cannot run
-`deepseek-v3-2`, so a session between the merge and the switch — or after a rollback to the CLI —
-digests on Sonnet 5.5, the digest's CLI stand-in, with a warning, and does not count. **[OWNER]** whether at least one of the counted dry sessions must
-run on Bedrock with the new research path before S0, to measure its wiring and timing the way
-Amendments 2–4 required for theirs.
+do not count towards the five. The rule, the `<web_content>` wrapper and the roster's models are
+in the code from the merge of PR #147 whatever `M17_LLM_PROVIDER` says, and the deploy switches
+the `.env` (`M17_LLM_PROVIDER=bedrock`, `M17_WEB_RESEARCH=websearch`) the same day (2026-10-31), so
+**the first counted dry session is the one for Monday 2026-11-02, run that evening at 22:00 IST** —
+the first under the new hashes, and on Bedrock with the new research path, so the counted dry
+sessions measure that path's wiring and timing the way Amendments 2–4 required for theirs. A desk
+rolled back to the Claude CLI runs the same Opus models there and keeps the hashes.
 
 ## 9. Owner confirmation
 
@@ -659,5 +673,5 @@ Amendments 2–4 required for theirs.
 | Horizons (§2) | 1–4 weeks and 1–3 months | 2026-10-09 (owner, chat) |
 | Web search (§5) | allowed, through the Commons fetcher | 2026-10-09 (owner, chat) |
 | LLM path (§2) | Claude CLI subscription; monthly cap deferred | 2026-10-09 (owner, chat) |
-| LLM path and models (Amendment 5) | Bedrock primary, Claude CLI backup per call; per-role models in the roster — decisions `claude-opus-5-5`, digests `deepseek-v3-2` (Sonnet 5.5 on the CLI as fallback), research `claude-opus-5-5` over our own search layer (Brave/Tavily/Firecrawl, CLI backup); effort `high` for Opus, `medium` for Sonnet, none for DeepSeek; untrusted-content rule added, 8 manager hashes change, dry-run count restarts with the first run under them | DRAFT — owner decisions 2026-10-30 08:05 IST and afternoon (chat), awaiting confirmation after the digest comparison |
+| LLM path and models (Amendment 5) | Bedrock primary, Claude CLI backup per call; per-role models in the roster, all `claude-opus-5-5` — decisions, digests (Sonnet 5.5 is not on Bedrock; DeepSeek V3.2 compared less faithful and stays unused capability) and research over our own search layer (Brave/Tavily/Firecrawl, CLI backup); Opus on the CLI as the backup; effort `high` for Opus (digests included); untrusted-content rule added, 8 manager hashes change, dry-run count restarts with the first run under them (Mon 2026-11-02, 22:00 IST) | DRAFT — owner decisions 2026-10-30 08:05 IST and afternoon, 2026-10-31 morning (digests on Opus, deploy approved; chat); owner confirms before S0 |
 | S0 | the first session after the 5-session dry run (M17.8) passes; owner asked for as soon as it is ready (2026-10-09) | — |
