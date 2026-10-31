@@ -715,21 +715,21 @@ bytes (now three schemas: round 0's research, the follow-up, the decisions) and 
 change, so the 8 manager hashes change again (g).
 
 (i) **Prompt caching on Bedrock** (2026-10-31 afternoon; transport, not a hash input). Every
-manager call on Bedrock was sent uncached (78k–190k-token prompts, about $13–20 a night). Each call
-now marks cache breakpoints at the session's shared header and at the end of each research bundle
-(`Message.cache_breaks`, outside the prompt text and its digest; 5-minute TTL), so a research round
-reads the header and the bundles the round before it wrote, and a repair reads its original. A
-live check on 2026-10-31 confirmed Mantle (Opus 5.5) reads the cache and bedrock-runtime (Sonnet
-5.5) writes it; it also showed the structured-output schema is part of the cached prefix, so the
-final call (decision schema) cannot read the research rounds' entries and writes its own. Cache
-tokens are priced on the card at the Bedrock rates (Opus 5.5 in-region write $5.50, read $0.22 per
-MTok; AWS Price List, as (f)). The transport alone leaves every hash unchanged; for the header to be
-one prefix, the template's line "**Today:** session …, round N of at most M." moves unchanged from
-the header to the end of each round block, which is a template change and part of (g)'s
-right-hand column. Because the schema is in the cached prefix, research1 (follow-up schema) cannot
-read round 0's entry either; research2 and repairs read research1's. Replayed over the 2026-10-31
-rehearsal's calls, the expected saving is about a quarter to a third of the decision calls' input
-cost (measured on the first full run: see PR #149).
+manager call on Bedrock was sent uncached (78k–190k-token prompts, about $13–20 a night). Calls now
+carry cache breakpoints (`Message.cache_breaks`, outside the prompt text and its digest; 5-minute
+TTL) at the session's shared header and the end of each research bundle. A live check on 2026-10-31
+confirmed Mantle (Opus 5.5) reads the cache and bedrock-runtime (Sonnet 5.5) writes it, and showed
+that the structured-output schema is part of the cached prefix: a call in one schema never reads
+an entry written in another. A cache write costs 1.25x the input rate and pays only when a later
+call reads it within the TTL, so, after the first rehearsal with every call marked (Opus input
+about $5.05 against $6.04 uncached), only the research rounds mark breakpoints: research2 and a
+research repair read research1's prefix; round 0 and the final call, whose schemas no other call
+shares, are sent uncached. Replayed on that rehearsal's two complete managers, this saves about 28%
+of their decision-call input cost. Cache tokens are priced on the card at the Bedrock rates (Opus
+5.5 in-region write $5.50, read $0.22 per MTok; AWS Price List, as (f)). The transport alone leaves
+every hash unchanged; for the header to be one prefix, the template's line "**Today:** session …,
+round N of at most M." moves unchanged from the header to the end of each round block, which is a
+template change and part of (g)'s right-hand column.
 
 ## 9. Owner confirmation
 
