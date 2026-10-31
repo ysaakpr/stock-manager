@@ -3,6 +3,9 @@ M17 fund-manager prompt, v1 (2026-10-09; amended before S0 by pre-registration �
 and 3, 2026-10-10 and 2026-10-16). Frozen at S0: its bytes feed mandate_hash, so any edit after
 S0 is a new manager (pre-registration §7). Design rationale and evidence:
 ops/studies/m17-analyst-strategy-2026-10-09.md. M17.4 renders it.
+Amendment 5 (DRAFT, 2026-10-31): the "Today: session, round" line moved from the header to
+the end of each round block, so everything above the round blocks is one prefix every call of
+a session shares byte for byte (the Bedrock prompt cache reads it); the line is unchanged.
   {{...}}            a value injected by the runtime
   [[ROUND:x]] blocks only the block for the current round is rendered
   [[STYLE:x]] blocks only the block for the manager's style is rendered
@@ -21,8 +24,6 @@ You may hold at most {{max_positions}} positions, each at most {{max_position_pc
 any one sector at most {{max_sector_pct}}%. Cash may be anywhere from 0 to 100%; idle cash earns
 repo − 50 bp. You may buy any eligible stock, from small caps to large caps. Where to look is your
 decision.
-
-**Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 
 ## How you are judged (read this first; it should change how you act)
 
@@ -230,6 +231,8 @@ The cost of a round trip in each liquidity tier, from the shared cost model:
      haven't seen in a snapshot usually fails, and a failed request still uses up your budget.
 
 You will receive the dossiers and snapshots next round.
+
+**Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]
 
 [[ROUND:RESEARCH]]
@@ -255,6 +258,8 @@ bought and sold the same shares that session (`matched_deal_qty`, `volume_ex_mat
 
 If one more query would *change a decision*, request it, within the same limits. If not, return an
 empty request. Do not ask for more just to feel thorough.
+
+**Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]
 
 [[ROUND:FINAL]]
@@ -333,4 +338,6 @@ Write the memo **in this order**. The order matters: the probability comes *afte
 
 Return the decisions in the required schema. If you decide nothing today, return the `NO_ACTION`
 form with your one-line reason. That is a complete and acceptable answer.
+
+**Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]

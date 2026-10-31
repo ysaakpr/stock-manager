@@ -61,6 +61,8 @@ decision that failed the contract through.
 from __future__ import annotations
 
 import json
+import os
+import re
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -352,6 +354,12 @@ def _canonical(document: Any) -> str:
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+def _bundles_text(bundles: Sequence[ResearchBundle]) -> str:
+    """The bundles as a rendered prompt carries them: the template's blank-line collapse and the
+    journal mask applied, so the text can be found in the prompt it was rendered into."""
+    return _journal_text(re.sub(r"\n{3,}", "\n\n", render_bundles(bundles)))
+
+
 def _log_text(text: str) -> str:
     """A harness message as a log line carries it: secret-masked and bounded (never a prompt)."""
     masked = mask_secrets(text)
@@ -460,6 +468,7 @@ class _Session:
         #: Amendment 2 (c): this manager's listing order for the session's screens and shortlist.
         self.desk = DeskOrder(mandate.manager, session, tuple(mandate.starting_screens))
         self._static = self._static_values()
+        self._header: str | None = None
 
     # -- the journal ------------------------------------------------------------------------------
 
@@ -636,6 +645,56 @@ class _Session:
             self.template.render(style=self.mandate.style.value, round_key=round_key, values=values)
         )
 
+    def _session_header(self) -> str:
+        """The text every prompt of this session starts with: the longest common prefix of the
+        three rounds' renderings (each with a different round number), cut at a line end.
+
+        Computed once. It is what a cache breakpoint marks first — the session's largest stable
+        prefix (mandate, market sheet, holdings, screens, shortlist, base rates, cost hurdles).
+        """
+        if self._header is None:
+            renders = [
+                _journal_text(
+                    self.template.render(
+                        style=self.mandate.style.value,
+                        round_key=key,
+                        values={
+                            **self._static,
+                            "round": str(number),
+                            "research_bundles": render_bundles(()),
+                        },
+                    )
+                )
+                for number, key in enumerate((ROUND_ZERO, ROUND_RESEARCH, ROUND_FINAL), start=1)
+            ]
+            common = os.path.commonprefix(renders)
+            self._header = common[: common.rfind("\n") + 1]
+        return self._header
+
+    def _cache_breaks(self, prompt: str) -> tuple[int, ...]:
+        """Where ``prompt``'s stable prefixes end, for the provider's prompt cache (transport only:
+        `analyst.llm.Message.cache_breaks` never changes the text or the prompt digest).
+
+        The session header, then the end of each research bundle as `render_bundles` lays them out
+        in ``prompt`` — so round k+1, which shows the same bundles and one more, reads what round k
+        wrote, and a repair (the same prompt plus its suffix) reads nearly all of its original.
+        A prefix that is not found where expected is simply not marked: a missed mark costs a
+        cache miss, never a different question.
+        """
+        breaks: list[int] = []
+        header = self._session_header()
+        if header and prompt.startswith(header):
+            breaks.append(len(header))
+        if self.bundles:
+            full = _bundles_text(self.bundles)
+            at = prompt.find(full, breaks[-1] if breaks else 0)
+            if at >= 0:
+                for k in range(1, len(self.bundles) + 1):
+                    shown = _bundles_text(self.bundles[:k])
+                    if full.startswith(shown):
+                        breaks.append(at + len(shown))
+        return tuple(b for b in sorted(set(breaks)) if 0 < b < len(prompt))
+
     # -- one call ---------------------------------------------------------------------------------
 
     def _complete(
@@ -662,7 +721,7 @@ class _Session:
                     f"{self.limits.max_calls}-call budget; the round loop is wrong"
                 )
         evidence = self._evidence(prompt)
-        messages = [Message(Role.USER, prompt)]
+        messages = [Message(Role.USER, prompt, cache_breaks=self._cache_breaks(prompt))]
         model = self.mandate.models.decision
         try:
             response = self.llm.complete(messages, model=model, tools=(tool,), system=SYSTEM_PROMPT)

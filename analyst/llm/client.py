@@ -172,14 +172,31 @@ class StopReason(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Message:
-    """One conversational turn. Text only — this system asks questions, it does not send images."""
+    """One conversational turn. Text only — this system asks questions, it does not send images.
+
+    ``cache_breaks`` are character offsets into ``content`` where a stable prefix ends — text a
+    later call will send again unchanged (a session's shared header, the research shown so far).
+    A provider with prompt caching may place a cache breakpoint at each (`analyst.llm.bedrock`
+    does); every other provider ignores them. They are transport only: never part of the text,
+    the wire shape `as_dict` gives, or the prompt digest — the same question with or without them
+    is the same question.
+    """
 
     role: Role
     content: str
+    cache_breaks: tuple[int, ...] = field(default=(), compare=False)
 
     def __post_init__(self) -> None:
         if not self.content.strip():
             raise ValueError(f"a {self.role.value} message must not be blank")
+        breaks = self.cache_breaks
+        if any(not 0 < b < len(self.content) for b in breaks) or list(breaks) != sorted(
+            set(breaks)
+        ):
+            raise ValueError(
+                "cache_breaks must be strictly increasing offsets inside the content, "
+                f"got {breaks!r} for {len(self.content)} characters"
+            )
 
     def as_dict(self) -> dict[str, str]:
         """The wire shape, and the shape the prompt digest is computed over."""

@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterator, Mapping
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +32,7 @@ import yaml
 from pydantic import SecretStr
 from structlog.testing import capture_logs
 
+from accounting import TokenPricer, load_price_card
 from analyst.llm import (
     BEDROCK_PROVIDER,
     BedrockLLM,
@@ -44,8 +47,10 @@ from analyst.llm import (
     ToolSpec,
     UnavailableReason,
     claude_cli_env,
+    prompt_digest,
 )
 from analyst.llm.bedrock import (
+    MAX_CACHE_BREAKPOINTS,
     BedrockAdapter,
     BedrockModelMap,
     load_bedrock_models,
@@ -890,3 +895,86 @@ def test_a_different_served_model_is_logged() -> None:
     assert response.model == "anthropic.claude-opus-5-5"
     [event] = [e for e in logs if e["event"] == "llm.bedrock.served_other_model"]
     assert event["served_model"] == "claude-opus-9"
+
+
+# ── prompt caching ───────────────────────────────────────────────────────────────────────────────
+
+
+_CACHED_PROMPT = "HEADER " * 50 + "\n" + "BUNDLE0 " * 40 + "\n" + "BUNDLE1 " * 40 + "\nTASK"
+
+
+def _breaks(text: str, *markers: str) -> tuple[int, ...]:
+    return tuple(text.index(m) for m in markers)
+
+
+@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5"])
+def test_cache_breaks_become_text_blocks_with_a_breakpoint_at_each_and_the_same_text(
+    model: str,
+) -> None:
+    """Both adapters (Mantle for Opus, bedrock-runtime for Sonnet) send a message with breaks as
+    consecutive text blocks cut exactly there, every block but the tail marked ephemeral; joined,
+    they are the message's text byte for byte."""
+    breaks = _breaks(_CACHED_PROMPT, "BUNDLE0", "BUNDLE1", "TASK")
+    endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER), model=model)))
+    bedrock(endpoint).complete(
+        [Message(Role.USER, _CACHED_PROMPT, cache_breaks=breaks)], model=model, tools=(VERDICT,)
+    )
+    (message,) = endpoint.body["messages"]
+    blocks = message["content"]
+    assert "".join(b["text"] for b in blocks) == _CACHED_PROMPT
+    assert [len("".join(b["text"] for b in blocks[: i + 1])) for i in range(3)] == list(breaks)
+    assert [b.get("cache_control") for b in blocks] == [{"type": "ephemeral"}] * 3 + [None]
+
+
+def test_more_breaks_than_the_cap_keep_the_first_and_the_latest() -> None:
+    """At most four breakpoints a request: the header's (the first) and the three latest."""
+    text = "".join(f"PART{i} " * 30 + "\n" for i in range(7))
+    breaks = _breaks(text, *(f"PART{i}" for i in range(1, 7)))
+    endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER))))
+    bedrock(endpoint).complete(
+        [Message(Role.USER, text, cache_breaks=breaks)], model="claude-opus-5-5", tools=(VERDICT,)
+    )
+    blocks = endpoint.body["messages"][0]["content"]
+    marked = [b for b in blocks if "cache_control" in b]
+    assert len(marked) == MAX_CACHE_BREAKPOINTS == 4
+    assert blocks[0]["text"].startswith("PART0") and blocks[1]["text"].startswith("PART1")
+    assert blocks[-1]["text"].startswith("PART6") and "cache_control" not in blocks[-1]
+    assert "".join(b["text"] for b in blocks) == text
+
+
+def test_a_message_without_breaks_is_sent_as_plain_text_and_breaks_never_touch_the_digest() -> None:
+    endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER))))
+    bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+    assert endpoint.body["messages"] == [{"role": "user", "content": "Is the thesis intact?"}]
+    plain = Message(Role.USER, _CACHED_PROMPT)
+    marked = Message(Role.USER, _CACHED_PROMPT, cache_breaks=_breaks(_CACHED_PROMPT, "TASK"))
+    assert marked.as_dict() == plain.as_dict()
+    assert prompt_digest([marked], model="m") == prompt_digest([plain], model="m")
+
+
+@pytest.mark.parametrize("breaks", [(0,), (5, 5), (9, 3), (10_000,)])
+def test_a_break_outside_the_text_or_out_of_order_is_refused(breaks: tuple[int, ...]) -> None:
+    with pytest.raises(ValueError, match="cache_breaks"):
+        Message(Role.USER, "some prompt text", cache_breaks=breaks)
+
+
+def test_cache_reads_and_writes_are_mapped_and_priced_at_the_bedrock_cache_rates() -> None:
+    """The SDK's cache buckets land in `Usage`, and the card prices them at Bedrock's in-region
+    rates (AWS Price List, us-east-1): Opus 5.5 write $5.50 and read $0.22 per MTok."""
+    endpoint = Endpoint(
+        streamed(message_stream(json.dumps(ANSWER), cache_write=200_000, cache_read=100_000))
+    )
+    response = bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+    assert response.usage.cache_write_tokens == 200_000
+    assert response.usage.cache_read_tokens == 100_000
+    card = load_price_card()
+    rates = card.schedule_for(date(2026, 11, 2)).price_for("anthropic.claude-opus-5-5")
+    assert (rates.cache_write, rates.cache_read) == (Decimal("5.50"), Decimal("0.22"))
+    priced = TokenPricer(card).price(response, on=date(2026, 11, 2), purpose="m17_manager")
+    expected = (
+        Decimal(response.usage.input_tokens) * Decimal("4.40")
+        + Decimal(response.usage.output_tokens) * Decimal("22.00")
+        + Decimal(200_000) * Decimal("5.50")
+        + Decimal(100_000) * Decimal("0.22")
+    ) / Decimal(1_000_000)
+    assert priced.cost_usd == expected

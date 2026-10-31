@@ -347,6 +347,7 @@ class ScriptedStub:
         self.replies = list(replies)
         self.prompts: list[str] = []
         self.tools: list[str] = []
+        self.breaks: list[tuple[int, ...]] = []
 
     def complete(
         self,
@@ -359,6 +360,7 @@ class ScriptedStub:
     ) -> LLMResponse:
         self.prompts.append(messages[-1].content)
         self.tools.append(tools[0].name)
+        self.breaks.append(messages[-1].cache_breaks)
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -655,6 +657,52 @@ def test_research_rounds_stop_at_two_so_a_session_never_exceeds_four_calls(
     assert [e.payload["round"] for e in journal.events(RESEARCH_EVENT)] == ["0", "1", "2"]
     assert "## Your task this round: decide" in llm.prompts[-1]
     assert "Exchange filing text about q three" in llm.prompts[-1]
+
+
+def test_every_call_marks_the_session_header_and_each_research_bundle_for_the_prompt_cache(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    """Transport only (`Message.cache_breaks`): one header shared byte for byte by every call and
+    reaching all the way to the round's task, so the mandate, market sheet, holdings, screens,
+    shortlist, base rates and cost hurdles are read from the cache after the first call; then
+    each research bundle's end, so a round reads what the round before it wrote."""
+    result, _, llm = _run(
+        world,
+        tmp_path,
+        [
+            research([LEADER], ["leader ltd order book q2 2026"]),
+            research([BREAKOUT], ["breakout ltd board meeting results date"]),
+            research(),
+            final(hold(), buy(atr_pct[LEADER]), passed()),
+        ],
+    )
+    assert result.status is SessionStatus.DECIDED
+    prompts, breaks = llm.prompts, llm.breaks
+    head = breaks[0][0]
+    header = prompts[0][:head]
+    assert all(b[0] == head and p.startswith(header) for p, b in zip(prompts, breaks, strict=True))
+    # The header is the whole stable context: the next line is the round's task, in every round.
+    assert all(p[head:].startswith("## Your task this round") for p in prompts)
+    assert "### Research fulfilled" not in header
+    # round 0: only the header; research1: + bundle 0; research2: + bundles 0 and 1.
+    assert [len(b) for b in breaks[:3]] == [1, 2, 3]
+    r1_end = breaks[1][-1]
+    assert r1_end in breaks[2] and prompts[2][:r1_end] == prompts[1][:r1_end]
+    assert prompts[1][:r1_end].endswith(prompts[2][breaks[2][1] - 40 : breaks[2][1]])
+    # The final round marks the header and both bundles.
+    assert len(breaks[3]) == 3
+
+
+def test_a_schema_repair_reuses_its_originals_cache_breaks(world: World, tmp_path: Path) -> None:
+    result, _, llm = _run(
+        world,
+        tmp_path,
+        [research([LEADER], ["q one"]), research(), final(hold(action="SELL")), final(hold())],
+    )
+    assert result.repairs == 1
+    original, repair = llm.prompts[-2], llm.prompts[-1]
+    assert repair.startswith(original) and llm.breaks[-1] == llm.breaks[-2]
+    assert len(llm.breaks[-1]) == 2
 
 
 def test_an_empty_round_zero_goes_straight_to_the_final_call(world: World, tmp_path: Path) -> None:
