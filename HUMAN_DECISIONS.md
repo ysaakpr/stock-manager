@@ -744,7 +744,9 @@ What it is:
   `maxLength`, so the limit reached the model only as an opaque `{maxLength: 500}` description, and
   the research round's per-name analysis landed in the notes. The limits, the one repair per session
   and exact enforcement are unchanged and nothing is truncated; the schema descriptions and each
-  round's instructions now state the limits in words, and a refusal logs the field, rule and length.
+  round's instructions now state the limits in words, a refusal logs the field, rule and length,
+  and — since a 539-character note still came back after that — the research rounds answer with a
+  follow-up schema that has no holdings triage (triage is round 0's; nothing reads a later one).
 - **Prompt caching on Bedrock (Amendment 5 (i)):** cache breakpoints at the session header and each
   research bundle (transport, not hashed; about a third off the decision calls' input cost). The
   template's "Today: session, round" line moves unchanged to the end of each round block so the
@@ -754,7 +756,7 @@ What it is:
   digest models are unchanged, but the new key is in the hashed bytes), and the template and both
   schemas change with the two items above, so the **8 manager books'
   `mandate_hash` change** (controls, style books and bench unchanged; the full table is in
-  Amendment 5 (g)): `FM-POS-FUND-10L` `89941098fd7a6cc4`, `FM-POS-FUND-1CR` `bdbe11c6b0b3b461`, `FM-POS-TREND-10L` `bf031e69c2d8d161`, `FM-POS-TREND-1CR` `af88b91df11c2f3b`, `FM-SWING-BRK-10L` `fc1e47caa876121d`, `FM-SWING-BRK-1CR` `a11ac47f6783e24d`, `FM-SWING-EVT-10L` `0f0f35ee5b6ede5e`, `FM-SWING-EVT-1CR` `8b96e52cfbfc09c2` (first 16 hex). S0 has not happened, so **the dry-run count restarts**
+  Amendment 5 (g)): `FM-POS-FUND-10L` `b12d62061ea7fa06`, `FM-POS-FUND-1CR` `c5ebeca91f0f9b41`, `FM-POS-TREND-10L` `bf4eb8d09edfeca4`, `FM-POS-TREND-1CR` `5ae85cf24ac370d5`, `FM-SWING-BRK-10L` `51a41e238fb85b5f`, `FM-SWING-BRK-1CR` `7535915c22ef9504`, `FM-SWING-EVT-10L` `c4aa41339380f6fd`, `FM-SWING-EVT-1CR` `7f13fd21d68220fb` (first 16 hex). S0 has not happened, so **the dry-run count restarts**
   with the first dry session under them: the session of Monday 2026-11-02, run at 22:00 IST.
 - **Transport:** Bedrock primary (`LLM_PROVIDER=bedrock`, `M17_LLM_PROVIDER=bedrock`), Claude CLI
   backup per call (`LLM_FALLBACK=claude_cli`, `M17_LLM_FALLBACK=claude_cli`). A call falls back only when Bedrock could not serve it —

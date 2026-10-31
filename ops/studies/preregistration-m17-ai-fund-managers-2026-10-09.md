@@ -651,20 +651,21 @@ the hashes come out exactly as the rule-only column below). So **the eight manag
 `mandate_hash` changes** (the eight control books, four style books and the bench are unchanged:
 8 of 21 changed; printed on 2026-10-31):
 
-| Book | `main` 8bafdf8 (in force) | Rule only (first draft) | DeepSeek digests (PR #147 at b4f7a8b) | This draft (rule + `research`) | This draft, 2026-10-31 PM (+ (h), (i)) |
-|---|---|---|---|---|---|
-| `FM-POS-FUND-10L` | `d52645654199b7b8` | `f2767a99fe228f23` | `48aad03e87ee5f4d` | `431ff6ce9c259d9b` | `89941098fd7a6cc4` |
-| `FM-POS-FUND-1CR` | `64d273a2be8e6b27` | `ec87caa2475f89a4` | `0aaa86ab53a963e5` | `98b728dc788fec28` | `bdbe11c6b0b3b461` |
-| `FM-POS-TREND-10L` | `bcb545000b90aa18` | `29f43451d6e5945b` | `a80d3135beddabe6` | `88af5bb2886ad53f` | `bf031e69c2d8d161` |
-| `FM-POS-TREND-1CR` | `3ceff88b34ad5fef` | `f8a2dfe524f71e3f` | `63a5abf7e5a2fd43` | `29c9bb823d8025f4` | `af88b91df11c2f3b` |
-| `FM-SWING-BRK-10L` | `31f1f72ffcab8956` | `077166ed09e44141` | `92839a37a96bedc4` | `752176d43187dde9` | `fc1e47caa876121d` |
-| `FM-SWING-BRK-1CR` | `cc6a7067f4659d07` | `9136027709dfdf4c` | `073fca0b0cafe66c` | `99be11b9b843daa8` | `a11ac47f6783e24d` |
-| `FM-SWING-EVT-10L` | `b7a1aad9e289c4a4` | `e5deef56a2137d61` | `5907665c2d63e460` | `5f412d204d0fcbce` | `0f0f35ee5b6ede5e` |
-| `FM-SWING-EVT-1CR` | `0f0fbbd4e7bce247` | `87816e83ea7303f2` | `36be694b20b46268` | `5e50cc349aa3a4ee` | `8b96e52cfbfc09c2` |
+| Book | `main` 8bafdf8 (in force) | Rule only (first draft) | DeepSeek digests (PR #147 at b4f7a8b) | PR #147 (rule + `research`) | PR #148 (+ (h) limits stated, (i)) | This draft (+ (h) follow-up schema) |
+|---|---|---|---|---|---|---|
+| `FM-POS-FUND-10L` | `d52645654199b7b8` | `f2767a99fe228f23` | `48aad03e87ee5f4d` | `431ff6ce9c259d9b` | `89941098fd7a6cc4` | `b12d62061ea7fa06` |
+| `FM-POS-FUND-1CR` | `64d273a2be8e6b27` | `ec87caa2475f89a4` | `0aaa86ab53a963e5` | `98b728dc788fec28` | `bdbe11c6b0b3b461` | `c5ebeca91f0f9b41` |
+| `FM-POS-TREND-10L` | `bcb545000b90aa18` | `29f43451d6e5945b` | `a80d3135beddabe6` | `88af5bb2886ad53f` | `bf031e69c2d8d161` | `bf4eb8d09edfeca4` |
+| `FM-POS-TREND-1CR` | `3ceff88b34ad5fef` | `f8a2dfe524f71e3f` | `63a5abf7e5a2fd43` | `29c9bb823d8025f4` | `af88b91df11c2f3b` | `5ae85cf24ac370d5` |
+| `FM-SWING-BRK-10L` | `31f1f72ffcab8956` | `077166ed09e44141` | `92839a37a96bedc4` | `752176d43187dde9` | `fc1e47caa876121d` | `51a41e238fb85b5f` |
+| `FM-SWING-BRK-1CR` | `cc6a7067f4659d07` | `9136027709dfdf4c` | `073fca0b0cafe66c` | `99be11b9b843daa8` | `a11ac47f6783e24d` | `7535915c22ef9504` |
+| `FM-SWING-EVT-10L` | `b7a1aad9e289c4a4` | `e5deef56a2137d61` | `5907665c2d63e460` | `5f412d204d0fcbce` | `0f0f35ee5b6ede5e` | `c4aa41339380f6fd` |
+| `FM-SWING-EVT-1CR` | `0f0fbbd4e7bce247` | `87816e83ea7303f2` | `36be694b20b46268` | `5e50cc349aa3a4ee` | `8b96e52cfbfc09c2` | `7f13fd21d68220fb` |
 
 None of the first three draft columns was ever in force: PR #147 was not merged under them. The
-"rule + `research`" column was deployed with PR #147 on 2026-10-31 (11:25 IST) but no counted dry
-session ran under it; the right-hand column adds (h) and (i), and is the one S0 starts from.
+"PR #147" column was deployed with PR #147 on 2026-10-31 (11:25 IST) and the "PR #148"
+column at 13:25 IST, and no counted dry session ran under either; the right-hand column adds the
+follow-up schema of (h), and is the one S0 starts from.
 These are the first 16 hex digits; the full hashes are journaled at S0. Each changed hash is a new
 manager under §7, and S0 has not happened, so **M17.8's dry-run count restarts with the first dry
 session run under the new hashes**; the earlier dry sessions stay journaled under the old ones and
@@ -689,14 +690,21 @@ the notes, and the limit reached the model only as an opaque `{maxLength: 500, m
 the field descriptions, because Bedrock cannot compile `maxLength` — the CLI had sent it as a real
 schema keyword. Nothing a manager may do changes: the limits (500 and 2,000 characters), the one
 schema repair per session and the parser's exact enforcement stand, and nothing is truncated (a cut
-note or claim would change what was asked). What changes is that the limits are stated: every
-bounded text field's schema description says, in words, "at most 500 characters (about 80 words);
-a longer value is refused" (2,000 for the long fields), and each round's instructions state the
-limits, the research round adding that the working belongs in the model's thinking and the request
-carries only its conclusions. A refused answer now names each violated field, rule, bound and
+note or claim would change what was asked). Two things change. First (PR #148), the limits are
+stated: every bounded text field's schema description says, in words, "at most 500 characters
+(about 80 words); a longer value is refused" (2,000 for the long fields), and each round's
+instructions state the limits, the research round adding that the working belongs in the model's
+thinking and the request carries only its conclusions. That was not enough: the first rehearsal
+after its deploy (2026-10-31, 13:26 IST) had FM-SWING-BRK-10L's research1 write a holding's note of
+539 characters. So, second, **the research rounds answer with a follow-up schema that has no
+holdings triage** — requests and queries only, with exactly round 0's shape and caps. Triage is
+round 0's step (§4 step 3), the research-round instructions never asked for it and nothing reads a
+later one; every overrun measured was a holding's note in a research round. The grammar now makes
+that field impossible to write instead of asking the model to keep it short. A refused answer now names each violated field, rule, bound and
 length in the log (`fm.call_malformed`, the repair's `fm.call`, `fm.manager_error`) and in the
-`MANAGER_ERROR` payload, and the repair prompt tells the model the length it wrote. The schema and
-template bytes change, so the 8 manager hashes change again (g).
+`MANAGER_ERROR` payload, and the repair prompt tells the model the length it wrote. The schema
+bytes (now three schemas: round 0's research, the follow-up, the decisions) and the template bytes
+change, so the 8 manager hashes change again (g).
 
 (i) **Prompt caching on Bedrock** (2026-10-31 afternoon; transport, not a hash input). Every
 manager call on Bedrock was sent uncached (78k–190k-token prompts, about $13–20 a night). Each call
@@ -710,8 +718,10 @@ tokens are priced on the card at the Bedrock rates (Opus 5.5 in-region write $5.
 MTok; AWS Price List, as (f)). The transport alone leaves every hash unchanged; for the header to be
 one prefix, the template's line "**Today:** session …, round N of at most M." moves unchanged from
 the header to the end of each round block, which is a template change and part of (g)'s
-right-hand column. Replayed over the 2026-10-31 rehearsal's calls, the expected saving is about a
-third of the decision calls' input cost (about $3 of $9.40 that night).
+right-hand column. Because the schema is in the cached prefix, research1 (follow-up schema) cannot
+read round 0's entry either; research2 and repairs read research1's. Replayed over the 2026-10-31
+rehearsal's calls, the expected saving is about a quarter to a third of the decision calls' input
+cost (measured on the first full run: see PR #149).
 
 ## 9. Owner confirmation
 
