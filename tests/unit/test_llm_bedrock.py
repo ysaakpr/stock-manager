@@ -868,6 +868,7 @@ def test_the_startup_wiring_line_says_set_or_not_set_never_the_key() -> None:
     )
     wiring = settings.llm_wiring()
     assert wiring["llm_provider"] == "bedrock" and wiring["llm_fallback"] == "claude_cli"
+    assert wiring["m17_web_research"] == "claude_cli"  # the default; the deploy sets websearch
     assert wiring["bedrock_key_set"] is True and wiring["bedrock_region_set"] is False
     assert FAKE_KEY not in json.dumps(wiring)
 

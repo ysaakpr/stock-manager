@@ -581,6 +581,7 @@ class Settings(BaseSettings):
             "m17_llm_fallback": None
             if self.m17_llm_fallback is None
             else self.m17_llm_fallback.value,
+            "m17_web_research": self.m17_web_research.value,
             "bedrock_key_set": self.aws_bearer_token_bedrock is not None,
             "bedrock_region_set": self.bedrock_region is not None,
             "bedrock_max_tokens": self.bedrock_max_tokens,
