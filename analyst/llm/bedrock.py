@@ -145,6 +145,13 @@ _UNCOMPILED_KEYWORDS: Final[tuple[str, ...]] = (
     "maxProperties",
 )
 
+#: The API's cap on ``cache_control`` breakpoints in one request.
+MAX_CACHE_BREAKPOINTS: Final[int] = 4
+#: The breakpoint every cached prefix is written with: the default 5-minute TTL, which each read
+#: refreshes. (A manager's calls are a few minutes apart; the 1-hour TTL writes at 2x the input
+#: rate where the 5-minute one writes at 1.25x, and the price card carries the 5-minute rate.)
+_CACHE_CONTROL: Final[dict[str, str]] = {"type": "ephemeral"}
+
 #: Error-event types a stream can end with that are the provider's fault (an HTTP 200 whose body
 #: then failed), mapped to the same reasons as their status-code twins.
 _STREAM_ERROR_REASONS: Final[dict[str, UnavailableReason]] = {
@@ -1008,10 +1015,36 @@ def _served(raw: SdkMessage, route: BedrockModelRoute) -> str:
     return raw.model if raw.model and raw.model.strip() else route.bedrock_id
 
 
+def _cache_marks(breaks: Sequence[int]) -> tuple[int, ...]:
+    """The breaks that get a cache breakpoint: the first (the longest-lived prefix — a session's
+    shared header) and the last ones, `MAX_CACHE_BREAKPOINTS` in all, the API's cap per request."""
+    if len(breaks) <= MAX_CACHE_BREAKPOINTS:
+        return tuple(breaks)
+    return (breaks[0], *breaks[-(MAX_CACHE_BREAKPOINTS - 1) :])
+
+
 def _message_param(message: Message) -> MessageParam:
-    """One turn in the SDK's wire shape."""
+    """One turn in the SDK's wire shape.
+
+    A message with ``cache_breaks`` goes as consecutive text blocks cut at the marked breaks
+    (`_cache_marks`), each block but the last carrying an ephemeral (5-minute) ``cache_control``:
+    the same text, so the same question, with a cache entry at every stable prefix. A break that
+    would leave a whitespace-only block is skipped (the API refuses blank text blocks).
+    """
     role: Literal["user", "assistant"] = "user" if message.role is Role.USER else "assistant"
-    return MessageParam(role=role, content=message.content)
+    marks = _cache_marks(message.cache_breaks)
+    if not marks:
+        return MessageParam(role=role, content=message.content)
+    text = message.content
+    blocks: list[dict[str, Any]] = []
+    start = 0
+    for end in marks:
+        if not text[start:end].strip() or not text[end:].strip():
+            continue
+        blocks.append({"type": "text", "text": text[start:end], "cache_control": _CACHE_CONTROL})
+        start = end
+    blocks.append({"type": "text", "text": text[start:]})
+    return MessageParam(role=role, content=cast("Any", blocks))
 
 
 def _arguments(value: object) -> dict[str, Any]:

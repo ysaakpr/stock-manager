@@ -3,6 +3,11 @@ M17 fund-manager prompt, v1 (2026-10-09; amended before S0 by pre-registration �
 and 3, 2026-10-10 and 2026-10-16). Frozen at S0: its bytes feed mandate_hash, so any edit after
 S0 is a new manager (pre-registration §7). Design rationale and evidence:
 ops/studies/m17-analyst-strategy-2026-10-09.md. M17.4 renders it.
+Amendment 5 (DRAFT, 2026-10-31): the "Today: session, round" line moved from the header to
+the end of each round block, so everything above the round blocks is one prefix every call of
+a session shares byte for byte (the Bedrock prompt cache reads it); the line is unchanged. Each
+round now states the text-length limits the schemas enforce ({{max_short_chars}} and
+{{max_text_chars}} come from `schemas`), which Bedrock's structured output cannot compile.
   {{...}}            a value injected by the runtime
   [[ROUND:x]] blocks only the block for the current round is rendered
   [[STYLE:x]] blocks only the block for the manager's style is rendered
@@ -21,8 +26,6 @@ You may hold at most {{max_positions}} positions, each at most {{max_position_pc
 any one sector at most {{max_sector_pct}}%. Cash may be anywhere from 0 to 100%; idle cash earns
 repo − 50 bp. You may buy any eligible stock, from small caps to large caps. Where to look is your
 decision.
-
-**Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 
 ## How you are judged (read this first; it should change how you act)
 
@@ -229,7 +232,12 @@ The cost of a round trip in each liquidity tier, from the shared cost model:
      anonymous forums are not evidence. Ask as **search queries**. Don't guess URLs: a URL you
      haven't seen in a snapshot usually fails, and a failed request still uses up your budget.
 
+Every text you return — each holding's `note`, each `claim` and `kill_test`, each query's `target`
+and `purpose` — is at most {{max_short_chars}} characters; a longer one is refused.
+
 You will receive the dossiers and snapshots next round.
+
+**Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]
 
 [[ROUND:RESEARCH]]
@@ -253,8 +261,14 @@ bought and sold the same shares that session (`matched_deal_qty`, `volume_ex_mat
 2. What that implies economically.
 3. What the price already reflects.
 
+Do this working in your thinking. The request you return carries only its conclusions: every text in
+it — each holding's `note`, each `claim` and `kill_test`, each query's `target` and `purpose` — is at
+most {{max_short_chars}} characters, and a longer one is refused (the session has one repair).
+
 If one more query would *change a decision*, request it, within the same limits. If not, return an
 empty request. Do not ask for more just to feel thorough.
+
+**Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]
 
 [[ROUND:FINAL]]
@@ -331,6 +345,14 @@ Write the memo **in this order**. The order matters: the probability comes *afte
 - If you are buying more than two or three names today, ask yourself whether you have that many
   genuine edges, or whether you are just busy.
 
+**Length limits.** `rationale`, `thesis`, `already_priced_in` and `what_changed.text` are at most
+{{max_text_chars}} characters each; every other text — `catalyst`, each `invalidation` and
+`premortem` line, each adjustment's `reason` and `citation`, each scenario's `description`, each
+`evidence_refs` entry, `base_rate_cell.cell_id` and `no_action_reason` — at most {{max_short_chars}}.
+A longer value is refused.
+
 Return the decisions in the required schema. If you decide nothing today, return the `NO_ACTION`
 form with your one-line reason. That is a complete and acceptable answer.
+
+**Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]

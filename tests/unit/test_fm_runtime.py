@@ -88,11 +88,15 @@ from analyst.fundmanager.runtime import (
     run_manager,
 )
 from analyst.fundmanager.schemas import (
+    MAX_SHORT_CHARS,
+    MAX_TEXT_CHARS,
     Action,
     MalformedOutputError,
     Scenario,
     ScenarioName,
+    decision_schema,
     parse_decisions,
+    parse_research,
     research_schema,
 )
 from analyst.fundmanager.scoreboard import (
@@ -347,6 +351,7 @@ class ScriptedStub:
         self.replies = list(replies)
         self.prompts: list[str] = []
         self.tools: list[str] = []
+        self.breaks: list[tuple[int, ...]] = []
 
     def complete(
         self,
@@ -359,6 +364,7 @@ class ScriptedStub:
     ) -> LLMResponse:
         self.prompts.append(messages[-1].content)
         self.tools.append(tools[0].name)
+        self.breaks.append(messages[-1].cache_breaks)
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -655,6 +661,52 @@ def test_research_rounds_stop_at_two_so_a_session_never_exceeds_four_calls(
     assert [e.payload["round"] for e in journal.events(RESEARCH_EVENT)] == ["0", "1", "2"]
     assert "## Your task this round: decide" in llm.prompts[-1]
     assert "Exchange filing text about q three" in llm.prompts[-1]
+
+
+def test_every_call_marks_the_session_header_and_each_research_bundle_for_the_prompt_cache(
+    world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
+) -> None:
+    """Transport only (`Message.cache_breaks`): one header shared byte for byte by every call and
+    reaching all the way to the round's task, so the mandate, market sheet, holdings, screens,
+    shortlist, base rates and cost hurdles are read from the cache after the first call; then
+    each research bundle's end, so a round reads what the round before it wrote."""
+    result, _, llm = _run(
+        world,
+        tmp_path,
+        [
+            research([LEADER], ["leader ltd order book q2 2026"]),
+            research([BREAKOUT], ["breakout ltd board meeting results date"]),
+            research(),
+            final(hold(), buy(atr_pct[LEADER]), passed()),
+        ],
+    )
+    assert result.status is SessionStatus.DECIDED
+    prompts, breaks = llm.prompts, llm.breaks
+    head = breaks[0][0]
+    header = prompts[0][:head]
+    assert all(b[0] == head and p.startswith(header) for p, b in zip(prompts, breaks, strict=True))
+    # The header is the whole stable context: the next line is the round's task, in every round.
+    assert all(p[head:].startswith("## Your task this round") for p in prompts)
+    assert "### Research fulfilled" not in header
+    # round 0: only the header; research1: + bundle 0; research2: + bundles 0 and 1.
+    assert [len(b) for b in breaks[:3]] == [1, 2, 3]
+    r1_end = breaks[1][-1]
+    assert r1_end in breaks[2] and prompts[2][:r1_end] == prompts[1][:r1_end]
+    assert prompts[1][:r1_end].endswith(prompts[2][breaks[2][1] - 40 : breaks[2][1]])
+    # The final round marks the header and both bundles.
+    assert len(breaks[3]) == 3
+
+
+def test_a_schema_repair_reuses_its_originals_cache_breaks(world: World, tmp_path: Path) -> None:
+    result, _, llm = _run(
+        world,
+        tmp_path,
+        [research([LEADER], ["q one"]), research(), final(hold(action="SELL")), final(hold())],
+    )
+    assert result.repairs == 1
+    original, repair = llm.prompts[-2], llm.prompts[-1]
+    assert repair.startswith(original) and llm.breaks[-1] == llm.breaks[-2]
+    assert len(llm.breaks[-1]) == 2
 
 
 def test_an_empty_round_zero_goes_straight_to_the_final_call(world: World, tmp_path: Path) -> None:
@@ -1425,6 +1477,46 @@ def test_the_repair_is_one_per_session_not_one_per_call(world: World, tmp_path: 
     assert journal.events(MANAGER_ERROR_EVENT)[0].payload["stage"] == "final"
 
 
+def _long_claim(text: str) -> dict[str, Any]:
+    answer = research([LEADER])
+    answer["requests"][0]["claim"] = text
+    return answer
+
+
+def test_why_an_answer_was_refused_is_logged_by_field_and_rule_never_by_its_text(
+    world: World, tmp_path: Path
+) -> None:
+    """A refused answer names the field path, the broken rule, its bound and the value's length on
+    the ``fm.call_malformed`` line, the repair's ``fm.call`` line, the ``fm.manager_error`` line
+    and the MANAGER_ERROR payload — and none of them carries the answer's text."""
+    secret_ish = "Z" * 610
+    with capture_logs() as logs:
+        result, journal, llm = _run(
+            world, tmp_path, [_long_claim(secret_ish), _long_claim(secret_ish + "Z")]
+        )
+    assert result.status is SessionStatus.MANAGER_ERROR and llm.calls == 2
+    malformed = [e for e in logs if e["event"] == "fm.call_malformed"]
+    assert [e["violations"] for e in malformed] == [
+        ["requests.0.claim string_too_long max_length=500 actual=610"],
+        ["requests.0.claim string_too_long max_length=500 actual=611"],
+    ]
+    assert [e["repair"] for e in malformed] == [False, True]
+    (repair_call,) = [e for e in logs if e["event"] == "fm.call" and e["repair"]]
+    assert repair_call["repair_violations"] == [
+        "requests.0.claim string_too_long max_length=500 actual=610"
+    ]
+    (error_line,) = [e for e in logs if e["event"] == "fm.manager_error"]
+    assert error_line["violations"] == [
+        "requests.0.claim string_too_long max_length=500 actual=611"
+    ]
+    assert "at most 500 characters" in error_line["reason"]
+    (error,) = journal.events(MANAGER_ERROR_EVENT)
+    assert json.loads(error.payload["violations"]) == error_line["violations"]
+    # The repair prompt tells the model by how much it overshot.
+    assert "(yours has 610 characters)" in llm.prompts[-1]
+    assert not any("ZZZZZZZZZZ" in json.dumps(e, default=str) for e in logs)
+
+
 def test_a_failed_model_call_is_a_manager_error(world: World, tmp_path: Path) -> None:
     result, journal, _ = _run(world, tmp_path, [LLMError("cli exited 1")])
     assert result.status is SessionStatus.MANAGER_ERROR and result.calls == 1
@@ -1784,3 +1876,75 @@ def test_the_prompt_states_the_contracts_probability_rule_with_its_numbers() -> 
     assert f"within ±{band} pp of zero" in text
     assert f"same side of 0.5 as `P*` (either may be exactly 0.5) and within {P_TOLERANCE}" in text
     assert "An exit is never voided for its scenarios' arithmetic" in text
+
+
+# ── text-length limits the model can see (2026-10-31: notes of 510 chars on Bedrock) ────────────
+
+
+def _bounded_strings(node: Any, path: str = "") -> list[tuple[str, dict[str, Any]]]:
+    """Every schema node that is a string with a ``maxLength``, with its path."""
+    out: list[tuple[str, dict[str, Any]]] = []
+    if isinstance(node, dict):
+        kind = node.get("type")
+        if "maxLength" in node and (kind == "string" or "string" in (kind or [])):
+            out.append((path, node))
+        for key, value in node.items():
+            out += _bounded_strings(value, f"{path}.{key}")
+    elif isinstance(node, list):
+        for i, value in enumerate(node):
+            out += _bounded_strings(value, f"{path}[{i}]")
+    return out
+
+
+@pytest.mark.parametrize("which", ["research", "decision"])
+def test_every_bounded_text_field_states_its_own_limit_where_bedrock_can_read_it(
+    which: str,
+) -> None:
+    """Bedrock's structured output cannot compile ``maxLength``, so the limit must reach the model
+    as words in the description — the same number the parser enforces, on every bounded field,
+    and still there after the Bedrock transform. Dropping or changing either side fails here."""
+    from analyst.llm.bedrock import structured_output_schema
+
+    schema = research_schema(_mandate().rounds) if which == "research" else decision_schema()
+    bounded = _bounded_strings(schema)
+    assert len(bounded) >= (5 if which == "research" else 12)
+    sent = json.dumps(structured_output_schema(schema))
+    for path, node in bounded:
+        limit = node["maxLength"]
+        assert limit in (MAX_SHORT_CHARS, MAX_TEXT_CHARS), path
+        assert f"at most {limit:,} characters" in node["description"], path
+        assert json.dumps(node["description"])[1:-1] in sent, path
+
+
+def test_the_bound_is_enforced_exactly_and_never_by_truncation() -> None:
+    """A value at the limit is kept byte for byte; one character over is refused with the field,
+    the rule and the length — never cut to fit (a cut note or claim changes what was asked)."""
+    limits = _mandate().rounds
+    at_limit = "n" * MAX_SHORT_CHARS
+    answer = research([LEADER])
+    answer["holdings"][0]["note"] = at_limit
+    request, _ = parse_research(answer, limits)
+    assert request.holdings[0].note == at_limit
+    answer["holdings"][0]["note"] = at_limit + "n"
+    with pytest.raises(MalformedOutputError) as refused:
+        parse_research(answer, limits)
+    (violation,) = refused.value.violations
+    assert (violation.path, violation.constraint, violation.actual) == (
+        "holdings.0.note",
+        "string_too_long",
+        MAX_SHORT_CHARS + 1,
+    )
+    assert violation.limit == f"max_length={MAX_SHORT_CHARS}"
+
+
+def test_every_round_tells_the_manager_the_text_limits_the_schema_enforces(
+    world: World, tmp_path: Path
+) -> None:
+    prompts = {k: " ".join(v.split()) for k, v in _all_prompts(world, tmp_path, _mandate()).items()}
+    short = f"at most {MAX_SHORT_CHARS:,} characters"
+    for key in (ROUND_ZERO, ROUND_RESEARCH):
+        assert short in prompts[key] and "`note`" in prompts[key], key
+    assert "Do this working in your thinking" in prompts[ROUND_RESEARCH]
+    final_text = prompts[ROUND_FINAL]
+    assert f"at most {MAX_TEXT_CHARS:,} characters each" in final_text
+    assert f"`no_action_reason` — at most {MAX_SHORT_CHARS:,}" in final_text

@@ -61,6 +61,8 @@ decision that failed the contract through.
 from __future__ import annotations
 
 import json
+import os
+import re
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -126,6 +128,8 @@ from analyst.fundmanager.render import (
     render_shortlist,
 )
 from analyst.fundmanager.schemas import (
+    MAX_SHORT_CHARS,
+    MAX_TEXT_CHARS,
     SCHEMA_VERSION,
     Action,
     MalformedOutputError,
@@ -133,6 +137,7 @@ from analyst.fundmanager.schemas import (
     QueryItem,
     QueryKind,
     ResearchRequest,
+    Violation,
     decision_tool,
     parse_decisions,
     parse_research,
@@ -328,14 +333,33 @@ def manager_horizons(band: HorizonBand) -> tuple[int, ...]:
 
 
 class _ManagerError(Exception):
-    def __init__(self, stage: str, message: str, evidence: EvidenceBundle | None) -> None:
+    def __init__(
+        self,
+        stage: str,
+        message: str,
+        evidence: EvidenceBundle | None,
+        violations: Sequence[Violation] = (),
+    ) -> None:
         super().__init__(message)
         self.stage = stage
         self.evidence = evidence
+        #: The constraints the last malformed answer broke (empty for a failed call).
+        self.violations = tuple(violations)
+
+
+def _violation_fields(violations: Sequence[Violation]) -> list[str]:
+    """Violations as a log line carries them: field path, rule, bound, length — never the text."""
+    return [v.compact() for v in violations]
 
 
 def _canonical(document: Any) -> str:
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _bundles_text(bundles: Sequence[ResearchBundle]) -> str:
+    """The bundles as a rendered prompt carries them: the template's blank-line collapse and the
+    journal mask applied, so the text can be found in the prompt it was rendered into."""
+    return _journal_text(re.sub(r"\n{3,}", "\n\n", render_bundles(bundles)))
 
 
 def _log_text(text: str) -> str:
@@ -446,6 +470,7 @@ class _Session:
         #: Amendment 2 (c): this manager's listing order for the session's screens and shortlist.
         self.desk = DeskOrder(mandate.manager, session, tuple(mandate.starting_screens))
         self._static = self._static_values()
+        self._header: str | None = None
 
     # -- the journal ------------------------------------------------------------------------------
 
@@ -608,6 +633,8 @@ class _Session:
             "cost_hurdles": render_cost_hurdles(self.hurdles),
             "max_isins": str(self.limits.max_isins),
             "max_queries": str(self.limits.max_queries),
+            "max_short_chars": f"{MAX_SHORT_CHARS:,}",
+            "max_text_chars": f"{MAX_TEXT_CHARS:,}",
         }
 
     def _prompt(self, round_key: str) -> str:
@@ -622,12 +649,72 @@ class _Session:
             self.template.render(style=self.mandate.style.value, round_key=round_key, values=values)
         )
 
+    def _session_header(self) -> str:
+        """The text every prompt of this session starts with: the longest common prefix of the
+        three rounds' renderings (each with a different round number), cut at a line end.
+
+        Computed once. It is what a cache breakpoint marks first — the session's largest stable
+        prefix (mandate, market sheet, holdings, screens, shortlist, base rates, cost hurdles).
+        """
+        if self._header is None:
+            renders = [
+                _journal_text(
+                    self.template.render(
+                        style=self.mandate.style.value,
+                        round_key=key,
+                        values={
+                            **self._static,
+                            "round": str(number),
+                            "research_bundles": render_bundles(()),
+                        },
+                    )
+                )
+                for number, key in enumerate((ROUND_ZERO, ROUND_RESEARCH, ROUND_FINAL), start=1)
+            ]
+            common = os.path.commonprefix(renders)
+            self._header = common[: common.rfind("\n") + 1]
+        return self._header
+
+    def _cache_breaks(self, prompt: str) -> tuple[int, ...]:
+        """Where ``prompt``'s stable prefixes end, for the provider's prompt cache (transport only:
+        `analyst.llm.Message.cache_breaks` never changes the text or the prompt digest).
+
+        The session header, then the end of each research bundle as `render_bundles` lays them out
+        in ``prompt`` — so round k+1, which shows the same bundles and one more, reads what round k
+        wrote, and a repair (the same prompt plus its suffix) reads nearly all of its original.
+        A prefix that is not found where expected is simply not marked: a missed mark costs a
+        cache miss, never a different question.
+        """
+        breaks: list[int] = []
+        header = self._session_header()
+        if header and prompt.startswith(header):
+            breaks.append(len(header))
+        if self.bundles:
+            full = _bundles_text(self.bundles)
+            at = prompt.find(full, breaks[-1] if breaks else 0)
+            if at >= 0:
+                for k in range(1, len(self.bundles) + 1):
+                    shown = _bundles_text(self.bundles[:k])
+                    if full.startswith(shown):
+                        breaks.append(at + len(shown))
+        return tuple(b for b in sorted(set(breaks)) if 0 < b < len(prompt))
+
     # -- one call ---------------------------------------------------------------------------------
 
     def _complete(
-        self, prompt: str, tool: ToolSpec, stage: str, *, repair: bool
+        self,
+        prompt: str,
+        tool: ToolSpec,
+        stage: str,
+        *,
+        repair: bool,
+        repair_violations: Sequence[Violation] = (),
     ) -> tuple[LLMResponse, str]:
-        """One model call, journaled as ``FM_CALL`` with its bundle; the response and bundle ref."""
+        """One model call, journaled as ``FM_CALL`` with its bundle; the response and bundle ref.
+
+        ``repair_violations`` (a schema repair only) are the constraints the answer being repaired
+        broke; the ``fm.call`` line carries them so a log alone says why the repair was asked.
+        """
         if repair:
             self.repairs += 1
         else:
@@ -638,7 +725,7 @@ class _Session:
                     f"{self.limits.max_calls}-call budget; the round loop is wrong"
                 )
         evidence = self._evidence(prompt)
-        messages = [Message(Role.USER, prompt)]
+        messages = [Message(Role.USER, prompt, cache_breaks=self._cache_breaks(prompt))]
         model = self.mandate.models.decision
         try:
             response = self.llm.complete(messages, model=model, tools=(tool,), system=SYSTEM_PROMPT)
@@ -695,6 +782,11 @@ class _Session:
             tokens_cache_write=usage.cache_write_tokens,
             tokens_cache_read=usage.cache_read_tokens,
             prompt_chars=len(prompt),
+            **(
+                {"repair_violations": _violation_fields(repair_violations)}
+                if repair_violations
+                else {}
+            ),
         )
         # The address `_write` stored, which is what a decision citing this call must name.
         assert stored_ref is not None
@@ -703,11 +795,19 @@ class _Session:
     @staticmethod
     def _arguments(response: LLMResponse, tool: ToolSpec) -> Mapping[str, Any]:
         if response.truncated:
-            raise MalformedOutputError("the answer hit the output ceiling and is incomplete")
+            raise MalformedOutputError(
+                "the answer hit the output ceiling and is incomplete",
+                [Violation(path="(answer)", constraint="truncated")],
+            )
         calls = [c for c in response.tool_calls if c.name == tool.name]
         if len(calls) != 1:
             raise MalformedOutputError(
-                f"expected one {tool.name} structured output, got {len(calls)}"
+                f"expected one {tool.name} structured output, got {len(calls)}",
+                [
+                    Violation(
+                        path="(answer)", constraint="structured_output_count", actual=len(calls)
+                    )
+                ],
             )
         return calls[0].arguments
 
@@ -727,24 +827,44 @@ class _Session:
             return parse(self._arguments(response, tool)), ref
         except MalformedOutputError as exc:
             first = exc
+        self._log_malformed(stage, first, repair=False)
         if self.repairs:
             raise _ManagerError(
                 stage,
                 f"malformed {stage} output and the session's one repair retry is spent: {first}",
                 self._evidence(prompt),
+                first.violations,
             )
         # The validation error quotes the model's own answer, which can carry anything; masked by
         # the same rule as the prompt, so what is sent and what the bundle records stay one text.
         repair_prompt = _journal_text(prompt + _REPAIR_SUFFIX.format(errors=str(first)))
-        response, ref = self._complete(repair_prompt, tool, stage, repair=True)
+        response, ref = self._complete(
+            repair_prompt, tool, stage, repair=True, repair_violations=first.violations
+        )
         try:
             return parse(self._arguments(response, tool)), ref
         except MalformedOutputError as exc:
+            self._log_malformed(stage, exc, repair=True)
             raise _ManagerError(
                 stage,
                 f"malformed {stage} output after the repair retry: {exc}",
                 self._evidence(repair_prompt),
+                exc.violations,
             ) from exc
+
+    def _log_malformed(self, stage: str, exc: MalformedOutputError, *, repair: bool) -> None:
+        """Why an answer was refused, in the log: every violated field path and rule, and the
+        message bounded and masked (it can quote a value; the journal keeps the whole text)."""
+        _LOG.warning(
+            "fm.call_malformed",
+            book=self.mandate.id,
+            session=self.session.isoformat(),
+            stage=stage,
+            call=self.calls,
+            repair=repair,
+            violations=_violation_fields(exc.violations),
+            reason=_log_text(str(exc)),
+        )
 
     # -- research ---------------------------------------------------------------------------------
 
@@ -1264,6 +1384,11 @@ class _Session:
                     "stage": exc.stage,
                     "calls": str(self.calls),
                     "repairs": str(self.repairs),
+                    **(
+                        {"violations": _canonical(_violation_fields(exc.violations))}
+                        if exc.violations
+                        else {}
+                    ),
                 },
             )
             _LOG.warning(
@@ -1273,6 +1398,8 @@ class _Session:
                 stage=exc.stage,
                 calls=self.calls,
                 repairs=self.repairs,
+                violations=_violation_fields(exc.violations),
+                reason=_log_text(str(exc)),
             )
             return self._result(SessionStatus.MANAGER_ERROR, reason=str(exc))
         return self._decide(answer, final_ref)
