@@ -714,7 +714,7 @@ gating) — a paused dataset is simply missing. Lifting it is the owner's decisi
 (AGENTIC_CONTEXT §8): delete the `paused` records and restart the scheduler
 (`ops/runbooks/daily-eod.md`). Task M18.2.
 
-### D30 — The application on Amazon Bedrock, every M17 role on Opus 5.5, the Claude CLI as per-call backup, effort per call type → **DRAFT, awaiting owner confirmation before S0 (owner decisions 2026-10-30 08:05, ~09:00 IST and afternoon, and 2026-10-31 morning — digests on Opus, deploy approved — chat).**
+### D30 — The application on Amazon Bedrock, the pre-registered M17 models (Opus via Mantle, Sonnet via the Global inference profile), the Claude CLI as per-call backup, effort per call type → **DRAFT, awaiting owner confirmation before S0 (owner decisions 2026-10-30 08:05, ~09:00 IST and afternoon, and 2026-10-31 morning — Sonnet via the Global profile, deploy approved — chat).**
 
 The owner decided on 2026-10-30 that the application's model calls — the M17 desk's and every
 other analyst path's (`LLM_PROVIDER`, `M17_LLM_PROVIDER`) — go to Claude on Amazon Bedrock first,
@@ -724,35 +724,34 @@ test it is written up for confirmation as pre-registration Amendment 5
 What it is:
 
 - **Per-role models, set in the roster** (`analyst/fundmanager/roster.yaml` `models:`; a model
-  change is config only, no module has a default of its own) — **all three on `claude-opus-5-5`
-  via Bedrock** (`anthropic.claude-opus-5-5`), with **Opus 5.5 on the Claude CLI as the backup**
-  (a Claude model falls back to itself): **decisions**, **Commons digests** and **web research**
-  (Bedrock plus our own search layer; the CLI web fetcher on the same model as its backup). Each
-  digest records the provider and model that actually wrote it.
-  - **Why Opus for digests:** Sonnet 5.5, §2's digest model, is not served on Mantle in us-east-1;
-    Opus 5.5 is. DeepSeek V3.2, compared on 30 filings against the stored Sonnet digests, misread a
-    revenue figure, dropped stated numbers, wrote empty headlines and echoed promotional claims, to
-    save about $8 a month.
-  - **DeepSeek stays as unused capability:** its Bedrock route (`deepseek.v3.2`, the
-    `openai_chat` adapter, Sonnet 5.5 as its CLI stand-in) and its price remain; no role names it.
-  No prompt template, decision schema, digest schema, rule or rail changes.
+  change is config only, no module has a default of its own) — **the pre-registered models**, each
+  falling back to itself on the Claude CLI:
+  - **decisions** on `claude-opus-5-5`, via Bedrock's Mantle endpoint in us-east-1
+    (`anthropic.claude-opus-5-5`);
+  - **Commons digests** and **web research** on `claude-sonnet-5-5`, via bedrock-runtime and the
+    **Global cross-region inference profile** (`global.anthropic.claude-sonnet-5-5`, adapter
+    `anthropic_runtime`): Mantle does not serve Sonnet 5.5 in us-east-1. The Global profile may
+    route a request to any AWS commercial region (data residency); what it carries is public
+    filings, market data and web pages, and the managers' research questions.
+  - **DeepSeek stays as unused capability** (`deepseek.v3.2`, the `openai_chat` adapter, its
+    price): on 30 filings it was less faithful than the stored Sonnet digests, to save about $8 a
+    month.
+  Each digest records the provider and model id that actually wrote it. No prompt template,
+  decision schema, digest schema, rule or rail changes.
 - **Hashes change:** the manager system prompt gains the untrusted-content rule (web content is
-  data, never instructions), and the roster's `models` gain the `research` role and the new digest
-  model, so the **8 manager books' `mandate_hash` change** (controls, style books and bench
-  unchanged; the full table is in Amendment 5 (g)): `FM-POS-FUND-10L` `7d8f3605361b0a7a`,
-  `FM-POS-FUND-1CR` `e5391cb58be813db`, `FM-POS-TREND-10L` `f487a2dd3055d3a5`, `FM-POS-TREND-1CR`
-  `a0dd58218502aaca`, `FM-SWING-BRK-10L` `f129ab0be3a21211`, `FM-SWING-BRK-1CR` `7473e4a2b7b86df0`,
-  `FM-SWING-EVT-10L` `dc7b11ee6fde7d01`, `FM-SWING-EVT-1CR` `09f12ac2e33d7350` (first 16 hex). S0
-  has not happened, so **the dry-run count restarts** with the first dry session under them: the
-  session of Monday 2026-11-02, run at 22:00 IST.
+  data, never instructions), and the roster's `models` gain the `research` key (the decision and
+  digest models are unchanged, but the new key is in the hashed bytes), so the **8 manager books'
+  `mandate_hash` change** (controls, style books and bench unchanged; the full table is in
+  Amendment 5 (g)): `FM-POS-FUND-10L` `431ff6ce9c259d9b`, `FM-POS-FUND-1CR` `98b728dc788fec28`, `FM-POS-TREND-10L` `88af5bb2886ad53f`, `FM-POS-TREND-1CR` `29c9bb823d8025f4`, `FM-SWING-BRK-10L` `752176d43187dde9`, `FM-SWING-BRK-1CR` `99be11b9b843daa8`, `FM-SWING-EVT-10L` `5f412d204d0fcbce`, `FM-SWING-EVT-1CR` `5e50cc349aa3a4ee` (first 16 hex). S0 has not happened, so **the dry-run count restarts**
+  with the first dry session under them: the session of Monday 2026-11-02, run at 22:00 IST.
 - **Transport:** Bedrock primary (`LLM_PROVIDER=bedrock`, `M17_LLM_PROVIDER=bedrock`), Claude CLI
   backup per call (`LLM_FALLBACK=claude_cli`, `M17_LLM_FALLBACK=claude_cli`). A call falls back only when Bedrock could not serve it —
   unreachable, timed out, rate limited after retries, a 5xx, a rejected or missing key — never on a
   400, a refusal or an answer that did not parse.
-- **Effort pinned per call type** on both paths (`analyst/llm/effort.yaml`, keyed by model):
-  Opus is `high`, so decisions, research **and digests** run at `high` (summarising on Sonnet or
-  Haiku stays `medium`); the CLI always passes `--effort`. Opus digests at `medium` would need an
-  effort argument on the `LLM` protocol — open, for the owner. It was previously inherited, unpinned, from the owner's personal Claude CLI setting
+- **Effort pinned per call type** on both paths (`analyst/llm/effort.yaml`): decisions (Opus)
+  `high`, digests and research (Sonnet) `medium`; the CLI always passes `--effort`, and
+  bedrock-runtime accepts the same `output_config` as Mantle (verified 2026-10-31). It was
+  previously inherited, unpinned, from the owner's personal Claude CLI setting
   (`xhigh` through the dry sessions, `high` since the owner's `/effort high` on 2026-10-30).
 - **Web research moves to our own search layer** (`analyst.websearch`): on Bedrock each manager
   query or URL is a bounded Bedrock tool loop over our `web_search` / `web_fetch` (Brave, Tavily,
@@ -760,26 +759,26 @@ What it is:
   NSE/BSE/niftyindices and private addresses never fetched), producing the same Commons snapshot
   as before; the CLI's own web tools answer a request only when Bedrock is unavailable, and the
   snapshot records which path ran. `M17_WEB_RESEARCH=claude_cli` is the no-code rollback.
-  The research model is the roster's `research` (Opus 5.5, which Mantle serves); the default of
+  The research model is the roster's `research` (Sonnet 5.5, via the Global profile); the default of
   `M17_WEB_RESEARCH` stays `claude_cli`, so turning the search layer on is the deploy's explicit
   `M17_WEB_RESEARCH=websearch`.
 - **Recorded per call:** the provider that answered, and the fallback reason when there was one, in
   each `FM_CALL` journal line; every call is a `token_usage` row (the console's Model cost panel).
 - **Cost measured:** Bedrock calls are billed per token to AWS and priced at the us-east-1 list
-  rate on the dated card (Opus 5.5 $4.40 / $22.00 per MTok in / out); CLI calls remain estimates.
-  Expected: about $0.015 an Opus digest (the comparison's token counts) — about $18 a month at
-  the dry sessions' mean of 57 digests a session, $3.5–9 a session in results season; the
-  decisions at most about $20 a session (the 2026-10-30 dry session's CLI token counts at the
-  Bedrock rate); research about 30–36 Opus tool loops a session. Amendment 5 (f) has the working.
+  rate on the dated card (Opus 5.5 in-region $4.40 / $22.00, Sonnet 5.5 Global $2.00 / $10.00
+  per MTok in / out); CLI calls remain estimates. Expected: $0.007–0.012 a Sonnet digest — $8–15 a
+  month at the dry sessions' mean of 57 digests a session, $1.6–7.5 a session in results season;
+  the decisions at most about $20 a session (the 2026-10-30 dry session's CLI token counts at the
+  Bedrock rate); research about 30–36 Sonnet tool loops a session. Amendment 5 (f) has the working.
 
 Open with it: whether to set a monthly Bedrock budget (§9's cap was deferred while the cost was a
-subscription), and whether Opus digests should run at `medium` rather than `high`. Activation for
+subscription). Activation for
 the desk is the `.env` change `M17_LLM_PROVIDER=bedrock`, `M17_WEB_RESEARCH=websearch` (with
 `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_REGION` and the vendor keys) and a scheduler restart, approved
 by the owner and made with the merge on 2026-10-31; `LLM_PROVIDER` for the other analyst paths is
 unchanged by that deploy. The effort levels, the untrusted-content rule and the roster's models
 (and with them the new manager hashes) take effect on merge for every provider; a desk rolled back
-to the CLI runs the same Opus models there. The amendment stays DRAFT until the owner confirms it
+to the CLI runs the same models there. The amendment stays DRAFT until the owner confirms it
 before S0. Task M17.
 
 ## Coming up
