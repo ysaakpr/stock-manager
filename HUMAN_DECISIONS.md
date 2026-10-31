@@ -751,7 +751,8 @@ What it is:
   described as identifiers, not "text", after that wording drew prose into the refs and the
   contract voided a manager's decisions as `MALFORMED_REF` (the contract rule is unchanged).
 - **Prompt caching on Bedrock (Amendment 5 (i)):** cache breakpoints at the session header and each
-  research bundle (transport, not hashed; about a third off the decision calls' input cost). The
+  research bundle, on the research rounds only (transport, not hashed; about a quarter off those
+  managers' decision-call input, measured). The
   template's "Today: session, round" line moves unchanged to the end of each round block so the
   header is one cacheable prefix — a template change, in the hashes below.
 - **Hashes change** (as of 2026-10-31 afternoon, with (h) and (i)): the manager system prompt gains the untrusted-content rule (web content is
