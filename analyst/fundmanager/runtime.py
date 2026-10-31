@@ -713,6 +713,7 @@ class _Session:
         *,
         repair: bool,
         repair_violations: Sequence[Violation] = (),
+        cache: bool = False,
     ) -> tuple[LLMResponse, str]:
         """One model call, journaled as ``FM_CALL`` with its bundle; the response and bundle ref.
 
@@ -729,7 +730,8 @@ class _Session:
                     f"{self.limits.max_calls}-call budget; the round loop is wrong"
                 )
         evidence = self._evidence(prompt)
-        messages = [Message(Role.USER, prompt, cache_breaks=self._cache_breaks(prompt))]
+        breaks = self._cache_breaks(prompt) if cache else ()
+        messages = [Message(Role.USER, prompt, cache_breaks=breaks)]
         model = self.mandate.models.decision
         try:
             response = self.llm.complete(messages, model=model, tools=(tool,), system=SYSTEM_PROMPT)
@@ -826,7 +828,12 @@ class _Session:
         prompt = self._prompt(round_key)
         if round_key == ROUND_FINAL:
             self.final_prompt = prompt
-        response, ref = self._complete(prompt, tool, stage, repair=False)
+        # Only a research round's prefix is read again (by the next research round, or this one's
+        # repair): round 0 and the final call answer in schemas no other call shares, and the
+        # schema is part of the cached prefix, so a write there would be paid for (1.25x) and,
+        # but for a repair, never read (measured 2026-10-31).
+        cache = round_key == ROUND_RESEARCH
+        response, ref = self._complete(prompt, tool, stage, repair=False, cache=cache)
         try:
             return parse(self._arguments(response, tool)), ref
         except MalformedOutputError as exc:
@@ -843,7 +850,12 @@ class _Session:
         # the same rule as the prompt, so what is sent and what the bundle records stay one text.
         repair_prompt = _journal_text(prompt + _REPAIR_SUFFIX.format(errors=str(first)))
         response, ref = self._complete(
-            repair_prompt, tool, stage, repair=True, repair_violations=first.violations
+            repair_prompt,
+            tool,
+            stage,
+            repair=True,
+            repair_violations=first.violations,
+            cache=cache,
         )
         try:
             return parse(self._arguments(response, tool)), ref
