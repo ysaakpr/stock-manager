@@ -41,9 +41,10 @@ books:
       median_lookback_sessions: 20
       excluded_surveillance: [GSM, ESM]
       flagged_surveillance: [ASM]
-    models: &models
-      decision: claude-opus-5-5
-      digest: claude-sonnet-5-5
+    models: &models                                  # per role (Amendment 5); keys of bedrock_models.yaml
+      decision: claude-opus-5-5                      # manager rounds, Bedrock (CLI backup: itself)
+      digest: claude-sonnet-5-5                      # Commons digests, Bedrock runtime (CLI backup: itself)
+      research: claude-sonnet-5-5                    # web research tool loop, Bedrock + analyst.websearch
     prompt_path: analyst/fundmanager/prompts/manager.md
     rounds: &rounds
       max_isins: 12

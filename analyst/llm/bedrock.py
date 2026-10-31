@@ -1,4 +1,12 @@
-"""X3: the `LLM` backed by Claude on Amazon Bedrock — the Mantle endpoint, billed per token to AWS.
+"""X3: the `LLM` backed by Claude on Amazon Bedrock — billed per token to AWS.
+
+Two endpoints speak the same Anthropic Messages body, and `bedrock_models.yaml` picks one per
+model: Mantle (`bedrock-mantle.<region>.api.aws/anthropic`, adapter `anthropic_messages` — Opus
+5.5) and bedrock-runtime (`bedrock-runtime.<region>.amazonaws.com/model/<id>/invoke`, adapter
+`anthropic_runtime` — Sonnet 5.5, which Mantle does not serve in us-east-1 but the Global
+cross-region inference profile `global.anthropic.claude-sonnet-5-5` does). Both use the same key as
+a Bearer token, the same request building, response parsing, usage, error classification and tool
+loop; only the transport differs (below).
 
 The application's primary transport from the owner's 2026-10-30 decision, with the Claude CLI as
 the per-call backup (`analyst.llm.fallback`). It answers the same protocol `ClaudeCliLLM` does, in
@@ -19,8 +27,11 @@ Four things are pinned here rather than left to a default, each because the defa
   adaptive where the model supports it; on Opus 5.5 and Sonnet 5.5 it cannot be switched off.
 - **`max_tokens`** counts thinking, so a caller's 2,000-token digest ceiling would truncate an
   answer before it began. The request carries `max(asked, BEDROCK_MAX_TOKENS)`, clamped to the
-  model's own ceiling, and always streams: the SDK refuses a non-streaming request whose ceiling
-  could outlast its ten-minute limit.
+  model's own ceiling. On Mantle it always streams: the SDK refuses a non-streaming request whose
+  ceiling could outlast its ten-minute limit. On bedrock-runtime it is one non-streaming `invoke`
+  under the explicit 600 s timeout (which is what lifts that SDK guard): the runtime's stream is
+  AWS's binary event-stream, whose decoder needs `botocore`, a dependency this repo does not carry
+  for one model.
 - **The model id and what the model accepts** come from `bedrock_models.yaml`. An unmapped model
   raises before any request.
 
@@ -47,7 +58,7 @@ import httpx
 import yaml
 from anthropic.types import Message as SdkMessage
 from anthropic.types import MessageParam
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from analyst.llm.client import (
     DEFAULT_MAX_TOKENS,
@@ -67,6 +78,7 @@ from analyst.llm.client import (
     Usage,
 )
 from analyst.llm.effort import EffortPolicy, load_effort_policy
+from analyst.llm.openai_chat import OpenAIChatClient
 from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger
 from dataplatform.redaction import MASK, mask_secrets
@@ -148,14 +160,30 @@ _STREAM_ERROR_REASONS: Final[dict[str, UnavailableReason]] = {
 class BedrockAdapter(StrEnum):
     """How a Bedrock model is spoken to. The seam for models that are not Claude.
 
-    `ANTHROPIC_MESSAGES` is Claude on the Mantle endpoint's Anthropic Messages API — the only
-    adapter built. A model served through bedrock-runtime Converse or Mantle's OpenAI-compatible
-    Chat Completions would add a value here and a branch in `BedrockLLM.complete` (and
-    `run_tools`), its own request and response mapping beside `_stream`; the map in
-    `bedrock_models.yaml` routes each model.
+    `ANTHROPIC_MESSAGES` is Claude on the Mantle endpoint's Anthropic Messages API.
+    `ANTHROPIC_RUNTIME` is Claude on bedrock-runtime's `InvokeModel` — the same Messages body, sent
+    to `/model/<bedrock_id>/invoke` — for a model Mantle does not serve (Sonnet 5.5 through its
+    Global inference profile).
+    `OPENAI_CHAT` is Mantle's OpenAI-compatible Chat Completions (`analyst.llm.openai_chat`), which
+    serves the models the Messages path refuses — DeepSeek V3.2. A model served some other way
+    would add a value here and a branch in `BedrockLLM.complete`; the map in `bedrock_models.yaml`
+    routes each model.
     """
 
     ANTHROPIC_MESSAGES = "anthropic_messages"
+    ANTHROPIC_RUNTIME = "anthropic_runtime"
+    OPENAI_CHAT = "openai_chat"
+
+    @property
+    def is_claude(self) -> bool:
+        """Whether the route speaks Anthropic Messages, so the Claude CLI can run the same model."""
+        return self in _CLAUDE_ADAPTERS
+
+
+#: The adapters that carry a Claude model (the Anthropic Messages body, on either endpoint).
+_CLAUDE_ADAPTERS: Final = frozenset(
+    {BedrockAdapter.ANTHROPIC_MESSAGES, BedrockAdapter.ANTHROPIC_RUNTIME}
+)
 
 
 class _Frozen(BaseModel):
@@ -172,6 +200,11 @@ class BedrockModelRoute(_Frozen):
     #: a model without them (Haiku 4.5) is sent neither, rather than a 400.
     adaptive_thinking: bool = True
     effort: bool = True
+    #: The Claude model a Claude-only backup (the Claude CLI) answers in this model's place when
+    #: Bedrock could not serve it. Unset for a Claude model, which falls back to itself; required
+    #: for any other (the map refuses an `openai_chat` route without one), because the CLI cannot
+    #: run DeepSeek and asking it to would turn every outage into a second, confusing failure.
+    cli_fallback_model: str | None = Field(default=None, min_length=1)
 
 
 class BedrockModelMap(_Frozen):
@@ -179,6 +212,34 @@ class BedrockModelMap(_Frozen):
 
     version: int
     models: dict[str, BedrockModelRoute] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _fallbacks_are_claude(self) -> BedrockModelMap:
+        for name, route in self.models.items():
+            target = route.cli_fallback_model
+            if not route.adapter.is_claude and target is None:
+                raise ValueError(
+                    f"{name} is not a Claude model, so it needs a cli_fallback_model: the Claude "
+                    "CLI backup cannot run it"
+                )
+            if target is not None:
+                backup = self.models.get(target)
+                if backup is None or not backup.adapter.is_claude:
+                    raise ValueError(
+                        f"{name}'s cli_fallback_model {target!r} must be a Claude model in this map"
+                    )
+        return self
+
+    def backup_model(self, model: str) -> str:
+        """The model a Claude-only backup is asked for in ``model``'s place.
+
+        ``model`` itself for a Claude route or an unmapped name (the backup then judges it, as it
+        did before this map existed); the route's `cli_fallback_model` otherwise.
+        """
+        route = self.models.get(model)
+        if route is None or route.cli_fallback_model is None:
+            return model
+        return route.cli_fallback_model
 
     def route(self, model: str) -> BedrockModelRoute:
         """The route for ``model``, or an `LLMError` naming the models that are mapped.
@@ -322,6 +383,7 @@ class BedrockLLM:
 
     __slots__ = (
         "_api_key",
+        "_chat",
         "_client",
         "_efforts",
         "_http_client",
@@ -329,6 +391,7 @@ class BedrockLLM:
         "_max_tokens",
         "_models",
         "_region",
+        "_runtime",
         "_timeout_seconds",
     )
 
@@ -372,6 +435,8 @@ class BedrockLLM:
         self._max_retries = max_retries
         self._http_client = http_client
         self._client: anthropic.AnthropicBedrockMantle | None = None
+        self._runtime: anthropic.AnthropicBedrock | None = None
+        self._chat: OpenAIChatClient | None = None
 
     def __repr__(self) -> str:
         # The key is a SecretStr and is never interpolated; a repr in a log must stay safe.
@@ -409,6 +474,41 @@ class BedrockLLM:
             )
         return self._client
 
+    @property
+    def runtime_endpoint(self) -> str:
+        """The bedrock-runtime endpoint (`anthropic_runtime`), built from the region, never env."""
+        return f"https://bedrock-runtime.{self._region}.amazonaws.com"
+
+    @property
+    def _runtime_sdk(self) -> anthropic.AnthropicBedrock:
+        """The bedrock-runtime SDK client, built on first use: the key goes in explicitly as the
+        Bearer token (so no SigV4, no ambient AWS credential, no `AWS_BEARER_TOKEN_BEDROCK` or
+        `ANTHROPIC_BEDROCK_BASE_URL` lookup), with the region and endpoint passed explicitly."""
+        if self._runtime is None:
+            self._runtime = anthropic.AnthropicBedrock(
+                api_key=self._api_key.get_secret_value(),
+                aws_region=self._region,
+                base_url=self.runtime_endpoint,
+                timeout=self._timeout_seconds,
+                max_retries=self._max_retries,
+                http_client=self._http_client,
+            )
+        return self._runtime
+
+    @property
+    def _openai_chat(self) -> OpenAIChatClient:
+        """The Chat Completions client for `openai_chat` routes, on the same key and transport."""
+        if self._chat is None:
+            self._chat = OpenAIChatClient(
+                self._api_key,
+                self._region,
+                provider=BEDROCK_PROVIDER,
+                timeout_seconds=self._timeout_seconds,
+                max_retries=self._max_retries,
+                http_client=self._http_client,
+            )
+        return self._chat
+
     # -- the protocol -----------------------------------------------------------------------------
 
     def complete(
@@ -440,7 +540,7 @@ class BedrockLLM:
         route = self._models.route(model)
         tool = tools[0] if tools else None
         match route.adapter:
-            case BedrockAdapter.ANTHROPIC_MESSAGES:
+            case BedrockAdapter.ANTHROPIC_MESSAGES | BedrockAdapter.ANTHROPIC_RUNTIME:
                 ceiling = self._ceiling(route, max_tokens)
                 raw, usage, latency_ms = self._stream(
                     [_message_param(m) for m in messages],
@@ -457,6 +557,19 @@ class BedrockLLM:
                     **self._fields(raw, model, route, ceiling, usage, latency_ms),
                 )
                 return self._final(raw, model=model, route=route, output=tool, usage=usage)
+            case BedrockAdapter.OPENAI_CHAT:
+                return self._openai_chat.complete(
+                    messages,
+                    model=model,
+                    bedrock_id=route.bedrock_id,
+                    system=system,
+                    output=tool,
+                    output_schema=(
+                        None if tool is None else structured_output_schema(tool.input_schema)
+                    ),
+                    ceiling=self._ceiling(route, max_tokens),
+                    effort=self._efforts.effort_for(model).value if route.effort else None,
+                )
             case _:  # pragma: no cover — exhaustive over BedrockAdapter
                 assert_never(route.adapter)
 
@@ -500,7 +613,7 @@ class BedrockLLM:
             raise ValueError(f"max_tokens must be positive, got {max_tokens}")
         route = self._models.route(model)
         match route.adapter:
-            case BedrockAdapter.ANTHROPIC_MESSAGES:
+            case BedrockAdapter.ANTHROPIC_MESSAGES | BedrockAdapter.ANTHROPIC_RUNTIME:
                 return self._messages_tool_loop(
                     messages,
                     model=model,
@@ -511,6 +624,13 @@ class BedrockLLM:
                     max_rounds=max_rounds,
                     output=output,
                     ceiling=self._ceiling(route, max_tokens),
+                )
+            case BedrockAdapter.OPENAI_CHAT:
+                # Not built: research runs on a Claude model (roster `research`), and a tool loop
+                # in the Chat Completions shape is its own translation. Refused, never faked.
+                raise LLMError(
+                    f"{model} is routed {route.adapter.value}, which has no client-side tool loop; "
+                    "run_tools needs a Claude (anthropic_messages or anthropic_runtime) model"
                 )
             case _:  # pragma: no cover — exhaustive over BedrockAdapter
                 assert_never(route.adapter)
@@ -625,7 +745,11 @@ class BedrockLLM:
         output: ToolSpec | None,
         tools: Sequence[Mapping[str, Any]] | None,
     ) -> tuple[SdkMessage, Usage, int]:
-        """One streamed Messages request; the final message, its usage and its latency."""
+        """One Messages request; the final message, its usage and its latency.
+
+        Streamed on Mantle; one `invoke` on bedrock-runtime (see the module header). The body is
+        the same on both, built here once.
+        """
         output_config: dict[str, Any] = {}
         if route.effort:
             output_config["effort"] = self._efforts.effort_for(model).value
@@ -644,14 +768,23 @@ class BedrockLLM:
             extra["tool_choice"] = {"type": "auto"}
         started = time.monotonic()
         try:
-            with self._sdk.messages.stream(
-                model=route.bedrock_id,
-                max_tokens=ceiling,
-                messages=cast("Any", list(conversation)),
-                system=anthropic.omit if system is None else system,
-                **extra,
-            ) as stream:
-                raw = stream.get_final_message()
+            if route.adapter is BedrockAdapter.ANTHROPIC_RUNTIME:
+                raw = self._runtime_sdk.messages.create(
+                    model=route.bedrock_id,
+                    max_tokens=ceiling,
+                    messages=cast("Any", list(conversation)),
+                    system=anthropic.omit if system is None else system,
+                    **extra,
+                )
+            else:
+                with self._sdk.messages.stream(
+                    model=route.bedrock_id,
+                    max_tokens=ceiling,
+                    messages=cast("Any", list(conversation)),
+                    system=anthropic.omit if system is None else system,
+                    **extra,
+                ) as stream:
+                    raw = stream.get_final_message()
         except anthropic.APIError as exc:
             raise self._classified(exc, model=model) from exc
         except httpx.TransportError as exc:
@@ -685,6 +818,7 @@ class BedrockLLM:
         return {
             "provider": BEDROCK_PROVIDER,
             "model": model,
+            "adapter": route.adapter.value,
             "served_model": _served(raw, route),
             "effort": self._efforts.effort_for(model).value if route.effort else None,
             "max_tokens": ceiling,
@@ -844,13 +978,19 @@ def _status_reason(exc: anthropic.APIStatusError) -> UnavailableReason | None:
     """The fallback reason of an HTTP failure, or None when the request itself is at fault.
 
     401/403 are the credential (expired, revoked, or an IAM policy without
-    `bedrock-mantle:CreateInference`); 429 is throttling the SDK already retried; 5xx and 529 are
-    the provider's. An error *event* inside a 200 stream carries its type in the body instead.
+    `bedrock-mantle:CreateInference` / `bedrock:InvokeModel`); 429 is throttling the SDK already
+    retried; 408 is bedrock-runtime's `ModelTimeoutException` and 424 its `ModelErrorException`
+    (the model failed while serving — the provider's, not the question's); 5xx and 529 are the
+    provider's. An error *event* inside a 200 stream carries its type in the body instead.
     Everything else — 400, 404, 409, 413, 422 — is the request's, and is never a fallback.
     """
     status = exc.status_code
     if status in (401, 403):
         return UnavailableReason.AUTH
+    if status == 408:
+        return UnavailableReason.TIMEOUT
+    if status == 424:
+        return UnavailableReason.SERVER_ERROR
     if status == 429:
         return UnavailableReason.RATE_LIMIT
     if status >= 500:

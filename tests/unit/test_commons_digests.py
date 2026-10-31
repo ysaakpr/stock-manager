@@ -31,7 +31,6 @@ from typing import Any
 import pytest
 
 from analyst.commons import (
-    DIGEST_MODEL,
     DIGEST_OUTPUT_SCHEMA,
     AnnouncementText,
     CommonsRefusedError,
@@ -57,6 +56,7 @@ from analyst.commons.digests import (
     parse_digest,
 )
 from analyst.commons.sheets import FilingFact
+from analyst.fundmanager import load_roster
 from analyst.llm import (
     LLM,
     LLMResponse,
@@ -88,6 +88,9 @@ GOOD_BODY: dict[str, Any] = {
     "period": None,
     "figures": [{"label": "Order value", "value": "120", "unit": "INR crore", "period": None}],
 }
+
+#: The digest model the roster names (Amendment 5); digests.py has no default of its own.
+DIGEST_MODEL = load_roster().primaries[0].models.digest
 
 
 def _ts(day: date, hour: int = 15) -> datetime:
@@ -212,6 +215,7 @@ def _run(
         store=store,
         gate=kwargs.pop("gate", Gate()),
         clock=kwargs.pop("clock", _clock(session)),
+        model=kwargs.pop("model", DIGEST_MODEL),
         **kwargs,
     )
 
@@ -603,6 +607,7 @@ def _on_demand(
         store=store,
         gate=kwargs.pop("gate", Gate()),
         clock=kwargs.pop("clock", _clock(session)),
+        model=kwargs.pop("model", DIGEST_MODEL),
         **kwargs,
     )
 

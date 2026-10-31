@@ -1,0 +1,25 @@
+{
+  "query": "reserve bank of india repo rate",
+  "answer": null,
+  "images": [],
+  "results": [
+    {
+      "title": "RBI policy: repo rate held",
+      "url": "https://news.example.org/economy/rbi-policy-october",
+      "content": "The Reserve Bank of India held the repo rate at its October meeting.",
+      "score": 0.81025416,
+      "raw_content": null,
+      "published_date": "Tue, 28 Oct 2026 09:30:00 GMT"
+    },
+    {
+      "title": "Repo rate history",
+      "url": "https://data.example.com/india/repo-rate",
+      "content": "A table of policy repo rate changes since 2000.",
+      "score": 0.6512,
+      "raw_content": null
+    }
+  ],
+  "response_time": 1.67,
+  "usage": {"credits": 1},
+  "request_id": "123e4567-e89b-12d3-a456-426614174111"
+}

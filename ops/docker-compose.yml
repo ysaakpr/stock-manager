@@ -72,10 +72,15 @@ services:
       # `env_file`, and Settings reads a blank as "not configured". tests/unit/test_llm_bedrock.py
       # holds this line in place.
       AWS_BEARER_TOKEN_BEDROCK: ""
+      # Nor the web research vendors' keys: /status/websearch reads the usage ledger (migration
+      # 0021) and needs none, and reports `configured: null` without them.
+      BRAVE_SEARCH_API_KEY: ""
+      TAVILY_API_KEY: ""
+      FIRECRAWL_API_KEY: ""
     env_file:
       # Optional so a fresh clone starts with no secrets on disk. Anything the owner puts in
       # the repo-root .env reaches the app; the two settings above still win, because their
-      # host-side values would be wrong inside the container.
+      # host-side values would be wrong inside the container, and the keys above stay blank.
       - path: ../.env
         required: false
     ports:

@@ -99,7 +99,7 @@ from backtest.paper_session import (
 )
 from backtest.run import _L1Market, _L1Reader
 from dataplatform.clock import Clock, SystemClock
-from dataplatform.config import LlmProvider, Settings, get_settings
+from dataplatform.config import LlmProvider, Settings, WebResearchPath, get_settings
 from dataplatform.identity.master import Exchange
 from dataplatform.logging import get_logger
 from dataplatform.query import AdjustedSeriesRequest, PitContext
@@ -806,21 +806,155 @@ def _llm(settings: Settings, provider: LlmProvider) -> LLM:
     return build_llm(settings, provider=provider, fallback=settings.m17_llm_fallback)
 
 
-#: The providers whose desk researches the web through the Claude CLI's `ClaudeWebFetcher`. Bedrock
-#: is one of them because Bedrock has no web tools: the decision path moved to Bedrock, the
-#: Commons research did not (the owner's 2026-10-30 decision keeps it on the CLI).
-_CLI_FETCH_PROVIDERS: Final = frozenset({LlmProvider.CLAUDE_CLI, LlmProvider.BEDROCK})
+#: The providers whose desk researches the web live: the Claude CLI with its own web tools, and
+#: Bedrock — through our own search layer (`analyst.websearch.BedrockWebFetcher`, Amendment 5 (d))
+#: unless ``M17_WEB_RESEARCH=claude_cli`` keeps it on the CLI. Every other provider gets none.
+_LIVE_FETCH_PROVIDERS: Final = frozenset({LlmProvider.CLAUDE_CLI, LlmProvider.BEDROCK})
 
 #: ``token_usage.purpose`` of an on-demand filing digest the desk's Commons asks for.
 DIGEST_TOKEN_PURPOSE: Final = "m17_digest"
+#: ``token_usage.purpose`` of a Commons web research loop on Bedrock (one row per manager query or
+#: URL fetched live; a cache hit costs nothing and writes nothing).
+FETCH_TOKEN_PURPOSE: Final = "m17_fetch"
 
 
-def _fetcher(provider: LlmProvider) -> Any:
-    if provider not in _CLI_FETCH_PROVIDERS:
+def _fetcher(
+    provider: LlmProvider,
+    *,
+    settings: Settings,
+    clock: Clock,
+    fetch_root: Path,
+    session: date,
+    ledger: TokenLedger | None,
+    memory: bool,
+    stack: ExitStack,
+    research_model: str,
+) -> Any:
+    """The desk's Commons fetcher for ``provider`` (see `_LIVE_FETCH_PROVIDERS`).
+
+    ``research_model`` is the roster's ``models.research`` (Amendment 5: Sonnet 5.5) on every path —
+    the CLI's web fetcher, the Bedrock tool loop and that loop's CLI backup.
+
+    On Bedrock with ``M17_WEB_RESEARCH=websearch`` (not the default, which is ``claude_cli``) it
+    is a `BedrockWebFetcher`: the research model runs the tool loop on Bedrock, the vendors
+    share the load under their budgets (counted in Postgres, migration 0021, or in memory for a
+    ``--memory`` rehearsal), the tool results are snapshots in their own store beside
+    ``fetch_root``, every loop's cost is a ``token_usage`` row under `FETCH_TOKEN_PURPOSE`, and
+    the Claude CLI's web fetcher is the backup when ``M17_LLM_FALLBACK`` is the CLI. When Bedrock
+    or every vendor is unconfigured, the desk researches on the CLI, with a warning, rather than
+    not at all.
+    """
+    if provider not in _LIVE_FETCH_PROVIDERS:
         return NoLiveFetcher()
     from analyst.commons.fetch import ClaudeWebFetcher
 
-    return ClaudeWebFetcher()
+    if provider is not LlmProvider.BEDROCK or (
+        settings.m17_web_research is WebResearchPath.CLAUDE_CLI
+    ):
+        return ClaudeWebFetcher(model=research_model)
+    return _bedrock_fetcher(
+        settings=settings,
+        clock=clock,
+        fetch_root=fetch_root,
+        session=session,
+        ledger=ledger,
+        memory=memory,
+        stack=stack,
+        research_model=research_model,
+    )
+
+
+def _bedrock_fetcher(
+    *,
+    settings: Settings,
+    clock: Clock,
+    fetch_root: Path,
+    session: date,
+    ledger: TokenLedger | None,
+    memory: bool,
+    stack: ExitStack,
+    research_model: str,
+) -> Any:
+    from accounting import AccountingError, TokenPricer, load_price_card
+    from analyst.commons import SnapshotStore
+    from analyst.commons.fetch import ClaudeWebFetcher, FetchError
+    from analyst.llm import LLMCredentialError, LLMResponse
+    from analyst.llm.bedrock import BedrockLLM, load_bedrock_models
+    from analyst.websearch import (
+        BedrockWebFetcher,
+        InMemoryUsageLedger,
+        PostgresUsageLedger,
+        UsageLedger,
+        WebResearch,
+        web_store_root,
+    )
+    from dataplatform.store.db import connect
+
+    try:
+        model = BedrockLLM.from_settings(settings)
+    except LLMCredentialError as exc:
+        _LOG.warning("fm_world.web_research_on_cli", reason="bedrock_unconfigured", detail=str(exc))
+        return ClaudeWebFetcher(model=research_model)
+    usage: UsageLedger
+    if memory:
+        usage = InMemoryUsageLedger()
+    else:
+        postgres = PostgresUsageLedger(lambda: connect(settings, autocommit=True))
+        stack.callback(postgres.close)
+        usage = postgres
+    research = WebResearch.from_settings(
+        settings,
+        clock=clock,
+        ledger=usage,
+        store=SnapshotStore(web_store_root(fetch_root), clock=clock),
+    )
+    if not research.search_vendors and not research.fetch_vendors:
+        _LOG.warning("fm_world.web_research_on_cli", reason="no_vendor_configured")
+        return ClaudeWebFetcher(model=research_model)
+    backup = None
+    if settings.m17_llm_fallback is LlmProvider.CLAUDE_CLI:
+        try:
+            backup = ClaudeWebFetcher(model=research_model)
+        except FetchError as exc:
+            _LOG.warning("fm_world.web_research_no_backup", detail=str(exc))
+    meter = None
+    if ledger is not None:
+        pricer = TokenPricer(load_price_card())
+        token_ledger = ledger
+
+        def meter_call(response: LLMResponse) -> None:
+            try:
+                priced = pricer.price(response, on=session, purpose=FETCH_TOKEN_PURPOSE)
+            except AccountingError as exc:
+                _LOG.warning(
+                    "token_usage.unpriced",
+                    provider=response.provider,
+                    model=response.model,
+                    purpose=FETCH_TOKEN_PURPOSE,
+                    reason=str(exc),
+                )
+                return
+            token_ledger.record(priced)
+
+        meter = meter_call
+    models = load_bedrock_models()
+    _LOG.info(
+        "fm_world.web_research",
+        path="websearch",
+        model=research_model,
+        search_vendors=[v.name.value for v in research.search_vendors],
+        fetch_vendors=[v.name.value for v in research.fetch_vendors],
+        backup=None if backup is None else backup.name,
+        ledger="memory" if memory else "postgres",
+    )
+    return BedrockWebFetcher(
+        model,
+        research,
+        model_id=research_model,
+        backup=backup,
+        meter=meter,
+        bedrock_model_id=lambda name: models.route(name).bedrock_id,
+    )
 
 
 def _wire(
@@ -859,7 +993,6 @@ def _wire(
             f"--start {start.isoformat()} is not the session this run decides ({owed.isoformat()})"
         )
     llm = _llm(settings, provider)
-    fetcher = _fetcher(provider)
     gate = StatusApiGate(datasets=M17_DATASETS, clock=clock, settings=settings)
     stream = STREAM_DRY if dry_run else STREAM_LIVE
     if memory:
@@ -901,6 +1034,17 @@ def _wire(
         reader = entries or functools.partial(
             _read_stream, conn, data_root, roster, journal_for_cases
         )
+    fetcher = _fetcher(
+        provider,
+        settings=settings,
+        clock=clock,
+        fetch_root=snapshots.root,
+        session=owed,
+        ledger=ledger,
+        memory=memory,
+        stack=stack,
+        research_model=roster.primaries[0].models.research,
+    )
     journal = StreamJournal(sink, stream)
     builder = LakeCommonsBuilder(
         data_root=data_root,

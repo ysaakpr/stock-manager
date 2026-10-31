@@ -1,0 +1,15 @@
+{
+  "success": true,
+  "data": {
+    "markdown": "# RBI keeps repo rate unchanged\n\nThe Monetary Policy Committee voted to keep the policy repo rate unchanged at 5.50%, retaining a neutral stance. The standing deposit facility rate stays at 5.25% and the marginal standing facility rate at 5.75%. The committee projected CPI inflation for the year at 2.6% and real GDP growth at 6.8%.",
+    "metadata": {
+      "title": "RBI keeps repo rate unchanged | News Example",
+      "description": "Policy decision coverage.",
+      "language": "en",
+      "sourceURL": "https://news.example.org/economy/rbi-policy-october",
+      "url": "https://news.example.org/economy/rbi-policy-october/",
+      "statusCode": 200,
+      "contentType": "text/html; charset=utf-8"
+    }
+  }
+}

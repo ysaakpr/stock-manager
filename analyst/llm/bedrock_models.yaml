@@ -5,22 +5,33 @@
 # a model that is not listed here, loudly, before any request is made: a guessed id is a 400 at
 # best and a different model at worst.
 #
-# `adapter` is the seam for models that are not Claude. Claude on Bedrock speaks the Anthropic
-# Messages API on the Mantle endpoint (`anthropic_messages`, the only adapter implemented). A
-# model served through bedrock-runtime Converse or Mantle's OpenAI-compatible Chat Completions
-# would get a new adapter value and its own request/response code beside `BedrockLLM`'s, chosen
-# here per model — never an `if model.startswith(...)` in the code.
+# `adapter` is the seam, chosen here per model — never an `if model.startswith(...)` in the code.
+# Claude on Bedrock speaks the Anthropic Messages API, on one of two endpoints: Mantle
+# (`anthropic_messages`, `bedrock-mantle.<region>.api.aws`) or bedrock-runtime
+# (`anthropic_runtime`, `bedrock-runtime.<region>.amazonaws.com/model/<bedrock_id>/invoke`) for a
+# model Mantle does not serve. Models Mantle serves only through its OpenAI-compatible
+# Chat Completions — DeepSeek, which the Messages path answers 400 — are `openai_chat`
+# (`analyst/llm/openai_chat.py`: structured output as `response_format: json_schema`, strict).
+#
+# `cli_fallback_model` is the Claude model the Claude CLI backup is asked for in a non-Claude
+# model's place when Bedrock could not serve it (unavailable — never on a 400). Required for every
+# non-Claude route, and must name a Claude route here; a Claude model leaves it unset and falls
+# back to itself. The answer then records the backup's provider and model, not this one's.
 #
 # `bedrock_id` is the id the request carries (Bedrock prefixes Claude with `anthropic.`), and the
 # id `accounting/model_prices.yaml` prices a Bedrock call under, so Bedrock and first-party rates
 # can differ without a provider column on the card. `max_output_tokens` is the model's own output
 # ceiling: the request's `max_tokens` (thinking included) is clamped to it. `adaptive_thinking` and
 # `effort` (default true) say whether the model accepts `thinking: {type: adaptive}` and
-# `output_config.effort`; Haiku 4.5 accepts neither, so it is sent neither rather than a 400.
+# `output_config.effort` (`reasoning_effort` on `openai_chat`); Haiku 4.5 accepts neither, so it is
+# sent neither rather than a 400.
 #
-# Listed: the M17 roster's models, and the models the older analyst paths name (`claude-opus-5`,
-# the T1/T2 reviews' and the thesis and mapper engines' default; `claude-haiku-4-5`, triage), so
-# LLM_PROVIDER=bedrock serves every consumer in the application.
+# Listed: the M17 roster's models (Amendment 5: `claude-opus-5-5` decisions on Mantle,
+# `claude-sonnet-5-5` digests and research on bedrock-runtime), and the models the older analyst
+# paths name (`claude-opus-5`, the T1/T2 reviews' and the thesis and mapper engines' default;
+# `claude-haiku-4-5`, triage), so LLM_PROVIDER=bedrock serves every consumer in the application;
+# and `deepseek-v3-2`, routed and priced but named by no caller (the owner kept digests on Claude
+# after the 2026-10-30 faithfulness comparison) — capability, not configuration.
 
 version: 1
 
@@ -30,8 +41,11 @@ models:
     bedrock_id: anthropic.claude-opus-5-5
     max_output_tokens: 128000
   claude-sonnet-5-5:
-    adapter: anthropic_messages
-    bedrock_id: anthropic.claude-sonnet-5-5
+    # Not served on Mantle in us-east-1 (`anthropic.`, `us.` and `global.` ids all 404,
+    # 2026-10-30/31). Served on bedrock-runtime through the Global cross-region inference profile
+    # (200, 2026-10-31 ~10:20 IST), which may route a request to any AWS commercial region.
+    adapter: anthropic_runtime
+    bedrock_id: global.anthropic.claude-sonnet-5-5
     max_output_tokens: 128000
   claude-opus-5:
     adapter: anthropic_messages
@@ -43,3 +57,16 @@ models:
     max_output_tokens: 64000
     adaptive_thinking: false
     effort: false
+  deepseek-v3-2:
+    # DeepSeek V3.2. Model card (read 2026-10-30):
+    # https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-deepseek-deepseek-v3-2.html
+    # — "Max output tokens: 8K", context 164K, in-region only (no geo/global inference profile).
+    adapter: openai_chat
+    bedrock_id: deepseek.v3.2
+    max_output_tokens: 8192
+    # No effort and no thinking switch: AWS documents no reasoning control for V3.2 (the card has
+    # no "Reasoning" line, unlike R1, and neither the Chat Completions nor the DeepSeek parameter
+    # pages name `reasoning_effort` or a thinking toggle for it), so none is sent.
+    adaptive_thinking: false
+    effort: false
+    cli_fallback_model: claude-sonnet-5-5

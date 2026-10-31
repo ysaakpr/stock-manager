@@ -36,9 +36,11 @@ every level), which has no field for a recommendation, a rating or a price view.
 text field (``target price``, ``outperform``, ``undervalued`` and the like). A refused digest is
 never stored. The run records it as a failure with the reason.
 
-**Metered.** One `claude-sonnet-5-5` call per uncached filing, through :mod:`analyst.llm` (so
-`StubLLM` drives the tests). Each digest records the provider, the model, the prompt digest and
-the token usage.
+**Metered.** One call per uncached filing, through :mod:`analyst.llm` (so `StubLLM` drives the
+tests), on the model the caller names — the M17 roster's ``models.digest`` (Amendment 5:
+`claude-sonnet-5-5` on Bedrock, the same model on the Claude CLI when Bedrock cannot serve it).
+There is no default model here: a model change is the roster's, never a constant's. Each digest
+records the provider and the model that actually answered, the prompt digest and the token usage.
 
 What it never does: fetch a document, read a wall clock, store a digest that failed validation,
 hold a manager's view, or import `analyst.fundmanager`.
@@ -74,7 +76,6 @@ from dataplatform.query import Dataset, PitContext
 __all__ = [
     "DIGEST_LOOKBACK_SESSIONS",
     "DIGEST_MAX_TOKENS",
-    "DIGEST_MODEL",
     "DIGEST_OUTPUT_SCHEMA",
     "DIGEST_SYSTEM_PROMPT",
     "DIGEST_TOOL",
@@ -106,8 +107,6 @@ _LOG = get_logger(__name__)
 
 #: Versioned identity of the prompt, the schema and the validation. Part of every digest.
 DIGEST_VERSION: Final = "commons-digest/1"
-#: The digest model (pre-registration §2, §9: confirmed 2026-10-09).
-DIGEST_MODEL: Final = "claude-sonnet-5-5"
 #: Output ceiling per digest. A digest is a paragraph and a table, not an essay.
 DIGEST_MAX_TOKENS: Final = 2_000
 #: The furthest back a run looks for a filing, in NSE sessions before the session.
@@ -533,7 +532,7 @@ def digest_messages(item: FilingInput) -> list[Message]:
 
 
 def digest_filing(
-    item: FilingInput, *, llm: LLM, trading_date: date, clock: Clock, model: str = DIGEST_MODEL
+    item: FilingInput, *, llm: LLM, trading_date: date, clock: Clock, model: str
 ) -> FilingDigest:
     """One model call that turns ``item`` into a validated :class:`FilingDigest`.
 
@@ -594,7 +593,7 @@ def build_digests(
     store: DigestStore,
     gate: GreenGate,
     clock: Clock,
-    model: str = DIGEST_MODEL,
+    model: str,
 ) -> DigestRun:
     """Digest every new filing on ``isins`` (the session's digest scope) and record the run.
 
@@ -732,7 +731,7 @@ def digest_for_isins(
     store: DigestStore,
     gate: GreenGate,
     clock: Clock,
-    model: str = DIGEST_MODEL,
+    model: str,
     lookback_sessions: int = ON_DEMAND_LOOKBACK_SESSIONS,
 ) -> OnDemandDigests:
     """The digests of every filing on ``isins`` knowable in the last ``lookback_sessions``.

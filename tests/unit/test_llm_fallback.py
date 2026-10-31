@@ -17,8 +17,10 @@ CLI, and every call lands in `token_usage` with the provider that answered it.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from contextlib import ExitStack
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -27,6 +29,7 @@ from pydantic import SecretStr, ValidationError
 from structlog.testing import capture_logs
 
 from accounting import LedgeredLLM, TokenLedger, TokenPricer, load_price_card
+from analyst.fundmanager import load_roster
 from analyst.llm import (
     DEFAULT_MAX_TOKENS,
     BedrockLLM,
@@ -65,6 +68,7 @@ from tests.unit.test_llm_bedrock import (
     sse,
     streamed,
 )
+from tests.unit.test_websearch import ALL_KEYS as ALL_VENDOR_KEYS
 
 SYSTEM = "You are a fund manager."
 
@@ -374,15 +378,100 @@ def test_build_llm_refuses_the_stub_as_a_backup() -> None:
         build_llm(_settings(), provider=LlmProvider.BEDROCK, fallback=LlmProvider.STUB)
 
 
-def test_the_commons_web_research_stays_on_the_claude_cli_under_bedrock(
-    monkeypatch: pytest.MonkeyPatch,
+#: The roster's research model (Amendment 5: Sonnet 5.5), the one every research path runs on.
+RESEARCH_MODEL = load_roster().primaries[0].models.research
+
+
+def _desk_fetcher(provider: LlmProvider, settings: Settings, root: Path) -> object:
+    with ExitStack() as stack:
+        return fm_world._fetcher(
+            provider,
+            settings=settings,
+            clock=FrozenClock(datetime(2026, 10, 30, 18, 0, tzinfo=IST)),
+            fetch_root=root / "commons" / "fetch",
+            session=date(2026, 10, 30),
+            ledger=None,
+            memory=True,
+            stack=stack,
+            research_model=RESEARCH_MODEL,
+        )
+
+
+_VENDOR_KEYS: dict[str, Any] = dict(
+    zip(
+        ("brave_search_api_key", "tavily_api_key", "firecrawl_api_key"),
+        ALL_VENDOR_KEYS,
+        strict=True,
+    )
+)
+
+
+def test_bedrock_research_runs_on_our_own_search_layer_with_the_cli_behind_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Bedrock has no web tools: the decision path moved, the fetcher did not."""
+    """Amendment 5 (d): Bedrock has no web tools, so the desk's fetcher is our own tool loop."""
+    from analyst.commons.fetch import ClaudeWebFetcher
+    from analyst.websearch import BedrockWebFetcher
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    settings = _settings(
+        aws_bearer_token_bedrock=FAKE_KEY,
+        bedrock_region="us-east-1",
+        m17_web_research="websearch",
+        **_VENDOR_KEYS,
+    )
+    fetcher = _desk_fetcher(LlmProvider.BEDROCK, settings, tmp_path)
+    assert isinstance(fetcher, BedrockWebFetcher)
+    assert RESEARCH_MODEL == "claude-sonnet-5-5"
+    assert fetcher.name == "bedrock+websearch:claude-sonnet-5-5"
+    assert isinstance(fetcher._backup, ClaudeWebFetcher)
+    assert fetcher._backup.name == "claude_cli:claude-sonnet-5-5"  # the backup on Sonnet too
+    # The tool results live in their own store, never in the desk's (a nested lock would hang).
+    assert fetcher.research._store is not None
+    assert fetcher.research._store.root == tmp_path / "commons" / "websearch"
+
+    # No CLI backup when the desk has none.
+    settings = _settings(
+        aws_bearer_token_bedrock=FAKE_KEY,
+        bedrock_region="us-east-1",
+        m17_llm_fallback=None,
+        m17_web_research="websearch",
+        **_VENDOR_KEYS,
+    )
+    fetcher = _desk_fetcher(LlmProvider.BEDROCK, settings, tmp_path)
+    assert isinstance(fetcher, BedrockWebFetcher) and fetcher._backup is None
+
+
+def test_bedrock_research_stays_on_the_cli_when_asked_or_when_it_cannot_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from analyst.commons.fetch import ClaudeWebFetcher
 
     monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
-    assert isinstance(fm_world._fetcher(LlmProvider.BEDROCK), ClaudeWebFetcher)
-    assert isinstance(fm_world._fetcher(LlmProvider.STUB), fm_world.NoLiveFetcher)
+    bedrock = {"aws_bearer_token_bedrock": FAKE_KEY, "bedrock_region": "us-east-1"}
+    # The default, until the research model is served on Bedrock: M17_WEB_RESEARCH=claude_cli.
+    default = _settings(**bedrock, **_VENDOR_KEYS)
+    assert default.m17_web_research.value == "claude_cli"
+    assert isinstance(_desk_fetcher(LlmProvider.BEDROCK, default, tmp_path), ClaudeWebFetcher)
+    bedrock["m17_web_research"] = "websearch"
+    # No Bedrock key: the research cannot run on Bedrock, so it runs on the CLI, not not at all.
+    assert isinstance(
+        _desk_fetcher(
+            LlmProvider.BEDROCK,
+            _settings(m17_web_research="websearch", **_VENDOR_KEYS),
+            tmp_path,
+        ),
+        ClaudeWebFetcher,
+    )
+    # No vendor key at all: the same.
+    assert isinstance(
+        _desk_fetcher(LlmProvider.BEDROCK, _settings(**bedrock), tmp_path), ClaudeWebFetcher
+    )
+    # A desk on the Claude CLI always researches there; a stub desk never researches live.
+    cli = _settings(**bedrock, **_VENDOR_KEYS)
+    on_cli = _desk_fetcher(LlmProvider.CLAUDE_CLI, cli, tmp_path)
+    assert isinstance(on_cli, ClaudeWebFetcher) and on_cli.name == f"claude_cli:{RESEARCH_MODEL}"
+    assert isinstance(_desk_fetcher(LlmProvider.STUB, cli, tmp_path), fm_world.NoLiveFetcher)
 
 
 # ── usage: every call in token_usage, priced for whoever answered ─────────────────────────────────

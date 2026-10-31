@@ -1,0 +1,14 @@
+{
+  "success": true,
+  "data": {
+    "markdown": "",
+    "metadata": {
+      "title": "Access denied",
+      "sourceURL": "https://news.example.org/economy/rbi-policy-october",
+      "url": "https://news.example.org/economy/rbi-policy-october",
+      "statusCode": 403,
+      "contentType": "text/html",
+      "error": "Forbidden"
+    }
+  }
+}

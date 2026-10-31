@@ -192,9 +192,36 @@ schedules:
          $0.55. Claude Haiku 4.5 (Amazon Bedrock Edition), USE1_InputTokenCount /
          OutputTokenCount / CacheWriteInputTokenCount / CacheReadInputTokenCount: $1.10 / $5.50 /
          $1.375 / $0.11."
+      - "AWS Price List API, offer AmazonBedrock, region us-east-1
+         (https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrock/current/us-east-1/index.json),
+         publicationDate 2026-10-29T18:57:48Z, read 2026-10-30, OnDemand terms effective
+         2026-10-01. DeepSeek V3.2 (deepseek.v3.2), usage types
+         USE1-deepseek.v3.2-mantle-input-tokens-standard / -mantle-output-tokens-standard (the
+         Mantle endpoint the M17 digests call) and USE1-deepseek.v3.2-input-tokens /
+         -output-tokens (bedrock-runtime), identical: $0.00062 / $0.00185 per 1K tokens, i.e.
+         $0.62 input / $1.85 output per 1M. No cache SKU exists for it in the offer. Model card:
+         https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-deepseek-deepseek-v3-2.html
+         (in-region only; no geo or global inference profile)."
+      - "AWS Price List API, offer AmazonBedrockFoundationModels, region us-east-1 (same URL as
+         above), publicationDate 2026-10-12T08:40:08Z, re-read 2026-10-31, OnDemand terms effective
+         2026-10-01, unit 1M tokens. Claude Sonnet 5.5 (Amazon Bedrock Edition), usage types
+         USE1-MP:USE1_input_tokens_global_standard-Units / _output_tokens_global_standard /
+         _cache_write_tokens_global_standard / _cache_read_tokens_global_standard: $2.00 / $10.00 /
+         $2.50 / $0.10. These are the rates of the Global cross-region inference profile
+         (`global.anthropic.claude-sonnet-5-5`, bedrock-runtime), added to this schedule on
+         2026-10-31 before any call was made under that id."
     notes: >-
-      Bedrock calls are priced under their Bedrock model ids (`anthropic.claude-*`, as
-      `analyst/llm/bedrock_models.yaml` maps them), so a Bedrock
+      DeepSeek V3.2 (`deepseek.v3.2`, Amendment 5's digest model) has no prompt-cache price on
+      Bedrock, so its cache buckets carry the full input rate: a cached token Mantle ever reports
+      is billed as an input token, never as free. Its `standard` (in-region on-demand) rate is the
+      only one that applies — the model has no cross-region profile — and the priority / flex
+      tiers are not requested.
+      Sonnet 5.5 is called through bedrock-runtime's Global cross-region inference profile
+      (Mantle does not serve it in us-east-1), so it is priced under that profile's id,
+      `global.anthropic.claude-sonnet-5-5`, at the `global_standard` rates; the in-region
+      `anthropic.claude-sonnet-5-5` entry is kept but no route sends that id.
+      Bedrock calls are priced under their Bedrock model ids (`anthropic.claude-*`,
+      `global.anthropic.claude-*`, as `analyst/llm/bedrock_models.yaml` maps them), so a Bedrock
       call and a first-party or Claude CLI call of the same model price at their own rates without
       a provider column on this card. The in-region `standard` rates are used — 10 % above the
       `global_standard` (cross-region) ones — because the Mantle endpoint is called in-region with
@@ -216,6 +243,11 @@ schedules:
         output: "11.00"
         cache_write: "2.75"
         cache_read: "0.11"
+      global.anthropic.claude-sonnet-5-5:
+        input: "2.00"
+        output: "10.00"
+        cache_write: "2.50"
+        cache_read: "0.10"
       anthropic.claude-opus-5:
         input: "5.50"
         output: "27.50"
@@ -226,6 +258,11 @@ schedules:
         output: "5.50"
         cache_write: "1.375"
         cache_read: "0.11"
+      deepseek.v3.2:
+        input: "0.62"
+        output: "1.85"
+        cache_write: "0.62"
+        cache_read: "0.62"
       claude-opus-5-5:
         input: "4.00"
         output: "20.00"

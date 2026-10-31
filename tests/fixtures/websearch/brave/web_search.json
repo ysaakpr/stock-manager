@@ -1,0 +1,40 @@
+{
+  "type": "search",
+  "query": {"original": "reserve bank of india repo rate", "more_results_available": true},
+  "mixed": {"type": "mixed", "main": [{"type": "web", "index": 0, "all": false}]},
+  "web": {
+    "type": "search",
+    "family_friendly": true,
+    "results": [
+      {
+        "type": "search_result",
+        "title": "RBI keeps <strong>repo rate</strong> unchanged at 5.50%",
+        "url": "https://news.example.org/economy/rbi-policy-october",
+        "is_source_local": false,
+        "is_source_both": false,
+        "description": "The <strong>Reserve Bank of India</strong> kept the policy repo rate unchanged &amp; retained a neutral stance.",
+        "age": "2 days ago",
+        "page_age": "2026-10-28T09:30:00",
+        "language": "en",
+        "family_friendly": true,
+        "profile": {"name": "News Example", "url": "https://news.example.org", "long_name": "news.example.org"},
+        "meta_url": {"scheme": "https", "netloc": "news.example.org", "hostname": "news.example.org", "path": "› economy"}
+      },
+      {
+        "type": "search_result",
+        "title": "Monetary Policy Statement",
+        "url": "https://www.nseindia.com/market-data/rbi-policy",
+        "description": "Policy rates as published.",
+        "language": "en"
+      },
+      {
+        "type": "search_result",
+        "title": "Repo rate explained",
+        "url": "https://explainers.example.net/repo-rate",
+        "description": "What the repo rate is and how it moves bank lending rates.",
+        "age": "March 3, 2025",
+        "language": "en"
+      }
+    ]
+  }
+}
