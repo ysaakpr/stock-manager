@@ -1988,3 +1988,23 @@ def test_the_followup_schema_is_hashed_with_the_others() -> None:
     document = json.loads(schema_bytes(limits, system_prompt="s"))
     assert document["research_followup"] == research_schema(limits, triage=False)
     assert "holdings" not in document["research_followup"]["properties"]
+
+
+def test_identifier_fields_are_described_as_identifiers_never_as_prose(
+    world: World, tmp_path: Path
+) -> None:
+    """An ``evidence_refs`` entry must be one bare citation (MALFORMED_REF otherwise), a cell id an
+    id. Described as "text … about 80 words", they drew prose after the id on 2026-10-31 and the
+    contract voided all ten of a manager's decisions. They keep their bound, stated as such."""
+    item = decision_schema()["properties"]["decisions"]["items"]["properties"]
+    ref = item["evidence_refs"]["items"]["description"]
+    cell = item["base_rate_cell"]["anyOf"][0]["properties"]["cell_id"]["description"]
+    citation = item["adjustments"]["items"]["properties"]["citation"]["description"]
+    for text in (ref, cell, citation):
+        assert "words" not in text and "text" not in text.lower()
+        assert f"at most {MAX_SHORT_CHARS:,} characters" in text
+    assert "[F:<field_id>] or [S:<snapshot_id>]" in ref and "nothing else" in ref
+    final_text = " ".join(_all_prompts(world, tmp_path, _mandate())[ROUND_FINAL].split())
+    assert "Each `evidence_refs` entry is one bare citation" in final_text
+    texts = final_text.split("every other text —", 1)[1].split("A longer value is refused", 1)[0]
+    assert "evidence_refs" not in texts and "cell_id" not in texts

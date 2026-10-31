@@ -349,9 +349,9 @@ Write the memo **in this order**. The order matters: the probability comes *afte
 
 **Length limits.** `rationale`, `thesis`, `already_priced_in` and `what_changed.text` are at most
 {{max_text_chars}} characters each; every other text — `catalyst`, each `invalidation` and
-`premortem` line, each adjustment's `reason` and `citation`, each scenario's `description`, each
-`evidence_refs` entry, `base_rate_cell.cell_id` and `no_action_reason` — at most {{max_short_chars}}.
-A longer value is refused.
+`premortem` line, each adjustment's `reason` and `citation`, each scenario's `description` and
+`no_action_reason` — at most {{max_short_chars}}. A longer value is refused. Each `evidence_refs`
+entry is one bare citation, `[F:…]` or `[S:…]`, with nothing after it.
 
 Return the decisions in the required schema. If you decide nothing today, return the `NO_ACTION`
 form with your one-line reason. That is a complete and acceptable answer.

@@ -327,13 +327,31 @@ def length_rule(max_length: int, *, nullable: bool = False) -> str:
     )
 
 
-def _string(max_length: int = _MAX_SHORT) -> dict[str, Any]:
+def _string(max_length: int = _MAX_SHORT, *, description: str | None = None) -> dict[str, Any]:
+    """A bounded text field; ``description`` replaces the prose wording for an identifier field
+    (a citation, a cell id), which must still name its limit."""
     return {
         "type": "string",
         "minLength": 1,
         "maxLength": max_length,
-        "description": length_rule(max_length),
+        "description": description or length_rule(max_length),
     }
+
+
+#: An `evidence_refs` entry is one bare citation (`contract` refuses anything else as
+#: MALFORMED_REF). Described as an identifier, never as "text … words": that wording drew prose
+#: after the id on 2026-10-31 and voided all ten decisions of one manager.
+_EVIDENCE_REF_RULE: Final = (
+    "One citation exactly as the bundle shows it — [F:<field_id>] or [S:<snapshot_id>] — and "
+    f"nothing else: no value, no comment (at most {_MAX_SHORT:,} characters)."
+)
+_CITATION_RULE: Final = (
+    "The citation this adjustment rests on: [F:<field_id>] or [S:<snapshot_id>] "
+    f"(at most {_MAX_SHORT:,} characters)."
+)
+_CELL_ID_RULE: Final = (
+    f"The base-rate cell's id exactly as the table shows it (at most {_MAX_SHORT:,} characters)."
+)
 
 
 def _nullable(schema: Mapping[str, Any]) -> dict[str, Any]:
@@ -669,7 +687,7 @@ def decision_schema() -> dict[str, Any]:
             "stop_pct": _nullable(_PCT),
             "new_stop_pct": _nullable(_PCT),
             "invalidation": _array(_string(), _MAX_LIST),
-            "evidence_refs": _array(_string(), 40),
+            "evidence_refs": _array(_string(description=_EVIDENCE_REF_RULE), 40),
             "what_changed": {
                 "anyOf": [
                     _object({"kind": _enum(WhatChangedKind), "text": _string(_MAX_TEXT)}),
@@ -684,7 +702,7 @@ def decision_schema() -> dict[str, Any]:
                 "anyOf": [
                     _object(
                         {
-                            "cell_id": _string(),
+                            "cell_id": _string(description=_CELL_ID_RULE),
                             "p_beat": _PROB,
                             "median_excess": _nullable(_NUMBER),
                             "iqr_excess": _nullable(_NUMBER),
@@ -699,7 +717,7 @@ def decision_schema() -> dict[str, Any]:
                         "reason": _string(),
                         "direction": _enum(Direction),
                         "size_pp": _PCT,
-                        "citation": _string(),
+                        "citation": _string(description=_CITATION_RULE),
                     }
                 ),
                 _MAX_ADJUSTMENTS,
