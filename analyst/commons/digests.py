@@ -38,9 +38,9 @@ never stored. The run records it as a failure with the reason.
 
 **Metered.** One call per uncached filing, through :mod:`analyst.llm` (so `StubLLM` drives the
 tests), on the model the caller names — the M17 roster's ``models.digest`` (Amendment 5:
-`claude-opus-5-5` on Bedrock, the same model on the Claude CLI when Bedrock cannot serve it). There is no
-default model here: a model change is the roster's, never a constant's. Each digest records the
-provider and the model that actually answered, the prompt digest and the token usage.
+`claude-opus-5-5` on Bedrock, the same model on the Claude CLI when Bedrock cannot serve it).
+There is no default model here: a model change is the roster's, never a constant's. Each digest
+records the provider and the model that actually answered, the prompt digest and the token usage.
 
 What it never does: fetch a document, read a wall clock, store a digest that failed validation,
 hold a manager's view, or import `analyst.fundmanager`.
