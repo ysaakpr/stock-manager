@@ -352,6 +352,7 @@ class ScriptedStub:
         self.prompts: list[str] = []
         self.tools: list[str] = []
         self.breaks: list[tuple[int, ...]] = []
+        self.schemas: list[Mapping[str, Any]] = []
 
     def complete(
         self,
@@ -365,6 +366,7 @@ class ScriptedStub:
         self.prompts.append(messages[-1].content)
         self.tools.append(tools[0].name)
         self.breaks.append(messages[-1].cache_breaks)
+        self.schemas.append(tools[0].input_schema)
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -663,13 +665,14 @@ def test_research_rounds_stop_at_two_so_a_session_never_exceeds_four_calls(
     assert "Exchange filing text about q three" in llm.prompts[-1]
 
 
-def test_every_call_marks_the_session_header_and_each_research_bundle_for_the_prompt_cache(
+def test_research_rounds_mark_the_session_header_and_each_bundle_for_the_prompt_cache(
     world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
 ) -> None:
-    """Transport only (`Message.cache_breaks`): one header shared byte for byte by every call and
-    reaching all the way to the round's task, so the mandate, market sheet, holdings, screens,
-    shortlist, base rates and cost hurdles are read from the cache after the first call; then
-    each research bundle's end, so a round reads what the round before it wrote."""
+    """Transport only (`Message.cache_breaks`). The session header is one prefix every call shares
+    byte for byte, reaching all the way to the round's task. Only research rounds mark it, and
+    each research bundle's end, so research2 reads what research1 wrote; round 0 and the final
+    call answer in schemas no other call shares (the schema is part of the cached prefix), so a
+    write there would be paid for and never read, and they mark nothing."""
     result, _, llm = _run(
         world,
         tmp_path,
@@ -682,31 +685,43 @@ def test_every_call_marks_the_session_header_and_each_research_bundle_for_the_pr
     )
     assert result.status is SessionStatus.DECIDED
     prompts, breaks = llm.prompts, llm.breaks
-    head = breaks[0][0]
-    header = prompts[0][:head]
-    assert all(b[0] == head and p.startswith(header) for p, b in zip(prompts, breaks, strict=True))
+    assert breaks[0] == () and breaks[3] == ()
+    head = breaks[1][0]
+    header = prompts[1][:head]
+    assert breaks[2][0] == head
+    assert all(p.startswith(header) for p in prompts)
     # The header is the whole stable context: the next line is the round's task, in every round.
     assert all(p[head:].startswith("## Your task this round") for p in prompts)
     assert "### Research fulfilled" not in header
-    # round 0: only the header; research1: + bundle 0; research2: + bundles 0 and 1.
-    assert [len(b) for b in breaks[:3]] == [1, 2, 3]
+    # research1: header + bundle 0; research2: header + bundles 0 and 1.
+    assert [len(b) for b in breaks[1:3]] == [2, 3]
     r1_end = breaks[1][-1]
     assert r1_end in breaks[2] and prompts[2][:r1_end] == prompts[1][:r1_end]
-    assert prompts[1][:r1_end].endswith(prompts[2][breaks[2][1] - 40 : breaks[2][1]])
-    # The final round marks the header and both bundles.
-    assert len(breaks[3]) == 3
 
 
-def test_a_schema_repair_reuses_its_originals_cache_breaks(world: World, tmp_path: Path) -> None:
+def test_a_research_repair_reuses_its_originals_cache_breaks_and_a_final_repair_has_none(
+    world: World, tmp_path: Path
+) -> None:
     result, _, llm = _run(
         world,
         tmp_path,
-        [research([LEADER], ["q one"]), research(), final(hold(action="SELL")), final(hold())],
+        [
+            research([LEADER], ["q one"]),
+            {"requests": "nope"},
+            research(),
+            final(hold(), passed(LEADER)),
+        ],
     )
-    assert result.repairs == 1
-    original, repair = llm.prompts[-2], llm.prompts[-1]
-    assert repair.startswith(original) and llm.breaks[-1] == llm.breaks[-2]
-    assert len(llm.breaks[-1]) == 2
+    assert result.repairs == 1 and result.status is SessionStatus.DECIDED
+    original, repair = llm.prompts[1], llm.prompts[2]
+    assert repair.startswith(original) and llm.breaks[2] == llm.breaks[1]
+    assert len(llm.breaks[2]) == 2
+    _, _, llm = _run(
+        world,
+        tmp_path,
+        [research(), final(hold(action="SELL")), final(hold())],
+    )
+    assert llm.breaks == [(), (), ()]
 
 
 def test_an_empty_round_zero_goes_straight_to_the_final_call(world: World, tmp_path: Path) -> None:
@@ -1943,8 +1958,69 @@ def test_every_round_tells_the_manager_the_text_limits_the_schema_enforces(
     prompts = {k: " ".join(v.split()) for k, v in _all_prompts(world, tmp_path, _mandate()).items()}
     short = f"at most {MAX_SHORT_CHARS:,} characters"
     for key in (ROUND_ZERO, ROUND_RESEARCH):
-        assert short in prompts[key] and "`note`" in prompts[key], key
+        assert short in prompts[key] and "`claim`" in prompts[key], key
+    assert "`note`" in prompts[ROUND_ZERO]
     assert "Do this working in your thinking" in prompts[ROUND_RESEARCH]
+    assert "no holdings triage this round" in prompts[ROUND_RESEARCH]
     final_text = prompts[ROUND_FINAL]
     assert f"at most {MAX_TEXT_CHARS:,} characters each" in final_text
     assert f"`no_action_reason` — at most {MAX_SHORT_CHARS:,}" in final_text
+
+
+def test_only_round_zero_is_offered_a_holdings_triage(world: World, tmp_path: Path) -> None:
+    """Triage is round 0's step; the research rounds' schema has no ``holdings`` at all, so a
+    manager cannot pour its per-name analysis into notes it would overrun (2026-10-31: 510 and 539
+    characters on Bedrock, which cannot enforce ``maxLength``). Requests and queries keep exactly
+    round 0's shape and caps."""
+    result, _, llm = _run(
+        world,
+        tmp_path,
+        [
+            research([LEADER], ["q one"]),
+            research([BREAKOUT], ["q two"]),
+            research(),
+            final(hold(), passed(LEADER), passed(BREAKOUT)),
+        ],
+    )
+    assert result.status is SessionStatus.DECIDED
+    round0, research1, research2, final_schema = llm.schemas
+    assert "holdings" in round0["properties"] and "holdings" in round0["required"]
+    for followup in (research1, research2):
+        assert "holdings" not in followup["properties"]
+        assert "holdings" not in followup["required"]
+        assert followup["additionalProperties"] is False
+        for key in ("requests", "queries"):
+            assert followup["properties"][key] == round0["properties"][key]
+    assert "decisions" in final_schema["properties"]
+
+
+def test_the_followup_schema_is_hashed_with_the_others() -> None:
+    from analyst.fundmanager.schemas import schema_bytes
+
+    limits = _mandate().rounds
+    document = json.loads(schema_bytes(limits, system_prompt="s"))
+    assert document["research_followup"] == research_schema(limits, triage=False)
+    assert "holdings" not in document["research_followup"]["properties"]
+
+
+def test_identifier_fields_are_described_as_identifiers_never_as_prose(
+    world: World, tmp_path: Path
+) -> None:
+    """An ``evidence_refs`` entry must be one bare citation (MALFORMED_REF otherwise), a cell id an
+    id. Described as "text … about 80 words", they drew prose after the id on 2026-10-31 and the
+    contract voided all ten of a manager's decisions. They keep their bound, stated as such."""
+    item = decision_schema()["properties"]["decisions"]["items"]["properties"]
+    ref = item["evidence_refs"]["items"]["description"]
+    cell = item["base_rate_cell"]["anyOf"][0]["properties"]["cell_id"]["description"]
+    citation = item["adjustments"]["items"]["properties"]["citation"]["description"]
+    target = research_schema(_mandate().rounds)["properties"]["queries"]["items"]["properties"][
+        "target"
+    ]["description"]
+    for text in (ref, cell, citation, target):
+        assert "words" not in text and "text" not in text.lower()
+        assert f"at most {MAX_SHORT_CHARS:,} characters" in text
+    assert "[F:<field_id>] or [S:<snapshot_id>]" in ref and "nothing else" in ref
+    final_text = " ".join(_all_prompts(world, tmp_path, _mandate())[ROUND_FINAL].split())
+    assert "Each `evidence_refs` entry is one bare citation" in final_text
+    texts = final_text.split("every other text —", 1)[1].split("A longer value is refused", 1)[0]
+    assert "evidence_refs" not in texts and "cell_id" not in texts

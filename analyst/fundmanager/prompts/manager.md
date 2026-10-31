@@ -7,7 +7,8 @@ Amendment 5 (DRAFT, 2026-10-31): the "Today: session, round" line moved from the
 the end of each round block, so everything above the round blocks is one prefix every call of
 a session shares byte for byte (the Bedrock prompt cache reads it); the line is unchanged. Each
 round now states the text-length limits the schemas enforce ({{max_short_chars}} and
-{{max_text_chars}} come from `schemas`), which Bedrock's structured output cannot compile.
+{{max_text_chars}} come from `schemas`), which Bedrock's structured output cannot compile, and the
+research rounds answer without a holdings triage (their schema has none; triage is round 0's).
   {{...}}            a value injected by the runtime
   [[ROUND:x]] blocks only the block for the current round is rendered
   [[STYLE:x]] blocks only the block for the manager's style is rendered
@@ -261,9 +262,10 @@ bought and sold the same shares that session (`matched_deal_qty`, `volume_ex_mat
 2. What that implies economically.
 3. What the price already reflects.
 
-Do this working in your thinking. The request you return carries only its conclusions: every text in
-it — each holding's `note`, each `claim` and `kill_test`, each query's `target` and `purpose` — is at
-most {{max_short_chars}} characters, and a longer one is refused (the session has one repair).
+Do this working in your thinking. The request you return carries only its conclusions — no holdings
+triage this round, that was round 0's: each `claim` and `kill_test`, each query's `target` and
+`purpose` is at most {{max_short_chars}} characters, and a longer one is refused (the session has
+one repair).
 
 If one more query would *change a decision*, request it, within the same limits. If not, return an
 empty request. Do not ask for more just to feel thorough.
@@ -347,9 +349,9 @@ Write the memo **in this order**. The order matters: the probability comes *afte
 
 **Length limits.** `rationale`, `thesis`, `already_priced_in` and `what_changed.text` are at most
 {{max_text_chars}} characters each; every other text — `catalyst`, each `invalidation` and
-`premortem` line, each adjustment's `reason` and `citation`, each scenario's `description`, each
-`evidence_refs` entry, `base_rate_cell.cell_id` and `no_action_reason` — at most {{max_short_chars}}.
-A longer value is refused.
+`premortem` line, each adjustment's `reason` and `citation`, each scenario's `description` and
+`no_action_reason` — at most {{max_short_chars}}. A longer value is refused. Each `evidence_refs`
+entry is one bare citation, `[F:…]` or `[S:…]`, with nothing after it.
 
 Return the decisions in the required schema. If you decide nothing today, return the `NO_ACTION`
 form with your one-line reason. That is a complete and acceptable answer.
