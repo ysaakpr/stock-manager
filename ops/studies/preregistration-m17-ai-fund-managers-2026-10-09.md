@@ -653,14 +653,14 @@ the hashes come out exactly as the rule-only column below). So **the eight manag
 
 | Book | `main` 8bafdf8 (in force) | Rule only (first draft) | DeepSeek digests (PR #147 at b4f7a8b) | PR #147 (rule + `research`) | PR #148 (+ (h) limits stated, (i)) | This draft (+ (h) follow-up schema) |
 |---|---|---|---|---|---|---|
-| `FM-POS-FUND-10L` | `d52645654199b7b8` | `f2767a99fe228f23` | `48aad03e87ee5f4d` | `431ff6ce9c259d9b` | `89941098fd7a6cc4` | `b12d62061ea7fa06` |
-| `FM-POS-FUND-1CR` | `64d273a2be8e6b27` | `ec87caa2475f89a4` | `0aaa86ab53a963e5` | `98b728dc788fec28` | `bdbe11c6b0b3b461` | `c5ebeca91f0f9b41` |
-| `FM-POS-TREND-10L` | `bcb545000b90aa18` | `29f43451d6e5945b` | `a80d3135beddabe6` | `88af5bb2886ad53f` | `bf031e69c2d8d161` | `bf4eb8d09edfeca4` |
-| `FM-POS-TREND-1CR` | `3ceff88b34ad5fef` | `f8a2dfe524f71e3f` | `63a5abf7e5a2fd43` | `29c9bb823d8025f4` | `af88b91df11c2f3b` | `5ae85cf24ac370d5` |
-| `FM-SWING-BRK-10L` | `31f1f72ffcab8956` | `077166ed09e44141` | `92839a37a96bedc4` | `752176d43187dde9` | `fc1e47caa876121d` | `51a41e238fb85b5f` |
-| `FM-SWING-BRK-1CR` | `cc6a7067f4659d07` | `9136027709dfdf4c` | `073fca0b0cafe66c` | `99be11b9b843daa8` | `a11ac47f6783e24d` | `7535915c22ef9504` |
-| `FM-SWING-EVT-10L` | `b7a1aad9e289c4a4` | `e5deef56a2137d61` | `5907665c2d63e460` | `5f412d204d0fcbce` | `0f0f35ee5b6ede5e` | `c4aa41339380f6fd` |
-| `FM-SWING-EVT-1CR` | `0f0fbbd4e7bce247` | `87816e83ea7303f2` | `36be694b20b46268` | `5e50cc349aa3a4ee` | `8b96e52cfbfc09c2` | `7f13fd21d68220fb` |
+| `FM-POS-FUND-10L` | `d52645654199b7b8` | `f2767a99fe228f23` | `48aad03e87ee5f4d` | `431ff6ce9c259d9b` | `89941098fd7a6cc4` | `28f17e17202eeb0d` |
+| `FM-POS-FUND-1CR` | `64d273a2be8e6b27` | `ec87caa2475f89a4` | `0aaa86ab53a963e5` | `98b728dc788fec28` | `bdbe11c6b0b3b461` | `d2c0ed83f6dddaf6` |
+| `FM-POS-TREND-10L` | `bcb545000b90aa18` | `29f43451d6e5945b` | `a80d3135beddabe6` | `88af5bb2886ad53f` | `bf031e69c2d8d161` | `f09aafb9c609cc76` |
+| `FM-POS-TREND-1CR` | `3ceff88b34ad5fef` | `f8a2dfe524f71e3f` | `63a5abf7e5a2fd43` | `29c9bb823d8025f4` | `af88b91df11c2f3b` | `c0bb3e527ac46292` |
+| `FM-SWING-BRK-10L` | `31f1f72ffcab8956` | `077166ed09e44141` | `92839a37a96bedc4` | `752176d43187dde9` | `fc1e47caa876121d` | `589644b378ba24ec` |
+| `FM-SWING-BRK-1CR` | `cc6a7067f4659d07` | `9136027709dfdf4c` | `073fca0b0cafe66c` | `99be11b9b843daa8` | `a11ac47f6783e24d` | `2086831f310a35ad` |
+| `FM-SWING-EVT-10L` | `b7a1aad9e289c4a4` | `e5deef56a2137d61` | `5907665c2d63e460` | `5f412d204d0fcbce` | `0f0f35ee5b6ede5e` | `9744c08eb7d8d862` |
+| `FM-SWING-EVT-1CR` | `0f0fbbd4e7bce247` | `87816e83ea7303f2` | `36be694b20b46268` | `5e50cc349aa3a4ee` | `8b96e52cfbfc09c2` | `c192a3b1c1c64497` |
 
 None of the first three draft columns was ever in force: PR #147 was not merged under them. The
 "PR #147" column was deployed with PR #147 on 2026-10-31 (11:25 IST) and the "PR #148"
@@ -700,7 +700,14 @@ after its deploy (2026-10-31, 13:26 IST) had FM-SWING-BRK-10L's research1 write 
 holdings triage** — requests and queries only, with exactly round 0's shape and caps. Triage is
 round 0's step (§4 step 3), the research-round instructions never asked for it and nothing reads a
 later one; every overrun measured was a holding's note in a research round. The grammar now makes
-that field impossible to write instead of asking the model to keep it short. A refused answer now names each violated field, rule, bound and
+that field impossible to write instead of asking the model to keep it short. The same rehearsal showed
+the first change's wording had a cost: described as "text … about 80 words", every `evidence_refs`
+entry of FM-SWING-EVT-10L carried prose after its id and the contract voided all ten of its
+decisions (`MALFORMED_REF`; the contract rule is unchanged and right). So the identifier fields —
+each `evidence_refs` entry, an adjustment's `citation`, the base-rate `cell_id` — are described as
+what they are (one bare `[F:…]` or `[S:…]` citation and nothing else; a citation; the cell's id as
+shown), still naming their 500-character bound, and the final round says each `evidence_refs` entry
+is one bare citation. A refused answer now names each violated field, rule, bound and
 length in the log (`fm.call_malformed`, the repair's `fm.call`, `fm.manager_error`) and in the
 `MANAGER_ERROR` payload, and the repair prompt tells the model the length it wrote. The schema
 bytes (now three schemas: round 0's research, the follow-up, the decisions) and the template bytes

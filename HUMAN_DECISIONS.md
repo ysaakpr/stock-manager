@@ -747,6 +747,9 @@ What it is:
   round's instructions now state the limits in words, a refusal logs the field, rule and length,
   and — since a 539-character note still came back after that — the research rounds answer with a
   follow-up schema that has no holdings triage (triage is round 0's; nothing reads a later one).
+  Citation and id fields (`evidence_refs` entries, an adjustment's `citation`, `cell_id`) are
+  described as identifiers, not "text", after that wording drew prose into the refs and the
+  contract voided a manager's decisions as `MALFORMED_REF` (the contract rule is unchanged).
 - **Prompt caching on Bedrock (Amendment 5 (i)):** cache breakpoints at the session header and each
   research bundle (transport, not hashed; about a third off the decision calls' input cost). The
   template's "Today: session, round" line moves unchanged to the end of each round block so the
@@ -756,7 +759,7 @@ What it is:
   digest models are unchanged, but the new key is in the hashed bytes), and the template and both
   schemas change with the two items above, so the **8 manager books'
   `mandate_hash` change** (controls, style books and bench unchanged; the full table is in
-  Amendment 5 (g)): `FM-POS-FUND-10L` `b12d62061ea7fa06`, `FM-POS-FUND-1CR` `c5ebeca91f0f9b41`, `FM-POS-TREND-10L` `bf4eb8d09edfeca4`, `FM-POS-TREND-1CR` `5ae85cf24ac370d5`, `FM-SWING-BRK-10L` `51a41e238fb85b5f`, `FM-SWING-BRK-1CR` `7535915c22ef9504`, `FM-SWING-EVT-10L` `c4aa41339380f6fd`, `FM-SWING-EVT-1CR` `7f13fd21d68220fb` (first 16 hex). S0 has not happened, so **the dry-run count restarts**
+  Amendment 5 (g)): `FM-POS-FUND-10L` `28f17e17202eeb0d`, `FM-POS-FUND-1CR` `d2c0ed83f6dddaf6`, `FM-POS-TREND-10L` `f09aafb9c609cc76`, `FM-POS-TREND-1CR` `c0bb3e527ac46292`, `FM-SWING-BRK-10L` `589644b378ba24ec`, `FM-SWING-BRK-1CR` `2086831f310a35ad`, `FM-SWING-EVT-10L` `9744c08eb7d8d862`, `FM-SWING-EVT-1CR` `c192a3b1c1c64497` (first 16 hex). S0 has not happened, so **the dry-run count restarts**
   with the first dry session under them: the session of Monday 2026-11-02, run at 22:00 IST.
 - **Transport:** Bedrock primary (`LLM_PROVIDER=bedrock`, `M17_LLM_PROVIDER=bedrock`), Claude CLI
   backup per call (`LLM_FALLBACK=claude_cli`, `M17_LLM_FALLBACK=claude_cli`). A call falls back only when Bedrock could not serve it —
