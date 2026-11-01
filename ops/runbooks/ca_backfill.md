@@ -104,3 +104,72 @@ earlier after a Saturday refresh, with no `--extend` run in between, is a regres
 Exit codes: `0` clean; `1` a unit FAILED or the fetch parked on a 403 spike (what landed is still
 finalized — re-run after the cause is cleared; PUBLISHED units are skipped); `2` an invalid window
 (over twelve months is the backfill's job).
+
+## The share-basis guard: splits and consolidations the feeds miss (M2.3, 2026-11-01)
+
+Owner ruling 2026-11-01 (HUMAN_DECISIONS, "system should have a way"): a split or consolidation
+no feed carries is adjusted automatically when the evidence is sufficient, and otherwise kept away
+from every decision and shown on Ops. Nobody is expected to look at the data. The case that forced
+it: AvenuesAI's Re 1 -> Rs 10 consolidation (2026-10-13). NSE's bc file stated the terms and the
+record date with a **blank ex-date**, NSE's CA API (queried by ex-date) never returned it, BSE is
+blocked, and nothing promoted bc lines into factors.
+
+### The derived ex-date rule (`corpactions/ex_date_rule.py`)
+
+`T1_RECORD_DATE`: **ex-date = record date**, only for a record date that is a trading session on
+or after **2023-01-27** (every stock settled T+1 from then; every row of the same bundles that
+states both dates shows ex = record). Never before 2023-01-27 — T+2 rules varied — and never from
+a non-session or a date the calendar does not cover. Where it applies:
+
+| Source | Where the rule is recorded |
+|---|---|
+| NSE bc file (L1 `pr_ca_broadcasts`) | `ex_date` filled, `ex_date_derived = 'T1_RECORD_DATE'` |
+| NSE CA feed (blank `exDate` on a face-value change) | `CorporateAction.ex_date_rule` (log `nse_corp_actions.ex_date_derived`) |
+| Curated `manual_actions.yaml` | `ex_date_derived: T1_RECORD_DATE` instead of `ex_date` (never both) |
+| The guard's admitted factor | `ex_date_rule` in `<L2>/share_basis/state.json` |
+
+### What the guard does (`quality/share_basis.py`, job `share_basis_guard`)
+
+Runs 19:40 IST weekdays (after the EOD pipeline and snapshot, before the paper session and M17)
+and 11:30 IST Saturday (after `ca_refresh`). About 30 s. Each run:
+
+1. **bc lines** stating a face-value change since T+1, resolved to the ISIN traded that session.
+   Ex-date stated, or derived by the rule. A line a recorded or curated split/bonus within 7 days
+   already covers is left to it.
+2. **Reissues** (D2 lineage edges) whose two ISINs' face values differ in the identity master.
+3. A factor is **admitted** only when L1's close-to-close step across the event agrees with the
+   stated ratio within **0.8-1.25**. One daily band either way. The nearest wrong reading of any
+   stated ratio is at least 2x away, so the band cannot admit the wrong one. An admitted factor is
+   composed into L2 like a curated row (source `nse_pr_bundle_bc` or `share_basis_reissue`), and
+   yields to any feed or curated split/bonus within 7 days. Exactly the partitions whose admitted
+   set changed are rebuilt.
+4. The **continuity scan** then runs over L2 with the `SHARE_BASIS` class: a step across a
+   reissue (any gap), or across a 6-30 day gap at a clean split multiple (`implied.py`'s
+   candidates and bands), that nothing explains.
+5. **Fail closed.** Every `SHARE_BASIS` step, and every stated ratio the price contradicts, is
+   **quarantined**. The ISIN's bars before the step are withheld by
+   `dataplatform.query.default_price_quarantine`, the same predicate as D22, in every
+   decision-facing reader (QueryService, the backtest readers, the Commons, the paper and M17
+   desks). Each is an **ERROR** on `/status/quality` (`l2_continuity` kind `share_basis_step`,
+   or `share_basis_guard` for a contradicted ratio) naming the ISIN, the step and the reason.
+6. **Clearing is automatic.** When a feed or curated row later explains the step, the next run
+   drops the quarantine and closes the ERROR.
+
+Never adjusted from price alone: a suspension can hide a real move.
+
+```bash
+uv run python -m dataplatform.quality.share_basis --dry-run --report /tmp/guard.json  # decide, write nothing
+uv run python -m dataplatform.quality.share_basis                                     # what the job runs
+cat data/L2/share_basis/state.json                                                    # admitted + quarantined
+```
+
+The state file is derived (L0 bc lines + L1 prices + identity tables) and safe to delete. The next
+run rewrites it, and until then nothing is admitted or quarantined by the guard. Do not run the
+guard by hand between 18:30 and 00:30 IST on a trading day. It may rebuild L2 partitions.
+
+### To fix one by hand anyway
+
+A curated `manual_actions.yaml` row with its bc citation, then `l2_fill --rebuild <survivor>`. The
+guard's next run sees it as recorded, so the quarantine and the ERROR clear on their own. A step
+that is a genuine move (a relisting after years of suspension) can be an `explained_moves`
+`MARKET_MOVE` row; that is also what clears it.

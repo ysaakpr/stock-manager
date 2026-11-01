@@ -835,6 +835,40 @@ BSE_CA_SWEEP = Job(
 )
 
 
+def share_basis_guard(context: JobContext) -> None:
+    """The share-basis guard (M2.3, owner ruling 2026-11-01): no unadjusted basis step decides.
+
+    What it does: reads NSE's bc face-value lines since T+1 settlement and every D2 reissue with a
+    face-value change, admits the stated terms L1's price step agrees with as factors and rebuilds
+    exactly those L2 partitions, scans L2 for share-basis steps nothing explains, and quarantines
+    each one's earlier bars from every decision-facing reader, with an ERROR on
+    `/status/quality` that clears itself once a corporate-action row explains the step — see
+    `quality.share_basis`.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: fetch, or derive a factor from a price alone. The import is deferred for
+    the same reason the others are.
+    """
+    from dataplatform.quality.share_basis import run_share_basis_guard_job
+
+    run_share_basis_guard_job(context)
+
+
+#: 19:40 IST on weekdays — after the EOD pipeline (18:30) and the daily snapshot (19:15) land the
+#: session, and well before the paper session (21:45) and the M17 run (22:00), so a quarantine is
+#: in force before anything decides on the day. 11:30 IST on Saturday — after `ca_refresh`
+#: (10:00) has published the week's corporate actions, so a step they explain is cleared and an
+#: admitted factor a feed now carries yields to it. Writes L2 only for a partition whose admitted
+#: factors changed.
+SHARE_BASIS_GUARD = Job(
+    name="share_basis_guard",
+    cron="40 19 * * mon-fri; 30 11 * * sat",
+    fn=share_basis_guard,
+    timeout=timedelta(minutes=30),
+    description="Share-basis guard: admit stated splits the price confirms; quarantine the rest",
+    registered_at=datetime(2026, 11, 2, 18, 0, tzinfo=IST),
+)
+
+
 def fbil_reference_rates(context: JobContext) -> None:
     """The daily FBIL reference-rate capture (macro-probes): USD/INR and the other INR benchmarks.
 
@@ -1201,6 +1235,7 @@ def default_registry() -> JobRegistry:
             INDEX_PRESS_REFRESH,
             CA_REFRESH,
             BSE_CA_SWEEP,
+            SHARE_BASIS_GUARD,
             FBIL_REFERENCE_RATES,
             MACRO_RELEASE_CAPTURE,
             NSE_DAILY_CAPTURE,

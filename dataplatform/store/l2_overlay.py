@@ -59,7 +59,6 @@ from dataplatform.corpactions.factors import (
     FactorError,
     with_events,
 )
-from dataplatform.corpactions.manual_actions import default_manual_actions
 from dataplatform.corpactions.taxonomy import ActionType
 from dataplatform.logging import get_logger
 from dataplatform.store.l2 import (
@@ -70,6 +69,7 @@ from dataplatform.store.l2 import (
     quantize_factor,
     quantize_price,
     quantize_volume,
+    sourced_actions,
 )
 from dataplatform.store.paths import l2_isin_partition_path
 
@@ -287,11 +287,7 @@ def plan_events(
         return True
 
     feed = tuple(a for a in recorded if admitted(a))
-    rows = (
-        tuple(a.as_action() for a in default_manual_actions().actions_for(isin))
-        if curated is None
-        else tuple(curated)
-    )
+    rows = sourced_actions(isin) if curated is None else tuple(curated)
     manual = curated_actions(isin, feed, tuple(a for a in rows if admitted(a))) if rows else ()
     events: list[OverlayEvent] = []
     stated = {(a.ex_date, a.action_type) for a in (*feed, *manual)}

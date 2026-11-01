@@ -163,6 +163,12 @@ class CorporateAction(BaseModel):
         "action. Part of the table's unique key, so a regular and a special dividend declared on "
         "one ex-date are two rows, not one",
     )
+    ex_date_rule: str | None = Field(
+        default=None,
+        description="set only when the source left the ex-date blank and it was derived from the "
+        "stated record date by a named rule (`corpactions.ex_date_rule`, e.g. `T1_RECORD_DATE`); "
+        "None means the source stated `ex_date`. Provenance only: not part of any key",
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -221,6 +227,7 @@ class CorporateAction(BaseModel):
         source_ref: str | None = None,
         l0_key: str | None = None,
         component: str | None = None,
+        ex_date_rule: str | None = None,
     ) -> CorporateAction:
         """Build a row from a normalizer `ParsedAction` plus the feed row's identity and dates.
 
@@ -243,6 +250,7 @@ class CorporateAction(BaseModel):
             source_ref=source_ref,
             l0_key=l0_key,
             component=dividend_component(parsed.terms) if component is None else component,
+            ex_date_rule=ex_date_rule,
         )
 
     @property

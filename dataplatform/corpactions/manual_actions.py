@@ -79,7 +79,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import yaml
 
-from dataplatform.corpactions.ex_date_rule import ExDateRule, derive_ex_date
+from dataplatform.corpactions.ex_date_rule import ExDateRule, derive_ex_date, nse_session
 from dataplatform.corpactions.merger_terms import TermSource, parse_term_sources
 from dataplatform.corpactions.taxonomy import (
     ActionType,
@@ -193,6 +193,7 @@ class CuratedAction:
             source_ref=MANUAL_ACTIONS_PATH.name,
             l0_key=first.l0_key,
             component=self.component or dividend_component(self.terms),
+            ex_date_rule=None if self.ex_date_rule is None else self.ex_date_rule.value,
         )
 
 
@@ -411,10 +412,7 @@ def _ex_date(
         raise ManualActionsError(f"{isin}: only a SPLIT may derive its ex-date, not {action_type}")
     if record_date is None:
         raise ManualActionsError(f"{isin}: {rule} needs the record_date the source states")
-    # Lazy: the calendar lives in `ingest`, which this module must not import at load time.
-    from dataplatform.ingest.calendar import trading_calendar
-
-    derived = derive_ex_date(record_date, is_session=trading_calendar().is_session)
+    derived = derive_ex_date(record_date, is_session=nse_session)
     if derived is None or derived.rule is not rule:
         raise ManualActionsError(
             f"{isin}: {rule} does not apply to record date {record_date} (before T+1 settlement "

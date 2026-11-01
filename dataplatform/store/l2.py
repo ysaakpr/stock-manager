@@ -58,6 +58,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dataplatform.clock import Clock
 from dataplatform.corpactions.factors import (
+    PRICE_EVENT_TYPES,
     FactorChain,
     FactorError,
     FactorRow,
@@ -68,6 +69,7 @@ from dataplatform.corpactions.factors import (
 from dataplatform.corpactions.implied import ImpliedSplit, SessionBar, detect_implied_splits
 from dataplatform.corpactions.manual_actions import default_manual_actions
 from dataplatform.corpactions.reconcile import load_reconciled_actions
+from dataplatform.corpactions.share_basis_state import BC_SOURCE, REISSUE_SOURCE, current_state
 from dataplatform.ingest.models import ISIN_PATTERN
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection
@@ -87,6 +89,7 @@ if TYPE_CHECKING:
     from dataplatform.ingest.corp_actions import CorporateAction
 
 __all__ = [
+    "ADMITTED_YIELD_DAYS",
     "PRICES_ADJUSTED_DATASET",
     "PRICES_ADJUSTED_SCHEMA",
     "AdjustedBar",
@@ -122,6 +125,7 @@ __all__ = [
     "rebuild_truncated",
     "register_adjusted_view",
     "register_raw_view",
+    "sourced_actions",
     "wipe_adjusted",
 ]
 
@@ -591,7 +595,9 @@ def materialize_isin(
         chain=chain,
         actions=actions,
         raw_bars=raw_bars,
-        curated=_curated_for_chain(isin, sources) if curated is None else curated,
+        curated=(
+            _curated_for_chain(isin, sources, data_root=data_root) if curated is None else curated
+        ),
         infer_splits=infer_splits,
     )
     manual, implied = composed.curated, composed.implied
@@ -628,6 +634,15 @@ def materialize_isin(
     return report
 
 
+#: The guard's admitted factors (`corpactions.share_basis_state`): sourced, never a feed's.
+_ADMITTED_SOURCES: Final = frozenset({BC_SOURCE, REISSUE_SOURCE})
+
+#: How near a recorded or curated split/bonus must be for an admitted factor to yield to it. A
+#: feed that publishes the event dates it within a session or two of NSE's bc line; a week is wide
+#: enough for a revised record date and far narrower than any company re-basing twice.
+ADMITTED_YIELD_DAYS: Final = 7
+
+
 class QuarantineLineageError(ValueError):
     """A quarantined ISIN's bars would be stitched under a survivor the quarantine does not name."""
 
@@ -656,7 +671,9 @@ def _refuse_an_unkeyed_quarantine(isin: str, sources: Sequence[str]) -> None:
         )
 
 
-def _curated_for_chain(isin: str, sources: Sequence[str]) -> tuple[CorporateAction, ...]:
+def _curated_for_chain(
+    isin: str, sources: Sequence[str], *, data_root: Path | None = None
+) -> tuple[CorporateAction, ...]:
     """The repo's curated actions for every ISIN whose bars feed `isin`'s partition, keyed to it.
 
     A curated row is keyed to the ISIN whose partition carried its ex-date when it was written.
@@ -667,20 +684,38 @@ def _curated_for_chain(isin: str, sources: Sequence[str]) -> tuple[CorporateActi
     `filed_against_isin` naming where it was filed, the shape a feed action resolved through the
     lineage has; a row already keyed to `isin` is unchanged, so a partition with no history is
     built exactly as before.
+
+    The share-basis guard's admitted factors (`corpactions.share_basis_state`, read from the lake
+    at `data_root`) ride with the curated rows the same way: sourced, never a feed's, and
+    deduplicated against the feeds by `curated_actions`.
     """
+    chain = tuple(dict.fromkeys((*sources, isin)))
+    rows = [
+        (source, row.as_action())
+        for source in chain
+        for row in default_manual_actions().actions_for(source)
+    ]
+    rows += [
+        (row.isin, row.as_action())
+        for row in current_state(data_root=data_root).admitted_for(chain)
+    ]
     found: list[CorporateAction] = []
-    for source in dict.fromkeys((*sources, isin)):
-        for row in default_manual_actions().actions_for(source):
-            action = row.as_action()
-            if source != isin:
-                action = action.model_copy(
-                    update={
-                        "isin": isin,
-                        "filed_against_isin": action.filed_against_isin or source,
-                    }
-                )
-            found.append(action)
+    for source, action in rows:
+        if source != isin:
+            action = action.model_copy(
+                update={"isin": isin, "filed_against_isin": action.filed_against_isin or source}
+            )
+        found.append(action)
     return tuple(sorted(found, key=lambda a: (a.ex_date, a.action_type.value)))
+
+
+def sourced_actions(isin: str, *, data_root: Path | None = None) -> tuple[CorporateAction, ...]:
+    """`isin`'s own curated rows plus the guard's admitted factors keyed to it (no lineage walk).
+
+    What the L2 overlay composes when it is not handed its curated rows: the same two sourced
+    sets the materializer composes for a partition with no stitched history.
+    """
+    return _curated_for_chain(isin, (isin,), data_root=data_root)
 
 
 @dataclass(frozen=True, slots=True)
@@ -733,11 +768,7 @@ def compose_events(
     """
     recorded = tuple(actions)
     manual = curated_actions(
-        isin,
-        recorded,
-        tuple(a.as_action() for a in default_manual_actions().actions_for(isin))
-        if curated is None
-        else tuple(curated),
+        isin, recorded, sourced_actions(isin) if curated is None else tuple(curated)
     )
     composed_actions = recorded
     if manual:
@@ -783,6 +814,7 @@ def compose_lake_events(
         possible = (
             _step_isins(conn, con, data_root=data_root)
             | {a.isin for a in default_manual_actions().actions}
+            | {a.isin for a in current_state(data_root=data_root).admitted}
             | set(history_for or {})
         )
         candidates = sorted(
@@ -810,7 +842,7 @@ def compose_lake_events(
                     chain=load_factor_chain(conn, isin),
                     actions=load_reconciled_actions(conn, isin=isin),
                     raw_bars=raw_bars,
-                    curated=_curated_for_chain(isin, sources),
+                    curated=_curated_for_chain(isin, sources, data_root=data_root),
                 )
                 if composed.added:
                     out.append(composed)
@@ -894,11 +926,30 @@ def curated_actions(
     What it never does: read a file or a database (the caller passes the curated rows), or drop a
     recorded action.
     """
+    recorded = tuple(recorded)
     have = {(a.ex_date, a.action_type) for a in recorded}
+    # An admitted factor yields to any recorded or curated price event near it, not just one on
+    # the same day: a feed that later publishes the event a day apart must never double it.
+    stated_events = [
+        a.ex_date
+        for a in (*recorded, *curated)
+        if a.action_type in PRICE_EVENT_TYPES and a.source not in _ADMITTED_SOURCES
+    ]
     kept: list[CorporateAction] = []
     for action in curated:
         if action.isin != isin:
             raise ValueError(f"curated action for {action.isin} passed for {isin}")
+        if action.source in _ADMITTED_SOURCES and any(
+            abs((action.ex_date - day).days) <= ADMITTED_YIELD_DAYS for day in stated_events
+        ):
+            _LOG.warning(
+                "l2.admitted_action_superseded",
+                isin=isin,
+                ex_date=action.ex_date.isoformat(),
+                source=action.source,
+                state="SKIPPED",
+            )
+            continue
         if (action.ex_date, action.action_type) in have:
             _LOG.warning(
                 "l2.curated_action_superseded",
