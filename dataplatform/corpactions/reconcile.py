@@ -613,9 +613,10 @@ def reconcile(
     What it does: groups the actions by `(ISIN, action_type)`, and within each group pairs the two
     feeds by ex-date. A pair whose terms agree becomes a `ReconciledAction`; a pair whose terms
     differ becomes a `RATIO_MISMATCH`; a lone unpaired action on each side, no more than
-    `ex_date_mismatch_window_days` apart, becomes one `EX_DATE_MISMATCH`; an action with no
-    counterpart at all — including one whose only candidate is further away than that window —
-    is single-source, accepted or queued as `SINGLE_SOURCE` per `single_source_policy`.
+    `ex_date_mismatch_window_days` apart, becomes one `EX_DATE_MISMATCH`, and several such on both
+    sides are each queued as `SINGLE_SOURCE` whatever the policy; an action with no counterpart at
+    all — including one with no other-feed leftover within that window, however many lie further
+    away — is single-source, accepted or queued as `SINGLE_SOURCE` per `single_source_policy`.
 
     What it assumes: at most two distinct sources per `(ISIN, type)` — the platform has exactly two
     corporate-action feeds. Three or more is a malformed input, not a data disagreement, and raises
@@ -730,33 +731,59 @@ def reconcile(
             else:
                 file_single_source(action, isin, action_type)
 
-        one_each = len(unmatched_left) == 1 and len(unmatched_right) == 1
-        if (
-            one_each
-            and abs(unmatched_left[0].ex_date - unmatched_right[0].ex_date) <= mismatch_window
-        ):
-            queue.append(
-                ReconciliationConflict(
-                    reason=ReconciliationReason.EX_DATE_MISMATCH,
-                    isin=isin,
-                    action_type=action_type,
-                    records=tuple(
-                        sorted((unmatched_left[0], unmatched_right[0]), key=lambda a: a.source)
-                    ),
-                )
-            )
-        elif unmatched_left and unmatched_right and not one_each:
-            # Leftovers on both sides: some may be one event the two feeds dated differently, and
-            # which ones is a guess. A disagreement is queued whatever the policy.
-            for action in (*unmatched_left, *unmatched_right):
+        if unmatched_left and unmatched_right:
+            # Leftovers on both sides. Only one with an other-feed row inside the mismatch window
+            # can be one event the feeds dated differently; the rest are events one feed alone
+            # published, single-source under the policy whatever sits on the other side years
+            # away. One bound for the lone pair (#133) and for several leftovers on both sides,
+            # which until 2026-11-01 queued all of them unbounded: one new NSE dividend beside a
+            # dozen old BSE ones — 967 rows in 83 groups, none with a counterpart within the
+            # window — pulled every old dividend ACCEPT had admitted out of the books and never
+            # booked the new one.
+            # "Other-feed row" counts the paired rows too, not just the leftovers: NSE re-files a
+            # dividend whose ex-date moved as a second row (INE617A01013's ₹5 on 2023-09-27 and
+            # 2023-10-19, BSE only on 10-19), and admitting the stale one beside the pair that
+            # already carries that ₹5 would reinvest it twice.
+            def near_other_feed(action: CorporateAction, others: Sequence[CorporateAction]) -> bool:
+                return any(abs(action.ex_date - o.ex_date) <= mismatch_window for o in others)
+
+            left_rows, right_rows = by_source[left_source], by_source[right_source]
+            far = [a for a in unmatched_left if not near_other_feed(a, right_rows)] + [
+                a for a in unmatched_right if not near_other_feed(a, left_rows)
+            ]
+            for action in far:
+                file_single_source(action, isin, action_type)
+            unmatched_left = [a for a in unmatched_left if a not in far]
+            unmatched_right = [a for a in unmatched_right if a not in far]
+
+            if (
+                len(unmatched_left) == 1
+                and len(unmatched_right) == 1
+                and abs(unmatched_left[0].ex_date - unmatched_right[0].ex_date) <= mismatch_window
+            ):
                 queue.append(
                     ReconciliationConflict(
-                        reason=ReconciliationReason.SINGLE_SOURCE,
+                        reason=ReconciliationReason.EX_DATE_MISMATCH,
                         isin=isin,
                         action_type=action_type,
-                        records=(action,),
+                        records=tuple(
+                            sorted((unmatched_left[0], unmatched_right[0]), key=lambda a: a.source)
+                        ),
                     )
                 )
+            else:
+                # What is left is near something on the other side: several candidates for one
+                # misdating, or a row beside a day the feeds already paired. Which is which is a
+                # guess, so it is queued whatever the policy.
+                for action in (*unmatched_left, *unmatched_right):
+                    queue.append(
+                        ReconciliationConflict(
+                            reason=ReconciliationReason.SINGLE_SOURCE,
+                            isin=isin,
+                            action_type=action_type,
+                            records=(action,),
+                        )
+                    )
         else:
             # Leftovers on one side only: events the other feed never published at all, single-
             # source in exactly the sense the policy governs. Until 2026-09-07 this branch queued
@@ -764,10 +791,11 @@ def reconcile(
             # that type was one feed's — UNOMINDA's 2:1 bonus of 2018 (BSE-only, NSE's line was a
             # compound string the parser refused) stayed unadjusted because NSE had published the
             # 2016 and 2022 bonuses. Same event, same evidence, different verdict by accident.
-            # Also one leftover per side further apart than the mismatch window: no misdating
-            # spans that, so they are two events each feed alone published. Pairing them anyway
-            # (until 2026-10-23) unreconciled both, so a new action retroactively pulled an old
-            # accepted one — BHAGYANGR's 2017 spin-off — out of the factor chain and the books.
+            # A leftover with nothing on the other side within the mismatch window was filed the
+            # same way above: no misdating spans that, so it is an event one feed alone published.
+            # Pairing a lone one anyway (until 2026-10-23) unreconciled both, so a new action
+            # retroactively pulled an old accepted one — BHAGYANGR's 2017 spin-off — out of the
+            # factor chain and the books.
             for action in (*unmatched_left, *unmatched_right):
                 file_single_source(action, isin, action_type)
 
