@@ -53,9 +53,11 @@ from dataplatform.quality.sentinel import QualityFinding
 from dataplatform.status.sync_state import SyncState
 from dataplatform.store import fo_aggregates
 from dataplatform.store.l0 import L0Store
+from dataplatform.store.l1 import write_prices_raw
 from dataplatform.store.paths import l1_partition_path, l2_partition_path
 from tests.conftest import SettingsLoader
 from tests.register_support import unpaused
+from tests.unit import test_deals_fo_ambiguity as amb
 from tests.unit.test_daily_snapshot import RecordingTracker, SpyAlerter
 
 FIXTURES: Final = Path("tests/fixtures")
@@ -476,6 +478,129 @@ def test_an_unpublished_fo_file_is_a_retryable_failure(settings: Settings, tmp_p
     )
     record = h.tracker.get("nse_fo_bhavcopy", date(2026, 8, 7))
     assert outcome.failed and record is not None and record.retryable
+
+
+# ── an ambiguous master costs one symbol, never the day (deals and F&O, 2026-11-01) ────────
+
+AMB_DAY: Final = date(2026, 10, 26)
+AMB_EVENING: Final = _ist(2026, 10, 26, 20, 0)
+AMB_BULK: Final = (amb.DEALS_DIR / amb.BULK_FILE).read_bytes()
+AMB_FO: Final = (amb.FO_DIR / amb.FO_FILE).read_bytes()
+AMB_FO_URL: Final = _url("nse_fo_bhavcopy").replace("{YYYYMMDD}", "20261026")
+
+
+def _ambiguous_capture(
+    settings: Settings, tmp_path: Path, script: dict[str, Any], *, master: IdentityMaster
+) -> tuple[Harness, CaptureContext, list[QualityFinding]]:
+    h = _harness(settings, tmp_path, AMB_EVENING)
+    h.master = master
+    raised: list[QualityFinding] = []
+    return h, replace(h.at(AMB_EVENING, script), raise_findings=raised.extend), raised
+
+
+def test_the_deals_day_lands_with_the_ambiguous_symbol_settled_by_the_sessions_bhavcopy(
+    settings: Settings, tmp_path: Path
+) -> None:
+    # The evening's prices_raw is already written (eod_pipeline, 18:30) when deals land at 20:00.
+    write_prices_raw(amb._prices(amb.DEALS_DIR), exchange=Exchange.NSE, data_root=tmp_path)
+    h, ctx, raised = _ambiguous_capture(
+        settings,
+        tmp_path,
+        _deals_script(RecordedResponse(body=AMB_BULK), RecordedResponse(body=BLOCK_EMPTY)),
+        master=amb._deals_master(),
+    )
+    outcomes = dc.capture_deals(ctx, _fetcher(h), owed=AMB_DAY)
+    assert {o.status for o in outcomes} == {CaptureStatus.CAPTURED}
+    held = {(r.symbol, r.isin) for r in deals.read_l1(AMB_DAY, data_root=tmp_path).rows}
+    assert held == {("PCJEWELLER", amb.PCJEWELLER), ("SSWL", amb.SSWL_NEW)}
+    assert raised == []
+
+
+def test_an_unsettled_ambiguous_symbol_is_flagged_and_the_deals_day_still_publishes(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Before the fix this day was FAILED for both files over one symbol."""
+    h, ctx, raised = _ambiguous_capture(
+        settings,
+        tmp_path,
+        _deals_script(RecordedResponse(body=AMB_BULK), RecordedResponse(body=BLOCK_EMPTY)),
+        master=amb._deals_master(),
+    )
+    outcomes = dc.capture_deals(ctx, _fetcher(h), owed=AMB_DAY)
+    assert h.state(deals.BULK_SOURCE_ID, AMB_DAY) is SyncState.PUBLISHED
+    assert h.state(deals.BLOCK_SOURCE_ID, AMB_DAY) is SyncState.PUBLISHED
+    bulk = next(o for o in outcomes if o.source == deals.BULK_SOURCE_ID)
+    assert "2 deal(s) held back as ambiguous" in bulk.detail
+    rows = deals.read_l1(AMB_DAY, data_root=tmp_path).rows
+    assert {r.symbol for r in rows} == {"PCJEWELLER"}
+    assert [(f.check_name, f.detail["symbol"], len(f.detail["rows"])) for f in raised] == [
+        (deals.AMBIGUOUS_DEALS_CHECK, "SSWL", 2)
+    ]
+
+
+def test_a_broken_master_still_fails_the_deals_day(settings: Settings, tmp_path: Path) -> None:
+    lines = AMB_BULK.decode().splitlines(keepends=True)
+    sswl = lines[3]
+    body = "".join([lines[0], *(sswl.replace(",SSWL,", f",REISSUED{k},") for k in range(6))])
+    windows = [
+        SymbolWindow(
+            exchange=Exchange.NSE,
+            symbol=f"REISSUED{k}",
+            valid_from=date(2000, 1, 1),
+            valid_to=None,
+            isin=isin,
+        )
+        for k in range(6)
+        for isin in (f"INE9{k:02d}A01011", f"INE9{k:02d}A01029")
+    ]
+    h, ctx, raised = _ambiguous_capture(
+        settings,
+        tmp_path,
+        _deals_script(RecordedResponse(body=body.encode()), RecordedResponse(body=BLOCK_EMPTY)),
+        master=IdentityMaster(tuple(windows)),
+    )
+    outcomes = dc.capture_deals(ctx, _fetcher(h), owed=AMB_DAY)
+    bulk = next(o for o in outcomes if o.source == deals.BULK_SOURCE_ID)
+    assert bulk.failed and "AmbiguousDealsFileError" in bulk.detail
+    assert h.state(deals.BULK_SOURCE_ID, AMB_DAY) is SyncState.FAILED
+    assert raised == []
+
+
+def test_an_ambiguous_underlier_is_flagged_and_the_fo_session_still_lands(
+    settings: Settings, tmp_path: Path
+) -> None:
+    h, ctx, raised = _ambiguous_capture(
+        settings,
+        tmp_path,
+        {AMB_FO_URL: RecordedResponse(body=AMB_FO)},
+        master=amb._fo_master(),
+    )
+    outcome = dc.capture_fo_bhavcopy(ctx, _fetcher(h), owed=AMB_DAY)
+    assert outcome.status is CaptureStatus.CAPTURED
+    by = {a.underlying: a.isin for a in fo_aggregates.read_l2(AMB_DAY, data_root=tmp_path)}
+    assert by == {"KOTAKBANK": None, "NIFTY": None, "RELIANCE": amb.RELIANCE}
+    assert [(f.check_name, f.detail["symbol"]) for f in raised] == [
+        (fo_aggregates.AMBIGUOUS_UNDERLYING_CHECK, "KOTAKBANK")
+    ]
+
+
+def test_the_fo_rederive_settles_from_the_session_and_flags_what_it_cannot(
+    settings: Settings, tmp_path: Path
+) -> None:
+    h, ctx, raised = _ambiguous_capture(
+        settings,
+        tmp_path,
+        {AMB_FO_URL: RecordedResponse(body=AMB_FO)},
+        master=amb._fo_master(),
+    )
+    dc.capture_fo_bhavcopy(ctx, _fetcher(h), owed=AMB_DAY)
+    raised.clear()
+    write_prices_raw(amb._prices(amb.FO_DIR), exchange=Exchange.NSE, data_root=tmp_path)
+    [outcome] = dc.rederive_fo_aggregates(ctx, [AMB_DAY], only_missing=False)
+    assert outcome.status is CaptureStatus.CAPTURED
+    by = {a.underlying: a.isin for a in fo_aggregates.read_l2(AMB_DAY, data_root=tmp_path)}
+    assert by["KOTAKBANK"] == amb.KOTAK_NEW
+    assert raised == []
 
 
 # ── 4. a busy host fails only its own sources ─────────────────────────────────────────────────
