@@ -79,6 +79,7 @@ from dataplatform.corpactions.share_basis_state import (
 from dataplatform.corpactions.taxonomy import FaceValueTerms
 from dataplatform.logging import get_logger
 from dataplatform.quality.sentinel import FindingScope, QualityFinding, finding_fingerprint
+from dataplatform.store.l2 import ADMITTED_YIELD_DAYS
 
 if TYPE_CHECKING:
     from dataplatform.clock import Clock
@@ -114,8 +115,6 @@ ADMIT_FROM: Final = T1_SETTLEMENT_FROM
 #: Close-to-close agreement, after the factor, for terms to be admitted (module docstring).
 PRICE_AGREEMENT: Final = (Decimal("0.8"), Decimal("1.25"))
 
-#: How near a recorded or curated price event must be for it to cover a bc line or reissue.
-ADMITTED_YIELD_DAYS: Final = 7
 
 #: Series a bc line is resolved for: the equity series the master may be asked about.
 _EQUITY_SERIES: Final = frozenset({"EQ", "BE", "BZ", "SM", "ST"})
