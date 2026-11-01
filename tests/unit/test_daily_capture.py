@@ -25,7 +25,7 @@ from contextlib import AbstractContextManager, contextmanager
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 import pyarrow.parquet as pq
 import pytest
@@ -490,7 +490,7 @@ AMB_FO_URL: Final = _url("nse_fo_bhavcopy").replace("{YYYYMMDD}", "20261026")
 
 
 def _ambiguous_capture(
-    settings: Settings, tmp_path: Path, script: dict[str, Any], *, master: IdentityMaster
+    settings: Settings, tmp_path: Path, script: Script, *, master: IdentityMaster
 ) -> tuple[Harness, CaptureContext, list[QualityFinding]]:
     h = _harness(settings, tmp_path, AMB_EVENING)
     h.master = master
@@ -533,9 +533,10 @@ def test_an_unsettled_ambiguous_symbol_is_flagged_and_the_deals_day_still_publis
     assert "2 deal(s) held back as ambiguous" in bulk.detail
     rows = deals.read_l1(AMB_DAY, data_root=tmp_path).rows
     assert {r.symbol for r in rows} == {"PCJEWELLER"}
-    assert [(f.check_name, f.detail["symbol"], len(f.detail["rows"])) for f in raised] == [
-        (deals.AMBIGUOUS_DEALS_CHECK, "SSWL", 2)
-    ]
+    assert [
+        (f.check_name, f.detail["symbol"], len(cast("list[object]", f.detail["rows"])))
+        for f in raised
+    ] == [(deals.AMBIGUOUS_DEALS_CHECK, "SSWL", 2)]
 
 
 def test_a_broken_master_still_fails_the_deals_day(settings: Settings, tmp_path: Path) -> None:
