@@ -527,7 +527,9 @@ except where this amendment adds to them. No rule, rail, contract, model or sche
 the manager's system prompt gains one sentence, the untrusted-content rule of (d), the roster names
 the research model as a role of its own (a), and — added 2026-10-31 afternoon — the prompt template
 and both schemas state the text-length limits the parser already enforced (h), and the template's
-round line moves to the end of each round block (i).
+round line moves to the end of each round block (i). Added 2026-11-01: the Commons filing digests
+refuse a figure the filing does not state, and ask for fuller headlines and announcement figures
+(j); the digest schema's fields are unchanged.
 
 (a) **Models: one per role, set in the roster — the pre-registered ones.** The roster's `models:`
 now names three roles, and a model change is a roster edit, never code — no module carries a
@@ -554,7 +556,8 @@ open web — plus the managers' own research questions; no credential or persona
 digest or research prompt. Every digest records the provider *and* the model id that actually
 wrote it (`bedrock` / `global.anthropic.claude-sonnet-5-5`, or `claude_cli` / `claude-sonnet-5-5`
 with the fallback reason). The digest's prompt, schema, validation (no opinion field, the
-opinion-term filter) and ceiling are unchanged. **DeepSeek V3.2 stays as unused capability** (its
+opinion-term filter) and ceiling are unchanged by the transport; (j) adds the grounding check and
+rewords the prompt and the schema descriptions. **DeepSeek V3.2 stays as unused capability** (its
 `deepseek.v3.2` route over the `openai_chat` adapter, Sonnet 5.5 as its CLI stand-in, and its price
 remain; no role names it): on 30 filings it was less faithful than the stored Sonnet digests — one
 misread revenue figure, dropped numbers, empty headlines — to save about $8 a month.
@@ -651,7 +654,7 @@ the hashes come out exactly as the rule-only column below). So **the eight manag
 `mandate_hash` changes** (the eight control books, four style books and the bench are unchanged:
 8 of 21 changed; printed on 2026-10-31):
 
-| Book | `main` 8bafdf8 (in force) | Rule only (first draft) | DeepSeek digests (PR #147 at b4f7a8b) | PR #147 (rule + `research`) | PR #148 (+ (h) limits stated, (i)) | This draft (+ (h) follow-up schema) |
+| Book | `main` 8bafdf8 (in force) | Rule only (first draft) | DeepSeek digests (PR #147 at b4f7a8b) | PR #147 (rule + `research`) | PR #148 (+ (h) limits stated, (i)) | This draft (+ (h) follow-up schema, + (j) digests) |
 |---|---|---|---|---|---|---|
 | `FM-POS-FUND-10L` | `d52645654199b7b8` | `f2767a99fe228f23` | `48aad03e87ee5f4d` | `431ff6ce9c259d9b` | `89941098fd7a6cc4` | `ada1808ce2d9e320` |
 | `FM-POS-FUND-1CR` | `64d273a2be8e6b27` | `ec87caa2475f89a4` | `0aaa86ab53a963e5` | `98b728dc788fec28` | `bdbe11c6b0b3b461` | `7ed8b122c0b7e627` |
@@ -662,6 +665,9 @@ the hashes come out exactly as the rule-only column below). So **the eight manag
 | `FM-SWING-EVT-10L` | `b7a1aad9e289c4a4` | `e5deef56a2137d61` | `5907665c2d63e460` | `5f412d204d0fcbce` | `0f0f35ee5b6ede5e` | `816082f5b2d506f5` |
 | `FM-SWING-EVT-1CR` | `0f0fbbd4e7bce247` | `87816e83ea7303f2` | `36be694b20b46268` | `5e50cc349aa3a4ee` | `8b96e52cfbfc09c2` | `e5c08d2581a4c04d` |
 
+The right-hand column was recomputed on 2026-11-01 with (j) in the tree
+(`mandate_fingerprints(load_roster())`): it is byte-for-byte the column of the (h) follow-up schema,
+because the digest prompt, schema and validation are not `mandate_hash` inputs (j).
 None of the first three draft columns was ever in force: PR #147 was not merged under them. The
 "PR #147" column was deployed with PR #147 on 2026-10-31 (11:25 IST) and the "PR #148"
 column at 13:25 IST, and no counted dry session ran under either; the right-hand column adds the
@@ -731,6 +737,63 @@ every hash unchanged; for the header to be one prefix, the template's line "**To
 round N of at most M." moves unchanged from the header to the end of each round block, which is a
 template change and part of (g)'s right-hand column.
 
+(j) **Commons filing digests: every figure grounded in the filing, fuller headlines and
+announcement figures** (`commons-digest/2`; owner approved 2026-11-01, chat, after the Sonnet 5.5 /
+Opus 5.5 digest comparison of that morning, which kept Sonnet 5.5 as the digest model). Three
+changes, all in `analyst/commons/digests.py`; the model, the effort, the schema's fields and bounds,
+the opinion-term filter and the output ceiling stand.
+
+1. **A figure whose number is not in the filing is refused.** After the schema and opinion
+   checks, every number in each figure's `value` must be one the filing states — its text, its id
+   or its knowable date, i.e. what the model was given. The match is numeric: Indian and western
+   digit grouping (1,23,456 / 123,456, and the "466,73,61,738.00" filings write), a scale word in
+   the value, the unit or the text (crore, lakh, million, billion, thousand; "5,030.6 million" is
+   5030600000), an amount written in words ("Rupees Four Hundred Sixty-Six Crore …"), trailing zeros,
+   a rescale rounded to the precision it is written at (503.06 crore for 5030645123), a percent sign
+   or "per cent", a sign or bracketed loss, and a date in the common formats ("the 02nd of November
+   2026", "2 Nov 2026", "2026-11-02", "02/11/2026"). A figure that fails refuses the whole digest
+   (`DigestRefusedError`, naming each failing figure) — it is never dropped or rewritten — so it
+   takes the path every refused digest takes: nothing is stored, the run names the filing as a
+   failure, the next build retries it, and an on-demand request reports it to the manager as an
+   unfulfilled digest. **Computed values are refused, by design.** The schema always asked for
+   "each number it states … exactly as stated" and has no field for a derived number; a growth
+   rate, margin, ratio or sum the filing does not state cannot be checked against it, and is the
+   manager's own arithmetic on the stated figures. The prompt and the `figures` / `value`
+   descriptions now say so in words, so the rule is visible to the model rather than a trap.
+2. **Results headlines name revenue from operations and profit after tax** of the latest period,
+   with values and units, wherever the filing states them (after the basis and the period), in
+   the prompt and the headline's description; the headline's 200-character bound is stated there.
+3. **An announcement's dates, percentages, quantities and amounts are figures** even when the
+   headline or `disclosed` already says them, and `period` is set to the date or period the
+   announcement concerns whenever the text states one; the dissemination time is not a figure.
+
+*Measured (2026-11-01).* Offline, over every stored digest (1,347 CLI Sonnet digests, 1,926
+figures, each input rebuilt byte-for-byte from the lake) and the comparison's 200 digests (four
+arms: Bedrock Sonnet, Opus high and medium, CLI Sonnet): **0 refused**. DeepSeek's misread revenue
+line of the 2026-10-30 comparison (`5,039,600,000` for `5030600000`) is refused, and 1,876 of 1,894
+planted one-digit misreads of the stored figures (99%) are caught. Live, Sonnet 5.5 on Bedrock
+through the real `digest_filing`, on the same 50 filings against the morning's run: 50 of 50
+valid, **0 refused**; announcement figures 19 → 28 (the 800 kV now among them), `period` set on
+6 → 14 of 24 announcements (the other 10 state no date); results headlines naming revenue and
+PAT 0 → 23 of 23 that state them (3 bank-style filings state neither, and their headlines say
+so); results figures unchanged at 283, now copied verbatim rather than rescaled; median latency
+4.2 → 4.1 s (p95 7.7 → 8.6 s); $0.40 → $0.42 for the 50 (results $0.0109 → $0.0112, announcements
+$0.0047 → $0.0055 a digest). On the 20 longest announcement texts in the lake (818–1,642
+characters of body; the lake's announcements start 2026-09-29 and carry the exchange's text, not
+the PDF): 98 figures against 46 under `commons-digest/1`, **0 refused by the grounding check**. In
+both versions the existing opinion-term filter refuses 4–5 of those 20 because the digest quotes
+"on the recommendation of the Nomination and Remuneration Committee" (a board-process fact, in
+18 of the lake's 15,730 announcements since 2026-09-29); that filter is unchanged here.
+
+*Hashes.* The digest prompt, schema and validation are Commons code, not `mandate_hash` inputs
+((g) lists them; only the roster's digest *model* is), so **(j) changes no hash**: recomputed with
+(j) in the tree, the 21 books' hashes are byte-identical to (g)'s right-hand column. A digest
+records its `digest_version` (`commons-digest/2` from the deploy; stored `/1` digests are served as
+they are, never re-digested), and the dry-run count still restarts with the session of Monday
+2026-11-02, run at 22:00 IST. **[OWNER]** whether, before S0, the digest identity
+(`DIGEST_VERSION`, prompt and schema bytes) should become a manager hash input; that would change
+the 8 manager hashes once more, before the first counted session.
+
 ## 9. Owner confirmation
 
 | Item | Value | Confirmed |
@@ -741,5 +804,5 @@ template change and part of (g)'s right-hand column.
 | Horizons (§2) | 1–4 weeks and 1–3 months | 2026-10-09 (owner, chat) |
 | Web search (§5) | allowed, through the Commons fetcher | 2026-10-09 (owner, chat) |
 | LLM path (§2) | Claude CLI subscription; monthly cap deferred | 2026-10-09 (owner, chat) |
-| LLM path and models (Amendment 5) | Bedrock primary, Claude CLI backup per call (each model falls back to itself); per-role models in the roster, the pre-registered ones — decisions `claude-opus-5-5` (Mantle us-east-1, effort `high`), digests and research `claude-sonnet-5-5` (bedrock-runtime, Global inference profile, which may route to any AWS commercial region; effort `medium`), research over our own search layer (Brave/Tavily/Firecrawl, CLI backup); DeepSeek V3.2 compared less faithful and stays unused capability; untrusted-content rule and `research` role added; text-length limits stated (h) and the round line moved for prompt caching (i), 2026-10-31 afternoon; 8 manager hashes change, dry-run count restarts with the first run under them (Mon 2026-11-02, 22:00 IST) | DRAFT — owner decisions 2026-10-30 08:05 IST and afternoon, 2026-10-31 morning (Sonnet via the Global profile, deploy approved; chat); owner confirms before S0 |
+| LLM path and models (Amendment 5) | Bedrock primary, Claude CLI backup per call (each model falls back to itself); per-role models in the roster, the pre-registered ones — decisions `claude-opus-5-5` (Mantle us-east-1, effort `high`), digests and research `claude-sonnet-5-5` (bedrock-runtime, Global inference profile, which may route to any AWS commercial region; effort `medium`), research over our own search layer (Brave/Tavily/Firecrawl, CLI backup); DeepSeek V3.2 compared less faithful and stays unused capability; untrusted-content rule and `research` role added; text-length limits stated (h) and the round line moved for prompt caching (i), 2026-10-31 afternoon; digests grounded in the filing, results headlines naming revenue and PAT, announcement dates, percentages and quantities as figures (j), 2026-11-01, no hash change; 8 manager hashes change, dry-run count restarts with the first run under them (Mon 2026-11-02, 22:00 IST) | DRAFT — owner decisions 2026-10-30 08:05 IST and afternoon, 2026-10-31 morning (Sonnet via the Global profile, deploy approved; chat), 2026-11-01 (digest changes (j), deploy approved; chat); owner confirms before S0 |
 | S0 | the first session after the 5-session dry run (M17.8) passes; owner asked for as soon as it is ready (2026-10-09) | — |

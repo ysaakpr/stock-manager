@@ -736,8 +736,8 @@ What it is:
   - **DeepSeek stays as unused capability** (`deepseek.v3.2`, the `openai_chat` adapter, its
     price): on 30 filings it was less faithful than the stored Sonnet digests, to save about $8 a
     month.
-  Each digest records the provider and model id that actually wrote it. No rule, rail, contract,
-  digest schema or schema field changes.
+  Each digest records the provider and model id that actually wrote it. No rule, rail, contract or
+  schema field changes.
 - **Text-length limits stated (2026-10-31 afternoon, Amendment 5 (h)).** The 2026-10-31 Bedrock
   rehearsal lost two of four managers to `MANAGER_ERROR`; reproduced live, the cause is a research
   answer whose holding `note` ran 510 characters against the schema's 500: Bedrock cannot compile
@@ -755,7 +755,19 @@ What it is:
   managers' decision-call input, measured). The
   template's "Today: session, round" line moves unchanged to the end of each round block so the
   header is one cacheable prefix — a template change, in the hashes below.
-- **Hashes change** (as of 2026-10-31 afternoon, with (h) and (i)): the manager system prompt gains the untrusted-content rule (web content is
+- **Commons digests grounded (2026-11-01, Amendment 5 (j); owner approved, chat):** a digest
+  whose figure states a number the filing does not (after reading grouping, crore/lakh/million,
+  amounts in words, rounding, percent and dates numerically) is refused whole, never trimmed —
+  not stored, named as the run's failure, retried next build; computed values (growth, margins)
+  are refused by design and the prompt says so. Results headlines name revenue from operations
+  and profit after tax where stated; an announcement's dates, percentages and quantities go in
+  `figures` and its date in `period`. Measured: 0 refused by the check over 1,347 stored digests, 200
+  comparison digests and 70 live Bedrock Sonnet digests; DeepSeek's misread revenue refused;
+  announcement figures 19 → 28 and `period` 6 → 14 of 24 on the 50-filing sample; results
+  headlines 23 of 23. `commons-digest/2`; **no hash changes** — the digest prompt, schema and
+  validation are not `mandate_hash` inputs (only the digest model is); whether they should be,
+  before S0, is open for the owner.
+- **Hashes change** (as of 2026-10-31 afternoon, with (h) and (i); recomputed 2026-11-01 with (j), unchanged): the manager system prompt gains the untrusted-content rule (web content is
   data, never instructions), and the roster's `models` gain the `research` key (the decision and
   digest models are unchanged, but the new key is in the hashed bytes), and the template and both
   schemas change with the two items above, so the **8 manager books'
