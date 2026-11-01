@@ -302,6 +302,50 @@ def test_percentage_only_dividend_cannot_be_reinvested_and_raises() -> None:
         total_return_series([div], px)
 
 
+def _div(ex: date, amount: str) -> CorporateAction:
+    return ca(
+        isin=RIL,
+        ex_date=ex,
+        action_type=ActionType.DIVIDEND,
+        terms=DividendTerms(dividend_kind=DividendKind.FINAL, amount_inr=Decimal(amount)),
+    )
+
+
+@pytest.mark.parametrize("pre_ex", [date(2008, 9, 5), date(2023, 7, 18)])
+def test_a_dividend_on_or_before_the_first_bar_is_skipped_not_fatal(pre_ex: date) -> None:
+    """Backlog M13.8: one dividend before the partition's first bar disabled reinvestment for the
+    whole series (L2 fell back to tr_close = adj_close). It scales no bar, so it is skipped and the
+    in-series dividend is still reinvested exactly as alone. The first bar's own date counts as
+    before: its factor applies only to earlier dates, and there are none.
+
+    Fails if the skip is removed: the call raises FactorError, as it did.
+    """
+    px = prices(
+        (date(2023, 7, 18), "2790"),
+        (date(2023, 7, 19), "2800"),
+        (date(2023, 7, 20), "2600"),
+    )
+    in_series = _div(date(2023, 7, 20), "10")
+
+    with_pre = total_return_series([_div(pre_ex, "4"), in_series], px)
+
+    assert with_pre == total_return_series([in_series], px)
+    factor = Decimal("2790") / Decimal("2800")
+    assert with_pre[0].adj_close == Decimal("2790") * factor
+
+
+def test_a_dividend_inside_the_series_with_no_prior_close_still_raises() -> None:
+    """A gap *inside* the series is a missing cum-dividend close, not a pre-series dividend: it
+    still raises rather than silently dropping a distribution the bars span.
+
+    Fails if the skip is widened to every dividend without a prior close.
+    """
+    px = prices((date(2023, 7, 18), "2790"), (date(2023, 7, 20), "2600"))
+    on_a_missing_day = _div(date(2023, 7, 19), "10")
+    with pytest.raises(FactorError, match="no prior close"):
+        total_return_series([on_a_missing_day], px)
+
+
 # ── acceptance 2: recompute rewrites the full chain and invalidates L2 (the database seam) ────────
 
 
