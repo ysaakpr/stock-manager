@@ -694,6 +694,59 @@ def latest_l1_session(*, data_root: Path | None) -> date | None:
     return max(days, default=None)
 
 
+def rebuild_admitted(
+    conn: Connection,
+    isins: Sequence[str],
+    *,
+    chain_of: Callable[[str], Sequence[str]],
+    data_root: Path | None,
+) -> None:
+    """Rebuild exactly `isins`' L2 partitions over their lineage chains, never extending them.
+
+    Each partition keeps its first date as the history floor — the drain's rule (M13.8): a guard
+    run changes the factors under existing bars and never reaches back into older L1 history no
+    one curated. A survivor with no partition yet is built over its whole chain, as the fill would.
+    """
+    from dataplatform.corpactions.reconcile import load_reconciled_actions
+    from dataplatform.store.l2 import (
+        PRICES_ADJUSTED_DATASET,
+        load_factor_chain,
+        materialize_isin,
+        open_connection,
+        preload_raw_bars,
+    )
+    from dataplatform.store.paths import l2_isin_partition_path
+
+    con = open_connection()
+    try:
+        preload_raw_bars(con, {i for isin in isins for i in chain_of(isin)}, data_root=data_root)
+        for isin in isins:
+            path = l2_isin_partition_path(PRICES_ADJUSTED_DATASET, isin, data_root=data_root)
+            floor = None
+            if path.exists():
+                row = con.execute(
+                    "SELECT min(trade_date) FROM read_parquet($p)", {"p": str(path)}
+                ).fetchone()
+                floor = None if row is None else row[0]
+            materialize_isin(
+                isin,
+                chain=load_factor_chain(conn, isin),
+                actions=load_reconciled_actions(conn, isin=isin),
+                con=con,
+                data_root=data_root,
+                history_isins=chain_of(isin),
+                history_floor=floor,
+            )
+            _LOG.info(
+                "share_basis.partition_rebuilt",
+                isin=isin,
+                history_floor=None if floor is None else str(floor),
+                state="PUBLISHED",
+            )
+    finally:
+        con.close()
+
+
 def run_guard(
     conn: Connection,
     *,
@@ -716,7 +769,6 @@ def run_guard(
     from dataplatform.identity.master import IdentityStore, InMemoryReconciliationQueue
     from dataplatform.quality import l2_continuity
     from dataplatform.quality.sentinel import persist_findings
-    from dataplatform.store.l2 import open_connection, rebuild_isins
 
     today = clock.today()
     resolver = LineageStore(conn).load()
@@ -774,19 +826,7 @@ def run_guard(
             data_root=data_root,
         )
         if changed:
-            history = {s: resolver.chain_to(s) for s in changed}
-            con = open_connection()
-            try:
-                rebuild_isins(
-                    conn,
-                    changed,
-                    con=con,
-                    data_root=data_root,
-                    history_for=history,
-                    survivor_of=resolver.survivor_of,
-                )
-            finally:
-                con.close()
+            rebuild_admitted(conn, changed, chain_of=resolver.chain_to, data_root=data_root)
             report.rebuilt = list(changed)
 
     scan = l2_continuity.scan(
