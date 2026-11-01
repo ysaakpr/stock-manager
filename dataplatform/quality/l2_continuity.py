@@ -15,9 +15,12 @@ two defects the 2026-10-05 data-quality audit found there and nothing had flagge
 
 **How a step is classified** (`StepClass`), in this order:
 
-* `STRUCTURAL` — a recorded merger, demerger, scheme or DVR conversion within `guard_days` (from
-  the reconciled store, or a curated, sourced one in `corpactions.manual_actions`). A real
-  change in what the security is; the level series keeps the gap by convention (§4.3 rule 3).
+* `STRUCTURAL` — a recorded merger, demerger, scheme or DVR conversion dated inside the step's
+  gap or within `guard_days` of either end (from the reconciled store, or a curated, sourced one
+  in `corpactions.manual_actions`). A real change in what the security is; the level series keeps
+  the gap by convention (§4.3 rule 3). Inside the gap since 2026-11-01: a demerger often suspends
+  the stock for a fortnight (Raymond, 2025-05-13 -> 05-28 around its 05-14 ex-date), and the old
+  seven-days-from-the-step window missed it. `RECORDED_UNSCALED` is matched the same way.
 * `RECORDED_UNSCALED` — a recorded event the price-adjusted series does not scale by convention:
   a rights issue (no theoretical ex-rights factor yet — Sadhana Nitrochem's 8:1 at par,
   2026-02-18) or a dividend of at least a quarter of the prior close (Strides' ₹500 special,
@@ -259,12 +262,14 @@ def classify_steps(
     lower = 1 / threshold
     out: list[tuple[AdjustedStep, StepClass]] = []
     for step in sorted(steps, key=lambda s: (s.isin, s.exchange, s.trade_date)):
+        # A recorded event explains the step when it falls inside the pair's gap, or within
+        # `guard_days` of either end: Raymond's 2025-05-14 demerger sits inside a 15-day gap
+        # (05-13 -> 05-28), two weeks from the step's own session.
+        low, high = step.prev_date - guard, step.trade_date + guard
         breaks = structural_dates.get(step.isin, ())
-        if any(abs(step.trade_date - d) <= guard for d in breaks):
+        if any(low < d <= high for d in breaks):
             cls = StepClass.STRUCTURAL
-        elif any(
-            abs(step.trade_date - d) <= guard for d in (unscaled_dates or {}).get(step.isin, ())
-        ):
+        elif any(low < d <= high for d in (unscaled_dates or {}).get(step.isin, ())):
             cls = StepClass.RECORDED_UNSCALED
         elif step.trade_date in (unsourced_dates or {}).get(step.isin, ()):
             cls = StepClass.UNSOURCED

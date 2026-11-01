@@ -840,6 +840,40 @@ journaled in `fundamentals_requeue_log`) — a truncated one is downloaded again
 copy, since a retry no longer re-parses the same broken bytes — and stay errors unless it
 succeeds. Task M14.3.
 
+### Share-basis changes the feeds miss are handled without a human → **ANSWERED (owner, 2026-11-01 ~19:45 IST): "one time manual addition is fine, but what about repeating this tomorrow. I wont look at the data, system should have a way."**
+
+AvenuesAI consolidated Re 1 -> Rs 10 on 2026-10-13. NSE's book-closure file stated the terms and
+the record date and left the ex-date blank, NSE's CA API (queried by ex-date) never returned it,
+the BSE feed is blocked (D26), and the reissue spanned a seven-day suspension, so the stitched L2
+series stepped x9.40 with nothing flagging it. Phase 1 (PR #159) curated it by hand. The owner's
+ruling asks for a mechanism, and this is it (task M2.3; `ops/runbooks/ca_backfill.md`, "The
+share-basis guard"):
+
+* **Derived ex-date, one rule.** A split or consolidation whose source states the terms and a
+  record date but no ex-date gets ex-date = record date (`T1_RECORD_DATE`), only when the record
+  date is a trading session on or after 2023-01-27 (all stocks T+1). Never before: T+2 rules
+  varied. The rule's name is kept on the row (L1 `pr_ca_broadcasts.ex_date_derived`, the CA
+  feed's `CorporateAction.ex_date_rule`, the curated YAML's `ex_date_derived`, the guard's
+  admitted factor), so a derived date never passes for a stated one.
+* **Admitted automatically** only when the exchange states the terms (bc line, or the identity
+  master's face values for both ISINs of a reissue) **and** L1's own close-to-close step across
+  the event agrees within 0.8-1.25 after the stated factor. Never from price alone.
+* **Otherwise fail closed.** A step across a reissue, a 6-30 day gap at a clean split multiple, or
+  stated terms the price contradicts, that nothing explains: the ISIN's bars before the step are
+  withheld from every decision-facing reader (the D22 mechanism), with an ERROR on
+  `/status/quality` naming the ISIN, the step and the reason. It clears itself on the first run
+  after a corporate-action row explains the step.
+* **Scheduled**: `share_basis_guard`, 19:40 IST weekdays (before the paper session and M17) and
+  11:30 IST Saturday (after `ca_refresh`).
+
+Recorded here as the owner's decision; no D-number assigned and no accepted deviation added by
+the agent. **Proposed, for the owner:** the guard's first run quarantines ~50 historical steps
+(2011-2026, almost all relistings after years-long suspensions; none held by any book). If their
+ERRORs are unwanted on Ops, a D-entry accepting `share_basis_step` flags dated before 2026-11-01 as
+amber would keep every new one red.
+
+---
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
