@@ -32,7 +32,7 @@ here rather than silently reading nothing.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
@@ -40,6 +40,7 @@ import pytest
 
 from dataplatform.clock import FrozenClock
 from dataplatform.corpactions import (
+    MAX_STALE_CLOSE_DAYS,
     ActionType,
     DividendKind,
     DividendTerms,
@@ -334,16 +335,95 @@ def test_a_dividend_on_or_before_the_first_bar_is_skipped_not_fatal(pre_ex: date
     assert with_pre[0].adj_close == Decimal("2790") * factor
 
 
-def test_a_dividend_inside_the_series_with_no_prior_close_still_raises() -> None:
-    """A gap *inside* the series is a missing cum-dividend close, not a pre-series dividend: it
-    still raises rather than silently dropping a distribution the bars span.
+def test_a_no_trade_day_dividend_reinvests_at_the_last_close_before_its_ex_date() -> None:
+    """Owner decision 2026-11-01 (backlog M13.8): a dividend whose ex-date has no bar reinvests
+    against the last close *before* the ex-date. It used to raise, and one such dividend made L2
+    fall back to tr_close = adj_close for the whole partition.
 
-    Fails if the skip is widened to every dividend without a prior close.
+    Fails if the case raises again, if the base is the next close (2600) instead of the prior one
+    (2790), or if the dividend is skipped (the pre-ex levels would be unscaled).
     """
     px = prices((date(2023, 7, 18), "2790"), (date(2023, 7, 20), "2600"))
     on_a_missing_day = _div(date(2023, 7, 19), "10")
-    with pytest.raises(FactorError, match="no prior close"):
-        total_return_series([on_a_missing_day], px)
+
+    tr = total_return_series([on_a_missing_day], px)
+
+    factor = (Decimal("2790") - Decimal("10")) / Decimal("2790")
+    assert [p.adj_close for p in tr] == [Decimal("2790") * factor, Decimal("2600")]
+
+
+def test_a_no_trade_day_dividend_reaches_back_across_a_short_suspension() -> None:
+    """The base is the last close however many sessions back it is, within the bound: a 55-day
+    trade-to-trade stint (INE228I01012's 2024 gap was 25 days, INE793A01012's 54) still reinvests.
+
+    Fails if the base is taken from the bar after the ex-date, or from the first bar of the series.
+    """
+    px = prices(
+        (date(2024, 7, 1), "50"),
+        (date(2024, 7, 27), "40"),  # the last close before the ex-date: 55 days earlier
+        (date(2024, 10, 1), "45"),
+    )
+    tr = total_return_series([_div(date(2024, 9, 20), "2")], px)
+
+    factor = Decimal("38") / Decimal("40")
+    assert [p.adj_close for p in tr] == [
+        Decimal("50") * factor,
+        Decimal("40") * factor,
+        Decimal(45),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("gap_days", "reinvests"),
+    [(MAX_STALE_CLOSE_DAYS, True), (MAX_STALE_CLOSE_DAYS + 1, False)],
+)
+def test_a_no_trade_day_dividend_beyond_the_staleness_bound_raises(
+    gap_days: int, reinvests: bool
+) -> None:
+    """A close more than MAX_STALE_CLOSE_DAYS before a no-trade-day ex-date is too stale to price
+    the distribution against: it raises, so L2 shows the partition without total return rather than
+    one reinvested at a months-old price. The bound itself still reinvests.
+
+    Fails if the bound is dropped (93 days would reinvest) or its comparison inverted (92 raises).
+    """
+    last = date(2022, 5, 24)
+    ex = last + timedelta(days=gap_days)
+    px = prices((date(2022, 5, 23), "105"), (last, "100"), (ex + timedelta(days=30), "90"))
+    div = _div(ex, "5")
+    if reinvests:
+        tr = total_return_series([div], px)
+        assert tr[1].adj_close == Decimal("95")
+        return
+    with pytest.raises(FactorError, match=f"no close within {MAX_STALE_CLOSE_DAYS} days"):
+        total_return_series([div], px)
+
+
+def test_the_bound_does_not_reach_a_dividend_whose_ex_date_has_a_bar() -> None:
+    """An ex-date that has a bar reinvests against the previous bar however far back, as it always
+    has (INE952H01027's 2019 ex-date followed a 206-day gap and its TR series worked). The bound
+    governs only the no-trade-day reinvestment the owner decision added.
+
+    Fails if the bound is applied to every dividend.
+    """
+    px = prices((date(2019, 2, 25), "100"), (date(2019, 9, 19), "80"))
+    tr = total_return_series([_div(date(2019, 9, 19), "4")], px)
+    assert [p.adj_close for p in tr] == [Decimal("96"), Decimal("80")]
+
+
+def test_a_dividend_after_the_last_bar_scales_every_bar_by_the_last_close() -> None:
+    """A dividend whose ex-date is after the last bar has the last close as its base: every bar is
+    before it, so every bar scales alike and no return inside the series moves. It is the factor
+    the series keeps once a bar on the ex-date arrives, so history does not shift that day.
+
+    Fails if the dividend raises, is skipped, or is priced against a close other than the last.
+    """
+    px = prices((date(2026, 7, 29), "60"), (date(2026, 7, 30), "50"))
+    tr = total_return_series([_div(date(2026, 9, 23), "1.5")], px)
+    factor = Decimal("48.5") / Decimal("50")
+    assert [p.adj_close for p in tr] == [Decimal("60") * factor, Decimal("50") * factor]
+
+    later = [*px, *prices((date(2026, 9, 23), "49"))]
+    assert total_return_series([_div(date(2026, 9, 23), "1.5")], later)[:2] == tr
 
 
 # ── acceptance 2: recompute rewrites the full chain and invalidates L2 (the database seam) ────────
