@@ -241,6 +241,33 @@ XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart scheduler
 XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user status scheduler
 ```
 
+## An empty or truncated document, and the one-time re-queue
+
+NSE sometimes answers a document with HTTP 200 and an empty body, or one cut off mid-document
+(`parse failed: …: empty response body`, `…: body is not well-formed XML: unclosed token | no element
+found …`). Since 2026-11-01 a retry does not re-parse those stored bytes: `_ref_for` sees the newest
+stored capture is empty or truncated (`parser.payload_defect`), downloads the document again — once
+per run — and stores it **beside** the old one as `<name>_at<YYYYMMDD>T<HHMMSS>.xml` (IST). The old
+capture is never touched (invariant #1). The newest capture is what the retry and any later rebuild
+parse. A complete document is never re-downloaded, whatever the parser thinks of it. The
+`fundamentals_forward.done` line counts `filings_refetched`, and each one logs
+`fundamentals_backfill.filing_refetched` with both L0 keys.
+
+A filing outside the week's re-read window is never retried again by the job. To have it tried
+**once more** — never by hand (AGENTIC_CONTEXT §8) — add it to
+`dataplatform/ingest/fundamentals_requeue.yaml` with a `not_before` date, merge, and restart the
+scheduler. The first scheduled `fundamentals_forward` run on or after that date drives it after the
+night's windows, under the same leases and limiter, and journals the outcome in
+`fundamentals_requeue_log`; an item with a row is never driven again. `refetch` is the normal
+per-filing path; `record_evidence` makes no request and only re-records a 404 with the index's
+zero-byte statement (D31). Bounded at 50 filings a re-queue and 100 in the file.
+
+```bash
+# What did the re-queues find?
+docker compose -f ops/docker-compose.yml exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+  -c "SELECT requeue_id, unit, logical_date, outcome, left(detail, 120) FROM fundamentals_requeue_log ORDER BY consumed_at"
+```
+
 ## Retrying refusals after a parser fix
 
 A parse refusal is recorded `FAILED` with its reason, and the document's bytes are already in L0

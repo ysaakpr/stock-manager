@@ -71,6 +71,7 @@ from dataplatform.ingest.fundamentals_backfill import (
     symbols_accepted_on,
     try_resolve_unambiguous,
 )
+from dataplatform.ingest.fundamentals_requeue import journal_to, pending_items
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.ingest.xbrl import integrated
 from dataplatform.logging import get_logger
@@ -401,6 +402,7 @@ def run_forward_plan(
                 owner_on=lambda symbol: master.try_resolve(symbol, on),
             ),
             resolve_isin=lambda symbol, on: try_resolve_unambiguous(master, symbol, on),
+            clock=clock,
         )
         _LOG.info(
             "fundamentals_forward.plan_start",
@@ -411,7 +413,21 @@ def run_forward_plan(
             universe=len(universe),
             state="RUNNING",
         )
-        return runner.run(units)
+        report = runner.run(units)
+        # The one-time re-queues ride behind tonight's windows, on the same leases and limiter,
+        # and only on a run that got through them: a parked or stopped run leaves them owed.
+        if not report.parked and not should_stop():
+            items = pending_items(conn, clock.today())
+            if items:
+                _LOG.info(
+                    "fundamentals_forward.requeue_start",
+                    source="nse_xbrl_filing",
+                    items=len(items),
+                    requeues=sorted({item.requeue_id for item in items}),
+                    state="RUNNING",
+                )
+                runner.requeue(items, journal=journal_to(conn, clock), report=report)
+        return report
 
 
 # ── the job ──────────────────────────────────────────────────────────────────────────────────
@@ -496,6 +512,7 @@ def run_fundamentals_forward(
         filings_published=report.filings_published,
         filings_skipped_published=report.filings_skipped_published,
         filings_failed=report.filings_failed,
+        filings_refetched=report.filings_refetched,
         skipped_out_of_universe=report.skipped_out_of_universe,
         unresolved_symbols=sorted(report.unresolved_symbols),
         facts_written=report.facts_written,
