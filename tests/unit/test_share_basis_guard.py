@@ -541,3 +541,24 @@ def test_an_admitted_factor_yields_to_a_recorded_event_within_a_week() -> None:
     )
     # Any recorded share-basis event that near stands in for it: fail to the feed, never double.
     assert curated_actions(AVENUES_NEW, [bonus], [admitted]) == ()
+
+
+def test_a_recorded_demerger_inside_the_gap_explains_the_step() -> None:
+    """Raymond 2025: 1564.30 on 05-13, 619.20 on 05-28, demerger ex 05-14 inside the gap."""
+    raymond = "INE301A01014"
+    step = _step(date(2025, 5, 13), date(2025, 5, 28), "0.3958", isin=raymond)
+    inside = classify_steps(
+        [step],
+        structural_dates={raymond: (date(2025, 5, 14),)},
+        threshold=Decimal(2),
+        max_gap_days=5,
+    )
+    assert [c for _, c in inside] == [StepClass.STRUCTURAL]
+    # A demerger months away explains nothing: the clean x2.5 over 15 days is a share-basis step.
+    far = classify_steps(
+        [step],
+        structural_dates={raymond: (date(2025, 3, 1),)},
+        threshold=Decimal(2),
+        max_gap_days=5,
+    )
+    assert [c for _, c in far] == [StepClass.SHARE_BASIS]
