@@ -300,7 +300,10 @@ def test_accept_never_touches_leftovers_on_both_sides() -> None:
     (conflict,) = one_each.queue
     assert conflict.reason is ReconciliationReason.EX_DATE_MISMATCH
 
-    bse_only_2 = split(INFY, BSE, date(2019, 3, 1), "10", "1", "Split 10 to 1")
+    # Within the window of `nse_only` too (10 days before it): two BSE candidates for one NSE row,
+    # so which pairs is a guess. (2019-03-01 until 2026-11-01, when the window was applied to this
+    # path as well and a leftover 233 days from anything stopped being a candidate.)
+    bse_only_2 = split(INFY, BSE, date(2018, 7, 1), "10", "1", "Split 10 to 1")
     uneven = reconcile(
         [matched_nse, matched_bse, nse_only, bse_only, bse_only_2],
         single_source_policy=SingleSourcePolicy.ACCEPT,
@@ -1073,3 +1076,132 @@ def test_the_next_pass_resolves_an_unbounded_pairing_flag() -> None:
     assert counts.flags_written == 0
     assert counts.rows_marked_reconciled == 2
     assert _open_count(conn, clock) == 0
+
+
+# ── the mismatch window bounds several leftovers on both sides too ────────────────────────────
+#
+# #133 bounded the lone-pair path; the many-vs-many path stayed unbounded until 2026-11-01. One
+# new NSE dividend beside several old BSE ones queued every row whatever the policy — 768 leftovers
+# in 72 live groups, none with an other-feed counterpart within 30 days — so each old dividend
+# ACCEPT had admitted dropped out of the books, and the new one was never booked. INE093I01010 was
+# one of the seven ISINs it hit on 2026-10-24.
+
+OBEROI = "INE093I01010"
+
+
+def _old_bse_dividends_and_a_new_nse_one() -> list[CorporateAction]:
+    bse = [
+        _dividend(OBEROI, BSE, ex, amount, DividendKind.FINAL, f"Final Dividend - Rs. - {amount}")
+        for ex, amount in (
+            (date(2008, 9, 5), "2"),
+            (date(2010, 9, 9), "3"),
+            (date(2012, 9, 6), "4"),
+        )
+    ]
+    nse = _dividend(
+        OBEROI, NSE, date(2026, 10, 22), "6", DividendKind.INTERIM, "Interim Dividend - Rs 6"
+    )
+    return [*bse, nse]
+
+
+def test_accept_admits_leftovers_on_both_sides_with_no_counterpart_in_the_window() -> None:
+    """Three BSE dividends of 2008-2012 and one NSE dividend of 2026 are four events, each booked.
+
+    Fails if the window is removed from the many-vs-many path: all four are then queued.
+    """
+    actions = _old_bse_dividends_and_a_new_nse_one()
+    result = reconcile(actions, single_source_policy=SingleSourcePolicy.ACCEPT)
+
+    assert not result.queue
+    assert sorted(r.ex_date for r in result.reconciled) == sorted(a.ex_date for a in actions)
+    assert all(not r.cross_verified for r in result.reconciled)
+
+
+def test_queue_files_far_leftovers_on_both_sides_as_ordinary_single_source() -> None:
+    """Under the strict default the same four are each a SINGLE_SOURCE conflict, not a mismatch."""
+    result = reconcile(_old_bse_dividends_and_a_new_nse_one())
+
+    assert not result.reconciled
+    assert [c.reason for c in result.queue] == [ReconciliationReason.SINGLE_SOURCE] * 4
+
+
+@pytest.mark.parametrize("policy", list(SingleSourcePolicy))
+def test_a_near_pair_among_far_leftovers_is_still_one_ex_date_mismatch(
+    policy: SingleSourcePolicy,
+) -> None:
+    """The window separates, it does not admit: a BSE row 20 days from the NSE one is still a
+    candidate misdating and queued under either policy; only the far rows are single-source.
+
+    Fails if the window is inverted (the near pair would be admitted, the far rows queued) or
+    applied only after the one-each test (the near pair would be filed as two SINGLE_SOURCE rows).
+    """
+    actions = _old_bse_dividends_and_a_new_nse_one()
+    near = _dividend(
+        OBEROI, BSE, date(2026, 10, 2), "6", DividendKind.INTERIM, "Interim Dividend - Rs. - 6.0000"
+    )
+    result = reconcile([*actions, near], single_source_policy=policy)
+
+    mismatches = [c for c in result.queue if c.reason is ReconciliationReason.EX_DATE_MISMATCH]
+    (mismatch,) = mismatches
+    assert {r.ex_date for r in mismatch.records} == {date(2026, 10, 2), date(2026, 10, 22)}
+    far_days = {date(2008, 9, 5), date(2010, 9, 9), date(2012, 9, 6)}
+    if policy is SingleSourcePolicy.ACCEPT:
+        assert {r.ex_date for r in result.reconciled} == far_days
+        assert result.queue == (mismatch,)
+    else:
+        assert not result.reconciled
+        assert {c.records[0].ex_date for c in result.queue if c is not mismatch} == far_days
+
+
+def test_the_window_on_both_sides_is_the_exact_boundary() -> None:
+    """Two BSE rows at 30 and 31 days from one NSE row, beside two far ones: the row at 30 is the
+    NSE row's candidate (one EX_DATE_MISMATCH), the row at 31 is single-source."""
+    nse = _dividend(INFY, NSE, date(2024, 3, 1), "5", DividendKind.FINAL, "Dividend - Rs 5")
+    at = _dividend(
+        INFY, BSE, date(2024, 3, 31), "5", DividendKind.FINAL, "Final Dividend - Rs. - 5"
+    )
+    past = _dividend(
+        INFY, BSE, date(2024, 1, 30), "4", DividendKind.FINAL, "Final Dividend - Rs. - 4"
+    )
+    assert (at.ex_date - nse.ex_date).days == DEFAULT_EX_DATE_MISMATCH_WINDOW_DAYS
+    assert (nse.ex_date - past.ex_date).days == DEFAULT_EX_DATE_MISMATCH_WINDOW_DAYS + 1
+
+    result = reconcile([nse, at, past], single_source_policy=SingleSourcePolicy.ACCEPT)
+
+    (mismatch,) = result.queue
+    assert mismatch.reason is ReconciliationReason.EX_DATE_MISMATCH
+    assert {r.ex_date for r in mismatch.records} == {nse.ex_date, at.ex_date}
+    assert [r.ex_date for r in result.reconciled] == [past.ex_date]
+
+
+ITI = "INE617A01013"  # the live store's re-filed ex-date case
+
+
+@pytest.mark.parametrize("policy", list(SingleSourcePolicy))
+def test_a_leftover_beside_a_paired_day_is_never_admitted(policy: SingleSourcePolicy) -> None:
+    """NSE re-files a dividend whose ex-date moved as a second row: ₹5 on 2023-09-27 and again on
+    2023-10-19, BSE only on 10-19 (INE617A01013 in the live store). The 10-19 rows pair; the stale
+    09-27 row has no *leftover* within the window, but it sits 22 days from a paired BSE row, so it
+    may be that same ₹5 — queued whatever the policy, never reinvested a second time. The far
+    2008 BSE row beside it is still single-source.
+
+    Fails if "near" looks only at the other feed's leftovers: ACCEPT then admits the stale row.
+    """
+    stale = _dividend(ITI, NSE, date(2023, 9, 27), "5", DividendKind.UNSPECIFIED, "Dividend - Rs 5")
+    nse = _dividend(ITI, NSE, date(2023, 10, 19), "5", DividendKind.UNSPECIFIED, "Dividend - Rs 5")
+    bse = _dividend(
+        ITI, BSE, date(2023, 10, 19), "5", DividendKind.FINAL, "Final Dividend - Rs. - 5.0000"
+    )
+    old = _dividend(ITI, BSE, date(2008, 9, 5), "1", DividendKind.FINAL, "Final Dividend - Rs. - 1")
+
+    result = reconcile([stale, nse, bse, old], single_source_policy=policy)
+
+    queued = {c.records[0].ex_date for c in result.queue}
+    assert date(2023, 9, 27) in queued
+    assert all(c.reason is ReconciliationReason.SINGLE_SOURCE for c in result.queue)
+    admitted = {r.ex_date for r in result.reconciled}
+    assert date(2023, 10, 19) in admitted
+    assert date(2023, 9, 27) not in admitted
+    if policy is SingleSourcePolicy.ACCEPT:
+        assert admitted == {date(2023, 10, 19), date(2008, 9, 5)}
+        assert queued == {date(2023, 9, 27)}
