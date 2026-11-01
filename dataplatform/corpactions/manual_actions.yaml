@@ -403,6 +403,50 @@ actions:
         line: 684
         quote: N,EQ,KESARENT,KESAR ENTERPRISES LTD.,129.7,84.4,84.4,49,57.25, ... ,N,XO,
 
+  # ── restored dividend records: a feed's own record the store's key could not hold ──────────
+  # A DIVIDEND row is never a factor and never booked alone. It restores one record a CA feed
+  # published in its own L0 payload (`feed`; the first source is that payload) that the stored
+  # key (isin, ex_date, type, source, component) dropped. Reconciliation stands it on that feed's
+  # side, so the event it completes is matched in full (M2.3 rule B, parts add up).
+
+  - isin: INE619A01035
+    company: Patanjali Foods Ltd
+    action_type: DIVIDEND
+    feed: nse_corp_actions
+    dividend_kind: INTERIM
+    amount_inr: "1.50"
+    component: INTERIM#2
+    ex_date: 2026-08-21
+    record_date: 2026-08-21
+    knowable_date: 2026-09-03
+    checked: 2026-11-01
+    note: >-
+      NSE filed two Interim records for 2026-08-21, Re 0.80 and Rs 1.50, in one payload. The
+      stored key holds one Interim per feed per day, so only the first (Re 0.80) reached
+      corporate_actions, and it disputed BSE's one record of Rs 2.30 (RATIO_MISMATCH, flag
+      30920). 0.80 + 1.50 = 2.30 exactly: with this record restored on NSE's side the event
+      reconciles by rule B, and BSE's single Rs 2.30 is booked once. The general key is not
+      changed: of the seven same-kind same-day collisions in L0, five are NSE revisions or
+      duplicates, where numbering them apart would invent dividends. knowable_date is the
+      payload's fetch (2026-09-03 IST); the record carries no broadcast date.
+    sources:
+      - l0_key: nse_corp_actions/2025/09/corporateActions_20250901_20260831.json
+        line: 1
+        quote: >-
+          {"bcEndDate":"-","bcStartDate":"-","caBroadcastDate":null,"comp":"Patanjali Foods
+          Limited","exDate":"21-Aug-2026","faceVal":"2","ind":"-","isin":"INE619A01035","ndEndDate":"-","ndStartDate":"-","recDate":"21-Aug-2026","series":"EQ","subject":"Interim
+          Dividend - Rs 1.50 Per Share","symbol":"PATANJALI"}
+      - l0_key: nse_corp_actions/2025/09/corporateActions_20250901_20260831.json
+        line: 1
+        quote: >-
+          "isin":"INE619A01035","ndEndDate":"-","ndStartDate":"-","recDate":"21-Aug-2026","series":"EQ","subject":"Interim
+          Dividend - Re 0.80 Per Share","symbol":"PATANJALI"}
+      - l0_key: bse_corp_actions/2016/09/defaultdata_500368.json
+        line: 1
+        quote: >-
+          {"scrip_code":500368,"short_name":"PATANJALI","Ex_date":"21 Aug 2026","Purpose":"Interim
+          Dividend - Rs. - 2.3000","RD_Date":"21 Aug 2026"
+
 explained_moves:
   - isin: INE111B01023
     company: Financial Technologies (India) Ltd (now 63 Moons)

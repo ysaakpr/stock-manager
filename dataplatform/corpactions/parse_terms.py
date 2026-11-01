@@ -77,6 +77,7 @@ __all__ = [
     "parse_purpose",
     "split_compound",
     "split_dividends",
+    "states_dividend_amount",
 ]
 
 _LOG: Final[FilteringBoundLogger] = get_logger(__name__)
@@ -428,6 +429,23 @@ def _dividend_amounts(text: str) -> list[Decimal]:
         if value not in seen:
             seen.append(value)
     return seen
+
+
+def states_dividend_amount(text: str) -> bool:
+    """Whether a dividend line states any usable amount: a positive rupee figure or a percentage.
+
+    What it does: reads the line exactly as the parser does (`_dividend_amounts`, `_percents`) and
+    says whether anything in it is an amount. NSE's blank `Dividend - Rs  Per Share`, a bare
+    `Interim Dividend`, and the typos `Re 0..30`, `Rs 0 .70`, `Re 0.0` and `Rs Per 0.50 Share` all
+    state none: the only figure any of them yields is a zero, which no dividend is.
+    What it never does: repair a typo into an amount. It answers only "said nothing usable"; a
+    line it says False for contributes no money, and reconciliation takes the amount from the other
+    feed's record (`reconcile._silent_amount_fill`), never from a guess at this one.
+    """
+    normalized = _normalize(text)
+    if _percents(normalized):
+        return True
+    return any(value > 0 for value in _dividend_amounts(normalized))
 
 
 def _ratios(text: str) -> list[tuple[Decimal, Decimal]]:

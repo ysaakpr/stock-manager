@@ -1,10 +1,10 @@
 """D27 and D28 as registry entries: each accepts its own known set and nothing next to it.
 
-D27 freezes 19 `ca_reconciliation` ERROR flags by fingerprint (31 until 2026-11-01, when code
-fixes resolved 12): a flag in the set is ACCEPTED on
-its own, a new disagreement never is, and the check (and its alert) turns amber only once every
-open ERROR flag is in the set. D28 accepts two sources' 404/empty-body failures only while the row
-is retryable and less than 7 days past its first attempt.
+D27 freezes 2 `ca_reconciliation` ERROR flags by fingerprint (31 until 2026-11-01, when code
+fixes resolved 12 and the owner-approved consistent-dividend rules 17 more): a flag in the set
+is ACCEPTED on its own, a new disagreement never is, and the check (and its alert) turns amber
+only once every open ERROR flag is in the set. D28 accepts two sources' 404/empty-body failures
+only while the row is retryable and less than 7 days past its first attempt.
 """
 
 from __future__ import annotations
@@ -32,10 +32,12 @@ from dataplatform.store.db import Connection
 REGISTRY: Final = load_deviations()
 D27: Final = REGISTRY.get("d27-ca-reconciliation-backlog")
 TODAY: Final = date(2026, 10, 24)
-KNOWN: Final = "4061d5bb710b19c7188af37ad28fdcfb"  # RATIO_MISMATCH INE121E01018 2017-06-30
+KNOWN: Final = "69102f228404b6f9cbe237d4bf3d38b1"  # RATIO_MISMATCH INE558D01021 2017-09-06
 #: Resolved by the "<n> Per Share" parser fix (2026-11-01) and so no longer accepted: a regression
 #: that raised it again must be red, not silently waved through.
 RESOLVED: Final = "fa424e5f2c8c4c801aa4d309c8137b12"  # RATIO_MISMATCH INE109C01017 2016-09-12
+#: Resolved by rule A, silence yields (2026-11-01): likewise no longer accepted.
+RESOLVED_BY_RULE: Final = "4061d5bb710b19c7188af37ad28fdcfb"  # RATIO_MISMATCH INE121E01018
 RAISED: Final = datetime(2026, 9, 7, 14, 24, tzinfo=IST)
 
 
@@ -55,7 +57,7 @@ class _Flags:
 
     def __init__(self, *fingerprints: str | None) -> None:
         self.rows = [
-            (i, fp, "INE121E01018", date(2017, 6, 30), RAISED) for i, fp in enumerate(fingerprints)
+            (i, fp, "INE558D01021", date(2017, 9, 6), RAISED) for i, fp in enumerate(fingerprints)
         ]
         self.queries = 0
 
@@ -75,7 +77,7 @@ def _judge(conn: object | None = None, today: date = TODAY) -> DeviationJudge:
 
 def _flag(fingerprint: str | None) -> OpenFlag:
     return OpenFlag(
-        id=1, fingerprint=fingerprint, isin="INE121E01018", logical_date=date(2017, 6, 30),
+        id=1, fingerprint=fingerprint, isin="INE558D01021", logical_date=date(2017, 9, 6),
         raised_at=RAISED,
     )  # fmt: skip
 
@@ -87,8 +89,9 @@ def test_d27_is_a_frozen_fingerprint_set_and_nothing_else() -> None:
     assert isinstance(D27, QualityEntry)
     match = D27.match
     assert match.fingerprints is not None
-    assert len(match.fingerprints) == 19 and KNOWN in match.fingerprints
+    assert len(match.fingerprints) == 2 and KNOWN in match.fingerprints
     assert RESOLVED not in match.fingerprints
+    assert RESOLVED_BY_RULE not in match.fingerprints
     assert match.ids is None and match.isins is None
     assert match.raised_before is None and match.dated_before is None
     assert D27.review_by == date(2027, 1, 31)

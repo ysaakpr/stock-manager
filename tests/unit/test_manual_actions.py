@@ -89,7 +89,11 @@ def test_every_row_is_sourced_checked_and_knowable_no_later_than_its_ex_date() -
 
 def _sources() -> list[tuple[str, TermSource]]:
     curated = load_manual_actions()
-    rows: list[CuratedAction | ExplainedMove] = [*curated.actions, *curated.explained_moves]
+    rows: list[CuratedAction | ExplainedMove] = [
+        *curated.actions,
+        *curated.dividends,
+        *curated.explained_moves,
+    ]
     return [(r.isin, s) for r in rows for s in r.sources]
 
 

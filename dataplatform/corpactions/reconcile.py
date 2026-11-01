@@ -45,7 +45,9 @@ import json
 import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from datetime import date, timedelta
+from decimal import Decimal
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final, Literal
 
@@ -53,7 +55,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dataplatform.clock import Clock
 from dataplatform.corpactions.factors import PRICE_EVENT_TYPES
-from dataplatform.corpactions.parse_terms import names_non_equity_bonus, names_several_dividends
+from dataplatform.corpactions.manual_actions import MANUAL_SOURCE, default_manual_actions
+from dataplatform.corpactions.parse_terms import (
+    names_non_equity_bonus,
+    names_several_dividends,
+    states_dividend_amount,
+)
 from dataplatform.corpactions.taxonomy import (
     TERMS_ADAPTER,
     ActionType,
@@ -506,7 +513,8 @@ def _named_kind_fill(left: CorporateAction, right: CorporateAction) -> DividendT
     differ, neither is UNSPECIFIED, and one row's text — a line naming one dividend, not a list —
     names the other row's kind as well as its own. The other row's terms stand: its kind is the
     one both feeds wrote. Feeds naming different kinds outright (NSE `Special Dividend`, BSE
-    `Interim Dividend`) are still a mismatch; this never picks between two statements.
+    `Interim Dividend`) are left to `_name_only` (rule C), which reconciles them only as the one
+    dividend on that day in each feed.
     """
     lt, rt = left.terms, right.terms
     if not (isinstance(lt, DividendTerms) and isinstance(rt, DividendTerms)):
@@ -524,28 +532,248 @@ def _named_kind_fill(left: CorporateAction, right: CorporateAction) -> DividendT
     return None
 
 
+# ── one event's dividends stated differently: the three owner-approved rules (2026-11-01) ──────
+#
+# Two exchanges disagreeing is flagged, never silently resolved. These three resolve a
+# disagreement only when the amounts are *consistent*, and only where the day leaves no choice
+# of partner: one dividend in each feed for A and C, one record against all of the other feed's
+# for B. A pair the by-date fallback forms later is never judged by them, so a busy day whose rows
+# could be paired several ways stays a RATIO_MISMATCH for a human.
+
+
+@dataclass(frozen=True, slots=True)
+class _Resolution:
+    """One event the feeds were found to state consistently: every row behind it, and what counts.
+
+    `rows` are all the feed rows (and any restored record, `MANUAL_SOURCE`) the event consumed —
+    two for a pair, one plus its parts for rule B. `terms` is what the factor chain and the total
+    return book, once; `carrier` the row whose statement that is, so the folded event points at
+    real evidence. `note` says which rule matched and what each side said.
+    """
+
+    rows: tuple[CorporateAction, ...]
+    terms: Terms
+    carrier: CorporateAction
+    note: str | None = None
+
+
+def _pair_resolution(left: CorporateAction, right: CorporateAction) -> _Resolution | None:
+    """Two rows that agree, or that one feed's silence fills (`_row_fill`); else `None`."""
+    if _terms_agree(left.terms, right.terms):
+        return _Resolution(rows=(left, right), terms=left.terms, carrier=left)
+    filled = _row_fill(left, right)
+    if filled is None:
+        return None
+    # `_row_fill` returns one side's own terms object; that side stated them.
+    return _Resolution(
+        rows=(left, right), terms=filled, carrier=left if filled == left.terms else right
+    )
+
+
+def _states_money(terms: DividendTerms) -> bool:
+    return terms.amount_inr is not None or terms.percent_of_face_value is not None
+
+
+def _kind_said(action: CorporateAction) -> str:
+    terms = action.terms
+    kind = terms.dividend_kind.value if isinstance(terms, DividendTerms) else "?"
+    return f"{action.source} said {kind}"
+
+
+def _silent_amount_fill(left: CorporateAction, right: CorporateAction) -> _Resolution | None:
+    """Rule A, silence yields: one feed's dividend states no amount, the other's states one.
+
+    NSE writes a blank `Dividend - Rs  Per Share`, a bare `Interim Dividend`, or a typo the parser
+    rightly refuses (`Re 0..30`, `Rs 0 .70`, `Re 0.0`, `Rs Per 0.50 Share`); BSE once wrote a bare
+    `Final Dividend` beside NSE's `Dividend - Rs 14 Per Share` (ACC, 2020-03-27). Nothing there
+    contradicts the other feed: one record states the money and the other says nothing usable
+    about it, so the stated amount stands — the same rule `_quantified_fill` applies to a split
+    one feed left unquantified.
+
+    "Says nothing" is checked on the text, not only on the parsed terms: a line the parser left
+    bare because it read *two* amounts in it (`parse_terms` queues those as conflicting) states
+    money, and stays a mismatch. The amount is never read out of the silent line's typo — it comes
+    from the other exchange's record, whose source and text the note names. Kinds may differ (a
+    label, as rule C has it); both are recorded.
+    """
+    lt, rt = left.terms, right.terms
+    if not (isinstance(lt, DividendTerms) and isinstance(rt, DividendTerms)):
+        return None
+
+    def silent(action: CorporateAction, terms: DividendTerms) -> bool:
+        return not _states_money(terms) and not states_dividend_amount(action.raw_text)
+
+    if silent(left, lt) and _states_money(rt):
+        quiet, loud = left, right
+    elif silent(right, rt) and _states_money(lt):
+        quiet, loud = right, left
+    else:
+        return None
+    note = (
+        f"silence yields: amount taken from {loud.source} ({loud.raw_text.strip()!r}); "
+        f"{quiet.source} stated none ({quiet.raw_text.strip()!r}); "
+        f"{_kind_said(left)}, {_kind_said(right)}"
+    )
+    return _Resolution(rows=(left, right), terms=loud.terms, carrier=loud, note=note)
+
+
+def _name_only(left: CorporateAction, right: CorporateAction) -> _Resolution | None:
+    """Rule C, name only: the same stated money, the feeds' kind labels differ.
+
+    Ingersoll-Rand's ₹202 of 2018-05-24 is a `Special Dividend` to NSE and an `Interim Dividend`
+    to BSE; Swaraj's ₹8.25 is NSE's interim and BSE's final. The money is the event — the total
+    return reinvests an amount, not a label — so the pair reconciles on the amount, and the note
+    records which kind each side said. The kind kept is the first feed's by name (BSE before NSE),
+    a deterministic choice rather than a judgement: nothing downstream reads the kind of a
+    reconciled dividend.
+
+    What it never does: reconcile different money, or a stated amount against a silent one (that
+    is rule A, with its own text check).
+    """
+    lt, rt = left.terms, right.terms
+    if not (isinstance(lt, DividendTerms) and isinstance(rt, DividendTerms)):
+        return None
+    if not _states_money(lt):
+        return None
+    if (lt.amount_inr, lt.percent_of_face_value) != (rt.amount_inr, rt.percent_of_face_value):
+        return None
+    if lt.dividend_kind is rt.dividend_kind:
+        return None  # identical terms agree; nothing for this rule to do
+    note = (
+        f"name only: the same money, kinds differ ({_kind_said(left)}, {_kind_said(right)}); "
+        f"reconciled on the amount, {left.source}'s kind kept"
+    )
+    return _Resolution(rows=(left, right), terms=lt, carrier=left, note=note)
+
+
+def _parts_add_up(whole: CorporateAction, parts: Sequence[CorporateAction]) -> _Resolution | None:
+    """Rule B, parts add up: one feed itemises what the other files as one record.
+
+    NSE's `Dividend - Rs 10/- Per Share + Special Dividend - Rs 7.5/- Per Share` is two rows (₹10
+    and ₹7.5) beside BSE's one `Final Dividend - Rs. - 17.5000`; Gujarat Industries Power's NSE
+    `Interim Dividend - Rs 3.50 Per Share` is BSE's Interim 2 plus Special 1.50. Every amount must
+    be a stated rupee figure, and the parts must sum to the whole *exactly* in `Decimal`, or it is
+    no rule at all and stays a mismatch.
+
+    Which side is booked: the single record, never the parts beside it. The money must be counted
+    once, and of the two representations the single one is also the exact one for the total
+    return: one dividend D against the cum-dividend close P reinvests at (P - D) / P, while the
+    parts booked as separate dividends on one day compound to (P - d1)(P - d2) / P², over-stating
+    the factor by d1·d2 / P². The parts stay on the reconciled action as its evidence, and the
+    note lists them.
+    """
+    wt = whole.terms
+    if not isinstance(wt, DividendTerms) or wt.amount_inr is None:
+        return None
+    amounts: list[Decimal] = []
+    for part in parts:
+        pt = part.terms
+        if not isinstance(pt, DividendTerms) or pt.amount_inr is None:
+            return None
+        amounts.append(pt.amount_inr)
+    if sum(amounts, Decimal(0)) != wt.amount_inr:
+        return None
+    itemised = " + ".join(
+        f"{p.terms.dividend_kind.value} {p.terms.amount_inr}"
+        for p in parts
+        if isinstance(p.terms, DividendTerms)
+    )
+    feeds = ", ".join(sorted({p.source for p in parts}))
+    note = (
+        f"parts add up: {feeds} itemised {itemised} = {whole.source} "
+        f"{wt.dividend_kind.value} {wt.amount_inr} in one record; the single record is booked, "
+        "its parts are evidence and are not booked beside it"
+    )
+    return _Resolution(rows=(whole, *parts), terms=wt, carrier=whole, note=note)
+
+
+def _consistent_day_rules(
+    pending_left: list[CorporateAction],
+    pending_right: list[CorporateAction],
+    tolerance: timedelta,
+) -> list[_Resolution]:
+    """Rules A, B and C over the dividends the exact passes left, removing what they consume.
+
+    A and C apply only to a lone dividend in each feed within `tolerance` of each other — the day
+    offers no other partner, so pairing them is no choice. B applies only to one record alone in
+    its feed against every remaining row of the other feed near it (two or more). Anything else
+    is left for the by-date fallback, whose pairs are judged only by exact agreement or a fill.
+    """
+
+    def near(action: CorporateAction, rows: Sequence[CorporateAction]) -> list[CorporateAction]:
+        return [r for r in rows if abs(r.ex_date - action.ex_date) <= tolerance]
+
+    def alone(action: CorporateAction, rows: Sequence[CorporateAction]) -> bool:
+        return all(r is action for r in rows) and len(rows) == 1
+
+    out: list[_Resolution] = []
+    for left in list(pending_left):
+        (right, *more) = near(left, pending_right) or (None,)
+        if right is None or more or not alone(left, near(right, pending_left)):
+            continue
+        res = _silent_amount_fill(left, right) or _name_only(left, right)
+        if res is not None:
+            out.append(res)
+            pending_left.remove(left)
+            pending_right.remove(right)
+    for side, other in ((pending_left, pending_right), (pending_right, pending_left)):
+        for whole in list(side):
+            if whole not in side:
+                continue
+            parts = near(whole, other)
+            if len(parts) < 2 or not all(alone(whole, near(p, side)) for p in parts):
+                continue
+            res = _parts_add_up(whole, parts)
+            if res is not None:
+                out.append(res)
+                side.remove(whole)
+                for part in parts:
+                    other.remove(part)
+    return out
+
+
 def _match(
     left: Sequence[CorporateAction],
     right: Sequence[CorporateAction],
     tolerance: timedelta,
 ) -> tuple[
-    list[tuple[CorporateAction, CorporateAction]], list[CorporateAction], list[CorporateAction]
+    list[_Resolution],
+    list[tuple[CorporateAction, CorporateAction]],
+    list[CorporateAction],
+    list[CorporateAction],
 ]:
     """Pair one `(ISIN, type)`'s rows across the feeds: dividends by component, others by date.
 
+    Returns the events resolved (rows the feeds state consistently), the pairs that disagree, and
+    the two lists of leftovers.
+
     A feed can carry several dividends on one ex-date — a regular and a special declared together
     — and nearest-date matching alone pairs them by row order, so NSE's ₹8 regular met BSE's ₹5
-    special and both read as a ratio mismatch. Dividends are therefore paired in three passes,
+    special and both read as a ratio mismatch. Dividends are therefore paired in four passes,
     each within `tolerance`: rows whose terms agree; then rows one feed's silence fills
-    (`_quantified_fill`: the same money, one feed naming the kind); then whatever is left, by date,
-    exactly as before — a pair formed there that disagrees is still a `RATIO_MISMATCH`. Every
-    other type has at most one row per feed and date, and keeps `_match_by_ex_date` unchanged.
+    (`_quantified_fill`: the same money, one feed naming the kind); then the consistent-day rules
+    A, B and C (`_consistent_day_rules`); then whatever is left, by date, exactly as before — a
+    pair formed there that disagrees is still a `RATIO_MISMATCH`. Every other type has at most one
+    row per feed and date, and keeps `_match_by_ex_date` unchanged.
     """
+    resolved: list[_Resolution] = []
+    disputed: list[tuple[CorporateAction, CorporateAction]] = []
+
+    def judge(pairs: Iterable[tuple[CorporateAction, CorporateAction]]) -> None:
+        for a, b in pairs:
+            res = _pair_resolution(a, b)
+            if res is None:
+                disputed.append((a, b))
+            else:
+                resolved.append(res)
+
     if not any(action.action_type is ActionType.DIVIDEND for action in (*left, *right)):
-        return _match_by_ex_date(left, right, tolerance)
+        pairs, unmatched_left, unmatched_right = _match_by_ex_date(left, right, tolerance)
+        judge(pairs)
+        return resolved, disputed, unmatched_left, unmatched_right
     pending_left = sorted(left, key=lambda a: (a.ex_date, a.component))
     pending_right = sorted(right, key=lambda a: (a.ex_date, a.component))
-    pairs: list[tuple[CorporateAction, CorporateAction]] = []
+    exact: list[tuple[CorporateAction, CorporateAction]] = []
     for accepts in (_rows_agree, _rows_fill):
         for action in list(pending_left):
             candidates = [
@@ -558,52 +786,90 @@ def _match(
             best = min(
                 candidates, key=lambda o: (abs(o.ex_date - action.ex_date), o.ex_date, o.component)
             )
-            pairs.append((action, best))
+            exact.append((action, best))
             pending_left.remove(action)
             pending_right.remove(best)
+    judge(exact)
+    resolved.extend(_consistent_day_rules(pending_left, pending_right, tolerance))
     rest, unmatched_left, unmatched_right = _match_by_ex_date(
         pending_left, pending_right, tolerance
     )
-    return [*pairs, *rest], unmatched_left, unmatched_right
+    judge(rest)
+    return resolved, disputed, unmatched_left, unmatched_right
 
 
-def _reconcile_pair(
-    left: CorporateAction, right: CorporateAction, *, terms: Terms | None = None
-) -> ReconciledAction:
-    """Fold two agreeing feed rows into one `ReconciledAction` (see the class docstring).
+def _reconcile_resolution(res: _Resolution) -> ReconciledAction:
+    """Fold one resolved event's rows into one `ReconciledAction` (see the class docstring).
 
-    `terms` overrides `left.terms` when one feed stated the numbers and the other did not — see
-    `_quantified_fill`. The note then records which feed supplied them, so a factor built on a
-    cross-filled action is never indistinguishable from one both feeds spelled out.
+    `res.terms` are what the feeds were found to state; when one feed stated the numbers and the
+    other did not (`_quantified_fill`), or a rule A/B/C matched, the note records which feed
+    supplied them, so a factor built on a cross-filled action is never indistinguishable from one
+    both feeds spelled out.
     """
-    note: str | None = None
-    if left.ex_date != right.ex_date:
-        note = (
-            f"ex-dates differed within tolerance: {left.source}={left.ex_date.isoformat()}, "
-            f"{right.source}={right.ex_date.isoformat()}; earliest used"
-        )
-    if terms is not None and not isinstance(terms, UnquantifiedTerms):
+    rows = res.rows
+    first, second = rows[0], rows[1]
+    notes: list[str] = []
+    if len({a.ex_date for a in rows}) > 1:
+        dated = ", ".join(f"{a.source}={a.ex_date.isoformat()}" for a in rows)
+        notes.append(f"ex-dates differed within tolerance: {dated}; earliest used")
+    if not isinstance(res.terms, UnquantifiedTerms):
         # Keyed on which feed was *silent*, not on which object won: the pair is ordered by source
         # name, so the feed that stated the numbers is as often `left` as `right`, and comparing
         # against `left.terms` silently skipped the note for half of them.
-        silent = next((a for a in (left, right) if isinstance(a.terms, UnquantifiedTerms)), None)
+        silent = next((a for a in (first, second) if isinstance(a.terms, UnquantifiedTerms)), None)
         if silent is not None:
-            stated = right if silent is left else left
-            filled = (
+            stated = second if silent is first else first
+            notes.append(
                 f"terms taken from {stated.source} ({stated.raw_text.strip()!r}); "
                 f"{silent.source} stated none"
             )
-            note = filled if note is None else f"{note}; {filled}"
+    if res.note is not None:
+        notes.append(res.note)
     return ReconciledAction(
-        isin=left.isin,
-        ex_date=min(left.ex_date, right.ex_date),
-        action_type=left.action_type,
-        terms=left.terms if terms is None else terms,
-        knowable_date=max(left.knowable_date, right.knowable_date),
-        record_date=left.record_date if left.record_date is not None else right.record_date,
-        reconciliation_note=note,
-        sources=tuple(sorted((left, right), key=lambda a: a.source)),
+        isin=first.isin,
+        ex_date=min(a.ex_date for a in rows),
+        action_type=first.action_type,
+        terms=res.terms,
+        knowable_date=max(a.knowable_date for a in rows),
+        record_date=next((a.record_date for a in rows if a.record_date is not None), None),
+        reconciliation_note="; ".join(notes) if notes else None,
+        sources=tuple(sorted(rows, key=lambda a: (a.source, a.component))),
     )
+
+
+def _feed(action: CorporateAction) -> str:
+    """The feed a row speaks for: its source, or for a restored record the feed it restores.
+
+    A restored record (`manual_actions`, `MANUAL_SOURCE`) is a feed's own published record the
+    store's key could not hold — Patanjali's second NSE Interim of 2026-08-21. It is transcribed
+    from that feed's L0 object, whose key starts with the feed's id, so it stands on that feed's
+    side of the pairing and never makes a third source.
+    """
+    if action.source != MANUAL_SOURCE:
+        return action.source
+    if not action.l0_key or "/" not in action.l0_key:
+        raise ReconcileError(
+            f"{action.isin} {action.action_type.value} on {action.ex_date.isoformat()}: a "
+            "restored record must name the feed L0 object it was transcribed from"
+        )
+    return action.l0_key.split("/", 1)[0]
+
+
+def _by_feed(rows: Iterable[CorporateAction]) -> dict[str, list[CorporateAction]]:
+    """One `(ISIN, type)` group's rows by the feed they speak for.
+
+    A restored record joins only beside a row its feed did store for that ex-date — the sibling it
+    was dropped next to. Without one there is no event for it to complete (a store that has not
+    ingested that day, a test store), so it is left out rather than queued as a lone record.
+    """
+    rows = list(rows)
+    stored = {(_feed(r), r.ex_date) for r in rows if r.source != MANUAL_SOURCE}
+    by_source: dict[str, list[CorporateAction]] = defaultdict(list)
+    for row in rows:
+        if row.source == MANUAL_SOURCE and (_feed(row), row.ex_date) not in stored:
+            continue
+        by_source[_feed(row)].append(row)
+    return by_source
 
 
 def _acceptable_alone(action: CorporateAction) -> bool:
@@ -690,7 +956,11 @@ def reconcile(
 
     def file_single_source(action: CorporateAction, isin: str, action_type: ActionType) -> None:
         """File one action no second feed published: accept it or queue it, per the policy."""
-        if single_source_policy is SingleSourcePolicy.ACCEPT and _acceptable_alone(action):
+        if (
+            single_source_policy is SingleSourcePolicy.ACCEPT
+            and _acceptable_alone(action)
+            and action.source != MANUAL_SOURCE
+        ):
             # Owner-ratified: trust the one feed, but stamp cross_verified=False so the factor it
             # feeds is never mistaken for a two-feed agreement.
             reconciled.append(_accept_single_source(action))
@@ -705,9 +975,7 @@ def reconcile(
             )
 
     for (isin, action_type), group in grouped.items():
-        by_source: dict[str, list[CorporateAction]] = defaultdict(list)
-        for action in group:
-            by_source[action.source].append(action)
+        by_source = _by_feed(group)
 
         if len(by_source) > 2:
             raise ReconcileError(
@@ -715,34 +983,32 @@ def reconcile(
                 f"({', '.join(sorted(by_source))}); reconciliation is defined for two exchanges"
             )
 
-        if len(by_source) == 1:
-            for action in group:
+        if len(by_source) <= 1:
+            for action in (a for rows in by_source.values() for a in rows):
                 file_single_source(action, isin, action_type)
             continue
 
         left_source, right_source = sorted(by_source)
-        pairs, unmatched_left, unmatched_right = _match(
+        resolved, disputed, unmatched_left, unmatched_right = _match(
             by_source[left_source], by_source[right_source], tolerance
         )
 
         paired_days: list[date] = []
         disputed_days: list[date] = []
-        for left, right in pairs:
+        for res in resolved:
+            paired_days.extend(action.ex_date for action in res.rows)
+            reconciled.append(_reconcile_resolution(res))
+        for left, right in disputed:
             paired_days.extend((left.ex_date, right.ex_date))
-            if _terms_agree(left.terms, right.terms):
-                reconciled.append(_reconcile_pair(left, right))
-            elif (filled := _row_fill(left, right)) is not None:
-                reconciled.append(_reconcile_pair(left, right, terms=filled))
-            else:
-                disputed_days.extend((left.ex_date, right.ex_date))
-                queue.append(
-                    ReconciliationConflict(
-                        reason=ReconciliationReason.RATIO_MISMATCH,
-                        isin=isin,
-                        action_type=action_type,
-                        records=tuple(sorted((left, right), key=lambda a: a.source)),
-                    )
+            disputed_days.extend((left.ex_date, right.ex_date))
+            queue.append(
+                ReconciliationConflict(
+                    reason=ReconciliationReason.RATIO_MISMATCH,
+                    isin=isin,
+                    action_type=action_type,
+                    records=tuple(sorted((left, right), key=lambda a: a.source)),
                 )
+            )
 
         # A same-day extra: one feed itemized a further dividend on a day the two feeds already
         # paired (NSE's `Dividend Rs 10 + Special Dividend Rs 7.5` beside BSE's one record). It is
@@ -854,6 +1120,7 @@ def collapse_reconciled_rows(
     rows: Iterable[CorporateAction],
     *,
     ex_date_tolerance_days: int = DEFAULT_EX_DATE_TOLERANCE_DAYS,
+    restored: Iterable[CorporateAction] = (),
 ) -> tuple[CorporateAction, ...]:
     """One `CorporateAction` per reconciled *event*, however many feeds published it.
 
@@ -873,6 +1140,12 @@ def collapse_reconciled_rows(
     carries the event — its source, raw text and L0 key — so a factor built on it still points at
     real evidence. A row with no counterpart passes through untouched.
 
+    An event the feeds stated as parts and a whole (rule B) folds to the whole alone, so its
+    money is counted once. `restored` are the curated records of a feed's own the store's key
+    could not hold (`ManualActions.restored_dividends`); they join their feed's side exactly as
+    `reconcile` saw them, and one that ends up in no reconciled event is dropped — a restored
+    record only ever completes an event, it is never booked on its own.
+
     What it never does: pick between two reconciled rows that *contradict*. Two rows marked
     reconciled whose terms neither agree nor fill can only mean the marks are stale relative to the
     rules, and that raises `ReconcileError` rather than building a factor on a guess. Three sources
@@ -880,41 +1153,33 @@ def collapse_reconciled_rows(
     """
     tolerance = timedelta(days=ex_date_tolerance_days)
     grouped: dict[tuple[str, ActionType], list[CorporateAction]] = defaultdict(list)
-    for row in rows:
+    for row in (*rows, *restored):
         grouped[(row.isin, row.action_type)].append(row)
+
+    def booked(actions: Iterable[CorporateAction]) -> list[CorporateAction]:
+        return [a for a in actions if a.source != MANUAL_SOURCE]
 
     folded: list[CorporateAction] = []
     for (isin, action_type), group in grouped.items():
-        by_source: dict[str, list[CorporateAction]] = defaultdict(list)
-        for row in group:
-            by_source[row.source].append(row)
+        by_source = _by_feed(group)
         if len(by_source) > 2:
             raise ReconcileError(
                 f"{isin} {action_type.value}: {len(by_source)} sources "
                 f"({', '.join(sorted(by_source))}); reconciliation is defined for two exchanges"
             )
-        if len(by_source) == 1:
-            folded.extend(group)
+        if len(by_source) <= 1:
+            folded.extend(booked(group))
             continue
         left_source, right_source = sorted(by_source)
-        pairs, unmatched_left, unmatched_right = _match(
+        resolved, disputed, unmatched_left, unmatched_right = _match(
             by_source[left_source], by_source[right_source], tolerance
         )
-        folded.extend(_fold_pair(left, right) for left, right in pairs)
-        folded.extend(unmatched_left)
-        folded.extend(unmatched_right)
-
-    folded.sort(key=lambda a: (a.isin, a.ex_date, a.action_type.value, a.source, a.component))
-    return tuple(folded)
-
-
-def _fold_pair(left: CorporateAction, right: CorporateAction) -> CorporateAction:
-    """Two reconciled feed rows of one event, as the one action the chain may count once."""
-    if _terms_agree(left.terms, right.terms):
-        terms, carrier = left.terms, left
-    else:
-        filled = _row_fill(left, right)
-        if filled is None:
+        for left, right in disputed:
+            if MANUAL_SOURCE in (left.source, right.source):
+                # A restored record beside an event it does not complete: it is not booked, and
+                # the feed row it met is left to stand as it was marked.
+                folded.extend(booked((left, right)))
+                continue
             raise ReconcileError(
                 f"{left.isin} {left.action_type.value} on {left.ex_date.isoformat()}: rows from "
                 f"{left.source} ({describe(left.action_type, left.terms)!r}) and {right.source} "
@@ -922,21 +1187,29 @@ def _fold_pair(left: CorporateAction, right: CorporateAction) -> CorporateAction
                 "state different terms; the reconciliation marks are stale — re-run the pass "
                 "rather than build a factor on a guess"
             )
-        terms = filled
-        # `_quantified_fill` returns one side's own terms object; that side stated the numbers.
-        carrier = left if filled == left.terms else right
-    return carrier.model_copy(
+        folded.extend(_fold(res) for res in resolved)
+        folded.extend(booked(unmatched_left))
+        folded.extend(booked(unmatched_right))
+
+    folded.sort(key=lambda a: (a.isin, a.ex_date, a.action_type.value, a.source, a.component))
+    return tuple(folded)
+
+
+def _fold(res: _Resolution) -> CorporateAction:
+    """One resolved event's reconciled rows, as the one action the chain may count once."""
+    rows = res.rows
+    return res.carrier.model_copy(
         update={
-            "ex_date": min(left.ex_date, right.ex_date),
-            "knowable_date": max(left.knowable_date, right.knowable_date),
-            "record_date": left.record_date if left.record_date is not None else right.record_date,
-            "announcement_date": (
-                left.announcement_date
-                if left.announcement_date is not None
-                else right.announcement_date
+            "ex_date": min(a.ex_date for a in rows),
+            "knowable_date": max(a.knowable_date for a in rows),
+            "record_date": next((a.record_date for a in rows if a.record_date is not None), None),
+            "announcement_date": next(
+                (a.announcement_date for a in rows if a.announcement_date is not None), None
             ),
-            "filed_against_isin": left.filed_against_isin or right.filed_against_isin,
-            "terms": terms,
+            "filed_against_isin": next(
+                (a.filed_against_isin for a in rows if a.filed_against_isin), None
+            ),
+            "terms": res.terms,
         }
     )
 
@@ -1036,6 +1309,8 @@ def persist_reconciliation(
     rows_marked = 0
     for reconciled in result.reconciled:
         for action in reconciled.sources:
+            if action.source == MANUAL_SOURCE:
+                continue  # a restored record lives in manual_actions.yaml, not in the table
             conn.execute(
                 _MARK_RECONCILED_SQL,
                 (
@@ -1054,6 +1329,8 @@ def persist_reconciliation(
     now = clock.now()
     for conflict in result.queue:
         for action in conflict.records:
+            if action.source == MANUAL_SOURCE:
+                continue
             conn.execute(
                 _MARK_UNRECONCILED_SQL,
                 (
@@ -1139,7 +1416,9 @@ def load_reconciled_actions(
 
     The rows come back *collapsed* (`collapse_reconciled_rows`): an event both feeds published is
     two reconciled rows in the table and exactly one action here, because everything behind this
-    door counts per event and would otherwise count it twice.
+    door counts per event and would otherwise count it twice. The curated records restoring a
+    feed's dropped dividend (`ManualActions.restored_dividends`) join the collapse exactly as they
+    joined the reconciliation, so the event they complete folds the same way here.
 
     `ex_after` / `ex_through` bound the ex-date (``ex_after < ex_date <= ex_through``) for a reader
     that needs only a recent window across every ISIN — the L2 overlay (`store.l2_overlay`) —
@@ -1158,7 +1437,10 @@ def load_reconciled_actions(
         params.append(ex_through)
     sql += " ORDER BY isin, ex_date, action_type, source, component"
     rows = conn.execute(sql, tuple(params)).fetchall()
-    return collapse_reconciled_rows(_action_from_row(row) for row in rows)
+    restored = default_manual_actions().restored_dividends(
+        isin=isin, ex_after=ex_after, ex_through=ex_through
+    )
+    return collapse_reconciled_rows((_action_from_row(row) for row in rows), restored=restored)
 
 
 def load_unreconciled_actions(

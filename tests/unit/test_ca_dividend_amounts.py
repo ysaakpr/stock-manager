@@ -194,16 +194,17 @@ def test_the_folded_event_carries_the_same_terms() -> None:
 @pytest.mark.parametrize(
     ("nse_kind", "nse_amount", "nse_raw"),
     [
-        # Kinds named outright differently (INE100A01010 2019-11-04): still a statement apiece.
-        (S, "12", "Special Dividend - Rs 12 Per Share"),
-        # Different money, whatever the words.
+        # Different money, whatever the words. (Kinds named outright differently on the same
+        # money — INE100A01010 2019-11-04 — reconcile on the amount since 2026-11-01: rule C,
+        # `test_ca_dividend_rules`.)
         (S, "11", "Special Interim Dividend Rs 11/- Per Share"),
+        (INTERIM, "11", "Interim Dividend - Rs 11 Per Share"),
     ],
 )
 def test_kinds_or_money_stated_differently_are_still_a_mismatch(
     nse_kind: DividendKind, nse_amount: str, nse_raw: str
 ) -> None:
-    """Fails if the rule is loosened to any same-day pair: it must never pick between statements."""
+    """Fails if the rule is loosened to any same-day pair: it must never pick between amounts."""
     nse = _row(BPCL, NSE, BPCL_EX, nse_kind, nse_amount, nse_raw)
     bse = _row(BPCL, BSE, BPCL_EX, INTERIM, "12", "Interim Dividend - Rs. - 12.0000")
 
@@ -218,10 +219,15 @@ def test_a_line_listing_several_dividends_never_names_a_kind_for_another() -> No
     line = "Interim Dividend Rs 15.50 Per Share + Special Dividend Rs 4/- Per Share"
     nse = _row(BPCL, NSE, BPCL_EX, S, "4", line)
     bse = _row(BPCL, BSE, BPCL_EX, INTERIM, "4", "Interim Dividend - Rs. - 4.0000")
+    # A busy day — two dividends in each feed — so rule C (a lone pair, `test_ca_dividend_rules`)
+    # cannot reconcile the special 4 and the interim 4 on the amount; only this fill could.
+    nse_other = _row(BPCL, NSE, BPCL_EX, U, "15.5", line)
+    bse_other = _row(BPCL, BSE, BPCL_EX, F, "9", "Final Dividend - Rs. - 9.0000")
 
-    result = reconcile([nse, bse])
+    result = reconcile([nse, bse, nse_other, bse_other])
 
-    assert [c.reason for c in result.queue] == [ReconciliationReason.RATIO_MISMATCH]
+    assert result.reconciled == ()
+    assert [c.reason for c in result.queue] == [ReconciliationReason.RATIO_MISMATCH] * 2
 
 
 # ── the repair: a single-dividend day-group the parser now reads differently ──────────────────
