@@ -58,3 +58,20 @@ wording change on the feed is visible in L1 rather than silently absorbed.
 day, not a truncated download. The register notes the same: a small `block.csv` must not be read
 as a failure. (A day with *no* deals serves a header-only file, which the parser reads as zero
 rows, never as an error — the distinction a truncation check would get wrong.)
+
+## 2026-10-26 — a symbol the identity master is ambiguous for (added 2026-11-01)
+
+`ambiguity_26102026/` holds **excerpts**, not whole files: the header and a few data lines of each,
+copied byte-for-byte (line endings included) from the lake's L0 payloads for the session. Nothing
+in a kept line was edited; lines were only dropped.
+
+| Excerpt | Copied from (L0) | L0 sha256 | Lines kept |
+|---|---|---|---|
+| `bulk_26102026_EXCERPT.csv` | `nse_bulk_deals/2026/10/bulk_captured_20261026T200005.csv` (8,349 bytes, 89 deals) | `bf9c42605ac2d35ac619f80b9ed25305432660e024bbe78e1dba8628650139d3` | header, lines 29-30 (`PCJEWELLER`), 35-36 (`SSWL`) |
+| `BhavCopy_NSE_CM_0_0_0_20261026_F_0000_EXCERPT.csv` | the single CSV member of `nse_bhavcopy_udiff/2026/10/BhavCopy_NSE_CM_0_0_0_20261026_F_0000.csv.zip` | `723bee076946c104b9cd56d09ca9b3776b062f19c136acc289c7c279290377e3` (the zip) | header, `PCJEWELLER` EQ, `SSWL` EQ |
+
+The deals file names no ISIN; the session's bhavcopy states `INE802C01033` for `SSWL`. SSWL's real
+reissue (`INE802C01025` → `INE802C01033`, `isin_lineage`, 2022-11-11) gives the two ISINs a broken
+master refresh would leave with two open windows — the shape of CCAVENUE on 2026-10-24 (#141).
+The master is constructed in the test; the files are real. `tests/unit/test_deals_fo_ambiguity.py`
+pins how `deals.resolve` settles or quarantines it.

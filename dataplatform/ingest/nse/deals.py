@@ -54,13 +54,22 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Final
+from typing import TYPE_CHECKING, Annotated, Final
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from dataplatform.identity.master import Exchange, IdentityMaster
+from dataplatform.identity.master import AmbiguousSymbolError, Exchange, IdentityMaster
+from dataplatform.identity.session import SessionIdentity
+from dataplatform.ingest.ambiguity import (
+    MAX_AMBIGUOUS_QUARANTINED,
+    Ambiguity,
+    AmbiguousFileError,
+    ambiguity_finding,
+    ambiguity_of,
+    refuse_over_threshold,
+)
 from dataplatform.ingest.models import ISIN_PATTERN, IngestError, ParseError
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
@@ -68,18 +77,25 @@ from dataplatform.logging import get_logger
 from dataplatform.store.l0 import L0Ref, L0Store
 from dataplatform.store.paths import l1_partition_path
 
+if TYPE_CHECKING:  # `quality` imports `ingest.nse`; the type alone is needed here
+    from dataplatform.quality.sentinel import QualityFinding
+
 __all__ = [
+    "AMBIGUOUS_DEALS_CHECK",
     "BLOCK_COLUMNS",
     "BLOCK_SOURCE_ID",
     "BULK_COLUMNS",
     "BULK_SOURCE_ID",
     "DEALS_DATASET",
+    "AmbiguousDealRow",
+    "AmbiguousDealsFileError",
     "DealResolution",
     "DealRow",
     "DealSide",
     "DealType",
     "DealsDay",
     "ResolvedDealRow",
+    "ambiguity_findings",
     "deals_for",
     "deals_url",
     "l0_filename",
@@ -265,19 +281,52 @@ class ResolvedDealRow(BaseModel):
     )
 
 
+#: The `quality_flag.check_name` for deals held back because the identity master named several
+#: ISINs for their symbol and the session's bhavcopy did not settle which.
+AMBIGUOUS_DEALS_CHECK: Final = "deals_symbol_ambiguous"
+
+
+class AmbiguousDealsFileError(AmbiguousFileError):
+    """More symbols in one deals file were ambiguous than one ISIN reissue explains — it fails.
+
+    Raised by `resolve` past `ingest.ambiguity.MAX_AMBIGUOUS_QUARANTINED` distinct symbols: that
+    many contradictions at once is a broken identity master, not a reissue.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class AmbiguousDealRow:
+    """A deal the master found ambiguous and the session's own bhavcopy did not settle.
+
+    Held back from L1 (it has no ISIN to be keyed by) and raised as an ERROR quality flag carrying
+    every fact of the row (`ambiguity_findings`), so the deal is visible on `/status/quality` and
+    re-derivable from its L0 payload (`l0_key`) once the master is fixed — never dropped, never
+    placed on a guessed ISIN.
+    """
+
+    row: DealRow
+    ambiguity: Ambiguity
+    source: str
+    l0_key: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class DealResolution:
     """The outcome of resolving a batch of deals to ISINs.
 
     `unresolved` holds the deals whose `(symbol, date)` the master had never seen — quarantined and
     counted rather than dropped, so a deal naming a security the identity master has not ingested
-    yet is a visible gap, not silent data loss. An *ambiguous* symbol is not quarantined here:
-    `IdentityMaster.resolve` raises `AmbiguousSymbolError` and queues the conflict, because "we
-    know two contradictory ISINs" is a different fact from "we know none".
+    yet is a visible gap, not silent data loss. An *ambiguous* symbol — the master holds two
+    windows naming two ISINs that day — is a different fact ("we know two contradictory ISINs",
+    not "we know none"), and the master queues it for reconciliation whatever happens next. One the
+    session's bhavcopy settles is resolved and counted in `ambiguity_resolved_by_session`; one it
+    cannot is held in `ambiguous`, with its candidates, for the caller to raise as a quality flag.
     """
 
     resolved: tuple[ResolvedDealRow, ...]
     unresolved: tuple[DealRow, ...]
+    ambiguous: tuple[AmbiguousDealRow, ...] = ()
+    ambiguity_resolved_by_session: int = 0
 
 
 class DealsDay(BaseModel):
@@ -390,6 +439,8 @@ def resolve(
     source: str,
     l0_key: str | None = None,
     exchange: Exchange = Exchange.NSE,
+    session: SessionIdentity | None = None,
+    max_ambiguous: int = MAX_AMBIGUOUS_QUARANTINED,
 ) -> DealResolution:
     """Resolve a batch of deals to ISINs through the D2 identity master.
 
@@ -397,15 +448,58 @@ def resolve(
     via `IdentityMaster.try_resolve` — the only sanctioned symbol→ISIN path (invariant #2) — and
     stamps the row's `source`/`l0_key` provenance onto the resolved row, so a shared bulk+block
     partition still names the exact payload each row came from.
+    When the master is ambiguous (two windows, two ISINs that day — already queued for
+    reconciliation by the master), `session` settles it: the deals file names no ISIN, but the same
+    session's bhavcopy does, and if it states exactly one of the master's candidates for the symbol
+    the deal is placed there and counted (`ingest.ambiguity`, the rule #141 set for delivery).
     What it assumes: `row.trade_date` is the session the symbol should be read as-of; a symbol is
     never resolved by name alone, because a recycled symbol resolves to different ISINs by date.
-    What it never does: guess an ISIN. An unknown `(symbol, date)` is quarantined into `unresolved`
-    and counted; an ambiguous one raises `AmbiguousSymbolError` from the master.
+    `session`, when given, is that same session's bhavcopy statement on `exchange`.
+    What it never does: guess an ISIN, or let one symbol fail the file. An unknown `(symbol, date)`
+    is quarantined into `unresolved` and counted; an ambiguous one the session cannot settle is
+    held in `ambiguous` with its candidates. Past `max_ambiguous` distinct such symbols it raises
+    `AmbiguousDealsFileError` instead: that many is a broken master, not one reissue.
     """
     resolved: list[ResolvedDealRow] = []
     unresolved: list[DealRow] = []
+    ambiguous: list[AmbiguousDealRow] = []
+    settled = 0
     for row in rows:
-        isin = master.try_resolve(row.symbol, row.trade_date, exchange=exchange)
+        try:
+            isin = master.try_resolve(row.symbol, row.trade_date, exchange=exchange)
+        except AmbiguousSymbolError as error:
+            stated = (
+                frozenset()
+                if session is None
+                else session.stated_for_symbol(row.symbol, row.trade_date, exchange=exchange)
+            )
+            ambiguity = ambiguity_of(error, stated)
+            isin = ambiguity.settled
+            if isin is None:
+                ambiguous.append(
+                    AmbiguousDealRow(row=row, ambiguity=ambiguity, source=source, l0_key=l0_key)
+                )
+                _LOG.error(
+                    "deals.ambiguous_quarantined",
+                    source=source,
+                    exchange=exchange.value,
+                    symbol=row.symbol,
+                    trade_date=row.trade_date.isoformat(),
+                    candidates=list(ambiguity.candidates),
+                    session_isins=list(ambiguity.stated),
+                    state="QUARANTINED",
+                )
+                continue
+            settled += 1
+            _LOG.warning(
+                "deals.ambiguity_resolved_by_session",
+                source=source,
+                exchange=exchange.value,
+                symbol=row.symbol,
+                trade_date=row.trade_date.isoformat(),
+                candidates=list(ambiguity.candidates),
+                chosen=isin,
+            )
         if isin is None:
             unresolved.append(row)
             continue
@@ -434,7 +528,70 @@ def resolve(
             unresolved=len(unresolved),
             resolved=len(resolved),
         )
-    return DealResolution(resolved=tuple(resolved), unresolved=tuple(unresolved))
+    refuse_over_threshold(
+        [f"{a.row.symbol}->{list(a.ambiguity.candidates)}" for a in ambiguous],
+        error=AmbiguousDealsFileError,
+        what="deals symbols",
+        event="deals",
+        source=source,
+        exchange=exchange,
+        threshold=max_ambiguous,
+    )
+    return DealResolution(
+        resolved=tuple(resolved),
+        unresolved=tuple(unresolved),
+        ambiguous=tuple(ambiguous),
+        ambiguity_resolved_by_session=settled,
+    )
+
+
+def ambiguity_findings(
+    held: Sequence[AmbiguousDealRow], *, exchange: Exchange = Exchange.NSE
+) -> tuple[QualityFinding, ...]:
+    """One ERROR finding per `(file, symbol)` whose deals were held back as ambiguous.
+
+    What it does: groups the held rows by source file and symbol, and carries every fact of every
+    row (client, side, quantity, price as an exact decimal string, remarks, `l0_key`) beside the
+    candidates and the reason, under `AMBIGUOUS_DEALS_CHECK` — so `/status/quality` shows the
+    deals L1 does not hold, not merely that some exist. Fingerprinted by `(source, symbol,
+    session)`: a re-run of the same file finds the open flag rather than stacking another.
+    What it never does: scope the flag to a source an interlock judges. `source` is the `deals`
+    dataset the rows were held back from; one reissue must not redden anything else.
+    """
+    groups: dict[tuple[str, str, date], list[AmbiguousDealRow]] = {}
+    for h in held:
+        groups.setdefault((h.source, h.row.symbol, h.row.trade_date), []).append(h)
+    findings = [
+        ambiguity_finding(
+            check_name=AMBIGUOUS_DEALS_CHECK,
+            source=DEALS_DATASET,
+            exchange=exchange,
+            symbol=symbol,
+            logical_date=trade_date,
+            ambiguity=group[0].ambiguity,
+            key=f"{source}/{symbol}",
+            detail={
+                "deals_source": source,
+                "session_isins": list(group[0].ambiguity.stated),
+                "rows": [
+                    {
+                        "deal_type": h.row.deal_type.value,
+                        "security_name": h.row.security_name,
+                        "client_name": h.row.client_name,
+                        "side": h.row.side.value,
+                        "quantity": h.row.quantity,
+                        "price": str(h.row.price),
+                        "remarks": h.row.remarks,
+                        "l0_key": h.l0_key,
+                    }
+                    for h in group
+                ],
+            },
+        )
+        for (source, symbol, trade_date), group in groups.items()
+    ]
+    findings.sort(key=lambda f: (f.logical_date, f.fingerprint))
+    return tuple(findings)
 
 
 # ── internals ────────────────────────────────────────────────────────────────────────────────

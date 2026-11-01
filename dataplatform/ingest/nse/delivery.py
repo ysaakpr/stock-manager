@@ -49,13 +49,15 @@ from xml.etree import ElementTree
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from dataplatform.identity.master import (
-    AmbiguousSymbolError,
-    Exchange,
-    IdentityError,
-    IdentityMaster,
-)
+from dataplatform.identity.master import AmbiguousSymbolError, Exchange, IdentityMaster
 from dataplatform.identity.session import SessionIdentity
+from dataplatform.ingest.ambiguity import (
+    MAX_AMBIGUOUS_QUARANTINED,
+    Ambiguity,
+    AmbiguousFileError,
+    ambiguity_of,
+    refuse_over_threshold,
+)
 from dataplatform.ingest.models import ParseError
 from dataplatform.logging import get_logger
 from dataplatform.store.l0 import L0Ref, L0Store
@@ -115,22 +117,7 @@ DELIVERY_COLUMNS: Final = (
     "DELIV_PER",
 )
 
-#: The most delivery rows one file may quarantine as *ambiguous* (the master names two ISINs and
-#: the session's bhavcopy cannot settle it) before the whole file fails instead.
-#:
-#: Why 5, and why a count rather than a share of the file. One ISIN reissue makes one symbol
-#: ambiguous, and a symbol occupies at most two or three `(symbol, series)` rows of a session's
-#: file (EQ, plus BE/BL on the days it trades there) — and in practice the session's bhavcopy
-#: settles it before it gets here (CCAVENUE, 2026-10-26 .. 28: one row a day, all settled). The
-#: identity history has exactly two shapes: a single reissue (CCAVENUE, reconciliation 72/73,
-#: 2026-10-24) and a broken refresh that left *seven* NSE symbols ambiguous at once (ids 21-27,
-#: 2026-10-10). Five rows admits a reissue with room for a second, and refuses the broken-refresh
-#: shape. A broken master scales with the number of symbols it mangles, not with the file's length,
-#: so the bar is absolute; on a 2,000-3,600-row file five rows is 0.14-0.25 %, under the 0.5 % a
-#: proportional bar would allow. Against the 2026-10-29 master, all 573 UDiFF-era sessions in L0
-#: resolve with no row left ambiguous (569 of them have one the session settles: the
-#: INFIBEAM/CCAVENUE windows overlap back to 2016), so the bar is nowhere near today's reality.
-MAX_AMBIGUOUS_QUARANTINED: Final = 5
+# `MAX_AMBIGUOUS_QUARANTINED` (re-exported) is `ingest.ambiguity`'s: one bar for every writer.
 
 #: The marker the exchange writes where a series does not report delivery. Modelled as `None`.
 _ABSENT: Final = "-"
@@ -233,7 +220,7 @@ class ResolvedDeliveryRow(BaseModel):
     deliv_pct: DeliveryPercent | None
 
 
-class AmbiguousDeliveryFileError(IdentityError):
+class AmbiguousDeliveryFileError(AmbiguousFileError):
     """More delivery rows were ambiguous than one ISIN reissue explains — the file fails.
 
     Raised by `resolve` when the rows it would quarantine as ambiguous exceed its threshold
@@ -258,17 +245,15 @@ class AmbiguousDeliveryRow:
     session_isin: str | None = None
 
     @property
+    def ambiguity(self) -> Ambiguity:
+        """The master's candidates against the session's statement — the shared D2 shape."""
+        stated = () if self.session_isin is None else (self.session_isin,)
+        return Ambiguity(candidates=self.candidates, stated=stated)
+
+    @property
     def reason(self) -> str:
         """Why the session did not settle it, in the words the quality flag carries."""
-        if self.session_isin is None:
-            return (
-                "ambiguous: the identity master names several ISINs for this symbol on this date "
-                "and the session's bhavcopy states none for this (symbol, series)"
-            )
-        return (
-            "ambiguous: the identity master names several ISINs for this symbol on this date "
-            f"and the session's bhavcopy states {self.session_isin}, which is not one of them"
-        )
+        return self.ambiguity.reason
 
 
 @dataclass(frozen=True, slots=True)
@@ -476,8 +461,10 @@ def resolve(
         try:
             windowed = master.try_resolve(row.symbol, row.trade_date, exchange=exchange)
         except AmbiguousSymbolError as error:
-            candidates = error.conflict.isins
-            if stated is None or stated not in candidates:
+            ambiguity = ambiguity_of(error, () if stated is None else (stated,))
+            candidates = ambiguity.candidates
+            chosen = ambiguity.settled
+            if chosen is None:
                 held = AmbiguousDeliveryRow(row=row, candidates=candidates, session_isin=stated)
                 ambiguous.append(held)
                 _LOG.error(
@@ -501,9 +488,9 @@ def resolve(
                 series=row.series,
                 trade_date=row.trade_date.isoformat(),
                 candidates=list(candidates),
-                chosen=stated,
+                chosen=chosen,
             )
-            resolved.append(_resolved(row, stated))
+            resolved.append(_resolved(row, chosen))
             continue
         if windowed is None:
             isin = stated
@@ -535,23 +522,15 @@ def resolve(
             disagrees=disagrees,
             sample=disagreeing[:10],
         )
-    if len(ambiguous) > max_ambiguous:
-        named = [f"{a.row.symbol}/{a.row.series}->{list(a.candidates)}" for a in ambiguous]
-        _LOG.error(
-            "delivery.ambiguity_over_threshold",
-            source=DELIVERY_SOURCE_ID,
-            exchange=exchange.value,
-            ambiguous=len(ambiguous),
-            threshold=max_ambiguous,
-            sample=named[:10],
-            state="FAILED",
-        )
-        raise AmbiguousDeliveryFileError(
-            f"{len(ambiguous)} delivery rows are ambiguous in the identity master and unsettled by "
-            f"the session's bhavcopy, more than the {max_ambiguous} one ISIN reissue explains — a "
-            f"broken master, so the file is refused rather than published around it: "
-            f"{', '.join(named[:10])}"
-        )
+    refuse_over_threshold(
+        [f"{a.row.symbol}/{a.row.series}->{list(a.candidates)}" for a in ambiguous],
+        error=AmbiguousDeliveryFileError,
+        what="delivery rows",
+        event="delivery",
+        source=DELIVERY_SOURCE_ID,
+        exchange=exchange,
+        threshold=max_ambiguous,
+    )
     return DeliveryResolution(
         resolved=tuple(resolved),
         unresolved=tuple(unresolved),

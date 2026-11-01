@@ -68,6 +68,9 @@ class SessionIdentity:
     exchange: Exchange
     trade_date: date
     _isins: dict[tuple[str, str], str] = field(default_factory=dict)
+    #: Every ISIN stated for a symbol, over every series — ambiguous keys included, because a
+    #: symbol-only question must see everything the file said about the symbol.
+    _by_symbol: dict[str, frozenset[str]] = field(default_factory=dict)
 
     @classmethod
     def from_statements(
@@ -95,10 +98,14 @@ class SessionIdentity:
                 trade_date=trade_date.isoformat(),
                 keys=ambiguous,
             )
+        by_symbol: dict[str, set[str]] = {}
+        for (symbol, _series), isins in stated.items():
+            by_symbol.setdefault(symbol, set()).update(isins)
         return cls(
             exchange=exchange,
             trade_date=trade_date,
             _isins={key: next(iter(isins)) for key, isins in stated.items() if len(isins) == 1},
+            _by_symbol={symbol: frozenset(isins) for symbol, isins in by_symbol.items()},
         )
 
     def try_resolve(
@@ -112,6 +119,20 @@ class SessionIdentity:
         if on_date != self.trade_date or exchange is not self.exchange:
             return None
         return self._isins.get(_key(symbol, series))
+
+    def stated_for_symbol(
+        self, symbol: str, on_date: date, *, exchange: Exchange
+    ) -> frozenset[str]:
+        """Every ISIN this session's file stated for `symbol`, in any series; empty if none.
+
+        For a file that names a symbol but no series (bulk/block deals, an F&O underlier). It is
+        evidence, not an answer: a caller may only use it to pick among the identity master's own
+        candidates for the symbol (`ingest.ambiguity.Ambiguity.settled`), never to place a symbol
+        the master does not know. Empty for another date or exchange, as `try_resolve` is `None`.
+        """
+        if on_date != self.trade_date or exchange is not self.exchange:
+            return frozenset()
+        return self._by_symbol.get(symbol.strip().upper(), frozenset())
 
     def __len__(self) -> int:
         return len(self._isins)

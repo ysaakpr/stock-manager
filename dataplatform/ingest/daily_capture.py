@@ -89,6 +89,7 @@ from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store import fo_aggregates
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Ref, L0Store
+from dataplatform.store.l1 import session_identity
 from dataplatform.store.paths import l1_partition_path, l2_partition_path
 
 if TYPE_CHECKING:  # imported lazily by the registry to avoid a scheduler→ingest import cycle
@@ -635,19 +636,28 @@ def _land_deals_day(
             ctx.tracker.mark_fetched(source, served, checksum=ref.sha256, l0_path=ref.key)
             ctx.tracker.mark_validated(source, served)
         master = ctx.master()
+        # The deals files name no ISIN; the session's own bhavcopy (already in `prices_raw` by the
+        # evening run) is what settles a symbol the master holds two windows for.
+        session = session_identity(served, data_root=ctx.data_root)
         resolved: list[deals.ResolvedDealRow] = []
+        held: list[deals.AmbiguousDealRow] = []
         quarantined = 0
         for source in (deals.BULK_SOURCE_ID, deals.BLOCK_SOURCE_ID):
             half = _deals_half(ctx, source, served, captured)
             if half is None:
                 continue
             ref, rows = half
-            resolution = deals.resolve(rows, master, source=source, l0_key=ref.key)
+            resolution = deals.resolve(rows, master, source=source, l0_key=ref.key, session=session)
             resolved.extend(resolution.resolved)
+            held.extend(resolution.ambiguous)
             quarantined += len(resolution.unresolved)
         deals.write_l1(
             deals.DealsDay(trade_date=served, rows=tuple(resolved)), data_root=ctx.data_root
         )
+        if held:
+            # In the same transaction as the publish below, so the flag and the partition that
+            # lacks those rows commit together.
+            ctx.raise_findings(deals.ambiguity_findings(held))
         for source in opened:
             ctx.tracker.mark_normalized(source, served)
             ctx.tracker.mark_published(source, served)
@@ -663,8 +673,17 @@ def _land_deals_day(
         sources=opened,
         resolved=len(resolved),
         quarantined=quarantined,
+        ambiguous=len(held),
         state="PUBLISHED",
     )
+    notes = [
+        *([f"{quarantined} unresolved symbol(s) quarantined"] if quarantined else []),
+        *(
+            [f"{len(held)} deal(s) held back as ambiguous ({deals.AMBIGUOUS_DEALS_CHECK} flag)"]
+            if held
+            else []
+        ),
+    ]
     return outcomes + [
         CaptureOutcome(
             source,
@@ -672,7 +691,7 @@ def _land_deals_day(
             CaptureStatus.CAPTURED,
             rows=len(captured[source][1]),
             requests=1,
-            detail=f"{quarantined} unresolved symbol(s) quarantined" if quarantined else "",
+            detail="; ".join(notes),
         )
         for source in opened
     ]
@@ -753,10 +772,29 @@ FO_L2_HEAL_SESSIONS: Final = 30
 def _write_fo(ctx: CaptureContext, rows: Sequence[fo_bhavcopy.FoContractRow]) -> int:
     """Land one session's contracts in L1 and derive its L2 aggregates from the same rows."""
     fo_aggregates.write_l1(rows, data_root=ctx.data_root)
-    fo_aggregates.write_l2(
-        fo_aggregates.build_aggregates(rows, master=ctx.master()), data_root=ctx.data_root
-    )
+    _write_fo_l2(ctx, rows)
     return len(rows)
+
+
+def _write_fo_l2(ctx: CaptureContext, rows: Sequence[fo_bhavcopy.FoContractRow]) -> int:
+    """Derive and write one session's L2 aggregates; raise a flag per ambiguous stock underlier.
+
+    The F&O file names no underlier ISIN, so the session's own bhavcopy (its `prices_raw`) is what
+    settles a symbol the master holds two windows for (`fo_aggregates.derive_aggregates`). One it
+    cannot settle is written ISIN-less and raised through `ctx.raise_findings`, which commits with
+    whatever the capture commits next. Returns the number of aggregates written.
+    """
+    if not rows:
+        raise ValueError("no contract rows to derive aggregates from")
+    derived = fo_aggregates.derive_aggregates(
+        rows,
+        master=ctx.master(),
+        session=session_identity(rows[0].trade_date, data_root=ctx.data_root),
+    )
+    fo_aggregates.write_l2(derived.aggregates, data_root=ctx.data_root)
+    if derived.ambiguous:
+        ctx.raise_findings(fo_aggregates.ambiguity_findings(derived.ambiguous))
+    return len(derived.aggregates)
 
 
 def _fo_l2_missing(ctx: CaptureContext, day: date) -> bool:
@@ -771,7 +809,8 @@ def rederive_fo_aggregates(
     """Re-derive L2 `fo_aggregates` from L1 `fo_contracts` for ``sessions`` — zero requests.
 
     What it does: for each session with an L1 partition (and, when ``only_missing``, no L2 one),
-    `fo_aggregates.rebuild_l2_from_l1` against the D2 master; one outcome per session touched,
+    re-derives L2 from it against the D2 master and the session's own bhavcopy (`_write_fo_l2`,
+    which raises a quality flag per ambiguous underlier); one outcome per session touched,
     under the source name ``fo_aggregates``. A session that fails is a FAILED outcome (logged with
     its date) and the walk goes on.
     What it never does: open a socket, touch L0 or L1, or change a `sync_state` row — L2 is
@@ -784,8 +823,7 @@ def rederive_fo_aggregates(
         if not l1.exists() or (only_missing and not _fo_l2_missing(ctx, day)):
             continue
         try:
-            fo_aggregates.rebuild_l2_from_l1(day, master=ctx.master(), data_root=ctx.data_root)
-            rows = len(fo_aggregates.read_l2(day, data_root=ctx.data_root))
+            rows = _write_fo_l2(ctx, fo_aggregates.read_l1(day, data_root=ctx.data_root))
         except Exception as exc:  # containment: reported per session, the walk goes on
             error = f"{type(exc).__name__}: {exc}"
             _LOG.error(
