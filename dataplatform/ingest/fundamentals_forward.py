@@ -65,6 +65,7 @@ from dataplatform.ingest.fundamentals_backfill import (
     FundamentalsBackfillReport,
     FundamentalsBackfillRunner,
     IndexUnit,
+    bse_codes_of,
     build_integrated_units,
     isins_in_price_window,
     resolve_universe,
@@ -402,6 +403,7 @@ def run_forward_plan(
                 owner_on=lambda symbol: master.try_resolve(symbol, on),
             ),
             resolve_isin=lambda symbol, on: try_resolve_unambiguous(master, symbol, on),
+            bse_codes=lambda isin: bse_codes_of(master, isin),
             clock=clock,
         )
         _LOG.info(

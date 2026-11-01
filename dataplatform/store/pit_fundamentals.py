@@ -56,6 +56,7 @@ from dataplatform.store.paths import Layer, l1_partition_path, layer_root, parti
 __all__ = [
     "PIT_FUNDAMENTALS_DATASET",
     "PitFundamentalsBatch",
+    "read_filed_between",
     "read_l1",
     "read_latest",
     "read_pit",
@@ -323,6 +324,27 @@ def read_latest(on_date: date, *, data_root: Path | None = None) -> tuple[Fundam
     return tuple(sorted(latest.values(), key=_key_without_filing))
 
 
+def read_filed_between(
+    first: date, last: date, *, isin: str, data_root: Path | None = None
+) -> tuple[FundamentalFact, ...]:
+    """One ISIN's facts from the filings disseminated between `first` and `last`, inclusive.
+
+    What it does: the narrow point-in-time read a per-filing check needs — only the partitions in
+    that filing-date range are opened, and only the ISIN's rows are kept from each.
+    What it assumes: `first <= last`; an empty range or a store with nothing for the ISIN yields an
+    empty result, not an error.
+    What it never does: return a fact filed after `last` (invariant #7), or collapse versions — a
+    period filed twice in the range comes back twice, as `read_pit` returns it.
+    """
+    rows: list[FundamentalFact] = []
+    for path in _partitions_through(last, data_root=data_root):
+        if partition_date_of(path.parent) < first:
+            continue
+        rows.extend(_rows_of(path, isin=isin))
+    rows.sort(key=lambda fact: (*_key_of(fact), fact.filing_date))
+    return tuple(rows)
+
+
 def _partitions_through(on_date: date, *, data_root: Path | None) -> Iterator[Path]:
     """The `part.parquet` files whose `filing_date` partition is on or before `on_date`."""
     dataset_dir = layer_root(Layer.L1, data_root=data_root) / PIT_FUNDAMENTALS_DATASET
@@ -413,9 +435,13 @@ def _write_partition(path: Path, rows: dict[tuple[Any, ...], FundamentalFact]) -
     return len(ordered)
 
 
-def _rows_of(path: Path) -> tuple[FundamentalFact, ...]:
-    """Parse one L1 partition file into facts, enforcing the declared schema on read."""
-    records = pq.read_table(path, schema=_L1_SCHEMA).to_pylist()
+def _rows_of(path: Path, *, isin: str | None = None) -> tuple[FundamentalFact, ...]:
+    """Parse one L1 partition file into facts, enforcing the declared schema on read.
+
+    `isin` keeps only that security's rows, filtered by the parquet reader rather than after it.
+    """
+    filters = None if isin is None else [("isin", "=", isin)]
+    records = pq.read_table(path, schema=_L1_SCHEMA, filters=filters).to_pylist()
     return tuple(
         FundamentalFact(
             isin=str(record["isin"]),

@@ -14,7 +14,10 @@ What makes it bounded, one-time and journaled:
 * **Bounded.** A re-queue names its filings explicitly, at most `MAX_FILINGS` of them, and the file
   as a whole at most `MAX_TOTAL_FILINGS` — far under B1's 200-request campaign threshold. Each item
   names the stored index page its entry is re-read from (no index request), so the only request an
-  item can make is its own document's, once.
+  item can make is its own document's, once. The one exception is a `reuse_only` re-queue the owner
+  approved by id (`RAISED_BOUNDS`): it may name more, because it cannot make a request at all —
+  an item whose stored document is missing, empty or truncated is journaled `FAILED` instead of
+  fetched — and it counts against its own bound, not the file's.
 * **One-time.** Every item's outcome is written to `fundamentals_requeue_log`, keyed
   `(requeue_id, unit, filing_date)`; an item with a row is never driven again, whatever happened.
   An item the run did not reach (the deadline, a 403 park) has no row and rides with the next run.
@@ -38,6 +41,7 @@ from dataclasses import dataclass
 from datetime import date
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final
 
 import yaml
@@ -50,6 +54,7 @@ from dataplatform.store.db import Connection
 __all__ = [
     "MAX_FILINGS",
     "MAX_TOTAL_FILINGS",
+    "RAISED_BOUNDS",
     "REQUEUE_PATH",
     "Journal",
     "RequeueAction",
@@ -70,6 +75,19 @@ REQUEUE_PATH: Final = Path(__file__).with_name("fundamentals_requeue.yaml")
 #: never a campaign: anything near B1's 200 requests to one host is a human go, not a YAML edit.
 MAX_FILINGS: Final = 50
 MAX_TOTAL_FILINGS: Final = 100
+
+#: Owner-approved, one-off raised bounds, by re-queue id — each for one reviewed list, never a
+#: standing allowance. Only a `reuse_only` re-queue may carry one: the bounds above exist to cap
+#: requests to NSE, and a reuse-only item makes none (an item without a complete stored document
+#: is journaled FAILED, not fetched). Such a re-queue counts against its own bound here, not
+#: against `MAX_TOTAL_FILINGS`.
+RAISED_BOUNDS: Final = MappingProxyType(
+    {
+        # 2026-11-02 (owner): the class E (multi-entity BSE code) and F1 (symbol typo, ISIN
+        # agrees) parse failures, re-parsed from their complete L0 documents in one night.
+        "xbrl-identity-e-f1-2026-11-03": 205,
+    }
+)
 
 #: The only index whose pages an item may be re-read from: the integrated feed (2025-03 on), the one
 #: the forward job drives. Its entries are what the runner's per-filing path takes.
@@ -131,13 +149,34 @@ class _Requeue(_Strict):
     action: RequeueAction
     not_before: date = Field(description="the first day a scheduled run may consume it")
     basis: str = Field(min_length=1, max_length=400)
-    filings: tuple[_Filing, ...] = Field(min_length=1, max_length=MAX_FILINGS)
+    reuse_only: bool = Field(
+        default=False,
+        description="refetch from the stored document only; never request (FAILED if none)",
+    )
+    filings: tuple[_Filing, ...] = Field(min_length=1)
+
+    @property
+    def raised(self) -> bool:
+        """Whether this re-queue runs under an owner-approved `RAISED_BOUNDS` entry."""
+        return self.id in RAISED_BOUNDS
 
     @model_validator(mode="after")
     def _unique(self) -> _Requeue:
         keys = [(f.unit, f.filing_date) for f in self.filings]
         if len(keys) != len(set(keys)):
             raise ValueError(f"re-queue {self.id} names a filing twice")
+        if self.reuse_only and self.action is not RequeueAction.REFETCH:
+            raise ValueError(f"re-queue {self.id}: reuse_only applies to refetch only")
+        if self.raised and not self.reuse_only:
+            raise ValueError(
+                f"re-queue {self.id} has a raised bound but is not reuse_only; a raised bound is "
+                "for a list that cannot make a request"
+            )
+        bound = RAISED_BOUNDS.get(self.id, MAX_FILINGS)
+        if len(self.filings) > bound:
+            raise ValueError(
+                f"re-queue {self.id} names {len(self.filings)} filings; its bound is {bound}"
+            )
         return self
 
 
@@ -150,7 +189,7 @@ class _Register(_Strict):
         ids = [r.id for r in self.requeues]
         if len(ids) != len(set(ids)):
             raise ValueError("two re-queues share an id")
-        total = sum(len(r.filings) for r in self.requeues)
+        total = sum(len(r.filings) for r in self.requeues if not r.raised)
         if total > MAX_TOTAL_FILINGS:
             raise ValueError(
                 f"{total} filings re-queued; the register's bound is {MAX_TOTAL_FILINGS}"
@@ -167,6 +206,8 @@ class RequeueItem:
     unit: str
     filing_date: date
     index_key: str
+    reuse_only: bool = False
+    """Never request: drive the filing only from a complete stored document (`refetch` only)."""
 
     @property
     def state_source(self) -> str:
@@ -202,6 +243,7 @@ def _items(requeues: Sequence[_Requeue], *, today: date | None = None) -> list[R
             unit=f.unit,
             filing_date=f.filing_date,
             index_key=f.index,
+            reuse_only=r.reuse_only,
         )
         for r in requeues
         if today is None or r.not_before <= today
