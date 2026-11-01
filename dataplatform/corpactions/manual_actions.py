@@ -61,8 +61,18 @@ source, so it can never be mistaken for a feed's.
 terms and the ex-date, never the day it was transcribed. L2 back-adjustment is retroactive by
 design (§4.3); nothing on the decision path reads this module.
 
-What this module never does: fetch, infer a ratio, or fill a missing term. An event no source
-states stays out of the file, and its step stays UNEXPLAINED until one does.
+**A derived ex-date (T+1).** One term may be filled, by one rule: a SPLIT (a consolidation is a
+SPLIT with the face value rising) whose source states the terms and a record date but leaves the
+ex-date blank may carry ``ex_date_derived: T1_RECORD_DATE`` instead of an ``ex_date``. The loader
+then sets the ex-date to the record date (`corpactions.ex_date_rule`: T+1 settlement, ex = record,
+for a record date that is a session on or after 2023-01-27) and keeps the rule on the row
+(`CuratedAction.ex_date_rule`), so a derived date can never pass for a stated one. A row that
+states an ex-date *and* names the rule, or whose record date is before 2023-01-27 or not a
+session, is refused.
+
+What this module never does: fetch, infer a ratio, or fill a missing term other than that one
+ex-date. An event no source states stays out of the file, and its step stays UNEXPLAINED until one
+does.
 """
 
 from __future__ import annotations
@@ -78,6 +88,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import yaml
 
+from dataplatform.corpactions.ex_date_rule import ExDateRule, derive_ex_date, nse_session
 from dataplatform.corpactions.merger_terms import TermSource, parse_term_sources
 from dataplatform.corpactions.taxonomy import (
     ActionType,
@@ -163,6 +174,9 @@ class CuratedAction:
     #: day (`INTERIM#2` for a second Interim the key could not hold beside the first).
     feed: str | None = None
     component: str = ""
+    #: Set only when the source left the ex-date blank and it was derived from the stated record
+    #: date (`corpactions.ex_date_rule`); `None` means the source stated `ex_date` itself.
+    ex_date_rule: ExDateRule | None = None
 
     @property
     def is_price_event(self) -> bool:
@@ -190,6 +204,7 @@ class CuratedAction:
             source_ref=MANUAL_ACTIONS_PATH.name,
             l0_key=first.l0_key,
             component=self.component or dividend_component(self.terms),
+            ex_date_rule=None if self.ex_date_rule is None else self.ex_date_rule.value,
         )
 
 
@@ -432,19 +447,51 @@ def _action(row: dict[str, Any]) -> CuratedAction:
     else:
         raise ManualActionsError(f"{isin}: {action_type} is not a type this file may state")
     filed = row.get("filed_against_isin")
+    record_date = None if row.get("record_date") is None else _date(row, "record_date")
+    ex_date, rule = _ex_date(row, isin, action_type, record_date)
     return CuratedAction(
         isin=isin,
         company=_text(row, "company"),
         action_type=action_type,
         terms=terms,
-        ex_date=_date(row, "ex_date"),
+        ex_date=ex_date,
         knowable_date=_date(row, "knowable_date"),
         checked=_date(row, "checked"),
         sources=_sources(row),
-        record_date=None if row.get("record_date") is None else _date(row, "record_date"),
+        record_date=record_date,
         filed_against_isin=None if filed is None else _isin(row, "filed_against_isin"),
         note=row.get("note"),
+        ex_date_rule=rule,
     )
+
+
+def _ex_date(
+    row: dict[str, Any], isin: str, action_type: ActionType, record_date: date | None
+) -> tuple[date, ExDateRule | None]:
+    """The stated `ex_date`, or one derived by the named T+1 rule — never both, never a guess."""
+    named = row.get("ex_date_derived")
+    if named is None:
+        return _date(row, "ex_date"), None
+    try:
+        rule = ExDateRule(str(named))
+    except ValueError as exc:
+        raise ManualActionsError(f"{isin}: ex_date_derived {named!r}: {exc}") from exc
+    if row.get("ex_date") is not None:
+        raise ManualActionsError(
+            f"{isin}: a row states ex_date or derives it ({rule}), never both — a derived date "
+            "must not look stated"
+        )
+    if action_type is not ActionType.SPLIT:
+        raise ManualActionsError(f"{isin}: only a SPLIT may derive its ex-date, not {action_type}")
+    if record_date is None:
+        raise ManualActionsError(f"{isin}: {rule} needs the record_date the source states")
+    derived = derive_ex_date(record_date, is_session=nse_session)
+    if derived is None or derived.rule is not rule:
+        raise ManualActionsError(
+            f"{isin}: {rule} does not apply to record date {record_date} (before T+1 settlement "
+            "on 2023-01-27, or not a trading session)"
+        )
+    return derived.ex_date, derived.rule
 
 
 def _restored_dividend(row: dict[str, Any], isin: str) -> CuratedAction:

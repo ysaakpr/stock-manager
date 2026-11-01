@@ -17,6 +17,11 @@ from pathlib import Path
 
 import pytest
 
+from dataplatform.corpactions.ex_date_rule import (
+    T1_SETTLEMENT_FROM,
+    ExDateRule,
+    derive_ex_date,
+)
 from dataplatform.corpactions.factors import (
     FactorChain,
     FactorError,
@@ -134,6 +139,13 @@ def test_every_ex_date_is_the_one_the_book_closure_line_states(
     Dates are dd/mm/yyyy up to 2025-10-01 and yyyy-mm-dd in the lowercase `bc<ddmmyyyy>` era after.
     """
     [fields] = list(csv.reader([source.quote]))
+    if row.ex_date_rule is not None:
+        # EX_DT blank on the line: the one derived case (T+1, ex = record), and only then.
+        assert not fields[6].strip(), f"{row.isin}: the line states an ex-date; transcribe it"
+        assert row.ex_date_rule is ExDateRule.T1_RECORD_DATE, row.isin
+        assert row.record_date is not None and row.record_date >= T1_SETTLEMENT_FROM, row.isin
+        assert row.ex_date == row.record_date == _bc_date(fields[3]), row.isin
+        return
     assert _bc_date(fields[6]) == row.ex_date, row.isin
     if row.record_date is not None:
         assert _bc_date(fields[3]) == row.record_date, row.isin
@@ -204,6 +216,103 @@ def test_a_malformed_file_is_refused(tmp_path: Path, patch: str, message: str) -
     bad.write_text(_GOOD.replace(patch, message))
     with pytest.raises(ManualActionsError):
         load_manual_actions(bad)
+
+
+# ── the one derived term: a T+1 ex-date from a stated record date ────────────────────────────
+
+_DERIVED = """\
+actions:
+  - isin: INE483S01038
+    company: AvenuesAI
+    filed_against_isin: INE483S01020
+    action_type: SPLIT
+    from_value: 1
+    to_value: 10
+    ex_date_derived: T1_RECORD_DATE
+    record_date: 2026-10-13
+    knowable_date: 2026-10-12
+    checked: 2026-11-01
+    sources:
+      - l0_key: x
+        quote: EQ,CCAVENUE,AvenuesAI Limited,2026-10-13,,,,,,CNSLDATNRE1 TO RS10
+"""
+
+
+def test_a_t1_split_with_a_blank_ex_date_derives_it_from_the_record_date(tmp_path: Path) -> None:
+    path = tmp_path / "derived.yaml"
+    path.write_text(_DERIVED)
+    [row] = load_manual_actions(path).actions
+    assert row.ex_date == row.record_date == date(2026, 10, 13)
+    assert row.ex_date_rule is ExDateRule.T1_RECORD_DATE
+    # A stated row carries no rule, so the two can never be confused.
+    [stated] = load_manual_actions(_write(tmp_path)).actions
+    assert stated.ex_date_rule is None
+
+
+def _write(tmp_path: Path) -> Path:
+    good = tmp_path / "good.yaml"
+    good.write_text(_GOOD)
+    return good
+
+
+@pytest.mark.parametrize(
+    ("patch", "replacement", "reason"),
+    [
+        # a stated ex-date beside the rule: a derived date must never look stated
+        (
+            "    record_date: 2026-10-13\n",
+            "    record_date: 2026-10-13\n    ex_date: 2026-10-13\n",
+            "never both",
+        ),
+        # T+2 era: the lag varied, never derive
+        ("record_date: 2026-10-13", "record_date: 2023-01-25", "does not apply"),
+        ("record_date: 2026-10-13", "record_date: 2016-03-10", "does not apply"),
+        # a record date on a weekend is no session
+        ("record_date: 2026-10-13", "record_date: 2026-10-17", "does not apply"),
+        # no record date stated: nothing to derive from
+        ("    record_date: 2026-10-13\n", "", "needs the record_date"),
+        # only a split/consolidation
+        (
+            "    action_type: SPLIT\n    from_value: 1\n    to_value: 10\n",
+            "    action_type: BONUS\n    new_shares: 1\n    held_shares: 1\n",
+            "only a SPLIT",
+        ),
+        ("ex_date_derived: T1_RECORD_DATE", "ex_date_derived: GUESSED", "ex_date_derived"),
+    ],
+)
+def test_the_derived_ex_date_is_refused_outside_its_rule(
+    tmp_path: Path, patch: str, replacement: str, reason: str
+) -> None:
+    assert _DERIVED.count(patch) == 1
+    path = tmp_path / "bad.yaml"
+    path.write_text(_DERIVED.replace(patch, replacement))
+    with pytest.raises(ManualActionsError, match=reason):
+        load_manual_actions(path)
+
+
+def test_the_t1_rule_starts_on_2023_01_27_and_needs_a_session() -> None:
+    always = lambda _d: True  # noqa: E731
+    assert date(2023, 1, 27) == T1_SETTLEMENT_FROM
+    derived = derive_ex_date(date(2023, 1, 27), is_session=always)
+    assert derived is not None and derived.ex_date == date(2023, 1, 27)
+    assert derive_ex_date(date(2023, 1, 26), is_session=always) is None
+    assert derive_ex_date(date(2026, 10, 13), is_session=lambda _d: False) is None
+    assert derive_ex_date(None, is_session=always) is None
+
+
+def test_avenuesai_consolidates_ten_into_one_and_closes_the_step() -> None:
+    """Re 1 -> Rs 10: x10 on every bar before 2026-10-13, so 13.83 reads 138.30 against 130.05."""
+    [row] = load_manual_actions().actions_for("INE483S01038")
+    assert row.ex_date == date(2026, 10, 13) and row.ex_date_rule is ExDateRule.T1_RECORD_DATE
+    assert row.filed_against_isin == "INE483S01020"
+    chain = with_events(FactorChain(isin="INE483S01038", rows=()), [row.as_action()])
+    [factor] = chain.rows
+    # Inverted (a split, not a consolidation) this is 0.1 and the step becomes x94.
+    assert factor.price_factor == Decimal(10) and factor.qty_factor == Decimal("0.1")
+    adjusted = Decimal("13.83") * chain.price_factor_asof(date(2026, 10, 12))
+    assert adjusted == Decimal("138.30")
+    assert chain.price_factor_asof(date(2026, 10, 19)) == Decimal(1)
+    assert Decimal("0.9") < Decimal("130.05") / adjusted < Decimal("1.0")
 
 
 def test_a_duplicate_action_is_refused(tmp_path: Path) -> None:
@@ -380,6 +489,9 @@ class _NullLineage:
 
     def survivor_of(self, isin: str) -> str:
         return isin
+
+    def edges(self) -> tuple[tuple[str, str, date], ...]:
+        return ()
 
 
 def test_the_check_reads_curated_breaks_and_moves_without_postgres(tmp_path: Path) -> None:

@@ -1,0 +1,75 @@
+# One-time re-queues of named XBRL filings — read by dataplatform.ingest.fundamentals_requeue and
+# consumed by the scheduled `fundamentals_forward` job: the first scheduled run on or after
+# `not_before` drives each filing once, under the job's own host leases, rate limiter and deadline,
+# and writes the outcome to `fundamentals_requeue_log`. A filing with a journal row is never driven
+# again. Nothing else fetches for these (AGENTIC_CONTEXT §8); an operator never fetches them by hand.
+#
+#   action: refetch          — the normal per-filing path, once: reuse L0, re-download a stored
+#                              document that is empty or truncated (beside it), parse, publish or fail.
+#   action: record_evidence  — NO request: re-read the entry from the stored index page and, if the
+#                              index lists the XBRL file as zero bytes and the row is that document's
+#                              404, re-record the failure with the index's statement (D31's evidence).
+#
+# Each filing names its sync_state unit, its filing (logical) date, and the L0 key of the stored
+# index page its entry is re-read from (source/logical_date/filename) — no index request is made.
+# Bounded: at most 50 filings a re-queue, 100 in the file. Public repository: no secret, no host.
+
+version: 1
+
+requeues:
+  # 2026-11-01 (owner, HUMAN_DECISIONS D31/D32): one scheduled re-check each for the failures the
+  # triage of PR #150 did NOT accept. 7 other 404s (no zero-byte statement, not the July outage) and
+  # the 5 stored bodies that are empty or truncated — which, before this fix, a retry re-parsed from
+  # the same broken L0 bytes and so could never heal. After the re-check a filing that still fails
+  # stays an ERROR on /status/gaps (its first attempt is long past D28's window); see ops/BACKLOG.md.
+  - id: xbrl-recheck-2026-11-01
+    action: refetch
+    not_before: 2026-11-02
+    basis: "HUMAN_DECISIONS.md D31/D32 (owner, 2026-11-01): one scheduled re-check, then errors"
+    filings:
+      # other 404s
+      - {unit: IF91762, filing_date: 2025-05-19, index: nse_integrated_filing_index/2025-05-01/integrated-filing-results_20250501_20250531_p03.json, note: UPL}
+      - {unit: IF91762-FY, filing_date: 2025-05-19, index: nse_integrated_filing_index/2025-05-01/integrated-filing-results_20250501_20250531_p03.json, note: UPL}
+      - {unit: IF93702, filing_date: 2025-05-25, index: nse_integrated_filing_index/2025-05-01/integrated-filing-results_20250501_20250531_p02.json, note: ALLCARGO}
+      - {unit: IF93702-FY, filing_date: 2025-05-25, index: nse_integrated_filing_index/2025-05-01/integrated-filing-results_20250501_20250531_p02.json, note: ALLCARGO}
+      - {unit: IF98124, filing_date: 2025-06-11, index: nse_integrated_filing_index/2025-06-01/integrated-filing-results_20250601_20250630_p01.json, note: ADANIENT}
+      - {unit: IF98124-FY, filing_date: 2025-06-11, index: nse_integrated_filing_index/2025-06-01/integrated-filing-results_20250601_20250630_p01.json, note: ADANIENT}
+      - {unit: IF108019, filing_date: 2025-08-01, index: nse_integrated_filing_index/2025-08-01/integrated-filing-results_20250801_20250831_p03.json, note: "HCG; index states 16.93 KB"}
+      # stored bodies empty (0 B) or truncated mid-document
+      - {unit: IF121347, filing_date: 2025-10-23, index: nse_integrated_filing_index/2025-10-01/integrated-filing-results_20251001_20251031_p01.json, note: "LAURUSLABS; 65,258 B stored, index 273.41 KB"}
+      - {unit: IF202489, filing_date: 2026-10-19, index: nse_integrated_filing_index/2026-10-19/integrated-filing-results_20261019_20261019_p01.json, note: "AONESTEELS; 0 B stored, index 24.14 KB"}
+      - {unit: IF205418, filing_date: 2026-10-28, index: nse_integrated_filing_index/2026-10-28/integrated-filing-results_20261028_20261028_p01.json, note: "KPRMILL; 0 B stored, index 102.18 KB"}
+      - {unit: IF205837, filing_date: 2026-10-28, index: nse_integrated_filing_index/2026-10-28/integrated-filing-results_20261028_20261028_p01.json, note: "SUDARCOLOR; 131,072 B stored, index 199.31 KB"}
+      - {unit: IF206642, filing_date: 2026-10-29, index: nse_integrated_filing_index/2026-10-29/integrated-filing-results_20261029_20261029_p01.json, note: "PARADEEP; 32,768 B stored, index 198.44 KB"}
+
+  # 2026-11-01 (owner, D31): the 404s recorded before the runner wrote the index's zero-byte
+  # statement into the failure. No request: the statement is re-read from the stored index page.
+  # (The three 2026-10-28 zero-byte filings are still inside the re-read window and pick it up on
+  # their next nightly retry.)
+  - id: xbrl-zero-byte-evidence-2026-11-01
+    action: record_evidence
+    not_before: 2026-11-02
+    basis: "HUMAN_DECISIONS.md D31 (owner, 2026-11-01): the index lists the XBRL file as 0 Bytes"
+    filings:
+      - {unit: IF124484, filing_date: 2025-11-04, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p04.json, note: ADANIENT}
+      - {unit: IF124873, filing_date: 2025-11-06, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: UPL}
+      - {unit: IF152665, filing_date: 2026-04-24, index: nse_integrated_filing_index/2026-04-01/integrated-filing-results_20260401_20260430_p01.json, note: ADANIGREEN}
+      - {unit: IF152665-FY, filing_date: 2026-04-24, index: nse_integrated_filing_index/2026-04-01/integrated-filing-results_20260401_20260430_p01.json, note: ADANIGREEN}
+      - {unit: IF152668, filing_date: 2026-04-24, index: nse_integrated_filing_index/2026-04-01/integrated-filing-results_20260401_20260430_p01.json, note: ADANIGREEN}
+      - {unit: IF152668-FY, filing_date: 2026-04-24, index: nse_integrated_filing_index/2026-04-01/integrated-filing-results_20260401_20260430_p01.json, note: ADANIGREEN}
+      - {unit: IF152674, filing_date: 2026-04-24, index: nse_integrated_filing_index/2026-04-01/integrated-filing-results_20260401_20260430_p01.json, note: ADANIGREEN}
+      - {unit: IF152674-FY, filing_date: 2026-04-24, index: nse_integrated_filing_index/2026-04-01/integrated-filing-results_20260401_20260430_p01.json, note: ADANIGREEN}
+      - {unit: IF155161, filing_date: 2026-05-01, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: ADANIENT}
+      - {unit: IF155161-FY, filing_date: 2026-05-01, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: ADANIENT}
+      - {unit: IF155162, filing_date: 2026-05-01, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: ADANIENT}
+      - {unit: IF155162-FY, filing_date: 2026-05-01, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: ADANIENT}
+      - {unit: IF156640, filing_date: 2026-05-11, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: UPL}
+      - {unit: IF156640-FY, filing_date: 2026-05-11, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: UPL}
+      - {unit: IF156755, filing_date: 2026-05-11, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: JSWENERGY}
+      - {unit: IF156755-FY, filing_date: 2026-05-11, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: JSWENERGY}
+      - {unit: IF157105, filing_date: 2026-05-12, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: CLEANMAX}
+      - {unit: IF157105-FY, filing_date: 2026-05-12, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: CLEANMAX}
+      - {unit: IF175271, filing_date: 2026-07-17, index: nse_integrated_filing_index/2026-07-01/integrated-filing-results_20260701_20260731_p02.json, note: UPL}
+      - {unit: IF175271-FY, filing_date: 2026-07-17, index: nse_integrated_filing_index/2026-07-01/integrated-filing-results_20260701_20260731_p02.json, note: UPL}
+      - {unit: IF202751, filing_date: 2026-10-21, index: nse_integrated_filing_index/2026-10-20/integrated-filing-results_20261020_20261021_p01.json, note: ADANIGREEN}
+      - {unit: IF202816, filing_date: 2026-10-21, index: nse_integrated_filing_index/2026-10-20/integrated-filing-results_20261020_20261021_p01.json, note: ADANIGREEN}

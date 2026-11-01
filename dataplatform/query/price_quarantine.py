@@ -26,8 +26,12 @@ partition reads with `sql_admits`. `quality.l2_continuity` does *not* read throu
 see the step to report it.
 
 The windows come from `corpactions.ManualActions.unsourced_windows()` (the package's public
-surface), so adding, or retiring, a row in the reviewed file is the only way to change them.
-Nothing here reads a clock, fetches, or writes.
+surface) and, since 2026-11-01, from the share-basis guard's state
+(`corpactions.share_basis_state`): a split or consolidation that moved an ISIN's basis with no
+factor the guard could admit — a long-gap step at a clean multiple, an unexplained step across a
+reissue, stated face values the price disagrees with — is withheld the same way, automatically,
+until a later corporate-action row explains it and the guard's next run clears it. Nothing here
+reads a clock, fetches, or writes.
 """
 
 from __future__ import annotations
@@ -43,6 +47,7 @@ from typing import Final, Protocol
 import duckdb
 
 from dataplatform.corpactions import ManualActions, default_manual_actions
+from dataplatform.corpactions.share_basis_state import current_state
 from dataplatform.ingest.models import ISIN_PATTERN
 from dataplatform.store.l2 import register_adjusted_view as _register_adjusted_view
 from dataplatform.store.l2 import register_raw_view as _register_raw_view
@@ -92,6 +97,13 @@ class PriceQuarantine:
                 if survivor != isin:
                     windows[survivor] = max(first, windows.get(survivor, first))
         return cls(first_sessions=windows)
+
+    def merged(self, windows: Mapping[str, date]) -> PriceQuarantine:
+        """This quarantine plus `windows`; where both name an ISIN the later session wins."""
+        out = dict(self.first_sessions)
+        for isin, first in windows.items():
+            out[isin] = max(first, out.get(isin, first))
+        return PriceQuarantine(first_sessions=out)
 
     def admits(self, isin: str, trade_date: date) -> bool:
         """False only for a quarantined ISIN's bar dated before its step session."""
@@ -151,6 +163,20 @@ class _Register(Protocol):
 
 
 @cache
-def default_price_quarantine() -> PriceQuarantine:
-    """The repo's quarantine, from the curated file, built once per process."""
+def _curated_quarantine() -> PriceQuarantine:
     return PriceQuarantine.from_manual_actions(default_manual_actions())
+
+
+def default_price_quarantine() -> PriceQuarantine:
+    """The repo's quarantine: the curated file's unsourced steps plus the share-basis guard's.
+
+    The curated windows are built once per process; the guard's (`corpactions.share_basis_state`,
+    written by `dataplatform.quality.share_basis` in the scheduled pipeline) are re-read whenever
+    the state file changes, so a long-lived process picks up a new quarantine — and drops a
+    cleared one — without a restart. Where both name an ISIN the later first session wins.
+    """
+    curated = _curated_quarantine()
+    guard = current_state().windows()
+    if not guard:
+        return curated
+    return curated.merged(guard)
