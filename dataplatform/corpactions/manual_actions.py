@@ -30,6 +30,15 @@ Two kinds of row:
   ₹1.50 against BSE's one ₹2.30 record — and the collapse drops it unless it completed one. It
   is kept apart from the price events (`ManualActions.dividends`), so no L2 path that composes
   `actions` into a factor chain ever sees it.
+* **Superseded dividends** (`superseded_dividends`) — an owner's ruling, on the issuer's own
+  document, that one feed's dividend record is stale and the other feed's stands. BEML's board
+  revised its FY2025-26 final dividend from ₹0.55 to ₹12.28 "inclusive of" the ₹0.55; NSE carries
+  ₹12.28 and BSE never picked the revision up. The row names the superseded record exactly (feed,
+  ISIN, ex-date, kind, amount) and the amount the other feed's record must state; reconciliation
+  (`reconcile._supersede`) books that record once and keeps the stale one beside it as evidence,
+  never booked. It states no number of its own: both amounts are the feeds' own records. If
+  either record is not in the store on a day the pass loads, reconciliation raises rather than
+  guess — a feed that corrected itself makes the row obsolete, and a human removes it.
 * **Unsourced steps** — rows in the same list whose kind is not `MARKET_MOVE`: a share-basis step
   whose terms no L0 object states. `UNSOURCED_ACTION` is one an exchange record shows to be a
   corporate action (EIH's 2006 ex-date lists a second, blank-purpose event beside its bonus);
@@ -102,8 +111,10 @@ __all__ = [
     "UNSOURCED_KINDS",
     "CuratedAction",
     "ExplainedMove",
+    "IssuerDocument",
     "ManualActions",
     "ManualActionsError",
+    "SupersededDividend",
     "default_manual_actions",
     "load_manual_actions",
 ]
@@ -216,6 +227,44 @@ class ExplainedMove:
 
 
 @dataclass(frozen=True, slots=True)
+class IssuerDocument:
+    """The issuer's own statement a supersession rests on: where it is published, and its date."""
+
+    url: str
+    dated: date
+    quote: str
+
+
+@dataclass(frozen=True, slots=True)
+class SupersededDividend:
+    """A ruling that one feed's dividend record is stale and the other feed's record stands.
+
+    `feed`, `superseded_kind` and `superseded_amount_inr` name the stale record on `ex_date`;
+    `amount_inr` is what the *other* feed's record (`booked_feed`) states and what is booked,
+    once. Neither amount is this file's: each is a feed's own record, and the issuer's document
+    (`issuer`) is why one of them is believed. It applies to that one ISIN and ex-date only.
+    """
+
+    isin: str
+    company: str
+    ex_date: date
+    amount_inr: Decimal
+    feed: str
+    superseded_kind: DividendKind
+    superseded_amount_inr: Decimal
+    issuer: IssuerDocument
+    checked: date
+    sources: tuple[TermSource, ...]
+    note: str
+
+    @property
+    def booked_feed(self) -> str:
+        """The feed whose record is booked: the other of the two CA feeds."""
+        (other,) = _RESTORABLE_FEEDS - {self.feed}
+        return other
+
+
+@dataclass(frozen=True, slots=True)
 class ManualActions:
     """The whole curated file, indexed by ISIN."""
 
@@ -224,6 +273,9 @@ class ManualActions:
     #: Restored dividend records (module docstring), kept out of `actions` so no factor path sees
     #: them; reconciliation reads them through `restored_dividends`.
     dividends: tuple[CuratedAction, ...] = ()
+    #: Owner rulings that one feed's dividend record is stale (module docstring); reconciliation
+    #: reads them directly, nothing else does.
+    superseded: tuple[SupersededDividend, ...] = ()
     _by_isin: Mapping[str, tuple[CuratedAction, ...]] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -300,7 +352,10 @@ def load_manual_actions(path: Path = MANUAL_ACTIONS_PATH) -> ManualActions:
     float ratio or amount, a DIVIDEND row whose `feed` is not a CA feed or whose first source is
     not that feed's L0 object, a duplicate `(isin, ex_date, action_type)` (a dividend: `(isin,
     ex_date, component)`) or `(isin, trade_date)`, or an explained move on the very session a
-    curated action is dated — the file cannot say both.
+    curated action is dated — the file cannot say both. A `superseded_dividends` row is refused
+    without its issuer document, with a feed that is not a CA feed, a first source that is not
+    the booked feed's L0 object, equal amounts, or an `(isin, ex_date)` that is listed twice or
+    also carries a restored dividend.
     """
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict):
@@ -338,7 +393,25 @@ def load_manual_actions(path: Path = MANUAL_ACTIONS_PATH) -> ManualActions:
                 f"{m.isin} {m.trade_date}: an explained move cannot share a curated action's date"
             )
         seen_moves.add((m.isin, m.trade_date))
-    return ManualActions(actions=actions, explained_moves=moves, dividends=dividends)
+    superseded = tuple(
+        sorted(
+            (_superseded(row) for row in document.get("superseded_dividends") or ()),
+            key=lambda r: (r.isin, r.ex_date),
+        )
+    )
+    restored_days = {(d.isin, d.ex_date) for d in dividends}
+    seen_superseded: set[tuple[str, date]] = set()
+    for r in superseded:
+        if (r.isin, r.ex_date) in seen_superseded:
+            raise ManualActionsError(f"{r.isin} supersession on {r.ex_date} is listed twice")
+        if (r.isin, r.ex_date) in restored_days:
+            raise ManualActionsError(
+                f"{r.isin} {r.ex_date}: a supersession cannot share a restored dividend's day"
+            )
+        seen_superseded.add((r.isin, r.ex_date))
+    return ManualActions(
+        actions=actions, explained_moves=moves, dividends=dividends, superseded=superseded
+    )
 
 
 @cache
@@ -453,6 +526,55 @@ def _restored_dividend(row: dict[str, Any], isin: str) -> CuratedAction:
         note=row.get("note"),
         feed=feed,
         component=component,
+    )
+
+
+def _superseded(row: dict[str, Any]) -> SupersededDividend:
+    """A `superseded_dividends` row: the stale record it names, and the amount booked instead."""
+    isin = _isin(row, "isin")
+    stale = row.get("supersedes")
+    if not isinstance(stale, dict):
+        raise ManualActionsError(
+            f"{isin}: supersedes (feed, dividend_kind, amount_inr) is required"
+        )
+    feed = _text(stale, "feed")
+    if feed not in _RESTORABLE_FEEDS:
+        raise ManualActionsError(f"{isin}: feed {feed!r} is not one of {sorted(_RESTORABLE_FEEDS)}")
+    try:
+        kind = DividendKind(_text(stale, "dividend_kind"))
+    except ValueError as exc:
+        raise ManualActionsError(f"{isin}: {exc}") from exc
+    amount = _positive(row, "amount_inr")
+    stale_amount = _positive(stale, "amount_inr")
+    if amount == stale_amount:
+        raise ManualActionsError(f"{isin}: the superseded record states the booked amount")
+    issuer = row.get("issuer_document")
+    if not isinstance(issuer, dict):
+        raise ManualActionsError(f"{isin}: issuer_document (url, dated, quote) is required")
+    url = _text(issuer, "url")
+    if not url.startswith("https://"):
+        raise ManualActionsError(f"{isin}: issuer_document url {url!r} is not an https URL")
+    sources = _sources(row)
+    (booked_feed,) = _RESTORABLE_FEEDS - {feed}
+    if not sources[0].l0_key.startswith(f"{booked_feed}/"):
+        raise ManualActionsError(
+            f"{isin}: a supersession books {booked_feed}'s record and must cite that feed's L0 "
+            f"object first, not {sources[0].l0_key!r}"
+        )
+    return SupersededDividend(
+        isin=isin,
+        company=_text(row, "company"),
+        ex_date=_date(row, "ex_date"),
+        amount_inr=amount,
+        feed=feed,
+        superseded_kind=kind,
+        superseded_amount_inr=stale_amount,
+        issuer=IssuerDocument(
+            url=url, dated=_date(issuer, "dated"), quote=" ".join(_text(issuer, "quote").split())
+        ),
+        checked=_date(row, "checked"),
+        sources=sources,
+        note=" ".join(_text(row, "note").split()),
     )
 
 

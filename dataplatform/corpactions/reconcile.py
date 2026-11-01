@@ -22,11 +22,13 @@ The output is deliberately two-sided, and the asymmetry is the whole point:
 The invariant this exists to protect is the last one in the task spec: **an unreconciled action
 is a known-unknown, and a known-unknown may not feed the factor chain.** Reconciliation never
 guesses a winner between two disagreeing feeds — guessing is exactly how one ISIN's ten years of
-adjusted history gets silently rewritten (risk register row 1). So the factor chain (M2.4) reads
-its actions through `load_reconciled_actions` (which returns only `reconciled = true` rows) and
-consumes `ReconciledAction`, a type this module alone can mint; `eligible_for_factor_chain` is the
-same gate over an in-memory result. A raw `CorporateAction` whose sources disagreed can reach the
-queue and a human, but it cannot reach a factor.
+adjusted history gets silently rewritten (risk register row 1). The one exception is not a guess
+but a reviewed ruling: a `superseded_dividends` row in `manual_actions.yaml` (`_supersede`), where
+the owner, on the issuer's own document, named one feed's exact record as stale. So the factor
+chain (M2.4) reads its actions through `load_reconciled_actions` (which returns only `reconciled =
+true` rows) and consumes `ReconciledAction`, a type this module alone can mint;
+`eligible_for_factor_chain` is the same gate over an in-memory result. A raw `CorporateAction`
+whose sources disagreed can reach the queue and a human, but it cannot reach a factor.
 
 Two halves, as elsewhere in D3. `reconcile()` and everything it returns are pure: they take
 `CorporateAction`s and return a `ReconciliationResult`, with no database, no network and no clock,
@@ -55,7 +57,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from dataplatform.clock import Clock
 from dataplatform.corpactions.factors import PRICE_EVENT_TYPES
-from dataplatform.corpactions.manual_actions import MANUAL_SOURCE, default_manual_actions
+from dataplatform.corpactions.manual_actions import (
+    MANUAL_SOURCE,
+    SupersededDividend,
+    default_manual_actions,
+)
 from dataplatform.corpactions.parse_terms import (
     names_non_equity_bonus,
     names_several_dividends,
@@ -837,6 +843,98 @@ def _reconcile_resolution(res: _Resolution) -> ReconciledAction:
     )
 
 
+def _ruled_record(
+    ruling: SupersededDividend,
+    by_source: dict[str, list[CorporateAction]],
+    loaded: Sequence[CorporateAction],
+    *,
+    booked: bool,
+) -> CorporateAction:
+    """The one record a ruling names on its day: the booked feed's, or the superseded one.
+
+    The superseded record must match feed, kind and amount; the booked one feed and amount (the
+    feeds label kinds differently, rule C). Anything but exactly one match raises (`_supersede`).
+    """
+    feed = ruling.booked_feed if booked else ruling.feed
+    kind = None if booked else ruling.superseded_kind
+    amount = ruling.amount_inr if booked else ruling.superseded_amount_inr
+    found = [
+        r
+        for r in by_source.get(feed, ())
+        if r.ex_date == ruling.ex_date
+        and r.source == feed
+        and isinstance(r.terms, DividendTerms)
+        and r.terms.amount_inr == amount
+        and (kind is None or r.terms.dividend_kind is kind)
+    ]
+    if len(found) != 1:
+        held = ", ".join(f"{r.source} {r.raw_text.strip()!r}" for r in loaded)
+        wanted = f"{kind.value} {amount}" if kind is not None else str(amount)
+        raise ReconcileError(
+            f"{ruling.isin} dividend on {ruling.ex_date.isoformat()}: manual_actions.yaml "
+            f"supersedes {ruling.feed} {ruling.superseded_kind.value} "
+            f"{ruling.superseded_amount_inr} and books {ruling.booked_feed} {ruling.amount_inr}, "
+            f"but {len(found)} {feed} record(s) state {wanted} (the store holds: {held}); the "
+            "feeds have changed since the ruling — review the row rather than book a guess"
+        )
+    return found[0]
+
+
+def _supersede(
+    isin: str,
+    by_source: dict[str, list[CorporateAction]],
+    superseded: Sequence[SupersededDividend],
+) -> list[_Resolution]:
+    """Apply `isin`'s rulings that one feed's dividend record is stale, removing what they use.
+
+    Each ruling (`manual_actions.SupersededDividend`) names one record exactly — feed, ex-date,
+    kind and amount — and the amount the other feed's record on that ex-date states. Both records
+    leave `by_source` as one event: the other feed's record is booked, once, and the stale one is
+    kept beside it as evidence and never booked — so it can neither be booked alone nor added on
+    top. BEML's 2026-09-22 final: NSE's ₹12.28 booked, BSE's pre-revision ₹0.55 superseded.
+
+    A ruling whose ex-date this pass did not load (no stored row of `isin` that day) does nothing:
+    a bounded or per-ISIN pass never sees it. One whose day *is* loaded but whose two records are
+    not both there exactly once raises `ReconcileError`: the feeds have changed since the ruling
+    — a correction, a re-parse — and booking anything on that day would be a guess.
+
+    What it never does: match a record by tolerance or kind alone, or touch another ISIN or day.
+    """
+    out: list[_Resolution] = []
+    for ruling in superseded:
+        if ruling.isin != isin:
+            continue
+        day = ruling.ex_date
+        loaded = [
+            r
+            for rows in by_source.values()
+            for r in rows
+            if r.ex_date == day and r.source != MANUAL_SOURCE
+        ]
+        if not loaded:
+            continue
+
+        stale = _ruled_record(ruling, by_source, loaded, booked=False)
+        booked = _ruled_record(ruling, by_source, loaded, booked=True)
+        by_source[ruling.feed].remove(stale)
+        by_source[ruling.booked_feed].remove(booked)
+        note = (
+            f"superseded (manual_actions.yaml, checked {ruling.checked.isoformat()}): "
+            f"{stale.source} {stale.raw_text.strip()!r} is superseded by the issuer's document of "
+            f"{ruling.issuer.dated.isoformat()} ({ruling.issuer.url}); {booked.source} "
+            f"{booked.raw_text.strip()!r} is booked once, the superseded record never"
+        )
+        out.append(
+            _Resolution(
+                rows=tuple(sorted((stale, booked), key=lambda a: a.source)),
+                terms=booked.terms,
+                carrier=booked,
+                note=note,
+            )
+        )
+    return out
+
+
 def _feed(action: CorporateAction) -> str:
     """The feed a row speaks for: its source, or for a restored record the feed it restores.
 
@@ -915,6 +1013,7 @@ def reconcile(
     ex_date_tolerance_days: int = DEFAULT_EX_DATE_TOLERANCE_DAYS,
     ex_date_mismatch_window_days: int = DEFAULT_EX_DATE_MISMATCH_WINDOW_DAYS,
     single_source_policy: SingleSourcePolicy = SingleSourcePolicy.QUEUE,
+    superseded: Iterable[SupersededDividend] | None = None,
 ) -> ReconciliationResult:
     """Reconcile a set of corporate actions across exchanges into agreements and a queue.
 
@@ -930,8 +1029,14 @@ def reconcile(
     corporate-action feeds. Three or more is a malformed input, not a data disagreement, and raises
     `ReconcileError` rather than silently reconciling a chosen pair.
 
-    What it never does: pick a winner between disagreeing feeds, read a clock, or touch a database.
+    `superseded` are the owner's rulings that one feed's dividend record is stale (`_supersede`);
+    `None` reads them from `manual_actions.yaml`, so every pass — backfill, refresh, lineage
+    rebuild — honours them alike. They are applied before any pairing.
+
+    What it never does: pick a winner between disagreeing feeds on its own judgement, read a
+    clock, or touch a database.
     """
+    rulings = tuple(default_manual_actions().superseded if superseded is None else superseded)
     tolerance = timedelta(days=ex_date_tolerance_days)
     mismatch_window = timedelta(days=ex_date_mismatch_window_days)
     grouped: dict[tuple[str, ActionType], list[CorporateAction]] = defaultdict(list)
@@ -983,6 +1088,15 @@ def reconcile(
                 f"({', '.join(sorted(by_source))}); reconciliation is defined for two exchanges"
             )
 
+        # The owner's rulings go first: their two records are one event, never a pair to judge.
+        # `full` keeps every row, for the "near the other feed" test of the leftovers below.
+        full = {feed: list(rows) for feed, rows in by_source.items()}
+        superseded_res = (
+            _supersede(isin, by_source, rulings) if action_type is ActionType.DIVIDEND else []
+        )
+        reconciled.extend(_reconcile_resolution(res) for res in superseded_res)
+        by_source = {feed: rows for feed, rows in by_source.items() if rows}
+
         if len(by_source) <= 1:
             for action in (a for rows in by_source.values() for a in rows):
                 file_single_source(action, isin, action_type)
@@ -993,7 +1107,7 @@ def reconcile(
             by_source[left_source], by_source[right_source], tolerance
         )
 
-        paired_days: list[date] = []
+        paired_days: list[date] = [a.ex_date for res in superseded_res for a in res.rows]
         disputed_days: list[date] = []
         for res in resolved:
             paired_days.extend(action.ex_date for action in res.rows)
@@ -1055,7 +1169,7 @@ def reconcile(
             def near_other_feed(action: CorporateAction, others: Sequence[CorporateAction]) -> bool:
                 return any(abs(action.ex_date - o.ex_date) <= mismatch_window for o in others)
 
-            left_rows, right_rows = by_source[left_source], by_source[right_source]
+            left_rows, right_rows = full[left_source], full[right_source]
             far = [a for a in unmatched_left if not near_other_feed(a, right_rows)] + [
                 a for a in unmatched_right if not near_other_feed(a, left_rows)
             ]
@@ -1121,6 +1235,7 @@ def collapse_reconciled_rows(
     *,
     ex_date_tolerance_days: int = DEFAULT_EX_DATE_TOLERANCE_DAYS,
     restored: Iterable[CorporateAction] = (),
+    superseded: Iterable[SupersededDividend] | None = None,
 ) -> tuple[CorporateAction, ...]:
     """One `CorporateAction` per reconciled *event*, however many feeds published it.
 
@@ -1144,13 +1259,17 @@ def collapse_reconciled_rows(
     money is counted once. `restored` are the curated records of a feed's own the store's key
     could not hold (`ManualActions.restored_dividends`); they join their feed's side exactly as
     `reconcile` saw them, and one that ends up in no reconciled event is dropped — a restored
-    record only ever completes an event, it is never booked on its own.
+    record only ever completes an event, it is never booked on its own. `superseded` are the
+    owner's rulings `reconcile` applied (`_supersede`; `None` reads `manual_actions.yaml`): the
+    stale record and the record booked fold to the booked one, so the stale amount is never
+    counted, and a day holding only one of the two reconciled raises rather than book it alone.
 
     What it never does: pick between two reconciled rows that *contradict*. Two rows marked
     reconciled whose terms neither agree nor fill can only mean the marks are stale relative to the
     rules, and that raises `ReconcileError` rather than building a factor on a guess. Three sources
     for one event is a malformed store, and raises for the same reason `reconcile` does.
     """
+    rulings = tuple(default_manual_actions().superseded if superseded is None else superseded)
     tolerance = timedelta(days=ex_date_tolerance_days)
     grouped: dict[tuple[str, ActionType], list[CorporateAction]] = defaultdict(list)
     for row in (*rows, *restored):
@@ -1167,8 +1286,11 @@ def collapse_reconciled_rows(
                 f"{isin} {action_type.value}: {len(by_source)} sources "
                 f"({', '.join(sorted(by_source))}); reconciliation is defined for two exchanges"
             )
+        if action_type is ActionType.DIVIDEND:
+            folded.extend(_fold(res) for res in _supersede(isin, by_source, rulings))
+            by_source = {feed: rows for feed, rows in by_source.items() if rows}
         if len(by_source) <= 1:
-            folded.extend(booked(group))
+            folded.extend(booked(a for rows in by_source.values() for a in rows))
             continue
         left_source, right_source = sorted(by_source)
         resolved, disputed, unmatched_left, unmatched_right = _match(
