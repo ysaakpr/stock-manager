@@ -46,7 +46,13 @@ for the date; a member present with no rows writes an empty partition, because "
 that session" is a fact and "not built" is not.
 
 Offline by construction: reads L0 and L1 `prices_raw`, reads the identity master from Postgres
-(read-only) in the CLI, and never fetches.
+(read-only) in the CLI and the job, and never fetches.
+
+**Kept current by the scheduler** (job `pr_bundle_l1`, 19:20 IST weekdays, `catch_up`): the EOD
+pipeline lands the previous session's bundle in L0 at 18:30, and the job builds every bundle
+dated after the newest built partition, plus a trailing `CATCH_UP_LOOKBACK` window so a bundle
+the EOD self-heal lands late is built too. Until 2026-11-02 nothing ran this daily and L1 stopped
+at 2026-10-01, while the M17 dossier reads `pr_ca_broadcasts` every evening.
 """
 
 from __future__ import annotations
@@ -57,7 +63,7 @@ import sys
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -85,12 +91,13 @@ from dataplatform.ingest.nse.pr_bundle.bundle import PR_BUNDLE_SOURCE_ID, Member
 from dataplatform.ingest.nse.pr_bundle.pd import PdIndexRow, PdSecurityRow, parse_pd_bundle
 from dataplatform.logging import get_logger
 from dataplatform.store.l0 import L0Store
-from dataplatform.store.paths import l1_partition_path
+from dataplatform.store.paths import Layer, l1_partition_path, layer_root
 from dataplatform.store.schemas import assert_raw_only, enforce_schema
 
 __all__ = [
     "BAND_HITS_DATASET",
     "BAND_HITS_SCHEMA",
+    "CATCH_UP_LOOKBACK",
     "CA_BROADCASTS_DATASET",
     "CA_BROADCASTS_SCHEMA",
     "INDEX_EOD_DATASET",
@@ -104,15 +111,19 @@ __all__ = [
     "SECURITY_MARKS_DATASET",
     "SECURITY_MARKS_SCHEMA",
     "BuildReport",
+    "PrBundleL1Error",
     "QuarantineReason",
     "ResolvedVia",
     "SessionBuild",
     "SessionResolver",
     "SessionStatementRow",
     "build_session",
+    "catch_up",
     "index_id_for",
     "load_session_identity",
+    "newest_built_session",
     "rebuild_from_l0",
+    "run_pr_bundle_l1_job",
     "write_session",
 ]
 
@@ -862,6 +873,118 @@ def _tally(report: BuildReport, build: SessionBuild) -> None:
         )
     for member, message in build.failures:
         report.failures.append((build.session.isoformat(), member, message[:300]))
+
+
+# ── the scheduled catch-up ───────────────────────────────────────────────────────────────────
+
+#: How far back each scheduled run rebuilds besides what is new: twice the EOD pipeline's
+#: self-heal lookback (`eod.DEFAULT_LOOKBACK`, 7 days), so a bundle it lands days late is built.
+#: A rebuild of a session already built is idempotent, and costs well under a second.
+CATCH_UP_LOOKBACK: Final = timedelta(days=14)
+
+
+class PrBundleL1Error(RuntimeError):
+    """The scheduled build left a bundle unbuilt; the message names the sessions and why."""
+
+
+def newest_built_session(*, data_root: Path | None = None) -> date | None:
+    """The newest session any PR-bundle dataset has a partition for, or None for an empty lake."""
+    newest: date | None = None
+    for dataset in PR_DATASETS:
+        root = layer_root(Layer.L1, data_root=data_root) / dataset
+        if not root.is_dir():
+            continue
+        for child in root.iterdir():
+            if not child.name.startswith("date="):
+                continue
+            try:
+                day = date.fromisoformat(child.name.removeprefix("date="))
+            except ValueError:
+                continue
+            if newest is None or day > newest:
+                newest = day
+    return newest
+
+
+def catch_up(
+    *,
+    today: date,
+    l0: L0Store,
+    master: IdentityMaster | None,
+    data_root: Path | None = None,
+    lookback: timedelta = CATCH_UP_LOOKBACK,
+) -> BuildReport:
+    """Build every L0 bundle not yet in L1, and re-build the trailing `lookback` window.
+
+    What it does: rebuilds `[start, today]` from L0 (`rebuild_from_l0`), where `start` is the
+    earlier of the day after the newest built partition and `today - lookback`, so a run after an
+    outage of any length catches up in one go.
+    What it assumes: the lake already holds the decade's backfill; on an empty lake (nothing
+    built) it refuses, because a decade is the CLI's one-off job, not a nightly one.
+    What it never does: fetch (the EOD pipeline captures the bundle), or report success over a
+    bundle it could not date or a member it could not parse: either raises `PrBundleL1Error`,
+    after every other session has been written, so the run is recorded FAILED on
+    `/status/jobs` and alerted.
+    """
+    newest = newest_built_session(data_root=data_root)
+    if newest is None:
+        raise PrBundleL1Error(
+            "no PR-bundle L1 partition exists yet: run the one-off backfill "
+            "(python -m dataplatform.ingest.pr_bundle_l1 --from 2010-01-04 ...) first"
+        )
+    start = min(newest + timedelta(days=1), today - lookback)
+    _LOG.info(
+        "pr_bundle_l1.catch_up_start",
+        source=PR_BUNDLE_SOURCE_ID,
+        date=today.isoformat(),
+        start=start.isoformat(),
+        newest_built=newest.isoformat(),
+        state="RUNNING",
+    )
+    report = rebuild_from_l0(start=start, end=today, l0=l0, master=master, data_root=data_root)
+    problems = [f"{day} undated: {error}" for day, error in report.undated] + [
+        f"{day} {member}: {message}" for day, member, message in report.failures
+    ]
+    _LOG.info(
+        "pr_bundle_l1.catch_up_done",
+        source=PR_BUNDLE_SOURCE_ID,
+        date=today.isoformat(),
+        start=start.isoformat(),
+        bundles=report.bundles,
+        built=report.built,
+        newest_built=str(newest_built_session(data_root=data_root)),
+        problems=len(problems),
+        state="FAILED" if problems else "PUBLISHED",
+    )
+    if problems:
+        raise PrBundleL1Error(
+            f"pr_bundle_l1: {len(problems)} problem(s) building {start}..{today} "
+            f"({report.built} of {report.bundles} bundles built): " + "; ".join(problems)[:1500]
+        )
+    return report
+
+
+def run_pr_bundle_l1_job(context: object) -> None:
+    """The scheduled job body: one `catch_up` against the configured lake and identity master.
+
+    The master is read with an in-memory reconciliation queue, as the CLI does: this build reads
+    identity and never writes to it.
+    """
+    from dataplatform.scheduler.registry import JobContext
+    from dataplatform.store.db import connection
+
+    assert isinstance(context, JobContext)
+    data_root = context.settings.data_root
+    with connection(context.settings) as conn:
+        master = IdentityStore(conn, clock=context.clock).load_master(
+            queue=InMemoryReconciliationQueue()
+        )
+    catch_up(
+        today=context.clock.today(),
+        l0=L0Store(clock=context.clock, data_root=data_root),
+        master=master,
+        data_root=data_root,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:

@@ -835,6 +835,40 @@ BSE_CA_SWEEP = Job(
 )
 
 
+def pr_bundle_l1(context: JobContext) -> None:
+    """The PR-bundle L1 build: the four datasets from the bundles L0 holds, kept current.
+
+    What it does: builds every NSE PR bundle in L0 dated after the newest built partition, and
+    re-builds the trailing 14 days, into `pr_band_hits`, `pr_security_marks`, `pr_index_eod` and
+    `pr_ca_broadcasts` (with `ex_date_derived`) — the last is what the M17 dossier reads as its
+    corporate-action notices (`analyst.commons.sources.LakeCommonsSource.corporate_actions`). It
+    raises when a bundle could not be dated or a member not parsed, so the run is FAILED on
+    `/status/jobs`. See `pr_bundle_l1.catch_up`.
+    What it assumes: the injected clock and settings are the run's (B10).
+    What it never does: fetch — the EOD pipeline captures the bundle into L0 — or write anything
+    but those L1 partitions and the quarantine. The import is deferred for the same reason the
+    others are.
+    """
+    from dataplatform.ingest.pr_bundle_l1 import run_pr_bundle_l1_job
+
+    run_pr_bundle_l1_job(context)
+
+
+#: 19:20 IST on weekdays — after the EOD pipeline (18:30), which lands the previous session's
+#: bundle in L0, has had its whole 45-minute budget, and well before the share-basis guard
+#: (19:40), the paper session (21:45) and the M17 run (22:00) that reads `pr_ca_broadcasts`. A
+#: build takes seconds; the misfire grace keeps a late start from running into 19:40.
+PR_BUNDLE_L1 = Job(
+    name="pr_bundle_l1",
+    cron="20 19 * * mon-fri",
+    fn=pr_bundle_l1,
+    timeout=timedelta(minutes=10),
+    description="PR-bundle L1: band hits, security marks, index EOD, CA broadcasts from L0",
+    misfire_grace=timedelta(minutes=5),
+    registered_at=datetime(2026, 11, 2, 6, 0, tzinfo=IST),
+)
+
+
 def share_basis_guard(context: JobContext) -> None:
     """The share-basis guard (M2.3, owner ruling 2026-11-01): no unadjusted basis step decides.
 
@@ -1235,6 +1269,7 @@ def default_registry() -> JobRegistry:
             INDEX_PRESS_REFRESH,
             CA_REFRESH,
             BSE_CA_SWEEP,
+            PR_BUNDLE_L1,
             SHARE_BASIS_GUARD,
             FBIL_REFERENCE_RATES,
             MACRO_RELEASE_CAPTURE,
