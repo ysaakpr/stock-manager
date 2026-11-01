@@ -38,6 +38,8 @@ KNOWN: Final = "69102f228404b6f9cbe237d4bf3d38b1"  # RATIO_MISMATCH INE558D01021
 RESOLVED: Final = "fa424e5f2c8c4c801aa4d309c8137b12"  # RATIO_MISMATCH INE109C01017 2016-09-12
 #: Resolved by rule A, silence yields (2026-11-01): likewise no longer accepted.
 RESOLVED_BY_RULE: Final = "4061d5bb710b19c7188af37ad28fdcfb"  # RATIO_MISMATCH INE121E01018
+#: Resolved by the owner's BEML ruling (`superseded_dividends`, 2026-11-01): no longer accepted.
+RESOLVED_BY_RULING: Final = "8c8fac0ad26f33b777fc94552e9cabb0"  # RATIO_MISMATCH INE258A01024
 RAISED: Final = datetime(2026, 9, 7, 14, 24, tzinfo=IST)
 
 
@@ -89,9 +91,10 @@ def test_d27_is_a_frozen_fingerprint_set_and_nothing_else() -> None:
     assert isinstance(D27, QualityEntry)
     match = D27.match
     assert match.fingerprints is not None
-    assert len(match.fingerprints) == 2 and KNOWN in match.fingerprints
+    assert match.fingerprints == frozenset({KNOWN})
     assert RESOLVED not in match.fingerprints
     assert RESOLVED_BY_RULE not in match.fingerprints
+    assert RESOLVED_BY_RULING not in match.fingerprints
     assert match.ids is None and match.isins is None
     assert match.raised_before is None and match.dated_before is None
     assert D27.review_by == date(2027, 1, 31)

@@ -266,13 +266,16 @@ deviations:
   # silence yields), 4 equal money under different kind names (rule C) and ACC 2020-03-27, where
   # BSE was the silent side (rule A). The 2 left are genuine conflicts - different money -
   # awaiting a human: CORALFINAC (NSE Re 1 vs BSE Rs 0.20) and BEML (NSE Rs 12.28 vs BSE Rs 0.55).
+  # 2026-11-01 (evening): BEML removed. The owner ruled on BEML's own letter of 2026-08-07 (a
+  # revised final of Rs 12.28 inclusive of the May Rs 0.55) that BSE's Rs 0.55 is stale; the
+  # `superseded_dividends` row in manual_actions.yaml books NSE's Rs 12.28 once (M2.3). Only
+  # CORALFINAC is left.
   - id: d27-ca-reconciliation-backlog
     kind: quality
     target: ca_reconciliation
     match:
       fingerprints:
         - 69102f228404b6f9cbe237d4bf3d38b1  # RATIO_MISMATCH INE558D01021 2017-09-06
-        - 8c8fac0ad26f33b777fc94552e9cabb0  # RATIO_MISMATCH INE258A01024 2026-09-22
     remark: *d27_remark
     basis: *d27_basis
     since: 2026-09-07
