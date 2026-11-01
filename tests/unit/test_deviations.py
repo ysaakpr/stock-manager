@@ -8,7 +8,7 @@ decision, not the SQL (`tests/integration/test_deviations.py` runs the reads aga
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -222,7 +222,7 @@ def test_the_checked_in_registry_loads_and_holds_the_bse_seeds() -> None:
 def test_every_entry_targets_what_its_decision_named() -> None:
     """D26 is the BSE block, D27 the ca_reconciliation backlog, D28 two retrying sources only,
     D31 and D32 the XBRL filings NSE never published."""
-    allowed = {
+    allowed: dict[str, Callable[[str], bool]] = {
         "bse-": lambda target: (
             "bse" in target
             or target

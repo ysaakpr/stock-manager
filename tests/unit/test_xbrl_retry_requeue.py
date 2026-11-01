@@ -1,4 +1,4 @@
-"""M14.3 (XBRL): a retry re-downloads an empty or truncated stored document, and the one-time re-queue.
+"""M14.3 (XBRL): a retry re-downloads an empty or truncated stored document; the one-time re-queue.
 
 Offline (B8): the fetcher is a scripted stand-in that stores what it "downloads" through the real
 `L0Store`, `sync_state` is an in-memory stand-in, and the index page and the document are captured
