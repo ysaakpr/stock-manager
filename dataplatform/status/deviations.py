@@ -352,14 +352,18 @@ class QualityMatch(_Strict):
 
     Set-valued: each criterion given must hold for every open ERROR flag of the check — its
     `fingerprint` (the sentinel's dedupe key, `detail->>'fingerprint'`) in `fingerprints`, its row
-    id in `ids`, its ISIN in `isins`, raised before `raised_before`, about a logical date before
-    `dated_before`. A flag without the field asked about (no ISIN, no fingerprint) never satisfies
-    it, so a new flag outside the set keeps the check red.
+    id in `ids`, its ISIN in `isins`, its finding kind (`detail->>'kind'`) in `kinds`, raised
+    before `raised_before`, about a logical date before `dated_before`. A flag without the field
+    asked about (no ISIN, no fingerprint, no kind) never satisfies it, so a new flag outside the
+    set keeps the check red. `kinds` narrows a check that raises several kinds of ERROR to one
+    class of finding; it is never enough on its own (a kind alone would accept every future flag
+    of that class), so the validator requires another criterion beside it.
     """
 
     fingerprints: frozenset[str] | None = None
     ids: frozenset[int] | None = None
     isins: frozenset[str] | None = None
+    kinds: frozenset[str] | None = None
     raised_before: datetime | None = None
     dated_before: date | None = None
 
@@ -373,7 +377,8 @@ class QualityMatch(_Strict):
             or self.dated_before is not None
         ):
             raise ValueError(
-                "a quality matcher needs fingerprints, ids, isins, raised_before or dated_before"
+                "a quality matcher needs fingerprints, ids, isins, raised_before or dated_before "
+                "(kinds alone would accept every future flag of that kind)"
             )
         if self.raised_before is not None and self.raised_before.tzinfo is None:
             raise ValueError("raised_before must carry a UTC offset (e.g. +05:30)")
@@ -657,6 +662,8 @@ class OpenFlag:
     isin: str | None
     logical_date: date
     raised_at: datetime
+    #: The finding's kind (`detail->>'kind'`), or None for a check that writes none.
+    kind: str | None = None
 
 
 _NEWEST_FINISHED_SQL: Final = """
@@ -668,7 +675,7 @@ LIMIT 1
 """
 
 _OPEN_ERROR_FLAGS_SQL: Final = """
-SELECT id, detail->>'fingerprint', isin, logical_date, raised_at
+SELECT id, detail->>'fingerprint', isin, logical_date, raised_at, detail->>'kind'
 FROM quality_flag
 WHERE NOT resolved AND severity = 'ERROR' AND check_name = %s
 """
@@ -905,6 +912,7 @@ class DeviationJudge:
                     isin=None if r[2] is None else str(r[2]),
                     logical_date=r[3],
                     raised_at=r[4],
+                    kind=None if r[5] is None else str(r[5]),
                 )
                 for r in self.conn.execute(_OPEN_ERROR_FLAGS_SQL, (check_name,)).fetchall()
             ]
@@ -968,6 +976,8 @@ def flag_in_set(match: QualityMatch, flag: OpenFlag) -> bool:
     if match.ids and flag.id not in match.ids:
         return False
     if match.isins and (flag.isin is None or flag.isin not in match.isins):
+        return False
+    if match.kinds and (flag.kind is None or flag.kind not in match.kinds):
         return False
     if match.raised_before is not None and flag.raised_at >= match.raised_before:
         return False

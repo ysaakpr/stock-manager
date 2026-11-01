@@ -59,7 +59,8 @@ class _Flags:
 
     def __init__(self, *fingerprints: str | None) -> None:
         self.rows = [
-            (i, fp, "INE558D01021", date(2017, 9, 6), RAISED) for i, fp in enumerate(fingerprints)
+            (i, fp, "INE558D01021", date(2017, 9, 6), RAISED, "RATIO_MISMATCH")
+            for i, fp in enumerate(fingerprints)
         ]
         self.queries = 0
 
@@ -130,7 +131,8 @@ def test_after_its_review_date_d27_accepts_nothing() -> None:
 
 def test_a_check_no_entry_targets_reads_nothing() -> None:
     conn = _Flags(KNOWN)
-    assert _judge(conn).quality_accepted("l2_continuity") == 0 and conn.queries == 0
+    # Not l2_continuity: since D33 an entry targets it.
+    assert _judge(conn).quality_accepted("shareholding_no_isin") == 0 and conn.queries == 0
 
 
 def test_the_quality_panel_counts_and_marks_accepted_flags_apart() -> None:

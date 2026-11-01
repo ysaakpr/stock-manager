@@ -25,7 +25,8 @@
 #                `identity_conflicts` (a known set of open conflicts, by id and/or ISIN).
 #       alert    `while_accepted`: the entry for the alert's subject accepts it right now.
 #       quality  every open ERROR flag of the check is in the given set (fingerprints / ids /
-#                isins / raised_before / dated_before — all given criteria hold for every flag).
+#                isins / kinds / raised_before / dated_before — all given criteria hold for every
+#                flag; `kinds`, the finding's `detail->>'kind'`, never on its own).
 #       gap      the entry's reason is in `reasons`, and its error / date is in the known set.
 #     `errors` alternatives name the exception class read from the stored text's `ClassName: `
 #     prefix (`class: null` for text stored without one), a regex searched in the message, and
@@ -139,6 +140,25 @@ x-d32-remark: &d32_remark >-
   NSE's archive serves no XBRL document for any filing disseminated on 2025-07-03 or 2025-07-04
   (404 for every one; the days either side publish). An outage at the source, accepted
   permanently.
+
+# D33 (owner, 2026-11-02): the share-basis flags of the guard's first full-history sweep. PR #160's
+# first run (2026-11-01) raised 47 `l2_continuity` share_basis_step ERRORs and 5
+# `share_basis_guard` ERRORs: 52 quarantine windows on 47 ISINs, every one about a step dated
+# 2011-08-25..2026-08-17. Matched by class (the finding's `detail->>'kind'`) and the step's own
+# date, so a share-basis step dated on or after 2026-11-01 — a new one — stays red, and so does
+# any other kind of ERROR either check raises. The quarantine itself is untouched: display only.
+x-d33-basis: &d33_basis
+  agreed_by: owner
+  agreed_on: 2026-11-02
+  recorded_in:
+    - "HUMAN_DECISIONS.md D33 (owner, 2026-11-02)"
+    - "ops/runbooks/ca_backfill.md, The share-basis guard (M2.3)"
+
+x-d33-remark: &d33_remark >-
+  From the share-basis guard's first historical sweep (2026-11-01), not a break with the plan. The
+  ISIN's bars before this step are quarantined (withheld from decisions); the flag clears
+  automatically if a corporate-action record later explains the step. A flag dated on or after
+  2026-11-01 stays an error (owner, 2026-11-02).
 
 x-gdelt-retrying-errors: &gdelt_errors
   - class: FetchHTTPError
@@ -335,6 +355,45 @@ deviations:
     basis: *d27_basis
     since: 2026-09-07
     review_by: 2027-01-31
+
+  # ── D33: share-basis flags of the guard's first historical sweep, dated before 2026-11-01 ──
+  - id: d33-share-basis-history-continuity
+    kind: quality
+    target: l2_continuity
+    match:
+      kinds: [share_basis_step]
+      dated_before: 2026-11-01
+    remark: *d33_remark
+    basis: *d33_basis
+    since: 2011-08-25
+
+  - id: d33-share-basis-history-guard
+    kind: quality
+    target: share_basis_guard
+    match:
+      # The two kinds of quarantine the guard raises itself (`quality.share_basis`).
+      kinds: [stated_terms_disagree, reissue_face_value_disagrees]
+      dated_before: 2026-11-01
+    remark: *d33_remark
+    basis: *d33_basis
+    since: 2021-08-24
+
+  # Each check's own alert is a warning only while every open ERROR flag of it is in the set.
+  - id: d33-share-basis-history-continuity-alert
+    kind: alert
+    target: quality:l2_continuity:red
+    match: {while_accepted: d33-share-basis-history-continuity}
+    remark: *d33_remark
+    basis: *d33_basis
+    since: 2011-08-25
+
+  - id: d33-share-basis-history-guard-alert
+    kind: alert
+    target: quality:share_basis_guard:red
+    match: {while_accepted: d33-share-basis-history-guard}
+    remark: *d33_remark
+    basis: *d33_basis
+    since: 2021-08-24
 
   # ── D31 / D32: XBRL filings NSE never published — permanent, by recorded evidence ──────────
   # Listed before D28 so that a zero-byte filing still inside its retry window shows why it will

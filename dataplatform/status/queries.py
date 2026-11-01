@@ -219,13 +219,16 @@ def _flag_verdict(flag: QualityFlagOut, judge: DeviationJudge) -> QualityFlagOut
     """One listed flag with its own accepted-deviation verdict (ERROR flags only)."""
     if flag.severity is not QualitySeverity.ERROR:
         return flag
-    fingerprint = flag.detail.get("fingerprint") if isinstance(flag.detail, dict) else None
+    detail = flag.detail if isinstance(flag.detail, dict) else {}
+    fingerprint = detail.get("fingerprint")
+    kind = detail.get("kind")
     open_flag = OpenFlag(
         id=flag.id,
         fingerprint=None if fingerprint is None else str(fingerprint),
         isin=flag.isin,
         logical_date=flag.date,
         raised_at=flag.raised_at,
+        kind=None if kind is None else str(kind),
     )
     return flag.model_copy(update={"deviation": judge.quality_flag(flag.check_name, open_flag)})
 

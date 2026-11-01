@@ -152,6 +152,10 @@ and 11:30 IST Saturday (after `ca_refresh`). About 30 s. Each run:
    decision-facing reader (QueryService, the backtest readers, the Commons, the paper and M17
    desks). Each is an **ERROR** on `/status/quality` (`l2_continuity` kind `share_basis_step`,
    or `share_basis_guard` for a contradicted ratio) naming the ISIN, the step and the reason.
+   The 52 the first full-history sweep raised (steps dated before 2026-11-01) show as ACCEPTED
+   (amber) with a remark, by the owner's ruling D33 (2026-11-02, `d33-*` in
+   `dataplatform/status/accepted_deviations.yaml`); a step dated on or after 2026-11-01 stays an
+   ERROR. Display only: those bars stay quarantined.
 6. **Clearing is automatic.** When a feed or curated row later explains the step, the next run
    drops the quarantine and closes the ERROR.
 
