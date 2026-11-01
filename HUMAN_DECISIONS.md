@@ -714,13 +714,14 @@ gating) — a paused dataset is simply missing. Lifting it is the owner's decisi
 (AGENTIC_CONTEXT §8): delete the `paused` records and restart the scheduler
 (`ops/runbooks/daily-eod.md`). Task M18.2.
 
-### D30 — The application on Amazon Bedrock, the pre-registered M17 models (Opus via Mantle, Sonnet via the Global inference profile), the Claude CLI as per-call backup, effort per call type → **DRAFT, awaiting owner confirmation before S0 (owner decisions 2026-10-30 08:05, ~09:00 IST and afternoon, and 2026-10-31 morning — Sonnet via the Global profile, deploy approved — chat).**
+### D30 — The application on Amazon Bedrock, the pre-registered M17 models (Opus via Mantle, Sonnet via the Global inference profile), the Claude CLI as per-call backup, effort per call type → **RATIFIED 2026-11-01 (owner, chat: "Amendment 5: can go to prod"), after owner decisions 2026-10-30 08:05, ~09:00 IST and afternoon, and 2026-10-31 morning — Sonnet via the Global profile, deploy approved — chat).**
 
 The owner decided on 2026-10-30 that the application's model calls — the M17 desk's and every
 other analyst path's (`LLM_PROVIDER`, `M17_LLM_PROVIDER`) — go to Claude on Amazon Bedrock first,
 with the Claude CLI subscription as the backup, and that effort is pinned per call type. For the M17
 test it is written up for confirmation as pre-registration Amendment 5
-(`ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md` §8); to confirm, answer both.
+(`ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md` §8), ratified by the owner on
+2026-11-01 with the digest changes and the hash column below.
 What it is:
 
 - **Per-role models, set in the roster** (`analyst/fundmanager/roster.yaml` `models:`; a model
@@ -802,14 +803,15 @@ What it is:
   Bedrock rate); research about 30–36 Sonnet tool loops a session. Amendment 5 (f) has the working.
 
 Open with it: whether to set a monthly Bedrock budget (§9's cap was deferred while the cost was a
-subscription). Activation for
+subscription) — not decided yet, and not a blocker for S0. Activation for
 the desk is the `.env` change `M17_LLM_PROVIDER=bedrock`, `M17_WEB_RESEARCH=websearch` (with
 `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_REGION` and the vendor keys) and a scheduler restart, approved
 by the owner and made with the merge on 2026-10-31; `LLM_PROVIDER` for the other analyst paths is
 unchanged by that deploy. The effort levels, the untrusted-content rule and the roster's models
 (and with them the new manager hashes) take effect on merge for every provider; a desk rolled back
-to the CLI runs the same models there. The amendment stays DRAFT until the owner confirms it
-before S0. Task M17.
+to the CLI runs the same models there. Ratified 2026-11-01 (owner, chat); the hashes above are the ones S0 starts from. Ratification is
+not the go for S0: S0 still needs M17.8's counted clean dry sessions — on Bedrock, those of Monday
+2026-11-02 and Tuesday 2026-11-03 among them — and a separate owner go. Task M17.
 
 ## Coming up
 

@@ -1,6 +1,6 @@
 # Pre-registration: M17 AI fund managers, forward paper test, 2026-10-09
 
-**Status: RATIFIED 2026-10-09 except S0** (owner, chat; §9). Written before any M17 code exists and before any manager has made a decision. The
+**Status: RATIFIED 2026-10-09 except S0** (owner, chat; §9); Amendment 5 RATIFIED 2026-11-01 (owner, chat). Written before any M17 code exists and before any manager has made a decision. The
 owner confirms the items marked **[OWNER]** and records it in §9. M17.8 cannot start the clock until
 §9 is filled in. After session S0 (§6), §2–§7 are frozen. A changed manager (prompt, model, mandate,
 rails or tools) is a **new manager** with a new id and its own clock. It is never a revision of the old
@@ -514,15 +514,19 @@ needing its own dated amendment before S0 (or a new manager id after):
 
 ### Amendment 5 (2026-10-30, before S0): Bedrock transport, per-role models, Claude CLI backup, pinned effort
 
-**DRAFT, awaiting owner confirmation before S0.** The owner decided at 08:05 IST on 2026-10-30
+**RATIFIED 2026-11-01 (owner, chat: "Amendment 5: can go to prod"),** with items (a)–(j) as
+written here and (g)'s right-hand hash column as the hashes S0 starts from. Ratification is not
+the go for S0: S0 still needs M17.8's counted clean dry sessions — on Bedrock, the counted ones of
+Monday 2026-11-02 and Tuesday 2026-11-03 among them — and a separate owner go. The monthly Bedrock
+budget of (f) is open and not a blocker for S0. The owner decided at 08:05 IST on 2026-10-30
 (chat) to run the desk — and the whole application — on Amazon Bedrock with the Claude CLI
 subscription as the backup, at about 09:00 IST to pin effort per call type, in the afternoon to move
 web research onto our own search layer, and on 2026-10-31 (morning, chat) — once Sonnet 5.5 was
 found served on Bedrock through its Global inference profile — to keep the pre-registered models
 (Opus 5.5 decisions, Sonnet 5.5 digests and research) and to deploy the Bedrock path that day
 (`.env`: `M17_LLM_PROVIDER=bedrock`, `M17_WEB_RESEARCH=websearch`). This is that decision, as it
-touches the M17 test, written down for confirmation (HUMAN_DECISIONS D30); the dry sessions run
-under it from the deploy, and the owner confirms it before S0. §2–§7 and Amendments 1–4 stand,
+touches the M17 test (HUMAN_DECISIONS D30); the dry sessions run under it from the deploy, and the
+owner confirmed it on 2026-11-01, before S0. §2–§7 and Amendments 1–4 stand,
 except where this amendment adds to them. No rule, rail, contract, model or schema field changes;
 the manager's system prompt gains one sentence, the untrusted-content rule of (d), the roster names
 the research model as a role of its own (a), and — added 2026-10-31 afternoon — the prompt template
@@ -633,7 +637,8 @@ out; Sonnet 5.5 on the Global profile (`global.anthropic.claude-sonnet-5-5`) at 
 `global_standard` rates, $2.00 / $10.00 (AWS Price List API, offer
 AmazonBedrockFoundationModels, us-east-1, read 2026-10-30 and 2026-10-31); DeepSeek V3.2, unused,
 $0.62 / $1.85. A CLI call stays a list-price estimate on the subscription. §9's "monthly cap
-deferred" now caps real money: **[OWNER]** whether to set a monthly Bedrock budget. Expected,
+deferred" now caps real money: whether to set a monthly Bedrock budget is **open** (owner,
+2026-11-01: not decided yet; not a blocker for S0). Expected,
 before the first Bedrock session measures it: a Sonnet digest costs about **$0.007–0.012** (the
 comparison's 30 filings, mean 400 input and 605 output tokens, give $0.007; the live check on a
 results filing, 1,428 in and 949 out, cost $0.012). At the first 13 dry sessions' mean of 57 new
@@ -654,7 +659,7 @@ the hashes come out exactly as the rule-only column below). So **the eight manag
 `mandate_hash` changes** (the eight control books, four style books and the bench are unchanged:
 8 of 21 changed; printed on 2026-10-31):
 
-| Book | `main` 8bafdf8 (in force) | Rule only (first draft) | DeepSeek digests (PR #147 at b4f7a8b) | PR #147 (rule + `research`) | PR #148 (+ (h) limits stated, (i)) | This draft (+ (h) follow-up schema, + (j) digests) |
+| Book | `main` 8bafdf8 (in force) | Rule only (first draft) | DeepSeek digests (PR #147 at b4f7a8b) | PR #147 (rule + `research`) | PR #148 (+ (h) limits stated, (i)) | Ratified, S0 starts from these (+ (h) follow-up schema, + (j) digests) |
 |---|---|---|---|---|---|---|
 | `FM-POS-FUND-10L` | `d52645654199b7b8` | `f2767a99fe228f23` | `48aad03e87ee5f4d` | `431ff6ce9c259d9b` | `89941098fd7a6cc4` | `ada1808ce2d9e320` |
 | `FM-POS-FUND-1CR` | `64d273a2be8e6b27` | `ec87caa2475f89a4` | `0aaa86ab53a963e5` | `98b728dc788fec28` | `bdbe11c6b0b3b461` | `7ed8b122c0b7e627` |
@@ -790,9 +795,10 @@ both versions the existing opinion-term filter refuses 4–5 of those 20 because
 (j) in the tree, the 21 books' hashes are byte-identical to (g)'s right-hand column. A digest
 records its `digest_version` (`commons-digest/2` from the deploy; stored `/1` digests are served as
 they are, never re-digested), and the dry-run count still restarts with the session of Monday
-2026-11-02, run at 22:00 IST. **[OWNER]** whether, before S0, the digest identity
-(`DIGEST_VERSION`, prompt and schema bytes) should become a manager hash input; that would change
-the 8 manager hashes once more, before the first counted session.
+2026-11-02, run at 22:00 IST. **Open** (raised with (j) on 2026-11-01, not part of the
+ratification): whether the digest identity (`DIGEST_VERSION`, prompt and schema bytes) should
+become a manager hash input. A yes would change the 8 manager hashes, so it would need its own
+dated amendment before S0.
 
 ## 9. Owner confirmation
 
@@ -804,5 +810,5 @@ the 8 manager hashes once more, before the first counted session.
 | Horizons (§2) | 1–4 weeks and 1–3 months | 2026-10-09 (owner, chat) |
 | Web search (§5) | allowed, through the Commons fetcher | 2026-10-09 (owner, chat) |
 | LLM path (§2) | Claude CLI subscription; monthly cap deferred | 2026-10-09 (owner, chat) |
-| LLM path and models (Amendment 5) | Bedrock primary, Claude CLI backup per call (each model falls back to itself); per-role models in the roster, the pre-registered ones — decisions `claude-opus-5-5` (Mantle us-east-1, effort `high`), digests and research `claude-sonnet-5-5` (bedrock-runtime, Global inference profile, which may route to any AWS commercial region; effort `medium`), research over our own search layer (Brave/Tavily/Firecrawl, CLI backup); DeepSeek V3.2 compared less faithful and stays unused capability; untrusted-content rule and `research` role added; text-length limits stated (h) and the round line moved for prompt caching (i), 2026-10-31 afternoon; digests grounded in the filing, results headlines naming revenue and PAT, announcement dates, percentages and quantities as figures (j), 2026-11-01, no hash change; 8 manager hashes change, dry-run count restarts with the first run under them (Mon 2026-11-02, 22:00 IST) | DRAFT — owner decisions 2026-10-30 08:05 IST and afternoon, 2026-10-31 morning (Sonnet via the Global profile, deploy approved; chat), 2026-11-01 (digest changes (j), deploy approved; chat); owner confirms before S0 |
+| LLM path and models (Amendment 5) | Bedrock primary, Claude CLI backup per call (each model falls back to itself); per-role models in the roster, the pre-registered ones — decisions `claude-opus-5-5` (Mantle us-east-1, effort `high`), digests and research `claude-sonnet-5-5` (bedrock-runtime, Global inference profile, which may route to any AWS commercial region; effort `medium`), research over our own search layer (Brave/Tavily/Firecrawl, CLI backup); DeepSeek V3.2 compared less faithful and stays unused capability; untrusted-content rule and `research` role added; text-length limits stated (h) and the round line moved for prompt caching (i), 2026-10-31 afternoon; digests grounded in the filing, results headlines naming revenue and PAT, announcement dates, percentages and quantities as figures (j), 2026-11-01, no hash change; 8 manager hashes change, dry-run count restarts with the first run under them (Mon 2026-11-02, 22:00 IST) | RATIFIED 2026-11-01 (owner, chat), after owner decisions 2026-10-30 08:05 IST and afternoon, 2026-10-31 morning (Sonnet via the Global profile, deploy approved; chat) and 2026-11-01 (digest changes (j), deploy approved; chat); counted dry sessions on Bedrock from Mon 2026-11-02; monthly Bedrock budget open, not a blocker for S0; not the go for S0 |
 | S0 | the first session after the 5-session dry run (M17.8) passes; owner asked for as soon as it is ready (2026-10-09) | — |
