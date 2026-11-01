@@ -31,29 +31,48 @@ Two design points worth stating:
 from __future__ import annotations
 
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Final, NamedTuple
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import BaseModel, ConfigDict, Field
 
-from dataplatform.identity.master import Exchange, IdentityMaster
+from dataplatform.identity.master import AmbiguousSymbolError, Exchange, IdentityMaster
+from dataplatform.identity.session import SessionIdentity
+from dataplatform.ingest.ambiguity import (
+    MAX_AMBIGUOUS_QUARANTINED,
+    Ambiguity,
+    AmbiguousFileError,
+    ambiguity_finding,
+    ambiguity_of,
+    refuse_over_threshold,
+)
 from dataplatform.ingest.models import ISIN_PATTERN
 from dataplatform.ingest.nse.fo_bhavcopy import FoContractRow, FoInstrumentType, OptionType
 from dataplatform.logging import get_logger
 from dataplatform.store.paths import l1_partition_path, l2_partition_path
 
+if TYPE_CHECKING:  # `quality` imports `ingest.nse`; the type alone is needed here
+    from dataplatform.quality.sentinel import QualityFinding
+
 __all__ = [
+    "AMBIGUOUS_UNDERLYING_CHECK",
     "FO_AGGREGATES_DATASET",
     "FO_CONTRACTS_DATASET",
+    "AggregateDerivation",
+    "AmbiguousFoFileError",
+    "AmbiguousUnderlying",
     "UnderlyingAggregate",
     "UnderlyingKind",
+    "ambiguity_findings",
     "build_aggregates",
+    "derive_aggregates",
     "read_l1",
     "read_l2",
     "rebuild_l2_from_l1",
@@ -158,9 +177,70 @@ class _FutureFields(NamedTuple):
     rollover_pct: Decimal | None
 
 
+#: The `quality_flag.check_name` for a stock underlier whose aggregate was written without an ISIN
+#: because the identity master named several and the session's bhavcopy did not settle which.
+AMBIGUOUS_UNDERLYING_CHECK: Final = "fo_underlying_ambiguous"
+
+
+class AmbiguousFoFileError(AmbiguousFileError):
+    """More stock underliers in one F&O file were ambiguous than one ISIN reissue explains.
+
+    Raised by `derive_aggregates` past `ingest.ambiguity.MAX_AMBIGUOUS_QUARANTINED`: that many
+    contradictions at once is a broken identity master, and the session fails rather than
+    publishing a page of ISIN-less aggregates around it.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class AmbiguousUnderlying:
+    """A stock underlier the master found ambiguous and the session's bhavcopy did not settle.
+
+    Its aggregate is still computed and written — the numbers come from the F&O file alone — with
+    `isin` None, so it is addressable by symbol but joins to no holding; this record is what makes
+    that visible (`ambiguity_findings`), rather than an ISIN-less row that looks merely unknown.
+    """
+
+    underlying: str
+    trade_date: date
+    ambiguity: Ambiguity
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateDerivation:
+    """One session's aggregates and how each stock underlier's ISIN was (or was not) placed.
+
+    `unresolved` counts stock underliers the master has never seen; `ambiguous` holds the ones it
+    named several ISINs for and the session did not settle; `ambiguity_resolved_by_session` counts
+    the ones the session's bhavcopy settled. All three leave the aggregate written.
+    """
+
+    aggregates: tuple[UnderlyingAggregate, ...]
+    ambiguous: tuple[AmbiguousUnderlying, ...] = ()
+    ambiguity_resolved_by_session: int = 0
+    unresolved: int = 0
+
+
 def build_aggregates(
-    rows: Iterable[FoContractRow], *, master: IdentityMaster | None = None
+    rows: Iterable[FoContractRow],
+    *,
+    master: IdentityMaster | None = None,
+    session: SessionIdentity | None = None,
 ) -> tuple[UnderlyingAggregate, ...]:
+    """`derive_aggregates(...).aggregates` — for a caller with no quality sink to raise flags to.
+
+    A writer that publishes should call `derive_aggregates` and raise `ambiguity_findings` from its
+    `ambiguous`, so an ISIN-less aggregate held back by an ambiguous master reaches the status API.
+    """
+    return derive_aggregates(rows, master=master, session=session).aggregates
+
+
+def derive_aggregates(
+    rows: Iterable[FoContractRow],
+    *,
+    master: IdentityMaster | None = None,
+    session: SessionIdentity | None = None,
+    max_ambiguous: int = MAX_AMBIGUOUS_QUARANTINED,
+) -> AggregateDerivation:
     """Derive the per-underlier L2 aggregates from one session's contract rows.
 
     What it does: groups the rows by underlier and, for each, sums open interest and its change,
@@ -172,8 +252,13 @@ def build_aggregates(
     they are not, or if one underlier's rows disagree on index-versus-stock - both are
     contradictions a caller must not paper over. When `master` is given, a *stock* underlier's
     symbol is resolved to its ISIN through it (the only sanctioned symbol-to-ISIN path, invariant
-    #2); an unresolved symbol leaves `isin` None and is counted, never guessed.
-    What it never does: fetch, adjust a price, or emit anything tradeable.
+    #2); an unresolved symbol leaves `isin` None and is counted, never guessed. When the master is
+    ambiguous for it (already queued for reconciliation), `session` - the same session's bhavcopy
+    statement - settles it if it states exactly one of the candidates (`ingest.ambiguity`, #141's
+    rule); otherwise `isin` stays None and the underlier is held in `ambiguous`.
+    What it never does: fetch, adjust a price, emit anything tradeable, or let one ambiguous
+    underlier fail the session - past `max_ambiguous` of them it raises `AmbiguousFoFileError`,
+    because that many is a broken master.
     """
     grouped: dict[str, list[FoContractRow]] = defaultdict(list)
     trade_dates: set[date] = set()
@@ -182,7 +267,7 @@ def build_aggregates(
         trade_dates.add(row.trade_date)
 
     if not grouped:
-        return ()
+        return AggregateDerivation(aggregates=())
     if len(trade_dates) > 1:
         raise ValueError(
             "contract rows span more than one session: "
@@ -190,18 +275,64 @@ def build_aggregates(
         )
     trade_date = next(iter(trade_dates))
 
+    resolver = _Resolver(trade_date=trade_date, master=master, session=session)
     aggregates = [
-        _aggregate_one(underlying, group, trade_date=trade_date, master=master)
+        _aggregate_one(underlying, group, trade_date=trade_date, resolve=resolver)
         for underlying, group in sorted(grouped.items())
     ]
+    refuse_over_threshold(
+        [f"{a.underlying}->{list(a.ambiguity.candidates)}" for a in resolver.ambiguous],
+        error=AmbiguousFoFileError,
+        what="F&O stock underliers",
+        event="fo_aggregates",
+        source=FO_AGGREGATES_DATASET,
+        exchange=Exchange.NSE,
+        threshold=max_ambiguous,
+    )
     _LOG.info(
         "fo_aggregates.built",
         trade_date=trade_date.isoformat(),
         underlyings=len(aggregates),
         contracts=sum(len(g) for g in grouped.values()),
+        unresolved=resolver.unresolved,
+        ambiguous=len(resolver.ambiguous),
+        ambiguity_resolved_by_session=resolver.settled,
         state="NORMALIZED",
     )
-    return tuple(aggregates)
+    return AggregateDerivation(
+        aggregates=tuple(aggregates),
+        ambiguous=tuple(resolver.ambiguous),
+        ambiguity_resolved_by_session=resolver.settled,
+        unresolved=resolver.unresolved,
+    )
+
+
+def ambiguity_findings(held: Sequence[AmbiguousUnderlying]) -> tuple[QualityFinding, ...]:
+    """One ERROR finding per stock underlier written without an ISIN because the master was
+    ambiguous — what `/status/quality` shows.
+
+    Scoped to the `fo_aggregates` dataset the row sits in (never a source the trading interlock
+    judges), fingerprinted by `(underlier, session)` so a re-derive finds the open flag.
+    """
+    findings = [
+        ambiguity_finding(
+            check_name=AMBIGUOUS_UNDERLYING_CHECK,
+            source=FO_AGGREGATES_DATASET,
+            exchange=Exchange.NSE,
+            symbol=h.underlying,
+            logical_date=h.trade_date,
+            ambiguity=h.ambiguity,
+            key=h.underlying,
+            detail={
+                "underlying_kind": UnderlyingKind.STOCK.value,
+                "session_isins": list(h.ambiguity.stated),
+                "aggregate_isin": None,
+            },
+        )
+        for h in held
+    ]
+    findings.sort(key=lambda f: (f.logical_date, f.fingerprint))
+    return tuple(findings)
 
 
 def _aggregate_one(
@@ -209,7 +340,7 @@ def _aggregate_one(
     group: Sequence[FoContractRow],
     *,
     trade_date: date,
-    master: IdentityMaster | None,
+    resolve: Callable[[str, UnderlyingKind], str | None],
 ) -> UnderlyingAggregate:
     """Compute one underlier's aggregates from its contract rows."""
     kinds = {row.is_index_underlying for row in group}
@@ -231,7 +362,7 @@ def _aggregate_one(
 
     spot = _spot_of(group)
     futures = _future_fields(group, spot=spot)
-    isin = _resolve_isin(underlying, kind, trade_date=trade_date, master=master)
+    isin = resolve(underlying, kind)
 
     return UnderlyingAggregate(
         trade_date=trade_date,
@@ -310,30 +441,70 @@ def _future_fields(group: Sequence[FoContractRow], *, spot: Decimal) -> _FutureF
     )
 
 
-def _resolve_isin(
-    underlying: str,
-    kind: UnderlyingKind,
-    *,
-    trade_date: date,
-    master: IdentityMaster | None,
-) -> str | None:
-    """A stock underlier's ISIN via the D2 master, or None for an index / no master / unresolved.
+@dataclass(slots=True)
+class _Resolver:
+    """A stock underlier's ISIN via the D2 master, recording how each one was or was not placed.
 
     The only symbol-to-ISIN step in the F&O module, and it goes through the sanctioned identity path
     (invariant #2). An index is never resolved - it has no ISIN. A stock symbol the master has never
-    seen returns None (quarantined-as-unresolved, counted below), while an *ambiguous* symbol raises
-    from the master: "we do not know" and "we know two contradictory things" are different facts.
+    seen returns None and is counted (`unresolved`). An *ambiguous* one ("we know two contradictory
+    things", not "we do not know") is settled by the session's bhavcopy when it states exactly one
+    of the candidates, and is otherwise None and held in `ambiguous`.
     """
-    if kind is UnderlyingKind.INDEX or master is None:
-        return None
-    isin = master.try_resolve(underlying, trade_date, exchange=Exchange.NSE)
-    if isin is None:
-        _LOG.warning(
-            "fo_aggregates.unresolved_underlying",
-            underlying=underlying,
-            trade_date=trade_date.isoformat(),
-        )
-    return isin
+
+    trade_date: date
+    master: IdentityMaster | None
+    session: SessionIdentity | None
+    unresolved: int = 0
+    settled: int = 0
+    ambiguous: list[AmbiguousUnderlying] = field(default_factory=list)
+
+    def __call__(self, underlying: str, kind: UnderlyingKind) -> str | None:
+        if kind is UnderlyingKind.INDEX or self.master is None:
+            return None
+        try:
+            isin = self.master.try_resolve(underlying, self.trade_date, exchange=Exchange.NSE)
+        except AmbiguousSymbolError as error:
+            stated = (
+                frozenset()
+                if self.session is None
+                else self.session.stated_for_symbol(
+                    underlying, self.trade_date, exchange=Exchange.NSE
+                )
+            )
+            ambiguity = ambiguity_of(error, stated)
+            if ambiguity.settled is None:
+                self.ambiguous.append(
+                    AmbiguousUnderlying(
+                        underlying=underlying, trade_date=self.trade_date, ambiguity=ambiguity
+                    )
+                )
+                _LOG.error(
+                    "fo_aggregates.ambiguous_quarantined",
+                    underlying=underlying,
+                    trade_date=self.trade_date.isoformat(),
+                    candidates=list(ambiguity.candidates),
+                    session_isins=list(ambiguity.stated),
+                    state="QUARANTINED",
+                )
+                return None
+            self.settled += 1
+            _LOG.warning(
+                "fo_aggregates.ambiguity_resolved_by_session",
+                underlying=underlying,
+                trade_date=self.trade_date.isoformat(),
+                candidates=list(ambiguity.candidates),
+                chosen=ambiguity.settled,
+            )
+            return ambiguity.settled
+        if isin is None:
+            self.unresolved += 1
+            _LOG.warning(
+                "fo_aggregates.unresolved_underlying",
+                underlying=underlying,
+                trade_date=self.trade_date.isoformat(),
+            )
+        return isin
 
 
 def _q(value: Decimal, quantum: Decimal) -> Decimal:
@@ -575,6 +746,7 @@ def rebuild_l2_from_l1(
     trade_date: date,
     *,
     master: IdentityMaster | None = None,
+    session: SessionIdentity | None = None,
     data_root: Path | None = None,
 ) -> Path:
     """Re-derive one session's L2 aggregates from its L1 contract partition and write them.
@@ -585,7 +757,7 @@ def rebuild_l2_from_l1(
     Deterministic: the same L1 partition yields byte-identical L2.
     """
     rows = read_l1(trade_date, data_root=data_root)
-    aggregates = build_aggregates(rows, master=master)
+    aggregates = build_aggregates(rows, master=master, session=session)
     return write_l2(aggregates, data_root=data_root)
 
 

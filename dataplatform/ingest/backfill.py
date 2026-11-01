@@ -46,6 +46,7 @@ from typing import Any, Final
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.identity.master import Exchange, IdentityMaster, IdentityStore
+from dataplatform.ingest.ambiguity import ambiguity_finding
 from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
 from dataplatform.ingest.bse.bhavcopy import LegacyParse, MalformedLine
 from dataplatform.ingest.calendar import (
@@ -67,7 +68,7 @@ from dataplatform.ingest.nse.delivery import AmbiguousDeliveryRow, DeliveryRow
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.logging import get_logger
-from dataplatform.quality.sentinel import QualityFinding, finding_fingerprint, persist_findings
+from dataplatform.quality.sentinel import QualityFinding, persist_findings
 from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Ref, L0Store
@@ -543,26 +544,19 @@ def ambiguity_findings(
     does not unpublish the other ~3,500 (a file past the threshold still fails outright).
     """
     findings = [
-        QualityFinding(
-            logical_date=h.row.trade_date,
+        ambiguity_finding(
             check_name=AMBIGUOUS_DELIVERY_CHECK,
-            severity="ERROR",
             source=PRICES_RAW_QUARANTINE_DATASET,
+            exchange=exchange,
+            symbol=h.row.symbol,
+            logical_date=h.row.trade_date,
+            ambiguity=h.ambiguity,
+            key=f"{h.row.symbol}/{h.row.series}",
             detail={
-                "exchange": exchange.value,
-                "symbol": h.row.symbol,
                 "series": h.row.series,
-                "trade_date": h.row.trade_date.isoformat(),
-                "candidates": list(h.candidates),
                 "session_isin": h.session_isin,
                 "quarantine_reason": PriceQuarantineReason.SYMBOL_AMBIGUOUS,
-                "reason": h.reason,
             },
-            fingerprint=finding_fingerprint(
-                f"{AMBIGUOUS_DELIVERY_CHECK}/{exchange.value}/{h.row.symbol}/{h.row.series}",
-                None,
-                h.row.trade_date,
-            ),
         )
         for h in held
     ]

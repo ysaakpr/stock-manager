@@ -38,7 +38,7 @@ from typing import Final, Protocol
 
 from dataplatform.clock import IST, Clock, SystemClock
 from dataplatform.config import Settings, get_settings
-from dataplatform.identity.master import IdentityMaster, IdentityStore
+from dataplatform.identity.master import IdentityError, IdentityMaster, IdentityStore
 from dataplatform.ingest.calendar import TradingCalendar, trading_calendar
 from dataplatform.ingest.fetcher import (
     Fetcher,
@@ -54,10 +54,17 @@ from dataplatform.ingest.nse.fo_bhavcopy import FO_ERA_START, FO_SOURCE_ID, pars
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.logging import get_logger
+from dataplatform.quality.sentinel import QualityFinding, persist_findings
 from dataplatform.status.sync_state import SyncState, SyncStateStore
 from dataplatform.store.db import connection
-from dataplatform.store.fo_aggregates import UnderlyingKind, build_aggregates, write_l1, write_l2
+from dataplatform.store.fo_aggregates import (
+    ambiguity_findings,
+    derive_aggregates,
+    write_l1,
+    write_l2,
+)
 from dataplatform.store.l0 import L0Error, L0Ref, L0Store
+from dataplatform.store.l1 import session_identity
 
 __all__ = [
     "FoBackfillReport",
@@ -104,6 +111,11 @@ class FoBackfillReport:
     contracts_written: int = 0
     aggregates_written: int = 0
     unresolved_underlyings: int = 0
+    #: Stock underliers written ISIN-less because the master was ambiguous and the session's
+    #: bhavcopy did not settle it — each raised as an ERROR flag (`fo_underlying_ambiguous`).
+    ambiguous_underlyings: int = 0
+    #: Stock underliers the master found ambiguous and the session's bhavcopy settled.
+    ambiguity_resolved_by_session: int = 0
     stopped_early: str | None = None
     park_reason: ParkReason | None = None
     park_detail: str | None = None
@@ -174,8 +186,12 @@ class FoBackfillRunner:
         should_stop: Callable[[], str | None] = lambda: None,
         data_root: Path | None = None,
         max_sessions: int | None = None,
+        findings: Callable[[Sequence[QualityFinding]], object] | None = None,
     ) -> None:
         self._fetcher = fetcher
+        #: Where an ambiguous underlier's ERROR flag goes — `persist_findings` on the runner's
+        #: connection, so it commits with the session it is about. `None` only in a test.
+        self._findings = findings
         self._l0 = l0
         self._sync = sync
         self._commit = commit
@@ -256,10 +272,17 @@ class FoBackfillRunner:
                     f"file reports {sorted(sessions)}, requested {unit.session}",
                     filename=unit.filename,
                 )
-            aggregates = build_aggregates(rows, master=self._master)
-        except (ParseError, L0Error, ValueError) as exc:
-            # Retryable: the bytes are in L0, so a re-run after a parser fix re-derives the
-            # session without a request. Only a 404 closes a session.
+            derived = derive_aggregates(
+                rows,
+                master=self._master,
+                session=session_identity(unit.session, data_root=self._data_root),
+            )
+            aggregates = derived.aggregates
+        except (ParseError, L0Error, ValueError, IdentityError) as exc:
+            # Retryable: the bytes are in L0, so a re-run after a parser or master fix re-derives
+            # the session without a request. Only a 404 closes a session. `IdentityError` is a
+            # master past the ambiguity threshold (`AmbiguousFoFileError`): before it was caught
+            # here, one ambiguous underlier escaped `_process` and ended the whole run.
             self._fail(unit, str(exc), retryable=True, report=report, counter="refused")
             return
 
@@ -271,19 +294,21 @@ class FoBackfillRunner:
             self._sync.mark_validated(FO_SOURCE_ID, unit.session)
             write_l1(rows, data_root=self._data_root)
             write_l2(aggregates, data_root=self._data_root)
+            if derived.ambiguous and self._findings is not None:
+                self._findings(ambiguity_findings(derived.ambiguous))
             self._sync.mark_normalized(FO_SOURCE_ID, unit.session)
             self._sync.mark_published(FO_SOURCE_ID, unit.session)
             self._commit()
         except Exception:
             self._rollback()
             raise
-        unresolved = sum(
-            1 for a in aggregates if a.underlying_kind is UnderlyingKind.STOCK and a.isin is None
-        )
+        unresolved = derived.unresolved
         report.published += 1
         report.contracts_written += len(rows)
         report.aggregates_written += len(aggregates)
         report.unresolved_underlyings += unresolved
+        report.ambiguous_underlyings += len(derived.ambiguous)
+        report.ambiguity_resolved_by_session += derived.ambiguity_resolved_by_session
         _LOG.info(
             "fo_backfill.session_published",
             source=FO_SOURCE_ID,
@@ -291,6 +316,8 @@ class FoBackfillRunner:
             contracts=len(rows),
             underlyings=len(aggregates),
             unresolved=unresolved,
+            ambiguous=len(derived.ambiguous),
+            ambiguity_resolved_by_session=derived.ambiguity_resolved_by_session,
             state="PUBLISHED",
         )
 
@@ -450,6 +477,7 @@ def _run_live(
             commit=conn.commit,
             rollback=conn.rollback,
             master=master,
+            findings=lambda found: persist_findings(conn, found, clock=clock),
             should_stop=lambda: "stop signal received" if stop_state["stop"] else external_stop(),
             data_root=settings.data_root,
             max_sessions=args.max_sessions,
@@ -462,7 +490,8 @@ def _run_live(
         f"{report.not_published} not published (404), {report.refused} refused, "
         f"{report.failed} failed; {report.contracts_written} contracts, "
         f"{report.aggregates_written} aggregates, {report.unresolved_underlyings} stock "
-        f"underliers unresolved"
+        f"underliers unresolved, {report.ambiguous_underlyings} ambiguous (flagged), "
+        f"{report.ambiguity_resolved_by_session} settled by the session"
         + (f" — stopped early ({report.stopped_early})" if report.stopped_early else "")
         + (" — PARKED (FORBIDDEN_SPIKE)" if report.parked else "")
     )
