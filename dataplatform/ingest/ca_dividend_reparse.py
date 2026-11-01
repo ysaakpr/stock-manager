@@ -14,7 +14,10 @@ this command does the one-off, in one transaction:
 2. selects the *day-groups* — one feed's dividends for one ISIN on one ex-date — the fix changes:
    those the re-parse yields more than one dividend for, and the store already holds one for (the
    old key kept the first; a day-group with nothing stored was never fetched or never resolved,
-   which is not this fix's to change). Nothing else is touched;
+   which is not this fix's to change); and, since 2026-11-01, any stored day-group whose re-parse
+   states different terms — a parser fix (`Dividend - 1.40 Per Share`, an amount with no currency
+   marker, was stored as "amount not stated") reaches the store the same way. Nothing else is
+   touched;
 3. in each, deletes the stored rows the re-parse does not reproduce exactly and inserts the ones it
    adds. A new row takes its stored siblings' knowable date: it came from the same line or
    payload, so it was knowable exactly when they were (invariant #7);
@@ -126,7 +129,7 @@ class ReparsePlan:
         return [
             "ca_dividend_reparse: plan (one transaction)",
             f"  payloads re-parsed: {dict(self.payloads)}",
-            f"  day-groups with several dividends: {len(self.groups)}, "
+            f"  day-groups with several dividends or restated terms: {len(self.groups)}, "
             f"of which the store differs in {len(changed)} ({dict(by_source)})",
             f"  left alone, nothing stored for them: {self.unstored}",
             f"  delete {len(self.deletes)} stored dividend row(s); "
@@ -177,18 +180,31 @@ def plan_reparse(
     *,
     payloads: Mapping[str, int] | None = None,
 ) -> ReparsePlan:
-    """The day-groups the re-parse yields several dividends for, beside what the store holds.
+    """The day-groups the re-parse yields several dividends for, or now reads differently from
+    what the store holds, beside what the store holds.
 
-    Pure: `stored_actions` is the store as `load_corporate_actions` reads it.
+    Pure: `stored_actions` is the store as `load_corporate_actions` reads it. A one-dividend
+    day-group is selected only when it is stored and its `(component, terms)` differ — the same
+    test `DayGroup.deletes`/`inserts` apply — so an unchanged one is never rewritten.
     """
     stored: dict[DayKey, list[CorporateAction]] = defaultdict(list)
     for action in stored_actions:
         if action.action_type is ActionType.DIVIDEND and action.source in SOURCES:
             stored[(action.isin, action.ex_date, action.source)].append(action)
     several = {key: rows for key, rows in sorted(reparsed.items()) if len(rows) > 1}
+
+    def restated(key: DayKey, rows: Sequence[CorporateAction]) -> bool:
+        held = stored.get(key)
+        if not held:
+            return False
+        return {(a.component, a.terms) for a in held} != {(a.component, a.terms) for a in rows}
+
+    selected = {
+        key: rows for key, rows in sorted(reparsed.items()) if key in several or restated(key, rows)
+    }
     groups = tuple(
         DayGroup(key=key, stored=tuple(stored[key]), reparsed=tuple(rows))
-        for key, rows in several.items()
+        for key, rows in selected.items()
         if stored.get(key)
     )
     return ReparsePlan(

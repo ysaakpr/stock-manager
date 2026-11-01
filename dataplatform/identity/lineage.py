@@ -46,7 +46,15 @@ import duckdb
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.corpactions.parse_terms import classify, split_compound
 from dataplatform.corpactions.taxonomy import ActionType
-from dataplatform.identity.master import Exchange, IdentityStore, ListingStatus, Security
+from dataplatform.identity.master import (
+    ConflictKind,
+    DetectedBy,
+    Exchange,
+    IdentityConflict,
+    IdentityStore,
+    ListingStatus,
+    Security,
+)
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection
 from dataplatform.store.l2 import open_connection, register_raw_view
@@ -54,16 +62,23 @@ from dataplatform.store.l2 import open_connection, register_raw_view
 __all__ = [
     "CORROBORATING_TYPES",
     "LINEAGE_BACKFILL",
+    "LINEAGE_CONFLICT_SOURCE",
     "EqPresence",
     "IsinSpan",
+    "LineageConflict",
+    "LineageConflictError",
+    "LineageConflictKind",
     "LineageEdge",
     "LineageResolver",
     "LineageStore",
     "LineageWriteReport",
+    "ManualEdge",
+    "ManualMerge",
     "RegistrationPlan",
     "SkipReason",
     "corroborating_type",
     "derive_edges",
+    "merge_with_manual",
     "plan_registrations",
     "read_corroboration",
     "read_eq_presence",
@@ -98,6 +113,9 @@ _SPAN_EXCHANGE: Final = "NSE"
 
 #: The `security_master.registered_by` marker (0011) on a row this module inferred from L1.
 LINEAGE_BACKFILL: Final = "lineage_backfill"
+
+#: `identity_reconciliation.source` of a conflict between a derived and a MANUAL edge.
+LINEAGE_CONFLICT_SOURCE: Final = "isin_lineage"
 
 
 class SkipReason(StrEnum):
@@ -356,6 +374,187 @@ def _sessions_between(sessions: Sequence[date], after: date, before: date) -> in
 
 
 @dataclass(frozen=True, slots=True)
+class ManualEdge:
+    """An `isin_lineage` row recorded by hand (`detected_by = 'MANUAL'`), as a rebuild reads it.
+
+    A MANUAL edge is evidence the derivation cannot see — the AvenuesAI reissue across a
+    suspension is the first (`repair_avenuesai`) — so a rebuild keeps it and never rewrites it.
+    """
+
+    predecessor_isin: str
+    successor_isin: str
+    effective_date: date
+    symbol_at_change: str
+
+
+class LineageConflictKind(StrEnum):
+    """How a derived edge disagrees with a MANUAL one — each needs a different human decision."""
+
+    #: Derived `A -> C` where MANUAL says `A -> B`: the two disagree on what `A` became.
+    SUCCESSOR_DIFFERS = "successor_differs"
+    #: Same pair, different effective date: they agree on the reissue but not on when.
+    EFFECTIVE_DATE_DIFFERS = "effective_date_differs"
+    #: Derived `X -> B` where MANUAL says `A -> B`, `X != A`: two histories would land on `B`.
+    SUCCESSOR_CLAIMED = "successor_claimed"
+    #: The derived edge closes a loop through the MANUAL edges, so no ISIN would be the survivor.
+    CYCLE = "cycle"
+
+
+@dataclass(frozen=True, slots=True)
+class LineageConflict:
+    """One derived edge that contradicts one MANUAL edge."""
+
+    kind: LineageConflictKind
+    derived: LineageEdge
+    manual: ManualEdge
+
+    @property
+    def isins(self) -> tuple[str, ...]:
+        """Every ISIN either edge names, sorted — the reconciliation row's key with the date."""
+        return tuple(
+            sorted(
+                {
+                    self.derived.predecessor_isin,
+                    self.derived.successor_isin,
+                    self.manual.predecessor_isin,
+                    self.manual.successor_isin,
+                }
+            )
+        )
+
+    @property
+    def symbols(self) -> tuple[str, ...]:
+        """The symbol each edge was recorded under, sorted and de-duplicated."""
+        return tuple(sorted({self.derived.symbol_at_change, self.manual.symbol_at_change}))
+
+    def __str__(self) -> str:
+        d, m = self.derived, self.manual
+        return (
+            f"{self.kind.value}: derived {d.predecessor_isin} -> {d.successor_isin} effective "
+            f"{d.effective_date.isoformat()} vs MANUAL {m.predecessor_isin} -> {m.successor_isin} "
+            f"effective {m.effective_date.isoformat()}"
+        )
+
+
+class LineageConflictError(Exception):
+    """A rebuild derived edges that contradict MANUAL ones; nothing was written.
+
+    Raised rather than resolved because neither side is safe to prefer blindly: a MANUAL edge can
+    be stale, and a derived one can be fooled by an issuer-code reuse. A human decides (see
+    `merge_with_manual` for how each decision is recorded).
+    """
+
+    def __init__(self, conflicts: Sequence[LineageConflict]) -> None:
+        self.conflicts = tuple(conflicts)
+        lines = "; ".join(str(c) for c in self.conflicts)
+        super().__init__(f"{len(self.conflicts)} derived edge(s) contradict MANUAL edges: {lines}")
+
+
+@dataclass(frozen=True, slots=True)
+class ManualMerge:
+    """How a set of derived edges sits against the stored MANUAL ones."""
+
+    #: Derived edges no MANUAL edge speaks to — the ones to write.
+    derived: tuple[LineageEdge, ...]
+    #: Derived edges a MANUAL edge already states (same pair, same date) — not written twice.
+    agreeing: tuple[LineageEdge, ...]
+    #: Conflicts a human has already decided for the MANUAL edge — skipped, MANUAL stands.
+    overridden: tuple[LineageConflict, ...]
+    #: Conflicts nobody has decided — the rebuild must stop on these.
+    conflicts: tuple[LineageConflict, ...]
+
+
+def merge_with_manual(
+    edges: Iterable[LineageEdge],
+    manual: Iterable[ManualEdge],
+    *,
+    decided: Container[tuple[date, tuple[str, ...]]] = (),
+) -> ManualMerge:
+    """Lay derived edges over the MANUAL ones, without I/O. The precedence rule lives here.
+
+    A MANUAL edge is authoritative for its own predecessor and is always kept as stored. Against
+    it, a derived edge is exactly one of:
+
+    * **agreeing** — the same predecessor, successor and effective date. It is the same fact, so
+      it is not written a second time (the table holds one edge per predecessor).
+    * **a conflict** — the same predecessor with another successor or another date, another
+      predecessor into the MANUAL successor, or a loop through MANUAL edges. Neither side is
+      chosen: the conflict is returned for the caller to queue and raise on.
+    * **overridden** — a conflict a human already decided *for the MANUAL edge*, recorded by
+      resolving its `identity_reconciliation` row (kind `LINEAGE_EDGE`). `decided` holds those
+      rows' `(on_date, isins)` keys. The derived edge is dropped and the MANUAL edge stands. To
+      decide *for the derived edge* instead, the human deletes the MANUAL row; the next rebuild
+      then writes the derived one.
+    * **independent** — none of the above; written as usual.
+
+    Never mutates or drops a MANUAL edge: they are recorded by hand, from evidence a rebuild does
+    not re-read.
+    """
+    manual_rows = tuple(manual)
+    by_predecessor = {m.predecessor_isin: m for m in manual_rows}
+    by_successor: dict[str, ManualEdge] = {}
+    for m in manual_rows:
+        by_successor.setdefault(m.successor_isin, m)
+    manual_forward = {m.predecessor_isin: m.successor_isin for m in manual_rows}
+
+    derived: list[LineageEdge] = []
+    agreeing: list[LineageEdge] = []
+    overridden: list[LineageConflict] = []
+    conflicts: list[LineageConflict] = []
+    for edge in edges:
+        conflict: LineageConflict | None = None
+        same = by_predecessor.get(edge.predecessor_isin)
+        if same is not None:
+            if same.successor_isin != edge.successor_isin:
+                conflict = LineageConflict(LineageConflictKind.SUCCESSOR_DIFFERS, edge, same)
+            elif same.effective_date != edge.effective_date:
+                conflict = LineageConflict(LineageConflictKind.EFFECTIVE_DATE_DIFFERS, edge, same)
+            else:
+                agreeing.append(edge)
+                continue
+        elif (claimed := by_successor.get(edge.successor_isin)) is not None:
+            conflict = LineageConflict(LineageConflictKind.SUCCESSOR_CLAIMED, edge, claimed)
+        elif (looped := _manual_on_loop(edge, manual_forward, by_predecessor)) is not None:
+            conflict = LineageConflict(LineageConflictKind.CYCLE, edge, looped)
+        if conflict is None:
+            derived.append(edge)
+        elif (edge.effective_date, conflict.isins) in decided:
+            overridden.append(conflict)
+        else:
+            conflicts.append(conflict)
+    return ManualMerge(
+        derived=tuple(derived),
+        agreeing=tuple(agreeing),
+        overridden=tuple(overridden),
+        conflicts=tuple(conflicts),
+    )
+
+
+def _manual_on_loop(
+    edge: LineageEdge,
+    manual_forward: Mapping[str, str],
+    by_predecessor: Mapping[str, ManualEdge],
+) -> ManualEdge | None:
+    """The first MANUAL edge on a path from `edge`'s successor back to its predecessor, if any.
+
+    Derived edges alone cannot loop — each runs strictly forward in time within one issuer — so
+    a loop needs a MANUAL edge, and only MANUAL hops are followed.
+    """
+    seen = {edge.successor_isin}
+    current = edge.successor_isin
+    first: ManualEdge | None = None
+    while (nxt := manual_forward.get(current)) is not None:
+        first = by_predecessor[current] if first is None else first
+        if nxt == edge.predecessor_isin:
+            return first
+        if nxt in seen:
+            return None
+        seen.add(nxt)
+        current = nxt
+    return None
+
+
+@dataclass(frozen=True, slots=True)
 class RegistrationPlan:
     """Which unknown successors to register, which edges to write, and which stay skipped."""
 
@@ -368,6 +567,8 @@ def plan_registrations(
     edges: Iterable[LineageEdge],
     known: Container[str],
     presence: Mapping[str, EqPresence],
+    *,
+    manual: Iterable[ManualEdge] = (),
 ) -> RegistrationPlan:
     """Decide, without I/O, which unknown successors to register and which edges that unblocks.
 
@@ -378,9 +579,13 @@ def plan_registrations(
     know is not registered (`TERMINAL_SUCCESSOR_NOT_IN_MASTER`), and nothing without L1 evidence
     ever is (`NO_L1_EQ_HISTORY`). Every edge whose successor is known or registered is writable;
     every other edge is returned with its reason, so the count of skips is never a guess.
+
+    `manual` edges are chain links too — a derived edge into a MANUAL edge's predecessor reaches
+    its survivor through it — but are never themselves planned: they are already stored.
     """
     rows = tuple(edges)
-    forward = {e.predecessor_isin: e.successor_isin for e in rows}
+    forward = {m.predecessor_isin: m.successor_isin for m in manual}
+    forward.update({e.predecessor_isin: e.successor_isin for e in rows})
     verdict: dict[str, SkipReason | None] = {}
 
     def resolve(isin: str, trail: frozenset[str]) -> SkipReason | None:
@@ -436,6 +641,12 @@ class LineageWriteReport:
     written: int
     registered_intermediates: tuple[str, ...]
     skipped: tuple[tuple[LineageEdge, SkipReason], ...]
+    #: MANUAL rows kept as stored — every one, every rebuild.
+    manual_kept: int = 0
+    #: Derived edges a MANUAL row already states, so not written a second time.
+    agreeing: tuple[LineageEdge, ...] = ()
+    #: Conflicts a human decided for the MANUAL edge; the derived edge was dropped.
+    overridden: tuple[LineageConflict, ...] = ()
 
     @property
     def still_skipped(self) -> int:
@@ -456,7 +667,9 @@ class LineageStore:
     The derivation is a pure function of L1, so a rebuild *replaces* the derived rows wholesale
     rather than merging: a re-derivation that no longer sees an edge means L1 no longer supports
     it, and leaving the stale row behind would make the table a union of every past belief.
-    Rows recorded by hand (`detected_by = 'MANUAL'`) are never touched by a rebuild.
+    Rows recorded by hand (`detected_by = 'MANUAL'`) are never touched by a rebuild: they are
+    kept, applied alongside the derived edges, and a derived edge that contradicts one stops the
+    rebuild before anything is written (`merge_with_manual` holds the precedence rule).
     """
 
     def __init__(self, conn: Connection, *, clock: Clock | None = None) -> None:
@@ -479,11 +692,27 @@ class LineageStore:
         unseen name must not cost the other 500 edges — and returned with its reason. Registered
         rows are insert-only and outlive the rebuild (a master row is never removed, §4.5), so a
         re-run finds them known and registers nothing twice.
+
+        MANUAL rows are kept, and serve as chain links for the registration plan. `edges` are laid
+        over them by `merge_with_manual`: one a MANUAL row already states is not written again,
+        and one that contradicts a MANUAL row raises `LineageConflictError` *before* anything is
+        deleted or written. Queueing that conflict is the caller's (`queue_conflicts`), because
+        the caller owns the transaction this one must not commit.
         """
-        rows = tuple(edges)
+        manual = self.load_manual()
+        merge = merge_with_manual(edges, manual, decided=self.decided_conflicts())
+        if merge.conflicts:
+            # Before the DELETE: a refused rebuild leaves the table exactly as it found it.
+            _LOG.error(
+                "lineage.manual_conflict",
+                conflicts=len(merge.conflicts),
+                detail=[str(c) for c in merge.conflicts],
+            )
+            raise LineageConflictError(merge.conflicts)
+        rows = merge.derived
         self._conn.execute("DELETE FROM isin_lineage WHERE detected_by = 'L1_CONTIGUITY'")
         known = {r[0] for r in self._conn.execute("SELECT isin FROM security_master").fetchall()}
-        plan = plan_registrations(rows, known, {} if presence is None else presence)
+        plan = plan_registrations(rows, known, {} if presence is None else presence, manual=manual)
         IdentityStore(self._conn, clock=self._clock).register_inferred(
             plan.register, registered_by=LINEAGE_BACKFILL
         )
@@ -517,10 +746,13 @@ class LineageStore:
             },
         )
         report = LineageWriteReport(
-            derived=len(rows),
+            derived=len(rows) + len(merge.agreeing) + len(merge.overridden),
             written=len(writable),
             registered_intermediates=tuple(s.isin for s in plan.register),
             skipped=plan.skipped,
+            manual_kept=len(manual),
+            agreeing=merge.agreeing,
+            overridden=merge.overridden,
         )
         _LOG.info(
             "lineage.written",
@@ -532,6 +764,50 @@ class LineageStore:
             **{f"skipped_{k}": v for k, v in report.skipped_by_reason().items()},
         )
         return report
+
+    def load_manual(self) -> tuple[ManualEdge, ...]:
+        """Every MANUAL row, by predecessor."""
+        rows = self._conn.execute(
+            "SELECT predecessor_isin, successor_isin, effective_date, symbol_at_change "
+            "FROM isin_lineage WHERE detected_by = 'MANUAL' ORDER BY predecessor_isin"
+        ).fetchall()
+        return tuple(ManualEdge(str(p), str(s), eff, str(sym)) for p, s, eff, sym in rows)
+
+    def decided_conflicts(self) -> frozenset[tuple[date, tuple[str, ...]]]:
+        """`(on_date, isins)` of every resolved `LINEAGE_EDGE` reconciliation row.
+
+        Resolving one is how a human records that the MANUAL edge stands against that derived
+        edge (`merge_with_manual`). An open row decides nothing.
+        """
+        rows = self._conn.execute(
+            "SELECT on_date, isins FROM identity_reconciliation WHERE kind = %s AND resolved",
+            (ConflictKind.LINEAGE_EDGE.value,),
+        ).fetchall()
+        return frozenset((on_date, tuple(sorted(isins))) for on_date, isins in rows)
+
+    def queue_conflicts(self, conflicts: Iterable[LineageConflict]) -> int:
+        """Queue each conflict into `identity_reconciliation`; returns how many rows were new.
+
+        Kind `LINEAGE_EDGE`, detected by `LINEAGE_REBUILD`, dated by the derived edge's effective
+        date. Deduplicated by the table's UNIQUE constraint, so a rebuild re-run over the same
+        conflict leaves one row. Never commits — the caller owns the transaction.
+        """
+        identity = IdentityStore(self._conn, clock=self._clock)
+        queued = 0
+        for c in conflicts:
+            queued += identity.record(
+                IdentityConflict(
+                    kind=ConflictKind.LINEAGE_EDGE,
+                    exchange=Exchange.NSE,
+                    on_date=c.derived.effective_date,
+                    symbols=c.symbols,
+                    isins=c.isins,
+                    detected_by=DetectedBy.LINEAGE_REBUILD,
+                    source=LINEAGE_CONFLICT_SOURCE,
+                    note=str(c),
+                )
+            )
+        return queued
 
     def load(self) -> LineageResolver:
         """Read every edge back as a resolver."""

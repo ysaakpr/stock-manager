@@ -559,7 +559,11 @@ def total_return_series(
 
     Takes the raw actions (not a pre-built chain) because a dividend factor needs the pre-ex close,
     which only exists alongside the price series. ``prices`` must cover the trading day before every
-    dividend ex-date, or that dividend cannot be reinvested and it raises ``FactorError``.
+    dividend ex-date *inside the series*, or that dividend cannot be reinvested and it raises
+    ``FactorError``. A dividend on or before the first bar scales no bar — its factor applies only
+    to dates before its ex-date — so it is skipped and logged, never a reason to give up: the factor
+    chain reaches back to 2000 while a partition often starts later, and one such dividend used to
+    make L2 fall back to ``tr_close = adj_close`` for the whole partition (backlog M13.8).
     """
     ordered = _sorted_prices(prices)
     if not ordered:
@@ -579,10 +583,22 @@ def total_return_series(
         key=lambda a: a.ex_date,
     )
     close_before = _close_before_index(ordered)
+    first_bar = ordered[0].date
+    pre_series = [div for div in dividends if div.ex_date <= first_bar]
+    if pre_series:
+        _LOG.info(
+            "ca.total_return.pre_series_dividends_skipped",
+            isin=pre_series[0].isin,
+            skipped=len(pre_series),
+            earliest_ex_date=pre_series[0].ex_date.isoformat(),
+            first_bar=first_bar.isoformat(),
+        )
 
     # Per-date cumulative dividend factor = product over dividends with ex_date > date of (P-D)/P.
     div_factors: list[tuple[date, Decimal]] = []
     for div in dividends:
+        if div.ex_date <= first_bar:
+            continue  # scales no bar in the series (see the docstring)
         prior_close = close_before.get(div.ex_date)
         if prior_close is None:
             raise FactorError(
