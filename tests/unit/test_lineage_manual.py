@@ -96,9 +96,7 @@ def test_a_derived_edge_that_closes_a_loop_through_manual_edges_is_a_conflict() 
     merge = merge_with_manual([backwards], [AVENUESAI])
 
     assert merge.derived == ()
-    assert [(c.kind, c.manual) for c in merge.conflicts] == [
-        (LineageConflictKind.CYCLE, AVENUESAI)
-    ]
+    assert [(c.kind, c.manual) for c in merge.conflicts] == [(LineageConflictKind.CYCLE, AVENUESAI)]
 
 
 def test_a_conflict_decided_for_the_manual_edge_drops_the_derived_one() -> None:
