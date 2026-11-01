@@ -84,6 +84,8 @@ _KEY_QUARTER_END: Final = "qe_Date"
 _KEY_FILING: Final = ("creation_Date", "broadcast_Date")
 _KEY_SEQ: Final = "seq_Id"
 _KEY_XBRL: Final = "xbrl"
+#: The XBRL attachment's size as the feed states it (`0 Bytes`, `24.14 KB`); absent before ~2025-08.
+_KEY_XBRL_SIZE: Final = "xbrlFileSize"
 _KEY_TYPE: Final = "type"
 _EXPECTED_TYPE: Final = "Integrated Filing- Financials"
 _MISSING_XBRL_SUFFIX: Final = "/-"
@@ -259,6 +261,7 @@ def parse_integrated_index(
             "nature": _nature(record, index=index, filename=filename),
             "audited": _optional_audited(record),
             "xbrl_url": _optional_xbrl_url(record, index=index, filename=filename),
+            "xbrl_file_size": _optional_size(record.get(_KEY_XBRL_SIZE)),
         }
         try:
             entries.append(
@@ -395,6 +398,11 @@ def _optional_audited(record: Mapping[str, Any]) -> bool | None:
     if squashed == "unaudited":
         return False
     return None
+
+
+def _optional_size(value: object) -> str | None:
+    """The stated attachment size, verbatim and stripped; None when absent or blank."""
+    return value.strip() or None if isinstance(value, str) else None
 
 
 def _optional_xbrl_url(record: Mapping[str, Any], *, index: int, filename: str) -> str | None:

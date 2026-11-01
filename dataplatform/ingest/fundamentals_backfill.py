@@ -67,18 +67,19 @@ Money is `Decimal` (inherited from the XBRL models). Time is injected (B10). The
 from __future__ import annotations
 
 import argparse
+import re
 import signal
 import sys
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from types import FrameType
 from typing import Final
 
-from dataplatform.clock import Clock, SystemClock
+from dataplatform.clock import IST, Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.identity.master import (
     AmbiguousSymbolError,
@@ -93,9 +94,16 @@ from dataplatform.ingest.calendar import (
 )
 from dataplatform.ingest.fetcher import (
     Fetcher,
+    FetchHTTPError,
     ForbiddenSpikeError,
     build_fetcher,
     leased_fetcher,
+)
+from dataplatform.ingest.fundamentals_requeue import (
+    Journal,
+    RequeueAction,
+    RequeueItem,
+    RequeueOutcome,
 )
 from dataplatform.ingest.lease import HostBusyError
 from dataplatform.ingest.models import ParseError
@@ -105,10 +113,11 @@ from dataplatform.ingest.xbrl import discovery, integrated, parser
 from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
 from dataplatform.ingest.xbrl.models import SHARES_OUTSTANDING, Filing
 from dataplatform.logging import get_logger
-from dataplatform.status.sync_state import SyncState, SyncStateStore
+from dataplatform.status.sync_state import SyncRecord, SyncState, SyncStateStore
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Error, L0Ref, L0Store
 from dataplatform.store.l1 import read_prices_raw
+from dataplatform.store.paths import l0_path
 from dataplatform.store.pit_fundamentals import PitFundamentalsBatch, write_pit
 
 __all__ = [
@@ -126,12 +135,14 @@ __all__ = [
     "Period",
     "build_index_units",
     "build_integrated_units",
+    "capture_filename",
     "isins_in_price_window",
     "main",
     "render_report",
     "resolve_universe",
     "symbols_accepted_on",
     "try_resolve_unambiguous",
+    "zero_byte_evidence",
 ]
 
 _LOG = get_logger(__name__)
@@ -164,6 +175,43 @@ MAX_BUFFERED_FILINGS: Final = 5_000
 
 #: The hosts a fetching run talks to: index feeds on the site, XBRL documents on the archive.
 LEASED_HOSTS: Final = ("www.nseindia.com", "nsearchives.nseindia.com")
+
+#: A re-fetch of a document L0 already holds is stored beside the old capture under this suffix,
+#: `<stem>_at<YYYYMMDD>T<HHMMSS><ext>` in IST — the shape `indices.l0_tri_filename` and the VIX
+#: evening capture use for a source asked twice. Matched exactly, so no other file is a capture.
+_CAPTURE_STAMP: Final = "_at"
+_CAPTURE_STAMP_FORMAT: Final = "%Y%m%dT%H%M%S"
+#: Any payload name carrying such a stamp (sidecars excluded), for listing a month directory once.
+_STAMPED: Final = re.compile(r".+_at\d{8}T\d{6}(?:\.[^.]+)?(?<!\.meta\.json)")
+
+
+def capture_filename(filename: str, at: datetime) -> str:
+    """The L0 name of a re-fetch of `filename` made at `at`: `<stem>_at<YYYYMMDD>T<HHMMSS><ext>`.
+
+    L0 is write-once (`L0Store.put`), so a second download of a document whose first one came back
+    empty or truncated cannot go under the first one's name — different bytes there would raise
+    `L0ImmutabilityError`, and the first capture is evidence of what the archive served then. The
+    instant is IST, like every other attempt-stamped L0 name. `at` must be tz-aware.
+    """
+    if at.tzinfo is None:
+        raise ValueError(f"a capture instant must be tz-aware, got {at.isoformat()!r}")
+    stem, suffix = _split_name(filename)
+    return f"{stem}{_CAPTURE_STAMP}{at.astimezone(IST).strftime(_CAPTURE_STAMP_FORMAT)}{suffix}"
+
+
+def _split_name(filename: str) -> tuple[str, str]:
+    """`name.xml` → (`name`, `.xml`); a name with no extension → (`name`, ``)."""
+    stem, dot, ext = filename.rpartition(".")
+    return (stem, f".{ext}") if dot else (filename, "")
+
+
+def zero_byte_evidence(entry: FilingIndexEntry) -> str:
+    """The clause a failure record carries when NSE's index lists the XBRL file as zero bytes.
+
+    Appended to a 404's message (`_process_filing`), it is the recorded evidence the D31 accepted
+    deviation matches: the stated size is quoted verbatim from the index record.
+    """
+    return f"; NSE's index lists this XBRL file as {entry.xbrl_file_size!r}"
 
 
 class Period(StrEnum):
@@ -335,6 +383,8 @@ class FundamentalsBackfillReport:
     filings_published: int = 0
     filings_skipped_published: int = 0
     filings_l0_reused: int = 0
+    #: Filings whose stored document was empty or truncated and was downloaded again, beside it.
+    filings_refetched: int = 0
     filings_failed: int = 0
     facts_written: int = 0
     derivations_refused: int = 0
@@ -604,6 +654,7 @@ class FundamentalsBackfillRunner:
         rebuild_from_l0: bool = False,
         batched_writes: bool = False,
         resolve_isin: integrated.ResolveIsin | None = None,
+        clock: Clock | None = None,
     ) -> None:
         if batched_writes and not rebuild_from_l0:
             raise ValueError(
@@ -639,6 +690,18 @@ class FundamentalsBackfillRunner:
         #: ISIN. Injected like `symbol_history`; a plan that contains an integrated page without it
         #: cannot run, and says so rather than guessing an identity (invariant #2).
         self._resolve_isin = resolve_isin
+        #: Names a re-fetch (`capture_filename`). Only a run that may re-download needs one; a
+        #: runner built without it fails the one unit that would have, loudly, rather than reuse.
+        self._clock = clock
+        #: `(filing date, filename)` of every document this run downloaded, so a second entry over
+        #: the same document — or a re-fetch that came back broken again — never costs a second
+        #: request in one run. One download per document per run is the retry cadence (D28).
+        self._downloaded: set[tuple[date, str]] = set()
+        #: `sync_state` keys this run drove down the pipeline (not resume-skipped) — so a one-time
+        #: re-queue item a window re-read already retried tonight is not retried twice.
+        self._attempted: set[tuple[str, date]] = set()
+        #: Month directory → the stamped re-fetch names in it, listed once per run (`_captures`).
+        self._stamped: dict[Path, set[str]] = {}
         self._should_stop = should_stop
         self._data_root = data_root
         #: A bounded-sample cap on how many in-universe filings the ingest phase *attempts* (B1's
@@ -698,6 +761,151 @@ class FundamentalsBackfillRunner:
             parked=report.parked,
         )
         return report
+
+    def requeue(
+        self,
+        items: Sequence[RequeueItem],
+        *,
+        journal: Journal,
+        report: FundamentalsBackfillReport,
+    ) -> None:
+        """Drive each one-time re-queue item once and journal what it ended as.
+
+        What it does: per item, in order — a `PUBLISHED` filing is journaled and left alone; one
+        this run already drove (a window re-read reached it tonight) is journaled with the state
+        that left, not driven twice; otherwise its entry is re-read from the stored index page it
+        names (no request) and, for `refetch`, driven through `_process_filing` exactly as a nightly
+        retry would be — so an empty or truncated stored document is downloaded again beside the
+        old one — or, for `record_evidence`, its 404 is re-recorded with the index's zero-byte
+        statement and nothing is fetched.
+        What it assumes: `run` has finished (or was not needed), on the same fetcher and leases;
+        `journal` commits its row.
+        What it never does: drive an item twice in one run, fetch an index page, ignore the
+        deadline (`should_stop` is checked per item, and an unreached item has no row, so the next
+        run owes it), or carry on past a 403 spike: the tripping item is journaled FAILED and the
+        run parks.
+        """
+        pages: dict[str, tuple[FilingIndexEntry, ...]] = {}
+        for item in items:
+            if self._should_stop():
+                _LOG.warning(
+                    "fundamentals_backfill.requeue_stopping",
+                    requeue_id=item.requeue_id,
+                    remaining=len(items) - items.index(item),
+                )
+                return
+            key = (item.state_source, item.filing_date)
+            existing = self._sync.get(*key)
+            if existing is not None and existing.state is SyncState.PUBLISHED:
+                journal(item, RequeueOutcome.ALREADY_PUBLISHED, None)
+                continue
+            if key in self._attempted:
+                journal(item, RequeueOutcome.ATTEMPTED_THIS_RUN, _row_detail(existing))
+                continue
+            entry, missing = self._requeue_entry(item, pages, report=report)
+            if entry is None:
+                journal(item, RequeueOutcome.NOT_IN_INDEX, missing)
+                continue
+            if item.action is RequeueAction.RECORD_EVIDENCE:
+                outcome, detail = self._record_zero_byte_evidence(item, entry)
+                journal(item, outcome, detail)
+                continue
+            url = entry.xbrl_url
+            if url is None:
+                journal(item, RequeueOutcome.NOT_IN_INDEX, "the index entry names no XBRL document")
+                continue
+            unit = FilingUnit(entry=entry, url=url, filename=url.rsplit("/", 1)[-1])
+            try:
+                self._process_filing(unit, report=report)
+            except _ParkedError as parked:
+                journal(item, RequeueOutcome.FAILED, parked.detail)
+                report.park_reason = parked.reason
+                report.park_detail = parked.detail
+                return
+            after = self._sync.get(*key)
+            published = after is not None and after.state is SyncState.PUBLISHED
+            journal(
+                item,
+                RequeueOutcome.PUBLISHED if published else RequeueOutcome.FAILED,
+                None if published else _row_detail(after),
+            )
+
+    def _requeue_entry(
+        self,
+        item: RequeueItem,
+        pages: dict[str, tuple[FilingIndexEntry, ...]],
+        *,
+        report: FundamentalsBackfillReport,
+    ) -> tuple[FilingIndexEntry | None, str | None]:
+        """The item's entry, re-read from its stored index page; or None and why not."""
+        if item.index_key not in pages:
+            source, day, filename = item.index_ref
+            unit = IndexUnit(
+                period=Period.QUARTERLY,
+                from_date=day,
+                to_date=day,
+                url="",
+                filename=filename,
+                feed=IndexFeed.INTEGRATED,
+            )
+            try:
+                ref = self._l0.ref_for(source, day, filename)
+                pages[item.index_key] = self._parse_index_payload(unit, ref, report=report)
+            except (L0Error, FileNotFoundError, ParseError) as exc:
+                pages[item.index_key] = ()
+                _LOG.warning(
+                    "fundamentals_backfill.requeue_index_unreadable",
+                    index=item.index_key,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+        found = [
+            entry
+            for entry in pages[item.index_key]
+            if entry.filing_id == item.unit and entry.filing_date == item.filing_date
+        ]
+        if len(found) != 1:
+            return None, (
+                f"{len(found)} entries for {item.unit} on {item.filing_date} in {item.index_key}"
+            )
+        return found[0], None
+
+    def _record_zero_byte_evidence(
+        self, item: RequeueItem, entry: FilingIndexEntry
+    ) -> tuple[RequeueOutcome, str]:
+        """Re-record a 404 with the index's zero-byte statement — no request, no other change.
+
+        Only when the index lists the XBRL file as zero bytes and the row is that very document's
+        404, retryable, not already carrying the statement. The row goes `FAILED → PENDING →
+        FAILED` (the runner's own `_fail` sequence, so `first_attempt_at` is kept and `attempts`
+        counts the re-evaluation, as a re-read from L0 is counted) with the same message plus the
+        statement. Anything else is left exactly as it is and journaled `NO_EVIDENCE`.
+        """
+        row = self._sync.get(item.state_source, item.filing_date)
+        if not entry.xbrl_stated_empty:
+            return RequeueOutcome.NO_EVIDENCE, (
+                f"the index states the XBRL file as {entry.xbrl_file_size!r}, not zero bytes"
+            )
+        error = row.last_error if row is not None else None
+        prefix = f"{FetchHTTPError.__name__}: {parser.SOURCE_ID}: {entry.xbrl_url} returned 404,"
+        if row is None or row.state is not SyncState.FAILED or not row.retryable:
+            return RequeueOutcome.NO_EVIDENCE, f"the row is not a retryable failure: {row!r:.200}"
+        if error is None or not error.startswith(prefix):
+            return RequeueOutcome.NO_EVIDENCE, f"the row's failure is not this 404: {error!r:.200}"
+        evidence = zero_byte_evidence(entry)
+        if error.endswith(evidence):
+            return RequeueOutcome.NO_EVIDENCE, "the failure already carries the statement"
+        self._rollback()
+        self._sync.begin(item.state_source, item.filing_date)
+        self._sync.mark_failed(item.state_source, item.filing_date, error + evidence)
+        self._commit()
+        _LOG.info(
+            "fundamentals_backfill.zero_byte_evidence_recorded",
+            unit=item.unit,
+            date=item.filing_date.isoformat(),
+            xbrl_file_size=entry.xbrl_file_size,
+            state="FAILED",
+        )
+        return RequeueOutcome.EVIDENCE_RECORDED, error + evidence
 
     def _process_index(
         self,
@@ -887,6 +1095,7 @@ class FundamentalsBackfillRunner:
             return False
 
         _LOG.info("fundamentals_backfill.filing_start", unit=unit.label, url=unit.url)
+        self._attempted.add((unit.state_source, unit.logical_date))
         try:
             batch = self._batch
             if batch is None:
@@ -906,11 +1115,18 @@ class FundamentalsBackfillRunner:
                 index=False,
             )
         except Exception as exc:  # fetch/write/DB — recorded, not swallowed; the run continues
+            message = f"{type(exc).__name__}: {exc}"
+            if (
+                isinstance(exc, FetchHTTPError)
+                and exc.status_code == 404
+                and unit.entry.xbrl_stated_empty
+            ):
+                message += zero_byte_evidence(unit.entry)
             self._fail(
                 unit.state_source,
                 unit.logical_date,
                 unit.label,
-                f"{type(exc).__name__}: {exc}",
+                message,
                 retryable=True,
                 report=report,
                 index=False,
@@ -1110,18 +1326,47 @@ class FundamentalsBackfillRunner:
         the digest on the way out, so a reused payload is the same bytes a fetch would have
         returned; anything unreadable raises and the unit fails loudly rather than parsing stale
         data.
+
+        **Except a payload the archive did not finish sending.** NSE sometimes answers 200 with an
+        empty body or one cut off mid-document. Reusing that would retry the parse of the same
+        broken bytes every night and never heal, so a stored capture that is empty or truncated
+        (`parser.payload_defect`) is downloaded again — once per run — and the new bytes are
+        stored *beside* the old ones under `capture_filename`, never over them (invariant #1). The
+        newest capture is the one used, by the retry and by a later rebuild alike. A complete
+        document is never re-fetched, whatever the parser later thinks of it, and a rebuild never
+        fetches at all.
         """
-        try:
-            ref = self._l0.ref_for(parser.SOURCE_ID, unit.logical_date, unit.filename)
-        except (L0Error, FileNotFoundError):
+        captures = self._captures(unit)
+        if not captures:
             if self._rebuild_from_l0:
                 raise MissingPayloadError(
                     f"{unit.label}: no L0 payload for {unit.filename} and --rebuild-from-l0 "
                     "forbids fetching; the lake this was rebuilt from is incomplete"
-                ) from None
-            return self._fetcher.fetch(
-                parser.SOURCE_ID, unit.url, unit.logical_date, filename=unit.filename
-            )
+                )
+            return self._download(unit, unit.filename)
+        ref = captures[-1]
+        document = (unit.logical_date, unit.filename)
+        if not self._rebuild_from_l0 and document not in self._downloaded:
+            defect = parser.payload_defect(self._l0.get(ref))
+            if defect is not None:
+                if self._clock is None:
+                    raise MissingPayloadError(
+                        f"{unit.label}: the stored payload {ref.key} is {defect} and this runner "
+                        "has no clock to name a re-fetch by; build it with one"
+                    )
+                fresh = self._download(unit, capture_filename(unit.filename, self._clock.now()))
+                report.filings_refetched += 1
+                _LOG.info(
+                    "fundamentals_backfill.filing_refetched",
+                    unit=unit.label,
+                    defect=defect,
+                    previous_l0_key=ref.key,
+                    previous_size_bytes=ref.size_bytes,
+                    l0_key=fresh.key,
+                    size_bytes=fresh.size_bytes,
+                    state="FETCHED",
+                )
+                return fresh
         report.filings_l0_reused += 1
         _LOG.info(
             "fundamentals_backfill.filing_l0_reused",
@@ -1131,6 +1376,46 @@ class FundamentalsBackfillRunner:
             state="FETCHED",
         )
         return ref
+
+    def _download(self, unit: FilingUnit, filename: str) -> L0Ref:
+        """Fetch the unit's document into L0 under `filename`; remembered for the run."""
+        self._downloaded.add((unit.logical_date, unit.filename))
+        ref = self._fetcher.fetch(parser.SOURCE_ID, unit.url, unit.logical_date, filename=filename)
+        listed = self._stamped.get(self._l0.path_of(ref).parent)
+        if listed is not None and filename != unit.filename:
+            listed.add(filename)
+        return ref
+
+    def _captures(self, unit: FilingUnit) -> list[L0Ref]:
+        """Every stored capture of the unit's document, oldest first: the original, then re-fetches.
+
+        A re-fetch is `capture_filename(filename, at)`; its stamp sorts in time order and the
+        original (no stamp) is the oldest. Only exact `<stem>_at<YYYYMMDD>T<HHMMSS><ext>` siblings
+        count, so no unrelated file in the month directory is mistaken for one. The directory's
+        stamped names are listed once per run and kept current by `_download`: a rebuild touches
+        tens of thousands of filings, and a listing per filing would make it quadratic.
+        """
+        source, day, filename = parser.SOURCE_ID, unit.logical_date, unit.filename
+        payload = l0_path(source, day, filename, data_root=self._l0.data_root)
+        found: list[tuple[str, L0Ref]] = []
+        if payload.is_file():
+            found.append(("", self._l0.ref_for(source, day, filename)))
+        else:
+            return []  # a re-fetch is only ever made beside an original
+        directory = payload.parent
+        if directory not in self._stamped:
+            self._stamped[directory] = {
+                entry.name for entry in directory.iterdir() if _STAMPED.fullmatch(entry.name)
+            }
+        stem, suffix = _split_name(filename)
+        for name in self._stamped[directory]:
+            if name.startswith(stem + _CAPTURE_STAMP) and name.endswith(suffix):
+                stamp = name[len(stem) + len(_CAPTURE_STAMP) : len(name) - len(suffix)]
+                if len(stamp) == 15 and stamp[8] == "T" and (stamp[:8] + stamp[9:]).isdigit():
+                    ref = self._l0.ref_for(source, day, name)
+                    if ref.logical_date == day:
+                        found.append((stamp, ref))
+        return [ref for _, ref in sorted(found, key=lambda pair: pair[0])]
 
     def _park_on_spike(
         self, label: str, state_source: str, logical_date: date, spike: ForbiddenSpikeError
@@ -1207,6 +1492,15 @@ class FundamentalsBackfillRunner:
             rollback()
 
 
+def _row_detail(row: SyncRecord | None) -> str | None:
+    """A sync_state row as one journal line: its state, and its error when it failed."""
+    if row is None:
+        return "no sync_state row"
+    if row.last_error is None:
+        return str(row.state)
+    return f"{row.state}: {row.last_error}"
+
+
 class MissingPayloadError(Exception):
     """A rebuild-from-L0 run needed a payload the lake does not hold.
 
@@ -1255,6 +1549,8 @@ def render_report(
         f"- Filings published: {report.filings_published}",
         f"- Filings resumed (already published): {report.filings_skipped_published}",
         f"- Filings whose L0 payload was reused (no re-fetch): {report.filings_l0_reused}",
+        f"- Filings whose stored document was empty or truncated and re-fetched beside it: "
+        f"{report.filings_refetched}",
         f"- Filings failed: {report.filings_failed}",
         f"- Facts written: {report.facts_written}",
         f"- Share counts refused (filing's own EPS contradicts its paid-up capital): "
@@ -1494,6 +1790,7 @@ def _run_live(
             # "throw the store away and redo it from L0", so the coarser checkpoint costs a local
             # re-parse and nothing else; the daily-forward path keeps its per-filing commit.
             batched_writes=rebuild_from_l0,
+            clock=clock,
         )
         report = runner.run(plan)
 

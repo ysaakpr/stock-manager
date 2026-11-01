@@ -39,6 +39,7 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import date
+from decimal import Decimal
 from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -73,6 +74,9 @@ _KEY_AUDITED: Final = "audited"
 _KEY_PERIOD: Final = "period"
 _KEY_XBRL: Final = "xbrl"
 _KEY_SEQ: Final = "seqNumber"
+
+#: An attachment size as the integrated feed states it: `0 Bytes`, `24.14 KB`, `3.63 MB`.
+_STATED_SIZE: Final = re.compile(r"(\d+(?:\.\d+)?)\s*(?:Bytes|B|KB|MB|GB)", re.IGNORECASE)
 
 #: `30-Jul-2026`, optionally trailed by a clock the broadcast timestamp carries. Spelled out rather
 #: than handed to `strptime("%b")`, which reads `LC_TIME`: a non-English host would otherwise fail
@@ -136,6 +140,25 @@ class FilingIndexEntry(BaseModel):
         description="absolute URL of the filing's XBRL document; None when the feed has none",
     )
     seq_number: str = Field(min_length=1, description="feed sequence id; keys restatements apart")
+    xbrl_file_size: str | None = Field(
+        default=None,
+        description="the XBRL document's size as the index states it, verbatim ('0 Bytes', "
+        "'24.14 KB'); None when the feed states none (the results feed, the 2025 integrated era)",
+    )
+
+    @property
+    def xbrl_stated_empty(self) -> bool:
+        """Whether the index itself lists the XBRL document as zero bytes long.
+
+        NSE's integrated feed states each attachment's size. For some filers it lists the XBRL
+        file as `0 Bytes` beside a multi-megabyte inline-XBRL HTML: the machine-readable document
+        was never produced, and the archive answers 404 for it. Kept as evidence for the failure
+        record (D31), never used to skip a fetch.
+        """
+        if self.xbrl_file_size is None:
+            return False
+        found = _STATED_SIZE.fullmatch(self.xbrl_file_size.strip())
+        return found is not None and Decimal(found.group(1)) == 0
 
     @property
     def filing_id(self) -> str:

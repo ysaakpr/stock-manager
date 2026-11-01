@@ -59,8 +59,9 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
-from typing import Final
+from typing import Final, Literal
 from xml.etree import ElementTree as ET
+from xml.parsers import expat
 
 from dataplatform.ingest.models import ParseError, is_isin_check_digit_valid
 from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
@@ -78,7 +79,9 @@ from dataplatform.logging import get_logger
 __all__ = [
     "SEGMENT_CONCEPT",
     "SOURCE_ID",
+    "PayloadDefect",
     "parse",
+    "payload_defect",
 ]
 
 _LOG = get_logger(__name__)
@@ -389,6 +392,43 @@ def parse(
 
 
 # ── XML plumbing ───────────────────────────────────────────────────────────────────────────────
+
+#: What `payload_defect` can find wrong with a stored body: nothing in it, or a document that ends
+#: before it closes. Both are bytes the archive did not finish sending, not a filing to refuse.
+PayloadDefect = Literal["empty", "truncated"]
+
+#: The expat errors that mean "the input ended early": no root yet, or cut inside a tag, a
+#: multi-byte character or a CDATA section. A body cut anywhere raises one of these; a whole
+#: document that is merely malformed (a mismatched tag, a bad token) raises something else.
+_TRUNCATION_CODES: Final = frozenset(
+    expat.errors.codes[message]
+    for message in (
+        expat.errors.XML_ERROR_NO_ELEMENTS,
+        expat.errors.XML_ERROR_UNCLOSED_TOKEN,
+        expat.errors.XML_ERROR_PARTIAL_CHAR,
+        expat.errors.XML_ERROR_UNCLOSED_CDATA_SECTION,
+    )
+)
+
+
+def payload_defect(payload: bytes) -> PayloadDefect | None:
+    """Whether a stored XBRL body is empty or truncated — bytes a new download could replace.
+
+    What it does: `"empty"` for a body with nothing but whitespace (the parser's `empty response
+    body`), `"truncated"` for one that stops before its document closes (the parser's `body is not
+    well-formed XML: no element found | unclosed token | partial character | unclosed CDATA
+    section`), and None for anything else — a whole document, or one malformed in some other way.
+    What it assumes: `payload` is the whole stored body, read back from L0.
+    What it never does: judge the filing. A complete document the parser refuses for its content
+    (identity, columns, units) is None here, so a retry never re-downloads a good payload.
+    """
+    if not payload.strip():
+        return "empty"
+    try:
+        ET.fromstring(payload)
+    except ET.ParseError as exc:
+        return "truncated" if exc.code in _TRUNCATION_CODES else None
+    return None
 
 
 def _root(payload: bytes, *, filename: str) -> ET.Element:
