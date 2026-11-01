@@ -125,6 +125,7 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "index_press_refresh",
         "ca_refresh",
         "bse_ca_sweep",
+        "pr_bundle_l1",
         "share_basis_guard",
         "fbil_reference_rates",
         "macro_release_capture",

@@ -105,6 +105,22 @@ Exit codes: `0` clean; `1` a unit FAILED or the fetch parked on a 403 spike (wha
 finalized — re-run after the cause is cleared; PUBLISHED units are skipped); `2` an invalid window
 (over twelve months is the backfill's job).
 
+### The broadcast CA book: `pr_ca_broadcasts` (job `pr_bundle_l1`)
+
+The PR bundle's `Bc` member, as broadcast each session, is L1 `pr_ca_broadcasts` (with
+`ex_date_derived`); the M17 dossier reads it as its corporate-action notices
+(`analyst/commons/sources.py`, `LakeCommonsSource.corporate_actions`). The EOD pipeline lands the
+previous session's bundle in L0 at 18:30; job `pr_bundle_l1` (19:20 IST weekdays) builds every
+bundle after the newest built partition plus the trailing 14 days, offline, and fails the run on
+an undated bundle or an unparsable member. Until 2026-11-02 it was unscheduled and the dataset
+stopped at 2026-10-01. To catch up by hand (offline; reads L0, L1 `prices_raw`, the identity
+master):
+
+```bash
+uv run python -m dataplatform.ingest.pr_bundle_l1 --data-root data --from <first missing> \
+  --to <today> --report ~/campaign/pr-bundle-l1-<date>.json
+```
+
 ## The share-basis guard: splits and consolidations the feeds miss (M2.3, 2026-11-01)
 
 Owner ruling 2026-11-01 (HUMAN_DECISIONS, "system should have a way"): a split or consolidation
