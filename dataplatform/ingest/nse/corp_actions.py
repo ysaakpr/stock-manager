@@ -32,6 +32,7 @@ from datetime import date
 from typing import Any, Final
 
 from dataplatform.clock import Clock
+from dataplatform.corpactions.ex_date_rule import DerivedExDate, derive_ex_date
 from dataplatform.corpactions.parse_terms import (
     ManualEntryQueue,
     ManualQueueEntry,
@@ -41,13 +42,14 @@ from dataplatform.corpactions.parse_terms import (
     split_compound,
     split_dividends,
 )
-from dataplatform.corpactions.taxonomy import ActionType, ParsedAction
+from dataplatform.corpactions.taxonomy import ActionType, FaceValueTerms, ParsedAction
 from dataplatform.identity.lineage import LineageResolver
 from dataplatform.identity.master import (
     AmbiguousSymbolError,
     Exchange,
     IdentityMaster,
 )
+from dataplatform.ingest.calendar import trading_calendar
 from dataplatform.ingest.corp_actions import (
     CaParseResult,
     CorporateAction,
@@ -187,10 +189,26 @@ def _one(
     subject = _text(record, _SUBJECT_KEY, index=index, filename=filename, required=True)
     symbol = _text(record, "symbol", index=index, filename=filename, required=True)
     native_isin = _text(record, "isin", index=index, filename=filename, required=True)
-    ex_date = _date(record, "exDate", index=index, filename=filename, required=True)
-    assert ex_date is not None  # required=True guarantees it; narrows the type for mypy
-
     record_date = _date(record, "recDate", index=index, filename=filename)
+    ex_date = _date(record, "exDate", index=index, filename=filename)
+    ex_date_rule: str | None = None
+    if ex_date is None:
+        # A blank ex-date is a parse error unless the one T+1 rule derives it: a face-value
+        # change (split or consolidation) with a stated record date on a session from 2023-01-27.
+        derived = _derived_ex_date(subject, record_date)
+        if derived is None:
+            _date(record, "exDate", index=index, filename=filename, required=True)  # raises
+            raise AssertionError("unreachable: a required empty date raises")  # pragma: no cover
+        ex_date, ex_date_rule = derived.ex_date, derived.rule.value
+        _LOG.info(
+            "nse_corp_actions.ex_date_derived",
+            source=SOURCE_ID,
+            symbol=symbol,
+            record_date=None if record_date is None else record_date.isoformat(),
+            ex_date=ex_date.isoformat(),
+            rule=ex_date_rule,
+            state="DERIVED",
+        )
     broadcast = _date(record, "caBroadcastDate", index=index, filename=filename)
     knowable = broadcast if broadcast is not None else clock.now().date()
 
@@ -247,8 +265,20 @@ def _one(
                 announcement_date=broadcast,
                 source_ref=f"{symbol}:{record.get('series', '')}".rstrip(":"),
                 l0_key=l0_key,
+                ex_date_rule=ex_date_rule,
             )
         )
+
+
+def _derived_ex_date(subject: str, record_date: date | None) -> DerivedExDate | None:
+    """The T+1 ex-date for a blank-ex-date record that states only face-value changes, or None."""
+    parsed, _ = _parse_subject(subject)
+    if not parsed or not all(
+        action.action_type is ActionType.SPLIT and isinstance(action.terms, FaceValueTerms)
+        for action in parsed
+    ):
+        return None
+    return derive_ex_date(record_date, is_session=trading_calendar().is_session)
 
 
 def _parse_subject(subject: str) -> tuple[list[ParsedAction], list[ManualQueueEntry]]:

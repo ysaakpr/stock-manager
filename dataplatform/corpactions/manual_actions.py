@@ -193,6 +193,7 @@ class CuratedAction:
             source_ref=MANUAL_ACTIONS_PATH.name,
             l0_key=first.l0_key,
             component=self.component or dividend_component(self.terms),
+            ex_date_rule=None if self.ex_date_rule is None else self.ex_date_rule.value,
         )
 
 
