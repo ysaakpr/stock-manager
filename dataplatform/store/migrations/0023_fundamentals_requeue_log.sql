@@ -28,3 +28,7 @@ CREATE TABLE fundamentals_requeue_log (
     consumed_at  timestamptz NOT NULL,
     PRIMARY KEY (requeue_id, unit, logical_date)
 );
+
+COMMENT ON TABLE fundamentals_requeue_log IS
+    'D1 (M14.3): one row per one-time XBRL filing re-queue item the fundamentals_forward job drove; '
+    'its outcome, and what makes the re-queue one-time. Append-only.';
