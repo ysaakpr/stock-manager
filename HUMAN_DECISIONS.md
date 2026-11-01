@@ -867,10 +867,32 @@ share-basis guard"):
   11:30 IST Saturday (after `ca_refresh`).
 
 Recorded here as the owner's decision; no D-number assigned and no accepted deviation added by
-the agent. **Proposed, for the owner:** the guard's first run quarantines ~50 historical steps
-(2011-2026, almost all relistings after years-long suspensions; none held by any book). If their
-ERRORs are unwanted on Ops, a D-entry accepting `share_basis_step` flags dated before 2026-11-01 as
-amber would keep every new one red.
+the agent. The agent's proposal to show the first run's historical flags as amber was ratified
+by the owner on 2026-11-02 as D33, below.
+
+### D33 — The share-basis flags of the guard's first historical sweep → **ANSWERED (owner, 2026-11-02): show as Warning, with a remark; new ones stay ERROR.**
+
+PR #160's first full-history sweep (2026-11-01 21:01 IST) raised 47 `l2_continuity` ERRORs of
+the `SHARE_BASIS` class (finding kind `share_basis_step`) and 5 `share_basis_guard` ERRORs (3
+`reissue_face_value_disagrees`, 2 `stated_terms_disagree`): 52 quarantine windows on 47 ISINs,
+about steps dated 2011-08-25 .. 2026-08-17, almost all relistings after years-long suspensions
+and none held by any book. The owner's ruling, 2026-11-02:
+
+* a flag about a step dated **before 2026-11-01** comes from that first historical sweep, not
+  from a break with the plan, so it shows as **Warning** (ACCEPTED, amber);
+* each carries a remark saying it comes from the first sweep, that its pre-step bars are
+  quarantined (withheld from decisions), and that it clears automatically if a corporate-action
+  record later explains the step;
+* a flag dated **on or after 2026-11-01** stays **ERROR**;
+* the quarantine itself is unchanged; this only changes how Ops displays the flags.
+
+The match is the class and the date bound, never the check alone: `l2_continuity` flags of kind
+`share_basis_step`, and `share_basis_guard` flags of kinds `stated_terms_disagree` /
+`reissue_face_value_disagrees`, each with a logical (step) date before 2026-11-01. Any other
+ERROR either check raises, on any date, stays red, and each check's `quality:<check>:red` alert is
+a warning only while every open ERROR flag of it is in the set. No review date (the owner set
+none). Display and alerting only (`d33-*` in `dataplatform/status/accepted_deviations.yaml`);
+nothing that withholds a bar or gates a session reads it. Task M2.3.
 
 ---
 
