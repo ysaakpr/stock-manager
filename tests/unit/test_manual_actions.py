@@ -290,7 +290,7 @@ def test_the_derived_ex_date_is_refused_outside_its_rule(
 
 def test_the_t1_rule_starts_on_2023_01_27_and_needs_a_session() -> None:
     always = lambda _d: True  # noqa: E731
-    assert T1_SETTLEMENT_FROM == date(2023, 1, 27)
+    assert date(2023, 1, 27) == T1_SETTLEMENT_FROM
     derived = derive_ex_date(date(2023, 1, 27), is_session=always)
     assert derived is not None and derived.ex_date == date(2023, 1, 27)
     assert derive_ex_date(date(2023, 1, 26), is_session=always) is None
