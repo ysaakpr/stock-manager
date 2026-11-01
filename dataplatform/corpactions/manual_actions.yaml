@@ -26,6 +26,13 @@
 #     and session. The UNSOURCED_* kinds at the end of the list are share-basis steps whose terms
 #     no source states: no factor, a WARN from the continuity check, and their pre-step bars
 #     quarantined from every backtest and decision (D22).
+#   * `superseded_dividends` are owner rulings, on the issuer's own document, that one CA feed's
+#     dividend record is stale. `supersedes` names that record exactly (feed, dividend_kind,
+#     amount_inr) on `ex_date`; `amount_inr` is what the OTHER feed's record states, and the first
+#     source is that record. Reconciliation books the other feed's record once and keeps the
+#     superseded one as evidence, never booked. No amount here is this file's own: both are the
+#     feeds'. If either record is missing on a day reconciliation loads, it raises — remove or
+#     revise the row then. It applies to that one ISIN and ex-date, nothing else.
 
 actions:
   - isin: INE018I01017
@@ -620,3 +627,63 @@ explained_moves:
         member: cm08SEP2008bhav.csv
         line: 586
         quote: JMFINANCIL,EQ,66,67.35,61.9,67.35,67.35,1402.2,166230,10786898.45,8-SEP-2008,
+
+superseded_dividends:
+  - isin: INE258A01024
+    company: BEML Ltd
+    ex_date: 2026-09-22
+    amount_inr: "12.28"
+    supersedes:
+      feed: bse_corp_actions
+      dividend_kind: FINAL
+      amount_inr: "0.55"
+    issuer_document:
+      url: https://www.bemlindia.in/wp-content/uploads/2026/08/Dividend_SE_signed.pdf
+      dated: 2026-08-07
+      quote: >-
+        Board of Directors at its 422nd meeting, held on 07.08.2026 have recommended revised Final
+        Dividend of Rs. 12.28/- per equity share of face value of Rs. 5 each (i.e. 246 % of
+        paid-up share capital) for the financial year 2025-26. Please note that the above final
+        dividend is inclusive of the dividend of Rs. 0.55 per equity share recommended by the
+        Board on 29th May, 2026 for the financial year 2025-26.
+    checked: 2026-11-01
+    note: >-
+      One FY2025-26 final dividend of Rs 12.28 per FV-5 share, ex and record 2026-09-22, booked
+      once. BEML's board recommended Rs 0.55 on 2026-05-29, then a revised Rs 12.28 on 2026-08-07
+      "inclusive of" the Rs 0.55 (BEML's letter to the exchanges, ref CS/SE/2026-27/835, dated
+      2026-08-07, https://www.bemlindia.in/wp-content/uploads/2026/08/Dividend_SE_signed.pdf).
+      The AGM approved Rs 12.28 on 2026-09-29. NSE's CA record and book-closure file carry Rs
+      12.28; BSE's record still carries the May Rs 0.55 and never picked up the revision. So
+      NSE's record is booked and BSE's is superseded: never booked alone, and never added on top
+      (12.28 + 0.55 would count the May recommendation twice). The 2025-11-03 1:2 split precedes
+      this ex-date, so every amount here is on the FV-5 basis. Owner decision 2026-11-01; the NSE
+      CA payload names the pre-split ISIN INE258A01016, which the D2 lineage maps to
+      INE258A01024.
+    sources:
+      - l0_key: nse_corp_actions/2026/10/corporateActions_20260901_20261006.json
+        line: 1
+        quote: >-
+          "comp":"BEML Limited","exDate":"22-Sep-2026","faceVal":"5","ind":"-","isin":"INE258A01016",
+          ... ,"recDate":"22-Sep-2026","series":"EQ","subject":"Dividend - Rs 12.28 Per
+          Share","symbol":"BEML"}
+      - l0_key: nse_pr_bundle/2026/08/PR070826.zip
+        member: an07082026.txt
+        line: 1751
+        quote: >-
+          BEML Limited has informed the Exchange that Board of Directors at its meeting held on
+          August 07, 2026, recommended Final Dividend of Rs. 12.28 per equity share.
+      - l0_key: nse_pr_bundle/2026/09/PR170926.zip
+        member: bc17092026.csv
+        line: 90
+        quote: EQ,BEML,BEML Limited,2026-09-22,,,2026-09-22,,,DIV - RS 12.28 PER SH
+      - l0_key: nse_pr_bundle/2026/05/PR290526.zip
+        member: an29052026.txt
+        line: 3427
+        quote: >-
+          BEML Limited has informed the Exchange that Board of Directors at its meeting held on
+          May 29, 2026, recommended Final Dividend of Rs. 0.55 per equity share.
+      - l0_key: bse_corp_actions/2016/09/defaultdata_500048.json
+        line: 1
+        quote: >-
+          {"scrip_code":500048,"short_name":"BEML","Ex_date":"22 Sep 2026","Purpose":"Final
+          Dividend - Rs. - 0.5500","RD_Date":"22 Sep 2026"

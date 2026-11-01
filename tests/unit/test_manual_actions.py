@@ -30,6 +30,7 @@ from dataplatform.corpactions.manual_actions import (
     ExplainedMove,
     ManualActions,
     ManualActionsError,
+    SupersededDividend,
     load_manual_actions,
 )
 from dataplatform.corpactions.merger_terms import TermSource
@@ -89,10 +90,11 @@ def test_every_row_is_sourced_checked_and_knowable_no_later_than_its_ex_date() -
 
 def _sources() -> list[tuple[str, TermSource]]:
     curated = load_manual_actions()
-    rows: list[CuratedAction | ExplainedMove] = [
+    rows: list[CuratedAction | ExplainedMove | SupersededDividend] = [
         *curated.actions,
         *curated.dividends,
         *curated.explained_moves,
+        *curated.superseded,
     ]
     return [(r.isin, s) for r in rows for s in r.sources]
 
