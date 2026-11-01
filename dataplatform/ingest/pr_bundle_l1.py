@@ -72,7 +72,8 @@ from typing import Final, Protocol
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from dataplatform.clock import FrozenClock
+from dataplatform.clock import Clock, FrozenClock
+from dataplatform.config import Settings
 from dataplatform.corpactions.bc_terms import face_value_change
 from dataplatform.corpactions.ex_date_rule import derive_ex_date, nse_session
 from dataplatform.identity.master import (
@@ -964,16 +965,26 @@ def catch_up(
     return report
 
 
-def run_pr_bundle_l1_job(context: object) -> None:
+class _JobContext(Protocol):
+    """What the job reads from `scheduler.registry.JobContext`. A protocol, not an import: the
+    Commons imports this module, and must never reach the scheduler (and through it M17's desk;
+    `tests/unit/test_commons_isolation.py`)."""
+
+    @property
+    def clock(self) -> Clock: ...
+
+    @property
+    def settings(self) -> Settings: ...
+
+
+def run_pr_bundle_l1_job(context: _JobContext) -> None:
     """The scheduled job body: one `catch_up` against the configured lake and identity master.
 
     The master is read with an in-memory reconciliation queue, as the CLI does: this build reads
     identity and never writes to it.
     """
-    from dataplatform.scheduler.registry import JobContext
     from dataplatform.store.db import connection
 
-    assert isinstance(context, JobContext)
     data_root = context.settings.data_root
     with connection(context.settings) as conn:
         master = IdentityStore(conn, clock=context.clock).load_master(
