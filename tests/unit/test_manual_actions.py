@@ -488,6 +488,9 @@ class _NullLineage:
     def survivor_of(self, isin: str) -> str:
         return isin
 
+    def edges(self) -> tuple[tuple[str, str, date], ...]:
+        return ()
+
 
 def test_the_check_reads_curated_breaks_and_moves_without_postgres(tmp_path: Path) -> None:
     from dataplatform.quality.l2_continuity import scan
