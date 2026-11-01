@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from datetime import date, timedelta
@@ -479,7 +480,48 @@ def _rows_agree(left: CorporateAction, right: CorporateAction) -> bool:
 
 
 def _rows_fill(left: CorporateAction, right: CorporateAction) -> bool:
-    return _quantified_fill(left.terms, right.terms) is not None
+    return _row_fill(left, right) is not None
+
+
+def _row_fill(left: CorporateAction, right: CorporateAction) -> Terms | None:
+    """`_quantified_fill` on two rows' terms, else `_named_kind_fill` on the rows themselves."""
+    filled = _quantified_fill(left.terms, right.terms)
+    return filled if filled is not None else _named_kind_fill(left, right)
+
+
+def _names_kind(text: str, kind: DividendKind) -> bool:
+    return re.search(rf"\b{kind.value.lower()}\b", text.lower()) is not None
+
+
+def _named_kind_fill(left: CorporateAction, right: CorporateAction) -> DividendTerms | None:
+    """The narrower kind, when one feed's single dividend phrase names both feeds' kinds.
+
+    NSE writes `Special Interim Dividend Rs 12/- Per Share` and BSE `Interim Dividend - Rs. -
+    12.0000`. The taxonomy holds one kind per dividend, so the parser keeps SPECIAL and the pair
+    read as INTERIM against SPECIAL — two RATIO_MISMATCH flags (INE029A01011 2017-03-24,
+    INE259A01022 2018-05-29) on the same money, the same day, and words both feeds wrote. NSE's
+    phrase *says* interim; nothing disagrees, the feeds only stated it at different widths.
+
+    So, as in `_dividend_kind_fill`: the money must match exactly and be stated; then the kinds
+    differ, neither is UNSPECIFIED, and one row's text — a line naming one dividend, not a list —
+    names the other row's kind as well as its own. The other row's terms stand: its kind is the
+    one both feeds wrote. Feeds naming different kinds outright (NSE `Special Dividend`, BSE
+    `Interim Dividend`) are still a mismatch; this never picks between two statements.
+    """
+    lt, rt = left.terms, right.terms
+    if not (isinstance(lt, DividendTerms) and isinstance(rt, DividendTerms)):
+        return None
+    if lt.amount_inr is None and lt.percent_of_face_value is None:
+        return None
+    if (lt.amount_inr, lt.percent_of_face_value) != (rt.amount_inr, rt.percent_of_face_value):
+        return None
+    kinds = (lt.dividend_kind, rt.dividend_kind)
+    if kinds[0] is kinds[1] or DividendKind.UNSPECIFIED in kinds:
+        return None
+    for broad, narrow in ((left.raw_text, rt), (right.raw_text, lt)):
+        if not names_several_dividends(broad) and _names_kind(broad, narrow.dividend_kind):
+            return narrow
+    return None
 
 
 def _match(
@@ -689,7 +731,7 @@ def reconcile(
             paired_days.extend((left.ex_date, right.ex_date))
             if _terms_agree(left.terms, right.terms):
                 reconciled.append(_reconcile_pair(left, right))
-            elif (filled := _quantified_fill(left.terms, right.terms)) is not None:
+            elif (filled := _row_fill(left, right)) is not None:
                 reconciled.append(_reconcile_pair(left, right, terms=filled))
             else:
                 disputed_days.extend((left.ex_date, right.ex_date))
@@ -871,7 +913,7 @@ def _fold_pair(left: CorporateAction, right: CorporateAction) -> CorporateAction
     if _terms_agree(left.terms, right.terms):
         terms, carrier = left.terms, left
     else:
-        filled = _quantified_fill(left.terms, right.terms)
+        filled = _row_fill(left, right)
         if filled is None:
             raise ReconcileError(
                 f"{left.isin} {left.action_type.value} on {left.ex_date.isoformat()}: rows from "

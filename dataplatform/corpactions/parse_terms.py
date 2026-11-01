@@ -222,13 +222,13 @@ def split_dividends(segment: str) -> tuple[str, ...]:
     starts = [match.start() for match in _DIVIDEND_PHRASE_RE.finditer(segment)]
     if len(starts) < 2 or _BREAKDOWN_RE.search(segment):
         return (segment,)
-    if _money_values(_normalize(segment[: starts[0]])):
+    if _dividend_amounts(_normalize(segment[: starts[0]])):
         return (segment,)
     bounds = [0, *starts[1:], len(segment)]
     pieces = tuple(segment[a:b].strip() for a, b in pairwise(bounds))
     for piece in pieces:
         normalized = _normalize(piece)
-        if len(_money_values(normalized)) + len(_percents(normalized)) > 1:
+        if len(_dividend_amounts(normalized)) + len(_percents(normalized)) > 1:
             return (segment,)
     return pieces
 
@@ -354,6 +354,18 @@ def classify(text: str) -> tuple[ActionType, ...]:
 _MONEY = r"(?:\b(?:rs|re|inr)(?=[\s.\d-])\s*\.?|₹)\s*-?\s*(\d[\d,]*(?:\.\d+)?)"
 _MONEY_RE: Final[re.Pattern[str]] = re.compile(_MONEY)
 
+#: A dividend amount stated per share with no currency marker before it: NSE's `Dividend - 1.40
+#: Per Share`, `Special Dividend 243 Per Share`, `Dividend - 1 Rs Per Share` (the marker after the
+#: number). `_MONEY` rightly refuses a bare number, but one followed by "per share" is an amount
+#: and nothing else — a year or a percentage is never "per share". Reading it as "amount not
+#: stated" left 19 dividend RATIO_MISMATCH flags open against BSE rows stating the very same
+#: figure, nine of them the special half of a regular-plus-special line. The lookbehind refuses a
+#: number that starts mid-figure, so NSE's typos `Re 0..30 Per Share` and `Rs 0 .70 Per Share`
+#: are never read as ₹30 or ₹70. Used for dividends only: rights and buyback prices keep `_MONEY`.
+_PER_SHARE_AMOUNT_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![\d.,])(\d[\d,]*(?:\.\d+)?)\s*(?:/-)?\s*(?:(?:rs|re|inr)\b\.?\s*)?(?:/-)?\s*per\s+sh"
+)
+
 #: `FROM <money> ... TO <money>`, non-greedy so it takes the first "to" after the first amount.
 _FROM_TO_RE: Final[re.Pattern[str]] = re.compile(rf"\bfrom\b\s*{_MONEY}.*?\bto\b\s*{_MONEY}")
 
@@ -398,6 +410,22 @@ def _money_values(text: str) -> list[Decimal]:
     for match in _MONEY_RE.finditer(text):
         value = _decimal(match.group(1))
         if value is not None and value not in seen:
+            seen.append(value)
+    return seen
+
+
+def _dividend_amounts(text: str) -> list[Decimal]:
+    """Every distinct rupee amount a dividend string states: `_money_values`, plus the amounts it
+    states only as `<n> Per Share` (`_PER_SHARE_AMOUNT_RE`), in order of first appearance."""
+    found = [
+        (match.start(), value)
+        for pattern in (_MONEY_RE, _PER_SHARE_AMOUNT_RE)
+        for match in pattern.finditer(text)
+        if (value := _decimal(match.group(1))) is not None
+    ]
+    seen: list[Decimal] = []
+    for _, value in sorted(found, key=lambda item: item[0]):
+        if value not in seen:
             seen.append(value)
     return seen
 
@@ -527,7 +555,7 @@ def _dividend_kind(text: str) -> DividendKind:
 
 def _dividend_terms(text: str) -> _Extraction:
     kind = _dividend_kind(text)
-    money, percents = _money_values(text), _percents(text)
+    money, percents = _dividend_amounts(text), _percents(text)
     # The bare form (kind only, no amount) is always valid and is the queue fallback — DIVIDEND is
     # the one type TERMS_BY_ACTION does not allow UnquantifiedTerms for, so a bad amount must fall
     # back to a bare DividendTerms, never to _conflicting()'s UnquantifiedTerms.
