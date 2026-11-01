@@ -66,7 +66,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
 from dataplatform.corpactions.bc_terms import face_value_change
-from dataplatform.corpactions.ex_date_rule import T1_SETTLEMENT_FROM, derive_ex_date
+from dataplatform.corpactions.ex_date_rule import T1_SETTLEMENT_FROM, derive_ex_date, nse_session
 from dataplatform.corpactions.factors import PRICE_EVENT_TYPES, FactorChain, with_events
 from dataplatform.corpactions.share_basis_state import (
     BC_SOURCE,
@@ -715,7 +715,6 @@ def run_guard(
     from dataplatform.corpactions.share_basis_state import load_state, write_state
     from dataplatform.identity.lineage import LineageStore
     from dataplatform.identity.master import IdentityStore, InMemoryReconciliationQueue
-    from dataplatform.ingest.calendar import trading_calendar
     from dataplatform.quality import l2_continuity
     from dataplatform.quality.sentinel import persist_findings
     from dataplatform.store.l2 import open_connection, rebuild_isins
@@ -746,7 +745,7 @@ def run_guard(
         bars=bars,
         survivor_of=resolver.survivor_of,
         chain_of=resolver.chain_to,
-        is_session=trading_calendar().is_session,
+        is_session=nse_session,
         as_of=latest_l1_session(data_root=data_root),
     )
     report = GuardReport(

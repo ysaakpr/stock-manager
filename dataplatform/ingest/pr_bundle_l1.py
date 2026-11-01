@@ -67,6 +67,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from dataplatform.clock import FrozenClock
+from dataplatform.corpactions.bc_terms import face_value_change
+from dataplatform.corpactions.ex_date_rule import derive_ex_date, nse_session
 from dataplatform.identity.master import (
     AmbiguousSymbolError,
     Exchange,
@@ -231,6 +233,10 @@ CA_BROADCASTS_SCHEMA: Final = pa.schema(
         pa.field("no_delivery_end", pa.date32(), nullable=True),
         pa.field("resolved_via", pa.string(), nullable=False),
         pa.field("l0_key", pa.string(), nullable=False),
+        # The rule that filled `ex_date` when NSE left EX_DT blank on a face-value change
+        # (`corpactions.ex_date_rule`, e.g. T1_RECORD_DATE); null when `ex_date` is as published.
+        # Last, so partitions written before it read unchanged by name.
+        pa.field("ex_date_derived", pa.string(), nullable=True),
     ]
 )
 
@@ -652,6 +658,11 @@ def _broadcasts(
             continue
         count.written += 1
         count.via[how] += 1
+        ex_date, derived_by = action.ex_date, None
+        if ex_date is None and face_value_change(action.purpose) is not None:
+            derived = derive_ex_date(action.record_date, is_session=nse_session)
+            if derived is not None:
+                ex_date, derived_by = derived.ex_date, derived.rule.value
         build.records[CA_BROADCASTS_DATASET].append(
             {
                 "knowable_date": action.knowable_date,
@@ -663,11 +674,12 @@ def _broadcasts(
                 "record_date": action.record_date,
                 "book_closure_start": action.book_closure_start,
                 "book_closure_end": action.book_closure_end,
-                "ex_date": action.ex_date,
+                "ex_date": ex_date,
                 "no_delivery_start": action.no_delivery_start,
                 "no_delivery_end": action.no_delivery_end,
                 "resolved_via": how.value,
                 "l0_key": build.l0_key,
+                "ex_date_derived": derived_by,
             }
         )
 

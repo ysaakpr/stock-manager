@@ -32,7 +32,7 @@ from datetime import date
 from typing import Any, Final
 
 from dataplatform.clock import Clock
-from dataplatform.corpactions.ex_date_rule import DerivedExDate, derive_ex_date
+from dataplatform.corpactions.ex_date_rule import DerivedExDate, derive_ex_date, nse_session
 from dataplatform.corpactions.parse_terms import (
     ManualEntryQueue,
     ManualQueueEntry,
@@ -49,7 +49,6 @@ from dataplatform.identity.master import (
     Exchange,
     IdentityMaster,
 )
-from dataplatform.ingest.calendar import trading_calendar
 from dataplatform.ingest.corp_actions import (
     CaParseResult,
     CorporateAction,
@@ -278,7 +277,7 @@ def _derived_ex_date(subject: str, record_date: date | None) -> DerivedExDate | 
         for action in parsed
     ):
         return None
-    return derive_ex_date(record_date, is_session=trading_calendar().is_session)
+    return derive_ex_date(record_date, is_session=nse_session)
 
 
 def _parse_subject(subject: str) -> tuple[list[ParsedAction], list[ManualQueueEntry]]:

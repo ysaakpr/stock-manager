@@ -24,7 +24,8 @@ The rule, and only the rule:
 Every derived ex-date carries the rule's name (`ExDateRule.T1_RECORD_DATE`) wherever it is
 recorded, so it can never be mistaken for one the source stated.
 
-Pure: no clock, no I/O, no network. The caller passes the session predicate.
+Pure: no clock, no I/O, no network. The caller passes the session predicate; `nse_session` is the
+production one (the checked-in NSE calendar, read once).
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ __all__ = [
     "DerivedExDate",
     "ExDateRule",
     "derive_ex_date",
+    "nse_session",
 ]
 
 #: The day every Indian equity settled T+1 (the last phase of the 2022-02-25 rollout). From here
@@ -79,3 +81,17 @@ def derive_ex_date(
     if not is_session(record_date):
         return None
     return DerivedExDate(ex_date=record_date, rule=ExDateRule.T1_RECORD_DATE)
+
+
+def nse_session(day: date) -> bool:
+    """Whether NSE held a trading session on `day`, by the checked-in calendar (`ingest.calendar`).
+
+    A date the calendar does not cover yet (a record date in a year whose holidays are not
+    declared) answers False, so the rule declines to derive rather than guess a session.
+    """
+    from dataplatform.ingest.calendar import CalendarCoverageError, trading_calendar
+
+    try:
+        return trading_calendar().is_session(day)
+    except CalendarCoverageError:
+        return False
