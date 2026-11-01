@@ -105,6 +105,11 @@ class ConflictKind(StrEnum):
     """One ISIN, two symbols, one date. Usually a rename recorded with the wrong effective
     date, and it makes the as-of symbol lookup a coin toss."""
 
+    LINEAGE_EDGE = "LINEAGE_EDGE"
+    """A derived `isin_lineage` edge contradicts a MANUAL one: two answers to which ISIN a
+    retired one became (`lineage.merge_with_manual`). Resolving the row decides for the MANUAL
+    edge; deleting the MANUAL edge decides for the derived one."""
+
 
 class DetectedBy(StrEnum):
     """Where the ambiguity was noticed. The same defect can be found by both."""
@@ -114,6 +119,9 @@ class DetectedBy(StrEnum):
 
     RESOLVE = "RESOLVE"
     """A caller asked the stored master a question it could not answer with one row."""
+
+    LINEAGE_REBUILD = "LINEAGE_REBUILD"
+    """`identity.lineage_rebuild` derived an edge a MANUAL `isin_lineage` row contradicts."""
 
 
 class IdentityError(Exception):
@@ -247,6 +255,8 @@ class IdentityConflict:
     def __str__(self) -> str:
         if self.kind is ConflictKind.SYMBOL_TO_ISIN:
             subject = f"symbol {self.symbols[0]!r} -> {list(self.isins)}"
+        elif self.kind is ConflictKind.LINEAGE_EDGE:
+            subject = f"lineage edge over {list(self.isins)}"
         else:
             subject = f"ISIN {self.isins[0]!r} -> {list(self.symbols)}"
         note = f" ({self.note})" if self.note else ""
