@@ -84,9 +84,11 @@ OUTSIDER = SPLIT
 
 GOOD_BODY: dict[str, Any] = {
     "headline": "Order received",
-    "disclosed": "The company received a letter of award for a road project worth Rs 120 crore.",
+    "disclosed": "The company received a letter of award for a road project worth Rs 1,250 crore.",
     "period": None,
-    "figures": [{"label": "Order value", "value": "120", "unit": "INR crore", "period": None}],
+    # 1,250 crore is in every fixture filing: the announcement's text and the results' revenue
+    # (12500000000), so the stub's one good answer passes the grounding check everywhere.
+    "figures": [{"label": "Order value", "value": "1,250", "unit": "INR crore", "period": None}],
 }
 
 #: The digest model the roster names (Amendment 5); digests.py has no default of its own.
@@ -102,7 +104,10 @@ def _clock(day: date = DAY3, hour: int = 21) -> FrozenClock:
 
 
 def _ann(
-    isin: str, ref: str, day: date, body: str | None = "Award letter received."
+    isin: str,
+    ref: str,
+    day: date,
+    body: str | None = "Award letter received for a road project worth Rs. 1,250 Crore.",
 ) -> AnnouncementText:
     return AnnouncementText(
         isin=isin,
