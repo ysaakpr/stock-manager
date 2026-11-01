@@ -6,13 +6,18 @@
 #
 #   action: refetch          — the normal per-filing path, once: reuse L0, re-download a stored
 #                              document that is empty or truncated (beside it), parse, publish or fail.
+#   reuse_only: true         — (refetch only) drive a filing only from a complete stored document;
+#                              one with none is journaled FAILED, never fetched. The only kind of
+#                              re-queue an owner-approved raised bound (RAISED_BOUNDS) may carry.
 #   action: record_evidence  — NO request: re-read the entry from the stored index page and, if the
 #                              index lists the XBRL file as zero bytes and the row is that document's
 #                              404, re-record the failure with the index's statement (D31's evidence).
 #
 # Each filing names its sync_state unit, its filing (logical) date, and the L0 key of the stored
 # index page its entry is re-read from (source/logical_date/filename) — no index request is made.
-# Bounded: at most 50 filings a re-queue, 100 in the file. Public repository: no secret, no host.
+# Bounded: at most 50 filings a re-queue, 100 in the file — except a reuse_only re-queue whose id
+# the owner approved a raised bound for in fundamentals_requeue.RAISED_BOUNDS, which counts against
+# that bound alone. Public repository: no secret, no host.
 
 version: 1
 
@@ -73,3 +78,223 @@ requeues:
       - {unit: IF175271-FY, filing_date: 2026-07-17, index: nse_integrated_filing_index/2026-07-01/integrated-filing-results_20260701_20260731_p02.json, note: UPL}
       - {unit: IF202751, filing_date: 2026-10-21, index: nse_integrated_filing_index/2026-10-20/integrated-filing-results_20261020_20261021_p01.json, note: ADANIGREEN}
       - {unit: IF202816, filing_date: 2026-10-21, index: nse_integrated_filing_index/2026-10-20/integrated-filing-results_20261020_20261021_p01.json, note: ADANIGREEN}
+
+  # 2026-11-02 (owner): re-parse the class E and F1 parse failures from their complete L0
+  # documents now that the parser accepts them (PR fix/xbrl-identity-e-f1): E — a multi-entity
+  # standalone Sep-25/Dec-25 filing whose extra identifier is the company's own BSE code (per D2)
+  # or 000000; F1 — a mistyped symbol in a document whose own ISIN is the entry's. reuse_only:
+  # every document is complete in L0, so the whole list makes no request, and the owner raised
+  # the bound once for it (RAISED_BOUNDS) so it runs in one night. NOT a --rebuild-from-l0 over
+  # the window: that would overwrite the D31/D32 404 evidence. PANACHE (IF142724) is included and
+  # stays refused: its extra identifier 123456 is no BSE code D2 holds.
+  - id: xbrl-identity-e-f1-2026-11-03
+    action: refetch
+    reuse_only: true
+    not_before: 2026-11-03
+    basis: "owner, 2026-11-02: one scheduled re-parse of the class E/F1 failures from L0, raised bound"
+    filings:
+      - {unit: IF120292, filing_date: 2025-10-16, index: nse_integrated_filing_index/2025-10-01/integrated-filing-results_20251001_20251031_p01.json, note: "E VIKRAMSOLR; 2025-07-01..2025-09-30"}
+      - {unit: IF120732, filing_date: 2025-10-17, index: nse_integrated_filing_index/2025-10-01/integrated-filing-results_20251001_20251031_p01.json, note: "E ZOTA; 2025-07-01..2025-09-30"}
+      - {unit: IF120766, filing_date: 2025-10-17, index: nse_integrated_filing_index/2025-10-01/integrated-filing-results_20251001_20251031_p01.json, note: "E POONAWALLA; 2025-07-01..2025-09-30"}
+      - {unit: IF121992, filing_date: 2025-10-27, index: nse_integrated_filing_index/2025-10-01/integrated-filing-results_20251001_20251031_p01.json, note: "E SHREEJISPG; 2025-07-01..2025-09-30"}
+      - {unit: IF122375, filing_date: 2025-10-28, index: nse_integrated_filing_index/2025-10-01/integrated-filing-results_20251001_20251031_p01.json, note: "E M&MFIN; 2025-07-01..2025-09-30"}
+      - {unit: IF122570, filing_date: 2025-10-29, index: nse_integrated_filing_index/2025-10-01/integrated-filing-results_20251001_20251031_p01.json, note: "E SHREEJISPG; 2025-07-01..2025-09-30"}
+      - {unit: IF124077, filing_date: 2025-11-01, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p04.json, note: "E SBFC; 2025-07-01..2025-09-30"}
+      - {unit: IF124168, filing_date: 2025-11-03, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p04.json, note: "E NIVABUPA; 2025-07-01..2025-09-30"}
+      - {unit: IF124204, filing_date: 2025-11-03, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p04.json, note: "E MARINE; 2025-07-01..2025-09-30"}
+      - {unit: IF124256, filing_date: 2025-11-04, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p04.json, note: "E ROUTE; 2025-07-01..2025-09-30"}
+      - {unit: IF124297, filing_date: 2025-11-04, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p04.json, note: "E MOBIKWIK; 2025-07-01..2025-09-30"}
+      - {unit: IF124420, filing_date: 2025-11-04, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p04.json, note: "E REFEX; 2025-07-01..2025-09-30"}
+      - {unit: IF124422, filing_date: 2025-11-04, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p04.json, note: "E REFEX; 2025-07-01..2025-09-30"}
+      - {unit: IF124478, filing_date: 2025-11-04, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p04.json, note: "E BLUESTONE; 2025-07-01..2025-09-30"}
+      - {unit: IF124557, filing_date: 2025-11-05, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E DIAMINESQ; 2025-07-01..2025-09-30"}
+      - {unit: IF124577, filing_date: 2025-11-05, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E IGIL; 2025-07-01..2025-09-30"}
+      - {unit: IF124620, filing_date: 2025-11-05, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E RELTD; 2025-07-01..2025-09-30"}
+      - {unit: IF124632, filing_date: 2025-11-05, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E SAREGAMA; 2025-07-01..2025-09-30"}
+      - {unit: IF124721, filing_date: 2025-11-06, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E SOLARA; 2025-07-01..2025-09-30"}
+      - {unit: IF124734, filing_date: 2025-11-06, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E AWL; 2025-07-01..2025-09-30"}
+      - {unit: IF124994, filing_date: 2025-11-06, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E HILINFRA; 2025-04-01..2025-09-30"}
+      - {unit: IF125044, filing_date: 2025-11-07, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E SAKAR; 2025-07-01..2025-09-30"}
+      - {unit: IF125171, filing_date: 2025-11-07, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E AKSHAR; 2025-07-01..2025-09-30"}
+      - {unit: IF125223, filing_date: 2025-11-07, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E GVPTECH; 2025-07-01..2025-09-30"}
+      - {unit: IF125285, filing_date: 2025-11-07, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E KPEL; 2025-07-01..2025-09-30"}
+      - {unit: IF125304, filing_date: 2025-11-07, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E CEWATER; 2025-07-01..2025-09-30"}
+      - {unit: IF125403, filing_date: 2025-11-08, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E SAMBHV; 2025-07-01..2025-09-30"}
+      - {unit: IF125419, filing_date: 2025-11-08, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E TIRUMALCHM; 2025-07-01..2025-09-30"}
+      - {unit: IF125640, filing_date: 2025-11-10, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E EXICOM; 2025-07-01..2025-09-30"}
+      - {unit: IF125670, filing_date: 2025-11-10, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E KAMDHENU; 2025-07-01..2025-09-30"}
+      - {unit: IF125747, filing_date: 2025-11-10, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E JTLIND; 2025-07-01..2025-09-30"}
+      - {unit: IF125748, filing_date: 2025-11-10, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E BALAJEE; 2025-07-01..2025-09-30"}
+      - {unit: IF125988, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E TIRUPATIFL; 2025-07-01..2025-09-30"}
+      - {unit: IF125992, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E LOKESHMACH; 2025-07-01..2025-09-30"}
+      - {unit: IF126023, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E TEXRAIL; 2025-07-01..2025-09-30"}
+      - {unit: IF126058, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E BALAXI; 2025-07-01..2025-09-30"}
+      - {unit: IF126070, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E MBEL; 2025-07-01..2025-09-30"}
+      - {unit: IF126086, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E PIIND; 2025-07-01..2025-09-30"}
+      - {unit: IF126096, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E SIKKO; 2025-07-01..2025-09-30"}
+      - {unit: IF126106, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E AMANTA; 2025-07-01..2025-09-30"}
+      - {unit: IF126141, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E LLOYDSENT; 2025-07-01..2025-09-30"}
+      - {unit: IF126261, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E E2E; 2025-07-01..2025-09-30"}
+      - {unit: IF126322, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E AHCL; 2025-07-01..2025-09-30"}
+      - {unit: IF126340, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E ZAGGLE; 2025-07-01..2025-09-30"}
+      - {unit: IF126367, filing_date: 2025-11-11, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E JAIPURKURT; 2025-07-01..2025-09-30"}
+      - {unit: IF126413, filing_date: 2025-11-12, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E STANLEY; 2025-07-01..2025-09-30"}
+      - {unit: IF126618, filing_date: 2025-11-12, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E STANLEY; 2025-07-01..2025-09-30"}
+      - {unit: IF126863, filing_date: 2025-11-12, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E PNGJL; 2025-07-01..2025-09-30"}
+      - {unit: IF126880, filing_date: 2025-11-12, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E UNIMECH; 2025-07-01..2025-09-30"}
+      - {unit: IF126902, filing_date: 2025-11-12, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E ENTERO; 2025-07-01..2025-09-30"}
+      - {unit: IF126984, filing_date: 2025-11-12, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E NPST; 2025-07-01..2025-09-30"}
+      - {unit: IF126998, filing_date: 2025-11-12, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E PAVNAIND; 2025-07-01..2025-09-30"}
+      - {unit: IF127088, filing_date: 2025-11-13, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E AJOONI; 2025-07-01..2025-09-30"}
+      - {unit: IF127159, filing_date: 2025-11-13, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E E2E; 2025-07-01..2025-09-30"}
+      - {unit: IF127255, filing_date: 2025-11-13, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E JASH; 2025-07-01..2025-09-30"}
+      - {unit: IF127315, filing_date: 2025-11-13, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p02.json, note: "E TOUCHWOOD; 2025-07-01..2025-09-30"}
+      - {unit: IF127506, filing_date: 2025-11-13, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E SADHNANIQ; 2025-07-01..2025-09-30"}
+      - {unit: IF127536, filing_date: 2025-11-13, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E MITCON; 2025-07-01..2025-09-30"}
+      - {unit: IF127595, filing_date: 2025-11-13, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E MUTHOOTFIN; 2025-07-01..2025-09-30"}
+      - {unit: IF127751, filing_date: 2025-11-13, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E IRIS; 2025-07-01..2025-09-30"}
+      - {unit: IF127783, filing_date: 2025-11-14, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E RPPL; 2025-07-01..2025-09-30"}
+      - {unit: IF127788, filing_date: 2025-11-14, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E ONEPOINT; 2025-04-01..2025-09-30"}
+      - {unit: IF128058, filing_date: 2025-11-14, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E KROSS; 2025-07-01..2025-09-30"}
+      - {unit: IF128094, filing_date: 2025-11-14, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E OPTIEMUS; 2025-07-01..2025-09-30"}
+      - {unit: IF128143, filing_date: 2025-11-14, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E STEELXIND; 2025-07-01..2025-09-30"}
+      - {unit: IF128155, filing_date: 2025-11-14, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E SANSTAR; 2025-07-01..2025-09-30"}
+      - {unit: IF128273, filing_date: 2025-11-14, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E GLOBECIVIL; 2025-07-01..2025-09-30"}
+      - {unit: IF128293, filing_date: 2025-11-14, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E PRAXIS; 2025-04-01..2025-09-30"}
+      - {unit: IF128305, filing_date: 2025-11-14, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E NRL; 2025-07-01..2025-09-30"}
+      - {unit: IF128448, filing_date: 2025-11-14, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E ISHANCH; 2025-07-01..2025-09-30"}
+      - {unit: IF128594, filing_date: 2025-11-14, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E SILGO; 2025-07-01..2025-09-30"}
+      - {unit: IF128661, filing_date: 2025-11-15, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E SPECTRUM; 2025-07-01..2025-09-30"}
+      - {unit: IF128699, filing_date: 2025-11-15, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E SHAH; 2025-04-01..2025-09-30"}
+      - {unit: IF128740, filing_date: 2025-11-15, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E FIRSTCRY; 2025-07-01..2025-09-30"}
+      - {unit: IF128787, filing_date: 2025-11-15, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E OSIAHYPER; 2025-07-01..2025-09-30"}
+      - {unit: IF129630, filing_date: 2025-11-27, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p01.json, note: "E ORIENTALTL; 2025-07-01..2025-09-30"}
+      - {unit: IF129867, filing_date: 2025-12-02, index: nse_integrated_filing_index/2025-12-01/integrated-filing-results_20251201_20251231_p01.json, note: "E PRAXIS; 2025-07-01..2025-09-30"}
+      - {unit: IF130191, filing_date: 2025-12-08, index: nse_integrated_filing_index/2025-12-01/integrated-filing-results_20251201_20251231_p01.json, note: "E UTLSOLAR; 2025-07-01..2025-09-30"}
+      - {unit: IF125576, filing_date: 2025-12-09, index: nse_integrated_filing_index/2025-11-01/integrated-filing-results_20251101_20251130_p03.json, note: "E SIRCA; 2025-07-01..2025-09-30"}
+      - {unit: IF130998, filing_date: 2025-12-22, index: nse_integrated_filing_index/2025-12-01/integrated-filing-results_20251201_20251231_p01.json, note: "E HIRECT; 2025-07-01..2025-09-30"}
+      - {unit: IF133855, filing_date: 2026-01-06, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E HILINFRA; 2025-07-01..2025-09-30"}
+      - {unit: IF134139, filing_date: 2026-01-09, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E MBEL; 2025-07-01..2025-09-30"}
+      - {unit: IF134433, filing_date: 2026-01-12, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E AMANTA; 2025-07-01..2025-09-30"}
+      - {unit: IF134776, filing_date: 2026-01-13, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E VINCOFE; 2025-07-01..2025-09-30"}
+      - {unit: IF134884, filing_date: 2026-01-14, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E CEIGALL; 2025-07-01..2025-09-30"}
+      - {unit: IF135123, filing_date: 2026-01-15, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E EMMVEE; 2025-10-01..2025-12-31"}
+      - {unit: IF135131, filing_date: 2026-01-15, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E EMMVEE; 2025-10-01..2025-12-31"}
+      - {unit: IF135171, filing_date: 2026-01-15, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E E2E; 2025-10-01..2025-12-31"}
+      - {unit: IF135211, filing_date: 2026-01-15, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E RELTD; 2025-10-01..2025-12-31"}
+      - {unit: IF135584, filing_date: 2026-01-17, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E EMBDL; 2025-07-01..2025-09-30"}
+      - {unit: IF135659, filing_date: 2026-01-19, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E ARSSBL; 2025-07-01..2025-09-30"}
+      - {unit: IF135868, filing_date: 2026-01-19, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "F1 CEATLTD; 2025-10-01..2025-12-31"}
+      - {unit: IF136147, filing_date: 2026-01-20, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p02.json, note: "E VIKRAMSOLR; 2025-10-01..2025-12-31"}
+      - {unit: IF136522, filing_date: 2026-01-21, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E BANKINDIA; 2025-10-01..2025-12-31"}
+      - {unit: IF136848, filing_date: 2026-01-22, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E SPECTRUM; 2025-10-01..2025-12-31"}
+      - {unit: IF136896, filing_date: 2026-01-22, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "F1 COFORGE; 2025-10-01..2025-12-31"}
+      - {unit: IF136897, filing_date: 2026-01-22, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "F1 COFORGE; 2025-10-01..2025-12-31"}
+      - {unit: IF137326, filing_date: 2026-01-26, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E AXISBANK; 2025-10-01..2025-12-31"}
+      - {unit: IF137329, filing_date: 2026-01-26, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E AXISBANK; 2025-10-01..2025-12-31"}
+      - {unit: IF137497, filing_date: 2026-01-27, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E EMKAY; 2025-10-01..2025-12-31"}
+      - {unit: IF137841, filing_date: 2026-01-28, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E KAYA; 2025-10-01..2025-12-31"}
+      - {unit: IF137886, filing_date: 2026-01-28, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E IGIL; 2025-10-01..2025-12-31"}
+      - {unit: IF137984, filing_date: 2026-01-28, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E BALAXI; 2025-10-01..2025-12-31"}
+      - {unit: IF138188, filing_date: 2026-01-28, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E VINCOFE; 2025-10-01..2025-12-31"}
+      - {unit: IF138600, filing_date: 2026-01-29, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E PARKHOSPS; 2025-10-01..2025-12-31"}
+      - {unit: IF138776, filing_date: 2026-01-29, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E AEGISVOPAK; 2025-10-01..2025-12-31"}
+      - {unit: IF138838, filing_date: 2026-01-29, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E PRESTIGE; 2025-10-01..2025-12-31"}
+      - {unit: IF138872, filing_date: 2026-01-29, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E AEQUS; 2025-10-01..2025-12-31"}
+      - {unit: IF138944, filing_date: 2026-01-30, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E AJOONI; 2025-10-01..2025-12-31"}
+      - {unit: IF139109, filing_date: 2026-01-30, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E SWIGGY; 2025-10-01..2025-12-31"}
+      - {unit: IF139302, filing_date: 2026-01-30, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E AMBUJACEM; 2025-10-01..2025-12-31"}
+      - {unit: IF139460, filing_date: 2026-01-30, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E PRAXIS; 2025-10-01..2025-12-31"}
+      - {unit: IF139587, filing_date: 2026-01-31, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E ELLEN; 2025-10-01..2025-12-31"}
+      - {unit: IF139588, filing_date: 2026-01-31, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E SAMBHV; 2025-10-01..2025-12-31"}
+      - {unit: IF139592, filing_date: 2026-01-31, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E ELLEN; 2025-10-01..2025-12-31"}
+      - {unit: IF139601, filing_date: 2026-01-31, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E IKIO; 2025-10-01..2025-12-31"}
+      - {unit: IF139610, filing_date: 2026-01-31, index: nse_integrated_filing_index/2026-01-01/integrated-filing-results_20260101_20260131_p01.json, note: "E SIRCA; 2025-10-01..2025-12-31"}
+      - {unit: IF139750, filing_date: 2026-02-02, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E POLICYBZR; 2025-10-01..2025-12-31"}
+      - {unit: IF139770, filing_date: 2026-02-02, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E SEJALLTD; 2025-10-01..2025-12-31"}
+      - {unit: IF139833, filing_date: 2026-02-03, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E KINGFA; 2025-07-01..2025-09-30"}
+      - {unit: IF139878, filing_date: 2026-02-03, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E SAREGAMA; 2025-10-01..2025-12-31"}
+      - {unit: IF139935, filing_date: 2026-02-03, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E RUBICON; 2025-10-01..2025-12-31"}
+      - {unit: IF140030, filing_date: 2026-02-03, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E MOBIKWIK; 2025-10-01..2025-12-31"}
+      - {unit: IF140241, filing_date: 2026-02-04, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E XPROINDIA; 2025-10-01..2025-12-31"}
+      - {unit: IF140295, filing_date: 2026-02-04, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E ZOTA; 2025-10-01..2025-12-31"}
+      - {unit: IF140298, filing_date: 2026-02-04, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E LLOYDSENGG; 2025-10-01..2025-12-31"}
+      - {unit: IF140369, filing_date: 2026-02-05, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E KINGFA; 2025-07-01..2025-09-30"}
+      - {unit: IF140480, filing_date: 2026-02-05, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E VENUSPIPES; 2025-10-01..2025-12-31"}
+      - {unit: IF140492, filing_date: 2026-02-05, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E SETL; 2025-10-01..2025-12-31"}
+      - {unit: IF140839, filing_date: 2026-02-06, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E SOLARA; 2025-10-01..2025-12-31"}
+      - {unit: IF140918, filing_date: 2026-02-06, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E SRGHFL; 2025-10-01..2025-12-31"}
+      - {unit: IF140919, filing_date: 2026-02-06, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E SRGHFL; 2025-10-01..2025-12-31"}
+      - {unit: IF141029, filing_date: 2026-02-07, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E EXCELSOFT; 2025-10-01..2025-12-31"}
+      - {unit: IF141098, filing_date: 2026-02-07, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E UGROCAP; 2025-10-01..2025-12-31"}
+      - {unit: IF141110, filing_date: 2026-02-07, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E SIKKO; 2025-10-01..2025-12-31"}
+      - {unit: IF141143, filing_date: 2026-02-07, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E HITECH; 2025-10-01..2025-12-31"}
+      - {unit: IF141161, filing_date: 2026-02-07, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E JKIPL; 2025-10-01..2025-12-31"}
+      - {unit: IF141165, filing_date: 2026-02-07, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p03.json, note: "E JKIPL; 2025-10-01..2025-12-31"}
+      - {unit: IF141236, filing_date: 2026-02-09, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E TEXRAIL; 2025-10-01..2025-12-31"}
+      - {unit: IF141241, filing_date: 2026-02-09, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E LLOYDSENT; 2025-10-01..2025-12-31"}
+      - {unit: IF141331, filing_date: 2026-02-09, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E JAINREC; 2025-10-01..2025-12-31"}
+      - {unit: IF141370, filing_date: 2026-02-09, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E MITCON; 2025-10-01..2025-12-31"}
+      - {unit: IF141440, filing_date: 2026-02-09, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E ALLTIME; 2025-10-01..2025-12-31"}
+      - {unit: IF141463, filing_date: 2026-02-09, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E ROUTE; 2025-10-01..2025-12-31"}
+      - {unit: IF141562, filing_date: 2026-02-10, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E TIRUPATIFL; 2025-10-01..2025-12-31"}
+      - {unit: IF141564, filing_date: 2026-02-10, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E TIRUPATIFL; 2025-10-01..2025-12-31"}
+      - {unit: IF141626, filing_date: 2026-02-10, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E ONEPOINT; 2025-10-01..2025-12-31"}
+      - {unit: IF141792, filing_date: 2026-02-10, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E NEPHROPLUS; 2025-10-01..2025-12-31"}
+      - {unit: IF141889, filing_date: 2026-02-11, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "F1 BECTORFOOD; 2025-10-01..2025-12-31"}
+      - {unit: IF142004, filing_date: 2026-02-11, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E VALIANTLAB; 2025-10-01..2025-12-31"}
+      - {unit: IF142074, filing_date: 2026-02-11, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E PAVNAIND; 2025-10-01..2025-12-31"}
+      - {unit: IF142179, filing_date: 2026-02-11, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E NPST; 2025-10-01..2025-12-31"}
+      - {unit: IF142228, filing_date: 2026-02-12, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E MEIL; 2025-10-01..2025-12-31"}
+      - {unit: IF142244, filing_date: 2026-02-12, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E MARINE; 2025-10-01..2025-12-31"}
+      - {unit: IF142349, filing_date: 2026-02-12, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E KAMOPAINTS; 2025-10-01..2025-12-31"}
+      - {unit: IF142398, filing_date: 2026-02-12, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E KMEW; 2025-10-01..2025-12-31"}
+      - {unit: IF142419, filing_date: 2026-02-12, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p02.json, note: "E MUTHOOTFIN; 2025-10-01..2025-12-31"}
+      - {unit: IF142616, filing_date: 2026-02-12, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E STANLEY; 2025-10-01..2025-12-31"}
+      - {unit: IF142658, filing_date: 2026-02-12, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E NRL; 2025-10-01..2025-12-31"}
+      - {unit: IF142724, filing_date: 2026-02-12, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E PANACHE; stays refused: BSE code 123456 is not D2's"}
+      - {unit: IF142856, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E HUBTOWN; 2025-10-01..2025-12-31"}
+      - {unit: IF142876, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E JASH; 2025-10-01..2025-12-31"}
+      - {unit: IF142890, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E KAMDHENU; 2025-10-01..2025-12-31"}
+      - {unit: IF142927, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E OPTIEMUS; 2025-10-01..2025-12-31"}
+      - {unit: IF143063, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E EXICOM; 2025-10-01..2025-12-31"}
+      - {unit: IF143080, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "F1 ORIENTLTD; 2025-10-01..2025-12-31"}
+      - {unit: IF143147, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E SRM; 2025-10-01..2025-12-31"}
+      - {unit: IF143152, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E QUADFUTURE; 2025-10-01..2025-12-31"}
+      - {unit: IF143167, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E INNOVANA; 2025-10-01..2025-12-31"}
+      - {unit: IF143191, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E AKSHAR; 2025-10-01..2025-12-31"}
+      - {unit: IF143194, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "F1 BILVYAPAR; 2025-10-01..2025-12-31"}
+      - {unit: IF143197, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "F1 BILVYAPAR; 2025-10-01..2025-12-31"}
+      - {unit: IF143200, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E SANSTAR; 2025-10-01..2025-12-31"}
+      - {unit: IF143266, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E LEMERITE; 2025-10-01..2025-12-31"}
+      - {unit: IF143281, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E SHRADHA; 2025-10-01..2025-12-31"}
+      - {unit: IF143318, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E OSIAHYPER; 2025-10-01..2025-12-31"}
+      - {unit: IF143331, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E GKENERGY; 2025-10-01..2025-12-31"}
+      - {unit: IF143335, filing_date: 2026-02-13, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E GKENERGY; 2025-10-01..2025-12-31"}
+      - {unit: IF143359, filing_date: 2026-02-14, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E SHRADHA; 2025-10-01..2025-12-31"}
+      - {unit: IF143383, filing_date: 2026-02-14, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E BETA; 2025-10-01..2025-12-31"}
+      - {unit: IF143491, filing_date: 2026-02-14, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E LEXUS; 2025-10-01..2025-12-31"}
+      - {unit: IF143494, filing_date: 2026-02-14, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E ANURAS; 2025-10-01..2025-12-31"}
+      - {unit: IF143514, filing_date: 2026-02-14, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E TOUCHWOOD; 2025-10-01..2025-12-31"}
+      - {unit: IF143633, filing_date: 2026-02-14, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E SARVESHWAR; 2025-10-01..2025-12-31"}
+      - {unit: IF143646, filing_date: 2026-02-14, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E JAINREC; 2025-10-01..2025-12-31"}
+      - {unit: IF143649, filing_date: 2026-02-14, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E JAINREC; 2025-10-01..2025-12-31"}
+      - {unit: IF143706, filing_date: 2026-02-16, index: nse_integrated_filing_index/2026-02-01/integrated-filing-results_20260201_20260228_p01.json, note: "E HILINFRA; 2025-10-01..2025-12-31"}
+      - {unit: IF144758, filing_date: 2026-03-04, index: nse_integrated_filing_index/2026-03-01/integrated-filing-results_20260301_20260331_p01.json, note: "E NPST; 2025-07-01..2025-09-30"}
+      - {unit: IF144966, filing_date: 2026-03-09, index: nse_integrated_filing_index/2026-03-01/integrated-filing-results_20260301_20260331_p01.json, note: "E SHRADHA; 2025-10-01..2025-12-31"}
+      - {unit: IF151991, filing_date: 2026-04-21, index: nse_integrated_filing_index/2026-04-01/integrated-filing-results_20260401_20260430_p01.json, note: "F1 CYIENTDLM; 2026-01-01..2026-03-31"}
+      - {unit: IF151991-FY, filing_date: 2026-04-21, index: nse_integrated_filing_index/2026-04-01/integrated-filing-results_20260401_20260430_p01.json, note: "F1 CYIENTDLM; 2025-04-01..2026-03-31"}
+      - {unit: IF151992, filing_date: 2026-04-21, index: nse_integrated_filing_index/2026-04-01/integrated-filing-results_20260401_20260430_p01.json, note: "F1 CYIENTDLM; 2026-01-01..2026-03-31"}
+      - {unit: IF151992-FY, filing_date: 2026-04-21, index: nse_integrated_filing_index/2026-04-01/integrated-filing-results_20260401_20260430_p01.json, note: "F1 CYIENTDLM; 2025-04-01..2026-03-31"}
+      - {unit: IF155890, filing_date: 2026-05-06, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: "F1 BAJAJ-AUTO; 2026-01-01..2026-03-31"}
+      - {unit: IF155890-FY, filing_date: 2026-05-06, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: "F1 BAJAJ-AUTO; 2025-04-01..2026-03-31"}
+      - {unit: IF155892, filing_date: 2026-05-06, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: "F1 BAJAJ-AUTO; 2026-01-01..2026-03-31"}
+      - {unit: IF155892-FY, filing_date: 2026-05-06, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p04.json, note: "F1 BAJAJ-AUTO; 2025-04-01..2026-03-31"}
+      - {unit: IF157431, filing_date: 2026-05-14, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p03.json, note: "F1 SKFINDIA; 2026-01-01..2026-03-31"}
+      - {unit: IF157431-FY, filing_date: 2026-05-14, index: nse_integrated_filing_index/2026-05-01/integrated-filing-results_20260501_20260531_p03.json, note: "F1 SKFINDIA; 2025-04-01..2026-03-31"}
+      - {unit: IF173890, filing_date: 2026-07-11, index: nse_integrated_filing_index/2026-07-01/integrated-filing-results_20260701_20260731_p02.json, note: "F1 ABANSENT; 2026-01-01..2026-03-31"}
+      - {unit: IF173890-FY, filing_date: 2026-07-11, index: nse_integrated_filing_index/2026-07-01/integrated-filing-results_20260701_20260731_p02.json, note: "F1 ABANSENT; 2025-04-01..2026-03-31"}
+      - {unit: IF173891, filing_date: 2026-07-11, index: nse_integrated_filing_index/2026-07-01/integrated-filing-results_20260701_20260731_p02.json, note: "F1 ABANSENT; 2026-01-01..2026-03-31"}
+      - {unit: IF173891-FY, filing_date: 2026-07-11, index: nse_integrated_filing_index/2026-07-01/integrated-filing-results_20260701_20260731_p02.json, note: "F1 ABANSENT; 2025-04-01..2026-03-31"}
+      - {unit: IF185547, filing_date: 2026-08-12, index: nse_integrated_filing_index/2026-08-01/integrated-filing-results_20260801_20260831_p02.json, note: "F1 ABANSENT; 2026-04-01..2026-06-30"}
+      - {unit: IF185548, filing_date: 2026-08-12, index: nse_integrated_filing_index/2026-08-01/integrated-filing-results_20260801_20260831_p02.json, note: "F1 ABANSENT; 2026-04-01..2026-06-30"}

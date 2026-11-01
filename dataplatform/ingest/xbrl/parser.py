@@ -140,6 +140,18 @@ _CAPMKT_SCRIP_SCHEME: Final = "http://www.bseindia.com/in-capmkt/ScripCode"
 _SEBI_SCRIP_SCHEME: Final = "http://www.sebi.gov.in/in-capmkt/ScripCode"
 _SCRIP_SCHEMES: Final = frozenset({_BSE_SCRIP_SCHEME, _CAPMKT_SCRIP_SCHEME, _SEBI_SCRIP_SCHEME})
 
+#: A BSE scrip code: six digits. Some Integrated Filing documents stamp it — or the placeholder
+#: `000000` — as the entity identifier of a few `StatementStatic*` contexts while every results
+#: context names the NSE symbol, under the same symbol scheme (182 standalone filings of the
+#: Sep-25 and Dec-25 quarters). `_check_symbol` tolerates such a code only when it is the one D2
+#: holds for the entry's ISIN, or the placeholder, which names no entity at all.
+_BSE_CODE: Final = re.compile(r"^\d{6}$")
+_BSE_CODE_PLACEHOLDER: Final = "000000"
+#: The document's own statement of its BSE scrip code, beside `Symbol` and `ISIN` in the header.
+_SCRIP_CODE_ELEMENT: Final = "ScripCode"
+#: A well-formed ISIN as a document states one (two letters, nine alphanumerics, a check digit).
+_ISIN_SHAPE: Final = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+
 
 def _normalise_scheme(scheme: str) -> str:
     """The scheme URI with the two spelling variants filers produce folded onto the canonical one.
@@ -275,6 +287,7 @@ def parse(
     *,
     entry: FilingIndexEntry,
     known_symbols: frozenset[str] | None = None,
+    bse_codes: frozenset[str] | None = None,
     source: str = SOURCE_ID,
     l0_key: str | None = None,
     filename: str,
@@ -299,6 +312,11 @@ def parse(
     `entry.symbol` alone, which is right for a fresh filing and wrong for a renamed company; the
     parser stays offline either way, so resolving the history is the caller's job.
 
+    `bse_codes` is the BSE scrip code D2 holds for the entry's ISIN (`exchange_listing`), if any.
+    It is what lets a document that stamps that code on a few contexts beside the symbol, or
+    states it while mistyping its symbol, be recognised as the company's own (`_check_symbol`).
+    Omitted, no BSE code corroborates anything and both stay refused.
+
     Raises `ParseError`, naming the file, for anything that is not this format: a body that is not
     well-formed XML, a root that is not `xbrl`, an unrecognised taxonomy entry point, an entity
     identified by something other than an NSE symbol, no column matching the entry's period, an
@@ -318,19 +336,22 @@ def parse(
     facts_by_context = _facts_by_context(root)
 
     accepted = frozenset({entry.symbol}) if known_symbols is None else known_symbols
+    integrated = _is_integrated(root)
     symbol = _check_symbol(
         root,
         entry=entry,
         facts_by_context=facts_by_context,
         accepted=accepted,
+        bse_codes=bse_codes or frozenset(),
+        integrated=integrated,
         filename=filename,
     )
 
-    if _is_integrated(root):
+    if integrated:
         _check_stated_isin(facts_by_context, entry=entry, filename=filename)
 
     column = _select_column(
-        _columns(shapes, facts_by_context=facts_by_context, filename=filename),
+        _columns(shapes, facts_by_context=facts_by_context, taxonomy=taxonomy, filename=filename),
         entry=entry,
         filename=filename,
     )
@@ -530,13 +551,15 @@ def _check_symbol(
     entry: FilingIndexEntry,
     facts_by_context: dict[str, dict[str, list[str]]],
     accepted: frozenset[str],
+    bse_codes: frozenset[str],
+    integrated: bool,
     filename: str,
 ) -> str:
     """Assert the document is about the company the index entry names, and return its symbol.
 
     The symbol is the only identity a filing states usefully, so it is what gets cross-checked and
     the ISIN is left to the index — which is what keeps invariant #2's join key coming from D2
-    rather than from a filer's typing. Two real-world facts shape how the check is done:
+    rather than from a filer's typing. Four real-world facts shape how the check is done:
 
     * **The identifier is not always a symbol.** Most filings use `scheme=…/NSESymbol`, but some
       (notably bank returns) identify the entity by BSE scrip code, which cannot be compared to a
@@ -551,6 +574,22 @@ def _check_symbol(
       entry that now says `HEALTHX`. Comparing against every symbol *ever* held is the opposite
       error: Dhunseri Ventures was DTIL until 2010, and a 2024 filing saying DTIL is a different
       company's (Dhunseri Tea & Industries), misattributed by the index.
+    * **One identifier per document — except a BSE code beside the symbol.** Two entities named in
+      one results filing is refused, with one exception the Sep-25 and Dec-25 quarters produced
+      182 times: every results context names the NSE symbol and a couple of `StatementStatic*`
+      contexts name a six-digit BSE scrip code (or `000000`) under the same scheme. That is one
+      company identified two ways, not two companies — **provided the code is the one D2 holds for
+      the entry's ISIN** (`bse_codes`), or the placeholder `000000`, which names nobody. Any other
+      code, a second symbol, or a code with no D2 code to compare it to is still refused.
+    * **A mistyped symbol in a document whose own ISIN is the entry's.** An Integrated Filing
+      document states its ISIN as a fact. When that ISIN *equals* the entry's ISIN exactly —
+      `BAJAJAUTO` for `BAJAJ-AUTO`, `SFKINDIA` for `SKFINDIA`, even `NUCLEUS` (Coforge's old
+      name) under Coforge's ISIN — the join key itself agrees, and the symbol is a filer's typing
+      (23 filings, 2025-26). Accepted and logged, on three conditions: the document is an
+      Integrated Filing one (the older banking documents carry stale ISINs and are never read for
+      one), it states that ISIN and no other, and any BSE code it states is D2's for that ISIN.
+      A stated ISIN that names a different company — DTIL's, a sister company's — is not this
+      case and stays refused (here, and in `_check_stated_isin`).
     """
     identifiers: set[str] = set()
     schemes: set[str] = set()
@@ -560,10 +599,8 @@ def _check_symbol(
         identifiers.add((element.text or "").strip())
         schemes.add(_normalise_scheme(element.get("scheme") or ""))
     if len(identifiers) > 1:
-        raise ParseError(
-            f"filing names more than one entity ({', '.join(sorted(identifiers))}); one results "
-            "filing is about one company",
-            filename=filename,
+        identifiers = _without_own_bse_code(
+            identifiers, entry=entry, bse_codes=bse_codes, filename=filename
         )
     unknown = schemes - _SYMBOL_SCHEMES - _SCRIP_SCHEMES
     if unknown:
@@ -602,16 +639,111 @@ def _check_symbol(
         for symbol in stated
         if any(_same_symbol(symbol, candidate) for candidate in accepted)
     }
-    if not matched:
+    if matched:
+        return sorted(matched)[0]
+    if integrated and _isin_vouches_for_entry(
+        facts_by_context,
+        identifiers=identifiers,
+        schemes=schemes,
+        entry=entry,
+        bse_codes=bse_codes,
+    ):
+        _LOG.info(
+            "xbrl.symbol_mismatch_isin_agrees",
+            filename=filename,
+            entry_symbol=entry.symbol,
+            entry_isin=entry.isin,
+            stated=sorted(stated),
+            bse_codes=sorted(bse_codes),
+            note="the document's own ISIN is the entry's exactly; its symbol is a filer's typo",
+        )
+        return entry.symbol
+    raise ParseError(
+        f"index says this filing is {entry.symbol!r} (ISIN {entry.isin}, symbols accepted on "
+        f"{entry.filing_date.isoformat()}: {', '.join(sorted(accepted))}) but the document "
+        f"says "
+        f"{', '.join(sorted(stated))}; the announcements index and the XBRL must name the "
+        "same company",
+        filename=filename,
+    )
+
+
+def _without_own_bse_code(
+    identifiers: set[str],
+    *,
+    entry: FilingIndexEntry,
+    bse_codes: frozenset[str],
+    filename: str,
+) -> set[str]:
+    """The identifiers with the company's own BSE code (and `000000`) set aside, or `ParseError`.
+
+    Only for a document naming more than one identifier. What is left must be exactly one
+    identifier that is not a six-digit code, and every code set aside must be `000000` or one of
+    `bse_codes` (D2's code for the entry's ISIN). Anything else is what it always was: a filing
+    that names more than one entity.
+    """
+    codes = {identifier for identifier in identifiers if _BSE_CODE.fullmatch(identifier)}
+    rest = identifiers - codes
+    foreign = sorted(
+        code for code in codes if code != _BSE_CODE_PLACEHOLDER and code not in bse_codes
+    )
+    if len(rest) != 1 or foreign:
+        why = (
+            f"; {', '.join(foreign)} is not the BSE code D2 holds for {entry.isin} "
+            f"({', '.join(sorted(bse_codes)) or 'none on file'})"
+            if len(rest) == 1
+            else ""
+        )
         raise ParseError(
-            f"index says this filing is {entry.symbol!r} (ISIN {entry.isin}, symbols accepted on "
-            f"{entry.filing_date.isoformat()}: {', '.join(sorted(accepted))}) but the document "
-            f"says "
-            f"{', '.join(sorted(stated))}; the announcements index and the XBRL must name the "
-            "same company",
+            f"filing names more than one entity ({', '.join(sorted(identifiers))}); one results "
+            f"filing is about one company{why}",
             filename=filename,
         )
-    return sorted(matched)[0]
+    _LOG.info(
+        "xbrl.own_bse_code_beside_symbol",
+        filename=filename,
+        entry_isin=entry.isin,
+        identifier=next(iter(rest)),
+        bse_codes_stated=sorted(codes),
+        note="a few contexts name the company's own BSE code (or 000000) beside its symbol",
+    )
+    return rest
+
+
+def _isin_vouches_for_entry(
+    facts_by_context: dict[str, dict[str, list[str]]],
+    *,
+    identifiers: set[str],
+    schemes: set[str],
+    entry: FilingIndexEntry,
+    bse_codes: frozenset[str],
+) -> bool:
+    """Whether an Integrated document's own ISIN — and BSE code, if stated — are the entry's.
+
+    True only when the document states exactly one well-formed ISIN and it equals the entry's
+    character for character (not merely the same issuer code: a split's stale template is not
+    evidence about a symbol), and every BSE code it states — a scrip-code identifier or its
+    `ScripCode` fact, `000000` aside — is one D2 holds for that ISIN. A stated code with no D2
+    code to compare it to does not vouch.
+    """
+    stated_isins = {
+        value.strip().upper()
+        for facts in facts_by_context.values()
+        for value in facts.get(_ISIN_ELEMENT, ())
+        if value and _ISIN_SHAPE.fullmatch(value.strip().upper())
+    }
+    if stated_isins != {entry.isin}:
+        return False
+    codes = {
+        value.strip()
+        for facts in facts_by_context.values()
+        for value in facts.get(_SCRIP_CODE_ELEMENT, ())
+        if value.strip()
+    }
+    if schemes and schemes <= _SCRIP_SCHEMES:
+        codes |= identifiers
+    codes.discard(_BSE_CODE_PLACEHOLDER)
+    return codes <= bse_codes
 
 
 def _is_integrated(root: ET.Element) -> bool:
@@ -654,7 +786,7 @@ def _check_stated_isin(
         value.strip().upper()
         for facts in facts_by_context.values()
         for value in facts.get(_ISIN_ELEMENT, ())
-        if value and re.fullmatch(r"[A-Z]{2}[A-Z0-9]{9}[0-9]", value.strip().upper())
+        if value and _ISIN_SHAPE.fullmatch(value.strip().upper())
     }
     if not stated or entry.isin in stated:
         return
@@ -798,6 +930,7 @@ def _columns(
     shapes: dict[str, _ContextShape],
     *,
     facts_by_context: dict[str, dict[str, list[str]]],
+    taxonomy: Taxonomy,
     filename: str,
 ) -> tuple[_Column, ...]:
     """Every column of the results table this document transcribes.
@@ -813,9 +946,15 @@ def _columns(
     the quarter's dates on the cumulative column's `xbrli:period` too, so the attribute cannot tell
     the two apart. A context that reports no period or no nature is a breakdown or a spare, not a
     column, and is skipped.
+
+    A column whose six-month period was read off a `Half yearly` *label* rather than stated must
+    also survive `_corroborated_half_years`, or it is skipped too: that label is the header
+    block's, and on a quarterly filer's September document the column it is pinned to holds the
+    quarter.
     """
     financial_year = _document_financial_year(facts_by_context, filename=filename)
     columns: list[_Column] = []
+    labelled_halves: set[str] = set()
     for context_id in facts_by_context:
         shape = shapes.get(context_id) or _column_shape(context_id)
         if shape.axes:
@@ -838,6 +977,10 @@ def _columns(
         nature = _nature(facts, context_id=context_id, filename=filename)
         if nature is None:
             continue
+        if _is_labelled_half_year(
+            facts, context_id=context_id, token=shape.token, filename=filename
+        ):
+            labelled_halves.add(context_id)
         columns.append(
             _Column(
                 token=shape.token,
@@ -851,6 +994,14 @@ def _columns(
                 nature=nature,
                 audited=_audited(facts, context_id=context_id, filename=filename),
             )
+        )
+    if labelled_halves:
+        columns = _corroborated_half_years(
+            columns,
+            labelled=labelled_halves,
+            facts_by_context=facts_by_context,
+            taxonomy=taxonomy,
+            filename=filename,
         )
     if not columns:
         raise ParseError(
@@ -961,6 +1112,103 @@ def _add_months(day: date, months: int) -> date:
     """
     total = day.month - 1 + months
     return day.replace(year=day.year + total // 12, month=total % 12 + 1)
+
+
+#: The concepts a half-year read off a label is corroborated on: the headline flows. A stock
+#: (paid-up capital) is the same in every column of a document and would corroborate anything.
+_HALF_YEAR_WITNESSES: Final = ("revenue_from_operations", "total_income", "profit_after_tax")
+
+
+def _is_labelled_half_year(
+    facts: dict[str, list[str]], *, context_id: str, token: str, filename: str
+) -> bool:
+    """Whether this column's period came from a `ReportingQuarter = Half yearly` label alone.
+
+    That is: it states no `DateOf…ReportingPeriod` of its own, it is not the cumulative column
+    (whose period is the financial year), and its `ReportingQuarter` reads `Half yearly` — the one
+    path through `_declared_period` that turns a header label into a six-month period.
+    """
+    start = _one(facts, _PERIOD_START_ELEMENT, context_id=context_id, filename=filename)
+    end = _one(facts, _PERIOD_END_ELEMENT, context_id=context_id, filename=filename)
+    if (start is not None and end is not None) or token == _CUMULATIVE_TOKEN:
+        return False
+    quarter = _one(facts, _REPORTING_QUARTER_ELEMENT, context_id=context_id, filename=filename)
+    return quarter is not None and _SUB_ANNUAL_PERIODS.get(quarter.strip().lower()) == (0, 6)
+
+
+def _corroborated_half_years(
+    columns: list[_Column],
+    *,
+    labelled: set[str],
+    facts_by_context: dict[str, dict[str, list[str]]],
+    taxonomy: Taxonomy,
+    filename: str,
+) -> list[_Column]:
+    """`columns` without any labelled half-year the document's own cumulative column contradicts.
+
+    The guard against storing one quarter's figures as a half-year (the class-M defect). The
+    2018-2022 `…_WEB.xml` generation pins the header block — `ReportingQuarter` with it — to the
+    `One` column, and a quarterly filer's September document is a *half-year results* document:
+    `ReportingQuarter = Half yearly`, with `One` holding the July-September quarter and `Four` the
+    six months to date. Read as `One`'s own period, the label files the quarter as April-September
+    (117 refused filings of 2018-2023 would parse that way today; in about 80 the "half-year" is
+    one quarter's revenue, the cumulative column twice that). A genuine half-yearly reporter's
+    `One` *is* the six months, and so is its year-to-date: the two columns state the same figures.
+
+    So a labelled half-year is kept only when the document has exactly one cumulative (`Four`)
+    column of the same nature and every headline flow both report (`_HALF_YEAR_WITNESSES`) is
+    equal in the two, with at least one compared. Otherwise it is dropped — as a column that
+    states nothing usable about its period is — and logged; the filing then fails as it did before
+    the label was read, unless another column matches the entry. A stated (in-column) period is
+    never second-guessed here: there the document says what the column covers.
+    """
+    concepts = concepts_for(taxonomy)
+    kept: list[_Column] = []
+    for column in columns:
+        if column.context_id not in labelled:
+            kept.append(column)
+            continue
+        cumulative = [
+            other
+            for other in columns
+            if other.token == _CUMULATIVE_TOKEN
+            and other.nature is column.nature
+            and other.context_id != column.context_id
+        ]
+        half = _witnesses(facts_by_context.get(column.context_id, {}), concepts)
+        to_date = (
+            _witnesses(facts_by_context.get(cumulative[0].context_id, {}), concepts)
+            if len(cumulative) == 1
+            else {}
+        )
+        shared = sorted(set(half) & set(to_date))
+        if shared and all(half[key] == to_date[key] for key in shared):
+            kept.append(column)
+            continue
+        _LOG.info(
+            "xbrl.half_year_label_uncorroborated",
+            filename=filename,
+            context=column.context_id,
+            labelled_period=f"{column.period_start.isoformat()}\u2192{column.period_end.isoformat()}",
+            cumulative=[other.context_id for other in cumulative],
+            half_year={key: str(value) for key, value in half.items()},
+            to_date={key: str(value) for key, value in to_date.items()},
+            note="the column labelled half-yearly does not state the six months to date: it is "
+            "the quarter of a half-year results document, so no period is taken from the label",
+        )
+    return kept
+
+
+def _witnesses(facts: dict[str, list[str]], concepts: dict[str, str]) -> dict[str, Decimal]:
+    """The headline flows one column states, as exact decimals; unreadable values are left out."""
+    found: dict[str, Decimal] = {}
+    for element, concept in concepts.items():
+        if concept not in _HALF_YEAR_WITNESSES:
+            continue
+        values = [value.strip() for value in facts.get(element, ()) if value.strip()]
+        if len(values) == 1 and _DECIMAL_LITERAL.match(values[0]):
+            found[concept] = Decimal(values[0])
+    return found
 
 
 #: A financial year, in days, with room for the 364-366 an actual one spans. A column at or above

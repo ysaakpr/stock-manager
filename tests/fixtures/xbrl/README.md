@@ -70,11 +70,28 @@ an assumption the modern documents let you get away with.
 | `NONINDAS_48504_…14092019033403_WEB.xml` | EMKAY | `other_than_banks_entry_point_2018-03-31` | Holds **only** the cumulative column, yet the index lists it under both an Annual and a Quarterly entry. The quarterly entry must be *refused* — a quarter's start is stated nowhere in it. Also the only captured filing with no `ProfitBeforeTax` element (the old form reports `ProfitBeforeExtraordinaryItemsAndTax`, a different basis, left deliberately unmapped). |
 | `BANKING_601183_…25072022110219_WEB.xml` | J&KBANK | `banking_entry_point_2019-09-30` | Identifies its entity by **BSE scrip code** (`532209`), not NSE symbol, so the cross-check falls to the `Symbol` fact. Declares its columns' periods, which is what independently confirms `Four` = cumulative and `One` = the quarter. |
 | `NBFC_INDAS_94201_…15072023024353.xml` | HEALTHX | `Ind-AS_entry_point_2020-03-31` | A **renamed** company: files as `SASTASUNDR` under an index entry that now says `HEALTHX`. The ISIN is unchanged, so the symbol cross-check needs the D2 symbol history. |
+| `NONINDAS_39357_…18102018055921_WEB.xml` | MUTHOOTCAP | `other_than_banks_entry_point_2018-03-31` | A quarterly filer's **September half-year results document**: `ReportingQuarter = Half yearly` is pinned to `OneD`, which holds the July-September quarter (131.8 cr) while `FourD` holds the six months (256.0 cr). Read as `OneD`'s own period, the label files the quarter as April-September; the parser keeps a labelled half-year only when the cumulative column states the same figures (class M, 117 documents of 2018-2023). |
 
 The two banking disagreements are the evidence for a rule, not a curiosity: the ISIN a fact is
 stored under comes from the index (D2's key, invariant #2), and the document's own ISIN element is
 never read. The document is cross-checked on **symbol** — which is itself only reliable given the
 ISIN's symbol *history*, per the rename case above.
+
+## `integrated/` — identity and half-year cases (copied from the L0 lake, 2026-11-02)
+
+Byte-for-byte copies of production L0 payloads, for the M14.3 identity and half-year rules
+(`tests/unit/test_xbrl_identity_half_year.py`):
+
+| File | Company | What it proves |
+|---|---|---|
+| `INTEGRATED_FILING_INDAS_1606052_…20012026061129_WEB.xml` | VIKRAMSOLR | Class E: 9 contexts name the symbol, two `StatementStatic*` contexts its BSE code `544488`, under the same symbol scheme. Accepted only when D2 holds that code for the ISIN. |
+| `INTEGRATED_FILING_INDAS_1568467_…07112025071648_WEB.xml` | GVPTECH | Class E with the placeholder `000000`, which names nobody. |
+| `INTEGRATED_FILING_INDAS_1624687_…12022026091347_WEB.xml` | PANACHE | Class E refused: the extra identifier `123456` is no BSE code D2 holds. |
+| `INTEGRATED_FILING_INDAS_1608771_…22012026114516_WEB.xml` | COFORGE | Class F1: `Symbol` says `NUCLEUS`, but the document's ISIN and BSE code are Coforge's. |
+| `INTEGRATED_FILING_INDAS_1510335_…12082025075003_WEB.xml` | ASHAPURMIN | Class G (owner decision, refused): symbol and BSE code are Ashapura's, the ISIN Orient Ceratech's. |
+| `INTEGRATED_FILING_INDAS_1572905_…12112025082817_WEB.xml` | ARIHANTSUP | A one-column "half-year" (OneD 2025-04-01→09-30) whose revenue is the July-September quarter's… |
+| `INTEGRATED_FILING_INDAS_1572886_…12112025082158_WEB.xml` | ARIHANTSUP | …as this same-day quarterly document states it (its own six months: 206.3 m, not 131.7 m). |
+| `INTEGRATED_FILING_INDAS_1502003_…04082025062112_WEB.xml` | GLOBUSSPR | The first quarter beside the genuine half-year `INTEGRATED_FILING_INDAS_1586681_…` already here. |
 
 ## Availability, and the real depth of this dataset
 

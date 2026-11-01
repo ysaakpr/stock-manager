@@ -83,6 +83,7 @@ from dataplatform.clock import IST, Clock, SystemClock
 from dataplatform.config import Settings, get_settings
 from dataplatform.identity.master import (
     AmbiguousSymbolError,
+    Exchange,
     IdentityMaster,
     IdentityStore,
     SymbolWindow,
@@ -109,16 +110,20 @@ from dataplatform.ingest.lease import HostBusyError
 from dataplatform.ingest.models import ParseError
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
-from dataplatform.ingest.xbrl import discovery, integrated, parser
+from dataplatform.ingest.xbrl import discovery, half_year, integrated, parser
 from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
-from dataplatform.ingest.xbrl.models import SHARES_OUTSTANDING, Filing
+from dataplatform.ingest.xbrl.models import SHARES_OUTSTANDING, Filing, FundamentalFact
 from dataplatform.logging import get_logger
 from dataplatform.status.sync_state import SyncRecord, SyncState, SyncStateStore
 from dataplatform.store.db import connection
 from dataplatform.store.l0 import L0Error, L0Ref, L0Store
 from dataplatform.store.l1 import read_prices_raw
 from dataplatform.store.paths import l0_path
-from dataplatform.store.pit_fundamentals import PitFundamentalsBatch, write_pit
+from dataplatform.store.pit_fundamentals import (
+    PitFundamentalsBatch,
+    read_filed_between,
+    write_pit,
+)
 
 __all__ = [
     "DEFAULT_CHUNK_MONTHS",
@@ -133,6 +138,7 @@ __all__ = [
     "MissingPayloadError",
     "ParkReason",
     "Period",
+    "bse_codes_of",
     "build_index_units",
     "build_integrated_units",
     "capture_filename",
@@ -655,6 +661,7 @@ class FundamentalsBackfillRunner:
         batched_writes: bool = False,
         resolve_isin: integrated.ResolveIsin | None = None,
         clock: Clock | None = None,
+        bse_codes: Callable[[str], frozenset[str]] | None = None,
     ) -> None:
         if batched_writes and not rebuild_from_l0:
             raise ValueError(
@@ -690,6 +697,11 @@ class FundamentalsBackfillRunner:
         #: ISIN. Injected like `symbol_history`; a plan that contains an integrated page without it
         #: cannot run, and says so rather than guessing an identity (invariant #2).
         self._resolve_isin = resolve_isin
+        #: ISIN → the BSE scrip code(s) D2 holds for it (`exchange_listing`), for the parser's
+        #: identity check: a document stamping the company's own BSE code beside its symbol, or
+        #: stating it with a mistyped symbol, is recognised only against this. Injected like
+        #: `symbol_history`; without it no BSE code vouches for anything and both stay refused.
+        self._bse_codes = bse_codes
         #: Names a re-fetch (`capture_filename`). Only a run that may re-download needs one; a
         #: runner built without it fails the one unit that would have, loudly, rather than reuse.
         self._clock = clock
@@ -780,10 +792,13 @@ class FundamentalsBackfillRunner:
         statement and nothing is fetched.
         What it assumes: `run` has finished (or was not needed), on the same fetcher and leases;
         `journal` commits its row.
-        What it never does: drive an item twice in one run, fetch an index page, ignore the
-        deadline (`should_stop` is checked per item, and an unreached item has no row, so the next
-        run owes it), or carry on past a 403 spike: the tripping item is journaled FAILED and the
-        run parks.
+        A `reuse_only` item is driven only when its newest stored capture is a complete document —
+        the case `_ref_for` reuses without a request; otherwise it is journaled `FAILED` with why,
+        and nothing is fetched.
+        What it never does: drive an item twice in one run, fetch an index page, fetch for a
+        `reuse_only` item, ignore the deadline (`should_stop` is checked per item, and an
+        unreached item has no row, so the next run owes it), or carry on past a 403 spike: the
+        tripping item is journaled FAILED and the run parks.
         """
         pages: dict[str, tuple[FilingIndexEntry, ...]] = {}
         for item in items:
@@ -815,6 +830,11 @@ class FundamentalsBackfillRunner:
                 journal(item, RequeueOutcome.NOT_IN_INDEX, "the index entry names no XBRL document")
                 continue
             unit = FilingUnit(entry=entry, url=url, filename=url.rsplit("/", 1)[-1])
+            if item.reuse_only:
+                unstored = self._not_reusable(unit)
+                if unstored is not None:
+                    journal(item, RequeueOutcome.FAILED, unstored)
+                    continue
             try:
                 self._process_filing(unit, report=report)
             except _ParkedError as parked:
@@ -829,6 +849,26 @@ class FundamentalsBackfillRunner:
                 RequeueOutcome.PUBLISHED if published else RequeueOutcome.FAILED,
                 None if published else _row_detail(after),
             )
+
+    def _not_reusable(self, unit: FilingUnit) -> str | None:
+        """Why `_ref_for` would have to request this filing's document, or None if it would not.
+
+        None exactly when L0 holds a capture of the document and the newest one is complete — the
+        branch of `_ref_for` that reuses it — so a `reuse_only` item that passes makes no request.
+        """
+        captures = self._captures(unit)
+        if not captures:
+            return (
+                f"no stored capture of {unit.filename}; this re-queue is reuse_only and fetches "
+                "nothing"
+            )
+        defect = parser.payload_defect(self._l0.get(captures[-1]))
+        if defect is not None:
+            return (
+                f"the stored capture {captures[-1].key} is {defect}; this re-queue is reuse_only "
+                "and fetches nothing"
+            )
+        return None
 
     def _requeue_entry(
         self,
@@ -1256,16 +1296,48 @@ class FundamentalsBackfillRunner:
         self._buffered_keys.clear()
 
     def _parse(self, unit: FilingUnit, ref: L0Ref) -> Filing:
-        """One L0 payload into a `Filing`, cross-checked against the ISIN's symbol history."""
-        return parser.parse(
+        """One L0 payload into a `Filing`, cross-checked against the ISIN's identity in D2.
+
+        A six-month filing is then held against the quarters the same company had already
+        published inside it (`half_year.single_quarter_reason`), and refused — a `ParseError`, so
+        filed `FAILED` like any other refusal — when it is one quarter's figures under a half-year
+        label.
+        """
+        isin = unit.entry.isin
+        filing = parser.parse(
             self._l0.get(ref),
             entry=unit.entry,
-            known_symbols=self._symbols_for(
-                unit.entry.isin, unit.entry.symbol, unit.entry.filing_date
-            ),
+            known_symbols=self._symbols_for(isin, unit.entry.symbol, unit.entry.filing_date),
+            bse_codes=None if self._bse_codes is None else self._bse_codes(isin),
             l0_key=ref.key,
             filename=unit.filename,
         )
+        if half_year.is_half_year(filing):
+            reason = half_year.single_quarter_reason(filing, self._published_facts(filing))
+            if reason is not None:
+                raise ParseError(reason, filename=unit.filename)
+        return filing
+
+    def _published_facts(self, filing: Filing) -> list[FundamentalFact]:
+        """The ISIN's facts filed between the half-year's start and its own filing date.
+
+        Read from L1 — only those partitions, only that ISIN — plus whatever this run has parsed
+        into its write buffer and not yet flushed, so a batched rebuild sees the quarters it has
+        just re-derived. Nothing filed after the half-year is read (invariant #7).
+        """
+        first = filing.period_start or filing.period_end
+        facts = list(
+            read_filed_between(
+                first, filing.filing_date, isin=filing.isin, data_root=self._data_root
+            )
+        )
+        facts.extend(
+            fact
+            for pending in self._buffered
+            if pending.filing.isin == filing.isin
+            for fact in pending.filing.facts
+        )
+        return facts
 
     def _count_published(
         self, unit: FilingUnit, filing: Filing, *, report: FundamentalsBackfillReport
@@ -1616,6 +1688,17 @@ def try_resolve_unambiguous(master: IdentityMaster, symbol: str, on: date) -> st
         return None
 
 
+def bse_codes_of(master: IdentityMaster, isin: str) -> frozenset[str]:
+    """The BSE scrip code D2 holds for `isin` (`exchange_listing`), as the parser's `bse_codes`.
+
+    What it does: the runner's `bse_codes` — empty when the ISIN has no BSE listing or no code.
+    What it never does: guess a code from a symbol, or reach the network.
+    """
+    listing = master.listing(isin, Exchange.BSE)
+    code = None if listing is None else listing.security_code
+    return frozenset() if code is None or not code.strip() else frozenset({code.strip()})
+
+
 def _print_plan(plan: Sequence[IndexUnit]) -> None:
     """Print the dry-run discovery plan: one line per index chunk, then the count. No socket."""
     for unit in plan:
@@ -1785,6 +1868,7 @@ def _run_live(
                 owner_on=lambda symbol: master.try_resolve(symbol, on),
             ),
             resolve_isin=lambda symbol, on: try_resolve_unambiguous(master, symbol, on),
+            bse_codes=lambda isin: bse_codes_of(master, isin),
             rebuild_from_l0=rebuild_from_l0,
             # A rebuild is the only run that batches its writes. It is the run whose whole shape is
             # "throw the store away and redo it from L0", so the coarser checkpoint costs a local
