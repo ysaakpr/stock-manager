@@ -33,8 +33,11 @@ filing is retried by the next build, until it falls out of the window.
 **Factual only.** The model fills :data:`DIGEST_OUTPUT_SCHEMA` (``additionalProperties: false`` at
 every level), which has no field for a recommendation, a rating or a price view.
 :class:`DigestBody` refuses an extra key, and :func:`opinion_terms` refuses opinion wording in any
-text field (``target price``, ``outperform``, ``undervalued`` and the like). A refused digest is
-never stored. The run records it as a failure with the reason.
+text field (``target price``, ``outperform``, ``undervalued`` and the like). **Grounded**
+(``commons-digest/2``, 2026-11-01): every number in a figure must be one the filing states
+(:func:`ground_digest`; digit grouping, scale words, rounding and date formats are read
+numerically). A refused digest is never stored. The run records it as a failure with the reason,
+and the next build retries it.
 
 **Metered.** One call per uncached filing, through :mod:`analyst.llm` (so `StubLLM` drives the
 tests), on the model the caller names — the M17 roster's ``models.digest`` (Amendment 5:
@@ -55,6 +58,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Final, Protocol, runtime_checkable
 
@@ -99,14 +103,16 @@ __all__ = [
     "digest_for_isins",
     "digest_messages",
     "filing_inputs",
+    "ground_digest",
     "opinion_terms",
     "parse_digest",
+    "ungrounded_figures",
 ]
 
 _LOG = get_logger(__name__)
 
 #: Versioned identity of the prompt, the schema and the validation. Part of every digest.
-DIGEST_VERSION: Final = "commons-digest/1"
+DIGEST_VERSION: Final = "commons-digest/2"
 #: Output ceiling per digest. A digest is a paragraph and a table, not an essay.
 DIGEST_MAX_TOKENS: Final = 2_000
 #: The furthest back a run looks for a filing, in NSE sessions before the session.
@@ -164,12 +170,36 @@ class DigestBody(_Strict):
     figures: tuple[DigestFigure, ...] = Field(default=(), max_length=_MAX_FIGURES)
 
 
-def _string(max_length: int) -> dict[str, Any]:
-    return {"type": "string", "minLength": 1, "maxLength": max_length}
+def _string(max_length: int, description: str | None = None) -> dict[str, Any]:
+    node: dict[str, Any] = {"type": "string", "minLength": 1, "maxLength": max_length}
+    return node if description is None else {**node, "description": description}
 
 
-def _nullable_string(max_length: int) -> dict[str, Any]:
-    return {"type": ["string", "null"], "maxLength": max_length}
+def _nullable_string(max_length: int, description: str | None = None) -> dict[str, Any]:
+    node: dict[str, Any] = {"type": ["string", "null"], "maxLength": max_length}
+    return node if description is None else {**node, "description": description}
+
+
+_HEADLINE_RULE: Final = (
+    "One line, at most 200 characters. For a results filing: the basis (standalone or "
+    "consolidated) and the period, then revenue from operations and profit after tax (profit "
+    "for the period) of the latest period, with their values and units, whenever the filing "
+    "states them. For an announcement: the company and what it disclosed."
+)
+_PERIOD_RULE: Final = (
+    "The date or period the filing covers or concerns, as the text states it: a results "
+    "period, or an announcement's meeting, record, effective or event date. Null only when "
+    "the text states none."
+)
+_FIGURES_RULE: Final = (
+    "Every number the filing states. For an announcement that includes every date, percentage, "
+    "quantity and amount in the text, even when the headline or 'disclosed' already says it. "
+    "Never a number you computed: no change, growth rate, margin, ratio, sum or conversion of "
+    "your own. A figure whose number is not in the filing text is refused."
+)
+_VALUE_RULE: Final = (
+    "The number, date or percentage exactly as the text writes it; never a value you computed."
+)
 
 
 #: The JSON Schema the model fills, written out rather than generated so it is frozen with
@@ -179,19 +209,20 @@ DIGEST_OUTPUT_SCHEMA: Final[Mapping[str, Any]] = {
     "additionalProperties": False,
     "required": ["headline", "disclosed", "period", "figures"],
     "properties": {
-        "headline": _string(_MAX_HEADLINE),
+        "headline": _string(_MAX_HEADLINE, _HEADLINE_RULE),
         "disclosed": _string(_MAX_DISCLOSED),
-        "period": _nullable_string(_MAX_FIELD),
+        "period": _nullable_string(_MAX_FIELD, _PERIOD_RULE),
         "figures": {
             "type": "array",
             "maxItems": _MAX_FIGURES,
+            "description": _FIGURES_RULE,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
                 "required": ["label", "value", "unit", "period"],
                 "properties": {
                     "label": _string(_MAX_FIELD),
-                    "value": _string(_MAX_FIELD),
+                    "value": _string(_MAX_FIELD, _VALUE_RULE),
                     "unit": _nullable_string(_MAX_FIELD),
                     "period": _nullable_string(_MAX_FIELD),
                 },
@@ -217,7 +248,18 @@ DIGEST_SYSTEM_PROMPT: Final = (
     "only names an attached document, say that the detail is in the attachment and do not "
     "guess its content. Never give a recommendation, a rating, a price target, a valuation "
     "view, an expectation or any opinion on the company or its shares. If the text is "
-    "truncated, say so in 'disclosed'."
+    "truncated, say so in 'disclosed'. "
+    "'figures' holds numbers the filing states, never one you computed: no change, growth "
+    "rate, margin, ratio, sum or conversion of your own. Copy each value as the text writes "
+    "it; a figure whose number is not in the text is refused. "
+    "For a results filing, the headline names the basis (standalone or consolidated) and the "
+    "period, then revenue from operations and profit after tax (profit for the period) of the "
+    "latest period, with their values and units, whenever the filing states them. "
+    "For an announcement, every date, percentage, quantity and amount the text states (a "
+    "meeting, record or effective date, a stake, a capacity, a price, an order value) is also "
+    "a figure, even when the headline or 'disclosed' already says it; and 'period' is the date "
+    "or period the announcement concerns whenever the text states one. The dissemination time "
+    "is not a figure."
 )
 
 #: Opinion wording a factual digest never needs. Matched case-insensitively on word boundaries in
@@ -285,6 +327,304 @@ def parse_digest(arguments: Mapping[str, Any]) -> DigestBody:
     terms = opinion_terms(body)
     if terms:
         raise DigestRefusedError(f"the digest states an opinion: {list(terms)}")
+    return body
+
+
+# ── grounding: every figure's number is in the filing ───────────────────────────────────────────
+#
+# A figure is a number the filing states (the schema and the prompt say so), so each number in a
+# figure's ``value`` must be found in what the model was given. "Found" is numeric, not textual:
+# Indian and western digit grouping (1,23,456 / 123,456), trailing zeros (5030.6 / 5030.60), a
+# percent sign, a scale word on either side (5,030.6 million is 5030600000; 120 crore is
+# 1,20,00,00,000; "Rupees Ten Crore" is 10 crore), a figure rounded to the precision it is written
+# at (503.06 crore for 5030645123), a sign or a bracketed loss, and a date in any common format
+# (02nd of November 2026 / 2 Nov 2026 / 2026-11-02 / 02/11/2026). A computed value — a change, a
+# margin, a ratio, a sum — is not in the text and is refused: the schema never asks for one.
+
+#: Scale words: the number before one also stands for itself times the scale.
+_SCALES: Final[Mapping[str, Decimal]] = {
+    **dict.fromkeys(("thousand", "thousands"), Decimal(10) ** 3),
+    **dict.fromkeys(("lakh", "lakhs", "lac", "lacs"), Decimal(10) ** 5),
+    **dict.fromkeys(("million", "millions", "mn", "mln"), Decimal(10) ** 6),
+    **dict.fromkeys(("crore", "crores", "cr", "crs"), Decimal(10) ** 7),
+    **dict.fromkeys(("billion", "billions", "bn"), Decimal(10) ** 9),
+}
+_SCALE_AFTER: Final = re.compile(
+    r"\)?\s*(?:-\s*)?(" + "|".join(sorted(_SCALES, key=len, reverse=True)) + r")\b\.?",
+    re.IGNORECASE,
+)
+#: A run of digits and commas with an optional decimal part. Commas are checked afterwards.
+_NUMBER: Final = re.compile(r"\d(?:[\d,]*\d)?(?:\.\d+)?")
+_PERCENT: Final = re.compile(r"%|\bper\s*cent\b|\bpercent(?:age)?\b", re.IGNORECASE)
+
+_MONTHS: Final[Mapping[str, int]] = {
+    name: number
+    for number, names in enumerate(
+        (
+            ("jan", "january"),
+            ("feb", "february"),
+            ("mar", "march"),
+            ("apr", "april"),
+            ("may",),
+            ("jun", "june"),
+            ("jul", "july"),
+            ("aug", "august"),
+            ("sep", "sept", "september"),
+            ("oct", "october"),
+            ("nov", "november"),
+            ("dec", "december"),
+        ),
+        start=1,
+    )
+    for name in names
+}
+_MONTH: Final = r"(" + "|".join(sorted(_MONTHS, key=len, reverse=True)) + r")\.?(?![a-z])"
+_DAY: Final = r"(\d{1,2})(?:st|nd|rd|th)?"
+#: Dates, most specific first. Each match is (year | None, month, day) once read; a numeric
+#: day-month-year is read both ways round, so a figure never fails on the convention alone.
+_ISO_DATE: Final = re.compile(r"(?<!\d)(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?!\d)")
+_NUMERIC_DATE: Final = re.compile(r"(?<![\d.])(\d{1,2})[-/.](\d{1,2})[-/.](\d{4}|\d{2})(?![\d])")
+_DAY_MONTH: Final = re.compile(
+    r"(?<![\d.])" + _DAY + r"(?:\s+of)?[\s,./-]*" + _MONTH + r"(?:[\s,./'-]*(\d{4})(?!\d))?",
+    re.IGNORECASE,
+)
+_MONTH_DAY: Final = re.compile(
+    r"(?<![a-z])" + _MONTH + r"[\s,./-]*" + _DAY + r"(?![\d:])(?:,?\s*(\d{4})(?!\d))?",
+    re.IGNORECASE,
+)
+
+_UNITS: Final[Mapping[str, int]] = {
+    word: n
+    for n, word in enumerate(
+        [
+            "zero",
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+            "six",
+            "seven",
+            "eight",
+            "nine",
+            "ten",
+            "eleven",
+            "twelve",
+            "thirteen",
+            "fourteen",
+            "fifteen",
+            "sixteen",
+            "seventeen",
+            "eighteen",
+            "nineteen",
+        ]
+    )
+}
+_TENS: Final[Mapping[str, int]] = {
+    word: 10 * n
+    for n, word in enumerate(
+        ["twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"], start=2
+    )
+}
+_WORD_SCALES: Final[Mapping[str, Decimal]] = {"hundred": Decimal(100), **_SCALES}
+_NUMBER_WORDS: Final = re.compile(
+    r"\b(?:(?:"
+    + "|".join(sorted([*_UNITS, *_TENS, *_WORD_SCALES], key=len, reverse=True))
+    + r")\b[\s-]*(?:and\s+)?)+",
+    re.IGNORECASE,
+)
+
+type _Date = tuple[int | None, int, int]
+
+
+def _grouped(digits: str) -> Decimal | None:
+    """The value of a comma-grouped run (western 1,234,567 or Indian 12,34,567), else ``None``.
+
+    The Indian head may run to three digits: filings write "Rs. 466,73,61,738.00".
+    """
+    whole, _, fraction = digits.partition(".")
+    parts = whole.split(",")
+    if len(parts) == 1:
+        return Decimal(digits)
+    head, middle, last = parts[0], parts[1:-1], parts[-1]
+    western = 1 <= len(head) <= 3 and all(len(p) == 3 for p in parts[1:])
+    indian = 1 <= len(head) <= 3 and all(len(p) == 2 for p in middle) and len(last) == 3
+    if not (western or indian):
+        return None
+    return Decimal(whole.replace(",", "") + ("." + fraction if fraction else ""))
+
+
+def _numbers(text: str, *, split_groups: bool) -> list[tuple[Decimal, Decimal | None]]:
+    """Every number in ``text`` as (absolute value, the scale word written after it).
+
+    A comma run that is not a valid grouping ("28,2026") is read as its parts. With
+    ``split_groups`` every comma run is read whole and as its parts (the text side, where reading
+    too many numbers can only make a figure easier to find, never harder).
+    """
+    out: list[tuple[Decimal, Decimal | None]] = []
+    for match in _NUMBER.finditer(text):
+        token = match.group(0)
+        scale_match = _SCALE_AFTER.match(text, match.end())
+        scale = _SCALES[scale_match.group(1).lower()] if scale_match else None
+        whole = _grouped(token)
+        if whole is None and split_groups:
+            whole = Decimal(token.replace(",", ""))
+        values = [] if whole is None else [whole]
+        if whole is None or (split_groups and "," in token):
+            pieces = token.split(",")
+            values += [Decimal(p) for p in pieces[:-1] if p] + [Decimal(pieces[-1])]
+        out += [(abs(v), scale) for v in values]
+    return out
+
+
+def _word_numbers(text: str) -> list[Decimal]:
+    """Numbers written in words ("Rupees Ten Crore Only", "one lakh twenty five thousand")."""
+    out: list[Decimal] = []
+    for match in _NUMBER_WORDS.finditer(text):
+        words = [w.lower() for w in re.findall(r"[a-z]+", match.group(0), re.IGNORECASE)]
+        total, current, largest, last_scale = Decimal(0), Decimal(0), Decimal(0), None
+        seen = False
+        for word in words:
+            if word in _UNITS:
+                current += _UNITS[word]
+                seen = True
+            elif word in _TENS:
+                current += _TENS[word]
+                seen = True
+            elif word in _WORD_SCALES and seen:
+                scale = _WORD_SCALES[word]
+                if scale == 100:
+                    current = (current or Decimal(1)) * scale
+                elif scale > largest:
+                    total, current, largest = (total + current) * scale, Decimal(0), scale
+                else:
+                    total, current = total + current * scale, Decimal(0)
+                last_scale = scale
+        if seen:
+            value = total + current
+            out.append(value)
+            if last_scale is not None and last_scale != 100 and current == 0:
+                out.append(value / last_scale)
+    return out
+
+
+def _dates(text: str) -> tuple[list[list[_Date]], str]:
+    """Every date written in ``text`` — one list of readings per written date — and ``text``
+    with those dates blanked out, so their digits are not read again as plain numbers."""
+    found: list[list[_Date]] = []
+    spans: list[tuple[int, int]] = []
+
+    def year(raw: str | None) -> int | None:
+        if raw is None:
+            return None
+        return int(raw) + 2000 if len(raw) == 2 else int(raw)
+
+    def add(match: re.Match[str], readings: list[_Date]) -> None:
+        if any(match.start() < end and start < match.end() for start, end in spans):
+            return
+        valid = [(y, m, d) for y, m, d in readings if 1 <= m <= 12 and 1 <= d <= 31]
+        if valid:
+            found.append(valid)
+            spans.append((match.start(), match.end()))
+
+    for match in _ISO_DATE.finditer(text):
+        add(match, [(int(match.group(1)), int(match.group(2)), int(match.group(3)))])
+    for match in _NUMERIC_DATE.finditer(text):
+        a, b, y = int(match.group(1)), int(match.group(2)), year(match.group(3))
+        add(match, [(y, b, a), (y, a, b)])
+    for match in _DAY_MONTH.finditer(text):
+        month = _MONTHS[match.group(2).lower()]
+        add(match, [(year(match.group(3)), month, int(match.group(1)))])
+    for match in _MONTH_DAY.finditer(text):
+        month = _MONTHS[match.group(1).lower()]
+        add(match, [(year(match.group(3)), month, int(match.group(2)))])
+    blanked = list(text)
+    for start, end in spans:
+        blanked[start:end] = " " * (end - start)
+    return found, "".join(blanked)
+
+
+def _same_date(a: _Date, b: _Date) -> bool:
+    return a[1:] == b[1:] and (a[0] is None or b[0] is None or a[0] == b[0])
+
+
+def _quantum(value: Decimal) -> Decimal:
+    exponent = value.as_tuple().exponent
+    return Decimal(1).scaleb(exponent if isinstance(exponent, int) and exponent < 0 else 0)
+
+
+@dataclass(frozen=True, slots=True)
+class _Grounds:
+    """What a filing states, read once: its quantities and its dates."""
+
+    quantities: tuple[Decimal, ...]
+    dates: tuple[_Date, ...]
+
+    @classmethod
+    def of(cls, text: str) -> _Grounds:
+        dates, _ = _dates(text)
+        quantities: set[Decimal] = set()
+        for value, scale in _numbers(text, split_groups=True):
+            quantities.add(value)
+            if scale is not None:
+                quantities.add(value * scale)
+        for value in _word_numbers(text):
+            quantities.add(value)
+        return cls(tuple(sorted(quantities)), tuple(d for readings in dates for d in readings))
+
+    def has(self, value: Decimal, quantum: Decimal) -> bool:
+        """``value`` is stated, exactly or rounded to the precision it is written at."""
+        half = quantum / 2
+        return any(abs(q - value) <= half for q in self.quantities)
+
+    def has_date(self, readings: Sequence[_Date]) -> bool:
+        return any(_same_date(r, d) for r in readings for d in self.dates)
+
+
+def _figure_grounded(figure: DigestFigure, grounds: _Grounds) -> bool:
+    """Every number in the figure's value is one the filing states (module comment above)."""
+    dates, rest = _dates(figure.value)
+    if not all(grounds.has_date(readings) for readings in dates):
+        return False
+    unit = figure.unit or ""
+    percent = bool(_PERCENT.search(figure.value) or _PERCENT.search(unit))
+    unit_scales = [_SCALES[m.group(1).lower()] for m in _SCALE_AFTER.finditer(" " + unit)]
+    for value, scale in _numbers(rest, split_groups=False):
+        quantum = _quantum(value)
+        candidates = [(value, quantum)]
+        candidates += [(value * s, quantum * s) for s in (scale, *unit_scales) if s is not None]
+        if percent:
+            candidates.append((value / 100, quantum / 100))
+        if not any(grounds.has(v, q) for v, q in candidates):
+            return False
+    return True
+
+
+def ungrounded_figures(body: DigestBody, item: FilingInput) -> tuple[DigestFigure, ...]:
+    """The figures of ``body`` with a number that ``item`` does not state, in order.
+
+    What it reads: the filing's text, its id and its knowable date — everything the model was
+    given. What it assumes: a figure is a stated number (the schema's rule), never a computed one.
+    What it never does: drop or rewrite a figure; the caller refuses the digest.
+    """
+    grounds = _Grounds.of(f"{item.text}\n{item.filing_id}\n{item.knowable_date.isoformat()}")
+    return tuple(f for f in body.figures if not _figure_grounded(f, grounds))
+
+
+def ground_digest(body: DigestBody, item: FilingInput) -> DigestBody:
+    """Refuse ``body`` when any figure's number is not in the filing; else return it unchanged.
+
+    Raises :class:`DigestRefusedError` naming each ungrounded figure, so the refusal takes the
+    path every refused digest takes: never stored, named as the run's failure, retried by the
+    next build (and, on demand, reported to the manager as an unfulfilled digest).
+    """
+    missing = ungrounded_figures(body, item)
+    if missing:
+        named = "; ".join(f"{f.label!r} = {f.value!r}" for f in missing)
+        raise DigestRefusedError(
+            f"the digest states {len(missing)} figure(s) whose number is not in the filing "
+            f"text: {named}"[:450]
+        )
     return body
 
 
@@ -537,9 +877,11 @@ def digest_filing(
     """One model call that turns ``item`` into a validated :class:`FilingDigest`.
 
     What it does: asks ``model`` through ``llm`` to fill :data:`DIGEST_TOOL`, validates the answer
-    with :func:`parse_digest`, and records the usage the response reports.
-    What it never does: retry, or return a digest that failed validation. A response with no
-    structured output, a truncated one, or an invalid one raises :class:`DigestRefusedError`.
+    with :func:`parse_digest` and :func:`ground_digest` (every figure's number is in ``item``),
+    and records the usage the response reports.
+    What it never does: retry, drop a figure, or return a digest that failed validation. A
+    response with no structured output, a truncated one, an invalid one or one with an
+    ungrounded figure raises :class:`DigestRefusedError`.
     """
     messages = digest_messages(item)
     response: LLMResponse = llm.complete(
@@ -557,7 +899,7 @@ def digest_filing(
             f"expected one {DIGEST_TOOL.name} output, got {len(calls)} (text: "
             f"{response.text[:80]!r})"
         )
-    body = parse_digest(calls[0].arguments)
+    body = ground_digest(parse_digest(calls[0].arguments), item)
     return FilingDigest(
         filing_id=item.filing_id,
         kind=item.kind,
