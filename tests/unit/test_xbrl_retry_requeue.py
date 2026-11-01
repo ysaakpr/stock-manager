@@ -493,7 +493,7 @@ def test_a_register_naming_a_filing_twice_or_another_index_is_refused(tmp_path: 
 
 
 def test_the_checked_in_register_is_the_owner_approved_bounded_set() -> None:
-    items = rq.load_requeues()
+    items = [i for i in rq.load_requeues() if i.requeue_id not in rq.RAISED_BOUNDS]
     refetch = {i.unit for i in items if i.action is rq.RequeueAction.REFETCH}
     evidence = {i.unit for i in items if i.action is rq.RequeueAction.RECORD_EVIDENCE}
     # 7 other 404s + 5 empty/truncated bodies; 22 zero-byte 404s recorded before the statement.
@@ -506,3 +506,94 @@ def test_the_checked_in_register_is_the_owner_approved_bounded_set() -> None:
 
 def test_the_requeue_bound_stays_under_a_campaign() -> None:
     assert rq.MAX_TOTAL_FILINGS < 200  # B1: >200 requests to one source is a human go
+
+
+# ── reuse-only re-queues and the owner's one-off raised bound ────────────────────────────────
+
+E_F1: Final = "xbrl-identity-e-f1-2026-11-03"
+
+
+def test_the_e_f1_requeue_is_the_one_raised_list_and_cannot_request() -> None:
+    """2026-11-02 (owner): 205 class E/F1 filings in one night, because none can cost a request."""
+    items = [i for i in rq.load_requeues() if i.requeue_id == E_F1]
+    assert len(items) == 205 == rq.RAISED_BOUNDS[E_F1]
+    assert all(i.reuse_only and i.action is rq.RequeueAction.REFETCH for i in items)
+    assert all(i.index_ref[0] == "nse_integrated_filing_index" for i in items)
+    assert set(rq.RAISED_BOUNDS) == {E_F1}  # no standing allowance
+    # Not before Tuesday's run: the forward job of Tue 3 Nov 02:00 IST is the first to owe it.
+    due_mon = rq.pending_items(cast(Any, _Conn([])), date(2026, 11, 2))
+    due_tue = rq.pending_items(cast(Any, _Conn([])), date(2026, 11, 3))
+    assert not any(i.requeue_id == E_F1 for i in due_mon)
+    assert sum(i.requeue_id == E_F1 for i in due_tue) == 205
+
+
+def _big(tmp_path: Path, rid: str, *, n: int, extra: str = "") -> Path:
+    path = tmp_path / "requeue.yaml"
+    filings = "".join(
+        f"      - {{unit: IF{100000 + k}, filing_date: 2025-05-31, index: {INDEX_KEY}}}\n"
+        for k in range(n)
+    )
+    path.write_text(
+        "version: 1\nrequeues:\n"
+        f"  - id: {rid}\n    action: refetch\n{extra}    not_before: 2026-11-03\n"
+        "    basis: test\n    filings:\n" + filings
+    )
+    return path
+
+
+def test_more_than_the_bound_needs_the_owners_id_and_reuse_only(tmp_path: Path) -> None:
+    with pytest.raises(rq.RequeueError, match="its bound is 50"):
+        rq.load_requeues(_big(tmp_path, "some-other-list", n=51, extra="    reuse_only: true\n"))
+    with pytest.raises(rq.RequeueError, match="not reuse_only"):
+        rq.load_requeues(_big(tmp_path, E_F1, n=51))
+    with pytest.raises(rq.RequeueError, match="its bound is 205"):
+        rq.load_requeues(_big(tmp_path, E_F1, n=206, extra="    reuse_only: true\n"))
+    items = rq.load_requeues(_big(tmp_path, E_F1, n=205, extra="    reuse_only: true\n"))
+    assert len(items) == 205 and all(i.reuse_only for i in items)
+
+
+def test_reuse_only_applies_to_refetch_alone(tmp_path: Path) -> None:
+    path = _big(tmp_path, "evidence", n=1, extra="    reuse_only: true\n")
+    path.write_text(path.read_text().replace("action: refetch", "action: record_evidence"))
+    with pytest.raises(rq.RequeueError, match="reuse_only applies to refetch only"):
+        rq.load_requeues(path)
+
+
+def _reuse_item(unit: str) -> rq.RequeueItem:
+    return rq.RequeueItem(E_F1, rq.RequeueAction.REFETCH, unit, FILED, INDEX_KEY, reuse_only=True)
+
+
+def test_a_reuse_only_item_with_a_complete_document_publishes_without_a_request(
+    world: _World,
+) -> None:
+    world.l0.put("nse_xbrl_filing", FILED, GSS_DOC, GOOD)
+    for unit in UNITS:
+        _failed(world, unit, f"parse failed: {GSS_DOC}: filing names more than one entity")
+    runner, fetcher = world.runner({})  # any request would KeyError: there is no body to serve
+    journal = _Journal()
+    report = fb.FundamentalsBackfillReport(index_requested=0)
+    runner.requeue([_reuse_item(u) for u in UNITS], journal=journal, report=report)
+    assert fetcher.requests == []
+    assert [o for _, o, _ in journal.rows] == [rq.RequeueOutcome.PUBLISHED] * 2
+    assert report.filings_l0_reused == 2 and report.filings_refetched == 0
+
+
+@pytest.mark.parametrize("stored", [None, b"", GOOD[:32768]], ids=["none", "empty", "truncated"])
+def test_a_reuse_only_item_without_a_complete_document_fails_and_fetches_nothing(
+    world: _World, stored: bytes | None
+) -> None:
+    """The inversion of the above: where `refetch` would download, `reuse_only` refuses to."""
+    if stored is not None:
+        world.l0.put("nse_xbrl_filing", FILED, GSS_DOC, stored)
+    _failed(world, "IF97542", "parse failed: (old)")
+    runner, fetcher = world.runner({GSS_URL: GOOD})
+    journal = _Journal()
+    runner.requeue(
+        [_reuse_item("IF97542")],
+        journal=journal,
+        report=fb.FundamentalsBackfillReport(index_requested=0),
+    )
+    assert fetcher.requests == []
+    ((_, outcome, detail),) = journal.rows
+    assert outcome is rq.RequeueOutcome.FAILED and detail is not None and "reuse_only" in detail
+    assert world.sync.state("IF97542").last_error == "parse failed: (old)"  # untouched
