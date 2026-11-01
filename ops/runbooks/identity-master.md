@@ -206,11 +206,37 @@ uv run python -m dataplatform.identity.repair_avenuesai --apply   # locks three 
 * With the edge in place, the weekly ingest re-derives CCAVENUE onto the stored 2026-10-19 start
   (`resolve_reissues`, the "already reconciled" branch) and drops the INFIBEAM rename history from
   the new ISIN, so neither deleted window comes back.
-* **Known follow-up — `lineage_rebuild`.** L1 contiguity will derive the same pair, and
-  `LineageStore.replace_derived` inserts derived edges without skipping a predecessor that already
-  holds a MANUAL row, so the next manual `identity.lineage_rebuild` stops on the unique index for
-  INE483S01020. It fails loudly and rolls back; nothing scheduled calls it. Fix `replace_derived`
-  to skip such an edge before the next rebuild. Do not delete the MANUAL row to get past it.
+* **`lineage_rebuild` and MANUAL edges (fixed 2026-11-01).** L1 contiguity derives the same pair.
+  Before the fix, `replace_derived` inserted it a second time and the rebuild stopped on
+  `isin_lineage_pkey`. Now every rebuild keeps MANUAL rows as stored and applies them with the
+  derived ones, and stage 4 stitches their survivors' L2. A derived edge that restates a MANUAL
+  one is not written again. Do not delete the MANUAL row.
+
+## `lineage_rebuild`: MANUAL edges and conflicts
+
+Before a real `identity.lineage_rebuild`, run the dry run. It derives stage 1, writes it in a
+transaction, prints the diff against the table and rolls back:
+
+```bash
+uv run python -m dataplatform.identity.lineage_rebuild --compare
+```
+
+It prints `manual_edges_kept`, the derived edges that agree with a MANUAL one, the rows it would add
+and remove, and any conflicts. It exits 1 if there are conflicts. On 2026-11-01 it showed 1 MANUAL
+kept (AvenuesAI, agreeing), 6 rows added (the October reissues of TAALTECH, BLSE, BUILDPRO,
+BANSALWIRE, JSWDULUX and AZADIND, all CORROBORATED by a SPLIT), 0 removed and 0 conflicts.
+
+**Precedence** (`lineage.merge_with_manual`). A MANUAL edge is authoritative for its own predecessor.
+A derived edge is a **conflict** when it gives the MANUAL predecessor another successor or another
+effective date, gives the MANUAL successor a second predecessor, or closes a loop through MANUAL
+edges. A rebuild never picks a side. It stops before deleting or writing anything, queues each
+conflict in `identity_reconciliation` (`kind = 'LINEAGE_EDGE'`, `detected_by = 'LINEAGE_REBUILD'`,
+`note` names both edges), commits the queue row and raises `LineageConflictError`. A human decides:
+
+* **The MANUAL edge is right:** resolve the row (as above, with the reasoning in `resolution`). The
+  next rebuild drops that derived edge and reports it as `derived_overridden_by_manual`.
+* **The derived edge is right:** delete the MANUAL row in a reviewed transaction and resolve the
+  queue row. The next rebuild writes the derived edge.
 
 ## Health
 
