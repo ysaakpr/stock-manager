@@ -12,6 +12,10 @@
 #   * `knowable_date` is the dissemination date of the earliest L0 source stating both the terms
 #     and the ex-date, never the date this file was written. `checked` is when a human last
 #     verified the row against its sources and against L1.
+#   * The one exception to "transcribed": a SPLIT whose bc line states the terms and the record
+#     date but leaves EX_DT blank carries `ex_date_derived: T1_RECORD_DATE` and NO `ex_date`. The
+#     loader derives ex = record (T+1 settlement, record date a session on/after 2023-01-27 only;
+#     corpactions.ex_date_rule) and records the rule on the row. Never both keys on one row.
 #   * SPLIT states face values `from_value` -> `to_value` (Rs 10 -> Rs 2 is a 1:5 sub-division);
 #     BONUS states `new_shares` for every `held_shares` held. Two events on one ex-date are two
 #     rows (the chain composes them). DEMERGER / SCHEME_OF_ARRANGEMENT carry no terms: they are
@@ -313,6 +317,40 @@ actions:
         member: bc13082026.csv
         line: 170
         quote: EQ,GOLDADD,DSPAMC - DSPGOLD,2026-08-28,,,2026-08-28,,,FVSPLT FRM RS 10 TO RE 1
+
+  - isin: INE483S01038
+    company: AvenuesAI Ltd (formerly Infibeam Avenues)
+    filed_against_isin: INE483S01020
+    action_type: SPLIT
+    from_value: 1
+    to_value: 10
+    # EX_DT is BLANK on the bc line below. The ex-date is DERIVED, not stated: record date under
+    # T+1 settlement (ex = record since 2023-01-27; corpactions.ex_date_rule). The loader sets
+    # ex_date = record_date = 2026-10-13 and keeps the rule on the row.
+    ex_date_derived: T1_RECORD_DATE
+    record_date: 2026-10-13
+    knowable_date: 2026-10-12
+    checked: 2026-11-01
+    note: >-
+      A consolidation, Re 1 -> Rs 10 face value (ten shares into one): price factor 10, quantity
+      factor 1/10 on every bar before the ex-date. The reissue retired INE483S01020 (MANUAL lineage
+      edge, PR #142); trading was suspended from 2026-10-13 and resumed 2026-10-19 under
+      INE483S01038. L1 NSE EQ: 13.83 on 2026-10-12 (INE483S01020) -> 130.05 on 2026-10-19
+      (INE483S01038), whose PREV_CLOSE the exchange printed as 138.30 = 13.83 x 10. Adjusted, the
+      seven-day gap is -6.0%, not x9.40. The ex-date is derived because the source leaves it
+      blank; the terms and the record date are stated.
+    sources:
+      - l0_key: nse_pr_bundle/2026/10/PR121026.zip
+        member: bc12102026.csv
+        line: 128
+        quote: EQ,CCAVENUE,AvenuesAI Limited,2026-10-13,,,,,,CNSLDATNRE1 TO RS10
+      - l0_key: nse_pr_bundle/2026/10/PR121026.zip
+        member: an12102026.txt
+        line: 195
+        quote: >-
+          trading in equity shares of AvenuesAI Limited shall be suspended w.e.f. October 13, 2026
+          (i.e. closing hours of trading on October 12, 2026) on account of Consolidation of
+          equity shares from Re. 1/- each to Rs.10/- each.
 
   # ── pre-2011 steps the 2006-2011 L2 extension exposes (gate l1-widen-2026-10-06 §5) ──────────
   # The ex-day row of the NSE PR bundle's Pd<ddmmyy>.csv carries the exchange's own CORP_IND flag
