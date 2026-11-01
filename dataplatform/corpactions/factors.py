@@ -135,10 +135,11 @@ _ONE: Final = Decimal(1)
 #: to the ex-date that the total-return series will still reinvest against (``total_return_series``;
 #: an ex-date that has a bar always reinvests against the previous bar, as before). One quarter:
 #: a close older than that predates at least one quarterly results cycle (SEBI LODR reg. 33 gives
-#: 45 days after quarter end), so it no longer prices the business the dividend is paid out of. The
-#: no-trade-day gaps that cleared on 2026-11-01 were trade-to-trade stints and short suspensions of
-#: 1 to 55 days; the ones beyond the bound ran from 122 days to over a decade, and a dividend there
-#: is a suspended or relisted security, which must fail loud rather than reinvest at a stale price.
+#: 45 days after quarter end), so it no longer prices the business the dividend is paid out of.
+#: It is a judgment, not a cliff in the data: on the 2026-11-01 lake, 492 no-trade-day dividends in
+#: 357 partitions fell within it (median gap 31 days: trade-to-trade stints, short suspensions), and
+#: 107 partitions hit it with gaps of 93 days to 12 years: suspended or relisted securities,
+#: which must fail loud rather than reinvest at a stale price.
 MAX_STALE_CLOSE_DAYS: Final = 92
 
 #: The action types that scale the price/quantity basis and so produce a factor row. Everything the
