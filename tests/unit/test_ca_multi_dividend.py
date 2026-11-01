@@ -309,9 +309,10 @@ def test_a_same_day_extra_never_unreconciles_an_old_one_feed_dividend() -> None:
 
 
 def test_a_same_day_extra_on_a_disputed_day_is_queued_with_the_dispute() -> None:
-    """BSE states the ₹19.50 total, NSE ₹15.50 + ₹4: the pair disagrees, so the extra is not
-    admitted on one feed's word either — but the 2000 dividend still is."""
-    result = reconcile(_bpcl(bse_total="19.5"), single_source_policy=SingleSourcePolicy.ACCEPT)
+    """BSE states ₹20, NSE ₹15.50 + ₹4: the pair disagrees, so the extra is not admitted on one
+    feed's word either — but the 2000 dividend still is. (BSE's real ₹19.50 is the parts' exact
+    sum, which rule B reconciles since 2026-11-01: `test_ca_dividend_rules`.)"""
+    result = reconcile(_bpcl(bse_total="20"), single_source_policy=SingleSourcePolicy.ACCEPT)
     reasons = sorted(c.reason for c in result.queue)
     assert reasons == [ReconciliationReason.RATIO_MISMATCH, ReconciliationReason.SINGLE_SOURCE]
     assert [r.ex_date for r in result.reconciled] == [date(2000, 7, 25)]

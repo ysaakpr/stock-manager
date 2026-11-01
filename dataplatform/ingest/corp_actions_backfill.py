@@ -57,6 +57,7 @@ from typing import Final
 
 from dataplatform.clock import Clock, SystemClock
 from dataplatform.config import Settings, get_settings
+from dataplatform.corpactions.manual_actions import default_manual_actions
 from dataplatform.corpactions.recompute import RecomputeResult, recompute_isins
 from dataplatform.corpactions.reconcile import (
     SingleSourcePolicy,
@@ -673,7 +674,10 @@ def finalize_reconcile_and_recompute(
     The caller's `commit` is the durable checkpoint; the reconcile marks and the factor rewrite land
     in one transaction, as every D3 writer intends.
     """
-    all_actions = load_corporate_actions(conn)
+    # The curated records restoring a feed's dropped dividend (`manual_actions`) stand on their
+    # feed's side, so the event they complete reconciles; `load_reconciled_actions` adds the same
+    # set to its collapse. They are never written to the table and never booked on their own.
+    all_actions = (*load_corporate_actions(conn), *default_manual_actions().restored_dividends())
     result = reconcile(all_actions, single_source_policy=single_source_policy)
     persist = persist_reconciliation(conn, result, clock=clock)
 

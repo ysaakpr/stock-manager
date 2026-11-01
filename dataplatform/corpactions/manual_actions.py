@@ -21,6 +21,15 @@ Two kinds of row:
   2013 NSEL crisis at Financial Technologies, YES Bank's 2020 moratorium). These get no factor:
   inventing one would erase a real loss from every backtest. They are an explicit allowlist the
   continuity check honours on the exact ISIN and session only, each with its reason and source.
+* **Restored dividends** — a DIVIDEND row in `actions` is a record one CA feed *did* publish,
+  in its own L0 payload, that the store's one-row-per-kind key could not hold: Patanjali's NSE
+  filed two Interim records on 2026-08-21 (₹0.80 and ₹1.50), and only the first reached
+  `corporate_actions`. It names the `feed` it restores, and its first source is that feed's L0
+  object. It never becomes a factor and is never booked on its own: reconciliation stands it on
+  its feed's side (`reconcile._feed`) so the event it completes can be matched — there, ₹0.80 +
+  ₹1.50 against BSE's one ₹2.30 record — and the collapse drops it unless it completed one. It
+  is kept apart from the price events (`ManualActions.dividends`), so no L2 path that composes
+  `actions` into a factor chain ever sees it.
 * **Unsourced steps** — rows in the same list whose kind is not `MARKET_MOVE`: a share-basis step
   whose terms no L0 object states. `UNSOURCED_ACTION` is one an exchange record shows to be a
   corporate action (EIH's 2006 ex-date lists a second, blank-purpose event beside its bonus);
@@ -63,6 +72,8 @@ import yaml
 from dataplatform.corpactions.merger_terms import TermSource, parse_term_sources
 from dataplatform.corpactions.taxonomy import (
     ActionType,
+    DividendKind,
+    DividendTerms,
     FaceValueTerms,
     RatioTerms,
     Terms,
@@ -94,6 +105,10 @@ MANUAL_SOURCE: Final = "manual_curated"
 #: The action types a curated row may state. Price events get a factor; the rest are breaks.
 _PRICE_EVENTS: Final = frozenset({ActionType.SPLIT, ActionType.BONUS})
 _BREAKS: Final = frozenset({ActionType.DEMERGER, ActionType.SCHEME_OF_ARRANGEMENT})
+
+#: The feeds whose dropped dividend records a DIVIDEND row may restore. Literal ids rather than the
+#: ingest modules' constants: this module sits below `ingest` and must not import it at load time.
+_RESTORABLE_FEEDS: Final = frozenset({"nse_corp_actions", "bse_corp_actions"})
 
 #: The one explained-move kind that is a real change in price, and so needs no quarantine.
 MARKET_MOVE: Final = "MARKET_MOVE"
@@ -133,14 +148,22 @@ class CuratedAction:
     record_date: date | None = None
     filed_against_isin: str | None = None
     note: str | None = None
+    #: A restored dividend only: the feed whose record it is, and its component in that feed's
+    #: day (`INTERIM#2` for a second Interim the key could not hold beside the first).
+    feed: str | None = None
+    component: str = ""
 
     @property
     def is_price_event(self) -> bool:
         return self.action_type in _PRICE_EVENTS
 
+    @property
+    def is_restored_dividend(self) -> bool:
+        return self.action_type is ActionType.DIVIDEND
+
     def as_action(self) -> CorporateAction:
         """This row as a `CorporateAction` under `MANUAL_SOURCE`, for the factor math."""
-        from dataplatform.ingest.corp_actions import CorporateAction
+        from dataplatform.ingest.corp_actions import CorporateAction, dividend_component
 
         first = self.sources[0]
         return CorporateAction(
@@ -155,6 +178,7 @@ class CuratedAction:
             record_date=self.record_date,
             source_ref=MANUAL_ACTIONS_PATH.name,
             l0_key=first.l0_key,
+            component=self.component or dividend_component(self.terms),
         )
 
 
@@ -182,6 +206,9 @@ class ManualActions:
 
     actions: tuple[CuratedAction, ...]
     explained_moves: tuple[ExplainedMove, ...]
+    #: Restored dividend records (module docstring), kept out of `actions` so no factor path sees
+    #: them; reconciliation reads them through `restored_dividends`.
+    dividends: tuple[CuratedAction, ...] = ()
     _by_isin: Mapping[str, tuple[CuratedAction, ...]] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -193,6 +220,28 @@ class ManualActions:
     def actions_for(self, isin: str) -> tuple[CuratedAction, ...]:
         """`isin`'s curated actions in ex-date order; empty for the ~all ISINs that have none."""
         return self._by_isin.get(isin, ())
+
+    def restored_dividends(
+        self,
+        *,
+        isin: str | None = None,
+        ex_after: date | None = None,
+        ex_through: date | None = None,
+    ) -> tuple[CorporateAction, ...]:
+        """The restored dividend records as `CorporateAction`s under `MANUAL_SOURCE`.
+
+        Bounded like `reconcile.load_reconciled_actions` (``ex_after < ex_date <= ex_through``,
+        one ISIN when given), so the collapse sees exactly the restored records beside the rows it
+        loaded. What it never does: hand one to a factor — that is the caller's contract, and
+        `reconcile` keeps it by never booking a restored record on its own.
+        """
+        return tuple(
+            row.as_action()
+            for row in self.dividends
+            if (isin is None or row.isin == isin)
+            and (ex_after is None or row.ex_date > ex_after)
+            and (ex_through is None or row.ex_date <= ex_through)
+        )
 
     def structural_dates(self) -> dict[str, tuple[date, ...]]:
         """ISIN → ex-dates of its curated structural breaks (demergers, schemes)."""
@@ -232,19 +281,26 @@ def load_manual_actions(path: Path = MANUAL_ACTIONS_PATH) -> ManualActions:
     """Read and validate the curated file.
 
     Raises `ManualActionsError` on a row without a source or a `checked` date, a malformed ISIN,
-    an action type outside SPLIT/BONUS/DEMERGER/SCHEME_OF_ARRANGEMENT, a non-positive or float
-    ratio, a duplicate `(isin, ex_date, action_type)` or `(isin, trade_date)`, or an explained
-    move on the very session a curated action is dated — the file cannot say both.
+    an action type outside SPLIT/BONUS/DEMERGER/SCHEME_OF_ARRANGEMENT/DIVIDEND, a non-positive or
+    float ratio or amount, a DIVIDEND row whose `feed` is not a CA feed or whose first source is
+    not that feed's L0 object, a duplicate `(isin, ex_date, action_type)` (a dividend: `(isin,
+    ex_date, component)`) or `(isin, trade_date)`, or an explained move on the very session a
+    curated action is dated — the file cannot say both.
     """
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict):
         raise ManualActionsError(f"{path}: expected a mapping at the top level")
-    actions = tuple(
-        sorted(
-            (_action(row) for row in document.get("actions") or ()),
-            key=lambda a: (a.isin, a.ex_date, a.action_type.value),
-        )
+    parsed = sorted(
+        (_action(row) for row in document.get("actions") or ()),
+        key=lambda a: (a.isin, a.ex_date, a.action_type.value, a.component),
     )
+    actions = tuple(a for a in parsed if not a.is_restored_dividend)
+    dividends = tuple(a for a in parsed if a.is_restored_dividend)
+    seen_dividends: set[tuple[str, date, str]] = set()
+    for d in dividends:
+        if (d.isin, d.ex_date, d.component) in seen_dividends:
+            raise ManualActionsError(f"{d.isin} dividend {d.component} on {d.ex_date} twice")
+        seen_dividends.add((d.isin, d.ex_date, d.component))
     moves = tuple(
         sorted(
             (_move(row) for row in document.get("explained_moves") or ()),
@@ -267,7 +323,7 @@ def load_manual_actions(path: Path = MANUAL_ACTIONS_PATH) -> ManualActions:
                 f"{m.isin} {m.trade_date}: an explained move cannot share a curated action's date"
             )
         seen_moves.add((m.isin, m.trade_date))
-    return ManualActions(actions=actions, explained_moves=moves)
+    return ManualActions(actions=actions, explained_moves=moves, dividends=dividends)
 
 
 @cache
@@ -298,6 +354,8 @@ def _action(row: dict[str, Any]) -> CuratedAction:
         )
     elif action_type in _BREAKS:
         terms = UnquantifiedTerms()
+    elif action_type is ActionType.DIVIDEND:
+        return _restored_dividend(row, isin)
     else:
         raise ManualActionsError(f"{isin}: {action_type} is not a type this file may state")
     filed = row.get("filed_against_isin")
@@ -313,6 +371,41 @@ def _action(row: dict[str, Any]) -> CuratedAction:
         record_date=None if row.get("record_date") is None else _date(row, "record_date"),
         filed_against_isin=None if filed is None else _isin(row, "filed_against_isin"),
         note=row.get("note"),
+    )
+
+
+def _restored_dividend(row: dict[str, Any], isin: str) -> CuratedAction:
+    """A DIVIDEND row: one feed's own record the store's key dropped, in that feed's words."""
+    feed = _text(row, "feed")
+    if feed not in _RESTORABLE_FEEDS:
+        raise ManualActionsError(f"{isin}: feed {feed!r} is not one of {sorted(_RESTORABLE_FEEDS)}")
+    try:
+        kind = DividendKind(_text(row, "dividend_kind"))
+    except ValueError as exc:
+        raise ManualActionsError(f"{isin}: {exc}") from exc
+    terms = DividendTerms(dividend_kind=kind, amount_inr=_positive(row, "amount_inr"))
+    component = str(row.get("component") or kind.value)
+    if component.split("#", 1)[0] != kind.value:
+        raise ManualActionsError(f"{isin}: component {component!r} does not name {kind.value}")
+    sources = _sources(row)
+    if not sources[0].l0_key.startswith(f"{feed}/"):
+        raise ManualActionsError(
+            f"{isin}: a restored {feed} record must cite that feed's L0 object first, "
+            f"not {sources[0].l0_key!r}"
+        )
+    return CuratedAction(
+        isin=isin,
+        company=_text(row, "company"),
+        action_type=ActionType.DIVIDEND,
+        terms=terms,
+        ex_date=_date(row, "ex_date"),
+        knowable_date=_date(row, "knowable_date"),
+        checked=_date(row, "checked"),
+        sources=sources,
+        record_date=None if row.get("record_date") is None else _date(row, "record_date"),
+        note=row.get("note"),
+        feed=feed,
+        component=component,
     )
 
 

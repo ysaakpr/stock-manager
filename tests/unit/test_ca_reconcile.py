@@ -921,8 +921,10 @@ def test_a_named_dividend_kind_fills_an_unspecified_one() -> None:
     assert action.terms.amount_inr == Decimal("2.5")
 
 
-def test_two_feeds_naming_different_dividend_kinds_still_disagree() -> None:
-    """INTERIM against FINAL is two claims, not one claim and a silence."""
+def test_two_feeds_naming_different_dividend_kinds_reconcile_on_the_amount() -> None:
+    """INTERIM against FINAL on the same money is a label, not money (rule C, owner 2026-11-01):
+    the pair reconciles on the amount and the note keeps what each feed said. Until then it was a
+    RATIO_MISMATCH; different money still is (`test_the_kind_fill_never_reconciles_...`)."""
     ex = date(2024, 7, 18)
     result = reconcile(
         [
@@ -930,8 +932,12 @@ def test_two_feeds_naming_different_dividend_kinds_still_disagree() -> None:
             _dividend(INFY, NSE, ex, "2.5", DividendKind.INTERIM, "Interim Dividend - Rs 2.50"),
         ]
     )
-    assert result.reconciled == ()
-    assert [c.reason for c in result.queue] == [ReconciliationReason.RATIO_MISMATCH]
+    assert result.queue == ()
+    (action,) = result.reconciled
+    assert isinstance(action.terms, DividendTerms) and action.terms.amount_inr == Decimal("2.5")
+    assert action.reconciliation_note is not None
+    assert f"{BSE} said FINAL" in action.reconciliation_note
+    assert f"{NSE} said INTERIM" in action.reconciliation_note
 
 
 def test_the_kind_fill_never_reconciles_different_money() -> None:
