@@ -355,16 +355,16 @@ def test_the_judge_reads_nothing_for_an_item_no_entry_targets(conn: Connection) 
 
 # ── D27 / D28 (owner, 2026-10-24) ────────────────────────────────────────────────────────────
 
-D27_KNOWN: Final = "4061d5bb710b19c7188af37ad28fdcfb"  # INE121E01018 2017-06-30
+D27_KNOWN: Final = "69102f228404b6f9cbe237d4bf3d38b1"  # INE558D01021 2017-09-06
 
 
 def _ca_flag(conn: Connection, fingerprint: str, raised: datetime) -> None:
     conn.execute(
         "INSERT INTO quality_flag (logical_date, check_name, severity, isin, source, detail, "
-        "raised_at) VALUES (%s, 'ca_reconciliation', 'ERROR', 'INE121E01018', "
+        "raised_at) VALUES (%s, 'ca_reconciliation', 'ERROR', 'INE558D01021', "
         "'bse_corp_actions', %s::jsonb, %s)",
         (
-            date(2017, 6, 30),
+            date(2017, 9, 6),
             f'{{"reason": "RATIO_MISMATCH", "fingerprint": "{fingerprint}"}}',
             raised,
         ),

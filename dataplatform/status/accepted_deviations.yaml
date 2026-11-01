@@ -261,29 +261,17 @@ deviations:
   # would silently re-accept a regression that raised it again: 10 an NSE amount stated as
   # "<n> Per Share" with no currency marker, 2 "Special Interim Dividend" against BSE's interim
   # (M2.3). The 19 below are feed disagreements still awaiting a human.
+  # 2026-11-01 (later): 17 more removed, resolved by the owner-approved rules for dividends the
+  # feeds state consistently (M2.3): 12 NSE records stating no amount against BSE's (rule A,
+  # silence yields), 4 equal money under different kind names (rule C) and ACC 2020-03-27, where
+  # BSE was the silent side (rule A). The 2 left are genuine conflicts - different money -
+  # awaiting a human: CORALFINAC (NSE Re 1 vs BSE Rs 0.20) and BEML (NSE Rs 12.28 vs BSE Rs 0.55).
   - id: d27-ca-reconciliation-backlog
     kind: quality
     target: ca_reconciliation
     match:
       fingerprints:
-        - 4061d5bb710b19c7188af37ad28fdcfb  # RATIO_MISMATCH INE121E01018 2017-06-30
-        - 408e48df624fc53269964e69c11eb797  # RATIO_MISMATCH INE180C01042 2017-07-05
         - 69102f228404b6f9cbe237d4bf3d38b1  # RATIO_MISMATCH INE558D01021 2017-09-06
-        - 6ed5fd4ef883990d2585280c836efe4a  # RATIO_MISMATCH INE177A01018 2018-05-24
-        - c039c5f54fc93e575fbf228e8d345663  # RATIO_MISMATCH INE100A01010 2019-11-04
-        - fc66728f99ff1099e6adb275b93d6b4b  # RATIO_MISMATCH INE347G01014 2019-11-07
-        - 3328a8fbcc3d6e6bd23cd26aef9548c0  # RATIO_MISMATCH INE012A01025 2020-03-27
-        - 47ac5ed5cabd2a0ca48a1201631594f7  # RATIO_MISMATCH INE573A01042 2020-09-14
-        - 8e826ccf0e618851498f5bf52fe383ef  # RATIO_MISMATCH INE068L01024 2021-02-12
-        - 8bbb965a3d559db1fb775addb28d4dc0  # RATIO_MISMATCH INE054A01027 2022-03-08
-        - 413d67db24bd7175840ec2bc1adb7404  # RATIO_MISMATCH INE205A01025 2022-03-09
-        - acaa1dbc73f772a14ef8b4a0c1b00a8e  # RATIO_MISMATCH INE0FS801015 2022-08-12
-        - 60fa749cf57ff33aa0ac170a1811a646  # RATIO_MISMATCH INE228I01012 2022-09-22
-        - 657c931c3bebaff0c4a3b099cd723340  # RATIO_MISMATCH INE386A01023 2023-04-26
-        - b18466ecb704ce4504a2dab7a6ae96f3  # RATIO_MISMATCH INE083C01022 2023-06-23
-        - f0952788384a268736be64c12c17d35e  # RATIO_MISMATCH INE256C01024 2023-09-01
-        - 7610041b839b5fa55f9fb0074e4bcf8f  # RATIO_MISMATCH INE076B01028 2024-07-15
-        - 79c74d91c67b5e28c0c8de7832a54955  # RATIO_MISMATCH INE976R01033 2025-03-19
         - 8c8fac0ad26f33b777fc94552e9cabb0  # RATIO_MISMATCH INE258A01024 2026-09-22
     remark: *d27_remark
     basis: *d27_basis
