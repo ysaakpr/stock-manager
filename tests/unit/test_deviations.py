@@ -150,7 +150,8 @@ class FakeConn:
     attempts: Mapping[str, tuple[str, datetime, datetime | None, str | None]] = field(
         default_factory=dict
     )
-    flags: Sequence[tuple[int, str | None, str | None, date, datetime]] = ()
+    #: id, fingerprint, ISIN, logical date, raised at, and optionally the finding's kind.
+    flags: Sequence[tuple[Any, ...]] = ()
     conflicts: Sequence[tuple[int, str, str, list[str]]] = ()
     queries: list[str] = field(default_factory=list)
 
@@ -160,7 +161,7 @@ class FakeConn:
             hit = self.attempts.get(str(params[0]))
             return _Result([] if hit is None else [hit])
         if "FROM quality_flag" in sql:
-            return _Result(self.flags)
+            return _Result([row if len(row) == 6 else (*row, None) for row in self.flags])
         if "FROM identity_reconciliation" in sql:
             return _Result(self.conflicts)
         raise AssertionError(f"unexpected query: {sql}")
@@ -211,9 +212,14 @@ def test_the_checked_in_registry_loads_and_holds_the_bse_seeds() -> None:
         "bse-403-alert-announcements-capture",
     } <= ids
     for entry in registry.deviations:
-        decision = {"bse-": "D26", "d27-": "D27", "d28-": "D28", "d31-": "D31", "d32-": "D32"}[
-            entry.id[:4]
-        ]
+        decision = {
+            "bse-": "D26",
+            "d27-": "D27",
+            "d28-": "D28",
+            "d31-": "D31",
+            "d32-": "D32",
+            "d33-": "D33",
+        }[entry.id[:4]]
         assert f"HUMAN_DECISIONS.md {decision}" in entry.basis.summary(), entry.id
         assert entry.basis.agreed_by == "owner"
     assert default_deviations() == registry
@@ -221,7 +227,7 @@ def test_the_checked_in_registry_loads_and_holds_the_bse_seeds() -> None:
 
 def test_every_entry_targets_what_its_decision_named() -> None:
     """D26 is the BSE block, D27 the ca_reconciliation backlog, D28 two retrying sources only,
-    D31 and D32 the XBRL filings NSE never published."""
+    D31 and D32 the XBRL filings NSE never published, D33 the two share-basis checks."""
     allowed: dict[str, Callable[[str], bool]] = {
         "bse-": lambda target: (
             "bse" in target
@@ -237,6 +243,15 @@ def test_every_entry_targets_what_its_decision_named() -> None:
         "d28-": lambda target: target in ("nse_xbrl_filing", "gdelt_v2_event_files"),
         "d31-": lambda target: target == "nse_xbrl_filing",
         "d32-": lambda target: target == "nse_xbrl_filing",
+        "d33-": lambda target: (
+            target
+            in (
+                "l2_continuity",
+                "share_basis_guard",
+                "quality:l2_continuity:red",
+                "quality:share_basis_guard:red",
+            )
+        ),
     }
     for entry in load_deviations().deviations:
         assert allowed[entry.id[:4]](entry.target), entry.id
@@ -715,7 +730,8 @@ def test_a_job_alert_follows_the_jobs_newest_finished_attempt() -> None:
 def test_an_alert_with_no_entry_is_not_accepted_and_costs_no_read() -> None:
     conn = FakeConn()
     assert _judge(SEEDS, conn=conn).alert("job:identity_refresh:failed") is None
-    assert _judge(SEEDS, conn=conn).alert("quality:l2_continuity:red") is None
+    # Not l2_continuity: since D33 an entry targets its alert.
+    assert _judge(SEEDS, conn=conn).alert("quality:shareholding_no_isin:red") is None
     assert conn.queries == []
 
 
