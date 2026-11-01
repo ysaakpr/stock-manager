@@ -714,13 +714,14 @@ gating) — a paused dataset is simply missing. Lifting it is the owner's decisi
 (AGENTIC_CONTEXT §8): delete the `paused` records and restart the scheduler
 (`ops/runbooks/daily-eod.md`). Task M18.2.
 
-### D30 — The application on Amazon Bedrock, the pre-registered M17 models (Opus via Mantle, Sonnet via the Global inference profile), the Claude CLI as per-call backup, effort per call type → **DRAFT, awaiting owner confirmation before S0 (owner decisions 2026-10-30 08:05, ~09:00 IST and afternoon, and 2026-10-31 morning — Sonnet via the Global profile, deploy approved — chat).**
+### D30 — The application on Amazon Bedrock, the pre-registered M17 models (Opus via Mantle, Sonnet via the Global inference profile), the Claude CLI as per-call backup, effort per call type → **RATIFIED 2026-11-01 (owner, chat: "Amendment 5: can go to prod"), after owner decisions 2026-10-30 08:05, ~09:00 IST and afternoon, and 2026-10-31 morning — Sonnet via the Global profile, deploy approved — chat).**
 
 The owner decided on 2026-10-30 that the application's model calls — the M17 desk's and every
 other analyst path's (`LLM_PROVIDER`, `M17_LLM_PROVIDER`) — go to Claude on Amazon Bedrock first,
 with the Claude CLI subscription as the backup, and that effort is pinned per call type. For the M17
 test it is written up for confirmation as pre-registration Amendment 5
-(`ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md` §8); to confirm, answer both.
+(`ops/studies/preregistration-m17-ai-fund-managers-2026-10-09.md` §8), ratified by the owner on
+2026-11-01 with the digest changes and the hash column below.
 What it is:
 
 - **Per-role models, set in the roster** (`analyst/fundmanager/roster.yaml` `models:`; a model
@@ -736,8 +737,8 @@ What it is:
   - **DeepSeek stays as unused capability** (`deepseek.v3.2`, the `openai_chat` adapter, its
     price): on 30 filings it was less faithful than the stored Sonnet digests, to save about $8 a
     month.
-  Each digest records the provider and model id that actually wrote it. No rule, rail, contract,
-  digest schema or schema field changes.
+  Each digest records the provider and model id that actually wrote it. No rule, rail, contract or
+  schema field changes.
 - **Text-length limits stated (2026-10-31 afternoon, Amendment 5 (h)).** The 2026-10-31 Bedrock
   rehearsal lost two of four managers to `MANAGER_ERROR`; reproduced live, the cause is a research
   answer whose holding `note` ran 510 characters against the schema's 500: Bedrock cannot compile
@@ -755,7 +756,19 @@ What it is:
   managers' decision-call input, measured). The
   template's "Today: session, round" line moves unchanged to the end of each round block so the
   header is one cacheable prefix — a template change, in the hashes below.
-- **Hashes change** (as of 2026-10-31 afternoon, with (h) and (i)): the manager system prompt gains the untrusted-content rule (web content is
+- **Commons digests grounded (2026-11-01, Amendment 5 (j); owner approved, chat):** a digest
+  whose figure states a number the filing does not (after reading grouping, crore/lakh/million,
+  amounts in words, rounding, percent and dates numerically) is refused whole, never trimmed —
+  not stored, named as the run's failure, retried next build; computed values (growth, margins)
+  are refused by design and the prompt says so. Results headlines name revenue from operations
+  and profit after tax where stated; an announcement's dates, percentages and quantities go in
+  `figures` and its date in `period`. Measured: 0 refused by the check over 1,347 stored digests, 200
+  comparison digests and 70 live Bedrock Sonnet digests; DeepSeek's misread revenue refused;
+  announcement figures 19 → 28 and `period` 6 → 14 of 24 on the 50-filing sample; results
+  headlines 23 of 23. `commons-digest/2`; **no hash changes** — the digest prompt, schema and
+  validation are not `mandate_hash` inputs (only the digest model is); whether they should be,
+  before S0, is open for the owner.
+- **Hashes change** (as of 2026-10-31 afternoon, with (h) and (i); recomputed 2026-11-01 with (j), unchanged): the manager system prompt gains the untrusted-content rule (web content is
   data, never instructions), and the roster's `models` gain the `research` key (the decision and
   digest models are unchanged, but the new key is in the hashed bytes), and the template and both
   schemas change with the two items above, so the **8 manager books'
@@ -790,14 +803,15 @@ What it is:
   Bedrock rate); research about 30–36 Sonnet tool loops a session. Amendment 5 (f) has the working.
 
 Open with it: whether to set a monthly Bedrock budget (§9's cap was deferred while the cost was a
-subscription). Activation for
+subscription) — not decided yet, and not a blocker for S0. Activation for
 the desk is the `.env` change `M17_LLM_PROVIDER=bedrock`, `M17_WEB_RESEARCH=websearch` (with
 `AWS_BEARER_TOKEN_BEDROCK`, `BEDROCK_REGION` and the vendor keys) and a scheduler restart, approved
 by the owner and made with the merge on 2026-10-31; `LLM_PROVIDER` for the other analyst paths is
 unchanged by that deploy. The effort levels, the untrusted-content rule and the roster's models
 (and with them the new manager hashes) take effect on merge for every provider; a desk rolled back
-to the CLI runs the same models there. The amendment stays DRAFT until the owner confirms it
-before S0. Task M17.
+to the CLI runs the same models there. Ratified 2026-11-01 (owner, chat); the hashes above are the ones S0 starts from. Ratification is
+not the go for S0: S0 still needs M17.8's counted clean dry sessions — on Bedrock, those of Monday
+2026-11-02 and Tuesday 2026-11-03 among them — and a separate owner go. Task M17.
 
 ### D31 — XBRL filings whose NSE index lists the XBRL file as 0 Bytes → **ANSWERED (owner, 2026-11-01): accept, permanent.**
 

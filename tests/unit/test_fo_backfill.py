@@ -17,14 +17,18 @@ import pytest
 from dataplatform.alerts import build_alerter
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
+from dataplatform.identity.master import Exchange, IdentityMaster
 from dataplatform.ingest import fo_backfill as fob
 from dataplatform.ingest.calendar import trading_calendar
 from dataplatform.ingest.fetcher import Fetcher, RecordedResponse, RecordedTransport
 from dataplatform.ingest.nse.fo_bhavcopy import FO_SOURCE_ID
 from dataplatform.ingest.source_register import load as load_register
+from dataplatform.quality.sentinel import QualityFinding
 from dataplatform.status.sync_state import SyncState
-from dataplatform.store.fo_aggregates import read_l1, read_l2
+from dataplatform.store.fo_aggregates import AMBIGUOUS_UNDERLYING_CHECK, read_l1, read_l2
 from dataplatform.store.l0 import L0Store
+from dataplatform.store.l1 import write_prices_raw
+from tests.unit import test_deals_fo_ambiguity as amb
 
 FIXTURE: Final = (
     Path(__file__).parents[1]
@@ -209,3 +213,72 @@ def test_the_real_udiff_instrument_codes_parse() -> None:
         FoInstrumentType.OPTIDX,
         FoInstrumentType.FUTIDX,
     ]
+
+
+# ── an ambiguous master costs one underlier, never the session or the run (2026-11-01) ───────
+
+AMB_DAY: Final = date(2026, 10, 26)
+
+
+def _amb_runner(
+    tmp_path: Path, payload: bytes, master: IdentityMaster, sunk: list[QualityFinding]
+) -> tuple[fob.FoBackfillRunner, list[fob.FoSessionUnit], _FakeSync]:
+    plan = fob.build_plan(AMB_DAY, AMB_DAY, calendar=trading_calendar(), register=load_register())
+    L0Store(clock=CLOCK, data_root=tmp_path).put(FO_SOURCE_ID, AMB_DAY, plan[0].filename, payload)
+    sync = _FakeSync()
+    runner = fob.FoBackfillRunner(
+        fetcher=None,
+        l0=L0Store(clock=CLOCK, data_root=tmp_path),
+        sync=sync,
+        commit=lambda: None,
+        master=master,
+        data_root=tmp_path,
+        findings=sunk.extend,
+    )
+    return runner, plan, sync
+
+
+def test_an_ambiguous_underlier_is_flagged_and_the_session_publishes(tmp_path: Path) -> None:
+    sunk: list[QualityFinding] = []
+    payload = (amb.FO_DIR / amb.FO_FILE).read_bytes()
+    runner, plan, sync = _amb_runner(tmp_path, payload, amb._fo_master(), sunk)
+    report = runner.run(plan)
+    assert report.published == 1 and report.ambiguous_underlyings == 1
+    assert report.unresolved_underlyings == 0
+    assert sync.get(FO_SOURCE_ID, AMB_DAY).state is SyncState.PUBLISHED  # type: ignore[union-attr]
+    assert {a.underlying: a.isin for a in read_l2(AMB_DAY, data_root=tmp_path)}["KOTAKBANK"] is None
+    assert [(f.check_name, f.detail["symbol"]) for f in sunk] == [
+        (AMBIGUOUS_UNDERLYING_CHECK, "KOTAKBANK")
+    ]
+
+
+def test_the_backfill_settles_from_the_sessions_prices_raw(tmp_path: Path) -> None:
+    write_prices_raw(amb._prices(amb.FO_DIR), exchange=Exchange.NSE, data_root=tmp_path)
+    sunk: list[QualityFinding] = []
+    payload = (amb.FO_DIR / amb.FO_FILE).read_bytes()
+    runner, plan, _sync = _amb_runner(tmp_path, payload, amb._fo_master(), sunk)
+    report = runner.run(plan)
+    assert report.published == 1 and report.ambiguity_resolved_by_session == 1
+    by = {a.underlying: a.isin for a in read_l2(AMB_DAY, data_root=tmp_path)}
+    assert by["KOTAKBANK"] == amb.KOTAK_NEW
+    assert sunk == []
+
+
+def test_a_broken_master_fails_the_session_retryably_and_the_run_goes_on(tmp_path: Path) -> None:
+    """Before the fix the identity error escaped `_process` and ended the whole run."""
+    master, rows = amb._ambiguous_underliers(6)
+    text = (amb.FO_DIR / amb.FO_FILE).read_text()
+    header, *lines = text.splitlines(keepends=True)
+    kotak = [line for line in lines if ",KOTAKBANK," in line]
+    body = header + "".join(
+        line.replace(",KOTAKBANK,", f",REISSUED{k},") for k in range(6) for line in kotak
+    )
+    assert len(rows) == len(body.splitlines()) - 1
+    sunk: list[QualityFinding] = []
+    runner, plan, sync = _amb_runner(tmp_path, body.encode(), master, sunk)
+    report = runner.run(plan)
+    assert report.published == 0 and report.refused == 1
+    row = sync.get(FO_SOURCE_ID, AMB_DAY)
+    assert row is not None and row.state is SyncState.FAILED and row.retryable
+    assert "broken master" in report.failures[0][1]
+    assert sunk == []

@@ -452,9 +452,10 @@ def build_adjusted_bars(
 
     What it assumes: `chain` and `actions` are the *consistent* output of one M2.4 recompute for
     `isin` — `chain` is the persisted factor chain, `actions` its reconciled corporate actions — so
-    the price events `total_return_series` derives from `actions` agree with `chain`. It assumes
-    L1 covers the trading day before every cash-dividend ex-date; if it does not,
-    `total_return_series` raises `FactorError` rather than silently dropping the distribution.
+    the price events `total_return_series` derives from `actions` agree with `chain`. A dividend
+    on a no-trade day reinvests at the last close before it; when that close is more than
+    `MAX_STALE_CLOSE_DAYS` old, `total_return_series` raises `FactorError` rather than pricing the
+    distribution against a stale close, and the venue falls back as below.
 
     What it never does: re-implement the factor arithmetic, invent a factor, or read I/O.
     """
@@ -470,9 +471,10 @@ def build_adjusted_bars(
         # The price-adjusted series (splits/bonuses) uses only chain.*_factor_asof and never a
         # dividend, so it must be produced unconditionally. The total-return leg needs cash-dividend
         # amounts and can legitimately fail — a dividend stated as a percent of face value (no rupee
-        # amount to reinvest) or one with no prior close. When it does, fall back tr_close to the
-        # price-adjusted close (dividends simply not reinvested) and log it, rather than let a
-        # dividend gap block a name's split adjustment. Decouples price-adjust from total-return.
+        # amount to reinvest) or one whose last prior close is too stale. When it does, fall back
+        # tr_close to the price-adjusted close (dividends simply not reinvested) and log it, rather
+        # than let a dividend gap block a name's split adjustment. Decouples price-adjust from
+        # total-return.
         try:
             tr_by_date = {p.date: p.adj_close for p in total_return_series(actions, prices)}
         except FactorError as exc:

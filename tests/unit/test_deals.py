@@ -26,9 +26,9 @@ import pytest
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.identity.master import (
-    AmbiguousSymbolError,
     Exchange,
     IdentityMaster,
+    InMemoryReconciliationQueue,
     SymbolWindow,
 )
 from dataplatform.ingest import nse
@@ -434,8 +434,13 @@ def test_resolve_quarantines_an_unknown_symbol_never_drops_it() -> None:
     assert isinstance(result, DealResolution)
 
 
-def test_resolve_raises_on_an_ambiguous_symbol() -> None:
-    """Two ISINs for one symbol on one date is a conflict to surface, not a silent pick."""
+def test_resolve_holds_an_ambiguous_symbol_rather_than_picking() -> None:
+    """Two ISINs for one symbol on one date is a conflict to surface, not a silent pick.
+
+    Until the 2026-11-01 fix this raised and failed the whole file (the #141 pattern); now the
+    deal is held in `ambiguous` with both candidates, placed nowhere, and the conflict is still
+    queued by the master. `tests/unit/test_deals_fo_ambiguity.py` covers the rest of the contract.
+    """
     windows = (
         SymbolWindow(
             exchange=Exchange.NSE,
@@ -452,8 +457,18 @@ def test_resolve_raises_on_an_ambiguous_symbol() -> None:
             isin="INE000B01019",
         ),
     )
-    with pytest.raises(AmbiguousSymbolError):
-        resolve([_deal("DUP", date(2026, 9, 1))], IdentityMaster(windows), source=BULK_SOURCE_ID)
+    queue = InMemoryReconciliationQueue()
+    out = resolve(
+        [_deal("DUP", date(2026, 9, 1))],
+        IdentityMaster(windows, queue=queue),
+        source=BULK_SOURCE_ID,
+    )
+    assert out.resolved == () and out.unresolved == ()
+    [held] = out.ambiguous
+    assert held.row.symbol == "DUP"
+    assert held.ambiguity.candidates == ("INE000A01010", "INE000B01019")
+    assert held.ambiguity.settled is None
+    assert [c.isins for c in queue.items] == [("INE000A01010", "INE000B01019")]
 
 
 def test_a_whole_fixture_resolves_through_the_master() -> None:

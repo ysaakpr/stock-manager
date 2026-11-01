@@ -61,6 +61,7 @@ from dataplatform.ingest.bse import bhavcopy as bse_bhavcopy
 from dataplatform.ingest.models import BhavcopyParse, PriceRow, UnidentifiedRow
 from dataplatform.ingest.nse import bhavcopy, delivery
 from dataplatform.ingest.nse.delivery import AmbiguousDeliveryRow, DeliveryRow, ResolvedDeliveryRow
+from dataplatform.ingest.nse.eras import ISIN_ERA_START
 from dataplatform.logging import get_logger
 from dataplatform.store.l0 import L0Ref, L0Store
 from dataplatform.store.paths import Layer, l1_partition_path, partition_path
@@ -83,6 +84,7 @@ __all__ = [
     "SchemaError",
     "read_prices_raw",
     "rebuild_prices_raw_from_l0",
+    "session_identity",
     "write_prices_raw",
     "write_unidentified_quarantine",
 ]
@@ -324,6 +326,53 @@ def read_prices_raw(
             f"no {PRICES_RAW_DATASET} partition for {trade_date.isoformat()}: {path}"
         )
     return tuple(pq.read_table(path, schema=PRICES_RAW_SCHEMA).to_pylist())
+
+
+@dataclass(frozen=True, slots=True)
+class _Stated:
+    """One `prices_raw` row as a `SessionStatement`: what the session's bhavcopy said."""
+
+    isin: str
+    symbol: str
+    series: str
+    trade_date: date
+
+
+def session_identity(
+    trade_date: date, *, exchange: Exchange = Exchange.NSE, data_root: Path | None = None
+) -> SessionIdentity | None:
+    """The session's own `(symbol, series) → ISIN` statement, read back from its `prices_raw`.
+
+    What it does: builds a `SessionIdentity` from `exchange`'s rows of the session's `prices_raw`
+    partition — for a writer whose own file names no ISIN (bulk/block deals, F&O) and so has only
+    the same session's bhavcopy to settle an ambiguous master with (`ingest.ambiguity`).
+    What it assumes: from `nse.eras.ISIN_ERA_START` on, every `prices_raw` ISIN is the one the
+    bhavcopy printed on that row (`_price_to_raw` copies it; nothing remaps it).
+    What it never does: answer for an earlier session, whose rows were promoted onto an ISIN the
+    master inferred (`pre_isin_promote`) — that is the master's opinion, not the session's
+    statement, so it returns `None` — or for a session whose partition was never written (`None`:
+    the evidence is absent, and the caller quarantines rather than guesses).
+    """
+    if trade_date < ISIN_ERA_START:
+        return None
+    try:
+        records = read_prices_raw(trade_date, data_root=data_root)
+    except FileNotFoundError:
+        return None
+    return SessionIdentity.from_statements(
+        (
+            _Stated(
+                isin=str(r["isin"]),
+                symbol=str(r["symbol"]),
+                series=str(r["series"]),
+                trade_date=trade_date,
+            )
+            for r in records
+            if r["exchange"] == exchange.value
+        ),
+        exchange=exchange,
+        trade_date=trade_date,
+    )
 
 
 # ── internals ────────────────────────────────────────────────────────────────────────────────

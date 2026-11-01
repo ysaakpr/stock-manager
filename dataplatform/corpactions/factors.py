@@ -64,6 +64,13 @@ whose prior close is ``P`` scales all earlier prices by ``(P - D) / P``, exactly
 factor does. The two series therefore diverge by the compounded dividend yield and agree in its
 absence — which is the documented, tested distinction of acceptance 4.
 
+``P`` is the **last close before the ex-date**, which is usually the previous session. When the
+stock did not trade on the ex-date (a session in the trade-to-trade series, which L2's EQ view does
+not carry, or a short suspension), the reinvestment base is still that last close, however many
+sessions back it is, up to ``MAX_STALE_CLOSE_DAYS`` calendar days (owner decision, 2026-11-01).
+Beyond that bound the close is too stale to price the distribution against, so the dividend raises
+``FactorError`` rather than being reinvested at it.
+
 Rights issues are not yet in the chain: their factor depends on the theoretical ex-rights price and
 so on the market close, and none of the M2 golden cases is a rights issue. Recorded in
 ``ops/BACKLOG.md`` rather than half-implemented here.
@@ -75,6 +82,7 @@ a clock, a database or the network: the retroactive-recompute seam that does liv
 
 from __future__ import annotations
 
+import bisect
 import itertools
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -101,6 +109,7 @@ if TYPE_CHECKING:
     from dataplatform.ingest.corp_actions import CorporateAction
 
 __all__ = [
+    "MAX_STALE_CLOSE_DAYS",
     "PRICE_EVENT_TYPES",
     "STRUCTURAL_BREAK_TYPES",
     "AdjustedPoint",
@@ -121,6 +130,17 @@ __all__ = [
 _LOG = get_logger(__name__)
 
 _ONE: Final = Decimal(1)
+
+#: The longest gap, in calendar days, from the last close before a no-trade-day dividend's ex-date
+#: to the ex-date that the total-return series will still reinvest against (``total_return_series``;
+#: an ex-date that has a bar always reinvests against the previous bar, as before). One quarter:
+#: a close older than that predates at least one quarterly results cycle (SEBI LODR reg. 33 gives
+#: 45 days after quarter end), so it no longer prices the business the dividend is paid out of.
+#: It is a judgment, not a cliff in the data: on the 2026-11-01 lake, 492 no-trade-day dividends in
+#: 357 partitions fell within it (median gap 31 days: trade-to-trade stints, short suspensions), and
+#: 107 partitions hit it with gaps of 93 days to 12 years: suspended or relisted securities,
+#: which must fail loud rather than reinvest at a stale price.
+MAX_STALE_CLOSE_DAYS: Final = 92
 
 #: The action types that scale the price/quantity basis and so produce a factor row. Everything the
 #: back-adjusted convention above describes as a ratio is one of these; nothing else moves a price.
@@ -558,12 +578,19 @@ def total_return_series(
     when there are no dividends, which is the other half of acceptance 4.
 
     Takes the raw actions (not a pre-built chain) because a dividend factor needs the pre-ex close,
-    which only exists alongside the price series. ``prices`` must cover the trading day before every
-    dividend ex-date *inside the series*, or that dividend cannot be reinvested and it raises
-    ``FactorError``. A dividend on or before the first bar scales no bar — its factor applies only
-    to dates before its ex-date — so it is skipped and logged, never a reason to give up: the factor
-    chain reaches back to 2000 while a partition often starts later, and one such dividend used to
-    make L2 fall back to ``tr_close = adj_close`` for the whole partition (backlog M13.8).
+    which only exists alongside the price series. ``P`` is the last close strictly before the
+    ex-date: the previous bar when the ex-date has one. When the stock had no bar on the ex-date (a
+    no-trade day), that close is older; it is still the base, as long as it lies within
+    ``MAX_STALE_CLOSE_DAYS`` calendar days of the ex-date (owner decision, 2026-11-01). Further
+    back, the dividend raises ``FactorError``: a stale close is no reinvestment base, and the
+    caller must see that rather than a total-return series priced against it. A dividend after the
+    last bar follows the same rule. It scales every bar alike, so no return inside the series
+    moves, and the series already holds the factor a later bar on or after the ex-date will give.
+
+    A dividend on or before the first bar scales no bar — its factor applies only to dates before
+    its ex-date — so it is skipped and logged, never a reason to give up: the factor chain reaches
+    back to 2000 while a partition often starts later, and one such dividend used to make L2 fall
+    back to ``tr_close = adj_close`` for the whole partition (backlog M13.8).
     """
     ordered = _sorted_prices(prices)
     if not ordered:
@@ -582,8 +609,9 @@ def total_return_series(
         (a for a in actions if a.action_type is ActionType.DIVIDEND),
         key=lambda a: a.ex_date,
     )
-    close_before = _close_before_index(ordered)
-    first_bar = ordered[0].date
+    bar_dates = [p.date for p in ordered]
+    bar_index = frozenset(bar_dates)
+    first_bar = bar_dates[0]
     pre_series = [div for div in dividends if div.ex_date <= first_bar]
     if pre_series:
         _LOG.info(
@@ -596,15 +624,33 @@ def total_return_series(
 
     # Per-date cumulative dividend factor = product over dividends with ex_date > date of (P-D)/P.
     div_factors: list[tuple[date, Decimal]] = []
+    no_trade_day: list[tuple[date, int]] = []
     for div in dividends:
         if div.ex_date <= first_bar:
             continue  # scales no bar in the series (see the docstring)
-        prior_close = close_before.get(div.ex_date)
-        if prior_close is None:
+        # The last bar strictly before the ex-date. The skip above means one exists; were it ever
+        # missing, index -1 would silently wrap to the newest bar, so it fails loud instead.
+        before = bisect.bisect_left(bar_dates, div.ex_date)
+        if before == 0:
             raise FactorError(
                 f"{div.isin} dividend on {div.ex_date.isoformat()} has no prior close in the price "
                 "series; the total-return factor needs the cum-dividend close to reinvest against"
             )
+        last = ordered[before - 1]
+        if div.ex_date not in bar_index:
+            # A no-trade day: reinvest at the last close before it, unless that is too stale. An
+            # ex-date that has a bar keeps the previous bar as its base however far back, as it
+            # always has; the bound governs only the no-trade-day reinvestment.
+            gap_days = (div.ex_date - last.date).days
+            if gap_days > MAX_STALE_CLOSE_DAYS:
+                raise FactorError(
+                    f"{div.isin} dividend on {div.ex_date.isoformat()} falls on a no-trade day "
+                    f"with no close within {MAX_STALE_CLOSE_DAYS} days before it; the last is "
+                    f"{last.date.isoformat()}, {gap_days} days earlier, too stale to reinvest "
+                    "the distribution against"
+                )
+            no_trade_day.append((div.ex_date, gap_days))
+        prior_close = last.close
         amount = _dividend_amount(div)
         if amount >= prior_close:
             raise FactorError(
@@ -612,6 +658,14 @@ def total_return_series(
                 f"close {prior_close}; a total-return factor would be non-positive"
             )
         div_factors.append((div.ex_date, (prior_close - amount) / prior_close))
+    if no_trade_day:
+        _LOG.info(
+            "ca.total_return.no_trade_day_dividends",
+            isin=dividends[0].isin,
+            reinvested=len(no_trade_day),
+            ex_dates=[d.isoformat() for d, _ in no_trade_day],
+            max_gap_days=max(g for _, g in no_trade_day),
+        )
 
     out: list[AdjustedPoint] = []
     for point in ordered:
@@ -621,18 +675,3 @@ def total_return_series(
                 cum *= factor
         out.append(AdjustedPoint(date=point.date, adj_close=point.close * cum))
     return tuple(out)
-
-
-def _close_before_index(ordered: Sequence[PricePoint]) -> dict[date, Decimal]:
-    """Map each date to the close of the immediately preceding trading day in the series.
-
-    The dividend factor reinvests against the cum-dividend close — the last close before the ex-date
-    — so a dividend whose ex-date is itself in the series maps to the prior row's close.
-    """
-    index: dict[date, Decimal] = {}
-    prev: Decimal | None = None
-    for point in ordered:
-        if prev is not None:
-            index[point.date] = prev
-        prev = point.close
-    return index

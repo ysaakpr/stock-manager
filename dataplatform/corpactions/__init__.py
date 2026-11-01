@@ -12,6 +12,7 @@ query layer quarantines (D22).
 """
 
 from dataplatform.corpactions.factors import (
+    MAX_STALE_CLOSE_DAYS,
     AdjustedPoint,
     FactorChain,
     FactorError,
@@ -109,6 +110,7 @@ __all__ = [
     "MANUAL_ACTIONS_PATH",
     "MANUAL_SOURCE",
     "MARKET_MOVE",
+    "MAX_STALE_CLOSE_DAYS",
     "MERGER_TERMS_PATH",
     "TERMS_ADAPTER",
     "TERMS_BY_ACTION",
