@@ -211,14 +211,17 @@ def test_the_checked_in_registry_loads_and_holds_the_bse_seeds() -> None:
         "bse-403-alert-announcements-capture",
     } <= ids
     for entry in registry.deviations:
-        decision = {"bse-": "D26", "d27-": "D27", "d28-": "D28"}[entry.id[:4]]
+        decision = {"bse-": "D26", "d27-": "D27", "d28-": "D28", "d31-": "D31", "d32-": "D32"}[
+            entry.id[:4]
+        ]
         assert f"HUMAN_DECISIONS.md {decision}" in entry.basis.summary(), entry.id
         assert entry.basis.agreed_by == "owner"
     assert default_deviations() == registry
 
 
 def test_every_entry_targets_what_its_decision_named() -> None:
-    """D26 is the BSE block, D27 the ca_reconciliation backlog, D28 two retrying sources only."""
+    """D26 is the BSE block, D27 the ca_reconciliation backlog, D28 two retrying sources only,
+    D31 and D32 the XBRL filings NSE never published."""
     allowed = {
         "bse-": lambda target: (
             "bse" in target
@@ -232,6 +235,8 @@ def test_every_entry_targets_what_its_decision_named() -> None:
         ),
         "d27-": lambda target: target in ("ca_reconciliation", "quality:ca_reconciliation:red"),
         "d28-": lambda target: target in ("nse_xbrl_filing", "gdelt_v2_event_files"),
+        "d31-": lambda target: target == "nse_xbrl_filing",
+        "d32-": lambda target: target == "nse_xbrl_filing",
     }
     for entry in load_deviations().deviations:
         assert allowed[entry.id[:4]](entry.target), entry.id

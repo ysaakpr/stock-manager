@@ -94,6 +94,51 @@ x-xbrl-retrying-errors: &xbrl_errors
   # prefix (dataplatform/ingest/fundamentals_backfill.py).
   - class: null
     pattern: '^parse failed: \S+\.xml: empty response body$'
+  # A body cut off before its document closes: expat's end-of-input errors only (the four
+  # `parser.payload_defect` calls truncated). Since 2026-11-01 a retry downloads such a document
+  # again instead of re-parsing the stored bytes, so it really is retried. A document malformed any
+  # other way is not this.
+  - class: null
+    pattern: '^parse failed: \S+\.xml: body is not well-formed XML: (?:no element found|unclosed token|partial character|unclosed CDATA section): line \d+, column \d+$'
+
+# D31 (owner, 2026-11-01): NSE's own index lists the XBRL file as zero bytes. The runner appends
+# the index's statement to the 404 it records (`fundamentals_backfill.zero_byte_evidence`), so the
+# match is that recorded evidence, not a list: a filing the index states with any other size, or a
+# 404 recorded without the statement, does not match.
+x-d31-basis: &d31_basis
+  agreed_by: owner
+  agreed_on: 2026-11-01
+  recorded_in:
+    - "HUMAN_DECISIONS.md D31 (owner, 2026-11-01)"
+    - "ops/BACKLOG.md M14.3 (XBRL) triage of PR #150"
+
+x-d31-errors: &d31_errors
+  - class: FetchHTTPError
+    pattern: '^nse_xbrl_filing: https://nsearchives\.nseindia\.com/corporate/xbrl/\S+\.xml returned 404, which no retry would change; NSE''s index lists this XBRL file as ''0(?:\.0+)? ?(?:Bytes|B|KB|MB|GB)''$'
+
+x-d31-remark: &d31_remark >-
+  NSE's own filing index lists this XBRL file as 0 Bytes: the company filed only the inline-XBRL
+  HTML, so there is no XBRL document to fetch (the archive answers 404). Accepted permanently.
+
+# D32 (owner, 2026-11-01): every filing disseminated 2025-07-03 or 2025-07-04 answers 404; the
+# days either side publish. Bounded by the row's logical (filing) date, and 404 only.
+x-d32-basis: &d32_basis
+  agreed_by: owner
+  agreed_on: 2026-11-01
+  recorded_in:
+    - "HUMAN_DECISIONS.md D32 (owner, 2026-11-01)"
+    - "ops/BACKLOG.md M14.3 (XBRL) triage of PR #150"
+
+x-d32-errors: &d32_errors
+  - class: FetchHTTPError
+    pattern: '^nse_xbrl_filing: https://nsearchives\.nseindia\.com/corporate/xbrl/\S+\.xml returned 404, which no retry would change$'
+    dated_from: 2025-07-03
+    dated_to: 2025-07-04
+
+x-d32-remark: &d32_remark >-
+  NSE's archive serves no XBRL document for any filing disseminated on 2025-07-03 or 2025-07-04
+  (404 for every one; the days either side publish). An outage at the source, accepted
+  permanently.
 
 x-gdelt-retrying-errors: &gdelt_errors
   - class: FetchHTTPError
@@ -288,6 +333,47 @@ deviations:
     since: 2026-09-07
     review_by: 2027-01-31
 
+  # ── D31 / D32: XBRL filings NSE never published — permanent, by recorded evidence ──────────
+  # Listed before D28 so that a zero-byte filing still inside its retry window shows why it will
+  # stay amber rather than D28's "turns red after 7 days".
+  - id: d31-xbrl-zero-byte-index
+    kind: gap
+    target: nse_xbrl_filing
+    match:
+      reasons: [FAILED]
+      errors: *d31_errors
+    remark: *d31_remark
+    basis: *d31_basis
+    since: 2025-11-04
+
+  - id: d31-xbrl-zero-byte-index-source
+    kind: source
+    target: nse_xbrl_filing
+    match:
+      errors: *d31_errors
+    remark: *d31_remark
+    basis: *d31_basis
+    since: 2025-11-04
+
+  - id: d32-xbrl-july-2025-outage
+    kind: gap
+    target: nse_xbrl_filing
+    match:
+      reasons: [FAILED]
+      errors: *d32_errors
+    remark: *d32_remark
+    basis: *d32_basis
+    since: 2025-07-03
+
+  - id: d32-xbrl-july-2025-outage-source
+    kind: source
+    target: nse_xbrl_filing
+    match:
+      errors: *d32_errors
+    remark: *d32_remark
+    basis: *d32_basis
+    since: 2025-07-03
+
   # ── D28: failures still being retried — amber for 7 days from the first attempt, then red ───
   - id: d28-xbrl-filing-retrying
     kind: gap
@@ -297,8 +383,8 @@ deviations:
       errors: *xbrl_errors
       retrying: *d28_retrying
     remark: >-
-      NSE has not published this XBRL filing yet (404 or an empty body); it is retried, and turns
-      red 7 days after its first attempt.
+      NSE has not published this XBRL filing yet (404, or an empty or truncated body); it is
+      retried, and turns red 7 days after its first attempt.
     basis: *d28_basis
     since: 2026-10-24
 
@@ -309,8 +395,8 @@ deviations:
       errors: *xbrl_errors
       retrying: *d28_retrying
     remark: >-
-      Only filings NSE has not published yet (404 or an empty body), still within 7 days of their
-      first attempt.
+      Only filings NSE has not published yet (404, or an empty or truncated body), still within 7
+      days of their first attempt.
     basis: *d28_basis
     since: 2026-10-24
 

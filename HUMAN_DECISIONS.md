@@ -799,6 +799,33 @@ unchanged by that deploy. The effort levels, the untrusted-content rule and the 
 to the CLI runs the same models there. The amendment stays DRAFT until the owner confirms it
 before S0. Task M17.
 
+### D31 — XBRL filings whose NSE index lists the XBRL file as 0 Bytes → **ANSWERED (owner, 2026-11-01): accept, permanent.**
+
+The triage of the 53 `nse_xbrl_filing` failures older than D28's 7-day window (PR #150,
+`ops/BACKLOG.md` M14.3) found 22 of them — 13 filings by ADANIENT, ADANIGREEN, UPL, JSWENERGY and
+CLEANMAX — whose row in NSE's own integrated-filing index lists the XBRL attachment as `0 Bytes`
+beside a multi-megabyte inline-XBRL HTML: the document was never produced, and the archive answers
+404. The owner accepted them, permanently, by that recorded evidence rather than by a list. The
+runner now appends the index's statement to the 404 it records (`fundamentals_backfill.
+zero_byte_evidence`), and the scheduled job re-records the 22 older failures with it once, from the
+stored index pages and with no request (`fundamentals_requeue.yaml`,
+`xbrl-zero-byte-evidence-2026-11-01`). Such a failure shows as ACCEPTED (amber) with the reason;
+a filing the index states with any other size, or a 404 without the statement, stays an error.
+Display and alerting only (`d31-*` in `dataplatform/status/accepted_deviations.yaml`). Task M14.3.
+
+### D32 — XBRL filings disseminated 2025-07-03 or 2025-07-04 that answer 404 → **ANSWERED (owner, 2026-11-01): accept, permanent.**
+
+The same triage found that every filing disseminated on those two days answers 404 (24 failures,
+13 filings), while the days either side publish: an outage at the source. The owner accepted them
+permanently: a 404 for a filing dated 2025-07-03 or 2025-07-04 shows as ACCEPTED (amber) with the
+reason; any other failure on those dates, or a 404 on any other date, stays an error. Display and
+alerting only (`d32-*`). **Not accepted, by the same decision:** the 7 other 404s and the 5 stored
+bodies that are empty or truncated. They get one scheduled re-check each through the nightly
+`fundamentals_forward` job (`xbrl-recheck-2026-11-01`, on its first run on or after 2026-11-02,
+journaled in `fundamentals_requeue_log`) — a truncated one is downloaded again beside the stored
+copy, since a retry no longer re-parses the same broken bytes — and stay errors unless it
+succeeds. Task M14.3.
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes
