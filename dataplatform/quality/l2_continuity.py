@@ -34,9 +34,18 @@ two defects the 2026-10-05 data-quality audit found there and nothing had flagge
   quarantines the ISIN's bars before it (D22). Never adjusted — that would invent a ratio.
 * `DIVIDEND` — the total-return close does not step: a distribution, reinvested there (Majesco's
   ₹974 on 2020-12-23), absent from the price-adjusted series by convention.
+* `SHARE_BASIS` — a step that looks like a change in share basis nothing explains: one across a
+  D2 lineage reissue (any gap), or one across a long gap of at most
+  `LONG_GAP_SHARE_BASIS_MAX_DAYS` at a clean split multiple (`CLEAN_MULTIPLES`, within
+  `corpactions.implied`'s bands). AvenuesAI's 2026-10-12 -> 10-19
+  consolidation (x9.40 over a seven-day suspension) was silently `LONG_GAP` before 2026-11-01.
+  Never adjusted from price alone — a suspension can hide a real move — so it fails the check
+  (ERROR, kind `share_basis_step`) and the share-basis guard (`quality.share_basis`) quarantines
+  the ISIN's bars before it until a recorded or admitted factor explains it.
 * `LONG_GAP` — the two bars are more than `max_gap_days` apart: a suspension, or months in the
   trade-to-trade series that L2's EQ-only view does not carry. A move across that can be genuine
-  (DOLPHIN, UEL), so it is reported, never failed and never adjusted.
+  (DOLPHIN, UEL), so it is reported, never failed and never adjusted — unless it is
+  `SHARE_BASIS`-shaped.
 * `UNEXPLAINED` — everything else. These fail the check.
 
 A step where the cumulative factor itself changed is still a step if it survives the factor — a
@@ -63,13 +72,14 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
+from dataplatform.corpactions.implied import CANDIDATE_MULTIPLES
 from dataplatform.corpactions.manual_actions import ManualActions, default_manual_actions
 from dataplatform.logging import get_logger
 from dataplatform.quality.sentinel import FindingScope, QualityFinding, finding_fingerprint
@@ -77,14 +87,20 @@ from dataplatform.store.db import Connection
 
 __all__ = [
     "CHECK_NAME",
+    "CLEAN_MULTIPLES",
     "DEFAULT_MAX_GAP_DAYS",
     "DEFAULT_THRESHOLD",
+    "LONG_GAP_MULTIPLE_TOLERANCE",
+    "LONG_GAP_SHARE_BASIS_MAX_DAYS",
+    "LONG_GAP_WIDE_MULTIPLE_TOLERANCE",
     "AdjustedStep",
     "L2ContinuityReport",
     "StepClass",
     "classify_steps",
+    "clean_multiple",
     "findings",
     "scan",
+    "share_basis_reason",
 ]
 
 _LOG = get_logger(__name__)
@@ -107,6 +123,25 @@ _RETIRED_FINGERPRINT_DATE: Final = date(1970, 1, 1)
 #: A recorded dividend at least this fraction of the raw close before it explains a step.
 _LARGE_DIVIDEND: Final = Decimal("0.25")
 
+#: The share multiples a split or consolidation re-bases at (`corpactions.implied`'s candidates).
+CLEAN_MULTIPLES: Final[tuple[Decimal, ...]] = tuple(sorted({a / b for a, b in CANDIDATE_MULTIPLES}))
+
+#: How far a long-gap step may sit from a clean multiple and still read as a share-basis change:
+#: `corpactions.implied`'s own bands, 3% below 5x and 6% from 5x up (AvenuesAI: x9.40 against 10
+#: over seven days, 5.97%). Measured 2026-11-01 over the whole lake: at a flat 10% the small
+#: multiples (2, 2.5, 3, 4) between them cover most ratios from 1.8 to 5.5, and 432 illiquid
+#: long gaps matched — noise, not evidence.
+LONG_GAP_MULTIPLE_TOLERANCE: Final = Decimal("0.03")
+LONG_GAP_WIDE_MULTIPLE_TOLERANCE: Final = Decimal("0.06")
+_WIDE_FROM: Final = Decimal(5)
+
+#: The longest gap a price-only share-basis suspicion is raised across. An exchange suspends a
+#: stock for a consolidation or a reissue from the record date until the new ISIN is credited —
+#: days to a few weeks (AvenuesAI: 7). Past a month the gap is illiquidity, trade-to-trade months
+#: off the EQ view, or a suspension for cause, where a clean-looking ratio is as likely a genuine
+#: move; those stay `LONG_GAP`. A step across a reissue is `SHARE_BASIS` at any gap.
+LONG_GAP_SHARE_BASIS_MAX_DAYS: Final = 30
+
 #: Recorded action types that explain a level step (the factor module's structural breaks).
 _STRUCTURAL_TYPES: Final = ("MERGER", "DEMERGER", "SCHEME_OF_ARRANGEMENT", "DVR_CONVERSION")
 
@@ -119,6 +154,7 @@ class StepClass(StrEnum):
     EXPLAINED_MOVE = "EXPLAINED_MOVE"
     UNSOURCED = "UNSOURCED"
     DIVIDEND = "DIVIDEND"
+    SHARE_BASIS = "SHARE_BASIS"
     LONG_GAP = "LONG_GAP"
     UNEXPLAINED = "UNEXPLAINED"
 
@@ -162,6 +198,8 @@ class L2ContinuityReport:
     retired_partitions: tuple[str, ...]
     #: The ISINs the scan was limited to; `None` for a scan of every partition.
     isins: frozenset[str] | None = None
+    #: Partition ISIN → the effective dates of the lineage reissues its history stitches.
+    reissue_dates: Mapping[str, tuple[date, ...]] = field(default_factory=dict)
 
     def of_class(self, cls: StepClass) -> tuple[AdjustedStep, ...]:
         return tuple(step for step, c in self.steps if c is cls)
@@ -175,8 +213,12 @@ class L2ContinuityReport:
         return self.of_class(StepClass.UNSOURCED)
 
     @property
+    def share_basis(self) -> tuple[AdjustedStep, ...]:
+        return self.of_class(StepClass.SHARE_BASIS)
+
+    @property
     def passed(self) -> bool:
-        return not self.unexplained and not self.retired_partitions
+        return not self.unexplained and not self.share_basis and not self.retired_partitions
 
     @property
     def resolution_scope(self) -> FindingScope | None:
@@ -198,6 +240,7 @@ def classify_steps(
     unscaled_dates: Mapping[str, Iterable[date]] | None = None,
     explained_dates: Mapping[str, Iterable[date]] | None = None,
     unsourced_dates: Mapping[str, Iterable[date]] | None = None,
+    reissue_dates: Mapping[str, Iterable[date]] | None = None,
     threshold: Decimal,
     max_gap_days: int,
     guard_days: int = 7,
@@ -208,7 +251,9 @@ def classify_steps(
     `unscaled_dates` to those of its recorded rights issues and large dividends;
     `explained_dates` to the sessions the curated allowlist documents as market moves — matched
     on the step's own session exactly, never within a guard window, so it cannot cover another;
-    `unsourced_dates` to the curated unsourced share-basis steps, matched the same exact way.
+    `unsourced_dates` to the curated unsourced share-basis steps, matched the same exact way;
+    `reissue_dates` to the effective dates of the D2 lineage edges whose bars the ISIN's
+    partition stitches — a step whose pair straddles one is `SHARE_BASIS` whatever its gap.
     """
     guard = timedelta(days=guard_days)
     lower = 1 / threshold
@@ -227,12 +272,50 @@ def classify_steps(
             cls = StepClass.EXPLAINED_MOVE
         elif lower <= step.tr_ratio <= threshold:
             cls = StepClass.DIVIDEND
+        elif any(
+            step.prev_date < d <= step.trade_date for d in (reissue_dates or {}).get(step.isin, ())
+        ) or (
+            max_gap_days < step.gap_days <= LONG_GAP_SHARE_BASIS_MAX_DAYS
+            and clean_multiple(step.ratio) is not None
+        ):
+            cls = StepClass.SHARE_BASIS
         elif step.gap_days > max_gap_days:
             cls = StepClass.LONG_GAP
         else:
             cls = StepClass.UNEXPLAINED
         out.append((step, cls))
     return tuple(out)
+
+
+def clean_multiple(ratio: Decimal) -> Decimal | None:
+    """The clean split multiple `ratio` (either way up) sits within tolerance of, or `None`."""
+    if ratio <= 0:
+        return None
+    size = ratio if ratio >= 1 else 1 / ratio
+    for multiple in CLEAN_MULTIPLES:
+        band = (
+            LONG_GAP_WIDE_MULTIPLE_TOLERANCE
+            if multiple >= _WIDE_FROM
+            else LONG_GAP_MULTIPLE_TOLERANCE
+        )
+        if abs(size / multiple - 1) <= band:
+            return multiple
+    return None
+
+
+def share_basis_reason(step: AdjustedStep, reissue_dates: Iterable[date] = ()) -> str:
+    """Why a `SHARE_BASIS` step is one, in words for the Ops page and the guard's state."""
+    across = [d for d in reissue_dates if step.prev_date < d <= step.trade_date]
+    if across:
+        return (
+            f"x{step.ratio:.4f} across the D2 reissue effective {across[0].isoformat()}; "
+            "no recorded or admitted factor explains it"
+        )
+    multiple = clean_multiple(step.ratio)
+    return (
+        f"x{step.ratio:.4f} across a {step.gap_days}-day gap, at a {multiple}:1 re-basing; no "
+        "recorded or admitted factor explains it, and a long gap is never adjusted from price alone"
+    )
 
 
 def findings(report: L2ContinuityReport, *, logical_date: date) -> tuple[QualityFinding, ...]:
@@ -266,6 +349,31 @@ def findings(report: L2ContinuityReport, *, logical_date: date) -> tuple[Quality
                 },
                 fingerprint=finding_fingerprint(
                     f"{CHECK_NAME}:{step.exchange}", step.isin, step.trade_date
+                ),
+            )
+        )
+    for step in report.share_basis:
+        out.append(
+            QualityFinding(
+                logical_date=step.trade_date,
+                check_name=CHECK_NAME,
+                severity="ERROR",
+                isin=step.isin,
+                source=_DATASET,
+                observed_value=step.ratio,
+                threshold=report.threshold,
+                detail={
+                    "kind": "share_basis_step",
+                    "exchange": step.exchange,
+                    "prev_date": step.prev_date.isoformat(),
+                    "prev_adj_close": str(step.prev_close),
+                    "adj_close": str(step.close),
+                    "gap_days": step.gap_days,
+                    "reason": share_basis_reason(step, report.reissue_dates.get(step.isin, ())),
+                    "quarantined_before": step.trade_date.isoformat(),
+                },
+                fingerprint=finding_fingerprint(
+                    f"{CHECK_NAME}:share_basis:{step.exchange}", step.isin, step.trade_date
                 ),
             )
         )
@@ -321,6 +429,7 @@ def scan(
     max_gap_days: int = DEFAULT_MAX_GAP_DAYS,
     curated: ManualActions | None = None,
     isins: Iterable[str] | None = None,
+    reissues: Iterable[tuple[str, str, date]] = (),
 ) -> L2ContinuityReport:
     """Scan the materialized L2 for steps past `threshold`x and for retired-ISIN partitions.
 
@@ -328,7 +437,9 @@ def scan(
     given, which the report records as its scope — and (when `conn` is given) one Postgres read
     of the reconciled structural breaks; without it only a curated break makes a step
     `STRUCTURAL`. `curated` (default: the repo's file) supplies the curated breaks and the
-    explained-move allowlist.
+    explained-move allowlist. `reissues` are the D2 lineage edges ``(predecessor, successor,
+    effective_date)`` (`LineageResolver.edges`); each is keyed to the successor's survivor, whose
+    partition stitches the step, so a step across one is `SHARE_BASIS`.
     """
     curated = default_manual_actions() if curated is None else curated
     scope = None if isins is None else frozenset(isins)
@@ -421,6 +532,9 @@ def scan(
                 if amount is None or not near or Decimal(amount) < _LARGE_DIVIDEND * near[0]:
                     continue
             unscaled.setdefault(str(isin), []).append(day)
+    reissue_dates: dict[str, list[date]] = {}
+    for _predecessor, successor, effective in reissues:
+        reissue_dates.setdefault(survivor_of(successor), []).append(effective)
     report = L2ContinuityReport(
         threshold=threshold,
         max_gap_days=max_gap_days,
@@ -431,11 +545,13 @@ def scan(
             unscaled_dates=unscaled,
             explained_dates=explained,
             unsourced_dates=unsourced,
+            reissue_dates=reissue_dates,
             threshold=threshold,
             max_gap_days=max_gap_days,
         ),
         retired_partitions=retired,
         isins=scope,
+        reissue_dates={k: tuple(sorted(v)) for k, v in reissue_dates.items()},
     )
     _LOG.info(
         "quality.l2_continuity",
@@ -496,6 +612,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             threshold=args.threshold,
             max_gap_days=args.max_gap_days,
             isins=args.isin,
+            reissues=resolver.edges(),
         )
         if args.persist:
             counts = persist_findings(
@@ -522,6 +639,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             f"UNEXPLAINED {step.isin} {step.exchange} {step.prev_date} -> {step.trade_date} "
             f"{step.prev_close} -> {step.close} (x{step.ratio:.4f})"
+        )
+    for step in report.share_basis:
+        print(
+            f"SHARE_BASIS {step.isin} {step.exchange} {step.prev_date} -> {step.trade_date} "
+            f"{step.prev_close} -> {step.close} (x{step.ratio:.4f}): "
+            f"{share_basis_reason(step, report.reissue_dates.get(step.isin, ()))}"
         )
     for step in report.unsourced:
         print(
