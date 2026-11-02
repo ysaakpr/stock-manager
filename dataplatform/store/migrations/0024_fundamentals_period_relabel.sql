@@ -28,7 +28,7 @@ CREATE TABLE fundamentals_period_relabel (
     unit          text        NOT NULL,
     logical_date  date        NOT NULL,
     filing_id     text        NOT NULL,
-    isin          text        NOT NULL,
+    isin          isin        NOT NULL,
     nature        text        NOT NULL CHECK (nature IN ('Standalone', 'Consolidated')),
     stated_start  date        NOT NULL,
     stated_end    date        NOT NULL,
@@ -45,5 +45,5 @@ CREATE TABLE fundamentals_period_relabel (
 CREATE INDEX fundamentals_period_relabel_by_isin ON fundamentals_period_relabel (isin, stored_end);
 
 COMMENT ON TABLE fundamentals_period_relabel IS
-    'M14.3 (owner, 2026-11-02): one row per XBRL filing stored under a period its document did not '
+    'D1 (M14.3, owner 2026-11-02): one row per XBRL filing stored under a period its document did not '
     'state — the class-A Q4 relabel. Its rule and check result are the provenance of those L1 rows.';
