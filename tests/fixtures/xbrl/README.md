@@ -93,6 +93,14 @@ Byte-for-byte copies of production L0 payloads, for the M14.3 identity and half-
 | `INTEGRATED_FILING_INDAS_1572886_…12112025082158_WEB.xml` | ARIHANTSUP | …as this same-day quarterly document states it (its own six months: 206.3 m, not 131.7 m). |
 | `INTEGRATED_FILING_INDAS_1502003_…04082025062112_WEB.xml` | GLOBUSSPR | The first quarter beside the genuine half-year `INTEGRATED_FILING_INDAS_1586681_…` already here. |
 
+Added for the owner's rulings of 2026-11-02 (`tests/unit/test_xbrl_owner_rulings.py`):
+
+| File | Company | What it proves |
+|---|---|---|
+| `INTEGRATED_FILING_INDAS_1414486_…15042025011830_WEB.xml` | GMBREW | Class A, relabelled: OneD states Oct→Mar under `Half Yearly`; its revenue and profit are FourD minus the three quarters filed before it, to the rupee. Stored as Jan→Mar. |
+| `INTEGRATED_FILING_INDAS_1423539_…23042025110233_WEB.xml` | ASTEC | Class A, refused: OneD is a genuine second half-year (FourD minus two quarters). |
+| `INTEGRATED_FILING_NBFC_INDAS_1689424_…08072026062603_WEB.xml` | INDBANK | Class G exception: states `INE841801017` for `INE841B01017` (B→8), symbol and BSE code its own. |
+
 ## Availability, and the real depth of this dataset
 
 Probing the whole window (index requests only) found 135,197 announcements over ten financial

@@ -86,6 +86,9 @@ RAISED_BOUNDS: Final = MappingProxyType(
         # 2026-11-02 (owner): the class E (multi-entity BSE code) and F1 (symbol typo, ISIN
         # agrees) parse failures, re-parsed from their complete L0 documents in one night.
         "xbrl-identity-e-f1-2026-11-03": 205,
+        # 2026-11-02 (owner): the class-A Q4 relabels that pass the FY-minus-9M check (121) and
+        # INDBANK's one-character ISIN typo (1), re-parsed from their complete L0 documents once.
+        "xbrl-owner-rulings-2026-11-03": 122,
     }
 )
 

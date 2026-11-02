@@ -511,6 +511,7 @@ def test_the_requeue_bound_stays_under_a_campaign() -> None:
 # ── reuse-only re-queues and the owner's one-off raised bound ────────────────────────────────
 
 E_F1: Final = "xbrl-identity-e-f1-2026-11-03"
+OWNER_RULINGS: Final = "xbrl-owner-rulings-2026-11-03"
 
 
 def test_the_e_f1_requeue_is_the_one_raised_list_and_cannot_request() -> None:
@@ -519,12 +520,30 @@ def test_the_e_f1_requeue_is_the_one_raised_list_and_cannot_request() -> None:
     assert len(items) == 205 == rq.RAISED_BOUNDS[E_F1]
     assert all(i.reuse_only and i.action is rq.RequeueAction.REFETCH for i in items)
     assert all(i.index_ref[0] == "nse_integrated_filing_index" for i in items)
-    assert set(rq.RAISED_BOUNDS) == {E_F1}  # no standing allowance
+    assert set(rq.RAISED_BOUNDS) == {E_F1, OWNER_RULINGS}  # no standing allowance
     # Not before Tuesday's run: the forward job of Tue 3 Nov 02:00 IST is the first to owe it.
     due_mon = rq.pending_items(cast(Any, _Conn([])), date(2026, 11, 2))
     due_tue = rq.pending_items(cast(Any, _Conn([])), date(2026, 11, 3))
     assert not any(i.requeue_id == E_F1 for i in due_mon)
     assert sum(i.requeue_id == E_F1 for i in due_tue) == 205
+
+
+def test_the_owner_rulings_requeue_is_reuse_only_under_its_own_bound() -> None:
+    """2026-11-02 (owner): 121 class-A relabels and INDBANK, with zero requests, Tue 02:00 IST."""
+    items = [i for i in rq.load_requeues() if i.requeue_id == OWNER_RULINGS]
+    assert len(items) == 122 == rq.RAISED_BOUNDS[OWNER_RULINGS]
+    assert all(i.reuse_only and i.action is rq.RequeueAction.REFETCH for i in items)
+    assert all(i.index_ref[0] == "nse_integrated_filing_index" for i in items)
+    assert ("IF173185", date(2026, 7, 8)) in {(i.unit, i.filing_date) for i in items}  # INDBANK
+    # The class-A relabels are quarterly units only: the `-FY` sibling already parsed.
+    assert not any(i.unit.endswith("-FY") for i in items)
+    # It rides behind the E/F1 list, so quarters that list lands are on file before the check.
+    order = [i.requeue_id for i in rq.load_requeues()]
+    assert order.index(E_F1) < order.index(OWNER_RULINGS)
+    due_mon = rq.pending_items(cast(Any, _Conn([])), date(2026, 11, 2))
+    due_tue = rq.pending_items(cast(Any, _Conn([])), date(2026, 11, 3))
+    assert not any(i.requeue_id == OWNER_RULINGS for i in due_mon)
+    assert sum(i.requeue_id == OWNER_RULINGS for i in due_tue) == 122
 
 
 def _big(tmp_path: Path, rid: str, *, n: int, extra: str = "") -> Path:

@@ -476,7 +476,9 @@ def _drive_parse(tmp_path: Path) -> Filing:
         (INTEGRATED / ARIHANT_H1_DOC).read_bytes(),
     )
     unit = fb.FilingUnit(entry=entry, url=str(entry.xbrl_url), filename=ARIHANT_H1_DOC)
-    return cast(Filing, runner._parse(unit, ref))
+    filing, relabel = runner._parse(unit, ref)
+    assert relabel is None
+    return cast(Filing, filing)
 
 
 def test_the_runner_refuses_the_half_year_once_its_quarter_is_published(tmp_path: Path) -> None:
