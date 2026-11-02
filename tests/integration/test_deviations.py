@@ -410,3 +410,57 @@ def test_d28_marks_a_recent_retrying_xbrl_404_on_the_gaps_page(
     assert len(by_error_age) == 2
     assert sum(1 for d in by_error_age if d is not None and d["status"] == "ACCEPTED") == 1
     assert body["accepted_total"] == 1 and body["fully_explained"] is False
+
+
+def test_d34_and_d39_judge_xbrl_gaps_by_unit_and_published_document(
+    client: TestClient, conn: Connection
+) -> None:
+    """The unit reaches the judge through `/status/gaps`, and `same_document_published` reads the
+    real `sync_state.l0_path` of PUBLISHED rows — a re-download's `_at<stamp>` name included."""
+    upl_404 = (
+        "FetchHTTPError: nse_xbrl_filing: https://nsearchives.nseindia.com/corporate/xbrl/"
+        "INTEGRATED_FILING_INDAS_1442647_19052025120108_WEB.xml returned 404, which no retry "
+        "would change"
+    )
+
+    def stale(doc: str, unit: str) -> str:
+        return (
+            f"parse failed: {doc}: no results column covers 2016-04-01→2017-03-31 as the index "
+            f"entry ({unit}) says; the document offers OneD=2018-01-01→2018-03-31/Standalone, "
+            "FourD=2017-04-01→2018-03-31/Standalone"
+        )
+
+    rows = (
+        ("IF91762", date(2025, 5, 19), "FAILED", upl_404, None),  # D34
+        ("IF91799", date(2025, 5, 19), "FAILED", upl_404, None),  # same 404, another filing
+        ("1040496", date(2018, 5, 25), "FAILED", stale("A_WEB.xml", "1040496"), None),
+        ("1040497", date(2018, 5, 25), "PUBLISHED", None, "nse_xbrl_filing/2018-05-25/A_WEB.xml"),
+        ("1040500", date(2018, 5, 25), "FAILED", stale("B_WEB.xml", "1040500"), None),
+        (
+            "1040501",
+            date(2018, 5, 25),
+            "PUBLISHED",
+            None,
+            "nse_xbrl_filing/2018-05-25/B_WEB_at20261102T020103.xml",
+        ),
+        ("1040510", date(2018, 5, 25), "FAILED", stale("C_WEB.xml", "1040510"), None),  # alone
+    )
+    for unit, day, state, error, l0 in rows:
+        conn.execute(
+            "INSERT INTO sync_state (source, unit, logical_date, state, attempts, retryable, "
+            "last_error, l0_path, first_attempt_at, updated_at) "
+            "VALUES ('nse_xbrl_filing', %s, %s, %s, 2, true, %s, %s, %s, %s)",
+            (unit, day, state, error, l0, NOW - timedelta(days=60), NOW - timedelta(days=1)),
+        )
+
+    def verdicts(day: str) -> list[str | None]:
+        body = client.get(
+            "/status/gaps",
+            params={"from": day, "to": day, "source": "nse_xbrl_filing"},
+        ).json()
+        return sorted(
+            (e["deviation"]["id"] if e["deviation"] else "-") for e in body["unexplained"]
+        )
+
+    assert verdicts("2025-05-19") == ["-", "d34-xbrl-recheck-404"]
+    assert verdicts("2018-05-25") == ["-", "d39-xbrl-old-index-period", "d39-xbrl-old-index-period"]

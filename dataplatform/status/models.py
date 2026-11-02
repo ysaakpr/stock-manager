@@ -714,6 +714,7 @@ class GapsOut(BaseModel):
                     last_error=entry.last_error,
                     retryable=entry.retryable,
                     first_attempt_at=entry.first_attempt_at,
+                    unit=entry.unit,
                 )
             )
             for entry in unexplained
