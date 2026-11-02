@@ -38,7 +38,7 @@ silence a page.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import StrEnum
@@ -79,6 +79,7 @@ __all__ = [
     "accepted_note",
     "conflicts_known",
     "default_deviations",
+    "document_name",
     "error_class",
     "flag_in_set",
     "flags_known",
@@ -104,6 +105,13 @@ _ALERT_KEY: Final = re.compile(
     r"|job:(?P<job>[a-z0-9_]+):failed"
     r"|quality:(?P<check>[A-Za-z0-9_.-]+):red)$"
 )
+
+#: A sync_state unit as a gap matcher may name one: a filing id, a slug, a chunk.
+_UNIT: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}")
+
+#: A re-download stored beside the first capture (`<stem>_at<YYYYMMDD>T<HHMMSS>.<ext>`): the same
+#: document, so `same_document_published` compares names with the stamp removed.
+_CAPTURE_STAMP: Final = re.compile(r"_at\d{8}T\d{6}(?=\.[^./]+$)")
 
 #: Gap reasons that are already explained and so never need accepting (`quality.gaps.GapReason`).
 _UNEXPLAINED_GAP_REASONS: Final = frozenset(
@@ -205,19 +213,23 @@ class ErrorPattern(_Strict):
 
     def matches(self, text: str | None, logical_date: date | None = None) -> bool:
         """Whether `text` (of a row about `logical_date`) is this failure."""
+        return self.search(text, logical_date) is not None
+
+    def search(self, text: str | None, logical_date: date | None = None) -> re.Match[str] | None:
+        """`matches`, returning the pattern's match (its named groups) instead of a bool."""
         if text is None:
-            return False
+            return None
         if self.dated_from is not None or self.dated_to is not None:
             if logical_date is None:
-                return False
+                return None
             if self.dated_from is not None and logical_date < self.dated_from:
-                return False
+                return None
             if self.dated_to is not None and logical_date > self.dated_to:
-                return False
+                return None
         found, message = error_class(text)
         if found != self.error_class:
-            return False
-        return re.search(self.pattern, message) is not None
+            return None
+        return re.search(self.pattern, message)
 
 
 def _compile(pattern: str) -> re.Pattern[str]:
@@ -389,14 +401,26 @@ class GapMatch(_Strict):
     """Unexplained gap entries of the target source, each accepted on its own evidence.
 
     `reasons` are the gap reasons it covers; at least one of `errors` (the entry's sync_state
-    error must be one of these), `dates` (a known set) or `before` (dated before) must narrow it.
-    `max_age_days` additionally limits it to entries dated within that many days of today.
+    error must be one of these), `dates` (a known set), `before` (dated before) or `units` (a
+    known set of sync_state units — one filing, slug or chunk each) must narrow it, and every one
+    given must hold. `max_age_days` additionally limits it to entries dated within that many days
+    of today.
+
+    `same_document_published` (structured, read by the judge): the failure names its document —
+    every `errors` alternative captures it as the named group `document` — and a row of the same
+    source is PUBLISHED from that document (its `l0_path`'s file name, a re-download's
+    `_at<stamp>` suffix ignored). "The index asked this document for a period it does not hold,
+    and the document's own figures landed under its other entry": the refusal costs no data. A
+    failure whose document no PUBLISHED row was read from does not match. Only for a source whose
+    document names are unique (NSE's XBRL file names carry the filing's sequence number).
     """
 
     reasons: frozenset[str] = Field(min_length=1)
     errors: tuple[ErrorPattern, ...] = ()
     dates: frozenset[date] | None = None
     before: date | None = None
+    units: frozenset[str] | None = None
+    same_document_published: bool = False
     max_age_days: int | None = Field(default=None, ge=0)
     retrying: RetryWindow | None = None
 
@@ -405,8 +429,21 @@ class GapMatch(_Strict):
         unknown = self.reasons - _UNEXPLAINED_GAP_REASONS
         if unknown:
             raise ValueError(f"gap reasons {sorted(unknown)} are not unexplained gap reasons")
-        if not self.errors and self.dates is None and self.before is None:
-            raise ValueError("a gap matcher needs errors, dates or before besides reasons")
+        if not self.errors and self.dates is None and self.before is None and self.units is None:
+            raise ValueError("a gap matcher needs errors, dates, before or units besides reasons")
+        if self.units is not None and (
+            not self.units or not all(_UNIT.fullmatch(unit) for unit in self.units)
+        ):
+            raise ValueError("units must be a non-empty set of sync_state unit names")
+        if self.same_document_published:
+            if not self.errors:
+                raise ValueError("same_document_published reads the document from errors")
+            for pattern in self.errors:
+                if "document" not in re.compile(pattern.pattern).groupindex:
+                    raise ValueError(
+                        f"same_document_published: pattern {pattern.pattern!r} does not capture "
+                        "the document as (?P<document>...)"
+                    )
         return self
 
 
@@ -641,6 +678,8 @@ class GapItem:
     last_error: str | None
     retryable: bool | None = None
     first_attempt_at: datetime | None = None
+    #: The sync_state unit (a filing id, a slug), or "" for a whole-source row.
+    unit: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -680,6 +719,12 @@ FROM quality_flag
 WHERE NOT resolved AND severity = 'ERROR' AND check_name = %s
 """
 
+_PUBLISHED_DOCUMENTS_SQL: Final = """
+SELECT DISTINCT l0_path
+FROM sync_state
+WHERE source = %s AND state = 'PUBLISHED' AND l0_path IS NOT NULL
+"""
+
 _OPEN_CONFLICTS_SQL: Final = """
 SELECT id, exchange, detected_by, isins
 FROM identity_reconciliation
@@ -709,6 +754,7 @@ class DeviationJudge:
     _attempts: dict[str, JobAttempt | None] = field(default_factory=dict)
     _flags: dict[str, list[OpenFlag]] = field(default_factory=dict)
     _conflicts: list[OpenConflict] | None = None
+    _documents: dict[str, frozenset[str]] = field(default_factory=dict)
 
     # ── sources ────────────────────────────────────────────────────────────────────────────
 
@@ -921,12 +967,26 @@ class DeviationJudge:
     # ── gaps ───────────────────────────────────────────────────────────────────────────────
 
     def gap(self, item: GapItem) -> DeviationOut | None:
-        """The verdict on one unexplained gap entry, from the entry's own fields (no read)."""
+        """The verdict on one unexplained gap entry, from the entry's own fields.
+
+        Reads nothing, except for an entry that asks `same_document_published` and whose other
+        criteria already hold: then the source's published document names, once per judge.
+        """
         return _first(
             _verdict(entry, self.today)
             for entry in self.registry.entries(DeviationKind.GAP, item.source)
-            if isinstance(entry, GapEntry) and gap_matches(entry.match, item, self.today)
+            if isinstance(entry, GapEntry)
+            and gap_matches(entry.match, item, self.today, published=self._document_published)
         )
+
+    def _document_published(self, source: str, document: str) -> bool:
+        """Whether a PUBLISHED row of `source` was read from the document named `document`."""
+        if source not in self._documents:
+            self._documents[source] = frozenset(
+                document_name(str(row[0]))
+                for row in self.conn.execute(_PUBLISHED_DOCUMENTS_SQL, (source,)).fetchall()
+            )
+        return document_name(document) in self._documents[source]
 
     # ── alerts ─────────────────────────────────────────────────────────────────────────────
 
@@ -1003,11 +1063,26 @@ def conflicts_known(match: IdentityConflictSet, conflicts: Sequence[OpenConflict
     )
 
 
-def gap_matches(match: GapMatch, item: GapItem, today: date) -> bool:
-    """Whether one unexplained gap entry is the known cause."""
+def document_name(path: str) -> str:
+    """The file name of an L0 path or document, a re-download's `_at<stamp>` suffix removed."""
+    return _CAPTURE_STAMP.sub("", path.rsplit("/", 1)[-1])
+
+
+def gap_matches(
+    match: GapMatch,
+    item: GapItem,
+    today: date,
+    *,
+    published: Callable[[str, str], bool] | None = None,
+) -> bool:
+    """Whether one unexplained gap entry is the known cause.
+
+    `published(source, document)` answers `same_document_published`; without it, a matcher that
+    asks for it never matches (fail closed: coverage nobody read is not coverage).
+    """
     if item.reason not in match.reasons:
         return False
-    if match.errors and not _any(match.errors, item.last_error, item.logical_date):
+    if match.units is not None and item.unit not in match.units:
         return False
     if match.dates is not None and item.logical_date not in match.dates:
         return False
@@ -1017,7 +1092,22 @@ def gap_matches(match: GapMatch, item: GapItem, today: date) -> bool:
         item.retryable, item.first_attempt_at, today
     ):
         return False
-    return _young(item.logical_date, today, match.max_age_days)
+    if not _young(item.logical_date, today, match.max_age_days):
+        return False
+    if not match.errors:
+        return True
+    found = [
+        hit
+        for pattern in match.errors
+        if (hit := pattern.search(item.last_error, item.logical_date)) is not None
+    ]
+    if not found:
+        return False
+    if not match.same_document_published:
+        return True
+    return published is not None and any(
+        published(item.source, hit.group("document")) for hit in found
+    )
 
 
 def accepted_note(verdict: DeviationOut) -> str:

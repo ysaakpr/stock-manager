@@ -27,7 +27,9 @@
 #       quality  every open ERROR flag of the check is in the given set (fingerprints / ids /
 #                isins / kinds / raised_before / dated_before — all given criteria hold for every
 #                flag; `kinds`, the finding's `detail->>'kind'`, never on its own).
-#       gap      the entry's reason is in `reasons`, and its error / date is in the known set.
+#       gap      the entry's reason is in `reasons`, and its error / date / unit is in the known
+#                set; `same_document_published` also requires another row of the source to be
+#                PUBLISHED from the document the error names (its `(?P<document>...)` group).
 #     `errors` alternatives name the exception class read from the stored text's `ClassName: `
 #     prefix (`class: null` for text stored without one), a regex searched in the message, and
 #     optionally `dated_from`/`dated_to` (the row's logical date) for a cause true only then.
@@ -159,6 +161,44 @@ x-d33-remark: &d33_remark >-
   ISIN's bars before this step are quarantined (withheld from decisions); the flag clears
   automatically if a corporate-action record later explains the step. A flag dated on or after
   2026-11-01 stays an error (owner, 2026-11-02).
+
+# D34..D39 (owner, 2026-11-02): per-filing XBRL failures the full-history triage of 2026-11-02
+# found to be correct refusals, documents NSE does not serve, or index errors whose document
+# landed anyway. Gap entries only — display, never a gate. Each matches its own recorded
+# evidence (the error's shape plus a stated condition); everything beside it stays red, notably
+# the quarter-labelled-as-half-year Q4 documents, the multi-entity and symbol-typo identity
+# refusals, the other-issuer ISINs, the MSEI scheme, the old half-year parses and the
+# never-fetched payloads (HUMAN_DECISIONS.md D34-D39).
+x-d34-basis: &d34_basis
+  agreed_by: owner
+  agreed_on: 2026-11-02
+  recorded_in:
+    - "HUMAN_DECISIONS.md D34 (owner, 2026-11-02)"
+x-d35-basis: &d35_basis
+  agreed_by: owner
+  agreed_on: 2026-11-02
+  recorded_in:
+    - "HUMAN_DECISIONS.md D35 (owner, 2026-11-02)"
+x-d36-basis: &d36_basis
+  agreed_by: owner
+  agreed_on: 2026-11-02
+  recorded_in:
+    - "HUMAN_DECISIONS.md D36 (owner, 2026-11-02)"
+x-d37-basis: &d37_basis
+  agreed_by: owner
+  agreed_on: 2026-11-02
+  recorded_in:
+    - "HUMAN_DECISIONS.md D37 (owner, 2026-11-02)"
+x-d38-basis: &d38_basis
+  agreed_by: owner
+  agreed_on: 2026-11-02
+  recorded_in:
+    - "HUMAN_DECISIONS.md D38 (owner, 2026-11-02)"
+x-d39-basis: &d39_basis
+  agreed_by: owner
+  agreed_on: 2026-11-02
+  recorded_in:
+    - "HUMAN_DECISIONS.md D39 (owner, 2026-11-02)"
 
 x-gdelt-retrying-errors: &gdelt_errors
   - class: FetchHTTPError
@@ -435,6 +475,175 @@ deviations:
     remark: *d32_remark
     basis: *d32_basis
     since: 2025-07-03
+
+  # ── D34-D39: XBRL failures accepted on the 2026-11-02 triage's evidence ──────────────────
+  # D34: the filings the one-time re-check (`xbrl-recheck-2026-11-01`, 2026-11-02 02:00 IST,
+  # journaled in fundamentals_requeue_log) still could not fetch. A fixed group, so by unit AND
+  # filing date AND error shape: the same unit failing any other way stays red.
+  - id: d34-xbrl-recheck-404
+    kind: gap
+    target: nse_xbrl_filing
+    match:
+      reasons: [FAILED]
+      units: [IF91762, IF91762-FY, IF93702, IF93702-FY, IF98124, IF98124-FY, IF108019]
+      dates: [2025-05-19, 2025-05-25, 2025-06-11, 2025-08-01]
+      errors:
+        - class: FetchHTTPError
+          pattern: '^nse_xbrl_filing: https://nsearchives\.nseindia\.com/corporate/xbrl/INTEGRATED_FILING_\S+\.xml returned 404, which no retry would change$'
+    remark: >-
+      NSE's index links this XBRL document but its archive does not serve it: still 404 on the
+      owner-approved one-time re-check of 2026-11-02 02:00 IST (xbrl-recheck-2026-11-01). No
+      further retry. Accepted permanently (owner, 2026-11-02).
+    basis: *d34_basis
+    since: 2025-05-19
+
+  - id: d34-xbrl-recheck-truncated
+    kind: gap
+    target: nse_xbrl_filing
+    match:
+      reasons: [FAILED]
+      units: [IF121347]
+      dates: [2025-10-23]
+      errors:
+        - class: null
+          pattern: '^parse failed: INTEGRATED_FILING_INDAS_1555947_23102025113639_WEB\.xml: body is not well-formed XML: (?:no element found|unclosed token|partial character|unclosed CDATA section): line \d+, column \d+$'
+    remark: >-
+      NSE's archive serves this XBRL document cut short: 65,258 bytes against the 273.41 KB its
+      index states, and the re-download of 2026-11-02 02:01 IST (xbrl-recheck-2026-11-01) was
+      byte-identical. The archive holds a short file; accepted permanently (owner, 2026-11-02).
+    basis: *d34_basis
+    since: 2025-10-23
+
+  # D35: the synthetic Apr->Mar `-FY` entry the index parser makes for every March-quarter record,
+  # met by a company whose financial year starts in January, July or October. Shape: a `-FY` unit
+  # asking Apr->Mar, every column the document offers ends on that 31 March and starts on the 1st
+  # of January, July or October. A column starting any other day (ICICIPRULI's day/month-swapped
+  # FY column) is a date typo, not this; and only filings dated 2025-04-21..2026-05-15 — a new one
+  # stays red until reviewed.
+  - id: d35-xbrl-synthetic-fy-non-march-year
+    kind: gap
+    target: nse_xbrl_filing
+    match:
+      reasons: [FAILED]
+      errors:
+        - class: null
+          pattern: '^parse failed: \S+\.xml: no results column covers \d{4}-04-01→(?P<end>\d{4})-03-31 as the index entry \(IF\d+-FY\) says, and no single column ends on (?P=end)-03-31 either; the document offers (?:OneD|FourD)=\d{4}-(?:01|07|10)-01→(?P=end)-03-31/(?:Standalone|Consolidated)(?:, (?:OneD|FourD)=\d{4}-(?:01|07|10)-01→(?P=end)-03-31/(?:Standalone|Consolidated))?$'
+          dated_from: 2025-04-21
+          dated_to: 2026-05-15
+    remark: >-
+      Not a missing filing: our index parser adds an Apr-Mar annual entry (-FY) for every March
+      quarter, but this company's financial year ends in December, June or September, so no
+      document states an Apr-Mar year. The quarter is its own entry. Accepted (owner, 2026-11-02).
+    basis: *d35_basis
+    since: 2025-04-21
+
+  # D36: the document is not the one the index entry names — another period's (a half-year on a
+  # Q4 entry, the year-earlier quarter, VENKEYS' next quarter). Shape: the document offers a single
+  # column, and it does not end on the date the entry asks for; filings dated 2025-05-05..09-16.
+  - id: d36-xbrl-wrong-period-document
+    kind: gap
+    target: nse_xbrl_filing
+    match:
+      reasons: [FAILED]
+      errors:
+        - class: null
+          pattern: '^parse failed: \S+\.xml: no results column covers \d{4}-\d\d-\d\d→(?P<end>\d{4}-\d\d-\d\d) as the index entry \(IF\d+(?:-FY)?\) says, and no single column ends on (?P=end) either; the document offers OneD=\d{4}-\d\d-\d\d→(?!(?P=end)/)\d{4}-\d\d-\d\d/(?:Standalone|Consolidated)$'
+          dated_from: 2025-05-05
+          dated_to: 2025-09-16
+    remark: >-
+      A correct refusal: the document attached to this index entry reports another period (a
+      year-old quarter or half-year), so it cannot be filed as the period the entry names. The
+      company's corrected filing carries the period. Accepted (owner, 2026-11-02).
+    basis: *d36_basis
+    since: 2025-05-05
+
+  # D37: NSE's index files Dhunseri Tea's results (DTIL, INE341R01014) under Dhunseri Ventures
+  # (DVL, INE477B01010). Shape: the index names DVL with DVL's ISIN and the document says DTIL;
+  # filings dated up to 2025-05-23.
+  - id: d37-xbrl-dtil-filed-as-dvl
+    kind: gap
+    target: nse_xbrl_filing
+    match:
+      reasons: [FAILED]
+      errors:
+        - class: null
+          pattern: '^parse failed: \S+\.xml: index says this filing is ''DVL'' \(ISIN INE477B01010, symbols accepted on \d{4}-\d\d-\d\d: (?:DPL, )?DVL\) but the document says DTIL; the announcements index and the XBRL must name the same company$'
+          dated_to: 2025-05-23
+    remark: >-
+      A correct refusal: NSE's index files this document under Dhunseri Ventures (DVL), but it is
+      Dhunseri Tea's (DTIL, INE341R01014). Storing it would put one company's results under
+      another's ISIN. Accepted (owner, 2026-11-02).
+    basis: *d37_basis
+    since: 2018-05-26
+
+  # D38: paid-up capital stated in scientific notation with an impossible magnitude (ARE&M, LT);
+  # each quarter is carried by the company's revised filing. Filings dated 2026-02-11..05-05.
+  - id: d38-xbrl-scientific-notation
+    kind: gap
+    target: nse_xbrl_filing
+    match:
+      reasons: [FAILED]
+      errors:
+        - class: null
+          pattern: '^parse failed: \S+\.xml: paid_up_equity_capital/None value ''\d\.\d+E\+\d+'' is not a plain decimal$'
+          dated_from: 2026-02-11
+          dated_to: 2026-05-05
+    remark: >-
+      A correct refusal: the document states paid-up capital in scientific notation at an
+      impossible size (about 1e15 rupees); the company's revised filing for the same quarter
+      carries the figures. Accepted (owner, 2026-11-02).
+    basis: *d38_basis
+    since: 2026-02-11
+
+  # D39: index errors in the 2018-2023 results feed, accepted only where the same document landed
+  # under its other index entry (`same_document_published`). Three shapes of the period stated a
+  # year (or a quarter) stale or the old two-quarter `_WEB` layout under an Annual entry, filed
+  # before 2021; and annual-only documents under a Quarterly entry, filed before 2024. The old
+  # half-year shape (a Jul-Sep entry offered Apr-Sep, which today's parser would mis-store) is
+  # none of these. A failure whose document no other entry published stays red.
+  - id: d39-xbrl-old-index-period
+    kind: gap
+    target: nse_xbrl_filing
+    match:
+      reasons: [FAILED]
+      before: 2021-01-01
+      same_document_published: true
+      errors:
+        # the index's period is stale: the quarter column ends in another year
+        - class: null
+          pattern: '^parse failed: (?P<document>\S+\.xml): no results column covers \d{4}-\d\d-\d\d→(?P<y>\d{4})-(?P<md>\d\d-\d\d) as the index entry \(\d+\) says; the document offers OneD=\d{4}-\d\d-\d\d→(?!(?P=y)-)\d{4}-(?P=md)/(?P<n>Standalone|Consolidated), FourD=\d{4}-\d\d-\d\d→\d{4}-\d\d-\d\d/(?P=n)$'
+        # old _WEB layout under an Annual entry: this year's and last year's Jan-Mar quarter only
+        - class: null
+          pattern: '^parse failed: (?P<document>\S+\.xml): no results column covers (?P<y0>\d{4})-04-01→(?P<y1>\d{4})-03-31 as the index entry \(\d+\) says; the document offers OneD=(?P=y1)-01-01→(?P=y1)-03-31/(?P<n>Standalone|Consolidated), FourD=(?P=y0)-01-01→(?P=y0)-03-31/(?P=n)$'
+        # the index's quarter is one behind: an Apr-Jun entry offered Jul-Sep
+        - class: null
+          pattern: '^parse failed: (?P<document>\S+\.xml): no results column covers (?P<y>\d{4})-04-01→(?P=y)-06-30 as the index entry \(\d+\) says; the document offers OneD=(?P=y)-07-01→(?P=y)-09-30/(?P<n>Standalone|Consolidated), FourD=(?P=y)-04-01→(?P=y)-09-30/(?P=n)$'
+        # ... and a Jul-Sep entry offered Oct-Dec
+        - class: null
+          pattern: '^parse failed: (?P<document>\S+\.xml): no results column covers (?P<y>\d{4})-07-01→(?P=y)-09-30 as the index entry \(\d+\) says; the document offers OneD=(?P=y)-10-01→(?P=y)-12-31/(?P<n>Standalone|Consolidated), FourD=(?P=y)-04-01→(?P=y)-12-31/(?P=n)$'
+    remark: >-
+      An index error, not missing data: NSE's 2018-2020 results feed asked this document for a
+      period it does not hold, and the same document was published under its other index entry.
+      Accepted (owner, 2026-11-02).
+    basis: *d39_basis
+    since: 2018-05-25
+
+  - id: d39-xbrl-old-annual-only-document
+    kind: gap
+    target: nse_xbrl_filing
+    match:
+      reasons: [FAILED]
+      before: 2024-01-01
+      same_document_published: true
+      errors:
+        # a Jan-Mar Quarterly entry; the document holds only the Apr-Mar year ending that day
+        - class: null
+          pattern: '^parse failed: (?P<document>\S+\.xml): no results column covers (?P<y>\d{4})-01-01→(?P=y)-03-31 as the index entry \(\d+\) says; the document offers FourD=\d{4}-04-01→(?P=y)-03-31/(?:Standalone|Consolidated)$'
+    remark: >-
+      By design, not missing data: this document states only the full year, which was published
+      under its Annual index entry; a Quarterly entry cannot take it. Accepted (owner, 2026-11-02).
+    basis: *d39_basis
+    since: 2018-05-25
 
   # ── D28: failures still being retried — amber for 7 days from the first attempt, then red ───
   - id: d28-xbrl-filing-retrying

@@ -894,6 +894,114 @@ a warning only while every open ERROR flag of it is in the set. No review date (
 none). Display and alerting only (`d33-*` in `dataplatform/status/accepted_deviations.yaml`);
 nothing that withholds a bar or gates a session reads it. Task M2.3.
 
+### D34 — The XBRL filings the one-time re-check of 2026-11-02 still could not fetch → **ANSWERED (owner, 2026-11-02): accept, permanent.**
+
+D32 gave the 7 other 404s and the 5 empty or truncated bodies one scheduled re-check each
+(`xbrl-recheck-2026-11-01`). It ran at 2026-11-02 02:00 IST, and `fundamentals_requeue_log`
+records the outcomes. AONESTEELS IF202489 published on the re-check, and KPRMILL IF205418,
+SUDARCOLOR IF205837 and PARADEEP IF206642 had already landed. Five filings still failed:
+
+* **404 again** (7 units): UPL IF91762 and IF91762-FY (filed 2025-05-19), ALLCARGO IF93702 and
+  IF93702-FY (2025-05-25), ADANIENT IF98124 and IF98124-FY (2025-06-11), and HCG IF108019
+  (2025-08-01; its index states 16.93 KB). NSE's index links each document, but its archive does
+  not serve it.
+* **Truncated again**: LAURUSLABS IF121347 (2025-10-23). The re-download at 02:01 IST was
+  byte-identical to the first capture: 65,258 bytes against the index's 273.41 KB, cut at the
+  same unclosed token. The archive itself holds a short file.
+
+The owner accepted them permanently. Because these are a small fixed group, the match keys on the
+filing (the sync_state unit), its filing date, and the error shape together:
+* `d34-xbrl-recheck-404` accepts a plain 404 for those seven units only;
+* `d34-xbrl-recheck-truncated` accepts IF121347's not-well-formed body only.
+
+The same unit failing any other way, or another filing with the same error, stays an error. For
+this, the gap matcher gained a `units` criterion, and `/status/gaps` now hands the judge each
+entry's unit. The triage's class J (the LAURUSLABS truncation) is this entry; it is not counted
+again. Display only. Task M14.3.
+
+### D35 — The synthetic Apr→Mar `-FY` entry of a company whose year is not Apr–Mar → **ANSWERED (owner, 2026-11-02): accept.**
+
+For every March-quarter record, our integrated-index parser adds an annual entry asking for the
+Apr→Mar year (the `-FY` unit). When the company's financial year ends in December, June or
+September, no document states an Apr→Mar year, so the refusal is correct and no data is missing.
+The quarter is its own entry. The 2026-11-02 triage (class B) found 68 of these.
+
+The match is the error's shape:
+* a `-FY` unit asking for Apr→Mar;
+* every column the document offers ends on that 31 March and starts on 1 January, 1 July or
+  1 October;
+* the filing is dated 2025-04-21..2026-05-15.
+
+This matches **67** rows. ICICIPRULI IF150750-FY is the 68th. Its year column starts on
+2025-01-04, which is 1 April with the day and month swapped. The triage calls that a date typo
+(class C), so it stays an error, as do all of class C. Next year's synthetic entries (Apr–May 2027)
+fall outside the window and stay red until reviewed, or until the runner stops making the entry
+for such companies. Task M14.3.
+
+### D36 — An index entry whose document reports another period → **ANSWERED (owner, 2026-11-02): accept.**
+
+In 13 filings (triage class D) the attached document is another period's:
+* a year-old quarter (AARTIDRUGS, SURAJEST, MMTC, KOHINOOR);
+* the previous half-year on a Q4 entry (CGPOWER, CGCL);
+* VENKEYS' next quarter on a Jan–Mar entry.
+
+These are correct refusals, and 12 of the 13 are covered by the company's corrected filing. The
+match is the shape: the document offers a single column, that column does not end on the date the
+entry asks for, and the filing is dated 2025-05-05..2025-09-16. It matches all **13**. KOHINOOR
+IF111008 is accepted as a correct refusal although the triage found no corrected filing for it.
+Task M14.3.
+
+### D37 — Dhunseri Tea's results filed under Dhunseri Ventures → **ANSWERED (owner, 2026-11-02): accept.**
+
+NSE's index files these documents under DVL (Dhunseri Ventures, INE477B01010), but the documents
+are DTIL's (Dhunseri Tea, INE341R01014). Storing them would put one company's results under
+another's ISIN, so the refusal is correct (triage class F3). The match is the error naming index
+symbol DVL, ISIN INE477B01010 and document symbol DTIL, on filings dated up to 2025-05-23. It
+matches all **69**. Task M14.3.
+
+### D38 — Paid-up capital stated in scientific notation → **ANSWERED (owner, 2026-11-02): accept.**
+
+ARE&M (IF142122, IF142124) and LT (IF155701, IF155701-FY) state `paid_up_equity_capital` as
+`1.83025364E+15` / `1.37563219E+16`, an impossible magnitude. These are correct refusals; each
+quarter is carried by the company's revised filing (triage class I). The parser is deliberately
+not taught scientific notation. The match is that error for that concept, on filings dated
+2026-02-11..2026-05-05: **4** rows. Task M14.3.
+
+### D39 — Old index errors whose document landed under its other entry → **ANSWERED (owner, 2026-11-02): accept the covered ones.**
+
+Between 2018 and 2023, the results feed often asked a document for a period it does not hold:
+* the period stated a year stale;
+* the old `_WEB` layout carrying two Jan–Mar quarters under an Annual entry;
+* the quarter one behind;
+* an annual-only document under a Quarterly entry.
+
+These are triage classes K (1,080) and L (236). The ruling was to accept them only where the
+matcher can prove nothing was lost, and it can. The new `same_document_published` criterion reads
+the document's name from the error and accepts the row only when another `nse_xbrl_filing` row was
+PUBLISHED from that same L0 document. Two entries do this:
+* `d39-xbrl-old-index-period` (K shapes, filed before 2021) matches **989** of 1,080;
+* `d39-xbrl-old-annual-only-document` (L, filed before 2024) matches **223** of 236.
+
+The other 91 K and 13 L rows have no published sibling, so they stay errors. The shapes exclude the
+old half-year case (class M: a Jul–Sep entry offered Apr–Sep), which stays an error even when the
+document is published elsewhere. Task M14.3.
+
+**Not accepted by D34–D39.** These stay errors on `/status/gaps`:
+* class A (287), the Q4 quarter labelled as a half-year;
+* class C (6) and the ICICIPRULI `-FY` row;
+* class E (182);
+* F1 (23);
+* F2 (89);
+* G (14), including ASHAPURMIN and GILLETTE;
+* H (6);
+* M (117);
+* the uncovered K/L rows (104);
+* the 710 `MissingPayloadError` rows.
+
+Classes A and G (INDBANK) are re-parsed by the reuse-only re-queue. These entries were checked
+against the live rows to match none of them. Surfacing historical per-filing failures on
+`/status/sources` waits until after S0 (`ops/BACKLOG.md`).
+
 ---
 
 ## Coming up
