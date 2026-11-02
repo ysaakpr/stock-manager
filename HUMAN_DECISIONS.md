@@ -1004,6 +1004,33 @@ against the live rows to match none of them. Surfacing historical per-filing fai
 
 ---
 
+### XBRL class A (Q4 labelled a half-year) and class G (INDBANK's ISIN typo) → **ANSWERED (owner, 2026-11-02): relabel only on a strict check; accept INDBANK's one-character typo only.**
+
+From the full-history triage of the `nse_xbrl_filing` parse failures (2026-11-02). The owner's
+rulings:
+
+* **Class A — relabel the verified filings.** A Q4 document whose quarter column states
+  October→March under `TypeOfReportingPeriod = Half Yearly` is stored as the January→March quarter,
+  **with the document's own stated values**, only when its revenue from operations *and* profit
+  after tax both equal the same document's year-to-date column minus the quarters the company had
+  filed **on or before** this filing's date, within rounding only (one rounding unit of its own
+  filing per figure). Never a computed FY − 9M number: the arithmetic only gates the relabel. Every
+  relabelled filing carries a provenance row (`fundamentals_period_relabel`, migration 0024): rule
+  `Q4_RELABEL_FY_MINUS_9M_CHECK` and the check result. A filing that fails or cannot be checked stays
+  refused, its error naming the check that failed. Offline count on 2026-11-02: **121 of 287** pass
+  (the triage's looser 0.2% tolerance counted 132–135; the difference is 7 filings with no revenue
+  at all, where revenue cannot corroborate, and 7 whose difference is a restatement, not rounding).
+* **Class G — keep refused, one exception.** INDBANK's `INE841801017` (B typed as 8) is accepted
+  only because it differs from the entry's ISIN in exactly one character, the document's symbol and
+  BSE code are the entry ISIN's in D2, and no other ISIN in the identity master is within one
+  character of it. ASHAPURMIN (Orient Ceratech's ISIN) and GILLETTE (P&G Hygiene's) stay refused.
+* **Re-queue.** Both are re-parsed from their complete L0 documents once, by the reuse-only
+  re-queue `xbrl-owner-rulings-2026-11-03` (122 filings, its own raised bound), in the
+  `fundamentals_forward` run of Tue 3 Nov 02:00 IST, behind the E/F1 list. It makes no request.
+  No rebuild from L0 over the window: it would destroy the D31/D32 evidence. Task M14.3.
+
+---
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes

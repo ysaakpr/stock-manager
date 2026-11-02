@@ -68,10 +68,12 @@ from dataplatform.ingest.fundamentals_backfill import (
     bse_codes_of,
     build_integrated_units,
     isins_in_price_window,
+    isins_near_of,
     resolve_universe,
     symbols_accepted_on,
     try_resolve_unambiguous,
 )
+from dataplatform.ingest.fundamentals_relabel import recorder as relabel_recorder
 from dataplatform.ingest.fundamentals_requeue import journal_to, pending_items
 from dataplatform.ingest.source_register import load as load_register
 from dataplatform.ingest.xbrl import integrated
@@ -404,6 +406,8 @@ def run_forward_plan(
             ),
             resolve_isin=lambda symbol, on: try_resolve_unambiguous(master, symbol, on),
             bse_codes=lambda isin: bse_codes_of(master, isin),
+            isins_near=isins_near_of(master),
+            record_relabel=relabel_recorder(conn, clock),
             clock=clock,
         )
         _LOG.info(

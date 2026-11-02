@@ -56,7 +56,8 @@ anything that is not a plain decimal literal is a `ParseError`, never a number.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Final, Literal
@@ -64,6 +65,7 @@ from xml.etree import ElementTree as ET
 from xml.parsers import expat
 
 from dataplatform.ingest.models import ParseError, is_isin_check_digit_valid
+from dataplatform.ingest.xbrl import q4_relabel
 from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
 from dataplatform.ingest.xbrl.models import (
     SHAREHOLDERS_EQUITY,
@@ -288,6 +290,7 @@ def parse(
     entry: FilingIndexEntry,
     known_symbols: frozenset[str] | None = None,
     bse_codes: frozenset[str] | None = None,
+    isins_near: Callable[[str], frozenset[str]] | None = None,
     source: str = SOURCE_ID,
     l0_key: str | None = None,
     filename: str,
@@ -316,6 +319,17 @@ def parse(
     It is what lets a document that stamps that code on a few contexts beside the symbol, or
     states it while mistyping its symbol, be recognised as the company's own (`_check_symbol`).
     Omitted, no BSE code corroborates anything and both stay refused.
+
+    `isins_near` answers, for a stated ISIN, every ISIN in the D2 identity master within one
+    character of it (itself included, if D2 holds it). It is what lets a one-character typo of the
+    entry's ISIN — INDBANK's `INE841801017` for `INE841B01017` — be told apart from a sister
+    company's real ISIN (`_check_stated_isin`). Omitted, no such typo is accepted.
+
+    A quarterly entry whose document offers, for that quarter's end, only a column stating the
+    six months to it under a `Half Yearly` header plus the year-to-date column (class A) raises
+    `q4_relabel.LabelledHalfYearError` — a `ParseError` — carrying that column built as the asked
+    quarter, so a caller holding the company's earlier filings can run the owner's check
+    (`q4_relabel.check`) and store it. The parser never stores it on its own say-so.
 
     Raises `ParseError`, naming the file, for anything that is not this format: a body that is not
     well-formed XML, a root that is not `xbrl`, an unrecognised taxonomy entry point, an entity
@@ -348,13 +362,39 @@ def parse(
     )
 
     if integrated:
-        _check_stated_isin(facts_by_context, entry=entry, filename=filename)
+        _check_stated_isin(
+            facts_by_context,
+            entry=entry,
+            symbol_agrees=any(_same_symbol(symbol, known) for known in accepted),
+            stated_codes=_document_bse_codes(root, facts_by_context),
+            bse_codes=bse_codes or frozenset(),
+            isins_near=isins_near,
+            filename=filename,
+        )
 
-    column = _select_column(
-        _columns(shapes, facts_by_context=facts_by_context, taxonomy=taxonomy, filename=filename),
-        entry=entry,
-        filename=filename,
+    columns = _columns(
+        shapes, facts_by_context=facts_by_context, taxonomy=taxonomy, filename=filename
     )
+    try:
+        column = _select_column(columns, entry=entry, filename=filename)
+    except ParseError as refused:
+        candidate = _labelled_half_year_quarter(
+            columns,
+            entry=entry,
+            taxonomy=taxonomy,
+            shapes=shapes,
+            facts_by_context=facts_by_context,
+            symbol=symbol,
+            source=source,
+            l0_key=l0_key,
+            filename=filename,
+        )
+        if candidate is None:
+            raise
+        message = str(refused).removeprefix(f"{filename}: ")
+        raise q4_relabel.LabelledHalfYearError(
+            message, filename=filename, candidate=candidate
+        ) from None
     if column.nature is not entry.nature:
         raise ParseError(
             f"index says this filing is {entry.nature.value} but column {column.context_id!r} of "
@@ -759,7 +799,14 @@ def _is_integrated(root: ET.Element) -> bool:
 
 
 def _check_stated_isin(
-    facts_by_context: dict[str, dict[str, list[str]]], *, entry: FilingIndexEntry, filename: str
+    facts_by_context: dict[str, dict[str, list[str]]],
+    *,
+    entry: FilingIndexEntry,
+    symbol_agrees: bool = False,
+    stated_codes: frozenset[str] = frozenset(),
+    bse_codes: frozenset[str] = frozenset(),
+    isins_near: Callable[[str], frozenset[str]] | None = None,
+    filename: str,
 ) -> None:
     """Refuse a document whose own `ISIN` fact names a different company than the entry.
 
@@ -781,6 +828,14 @@ def _check_stated_isin(
     `INE576I01022`, `INE903I01010` for `INE093I01010` — and the other two stated a sister
     company's real ISIN (Gillette stating P&G Hygiene's), which stays refused: the document's
     Symbol and its ISIN name two different known companies and neither side is safe to prefer.
+
+    One more typo shape is accepted, by owner ruling (2026-11-02), on three conditions that all
+    have to hold (`_one_character_typo`): INDBANK's `INE841801017` for `INE841B01017` — a `B` typed
+    as an `8`, which passes its check digit. The stated ISIN differs from the entry's in exactly one
+    character; the document's symbol and its BSE code both are the entry ISIN's in D2; and no other
+    ISIN in the identity master is within one character of the stated one. A sister company's real
+    ISIN fails the last condition (it is itself in the master), and Ashapura's (Orient Ceratech's
+    ISIN) and Gillette's (P&G Hygiene's) differ in far more than one character — both stay refused.
     """
     stated = {
         value.strip().upper()
@@ -793,7 +848,30 @@ def _check_stated_isin(
     issuer = entry.isin[:_ISSUER_CODE_LENGTH]
     foreign = sorted(isin for isin in stated if isin[:_ISSUER_CODE_LENGTH] != issuer)
     typos = [isin for isin in foreign if is_isin_typo_of(isin, entry.isin)]
-    other = [isin for isin in foreign if isin not in typos]
+    one_character = [
+        isin
+        for isin in foreign
+        if isin not in typos
+        and _one_character_typo(
+            isin,
+            entry=entry,
+            symbol_agrees=symbol_agrees,
+            stated_codes=stated_codes,
+            bse_codes=bse_codes,
+            isins_near=isins_near,
+        )
+    ]
+    other = [isin for isin in foreign if isin not in typos and isin not in one_character]
+    if one_character:
+        _LOG.info(
+            "xbrl.stated_isin_one_character_typo",
+            filename=filename,
+            entry_isin=entry.isin,
+            stated=one_character,
+            bse_codes=sorted(stated_codes),
+            note="one character from the entry's ISIN, symbol and BSE code are the entry's, and no "
+            "other ISIN in D2 is within one character (owner ruling, 2026-11-02)",
+        )
     if other:
         raise ParseError(
             f"index says this filing is {entry.symbol!r} (ISIN {entry.isin}) but the document "
@@ -819,6 +897,56 @@ def _check_stated_isin(
             stated=same_issuer,
             note="same issuer code: a split changed the ISIN and the template kept the old one",
         )
+
+
+def _one_character_typo(
+    stated: str,
+    *,
+    entry: FilingIndexEntry,
+    symbol_agrees: bool,
+    stated_codes: frozenset[str],
+    bse_codes: frozenset[str],
+    isins_near: Callable[[str], frozenset[str]] | None,
+) -> bool:
+    """Whether `stated` is the entry's ISIN with one character mistyped (owner ruling, 2026-11-02).
+
+    All of: exactly one character differs from the entry's ISIN; the document's symbol agrees with
+    the entry's; the document states a BSE code and every one it states is D2's for the entry's
+    ISIN; and D2's ISINs within one character of `stated` are exactly the entry's — none other, and
+    not `stated` itself. Without `isins_near` (no master to ask) it is never True.
+    """
+    if isins_near is None or not symbol_agrees or len(stated) != len(entry.isin):
+        return False
+    if sum(a != b for a, b in zip(stated, entry.isin, strict=True)) != 1:
+        return False
+    if not stated_codes or not bse_codes or not stated_codes <= bse_codes:
+        return False
+    return isins_near(stated) == frozenset({entry.isin})
+
+
+def _document_bse_codes(
+    root: ET.Element, facts_by_context: dict[str, dict[str, list[str]]]
+) -> frozenset[str]:
+    """Every BSE scrip code the document states about itself, the placeholder `000000` aside.
+
+    From its `ScripCode` facts, its scrip-code-scheme identifiers, and any six-digit identifier
+    under a symbol scheme (the class-E stamp).
+    """
+    codes = {
+        value.strip()
+        for facts in facts_by_context.values()
+        for value in facts.get(_SCRIP_CODE_ELEMENT, ())
+        if value.strip()
+    }
+    for element in root.iter():
+        if _local(element.tag) != "identifier":
+            continue
+        text = (element.text or "").strip()
+        scheme = _normalise_scheme(element.get("scheme") or "")
+        if text and (scheme in _SCRIP_SCHEMES or _BSE_CODE.fullmatch(text)):
+            codes.add(text)
+    codes.discard(_BSE_CODE_PLACEHOLDER)
+    return frozenset(codes)
 
 
 def is_isin_typo_of(stated: str, expected: str) -> bool:
@@ -1323,6 +1451,146 @@ def _select_column(
         f"column, so which numbers the entry means is undecidable. Document offers {offered}",
         filename=filename,
     )
+
+
+#: The header element a class-A document states its column's kind in (`Half Yearly`).
+_TYPE_OF_REPORTING_PERIOD_ELEMENT: Final = "TypeOfReportingPeriod"
+_HALF_YEARLY: Final = "half yearly"
+
+
+def _labelled_half_year_quarter(
+    columns: tuple[_Column, ...],
+    *,
+    entry: FilingIndexEntry,
+    taxonomy: Taxonomy,
+    shapes: dict[str, _ContextShape],
+    facts_by_context: dict[str, dict[str, list[str]]],
+    symbol: str,
+    source: str,
+    l0_key: str | None,
+    filename: str,
+) -> q4_relabel.RelabelCandidate | None:
+    """The class-A shape, if the refused document has it exactly, as a `RelabelCandidate`.
+
+    Exactly this, and nothing looser: the entry asks a three-month quarter; the document has, of
+    the entry's nature and ending on the quarter's end, exactly two columns — one (not the
+    cumulative) stating its own period as the six months ending then, under a
+    `TypeOfReportingPeriod` of `Half Yearly`, and the cumulative column, starting on the
+    financial-year start the document states. The first column's facts are built tagged with the
+    entry's quarter; whether they may be stored as it is `q4_relabel.check`'s question, not this
+    function's.
+    """
+    start = entry.period_start
+    if start is None or start.day != 1:
+        return None
+    if _add_months(start, 3) - timedelta(days=1) != entry.period_end:
+        return None
+    ending = [
+        column
+        for column in columns
+        if column.nature is entry.nature and column.period_end == entry.period_end
+    ]
+    halves = [
+        column
+        for column in ending
+        if column.token != _CUMULATIVE_TOKEN and column.period_start == _add_months(start, -3)
+    ]
+    cumulative = [column for column in ending if column.token == _CUMULATIVE_TOKEN]
+    if len(ending) != 2 or len(halves) != 1 or len(cumulative) != 1:
+        return None
+    half, year_to_date = halves[0], cumulative[0]
+    facts = facts_by_context.get(half.context_id, {})
+    stated_start = _one(facts, _PERIOD_START_ELEMENT, context_id=half.context_id, filename=filename)
+    stated_end = _one(facts, _PERIOD_END_ELEMENT, context_id=half.context_id, filename=filename)
+    label = _one(
+        facts, _TYPE_OF_REPORTING_PERIOD_ELEMENT, context_id=half.context_id, filename=filename
+    )
+    if stated_start is None or stated_end is None or label is None:
+        return None
+    if label.strip().lower() != _HALF_YEARLY:
+        return None
+    financial_year = _document_financial_year(facts_by_context, filename=filename)
+    if financial_year is None or financial_year[0] != year_to_date.period_start.isoformat():
+        return None
+
+    quarter = replace(half, period_start=start)
+    built = _facts(
+        taxonomy=taxonomy,
+        column=quarter,
+        shapes=shapes,
+        facts_by_context=facts_by_context,
+        entry=entry,
+        source=source,
+        l0_key=l0_key,
+        filename=filename,
+    )
+    try:
+        filing = Filing(
+            isin=entry.isin,
+            symbol=symbol,
+            taxonomy=taxonomy,
+            name=_company_name(facts_by_context, entry=entry),
+            period_start=start,
+            period_end=entry.period_end,
+            filing_date=entry.filing_date,
+            nature=half.nature,
+            filing_id=entry.filing_id,
+            audited=half.audited if half.audited is not None else entry.audited,
+            source=source,
+            l0_key=l0_key,
+            facts=built,
+        )
+    except ValueError:
+        return None
+    concepts = concepts_for(taxonomy)
+    half_values = _witnesses_of(facts, concepts, q4_relabel.WITNESSES)
+    year_values = _witnesses_of(
+        facts_by_context.get(year_to_date.context_id, {}), concepts, q4_relabel.WITNESSES
+    )
+    step_values = [
+        *_witnesses_of(facts, concepts, _ROUNDING_WITNESSES).values(),
+        *_witnesses_of(
+            facts_by_context.get(year_to_date.context_id, {}), concepts, _ROUNDING_WITNESSES
+        ).values(),
+    ]
+    return q4_relabel.RelabelCandidate(
+        filing=filing,
+        stated_start=half.period_start,
+        stated_end=half.period_end,
+        stated_column=half.context_id,
+        cumulative_start=year_to_date.period_start,
+        cumulative_end=year_to_date.period_end,
+        cumulative_column=year_to_date.context_id,
+        stated=half_values,
+        cumulative=year_values,
+        document_step=q4_relabel.rounding_step(step_values),
+        reporting_period_label=label.strip(),
+    )
+
+
+#: The rupee flows a document's rounding unit is read from (`q4_relabel.rounding_step`).
+_ROUNDING_WITNESSES: Final = (
+    "revenue_from_operations",
+    "other_income",
+    "total_income",
+    "total_expenses",
+    "profit_before_tax",
+    "profit_after_tax",
+)
+
+
+def _witnesses_of(
+    facts: dict[str, list[str]], concepts: dict[str, str], wanted: tuple[str, ...]
+) -> dict[str, Decimal]:
+    """The `wanted` concepts one column states, as exact decimals; unreadable values left out."""
+    found: dict[str, Decimal] = {}
+    for element, concept in concepts.items():
+        if concept not in wanted:
+            continue
+        values = [value.strip() for value in facts.get(element, ()) if value.strip()]
+        if len(values) == 1 and _DECIMAL_LITERAL.match(values[0]):
+            found[concept] = Decimal(values[0])
+    return found
 
 
 def _nature(facts: dict[str, list[str]], *, context_id: str, filename: str) -> Nature | None:

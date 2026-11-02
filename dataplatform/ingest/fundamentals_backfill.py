@@ -100,6 +100,7 @@ from dataplatform.ingest.fetcher import (
     build_fetcher,
     leased_fetcher,
 )
+from dataplatform.ingest.fundamentals_relabel import recorder as relabel_recorder
 from dataplatform.ingest.fundamentals_requeue import (
     Journal,
     RequeueAction,
@@ -110,7 +111,7 @@ from dataplatform.ingest.lease import HostBusyError
 from dataplatform.ingest.models import ParseError
 from dataplatform.ingest.source_register import SourceRegister
 from dataplatform.ingest.source_register import load as load_register
-from dataplatform.ingest.xbrl import discovery, half_year, integrated, parser
+from dataplatform.ingest.xbrl import discovery, half_year, integrated, parser, q4_relabel
 from dataplatform.ingest.xbrl.discovery import FilingIndexEntry
 from dataplatform.ingest.xbrl.models import SHARES_OUTSTANDING, Filing, FundamentalFact
 from dataplatform.logging import get_logger
@@ -143,6 +144,7 @@ __all__ = [
     "build_integrated_units",
     "capture_filename",
     "isins_in_price_window",
+    "isins_near_of",
     "main",
     "render_report",
     "resolve_universe",
@@ -358,6 +360,7 @@ class _BufferedFiling:
     unit: FilingUnit
     ref: L0Ref
     filing: Filing
+    relabel: q4_relabel.RelabelRecord | None = None
 
 
 @dataclass(slots=True)
@@ -662,6 +665,8 @@ class FundamentalsBackfillRunner:
         resolve_isin: integrated.ResolveIsin | None = None,
         clock: Clock | None = None,
         bse_codes: Callable[[str], frozenset[str]] | None = None,
+        isins_near: Callable[[str], frozenset[str]] | None = None,
+        record_relabel: Callable[[q4_relabel.RelabelRecord], None] | None = None,
     ) -> None:
         if batched_writes and not rebuild_from_l0:
             raise ValueError(
@@ -702,6 +707,13 @@ class FundamentalsBackfillRunner:
         #: stating it with a mistyped symbol, is recognised only against this. Injected like
         #: `symbol_history`; without it no BSE code vouches for anything and both stay refused.
         self._bse_codes = bse_codes
+        #: A stated ISIN → every D2 ISIN within one character of it, for the owner's one-character
+        #: ISIN typo rule (INDBANK, 2026-11-02). Without it no such typo is accepted.
+        self._isins_near = isins_near
+        #: Where a class-A filing's relabel is recorded (`fundamentals_relabel.recorder`), on the
+        #: connection `commit` commits. Without it a relabel the check allows is still refused:
+        #: a filing stored under a period its document did not state must carry its provenance.
+        self._record_relabel = record_relabel
         #: Names a re-fetch (`capture_filename`). Only a run that may re-download needs one; a
         #: runner built without it fails the one unit that would have, loudly, rather than reuse.
         self._clock = clock
@@ -1204,11 +1216,14 @@ class FundamentalsBackfillRunner:
         self._sync.mark_fetched(
             unit.state_source, unit.logical_date, checksum=ref.sha256, l0_path=ref.key
         )
-        filing = self._parse(unit, ref)
+        filing, relabel = self._parse(unit, ref)
         self._sync.mark_validated(unit.state_source, unit.logical_date)
         write_pit(filing, data_root=self._data_root)
         self._sync.mark_normalized(unit.state_source, unit.logical_date)
         self._sync.mark_published(unit.state_source, unit.logical_date)
+        if relabel is not None:
+            assert self._record_relabel is not None  # `_relabelled` refuses without one
+            self._record_relabel(relabel)
         self._commit()
         self._count_published(unit, filing, report=report)
 
@@ -1240,9 +1255,9 @@ class FundamentalsBackfillRunner:
         if existing is not None:
             existing.check_transition(SyncState.PENDING)
         ref = self._ref_for(unit, report=report)
-        filing = self._parse(unit, ref)
+        filing, relabel = self._parse(unit, ref)
         batch.add(filing)
-        self._buffered.append(_BufferedFiling(unit=unit, ref=ref, filing=filing))
+        self._buffered.append(_BufferedFiling(unit=unit, ref=ref, filing=filing, relabel=relabel))
         self._buffered_keys.add((unit.state_source, unit.logical_date))
         _LOG.info(
             "fundamentals_backfill.filing_buffered",
@@ -1283,6 +1298,9 @@ class FundamentalsBackfillRunner:
             self._sync.mark_validated(state_source, logical_date)
             self._sync.mark_normalized(state_source, logical_date)
             self._sync.mark_published(state_source, logical_date)
+            if pending.relabel is not None:
+                assert self._record_relabel is not None  # `_relabelled` refuses without one
+                self._record_relabel(pending.relabel)
         self._commit()
         for pending in self._buffered:
             self._count_published(pending.unit, pending.filing, report=report)
@@ -1295,37 +1313,98 @@ class FundamentalsBackfillRunner:
         self._buffered.clear()
         self._buffered_keys.clear()
 
-    def _parse(self, unit: FilingUnit, ref: L0Ref) -> Filing:
+    def _parse(
+        self, unit: FilingUnit, ref: L0Ref
+    ) -> tuple[Filing, q4_relabel.RelabelRecord | None]:
         """One L0 payload into a `Filing`, cross-checked against the ISIN's identity in D2.
 
         A six-month filing is then held against the quarters the same company had already
         published inside it (`half_year.single_quarter_reason`), and refused — a `ParseError`, so
         filed `FAILED` like any other refusal — when it is one quarter's figures under a half-year
-        label.
+        label. A class-A document (`q4_relabel`) is stored as the asked quarter only when the
+        owner's check passes, and comes back with the provenance record it must be stored with.
         """
         isin = unit.entry.isin
-        filing = parser.parse(
-            self._l0.get(ref),
-            entry=unit.entry,
-            known_symbols=self._symbols_for(isin, unit.entry.symbol, unit.entry.filing_date),
-            bse_codes=None if self._bse_codes is None else self._bse_codes(isin),
-            l0_key=ref.key,
-            filename=unit.filename,
-        )
+        try:
+            filing = parser.parse(
+                self._l0.get(ref),
+                entry=unit.entry,
+                known_symbols=self._symbols_for(isin, unit.entry.symbol, unit.entry.filing_date),
+                bse_codes=None if self._bse_codes is None else self._bse_codes(isin),
+                isins_near=self._isins_near,
+                l0_key=ref.key,
+                filename=unit.filename,
+            )
+        except q4_relabel.LabelledHalfYearError as labelled:
+            return self._relabelled(unit, labelled)
         if half_year.is_half_year(filing):
-            reason = half_year.single_quarter_reason(filing, self._published_facts(filing))
+            reason = half_year.single_quarter_reason(
+                filing, self._published_facts(filing, first=filing.period_start)
+            )
             if reason is not None:
                 raise ParseError(reason, filename=unit.filename)
-        return filing
+        return filing, None
 
-    def _published_facts(self, filing: Filing) -> list[FundamentalFact]:
-        """The ISIN's facts filed between the half-year's start and its own filing date.
+    def _relabelled(
+        self, unit: FilingUnit, labelled: q4_relabel.LabelledHalfYearError
+    ) -> tuple[Filing, q4_relabel.RelabelRecord]:
+        """The class-A candidate as the asked quarter, if the owner's check allows it; else refused.
+
+        The check reads the ISIN's quarters filed from the cumulative column's start up to this
+        filing's own date — L1 plus this run's unflushed buffer — and nothing later (invariant #7).
+        A refusal is a `ParseError` naming the original refusal and the check that failed.
+        """
+        candidate = labelled.candidate
+        verdict = q4_relabel.check(
+            candidate,
+            self._published_facts(candidate.filing, first=candidate.cumulative_start),
+        )
+        if not verdict.passed:
+            raise ParseError(f"{labelled.reason}; {verdict.reason}", filename=unit.filename)
+        if self._record_relabel is None:
+            raise ParseError(
+                f"{labelled.reason}; {verdict.reason}, but this run has no provenance record to "
+                "store the relabel with, so it is refused",
+                filename=unit.filename,
+            )
+        filing = candidate.filing
+        _LOG.info(
+            "fundamentals_backfill.filing_relabelled",
+            source=filing.source,
+            unit=unit.label,
+            isin=filing.isin,
+            nature=filing.nature.value,
+            stated=f"{candidate.stated_start.isoformat()}..{candidate.stated_end.isoformat()}",
+            stored=f"{filing.period_start}..{filing.period_end.isoformat()}",
+            rule=q4_relabel.RULE,
+            reason=verdict.reason,
+            state="VALIDATED",
+        )
+        assert filing.period_start is not None
+        return filing, q4_relabel.RelabelRecord(
+            source=filing.source,
+            unit=unit.entry.filing_id,
+            logical_date=unit.logical_date,
+            filing_id=filing.filing_id,
+            isin=filing.isin,
+            nature=filing.nature.value,
+            stated_start=candidate.stated_start,
+            stated_end=candidate.stated_end,
+            stored_start=filing.period_start,
+            stored_end=filing.period_end,
+            rule=q4_relabel.RULE,
+            check_result=verdict.result,
+            l0_key=filing.l0_key,
+        )
+
+    def _published_facts(self, filing: Filing, *, first: date | None) -> list[FundamentalFact]:
+        """The ISIN's facts filed between `first` (or the period end) and the filing's own date.
 
         Read from L1 — only those partitions, only that ISIN — plus whatever this run has parsed
         into its write buffer and not yet flushed, so a batched rebuild sees the quarters it has
-        just re-derived. Nothing filed after the half-year is read (invariant #7).
+        just re-derived. Nothing filed after this filing is read (invariant #7).
         """
-        first = filing.period_start or filing.period_end
+        first = first or filing.period_end
         facts = list(
             read_filed_between(
                 first, filing.filing_date, isin=filing.isin, data_root=self._data_root
@@ -1335,6 +1414,7 @@ class FundamentalsBackfillRunner:
             fact
             for pending in self._buffered
             if pending.filing.isin == filing.isin
+            and pending.filing.filing_date <= filing.filing_date
             for fact in pending.filing.facts
         )
         return facts
@@ -1699,6 +1779,30 @@ def bse_codes_of(master: IdentityMaster, isin: str) -> frozenset[str]:
     return frozenset() if code is None or not code.strip() else frozenset({code.strip()})
 
 
+def isins_near_of(master: IdentityMaster) -> Callable[[str], frozenset[str]]:
+    """The runner's `isins_near`: D2's ISINs within one character of a stated ISIN (itself too).
+
+    What it does: indexes the master's ISINs once, then answers each question by trying every
+    one-character variant of the stated ISIN against that set.
+    What it never does: reach the network, or answer for an ISIN of another length.
+    """
+    known = frozenset(master.securities)
+    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+    def near(stated: str) -> frozenset[str]:
+        stated = stated.strip().upper()
+        found = {stated} & known
+        for index, current in enumerate(stated):
+            for character in alphabet:
+                if character != current:
+                    variant = f"{stated[:index]}{character}{stated[index + 1 :]}"
+                    if variant in known:
+                        found.add(variant)
+        return frozenset(found)
+
+    return near
+
+
 def _print_plan(plan: Sequence[IndexUnit]) -> None:
     """Print the dry-run discovery plan: one line per index chunk, then the count. No socket."""
     for unit in plan:
@@ -1869,6 +1973,8 @@ def _run_live(
             ),
             resolve_isin=lambda symbol, on: try_resolve_unambiguous(master, symbol, on),
             bse_codes=lambda isin: bse_codes_of(master, isin),
+            isins_near=isins_near_of(master),
+            record_relabel=relabel_recorder(conn, clock),
             rebuild_from_l0=rebuild_from_l0,
             # A rebuild is the only run that batches its writes. It is the run whose whole shape is
             # "throw the store away and redo it from L0", so the coarser checkpoint costs a local
