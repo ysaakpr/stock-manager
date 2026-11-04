@@ -250,20 +250,27 @@ def _ratio(traded: int, observed: int) -> Decimal:
     return (Decimal(traded) / Decimal(observed)).quantize(_RATIO_QUANTUM, ROUND_HALF_EVEN)
 
 
-def _identity_seam(longest: _Gap, counted: Sequence[date], sibling_traded: frozenset[date]) -> bool:
-    """Whether the longest gap is mostly sessions a sibling ISIN of the same issuer traded.
+def _identity_seam(
+    longest: _Gap,
+    counted: Sequence[date],
+    own_traded: frozenset[date],
+    sibling_traded: frozenset[date],
+) -> bool:
+    """Whether the longest gap is a reissue the lineage table has no edge for.
 
-    That is the shape of a reissue the lineage table has no edge for — the old ISIN stops, the new
-    one carries on, and BSE's scrip-code era has filed the scrip's history under one of them. It is
-    our identity seam, not a stretch nobody traded, so the row is reported (`identity_seam`) and
-    never labelled thin on it.
+    The shape: another ISIN of the same issuer and security type traded inside the gap, and the two
+    never traded on the same session in the window — the old ISIN stops, the new one carries on
+    (BSE's scrip-code era having filed the scrip's history under one of them). Two share classes
+    that trade side by side (a DVR beside the ordinary share) overlap, so they are no seam. It is
+    our identity seam, not a stretch nobody traded: reported (`identity_seam`), never labelled.
     """
     length, _, start, end = longest
     if length < THIN_GAP_SESSIONS or start is None or end is None:
         return False
-    gap = [d for d in counted if start <= d <= end]
-    covered = sum(1 for d in gap if d in sibling_traded)
-    return covered * 5 >= len(gap) * 4  # at least 80% of the gap
+    window = frozenset(counted)
+    if own_traded & sibling_traded & window:
+        return False
+    return any(start <= d <= end for d in sibling_traded & window)
 
 
 def trailing_sessions(calendar: TradingCalendar, as_of: date, count: int) -> list[date]:
@@ -374,7 +381,8 @@ def label_isin(
 
     ratio = _ratio(traded, observed)
     insufficient = observed < MIN_OBSERVED_SESSIONS
-    seam = _identity_seam(longest, counted, activity.sibling_traded)
+    own = frozenset().union(*(v.traded for v in venues))
+    seam = _identity_seam(longest, counted, own, activity.sibling_traded)
     reasons: list[str] = []
     if not insufficient and not seam:
         if ratio < THIN_RATIO_BELOW:

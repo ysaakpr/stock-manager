@@ -219,8 +219,18 @@ def test_a_gap_a_sibling_isin_traded_through_is_an_identity_seam() -> None:
     stopped = venue(set(WINDOW[:-60]))
     seam = label(stopped, sibling=frozenset(WINDOW[-60:]))
     assert seam.identity_seam and not seam.thin and seam.reasons == ()
+    # A sparse successor still marks the seam: one trade inside the gap, none alongside.
+    assert label(stopped, sibling=frozenset({WINDOW[-5]})).identity_seam
     real = label(stopped)
     assert not real.identity_seam and real.thin
+
+
+def test_a_sibling_that_trades_alongside_is_no_seam() -> None:
+    """A second share class trading on the same sessions (a DVR) is not a reissue: the gap stays
+    a real no-trade gap. Fails if any same-issuer trade in the gap is taken as a seam."""
+    stopped = venue(set(WINDOW[:-60]))
+    alongside = label(stopped, sibling=frozenset(WINDOW))
+    assert not alongside.identity_seam and alongside.thin
 
 
 def test_no_bar_on_or_before_as_of_is_no_label() -> None:
