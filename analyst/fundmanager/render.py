@@ -32,10 +32,11 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+from enum import StrEnum
 from pathlib import Path
 from typing import Final
 
@@ -44,6 +45,8 @@ from analyst.commons import (
     BaseRateTable,
     CommonsScreens,
     Dossier,
+    DossierItem,
+    EventFact,
     FilingDigest,
     MarketSheet,
     RegimeReading,
@@ -52,7 +55,14 @@ from analyst.commons import (
     Snapshot,
     UniverseRow,
 )
-from analyst.commons.dossier import DOSSIER_FIELDS, MARKET_FIELDS
+from analyst.commons.digests import FilingKind
+from analyst.commons.dossier import (
+    DOSSIER_FIELDS,
+    MARKET_FIELDS,
+    OUTSIDE_UNIVERSE_SOURCE,
+    announcement_field,
+)
+from analyst.commons.screens import EventKind
 from analyst.fundmanager.bundle import (
     UNRANKED_TIER,
     CostHurdle,
@@ -63,24 +73,34 @@ from analyst.fundmanager.bundle import (
 from analyst.websearch import UNTRUSTED_CONTENT_RULE, wrap_untrusted
 
 __all__ = [
+    "ALIAS_FIELDS",
     "DESK_ORDER_DOMAIN",
+    "FO_FIELDS",
+    "NO_RESEARCH",
     "PROMPT_PATH",
     "REGIME_DEFINITION",
     "ROUND_FINAL",
     "ROUND_RESEARCH",
     "ROUND_ZERO",
+    "S5_RANKED_MAX",
     "SYSTEM_PROMPT",
+    "TWIN_FIELDS",
     "DeskOrder",
+    "DigestShow",
     "PromptTemplate",
     "TemplateError",
+    "digest_show",
     "render_base_rates",
     "render_bundles",
     "render_cost_hurdles",
     "render_forced_reviews",
     "render_holdings",
     "render_market",
+    "render_s5",
     "render_screens",
     "render_shortlist",
+    "shown_digests",
+    "shown_dossier_fields",
 ]
 
 PROMPT_PATH: Final = Path(__file__).with_name("prompts") / "manager.md"
@@ -99,6 +119,9 @@ SYSTEM_PROMPT: Final = (
     "only through the structured output you are given, and cite every number from the bundle. "
     + UNTRUSTED_CONTENT_RULE
 )
+
+#: What the research section shows before any research is fulfilled.
+NO_RESEARCH: Final = "None yet: what you request this round is fulfilled here."
 
 #: Study §4's three-state rule, as `analyst.commons.regime` computes it.
 REGIME_DEFINITION: Final = (
@@ -332,9 +355,15 @@ def render_screens(
     screens: CommonsScreens,
     rows: Mapping[str, UniverseRow],
     order: DeskOrder | None = None,
+    *,
+    shortlist: Shortlist | None = None,
+    holdings: Collection[str] = (),
 ) -> str:
     """Every screen, each name with its rank. With ``order``, the manager's starting screens come
-    first and each listing is in its desk shuffle (Amendment 2 c); without, the Commons' order."""
+    first and each listing is in its desk shuffle (Amendment 2 c); without, the Commons' order.
+
+    S5 is listed in its compact form (`render_s5`, Amendment 6 (a)): ``shortlist`` and
+    ``holdings`` only decide which S5 names come first, never which are listed."""
     lines = [f"### Screens ({screens.trading_date}, digest {screens.screens_digest[:12]})"]
     if order is not None:
         lines.append(
@@ -348,7 +377,9 @@ def render_screens(
     sections = _SECTIONS if order is None else order.sections()
     for section in sections:
         if section == "S5":
-            lines += _render_s5(screens, order)
+            lines += render_s5(
+                screens, rows, order, shortlist=shortlist, holdings=frozenset(holdings)
+            )
             continue
         entries = list(screens.ranked(Screen(section)))
         if order is not None:
@@ -363,24 +394,113 @@ def render_screens(
     return "\n".join(lines)
 
 
-def _render_s5(screens: CommonsScreens, order: DeskOrder | None) -> list[str]:
-    lines = ["", "S5 event watch (facts, unranked):"]
+#: Amendment 6 (a): at most this many S5 names get a line of their own (the ones also on S1-S4,
+#: the shortlist or the book, most memberships first); every other S5 name is listed by event.
+S5_RANKED_MAX: Final = 40
+
+_S5_LIST_TITLES: Final[dict[str, str]] = {
+    "results_meeting": "Results board meetings (meeting date: names)",
+    "bulk_deal": "Bulk deals (trade date: name side; B buy, S sell)",
+    "block_deal": "Block deals (trade date: name side; B buy, S sell)",
+}
+
+
+def _s5_event(fact: EventFact) -> tuple[str, date, str]:
+    """One S5 fact as (event type, its date, a side suffix): a results meeting is dated by its
+    meeting, a deal by its trade date, an announcement by when it became knowable."""
+    if fact.kind is EventKind.BOARD_MEETING:
+        return "results_meeting", fact.meeting_date or fact.knowable_date, ""
+    if fact.kind in (EventKind.BULK_DEAL, EventKind.BLOCK_DEAL):
+        side = (fact.side or "?").strip().upper()[:1] or "?"
+        return fact.kind.value.lower(), fact.knowable_date, side
+    return ",".join(fact.categories) or "announcement", fact.knowable_date, ""
+
+
+def _s5_label(kind: str) -> str:
+    return {"results_meeting": "results meeting", "bulk_deal": "bulk deal"}.get(
+        kind, kind.replace("_", " ")
+    )
+
+
+def _sides(sides: set[str]) -> str:
+    """A deal's sides on one date (``" B/S"``), or nothing for an event without a side."""
+    shown = sorted(s for s in sides if s)
+    return f" {'/'.join(shown)}" if shown else ""
+
+
+def render_s5(
+    screens: CommonsScreens,
+    rows: Mapping[str, UniverseRow],
+    order: DeskOrder | None = None,
+    *,
+    shortlist: Shortlist | None = None,
+    holdings: frozenset[str] = frozenset(),
+) -> list[str]:
+    """S5 in its compact, ranked and bounded form (Amendment 6 (a)); every S5 name is listed.
+
+    Each fact keeps its event type and date (and a deal its side); the meeting's boilerplate
+    purpose, a deal's client, quantity and price are left to the name's dossier, where research
+    shows them in full. Names also on S1-S4, the shortlist or the book come first, one line each
+    with that membership, most memberships first and then in the desk shuffle, at most
+    `S5_RANKED_MAX` of them. Every other S5 name is listed by event type and date, in the desk
+    shuffle. What it never does: drop an S5 name, or rank one by anything but its membership.
+    """
+    lines = [
+        "",
+        "S5 event watch (facts; every S5 name below, its filings and deals in full in "
+        "its dossier):",
+    ]
     facts = list(screens.s5)
-    if order is not None:
-        facts = order.shuffle(facts, lambda f: f.isin)
     if not facts:
         lines.append("- (none)")
+        return lines
+    key = (lambda isin: order.key(isin)) if order is not None else (lambda isin: isin)
+    events: dict[str, set[tuple[str, date, str]]] = {}
     for fact in facts:
-        detail = fact.subject or (
-            f"{fact.side} {fact.quantity} @ {_fmt(fact.price)} by {fact.client_name}"
-            if fact.client_name
-            else ""
+        events.setdefault(fact.isin, set()).add(_s5_event(fact))
+    listed = {e.isin for e in (shortlist.entries if shortlist is not None else ())}
+
+    def memberships(isin: str) -> list[str]:
+        out = [s.value for s in Screen if any(e.isin == isin for e in screens.ranked(s))]
+        if isin in listed:
+            out.append("shortlist")
+        if isin in holdings:
+            out.append("your book")
+        return out
+
+    member = {isin: memberships(isin) for isin in events}
+    ranked = sorted((i for i in events if member[i]), key=lambda i: (-len(member[i]), key(i)))
+    ranked = ranked[:S5_RANKED_MAX]
+    if ranked:
+        lines.append("Also on S1-S4, the shortlist or your book (most memberships first):")
+    for isin in ranked:
+        sides: dict[tuple[date, str], set[str]] = {}
+        for kind, day, side in events[isin]:
+            sides.setdefault((day, kind), set()).add(side)
+        detail = "; ".join(
+            f"{_s5_label(kind)} {day}" + _sides(sides[(day, kind)]) for day, kind in sorted(sides)
         )
         lines.append(
-            f"- {fact.isin} {fact.kind.value} {','.join(fact.categories)} knowable "
-            f"{fact.knowable_date}: {detail}"
-            + (f" (meeting {fact.meeting_date})" if fact.meeting_date else "")
+            f"- {isin}{_row_note(rows.get(isin))} · on {', '.join(member[isin])}: {detail}"
         )
+    rest = [i for i in events if i not in set(ranked)]
+    if not rest:
+        return lines
+    lines.append("Every other S5 name, by event:")
+    by_kind: dict[str, dict[date, dict[str, set[str]]]] = {}
+    for isin in rest:
+        for kind, day, side in events[isin]:
+            by_kind.setdefault(kind, {}).setdefault(day, {}).setdefault(isin, set()).add(side)
+    kinds = [k for k in _S5_LIST_TITLES if k in by_kind]
+    kinds += sorted(k for k in by_kind if k not in _S5_LIST_TITLES)
+    for kind in kinds:
+        title = _S5_LIST_TITLES.get(kind, f"{_s5_label(kind).capitalize()} (date known: names)")
+        days = []
+        for day in sorted(by_kind[kind]):
+            names = sorted(by_kind[kind][day], key=key)
+            shown = [isin + _sides(by_kind[kind][day][isin]) for isin in names]
+            days.append(f"{day}: {', '.join(shown)}")
+        lines.append(f"- {title}: " + "; ".join(days))
     return lines
 
 
@@ -452,13 +572,98 @@ def render_cost_hurdles(hurdles: Sequence[CostHurdle]) -> str:
 # ── the research bundles ─────────────────────────────────────────────────────────────────────────
 
 
-def _render_dossier(d: Dossier) -> list[str]:
+#: Amendment 6 (c): dossier fields not rendered because another rendered field always carries the
+#: same value (`dossier._ALIASES`). Each still resolves when cited (`Dossier.resolve`).
+ALIAS_FIELDS: Final[dict[str, str]] = {
+    "ret_1w": "return_1w",
+    "ret_4w": "return_4w",
+    "ret_13w": "return_13w",
+    "ret_52w": "return_52w",
+}
+#: Amendment 6 (c): a field not rendered in a dossier where its value equals its twin's, compared
+#: at the coarser of the two precisions — the two definitions agree there, so the line repeats
+#: its twin. Where they differ both are shown. None of these was cited on 2-3 Nov, none is read
+#: by a contract check or a decision rule, and each still resolves when cited.
+TWIN_FIELDS: Final[dict[str, str]] = {
+    "ret_5": "return_1w",
+    "volatility_20": "vol_20",
+    "filing_date": "results_filing_date",
+    "results_day0": "results_day",
+    "volume_ratio_day0_ex_matched": "volume_ratio_day0",
+    "results_day_volume_ratio_ex_matched": "results_day_volume_ratio",
+}
+#: Amendment 6 (c): the F&O lines, not rendered when ``fo_listed`` is ``no`` — each is then
+#: ``unknown`` by definition, which ``fo_listed`` already says.
+FO_FIELDS: Final[tuple[str, ...]] = (
+    "fo_session",
+    "fo_oi_buildup",
+    "fo_pcr_oi",
+    "fo_rollover_pct",
+    "fo_oi_change",
+    "fo_spot_change",
+)
+#: The gap source a dossier of a holding outside the session's universe carries (Amendment 6 (e)).
+OUTSIDE_UNIVERSE_GAP: Final = OUTSIDE_UNIVERSE_SOURCE
+
+
+def _same_value(a: object, b: object) -> bool:
+    """Whether two dossier values are the same figure: equal, or two decimals equal at the
+    coarser of their precisions (a sheet return at 6 places against a feature at 8)."""
+    if a is None or b is None:
+        return False
+    if isinstance(a, Decimal) and isinstance(b, Decimal):
+        exp = max(int(a.as_tuple().exponent), int(b.as_tuple().exponent))
+        quantum = Decimal(1).scaleb(exp)
+        return a.quantize(quantum) == b.quantize(quantum)
+    return type(a) is type(b) and a == b
+
+
+def shown_dossier_fields(d: Dossier) -> tuple[str, ...]:
+    """The dossier fields rendered for ``d``, in `DOSSIER_FIELDS` order (Amendment 6 (c)):
+    every field but an alias, a twin equal to its rendered twin, and the F&O lines of a name
+    that is not F&O-listed. What it never does: hide a field whose value differs from its twin."""
+    out = []
+    for name in DOSSIER_FIELDS:
+        if name in ALIAS_FIELDS:
+            continue
+        twin = TWIN_FIELDS.get(name)
+        if twin is not None and _same_value(d.fields.get(name), d.fields.get(twin)):
+            continue
+        if name in FO_FIELDS and d.fields.get("fo_listed") is False:
+            continue
+        out.append(name)
+    return tuple(out)
+
+
+def _outside_universe(d: Dossier) -> str | None:
+    """The reason ``d`` is a holding outside the session's universe, or None."""
+    for gap in d.gaps:
+        if gap.source == OUTSIDE_UNIVERSE_GAP:
+            return gap.reason
+    return None
+
+
+def _render_dossier(d: Dossier, digested: Mapping[str, str] | None = None) -> list[str]:
+    """One dossier. ``digested`` maps an announcement's field id to the digest shown for it in the
+    same bundle: that announcement's line becomes a pointer to the digest (Amendment 6 (b)), so
+    its text is shown once and its id still resolves."""
+    outside = _outside_universe(d)
     lines = [
         "",
         f"#### Dossier {d.isin} ({d.trading_date}, digest {d.dossier_digest[:12]}; returns and "
         "ratios are fractions)",
     ]
-    lines += [f"- [F:{d.field_id(name)}] {_fmt(d.fields.get(name))}" for name in DOSSIER_FIELDS]
+    if outside is not None:
+        lines.append(
+            f"HOLDING OUTSIDE TODAY'S UNIVERSE ({outside}). Only the fields the lake has for it "
+            "are listed; every other field is unknown. It is your holding: decide HOLD, TRIM or "
+            "SELL on this dossier and your book line."
+        )
+    names = shown_dossier_fields(d)
+    if outside is not None:
+        names = tuple(n for n in names if d.fields.get(n) is not None)
+    lines += [f"- [F:{d.field_id(name)}] {_fmt(d.fields.get(name))}" for name in names]
+    pointers = digested or {}
     for title, items in (
         ("Announcements", d.announcements),
         ("Corporate actions due", d.corporate_actions),
@@ -466,25 +671,163 @@ def _render_dossier(d: Dossier) -> list[str]:
     ):
         if items:
             lines.append(f"{title}:")
-            lines += [
-                f"- [F:{i.field_id}] knowable {i.knowable_date}: {i.text}"
-                + (f" [{', '.join(i.categories)}]" if i.categories else "")
-                + (f" (due {i.due_date})" if i.due_date else "")
-                for i in items
-            ]
-    if d.gaps:
+            lines += [_render_item(i, pointers.get(i.field_id)) for i in items]
+    other_gaps = [g for g in d.gaps if g.source != OUTSIDE_UNIVERSE_GAP]
+    if other_gaps:
         lines.append(
-            "Sources unavailable: " + "; ".join(f"{g.source} ({g.reason})" for g in d.gaps)
+            "Sources unavailable: " + "; ".join(f"{g.source} ({g.reason})" for g in other_gaps)
         )
     return lines
 
 
-def _render_digest(g: FilingDigest) -> list[str]:
-    lines = [
-        f"- [F:{g.filing_id}] {g.isin} {g.kind.value} knowable {g.knowable_date}: "
-        f"{g.body.headline}" + (" (input truncated)" if g.input_truncated else ""),
-        f"  {g.body.disclosed}",
+def _render_item(i: DossierItem, digest_id: str | None) -> str:
+    if digest_id is not None:
+        return f"- [F:{i.field_id}] knowable {i.knowable_date}: digested below as [F:{digest_id}]"
+    return (
+        f"- [F:{i.field_id}] knowable {i.knowable_date}: {i.text}"
+        + (f" [{', '.join(i.categories)}]" if i.categories else "")
+        + (f" (due {i.due_date})" if i.due_date else "")
+    )
+
+
+# ── Amendment 6 (b): which filing digests are shown, and how ──────────────────────────────────
+
+
+#: A digest body that says the announcement text carries nothing beyond its subject.
+_NO_DETAIL: Final = re.compile(
+    r"no (?:further|other|more) detail|gives no\b|gives only|states no\b|does not state|"
+    r"do not state|names only|only names|not stated|not included in the text|"
+    r"(?:was|is|were) not included|no further information",
+    re.IGNORECASE,
+)
+_URL: Final = re.compile(r"https?://\S+|\b\S+\.pdf\b", re.IGNORECASE)
+_TIMESTAMP: Final = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:[+-]\d{2}:\d{2})?")
+_NUMBER: Final = re.compile(r"\d[\d,]*(?:\.\d+)?")
+_WORD: Final = re.compile(r"[a-z][a-z0-9&']{2,}")
+#: Words a digest headline adds to any announcement without adding a fact.
+_FILLER: Final = frozenset(
+    [
+        "the",
+        "and",
+        "for",
+        "with",
+        "from",
+        "into",
+        "about",
+        "has",
+        "have",
+        "its",
+        "this",
+        "that",
+        "was",
+        "were",
+        "are",
+        "been",
+        "being",
+        "under",
+        "limited",
+        "ltd",
+        "company",
+        "exchange",
+        "informed",
+        "informs",
+        "inform",
+        "intimates",
+        "intimated",
+        "intimation",
+        "submits",
+        "submitted",
+        "submission",
+        "files",
+        "filed",
+        "filing",
+        "announcement",
+        "announces",
+        "announced",
+        "nse",
+        "regarding",
+        "regulation",
+        "regulations",
+        "sebi",
+        "lodr",
+        "per",
+        "details",
+        "detail",
+        "attached",
+        "attachment",
+        "pdf",
+        "copy",
+        "text",
+        "dated",
+        "date",
     ]
+)
+
+
+class DigestShow(StrEnum):
+    """How a filing digest is rendered (Amendment 6 (b))."""
+
+    FULL = "FULL"
+    HEADLINE = "HEADLINE"
+    DROPPED = "DROPPED"
+
+
+def _announcement_item(g: FilingDigest, dossiers: Mapping[str, Dossier]) -> DossierItem | None:
+    """The dossier line of the announcement ``g`` digests, when that dossier is shown."""
+    dossier = dossiers.get(g.isin)
+    if dossier is None or ":" not in g.filing_id:
+        return None
+    field_id = f"{g.isin}.{announcement_field(g.filing_id.split(':', 1)[1])}"
+    return next((i for i in dossier.announcements if i.field_id == field_id), None)
+
+
+def _restates(g: FilingDigest, line: str) -> bool:
+    """Whether ``g`` adds nothing to its dossier line: no number the line lacks (the
+    dissemination time and links aside) and no headline word the line lacks (filler aside)."""
+    said = _URL.sub(" ", _TIMESTAMP.sub(" ", f"{g.body.headline} {g.body.disclosed}"))
+    known = line.casefold()
+    known_numbers = {n.replace(",", "") for n in _NUMBER.findall(known)}
+    if any(n.replace(",", "") not in known_numbers for n in _NUMBER.findall(said)):
+        return False
+    words = set(_WORD.findall(g.body.headline.casefold())) - _FILLER
+    return all(w in known for w in words)
+
+
+def digest_show(g: FilingDigest, dossiers: Mapping[str, Dossier]) -> DigestShow:
+    """How ``g`` is shown beside ``dossiers`` (the dossiers of the same bundle, by ISIN).
+
+    Amendment 6 (b). A results digest, and an announcement digest with any figure, is shown in
+    full: it adds a figure. An announcement digest with no figure is dropped when its own
+    announcement is a line of a dossier shown with it and the digest either says the text gives
+    no further detail or adds no number and no headline word to that line; with no such dossier
+    line, a digest that says the text gives no further detail is cut to its headline (still
+    citable). Every other digest is shown in full. What it never does: drop a digest with a
+    figure, a results digest, or the only line that names an announcement.
+    """
+    if g.kind is not FilingKind.ANNOUNCEMENT or g.body.figures:
+        return DigestShow.FULL
+    no_detail = _NO_DETAIL.search(g.body.disclosed) is not None
+    item = _announcement_item(g, dossiers)
+    if item is not None and (no_detail or _restates(g, item.text)):
+        return DigestShow.DROPPED
+    return DigestShow.HEADLINE if no_detail else DigestShow.FULL
+
+
+def shown_digests(bundle: ResearchBundle) -> tuple[tuple[FilingDigest, DigestShow], ...]:
+    """The bundle's digests that are rendered, each with how (`digest_show`), in bundle order."""
+    dossiers = {d.isin: d for d in bundle.dossiers}
+    out = [(g, digest_show(g, dossiers)) for g in bundle.digests]
+    return tuple((g, how) for g, how in out if how is not DigestShow.DROPPED)
+
+
+def _render_digest(g: FilingDigest, how: DigestShow = DigestShow.FULL) -> list[str]:
+    head = (
+        f"- [F:{g.filing_id}] {g.isin} {g.kind.value} knowable {g.knowable_date}: "
+        f"{g.body.headline}" + (" (input truncated)" if g.input_truncated else "")
+    )
+    if how is DigestShow.HEADLINE:
+        return [head + " (the text gives no further detail)"]
+    lines = [head, f"  {g.body.disclosed}"]
     lines += [
         f"  · {f.label}: {f.value}"
         + (f" {f.unit}" if f.unit else "")
@@ -508,9 +851,12 @@ def _render_snapshot(snapshot: Snapshot) -> str:
 
 
 def render_bundles(bundles: Sequence[ResearchBundle]) -> str:
-    """Every fulfilled bundle so far, oldest first, with the requests that produced it."""
+    """Every fulfilled bundle so far, oldest first, with the requests that produced it.
+
+    A bundle's rendering depends only on that bundle, so bundle k's text is the same in every
+    later round (the prompt cache reads it)."""
     if not bundles:
-        return "No research was requested or fulfilled."
+        return NO_RESEARCH
     lines: list[str] = []
     for b in bundles:
         lines += ["", f"### Research fulfilled after round {b.round}"]
@@ -520,12 +866,19 @@ def render_bundles(bundles: Sequence[ResearchBundle]) -> str:
                 f"- {r.isin}: claim — {r.claim}; kill test — {r.kill_test}" for r in b.requests
             ]
             lines += [f"- {q.kind.value} {q.target!r} ({q.purpose})" for q in b.queries]
+        digests = shown_digests(b)
+        dossiers = {d.isin: d for d in b.dossiers}
+        digested = {
+            item.field_id: g.filing_id
+            for g, how in digests
+            if how is DigestShow.FULL and (item := _announcement_item(g, dossiers)) is not None
+        }
         for dossier in b.dossiers:
-            lines += _render_dossier(dossier)
-        if b.digests:
+            lines += _render_dossier(dossier, digested)
+        if digests:
             lines += ["", "#### Filing digests (factual, from the Commons)"]
-            for digest in b.digests:
-                lines += _render_digest(digest)
+            for digest, how in digests:
+                lines += _render_digest(digest, how)
         for query, snapshot in b.snapshots:
             lines += [
                 "",

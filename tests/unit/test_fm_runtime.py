@@ -63,6 +63,7 @@ from analyst.fundmanager.contract import (
     p_consistent,
 )
 from analyst.fundmanager.render import (
+    NO_RESEARCH,
     PROMPT_PATH,
     ROUND_FINAL,
     ROUND_RESEARCH,
@@ -560,7 +561,9 @@ def test_a_full_session_runs_four_calls_and_journals_every_decision_and_bundle(
     )
     assert result.status is SessionStatus.DECIDED
     assert llm.calls == result.calls == 4 and result.repairs == 0
-    assert llm.tools == ["research_request"] * 3 + ["manager_decisions"]
+    # Amendment 6 (d): every round answers in the one schema.
+    assert llm.tools == ["manager_answer"] * 4
+    assert all(schema == llm.schemas[0] for schema in llm.schemas)
     assert {v.decision.isin for v in result.accepted} == {HELD, LEADER, BREAKOUT}
     assert not result.refused
 
@@ -665,14 +668,14 @@ def test_research_rounds_stop_at_two_so_a_session_never_exceeds_four_calls(
     assert "Exchange filing text about q three" in llm.prompts[-1]
 
 
-def test_research_rounds_mark_the_session_header_and_each_bundle_for_the_prompt_cache(
+def test_every_round_marks_the_session_header_and_each_bundle_for_the_prompt_cache(
     world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
 ) -> None:
-    """Transport only (`Message.cache_breaks`). The session header is one prefix every call shares
-    byte for byte, reaching all the way to the round's task. Only research rounds mark it, and
-    each research bundle's end, so research2 reads what research1 wrote; round 0 and the final
-    call answer in schemas no other call shares (the schema is part of the cached prefix), so a
-    write there would be paid for and never read, and they mark nothing."""
+    """Transport only (`Message.cache_breaks`), Amendment 6 (d). Every round answers in one
+    schema and shows the bundles ahead of its task text, so each call's prompt starts with the
+    previous call's up to its round block: round 0 writes the header, research1 reads it and writes
+    bundle 0, research2 reads that and writes bundle 1, and the final reads both. The final does
+    not mark its newest bundle: no later call shares it but a repair."""
     result, _, llm = _run(
         world,
         tmp_path,
@@ -685,23 +688,59 @@ def test_research_rounds_mark_the_session_header_and_each_bundle_for_the_prompt_
     )
     assert result.status is SessionStatus.DECIDED
     prompts, breaks = llm.prompts, llm.breaks
-    assert breaks[0] == () and breaks[3] == ()
-    head = breaks[1][0]
-    header = prompts[1][:head]
-    assert breaks[2][0] == head
+    head = breaks[0][0]
+    header = prompts[0][:head]
+    assert [b[0] for b in breaks] == [head] * 4
     assert all(p.startswith(header) for p in prompts)
-    # The header is the whole stable context: the next line is the round's task, in every round.
-    assert all(p[head:].startswith("## Your task this round") for p in prompts)
-    assert "### Research fulfilled" not in header
-    # research1: header + bundle 0; research2: header + bundles 0 and 1.
-    assert [len(b) for b in breaks[1:3]] == [2, 3]
-    r1_end = breaks[1][-1]
-    assert r1_end in breaks[2] and prompts[2][:r1_end] == prompts[1][:r1_end]
+    # The header ends where the research section's bundles begin, in every round.
+    assert "## Research so far" in header and "### Research fulfilled" not in header
+    assert all(
+        p[head:].lstrip().startswith(("### Research fulfilled", "None yet")) for p in prompts
+    )
+    assert prompts[0][head:].startswith(NO_RESEARCH)
+    # round 0: header; research1: + bundle 0; research2: + bundles 0, 1; final: the same (it
+    # asked for nothing more, so no bundle 2).
+    assert [len(b) for b in breaks] == [1, 2, 3, 3]
+    for earlier, later in ((0, 1), (1, 2), (2, 3)):
+        end = breaks[earlier][-1]
+        assert end in breaks[later] and prompts[later][:end] == prompts[earlier][:end]
 
 
-def test_a_research_repair_reuses_its_originals_cache_breaks_and_a_final_repair_has_none(
+def test_reversing_the_template_order_would_break_prefix_reuse(
     world: World, tmp_path: Path
 ) -> None:
+    """The reorder is what lets the final read research's prefix: the bundles sit before every
+    round's task text. Fails if the task text moves back ahead of the bundles."""
+    _, _, llm = _run(
+        world, tmp_path, [research([LEADER], ["q one"]), research(), final(hold(), passed(LEADER))]
+    )
+    first_task = [p.index("## Your task this round") for p in llm.prompts]
+    first_bundle = [p.find("### Research fulfilled") for p in llm.prompts]
+    assert first_bundle[0] == -1
+    assert all(0 < b < t for b, t in zip(first_bundle[1:], first_task[1:], strict=True))
+
+
+def test_the_final_does_not_mark_a_bundle_no_earlier_call_showed(
+    world: World, tmp_path: Path
+) -> None:
+    """research2 asked for more, so bundle 2 is new in the final: no call wrote it and only a
+    repair would read it, so it is not marked; bundles 0 and 1, which research2 wrote, are."""
+    _, _, llm = _run(
+        world,
+        tmp_path,
+        [
+            research([LEADER], ["q one"]),
+            research([BREAKOUT], ["q two"]),
+            research([], ["q three"]),
+            final(hold(), passed(LEADER), passed(BREAKOUT)),
+        ],
+    )
+    assert [len(b) for b in llm.breaks] == [1, 2, 3, 3]
+    assert llm.breaks[3] == llm.breaks[2]
+    assert "Exchange filing text about q three" in llm.prompts[3][llm.breaks[3][-1] :]
+
+
+def test_a_repair_reuses_its_originals_cache_breaks(world: World, tmp_path: Path) -> None:
     result, _, llm = _run(
         world,
         tmp_path,
@@ -721,7 +760,8 @@ def test_a_research_repair_reuses_its_originals_cache_breaks_and_a_final_repair_
         tmp_path,
         [research(), final(hold(action="SELL")), final(hold())],
     )
-    assert llm.breaks == [(), (), ()]
+    # A final repair re-reads the final's own marks.
+    assert llm.breaks[2] == llm.breaks[1] and llm.prompts[2].startswith(llm.prompts[1])
 
 
 def test_an_empty_round_zero_goes_straight_to_the_final_call(world: World, tmp_path: Path) -> None:
@@ -1967,40 +2007,60 @@ def test_every_round_tells_the_manager_the_text_limits_the_schema_enforces(
     assert f"`no_action_reason` — at most {MAX_SHORT_CHARS:,}" in final_text
 
 
-def test_only_round_zero_is_offered_a_holdings_triage(world: World, tmp_path: Path) -> None:
-    """Triage is round 0's step; the research rounds' schema has no ``holdings`` at all, so a
-    manager cannot pour its per-name analysis into notes it would overrun (2026-10-31: 510 and 539
-    characters on Bedrock, which cannot enforce ``maxLength``). Requests and queries keep exactly
-    round 0's shape and caps."""
-    result, _, llm = _run(
+def test_a_research_round_never_reads_a_holdings_triage_however_long(
+    world: World, tmp_path: Path
+) -> None:
+    """Amendment 6 (d) keeps Amendment 5 (h)'s protection with one schema: triage is round 0's
+    step, and a research round reads only its requests and queries. A holding's note written in a
+    research round — over the 500-character bound, as on 2026-10-31 (510 and 539 characters on
+    Bedrock, which cannot enforce ``maxLength``) — is not read, so it cannot cost the repair."""
+    long_note = research([BREAKOUT], ["q two"])
+    long_note["holdings"] = [{"isin": HELD, "triage": "CLEAR", "note": "x" * 539}]
+    result, _, _ = _run(
         world,
         tmp_path,
         [
             research([LEADER], ["q one"]),
-            research([BREAKOUT], ["q two"]),
+            long_note,
             research(),
             final(hold(), passed(LEADER), passed(BREAKOUT)),
         ],
     )
-    assert result.status is SessionStatus.DECIDED
-    round0, research1, research2, final_schema = llm.schemas
-    assert "holdings" in round0["properties"] and "holdings" in round0["required"]
-    for followup in (research1, research2):
-        assert "holdings" not in followup["properties"]
-        assert "holdings" not in followup["required"]
-        assert followup["additionalProperties"] is False
-        for key in ("requests", "queries"):
-            assert followup["properties"][key] == round0["properties"][key]
-    assert "decisions" in final_schema["properties"]
+    assert result.status is SessionStatus.DECIDED and result.repairs == 0
+    # The same over-long note in round 0, which does read the triage, is refused.
+    bad_round0 = research([LEADER])
+    bad_round0["holdings"] = [{"isin": HELD, "triage": "CLEAR", "note": "x" * 539}]
+    result, _, _ = _run(world, tmp_path, [bad_round0, research(), final(hold())])
+    assert result.repairs == 1
 
 
-def test_the_followup_schema_is_hashed_with_the_others() -> None:
-    from analyst.fundmanager.schemas import schema_bytes
+def test_a_round_reads_only_its_own_fields_of_the_one_schema() -> None:
+    """Decisions in a research answer are not read as research, and research in a final answer
+    is not read as decisions; a key no round defines is refused."""
+    limits = _mandate().rounds
+    both = {
+        **research([LEADER], ["q one"]),
+        **final(hold(), passed(LEADER)),
+    }
+    request, _ = parse_research(both, limits, triage=False)
+    assert [r.isin for r in request.requests] == [LEADER] and request.holdings == ()
+    decisions = parse_decisions(both, holdings=[HELD], researched=[LEADER])
+    assert {d.isin for d in decisions.decisions} == {HELD, LEADER}
+    with pytest.raises(MalformedOutputError):
+        parse_decisions({**both, "surprise": 1}, holdings=[HELD], researched=[LEADER])
+
+
+def test_the_one_answer_schema_is_what_is_hashed() -> None:
+    from analyst.fundmanager.schemas import answer_schema, schema_bytes
 
     limits = _mandate().rounds
     document = json.loads(schema_bytes(limits, system_prompt="s"))
-    assert document["research_followup"] == research_schema(limits, triage=False)
-    assert "holdings" not in document["research_followup"]["properties"]
+    assert set(document) == {"version", "answer", "system_prompt"}
+    assert document["answer"] == answer_schema(limits)
+    properties = document["answer"]["properties"]
+    assert properties["holdings"] == research_schema(limits)["properties"]["holdings"]
+    assert properties["decisions"] == decision_schema()["properties"]["decisions"]
+    assert sorted(document["answer"]["required"]) == sorted(properties)
 
 
 def test_identifier_fields_are_described_as_identifiers_never_as_prose(

@@ -3,23 +3,28 @@
 Pre-registration §4 steps 3-4 with §8 Amendment 1 (d), (g). `run_manager` is the whole session of
 one manager, in isolation:
 
-1. **Round 0** — one call with `schemas.research_tool`: the manager sees its mandate, its own book
-   and open rationales (`bundle.ManagerBook`, no cost basis or P&L), the market sheet and regime,
-   the screens, the shortlist, the base-rate cells and the cost hurdles, and returns its holdings
-   triage and research requests.
+Every round answers in **one** schema, `schemas.answer_tool`, and reads only its own fields of it
+(Amendment 6 (d)); the research bundles are shown in one "Research so far" section ahead of every
+round's task text, so each call's prompt begins with the previous call's and reads it from the
+provider's prompt cache.
+
+1. **Round 0** — the manager sees its mandate, its own book and open rationales
+   (`bundle.ManagerBook`, no cost basis or P&L), the market sheet and regime, the screens, the
+   shortlist, the base-rate cells and the cost hurdles, and returns its holdings triage and
+   research requests.
 2. **Fulfilment** — the harness, not the model: a dossier for every requested name in the
-   session's universe and for every holding (`analyst.commons.build_dossiers`), the filing digests
-   of those names (on demand, `analyst.commons.digest_for_isins`, cache first), and each web query
-   or URL through the Commons snapshot store, cache first (`SnapshotStore.get_or_fetch`), up to
-   `FETCH_CONCURRENCY` (3) at once. A request over the mandate's caps is truncated and the
-   truncation journaled; every request that could not be fulfilled is journaled and shown with
-   its reason (a fetcher that retrieved no page, a refused target, a repeat of a request that
-   already failed this session — which is not re-fetched).
+   session's universe and for every holding (`analyst.commons.build_dossiers`; a holding outside
+   the universe gets one too, Amendment 6 (e)), the filing digests of those names (on demand,
+   `analyst.commons.digest_for_isins`, cache first; those that add nothing to their dossier line
+   are not shown, Amendment 6 (b)), and each web query or URL through the Commons snapshot store,
+   cache first (`SnapshotStore.get_or_fetch`), up to `FETCH_CONCURRENCY` (3) at once. A request
+   over the mandate's caps is truncated and the truncation journaled; every request that could not
+   be fulfilled is journaled and shown with its reason (a fetcher that retrieved no page, a refused
+   target, a repeat of a request that already failed this session — which is not re-fetched).
 3. **Research rounds** — at most ``rounds.max_research_rounds`` (2) calls, each showing every
    bundle so far and allowed one more request within the same caps; an empty request ends them.
-   They answer with the follow-up schema (`schemas.research_tool` with ``triage=False``):
-   requests and queries only, the holdings triage being round 0's.
-4. **Final call** — one call with `schemas.decision_tool`. Each well-formed decision then passes
+   They read requests and queries only, the holdings triage being round 0's.
+4. **Final call** — reads the decisions. Each well-formed decision then passes
    `contract.validate_decision`; one that fails is voided (journaled ``FM_DECISION_REFUSED``,
    never staged) and the rest stand.
 
@@ -63,7 +68,6 @@ decision that failed the contract through.
 from __future__ import annotations
 
 import json
-import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -128,11 +132,15 @@ from analyst.fundmanager.render import (
     render_market,
     render_screens,
     render_shortlist,
+    shown_digests,
 )
 from analyst.fundmanager.schemas import (
+    DECISION_FIELDS,
     MAX_SHORT_CHARS,
     MAX_TEXT_CHARS,
+    REQUEST_FIELDS,
     SCHEMA_VERSION,
+    TRIAGE_FIELDS,
     Action,
     MalformedOutputError,
     ManagerDecisions,
@@ -140,10 +148,10 @@ from analyst.fundmanager.schemas import (
     QueryKind,
     ResearchRequest,
     Violation,
-    decision_tool,
+    answer_tool,
+    off_round_fields,
     parse_decisions,
     parse_research,
-    research_tool,
 )
 from analyst.fundmanager.scoreboard import (
     DECISION_EVENT,
@@ -252,6 +260,9 @@ class ManagerCommons:
     cost_model: CostModel
     slippage: SlippageCurve
     digests: DigestProvider | None = None
+    #: Amendment 6 (e): dossiers of holdings outside the session's universe
+    #: (`build_dossiers(..., outside_universe=True)`); None leaves such a holding without one.
+    outside_dossiers: DossierProvider | None = None
 
     @classmethod
     def from_builds(
@@ -272,6 +283,11 @@ class ManagerCommons:
         def dossiers(isins: Sequence[str]) -> tuple[Dossier, ...]:
             return build_dossiers(isins, screens=screens, sheets=sheets, source=source)
 
+        def outside(isins: Sequence[str]) -> tuple[Dossier, ...]:
+            return build_dossiers(
+                isins, screens=screens, sheets=sheets, source=source, outside_universe=True
+            )
+
         return cls(
             sheets=sheets,
             screens=screens,
@@ -282,6 +298,7 @@ class ManagerCommons:
             cost_model=cost_model,
             digests=digests,
             slippage=slippage,
+            outside_dossiers=outside,
         )
 
     def verify(self, session: date) -> None:
@@ -454,18 +471,22 @@ class _Session:
             cost_model=commons.cost_model,
             slippage=commons.slippage,
         )
-        self.research_tool = research_tool(self.limits)
-        #: The research rounds' tool: requests and queries only — triage is round 0's.
-        self.followup_tool = research_tool(self.limits, triage=False)
-        self.decision_tool = decision_tool()
+        #: Amendment 6 (d): the one tool of every round; each round reads only its own fields.
+        self.answer_tool = answer_tool(self.limits)
         self.calls = 0
         self.repairs = 0
         #: The final round's prompt as first sent (before any schema repair): the contract repair
         #: re-asks it (Amendment 3).
         self.final_prompt: str | None = None
         self.bundles: list[ResearchBundle] = []
+        #: How many bundles the last research-round call showed: what the final (and its repairs)
+        #: may read from the cache (`_cache_breaks`).
+        self.shown_bundles = 0
         self.dossiers: dict[str, Dossier] = {}
+        #: The digests shown to the manager (`render.shown_digests`): the citable ones.
         self.digests: dict[str, FilingDigest] = {}
+        #: Every digest fulfilled this session, shown or not (Amendment 6 (b)).
+        self.fulfilled_digests: set[str] = set()
         self.snapshots: dict[str, Snapshot] = {}
         self.queried: set[str] = set()
         self.query_failures: dict[str, str] = {}
@@ -631,7 +652,13 @@ class _Session:
             "regime_definition": REGIME_DEFINITION,
             "holdings": render_holdings(self.book, self.closes),
             "forced_reviews": render_forced_reviews(self.book),
-            "screens": render_screens(commons.screens, self.rows, self.desk),
+            "screens": render_screens(
+                commons.screens,
+                self.rows,
+                self.desk,
+                shortlist=commons.shortlist,
+                holdings=self.book.isins,
+            ),
             "shortlist": render_shortlist(commons.shortlist, self.rows, self.desk),
             "base_rate_table": render_base_rates(commons.base_rates, self.cells),
             "cost_hurdles": render_cost_hurdles(self.hurdles),
@@ -654,40 +681,39 @@ class _Session:
         )
 
     def _session_header(self) -> str:
-        """The text every prompt of this session starts with: the longest common prefix of the
-        three rounds' renderings (each with a different round number), cut at a line end.
+        """The text every prompt of this session starts with: everything above the research
+        section's bundles, cut at a line end (Amendment 6 (d): the bundles follow it, and the
+        round's task text follows them).
 
-        Computed once. It is what a cache breakpoint marks first — the session's largest stable
-        prefix (mandate, market sheet, holdings, screens, shortlist, base rates, cost hurdles).
+        Computed once, from a rendering whose bundles are a sentinel. It is what a cache
+        breakpoint marks first — the session's largest stable prefix (mandate, market sheet,
+        holdings, screens, shortlist, base rates, cost hurdles, the research section's head).
         """
         if self._header is None:
-            renders = [
-                _journal_text(
-                    self.template.render(
-                        style=self.mandate.style.value,
-                        round_key=key,
-                        values={
-                            **self._static,
-                            "round": str(number),
-                            "research_bundles": render_bundles(()),
-                        },
-                    )
+            sentinel = "\x00research-bundles\x00"
+            rendered = _journal_text(
+                self.template.render(
+                    style=self.mandate.style.value,
+                    round_key=ROUND_ZERO,
+                    values={**self._static, "round": "1", "research_bundles": sentinel},
                 )
-                for number, key in enumerate((ROUND_ZERO, ROUND_RESEARCH, ROUND_FINAL), start=1)
-            ]
-            common = os.path.commonprefix(renders)
-            self._header = common[: common.rfind("\n") + 1]
+            )
+            head = rendered[: rendered.index(sentinel)]
+            self._header = head[: head.rfind("\n") + 1]
         return self._header
 
-    def _cache_breaks(self, prompt: str) -> tuple[int, ...]:
+    def _cache_breaks(self, prompt: str, *, final: bool = False) -> tuple[int, ...]:
         """Where ``prompt``'s stable prefixes end, for the provider's prompt cache (transport only:
         `analyst.llm.Message.cache_breaks` never changes the text or the prompt digest).
 
         The session header, then the end of each research bundle as `render_bundles` lays them out
-        in ``prompt`` — so round k+1, which shows the same bundles and one more, reads what round k
-        wrote, and a repair (the same prompt plus its suffix) reads nearly all of its original.
-        A prefix that is not found where expected is simply not marked: a missed mark costs a
-        cache miss, never a different question.
+        in ``prompt`` — so each call reads what the call before it wrote (Amendment 6 (d): every
+        round answers in one schema and shows the bundles before its task text), and a repair
+        (the same prompt plus its suffix) reads nearly all of its original. On the ``final`` round
+        a bundle no earlier call showed (fulfilled after the last research round) is not marked:
+        no later call shares it but a repair, and a write costs 1.25x. A prefix that is not found
+        where expected is simply not marked: a missed mark costs a cache miss, never a different
+        question.
         """
         breaks: list[int] = []
         header = self._session_header()
@@ -697,7 +723,8 @@ class _Session:
             full = _bundles_text(self.bundles)
             at = prompt.find(full, breaks[-1] if breaks else 0)
             if at >= 0:
-                for k in range(1, len(self.bundles) + 1):
+                marked = min(len(self.bundles), self.shown_bundles) if final else len(self.bundles)
+                for k in range(1, marked + 1):
                     shown = _bundles_text(self.bundles[:k])
                     if full.startswith(shown):
                         breaks.append(at + len(shown))
@@ -714,6 +741,7 @@ class _Session:
         repair: bool,
         repair_violations: Sequence[Violation] = (),
         cache: bool = False,
+        final: bool = False,
     ) -> tuple[LLMResponse, str]:
         """One model call, journaled as ``FM_CALL`` with its bundle; the response and bundle ref.
 
@@ -730,7 +758,9 @@ class _Session:
                     f"{self.limits.max_calls}-call budget; the round loop is wrong"
                 )
         evidence = self._evidence(prompt)
-        breaks = self._cache_breaks(prompt) if cache else ()
+        breaks = self._cache_breaks(prompt, final=final) if cache else ()
+        if not repair and not final:
+            self.shown_bundles = len(self.bundles)
         messages = [Message(Role.USER, prompt, cache_breaks=breaks)]
         model = self.mandate.models.decision
         try:
@@ -798,8 +828,13 @@ class _Session:
         assert stored_ref is not None
         return response, stored_ref
 
-    @staticmethod
-    def _arguments(response: LLMResponse, tool: ToolSpec) -> Mapping[str, Any]:
+    def _arguments(
+        self,
+        response: LLMResponse,
+        tool: ToolSpec,
+        stage: str,
+        fields: Sequence[str] | None = None,
+    ) -> Mapping[str, Any]:
         if response.truncated:
             raise MalformedOutputError(
                 "the answer hit the output ceiling and is incomplete",
@@ -815,27 +850,37 @@ class _Session:
                     )
                 ],
             )
-        return calls[0].arguments
+        arguments = calls[0].arguments
+        if fields is not None and (extra := off_round_fields(arguments, fields)):
+            _LOG.info(
+                "fm.off_round_fields",
+                book=self.mandate.id,
+                session=self.session.isoformat(),
+                stage=stage,
+                fields=list(extra),
+            )
+        return arguments
 
     def _ask[T](
         self,
         round_key: str,
-        tool: ToolSpec,
         stage: str,
         parse: Callable[[Mapping[str, Any]], T],
+        fields: Sequence[str],
     ) -> tuple[T, str]:
-        """Ask one round's question; repair once if the session has a retry left."""
+        """Ask one round's question in the one schema; repair once if the session has a retry
+        left. ``fields`` are the schema fields this round reads; any other the answer filled is
+        logged, never read."""
+        tool = self.answer_tool
         prompt = self._prompt(round_key)
-        if round_key == ROUND_FINAL:
+        final = round_key == ROUND_FINAL
+        if final:
             self.final_prompt = prompt
-        # Only a research round's prefix is read again (by the next research round, or this one's
-        # repair): round 0 and the final call answer in schemas no other call shares, and the
-        # schema is part of the cached prefix, so a write there would be paid for (1.25x) and,
-        # but for a repair, never read (measured 2026-10-31).
-        cache = round_key == ROUND_RESEARCH
-        response, ref = self._complete(prompt, tool, stage, repair=False, cache=cache)
+        # Every round answers in one schema and shows the bundles ahead of its task text, so each
+        # call reads the prefix the call before it wrote (Amendment 6 (d)).
+        response, ref = self._complete(prompt, tool, stage, repair=False, cache=True, final=final)
         try:
-            return parse(self._arguments(response, tool)), ref
+            return parse(self._arguments(response, tool, stage, fields)), ref
         except MalformedOutputError as exc:
             first = exc
         self._log_malformed(stage, first, repair=False)
@@ -855,10 +900,11 @@ class _Session:
             stage,
             repair=True,
             repair_violations=first.violations,
-            cache=cache,
+            cache=True,
+            final=final,
         )
         try:
-            return parse(self._arguments(response, tool)), ref
+            return parse(self._arguments(response, tool, stage, fields)), ref
         except MalformedOutputError as exc:
             self._log_malformed(stage, exc, repair=True)
             raise _ManagerError(
@@ -885,11 +931,12 @@ class _Session:
     # -- research ---------------------------------------------------------------------------------
 
     def _research(self, round_key: str, stage: str) -> ResearchRequest:
+        triage = round_key == ROUND_ZERO
         (request, truncation), _ = self._ask(
             round_key,
-            self.research_tool if round_key == ROUND_ZERO else self.followup_tool,
             stage,
-            lambda a: parse_research(a, self.limits),
+            lambda a: parse_research(a, self.limits, triage=triage),
+            (*TRIAGE_FIELDS, *REQUEST_FIELDS) if triage else REQUEST_FIELDS,
         )
         if truncation.truncated:
             self._write(
@@ -954,13 +1001,23 @@ class _Session:
         wanted += [r.isin for r in request.requests if r.isin not in self.dossiers]
         wanted = list(dict.fromkeys(wanted))
         in_universe = [i for i in wanted if i in self.rows]
+        held = set(self.book.isins)
+        # Amendment 6 (e): a holding outside today's universe still gets a dossier, so the final
+        # call can decide it; a requested name outside it does not (it cannot be bought).
+        outside = [
+            i
+            for i in wanted
+            if i not in self.rows and i in held and self.commons.outside_dossiers is not None
+        ]
         for isin in wanted:
-            if isin not in self.rows:
+            if isin not in self.rows and isin not in outside:
                 unfulfilled.append(Unfulfilled(isin, "not in today's universe; no dossier"))
         new_dossiers = self.commons.dossiers(in_universe) if in_universe else ()
+        if outside:
+            assert self.commons.outside_dossiers is not None
+            new_dossiers = (*new_dossiers, *self.commons.outside_dossiers(outside))
         for dossier in new_dossiers:
             self.dossiers[dossier.isin] = dossier
-        held = set(self.book.isins)
         for item in request.requests:
             if (
                 item.isin in self.dossiers
@@ -970,15 +1027,16 @@ class _Session:
                 self.researched.append(item.isin)
 
         new_digests: list[FilingDigest] = []
-        if self.commons.digests is not None and in_universe:
+        digested = [*in_universe, *outside]
+        if self.commons.digests is not None and digested:
             try:
-                on_demand = self.commons.digests(in_universe)
+                on_demand = self.commons.digests(digested)
             except (CommonsRefusedError, LLMError) as exc:
                 unfulfilled.append(Unfulfilled("filing digests", str(exc)))
             else:
                 for digest in on_demand.digests:
-                    if digest.filing_id not in self.digests:
-                        self.digests[digest.filing_id] = digest
+                    if digest.filing_id not in self.fulfilled_digests:
+                        self.fulfilled_digests.add(digest.filing_id)
                         new_digests.append(digest)
                 unfulfilled += [
                     Unfulfilled(f"filing digest {f.filing_id}", f.reason)
@@ -1053,6 +1111,11 @@ class _Session:
             unfulfilled=new_unfulfilled,
         )
         self.bundles.append(bundle)
+        # Amendment 6 (b): only the digests the prompt shows are citable and in the evidence.
+        shown = {g.filing_id for g, _ in shown_digests(bundle)}
+        for digest in new_digests:
+            if digest.filing_id in shown:
+                self.digests[digest.filing_id] = digest
         evidence = self._evidence(None)
         self._write(
             decision=Decision.HEARTBEAT,
@@ -1062,7 +1125,10 @@ class _Session:
                 "round": str(round_index),
                 "request": _canonical(request.model_dump(mode="json")),
                 "dossiers": ",".join(f"{d.isin}:{d.dossier_digest}" for d in new_dossiers),
-                "digests": ",".join(g.filing_id for g in new_digests),
+                "digests": ",".join(g.filing_id for g in new_digests if g.filing_id in shown),
+                "digests_not_shown": ",".join(
+                    g.filing_id for g in new_digests if g.filing_id not in shown
+                ),
                 "snapshots": ",".join(s.id for _, s in fetched),
                 "cache_hits": str(hits),
                 "fetch_tokens_in": str(fetch_in),
@@ -1076,7 +1142,8 @@ class _Session:
             session=self.session.isoformat(),
             round=round_index,
             dossiers=len(new_dossiers),
-            digests=len(new_digests),
+            digests=len(shown),
+            digests_not_shown=len(new_digests) - len(shown),
             snapshots=len(fetched),
             cache_hits=hits,
             unfulfilled=len(unfulfilled),
@@ -1254,14 +1321,19 @@ class _Session:
         prompt = _journal_text(self.final_prompt + _CONTRACT_REPAIR_SUFFIX.format(voids=voids))
         try:
             response, ref = self._complete(
-                prompt, self.decision_tool, CONTRACT_REPAIR_STAGE, repair=True
+                prompt,
+                self.answer_tool,
+                CONTRACT_REPAIR_STAGE,
+                repair=True,
+                cache=True,
+                final=True,
             )
         except _ManagerError as exc:
             self._contract_repair_failed(str(exc), evidence=exc.evidence)
             return None
         try:
             answer = parse_decisions(
-                self._arguments(response, self.decision_tool),
+                self._arguments(response, self.answer_tool, CONTRACT_REPAIR_STAGE, DECISION_FIELDS),
                 holdings=self.book.isins,
                 researched=self.researched,
             )
@@ -1388,9 +1460,9 @@ class _Session:
                 self._fulfil(request, index)
             answer, final_ref = self._ask(
                 ROUND_FINAL,
-                self.decision_tool,
                 "final",
                 lambda a: parse_decisions(a, holdings=self.book.isins, researched=self.researched),
+                DECISION_FIELDS,
             )
         except _ManagerError as exc:
             self._write(

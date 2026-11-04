@@ -9,6 +9,11 @@ a session shares byte for byte (the Bedrock prompt cache reads it); the line is 
 round now states the text-length limits the schemas enforce ({{max_short_chars}} and
 {{max_text_chars}} come from `schemas`), which Bedrock's structured output cannot compile, and the
 research rounds answer without a holdings triage (their schema has none; triage is round 0's).
+Amendment 6 (2026-11-04): every round answers in one schema, and the research bundles move out of
+the round blocks into one "Research so far" section ahead of them, so each call's prompt starts
+with the previous call's whole prompt up to its round block (round 0 -> research -> final share
+the longest prefix the cache can read). Each round says which fields of the one schema it fills.
+S5 is listed in a compact form, and every holding has a dossier, inside the universe or not.
   {{...}}            a value injected by the runtime
   [[ROUND:x]] blocks only the block for the current round is rendered
   [[STYLE:x]] blocks only the block for the manager's style is rendered
@@ -197,7 +202,10 @@ irrelevant to what you should do now. A capable model is *more* prone to sunk-co
 ## Today's shared research
 
 - **Screens:** S1 trend leaders, S2 volume breakouts, S3 pullbacks in leaders, S4 earnings momentum,
-  S5 event watch.
+  S5 event watch. S5 lists every name with a results board meeting, an order win, a buyback,
+  split or bonus, or a bulk or block deal: first those also on S1–S4, the shortlist or your book,
+  then every other name by event type and date. A name's dossier has its filings and deals in
+  full.
 - **The pre-registered composite shortlist**, which is your control book's input.
 - **Base rates:** a table of how often stocks like these beat NIFTY 500 historically, by screen, cap
   tier, regime and horizon.
@@ -208,6 +216,28 @@ irrelevant to what you should do now. A capable model is *more* prone to sunk-co
 
 The cost of a round trip in each liquidity tier, from the shared cost model:
 {{cost_hurdles}}
+
+## Research so far
+
+The dossiers and snapshots you request are fulfilled here, after each round, oldest first. Each
+dossier is the platform's computed view of one stock: price and volume structure, momentum,
+delivery, F&O positioning where it applies, fundamentals and their trend, earnings surprise and the
+results-day reaction, recent announcements, and corporate actions due. It also carries the last and
+next results dates; the mean delivery % over 5 and 20 sessions (`deliv_pct_avg_5`,
+`deliv_pct_avg_20`, in percent like `deliv_pct`); the results day's delivery % and volume ratio
+(`results_day`, `results_day_deliv_pct`, `results_day_volume_ratio`); and volume net of matched
+bulk/block round trips, where one client bought and sold the same shares that session
+(`matched_deal_qty`, `volume_ex_matched`, `volume_ratio_day0_ex_matched`,
+`results_day_volume_ratio_ex_matched`). Deals are captured from 2026-10-05; a session before that,
+or one with no captured deals, shows these as unknown. A field that would repeat another's value is
+not listed again (`ret_5` and `volatility_20` where they equal `return_1w` and `vol_20`, a net
+figure where no round trip was matched, a date equal to its twin), and an F&O line is not listed
+for a name that is not F&O-listed. An announcement digested in full below its dossier is listed in
+the dossier as a pointer to its digest; a digest that adds nothing to its announcement line is not
+shown. A holding outside today's universe still has a dossier, with its price and screen fields
+unknown.
+
+{{research_bundles}}
 
 [[ROUND:0]]
 ## Your task this round: triage and research requests
@@ -236,7 +266,9 @@ The cost of a round trip in each liquidity tier, from the shared cost model:
 Every text you return — each holding's `note`, each `claim` and `kill_test`, each query's `target`
 and `purpose` — is at most {{max_short_chars}} characters; a longer one is refused.
 
-You will receive the dossiers and snapshots next round.
+This round fills `holdings`, `requests` and `queries`; leave `decisions` empty, `no_action` false
+and `no_action_reason` null — they are not read this round. You will receive the dossiers and
+snapshots in "Research so far" next round.
 
 **Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]
@@ -244,18 +276,7 @@ You will receive the dossiers and snapshots next round.
 [[ROUND:RESEARCH]]
 ## Your task this round: read the evidence; ask once more only if it would change a decision
 
-The dossiers and snapshots you requested are below. Each dossier is the platform's computed view of
-one stock: price and volume structure, momentum, delivery, F&O positioning where it applies,
-fundamentals and their trend, earnings surprise and the results-day reaction, recent announcements,
-and corporate actions due. It also carries the last and next results dates; the mean delivery %
-over 5 and 20 sessions (`deliv_pct_avg_5`, `deliv_pct_avg_20`, in percent like `deliv_pct`); the
-results day's delivery % and volume ratio (`results_day`, `results_day_deliv_pct`,
-`results_day_volume_ratio`); and volume net of matched bulk/block round trips, where one client
-bought and sold the same shares that session (`matched_deal_qty`, `volume_ex_matched`,
-`volume_ratio_day0_ex_matched`, `results_day_volume_ratio_ex_matched`). Deals are captured from
-2026-10-05; a session before that, or one with no captured deals, shows these as unknown.
-
-{{research_bundles}}
+The dossiers and snapshots you requested are in "Research so far" above.
 
 **Work through each name in this order:**
 1. What changed, and which numbers moved.
@@ -270,15 +291,21 @@ one repair).
 If one more query would *change a decision*, request it, within the same limits. If not, return an
 empty request. Do not ask for more just to feel thorough.
 
+This round fills `requests` and `queries` only; leave `holdings` and `decisions` empty,
+`no_action` false and `no_action_reason` null — they are not read this round.
+
 **Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]
 
 [[ROUND:FINAL]]
 ## Your task this round: decide
 
-{{research_bundles}}
+Decide on the evidence in "Research so far" above.
 
 ### For every holding: HOLD, TRIM or SELL
+
+Every holding needs a decision, including one outside today's universe or with no close today:
+decide it on its dossier and your book line.
 
 - **HOLD** is the default. It needs no story beyond "the thesis and its invalidation conditions
   stand", citing what you checked.
@@ -353,8 +380,10 @@ Write the memo **in this order**. The order matters: the probability comes *afte
 `no_action_reason` — at most {{max_short_chars}}. A longer value is refused. Each `evidence_refs`
 entry is one bare citation, `[F:…]` or `[S:…]`, with nothing after it.
 
-Return the decisions in the required schema. If you decide nothing today, return the `NO_ACTION`
-form with your one-line reason. That is a complete and acceptable answer.
+Return the decisions in `decisions`, with `no_action` false; leave `holdings`, `requests` and
+`queries` empty — they are not read this round. If you decide nothing today, return the
+`NO_ACTION` form (`no_action` true, your one-line `no_action_reason`, no decisions). That is a
+complete and acceptable answer.
 
 **Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]
