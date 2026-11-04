@@ -127,6 +127,7 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "bse_ca_sweep",
         "pr_bundle_l1",
         "share_basis_guard",
+        "thin_trading_label",
         "fbil_reference_rates",
         "macro_release_capture",
         "nse_daily_capture",

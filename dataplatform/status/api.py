@@ -88,6 +88,11 @@ from dataplatform.status.queries import (
     read_quarantine_status,
 )
 from dataplatform.status.queries_data import read_sources_status, read_sync_status
+from dataplatform.status.queries_thin_trading import (
+    THIN_TRADING_LIMIT,
+    ThinTradingOut,
+    read_thin_trading_status,
+)
 from dataplatform.status.queries_websearch import WebsearchOut, read_websearch_usage
 from dataplatform.status.sync_state import MalformedSyncSourceError
 from dataplatform.store.paths import PathLayoutError
@@ -369,6 +374,37 @@ def status_websearch(conn: ConnDep, clock: ClockDep, settings: SettingsDep) -> W
     against the monthly cap, the rotations, and whether each key is configured (a boolean; never
     the key)."""
     return read_websearch_usage(conn, settings, as_of=clock.now())
+
+
+@app.get(
+    "/status/thin-trading",
+    summary="Thinly-traded label: how many ISINs rarely trade, and which (information only)",
+)
+def status_thin_trading(
+    conn: ConnDep,
+    clock: ClockDep,
+    as_of: Annotated[
+        date | None,
+        Query(description="Read the newest label session on or before this date. Default today."),
+    ] = None,
+    limit: Annotated[
+        int, Query(ge=1, le=20000, description="Cap on the listed names; counts are uncapped.")
+    ] = THIN_TRADING_LIMIT,
+    nse_only: Annotated[
+        bool, Query(description="List only names with an NSE bar in the window.")
+    ] = False,
+) -> ThinTradingOut:
+    """The thinly-traded label (M13.8, owner ruling 2026-11-01): the counts, the thresholds that
+    produced them, the thin names lowest traded share first, and the identity seams.
+
+    A name is thin when it traded on fewer than 80% of the observed sessions of the trailing 250,
+    or had a no-trade gap of 20 sessions or more. A capture hole of ours is never a no-trade
+    session, and a gap that is an identity seam (a reissue the lineage table lacks) is listed under
+    `seams`, not labelled. Information only: nothing reads this to gate, exclude or reprice.
+    """
+    return read_thin_trading_status(
+        conn, as_of=clock.today() if as_of is None else as_of, limit=limit, nse_only=nse_only
+    )
 
 
 # ── /archives ───────────────────────────────────────────────────────────────────────────────

@@ -46,6 +46,7 @@ from dataplatform.status.models_data import (
     IsinLookupOut,
     SymbolSearchOut,
 )
+from dataplatform.status.queries_thin_trading import ThinTradingOut, ThinTradingRowOut
 from dataplatform.status.sync_state import SyncState
 
 __all__ = [
@@ -53,6 +54,7 @@ __all__ = [
     "Rag",
     "render_data",
     "render_isin_page",
+    "render_thin_trading",
     "render_unreadable",
     "source_health",
     "sync_rag",
@@ -470,6 +472,74 @@ def render_quality(quality: QualityOut) -> str:
 
 _QUARANTINE_ROWS: Final = 30
 
+#: How many thin names the panel lists; the rest are one link away at `/status/thin-trading`.
+THIN_PANEL_ROWS: Final = 50
+
+
+def _thin_row(row: ThinTradingRowOut) -> str:
+    gap = (
+        f"{row.longest_gap_sessions} s / {row.longest_gap_days} d "
+        f"({_opt(row.longest_gap_from)} … {_opt(row.longest_gap_to)})"
+        if row.longest_gap_sessions
+        else "0"
+    )
+    series = " / ".join(s for s in (row.nse_series, row.bse_series) if s) or MISSING
+    return (
+        f'<tr data-isin="{esc(row.isin)}"><td><a href="/console/data/isin?'
+        f'{esc(urlencode({"q": row.isin}))}">{esc(row.isin)}</a></td>'
+        f"<td>{_text(row.name, limit=60)}</td>"
+        f'<td class="num">{_num(row.traded_ratio)}</td>'
+        f'<td class="num">{_num(row.nse_traded_ratio)}</td>'
+        f'<td class="num">{_num(row.bse_traded_ratio)}</td>'
+        f"<td>{gap}</td><td>{esc(series)}{' (T2T)' if row.trade_to_trade else ''}</td>"
+        f"<td>{_opt(row.listing_status)}</td><td>{esc(', '.join(row.reasons))}</td></tr>"
+    )
+
+
+def render_thin_trading(out: ThinTradingOut) -> str:
+    """The thinly-traded label: counts, the rule, the thinnest names and the identity seams."""
+    t = out.thresholds
+    if out.as_of is None:
+        return (
+            '<div class="panel" id="thin"><h2>Thinly traded</h2>'
+            '<p class="muted">no label computed yet — the thin_trading_label job writes one each '
+            "weekday at 20:15 IST</p></div>"
+        )
+    reasons = " · ".join(f"{esc(k)} {v}" for k, v in out.thin_by_reason.items()) or MISSING
+    status = " · ".join(f"{esc(k)} {v}" for k, v in out.thin_by_listing_status.items()) or MISSING
+    head = (
+        "<thead><tr><th>ISIN</th><th>Name</th><th>Traded</th><th>NSE</th><th>BSE</th>"
+        "<th>Longest gap</th><th>Series</th><th>Status</th><th>Why</th></tr></thead>"
+    )
+    rows = "".join(_thin_row(r) for r in out.names[:THIN_PANEL_ROWS])
+    seams = "".join(_thin_row(r) for r in out.seams[:THIN_PANEL_ROWS])
+    return (
+        f'<div class="panel" id="thin" data-thin="{out.thin}">'
+        f'<h2>Thinly traded <span class="muted">label of {esc(out.as_of.isoformat())} · '
+        "information only</span></h2>"
+        f"<p><strong>{out.thin}</strong> of {out.labelled} ISINs thin "
+        f"({out.thin_nse_listed} with an NSE bar) · by reason: {reasons} · "
+        f"trade-to-trade {out.thin_trade_to_trade} · status: {status} · identity seams (ours, "
+        f"not labelled) {out.identity_seams} · with capture holes {out.with_capture_holes} · "
+        f'<a href="/status/thin-trading">/status/thin-trading</a></p>'
+        f'<p class="muted">thin = traded on fewer than {_num(t.thin_ratio_below)} of the '
+        f"observed sessions of the trailing {t.window_sessions}, or a no-trade gap of "
+        f"{t.thin_gap_sessions} sessions or more; a capture hole is never a no-trade session</p>"
+        + (
+            f"<h3>Thinnest {min(len(out.names), THIN_PANEL_ROWS)}</h3>"
+            f"<table>{head}<tbody>{rows}</tbody></table>"
+            if out.names
+            else ""
+        )
+        + (
+            f"<h3>Identity seams ({out.identity_seams})</h3>"
+            f"<table>{head}<tbody>{seams}</tbody></table>"
+            if out.seams
+            else ""
+        )
+        + "</div>"
+    )
+
 
 def render_quarantine(quarantine: QuarantineOut) -> str:
     """What L1 refused over the range: totals by reason, the step changes, the newest sessions."""
@@ -571,10 +641,18 @@ def gaps_range_inputs(start: date, end: date) -> str:
 class DataPanels:
     """The page's panels, each already rendered (or rendered as unreadable) by the route."""
 
-    __slots__ = ("archives", "gaps", "quality", "quarantine", "sources", "sync")
+    __slots__ = ("archives", "gaps", "quality", "quarantine", "sources", "sync", "thin")
 
     def __init__(
-        self, *, sync: str, sources: str, gaps: str, quality: str, quarantine: str, archives: str
+        self,
+        *,
+        sync: str,
+        sources: str,
+        gaps: str,
+        quality: str,
+        quarantine: str,
+        archives: str,
+        thin: str = "",
     ) -> None:
         self.sync = sync
         self.sources = sources
@@ -582,6 +660,7 @@ class DataPanels:
         self.quality = quality
         self.quarantine = quarantine
         self.archives = archives
+        self.thin = thin
 
 
 def render_data(panels: DataPanels, *, as_of: datetime) -> str:
@@ -595,6 +674,7 @@ def render_data(panels: DataPanels, *, as_of: datetime) -> str:
         + panels.gaps
         + panels.quality
         + panels.quarantine
+        + panels.thin
         + panels.archives
     )
     return _page("Data", "data", body, as_of=as_of)

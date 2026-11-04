@@ -56,6 +56,7 @@ __all__ = [
     "PAPER_SESSION",
     "POSTGRES_BACKUP",
     "SHAREHOLDING_POLL",
+    "THIN_TRADING_LABEL",
     "TRI_EVENING",
     "TRI_REFRESH",
     "UNSCHEDULED",
@@ -84,6 +85,7 @@ __all__ = [
     "paper_session",
     "postgres_backup",
     "shareholding_poll",
+    "thin_trading_label",
     "tri_evening",
     "tri_refresh",
 ]
@@ -903,6 +905,39 @@ SHARE_BASIS_GUARD = Job(
 )
 
 
+def thin_trading_label(context: JobContext) -> None:
+    """The thinly-traded label (M13.8, owner ruling 2026-11-01): how often each ISIN trades.
+
+    What it does: for the newest NSE session whose bhavcopy is PUBLISHED, labels every ISIN with
+    an equity bar in the trailing 250 sessions — traded share, longest no-trade gap, trade-to-trade
+    and listing status — counting a capture hole never as a no-trade session, and replaces that
+    session's `thin_trading_label` rows. See `quality.thin_trading.run_thin_trading`.
+    What it assumes: the injected clock and settings are the run's (B10), migrated through 0025.
+    What it never does: fetch, write L1 or L2, or change a price, factor, quarantine or total
+    return; and nothing the M17 managers read includes it. The import is deferred for the same
+    reason the others are.
+    """
+    from dataplatform.quality.thin_trading import run_thin_trading_job
+
+    run_thin_trading_job(context)
+
+
+#: 20:15 IST on weekdays — after the EOD pipeline (18:30, 45-minute budget) and the daily snapshot
+#: land the session, and after the share-basis guard's 19:40 fire and 30-minute budget, so it reads
+#: a settled L1. It reads the lake and Postgres only (a few seconds) and holds no host lease. The
+#: budget and misfire grace end it by 20:40 at the latest, well before the 21:45 paper session and
+#: the 22:00 M17 desk, which do not read it: it can neither delay M17 nor change what M17 sees.
+THIN_TRADING_LABEL = Job(
+    name="thin_trading_label",
+    cron="15 20 * * mon-fri",
+    fn=thin_trading_label,
+    timeout=timedelta(minutes=15),
+    description="Thinly-traded label: traded share, longest no-trade gap, T2T per ISIN (M13.8)",
+    misfire_grace=timedelta(minutes=10),
+    registered_at=datetime(2026, 11, 4, 17, 30, tzinfo=IST),
+)
+
+
 def fbil_reference_rates(context: JobContext) -> None:
     """The daily FBIL reference-rate capture (macro-probes): USD/INR and the other INR benchmarks.
 
@@ -1271,6 +1306,7 @@ def default_registry() -> JobRegistry:
             BSE_CA_SWEEP,
             PR_BUNDLE_L1,
             SHARE_BASIS_GUARD,
+            THIN_TRADING_LABEL,
             FBIL_REFERENCE_RATES,
             MACRO_RELEASE_CAPTURE,
             NSE_DAILY_CAPTURE,

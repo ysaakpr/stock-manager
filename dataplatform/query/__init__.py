@@ -6,7 +6,8 @@ full-market cross-sections (b) from M4.1, plus screen filters (c) and the point-
 added by M4.2 — all over DuckDB/Parquet, deduped to the primary listing. The request/response models
 it speaks in live in `shapes`; the screen filter algebra and PIT-only fundamentals join surface in
 `screen`; the survivorship-safe universe in `universe`. The announcement index is the
-searchable-disclosure half of D4 (M3 box 3).
+searchable-disclosure half of D4 (M3 box 3). `thin_trading_asof` reads D7's thinly-traded label
+point in time: information a strategy may consult, never a filter applied for it.
 """
 
 from dataplatform.query.announcement_search import (
@@ -58,6 +59,7 @@ from dataplatform.query.shapes import (
     CrossSection,
     CrossSectionRequest,
 )
+from dataplatform.query.thin_trading import label_session_asof, thin_trading_asof
 from dataplatform.query.universe import (
     InMemoryListingCalendar,
     ListingCalendar,
@@ -112,6 +114,7 @@ __all__ = [
     "ge",
     "gt",
     "index_membership_asof",
+    "label_session_asof",
     "le",
     "lt",
     "metric",
@@ -120,4 +123,5 @@ __all__ = [
     "pit_universe",
     "run_screen",
     "store_listing_calendar",
+    "thin_trading_asof",
 ]
