@@ -39,11 +39,12 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 import duckdb
 
 from dataplatform.clock import Clock
+from dataplatform.config import Settings
 from dataplatform.ingest.calendar import TradingCalendar, trading_calendar
 from dataplatform.logging import get_logger
 from dataplatform.store.db import Connection
@@ -776,12 +777,26 @@ def run_thin_trading(
     return run
 
 
-def run_thin_trading_job(context: object) -> None:
+class _JobContext(Protocol):
+    """What the job body needs of `scheduler.registry.JobContext`.
+
+    Structural rather than imported: the registry imports every job's owner (the M17 desk among
+    them), and the query layer re-exports this module, so importing the registry here would put
+    `analyst.fundmanager` on the import graph of everything that reads the query layer —
+    `tests/unit/test_commons_isolation.py` forbids exactly that.
+    """
+
+    @property
+    def clock(self) -> Clock: ...
+
+    @property
+    def settings(self) -> Settings: ...
+
+
+def run_thin_trading_job(context: _JobContext) -> None:
     """The scheduled job body: one `run_thin_trading` against the configured lake and store."""
-    from dataplatform.scheduler.registry import JobContext
     from dataplatform.store.db import connect
 
-    assert isinstance(context, JobContext)
     with connect(context.settings) as conn:
         run_thin_trading(conn, clock=context.clock, data_root=context.settings.data_root)
 
