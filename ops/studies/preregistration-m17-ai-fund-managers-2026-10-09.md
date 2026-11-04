@@ -1006,8 +1006,21 @@ The rebuild under `main`'s code reproduces the stored prompts to within 0.1 %.
 The finals are now the largest item: about 370 k tokens a night sent uncached ($1.5 at Global
 rates), because their schema differs. Output tokens (91 k, ≈ $1.8) are the other one. With one
 schema for every round the model gives ≈ $3.9; the grammar limit of (d) rules that out without
-reshaping the decision schema. A real-Opus
-rehearsal of 3 Nov on this code is reported with the PR.
+reshaping the decision schema.
+
+**Rehearsal (2026-11-04, 17:05–17:47 IST).** The session of 2026-11-03 was re-run on this code with
+real Opus 5.5 at `high` on the Global profile (`fm_job --dry-run --memory`, so the books were empty;
+the stored digests were read, the research ran live).
+
+- **Status:** all 4 managers DECIDED, with 0 schema repairs and 0 contract refusals. The journaled
+  3 Nov run had 4 refusals (3 for TREND, 1 for EVT) and 1 schema repair (EVT's).
+- **Cost:** Opus $5.73. Every research call read the previous call's prefix: research1 read 20.7 k,
+  and research2 read 75.6–93.3 k.
+- **Agreement with the 3 Nov journal:** on the 32 candidates both runs decided, 24 had the same
+  action (75 %) and 28 fell on the same side of BUY (88 %). The 3 Nov holdings are left out, because
+  the rehearsal held nothing.
+- **This is not like-for-like.** The web research was fresh, against the study's frozen-prompt
+  replay at 95 %.
 
 (h) **Reserved: the digest and research model.** A separate evaluation (2026-11-04) measured GPT-5.6
 Luna for the Commons digests and web research. Whether this item adopts it, and under what guard, is
