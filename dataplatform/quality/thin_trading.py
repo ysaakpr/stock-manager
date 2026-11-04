@@ -79,15 +79,16 @@ log = get_logger(__name__)
 #: trade-to-trade stint shows and short enough that a name which has recovered stops being marked.
 WINDOW_SESSIONS: Final = 250
 
-#: Thinly traded when it traded on fewer than 80% of the sessions observed. The distribution over
-#: the live lake (2026-11-03, `ops/runbooks/thin-trading.md`) has no cliff: most NSE names trade on
-#: every session and the ratio falls away in a long tail. 0.8 means about one session in five with
-#: no trade at all, which no name a strategy could size into does.
+#: Thinly traded when it traded on fewer than 80% of the sessions observed. The live distribution
+#: (label of 2026-11-03, `ops/runbooks/thin-trading.md`) has no cliff: 80% of NSE-listed names trade
+#: on at least 99.6% of sessions and the rest fall away gradually. 0.8 — one session in five with no
+#: trade at all — marks 301 of 3,643 NSE-listed names (8%) and 843 of 2,503 BSE-only ones (34%).
 THIN_RATIO_BELOW: Final = Decimal("0.80")
 
-#: ...or when at least one no-trade gap ran 20 sessions (four trading weeks) or more: a suspension,
-#: a trade-to-trade stint or a month nobody dealt, and the kind of gap the owner's question was
-#: about (a dividend landing after one is reinvested against a stale close).
+#: ...or when one no-trade gap ran 20 sessions (four trading weeks) or more: where short gaps
+#: (holidays, a quiet fortnight) end and verified suspensions, trade-to-trade stints and months of
+#: no trades begin. It adds only 18 names the ratio misses — the owner's shape: a name that trades
+#: normally except for one long silence.
 THIN_GAP_SESSIONS: Final = 20
 
 #: Below this many observed sessions (a name listed in the last month) there is no evidence either
