@@ -561,9 +561,9 @@ def test_a_full_session_runs_four_calls_and_journals_every_decision_and_bundle(
     )
     assert result.status is SessionStatus.DECIDED
     assert llm.calls == result.calls == 4 and result.repairs == 0
-    # Amendment 6 (d): every round answers in the one schema.
-    assert llm.tools == ["manager_answer"] * 4
-    assert all(schema == llm.schemas[0] for schema in llm.schemas)
+    # Amendment 6 (d): round 0 and both research rounds answer in one research schema.
+    assert llm.tools == ["research_request"] * 3 + ["manager_decisions"]
+    assert llm.schemas[0] == llm.schemas[1] == llm.schemas[2] != llm.schemas[3]
     assert {v.decision.isin for v in result.accepted} == {HELD, LEADER, BREAKOUT}
     assert not result.refused
 
@@ -668,14 +668,14 @@ def test_research_rounds_stop_at_two_so_a_session_never_exceeds_four_calls(
     assert "Exchange filing text about q three" in llm.prompts[-1]
 
 
-def test_every_round_marks_the_session_header_and_each_bundle_for_the_prompt_cache(
+def test_research_rounds_mark_the_session_header_and_each_bundle_for_the_prompt_cache(
     world: World, tmp_path: Path, atr_pct: dict[str, Decimal]
 ) -> None:
-    """Transport only (`Message.cache_breaks`), Amendment 6 (d). Every round answers in one
-    schema and shows the bundles ahead of its task text, so each call's prompt starts with the
-    previous call's up to its round block: round 0 writes the header, research1 reads it and writes
-    bundle 0, research2 reads that and writes bundle 1, and the final reads both. The final does
-    not mark its newest bundle: no later call shares it but a repair."""
+    """Transport only (`Message.cache_breaks`), Amendment 6 (d). Round 0 and the research rounds
+    answer in one schema and show the bundles ahead of their task text, so each reads what the one
+    before wrote: round 0 writes the header, research1 reads it and writes bundle 0, research2
+    reads that. research2 is the last research round: the final answers in the decision schema
+    and cannot read its newest bundle, so it is not marked, and the final marks nothing."""
     result, _, llm = _run(
         world,
         tmp_path,
@@ -690,7 +690,7 @@ def test_every_round_marks_the_session_header_and_each_bundle_for_the_prompt_cac
     prompts, breaks = llm.prompts, llm.breaks
     head = breaks[0][0]
     header = prompts[0][:head]
-    assert [b[0] for b in breaks] == [head] * 4
+    assert [b[0] for b in breaks[:3]] == [head] * 3 and breaks[3] == ()
     assert all(p.startswith(header) for p in prompts)
     # The header ends where the research section's bundles begin, in every round.
     assert "## Research so far" in header and "### Research fulfilled" not in header
@@ -698,10 +698,9 @@ def test_every_round_marks_the_session_header_and_each_bundle_for_the_prompt_cac
         p[head:].lstrip().startswith(("### Research fulfilled", "None yet")) for p in prompts
     )
     assert prompts[0][head:].startswith(NO_RESEARCH)
-    # round 0: header; research1: + bundle 0; research2: + bundles 0, 1; final: the same (it
-    # asked for nothing more, so no bundle 2).
-    assert [len(b) for b in breaks] == [1, 2, 3, 3]
-    for earlier, later in ((0, 1), (1, 2), (2, 3)):
+    # round 0: header; research1: + bundle 0; research2: + bundle 0 only (bundle 1 is newest).
+    assert [len(b) for b in breaks] == [1, 2, 2, 0]
+    for earlier, later in ((0, 1), (1, 2)):
         end = breaks[earlier][-1]
         assert end in breaks[later] and prompts[later][:end] == prompts[earlier][:end]
 
@@ -718,26 +717,6 @@ def test_reversing_the_template_order_would_break_prefix_reuse(
     first_bundle = [p.find("### Research fulfilled") for p in llm.prompts]
     assert first_bundle[0] == -1
     assert all(0 < b < t for b, t in zip(first_bundle[1:], first_task[1:], strict=True))
-
-
-def test_the_final_does_not_mark_a_bundle_no_earlier_call_showed(
-    world: World, tmp_path: Path
-) -> None:
-    """research2 asked for more, so bundle 2 is new in the final: no call wrote it and only a
-    repair would read it, so it is not marked; bundles 0 and 1, which research2 wrote, are."""
-    _, _, llm = _run(
-        world,
-        tmp_path,
-        [
-            research([LEADER], ["q one"]),
-            research([BREAKOUT], ["q two"]),
-            research([], ["q three"]),
-            final(hold(), passed(LEADER), passed(BREAKOUT)),
-        ],
-    )
-    assert [len(b) for b in llm.breaks] == [1, 2, 3, 3]
-    assert llm.breaks[3] == llm.breaks[2]
-    assert "Exchange filing text about q three" in llm.prompts[3][llm.breaks[3][-1] :]
 
 
 def test_a_repair_reuses_its_originals_cache_breaks(world: World, tmp_path: Path) -> None:
@@ -760,8 +739,8 @@ def test_a_repair_reuses_its_originals_cache_breaks(world: World, tmp_path: Path
         tmp_path,
         [research(), final(hold(action="SELL")), final(hold())],
     )
-    # A final repair re-reads the final's own marks.
-    assert llm.breaks[2] == llm.breaks[1] and llm.prompts[2].startswith(llm.prompts[1])
+    # The final answers in a schema no other call shares: neither it nor its repair marks anything.
+    assert llm.breaks[1] == llm.breaks[2] == () and llm.prompts[2].startswith(llm.prompts[1])
 
 
 def test_an_empty_round_zero_goes_straight_to_the_final_call(world: World, tmp_path: Path) -> None:
@@ -2034,7 +2013,7 @@ def test_a_research_round_never_reads_a_holdings_triage_however_long(
     assert result.repairs == 1
 
 
-def test_a_round_reads_only_its_own_fields_of_the_one_schema() -> None:
+def test_a_round_reads_only_its_own_fields_of_its_schema() -> None:
     """Decisions in a research answer are not read as research, and research in a final answer
     is not read as decisions; a key no round defines is refused."""
     limits = _mandate().rounds
@@ -2050,17 +2029,14 @@ def test_a_round_reads_only_its_own_fields_of_the_one_schema() -> None:
         parse_decisions({**both, "surprise": 1}, holdings=[HELD], researched=[LEADER])
 
 
-def test_the_one_answer_schema_is_what_is_hashed() -> None:
-    from analyst.fundmanager.schemas import answer_schema, schema_bytes
+def test_one_research_schema_and_the_decision_schema_are_what_is_hashed() -> None:
+    from analyst.fundmanager.schemas import schema_bytes
 
     limits = _mandate().rounds
     document = json.loads(schema_bytes(limits, system_prompt="s"))
-    assert set(document) == {"version", "answer", "system_prompt"}
-    assert document["answer"] == answer_schema(limits)
-    properties = document["answer"]["properties"]
-    assert properties["holdings"] == research_schema(limits)["properties"]["holdings"]
-    assert properties["decisions"] == decision_schema()["properties"]["decisions"]
-    assert sorted(document["answer"]["required"]) == sorted(properties)
+    assert set(document) == {"version", "research", "decision", "system_prompt"}
+    assert document["research"] == research_schema(limits)
+    assert document["decision"] == decision_schema()
 
 
 def test_identifier_fields_are_described_as_identifiers_never_as_prose(

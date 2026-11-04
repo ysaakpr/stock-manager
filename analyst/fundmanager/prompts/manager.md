@@ -9,10 +9,10 @@ a session shares byte for byte (the Bedrock prompt cache reads it); the line is 
 round now states the text-length limits the schemas enforce ({{max_short_chars}} and
 {{max_text_chars}} come from `schemas`), which Bedrock's structured output cannot compile, and the
 research rounds answer without a holdings triage (their schema has none; triage is round 0's).
-Amendment 6 (2026-11-04): every round answers in one schema, and the research bundles move out of
-the round blocks into one "Research so far" section ahead of them, so each call's prompt starts
-with the previous call's whole prompt up to its round block (round 0 -> research -> final share
-the longest prefix the cache can read). Each round says which fields of the one schema it fills.
+Amendment 6 (2026-11-04): round 0 and the research rounds answer in one research schema, and the
+research bundles move out of the round blocks into one "Research so far" section ahead of them, so
+each research call's prompt starts with the previous call's whole prompt up to its round block
+(the longest prefix the cache can read). A research round says it leaves the triage empty.
 S5 is listed in a compact form, and every holding has a dossier, inside the universe or not.
   {{...}}            a value injected by the runtime
   [[ROUND:x]] blocks only the block for the current round is rendered
@@ -266,9 +266,7 @@ unknown.
 Every text you return — each holding's `note`, each `claim` and `kill_test`, each query's `target`
 and `purpose` — is at most {{max_short_chars}} characters; a longer one is refused.
 
-This round fills `holdings`, `requests` and `queries`; leave `decisions` empty, `no_action` false
-and `no_action_reason` null — they are not read this round. You will receive the dossiers and
-snapshots in "Research so far" next round.
+You will receive the dossiers and snapshots in "Research so far" next round.
 
 **Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]
@@ -291,8 +289,8 @@ one repair).
 If one more query would *change a decision*, request it, within the same limits. If not, return an
 empty request. Do not ask for more just to feel thorough.
 
-This round fills `requests` and `queries` only; leave `holdings` and `decisions` empty,
-`no_action` false and `no_action_reason` null — they are not read this round.
+This round fills `requests` and `queries` only; leave `holdings` empty — the triage was round
+0's and is not read this round.
 
 **Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]
@@ -380,10 +378,8 @@ Write the memo **in this order**. The order matters: the probability comes *afte
 `no_action_reason` — at most {{max_short_chars}}. A longer value is refused. Each `evidence_refs`
 entry is one bare citation, `[F:…]` or `[S:…]`, with nothing after it.
 
-Return the decisions in `decisions`, with `no_action` false; leave `holdings`, `requests` and
-`queries` empty — they are not read this round. If you decide nothing today, return the
-`NO_ACTION` form (`no_action` true, your one-line `no_action_reason`, no decisions). That is a
-complete and acceptable answer.
+Return the decisions in the required schema. If you decide nothing today, return the `NO_ACTION`
+form with your one-line reason. That is a complete and acceptable answer.
 
 **Today:** session {{session_date}}, round {{round}} of at most {{max_rounds}}.
 [[/ROUND]]

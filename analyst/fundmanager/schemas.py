@@ -1,21 +1,20 @@
-"""A10 · M17.4 — the shapes a fund manager answers in: a research request and its decisions, as one.
+"""A10 · M17.4 — the two shapes a fund manager answers in: a research request and its decisions.
 
 Pre-registration §4 steps 3-4 and §8 Amendment 1 (d). The Claude CLI accepts one structured-output
-schema per call (`analyst.llm.claude_cli`), so a manager session is a sequence of calls. Since
-Amendment 6 (d) every call of a session answers in **one** schema, `answer_tool`: the union of the
-two shapes defined here, so that each call can read the previous call's cached prefix (the schema
-is part of it). Each round fills and reads only its own fields:
+schema per call (`analyst.llm.claude_cli`), so a manager session is a sequence of calls, each with
+exactly one of the two tools defined here. Since Amendment 6 (d) round 0 and every research round
+answer in the **same** research schema, so each research call can read the previous call's cached
+prefix (the schema is part of it); a research round reads only its requests and queries. One
+schema for every round, the final included, was built and refused by Bedrock ("The compiled
+grammar is too large"): the decision schema alone is at the structured-output grammar limit.
 
-- the research shape (round 0 and every research round): holdings triage (round 0 only), at most
-  ``max_isins`` deep-dive requests and at most ``max_queries`` web queries or URLs. The JSON Schema
-  carries the mandate's caps as ``maxItems``; :func:`parse_research` truncates an over-long answer
-  anyway (a stub or a lax provider can ignore the schema) and reports exactly what it dropped, so
-  the runtime can journal the truncation.
-- the decision shape (the final call): one decision per holding and per researched candidate, or
-  the whole-session ``NO_ACTION`` form with its reason.
-
-`research_tool` and `decision_tool` remain as the two shapes on their own; no manager round sends
-them any more.
+- `research_tool` (round 0 and every research round): holdings triage (read in round 0 only), at
+  most ``max_isins`` deep-dive requests and at most ``max_queries`` web queries or URLs. The JSON
+  Schema carries the mandate's caps as ``maxItems``; :func:`parse_research` truncates an over-long
+  answer anyway (a stub or a lax provider can ignore the schema) and reports exactly what it
+  dropped, so the runtime can journal the truncation.
+- `decision_tool` (the final call): one decision per holding and per researched candidate, or the
+  whole-session ``NO_ACTION`` form with its reason.
 
 **Two layers of refusal**, kept apart on purpose:
 
@@ -59,7 +58,6 @@ from analyst.journal.models import ISIN_PATTERN
 from analyst.llm import ToolSpec
 
 __all__ = [
-    "ANSWER_TOOL_NAME",
     "CANDIDATE_ACTIONS",
     "DECISION_FIELDS",
     "DECISION_TOOL_NAME",
@@ -90,8 +88,6 @@ __all__ = [
     "Violation",
     "WhatChanged",
     "WhatChangedKind",
-    "answer_schema",
-    "answer_tool",
     "decision_schema",
     "decision_tool",
     "length_rule",
@@ -109,9 +105,7 @@ __all__ = [
 SCHEMA_VERSION: Final = "m17-fm-schema/2"
 RESEARCH_TOOL_NAME: Final = "research_request"
 DECISION_TOOL_NAME: Final = "manager_decisions"
-#: Amendment 6 (d): the one tool every round of a session answers with (`answer_tool`).
-ANSWER_TOOL_NAME: Final = "manager_answer"
-#: Which of the one schema's fields each round fills; every other field is not read.
+#: Which fields of its schema each round reads (Amendment 6 (d)); every other field is not read.
 TRIAGE_FIELDS: Final = ("holdings",)
 REQUEST_FIELDS: Final = ("requests", "queries")
 DECISION_FIELDS: Final = ("no_action", "no_action_reason", "decisions")
@@ -445,7 +439,8 @@ def research_schema(limits: RoundLimits, *, triage: bool = True) -> dict[str, An
 
 
 def research_tool(limits: RoundLimits, *, triage: bool = True) -> ToolSpec:
-    """Round 0's research tool (``triage``), or the research rounds' follow-up without triage."""
+    """The research tool of round 0 and every research round (``triage``, Amendment 6 (d)). The
+    follow-up without triage (``triage=False``) is Amendment 5 (h)'s and no round sends it now."""
     if not triage:
         return ToolSpec(
             name=RESEARCH_TOOL_NAME,
@@ -802,35 +797,6 @@ def decision_tool() -> ToolSpec:
     )
 
 
-def answer_schema(limits: RoundLimits) -> dict[str, Any]:
-    """Amendment 6 (d): the one JSON Schema every round of a session answers in.
-
-    The union of round 0's research request (holdings triage, requests, queries) and the final
-    call's decisions (no_action, no_action_reason, decisions), each field exactly as its own
-    schema defines it. Every key is required, as in both; a round fills its own fields and leaves
-    the others empty (an empty list, ``no_action`` false, a null reason), and reads only its own
-    (`parse_research`, `parse_decisions`). One schema for every call lets each call read the
-    previous call's cached prefix: the schema is part of the cached prefix (Amendment 5 (i)).
-    """
-    research = research_schema(limits)
-    decision = decision_schema()
-    return _object({**research["properties"], **decision["properties"]})
-
-
-def answer_tool(limits: RoundLimits) -> ToolSpec:
-    """The one tool of every round (Amendment 6 (d)); its text is the same in every round."""
-    return ToolSpec(
-        name=ANSWER_TOOL_NAME,
-        description=(
-            "Return this round's answer. Round 0: the holdings triage and research requests. A "
-            "research round: the research requests and queries, empty when more research would "
-            "not change a decision. The final round: the decisions, or no_action true with its "
-            "one-line reason. Fields the round does not ask for are left empty."
-        ),
-        input_schema=answer_schema(limits),
-    )
-
-
 def parse_decisions(
     arguments: Mapping[str, Any],
     *,
@@ -863,15 +829,17 @@ def parse_decisions(
 
 
 def schema_bytes(limits: RoundLimits, *, system_prompt: str) -> bytes:
-    """The canonical bytes of the one answer schema (Amendment 6 (d)), the system prompt and the
-    shape version.
+    """The canonical bytes of the two schemas (Amendment 6 (d): one research schema for round 0 and
+    every research round, the decision schema for the final), the system prompt and the shape
+    version.
 
     What `mandate_hash` takes as ``schema_bytes`` for a manager (pre-registration §7): any change
     to a field, a cap or the system prompt is a new manager.
     """
     document = {
         "version": SCHEMA_VERSION,
-        "answer": answer_schema(limits),
+        "research": research_schema(limits),
+        "decision": decision_schema(),
         "system_prompt": system_prompt,
     }
     return json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(

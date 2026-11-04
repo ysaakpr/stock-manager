@@ -3,10 +3,12 @@
 Pre-registration §4 steps 3-4 with §8 Amendment 1 (d), (g). `run_manager` is the whole session of
 one manager, in isolation:
 
-Every round answers in **one** schema, `schemas.answer_tool`, and reads only its own fields of it
-(Amendment 6 (d)); the research bundles are shown in one "Research so far" section ahead of every
-round's task text, so each call's prompt begins with the previous call's and reads it from the
-provider's prompt cache.
+Round 0 and every research round answer in **one** research schema (`schemas.research_tool`) and
+each reads only its own fields of it; the final answers in the decision schema (Amendment 6 (d)).
+The research bundles are shown in one "Research so far" section ahead of every round's task text,
+so each research call's prompt begins with the previous call's and reads it from the provider's
+prompt cache. (The final cannot: the schema is part of the cached prefix, and one schema for every
+round exceeds Bedrock's structured-output grammar limit.)
 
 1. **Round 0** — the manager sees its mandate, its own book and open rationales
    (`bundle.ManagerBook`, no cost basis or P&L), the market sheet and regime, the screens, the
@@ -148,10 +150,11 @@ from analyst.fundmanager.schemas import (
     QueryKind,
     ResearchRequest,
     Violation,
-    answer_tool,
+    decision_tool,
     off_round_fields,
     parse_decisions,
     parse_research,
+    research_tool,
 )
 from analyst.fundmanager.scoreboard import (
     DECISION_EVENT,
@@ -471,16 +474,18 @@ class _Session:
             cost_model=commons.cost_model,
             slippage=commons.slippage,
         )
-        #: Amendment 6 (d): the one tool of every round; each round reads only its own fields.
-        self.answer_tool = answer_tool(self.limits)
+        #: Amendment 6 (d): one research tool for round 0 and every research round (each reads
+        #: only its own fields), and the decision tool for the final.
+        self.research_tool = research_tool(self.limits)
+        self.decision_tool = decision_tool()
         self.calls = 0
         self.repairs = 0
         #: The final round's prompt as first sent (before any schema repair): the contract repair
         #: re-asks it (Amendment 3).
         self.final_prompt: str | None = None
         self.bundles: list[ResearchBundle] = []
-        #: How many bundles the last research-round call showed: what the final (and its repairs)
-        #: may read from the cache (`_cache_breaks`).
+        #: How many bundles the previous research call showed: what the last research round (and
+        #: its repair) marks (`_cache_breaks`).
         self.shown_bundles = 0
         self.dossiers: dict[str, Dossier] = {}
         #: The digests shown to the manager (`render.shown_digests`): the citable ones.
@@ -702,18 +707,18 @@ class _Session:
             self._header = head[: head.rfind("\n") + 1]
         return self._header
 
-    def _cache_breaks(self, prompt: str, *, final: bool = False) -> tuple[int, ...]:
+    def _cache_breaks(self, prompt: str, *, last: bool = False) -> tuple[int, ...]:
         """Where ``prompt``'s stable prefixes end, for the provider's prompt cache (transport only:
         `analyst.llm.Message.cache_breaks` never changes the text or the prompt digest).
 
         The session header, then the end of each research bundle as `render_bundles` lays them out
-        in ``prompt`` — so each call reads what the call before it wrote (Amendment 6 (d): every
-        round answers in one schema and shows the bundles before its task text), and a repair
-        (the same prompt plus its suffix) reads nearly all of its original. On the ``final`` round
-        a bundle no earlier call showed (fulfilled after the last research round) is not marked:
-        no later call shares it but a repair, and a write costs 1.25x. A prefix that is not found
-        where expected is simply not marked: a missed mark costs a cache miss, never a different
-        question.
+        in ``prompt`` — so each research call reads what the call before it wrote (Amendment 6 (d):
+        round 0 and the research rounds answer in one schema and show the bundles before their
+        task text), and a repair (the same prompt plus its suffix) reads nearly all of its
+        original. On the ``last`` research round the bundle no earlier call showed is not marked:
+        the final answers in another schema and cannot read it, so only a repair would, and a
+        write costs 1.25x. A prefix that is not found where expected is simply not marked: a
+        missed mark costs a cache miss, never a different question.
         """
         breaks: list[int] = []
         header = self._session_header()
@@ -723,7 +728,7 @@ class _Session:
             full = _bundles_text(self.bundles)
             at = prompt.find(full, breaks[-1] if breaks else 0)
             if at >= 0:
-                marked = min(len(self.bundles), self.shown_bundles) if final else len(self.bundles)
+                marked = min(len(self.bundles), self.shown_bundles) if last else len(self.bundles)
                 for k in range(1, marked + 1):
                     shown = _bundles_text(self.bundles[:k])
                     if full.startswith(shown):
@@ -741,7 +746,7 @@ class _Session:
         repair: bool,
         repair_violations: Sequence[Violation] = (),
         cache: bool = False,
-        final: bool = False,
+        last: bool = False,
     ) -> tuple[LLMResponse, str]:
         """One model call, journaled as ``FM_CALL`` with its bundle; the response and bundle ref.
 
@@ -758,8 +763,8 @@ class _Session:
                     f"{self.limits.max_calls}-call budget; the round loop is wrong"
                 )
         evidence = self._evidence(prompt)
-        breaks = self._cache_breaks(prompt, final=final) if cache else ()
-        if not repair and not final:
+        breaks = self._cache_breaks(prompt, last=last) if cache else ()
+        if not repair and not last:
             self.shown_bundles = len(self.bundles)
         messages = [Message(Role.USER, prompt, cache_breaks=breaks)]
         model = self.mandate.models.decision
@@ -871,14 +876,19 @@ class _Session:
         """Ask one round's question in the one schema; repair once if the session has a retry
         left. ``fields`` are the schema fields this round reads; any other the answer filled is
         logged, never read."""
-        tool = self.answer_tool
-        prompt = self._prompt(round_key)
         final = round_key == ROUND_FINAL
+        tool = self.decision_tool if final else self.research_tool
+        prompt = self._prompt(round_key)
         if final:
             self.final_prompt = prompt
-        # Every round answers in one schema and shows the bundles ahead of its task text, so each
-        # call reads the prefix the call before it wrote (Amendment 6 (d)).
-        response, ref = self._complete(prompt, tool, stage, repair=False, cache=True, final=final)
+        # Round 0 and the research rounds answer in one schema and show the bundles ahead of their
+        # task text, so each reads the prefix the one before wrote (Amendment 6 (d)). The final
+        # answers in the decision schema, which no other call shares, so it marks nothing: its
+        # write would be read only by a repair.
+        cache = not final
+        # The last research round: the next call is the final, which cannot read its newest bundle.
+        last = round_key == ROUND_RESEARCH and self.calls + 1 == 1 + self.limits.max_research_rounds
+        response, ref = self._complete(prompt, tool, stage, repair=False, cache=cache, last=last)
         try:
             return parse(self._arguments(response, tool, stage, fields)), ref
         except MalformedOutputError as exc:
@@ -900,8 +910,8 @@ class _Session:
             stage,
             repair=True,
             repair_violations=first.violations,
-            cache=True,
-            final=final,
+            cache=cache,
+            last=last,
         )
         try:
             return parse(self._arguments(response, tool, stage, fields)), ref
@@ -1321,19 +1331,16 @@ class _Session:
         prompt = _journal_text(self.final_prompt + _CONTRACT_REPAIR_SUFFIX.format(voids=voids))
         try:
             response, ref = self._complete(
-                prompt,
-                self.answer_tool,
-                CONTRACT_REPAIR_STAGE,
-                repair=True,
-                cache=True,
-                final=True,
+                prompt, self.decision_tool, CONTRACT_REPAIR_STAGE, repair=True
             )
         except _ManagerError as exc:
             self._contract_repair_failed(str(exc), evidence=exc.evidence)
             return None
         try:
             answer = parse_decisions(
-                self._arguments(response, self.answer_tool, CONTRACT_REPAIR_STAGE, DECISION_FIELDS),
+                self._arguments(
+                    response, self.decision_tool, CONTRACT_REPAIR_STAGE, DECISION_FIELDS
+                ),
                 holdings=self.book.isins,
                 researched=self.researched,
             )

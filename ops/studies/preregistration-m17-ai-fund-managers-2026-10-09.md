@@ -800,11 +800,13 @@ ratification): whether the digest identity (`DIGEST_VERSION`, prompt and schema 
 become a manager hash input. A yes would change the 8 manager hashes, so it would need its own
 dated amendment before S0.
 
-### Amendment 6 (2026-11-04, before S0): what the managers read, one schema, the Global route
+### Amendment 6 (2026-11-04, before S0): what the managers read, one research schema, the Global route
 
 **RATIFIED 2026-11-04 (owner, chat: "approve the bundle"),** the R2 bundle of the Bedrock cost study
-of 2026-11-04, items (a)–(g) as written here. Item (h) is a placeholder: it is filled in or withdrawn
-by a separate owner decision. Ratification is not the go for S0. Evidence: the cost study (journal
+of 2026-11-04. Item (d) is built in a narrower form than the bundle approved, because Bedrock
+refuses the approved form (one schema for every round); the owner's confirmation of (d) as written
+here is **pending**. Item (h) is a placeholder: it is filled in or withdrawn by a separate owner
+decision. Ratification is not the go for S0. Evidence: the cost study (journal
 `FM_CALL` payloads and `token_usage` of the counted dry sessions of 2 and 3 Nov, the byte-exact
 rendered prompts of both nights, offline transforms of them, and a frozen-input model replay).
 
@@ -880,27 +882,40 @@ Where a twin's value differs from its twin's, both are shown. Fields never cited
 `atr50_prev`, `atr_contraction`, `vol_252`, `matched_deal_qty`) stay. The prompt's dossier paragraph
 says what is not repeated.
 
-(d) **One output schema for every round, and the template reordered.**
+(d) **One research schema for round 0 and every research round, and the template reordered.**
 
-- Every call of a session answers in **one** schema, `schemas.answer_tool` (`m17-fm-schema/2`): the
-  union of round 0's research request and the decisions object, each field exactly as before, every
-  key required. Each round fills its own fields and leaves the others empty, and the runtime reads
-  only the round's own fields: round 0 reads the triage, requests and queries; a research round
-  reads requests and queries; the final reads `no_action`, `no_action_reason` and `decisions`.
-- A field outside the round is never read or validated, only logged (`fm.off_round_fields`). So
-  Amendment 5 (h)'s protection holds: a holding's note written in a research round, however long, is
-  not read and cannot cost the repair (tested at 539 characters). A key no round defines is refused,
-  as before.
-- The research bundles move out of the round blocks into one **"Research so far"** section between
-  the cost hurdles and the round's task text. The dossier paragraph moves with them. Each round's
-  prompt therefore begins with the previous round's prompt up to its round block.
-- The runtime marks the cache at the session header and at each bundle's end in **every** round.
-  Round 0 writes the header, research1 reads it and writes bundle 0, research2 reads that and writes
-  bundle 1, and the final reads everything the last research round showed. The final does not mark a
-  bundle no earlier call showed, because only a repair would read it. A repair re-sends its original
-  marks. 5-minute TTL, as before.
-- The contract, the rails and every decision field keep their meaning. The repair rules (one schema
-  repair, one contract repair) are unchanged.
+- **What was asked and why it is not built as asked.** The bundle asked for one output schema for
+  every round, the final included: the union of round 0's research request and the decisions
+  object. It was built, and Bedrock refuses it on every call: HTTP 400, "The compiled grammar is
+  too large, which would cause performance issues". This holds on the Global profile and on Mantle
+  alike (2026-11-04, ~16:40 IST, after the first rehearsal's four managers all failed round 0 with
+  it).
+- **Why.** The decision schema alone compiles but sits at the limit. It carries 12 union-typed
+  (nullable) fields, which the published limits (16) call "especially expensive … exponential
+  compilation cost". Probed, it compiles with the triage and the requests added (or with one more
+  string), and fails with anything the size of the queries object. Removing ISIN patterns, enums or
+  the queries' nullable ISIN did not bring it under.
+- **What was not done instead.** The decision schema's fields are not reshaped to fit. That would
+  change the decision object's form, which this bundle keeps.
+- **What is built.**
+  - Round 0 and every research round answer in **one** schema, the research schema
+    (`schemas.research_tool`, `m17-fm-schema/2`).
+  - Each round reads only its own fields: round 0 the triage, requests and queries; a research
+    round the requests and queries.
+  - The final answers in the unchanged decision schema.
+  - Amendment 5 (h)'s follow-up schema without triage is retired. Its protection holds: a field
+    outside the round is never read or validated, only logged (`fm.off_round_fields`), so a
+    holding's note written in a research round, however long, cannot cost the repair (tested at
+    539 characters). A key the schema does not define is refused, as before.
+- **The template reorder.** The research bundles move out of the round blocks into one
+  **"Research so far"** section between the cost hurdles and the round's task text, and the dossier
+  paragraph moves with them. Each research round's prompt therefore begins with the previous
+  round's prompt up to its round block.
+- **The cache marks.** Round 0 now marks the session header (it wrote nothing before). Research1
+  reads the header and writes bundle 0, and research2 reads that. The last research round does not
+  mark its newest bundle, because the final, in the other schema, cannot read it. The final marks
+  nothing, as before, and a repair re-sends its original marks. 5-minute TTL, as before.
+- **What does not change.** The contract, the rails, the repair rules and every decision field.
 
 (e) **A holding outside the universe gets a dossier** (`build_dossiers(..., outside_universe=True)`,
 `ManagerCommons.outside_dossiers`). This is the EVT gap of study §1.5: INE229A01017, held by
@@ -940,21 +955,21 @@ Amendment 5 (a) accepted for Sonnet. The decision prompts carry public filings, 
 pages and the managers' own reasoning about them; no credential or personal data.
 
 (g) **Hashes, the dry run and the measured effect.** (a)–(c) and (e) are render and Commons code, not
-`mandate_hash` inputs. (d) changes the schema bytes (one answer schema, `m17-fm-schema/2`) and the
-template, so **the eight manager books' `mandate_hash` changes**. The eight control books, four style
+`mandate_hash` inputs. (d) changes the schema bytes (the follow-up schema retired,
+`m17-fm-schema/2`) and the template, so **the eight manager books' `mandate_hash` changes**. The eight control books, four style
 books and the bench are unchanged: 8 of 21 change. Computed with `mandate_fingerprints(load_roster())`
 on 2026-11-04; first 16 hex digits; the full hashes are journaled at S0:
 
 | Book | Amendment 5 (ratified, in force) | Amendment 6 (S0 starts from these) |
 |---|---|---|
-| `FM-POS-FUND-10L` | `ada1808ce2d9e320` | `3671f15521d45434` |
-| `FM-POS-FUND-1CR` | `7ed8b122c0b7e627` | `b6df1889efa1014d` |
-| `FM-POS-TREND-10L` | `c364921fb5170211` | `456a7d0869eb5fde` |
-| `FM-POS-TREND-1CR` | `9c1bffac08d640c1` | `92e16cd1c1871e01` |
-| `FM-SWING-BRK-10L` | `6ac92f102e2b20a5` | `6877594663222dfe` |
-| `FM-SWING-BRK-1CR` | `0b34b3ed01d90486` | `8bac40664355c248` |
-| `FM-SWING-EVT-10L` | `816082f5b2d506f5` | `d5f05bc3c5eb3732` |
-| `FM-SWING-EVT-1CR` | `e5c08d2581a4c04d` | `dab0048a0c9216f9` |
+| `FM-POS-FUND-10L` | `ada1808ce2d9e320` | `9045b45ecce4b400` |
+| `FM-POS-FUND-1CR` | `7ed8b122c0b7e627` | `668f8717633ea08f` |
+| `FM-POS-TREND-10L` | `c364921fb5170211` | `e69f0efc29b690ad` |
+| `FM-POS-TREND-1CR` | `9c1bffac08d640c1` | `30b0e57b6b61dbbf` |
+| `FM-SWING-BRK-10L` | `6ac92f102e2b20a5` | `001564d2a33f46e7` |
+| `FM-SWING-BRK-1CR` | `0b34b3ed01d90486` | `0ba8deb1c866ecba` |
+| `FM-SWING-EVT-10L` | `816082f5b2d506f5` | `e6a37e625a5c4ed4` |
+| `FM-SWING-EVT-1CR` | `e5c08d2581a4c04d` | `17a46e52939d6352` |
 
 Unchanged, for the record:
 
@@ -977,18 +992,21 @@ The rebuild under `main`'s code reproduces the stored prompts to within 0.1 %.
 
 | Tokens (4 managers) | Before (3 Nov, measured) | After (rebuild) | Change |
 |---|---:|---:|---:|
-| S5, one round 0 | 56 k | 4.2 k | −93 % |
-| Round 0, all four | 286 k | 92 k | −68 % |
-| Finals, all four | 676 k | 375 k | −44 % |
+| S5, one round 0 | 56 k | 4.1 k | −93 % |
+| Round 0, all four | 286 k | 82 k | −71 % |
+| Finals, all four | 676 k | 370 k | −45 % |
 | of which S5 | 221 k | 16 k | −93 % |
 | of which filing digests | 184 k | 101 k | −45 % |
-| of which dossier fields | 78 k | 67 k | −13 % |
+| of which dossier fields | 78 k | 66 k | −15 % |
 | of which announcement lines | 45 k | 37 k | −18 % |
-| Input tokens, the night (17 calls before, 16 after) | 2.39 M | 1.16 M | −52 % |
-| of which uncached / cache write / cache read | 1.13 M / 0.66 M / 0.60 M | 0.02 M / 0.36 M / 0.77 M | |
-| Decision calls, $ | 11.11 (Mantle, measured, with EVT's repair) | ≈ 3.9 (Global, modelled, same output tokens, no repair) | −65 % |
+| Input tokens, the night (17 calls before, 16 after) | 2.39 M | 1.12 M | −53 % |
+| of which uncached / cache write / cache read | 1.13 M / 0.66 M / 0.60 M | 0.42 M / 0.31 M / 0.39 M | |
+| Decision calls, $ | 11.11 (Mantle, measured, with EVT's repair) | ≈ 5.1 (Global, modelled, same output tokens, no repair) | −54 % |
 
-Output tokens (91 k, ≈ $1.8 of the $3.9 at Global rates) are now most of the decision cost. A real-Opus
+The finals are now the largest item: about 370 k tokens a night sent uncached ($1.5 at Global
+rates), because their schema differs. Output tokens (91 k, ≈ $1.8) are the other one. With one
+schema for every round the model gives ≈ $3.9; the grammar limit of (d) rules that out without
+reshaping the decision schema. A real-Opus
 rehearsal of 3 Nov on this code is reported with the PR.
 
 (h) **Reserved: the digest and research model.** A separate evaluation (2026-11-04) measured GPT-5.6
@@ -1008,5 +1026,5 @@ and the hashes of (g) are recomputed before the first counted session.
 | Web search (§5) | allowed, through the Commons fetcher | 2026-10-09 (owner, chat) |
 | LLM path (§2) | Claude CLI subscription; monthly cap deferred | 2026-10-09 (owner, chat) |
 | LLM path and models (Amendment 5) | Bedrock primary, Claude CLI backup per call (each model falls back to itself); per-role models in the roster, the pre-registered ones — decisions `claude-opus-5-5` (Mantle us-east-1, effort `high`), digests and research `claude-sonnet-5-5` (bedrock-runtime, Global inference profile, which may route to any AWS commercial region; effort `medium`), research over our own search layer (Brave/Tavily/Firecrawl, CLI backup); DeepSeek V3.2 compared less faithful and stays unused capability; untrusted-content rule and `research` role added; text-length limits stated (h) and the round line moved for prompt caching (i), 2026-10-31 afternoon; digests grounded in the filing, results headlines naming revenue and PAT, announcement dates, percentages and quantities as figures (j), 2026-11-01, no hash change; 8 manager hashes change, dry-run count restarts with the first run under them (Mon 2026-11-02, 22:00 IST) | RATIFIED 2026-11-01 (owner, chat), after owner decisions 2026-10-30 08:05 IST and afternoon, 2026-10-31 morning (Sonnet via the Global profile, deploy approved; chat) and 2026-11-01 (digest changes (j), deploy approved; chat); counted dry sessions on Bedrock from Mon 2026-11-02; monthly Bedrock budget open, not a blocker for S0; not the go for S0 |
-| What the managers read, one schema, Opus route (Amendment 6) | S5 compacted to a ranked, bounded list that keeps every name, its screen membership and each event's type and date; announcement digests that add nothing to their dossier line dropped (any digest with a figure kept), a shown digest's dossier line a pointer; duplicate dossier fields not rendered (each listed with its reason; every id still resolves); one output schema for every round and the research bundles ahead of each round's task text, so each call reads the previous call's cached prefix; a holding outside the universe gets a minimal dossier; Opus 5.5 decisions through the Global inference profile on bedrock-runtime (any AWS commercial region; cache reads and the 600 s timeout verified first); (h) the digest and research model reserved for a separate decision; 8 manager hashes change, dry-run count restarts with the first counted session under them | RATIFIED 2026-11-04 (owner, chat: "approve the bundle"); not the go for S0 |
+| What the managers read, one research schema, Opus route (Amendment 6) | S5 compacted to a ranked, bounded list that keeps every name, its screen membership and each event's type and date; announcement digests that add nothing to their dossier line dropped (any digest with a figure kept), a shown digest's dossier line a pointer; duplicate dossier fields not rendered (each listed with its reason; every id still resolves); one research schema for round 0 and every research round (one schema for every round is refused by Bedrock's grammar limit, so the final keeps the decision schema) and the research bundles ahead of each round's task text, so each research call reads the previous call's cached prefix; a holding outside the universe gets a minimal dossier; Opus 5.5 decisions through the Global inference profile on bedrock-runtime (any AWS commercial region; cache reads and the 600 s timeout verified first); (h) the digest and research model reserved for a separate decision; 8 manager hashes change, dry-run count restarts with the first counted session under them | RATIFIED 2026-11-04 (owner, chat: "approve the bundle"); (d)'s narrower form, forced by the grammar limit, pending the owner's confirmation; not the go for S0 |
 | S0 | the first session after the 5-session dry run (M17.8) passes; owner asked for as soon as it is ready (2026-10-09) | — |
