@@ -96,7 +96,7 @@ def sse(*events: Mapping[str, Any]) -> bytes:
 def message_stream(
     text: str,
     *,
-    model: str = "anthropic.claude-opus-5-5",
+    model: str = "anthropic.claude-opus-5",
     stop_reason: str = "end_turn",
     input_tokens: int = 1_200,
     output_tokens: int = 640,
@@ -258,13 +258,13 @@ def bedrock(endpoint: Endpoint, *, max_retries: int = 0, **kwargs: Any) -> Bedro
 def test_the_request_carries_the_bedrock_id_the_schema_the_effort_and_adaptive_thinking() -> None:
     endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER))))
     bedrock(endpoint).complete(
-        ASK, model="claude-opus-5-5", tools=(VERDICT,), system="You are a fund manager."
+        ASK, model="claude-opus-5", tools=(VERDICT,), system="You are a fund manager."
     )
 
     request = endpoint.requests[0]
     body = endpoint.body
     assert request.url == "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages"
-    assert body["model"] == "anthropic.claude-opus-5-5"
+    assert body["model"] == "anthropic.claude-opus-5"
     assert body["thinking"] == {"type": "adaptive"}
     assert body["output_config"]["effort"] == "high"  # a decision call (effort.yaml)
     assert body["output_config"]["format"] == {
@@ -328,23 +328,32 @@ def test_sonnet_goes_to_bedrock_runtime_with_the_same_body_and_the_key_as_a_bear
     assert (response.usage.input_tokens, response.usage.output_tokens) == (1_200, 640)
 
 
-def test_the_model_map_sends_sonnet_to_runtime_and_opus_to_mantle() -> None:
+def test_the_model_map_sends_sonnet_and_opus_5_5_to_runtime_and_older_opus_to_mantle() -> None:
     models = load_bedrock_models()
     sonnet, opus = models.route("claude-sonnet-5-5"), models.route("claude-opus-5-5")
     assert (sonnet.adapter, sonnet.bedrock_id) == (
         BedrockAdapter.ANTHROPIC_RUNTIME,
         "global.anthropic.claude-sonnet-5-5",
     )
+    # Amendment 6 (f): Opus 5.5 through the Global inference profile on bedrock-runtime.
     assert (opus.adapter, opus.bedrock_id) == (
+        BedrockAdapter.ANTHROPIC_RUNTIME,
+        "global.anthropic.claude-opus-5-5",
+    )
+    older = models.route("claude-opus-5")
+    assert (older.adapter, older.bedrock_id) == (
         BedrockAdapter.ANTHROPIC_MESSAGES,
-        "anthropic.claude-opus-5-5",
+        "anthropic.claude-opus-5",
     )
     assert sonnet.adapter.is_claude and opus.adapter.is_claude
     assert models.backup_model("claude-sonnet-5-5") == "claude-sonnet-5-5"
 
     opus_endpoint = Endpoint(streamed(message_stream("fine")))
-    bedrock(opus_endpoint).complete(ASK, model="claude-opus-5-5")
+    bedrock(opus_endpoint).complete(ASK, model="claude-opus-5")
     assert opus_endpoint.requests[0].url.host == "bedrock-mantle.us-east-1.api.aws"
+    opus55_endpoint = Endpoint(streamed(message_stream("fine", model="claude-opus-5-5")))
+    bedrock(opus55_endpoint).complete(ASK, model="claude-opus-5-5")
+    assert opus55_endpoint.requests[0].url.host == "bedrock-runtime.us-east-1.amazonaws.com"
     sonnet_endpoint = Endpoint(streamed(message_stream("fine", model="claude-sonnet-5-5")))
     bedrock(sonnet_endpoint).complete(ASK, model="claude-sonnet-5-5")
     assert sonnet_endpoint.requests[0].url.host == "bedrock-runtime.us-east-1.amazonaws.com"
@@ -451,7 +460,7 @@ def test_a_callers_small_ceiling_is_raised_so_thinking_cannot_truncate_the_answe
 def test_the_ceiling_never_exceeds_the_models_own() -> None:
     endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER))))
     bedrock(endpoint, max_tokens=64_000).complete(
-        ASK, model="claude-opus-5-5", tools=(VERDICT,), max_tokens=500_000
+        ASK, model="claude-opus-5", tools=(VERDICT,), max_tokens=500_000
     )
     assert endpoint.body["max_tokens"] == 128_000
 
@@ -480,7 +489,7 @@ def test_the_key_and_region_come_from_settings_never_the_process_environment(
     llm = BedrockLLM.from_settings(
         settings, http_client=httpx.Client(transport=httpx.MockTransport(endpoint))
     )
-    llm.complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+    llm.complete(ASK, model="claude-opus-5", tools=(VERDICT,))
     assert endpoint.requests[0].url.host == "bedrock-mantle.us-east-1.api.aws"
     assert endpoint.requests[0].headers["authorization"] == f"Bearer {FAKE_KEY}"
 
@@ -520,10 +529,10 @@ def test_a_structured_answer_comes_back_as_one_tool_call_with_its_usage() -> Non
             )
         )
     )
-    response = bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+    response = bedrock(endpoint).complete(ASK, model="claude-opus-5", tools=(VERDICT,))
 
     assert response.provider == BEDROCK_PROVIDER
-    assert response.model == "anthropic.claude-opus-5-5"
+    assert response.model == "anthropic.claude-opus-5"
     assert response.stop_reason is StopReason.TOOL_USE
     assert len(response.tool_calls) == 1
     call = response.tool_calls[0]
@@ -547,10 +556,10 @@ def test_a_plain_completion_returns_the_text_without_its_thinking() -> None:
 def test_each_call_is_logged_with_its_usage_and_latency() -> None:
     endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER))))
     with capture_logs() as logs:
-        bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+        bedrock(endpoint).complete(ASK, model="claude-opus-5", tools=(VERDICT,))
     [event] = [e for e in logs if e["event"] == "llm.bedrock.call"]
     assert event["provider"] == "bedrock"
-    assert event["served_model"] == "anthropic.claude-opus-5-5"
+    assert event["served_model"] == "anthropic.claude-opus-5"
     assert event["input_tokens"] == 1_200
     assert event["effort"] == "high"
     assert isinstance(event["latency_ms"], int)
@@ -559,7 +568,7 @@ def test_each_call_is_logged_with_its_usage_and_latency() -> None:
 def test_two_tools_raise_rather_than_one_being_dropped() -> None:
     with pytest.raises(ValueError, match="one structured-output schema"):
         bedrock(Endpoint(streamed(b""))).complete(
-            ASK, model="claude-opus-5-5", tools=(VERDICT, VERDICT)
+            ASK, model="claude-opus-5", tools=(VERDICT, VERDICT)
         )
 
 
@@ -584,7 +593,7 @@ def test_a_provider_failure_is_unavailable_with_its_reason(
     response: httpx.Response, reason: UnavailableReason
 ) -> None:
     with pytest.raises(LLMUnavailableError) as raised:
-        bedrock(Endpoint(response)).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+        bedrock(Endpoint(response)).complete(ASK, model="claude-opus-5", tools=(VERDICT,))
     assert raised.value.reason is reason
     assert raised.value.provider == "bedrock"
 
@@ -592,7 +601,7 @@ def test_a_provider_failure_is_unavailable_with_its_reason(
 def test_a_rate_limit_is_raised_only_after_the_sdks_own_retries() -> None:
     endpoint = Endpoint(api_error(429, "rate_limit_error"))
     with pytest.raises(LLMUnavailableError) as raised:
-        bedrock(endpoint, max_retries=2).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+        bedrock(endpoint, max_retries=2).complete(ASK, model="claude-opus-5", tools=(VERDICT,))
     assert len(endpoint.requests) == 3
     # Still a rate limit to a caller with no backup: DeadlineLLM backs off on it.
     assert isinstance(raised.value, LLMRateLimitError)
@@ -601,7 +610,7 @@ def test_a_rate_limit_is_raised_only_after_the_sdks_own_retries() -> None:
 def test_a_rejected_key_is_still_a_credential_error_to_a_caller_without_a_backup() -> None:
     with pytest.raises(LLMCredentialError):
         bedrock(Endpoint(api_error(401, "authentication_error"))).complete(
-            ASK, model="claude-opus-5-5"
+            ASK, model="claude-opus-5"
         )
 
 
@@ -623,7 +632,7 @@ def test_an_unreachable_or_silent_endpoint_is_unavailable(
     error: Exception, reason: UnavailableReason
 ) -> None:
     with pytest.raises(LLMUnavailableError) as raised:
-        bedrock(Endpoint(_raise(error))).complete(ASK, model="claude-opus-5-5")
+        bedrock(Endpoint(_raise(error))).complete(ASK, model="claude-opus-5")
     assert raised.value.reason is reason
 
 
@@ -632,7 +641,7 @@ def test_an_error_event_mid_stream_is_the_providers_fault() -> None:
         {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
     )
     with pytest.raises(LLMUnavailableError) as raised:
-        bedrock(Endpoint(streamed(body))).complete(ASK, model="claude-opus-5-5")
+        bedrock(Endpoint(streamed(body))).complete(ASK, model="claude-opus-5")
     assert raised.value.reason is UnavailableReason.SERVER_ERROR
 
 
@@ -653,7 +662,7 @@ def test_a_connection_that_drops_mid_stream_is_unavailable() -> None:
         200, headers={"content-type": "text/event-stream"}, stream=_BrokenStream(head)
     )
     with pytest.raises(LLMUnavailableError) as raised:
-        bedrock(Endpoint(response)).complete(ASK, model="claude-opus-5-5")
+        bedrock(Endpoint(response)).complete(ASK, model="claude-opus-5")
     assert raised.value.reason is UnavailableReason.CONNECTION
 
 
@@ -668,7 +677,7 @@ def test_a_connection_that_drops_mid_stream_is_unavailable() -> None:
 )
 def test_a_request_the_provider_rejects_is_not_unavailable(response: httpx.Response) -> None:
     with pytest.raises(LLMError) as raised:
-        bedrock(Endpoint(response)).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+        bedrock(Endpoint(response)).complete(ASK, model="claude-opus-5", tools=(VERDICT,))
     assert not isinstance(raised.value, LLMUnavailableError)
     assert "defect in the request" in str(raised.value)
 
@@ -676,14 +685,14 @@ def test_a_request_the_provider_rejects_is_not_unavailable(response: httpx.Respo
 def test_a_refusal_raises_and_is_not_unavailable() -> None:
     endpoint = Endpoint(streamed(message_stream("", stop_reason="refusal")))
     with pytest.raises(LLMRefusalError) as raised:
-        bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+        bedrock(endpoint).complete(ASK, model="claude-opus-5", tools=(VERDICT,))
     assert not isinstance(raised.value, LLMUnavailableError)
 
 
 def test_a_truncated_answer_raises_with_the_reason_and_logs_its_billed_usage() -> None:
     endpoint = Endpoint(streamed(message_stream('{"intact": tr', stop_reason="max_tokens")))
     with capture_logs() as logs, pytest.raises(LLMError, match="output ceiling") as raised:
-        bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+        bedrock(endpoint).complete(ASK, model="claude-opus-5", tools=(VERDICT,))
     assert not isinstance(raised.value, LLMUnavailableError)
     [event] = [e for e in logs if e["event"] == "llm.bedrock.truncated"]
     assert event["output_tokens"] == 640
@@ -695,7 +704,7 @@ def test_an_answer_that_is_not_the_object_asked_for_raises_and_is_not_unavailabl
 ) -> None:
     endpoint = Endpoint(streamed(message_stream(text)))
     with pytest.raises(LLMError) as raised:
-        bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+        bedrock(endpoint).complete(ASK, model="claude-opus-5", tools=(VERDICT,))
     assert not isinstance(raised.value, LLMUnavailableError)
 
 
@@ -749,7 +758,7 @@ def test_the_m17_schemas_keep_every_field_type_and_requirement() -> None:
 
 
 def test_the_model_map_routes_every_roster_model_and_its_cli_backup() -> None:
-    """Amendment 5: decisions on Opus 5.5 over Mantle, digests and research on Sonnet 5.5 over
+    """Amendment 5, with 6 (f): decisions on Opus 5.5, digests and research on Sonnet 5.5, all over
     bedrock-runtime's Global inference profile, each falling back to itself on the Claude CLI —
     and DeepSeek V3.2 stays routed (Chat Completions, Sonnet 5.5 as its CLI stand-in) as
     capability the roster does not use."""
@@ -759,8 +768,8 @@ def test_the_model_map_routes_every_roster_model_and_its_cli_backup() -> None:
     roster = load_roster()
     for book in roster.primaries:
         decision = models.route(book.models.decision)
-        assert decision.adapter is BedrockAdapter.ANTHROPIC_MESSAGES
-        assert decision.bedrock_id == "anthropic.claude-opus-5-5"
+        assert decision.adapter is BedrockAdapter.ANTHROPIC_RUNTIME
+        assert decision.bedrock_id == "global.anthropic.claude-opus-5-5"
         for name in (book.models.digest, book.models.research):
             route = models.route(name)
             assert route.adapter is BedrockAdapter.ANTHROPIC_RUNTIME
@@ -846,7 +855,7 @@ def test_the_key_never_reaches_a_repr_a_log_line_or_an_error_message() -> None:
     )
     llm = bedrock(Endpoint(echo))
     with capture_logs() as logs, pytest.raises(LLMUnavailableError) as raised:
-        llm.complete(ASK, model="claude-opus-5-5")
+        llm.complete(ASK, model="claude-opus-5")
     assert FAKE_KEY not in repr(llm)
     assert FAKE_KEY not in str(raised.value)
     assert "bedrock-mantle:CreateInference" in str(raised.value)
@@ -879,20 +888,20 @@ def test_the_startup_wiring_line_says_set_or_not_set_never_the_key() -> None:
 
 
 def test_the_response_names_the_bedrock_id_even_when_mantle_reports_the_bare_name() -> None:
-    """Measured live 2026-10-30: Mantle reports `claude-opus-5-5`. The record must still say
-    `anthropic.claude-opus-5-5`, so the call prices at the Bedrock rate, not first-party."""
-    endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER), model="claude-opus-5-5")))
+    """Measured live 2026-10-30: Mantle reports `claude-opus-5`. The record must still say
+    `anthropic.claude-opus-5`, so the call prices at the Bedrock rate, not first-party."""
+    endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER), model="claude-opus-5")))
     with capture_logs() as logs:
-        response = bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
-    assert response.model == "anthropic.claude-opus-5-5"
+        response = bedrock(endpoint).complete(ASK, model="claude-opus-5", tools=(VERDICT,))
+    assert response.model == "anthropic.claude-opus-5"
     assert not [e for e in logs if e["event"] == "llm.bedrock.served_other_model"]
 
 
 def test_a_different_served_model_is_logged() -> None:
     endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER), model="claude-opus-9")))
     with capture_logs() as logs:
-        response = bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
-    assert response.model == "anthropic.claude-opus-5-5"
+        response = bedrock(endpoint).complete(ASK, model="claude-opus-5", tools=(VERDICT,))
+    assert response.model == "anthropic.claude-opus-5"
     [event] = [e for e in logs if e["event"] == "llm.bedrock.served_other_model"]
     assert event["served_model"] == "claude-opus-9"
 
@@ -907,7 +916,7 @@ def _breaks(text: str, *markers: str) -> tuple[int, ...]:
     return tuple(text.index(m) for m in markers)
 
 
-@pytest.mark.parametrize("model", ["claude-opus-5-5", "claude-sonnet-5-5"])
+@pytest.mark.parametrize("model", ["claude-opus-5", "claude-sonnet-5-5"])
 def test_cache_breaks_become_text_blocks_with_a_breakpoint_at_each_and_the_same_text(
     model: str,
 ) -> None:
@@ -932,7 +941,7 @@ def test_more_breaks_than_the_cap_keep_the_first_and_the_latest() -> None:
     breaks = _breaks(text, *(f"PART{i}" for i in range(1, 7)))
     endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER))))
     bedrock(endpoint).complete(
-        [Message(Role.USER, text, cache_breaks=breaks)], model="claude-opus-5-5", tools=(VERDICT,)
+        [Message(Role.USER, text, cache_breaks=breaks)], model="claude-opus-5", tools=(VERDICT,)
     )
     blocks = endpoint.body["messages"][0]["content"]
     marked = [b for b in blocks if "cache_control" in b]
@@ -944,7 +953,7 @@ def test_more_breaks_than_the_cap_keep_the_first_and_the_latest() -> None:
 
 def test_a_message_without_breaks_is_sent_as_plain_text_and_breaks_never_touch_the_digest() -> None:
     endpoint = Endpoint(streamed(message_stream(json.dumps(ANSWER))))
-    bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+    bedrock(endpoint).complete(ASK, model="claude-opus-5", tools=(VERDICT,))
     assert endpoint.body["messages"] == [{"role": "user", "content": "Is the thesis intact?"}]
     plain = Message(Role.USER, _CACHED_PROMPT)
     marked = Message(Role.USER, _CACHED_PROMPT, cache_breaks=_breaks(_CACHED_PROMPT, "TASK"))
@@ -959,22 +968,36 @@ def test_a_break_outside_the_text_or_out_of_order_is_refused(breaks: tuple[int, 
 
 
 def test_cache_reads_and_writes_are_mapped_and_priced_at_the_bedrock_cache_rates() -> None:
-    """The SDK's cache buckets land in `Usage`, and the card prices them at Bedrock's in-region
-    rates (AWS Price List, us-east-1): Opus 5.5 write $5.50 and read $0.22 per MTok."""
+    """The SDK's cache buckets land in `Usage`, and the card prices them at Bedrock's rates (AWS
+    Price List, us-east-1): Opus 5.5 on the Global profile (Amendment 6 (f)) write $5.00 and read
+    $0.20 per MTok, and the older Mantle in-region Opus 5.5 id stays priced at $5.50 and $0.22."""
     endpoint = Endpoint(
-        streamed(message_stream(json.dumps(ANSWER), cache_write=200_000, cache_read=100_000))
+        streamed(
+            message_stream(
+                json.dumps(ANSWER), model="claude-opus-5-5", cache_write=200_000, cache_read=100_000
+            )
+        )
     )
     response = bedrock(endpoint).complete(ASK, model="claude-opus-5-5", tools=(VERDICT,))
+    assert response.model == "global.anthropic.claude-opus-5-5"
     assert response.usage.cache_write_tokens == 200_000
     assert response.usage.cache_read_tokens == 100_000
     card = load_price_card()
-    rates = card.schedule_for(date(2026, 11, 2)).price_for("anthropic.claude-opus-5-5")
-    assert (rates.cache_write, rates.cache_read) == (Decimal("5.50"), Decimal("0.22"))
-    priced = TokenPricer(card).price(response, on=date(2026, 11, 2), purpose="m17_manager")
+    day = date(2026, 11, 5)
+    rates = card.schedule_for(day).price_for("global.anthropic.claude-opus-5-5")
+    assert (rates.input, rates.output, rates.cache_write, rates.cache_read) == (
+        Decimal("4.00"),
+        Decimal("20.00"),
+        Decimal("5.00"),
+        Decimal("0.20"),
+    )
+    mantle = card.schedule_for(day).price_for("anthropic.claude-opus-5-5")
+    assert (mantle.cache_write, mantle.cache_read) == (Decimal("5.50"), Decimal("0.22"))
+    priced = TokenPricer(card).price(response, on=day, purpose="m17_manager")
     expected = (
-        Decimal(response.usage.input_tokens) * Decimal("4.40")
-        + Decimal(response.usage.output_tokens) * Decimal("22.00")
-        + Decimal(200_000) * Decimal("5.50")
-        + Decimal(100_000) * Decimal("0.22")
+        Decimal(response.usage.input_tokens) * Decimal("4.00")
+        + Decimal(response.usage.output_tokens) * Decimal("20.00")
+        + Decimal(200_000) * Decimal("5.00")
+        + Decimal(100_000) * Decimal("0.20")
     ) / Decimal(1_000_000)
     assert priced.cost_usd == expected

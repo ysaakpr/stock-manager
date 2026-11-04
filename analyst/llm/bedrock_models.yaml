@@ -26,8 +26,9 @@
 # `output_config.effort` (`reasoning_effort` on `openai_chat`); Haiku 4.5 accepts neither, so it is
 # sent neither rather than a 400.
 #
-# Listed: the M17 roster's models (Amendment 5: `claude-opus-5-5` decisions on Mantle,
-# `claude-sonnet-5-5` digests and research on bedrock-runtime), and the models the older analyst
+# Listed: the M17 roster's models (Amendment 5: `claude-opus-5-5` decisions on Mantle — on
+# bedrock-runtime's Global profile from Amendment 6 (f) — and `claude-sonnet-5-5` digests and
+# research on bedrock-runtime), and the models the older analyst
 # paths name (`claude-opus-5`, the T1/T2 reviews' and the thesis and mapper engines' default;
 # `claude-haiku-4-5`, triage), so LLM_PROVIDER=bedrock serves every consumer in the application;
 # and `deepseek-v3-2`, routed and priced but named by no caller (the owner kept digests on Claude
@@ -37,8 +38,13 @@ version: 1
 
 models:
   claude-opus-5-5:
-    adapter: anthropic_messages
-    bedrock_id: anthropic.claude-opus-5-5
+    # Amendment 6 (f), 2026-11-04: the Global cross-region inference profile on bedrock-runtime
+    # (was `anthropic.claude-opus-5-5` on Mantle in-region), 9% cheaper per token. Verified
+    # before the switch (2026-11-04): a full-size final (193k tokens in, 18.2k out, effort high)
+    # answered in 227 s against the 600 s client timeout, and a second call read 72,967 cached
+    # prefix tokens. It may route a request to any AWS commercial region, as Sonnet's already does.
+    adapter: anthropic_runtime
+    bedrock_id: global.anthropic.claude-opus-5-5
     max_output_tokens: 128000
   claude-sonnet-5-5:
     # Not served on Mantle in us-east-1 (`anthropic.`, `us.` and `global.` ids all 404,

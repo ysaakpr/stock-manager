@@ -116,7 +116,7 @@ def desk(primary: Any, backup: Backup) -> FallbackLLM:
 
 def ask(llm: Any) -> LLMResponse:
     response: LLMResponse = llm.complete(
-        ASK, model="claude-opus-5-5", tools=(VERDICT,), system=SYSTEM, max_tokens=2_000
+        ASK, model="claude-opus-5", tools=(VERDICT,), system=SYSTEM, max_tokens=2_000
     )
     return response
 
@@ -172,7 +172,7 @@ def test_a_provider_failure_falls_back_to_the_backup_with_the_identical_question
     assert len(backup.calls) == 1
     call = backup.calls[0]
     assert call["messages"] == ASK
-    assert call["model"] == "claude-opus-5-5"  # the roster's name, not the Bedrock id
+    assert call["model"] == "claude-opus-5"  # the caller's name, not the Bedrock id
     assert call["tools"] == [VERDICT]
     assert call["system"] == SYSTEM
     assert call["max_tokens"] == 2_000
@@ -226,7 +226,7 @@ def test_each_fallback_logs_a_warning_with_provider_reason_and_model() -> None:
     assert warning["provider"] == "bedrock"
     assert warning["backup"] == "claude_cli"
     assert warning["reason"] == "server_error"
-    assert warning["model"] == "claude-opus-5-5"
+    assert warning["model"] == "claude-opus-5"
     [answered] = [e for e in logs if e["event"] == "llm.fallback_answered"]
     assert answered["provider"] == "claude_cli" and answered["input_tokens"] == 900
     assert not [e for e in logs if e["log_level"] == "error"]
@@ -545,11 +545,11 @@ def test_a_bedrock_call_is_recorded_with_its_provider_tokens_and_bedrock_price()
     [row] = [dict(zip(_COLUMNS, params, strict=True)) for params in conn.inserts]
     assert response.provider == "bedrock"
     assert row["provider"] == "bedrock"
-    assert row["model"] == "anthropic.claude-opus-5-5"
+    assert row["model"] == "anthropic.claude-opus-5"
     assert row["purpose"] == "m17_manager" and row["case_id"] == "FM-MOMENTUM-1"
     assert (row["tokens_in"], row["tokens_out"], row["cached_tokens"]) == (1_000_000, 100_000, 0)
-    # The Bedrock rate (in-region us-east-1): $4.40/MTok in, $22.00/MTok out — not first-party.
-    assert row["cost_usd"] == Decimal("4.40") + Decimal("2.20")
+    # The Bedrock rate (in-region us-east-1): $5.50/MTok in, $27.50/MTok out — not first-party.
+    assert row["cost_usd"] == Decimal("5.50") + Decimal("2.75")
     assert row["ts"] == NOW
 
 
@@ -559,7 +559,7 @@ def test_a_fallback_call_is_recorded_under_the_backup_that_answered_it() -> None
     [row] = [dict(zip(_COLUMNS, params, strict=True)) for params in conn.inserts]
     assert response.fallback is not None
     assert row["provider"] == "claude_cli"
-    assert row["model"] == "claude-opus-5-5"
+    assert row["model"] == "claude-opus-5"
     assert row["tokens_in"] == 950 and row["cached_tokens"] == 50
 
 
