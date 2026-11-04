@@ -9,6 +9,10 @@ about *wrong values*. `run_sentinel` runs a registry of rules over gathered fact
 `QualityFinding`s; `persist_findings` lands them in `quality_flag`, where `read_quality`
 (`/status/quality`) serves them and `SyncStateStore.open_error_flags` gates trading on them. The
 charter rule is the unexplained-move tripwire; new rules are one file each under `rules/`.
+
+The thinly-traded label (`thin_trading`) is the third: how often each ISIN actually trades. It is a
+label only, read through `dataplatform.query.thin_trading_asof` and `/status/thin-trading`; it
+never quarantines or changes a price.
 """
 
 from dataplatform.quality.gaps import (
@@ -43,9 +47,21 @@ from dataplatform.quality.sentinel import (
     registered_rules,
     run_sentinel,
 )
+from dataplatform.quality.thin_trading import (
+    THIN_GAP_SESSIONS,
+    THIN_RATIO_BELOW,
+    WINDOW_SESSIONS,
+    ThinTradingLabel,
+    ThinTradingRun,
+    label_isin,
+    run_thin_trading,
+)
 
 __all__ = [
     "PER_SESSION_CADENCES",
+    "THIN_GAP_SESSIONS",
+    "THIN_RATIO_BELOW",
+    "WINDOW_SESSIONS",
     "CloseToCloseMove",
     "ExchangeClose",
     "GapEntry",
@@ -63,14 +79,18 @@ __all__ = [
     "SentinelRule",
     "Severity",
     "SourceExpectation",
+    "ThinTradingLabel",
+    "ThinTradingRun",
     "build_report",
     "classify_pair",
     "default_rules",
     "expectations_from_register",
     "finding_fingerprint",
+    "label_isin",
     "moves_from_price_rows",
     "persist_findings",
     "register",
     "registered_rules",
     "run_sentinel",
+    "run_thin_trading",
 ]
