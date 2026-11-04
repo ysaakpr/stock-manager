@@ -9,11 +9,13 @@ identity seam, reported and never labelled.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
+from dataplatform.clock import IST
 from dataplatform.ingest.calendar import trading_calendar
 from dataplatform.quality.thin_trading import (
     MIN_OBSERVED_SESSIONS,
@@ -27,6 +29,15 @@ from dataplatform.quality.thin_trading import (
     label_isin,
     resolve_successors,
     trailing_sessions,
+)
+from dataplatform.scheduler.registry import (
+    EOD_PIPELINE,
+    M17_FUND_MANAGERS,
+    PAPER_SESSION,
+    SHARE_BASIS_GUARD,
+    THIN_TRADING_LABEL,
+    Job,
+    default_registry,
 )
 
 AS_OF = date(2026, 11, 3)
@@ -237,3 +248,41 @@ def test_label_json_carries_no_float() -> None:
     payload = label(venue(ALL)).to_json()
     assert payload["traded_ratio"] == "1.0000"
     assert not any(isinstance(v, float) for v in payload.values())
+
+
+# ── when it runs, and who may read it ─────────────────────────────────────────────────────────
+
+
+def _next_fire(job: Job, after: datetime) -> datetime:
+    fire: datetime = job.trigger(IST).get_next_fire_time(None, after)
+    return fire
+
+
+@pytest.mark.parametrize("day", [date(2026, 11, 2) + timedelta(days=i) for i in range(5)])
+def test_the_job_runs_after_the_evening_chain_and_ends_before_m17(day: date) -> None:
+    midnight = datetime(day.year, day.month, day.day, tzinfo=IST)
+    fire = _next_fire(THIN_TRADING_LABEL, midnight)
+    assert fire.date() == day and (fire.hour, fire.minute) == (20, 15)
+    eod = _next_fire(EOD_PIPELINE, midnight)
+    guard = _next_fire(SHARE_BASIS_GUARD, midnight)
+    assert eod + EOD_PIPELINE.timeout <= fire
+    assert guard + SHARE_BASIS_GUARD.timeout <= fire
+    latest_end = fire + THIN_TRADING_LABEL.latest_start + THIN_TRADING_LABEL.timeout
+    assert latest_end < _next_fire(PAPER_SESSION, midnight)
+    assert latest_end < _next_fire(M17_FUND_MANAGERS, midnight)
+    assert "thin_trading_label" in default_registry()
+    assert THIN_TRADING_LABEL.covers == () and THIN_TRADING_LABEL.sync_sources == ()
+
+
+def test_nothing_m17_or_the_backtest_reads_imports_the_label() -> None:
+    """The label must not reach the M17 managers (their mandate hash would change; that needs a
+    pre-registration amendment) or the backtest/paper books. Fails the day anything under
+    `analyst/` or `backtest/` names it."""
+    root = Path(__file__).resolve().parents[2]
+    offenders = [
+        str(path.relative_to(root))
+        for package in ("analyst", "backtest")
+        for path in (root / package).rglob("*.py")
+        if "thin_trading" in path.read_text(encoding="utf-8")
+    ]
+    assert offenders == []
