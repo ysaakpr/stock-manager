@@ -516,6 +516,34 @@ def test_a_url_request_fetches_exactly_that_url_and_never_searches(tmp_path: Pat
     assert RequestBudget(searches=0, fetches=1, rounds=3) == URL_BUDGET
 
 
+# ── Amendment 6 (h): a page must be one a tool result served ─────────────────────────────────────
+
+
+def test_a_page_no_tool_result_served_is_refused_and_a_served_one_is_kept(tmp_path: Path) -> None:
+    """The URL-provenance guard: an answer page whose URL is neither the request's target nor a
+    URL a served tool result named is refused (how a planted "NO DATA" page surfaced, 2026-11-04);
+    the same answer with the served page passes. Fails if the guard is inverted or dropped."""
+    vendors = Vendors(tmp_path, {FIRECRAWL_SCRAPE_URL: _json(_fixture("firecrawl", "scrape.json"))})
+    invented = {**PAGE_ANSWER, "url": "https://no-data.example.org/task-cancelled"}
+    endpoint = Endpoint(
+        streamed(tool_round(("t1", "web_fetch", {"url": PAGE}))),
+        streamed(pages_answer(invented)),
+    )
+    research_fetcher, _ = fetcher(endpoint, vendors)
+    with pytest.raises(FetchError, match="no tool result served"):
+        desk_store(tmp_path).get_or_fetch(FetchRequest.url(PAGE, SESSION), research_fetcher)
+
+    endpoint = Endpoint(
+        streamed(tool_round(("t1", "web_fetch", {"url": PAGE}))),
+        streamed(pages_answer({**PAGE_ANSWER, "url": PAGE + "/"})),  # a trailing slash is the page
+    )
+    research_fetcher, _ = fetcher(endpoint, vendors)
+    outcome = desk_store(tmp_path / "again").get_or_fetch(
+        FetchRequest.url(PAGE, SESSION), research_fetcher
+    )
+    assert [p.url for p in outcome.snapshot.pages] == [PAGE + "/"]
+
+
 # ── the CLI backup: only when Bedrock is unavailable, and recorded ───────────────────────────────
 
 

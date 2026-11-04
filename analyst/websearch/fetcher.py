@@ -46,11 +46,13 @@ a key anywhere a model, a log or a snapshot can see it.
 
 from __future__ import annotations
 
+import re
 import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Protocol
+from urllib.parse import urlsplit
 
 from analyst.commons import (
     MAX_PAGE_BYTES,
@@ -227,6 +229,8 @@ class _RequestTools:
         self.fetches = 0
         self.snapshots: list[str] = []
         self.refused = 0
+        #: Every URL a served tool result named (normalised): a page the answer cites must be one.
+        self.served_urls: set[str] = set()
 
     def __call__(self, call: ToolCall) -> ToolOutcome:
         if call.name == WEB_SEARCH.name:
@@ -251,7 +255,19 @@ class _RequestTools:
         result = self._tools.handle(call.name, call.arguments)
         if result.snapshot is not None:
             self.snapshots.append(result.snapshot.id)
+        if not result.is_error:
+            self.served_urls.update(_url_key(u) for u in _URL_IN_TEXT.findall(result.content))
+            if call.name == WEB_FETCH.name and isinstance(call.arguments.get("url"), str):
+                self.served_urls.add(_url_key(call.arguments["url"]))
         return ToolOutcome(result.content, is_error=result.is_error)
+
+    def unprovenanced(self, pages: Sequence[FetchedPage]) -> list[str]:
+        """The answer's page URLs that are neither this request's target nor a URL a served tool
+        result named (Amendment 6 (h)): a page the loop never saw is not research."""
+        allowed = set(self.served_urls)
+        if self._request.kind is FetchKind.URL:
+            allowed.add(_url_key(self._request.target))
+        return [p.url for p in pages if _url_key(p.url) not in allowed]
 
     def _is_target(self, call: ToolCall) -> bool:
         url = call.arguments.get("url")
@@ -358,6 +374,15 @@ class BedrockWebFetcher:
             raise FetchError(f"the research model failed: {mask_secrets(str(exc))[:400]}") from exc
         self._charge(result.response)
         pages = _pages(result.response)
+        stray = executor.unprovenanced(pages)
+        if stray:
+            # Amendment 6 (h): a page whose URL no tool result served is refused, never shown —
+            # it is how an instruction planted in a page surfaced as an invented "NO DATA" page.
+            self._log(request, executor, path="bedrock", outcome="unprovenanced", rounds=None)
+            raise FetchError(
+                f"the research answer cites {len(stray)} page(s) no tool result served: "
+                + ", ".join(mask_secrets(u)[:120] for u in stray[:3])
+            )
         self._local.served = f"{FETCHER_PREFIX}:{self._model_id}"
         self._log(request, executor, path="bedrock", outcome="answered", rounds=result.rounds)
         return FetchResponse(pages=pages, usage=result.response.usage)
@@ -426,6 +451,20 @@ class BedrockWebFetcher:
             refused_calls=executor.refused,
             tool_snapshots=executor.snapshots,
         )
+
+
+_URL_IN_TEXT: Final = re.compile(r"https?://[^\s<>\"'\])}]+")
+
+
+def _url_key(url: str) -> str:
+    """A URL as the provenance check compares it: scheme and host lower-cased, the fragment and
+    trailing punctuation and slashes dropped."""
+    url = url.strip().rstrip(".,;:")
+    parts = urlsplit(url)
+    path = parts.path.rstrip("/")
+    return f"{parts.scheme.lower()}://{parts.netloc.lower()}{path}" + (
+        f"?{parts.query}" if parts.query else ""
+    )
 
 
 def _pages(response: LLMResponse) -> tuple[FetchedPage, ...]:

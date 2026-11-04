@@ -474,6 +474,51 @@ def test_bedrock_research_stays_on_the_cli_when_asked_or_when_it_cannot_run(
     assert isinstance(_desk_fetcher(LlmProvider.STUB, cli, tmp_path), fm_world.NoLiveFetcher)
 
 
+def test_luna_research_runs_its_cli_backup_on_sonnet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Amendment 6 (h) prep: the CLI cannot run GPT-5.6 Luna, so every CLI web fetcher of a Luna
+    research role is asked for the route's `cli_fallback_model` (Sonnet 5.5), never for Luna."""
+    from analyst.commons.fetch import ClaudeWebFetcher
+    from analyst.websearch import BedrockWebFetcher
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    settings = _settings(
+        aws_bearer_token_bedrock=FAKE_KEY,
+        bedrock_region="us-east-1",
+        m17_web_research="websearch",
+        **_VENDOR_KEYS,
+    )
+    with ExitStack() as stack:
+        fetcher = fm_world._fetcher(
+            LlmProvider.BEDROCK,
+            settings=settings,
+            clock=FrozenClock(datetime(2026, 11, 5, 18, 0, tzinfo=IST)),
+            fetch_root=tmp_path / "commons" / "fetch",
+            session=date(2026, 11, 5),
+            ledger=None,
+            memory=True,
+            stack=stack,
+            research_model="gpt-5-6-luna",
+        )
+        assert isinstance(fetcher, BedrockWebFetcher)
+        assert fetcher.name == "bedrock+websearch:gpt-5-6-luna"
+        assert isinstance(fetcher._backup, ClaudeWebFetcher)
+        assert fetcher._backup.name == "claude_cli:claude-sonnet-5-5"
+        on_cli = fm_world._fetcher(
+            LlmProvider.CLAUDE_CLI,
+            settings=settings,
+            clock=FrozenClock(datetime(2026, 11, 5, 18, 0, tzinfo=IST)),
+            fetch_root=tmp_path / "commons" / "fetch",
+            session=date(2026, 11, 5),
+            ledger=None,
+            memory=True,
+            stack=stack,
+            research_model="gpt-5-6-luna",
+        )
+    assert isinstance(on_cli, ClaudeWebFetcher) and on_cli.name == "claude_cli:claude-sonnet-5-5"
+
+
 # ── usage: every call in token_usage, priced for whoever answered ─────────────────────────────────
 
 
