@@ -634,6 +634,7 @@ _COLUMNS: Final = (
     "trade_to_trade, listing_status, insufficient_history, identity_seam, thin, reasons, "
     "computed_at"
 )
+_PLACEHOLDERS: Final = ", ".join(["%s"] * len(_COLUMNS.split(",")))
 
 
 def write_labels(
@@ -651,7 +652,7 @@ def write_labels(
         conn.execute("DELETE FROM thin_trading_label WHERE as_of = %s", (as_of,))
         with conn.cursor() as cur:
             cur.executemany(
-                f"INSERT INTO thin_trading_label ({_COLUMNS}) VALUES ({', '.join(['%s'] * 21)})",
+                f"INSERT INTO thin_trading_label ({_COLUMNS}) VALUES ({_PLACEHOLDERS})",
                 [
                     (
                         lab.as_of,

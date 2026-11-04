@@ -9,6 +9,7 @@ cannot disagree with its JSON:
     gaps         GapScanner.report/GapsOut = GET /status/gaps?from=&to=
     quality      read_quality              = GET /status/quality
     quarantine   read_quarantine_status    = GET /status/quarantine
+    thin         read_thin_trading_status  = GET /status/thin-trading
     archives     read_archive_list         (links to GET /archives?date=)
 
 A panel whose read fails renders as *unreadable*, with the masked reason, instead of failing the
@@ -43,6 +44,7 @@ from dataplatform.status.console.data_render import (
     render_quarantine,
     render_sources,
     render_sync_board,
+    render_thin_trading,
     render_unreadable,
 )
 from dataplatform.status.console.pages import render_not_found
@@ -66,6 +68,7 @@ from dataplatform.status.queries_data import (
     search_symbol,
     sort_sources_worst_first,
 )
+from dataplatform.status.queries_thin_trading import read_thin_trading_status
 from dataplatform.store.db import Connection
 
 __all__ = [
@@ -178,6 +181,9 @@ def data_page(
     def archives() -> str:
         return render_archives(read_archive_list(conn))
 
+    def thin() -> str:
+        return render_thin_trading(read_thin_trading_status(conn, as_of=board_date))
+
     panels = DataPanels(
         sync=_panel("sync", "Sync board", conn, sync),
         sources=_panel("sources", "Sources", conn, sources),
@@ -185,6 +191,7 @@ def data_page(
         quality=_panel("quality", "Quality flags", conn, quality),
         quarantine=_panel("quarantine", "Quarantine", conn, quarantine),
         archives=_panel("archives", "Archives", conn, archives),
+        thin=_panel("thin", "Thinly traded", conn, thin),
     )
     log.info(
         "console.data_rendered",
