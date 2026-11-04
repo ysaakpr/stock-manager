@@ -44,6 +44,7 @@ as it is, because sending the same broken question elsewhere would only hide it.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -62,6 +63,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from analyst.llm.client import (
     DEFAULT_MAX_TOKENS,
+    Fallback,
     LLMCredentialError,
     LLMError,
     LLMRefusalError,
@@ -78,7 +80,7 @@ from analyst.llm.client import (
     Usage,
 )
 from analyst.llm.effort import EffortPolicy, load_effort_policy
-from analyst.llm.openai_chat import OpenAIChatClient
+from analyst.llm.openai_chat import ChatEndpoint, OpenAIChatClient, run_tools_responses
 from dataplatform.config import Settings, get_settings
 from dataplatform.logging import get_logger
 from dataplatform.redaction import MASK, mask_secrets
@@ -212,6 +214,14 @@ class BedrockModelRoute(_Frozen):
     #: for any other (the map refuses an `openai_chat` route without one), because the CLI cannot
     #: run DeepSeek and asking it to would turn every outage into a second, confusing failure.
     cli_fallback_model: str | None = Field(default=None, min_length=1)
+    #: Where an `openai_chat` route is served: Mantle /v1 (DeepSeek), Mantle /openai/v1 (OpenAI
+    #: models in-region) or bedrock-runtime /openai/v1 (an OpenAI model's Global profile).
+    chat_endpoint: ChatEndpoint = ChatEndpoint.MANTLE_V1
+    #: Amendment 6 (h): the Claude model on Bedrock this model's call is re-asked on, in the same
+    #: `BedrockLLM`, when Bedrock could not serve it (`LLMUnavailableError` only) — before any
+    #: backup provider. Unset: no second Bedrock model (every Claude route). The chain is then
+    #: this model on Bedrock, the named model on Bedrock, `cli_fallback_model` on the backup.
+    bedrock_fallback_model: str | None = Field(default=None, min_length=1)
 
 
 class BedrockModelMap(_Frozen):
@@ -234,6 +244,14 @@ class BedrockModelMap(_Frozen):
                 if backup is None or not backup.adapter.is_claude:
                     raise ValueError(
                         f"{name}'s cli_fallback_model {target!r} must be a Claude model in this map"
+                    )
+            second = route.bedrock_fallback_model
+            if second is not None:
+                other = self.models.get(second)
+                if other is None or not other.adapter.is_claude or other.bedrock_fallback_model:
+                    raise ValueError(
+                        f"{name}'s bedrock_fallback_model {second!r} must be a Claude model in "
+                        "this map with no Bedrock fallback of its own (one hop, never a cycle)"
                     )
         return self
 
@@ -527,6 +545,44 @@ class BedrockLLM:
         system: str | None = None,
         max_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> LLMResponse:
+        """`_complete_route`, re-asked once on the route's `bedrock_fallback_model` (if any) when
+        Bedrock could not serve it; the answer then carries a `Fallback` naming the first model."""
+        try:
+            return self._complete_route(
+                messages, model=model, tools=tools, system=system, max_tokens=max_tokens
+            )
+        except LLMUnavailableError as exc:
+            second = self._second(model, exc)
+            if second is None:
+                raise
+            response = self._complete_route(
+                messages, model=second, tools=tools, system=system, max_tokens=max_tokens
+            )
+            return dataclasses.replace(
+                response, fallback=Fallback(from_provider=f"bedrock:{model}", reason=exc.reason)
+            )
+
+    def _second(self, model: str, exc: LLMUnavailableError) -> str | None:
+        second = self._models.route(model).bedrock_fallback_model
+        if second is not None:
+            _LOG.warning(
+                "llm.bedrock.model_fallback",
+                model=model,
+                fallback_model=second,
+                reason=exc.reason.value,
+                detail=mask_secrets(str(exc))[:300],
+            )
+        return second
+
+    def _complete_route(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        tools: Sequence[ToolSpec] = (),
+        system: str | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> LLMResponse:
         """Ask the model on Bedrock, and report what the answer cost in tokens.
 
         What it does: routes ``model`` through `bedrock_models.yaml` and answers through the
@@ -576,6 +632,7 @@ class BedrockLLM:
                     ),
                     ceiling=self._ceiling(route, max_tokens),
                     effort=self._efforts.effort_for(model).value if route.effort else None,
+                    where=route.chat_endpoint,
                 )
             case _:  # pragma: no cover — exhaustive over BedrockAdapter
                 assert_never(route.adapter)
@@ -583,6 +640,41 @@ class BedrockLLM:
     # -- the client-side tool loop ----------------------------------------------------------------
 
     def run_tools(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str,
+        tools: Sequence[ToolSpec],
+        execute: ToolExecutor,
+        system: str | None = None,
+        max_rounds: int = DEFAULT_TOOL_ROUNDS,
+        output: ToolSpec | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ) -> ToolLoopResult:
+        """`_run_tools_route`, re-run once on the route's `bedrock_fallback_model` (if any) when
+        Bedrock could not serve it; the answer then carries a `Fallback` naming the first model."""
+        kwargs: dict[str, Any] = {
+            "tools": tools,
+            "execute": execute,
+            "system": system,
+            "max_rounds": max_rounds,
+            "output": output,
+            "max_tokens": max_tokens,
+        }
+        try:
+            return self._run_tools_route(messages, model=model, **kwargs)
+        except LLMUnavailableError as exc:
+            second = self._second(model, exc)
+            if second is None:
+                raise
+            result = self._run_tools_route(messages, model=second, **kwargs)
+            response = dataclasses.replace(
+                result.response,
+                fallback=Fallback(from_provider=f"bedrock:{model}", reason=exc.reason),
+            )
+            return dataclasses.replace(result, response=response)
+
+    def _run_tools_route(
         self,
         messages: Sequence[Message],
         *,
@@ -633,11 +725,43 @@ class BedrockLLM:
                     ceiling=self._ceiling(route, max_tokens),
                 )
             case BedrockAdapter.OPENAI_CHAT:
-                # Not built: research runs on a Claude model (roster `research`), and a tool loop
-                # in the Chat Completions shape is its own translation. Refused, never faked.
-                raise LLMError(
-                    f"{model} is routed {route.adapter.value}, which has no client-side tool loop; "
-                    "run_tools needs a Claude (anthropic_messages or anthropic_runtime) model"
+                if route.chat_endpoint is ChatEndpoint.MANTLE_V1:
+                    raise LLMError(
+                        f"{model} is served on Mantle /v1, which has no /responses tool loop"
+                    )
+                offered = {t.name for t in tools}
+
+                def run(call: ToolCall) -> tuple[str, bool]:
+                    block = _tool_result(call, execute, offered)
+                    return str(block["content"]), bool(block.get("is_error", False))
+
+                final, rounds, called, usages = run_tools_responses(
+                    self._openai_chat,
+                    messages,
+                    model=model,
+                    bedrock_id=route.bedrock_id,
+                    where=route.chat_endpoint,
+                    system=system,
+                    tools=tools,
+                    tool_schemas=[structured_output_schema(t.input_schema) for t in tools],
+                    run=run,
+                    output=output,
+                    output_schema=(
+                        None if output is None else structured_output_schema(output.input_schema)
+                    ),
+                    ceiling=self._ceiling(route, max_tokens),
+                    effort=self._efforts.effort_for(model).value if route.effort else None,
+                    max_rounds=max_rounds,
+                )
+                if final is None:
+                    raise ToolLoopExhaustedError(
+                        f"{model} on Bedrock still wanted a tool after {max_rounds} rounds "
+                        f"({len(called)} tool calls); the loop is bounded and there is no answer",
+                        usage=_sum(usages),
+                        rounds=max_rounds,
+                    )
+                return ToolLoopResult(
+                    response=final, rounds=rounds, tool_calls=called, round_usage=usages
                 )
             case _:  # pragma: no cover — exhaustive over BedrockAdapter
                 assert_never(route.adapter)

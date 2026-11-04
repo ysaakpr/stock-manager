@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable, Mapping, Sequence
+from enum import StrEnum
 from typing import Any, Final
 
 import httpx
@@ -55,12 +56,36 @@ from analyst.llm.client import (
 from dataplatform.logging import get_logger
 from dataplatform.redaction import MASK, mask_secrets
 
-__all__ = ["OPENAI_CHAT_PATH", "OpenAIChatClient"]
+__all__ = ["OPENAI_CHAT_PATH", "ChatEndpoint", "OpenAIChatClient"]
 
 _LOG = get_logger(__name__)
 
-#: Mantle's OpenAI-compatible endpoint, below the region's host.
+#: Mantle's OpenAI-compatible endpoint, below the region's host (DeepSeek's route).
 OPENAI_CHAT_PATH: Final[str] = "/v1/chat/completions"
+
+
+class ChatEndpoint(StrEnum):
+    """Where an `openai_chat` route is served (measured 2026-11-04).
+
+    `MANTLE_V1`: bedrock-mantle ``/v1`` — DeepSeek V3.2 (``/openai/v1`` answers it 400).
+    `MANTLE_OPENAI`: bedrock-mantle ``/openai/v1`` — OpenAI models in-region
+    (``openai.gpt-5.6-luna``; ``/v1`` answers them 400, and the ``global.``/``us.`` ids 404 here).
+    `RUNTIME_OPENAI`: bedrock-runtime ``/openai/v1`` — OpenAI models through a cross-region
+    inference profile (``global.openai.gpt-5.6-luna``; the bare id is refused there: "on-demand
+    throughput isn't supported").
+    """
+
+    MANTLE_V1 = "mantle_v1"
+    MANTLE_OPENAI = "mantle_openai"
+    RUNTIME_OPENAI = "runtime_openai"
+
+    def base(self, region: str) -> str:
+        if self is ChatEndpoint.MANTLE_V1:
+            return f"https://bedrock-mantle.{region}.api.aws/v1"
+        if self is ChatEndpoint.MANTLE_OPENAI:
+            return f"https://bedrock-mantle.{region}.api.aws/openai/v1"
+        return f"https://bedrock-runtime.{region}.amazonaws.com/openai/v1"
+
 
 #: The `ToolCall` id of a structured answer — the one `BedrockLLM` and `ClaudeCliLLM` use.
 _STRUCTURED_TOOL_CALL_ID: Final[str] = "structured_output"
@@ -123,8 +148,12 @@ class OpenAIChatClient:
 
     @property
     def endpoint(self) -> str:
-        """The URL this client posts to — built from the region, never from the environment."""
-        return f"https://bedrock-mantle.{self._region}.api.aws{OPENAI_CHAT_PATH}"
+        """The DeepSeek-era default URL (Mantle ``/v1``) — built from the region, never the env."""
+        return self.url(ChatEndpoint.MANTLE_V1, "chat/completions")
+
+    def url(self, where: ChatEndpoint, api: str) -> str:
+        """The URL of ``api`` (``chat/completions`` or ``responses``) on ``where``."""
+        return f"{where.base(self._region)}/{api}"
 
     @property
     def _client(self) -> httpx.Client:
@@ -145,6 +174,7 @@ class OpenAIChatClient:
         output_schema: Mapping[str, Any] | None,
         ceiling: int,
         effort: str | None,
+        where: ChatEndpoint = ChatEndpoint.MANTLE_V1,
     ) -> LLMResponse:
         """Ask ``bedrock_id`` once; the answer as text, or as one structured `ToolCall`.
 
@@ -155,7 +185,13 @@ class OpenAIChatClient:
         if system is not None:
             wire.append({"role": "system", "content": system})
         wire.extend(m.as_dict() for m in messages)
-        body: dict[str, Any] = {"model": bedrock_id, "messages": wire, "max_tokens": ceiling}
+        # OpenAI reasoning models refuse `max_tokens` (400); `max_completion_tokens` is the
+        # Chat Completions name for the same ceiling (thinking included), and DeepSeek takes it too.
+        body: dict[str, Any] = {
+            "model": bedrock_id,
+            "messages": wire,
+            "max_completion_tokens": ceiling,
+        }
         if output is not None:
             body["response_format"] = {
                 "type": "json_schema",
@@ -169,7 +205,7 @@ class OpenAIChatClient:
         if effort is not None:
             body["reasoning_effort"] = effort
         started = time.monotonic()
-        payload = self._post(body, model=model)
+        payload = self._post(body, model=model, url=self.url(where, "chat/completions"))
         latency_ms = round((time.monotonic() - started) * 1000)
         choice, usage = _choice_and_usage(payload, model=model)
         finish = choice.get("finish_reason")
@@ -222,7 +258,9 @@ class OpenAIChatClient:
 
     # -- the request ------------------------------------------------------------------------------
 
-    def _post(self, body: Mapping[str, Any], *, model: str) -> dict[str, Any]:
+    def _post(
+        self, body: Mapping[str, Any], *, model: str, url: str | None = None
+    ) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self._api_key.get_secret_value()}",
             "Content-Type": "application/json",
@@ -232,7 +270,10 @@ class OpenAIChatClient:
         while True:
             try:
                 response = self._client.post(
-                    self.endpoint, json=dict(body), headers=headers, timeout=self._timeout_seconds
+                    url or self.endpoint,
+                    json=dict(body),
+                    headers=headers,
+                    timeout=self._timeout_seconds,
                 )
             except httpx.TransportError as exc:
                 if attempt < self._max_retries:
@@ -403,3 +444,186 @@ def _structured(text: str, *, model: str) -> dict[str, Any]:
             "schema asks for"
         )
     return {str(key): value for key, value in payload.items()}
+
+
+# ── the client-side tool loop, on the Responses API ───────────────────────────────────────────────
+#
+# Chat Completions refuses function tools with any reasoning effort on GPT-5.6 Luna ("use
+# /v1/responses or set reasoning_effort to 'none'", measured 2026-11-04 on bedrock-runtime), so a
+# tool loop that keeps the pinned effort runs on `/responses`: function tools, `reasoning.effort`
+# and a strict `text.format` json_schema together, `store: false` (nothing kept server-side), the
+# reasoning items carried between rounds as `encrypted_content`.
+
+#: Executes one tool call: (content, is_error). `BedrockLLM` wraps its `ToolExecutor` into this.
+ChatToolRunner = Callable[[ToolCall], tuple[str, bool]]
+
+
+def _responses_usage(payload: Mapping[str, Any], *, model: str) -> Usage:
+    raw = payload.get("usage")
+    if not isinstance(raw, Mapping):
+        raise LLMError(f"{model} on Bedrock answered without usage; an unmetered call is refused")
+    prompt = _count(raw, "input_tokens", model)
+    completion = _count(raw, "output_tokens", model)
+    details = raw.get("input_tokens_details")
+    cached = 0
+    if isinstance(details, Mapping) and details.get("cached_tokens") is not None:
+        cached = min(_count(details, "cached_tokens", model), prompt)
+    return Usage(input_tokens=prompt - cached, output_tokens=completion, cache_read_tokens=cached)
+
+
+def run_tools_responses(
+    client: OpenAIChatClient,
+    messages: Sequence[Message],
+    *,
+    model: str,
+    bedrock_id: str,
+    where: ChatEndpoint,
+    system: str | None,
+    tools: Sequence[ToolSpec],
+    tool_schemas: Sequence[Mapping[str, Any]],
+    run: ChatToolRunner,
+    output: ToolSpec | None,
+    output_schema: Mapping[str, Any] | None,
+    ceiling: int,
+    effort: str | None,
+    max_rounds: int,
+) -> tuple[LLMResponse | None, int, tuple[ToolCall, ...], tuple[Usage, ...]]:
+    """A bounded tool loop on ``/responses``. Returns (final or None if exhausted, rounds, calls,
+    per-round usage). The final's usage is the sum over rounds."""
+    items: list[dict[str, Any]] = []
+    if system is not None:
+        items.append({"role": "system", "content": system})
+    items.extend(m.as_dict() for m in messages)
+    offered = {t.name for t in tools}
+    body_base: dict[str, Any] = {
+        "model": bedrock_id,
+        "tools": [
+            {
+                "type": "function",
+                "name": t.name,
+                "description": t.description,
+                "strict": True,
+                "parameters": dict(schema),
+            }
+            for t, schema in zip(tools, tool_schemas, strict=True)
+        ],
+        "tool_choice": "auto",
+        "max_output_tokens": ceiling,
+        "store": False,
+        "include": ["reasoning.encrypted_content"],
+    }
+    if effort is not None:
+        body_base["reasoning"] = {"effort": effort}
+    if output is not None:
+        body_base["text"] = {
+            "format": {
+                "type": "json_schema",
+                "name": output.name,
+                "description": output.description,
+                "strict": True,
+                "schema": dict(output_schema or {}),
+            }
+        }
+    usages: list[Usage] = []
+    called: list[ToolCall] = []
+    url = client.url(where, "responses")
+    for round_number in range(1, max_rounds + 1):
+        payload = client._post({**body_base, "input": items}, model=model, url=url)
+        usage = _responses_usage(payload, model=model)
+        usages.append(usage)
+        status = payload.get("status")
+        out = payload.get("output")
+        if not isinstance(out, list):
+            raise LLMError(f"{model} on Bedrock answered /responses without an output list")
+        _LOG.info(
+            "llm.bedrock.tool_round",
+            provider=client._provider,
+            adapter="openai_responses",
+            model=model,
+            round=round_number,
+            status=status,
+            input_tokens=usage.input_tokens,
+            cache_read_tokens=usage.cache_read_tokens,
+            output_tokens=usage.output_tokens,
+        )
+        if status == "incomplete":
+            details = payload.get("incomplete_details") or {}
+            reason = details.get("reason") if isinstance(details, Mapping) else None
+            if reason == "content_filter":
+                raise LLMRefusalError(f"{model} on Bedrock stopped on its content filter")
+            raise LLMError(f"{model} on Bedrock stopped incomplete ({reason!r}); not used")
+        if status != "completed":
+            raise LLMError(f"{model} on Bedrock answered /responses with status {status!r}")
+        calls = [o for o in out if isinstance(o, Mapping) and o.get("type") == "function_call"]
+        if not calls:
+            text = "".join(
+                part.get("text", "")
+                for o in out
+                if isinstance(o, Mapping) and o.get("type") == "message"
+                for part in (o.get("content") or [])
+                if isinstance(part, Mapping) and part.get("type") == "output_text"
+            )
+            refusal = [
+                part
+                for o in out
+                if isinstance(o, Mapping) and o.get("type") == "message"
+                for part in (o.get("content") or [])
+                if isinstance(part, Mapping) and part.get("type") == "refusal"
+            ]
+            if refusal or not text.strip():
+                raise LLMRefusalError(f"{model} on Bedrock refused or returned no answer")
+            total = Usage(
+                input_tokens=sum(u.input_tokens for u in usages),
+                output_tokens=sum(u.output_tokens for u in usages),
+                cache_read_tokens=sum(u.cache_read_tokens for u in usages),
+            )
+            if output is None:
+                final = LLMResponse(
+                    provider=client._provider,
+                    model=bedrock_id,
+                    text=text,
+                    usage=total,
+                    stop_reason=StopReason.END_TURN,
+                )
+            else:
+                final = LLMResponse(
+                    provider=client._provider,
+                    model=bedrock_id,
+                    text=text,
+                    usage=total,
+                    stop_reason=StopReason.TOOL_USE,
+                    tool_calls=(
+                        ToolCall(
+                            id=_STRUCTURED_TOOL_CALL_ID,
+                            name=output.name,
+                            arguments=_structured(text, model=model),
+                        ),
+                    ),
+                )
+            return final, round_number, tuple(called), tuple(usages)
+        # Every output item goes back (reasoning with its encrypted content, the calls), then
+        # one function_call_output per call.
+        items.extend(dict(o) for o in out if isinstance(o, Mapping))
+        for c in calls:
+            try:
+                args = json.loads(c.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = None
+            call = ToolCall(
+                id=str(c.get("call_id")),
+                name=str(c.get("name")),
+                arguments=args if isinstance(args, dict) else {},
+            )
+            called.append(call)
+            if call.name not in offered or not isinstance(args, dict):
+                content, is_error = f"no tool named {call.name!r} was offered", True
+            else:
+                content, is_error = run(call)
+            items.append(
+                {
+                    "type": "function_call_output",
+                    "call_id": call.id,
+                    "output": f"ERROR: {content}" if is_error else content,
+                }
+            )
+    return None, max_rounds, tuple(called), tuple(usages)

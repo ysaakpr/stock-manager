@@ -76,3 +76,17 @@ models:
     adaptive_thinking: false
     effort: false
     cli_fallback_model: claude-sonnet-5-5
+  gpt-5-6-luna:
+    # GPT-5.6 Luna through its Global cross-region inference profile on bedrock-runtime's
+    # OpenAI-compatible API (measured 2026-11-04: `global.openai.gpt-5.6-luna` 404s on Mantle; the
+    # bare `openai.gpt-5.6-luna` is Mantle /openai/v1 only). The Global profile may route a
+    # request to any AWS commercial region. Function tools need /responses at any effort.
+    adapter: openai_chat
+    bedrock_id: global.openai.gpt-5.6-luna
+    chat_endpoint: runtime_openai
+    max_output_tokens: 128000
+    adaptive_thinking: false
+    effort: true
+    # Amendment 6 (h): could not serve -> Sonnet 5.5 on Bedrock -> Sonnet 5.5 on the Claude CLI.
+    bedrock_fallback_model: claude-sonnet-5-5
+    cli_fallback_model: claude-sonnet-5-5

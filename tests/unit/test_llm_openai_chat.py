@@ -164,7 +164,9 @@ def test_a_text_call_goes_to_chat_completions_with_the_bedrock_id_and_no_effort(
         {"role": "user", "content": "Is the thesis intact?"},
     ]
     # The ceiling: a caller's 16K is clamped to the model card's 8K output limit.
-    assert body["max_tokens"] == 8192
+    # `max_completion_tokens`, the Chat Completions name OpenAI reasoning models require (a
+    # `max_tokens` is a 400 there); DeepSeek takes it too.
+    assert body["max_completion_tokens"] == 8192 and "max_tokens" not in body
     # No reasoning control is documented for V3.2, so none is sent — nor anything Claude-only.
     for absent in ("reasoning_effort", "thinking", "output_config", "tools", "tool_choice"):
         assert absent not in body
@@ -236,7 +238,7 @@ def test_an_effort_is_sent_only_when_the_route_says_the_model_takes_one() -> Non
     endpoint = Endpoint(completion("ok", model="vendor.chatty"))
     bedrock(endpoint, models=models, efforts=policy).complete(ASK, model="chatty")
     assert endpoint.body["reasoning_effort"] == "low"
-    assert endpoint.body["max_tokens"] == 4096
+    assert endpoint.body["max_completion_tokens"] == 4096
 
 
 # ── 2. the answer ────────────────────────────────────────────────────────────────────────────────
@@ -353,11 +355,89 @@ def test_the_tool_loop_is_refused_on_a_chat_completions_model() -> None:
     from analyst.llm import ToolOutcome
 
     endpoint = Endpoint(completion("ok"))
-    with pytest.raises(LLMError, match="no client-side tool loop"):
+    with pytest.raises(LLMError, match="no /responses tool loop"):
         bedrock(endpoint).run_tools(
             ASK, model=DEEPSEEK, tools=(VERDICT,), execute=lambda call: ToolOutcome("x")
         )
     assert endpoint.requests == []
+
+
+# ── 3b. GPT-5.6 Luna: bedrock-runtime's OpenAI-compatible API (Amendment 6 (h), capability) ─────
+
+LUNA = "gpt-5-6-luna"
+RUNTIME = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+
+
+def responses(output: list[dict[str, Any]], *, status: str = "completed") -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "id": "resp-test",
+            "status": status,
+            "output": output,
+            "usage": {
+                "input_tokens": 900,
+                "output_tokens": 120,
+                "input_tokens_details": {"cached_tokens": 100},
+            },
+        },
+    )
+
+
+def test_luna_is_routed_to_runtime_openai_and_named_by_no_role() -> None:
+    from analyst.llm.openai_chat import ChatEndpoint
+
+    route = load_bedrock_models().route(LUNA)
+    assert route.bedrock_id == "global.openai.gpt-5.6-luna"
+    assert route.chat_endpoint is ChatEndpoint.RUNTIME_OPENAI
+    assert load_bedrock_models().backup_model(LUNA) == "claude-sonnet-5-5"
+    for book in load_roster().books:
+        models = getattr(book, "models", None)
+        if models is not None:
+            assert LUNA not in (models.decision, models.digest, models.research)
+
+
+def test_a_luna_call_goes_to_runtime_chat_completions_with_its_effort() -> None:
+    endpoint = Endpoint(completion(json.dumps(DIGEST_ANSWER), model="gpt-5.6-luna"))
+    response = bedrock(endpoint).complete(ASK, model=LUNA, tools=(DIGEST_TOOL,))
+    assert str(endpoint.requests[-1].url) == f"{RUNTIME}/chat/completions"
+    assert endpoint.body["model"] == "global.openai.gpt-5.6-luna"
+    assert endpoint.body["reasoning_effort"] == "medium"
+    assert "max_tokens" not in endpoint.body
+    assert response.tool_calls[0].arguments == DIGEST_ANSWER
+    assert response.model == "global.openai.gpt-5.6-luna"
+
+
+def test_a_luna_tool_loop_runs_on_responses_and_returns_the_structured_answer() -> None:
+    from analyst.llm import ToolOutcome
+
+    call = {
+        "type": "function_call",
+        "call_id": "c1",
+        "name": VERDICT.name,
+        "arguments": json.dumps({"verdict": "x"}),
+    }
+    final = {
+        "type": "message",
+        "content": [{"type": "output_text", "text": json.dumps(DIGEST_ANSWER)}],
+    }
+    endpoint = Endpoint(responses([call]), responses([final]))
+    seen: list[str] = []
+
+    def execute(c: Any) -> ToolOutcome:
+        seen.append(c.name)
+        return ToolOutcome("tool says hi")
+
+    result = bedrock(endpoint).run_tools(
+        ASK, model=LUNA, tools=(VERDICT,), execute=execute, output=DIGEST_TOOL
+    )
+    assert [str(r.url) for r in endpoint.requests] == [f"{RUNTIME}/responses"] * 2
+    assert endpoint.body["store"] is False and endpoint.body["reasoning"] == {"effort": "medium"}
+    sent = json.loads(endpoint.requests[-1].content)["input"]
+    assert {"type": "function_call_output", "call_id": "c1", "output": "tool says hi"} in sent
+    assert seen == [VERDICT.name] and result.rounds == 2
+    assert result.response.tool_calls[0].arguments == DIGEST_ANSWER
+    assert result.response.usage.cache_read_tokens == 200
 
 
 # ── 4. the fallback for a model the CLI cannot run ──────────────────────────────────────────────
@@ -588,3 +668,96 @@ def test_the_message_turns_keep_their_roles() -> None:
     turns = [Message(Role.USER, "a"), Message(Role.ASSISTANT, "b"), Message(Role.USER, "c")]
     bedrock(endpoint).complete(turns, model=DEEPSEEK)
     assert [m["role"] for m in endpoint.body["messages"]] == ["user", "assistant", "user"]
+
+
+# ── 4b. Amendment 6 (h): Luna -> Sonnet on Bedrock -> Sonnet on the CLI ─────────────────────────
+
+
+def _luna_then_sonnet(*luna: httpx.Response, sonnet: httpx.Response) -> Any:
+    """Luna's chat endpoint plays ``luna``; Sonnet's runtime invoke answers ``sonnet``."""
+    from tests.unit.test_llm_bedrock import Endpoint as ClaudeEndpoint
+
+    chat = Endpoint(*luna)
+    claude = ClaudeEndpoint(sonnet)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return claude(request) if request.url.path.endswith("/invoke") else chat(request)
+
+    handler.chat = chat  # type: ignore[attr-defined]
+    handler.claude = claude  # type: ignore[attr-defined]
+    return handler
+
+
+def test_luna_unavailable_is_asked_of_sonnet_on_bedrock_before_the_cli() -> None:
+    from tests.unit.test_llm_bedrock import message_stream, streamed
+
+    handler = _luna_then_sonnet(
+        chat_error(503), sonnet=streamed(message_stream(json.dumps(DIGEST_ANSWER), model="x"))
+    )
+    backup = Backup()
+    llm = FallbackLLM(
+        BedrockLLM(
+            SecretStr(FAKE_KEY),
+            "us-east-1",
+            max_retries=0,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        ),
+        backup,
+        primary_provider="bedrock",
+        backup_provider="claude_cli",
+        backup_model=load_bedrock_models().backup_model,
+    )
+    response = llm.complete(ASK, model=LUNA, tools=(DIGEST_TOOL,))
+    assert response.provider == BEDROCK_PROVIDER
+    assert response.model == "global.anthropic.claude-sonnet-5-5"
+    assert response.fallback is not None
+    assert response.fallback.from_provider == "bedrock:gpt-5-6-luna"
+    assert response.fallback.reason is UnavailableReason.SERVER_ERROR
+    assert backup.calls == []  # the CLI is the last hop, not the second
+
+
+def test_luna_and_sonnet_both_unavailable_reach_sonnet_on_the_cli() -> None:
+    from tests.unit.test_llm_bedrock import api_error
+
+    handler = _luna_then_sonnet(chat_error(503), sonnet=api_error(503, "api_error"))
+    backup = Backup()
+    llm = FallbackLLM(
+        BedrockLLM(
+            SecretStr(FAKE_KEY),
+            "us-east-1",
+            max_retries=0,
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        ),
+        backup,
+        primary_provider="bedrock",
+        backup_provider="claude_cli",
+        backup_model=load_bedrock_models().backup_model,
+    )
+    response = llm.complete(ASK, model=LUNA, tools=(DIGEST_TOOL,))
+    assert response.provider == "claude_cli"
+    assert [c["model"] for c in backup.calls] == ["claude-sonnet-5-5"]
+
+
+def test_a_luna_refusal_is_asked_of_nobody_else() -> None:
+    from tests.unit.test_llm_bedrock import message_stream, streamed
+
+    handler = _luna_then_sonnet(
+        chat_error(400), sonnet=streamed(message_stream(json.dumps(DIGEST_ANSWER)))
+    )
+    llm = BedrockLLM(
+        SecretStr(FAKE_KEY),
+        "us-east-1",
+        max_retries=0,
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(LLMError) as caught:
+        llm.complete(ASK, model=LUNA, tools=(DIGEST_TOOL,))
+    assert not isinstance(caught.value, LLMUnavailableError)
+    assert handler.claude.requests == []
+
+
+def test_a_bedrock_fallback_must_be_one_hop_to_a_claude_model() -> None:
+    raw = load_bedrock_models().model_dump()
+    raw["models"]["gpt-5-6-luna"]["bedrock_fallback_model"] = "deepseek-v3-2"
+    with pytest.raises(ValueError, match="bedrock_fallback_model"):
+        BedrockModelMap.model_validate(raw)
