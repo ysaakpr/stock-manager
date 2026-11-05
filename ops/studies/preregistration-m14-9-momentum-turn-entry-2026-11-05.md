@@ -164,3 +164,59 @@ variant inherits this. An early re-entry therefore moves the book from "≥ 8 na
 "20 names", not from cash to fully invested. The study measures the variants on the book as the
 rails actually allow. It does not change the rails. How a park should meet the floor is an owner
 decision about the ratified rails.
+
+## 8. Amendment, 2026-11-05 (≈13:00 IST): arm S, rank-ordered sector cap
+
+Added at the owner's request (5 Nov 12:30 IST) **before any S run**, while the V1–V4 campaign
+was already running. §§0–7 are unchanged; V1–V4 and their decision rule stand as written above.
+The S arms are a separate family with their own walk-forward. They are never combined with
+V1–V4 here; any combination (for example the V-winner plus S) would be a follow-up with its own
+pre-registration.
+
+**Why.** A read-only simulation of 4 Nov's live paper path found that D13's A8 sector rail
+(MAX_SECTOR, 35%) refused CPPLUS (momentum rank 2) and INOXINDIA (rank 18), leaving about 12.7%
+of the book in cash until the next rebalance. A8 clears a session's buys one by one, in the order
+the policy submits them. So *which* names of a crowded sector are refused depends on that order,
+not on rank.
+
+**S — rank-ordered buys.** D13 with one change, policy-side only: every session's buys
+(rebalance and next-session redeploy) are submitted to the rail gate in momentum-rank order, best
+first, using the ranking of the last rebalance. When the sector cap binds, the lowest-ranked
+names of that sector are the ones refused. A8's rails, limits and sector map are untouched.
+
+**S+refill.** S, and at each rebalance a basket name whose buy would take its sector past the cap
+is replaced by the next-ranked name outside that sector, up to `top_n` (20), so the cash is not
+left idle. The check is a policy-side projection of what A8 will see:
+- held names the rebalance keeps (inside the sell band) count at their current price;
+- each basket name is topped up to its inverse-vol weight of the book's capital (cash, settled or
+  not, plus holdings), walking the basket in rank order;
+- the first name whose top-up would take its sector's value above 35% of capital is dropped, the
+  basket is re-formed from the next-ranked names, and the walk repeats until nothing is dropped;
+- a name already held at or above its weight is never dropped;
+- the sector of a name is the rails' own map (`ratified_sector_map`), so unclassified names share
+  the rails' pooled UNKNOWN bucket.
+
+The rails still clear every order; a buy they refuse anyway stays refused.
+
+**Runs.** Same mandate and cells as V1–V4 (§4): floor-only walk-forward, decade and six-year at
+both floors; NIFTY 500 six-year and wf-verification at both floors. They are queued after the
+V1–V4 campaign, at most 2 workers, inside the same 09:00–20:30 IST window. They run on a new
+commit carrying the S code, in their own directories, with D13 beside them. D13's runs are copied
+in from the V1–V4 directories (commit `d9ec7cf`) only if a fresh D13 replay on the S commit
+reproduces the V1–V4 directory's D13 replay digest in the floor-only wf-verification ₹1 cr cell.
+Otherwise D13 is re-run there.
+
+**Decision rule for S (fixed now).** As §5, applied to the family {D13, S, S+refill}: the
+walk-forward on the floor-only selection window (XIRR ÷ max DD, ₹1 cr first) chooses; if it
+chooses an S arm, that arm is recommended as a candidate for a separate paper book only if its
+floor-only verification XIRR ÷ max DD ≥ D13's at both floors, it is ≥ D13 in at least 6 of the 8
+floor-only cells, and its max DD is no more than 2 pp deeper than D13's in every floor-only cell.
+
+**Extra report items for S.**
+- How often the cap bound: A8 MAX_SECTOR refusals over the run (from the run summary), in total
+  and per risk-on rebalance.
+- Idle cash after rebalances: the book's cash share at the close of the second session after each
+  risk-on rebalance (after the rebalance's fills and the next-session redeploy). Cash is rebuilt
+  from the fill ledger (trades, dividends, interest, the opening deposit) and divided by that
+  session's NAV. Reported as the mean and the maximum over the window.
+- The scorecard against D13, as for V1–V4.
