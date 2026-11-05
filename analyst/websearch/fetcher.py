@@ -383,7 +383,14 @@ class BedrockWebFetcher:
                 f"the research answer cites {len(stray)} page(s) no tool result served: "
                 + ", ".join(mask_secrets(u)[:120] for u in stray[:3])
             )
-        self._local.served = f"{FETCHER_PREFIX}:{self._model_id}"
+        # Amendment 6 (h): when the route's Bedrock fallback model answered (Luna -> Sonnet on
+        # Bedrock), the snapshot names the model that wrote it, by the Bedrock id it reported.
+        answered = result.response
+        self._local.served = (
+            f"{FETCHER_PREFIX}:{answered.model}"
+            if answered.fallback is not None and answered.provider == BEDROCK_PROVIDER
+            else f"{FETCHER_PREFIX}:{self._model_id}"
+        )
         self._log(request, executor, path="bedrock", outcome="answered", rounds=result.rounds)
         return FetchResponse(pages=pages, usage=result.response.usage)
 

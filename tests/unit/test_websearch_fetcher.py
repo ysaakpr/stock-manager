@@ -544,6 +544,37 @@ def test_a_page_no_tool_result_served_is_refused_and_a_served_one_is_kept(tmp_pa
     assert [p.url for p in outcome.snapshot.pages] == [PAGE + "/"]
 
 
+def test_a_bedrock_model_fallback_names_the_model_that_answered_on_the_snapshot(
+    tmp_path: Path,
+) -> None:
+    """Amendment 6 (h): when the route's Bedrock fallback model answered (Luna -> Sonnet), the
+    snapshot's fetcher names it, never the model that could not serve."""
+    import dataclasses
+
+    from analyst.llm import Fallback, UnavailableReason
+
+    vendors = Vendors(tmp_path, {FIRECRAWL_SCRAPE_URL: _json(_fixture("firecrawl", "scrape.json"))})
+    endpoint = Endpoint(
+        streamed(tool_round(("t1", "web_fetch", {"url": PAGE}))),
+        streamed(pages_answer(PAGE_ANSWER)),
+    )
+    research_fetcher, _ = fetcher(endpoint, vendors)
+    real = research_fetcher._model
+
+    class AnsweredBySonnet:
+        def run_tools(self, *args: Any, **kwargs: Any) -> Any:
+            result = real.run_tools(*args, **kwargs)
+            fell = Fallback(
+                from_provider="bedrock:gpt-5-6-luna", reason=UnavailableReason.SERVER_ERROR
+            )
+            response = dataclasses.replace(result.response, fallback=fell)
+            return dataclasses.replace(result, response=response)
+
+    research_fetcher._model = AnsweredBySonnet()
+    outcome = desk_store(tmp_path).get_or_fetch(FetchRequest.url(PAGE, SESSION), research_fetcher)
+    assert outcome.snapshot.fetcher == "bedrock+websearch:global.anthropic.claude-sonnet-5-5"
+
+
 # ── the CLI backup: only when Bedrock is unavailable, and recorded ───────────────────────────────
 
 
