@@ -5,7 +5,12 @@ from __future__ import annotations
 from datetime import date, timedelta
 from decimal import Decimal
 
-from backtest.m14_9_report import EntrySwitches, Readings, entry_switches
+from backtest.m14_9_report import (
+    EntrySwitches,
+    Readings,
+    entry_switches,
+    idle_cash_after_rebalances,
+)
 from backtest.policies.early_entry import BreadthReading, RegimeTrendReading
 from backtest.policies.momentum_v2 import (
     D13_EARLY_BREADTH_TURN,
@@ -120,3 +125,22 @@ def test_the_ledger_confirms_a_reentry_bought_on_the_next_session() -> None:
     sw = _count(D13_EARLY_SCALE_IN, bought={date(2024, 1, 11)})
     assert sw.early_confirmed == 1
     assert _count(D13_EARLY_SCALE_IN, bought={date(2024, 1, 10)}).early_confirmed == 0
+
+
+def test_idle_cash_is_read_two_sessions_after_each_risk_on_rebalance() -> None:
+    days = SESSIONS[:6]
+    ledger = {
+        "external_flows": [{"date": days[0].isoformat(), "amount": "-1000"}],
+        "trades": [
+            {"trade_date": days[1].isoformat(), "side": "BUY", "net_amount": "600"},
+            {"trade_date": days[2].isoformat(), "side": "BUY", "net_amount": "300"},
+            {"trade_date": days[4].isoformat(), "side": "SELL", "net_amount": "500"},
+        ],
+        "dividends": [{"received": days[2].isoformat(), "amount": "10"}],
+        "interest": [],
+    }
+    nav = dict.fromkeys(days, Decimal("1000"))
+    # 1000 - 600 - 300 + 10 at the close of the second session after the rebalance; the sale on
+    # the fifth session is later and does not count there. Inversion: a later rebalance sees it.
+    assert idle_cash_after_rebalances(ledger, nav, days, [days[0]]) == [Decimal("0.11")]
+    assert idle_cash_after_rebalances(ledger, nav, days, [days[3]]) == [Decimal("0.61")]

@@ -2572,7 +2572,12 @@ def run_momentum_v2(
                 SectorIndexLevels.from_l1(index_map, through=terminal, data_root=data_root),
                 index_map,
             )
-        policy = MomentumV2Policy(policy_data, v2_parameters, order_caps=rails_in_force.rails)
+        policy = MomentumV2Policy(
+            policy_data,
+            v2_parameters,
+            order_caps=rails_in_force.rails,
+            sector_of=rails_in_force.sectors.sector_of,
+        )
 
         engine = ReplayEngine(
             policy=policy,

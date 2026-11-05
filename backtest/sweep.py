@@ -69,6 +69,8 @@ from backtest.policies.momentum_v2 import (
     D13_PER_STOCK_DAILY_GATE,
     D13_PER_STOCK_DAILY_PARK,
     D13_PER_STOCK_NO_REGIME,
+    D13_RANK_ORDERED_BUYS,
+    D13_SECTOR_REFILL,
     PAPER_RATIFIED_2026_09_06,
     MomentumV2Parameters,
 )
@@ -132,6 +134,7 @@ __all__ = [
     "REGIME_DAILY_ARMS",
     "REGIME_LENGTH_ARMS",
     "RETIRED_ARMS",
+    "SECTOR_ORDER_ARMS",
     "SWING_REDEPLOY",
     "SWING_REGIME_REDEPLOY",
     "Arm",
@@ -397,6 +400,31 @@ EARLY_ENTRY_ARMS: tuple[Arm, ...] = (
         note="a parked book re-enters when >= 50% of the PIT universe closes above its own 200d "
         "MA and that share is higher than 20 sessions earlier; exits monthly",
         v2=D13_EARLY_BREADTH_TURN,
+    ),
+)
+
+#: M14.9 arm S (owner, 2026-11-05): D13 with its buys submitted to A8's rails in momentum-rank
+#: order, so the 35% sector cap refuses the lowest-ranked names of a crowded sector; S+refill also
+#: replaces a name the cap would refuse with the next-ranked name outside that sector. The rails
+#: are untouched. Research arms only — kept out of ``ARMS`` for the reason D13 is.
+SECTOR_S = "S rank-ordered buys under the sector cap"
+SECTOR_S_REFILL = "S+refill: capped names replaced by the next-ranked outside the sector"
+SECTOR_ORDER_ARMS: tuple[Arm, ...] = (
+    Arm(
+        label=SECTOR_S,
+        family="sector-cap order (M14.9)",
+        reference=D13_PAPER_BASELINE.label,
+        note="buys reach the rail gate best-ranked first, so the 35% sector cap refuses the "
+        "lowest-ranked names in a capped sector; nothing else changed",
+        v2=D13_RANK_ORDERED_BUYS,
+    ),
+    Arm(
+        label=SECTOR_S_REFILL,
+        family="sector-cap order (M14.9)",
+        reference=SECTOR_S,
+        note="as S, and a basket name the cap would refuse is replaced by the next-ranked name "
+        "outside the capped sector, up to 20 names",
+        v2=D13_SECTOR_REFILL,
     ),
 )
 

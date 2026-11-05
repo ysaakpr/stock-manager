@@ -83,6 +83,15 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
   rebalance session; a re-entry is a full rebalance on that session (at half exposure for the
   scale-in), and exits stay the monthly rule. Off by default and out of ``repr`` while off.
 
+* **Rank-ordered buys and sector refill** (``rank_ordered_buys``, ``sector_refill``) — M14.9
+  arm S, research variants on D13. A8's 35 % sector rail clears a session's buys one by one in
+  the order the policy submits them, so which name in a crowded sector it refuses depends on that
+  order, not on momentum. ``rank_ordered_buys`` submits the buys best-ranked first, so the cap
+  refuses the *lowest*-ranked names of a sector. ``sector_refill`` goes further, policy-side: a
+  basket name whose buy would take its sector past the cap is replaced by the next-ranked name
+  outside the capped sector, up to ``top_n``, so the slot's cash is not left idle. The rails and
+  their limits are untouched. Off by default and out of ``repr`` while off.
+
 With **all six toggles off** the policy reproduces the naive top-N decision exactly — that is the
 "naive" baseline the increment report is struck against, and a unit test pins the parity. Every knob
 is a stated parameter, echoed verbatim into the report, so nothing here is silently tuned.
@@ -99,7 +108,7 @@ or reach data outside the point-in-time context. Given the same inputs it return
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from datetime import date
 from decimal import ROUND_CEILING, Decimal
@@ -146,7 +155,9 @@ __all__ = [
     "D13_PER_STOCK_DAILY_PARK",
     "D13_PER_STOCK_NO_REGIME",
     "D13_PROFIT_FILTER",
+    "D13_RANK_ORDERED_BUYS",
     "D13_RESID_MOM",
+    "D13_SECTOR_REFILL",
     "PAPER_RATIFIED_2026_09_06",
     "PER_STOCK_REVIEW_SESSIONS",
     "MomentumV2Data",
@@ -290,6 +301,12 @@ class MomentumV2Parameters:
       daily regime switches need ``review_sessions`` and ``regime_filter``. Defined on D13's own
       toggles only: none combines with the M14.5 daily regime checks, the vol target or an M16
       overlay. Off by default and out of ``repr`` while off.
+    * ``rank_ordered_buys`` / ``sector_refill`` — M14.9 arm S: submit a session's buys in
+      momentum-rank order (best first), and (refill, which needs it) replace a basket name the
+      35 % sector rail would refuse with the next-ranked name outside its sector. The refill needs
+      the rails' sector map and caps, handed to the policy (``sector_of``, ``order_caps``). Never
+      combined with an early-entry trigger, the M14.5/M14.6 switches, the vol target or A1. Off by
+      default and out of ``repr`` while off.
     * ``early_entry`` — M14.9: which pre-registered trigger may re-enter a parked book off a
       rebalance session (:class:`~backtest.policies.early_entry.EarlyEntry`), or ``None`` (D13).
       Requires ``regime_filter``; defined on D13's own toggles, so it never combines with the
@@ -326,6 +343,8 @@ class MomentumV2Parameters:
     daily_regime_gate: bool = field(default=False, repr=False)
     daily_regime_park: bool = field(default=False, repr=False)
     early_entry: EarlyEntry | None = field(default=None, repr=False)
+    rank_ordered_buys: bool = field(default=False, repr=False)
+    sector_refill: bool = field(default=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -367,6 +386,33 @@ class MomentumV2Parameters:
             raise ValueError("regime_daily_band applies only to a daily regime check")
         self._check_per_stock()
         self._check_early_entry()
+        self._check_sector_order()
+
+    def _check_sector_order(self) -> None:
+        """M14.9 arm S: rank-ordered buys and the refill are D13's own toggles plus this one."""
+        if self.sector_refill and not self.rank_ordered_buys:
+            raise ValueError("sector_refill extends rank_ordered_buys; turn it on")
+        if not self.rank_ordered_buys:
+            return
+        clashing = [
+            name
+            for name in (
+                "regime_daily_reentry",
+                "regime_daily_exit",
+                "daily_slot_fill",
+                "absolute_momentum",
+            )
+            if getattr(self, name)
+        ]
+        if self.early_entry is not None:
+            clashing.append("early_entry")
+        if self.vol_target_annual is not None:
+            clashing.append("vol_target_annual")
+        if clashing:
+            raise ValueError(
+                f"the sector-order arms are defined on D13's own toggles; turn off "
+                f"{', '.join(clashing)}"
+            )
 
     def _check_early_entry(self) -> None:
         """M14.9: an early-entry trigger extends D13's regime filter and nothing else."""
@@ -506,6 +552,11 @@ D13_EARLY_BREADTH_TURN: Final = replace(
     PAPER_RATIFIED_2026_09_06, early_entry=EarlyEntry.BREADTH_TURN
 )
 
+#: M14.9 arm S: D13 with its buys submitted to the rails in momentum-rank order; S+refill also
+#: replaces a name the sector cap would refuse. Research configurations only.
+D13_RANK_ORDERED_BUYS: Final = replace(PAPER_RATIFIED_2026_09_06, rank_ordered_buys=True)
+D13_SECTOR_REFILL: Final = replace(D13_RANK_ORDERED_BUYS, sector_refill=True)
+
 
 @runtime_checkable
 class MomentumV2Data(Protocol):
@@ -560,6 +611,8 @@ class MomentumV2Policy:
         "_params",
         "_parked",
         "_pending",
+        "_rank_of",
+        "_sector_of",
         "_session_count",
     )
 
@@ -569,9 +622,17 @@ class MomentumV2Policy:
         params: MomentumV2Parameters | None = None,
         *,
         order_caps: RiskRails | None = None,
+        sector_of: Callable[[str], str] | None = None,
     ) -> None:
         self._data = data
         self._params = params if params is not None else MomentumV2Parameters()
+        # M14.9 arm S: the refill reads the rails' own sector map and cap, never its own copy.
+        self._sector_of = sector_of
+        if self._params.sector_refill and (sector_of is None or order_caps is None):
+            raise TypeError("sector_refill needs the rails' sector map (sector_of) and order_caps")
+        #: The momentum rank of every candidate at the last rebalance (rank_ordered_buys only),
+        #: so the next-session redeploy submits its buys in the same order.
+        self._rank_of: dict[str, int] = {}
         # M16.1: an overlay switched on against a source with no method for it is refused here,
         # not on the first rebalance a month into a run. The check is runtime_checkable's, so it
         # sees only that the method exists: the L1 source always has all three and raises
@@ -778,6 +839,61 @@ class MomentumV2Policy:
                 text=f"M14.9 {mode}: a parked book re-enters before the monthly rebalance",
             )
         return self._rebalance(ctx, early=item, exposure_cap=cap)
+
+    # ── M14.9 arm S: rank-ordered buys and the sector refill ──────────────────────────────────
+
+    def _in_rank_order(
+        self, buys: list[tuple[OrderRequest, str]]
+    ) -> list[tuple[OrderRequest, str]]:
+        """The buys best-ranked first (rank at the last rebalance; unranked last, by ISIN)."""
+        unranked = len(self._rank_of)
+        return sorted(buys, key=lambda buy: (self._rank_of.get(buy[0].isin, unranked), buy[0].isin))
+
+    def _sector_refill(
+        self, ctx: SessionContext, ranked: Sequence[MomentumV2Record], keep: set[str]
+    ) -> list[MomentumV2Record]:
+        """The basket with every name the sector cap would refuse replaced, best-ranked first.
+
+        Projects the book the way A8's sector rail sees it: each held name the rebalance keeps at
+        its price, plus each basket name topped up to its model weight of the book's capital,
+        walked in rank order. The first basket name whose top-up would take its sector past
+        ``max_sector_pct`` of capital is dropped and the basket re-formed from the next-ranked
+        names; repeated until no name is refused (each pass drops one name, so it ends). A name
+        already held at or above its weight adds nothing and is never dropped. It is a projection:
+        the rails still clear every order, and a buy they refuse anyway stays refused.
+        """
+        assert self._sector_of is not None and self._order_caps is not None
+        cap = self._order_caps.max_sector_pct / Decimal(100)
+        held = {holding.isin: holding for holding in ctx.broker.holdings()}
+        price_of = {record.isin: record.price for record in ranked}
+        held_value = {
+            isin: Decimal(h.quantity) * price_of.get(isin, h.average_price)
+            for isin, h in held.items()
+            if isin in keep
+        }
+        capital = self._capital(ctx, held, price_of, ranked)
+        limit = cap * capital
+        base: dict[str, Decimal] = {}
+        for isin, value in held_value.items():
+            sector = self._sector_of(isin)
+            base[sector] = base.get(sector, _ZERO) + value
+        excluded: set[str] = set()
+        while True:
+            basket = [r for r in ranked if r.isin not in excluded][: self._params.top_n]
+            weights = self._weights_for({r.isin: r for r in basket})
+            used = dict(base)
+            refused: str | None = None
+            for record in basket:
+                sector = self._sector_of(record.isin)
+                already = held_value.get(record.isin, _ZERO)
+                add = max(_ZERO, weights[record.isin] * capital - already)
+                if add > _ZERO and used.get(sector, _ZERO) + add > limit:
+                    refused = record.isin
+                    break
+                used[sector] = used.get(sector, _ZERO) + add
+            if refused is None:
+                return basket
+            excluded.add(refused)
 
     # ── M14.6: per-stock entry and review ────────────────────────────────────────────────────────
 
@@ -1106,6 +1222,10 @@ class MomentumV2Policy:
         # top ``top_n`` (no banding — the naive rule). A held name inside this band is retained.
         band = self._params.sell_band if self._params.sell_band is not None else self._params.top_n
         keep = {record.isin for record in ranked[:band]}
+        if self._params.rank_ordered_buys:
+            self._rank_of = {record.isin: rank for rank, record in enumerate(ranked)}
+        if self._params.sector_refill:
+            chosen = self._sector_refill(ctx, ranked, keep)
         target = {record.isin: record for record in chosen}
         slots: dict[str, Decimal] | None = None
         if self._params.absolute_momentum:
@@ -1166,6 +1286,8 @@ class MomentumV2Policy:
             # the slot weights go (summing below one), so the redeploy also leaves the cash slots.
             self._pending = self._weights_for(target) if slots is None else slots
 
+        if self._params.rank_ordered_buys:
+            buys = self._in_rank_order(buys)
         orders = tuple(order for order, _ in (*sells, *trims, *buys))
         entries = tuple(self._entry(ctx, order, note) for order, note in (*sells, *trims, *buys))
         evidence = self._evidence(
@@ -1466,6 +1588,8 @@ class MomentumV2Policy:
             )
             for order in allocation.orders
         ]
+        if self._params.rank_ordered_buys:
+            buys = self._in_rank_order(buys)
         orders = tuple(order for order, _ in buys)
         entries = tuple(self._entry(ctx, order, note) for order, note in buys)
         evidence = EvidenceBundle(

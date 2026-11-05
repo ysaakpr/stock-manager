@@ -39,6 +39,7 @@ def test_default_sets_are_unchanged() -> None:
         "regime-length",
         "per-stock",
         "early-entry",
+        "sector-order",
         "m16",
         "m16-fundamentals",
     }

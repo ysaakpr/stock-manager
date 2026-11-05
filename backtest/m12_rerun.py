@@ -73,6 +73,7 @@ from backtest.sweep import (
     PER_STOCK_ARMS,
     REGIME_DAILY_ARMS,
     REGIME_LENGTH_ARMS,
+    SECTOR_ORDER_ARMS,
     Arm,
     SweepResult,
     run_digests,
@@ -89,6 +90,7 @@ __all__ = [
     "REGIME_DAILY_SET",
     "REGIME_LENGTH_SET",
     "RERUN_ARMS",
+    "SECTOR_ORDER_SET",
     "UNITS",
     "WALK_FORWARD",
     "WINDOWS",
@@ -152,6 +154,9 @@ REGIME_LENGTH_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *REGIME_LENGTH_ARMS)
 #: M14.9's arm set: D13 beside its pre-registered early re-entry variants.
 EARLY_ENTRY_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *EARLY_ENTRY_ARMS)
 
+#: M14.9 arm S: D13 beside its rank-ordered-buys and sector-refill variants.
+SECTOR_ORDER_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *SECTOR_ORDER_ARMS)
+
 #: M14.6's arm set: D13 beside its per-stock entry variants (``backtest.sweep.PER_STOCK_ARMS``).
 PER_STOCK_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *PER_STOCK_ARMS)
 
@@ -192,6 +197,7 @@ ARM_SETS: Mapping[str, tuple[Arm, ...]] = _ArmSets(
         "regime-length": REGIME_LENGTH_SET,
         "per-stock": PER_STOCK_SET,
         "early-entry": EARLY_ENTRY_SET,
+        "sector-order": SECTOR_ORDER_SET,
     },
     {"m16": m16_arms, "m16-fundamentals": m16_fundamentals_arms},
 )
@@ -472,6 +478,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "regime-length: D13 with a 30/50-session regime MA; "
         "per-stock: D13 and its M14.6 per-stock entry variants; "
         "early-entry: D13 and its M14.9 early re-entry variants; "
+        "sector-order: D13 and its M14.9 rank-ordered-buys / sector-refill arms; "
         "m16: baselines, A1, A2, A3, A7; m16-fundamentals: D13, M10.7, A4, A5 "
         "(six-year and wf-verification only)",
     )

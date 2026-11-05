@@ -458,3 +458,22 @@ def test_l1_isins_only_holds_the_candidate_set_to_the_raw_run_s(lake: Path) -> N
     assert set(held) == set(raw)
     # The restriction drops rows, never rewrites them: every kept ISIN carries L2's close.
     assert all(held[isin] == open_closes[isin] for isin in held)
+
+
+def test_the_bulk_read_answers_every_session_as_the_per_session_source_does(lake: Path) -> None:
+    """M14.9: the breadth pass's block read is the per-session adjusted source, session by session.
+
+    The split name's pre-ex closes come back halved (adjusted) through both routes, and every
+    filler's raw close is untouched. A test that fails if the bulk read drops the L2 overlay, keeps
+    a stale block, or picks another venue's bar.
+    """
+    reader = _L1Reader(data_root=lake)
+    try:
+        with QueryService(data_root=lake) as service:
+            source = _AdjustedCloseSource(service, reader)
+            bulk = source.bulk(_SESSIONS)
+            for session in _SESSIONS:
+                assert bulk(session) == source.uncached(session), session
+            assert bulk(_SESSIONS[0])[SPLIT_ISIN] == _PRE_SPLIT_CLOSE * Decimal("0.5")
+    finally:
+        reader.close()

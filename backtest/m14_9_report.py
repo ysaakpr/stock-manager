@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import Any
 
 from backtest.breadth import BreadthSeries
-from backtest.m12_rerun import EARLY_ENTRY_SET, WINDOWS
+from backtest.m12_rerun import EARLY_ENTRY_SET, SECTOR_ORDER_SET, WINDOWS
 from backtest.m14_5_report import (
     _FLOOR_RE,
     _INDEX_RE,
@@ -85,6 +85,13 @@ __all__ = [
 ]
 
 REPORT = Path("ops/gates/M14.9-momentum-turn-entry-report.md")
+#: Every arm the report reads: D13, V1-V4 and (pre-registration §8) the two S arms.
+ALL_ARMS: tuple[Arm, ...] = (*EARLY_ENTRY_SET, *SECTOR_ORDER_SET[1:])
+#: The two families, each with its own walk-forward (pre-registration §5 and §8).
+FAMILIES: dict[str, tuple[Arm, ...]] = {
+    "early-entry": EARLY_ENTRY_SET,
+    "sector-order": SECTOR_ORDER_SET,
+}
 _ZERO = Decimal("0")
 #: Pre-registration §6(b): a re-entry reversed when the TRI closes below MA200 within a month.
 REVERSAL_SESSIONS = 21
@@ -199,6 +206,52 @@ class EntryFacts:
 
     base: RunFacts
     switches: EntrySwitches
+    #: A8 MAX_SECTOR refusals over the run, and the risk-on rebalances it had (pre-reg §8).
+    sector_refusals: int = 0
+    risk_on_rebalances: int = 0
+    #: The book's cash share at the close of the second session after each risk-on rebalance.
+    idle_mean: Decimal = _ZERO
+    idle_max: Decimal = _ZERO
+
+
+def idle_cash_after_rebalances(
+    ledger: Mapping[str, Any],
+    nav: Mapping[date, Decimal],
+    sessions: Sequence[date],
+    risk_on_rebalances: Sequence[date],
+) -> list[Decimal]:
+    """Cash ÷ NAV at the close of the second session after each risk-on rebalance (§8).
+
+    Cash is rebuilt from the fill ledger: the opening deposit (an external flow, negative from the
+    investor's side), every sale's net proceeds less every purchase's net cost, dividends and
+    interest, each on its own date. The second session after a rebalance R is R+2: R's orders
+    fill on R+1 and the next-session redeploy on R+2.
+    """
+    events: list[tuple[date, Decimal]] = []
+    for flow in ledger["external_flows"]:
+        events.append((date.fromisoformat(flow["date"]), -Decimal(flow["amount"])))
+    for trade in ledger["trades"]:
+        amount = Decimal(trade["net_amount"])
+        events.append(
+            (
+                date.fromisoformat(trade["trade_date"]),
+                amount if trade["side"] == "SELL" else -amount,
+            )
+        )
+    for item in (*ledger["dividends"], *ledger["interest"]):
+        events.append((date.fromisoformat(item["received"]), Decimal(item["amount"])))
+    events.sort()
+    index = {s: i for i, s in enumerate(sessions)}
+    shares: list[Decimal] = []
+    for rebalance in risk_on_rebalances:
+        at = index[rebalance] + 2
+        if at >= len(sessions) or sessions[at] not in nav:
+            continue
+        close = sessions[at]
+        cash = sum((amount for when, amount in events if when <= close), _ZERO)
+        if nav[close] > _ZERO:
+            shares.append(cash / nav[close])
+    return shares
 
 
 # ── reading the lake ─────────────────────────────────────────────────────────────────────────────
@@ -265,9 +318,7 @@ def _load(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def collect(
-    run_dir: Path, lake: _Lake, *, arms: Sequence[Arm] = EARLY_ENTRY_SET
-) -> list[EntryFacts]:
+def collect(run_dir: Path, lake: _Lake, *, arms: Sequence[Arm] = ALL_ARMS) -> list[EntryFacts]:
     """Every momentum-v2 run in ``run_dir`` whose parameters are one of ``arms``."""
     by_repr = {repr(arm.v2): arm for arm in arms}
     facts: list[EntryFacts] = []
@@ -332,19 +383,83 @@ def collect(
                 park_sessions=flips.park_sessions,
             ),
         )
-        facts.append(EntryFacts(base=base, switches=flips))
+        risk_on = [r for r in rebalances if lake.regime(r).risk_on]
+        idle = idle_cash_after_rebalances(
+            ledger,
+            {date.fromisoformat(d): Decimal(v) for d, v in nav["points"]},
+            sessions,
+            risk_on,
+        )
+        facts.append(
+            EntryFacts(
+                base=base,
+                switches=flips,
+                sector_refusals=int(summary["rail_blocks"].get("MAX_SECTOR", 0)),
+                risk_on_rebalances=len(risk_on),
+                idle_mean=sum(idle, _ZERO) / Decimal(len(idle)) if idle else _ZERO,
+                idle_max=max(idle, default=_ZERO),
+            )
+        )
     return facts
+
+
+def sector_table(facts: Sequence[EntryFacts]) -> list[str]:
+    """How often A8's sector cap bound, and the cash left idle after rebalances (§8)."""
+    labels = [arm.label for arm in SECTOR_ORDER_SET]
+    rows = [f for f in facts if f.base.label in labels]
+    if not rows:
+        return []
+    out = [
+        "## Sector cap and idle cash (generated, pre-registration §8)",
+        "",
+        "**MAX_SECTOR refusals** are every buy A8's 35% sector rail refused over the run (run "
+        "summary). **Idle cash** is the book's cash share at the close of the second session "
+        "after each risk-on rebalance (after the rebalance's fills and the next-session "
+        "redeploy), rebuilt from the fill ledger; mean and worst over the window.",
+        "",
+        "| Universe | Window | Floor | Strategy | MAX_SECTOR refusals | per risk-on rebalance "
+        "| Idle cash after rebalances: mean | worst | XIRR/DD |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    order = {label: i for i, label in enumerate(labels)}
+    rows.sort(
+        key=lambda f: (
+            f.base.universe != "turnover_floor",
+            _WINDOW_ORDER.index(f.base.window),
+            f.base.floor,
+            order[f.base.label],
+        )
+    )
+    for f in rows:
+        per = (
+            Decimal(f.sector_refusals) / Decimal(f.risk_on_rebalances)
+            if f.risk_on_rebalances
+            else _ZERO
+        )
+        out.append(
+            f"| {f.base.universe} | {f.base.window} | {_floor_label(f.base.floor)} "
+            f"| {f.base.label} | {f.sector_refusals} | {_r(per)} | {_p(f.idle_mean)} "
+            f"| {_p(f.idle_max)} | {_r(f.base.ratio)} |"
+        )
+    out.append("")
+    return out
 
 
 # ── the decision rule (pre-registration §5), evaluated in code ───────────────────────────────────
 
 
-def decision(facts: Sequence[EntryFacts], selected: str) -> list[str]:
-    """The pre-registered decision rule over the floor-only cells, as report lines."""
+def decision(
+    facts: Sequence[EntryFacts],
+    selected: str,
+    *,
+    family: Sequence[Arm] = EARLY_ENTRY_SET,
+    title: str = "Decision rule (pre-registered §5, evaluated in code)",
+) -> list[str]:
+    """The pre-registered decision rule for one family over the floor-only cells."""
     floor_only = [f.base for f in facts if f.base.universe == "turnover_floor"]
     d13 = {(f.window, f.floor): f for f in floor_only if f.label == D13_PAPER_BASELINE.label}
     out = [
-        "## Decision rule (pre-registered §5, evaluated in code)",
+        f"## {title}",
         "",
         f"1. **Walk-forward choice** (floor-only selection window, XIRR ÷ max DD, ₹1 cr first): "
         f"**{selected or '(none)'}**.",
@@ -367,7 +482,7 @@ def decision(facts: Sequence[EntryFacts], selected: str) -> list[str]:
         "three |",
         "| --- | --- | --- | --- | --- |",
     ]
-    for arm in EARLY_ENTRY_SET[1:]:
+    for arm in family[1:]:
         rows = {(f.window, f.floor): f for f in floor_only if f.label == arm.label}
         pairs = [(rows[k], d13[k]) for k in rows if k in d13]
         if not pairs:
@@ -553,7 +668,7 @@ def render(
         "rebalances; exits stay D13's monthly rule:",
         "",
     ]
-    for arm in EARLY_ENTRY_SET:
+    for arm in ALL_ARMS:
         out.append(f"* **{arm.label}** — {arm.note}.")
     out += [
         "",
@@ -599,23 +714,35 @@ def render(
                 rows = [f for f in cell if f.base.floor == floor]
                 if rows:
                     out += [f"**{_floor_label(floor)}**", "", *_table(rows), ""]
-        if selected.get(universe):
-            out += [
-                f"**Walk-forward choice ({title})**: on the selection window the code "
-                f"(`backtest.verdict.run_walk_forward`, ₹1 cr floor first) chose "
-                f"**{selected[universe]}**; its verification-window row is in the table above, "
-                "read after the choice was frozen.",
-                "",
-            ]
-        elif any(f.base.universe == universe and f.base.window == "wf-verification" for f in facts):
+        chosen = {fam: selected.get(f"{universe}/{fam}", "") for fam in FAMILIES}
+        for fam, pick in chosen.items():
+            if pick:
+                out += [
+                    f"**Walk-forward choice ({title}, {fam} family)**: on the selection window "
+                    f"the code (`backtest.verdict.run_walk_forward`, ₹1 cr floor first) chose "
+                    f"**{pick}**; its verification-window row is in the table above, read after "
+                    "the choice was frozen.",
+                    "",
+                ]
+        if not any(chosen.values()) and any(
+            f.base.universe == universe and f.base.window == "wf-verification" for f in facts
+        ):
             out += [
                 f"**Walk-forward ({title})**: no selection window — the PIT NIFTY 500 membership "
                 "history opens 2016-10-24, after the selection window opens. These rows are "
                 "attribution only; the walk-forward choice on record is the floor-only one.",
                 "",
             ]
-    out += scorecard([f.base for f in facts], EARLY_ENTRY_SET)
-    out += decision(facts, selected.get("turnover_floor", ""))
+    out += scorecard([f.base for f in facts], ALL_ARMS)
+    out += decision(facts, selected.get("turnover_floor/early-entry", ""))
+    if any(f.base.label in {a.label for a in SECTOR_ORDER_SET[1:]} for f in facts):
+        out += sector_table(facts)
+        out += decision(
+            facts,
+            selected.get("turnover_floor/sector-order", ""),
+            family=SECTOR_ORDER_SET,
+            title="Decision rule for arm S (pre-registered §8, evaluated in code)",
+        )
     out += list(live)
     out += [MARKER, hand_written.strip("\n"), ""]
     return "\n".join(out)
@@ -637,12 +764,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         facts: list[EntryFacts] = []
         manifests: dict[str, dict[str, Any]] = {}
         selected: dict[str, str] = {}
+        seen: dict[tuple[str, str, Decimal, str], str] = {}
         for run_dir in args.run_dirs:
             manifest = _load(run_dir / "manifest.json")
             manifests[run_dir.name] = manifest
             results = _load(run_dir / "results.json")
-            selected[manifest["universe"]] = results.get("selected", "")
-            facts.extend(collect(run_dir, lake))
+            family = next(
+                (
+                    name
+                    for name, arms in FAMILIES.items()
+                    if [a.label for a in arms] == manifest["arms"]
+                ),
+                "early-entry",
+            )
+            selected[f"{manifest['universe']}/{family}"] = results.get("selected", "")
+            for fact in collect(run_dir, lake):
+                f = fact.base
+                key = (f.universe, f.window, f.floor, f.label)
+                if key in seen:
+                    # D13 sits in both families' directories (copied, §8): the same run, once.
+                    if seen[key] != f.replay_digest:
+                        raise ValueError(f"two different runs for {key}")
+                    continue
+                seen[key] = f.replay_digest
+                facts.append(fact)
         live = this_time(
             lake,
             [
