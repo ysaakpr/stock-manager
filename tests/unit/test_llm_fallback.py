@@ -422,8 +422,8 @@ def test_bedrock_research_runs_on_our_own_search_layer_with_the_cli_behind_it(
     )
     fetcher = _desk_fetcher(LlmProvider.BEDROCK, settings, tmp_path)
     assert isinstance(fetcher, BedrockWebFetcher)
-    assert RESEARCH_MODEL == "claude-sonnet-5-5"
-    assert fetcher.name == "bedrock+websearch:claude-sonnet-5-5"
+    assert RESEARCH_MODEL == "gpt-5-6-luna"  # Amendment 6 (h)
+    assert fetcher.name == "bedrock+websearch:gpt-5-6-luna"
     assert isinstance(fetcher._backup, ClaudeWebFetcher)
     assert fetcher._backup.name == "claude_cli:claude-sonnet-5-5"  # the backup on Sonnet too
     # The tool results live in their own store, never in the desk's (a nested lock would hang).
@@ -470,7 +470,8 @@ def test_bedrock_research_stays_on_the_cli_when_asked_or_when_it_cannot_run(
     # A desk on the Claude CLI always researches there; a stub desk never researches live.
     cli = _settings(**bedrock, **_VENDOR_KEYS)
     on_cli = _desk_fetcher(LlmProvider.CLAUDE_CLI, cli, tmp_path)
-    assert isinstance(on_cli, ClaudeWebFetcher) and on_cli.name == f"claude_cli:{RESEARCH_MODEL}"
+    # The CLI cannot run Luna: its fetcher runs the route's CLI stand-in, Sonnet 5.5.
+    assert isinstance(on_cli, ClaudeWebFetcher) and on_cli.name == "claude_cli:claude-sonnet-5-5"
     assert isinstance(_desk_fetcher(LlmProvider.STUB, cli, tmp_path), fm_world.NoLiveFetcher)
 
 

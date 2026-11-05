@@ -758,11 +758,12 @@ def test_the_m17_schemas_keep_every_field_type_and_requirement() -> None:
 
 
 def test_the_model_map_routes_every_roster_model_and_its_cli_backup() -> None:
-    """Amendment 5, with 6 (f): decisions on Opus 5.5, digests and research on Sonnet 5.5, all over
-    bedrock-runtime's Global inference profile, each falling back to itself on the Claude CLI —
-    and DeepSeek V3.2 stays routed (Chat Completions, Sonnet 5.5 as its CLI stand-in) as
-    capability the roster does not use."""
+    """Amendment 5, with 6 (f) and (h): decisions on Opus 5.5 over bedrock-runtime's Global
+    inference profile, falling back to itself on the Claude CLI; digests and research on GPT-5.6
+    Luna over bedrock-runtime's OpenAI-compatible API, then Sonnet 5.5 on Bedrock, then Sonnet 5.5
+    on the CLI — and DeepSeek V3.2 stays routed as capability the roster does not use."""
     from analyst.fundmanager.mandate import load_roster
+    from analyst.llm.openai_chat import ChatEndpoint
 
     models = load_bedrock_models()
     roster = load_roster()
@@ -770,13 +771,16 @@ def test_the_model_map_routes_every_roster_model_and_its_cli_backup() -> None:
         decision = models.route(book.models.decision)
         assert decision.adapter is BedrockAdapter.ANTHROPIC_RUNTIME
         assert decision.bedrock_id == "global.anthropic.claude-opus-5-5"
+        assert models.backup_model(book.models.decision) == book.models.decision
         for name in (book.models.digest, book.models.research):
             route = models.route(name)
-            assert route.adapter is BedrockAdapter.ANTHROPIC_RUNTIME
-            assert route.bedrock_id == "global.anthropic.claude-sonnet-5-5"
-        for name in (book.models.decision, book.models.digest, book.models.research):
-            assert models.route(name).adapter.is_claude
-            assert models.backup_model(name) == name
+            assert route.adapter is BedrockAdapter.OPENAI_CHAT
+            assert route.bedrock_id == "global.openai.gpt-5.6-luna"
+            assert route.chat_endpoint is ChatEndpoint.RUNTIME_OPENAI
+            assert route.bedrock_fallback_model == "claude-sonnet-5-5"
+            assert models.backup_model(name) == "claude-sonnet-5-5"
+        sonnet = models.route("claude-sonnet-5-5")
+        assert sonnet.bedrock_id == "global.anthropic.claude-sonnet-5-5"
     deepseek = models.route("deepseek-v3-2")
     assert deepseek.adapter is BedrockAdapter.OPENAI_CHAT
     assert deepseek.bedrock_id == "deepseek.v3.2"

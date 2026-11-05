@@ -43,8 +43,8 @@ books:
       flagged_surveillance: [ASM]
     models: &models                                  # per role (Amendment 5); keys of bedrock_models.yaml
       decision: claude-opus-5-5                      # manager rounds, Bedrock (CLI backup: itself)
-      digest: claude-sonnet-5-5                      # Commons digests, Bedrock runtime (CLI backup: itself)
-      research: claude-sonnet-5-5                    # web research tool loop, Bedrock + analyst.websearch
+      digest: gpt-5-6-luna                           # Commons digests (Amendment 6 h): Luna on the Global profile; then Sonnet 5.5 on Bedrock, then on the CLI
+      research: gpt-5-6-luna                         # web research tool loop (Amendment 6 h), Bedrock + analyst.websearch; same fallback chain
     prompt_path: analyst/fundmanager/prompts/manager.md
     rounds: &rounds
       max_isins: 12

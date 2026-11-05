@@ -384,17 +384,13 @@ def responses(output: list[dict[str, Any]], *, status: str = "completed") -> htt
     )
 
 
-def test_luna_is_routed_to_runtime_openai_and_named_by_no_role() -> None:
+def test_luna_is_routed_to_runtime_openai() -> None:
     from analyst.llm.openai_chat import ChatEndpoint
 
     route = load_bedrock_models().route(LUNA)
     assert route.bedrock_id == "global.openai.gpt-5.6-luna"
     assert route.chat_endpoint is ChatEndpoint.RUNTIME_OPENAI
     assert load_bedrock_models().backup_model(LUNA) == "claude-sonnet-5-5"
-    for book in load_roster().books:
-        models = getattr(book, "models", None)
-        if models is not None:
-            assert LUNA not in (models.decision, models.digest, models.research)
 
 
 def test_a_luna_call_goes_to_runtime_chat_completions_with_its_effort() -> None:
@@ -598,20 +594,18 @@ def test_the_map_refuses_a_non_claude_model_without_a_claude_backup(
 
 
 def test_the_roster_names_each_roles_model_and_each_is_routed() -> None:
-    """A model change is the roster's (config only): Amendment 5's three roles, the
-    pre-registered models (Opus decisions, Sonnet digests and research).
-
-    Every role is a Claude model, so a desk on the Claude CLI (before the deploy, or rolled back)
-    runs the roster's own models and a Bedrock call that falls back is asked of the same model.
-    DeepSeek is routed but named by no role: a non-Claude role would need a CLI stand-in again.
-    """
+    """A model change is the roster's (config only). Amendment 6 (h): Opus decides, GPT-5.6 Luna
+    digests and researches. Luna is not a Claude model, so its CLI stand-in is Sonnet 5.5 (and
+    Sonnet 5.5 on Bedrock is asked first); Opus falls back to itself. DeepSeek is named by no
+    role."""
     models = load_bedrock_models()
     for book in load_roster().primaries:
         roles = (book.models.decision, book.models.digest, book.models.research)
-        assert roles == ("claude-opus-5-5", "claude-sonnet-5-5", "claude-sonnet-5-5")
-        for name in roles:
-            assert models.route(name).adapter.is_claude
-            assert models.backup_model(name) == name
+        assert roles == ("claude-opus-5-5", LUNA, LUNA)
+        assert models.route(book.models.decision).adapter.is_claude
+        assert models.backup_model(book.models.decision) == book.models.decision
+        assert models.backup_model(LUNA) == "claude-sonnet-5-5"
+        assert models.route(LUNA).bedrock_fallback_model == "claude-sonnet-5-5"
         assert DEEPSEEK not in roles
 
 
