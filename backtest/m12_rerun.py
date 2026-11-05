@@ -67,6 +67,7 @@ from backtest.sweep import (
     ARMS,
     D13_PAPER_BASELINE,
     DURATION_ARMS,
+    EARLY_ENTRY_ARMS,
     HIGH_FLOOR,
     LOW_FLOOR,
     PER_STOCK_ARMS,
@@ -82,6 +83,7 @@ from dataplatform.logging import get_logger
 
 __all__ = [
     "ARM_SETS",
+    "EARLY_ENTRY_SET",
     "LONG",
     "PER_STOCK_SET",
     "REGIME_DAILY_SET",
@@ -147,6 +149,9 @@ REGIME_DAILY_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *REGIME_DAILY_ARMS)
 #: The MA-timing study's arm set: D13 beside D13 with a 30- and a 50-session regime average.
 REGIME_LENGTH_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *REGIME_LENGTH_ARMS)
 
+#: M14.9's arm set: D13 beside its pre-registered early re-entry variants.
+EARLY_ENTRY_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *EARLY_ENTRY_ARMS)
+
 #: M14.6's arm set: D13 beside its per-stock entry variants (``backtest.sweep.PER_STOCK_ARMS``).
 PER_STOCK_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *PER_STOCK_ARMS)
 
@@ -186,6 +191,7 @@ ARM_SETS: Mapping[str, tuple[Arm, ...]] = _ArmSets(
         "regime-daily": REGIME_DAILY_SET,
         "regime-length": REGIME_LENGTH_SET,
         "per-stock": PER_STOCK_SET,
+        "early-entry": EARLY_ENTRY_SET,
     },
     {"m16": m16_arms, "m16-fundamentals": m16_fundamentals_arms},
 )
@@ -465,6 +471,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         help="m12: the M12 review's arms (default); regime-daily: D13 and its M14.5 variants; "
         "regime-length: D13 with a 30/50-session regime MA; "
         "per-stock: D13 and its M14.6 per-stock entry variants; "
+        "early-entry: D13 and its M14.9 early re-entry variants; "
         "m16: baselines, A1, A2, A3, A7; m16-fundamentals: D13, M10.7, A4, A5 "
         "(six-year and wf-verification only)",
     )

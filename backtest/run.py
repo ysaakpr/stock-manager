@@ -89,6 +89,7 @@ from backtest.book_actions import (
     current_signal_split_factors,
     store_book_actions_unless,
 )
+from backtest.breadth import BreadthSeries
 from backtest.cap_tiers import LiquidityRankTiers, TierSleeve, describe_sleeves
 from backtest.cash_interest import (
     CashInterestAccrual,
@@ -96,6 +97,13 @@ from backtest.cash_interest import (
     RepoRateSchedule,
     current_cash_interest,
     load_repo_rate_schedule,
+)
+from backtest.policies.early_entry import (
+    TURN_MA_DAYS,
+    TURN_MA_LAG,
+    TURN_RETURN_SESSIONS,
+    BreadthReading,
+    RegimeTrendReading,
 )
 from backtest.policies.earnings_surprise import CONCEPTS as EARNINGS_SURPRISE_CONCEPTS
 from backtest.policies.earnings_surprise import EarningsSurprisePanel, NoSignal
@@ -867,6 +875,21 @@ class _AdjustedCloseSource:
         cached = self._closes.get(session)
         if cached is not None:
             return cached
+        closes = self.uncached(session)
+        self._closes[session] = closes
+        return closes
+
+    def bulk(self, sessions: Sequence[date]) -> _BulkAdjustedCloses:
+        """The same closes for a walk over ``sessions`` in calendar order, read in blocks (M14.9).
+
+        One :meth:`__call__` per session scans every L2 partition per session; a breadth pass over
+        a decade asks for every session once, so it reads L2 a block of sessions at a time and
+        keeps nothing it has passed.
+        """
+        return _BulkAdjustedCloses(self._service, self._reader, sessions, self._l1_isins_only)
+
+    def uncached(self, session: date) -> dict[str, Decimal]:
+        """The session's closes, exactly as a call answers them, without keeping them (M14.9)."""
         # NSE-primary run: pin every name's primary to the venue the reader serves, so
         # cross_section returns that venue's L2 series and skips the L1 liquidity scan it would
         # otherwise run to pick one. The ISIN universe is L1's own priced NSE names for the session.
@@ -884,7 +907,55 @@ class _AdjustedCloseSource:
                 if not self._l1_isins_only or row.isin in raw
             }
         )
-        self._closes[session] = closes
+        return closes
+
+
+class _BulkAdjustedCloses:
+    """:class:`_AdjustedCloseSource`'s answer for each session of a forward walk, read in blocks.
+
+    Same rule as the per-session source: raw L1 NSE closes as the base, the L2 adjusted close
+    overlaid where L2 has one. A name L1 printed that session is pinned to NSE (falling back to
+    the other venue's bar when NSE's is missing, as ``canonical_daily`` does); a name L2 answers
+    for that L1 did not print (a stitched successor) takes its only venue's bar. A name with bars
+    on both venues and no L1 print has no primary — the per-session cross-section refuses such a
+    session outright — and is left out here. Equality with the per-session source is checked on
+    the live lake by the M14.9 smoke run (report provenance).
+    """
+
+    _BLOCK: Final = 60
+
+    def __init__(
+        self,
+        service: QueryService,
+        reader: _L1Reader,
+        sessions: Sequence[date],
+        l1_isins_only: bool,
+    ) -> None:
+        self._service = service
+        self._reader = reader
+        self._sessions = list(sessions)
+        self._l1_isins_only = l1_isins_only
+        self._block: dict[date, dict[str, dict[IdentityExchange, Decimal]]] = {}
+        self._block_end: date | None = None
+
+    def __call__(self, session: date) -> dict[str, Decimal]:
+        if self._block_end is None or session > self._block_end or session not in self._block:
+            index = self._sessions.index(session)
+            last = self._sessions[min(len(self._sessions) - 1, index + self._BLOCK - 1)]
+            self._block = self._service.adjusted_closes_between(session, last)
+            self._block_end = last
+        raw = self._reader.closes_on(session)
+        closes = dict(raw)
+        for isin, venues in self._block.get(session, {}).items():
+            if isin in raw:
+                close = venues.get(IdentityExchange.NSE)
+                if close is None:
+                    close = next(iter(venues.values()))
+            elif self._l1_isins_only or len(venues) != 1:
+                continue
+            else:
+                (close,) = venues.values()
+            closes[isin] = close
         return closes
 
 
@@ -1293,6 +1364,53 @@ class _RegimeSource:
             index_level=current, moving_average=moving_average, knowable_date=as_of
         )
 
+    def _mean_ending(self, end: int, days: int) -> Decimal:
+        """The mean of the ``days`` published levels ending at index ``end`` (inclusive)."""
+        if end - days + 1 < 0:
+            raise RegimeSourceError(
+                f"the published {self._slug!r} series has {end + 1} points by "
+                f"{self._as_of[end].isoformat()}, short of a {days}-session mean"
+            )
+        return sum(self._levels[end - days + 1 : end + 1], _ZERO) / Decimal(days)
+
+    def trend(self, as_of: date) -> RegimeTrendReading:
+        """M14.9: the regime index's trend as of ``as_of`` — what the V1/V2 triggers read.
+
+        The streak of closes at or above their own regime MA ending at ``as_of``, the
+        :data:`~backtest.policies.early_entry.TURN_MA_DAYS`-session mean today and
+        :data:`~backtest.policies.early_entry.TURN_MA_LAG` published sessions earlier, and the
+        close :data:`~backtest.policies.early_entry.TURN_RETURN_SESSIONS` sessions earlier. Every
+        figure is struck over points knowable by ``as_of`` (the same cut :meth:`reading` makes),
+        and the regime MA is :meth:`reading`'s own.
+        """
+        reading = self.reading(as_of)
+        end = bisect_right(self._knowable, as_of) - 1
+        if self._as_of[end] != as_of:
+            raise RegimeSourceError(
+                f"the last {self._slug!r} point knowable by {as_of.isoformat()} is dated "
+                f"{self._as_of[end].isoformat()}, not the session itself"
+            )
+        streak = 0
+        index = end
+        while index - self._ma_days + 1 >= 0:
+            if self._levels[index] < self._mean_ending(index, self._ma_days):
+                break
+            streak += 1
+            index -= 1
+        lag_end = end - TURN_MA_LAG
+        level_lagged_at = end - TURN_RETURN_SESSIONS
+        if lag_end < 0 or level_lagged_at < 0:
+            raise RegimeSourceError(f"too few published points before {as_of.isoformat()}")
+        return RegimeTrendReading(
+            index_level=reading.index_level,
+            moving_average=reading.moving_average,
+            sessions_at_or_above=streak,
+            short_average=self._mean_ending(end, TURN_MA_DAYS),
+            short_average_lagged=self._mean_ending(lag_end, TURN_MA_DAYS),
+            level_lagged=self._levels[level_lagged_at],
+            knowable_date=as_of,
+        )
+
 
 # ── M9.5: the v2 momentum signal — 0-12 and 12-1 returns, plus a trailing volatility ─────────────
 
@@ -1382,6 +1500,10 @@ class _L1MomentumV2Data:
         # rebalances on whatever session the regime turns. Same lazy rule, so a run that never
         # asks pays nothing and its digest is unchanged.
         self._calendar: frozenset[date] = frozenset(self._sessions)
+        #: M14.9 V4: the breadth series over the replay's span, built on the first read.
+        self._replay_span = (min(sessions), max(sessions))
+        self._breadth: BreadthSeries | None = None
+        self._bulk_closes: _BulkAdjustedCloses | None = None
 
     def is_rebalance(self, session: date) -> bool:
         return session in self._rebalance
@@ -1437,6 +1559,51 @@ class _L1MomentumV2Data:
             (reading,),
             knowable_date=lambda r: r.knowable_date,
         )
+
+    def regime_trend(self, as_of: date) -> Dataset[RegimeTrendReading]:
+        """M14.9 V1/V2: the regime index's trend as of ``as_of`` (read only by those triggers)."""
+        reading = self._regime_source.trend(as_of)
+        return Dataset.declaring(
+            f"regime_trend@{as_of.isoformat()}",
+            (reading,),
+            knowable_date=lambda r: r.knowable_date,
+        )
+
+    def breadth(self, as_of: date) -> Dataset[BreadthReading]:
+        """M14.9 V4: the universe's breadth as of ``as_of``, from one pass built on first read.
+
+        The universe is this source's own screen as of the month's first session, over the names
+        L1 priced that session; the closes are the signal's own (L2 adjusted over raw, uncached).
+        A run without the breadth trigger never calls this, so it pays nothing for it.
+        """
+        if self._breadth is None:
+            self._breadth = BreadthSeries(
+                calendar=self._sessions,
+                first=self._replay_span[0],
+                last=self._replay_span[1],
+                closes=self._breadth_closes,
+                universe=self._breadth_universe,
+            )
+        reading = self._breadth.reading(as_of)
+        return Dataset.declaring(
+            f"breadth@{as_of.isoformat()}",
+            (reading,),
+            knowable_date=lambda r: r.knowable_date,
+        )
+
+    def _breadth_closes(self, session: date) -> Mapping[str, Decimal]:
+        closes = self._signal_closes
+        if isinstance(closes, _AdjustedCloseSource):
+            if self._bulk_closes is None:
+                self._bulk_closes = closes.bulk(self._sessions)
+            return self._bulk_closes(session)
+        return closes(session)
+
+    def _breadth_universe(self, rebalance: date) -> frozenset[str]:
+        priced = self._reader.closes_on(rebalance)
+        if self._universe_filter is None:
+            return frozenset(priced)
+        return frozenset(self._universe_filter.constrain(rebalance, priced))
 
     def repo_rate(self, as_of: date) -> Dataset[RepoRateReading]:
         """A1: the repo rate in force on ``as_of``, knowable from the day it took effect."""

@@ -76,6 +76,13 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
   ``daily_regime_park`` makes a risk-off session park the whole book as well. Off by default and
   absent from the parameters' ``repr`` while off, so D13's fingerprint is unchanged.
 
+* **Early re-entry** (``early_entry``) — M14.9, research variants on D13 asking whether a parked
+  book should come back before the next monthly rebalance when the trend *turns*, not only when the
+  index crosses its average (:mod:`backtest.policies.early_entry`): a confirmed cross, a momentum
+  turn, a half-size scale-in, or a breadth turn. Read only while the book is parked and only off a
+  rebalance session; a re-entry is a full rebalance on that session (at half exposure for the
+  scale-in), and exits stay the monthly rule. Off by default and out of ``repr`` while off.
+
 With **all six toggles off** the policy reproduces the naive top-N decision exactly — that is the
 "naive" baseline the increment report is struck against, and a unit test pins the parity. Every knob
 is a stated parameter, echoed verbatim into the report, so nothing here is silently tuned.
@@ -101,6 +108,15 @@ from typing import Final, Protocol, runtime_checkable
 from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from backtest.policies.early_entry import (
+    SCALE_IN_FRACTION,
+    BreadthData,
+    EarlyEntry,
+    RegimeTrendData,
+    breadth_turn,
+    confirmed_cross,
+    momentum_turn,
+)
 from backtest.policies.industry_gate import apply_industry_gate
 from backtest.policies.momentum_v2_overlays import (
     AbsoluteMomentumData,
@@ -120,6 +136,10 @@ from execution.broker import Exchange, Holding, OrderRequest, Position, Side
 __all__ = [
     "D13_ABS_MOM",
     "D13_DAILY_SLOT_FILL",
+    "D13_EARLY_BREADTH_TURN",
+    "D13_EARLY_CONFIRMED_CROSS",
+    "D13_EARLY_MOMENTUM_TURN",
+    "D13_EARLY_SCALE_IN",
     "D13_INDUSTRY_GATE",
     "D13_PER_STOCK_CLOCK",
     "D13_PER_STOCK_DAILY_GATE",
@@ -270,6 +290,11 @@ class MomentumV2Parameters:
       daily regime switches need ``review_sessions`` and ``regime_filter``. Defined on D13's own
       toggles only: none combines with the M14.5 daily regime checks, the vol target or an M16
       overlay. Off by default and out of ``repr`` while off.
+    * ``early_entry`` — M14.9: which pre-registered trigger may re-enter a parked book off a
+      rebalance session (:class:`~backtest.policies.early_entry.EarlyEntry`), or ``None`` (D13).
+      Requires ``regime_filter``; defined on D13's own toggles, so it never combines with the
+      M14.5 daily regime checks, the M14.6 per-stock switches or the vol target. Off by default
+      and out of ``repr`` while off.
 
     With ``use_12_1``, ``sell_band``, ``regime_filter``, ``vol_scaled``, ``redeploy_next_session``
     and ``vol_target_annual`` all off/``None`` the policy is the naive top-N policy exactly. Every
@@ -300,6 +325,7 @@ class MomentumV2Parameters:
     review_sessions: int | None = field(default=None, repr=False)
     daily_regime_gate: bool = field(default=False, repr=False)
     daily_regime_park: bool = field(default=False, repr=False)
+    early_entry: EarlyEntry | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.top_n <= 0:
@@ -340,6 +366,27 @@ class MomentumV2Parameters:
         if self.regime_daily_band != _ZERO and not daily:
             raise ValueError("regime_daily_band applies only to a daily regime check")
         self._check_per_stock()
+        self._check_early_entry()
+
+    def _check_early_entry(self) -> None:
+        """M14.9: an early-entry trigger extends D13's regime filter and nothing else."""
+        if self.early_entry is None:
+            return
+        if not isinstance(self.early_entry, EarlyEntry):
+            raise TypeError("early_entry must be an EarlyEntry")
+        if not self.regime_filter:
+            raise ValueError("early_entry re-enters a regime-parked book; turn on regime_filter")
+        clashing = [
+            name
+            for name in ("regime_daily_reentry", "regime_daily_exit", "daily_slot_fill")
+            if getattr(self, name)
+        ]
+        if self.vol_target_annual is not None:
+            clashing.append("vol_target_annual")
+        if clashing:
+            raise ValueError(
+                f"early_entry is defined on D13's own toggles; turn off {', '.join(clashing)}"
+            )
 
     def _check_per_stock(self) -> None:
         """M14.6: the per-stock switches' own dependencies, and what they never combine with."""
@@ -446,6 +493,19 @@ D13_PER_STOCK_DAILY_PARK: Final = replace(D13_PER_STOCK_DAILY_GATE, daily_regime
 #: V4 — V2 with no regime filter at all.
 D13_PER_STOCK_NO_REGIME: Final = replace(D13_PER_STOCK_CLOCK, regime_filter=False)
 
+#: M14.9's early-entry variants on D13 — research configurations only; paper trading runs D13.
+#: Each is D13 with one pre-registered trigger (:mod:`backtest.policies.early_entry`).
+D13_EARLY_CONFIRMED_CROSS: Final = replace(
+    PAPER_RATIFIED_2026_09_06, early_entry=EarlyEntry.CONFIRMED_CROSS
+)
+D13_EARLY_MOMENTUM_TURN: Final = replace(
+    PAPER_RATIFIED_2026_09_06, early_entry=EarlyEntry.MOMENTUM_TURN
+)
+D13_EARLY_SCALE_IN: Final = replace(PAPER_RATIFIED_2026_09_06, early_entry=EarlyEntry.SCALE_IN)
+D13_EARLY_BREADTH_TURN: Final = replace(
+    PAPER_RATIFIED_2026_09_06, early_entry=EarlyEntry.BREADTH_TURN
+)
+
 
 @runtime_checkable
 class MomentumV2Data(Protocol):
@@ -525,6 +585,18 @@ class MomentumV2Policy:
                 raise TypeError(
                     f"{switch} is on but the data source does not serve {seam.__name__}"
                 )
+        # M14.9: the trend triggers read the regime index's trend, the breadth trigger the
+        # universe's breadth; the scale-in reads only the ordinary regime reading.
+        early = self._params.early_entry
+        early_seam: type | None = None
+        if early in (EarlyEntry.CONFIRMED_CROSS, EarlyEntry.MOMENTUM_TURN):
+            early_seam = RegimeTrendData
+        elif early is EarlyEntry.BREADTH_TURN:
+            early_seam = BreadthData
+        if early_seam is not None and not isinstance(data, early_seam):
+            raise TypeError(
+                f"early_entry={early} but the data source does not serve {early_seam.__name__}"
+            )
         # The rails A8 will clear this policy's orders against. With them, no buy is sized past the
         # per-order ceiling (``backtest.policies.sizing.account_order_ceiling``): a buy the rail is
         # bound to refuse leaves its cash idle, the next rebalance spreads the larger idle balance
@@ -610,6 +682,10 @@ class MomentumV2Policy:
             daily = self._daily_regime(ctx)
             if daily is not None:
                 return daily
+        if self._params.early_entry is not None and self._parked:
+            early = self._early_entry(ctx)
+            if early is not None:
+                return early
         if self._pending is not None:
             pending, self._pending = self._pending, None
             return self._redeploy(ctx, pending)
@@ -637,6 +713,71 @@ class MomentumV2Policy:
             self._pending = None  # nothing is redeployed into a basket being parked
             return self._park(ctx, reading)
         return None
+
+    def _early_entry(self, ctx: SessionContext) -> SessionDecision | None:
+        """M14.9: a parked book's pre-registered early trigger, read off a rebalance session.
+
+        Returns the re-entry rebalance when the trigger fires, else ``None`` (the session falls
+        through to D13's heartbeat). The reading is admitted through the PIT guard. A re-entry
+        clears :attr:`parked`, so a parked spell re-enters at most once; the next risk-off
+        rebalance parks the book again exactly as D13 does.
+        """
+        mode = self._params.early_entry
+        cap = _ONE
+        item: EvidenceItem
+        if mode is EarlyEntry.BREADTH_TURN:
+            assert isinstance(self._data, BreadthData)
+            (breadth,) = ctx.pit.admit(self._data.breadth(ctx.session))
+            if not breadth_turn(breadth):
+                return None
+            item = EvidenceItem(
+                kind=EvidenceKind.PRICE,
+                source="L2",
+                label="early_entry_breadth_turn",
+                as_of=ctx.session,
+                value=breadth.share_above,
+                detail={
+                    "share_above_lagged": str(breadth.share_above_lagged),
+                    "names_counted": str(breadth.names_counted),
+                },
+                text="M14.9 breadth turn: a parked book re-enters before the monthly rebalance",
+            )
+        elif mode is EarlyEntry.SCALE_IN:
+            (reading,) = ctx.pit.admit(self._data.regime(ctx.session))
+            if not reading.risk_on:
+                return None
+            cap = SCALE_IN_FRACTION
+            item = EvidenceItem(
+                kind=EvidenceKind.PRICE,
+                source="benchmark",
+                label="early_entry_scale_in",
+                as_of=ctx.session,
+                value=reading.index_level,
+                detail={"moving_average": str(reading.moving_average), "exposure": str(cap)},
+                text="M14.9 scale-in: the first close at or above the MA deploys half the basket",
+            )
+        else:
+            assert isinstance(self._data, RegimeTrendData)
+            (trend,) = ctx.pit.admit(self._data.regime_trend(ctx.session))
+            fires = confirmed_cross if mode is EarlyEntry.CONFIRMED_CROSS else momentum_turn
+            if not fires(trend):
+                return None
+            item = EvidenceItem(
+                kind=EvidenceKind.PRICE,
+                source="benchmark",
+                label=f"early_entry_{mode}",
+                as_of=ctx.session,
+                value=trend.index_level,
+                detail={
+                    "moving_average": str(trend.moving_average),
+                    "sessions_at_or_above": str(trend.sessions_at_or_above),
+                    "short_average": str(trend.short_average),
+                    "short_average_lagged": str(trend.short_average_lagged),
+                    "level_lagged": str(trend.level_lagged),
+                },
+                text=f"M14.9 {mode}: a parked book re-enters before the monthly rebalance",
+            )
+        return self._rebalance(ctx, early=item, exposure_cap=cap)
 
     # ── M14.6: per-stock entry and review ────────────────────────────────────────────────────────
 
@@ -909,13 +1050,25 @@ class MomentumV2Policy:
         )
         return SessionDecision(evidence=evidence)
 
-    def _rebalance(self, ctx: SessionContext) -> SessionDecision:
-        """Rank the admitted candidates, apply the toggled overlays, and stage the orders."""
+    def _rebalance(
+        self,
+        ctx: SessionContext,
+        *,
+        early: EvidenceItem | None = None,
+        exposure_cap: Decimal = _ONE,
+    ) -> SessionDecision:
+        """Rank the admitted candidates, apply the toggled overlays, and stage the orders.
+
+        ``early`` is an M14.9 trigger's reading: the trigger has already decided to re-enter, so
+        the regime is not re-read (the momentum and breadth turns may fire below the MA by
+        design), and the reading is filed with the decision. ``exposure_cap`` below one (the
+        scale-in) caps the basket, and tomorrow's redeploy, at that share of the book's capital.
+        """
         # Regime filter: read the regime through the PIT guard *first*. When it is risk-off, the
         # basket is not held at all — sell everything and park in the liquid sleeve (invariant #7:
         # the reading is admitted, so a future-dated regime trips the guard rather than leaking).
         self._pending = None
-        if self._params.regime_filter:
+        if self._params.regime_filter and early is None:
             (reading,) = ctx.pit.admit(self._data.regime(ctx.session))
             if not reading.risk_on:
                 return self._park(ctx, reading)
@@ -982,6 +1135,15 @@ class MomentumV2Policy:
         sells = self._sells(held, keep)
         # A1's cash slots cap the basket at the passing names' share of capital.
         exposure = _ONE if slots is None else sum(slots.values(), _ZERO)
+        if exposure_cap != _ONE:  # M14.9 scale-in: part of the basket now, the rest next month
+            exposure = exposure * exposure_cap
+            weights = self._weights_for(target) if slots is None else slots
+            slots = {
+                isin: (weight * exposure_cap).quantize(_WEIGHT_QUANTUM)
+                for isin, weight in weights.items()
+            }
+        if early is not None:
+            overlay_evidence.append(early)
         trims: list[tuple[OrderRequest, str]] = []
         if self._params.vol_target_annual is not None and target:
             vol_exposure = self._exposure(target)
