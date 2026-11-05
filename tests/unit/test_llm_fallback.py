@@ -116,7 +116,7 @@ def desk(primary: Any, backup: Backup) -> FallbackLLM:
 
 def ask(llm: Any) -> LLMResponse:
     response: LLMResponse = llm.complete(
-        ASK, model="claude-opus-5-5", tools=(VERDICT,), system=SYSTEM, max_tokens=2_000
+        ASK, model="claude-opus-5", tools=(VERDICT,), system=SYSTEM, max_tokens=2_000
     )
     return response
 
@@ -172,7 +172,7 @@ def test_a_provider_failure_falls_back_to_the_backup_with_the_identical_question
     assert len(backup.calls) == 1
     call = backup.calls[0]
     assert call["messages"] == ASK
-    assert call["model"] == "claude-opus-5-5"  # the roster's name, not the Bedrock id
+    assert call["model"] == "claude-opus-5"  # the caller's name, not the Bedrock id
     assert call["tools"] == [VERDICT]
     assert call["system"] == SYSTEM
     assert call["max_tokens"] == 2_000
@@ -226,7 +226,7 @@ def test_each_fallback_logs_a_warning_with_provider_reason_and_model() -> None:
     assert warning["provider"] == "bedrock"
     assert warning["backup"] == "claude_cli"
     assert warning["reason"] == "server_error"
-    assert warning["model"] == "claude-opus-5-5"
+    assert warning["model"] == "claude-opus-5"
     [answered] = [e for e in logs if e["event"] == "llm.fallback_answered"]
     assert answered["provider"] == "claude_cli" and answered["input_tokens"] == 900
     assert not [e for e in logs if e["log_level"] == "error"]
@@ -422,8 +422,8 @@ def test_bedrock_research_runs_on_our_own_search_layer_with_the_cli_behind_it(
     )
     fetcher = _desk_fetcher(LlmProvider.BEDROCK, settings, tmp_path)
     assert isinstance(fetcher, BedrockWebFetcher)
-    assert RESEARCH_MODEL == "claude-sonnet-5-5"
-    assert fetcher.name == "bedrock+websearch:claude-sonnet-5-5"
+    assert RESEARCH_MODEL == "gpt-5-6-luna"  # Amendment 6 (h)
+    assert fetcher.name == "bedrock+websearch:gpt-5-6-luna"
     assert isinstance(fetcher._backup, ClaudeWebFetcher)
     assert fetcher._backup.name == "claude_cli:claude-sonnet-5-5"  # the backup on Sonnet too
     # The tool results live in their own store, never in the desk's (a nested lock would hang).
@@ -470,8 +470,54 @@ def test_bedrock_research_stays_on_the_cli_when_asked_or_when_it_cannot_run(
     # A desk on the Claude CLI always researches there; a stub desk never researches live.
     cli = _settings(**bedrock, **_VENDOR_KEYS)
     on_cli = _desk_fetcher(LlmProvider.CLAUDE_CLI, cli, tmp_path)
-    assert isinstance(on_cli, ClaudeWebFetcher) and on_cli.name == f"claude_cli:{RESEARCH_MODEL}"
+    # The CLI cannot run Luna: its fetcher runs the route's CLI stand-in, Sonnet 5.5.
+    assert isinstance(on_cli, ClaudeWebFetcher) and on_cli.name == "claude_cli:claude-sonnet-5-5"
     assert isinstance(_desk_fetcher(LlmProvider.STUB, cli, tmp_path), fm_world.NoLiveFetcher)
+
+
+def test_luna_research_runs_its_cli_backup_on_sonnet(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Amendment 6 (h) prep: the CLI cannot run GPT-5.6 Luna, so every CLI web fetcher of a Luna
+    research role is asked for the route's `cli_fallback_model` (Sonnet 5.5), never for Luna."""
+    from analyst.commons.fetch import ClaudeWebFetcher
+    from analyst.websearch import BedrockWebFetcher
+
+    monkeypatch.setattr("shutil.which", lambda _: "/usr/bin/claude")
+    settings = _settings(
+        aws_bearer_token_bedrock=FAKE_KEY,
+        bedrock_region="us-east-1",
+        m17_web_research="websearch",
+        **_VENDOR_KEYS,
+    )
+    with ExitStack() as stack:
+        fetcher = fm_world._fetcher(
+            LlmProvider.BEDROCK,
+            settings=settings,
+            clock=FrozenClock(datetime(2026, 11, 5, 18, 0, tzinfo=IST)),
+            fetch_root=tmp_path / "commons" / "fetch",
+            session=date(2026, 11, 5),
+            ledger=None,
+            memory=True,
+            stack=stack,
+            research_model="gpt-5-6-luna",
+        )
+        assert isinstance(fetcher, BedrockWebFetcher)
+        assert fetcher.name == "bedrock+websearch:gpt-5-6-luna"
+        assert isinstance(fetcher._backup, ClaudeWebFetcher)
+        assert fetcher._backup.name == "claude_cli:claude-sonnet-5-5"
+        on_cli = fm_world._fetcher(
+            LlmProvider.CLAUDE_CLI,
+            settings=settings,
+            clock=FrozenClock(datetime(2026, 11, 5, 18, 0, tzinfo=IST)),
+            fetch_root=tmp_path / "commons" / "fetch",
+            session=date(2026, 11, 5),
+            ledger=None,
+            memory=True,
+            stack=stack,
+            research_model="gpt-5-6-luna",
+        )
+    assert isinstance(on_cli, ClaudeWebFetcher) and on_cli.name == "claude_cli:claude-sonnet-5-5"
 
 
 # ── usage: every call in token_usage, priced for whoever answered ─────────────────────────────────
@@ -545,11 +591,11 @@ def test_a_bedrock_call_is_recorded_with_its_provider_tokens_and_bedrock_price()
     [row] = [dict(zip(_COLUMNS, params, strict=True)) for params in conn.inserts]
     assert response.provider == "bedrock"
     assert row["provider"] == "bedrock"
-    assert row["model"] == "anthropic.claude-opus-5-5"
+    assert row["model"] == "anthropic.claude-opus-5"
     assert row["purpose"] == "m17_manager" and row["case_id"] == "FM-MOMENTUM-1"
     assert (row["tokens_in"], row["tokens_out"], row["cached_tokens"]) == (1_000_000, 100_000, 0)
-    # The Bedrock rate (in-region us-east-1): $4.40/MTok in, $22.00/MTok out — not first-party.
-    assert row["cost_usd"] == Decimal("4.40") + Decimal("2.20")
+    # The Bedrock rate (in-region us-east-1): $5.50/MTok in, $27.50/MTok out — not first-party.
+    assert row["cost_usd"] == Decimal("5.50") + Decimal("2.75")
     assert row["ts"] == NOW
 
 
@@ -559,7 +605,7 @@ def test_a_fallback_call_is_recorded_under_the_backup_that_answered_it() -> None
     [row] = [dict(zip(_COLUMNS, params, strict=True)) for params in conn.inserts]
     assert response.fallback is not None
     assert row["provider"] == "claude_cli"
-    assert row["model"] == "claude-opus-5-5"
+    assert row["model"] == "claude-opus-5"
     assert row["tokens_in"] == 950 and row["cached_tokens"] == 50
 
 

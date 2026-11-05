@@ -2,14 +2,18 @@
 
 Pre-registration §4 steps 3-4 and §8 Amendment 1 (d). The Claude CLI accepts one structured-output
 schema per call (`analyst.llm.claude_cli`), so a manager session is a sequence of calls, each with
-exactly one of the two tools defined here:
+exactly one of the two tools defined here. Since Amendment 6 (d) round 0 and every research round
+answer in the **same** research schema, so each research call can read the previous call's cached
+prefix (the schema is part of it); a research round reads only its requests and queries. One
+schema for every round, the final included, was built and refused by Bedrock ("The compiled
+grammar is too large"): the decision schema alone is at the structured-output grammar limit.
 
-- `RESEARCH_TOOL` (round 0 and every research round): holdings triage, at most ``max_isins``
-  deep-dive requests and at most ``max_queries`` web queries or URLs. The JSON Schema carries the
-  mandate's caps as ``maxItems``; :func:`parse_research` truncates an over-long answer anyway (a
-  stub or a lax provider can ignore the schema) and reports exactly what it dropped, so the runtime
-  can journal the truncation.
-- `DECISION_TOOL` (the final call): one decision per holding and per researched candidate, or the
+- `research_tool` (round 0 and every research round): holdings triage (read in round 0 only), at
+  most ``max_isins`` deep-dive requests and at most ``max_queries`` web queries or URLs. The JSON
+  Schema carries the mandate's caps as ``maxItems``; :func:`parse_research` truncates an over-long
+  answer anyway (a stub or a lax provider can ignore the schema) and reports exactly what it
+  dropped, so the runtime can journal the truncation.
+- `decision_tool` (the final call): one decision per holding and per researched candidate, or the
   whole-session ``NO_ACTION`` form with its reason.
 
 **Two layers of refusal**, kept apart on purpose:
@@ -55,12 +59,15 @@ from analyst.llm import ToolSpec
 
 __all__ = [
     "CANDIDATE_ACTIONS",
+    "DECISION_FIELDS",
     "DECISION_TOOL_NAME",
     "HOLDING_ACTIONS",
     "MAX_SHORT_CHARS",
     "MAX_TEXT_CHARS",
+    "REQUEST_FIELDS",
     "RESEARCH_TOOL_NAME",
     "SCHEMA_VERSION",
+    "TRIAGE_FIELDS",
     "Action",
     "Adjustment",
     "BaseRateQuote",
@@ -84,6 +91,7 @@ __all__ = [
     "decision_schema",
     "decision_tool",
     "length_rule",
+    "off_round_fields",
     "parse_decisions",
     "parse_research",
     "research_schema",
@@ -94,9 +102,13 @@ __all__ = [
 
 #: Versioned identity of both schemas and the shape rules here. In `schema_bytes`, so a change is a
 #: new `mandate_hash` (pre-registration §7).
-SCHEMA_VERSION: Final = "m17-fm-schema/1"
+SCHEMA_VERSION: Final = "m17-fm-schema/2"
 RESEARCH_TOOL_NAME: Final = "research_request"
 DECISION_TOOL_NAME: Final = "manager_decisions"
+#: Which fields of its schema each round reads (Amendment 6 (d)); every other field is not read.
+TRIAGE_FIELDS: Final = ("holdings",)
+REQUEST_FIELDS: Final = ("requests", "queries")
+DECISION_FIELDS: Final = ("no_action", "no_action_reason", "decisions")
 
 _MAX_TEXT: Final = 2_000
 _MAX_SHORT: Final = 500
@@ -427,7 +439,8 @@ def research_schema(limits: RoundLimits, *, triage: bool = True) -> dict[str, An
 
 
 def research_tool(limits: RoundLimits, *, triage: bool = True) -> ToolSpec:
-    """Round 0's research tool (``triage``), or the research rounds' follow-up without triage."""
+    """The research tool of round 0 and every research round (``triage``, Amendment 6 (d)). The
+    follow-up without triage (``triage=False``) is Amendment 5 (h)'s and no round sends it now."""
     if not triage:
         return ToolSpec(
             name=RESEARCH_TOOL_NAME,
@@ -493,10 +506,31 @@ def _validation_message(exc: ValidationError) -> str:
 _LENGTH_ERRORS: Final = frozenset({"string_too_long", "string_too_short", "too_long", "too_short"})
 
 
+def _pick(arguments: Mapping[str, Any], fields: Sequence[str]) -> dict[str, Any]:
+    """The answer's values for ``fields`` only. An answer in the one schema (Amendment 6 (d))
+    carries every round's fields; a round reads its own and never validates the others, so a
+    field this round does not ask for can neither be acted on nor cost the session its repair. A
+    key that no round defines is not the schema's, and is kept so that validation refuses it."""
+    known = (*TRIAGE_FIELDS, *REQUEST_FIELDS, *DECISION_FIELDS)
+    # A key no round defines is kept, so the model's own `extra="forbid"` refuses it.
+    return {k: v for k, v in arguments.items() if k in fields or k not in known}
+
+
+def off_round_fields(arguments: Mapping[str, Any], fields: Sequence[str]) -> tuple[str, ...]:
+    """The fields outside ``fields`` that an answer filled (non-empty, not false or null): what a
+    round did not ask for and does not read, for the log."""
+    return tuple(
+        k for k, v in arguments.items() if k not in fields and v not in (None, False, [], (), "")
+    )
+
+
 def parse_research(
-    arguments: Mapping[str, Any], limits: RoundLimits
+    arguments: Mapping[str, Any], limits: RoundLimits, *, triage: bool = True
 ) -> tuple[ResearchRequest, ResearchTruncation]:
     """Validate a research request and cut it to the mandate's caps.
+
+    ``triage`` (round 0) reads the holdings triage too; a research round (``triage=False``) reads
+    only the requests and queries. Any other field of the answer is not read (`_pick`).
 
     What it does: refuses a wrong shape (:class:`MalformedOutputError`); drops repeated ISINs and
     repeated (kind, target) queries, keeping the first; then keeps the first ``max_isins`` requests
@@ -504,8 +538,9 @@ def parse_research(
     What it never does: reorder what it keeps, or refuse a request merely for asking too much —
     over-asking is truncated and journaled, not punished with a repair.
     """
+    wanted = (*TRIAGE_FIELDS, *REQUEST_FIELDS) if triage else REQUEST_FIELDS
     try:
-        request = ResearchRequest.model_validate(dict(arguments))
+        request = ResearchRequest.model_validate(_pick(arguments, wanted))
     except ValidationError as exc:
         raise MalformedOutputError(
             f"the research request does not match the schema: {_validation_message(exc)}",
@@ -770,12 +805,13 @@ def parse_decisions(
 ) -> ManagerDecisions:
     """Validate the final call's answer, or raise :class:`MalformedOutputError`.
 
+    Only the decision fields are read (`_pick`): the research fields of the one schema are not.
     Beyond the schema: unless the answer is ``NO_ACTION``, every holding and every researched
     candidate must have a decision (prompt, final round), because a name the manager was asked
     about and silently skipped would vanish from its Brier score.
     """
     try:
-        answer = ManagerDecisions.model_validate(dict(arguments))
+        answer = ManagerDecisions.model_validate(_pick(arguments, DECISION_FIELDS))
     except ValidationError as exc:
         raise MalformedOutputError(
             f"the decisions do not match the schema: {_validation_message(exc)}",
@@ -793,7 +829,9 @@ def parse_decisions(
 
 
 def schema_bytes(limits: RoundLimits, *, system_prompt: str) -> bytes:
-    """The canonical bytes of the three schemas, the system prompt and the shape version.
+    """The canonical bytes of the two schemas (Amendment 6 (d): one research schema for round 0 and
+    every research round, the decision schema for the final), the system prompt and the shape
+    version.
 
     What `mandate_hash` takes as ``schema_bytes`` for a manager (pre-registration §7): any change
     to a field, a cap or the system prompt is a new manager.
@@ -801,7 +839,6 @@ def schema_bytes(limits: RoundLimits, *, system_prompt: str) -> bytes:
     document = {
         "version": SCHEMA_VERSION,
         "research": research_schema(limits),
-        "research_followup": research_schema(limits, triage=False),
         "decision": decision_schema(),
         "system_prompt": system_prompt,
     }

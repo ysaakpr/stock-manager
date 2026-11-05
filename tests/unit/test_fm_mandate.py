@@ -118,8 +118,9 @@ def test_each_manager_book_matches_amendment_2(book_id: str) -> None:
     assert set(universe.excluded_surveillance) == {"GSM", "ESM"}
     assert universe.flagged_surveillance == ("ASM",)
     assert manager.models.decision == "claude-opus-5-5"
-    assert manager.models.digest == "claude-sonnet-5-5"  # §2, unchanged by Amendment 5
-    assert manager.models.research == "claude-sonnet-5-5"
+    # Amendment 6 (h): digests and research on GPT-5.6 Luna (Sonnet 5.5 behind it).
+    assert manager.models.digest == "gpt-5-6-luna"
+    assert manager.models.research == "gpt-5-6-luna"
     assert manager.prompt_path == "analyst/fundmanager/prompts/manager.md"
     assert (manager.rounds.max_isins, manager.rounds.max_queries) == (12, 8)
     assert manager.rounds.max_research_rounds == 2

@@ -851,7 +851,7 @@ def _fetcher(
     if provider is not LlmProvider.BEDROCK or (
         settings.m17_web_research is WebResearchPath.CLAUDE_CLI
     ):
-        return ClaudeWebFetcher(model=research_model)
+        return ClaudeWebFetcher(model=_cli_research_model(research_model))
     return _bedrock_fetcher(
         settings=settings,
         clock=clock,
@@ -862,6 +862,15 @@ def _fetcher(
         stack=stack,
         research_model=research_model,
     )
+
+
+def _cli_research_model(research_model: str) -> str:
+    """The model the Claude CLI's web fetcher runs for ``research_model``: itself for a Claude
+    model, the route's `cli_fallback_model` for one the CLI cannot run (Amendment 6 (h): Luna's
+    research falls back to Sonnet 5.5), so the CLI is never asked for a model it does not have."""
+    from analyst.llm.bedrock import load_bedrock_models
+
+    return load_bedrock_models().backup_model(research_model)
 
 
 def _bedrock_fetcher(
@@ -894,7 +903,7 @@ def _bedrock_fetcher(
         model = BedrockLLM.from_settings(settings)
     except LLMCredentialError as exc:
         _LOG.warning("fm_world.web_research_on_cli", reason="bedrock_unconfigured", detail=str(exc))
-        return ClaudeWebFetcher(model=research_model)
+        return ClaudeWebFetcher(model=_cli_research_model(research_model))
     usage: UsageLedger
     if memory:
         usage = InMemoryUsageLedger()
@@ -910,11 +919,11 @@ def _bedrock_fetcher(
     )
     if not research.search_vendors and not research.fetch_vendors:
         _LOG.warning("fm_world.web_research_on_cli", reason="no_vendor_configured")
-        return ClaudeWebFetcher(model=research_model)
+        return ClaudeWebFetcher(model=_cli_research_model(research_model))
     backup = None
     if settings.m17_llm_fallback is LlmProvider.CLAUDE_CLI:
         try:
-            backup = ClaudeWebFetcher(model=research_model)
+            backup = ClaudeWebFetcher(model=_cli_research_model(research_model))
         except FetchError as exc:
             _LOG.warning("fm_world.web_research_no_backup", detail=str(exc))
     meter = None

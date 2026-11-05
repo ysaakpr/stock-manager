@@ -1,6 +1,6 @@
 # Pre-registration: M17 AI fund managers, forward paper test, 2026-10-09
 
-**Status: RATIFIED 2026-10-09 except S0** (owner, chat; §9); Amendment 5 RATIFIED 2026-11-01 (owner, chat). Written before any M17 code exists and before any manager has made a decision. The
+**Status: RATIFIED 2026-10-09 except S0** (owner, chat; §9); Amendment 5 RATIFIED 2026-11-01 (owner, chat); Amendment 6 RATIFIED 2026-11-04 (owner, chat). Written before any M17 code exists and before any manager has made a decision. The
 owner confirms the items marked **[OWNER]** and records it in §9. M17.8 cannot start the clock until
 §9 is filled in. After session S0 (§6), §2–§7 are frozen. A changed manager (prompt, model, mandate,
 rails or tools) is a **new manager** with a new id and its own clock. It is never a revision of the old
@@ -800,6 +800,301 @@ ratification): whether the digest identity (`DIGEST_VERSION`, prompt and schema 
 become a manager hash input. A yes would change the 8 manager hashes, so it would need its own
 dated amendment before S0.
 
+### Amendment 6 (2026-11-04, before S0): what the managers read, one research schema, the Global route, Luna for digests and research
+
+**RATIFIED 2026-11-04 (owner, chat: "approve the bundle"),** the R2 bundle of the Bedrock cost study
+of 2026-11-04. Item (d) is built in a narrower form than the bundle approved, because Bedrock
+refuses the approved form (one schema for every round). The owner **accepted (d) as written here on
+2026-11-05** (chat: "go as per recommended"), with its extra ≈ $1 a night against the study's
+estimate recorded as a deviation (g). Item (h), GPT-5.6 Luna for the Commons digests and the web
+research, was **adopted on 2026-11-05** by the same decision, after its live check passed.
+Ratification is not the go for S0. Evidence: the cost study (journal
+`FM_CALL` payloads and `token_usage` of the counted dry sessions of 2 and 3 Nov, the byte-exact
+rendered prompts of both nights, offline transforms of them, and a frozen-input model replay).
+
+On Tue 3 Nov the four manager runs (17 calls) read 2.39 M input tokens and cost $11.11. Two causes:
+
+- **S5 "event watch"** was about 55 k tokens of every call: 667 unranked board-meeting intimations and
+  bulk deals in full prose, re-sent on all 17 calls (0.96 M of the 2.39 M). It carries no citation id,
+  was never cited, and none of the 78 names researched on 2–3 Nov came from S5 alone.
+- **Caching could not reach two calls in four.** Round 0, the research rounds and the final answered
+  in three different schemas, and the schema is part of the cached prefix (Amendment 5 (i)). The
+  template also put each round's task text *before* the research bundles. So research1 wrote its
+  whole prompt and only research2 read it; round 0 and the final were sent uncached.
+
+Also, **816 filing digests** were shown in the 8 finals of 2–3 Nov and 32 were ever cited; most
+announcement digests said only that the text gives no further detail. And on both nights
+FM-SWING-EVT-10L's final was refused for a missing decision on a holding that had no dossier.
+
+§2–§7 and Amendments 1–5 stand, except where this amendment changes them. No rule, rail, contract
+check, decision field, mandate, model, effort or threshold changes. What the managers *read* changes
+(a)–(e), and the decision calls' transport (f).
+
+(a) **S5 compacted: ranked, bounded, every name listed** (`render.render_s5`). S5's facts are the same
+facts (`SCREENS_RULE_HASH` and `_board_meeting_events` are unchanged); only their rendering changes.
+Each fact keeps what a decision can use: its **event type and date** (a results meeting by its meeting
+date, a deal by its trade date and side, an order win, buyback, split or bonus by the date it became
+knowable). The meeting's boilerplate purpose and a deal's client, quantity and price are left to the
+name's dossier, where research shows them in full. The names are listed in two parts:
+
+- names also on S1–S4, the composite shortlist or the manager's own book come first, one line each,
+  with that **screen membership**, most memberships first and then in the desk shuffle
+  (Amendment 2 c); at most `S5_RANKED_MAX` (40) of them;
+- every other S5 name follows, grouped by event type and date, in the desk shuffle.
+
+Every S5 name stays discoverable: nothing is dropped, and a test lists every name of a 120-fact S5
+for a cap of 0, 1 and 40 lines. Removing the board meetings from S5 instead was not adopted: it would
+change the screens rule.
+
+(b) **Digests and announcements de-duplicated** (`render.digest_show`, `render.shown_digests`).
+
+- A results digest, and an announcement digest with any figure, is always shown in full: it adds a
+  figure.
+- An announcement digest with no figure is **dropped** when its own announcement is a line of a dossier
+  shown with it and the digest either says the text gives no further detail or adds no number and no
+  headline word to that line. With no such dossier line, a digest that says the text gives no further
+  detail is **cut to its headline** (still citable), never dropped: it is the only line naming that
+  announcement.
+- Every other digest is shown in full. When it is shown, the dossier's line for the same announcement
+  becomes a pointer, `[F:<ISIN>.ann_<ref>] knowable <date>: digested below as
+  [F:nse_announcements:<ref>]`, so the text appears once and both ids resolve.
+- The citable set follows what is shown: a dropped digest is not in the contract's citation index,
+  and `FM_RESEARCH_FULFILLED` journals it under `digests_not_shown`. The digest store, the digest
+  prompt, (j)'s grounding check and every stored digest are unchanged.
+
+(c) **Dossier fields de-duplicated** (`render.shown_dossier_fields`; the dossier, its digest and
+`Dossier.resolve` are unchanged, so every field still resolves when cited, an old invalidation
+naming a hidden id included). No field a contract check or decision rule reads is hidden (`close`,
+`atr14_pct`, the SMAs, `high_20`, `high_252`, `volume_median_50`, the delivery and results-date
+fields), and a test pins that. Dropped from the rendering, each with its reason:
+
+| Field | Not rendered | Reason |
+|---|---|---|
+| `ret_1w`, `ret_4w`, `ret_13w`, `ret_52w` | always | exact aliases of `return_1w`, `return_4w`, `return_13w`, `return_52w` (`dossier._ALIASES`) |
+| `ret_5` | where equal to `return_1w` at the coarser precision | the third copy of the 1-week return; never cited 2–3 Nov |
+| `volatility_20` | where equal to `vol_20` at the coarser precision | the same 20-session volatility; never cited |
+| `filing_date` | where equal to `results_filing_date` | the same filing; never cited |
+| `results_day0` | where equal to `results_day` | the same session; never cited |
+| `volume_ratio_day0_ex_matched` | where equal to `volume_ratio_day0` | no matched round trip: the net ratio is the gross one; never cited |
+| `results_day_volume_ratio_ex_matched` | where equal to `results_day_volume_ratio` | as above, for the results day |
+| `fo_session`, `fo_oi_buildup`, `fo_pcr_oi`, `fo_rollover_pct`, `fo_oi_change`, `fo_spot_change` | where `fo_listed` is `no` | each is `unknown` by definition, which `fo_listed` says; shown when `fo_listed` is `yes` or unknown |
+
+Where a twin's value differs from its twin's, both are shown. Fields never cited but not duplicates
+(`screens`, `excluded`, `exclusion_reasons`, `size_rank`, `sector_median_pe`, `atr10_prev`,
+`atr50_prev`, `atr_contraction`, `vol_252`, `matched_deal_qty`) stay. The prompt's dossier paragraph
+says what is not repeated.
+
+(d) **One research schema for round 0 and every research round, and the template reordered.**
+
+- **What was asked and why it is not built as asked.** The bundle asked for one output schema for
+  every round, the final included: the union of round 0's research request and the decisions
+  object. It was built, and Bedrock refuses it on every call: HTTP 400, "The compiled grammar is
+  too large, which would cause performance issues". This holds on the Global profile and on Mantle
+  alike (2026-11-04, ~16:40 IST, after the first rehearsal's four managers all failed round 0 with
+  it).
+- **Why.** The decision schema alone compiles but sits at the limit. It carries 12 union-typed
+  (nullable) fields, which the published limits (16) call "especially expensive … exponential
+  compilation cost". Probed, it compiles with the triage and the requests added (or with one more
+  string), and fails with anything the size of the queries object. Removing ISIN patterns, enums or
+  the queries' nullable ISIN did not bring it under.
+- **What was not done instead.** The decision schema's fields are not reshaped to fit. That would
+  change the decision object's form, which this bundle keeps.
+- **What is built.**
+  - Round 0 and every research round answer in **one** schema, the research schema
+    (`schemas.research_tool`, `m17-fm-schema/2`).
+  - Each round reads only its own fields: round 0 the triage, requests and queries; a research
+    round the requests and queries.
+  - The final answers in the unchanged decision schema.
+  - Amendment 5 (h)'s follow-up schema without triage is retired. Its protection holds: a field
+    outside the round is never read or validated, only logged (`fm.off_round_fields`), so a
+    holding's note written in a research round, however long, cannot cost the repair (tested at
+    539 characters). A key the schema does not define is refused, as before.
+- **The template reorder.** The research bundles move out of the round blocks into one
+  **"Research so far"** section between the cost hurdles and the round's task text, and the dossier
+  paragraph moves with them. Each research round's prompt therefore begins with the previous
+  round's prompt up to its round block.
+- **The cache marks.** Round 0 now marks the session header (it wrote nothing before). Research1
+  reads the header and writes bundle 0, and research2 reads that. The last research round does not
+  mark its newest bundle, because the final, in the other schema, cannot read it. The final marks
+  nothing, as before, and a repair re-sends its original marks. 5-minute TTL, as before.
+- **What does not change.** The contract, the rails, the repair rules and every decision field.
+
+(e) **A holding outside the universe gets a dossier** (`build_dossiers(..., outside_universe=True)`,
+`ManagerCommons.outside_dossiers`). This is the EVT gap of study §1.5: INE229A01017, held by
+FM-SWING-EVT-10L and out of the 2–3 Nov universe, was shown as "not in today's universe; no dossier".
+The model left it out and the whole final was re-asked on both nights (≈ $1.10 a night, and the
+session's only schema repair). Such a holding now gets a minimal dossier:
+
+- every sheet, feature and screen field is unknown, and only the fields the lake has are listed:
+  results dates, delivery averages, F&O, announcements, corporate actions and deals;
+- it is headed "HOLDING OUTSIDE TODAY'S UNIVERSE", and the final round says every holding needs a
+  decision, this one included;
+- its digests are fetched like any holding's.
+
+A requested name outside the universe still gets none, because it cannot be bought. The contract
+already accepts a HOLD, TRIM or SELL of a holding without today's facts; nothing there changes. On
+the 3 Nov rebuild the EVT final carries the dossier, and the holding's invalidation citation
+`[F:INE229A01017.deal_3]` now resolves.
+
+(f) **Opus 5.5 decisions through the Global inference profile** (`analyst/llm/bedrock_models.yaml`:
+`claude-opus-5-5` → adapter `anthropic_runtime`, `global.anthropic.claude-opus-5-5`). This is
+transport, not a hash input (Amendment 5 (g)). The price is −9.1 % on every Opus token: $4.00 /
+$20.00 / $5.00 / $0.20 per MTok against Mantle in-region $4.40 / $22.00 / $5.50 / $0.22 (AWS Price
+List, `_global_standard` usage types, added to the dated card before the first counted call).
+
+Verified on 2026-11-04 before the switch:
+
+- **Cache reads:** bedrock-runtime reports cache reads for the Opus prefix. A second call read 72,967
+  tokens, exactly what the first had written.
+- **Timeout:** a full-size final finishes inside the client's 600 s non-streaming timeout. The stored
+  3 Nov FM-SWING-BRK-10L final (193 k tokens in, 18.2 k out, effort high, the decision schema) took
+  227 s, a 2.6× margin.
+
+The fallback is unchanged: Opus 5.5 falls back to itself on the Claude CLI.
+
+**Data residency:** the Global profile may route a request to any AWS commercial region, the posture
+Amendment 5 (a) accepted for Sonnet. The decision prompts carry public filings, market data, web
+pages and the managers' own reasoning about them; no credential or personal data.
+
+(g) **Hashes, the dry run and the measured effect.** (a)–(c) and (e) are render and Commons code, not
+`mandate_hash` inputs. (d) changes the schema bytes (the follow-up schema retired,
+`m17-fm-schema/2`) and the template, and (h) changes the roster's `models.digest` and
+`models.research`, so **the eight manager books' `mandate_hash` changes**. The eight control books, four style
+books and the bench are unchanged: 8 of 21 change. Computed with `mandate_fingerprints(load_roster())`
+on 2026-11-05 with (a)–(h) in the tree; first 16 hex digits; the full hashes are journaled at S0:
+
+| Book | Amendment 5 (ratified, in force) | Amendment 6 (S0 starts from these) |
+|---|---|---|
+| `FM-POS-FUND-10L` | `ada1808ce2d9e320` | `50fea31db617359f` |
+| `FM-POS-FUND-1CR` | `7ed8b122c0b7e627` | `73bde5d68a3db9f4` |
+| `FM-POS-TREND-10L` | `c364921fb5170211` | `cbb9528283592446` |
+| `FM-POS-TREND-1CR` | `9c1bffac08d640c1` | `d926bb544562c100` |
+| `FM-SWING-BRK-10L` | `6ac92f102e2b20a5` | `2d318cddbc662d6e` |
+| `FM-SWING-BRK-1CR` | `0b34b3ed01d90486` | `26b1557ea3af1e6f` |
+| `FM-SWING-EVT-10L` | `816082f5b2d506f5` | `e12af7509ebdf176` |
+| `FM-SWING-EVT-1CR` | `e5c08d2581a4c04d` | `330fe5a2f02399bd` |
+
+Unchanged, for the record:
+
+- **Control books:** `CTRL-FM-POS-FUND-10L` `944075938e7d40bc`, `-1CR` `86df3c7d18dd8655`;
+  `CTRL-FM-POS-TREND-10L` `a869ea7f5dfb70f0`, `-1CR` `84c8f994f3265034`; `CTRL-FM-SWING-BRK-10L`
+  `9122d824085a7613`, `-1CR` `52a85449cdc49988`; `CTRL-FM-SWING-EVT-10L` `c20520e9657a08a0`, `-1CR`
+  `7376d82cc7266f94`.
+- **Style books:** `STYLE-FM-POS-FUND` `42b94da5c0c390dd`, `STYLE-FM-POS-TREND` `111cd6be17096c07`,
+  `STYLE-FM-SWING-BRK` `aa002f1e50d9105f`, `STYLE-FM-SWING-EVT` `3beac69c14232f21`.
+- **Bench:** `BENCH-N500` `4cc6e90eb67306c4`.
+
+Each changed hash is a new manager under §7. S0 has not happened, so **M17.8's 5-session dry-run
+count restarts with the first counted dry session run under the new hashes**. The sessions of 2, 3
+and 4 Nov stay journaled under the Amendment 5 hashes and do not count towards the five.
+
+**Measured on a replay of the 2026-11-03 prompts** (offline rebuild: the 3 Nov Commons over the lake,
+the stored digests and snapshots read-only, each manager's journaled requests replayed round by
+round, no model call). Tokens are characters × each call's own measured ratio, as in the cost study.
+The rebuild under `main`'s code reproduces the stored prompts to within 0.1 %.
+
+| Tokens (4 managers) | Before (3 Nov, measured) | After (rebuild) | Change |
+|---|---:|---:|---:|
+| S5, one round 0 | 56 k | 4.1 k | −93 % |
+| Round 0, all four | 286 k | 82 k | −71 % |
+| Finals, all four | 676 k | 370 k | −45 % |
+| of which S5 | 221 k | 16 k | −93 % |
+| of which filing digests | 184 k | 101 k | −45 % |
+| of which dossier fields | 78 k | 66 k | −15 % |
+| of which announcement lines | 45 k | 37 k | −18 % |
+| Input tokens, the night (17 calls before, 16 after) | 2.39 M | 1.12 M | −53 % |
+| of which uncached / cache write / cache read | 1.13 M / 0.66 M / 0.60 M | 0.42 M / 0.31 M / 0.39 M | |
+| Decision calls, $ | 11.11 (Mantle, measured, with EVT's repair) | ≈ 5.1 (Global, modelled, same output tokens, no repair) | −54 % |
+
+**Recorded deviation from the study (owner, 2026-11-05).** The study estimated the bundle at
+≈ $4.2 a night for the decision calls; with (d) in its narrow form it is ≈ $5.1, about $1 more. The
+finals are now the largest item: about 370 k tokens a night sent uncached ($1.5 at Global rates),
+because their schema differs. Output tokens (91 k, ≈ $1.8) are the other one. With one
+schema for every round the model gives ≈ $3.9; the grammar limit of (d) rules that out without
+reshaping the decision schema.
+
+**Rehearsal (2026-11-04, 17:05–17:47 IST).** The session of 2026-11-03 was re-run on this code with
+real Opus 5.5 at `high` on the Global profile (`fm_job --dry-run --memory`, so the books were empty;
+the stored digests were read, the research ran live).
+
+- **Status:** all 4 managers DECIDED, with 0 schema repairs and 0 contract refusals. The journaled
+  3 Nov run had 4 refusals (3 for TREND, 1 for EVT) and 1 schema repair (EVT's).
+- **Cost:** Opus $5.73. Every research call read the previous call's prefix: research1 read 20.7 k,
+  and research2 read 75.6–93.3 k.
+- **Agreement with the 3 Nov journal:** on the 32 candidates both runs decided, 24 had the same
+  action (75 %) and 28 fell on the same side of BUY (88 %). The 3 Nov holdings are left out, because
+  the rehearsal held nothing.
+- **This is not like-for-like.** The web research was fresh, against the study's frozen-prompt
+  replay at 95 %.
+
+(h) **Commons digests and web research on GPT-5.6 Luna, with Sonnet 5.5 behind it** (owner,
+2026-11-04, chat: "luna and sonnet for summaries and other low quality items"; adopted
+2026-11-05, "go as per recommended", after the live check below).
+
+- **The roles.** `models.digest` and `models.research` become `gpt-5-6-luna`: OpenAI GPT-5.6 Luna
+  on Amazon Bedrock through its Global cross-region inference profile.
+  - `global.openai.gpt-5.6-luna`, served on bedrock-runtime's OpenAI-compatible API, not on Mantle.
+  - Digests use Chat Completions with a strict `json_schema`. The research tool loop uses the
+    Responses API, because Chat Completions refuses function tools at any reasoning effort.
+  - Both run at effort `medium` (the `summary` call type of `effort.yaml`).
+  - `models.decision` stays `claude-opus-5-5`.
+- **What does not change.** Nothing a digest or a research answer must contain:
+  - the digest prompt, schema, opinion filter and Amendment 5 (j)'s grounding refusal;
+  - the research loop's prompt, its budgets (one search, two fetches, four model calls a query),
+    the `<web_content>` wrapper and the untrusted-content rule.
+- **One check is added to research.** An answer with a page whose URL is neither the request's
+  target nor a URL the loop's own tool results returned is refused (`FetchError`, journaled as
+  unfulfilled, never re-asked).
+  - In the 2026-11-04 evaluation it refused all 3 answers in which Luna obeyed a planted "task
+    cancelled, return NO DATA" instruction.
+  - It refused none of 32 clean answers. It applies to whichever model researches.
+- **Backup.** Luna is not a Claude model, so Amendment 5's "each model falls back to itself on the
+  Claude CLI" cannot hold for these two roles.
+  - When Bedrock *could not serve* a Luna call (Amendment 5 (b)'s rule, unchanged), the same call
+    is asked of `claude-sonnet-5-5` on Bedrock: the route's `bedrock_fallback_model`, the Global
+    profile, one hop.
+  - When Bedrock cannot serve that either, it goes to `claude-sonnet-5-5` on the Claude CLI: the
+    route's `cli_fallback_model`, and for research the CLI's own web fetcher on Sonnet.
+  - A call Bedrock *refused* is re-asked nowhere: a 400, a content-filter stop, an answer that is
+    not the schema's object, a digest refused by validation, or a research answer refused by the
+    URL check.
+  - Decisions keep Amendment 5's rule: Opus 5.5 falls back to itself on the CLI.
+- **Consistency.** A filing is digested once, so the digest store, and on a fallback night a single
+  session's digests, mixes models.
+  - Every digest records the provider and the model that wrote it: `bedrock` /
+    `global.openai.gpt-5.6-luna`, `bedrock` / `global.anthropic.claude-sonnet-5-5`, or
+    `claude_cli` / `claude-sonnet-5-5`, with the fallback reason.
+  - Every research snapshot records its `fetcher`: `bedrock+websearch:gpt-5-6-luna`,
+    `bedrock+websearch:global.anthropic.claude-sonnet-5-5` or `claude_cli:claude-sonnet-5-5`.
+- **Data residency.** The Global profile may process a request in any AWS commercial region. What
+  it carries is what Amendment 5 (a) already sends to Sonnet's Global profile: public filings,
+  public web pages and the managers' research questions, with no credential or personal data.
+- **Price.** $0.20 / $1.20 per MTok on the Global profile (AWS model card, read 2026-11-04), added to
+  the dated card before the first call. Its cache buckets are carried at the input rate until AWS
+  publishes a Global cache rate.
+
+*Measured (2026-11-04, the low-stakes evaluation).*
+
+- **Digests:** 379 of 379 schema-valid, 0 wrong figures, and 1 grounding refusal (a date written
+  only in an attachment's file name). The opinion-filter trip came on 2 of 10, against Sonnet's 3.
+  $0.0005 an announcement and $0.0014 a results digest, against $0.0051 and $0.0115.
+- **Research, on 16 replayed requests:** 16 of 16 answered, with 0 numbers not in the tool results.
+  $0.0033 a request, against $0.039–0.058.
+- **Night cost:** on the 2–3 Nov volumes, digests and research cost about $0.2–0.3 a night against
+  $2.5–3.2.
+
+*Live check (2026-11-05, 10:48–10:50 IST, the production desk fetcher, live vendors).*
+
+- **Luna answers.** 5 of 5 journaled 2–3 Nov research requests were answered by Luna on the
+  Responses-API loop, with 0 URL-check refusals, $0.029 in all and 14–25 s each.
+- **Luna unavailable.** Sonnet 5.5 on Bedrock answered, and the snapshot names it.
+- **Luna and Sonnet on Bedrock both unavailable.** The CLI web fetcher on Sonnet 5.5 answered.
+- **Spend:** Bedrock $0.07 in all.
+
+*Hashes.* The roster's `models.digest` and `models.research` are hashed bytes (Amendment 5 (g)), so
+the eight manager hashes of (g) include this item. The adapter, the endpoint, the backup chain and
+the URL check are transport and Commons code, not hash inputs.
+
 ## 9. Owner confirmation
 
 | Item | Value | Confirmed |
@@ -811,4 +1106,5 @@ dated amendment before S0.
 | Web search (§5) | allowed, through the Commons fetcher | 2026-10-09 (owner, chat) |
 | LLM path (§2) | Claude CLI subscription; monthly cap deferred | 2026-10-09 (owner, chat) |
 | LLM path and models (Amendment 5) | Bedrock primary, Claude CLI backup per call (each model falls back to itself); per-role models in the roster, the pre-registered ones — decisions `claude-opus-5-5` (Mantle us-east-1, effort `high`), digests and research `claude-sonnet-5-5` (bedrock-runtime, Global inference profile, which may route to any AWS commercial region; effort `medium`), research over our own search layer (Brave/Tavily/Firecrawl, CLI backup); DeepSeek V3.2 compared less faithful and stays unused capability; untrusted-content rule and `research` role added; text-length limits stated (h) and the round line moved for prompt caching (i), 2026-10-31 afternoon; digests grounded in the filing, results headlines naming revenue and PAT, announcement dates, percentages and quantities as figures (j), 2026-11-01, no hash change; 8 manager hashes change, dry-run count restarts with the first run under them (Mon 2026-11-02, 22:00 IST) | RATIFIED 2026-11-01 (owner, chat), after owner decisions 2026-10-30 08:05 IST and afternoon, 2026-10-31 morning (Sonnet via the Global profile, deploy approved; chat) and 2026-11-01 (digest changes (j), deploy approved; chat); counted dry sessions on Bedrock from Mon 2026-11-02; monthly Bedrock budget open, not a blocker for S0; not the go for S0 |
+| What the managers read, one research schema, Opus route, Luna for digests and research (Amendment 6) | S5 compacted to a ranked, bounded list that keeps every name, its screen membership and each event's type and date; announcement digests that add nothing to their dossier line dropped (any digest with a figure kept), a shown digest's dossier line a pointer; duplicate dossier fields not rendered (each listed with its reason; every id still resolves); one research schema for round 0 and every research round (one schema for every round is refused by Bedrock's grammar limit, so the final keeps the decision schema) and the research bundles ahead of each round's task text, so each research call reads the previous call's cached prefix; a holding outside the universe gets a minimal dossier; Opus 5.5 decisions through the Global inference profile on bedrock-runtime (any AWS commercial region; cache reads and the 600 s timeout verified first); (h) Commons digests and web research on GPT-5.6 Luna (Global profile, bedrock-runtime; any AWS commercial region), Sonnet 5.5 on Bedrock then on the CLI behind it, research pages must come from served tool results; 8 manager hashes change, dry-run count restarts with the first counted session under them | RATIFIED 2026-11-04 (owner, chat: "approve the bundle"); (d)'s narrower form, forced by the grammar limit, accepted and (h) adopted 2026-11-05 (owner, chat: "go as per recommended"); not the go for S0 |
 | S0 | the first session after the 5-session dry run (M17.8) passes; owner asked for as soon as it is ready (2026-10-09) | — |

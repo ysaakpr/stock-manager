@@ -75,6 +75,7 @@ __all__ = [
     "DOSSIER_VERSION",
     "FIELD_ID_PATTERN",
     "MARKET_FIELDS",
+    "OUTSIDE_UNIVERSE_SOURCE",
     "Dossier",
     "DossierItem",
     "OiBuildup",
@@ -86,6 +87,8 @@ __all__ = [
 ]
 
 DOSSIER_VERSION: Final = "commons-dossier/1"
+#: The gap source of a dossier built for a name outside the session's universe (Amendment 6 (e)).
+OUTSIDE_UNIVERSE_SOURCE: Final = "universe"
 #: Announcements listed in a dossier: those knowable in the last 20 sessions.
 ANNOUNCEMENT_SESSIONS: Final = 20
 _DEAL_SESSIONS: Final = 20
@@ -409,8 +412,17 @@ def build_dossiers(
     screens: CommonsScreens,
     sheets: CommonsSheets,
     source: ScreenSource,
+    outside_universe: bool = False,
 ) -> tuple[Dossier, ...]:
     """The dossiers of ``isins`` on the screens' session, in ``isins`` order without repeats.
+
+    ``outside_universe`` (Amendment 6 (e)) builds the dossiers of names that are *not* in the
+    session's universe — a manager's holding that dropped out of it — so the manager can still
+    decide it: every sheet, feature and screen field is ``None`` (there is no universe row and no
+    feature for it), the fields read through ``source`` (fundamentals, results dates, delivery
+    averages, F&O, announcements, corporate actions, deals) are computed as for any name, and a
+    gap with source ``universe`` says why the rest is unknown. Each ISIN must then be outside the
+    universe (``ValueError`` otherwise), so one name never has two kinds of dossier.
 
     What it does: verifies both builds and that they are the same session's, takes every feature
     the screens build already computed, and reads the rest (F&O, filings for the margin trend and
@@ -427,10 +439,20 @@ def build_dossiers(
     session = screens.trading_date
     wanted = list(dict.fromkeys(isins))
     rows = {r.isin: r for r in sheets.universe}
-    if missing := [i for i in wanted if i not in rows]:
+    if outside_universe:
+        if inside := [i for i in wanted if i in rows]:
+            raise ValueError(f"in the {session} universe, so not an outside dossier: {inside}")
+    elif missing := [i for i in wanted if i not in rows]:
         raise ValueError(f"not in the {session} universe: {missing}")
     pit = PitContext(as_of=session)
     gaps: list[Gap] = []
+    if outside_universe:
+        gaps.append(
+            Gap(
+                source=OUTSIDE_UNIVERSE_SOURCE,
+                reason=f"not in the {session} universe: no universe row, price features or screens",
+            )
+        )
     member_set = frozenset(wanted)
     features = {f.isin: f for f in screens.features}
     earnings = {e.isin: e for e in screens.earnings}
@@ -467,7 +489,7 @@ def build_dossiers(
         compute_metrics(
             (f for f in facts if f.isin in member_set),
             as_of=session,
-            prices={i: rows[i].close for i in wanted},
+            prices={i: rows[i].close for i in wanted if i in rows},
         )
         if facts is not None
         else None
@@ -505,8 +527,10 @@ def build_dossiers(
     ordered_gaps = tuple(sorted(gaps, key=lambda g: (g.source, g.reason)))
     out: list[Dossier] = []
     for isin in wanted:
-        row = rows[isin]
-        values: dict[str, FieldValue] = {name: getattr(row, name) for name in _SHEET_FIELDS}
+        row = rows.get(isin)
+        values: dict[str, FieldValue] = {
+            name: getattr(row, name) if row is not None else None for name in _SHEET_FIELDS
+        }
         for alias, name in _ALIASES.items():
             values[alias] = values[name]
         feature = features.get(isin)
@@ -538,7 +562,7 @@ def build_dossiers(
             else None
         )
         values["screens"] = ",".join(screens.screens_of(isin)) or None
-        values["excluded"] = isin in excluded
+        values["excluded"] = None if row is None else isin in excluded
         values["exclusion_reasons"] = (
             ",".join(r.value for r in excluded[isin].reasons) if isin in excluded else None
         )
