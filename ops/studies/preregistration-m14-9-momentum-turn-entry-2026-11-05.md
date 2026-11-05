@@ -1,0 +1,166 @@
+# Pre-registration: M14.9 momentum-turn entry for a parked D13 book, 2026-11-05
+
+Written **before** any M14.9 variant has been implemented or run. No M14.9 return, XIRR, drawdown
+or switch count exists anywhere yet. Nothing below may change after the first M14.9 evaluation run.
+A changed trigger (a different threshold, look-back, lag, fraction or universe rule) is a **new
+trial**: it gets a new id here and is reported as such, never folded into these rows.
+
+## 0. Why this study exists
+
+D13 (`PAPER_RATIFIED_2026_09_06`) reads the regime (NIFTY 50 TRI against its 200-session moving
+average) only on the first session of each month. On the 2 Nov 2026 rebalance the TRI stood 1.92%
+below its average, so the book parked. Two sessions later, on 4 Nov, it closed 0.32% above it. Under
+D13 the book waits for the 1 Dec rebalance.
+
+The owner's question (5 Nov 2026) is whether ignoring the **rate of change** of momentum costs the
+book its best entries. The alternative is to enter at the earliest point the trend turns up.
+
+M14.5 (`ops/gates/M14.5-regime-reentry-report.md`) tested only level crossings: daily re-entry,
+daily re-entry and exit, and a 2% band. Daily re-entry lost to D13 on XIRR ÷ max drawdown in all 12
+cells, because most crossings reverse; the scoping investigation counted 77 crossings of the
+200-session average since 2016, 61% of them reversing within 5 sessions. This study tests four
+*different* early-entry triggers. Three of them try to filter out the crossings that reverse, and
+one scales in.
+
+## 1. Code and data state
+
+- `main` at `e68755f` or later. The campaign runs on one commit that carries this task's policy
+  switches. That commit is recorded in every run directory's manifest.
+- Engine switches are the same as M12.R, M14.5 and M14.6: book corporate actions on, interest on
+  idle cash on (repo − 50 bp, `backtest/repo_rates.yaml`), every order through A8's ratified rails,
+  ₹10 lakh opening book, one deposit at the start.
+- Lake: last L1 session 2026-11-04 at the time of writing. The PIT NIFTY 500 membership history
+  opens 2016-10-24.
+
+## 2. What stays D13
+
+Every variant is D13 (`PAPER_RATIFIED_2026_09_06`: top 20, 12-1 ranking, sell band 30, monthly
+regime filter on the published NIFTY 50 TRI against its 200-session mean, inverse-vol weights,
+next-session redeploy, no vol target) with **one** switch on, and nothing else changed:
+
+- **Exits stay D13's.** The regime is read for an exit only on the monthly rebalance session. A
+  risk-off rebalance parks the book exactly as D13 does. No variant has a daily exit; daily exit
+  lost in M14.5.
+- **The variants act only while the book is parked.** "Parked" is the policy's own flag: set by
+  every park and cleared by a risk-on rebalance or a variant re-entry. It is not an empty book (see
+  §7). Once the book is invested, D13's rules apply unchanged.
+- **A rebalance session is always D13's.** On the first session of a month the D13 rule decides,
+  invested or parked: risk-on → full rebalance, risk-off → park. The variants' triggers are read only
+  on the other sessions.
+- **A re-entry is a D13 rebalance** on the trigger session: the same 12-1 ranking, band, inverse-vol
+  weights, A8 sizing, and next-session redeploy of sale proceeds. As for every decision in the
+  engine, the orders are placed at the trigger session's close and fill on the next session.
+- **At most one re-entry per parked spell.** After it the book is invested until the next risk-off
+  rebalance parks it again.
+
+## 3. The variants (parameters fixed now)
+
+All index figures are the published NIFTY 50 TRI (the series D13's regime reads), on its own
+published sessions, using only points knowable on or before the decision session. "MA*N*" is the
+simple mean of the last *N* published closes, the decision session's close included.
+
+**V1 — confirmed cross.** While parked, re-enter on the session after the TRI has closed at or
+above its MA200 on **5** consecutive sessions. Concretely, the decision is taken at the close of
+the fifth such session and fills on the next one. A streak is broken by any close below MA200.
+
+**V2 — momentum turn (the owner's idea).** While parked, re-enter at the close of the first session
+on which all three hold:
+1. TRI ≥ **0.98** × MA200 (it may still be below the average);
+2. MA50 is rising: MA50 today > MA50 **10** sessions earlier;
+3. the TRI's **20**-session return is positive: today's close > the close 20 sessions earlier.
+
+**V3 — scale-in.** While parked, at the close of the first session with TRI ≥ MA200, deploy
+**half** the basket. That is a D13 rebalance at **50%** exposure: the same basket and weights, each
+name bought to half its weight. The buys are capped so the basket's value is at most 50% of the
+book's capital (cash, settled or not, plus holdings at that session's prices), and the next-session
+redeploy honours the same cap. Names outside the sell band are sold as in any rebalance. A kept
+name already above its half-weight is not trimmed. The rest is deployed at the next monthly
+rebalance if it reads risk-on, which is the ordinary D13 rebalance at full exposure. If that
+rebalance reads risk-off, D13 parks the book again.
+
+**V4 — breadth turn.** While parked, re-enter at the close of the first session on which:
+1. the share of the PIT universe closing above its own 200-day moving average is ≥ **50%**, and
+2. that share is higher than it was **20** sessions earlier.
+
+The breadth series is defined now:
+- **Universe:** the run's own investable universe (the same screen and liquidity floor the run
+  trades) as of the first session of the decision session's month, i.e. the latest rebalance on or
+  before it. It is screened from the names L1 priced that session.
+- **A name's MA200:** the mean of its last **200** printed closes, the session's close included,
+  on the same L2-adjusted-over-raw close source the momentum signal reads. A name counts only if it
+  printed on the session and has 200 such closes.
+- **Above:** close strictly greater than its MA200.
+- **Share** = names above ÷ names counted. The lagged share is the same computation 20 NSE sessions
+  earlier, with that session's own universe.
+
+V4 is dropped only if this series cannot be built point-in-time from the lake within the time
+budget. If it is dropped, the report says why.
+
+**Baseline: D13 itself**, with every switch off. M14.5's saved D13 runs (`m14-5-regime-floor-cb1fcf9`,
+`m14-5-regime-nifty500-cb1fcf9`) are reused only if a fresh D13 replay on the campaign commit
+reproduces the saved replay digest (journal, book and rails) in at least the floor-only
+wf-verification cells at both floors. Otherwise every D13 cell is re-run on the campaign commit.
+
+**No grid, no tuning.** The constants above (5 sessions; 0.98, 50, 10, 20; 50%; 50%, 20, 200) are
+the owner's or the standard ones, fixed now and stated as constants in code. Nothing is searched.
+
+## 4. Mandate: windows, floors, universe
+
+- **Rank on XIRR ÷ max drawdown.** Report XIRR, max drawdown and excess over the NIFTY 50 TRI too.
+- **Both liquidity floors:** ₹1 cr and ₹10 cr median daily turnover.
+- **Windows, never averaged:** the decade 2016-09-01..2026-08-31; the six-year window
+  2019-07-01..2026-08-31; the walk-forward, choosing on 2016-09-01..2021-08-31 and verifying on
+  2021-09-01..2026-08-31.
+- **Bar:** backtested XIRR > 25%, reported per cell.
+- **Universe:** the `turnover_floor` screen on every window, as in M14.5. NIFTY 500 rows are added
+  for the six-year and wf-verification windows, where its PIT membership covers (it opens
+  2016-10-24). They are attribution only and are never used for the choice.
+- Driver: `backtest.m12_rerun` with a new arm set; report rendered by the M14.5 report machinery.
+  At most 2 workers; runs stop by 20:30 IST each day and resume the next morning (resumable by run).
+
+## 5. Decision rule (fixed now)
+
+1. **The walk-forward chooses.** `backtest.verdict.run_walk_forward` ranks D13, V1, V2, V3 and V4
+   on the floor-only selection window by XIRR ÷ max drawdown, the ₹1 cr floor first, exactly as in
+   M14.5. The choice is frozen before the verification rows are read.
+2. **If it chooses D13**, no variant is recommended. D13 stays as ratified.
+3. **If it chooses a variant**, that variant is recommended *as a candidate for a separate,
+   parallel paper book* only if all of these hold:
+   - its floor-only verification XIRR ÷ max DD is ≥ D13's at **both** floors;
+   - its XIRR ÷ max DD is ≥ D13's in at least **6 of the 8** floor-only cells;
+   - its max drawdown is no more than **2 pp** deeper than D13's in every floor-only cell.
+
+   Otherwise it is reported as not recommended, with the failing condition named.
+4. NIFTY 500 rows, the >25% bar and the switch counts are reported and discussed. They do not
+   override 1–3.
+5. **Adoption is the owner's decision.** A recommended variant would run as a separate paper book
+   beside D13. D13 and its paper book are never changed by this study.
+
+**Trial count.** These are 4 new configurations (V1–V4) on a lake that has already seen many (M16
+pre-registration, Appendix A, counted 68 before M16). The report states that the winner of five
+arms on one selection window is partly luck. No deflation is applied to the choice; the
+verification window is the check.
+
+## 6. What the report must show
+
+- Per window, floor and universe: XIRR, max DD, XIRR ÷ max DD, Δ vs D13, excess, trades, one-way
+  turnover, charges, A8 min-holdings refusals, and the >25% flag.
+- **Parks and re-entries**: re-derived from the published TRI (and, for V4, the breadth series)
+  with the policy's own trigger functions, and checked against the fill ledger.
+- **Re-entries that reversed within a month**, counted two ways: (a) the book was re-parked at the
+  first monthly rebalance after the re-entry; (b) the TRI closed below its MA200 on any of the 21
+  sessions after the re-entry decision.
+- The generated scorecard against D13, and the walk-forward choice.
+- **"This time" readout:** on the live lake, for each variant, the session in Oct–Nov 2026 on which
+  it would have re-entered after D13's parks (1 Oct and 2 Nov), or "not yet" through the lake's
+  last session. Also the D13 book's position, i.e. what the paper book holds today.
+- The A8 caveat (§7) and how it bears on these results.
+
+## 7. Known limitation carried in: A8's 8-name floor
+
+A8's minimum-holdings rail refuses any sell that would take a book holding 8 or more names below 8.
+A D13 park therefore leaves at least 8 names invested through the risk-off spell (M14.5). Every
+variant inherits this. An early re-entry therefore moves the book from "≥ 8 names plus cash" to
+"20 names", not from cash to fully invested. The study measures the variants on the book as the
+rails actually allow. It does not change the rails. How a park should meet the floor is an owner
+decision about the ratified rails.
