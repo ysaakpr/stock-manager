@@ -42,7 +42,8 @@
 #   L0_MANIFEST           default ~/backups/l0/MANIFEST.sha256 (verify uses it when present)
 #
 # Exit codes: 0 ok · 1 sync or verification failed · 2 configuration missing or invalid · 3 another
-# sync holds the lock · 4 no usable `aws`.
+# sync holds the lock · 4 no usable `aws` · 5 verify found only keys S3 lacks (nothing extra, no
+# size or sha256 disagreement, no failed download) — sync again and re-verify.
 
 set -euo pipefail
 
@@ -196,7 +197,11 @@ case "$mode" in
         echo "missing or size-mismatched: $missing  extra or size-mismatched: $extra"
         LC_ALL=C comm -23 "$work/local.tsv" "$work/remote.tsv" | head -10
 
-        shuf -n "$sample" "$work/local.tsv" | cut -f1 > "$work/sample"
+        # Sample what both sides list with equal size: a missing key is counted once, above, and
+        # not a second time as a failed download. Through a file: `shuf -n 0` reads nothing, and
+        # a pipe into it would kill the writer with SIGPIPE under pipefail.
+        LC_ALL=C comm -12 "$work/local.tsv" "$work/remote.tsv" > "$work/both.tsv"
+        shuf -n "$sample" "$work/both.tsv" | cut -f1 > "$work/sample"
         sampled="$(wc -l < "$work/sample")"
         # The manifest names files relative to DATA_ROOT (`<sha256>  L0/<path>`); keep the sample's.
         : > "$work/manifest"
@@ -235,6 +240,12 @@ case "$mode" in
             " sha256 mismatches: local $mismatched, manifest $manifest_bad"
         if ((missing + extra + unreadable + mismatched + manifest_bad == 0)); then
             echo "l0-s3-sync: VERIFIED"
+        elif ((extra + unreadable + mismatched + manifest_bad == 0)); then
+            # Only names S3 lacks, every sampled byte agreeing: normally L0 files that settled
+            # after the sync's listing. Its own code, so a caller can sync once more and
+            # re-verify rather than page on it; anything else stays 1.
+            echo "l0-s3-sync: NOT VERIFIED (only missing: $missing)"
+            exit 5
         else
             echo "l0-s3-sync: NOT VERIFIED"
             exit 1
