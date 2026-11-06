@@ -1,0 +1,26 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "order_id": "mf-synthetic-0001",
+      "exchange_order_id": null,
+      "tradingsymbol": "INF000S01011",
+      "status": "COMPLETE",
+      "status_message": "",
+      "folio": "123456789/01",
+      "fund": "SYNTHETIC FLEXI CAP FUND - DIRECT PLAN",
+      "order_timestamp": "2026-11-05 10:00:00",
+      "exchange_timestamp": "2026-11-05",
+      "settlement_id": null,
+      "transaction_type": "BUY",
+      "variety": "regular",
+      "purchase_type": "ADDITIONAL",
+      "quantity": 85.567,
+      "amount": 5000,
+      "last_price": 58.4321,
+      "average_price": 58.4321,
+      "placed_by": "AB1234",
+      "tag": null
+    }
+  ]
+}
