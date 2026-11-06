@@ -238,6 +238,34 @@ conflict in `identity_reconciliation` (`kind = 'LINEAGE_EDGE'`, `detected_by = '
 * **The derived edge is right:** delete the MANUAL row in a reviewed transaction and resolve the
   queue row. The next rebuild writes the derived edge.
 
+## Filing feeds: re-key to the live ISIN (DQ-ISIN)
+
+NSE's board-meeting, announcement and shareholding feeds state a company's *original* ISIN
+(HDFCBANK files as `INE040A01018`; it trades as `INE040A01034`). L1 keeps that in `isin_as_filed`
+and puts in `isin` the ISIN the lineage says was live on the row's knowable date
+(`dataplatform.identity.filing_isin`). The nightly captures do this for what they land.
+`lineage_rebuild` re-keys the three datasets as its last stage. After anything else that changes
+`isin_lineage` (a MANUAL edge), re-key by hand. It is offline and idempotent:
+
+```bash
+uv run python -m dataplatform.ingest.filing_rekey --dry-run   # counts, no write
+uv run python -m dataplatform.ingest.filing_rekey             # rewrite the changed partitions
+```
+
+It writes L1. Do not run it between 18:30 and 00:30 IST on a weekday, or while a capture job runs.
+
+What stays on the stated ISIN, and is counted in the report's `unmapped` (by reason):
+
+* `unexplained`: a DERIVED edge with a gap over 5 sessions, which could be an issuer-code reuse.
+* `cross_issuer`: an edge that leaves the issuer code or the equity type (fund merges).
+* `ambiguous`: a successor with two predecessors, a cycle, or a re-key that would collide on a
+  shareholding company-quarter.
+* `pre_reissue` is not a defect. The row was knowable before its successor first traded, so it
+  stays on the ISIN that was live then.
+
+A stated ISIN with no lineage edge at all stays as filed (`as_filed`). This covers a reissue before
+the NSE ISIN era (2011-06), which L1 contiguity cannot see, and a filing under a debenture ISIN.
+
 ## Health
 
 * Every stored window names the file it came from: `symbol_history.source` is `nse_equity_list`
