@@ -1,0 +1,101 @@
+# DQ-ISIN Phase 2: the NIFTY 500 names (constituents of 2026-11-05) whose pre-2025 results filings
+# the old results index lists only under a since-retired ISIN, so the M10.4 backfill skipped them
+# as out of universe. Sized request-free on 2026-11-06 from the stored index pages: 91 names,
+# 7,378 filings, 4,270 distinct XBRL documents (ops/gates/data-lake-status-2026-11-06.md
+# gap 2). Read by dataplatform.ingest.fundamentals_lineage_backfill; a name not listed here is
+# never fetched.
+# `isin` is the current ISIN; `symbol` is display only (invariant #2). Public repo: no secret.
+
+version: 1
+names:
+  - {isin: INE007A01025, symbol: CRISIL}
+  - {isin: INE00WC01027, symbol: AFFLE}
+  - {isin: INE019A01038, symbol: JSWSTEEL}
+  - {isin: INE021A01026, symbol: ASIANPAINT}
+  - {isin: INE022Q01020, symbol: IEX}
+  - {isin: INE024L01027, symbol: GRAVITA}
+  - {isin: INE028A01039, symbol: BANKBARODA}
+  - {isin: INE031B01049, symbol: AJANTPHARM}
+  - {isin: INE036D01028, symbol: KARURVYSYA}
+  - {isin: INE040A01034, symbol: HDFCBANK}
+  - {isin: INE047A01021, symbol: GRASIM}
+  - {isin: INE048G01026, symbol: NAVINFLUOR}
+  - {isin: INE062A01020, symbol: SBIN}
+  - {isin: INE064C01022, symbol: TRIDENT}
+  - {isin: INE066A01021, symbol: EICHERMOT}
+  - {isin: INE066F01020, symbol: HAL}
+  - {isin: INE081A01020, symbol: TATASTEEL}
+  - {isin: INE089A01031, symbol: DRREDDY}
+  - {isin: INE090A01021, symbol: ICICIBANK}
+  - {isin: INE095N01031, symbol: NBCC}
+  - {isin: INE101D01020, symbol: GRANULES}
+  - {isin: INE111A01025, symbol: CONCOR}
+  - {isin: INE120A01034, symbol: CARBORUNIV}
+  - {isin: INE121A01024, symbol: CHOLAFIN}
+  - {isin: INE153T01027, symbol: BLS}
+  - {isin: INE160A01022, symbol: PNB}
+  - {isin: INE168A01041, symbol: J&KBANK}
+  - {isin: INE171A01029, symbol: FEDERALBNK}
+  - {isin: INE171Z01026, symbol: BDL}
+  - {isin: INE176A01028, symbol: BATAINDIA}
+  - {isin: INE177H01039, symbol: GPIL}
+  - {isin: INE180C01042, symbol: CGCL}
+  - {isin: INE200M01039, symbol: VBL}
+  - {isin: INE203G01027, symbol: IGL}
+  - {isin: INE205B01031, symbol: ELECON}
+  - {isin: INE205C01021, symbol: POLYMED}
+  - {isin: INE217B01036, symbol: KAJARIACER}
+  - {isin: INE238A01034, symbol: AXISBANK}
+  - {isin: INE239A01024, symbol: NESTLEIND}
+  - {isin: INE245A01021, symbol: TATAPOWER}
+  - {isin: INE257A01026, symbol: BHEL}
+  - {isin: INE260B01028, symbol: GODFRYPHLP}
+  - {isin: INE262H01021, symbol: PERSISTENT}
+  - {isin: INE263A01024, symbol: BEL}
+  - {isin: INE280A01028, symbol: TITAN}
+  - {isin: INE288B01029, symbol: DEEPAKNTR}
+  - {isin: INE296A01032, symbol: BAJFINANCE}
+  - {isin: INE324A01032, symbol: JINDALSAW}
+  - {isin: INE335Y01020, symbol: IRCTC}
+  - {isin: INE343H01029, symbol: SOLARINDS}
+  - {isin: INE385C01021, symbol: SARDAEN}
+  - {isin: INE399G01023, symbol: RKFORGE}
+  - {isin: INE419M01035, symbol: TDPOWERSYS}
+  - {isin: INE421D01022, symbol: CCL}
+  - {isin: INE457L01029, symbol: PGEL}
+  - {isin: INE463A01038, symbol: BERGEPAINT}
+  - {isin: INE466L01038, symbol: 360ONE}
+  - {isin: INE475E01026, symbol: CAPLIPOINT}
+  - {isin: INE476A01022, symbol: CANBK}
+  - {isin: INE477A01020, symbol: CANFINHOME}
+  - {isin: INE484J01027, symbol: GODREJPROP}
+  - {isin: INE486A01021, symbol: CESC}
+  - {isin: INE509F01029, symbol: CUPID}
+  - {isin: INE513A01022, symbol: SCHAEFFLER}
+  - {isin: INE520A01027, symbol: ZENSARTECH}
+  - {isin: INE528G01035, symbol: YESBANK}
+  - {isin: INE545A01024, symbol: HEGAM}
+  - {isin: INE571A01038, symbol: IPCALAB}
+  - {isin: INE573A01042, symbol: JKTYRE}
+  - {isin: INE602A01031, symbol: PCBL}
+  - {isin: INE603J01030, symbol: PIIND}
+  - {isin: INE669C01036, symbol: TECHM}
+  - {isin: INE676A01027, symbol: BBOX}
+  - {isin: INE702C01027, symbol: APLAPOLLO}
+  - {isin: INE704P01025, symbol: COCHINSHIP}
+  - {isin: INE774D01024, symbol: M&MFIN}
+  - {isin: INE797F01020, symbol: JUBLFOOD}
+  - {isin: INE821I01022, symbol: IRB}
+  - {isin: INE825A01020, symbol: VTL}
+  - {isin: INE842C01021, symbol: MINDACORP}
+  - {isin: INE849A01020, symbol: TRENT}
+  - {isin: INE871C01038, symbol: AVANTIFEED}
+  - {isin: INE918I01026, symbol: BAJAJFINSV}
+  - {isin: INE927D01051, symbol: JBMA}
+  - {isin: INE930H01031, symbol: KPRMILL}
+  - {isin: INE935N01020, symbol: DIXON}
+  - {isin: INE947Q01028, symbol: LAURUSLABS}
+  - {isin: INE962Y01021, symbol: IRCON}
+  - {isin: INE967H01025, symbol: KIMS}
+  - {isin: INE987B01026, symbol: NATCOPHARM}
+  - {isin: INE999A01023, symbol: KSB}

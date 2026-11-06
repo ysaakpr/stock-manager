@@ -138,6 +138,7 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "paper_session",
         "m17_fund_managers",
         "fundamentals_forward",
+        "fundamentals_lineage_backfill",
         "postgres_backup",
         "l0_backup",
         "l0_s3_sync",

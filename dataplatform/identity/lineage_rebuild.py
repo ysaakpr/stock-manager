@@ -1,6 +1,6 @@
 """Rebuild the ISIN lineage and everything downstream of it, offline from L0 and L1.
 
-The four stages the lineage touches, in the only order they can run:
+The stages the lineage touches, in the only order they can run:
 
 1. **Derive** the reissue edges from L1 contiguity and write `isin_lineage` (0009): equity
    reissues by issuer code (`lineage.derive_edges`), and fund unit splits by NSE symbol with the
@@ -17,6 +17,9 @@ The four stages the lineage touches, in the only order they can run:
    reissue, and keeping that start as a floor would drop the very history the edge stitches in.
 5. **Fill L2** for every ISIN L1 has EQ bars for and no stage ever built — the names with no
    corporate action at all, which the invalidation queue never reaches (`materialize_missing`).
+6. **Re-key the filing feeds** (DQ-ISIN): L1 board meetings, announcements and shareholding carry
+   NSE's stated, original ISIN, and each row is moved to the ISIN the new lineage says was live on
+   its knowable date (`ingest.filing_rekey`). Only `isin` changes; the stated one stays beside it.
 
 **MANUAL edges.** A row recorded by hand (`detected_by = 'MANUAL'`, e.g. `repair_avenuesai`'s
 INE483S01020 → INE483S01038) is evidence the derivation cannot see. Every rebuild keeps it as
@@ -107,6 +110,8 @@ class LineageRebuildReport:
     l2_partitions_filled: int
     #: `(predecessor, successor, reason)` for every edge not written — printed after the counts.
     skipped_edges: tuple[tuple[str, str, str], ...] = ()
+    #: Stage 6: filing-feed rows whose ISIN pair the re-key changed.
+    filing_rows_rekeyed: int = 0
 
     def counts(self) -> dict[str, int]:
         """Every per-stage count, in field order — what the CLI prints as its table."""
@@ -350,6 +355,15 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
     # unadjusted copy of the survivor's history; the derived edges above are what retire it.
     prune_retired(resolver.survivor_of, data_root=data_root)
 
+    # ── 6. re-key the filing feeds through the lineage just written (DQ-ISIN) ────────────────
+    # Imported here: `ingest` imports `identity`, and the package must not import back at load.
+    from dataplatform.identity.filing_isin import load_filing_resolver
+    from dataplatform.ingest.filing_rekey import rekey_lake
+
+    with connect() as conn:
+        filing = load_filing_resolver(conn)
+    rekeyed = rekey_lake(filing, data_root=data_root)
+
     stitched = sum(1 for r in reports if r.isin in history)
     report = LineageRebuildReport(
         edges_derived=lineage.derived,
@@ -368,6 +382,7 @@ def rebuild(*, clock: Clock | None = None, derive_only: bool = False) -> Lineage
         l2_partitions_stitched=stitched,
         l2_partitions_filled=len(fill.written),
         skipped_edges=skipped_edges,
+        filing_rows_rekeyed=sum(r.tally.changed for r in rekeyed),
     )
     _LOG.info("lineage_rebuild.done", **report.counts())
     return report

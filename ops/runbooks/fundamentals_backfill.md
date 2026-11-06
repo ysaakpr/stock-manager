@@ -279,3 +279,30 @@ Do it on the machine that holds the L0 (the server, under the development model)
 running driver has exited — never beside it, because both would write the same `filing_date`
 partitions. Read the new report's failure section afterwards: what is still `FAILED` is a class the
 change did not cover, and it should be named in `ops/BACKLOG.md` before the next season.
+
+## Stale-ISIN filings: the one-shot lineage backfill (DQ-ISIN Phase 2)
+
+NSE's old results index (filings up to Dec-2024) names a company by its *original* ISIN.
+HDFCBANK's filings sit under `INE040A01018`, but the company trades as `INE040A01034`. The
+campaign's universe is the ISINs that traded in the price window, so it skipped those filings as
+out of universe. `fundamentals_lineage_backfill` is the scheduler job that fetches them for the 91
+NIFTY 500 names listed in `dataplatform/ingest/fundamentals_lineage_backfill.yaml`, and no others.
+
+* It reads the index entries from the pages already in L0, so it makes no index request.
+* It follows the lineage through explained edges only (`identity.filing_isin`). Each filing is
+  keyed to the ISIN that was live on its filing date.
+* It fetches each XBRL document under both NSE leases at the fetcher's spacing. A `PUBLISHED`
+  filing is never fetched again, so a later run resumes.
+* It runs only on the dates in `RUN_DAYS` (Mon 2026-11-09 at 11:00 IST, Wed 2026-11-11 at 10:00). On any
+  other day it logs `lineage_backfill.not_a_run_window` and returns.
+* It starts no filing after 17:45 IST. A run stopped at that deadline is FAILED on
+  `/status/jobs` with "stopped at the 17:45 deadline". The next run day resumes it.
+
+```bash
+# If the 11:00 fire was missed (the scheduler restarted later), on a run day only:
+uv run python -m dataplatform.scheduler run-once fundamentals_lineage_backfill
+curl -s 127.0.0.1:8000/status/jobs | jq '.jobs[] | select(.name == "fundamentals_lineage_backfill")'
+```
+
+The log events to read are `lineage_backfill.selected` (what it chose and refused) and
+`lineage_backfill.done` (published, failed and skipped counts).
