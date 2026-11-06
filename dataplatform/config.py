@@ -466,6 +466,12 @@ class Settings(BaseSettings):
     kite_api_secret: SecretStr | None = Field(
         default=None, description="required only when BROKER_PROVIDER=kite"
     )
+    # Not a secret: the *path* of the daily Kite session file (M19.1). The file itself holds the
+    # access token, is written 0600, lives outside the checkout, and is refused if wider.
+    kite_session_file: Path = Field(
+        default=Path("~/.config/smagent/kite-session.json"),
+        description="where execution.kite_session keeps the day's Kite access token (0600)",
+    )
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -556,6 +562,19 @@ class Settings(BaseSettings):
         expanded = value.expanduser()
         if not expanded.is_absolute():
             raise ValueError(f"backup_root must be absolute or ~-prefixed, got {str(value)!r}")
+        return expanded
+
+    @field_validator("kite_session_file")
+    @classmethod
+    def _session_file_outside_the_checkout(cls, value: Path) -> Path:
+        """The token file must not land inside a checkout, where `git add -A` could reach it."""
+        expanded = value.expanduser()
+        if not expanded.is_absolute():
+            raise ValueError(
+                f"kite_session_file must be absolute or ~-prefixed, got {str(value)!r}"
+            )
+        if expanded.resolve().is_relative_to(REPO_ROOT.resolve()):
+            raise ValueError("kite_session_file must live outside the repository checkout")
         return expanded
 
     @property
