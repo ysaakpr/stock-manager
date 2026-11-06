@@ -144,3 +144,50 @@ def test_idle_cash_is_read_two_sessions_after_each_risk_on_rebalance() -> None:
     # the fifth session is later and does not count there. Inversion: a later rebalance sees it.
     assert idle_cash_after_rebalances(ledger, nav, days, [days[0]]) == [Decimal("0.11")]
     assert idle_cash_after_rebalances(ledger, nav, days, [days[3]]) == [Decimal("0.61")]
+
+
+def test_the_m14_10_report_decides_on_the_nifty500_cells() -> None:
+    """M14.10 applies M14.9's rule to NIFTY 500; floor-only rows must not enter its verdict."""
+    from backtest.m12_rerun import NIFTY500_WF_SET
+    from backtest.m14_5_report import RunFacts, Switches
+    from backtest.m14_9_report import EntryFacts, decision
+    from backtest.sweep import D13_PAPER_BASELINE, HIGH_FLOOR, LOW_FLOOR
+
+    v2 = NIFTY500_WF_SET[2].label
+    zero = EntrySwitches(0, 0, 0, 0, 0, 0, 0)
+
+    def fact(universe: str, window: str, floor: Decimal, label: str, xirr: str) -> EntryFacts:
+        base = RunFacts(
+            window=window,
+            universe=universe,
+            floor=floor,
+            label=label,
+            digest="d",
+            replay_digest="r",
+            xirr=Decimal(xirr),
+            max_drawdown=Decimal("0.2"),
+            excess=Decimal(0),
+            charges=Decimal(1),
+            final_nav=Decimal(1),
+            trades=1,
+            traded_value=Decimal(1),
+            turnover=Decimal(1),
+            switches=Switches(0, 0, 0, 0, 0),
+            floor_refusals=0,
+        )
+        return EntryFacts(base=base, switches=zero)
+
+    windows = ("decade", "six-year", "wf-selection", "wf-verification")
+    facts = []
+    for window in windows:
+        for floor in (LOW_FLOOR, HIGH_FLOOR):
+            facts.append(fact("nifty500", window, floor, D13_PAPER_BASELINE.label, "0.20"))
+            facts.append(fact("nifty500", window, floor, v2, "0.25"))  # V2 better on NIFTY 500
+            facts.append(fact("turnover_floor", window, floor, D13_PAPER_BASELINE.label, "0.30"))
+            facts.append(fact("turnover_floor", window, floor, v2, "0.10"))  # worse floor-only
+    nifty = "\n".join(decision(facts, v2, family=NIFTY500_WF_SET, universe="nifty500"))
+    floor_only = "\n".join(decision(facts, v2, family=NIFTY500_WF_SET))
+    row = next(line for line in nifty.splitlines() if line.startswith(f"| {v2} "))
+    assert "| yes | 8 / 8 |" in row and row.endswith("| yes |")
+    inverted = next(line for line in floor_only.splitlines() if line.startswith(f"| {v2} "))
+    assert "| no | 0 / 8 |" in inverted and inverted.endswith("| no |")

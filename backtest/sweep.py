@@ -71,6 +71,7 @@ from backtest.policies.momentum_v2 import (
     D13_PER_STOCK_NO_REGIME,
     D13_RANK_ORDERED_BUYS,
     D13_SECTOR_REFILL,
+    D13_V2_SECTOR_REFILL,
     PAPER_RATIFIED_2026_09_06,
     MomentumV2Parameters,
 )
@@ -129,6 +130,7 @@ __all__ = [
     "H3_RESIDUAL_AND_BAND_HIT",
     "MULTI_CAP_REDEPLOY",
     "NAIVE_REDEPLOY",
+    "NIFTY500_WF_ARMS",
     "PER_STOCK_ARMS",
     "REDEPLOY_ARMS",
     "REGIME_DAILY_ARMS",
@@ -425,6 +427,24 @@ SECTOR_ORDER_ARMS: tuple[Arm, ...] = (
         note="as S, and a basket name the cap would refuse is replaced by the next-ranked name "
         "outside the capped sector, up to 20 names",
         v2=D13_SECTOR_REFILL,
+    ),
+)
+
+#: M14.10 (pre-registration 2026-11-06): the NIFTY 500 walk-forward's arms. V1, V2 and S+refill
+#: are M14.9's own arms (same labels, same parameters, so the same run fingerprints), plus the one
+#: pre-specified combination of the owner's two ideas. Research arms only.
+EARLY_V2_SECTOR_REFILL = "V2 + S+refill (momentum turn with the sector refill)"
+NIFTY500_WF_ARMS: tuple[Arm, ...] = (
+    EARLY_ENTRY_ARMS[0],
+    EARLY_ENTRY_ARMS[1],
+    SECTOR_ORDER_ARMS[1],
+    Arm(
+        label=EARLY_V2_SECTOR_REFILL,
+        family="early entry + sector order (M14.10)",
+        reference=D13_PAPER_BASELINE.label,
+        note="V2's momentum-turn re-entry and S+refill's rank-ordered, sector-refilled buys "
+        "together; every rebalance, the early re-entry included, uses the refill",
+        v2=D13_V2_SECTOR_REFILL,
     ),
 )
 

@@ -159,6 +159,7 @@ __all__ = [
     "D13_RANK_ORDERED_BUYS",
     "D13_RESID_MOM",
     "D13_SECTOR_REFILL",
+    "D13_V2_SECTOR_REFILL",
     "PAPER_RATIFIED_2026_09_06",
     "PER_STOCK_REVIEW_SESSIONS",
     "MomentumV2Data",
@@ -306,8 +307,9 @@ class MomentumV2Parameters:
       momentum-rank order (best first), and (refill, which needs it) replace a basket name the
       35 % sector rail would refuse with the next-ranked name outside its sector. The refill needs
       the rails' sector map and caps, handed to the policy (``sector_of``, ``order_caps``). Never
-      combined with an early-entry trigger, the M14.5/M14.6 switches, the vol target or A1. Off by
-      default and out of ``repr`` while off.
+      combined with the scale-in or breadth trigger, the M14.5/M14.6 switches, the vol target or
+      A1; M14.10 combines it with the momentum-turn (and confirmed-cross) trigger. Off by default
+      and out of ``repr`` while off.
     * ``early_entry`` — M14.9: which pre-registered trigger may re-enter a parked book off a
       rebalance session (:class:`~backtest.policies.early_entry.EarlyEntry`), or ``None`` (D13).
       Requires ``regime_filter``; defined on D13's own toggles, so it never combines with the
@@ -405,7 +407,10 @@ class MomentumV2Parameters:
             )
             if getattr(self, name)
         ]
-        if self.early_entry is not None:
+        # M14.10 pre-registers one combination: a trend trigger (V1/V2) with the sector order.
+        # The scale-in stays refused: its half-exposure cap and the refill's full-weight
+        # projection of the basket disagree.
+        if self.early_entry is EarlyEntry.SCALE_IN or self.early_entry is EarlyEntry.BREADTH_TURN:
             clashing.append("early_entry")
         if self.vol_target_annual is not None:
             clashing.append("vol_target_annual")
@@ -557,6 +562,9 @@ D13_EARLY_BREADTH_TURN: Final = replace(
 #: replaces a name the sector cap would refuse. Research configurations only.
 D13_RANK_ORDERED_BUYS: Final = replace(PAPER_RATIFIED_2026_09_06, rank_ordered_buys=True)
 D13_SECTOR_REFILL: Final = replace(D13_RANK_ORDERED_BUYS, sector_refill=True)
+
+#: M14.10's one pre-specified combination: the V2 momentum-turn trigger with S+refill.
+D13_V2_SECTOR_REFILL: Final = replace(D13_SECTOR_REFILL, early_entry=EarlyEntry.MOMENTUM_TURN)
 
 
 @runtime_checkable
