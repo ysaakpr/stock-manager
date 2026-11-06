@@ -48,6 +48,7 @@ __all__ = [
     "INDEX_PRESS_REFRESH",
     "JOB_NAME",
     "L0_BACKUP",
+    "L0_S3_SYNC",
     "M17_DRY_RUN",
     "M17_FUND_MANAGERS",
     "MACRO_RELEASE_CAPTURE",
@@ -77,6 +78,7 @@ __all__ = [
     "fundamentals_forward",
     "index_close_evening",
     "l0_backup",
+    "l0_s3_sync",
     "lag_budgets",
     "m17_fund_managers",
     "macro_release_capture",
@@ -161,6 +163,12 @@ class Job:
     #: day (`announcements_capture` at 00:30 lands D-1). The gap report's NOT_YET_DUE uses it to
     #: find the fire that covers a given date (`quality.gap_schedule`).
     logical_date_lag_days: int = 0
+    #: The oldest a newest success may be before `scheduler.health` calls the job OVERDUE, however
+    #: its fires went. `None` (the default) leaves health to the cron alone. Set for a job whose
+    #: last success is itself the fact operators need, such as the weekly S3 mirror: "the mirror is
+    #: more than eight days behind" stays true through a skipped fire, a lock collision or a
+    #: scheduler that was down, all of which the per-fire check judges more leniently.
+    max_success_age: timedelta | None = None
 
     def __post_init__(self) -> None:
         if not JOB_NAME.match(self.name):
@@ -179,6 +187,8 @@ class Job:
             raise ValueError(f"job {self.name!r} needs a tz-aware registered_at")
         if self.logical_date_lag_days < 0:
             raise ValueError(f"job {self.name!r} needs a non-negative logical_date_lag_days")
+        if self.max_success_age is not None and self.max_success_age <= timedelta(0):
+            raise ValueError(f"job {self.name!r} needs a positive max_success_age")
         self.trigger()  # validate the cron now, not on the morning it was supposed to fire
 
     @property
@@ -1228,6 +1238,38 @@ L0_BACKUP = Job(
 )
 
 
+def l0_s3_sync(context: JobContext) -> None:
+    """The weekly L0 → S3 mirror (OPS): `ops/l0-s3-sync.sh sync`, then a sampled `verify`.
+
+    What it does: uploads every settled L0 file whose key the SSE-C mirror lacks, then re-lists the
+    mirror against the lake and re-downloads a random sample to compare by sha256; a verify that
+    found only keys S3 lacks (files that settled mid-run) gets one more sync and verify. See
+    `store.l0_s3_mirror.run_l0_s3_sync`.
+    What it assumes: the script's untracked config (bucket env file, SSE-C key and fingerprint) is
+    on this host and the host's instance role may write the bucket; `DATA_ROOT` is the real lake.
+    What it never does: read the key, put it or the bucket in argv, a log or `job_run.error`,
+    delete or overwrite an object, or run in the status app container — the scheduler runs on the
+    host, which is where the AWS credentials are. The import is deferred like the others.
+    """
+    from dataplatform.store.l0_s3_mirror import run_l0_s3_sync
+
+    run_l0_s3_sync(context.settings)
+
+
+#: Sunday 10:00 IST: after the 03:00 `l0_verify` sweep and the 05:45 `l0_backup`, beside only
+#: `macro_release_capture` (no AWS, no shared lock). Unhealthy when the last success is older than
+#: eight days — a week plus a day of slack — or the newest run failed (`scheduler.health`).
+L0_S3_SYNC = Job(
+    name="l0_s3_sync",
+    cron="0 10 * * sun",
+    fn=l0_s3_sync,
+    timeout=timedelta(hours=6),
+    description="Weekly L0 → SSE-C S3 mirror: upload what S3 lacks, then a sampled verify (OPS)",
+    max_success_age=timedelta(days=8),
+    registered_at=datetime(2026, 11, 6, 18, 0, tzinfo=IST),
+)
+
+
 #: Every live Source Register row that no registered job keeps current, and why. The 2026-10-05
 #: audit's root cause was not one broken job but sources that were simply never scheduled — the
 #: register said `cadence: daily` and nothing ran them. A source belongs here only with a reason a
@@ -1319,6 +1361,7 @@ def default_registry() -> JobRegistry:
             FUNDAMENTALS_FORWARD,
             POSTGRES_BACKUP,
             L0_BACKUP,
+            L0_S3_SYNC,
         ],
         declined=_declined_source_ids(),
     )

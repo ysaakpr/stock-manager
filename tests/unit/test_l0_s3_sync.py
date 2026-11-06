@@ -291,7 +291,7 @@ def test_verify_passes_and_reports_the_true_sample_size(rig: Rig) -> None:
 def test_verify_counts_an_empty_listing_as_zero_objects(rig: Rig) -> None:
     proc = rig.run("verify", "0")
 
-    assert proc.returncode == 1
+    assert proc.returncode == 5  # only missing: nothing extra, nothing sampled disagreed
     assert "remote objects: 0" in proc.stdout
     assert "missing or size-mismatched: 3  extra or size-mismatched: 0" in proc.stdout
 
@@ -326,3 +326,19 @@ def test_verify_checks_the_sample_against_the_l0_manifest(rig: Rig) -> None:
     assert "3 of them in" in proc.stdout
     assert "sha256 mismatch with manifest: src/2024/a.csv" in proc.stdout
     assert "local 0, manifest 1" in proc.stdout
+
+
+def test_verify_with_only_missing_keys_exits_5_and_anything_else_exits_1(rig: Rig) -> None:
+    """5 lets the weekly job sync once more; a size disagreement or extra object stays 1."""
+    assert rig.run("sync").returncode == 0
+    _settled(rig.l0 / "src" / "2024" / "late.csv", b"settled after the sync listed\n")
+
+    only_missing = rig.run("verify", "3")
+    assert only_missing.returncode == 5, only_missing.stdout
+    assert "NOT VERIFIED (only missing: 1)" in only_missing.stdout
+
+    (rig.remote / "sm-raw" / "src" / "2024" / "a.csv").write_bytes(b"a different size")
+    resized = rig.run("verify", "0")
+    assert resized.returncode == 1, resized.stdout
+    assert "l0-s3-sync: NOT VERIFIED" in resized.stdout
+    _assert_quiet(rig, resized)
