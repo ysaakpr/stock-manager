@@ -240,8 +240,8 @@ def test_no_generated_ranking_and_sector_map_ends_a_sector_above_the_cap(
             Decimal(0),
         )
         assert value <= CAP * total, (sector, value, total)
-    if refill:
-        assert _sector_blocks(result) == 0  # the refill never hands the gate a breaching buy
+    if refill and len(set(labels)) == len(NAMES):
+        assert _sector_blocks(result) == 0  # replacements always exist: none is ever refused
     assert all(e.decision is not Decision.SELL for e in result.journal)
 
 
@@ -270,3 +270,18 @@ def test_the_refill_never_buys_a_name_the_same_rebalance_sells() -> None:
     buys = {o.isin for o in decision.orders if o.side is Side.BUY}
     assert sells == {NAMES[6]}
     assert buys == {_X[0], NAMES[7], NAMES[8]}  # one X name, then the ranks past the sold one
+
+
+def test_the_refill_with_no_replacement_left_leaves_the_basket_to_the_gate() -> None:
+    """Falsified by hypothesis on 2026-11-06: every name in one sector, top_n=3.
+
+    Each refused name was dropped with no replacement, the basket shrank, the survivors' weights
+    rose past the cap in turn, and the last name went too: "cannot weight an empty basket". A
+    refused name is now only ever replaced; with none left, the refill behaves as S does.
+    """
+    one_sector = dict.fromkeys(NAMES, "A")
+    params = replace(D13_RANK_ORDERED_BUYS, top_n=3, sell_band=3)
+    s_result, s_book = _replay(params, NAMES, one_sector)
+    r_result, r_book = _replay(replace(params, sector_refill=True), NAMES, one_sector)
+    assert _held(r_book) == _held(s_book)
+    assert r_result.digest() == s_result.digest()

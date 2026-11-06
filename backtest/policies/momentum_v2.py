@@ -910,7 +910,21 @@ class MomentumV2Policy:
                 projected = apply_order(projected, order)
             if refused is None:
                 return basket
-            excluded.add(refused)
+            # Pre-registration §8: the replacement is the next-ranked name *outside the capped
+            # sector*. So the refused name and every lower-ranked name of its sector leave the
+            # candidates; better-ranked names of that sector already accepted stay. A refused name
+            # is replaced, never just dropped: with fewer eligible names left than the basket
+            # holds, the refill stops and leaves this basket to the gate, as S would (dropping it
+            # would shrink the basket and inflate every remaining weight).
+            capped = sector_of(refused)
+            position = next(i for i, r in enumerate(ranked) if r.isin == refused)
+            dropped = {refused} | {
+                r.isin for r in ranked[position + 1 :] if sector_of(r.isin) == capped
+            }
+            remaining = sum(1 for r in ranked if r.isin not in excluded and r.isin not in dropped)
+            if remaining < len(basket):
+                return basket
+            excluded |= dropped
 
     # ── M14.6: per-stock entry and review ────────────────────────────────────────────────────────
 
