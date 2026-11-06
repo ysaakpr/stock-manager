@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
@@ -77,6 +77,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from dataplatform.identity.filing_isin import FilingIsin, FilingIsinResolver, RekeyTally, rekey_rows
 from dataplatform.ingest.fetcher import (
     Fetcher,
     FetchHTTPError,
@@ -115,6 +116,7 @@ __all__ = [
     "quality_findings",
     "read_l1",
     "read_pit",
+    "rekey",
     "snapshot_url",
     "write_l1",
 ]
@@ -285,6 +287,17 @@ class ShareholdingRow(BaseModel):
     l0_key: str | None = Field(
         default=None, description="`source/date/filename` of the L0 payload this was derived from"
     )
+    isin_as_filed: str | None = Field(
+        default=None,
+        pattern=ISIN_PATTERN,
+        description="the ISIN the master stated, when `isin` was re-keyed through the lineage "
+        "(DQ-ISIN); None when no re-key has run, and `isin` is then the stated one",
+    )
+
+    @property
+    def filed_isin(self) -> str:
+        """The ISIN the master stated for this filing, whether or not `isin` was re-keyed."""
+        return self.isin_as_filed or self.isin
 
     @property
     def bc3_status(self) -> Bc3Status:
@@ -932,8 +945,34 @@ _L1_SCHEMA: Final = pa.schema(
         pa.field("revised", pa.bool_(), nullable=False),
         pa.field("source", pa.string(), nullable=False),
         pa.field("l0_key", pa.string(), nullable=True),
+        pa.field("isin_as_filed", pa.string(), nullable=True),
     ]
 )
+
+
+def rekey(
+    rows: Sequence[ShareholdingRow], resolver: FilingIsinResolver
+) -> tuple[tuple[ShareholdingRow, ...], RekeyTally]:
+    """Re-key ``rows`` to the ISIN each stated ISIN had become on the row's filing date.
+
+    The master states a company's original ISIN (DQ-ISIN). `(isin, period_end)` stays unique: a
+    re-key that would land two filings on one company-quarter leaves the re-keyed one as stated and
+    counts it `AMBIGUOUS` (`rekey_rows`).
+    What it never does: change a field other than `isin` / `isin_as_filed`, or the row order.
+    """
+
+    def rebuild(row: ShareholdingRow, outcome: FilingIsin) -> ShareholdingRow:
+        return row.model_copy(update={"isin": outcome.isin, "isin_as_filed": outcome.as_filed})
+
+    return rekey_rows(
+        rows,
+        resolver,
+        as_filed=lambda r: r.filed_isin,
+        knowable=lambda r: r.filing_date,
+        current=lambda r: (r.isin, r.isin_as_filed),
+        rebuild=rebuild,
+        unique_key=lambda r: (r.isin, r.period_end),
+    )
 
 
 def write_l1(snapshot: ShareholdingSnapshot, *, data_root: Path | None = None) -> tuple[Path, ...]:
@@ -976,7 +1015,12 @@ def write_l1(snapshot: ShareholdingSnapshot, *, data_root: Path | None = None) -
     return tuple(written)
 
 
-def merge_l1(snapshot: ShareholdingSnapshot, *, data_root: Path | None = None) -> tuple[Path, ...]:
+def merge_l1(
+    snapshot: ShareholdingSnapshot,
+    *,
+    data_root: Path | None = None,
+    resolver: FilingIsinResolver | None = None,
+) -> tuple[Path, ...]:
     """Merge a poll into the filing-date partitions it touches, and return the paths written.
 
     What it does: for every filing date the snapshot carries, rewrites that partition as the union
@@ -986,24 +1030,35 @@ def merge_l1(snapshot: ShareholdingSnapshot, *, data_root: Path | None = None) -
     list (a revision, or the whole previous quarter).
     What it assumes: snapshots are merged in poll order, so "this snapshot wins" means "the later
     poll wins".
+    Rows are matched on the *stated* ISIN, so a re-keyed partition merges with a fresh poll rather
+    than doubling it. With ``resolver``, each rewritten partition is re-keyed first (`rekey`).
     What it never does: move a row to a different filing date — the partition is the PIT contract.
     """
     by_filing: dict[date, dict[tuple[str, date], ShareholdingRow]] = {}
     for row in snapshot.rows:
-        by_filing.setdefault(row.filing_date, {})[(row.isin, row.period_end)] = row
+        by_filing.setdefault(row.filing_date, {})[(row.filed_isin, row.period_end)] = row
     written: list[Path] = []
     for filing_date, fresh in sorted(by_filing.items()):
         try:
             held = read_l1(filing_date, data_root=data_root)
         except FileNotFoundError:
             held = ()
-        merged = {(row.isin, row.period_end): row for row in held}
+        merged = {(row.filed_isin, row.period_end): row for row in held}
         merged.update(fresh)
+        rows: Sequence[ShareholdingRow] = tuple(merged.values())
+        if resolver is not None:
+            rows, tally = rekey(rows, resolver)
+            _LOG.info(
+                "shareholding.rekeyed",
+                source=snapshot.source,
+                filing_date=filing_date.isoformat(),
+                **tally.as_dict(),
+            )
         written += write_l1(
             ShareholdingSnapshot(
                 source=snapshot.source,
                 l0_key=snapshot.l0_key,
-                rows=tuple(sorted(merged.values(), key=lambda row: (row.isin, row.period_end))),
+                rows=tuple(sorted(rows, key=lambda row: (row.isin, row.period_end))),
             ),
             data_root=data_root,
         )
@@ -1066,7 +1121,12 @@ def _partitions_through(on_date: date, *, data_root: Path | None) -> Iterator[Pa
 
 #: Columns added to `_L1_SCHEMA` after the first partitions could have been written (M13.3), with
 #: the value a partition that predates them means: no employee-trust figure, an original filing.
-_ADDED_COLUMNS: Final[Mapping[str, Any]] = {"employee_trusts_pct": None, "revised": False}
+_ADDED_COLUMNS: Final[Mapping[str, Any]] = {
+    "employee_trusts_pct": None,
+    "revised": False,
+    # DQ-ISIN: a partition no re-key has touched holds the ISIN as stated.
+    "isin_as_filed": None,
+}
 
 
 def _rows_of(path: Path) -> tuple[ShareholdingRow, ...]:
@@ -1097,6 +1157,9 @@ def _rows_of(path: Path) -> tuple[ShareholdingRow, ...]:
             revised=bool(record["revised"]),
             source=str(record["source"]),
             l0_key=None if record["l0_key"] is None else str(record["l0_key"]),
+            isin_as_filed=(
+                None if record["isin_as_filed"] is None else str(record["isin_as_filed"])
+            ),
         )
         for record in records
     )
@@ -1118,6 +1181,7 @@ def _to_record(row: ShareholdingRow) -> dict[str, Any]:
         "revised": row.revised,
         "source": row.source,
         "l0_key": row.l0_key,
+        "isin_as_filed": row.isin_as_filed,
     }
 
 

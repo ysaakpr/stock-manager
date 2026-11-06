@@ -32,6 +32,7 @@ import pytest
 
 from dataplatform.clock import IST, FrozenClock
 from dataplatform.config import Settings
+from dataplatform.identity.filing_isin import FilingEdge, FilingIsinResolver
 from dataplatform.identity.master import Exchange, IdentityMaster, SymbolWindow
 from dataplatform.ingest import announcements as ann
 from dataplatform.ingest import daily_capture as dc
@@ -937,6 +938,50 @@ def test_nse_and_bse_land_in_one_partition_whichever_lands_second(
     assert set(nse_only) <= set(rows)
     assert all(row.l0_key for row in rows)
     assert h.urls() == [bse_url]  # NSE re-derived from L0, not re-fetched
+
+
+def _reissue_of(isin: str, effective: date) -> FilingIsinResolver:
+    """A lineage holding one seamless reissue of ``isin`` to the next serial of its issuer."""
+    successor = f"{isin[:9]}9{isin[10]}9"
+    return FilingIsinResolver([FilingEdge(isin, successor, effective, "MANUAL", "DERIVED", 0)])
+
+
+def test_the_captures_rekey_a_stated_isin_through_the_lineage(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """DQ-ISIN: what the board-meeting and announcement captures land is on the live ISIN, with
+    the stated one kept beside it."""
+    evening = _ist(2026, 10, 19, 20, 0)
+    owed = date(2026, 10, 19)
+    h = _harness(settings, tmp_path, evening)
+    infy = "INE009A01021"
+    resolver = _reissue_of(infy, date(2020, 1, 1))
+    ctx = replace(h.at(evening, _flows_script(owed=owed)), filing_isins=lambda: resolver)
+    dc.run_nse_daily_capture(ctx)
+    held = board_meetings.read_pit(owed, data_root=tmp_path)
+    moved = [r for r in held if r.isin_as_filed == infy]
+    assert moved and {r.isin for r in moved} == {resolver.resolve(infy, owed).isin}
+    assert infy not in {r.isin for r in held}
+
+    day = date(2026, 8, 7)
+    nse_url, _ = _ann_urls(day)
+    stated = ann.parse_nse(NSE_ANN, filename="x").rows[0].isin
+    resolver = _reissue_of(stated, date(2020, 1, 1))
+    ctx = replace(
+        h.at(
+            _ist(2026, 8, 8, 0, 30),
+            {WARM: RecordedResponse(status_code=403), nse_url: RecordedResponse(body=NSE_ANN)},
+        ),
+        filing_isins=lambda: resolver,
+    )
+    dc.capture_announcements(
+        ctx, {ann.NSE_SOURCE_ID: _fetcher(h)}, day=day, sources=(ann.NSE_SOURCE_ID,)
+    )
+    rows = ann.read_l1(day, data_root=tmp_path).rows
+    assert stated not in {r.isin for r in rows}
+    assert {r.isin for r in rows if r.isin_as_filed == stated} == {
+        resolver.resolve(stated, day).isin
+    }
 
 
 def test_a_shut_day_with_no_announcements_is_an_empty_capture(
