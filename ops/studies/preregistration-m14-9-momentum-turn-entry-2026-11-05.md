@@ -249,3 +249,18 @@ unchanged: a name whose top-up would take its sector above 35% of the book is re
 code that evaluates it moved into A8, with top-ups now in whole shares as A8 sizes every order.
 The re-run on `d1539a9` had started and was stopped before any S result was rendered; it is
 discarded. S and S+refill are re-run on the fixed commit, with the same D13 check and copy rule.
+
+**Addendum, 2026-11-06 (≈13:00 IST): the replacement now follows §8's wording; not a rule
+change.** The gate's property test found a falsifying case: every name in one sector, `top_n` 3.
+The refill raised "cannot weight an empty basket". The implementation had dropped each refused
+name and taken the next-ranked name of *any* sector. §8 says the replacement is the next-ranked
+name **outside the capped sector**, and that a capped name is *replaced*. The code now does
+exactly that (commit `98b72d5`):
+- a refused name and every lower-ranked name of its sector leave the candidates;
+- better-ranked names of that sector that the basket already holds stay;
+- if too few eligible names remain to fill the basket, the refill stops and leaves the basket to
+  the gate, as S does.
+
+Thresholds, weights, caps, ranking and universe are unchanged. The re-run on `449680f` was
+stopped before any S result was rendered and is discarded. S and S+refill are re-run on the fixed
+commit, with the same D13 check and copy rule.
