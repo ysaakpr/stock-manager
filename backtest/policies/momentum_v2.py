@@ -117,6 +117,7 @@ from typing import Final, Protocol, runtime_checkable
 from analyst.cases import RiskRails
 from analyst.journal.evidence import EvidenceBundle, EvidenceItem, EvidenceKind
 from analyst.journal.models import Actor, Decision, JournalEntry, Sleeve
+from analyst.rails import Lot, Portfolio, ProposedOrder, RailId, apply_order, check_order
 from backtest.policies.early_entry import (
     SCALE_IN_FRACTION,
     BreadthData,
@@ -852,49 +853,61 @@ class MomentumV2Policy:
     def _sector_refill(
         self, ctx: SessionContext, ranked: Sequence[MomentumV2Record], keep: set[str]
     ) -> list[MomentumV2Record]:
-        """The basket with every name the sector cap would refuse replaced, best-ranked first.
+        """The basket with every name A8's sector rail would refuse replaced, best-ranked first.
 
-        Projects the book the way A8's sector rail sees it: each held name the rebalance keeps at
-        its price, plus each basket name topped up to its model weight of the book's capital,
-        walked in rank order. The first basket name whose top-up would take its sector past
-        ``max_sector_pct`` of capital is dropped and the basket re-formed from the next-ranked
-        names; repeated until no name is refused (each pass drops one name, so it ends). A name
-        already held at or above its weight adds nothing and is never dropped. It is a projection:
-        the rails still clear every order, and a buy they refuse anyway stays refused.
+        Asks A8 itself (:func:`analyst.rails.check_order` on a projected book), never compares a
+        cap here: the book is the held names the rebalance keeps, at their prices, plus the rest of
+        the capital in cash; each basket name in rank order is proposed as a whole-share top-up to
+        its model weight of capital and applied with :func:`analyst.rails.apply_order`. The first
+        name whose top-up A8 would refuse under ``MAX_SECTOR`` is dropped and the basket re-formed
+        from the next-ranked eligible names, until A8 refuses none (each pass drops one name, so it
+        ends). Only the sector verdict decides; any other rail is left to the gate as for every
+        order. A held name outside the sell band is sold by this rebalance and is not eligible
+        (the 2026-11-05 crash: one ISIN sold and bought in one session). A projection only: the
+        gate still clears every order, and a buy it refuses anyway stays refused.
         """
         assert self._sector_of is not None and self._order_caps is not None
-        cap = self._order_caps.max_sector_pct / Decimal(100)
+        sector_of = self._sector_of
         held = {holding.isin: holding for holding in ctx.broker.holdings()}
         price_of = {record.isin: record.price for record in ranked}
-        held_value = {
-            isin: Decimal(h.quantity) * price_of.get(isin, h.average_price)
-            for isin, h in held.items()
-            if isin in keep
-        }
+        kept = tuple(
+            Lot(
+                isin=isin,
+                sector=sector_of(isin),
+                quantity=h.quantity,
+                price=price_of.get(isin, h.average_price),
+            )
+            for isin, h in sorted(held.items())
+            if isin in keep and h.quantity > 0
+        )
         capital = self._capital(ctx, held, price_of, ranked)
-        limit = cap * capital
-        base: dict[str, Decimal] = {}
-        for isin, value in held_value.items():
-            sector = self._sector_of(isin)
-            base[sector] = base.get(sector, _ZERO) + value
-        # A held name outside the sell band is sold by this rebalance, so it is not eligible: a
-        # refill reaching below the band must pass over it rather than buy it back the session
-        # it is sold (one ISIN, two orders — the 2026-11-05 campaign crash). The unrefilled
-        # basket lies inside the band, so this changes nothing until the refill goes past it.
+        cash = capital - sum((lot.value for lot in kept), _ZERO)
+        book = Portfolio(case_id="momentum-v2-refill", lots=kept, cash=max(_ZERO, cash))
         excluded: set[str] = {isin for isin in held if isin not in keep}
         while True:
             basket = [r for r in ranked if r.isin not in excluded][: self._params.top_n]
             weights = self._weights_for({r.isin: r for r in basket})
-            used = dict(base)
+            projected = book
             refused: str | None = None
             for record in basket:
-                sector = self._sector_of(record.isin)
-                already = held_value.get(record.isin, _ZERO)
-                add = max(_ZERO, weights[record.isin] * capital - already)
-                if add > _ZERO and used.get(sector, _ZERO) + add > limit:
+                lot = projected.lot(record.isin)
+                already = _ZERO if lot is None else lot.value
+                add = weights[record.isin] * capital - already
+                quantity = min(int(add // record.price), int(projected.cash // record.price))
+                if quantity <= 0:
+                    continue
+                order = ProposedOrder(
+                    request=OrderRequest(
+                        isin=record.isin, side=Side.BUY, quantity=quantity, tag="MOMENTUM"
+                    ),
+                    price=record.price,
+                    sector=sector_of(record.isin),
+                )
+                verdict = check_order(order, projected, self._order_caps)
+                if any(b.rail is RailId.MAX_SECTOR for b in verdict.breaches):
                     refused = record.isin
                     break
-                used[sector] = used.get(sector, _ZERO) + add
+                projected = apply_order(projected, order)
             if refused is None:
                 return basket
             excluded.add(refused)
