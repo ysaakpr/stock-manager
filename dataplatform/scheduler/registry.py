@@ -44,6 +44,7 @@ __all__ = [
     "FAILURE_ALERTS",
     "FBIL_REFERENCE_RATES",
     "FUNDAMENTALS_FORWARD",
+    "FUNDAMENTALS_LINEAGE_BACKFILL",
     "INDEX_CLOSE_EVENING",
     "INDEX_PRESS_REFRESH",
     "JOB_NAME",
@@ -54,6 +55,7 @@ __all__ = [
     "MACRO_RELEASE_CAPTURE",
     "NEWS_CAPTURE",
     "NSE_DAILY_CAPTURE",
+    "ONE_SHOT_JOBS",
     "PAPER_SESSION",
     "POSTGRES_BACKUP",
     "SHAREHOLDING_POLL",
@@ -1179,6 +1181,52 @@ FUNDAMENTALS_FORWARD = Job(
 )
 
 
+def fundamentals_lineage_backfill(context: JobContext) -> None:
+    """DQ-ISIN Phase 2, one-shot: pre-2025 results filings the backfill skipped on a stale ISIN.
+
+    What it does: reads the old results index's entries from the pages already in L0, keeps those
+    whose stated ISIN the lineage walks (explained edges only) to one of the 91 checked-in NIFTY
+    500 names, keys each to the ISIN live on its filing date, and fetches its XBRL through the
+    campaign's runner under both NSE leases at the fetcher's polite rate. See
+    `fundamentals_lineage_backfill.run_fundamentals_lineage_backfill`.
+    What it assumes: the DQ-ISIN lineage resolver is deployed and `isin_lineage` is current.
+    What it never does: request an index page, fetch an unlisted name, run on a day outside its
+    `RUN_DAYS`, or start a filing after 17:45 IST. A refused lease propagates (FAILED, naming the
+    holder). The import is deferred like the others.
+    """
+    from dataplatform.ingest.fundamentals_lineage_backfill import (
+        run_fundamentals_lineage_backfill_job,
+    )
+
+    run_fundamentals_lineage_backfill_job(context)
+
+
+#: One-shot (coordinator, 2026-11-06): 11:00 IST on Mon 2026-11-09 (after the DQ-ISIN deploy) and
+#: Wed 2026-11-11 (resume), skipping Tue 2026-11-10, an NSE holiday. A crontab has no year field,
+#: so the job itself refuses any other date (`RUN_DAYS`) and fires next year are no-ops. Its own
+#: deadline stops starting filings at 17:45; the 15-minute misfire grace plus the 6h45m budget end
+#: by 18:00, before `shareholding_poll` takes www.nseindia.com at 18:05. No daytime job holds
+#: either NSE host. 4,270 documents (sized 2026-11-06) at the 2.5 s spacing is about three hours.
+FUNDAMENTALS_LINEAGE_BACKFILL = Job(
+    name="fundamentals_lineage_backfill",
+    cron="0 11 9,11 11 *",
+    fn=fundamentals_lineage_backfill,
+    timeout=timedelta(hours=6, minutes=45),
+    description=(
+        "One-shot DQ-ISIN Phase 2: pre-2025 XBRL filings of 91 NIFTY 500 names indexed under a "
+        "retired ISIN, keyed through the lineage (Mon 9 / Wed 11 Nov 2026 only)"
+    ),
+    misfire_grace=timedelta(minutes=15),
+    registered_at=datetime(2026, 11, 9, 9, 30, tzinfo=IST),
+)
+
+
+#: Jobs that fire on named dates only, not on a recurring cadence. Their crons repeat a year apart,
+#: past the health `LOOKBACK`, which is right: once their dates are behind them nothing is owed.
+#: `test_scheduler_coverage` holds every *other* job to a gap inside the lookback.
+ONE_SHOT_JOBS: frozenset[str] = frozenset({FUNDAMENTALS_LINEAGE_BACKFILL.name})
+
+
 def postgres_backup(context: JobContext) -> None:
     """The nightly Postgres backup (M15.4): one `pg_dump -Fc`, then retention.
 
@@ -1359,6 +1407,7 @@ def default_registry() -> JobRegistry:
             PAPER_SESSION,
             M17_FUND_MANAGERS,
             FUNDAMENTALS_FORWARD,
+            FUNDAMENTALS_LINEAGE_BACKFILL,
             POSTGRES_BACKUP,
             L0_BACKUP,
             L0_S3_SYNC,

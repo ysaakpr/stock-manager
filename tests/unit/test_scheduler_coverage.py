@@ -46,9 +46,11 @@ from dataplatform.scheduler.registry import (
     DAILY_SNAPSHOT,
     EOD_PIPELINE,
     FUNDAMENTALS_FORWARD,
+    FUNDAMENTALS_LINEAGE_BACKFILL,
     INDEX_CLOSE_EVENING,
     NEWS_CAPTURE,
     NSE_DAILY_CAPTURE,
+    ONE_SHOT_JOBS,
     SHAREHOLDING_POLL,
     TRI_EVENING,
     TRI_REFRESH,
@@ -292,7 +294,14 @@ NSE_HOSTS: Final = frozenset({"www.nseindia.com", "nsearchives.nseindia.com"})
 #: feed, and `daily_snapshot` leases hosts its covered rows do not all name. Named so the generic
 #: `covers`-derived check cannot miss them; every other NSE job is found from its register rows.
 NSE_LEASE_HOLDERS_BY_BODY: Final = frozenset(
-    {"bse_ca_sweep", "ca_refresh", "daily_snapshot", "eod_pipeline", "identity_refresh"}
+    {
+        "bse_ca_sweep",
+        "ca_refresh",
+        "daily_snapshot",
+        "eod_pipeline",
+        "identity_refresh",
+        "fundamentals_lineage_backfill",
+    }
 )
 
 #: 18:00-20:30 IST: the evening window in which the scheduler's NSE jobs run back to back and no
@@ -512,6 +521,8 @@ def test_the_lookback_reaches_past_every_registered_crons_longest_gap() -> None:
     start = datetime(2026, 1, 1, tzinfo=IST)
     end = start + timedelta(days=2 * 366)
     for job in default_registry():
+        if job.name in ONE_SHOT_JOBS:
+            continue  # named dates, a year apart by construction (see the one-shot test below)
         trigger = job.trigger(IST)
         fires: list[datetime] = []
         previous: datetime | None = None
@@ -658,3 +669,38 @@ def test_installing_the_scheduler_retires_the_single_job_timer() -> None:
     script = (REPO / "ops/systemd/install-scheduler.sh").read_text()
     assert "disable --now daily-snapshot.timer" in script
     assert "enable --now scheduler.service" in script
+
+
+def test_the_lineage_backfill_fires_only_on_its_run_days_and_clears_the_nse_leases() -> None:
+    """DQ-ISIN Phase 2: Mon 9 and Wed 11 Nov 2026 at 11:00, never the Tuesday holiday, and off
+    both NSE hosts before `shareholding_poll` takes one at 18:05."""
+    from dataplatform.ingest.fundamentals_lineage_backfill import RUN_DAYS
+
+    trigger = FUNDAMENTALS_LINEAGE_BACKFILL.trigger(IST)
+    fires: list[datetime] = []
+    previous: datetime | None = None
+    cursor = datetime(2026, 11, 1, tzinfo=IST)
+    while (fire := trigger.get_next_fire_time(previous, cursor)) is not None and fire.year == 2026:
+        fires.append(fire)
+        previous, cursor = fire, fire + timedelta(seconds=1)
+    assert [f.date() for f in fires] == sorted(RUN_DAYS)
+    assert {f.time() for f in fires} == {time(11, 0)}
+    assert date(2026, 11, 10) not in RUN_DAYS
+    for fire in fires:
+        latest_end = fire + FUNDAMENTALS_LINEAGE_BACKFILL.latest_start
+        latest_end += FUNDAMENTALS_LINEAGE_BACKFILL.timeout
+        assert latest_end.time() <= time(18, 0)
+    # Its two fires against every other NSE lease holder's fire + budget over that week.
+    holders = _nse_lease_holders(default_registry())
+    assert FUNDAMENTALS_LINEAGE_BACKFILL in holders
+    week = (datetime(2026, 11, 8, tzinfo=IST), datetime(2026, 11, 12, tzinfo=IST))
+    mine = _worst_case(FUNDAMENTALS_LINEAGE_BACKFILL, *week)
+    assert len(mine) == 2
+    for other in holders:
+        if other is FUNDAMENTALS_LINEAGE_BACKFILL:
+            continue
+        for theirs_start, theirs_end in _windows(other, week[0] - timedelta(days=1), week[1]):
+            for my_start, my_end in mine:
+                assert my_end <= theirs_start or theirs_end <= my_start, (
+                    f"{my_start:%a %H:%M} overlaps {other.name} {theirs_start:%a %H:%M}"
+                )

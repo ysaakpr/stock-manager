@@ -786,6 +786,26 @@ class FundamentalsBackfillRunner:
         )
         return report
 
+    def ingest(self, entries: Sequence[FilingIndexEntry]) -> FundamentalsBackfillReport:
+        """Ingest ``entries`` a caller already holds, with no index phase and so no index request.
+
+        What it does: drives each in-universe entry exactly as `run` drives a chunk's entries —
+        skip-if-published, else fetch the XBRL, parse, write, checkpoint — and flushes. A 403 spike
+        parks the run, as in `run`.
+        What it assumes: the caller read ``entries`` from stored index pages (L0) and set the
+        universe to the ISINs it means to fetch.
+        What it never does: fetch or checkpoint an index page.
+        """
+        report = FundamentalsBackfillReport(index_requested=0)
+        report.filings_discovered = len(entries)
+        try:
+            self._ingest_entries(entries, report=report)
+        except _ParkedError as parked:
+            report.park_reason = parked.reason
+            report.park_detail = parked.detail
+        self._flush(report=report)
+        return report
+
     def requeue(
         self,
         items: Sequence[RequeueItem],
