@@ -87,6 +87,11 @@ class FilingIsinStatus(StrEnum):
     #: Stopped at an edge whose successor has more than one predecessor, at a cycle, or because the
     #: re-keyed row would collide with another row's key in the same dataset.
     AMBIGUOUS = "ambiguous"
+    #: The re-keyed row would collide with a row the source also stated under the live ISIN, and
+    #: the two agree on every fact: one filing listed twice (the shareholding master does this for
+    #: 84 companies on 2026-11-06). The stated copy is kept as stated; the live ISIN already has
+    #: the filing, so nothing is unmapped.
+    DUPLICATE = "duplicate"
 
 
 #: The statuses that leave a row short of the ISIN lineage says it became: counted as unmapped.
@@ -246,6 +251,7 @@ def rekey_rows[R](
     current: Callable[[R], tuple[str, str | None]],
     rebuild: Callable[[R, FilingIsin], R],
     unique_key: Callable[[R], Hashable] | None = None,
+    facts: Callable[[R], Hashable] | None = None,
 ) -> tuple[tuple[R, ...], RekeyTally]:
     """Re-key ``rows`` to the ISIN each was filed under had become on its knowable date.
 
@@ -253,7 +259,9 @@ def rekey_rows[R](
     ISIN, never an earlier re-key's result) at its ``knowable`` date and rebuilds the row with the
     resolved ISIN and the filed one beside it. With ``unique_key``, a re-keyed row whose key would
     collide with another row's is put back on its filed ISIN and counted `AMBIGUOUS`: two filings
-    landing on one key is exactly the case a re-key cannot decide. ``current`` reads the row's
+    landing on one key is exactly the case a re-key cannot decide, unless every colliding row
+    states the same ``facts``: that is one filing listed twice, counted `DUPLICATE`, not unmapped.
+    ``current`` reads the row's
     present ``(isin, isin_as_filed)`` so the tally counts rows that actually change.
     What it assumes: the caller's rows all belong to one dataset.
     What it never does: change any field but the ISIN pair, or reorder ``rows``.
@@ -262,10 +270,17 @@ def rekey_rows[R](
     outcomes = [resolver.resolve(as_filed(row), knowable(row)) for row in rows]
     if unique_key is not None:
         rebuilt = [rebuild(row, o) for row, o in zip(rows, outcomes, strict=True)]
-        keys = Counter(unique_key(r) for r in rebuilt)
+        groups: dict[Hashable, list[R]] = {}
+        for r in rebuilt:
+            groups.setdefault(unique_key(r), []).append(r)
         for i, (row, o) in enumerate(zip(rows, outcomes, strict=True)):
-            if o.isin != o.as_filed and keys[unique_key(rebuilt[i])] > 1:
-                outcomes[i] = FilingIsin(o.as_filed, o.as_filed, FilingIsinStatus.AMBIGUOUS, 0)
+            group = groups[unique_key(rebuilt[i])]
+            if o.isin != o.as_filed and len(group) > 1:
+                same = facts is not None and len({facts(r) for r in group}) == 1
+                status = FilingIsinStatus.DUPLICATE if same else FilingIsinStatus.AMBIGUOUS
+                outcomes[i] = FilingIsin(o.as_filed, o.as_filed, status, 0)
+                if same:
+                    continue
                 _LOG.warning(
                     "filing_isin.key_collision",
                     as_filed=o.as_filed,

@@ -149,6 +149,22 @@ def test_a_rekey_that_would_collide_on_a_unique_key_keeps_the_stated_isin() -> N
     assert tally.unmapped == {HDFC_1: "ambiguous"}
 
 
+def test_a_filing_the_master_lists_under_both_isins_is_a_duplicate_not_unmapped() -> None:
+    """The shareholding master lists some companies twice, once per ISIN, with the same figures."""
+    filed = date(2026, 10, 14)
+    same = [_holding(HDFC_1, filed), _holding(HDFC_3, filed)]
+    out, tally = sh.rekey(same, _resolver())
+    assert [(r.isin, r.isin_as_filed) for r in out] == [(HDFC_1, HDFC_1), (HDFC_3, HDFC_3)]
+    assert tally.by_status == {"duplicate": 1, "as_filed": 1}
+    assert tally.unmapped == {}
+    differing = [
+        _holding(HDFC_1, filed),
+        _holding(HDFC_3, filed).model_copy(update={"revised": True}),
+    ]
+    _, tally = sh.rekey(differing, _resolver())
+    assert tally.unmapped == {HDFC_1: "ambiguous"}
+
+
 # ── the three datasets ─────────────────────────────────────────────────────────────────────────
 
 

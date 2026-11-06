@@ -956,8 +956,9 @@ def rekey(
     """Re-key ``rows`` to the ISIN each stated ISIN had become on the row's filing date.
 
     The master states a company's original ISIN (DQ-ISIN). `(isin, period_end)` stays unique: a
-    re-key that would land two filings on one company-quarter leaves the re-keyed one as stated and
-    counts it `AMBIGUOUS` (`rekey_rows`).
+    re-key that would land two filings on one company-quarter leaves the re-keyed one as stated:
+    `DUPLICATE` when both state the same figures (the master lists some companies under both
+    ISINs), `AMBIGUOUS` when they differ (`rekey_rows`).
     What it never does: change a field other than `isin` / `isin_as_filed`, or the row order.
     """
 
@@ -972,6 +973,17 @@ def rekey(
         current=lambda r: (r.isin, r.isin_as_filed),
         rebuild=rebuild,
         unique_key=lambda r: (r.isin, r.period_end),
+        facts=lambda r: (
+            r.period_end,
+            r.filing_date,
+            r.promoter_holding_pct,
+            r.promoter_pledge_pct,
+            r.public_pct,
+            r.fii_pct,
+            r.dii_pct,
+            r.employee_trusts_pct,
+            r.revised,
+        ),
     )
 
 

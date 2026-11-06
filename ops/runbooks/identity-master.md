@@ -260,6 +260,9 @@ What stays on the stated ISIN, and is counted in the report's `unmapped` (by rea
 * `cross_issuer`: an edge that leaves the issuer code or the equity type (fund merges).
 * `ambiguous`: a successor with two predecessors, a cycle, or a re-key that would collide on a
   shareholding company-quarter.
+* `duplicate` is not a defect either. The shareholding master lists some companies under both
+  ISINs with identical figures. The stated copy stays on its ISIN, and the live ISIN already has
+  the filing.
 * `pre_reissue` is not a defect. The row was knowable before its successor first traded, so it
   stays on the ISIN that was live then.
 
