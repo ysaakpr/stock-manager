@@ -293,7 +293,7 @@ NIFTY 500 names listed in `dataplatform/ingest/fundamentals_lineage_backfill.yam
   keyed to the ISIN that was live on its filing date.
 * It fetches each XBRL document under both NSE leases at the fetcher's spacing. A `PUBLISHED`
   filing is never fetched again, so a later run resumes.
-* It runs only on the dates in `RUN_DAYS` (Mon 2026-11-09 and Wed 2026-11-11, 11:00 IST). On any
+* It runs only on the dates in `RUN_DAYS` (Mon 2026-11-09 at 11:00 IST, Wed 2026-11-11 at 10:00). On any
   other day it logs `lineage_backfill.not_a_run_window` and returns.
 * It starts no filing after 17:45 IST. A run stopped at that deadline is FAILED on
   `/status/jobs` with "stopped at the 17:45 deadline". The next run day resumes it.

@@ -672,8 +672,8 @@ def test_installing_the_scheduler_retires_the_single_job_timer() -> None:
 
 
 def test_the_lineage_backfill_fires_only_on_its_run_days_and_clears_the_nse_leases() -> None:
-    """DQ-ISIN Phase 2: Mon 9 and Wed 11 Nov 2026 at 11:00, never the Tuesday holiday, and off
-    both NSE hosts before `shareholding_poll` takes one at 18:05."""
+    """DQ-ISIN Phase 2: Mon 9 Nov 2026 at 11:00 and Wed 11 Nov at 10:00, never the Tuesday
+    holiday, and off both NSE hosts before `shareholding_poll` takes one at 18:05."""
     from dataplatform.ingest.fundamentals_lineage_backfill import RUN_DAYS
 
     trigger = FUNDAMENTALS_LINEAGE_BACKFILL.trigger(IST)
@@ -684,7 +684,7 @@ def test_the_lineage_backfill_fires_only_on_its_run_days_and_clears_the_nse_leas
         fires.append(fire)
         previous, cursor = fire, fire + timedelta(seconds=1)
     assert [f.date() for f in fires] == sorted(RUN_DAYS)
-    assert {f.time() for f in fires} == {time(11, 0)}
+    assert [f.time() for f in fires] == [time(11, 0), time(10, 0)]
     assert date(2026, 11, 10) not in RUN_DAYS
     for fire in fires:
         latest_end = fire + FUNDAMENTALS_LINEAGE_BACKFILL.latest_start
