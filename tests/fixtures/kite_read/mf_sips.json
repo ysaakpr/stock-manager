@@ -1,0 +1,25 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "sip_id": "900000000000001",
+      "tradingsymbol": "INF000S01011",
+      "fund": "SYNTHETIC FLEXI CAP FUND - DIRECT PLAN",
+      "dividend_type": "growth",
+      "transaction_type": "BUY",
+      "status": "ACTIVE",
+      "sip_type": "sip",
+      "created": "2025-01-05 10:00:00",
+      "frequency": "monthly",
+      "instalment_amount": 5000,
+      "instalments": -1,
+      "last_instalment": "2026-11-05 10:00:00",
+      "pending_instalments": -1,
+      "instalment_day": 5,
+      "completed_instalments": 22,
+      "next_instalment": "2026-12-05",
+      "trigger_price": 0,
+      "tag": null
+    }
+  ]
+}

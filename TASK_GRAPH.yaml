@@ -29,6 +29,7 @@ milestones:
   M16: {title: "Strategy exploration — seven pre-registered arms against D13", depends: [M9, M12, M14]}
   M17: {title: "AI fund managers — forward paper test on a shared Research Commons", depends: [M5, M6, M15]}
   M18: {title: "Operator console — one web view of the platform, read-only first", depends: [M5, M15]}
+  M19: {title: "Kite integration phase A — read-only agentic review of the owner's portfolio", depends: [M15]}
   C:  {title: Continuous tracks (no gate), depends: []}
 
 tasks:
@@ -3714,3 +3715,169 @@ tasks:
     - "all M18.1 shared rules still hold (read-only, no external URL, no secret, IST)"
     - "make check is green"
   verify: "uv run pytest tests/unit/test_console_portfolio.py tests/unit/test_console_ops.py -q"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M19 — Kite integration, phase A: read-only agentic review of the owner's portfolio
+#        (owner-approved 2026-11-06; spec ops/studies/kite-portfolio-review-integration-2026-11-06.md)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The owner's real, self-managed Zerodha account is read over Kite Connect and reviewed by an
+# agent (a Claude Code session) through a local MCP server. Shared rules for every M19 task:
+#   - Read-only by construction (spec §4 I1): no phase-A module sends a non-GET or a
+#     non-allowlisted request; nothing under analyst/owner_portfolio/ or execution/kite_read.py
+#     imports KiteBroker; the MCP tool list is pinned. The agent recommends; it cannot trade.
+#   - Private (I2): snapshots live only under gitignored data/private/kite/, never in Postgres,
+#     the journal, the status API/console or a committed file; logs carry counts and snapshot ids
+#     only; analyst.fundmanager (M17) never imports analyst.owner_portfolio.
+#   - Secrets (I3, invariant #13): api key/secret and access token are SecretStr; the token file
+#     is 0600 outside the repo; never in argv, URL, log, snapshot or exception text. No stored
+#     password or TOTP and no automated login — every token comes from a human login.
+#   - House rules (I4/I5): Decimal money, ISIN keys, injected Clock, IST timestamps, fail loud;
+#     no scheduler job, no change to M17 inputs or the paper desk; tests offline on synthetic
+#     fixtures (tests/fixtures/kite_read/).
+
+- id: M19.1
+  title: Kite session — login exchange, 0600 token file, kite-session CLI
+  milestone: M19
+  module: X1
+  autonomy: AUTO
+  deps: []
+  spec: |
+    Spec §3 M19.1. `execution/kite_session.py`, shared with phase B.
+    - `login` prints `https://kite.zerodha.com/connect/login?v=3&api_key=…`, reads the pasted
+      redirect URL (registered as http://127.0.0.1/kite/callback; nothing listens there) or the
+      bare request_token from stdin — never argv — and POSTs `/session/token` with
+      `checksum = sha256(api_key + request_token + api_secret)` and `X-Kite-Version: 3`.
+    - Stores {access_token, user_id, login_time, expires_at = next 06:00 IST} at
+      `Settings.kite_session_file` (default ~/.config/smagent/kite-session.json), mode 0600,
+      atomically; loading refuses a file with wider permissions.
+    - `set-token` (stdin, verified with GET /user/profile) as the fallback route; `status`
+      (masked user id, expiry in IST); `forget` (deletes the file).
+    - No logout API call (it puts the token in a query string); no password/TOTP; no automation.
+  deliverables: [execution/kite_session.py, dataplatform/config.py, .env.example, tests/unit/test_kite_session.py, tests/fixtures/kite_read/session_token.json]
+  acceptance:
+    - "the exchange posts exactly api_key, request_token and the documented checksum, with X-Kite-Version 3, and nothing in the URL"
+    - "the session file is written 0600 and a 0640/0644/0604/0660 file is refused on load"
+    - "expiry is the next 06:00 IST; an expired or missing session is LoginNeededError"
+    - "no token appears in stdout, stderr, logs or exception text; set-token has no argv form"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_kite_session.py -q"
+
+- id: M19.2
+  title: Read-only Kite client — GET-only allowlisted transport and typed models
+  milestone: M19
+  module: X1
+  autonomy: AUTO
+  deps: [M19.1]
+  spec: |
+    Spec §3 M19.2. `execution/kite_read.py`.
+    - `KiteReadTransport` has one network method, `get`, and the fixed allowlist /user/profile,
+      /user/margins, /portfolio/holdings, /portfolio/positions, /orders, /trades, /mf/holdings,
+      /mf/sips, /mf/orders, /gtt/triggers; anything else raises before any I/O.
+    - Shares `LiveKiteTransport._unwrap` (Decimal money, TokenException → session error); maps
+      httpx timeouts/connection errors to typed errors (G11 for reads); retries 429/5xx with a
+      bounded backoff. A 403 PermissionException stays a request error, not a dead session.
+    - Frozen models with Decimal money: KiteHolding (held quantity = quantity + t1_quantity),
+      KitePosition, KiteFunds, KiteOrder/KiteTrade, KiteMfHolding/Sip/Order, KiteGtt. A missing
+      documented field is KiteMalformedResponseError, never a zero. Does not import KiteBroker.
+  deliverables: [execution/kite_read.py, tests/unit/test_kite_read.py, tests/fixtures/kite_read/]
+  acceptance:
+    - "the allowlist equals the spec's ten paths; a non-allowlisted path raises with zero requests sent"
+    - "429/5xx retried at most three times; timeouts and connection errors are typed and carry no token"
+    - "holdings parse ISIN-keyed with Decimal money and held quantity including T+1; a native float in a money field fails"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_kite_read.py -q"
+
+- id: M19.3
+  title: Private write-once snapshots of the account and OwnerPortfolio
+  milestone: M19
+  module: A11
+  autonomy: AUTO
+  deps: [M19.2]
+  spec: |
+    Spec §3 M19.3. `analyst/owner_portfolio/snapshot.py`.
+    - `refresh()` reads every allowlisted endpoint once and writes the raw envelopes byte for byte
+      to data/private/kite/<YYYY-MM-DD>/<HHMMSS>/<endpoint>.json plus manifest.json (sha256 per
+      file, IST clock time). Write-once; outside data/L0 (no rebuild, no S3 L0 mirror).
+    - An expired session or a core-endpoint error writes nothing; an optional endpoint's (MF,
+      GTT) error envelope is kept and reported as unavailable, never emptied.
+    - `load(snapshot_id)` verifies the manifest and parses into OwnerPortfolio; minimum refresh
+      interval 5 minutes.
+  deliverables: [analyst/owner_portfolio/snapshot.py, tests/unit/test_owner_portfolio.py]
+  acceptance:
+    - "snapshot files equal the fixture bytes and match their manifest hashes; a second write of the same id fails"
+    - "a tampered file fails load with SnapshotIntegrityError"
+    - "data/private/ is gitignored (git check-ignore)"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_owner_portfolio.py -q -k 'snapshot or refresh or load'"
+
+- id: M19.4
+  title: Review context — the owner's holdings joined to the lake by ISIN
+  milestone: M19
+  module: A11
+  autonomy: AUTO
+  deps: [M19.3]
+  spec: |
+    Spec §3 M19.4. `analyst/owner_portfolio/context.py`.
+    - Per holding: latest lake close and session, 1m/3m/6m/1y adjusted returns, distance to the
+      50/200-session averages and 52-week high/low, 20-session median traded value, the M13.8
+      thin-trading label, NSE industry, index membership and a size bucket from it, latest PIT
+      fundamentals with their filing date, corporate actions announced and not yet ex.
+    - Portfolio: value and weight (lake close x held quantity, Kite's mark beside it), unrealised
+      P&L on Kite's average cost, cash and liquid-ETF share, top-5 weight and HHI, sector / size /
+      ETF-vs-equity weights, holdings the lake cannot price, named.
+    - Reuses the reads M17's Commons makes (LakeCommonsSource, index_membership_asof,
+      thin_trading_asof, compute_metrics behind PitContext) without changing them; imports
+      nothing from analyst.fundmanager. A holding the lake cannot identify gets
+      `unavailable(<reason>)` and is never dropped; a failing lake piece degrades only itself.
+  deliverables: [analyst/owner_portfolio/context.py, tests/unit/test_owner_portfolio.py, tests/unit/owner_portfolio_fakes.py, tests/unit/test_thin_trading.py]
+  acceptance:
+    - "for the fixture snapshot and a fake lake every value, weight and P&L matches a hand-computed number"
+    - "the SME holding is listed with Kite's numbers and unavailable(ISIN not in the lake's identity master)"
+    - "a lake piece that raises is reported in lake_notes and leaves the other pieces intact"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_owner_portfolio.py -q -k review"
+
+- id: M19.5
+  title: Agent interface — kite-portfolio MCP server and the same tools as a CLI
+  milestone: M19
+  module: A11
+  autonomy: AUTO
+  deps: [M19.4]
+  spec: |
+    Spec §3 M19.5. `analyst/owner_portfolio/mcp_server.py` (stdio, `mcp` Python SDK — new
+    dependency, owner-approved 2026-11-06), registered in the project .mcp.json as
+    `kite-portfolio` with a `uv run` command and no secret. Tools, all read-only: session_status,
+    refresh, portfolio_overview, holding_detail, exposures, changes, orders_today, trades_today,
+    mf_holdings, gtt_triggers. Symbols are an input convenience resolved to ISIN through the
+    snapshot's Kite row; every output is ISIN-keyed. The same functions as a CLI:
+    `uv run python -m analyst.owner_portfolio <tool>` (JSON, or --markdown).
+  deliverables: [analyst/owner_portfolio/mcp_server.py, analyst/owner_portfolio/tools.py, analyst/owner_portfolio/__main__.py, analyst/owner_portfolio/__init__.py, .mcp.json, pyproject.toml, uv.lock, tests/unit/test_owner_portfolio_invariants.py]
+  acceptance:
+    - "the MCP server lists exactly the ten spec tools, each annotated read-only (pinned test)"
+    - "no post/put/delete/patch/request call and no KiteBroker reference under analyst/owner_portfolio or in execution/kite_read.py (AST test)"
+    - "analyst.fundmanager, analyst.commons and backtest never import analyst.owner_portfolio (import-graph test)"
+    - "logs over a full tool run carry no symbol, ISIN, quantity or value"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_owner_portfolio.py tests/unit/test_owner_portfolio_invariants.py -q"
+
+- id: M19.6
+  title: Console exports import — tradebook, tax P&L and ledger (DEFERRED)
+  milestone: M19
+  module: A11
+  autonomy: NEEDS_GO
+  deps: [M19.3]
+  spec: |
+    DEFERRED by the owner on 2026-11-06 (spec §6.4): "M19.6 (Console exports) later".
+    Parse the Console Tradebook / Tax-P&L / Ledger exports the owner already downloads (xlsx/CSV)
+    into the same private area (data/private/kite/), to give lot dates, holding period (LTCG vs
+    STCG), realised P&L and the FY tax picture — the only route to those numbers, since Kite
+    Connect has no reports API (spec §1). Not needed for a first useful review.
+  deliverables: []
+  acceptance:
+    - "deferred: no acceptance until the owner gives the go"
+  verify: ""
+  escalation:
+    question: "Build the Console exports import (tradebook / tax P&L / ledger) now?"
+    why_blocked: "Deferred by the owner on 2026-11-06; phase A ships without it."
+    unblocks: []

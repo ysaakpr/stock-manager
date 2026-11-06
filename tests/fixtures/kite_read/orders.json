@@ -1,0 +1,40 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "placed_by": "AB1234",
+      "order_id": "261106000000001",
+      "exchange_order_id": "1100000000000001",
+      "parent_order_id": null,
+      "status": "COMPLETE",
+      "status_message": null,
+      "status_message_raw": null,
+      "order_timestamp": "2026-11-06 09:20:11",
+      "exchange_update_timestamp": "2026-11-06 09:20:12",
+      "exchange_timestamp": "2026-11-06 09:20:11",
+      "variety": "regular",
+      "modified": false,
+      "exchange": "NSE",
+      "tradingsymbol": "WIPRO",
+      "instrument_token": 969473,
+      "order_type": "LIMIT",
+      "transaction_type": "SELL",
+      "validity": "DAY",
+      "validity_ttl": 0,
+      "product": "CNC",
+      "quantity": 25,
+      "disclosed_quantity": 0,
+      "price": 452.00,
+      "trigger_price": 0,
+      "average_price": 452.00,
+      "filled_quantity": 25,
+      "pending_quantity": 0,
+      "cancelled_quantity": 0,
+      "market_protection": 0,
+      "meta": {},
+      "tag": null,
+      "tags": [],
+      "guid": "synthetic-guid-0001"
+    }
+  ]
+}

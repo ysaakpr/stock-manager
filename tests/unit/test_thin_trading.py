@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -284,15 +285,24 @@ def test_the_job_runs_after_the_evening_chain_and_ends_before_m17(day: date) -> 
     assert THIN_TRADING_LABEL.covers == () and THIN_TRADING_LABEL.sync_sources == ()
 
 
+#: Packages under `analyst/` that may read the label. `analyst/owner_portfolio` (M19, owner-approved
+#: 2026-11-06) is the review of the owner's own self-managed Kite account: no M17 manager, backtest
+#: or paper book reads it — `tests/unit/test_owner_portfolio_invariants.py` fails if
+#: `analyst.fundmanager`, `analyst.commons` or `backtest` ever import it — so the label reaching it
+#: changes no mandate hash and no simulated book.
+_LABEL_READERS: Final = ("analyst/owner_portfolio/",)
+
+
 def test_nothing_m17_or_the_backtest_reads_imports_the_label() -> None:
     """The label must not reach the M17 managers (their mandate hash would change; that needs a
     pre-registration amendment) or the backtest/paper books. Fails the day anything under
-    `analyst/` or `backtest/` names it."""
+    `analyst/` or `backtest/` names it, outside the owner's portfolio review (`_LABEL_READERS`)."""
     root = Path(__file__).resolve().parents[2]
     offenders = [
-        str(path.relative_to(root))
+        rel
         for package in ("analyst", "backtest")
         for path in (root / package).rglob("*.py")
         if "thin_trading" in path.read_text(encoding="utf-8")
+        and not (rel := path.relative_to(root).as_posix()).startswith(_LABEL_READERS)
     ]
     assert offenders == []

@@ -1,0 +1,35 @@
+{
+  "status": "success",
+  "data": [
+    {
+      "id": 1000001,
+      "user_id": "AB1234",
+      "parent_trigger": null,
+      "type": "single",
+      "created_at": "2026-10-20 10:00:00",
+      "updated_at": "2026-10-20 10:00:00",
+      "expires_at": "2027-10-20 10:00:00",
+      "status": "active",
+      "condition": {
+        "exchange": "NSE",
+        "last_price": 3288.10,
+        "tradingsymbol": "TCS",
+        "trigger_values": [2900.00],
+        "instrument_token": 2953217
+      },
+      "orders": [
+        {
+          "exchange": "NSE",
+          "tradingsymbol": "TCS",
+          "product": "CNC",
+          "order_type": "LIMIT",
+          "transaction_type": "SELL",
+          "quantity": 10,
+          "price": 2890.00,
+          "result": null
+        }
+      ],
+      "meta": null
+    }
+  ]
+}

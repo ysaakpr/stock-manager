@@ -1,0 +1,6 @@
+{
+  "status": "error",
+  "message": "Insufficient permission for that call.",
+  "data": null,
+  "error_type": "PermissionException"
+}
