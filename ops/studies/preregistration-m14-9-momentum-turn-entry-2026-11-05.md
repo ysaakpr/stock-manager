@@ -233,6 +233,8 @@ session is therefore not eligible, and the fix (commit `a1d70f7`) makes the refi
 No threshold, weight, cap, ranking or universe changed. S itself (rank-ordered buys without
 refill) and D13 are untouched by the fix.
 
-No S result had been read when this was fixed: the crashed campaign produced no `results.json`
-and no S figure was rendered. Every S and S+refill run is re-run on the fixed commit, with the
+No S result had been analysed when this was fixed: the crashed campaign produced no
+`results.json`, nothing was rendered, and no S figure was compared with D13. (Locating the failing
+arm meant reading the driver's per-run `sweep.arm_done` log lines, which print each finished
+run's drawdown; those were not compared or used.) Every S and S+refill run is re-run on the fixed commit, with the
 same D13 check and copy rule as §8. The runs of the crashed campaign are not used.
