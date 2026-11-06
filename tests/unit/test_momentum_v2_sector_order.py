@@ -37,11 +37,13 @@ from backtest.replay import ReplayEngine, ReplayResult
 from backtest.run import _AccountingBroker
 from dataplatform.clock import FrozenClock
 from dataplatform.query.pit import Dataset
+from execution.broker import Side
 from execution.costs import CostModel, load_rate_card
 from execution.sim_broker import SimBroker
 from tests.rails_support import marks_from
 from tests.unit.test_buy_sizing_ceiling import NAMES, PRICE, RAILS, _Market
-from tests.unit.test_momentum_v2_daily_regime import _D13_DIGEST_BEFORE_M14_5
+from tests.unit.test_momentum_v2_daily_regime import _D13_DIGEST_BEFORE_M14_5, _Broker, _ctx
+from tests.unit.test_momentum_v2_daily_regime import _held as _held_names
 from tests.unit.test_momentum_v2_daily_regime import _replay as _m14_5_replay
 
 D13 = PAPER_RATIFIED_2026_09_06
@@ -241,3 +243,30 @@ def test_no_generated_ranking_and_sector_map_ends_a_sector_above_the_cap(
     if refill:
         assert _sector_blocks(result) == 0  # the refill never hands the gate a breaching buy
     assert all(e.decision is not Decision.SELL for e in result.journal)
+
+
+# ── regression: a name the rebalance sells is never refilled into the same session ───────────────
+
+
+def test_the_refill_never_buys_a_name_the_same_rebalance_sells() -> None:
+    """2026-11-05 campaign crash (DuplicateStagedOrderError, INE805D01034, 2018-03-05).
+
+    A held name ranked outside the sell band is sold by the rebalance. When the sector cap pushed
+    the refill below the band, the refill picked that same name back into the basket, and the
+    policy staged a SELL and a BUY of one ISIN for one session. Here sector X fills ranks 1-6 and
+    the book holds rank 7 (outside a band of 3): the refill must reach past it, never buy it back.
+    """
+    ranking = (*_X, *NAMES[6:])  # X = ranks 1-6; NAMES[6] is rank 7
+    params = replace(D13_SECTOR_REFILL, top_n=3, sell_band=3)
+    sector_map = SectorMap(source="test", sha256="test", by_isin=_SECTORS)
+    policy = MomentumV2Policy(
+        _Data(ranking), params, order_caps=RAILS, sector_of=sector_map.sector_of
+    )
+    broker = _Broker(cash="900000", holdings=_held_names(NAMES[6]))
+    decision = policy.decide(_ctx(_SESSIONS[0], broker))
+    isins = [order.isin for order in decision.orders]
+    assert len(isins) == len(set(isins)), isins  # one order per ISIN per session
+    sells = {o.isin for o in decision.orders if o.side is Side.SELL}
+    buys = {o.isin for o in decision.orders if o.side is Side.BUY}
+    assert sells == {NAMES[6]}
+    assert buys == {_X[0], NAMES[7], NAMES[8]}  # one X name, then the ranks past the sold one

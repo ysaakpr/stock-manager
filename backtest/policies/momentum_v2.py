@@ -877,7 +877,11 @@ class MomentumV2Policy:
         for isin, value in held_value.items():
             sector = self._sector_of(isin)
             base[sector] = base.get(sector, _ZERO) + value
-        excluded: set[str] = set()
+        # A held name outside the sell band is sold by this rebalance, so it is not eligible: a
+        # refill reaching below the band must pass over it rather than buy it back the session
+        # it is sold (one ISIN, two orders — the 2026-11-05 campaign crash). The unrefilled
+        # basket lies inside the band, so this changes nothing until the refill goes past it.
+        excluded: set[str] = {isin for isin in held if isin not in keep}
         while True:
             basket = [r for r in ranked if r.isin not in excluded][: self._params.top_n]
             weights = self._weights_for({r.isin: r for r in basket})
