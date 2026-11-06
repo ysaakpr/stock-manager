@@ -158,10 +158,9 @@ def test_a_failed_sync_or_verify_is_a_failed_job_run(
     settings: Settings, monkeypatch: pytest.MonkeyPatch, sync: list[int], verify: list[int]
 ) -> None:
     """Through the runner's own outcome mapping: the run is FAILED, with the step in the error."""
-    import dataplatform.store.l0_s3_mirror as mirror
-
     fake = FakeScript(sync=sync, verify=verify)
-    monkeypatch.setattr(mirror.subprocess, "run", fake)
+    # The job calls `run_l0_s3_sync` with no runner, which resolves `subprocess.run` per call.
+    monkeypatch.setattr(subprocess, "run", fake)
     runner = SchedulerRunner(
         JobRegistry([L0_S3_SYNC]), settings=settings, clock=FrozenClock(FRIDAY), instance="t"
     )
