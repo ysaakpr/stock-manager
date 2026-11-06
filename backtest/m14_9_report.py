@@ -403,9 +403,9 @@ def collect(run_dir: Path, lake: _Lake, *, arms: Sequence[Arm] = ALL_ARMS) -> li
     return facts
 
 
-def sector_table(facts: Sequence[EntryFacts]) -> list[str]:
+def sector_table(facts: Sequence[EntryFacts], arms: Sequence[Arm] = SECTOR_ORDER_SET) -> list[str]:
     """How often A8's sector cap bound, and the cash left idle after rebalances (§8)."""
-    labels = [arm.label for arm in SECTOR_ORDER_SET]
+    labels = [arm.label for arm in arms]
     rows = [f for f in facts if f.base.label in labels]
     if not rows:
         return []
@@ -454,14 +454,19 @@ def decision(
     *,
     family: Sequence[Arm] = EARLY_ENTRY_SET,
     title: str = "Decision rule (pre-registered §5, evaluated in code)",
+    universe: str = "turnover_floor",
 ) -> list[str]:
-    """The pre-registered decision rule for one family over the floor-only cells."""
-    floor_only = [f.base for f in facts if f.base.universe == "turnover_floor"]
+    """The pre-registered decision rule for one family over one universe's cells.
+
+    M14.9 decides on the floor-only cells; M14.10 applies the same rule to NIFTY 500's.
+    """
+    name = "floor-only" if universe == "turnover_floor" else universe.upper()
+    floor_only = [f.base for f in facts if f.base.universe == universe]
     d13 = {(f.window, f.floor): f for f in floor_only if f.label == D13_PAPER_BASELINE.label}
     out = [
         f"## {title}",
         "",
-        f"1. **Walk-forward choice** (floor-only selection window, XIRR ÷ max DD, ₹1 cr first): "
+        f"1. **Walk-forward choice** ({name} selection window, XIRR ÷ max DD, ₹1 cr first): "
         f"**{selected or '(none)'}**.",
     ]
     if not selected or selected == D13_PAPER_BASELINE.label:
@@ -477,8 +482,8 @@ def decision(
             "",
         ]
     out += [
-        "| Variant | Verification XIRR/DD ≥ D13 at both floors | Floor-only cells with XIRR/DD "
-        "≥ D13 (of 8; need ≥ 6) | Max DD within 2 pp of D13 in every floor-only cell | All "
+        f"| Variant | Verification XIRR/DD ≥ D13 at both floors | {name} cells with XIRR/DD "
+        f"≥ D13 (of 8; need ≥ 6) | Max DD within 2 pp of D13 in every {name} cell | All "
         "three |",
         "| --- | --- | --- | --- | --- |",
     ]
@@ -731,9 +736,11 @@ def render(
             f.base.universe == universe and f.base.window == "wf-verification" for f in facts
         ):
             out += [
-                f"**Walk-forward ({title})**: no selection window — the PIT NIFTY 500 membership "
-                "history opens 2016-10-24, after the selection window opens. These rows are "
-                "attribution only; the walk-forward choice on record is the floor-only one.",
+                f"**Walk-forward ({title})**: no selection run. M14.9 ran NIFTY 500 only on "
+                "the six-year and wf-verification windows, on the belief that its PIT membership "
+                "opened 2016-10-24; it covers from 2015-03-28 (M14.1, published 2026-10-10), and "
+                "the NIFTY 500 walk-forward is M14.10. These rows are attribution only; the "
+                "walk-forward choice on record here is the floor-only one.",
                 "",
             ]
     out += scorecard([f.base for f in facts], ALL_ARMS)

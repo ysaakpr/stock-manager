@@ -264,3 +264,16 @@ exactly that (commit `98b72d5`):
 Thresholds, weights, caps, ranking and universe are unchanged. The re-run on `449680f` was
 stopped before any S result was rendered and is discarded. S and S+refill are re-run on the fixed
 commit, with the same D13 check and copy rule.
+
+## 10. Correction, 2026-11-06 (≈17:15 IST): NIFTY 500 PIT coverage
+
+§1 and §4 say the PIT NIFTY 500 membership history "opens 2016-10-24". That was stale when it was
+written:
+- M14.1's membership build, published to the lake on 2026-10-10, covers NIFTY 500 from
+  **2015-03-28**.
+- It returns 500 members on 2016-09-01 (PR #170, `ops/gates/data-lake-status-2026-11-06.md`).
+
+So a NIFTY 500 walk-forward was possible. This study still ran NIFTY 500 only on the six-year and
+wf-verification windows, as attribution, and its rule still decides on the floor-only cells. The
+correction changes no M14.9 result or verdict. The NIFTY 500 walk-forward is pre-registered
+separately as M14.10 (`ops/studies/preregistration-m14-10-nifty500-walk-forward-2026-11-06.md`).
