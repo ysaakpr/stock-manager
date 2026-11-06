@@ -102,8 +102,10 @@ def assess(job: Job, runs: LastRuns, *, now: datetime, timezone: ZoneInfo) -> Jo
     What it does: with no attempt at all, NEVER_RAN once a fire has come due since the job was
     registered, NOT_YET_DUE before; FAILING when the newest attempt is FAILED or TIMED_OUT;
     OVERDUE when no success started at or after the newest due fire; RUNNING when an attempt is in
-    flight; OK otherwise. A SKIPPED_LOCKED newest attempt is judged by the success behind it —
-    another process held the lock, which is the job running, not the job broken. A fire before
+    flight; OK otherwise — unless the job sets `max_success_age` and its newest success is older
+    than that, which is OVERDUE from the instant the limit was crossed. A SKIPPED_LOCKED newest
+    attempt is judged by the success behind it — another process held the lock, which is the job
+    running, not the job broken. A fire before
     `Job.registered_at` is not due: no scheduler held the job then.
     What it never does: read a clock (`now` is the caller's injected instant), or call a job that
     has had a due fire and no run anything but NEVER_RAN.
@@ -122,6 +124,16 @@ def assess(job: Job, runs: LastRuns, *, now: datetime, timezone: ZoneInfo) -> Jo
         state = JobHealthState.RUNNING
     else:
         state = JobHealthState.OK
+    if (
+        state in (JobHealthState.OK, JobHealthState.RUNNING)
+        and job.max_success_age is not None
+        and runs.last_success_at is not None
+        and runs.last_success_at + job.max_success_age < now
+    ):
+        # The job's own age limit: a newest success older than it is OVERDUE from the moment it
+        # crossed the limit, whatever the cron says the latest due fire was. No success at all is
+        # the cron's to judge (NEVER_RAN, NOT_YET_DUE, OVERDUE above).
+        state, due = JobHealthState.OVERDUE, runs.last_success_at + job.max_success_age
     return JobHealth(name=job.name, cron=job.cron, state=state, due_since=due, runs=runs)
 
 

@@ -140,6 +140,7 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
         "fundamentals_forward",
         "postgres_backup",
         "l0_backup",
+        "l0_s3_sync",
     )
     assert registry.get("eod_pipeline").cron == "30 18 * * mon-fri"
     # 19:15, after the 18:30 EOD pipeline: the two share nsearchives.nseindia.com, and a host
@@ -179,6 +180,8 @@ def test_the_default_registry_holds_exactly_the_jobs_production_runs() -> None:
     # M14.3: 02:00 daily, when neither NSE host is leased by another job (after the 00:30
     # announcements capture, three hours clear of the 06:00 first-Sunday BSE sweep).
     assert registry.get("fundamentals_forward").cron == "0 2 * * *"
+    # OPS: Sunday 10:00, after the 03:00 L0 sweep and the 05:45 L0 manifest.
+    assert registry.get("l0_s3_sync").cron == "0 10 * * sun"
 
 
 def test_every_default_job_is_valid_and_describes_itself() -> None:
