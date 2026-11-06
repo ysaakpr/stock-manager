@@ -665,11 +665,14 @@ def render(
         "before any run. D13 (`PAPER_RATIFIED_2026_09_06`) reads the regime — NIFTY 50 TRI "
         "against its 200-session average — only on the monthly rebalance session. Each variant is "
         "D13 with one switch (`early_entry`) that may re-enter a **parked** book between "
-        "rebalances; exits stay D13's monthly rule:",
+        "rebalances; exits stay D13's monthly rule. Arm S (pre-registration §8) changes only the "
+        "order buys reach A8's sector rail, and is listed when its runs are rendered:",
         "",
     ]
+    present = {f.base.label for f in facts}
     for arm in ALL_ARMS:
-        out.append(f"* **{arm.label}** — {arm.note}.")
+        if arm in EARLY_ENTRY_SET or arm.label in present:
+            out.append(f"* **{arm.label}** — {arm.note}.")
     out += [
         "",
         "Mandate (owner, 2026-09-07): rank on XIRR ÷ max drawdown; both liquidity floors "
