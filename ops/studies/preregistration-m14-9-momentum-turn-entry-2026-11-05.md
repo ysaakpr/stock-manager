@@ -238,3 +238,14 @@ No S result had been analysed when this was fixed: the crashed campaign produced
 arm meant reading the driver's per-run `sweep.arm_done` log lines, which print each finished
 run's drawdown; those were not compared or used.) Every S and S+refill run is re-run on the fixed commit, with the
 same D13 check and copy rule as §8. The runs of the crashed campaign are not used.
+
+**Addendum, 2026-11-06 (≈13:00 IST): a second implementation fix, also not a rule change.** The
+repo's gate forbids any rail-cap comparison under `backtest/` (A8 owns every rail; test
+`test_the_backtest_holds_no_rail_logic_of_its_own`). The refill's projection compared sector value
+to the cap itself, so it now asks A8 instead (commit `8786b7d`). It builds an A8 `Portfolio` of
+the kept names plus cash, proposes each basket top-up as a whole-share `ProposedOrder`, and drops
+a name when `analyst.rails.check_order` reports a `MAX_SECTOR` breach. The rule is §8's,
+unchanged: a name whose top-up would take its sector above 35% of the book is replaced. Only the
+code that evaluates it moved into A8, with top-ups now in whole shares as A8 sizes every order.
+The re-run on `d1539a9` had started and was stopped before any S result was rendered; it is
+discarded. S and S+refill are re-run on the fixed commit, with the same D13 check and copy rule.
