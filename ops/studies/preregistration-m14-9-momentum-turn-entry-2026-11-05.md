@@ -220,3 +220,19 @@ floor-only cells, and its max DD is no more than 2 pp deeper than D13's in every
   from the fill ledger (trades, dividends, interest, the opening deposit) and divided by that
   session's NAV. Reported as the mean and the maximum over the window.
 - The scorecard against D13, as for V1–V4.
+
+## 9. Note, 2026-11-06 (≈12:15 IST): a bug fix in S+refill, not a rule change
+
+The first S campaign (commit `cbed66b`, 5 Nov) crashed twice on an S+refill run with
+`DuplicateStagedOrderError` (INE805D01034, session 2018-03-05). Cause: a held name ranked outside
+the sell band is sold by the rebalance; when the sector cap pushed the refill below the band, the
+refill picked that same name back into the basket, so the policy staged a sell and a buy of one
+ISIN in one session, which the engine refuses. §8 says the refill takes "the next-ranked name"
+and that names outside the sell band are sold "as in any rebalance". A name being sold in that
+session is therefore not eligible, and the fix (commit `a1d70f7`) makes the refill pass over it.
+No threshold, weight, cap, ranking or universe changed. S itself (rank-ordered buys without
+refill) and D13 are untouched by the fix.
+
+No S result had been read when this was fixed: the crashed campaign produced no `results.json`
+and no S figure was rendered. Every S and S+refill run is re-run on the fixed commit, with the
+same D13 check and copy rule as §8. The runs of the crashed campaign are not used.
