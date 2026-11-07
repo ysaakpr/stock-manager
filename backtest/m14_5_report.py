@@ -297,25 +297,33 @@ def _range(values: Sequence[Decimal], fmt: Any) -> str:
     return f"{fmt(min(values))} to {fmt(max(values))}" if values else "—"
 
 
-def scorecard(facts: Sequence[RunFacts], arms: Sequence[Arm] = REGIME_DAILY_SET) -> list[str]:
+def scorecard(
+    facts: Sequence[RunFacts],
+    arms: Sequence[Arm] = REGIME_DAILY_SET,
+    *,
+    baseline: Arm = D13_PAPER_BASELINE,
+    name: str = "D13",
+) -> list[str]:
     """Each variant against D13, cell by cell, counted in code from the same runs as the tables.
 
     A cell is one (universe, window, floor); a variant counts only in cells where D13 also ran.
+    ``baseline`` / ``name`` swap D13 for another arm (M14.12 scores against C0 too); arms listed
+    before the baseline are left out of a non-D13 scorecard.
     XIRR/DD and max drawdown are compared exactly (no rounding), so a tie is a tie.
     """
-    base = {
-        (f.universe, f.window, f.floor): f for f in facts if f.label == D13_PAPER_BASELINE.label
-    }
+    base = {(f.universe, f.window, f.floor): f for f in facts if f.label == baseline.label}
     order = [arm.label for arm in arms]
+    if baseline.label in order:
+        order = order[order.index(baseline.label) :]
     out = [
-        "## Scorecard against D13 (generated)",
+        f"## Scorecard against {name} (generated)",
         "",
         "Counted in code (`backtest.m14_5_report.scorecard`) over every cell (universe, window, "
-        "floor) that has both the variant and D13. Comparisons are exact.",
+        f"floor) that has both the variant and {name}. Comparisons are exact.",
         "",
-        "| Strategy | Cells | XIRR/DD better / tie / worse than D13 | Cells where XIRR/DD is "
+        f"| Strategy | Cells | XIRR/DD better / tie / worse than {name} | Cells where XIRR/DD is "
         "worse | Max DD worse / tie / better | Worst DD increase | XIRR > 25% | One-way turnover "
-        "/yr | Charges vs D13 |",
+        f"/yr | Charges vs {name} |",
         "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for label in order:
@@ -327,7 +335,7 @@ def scorecard(facts: Sequence[RunFacts], arms: Sequence[Arm] = REGIME_DAILY_SET)
             continue
         cleared = sum(1 for f in rows if f.xirr > BAR)
         turnover = _range([f.turnover for f in rows], lambda v: f"{v}x")
-        if label == D13_PAPER_BASELINE.label:
+        if label == baseline.label:
             out.append(
                 f"| **{label}** | {len(rows)} | — | — | — | — | {cleared} / {len(rows)} "
                 f"| {turnover} | — |"

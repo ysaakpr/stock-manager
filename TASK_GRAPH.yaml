@@ -2657,6 +2657,34 @@ tasks:
     - "the candidate journals its opening and every session including no-ops; make check is green"
   verify: "uv run pytest tests/unit/test_paper_candidate_book.py tests/unit/test_paper_session_job.py -q"
 
+- id: M14.12
+  title: Early entry + early exit + sector refill on NIFTY 500 (study b)
+  milestone: M14
+  module: X2
+  autonomy: AUTO
+  deps: [M14.10, M14.11]
+  spec: |
+    Owner request (2026-11-07): backtest early entry, early exit and the sector refill together.
+    Pre-registered in `ops/studies/preregistration-m14-12-early-exit-combo-2026-11-07.md` before any
+    code or run. Arms on M14.10's NIFTY 500 windows and floors: D13, C0
+    (`PAPER_CANDIDATE_V2_SREFILL_2026_11_07`), C1 (C0 + M14.5's `regime_daily_exit` with a 2% band)
+    and C2 (C0 + the unbanded daily exit). Re-entry stays C0's: each park (monthly or daily) opens a
+    new parked spell and the V2 trigger re-enters at most once per spell. The only code change is
+    validation: a trend trigger (V1/V2) may now share a book with the daily exit, with or without the
+    sector order; daily re-entry, the other triggers and the forward paper runner still refuse it.
+    D13's and C0's replays are byte-identical. Arm set `early-exit-combo` in `backtest.m12_rerun`;
+    renderer `backtest.m14_12_report` (M14.10's tables plus parks/whipsaw, scorecards against D13
+    and C0, the two-comparator decision rule in code, and D13/C0 replay digests against M14.10's).
+    Gate report `ops/gates/M14.12-early-exit-combo-report.md`; adoption is the owner's decision.
+  deliverables: [ops/studies/preregistration-m14-12-early-exit-combo-2026-11-07.md, backtest/policies/momentum_v2.py, backtest/sweep.py, backtest/m12_rerun.py, backtest/m14_5_report.py, backtest/m14_12_report.py, tests/unit/test_momentum_v2_early_exit_combo.py, tests/unit/test_m14_12_report.py, ops/gates/M14.12-early-exit-combo-report.md]
+  acceptance:
+    - "the pre-registration is committed before any code and before any run"
+    - "D13's and C0's replay digests are unchanged by the composition change; tests pin both"
+    - "C1 and C2 park on the session their rule says and V2 re-enters once per spell; inverted twins fail if the band or the exit is flipped"
+    - "the report is rendered from the saved runs with the decision rule against D13 and C0 evaluated in code"
+    - "make check is green"
+  verify: "uv run pytest tests/unit/test_momentum_v2_early_exit_combo.py tests/unit/test_m14_12_report.py -q"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # M15 — real-money readiness prerequisites (run of 2026-10-08)
 # Built and merged (PRs #90 + #93, #87, #89, #88, #86, #91) without graph entries; recorded here after

@@ -82,6 +82,10 @@ a documented *v2* — four independent, a-priori improvements, **each behind its
   turn, a half-size scale-in, or a breadth turn. Read only while the book is parked and only off a
   rebalance session; a re-entry is a full rebalance on that session (at half exposure for the
   scale-in), and exits stay the monthly rule. Off by default and out of ``repr`` while off.
+  M14.12 lets a trend trigger (confirmed cross, momentum turn) share the book with M14.5's
+  ``regime_daily_exit``: the daily exit parks an invested book, each park opens a new parked
+  spell, and the trigger re-enters at most once per spell. ``decide`` reads the exit before the
+  trigger, so a session is one park or one re-entry, never both.
 
 * **Rank-ordered buys and sector refill** (``rank_ordered_buys``, ``sector_refill``) — M14.9
   arm S, research variants on D13. A8's 35 % sector rail clears a session's buys one by one in
@@ -163,6 +167,8 @@ __all__ = [
     "PAPER_CANDIDATE_V2_SREFILL_2026_11_07",
     "PAPER_RATIFIED_2026_09_06",
     "PER_STOCK_REVIEW_SESSIONS",
+    "V2_SREFILL_DAILY_EXIT",
+    "V2_SREFILL_DAILY_EXIT_BANDED",
     "MomentumV2Data",
     "MomentumV2Parameters",
     "MomentumV2Policy",
@@ -179,6 +185,10 @@ _WEIGHT_QUANTUM = Decimal("0.00000001")
 
 #: The evidence label a regime-parking decision files its reading under (:func:`regime_parked`).
 _REGIME_LABEL: Final = "regime_index_vs_ma"
+
+#: The M14.9 triggers that read the index's trend (V1, V2): the only ones M14.10 lets share a book
+#: with the sector order, and M14.12 with the daily exit.
+_TREND_TRIGGERS: Final = frozenset({EarlyEntry.CONFIRMED_CROSS, EarlyEntry.MOMENTUM_TURN})
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,13 +319,16 @@ class MomentumV2Parameters:
       35 % sector rail would refuse with the next-ranked name outside its sector. The refill needs
       the rails' sector map and caps, handed to the policy (``sector_of``, ``order_caps``). Never
       combined with the scale-in or breadth trigger, the M14.5/M14.6 switches, the vol target or
-      A1; M14.10 combines it with the momentum-turn (and confirmed-cross) trigger. Off by default
-      and out of ``repr`` while off.
+      A1; M14.10 combines it with the momentum-turn (and confirmed-cross) trigger, and M14.12
+      adds ``regime_daily_exit`` to that combination only. Off by default and out of ``repr``
+      while off.
     * ``early_entry`` — M14.9: which pre-registered trigger may re-enter a parked book off a
       rebalance session (:class:`~backtest.policies.early_entry.EarlyEntry`), or ``None`` (D13).
       Requires ``regime_filter``; defined on D13's own toggles, so it never combines with the
-      M14.5 daily regime checks, the M14.6 per-stock switches or the vol target. Off by default
-      and out of ``repr`` while off.
+      M14.5 daily re-entry, the M14.6 per-stock switches or the vol target. M14.12: a trend
+      trigger (confirmed cross, momentum turn) may combine with ``regime_daily_exit`` (and its
+      band), which parks and so opens a new spell for the trigger. Off by default and out of
+      ``repr`` while off.
 
     With ``use_12_1``, ``sell_band``, ``regime_filter``, ``vol_scaled``, ``redeploy_next_session``
     and ``vol_target_annual`` all off/``None`` the policy is the naive top-N policy exactly. Every
@@ -408,6 +421,10 @@ class MomentumV2Parameters:
             )
             if getattr(self, name)
         ]
+        # M14.12: the daily exit rides along only with a trend trigger, which re-enters what it
+        # parks; S with a daily exit and no early trigger is not a pre-registered arm.
+        if self.regime_daily_exit and self.early_entry in _TREND_TRIGGERS:
+            clashing.remove("regime_daily_exit")
         # M14.10 pre-registers one combination: a trend trigger (V1/V2) with the sector order.
         # The scale-in stays refused: its half-exposure cap and the refill's full-weight
         # projection of the basket disagree.
@@ -429,10 +446,14 @@ class MomentumV2Parameters:
             raise TypeError("early_entry must be an EarlyEntry")
         if not self.regime_filter:
             raise ValueError("early_entry re-enters a regime-parked book; turn on regime_filter")
+        # M14.12: a trend trigger (V1/V2) may share the book with M14.5's daily *exit*: the exit
+        # parks, the trigger re-enters once per parked spell. Daily *re-entry* stays refused, as
+        # two rules re-entering the same parked book would race.
+        exit_allowed = self.early_entry in _TREND_TRIGGERS
         clashing = [
             name
             for name in ("regime_daily_reentry", "regime_daily_exit", "daily_slot_fill")
-            if getattr(self, name)
+            if getattr(self, name) and not (name == "regime_daily_exit" and exit_allowed)
         ]
         if self.vol_target_annual is not None:
             clashing.append("vol_target_annual")
@@ -583,6 +604,20 @@ PAPER_CANDIDATE_V2_SREFILL_2026_11_07: Final = MomentumV2Parameters(
     early_entry=EarlyEntry.MOMENTUM_TURN,
     rank_ordered_buys=True,
     sector_refill=True,
+)
+
+#: M14.12 (ops/studies/preregistration-m14-12-early-exit-combo-2026-11-07.md): the candidate (C0)
+#: with M14.5's daily exit, re-entering only through C0's own rules. Research configurations only;
+#: the forward paper runner refuses any daily regime check.
+#: C1 — park on the first non-rebalance session the TRI closes below 0.98 x MA200.
+V2_SREFILL_DAILY_EXIT_BANDED: Final = replace(
+    PAPER_CANDIDATE_V2_SREFILL_2026_11_07,
+    regime_daily_exit=True,
+    regime_daily_band=Decimal("0.02"),
+)
+#: C2 — park on the first non-rebalance session the TRI closes below MA200.
+V2_SREFILL_DAILY_EXIT: Final = replace(
+    PAPER_CANDIDATE_V2_SREFILL_2026_11_07, regime_daily_exit=True
 )
 
 
