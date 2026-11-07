@@ -191,3 +191,20 @@ def test_the_m14_10_report_decides_on_the_nifty500_cells() -> None:
     assert "| yes | 8 / 8 |" in row and row.endswith("| yes |")
     inverted = next(line for line in floor_only.splitlines() if line.startswith(f"| {v2} "))
     assert "| no | 0 / 8 |" in inverted and inverted.endswith("| no |")
+
+    # The verdict follows the chosen arm only. Chosen V2 passes: recommended. Chosen V1 (equal
+    # to D13 everywhere but one verification cell) fails, and V2 is named as unchosen.
+    from backtest.m14_10_report import verdict
+
+    v1 = NIFTY500_WF_SET[1].label
+    nifty_facts = [f for f in facts if f.base.universe == "nifty500"]
+    for window in windows:
+        for floor in (LOW_FLOOR, HIGH_FLOOR):
+            worse = window == "wf-verification" and floor == LOW_FLOOR
+            nifty_facts.append(fact("nifty500", window, floor, v1, "0.19" if worse else "0.20"))
+    assert "is recommended" not in " ".join(verdict(nifty_facts, v2))
+    assert f"{v2} meets all three conditions: recommended" in " ".join(verdict(nifty_facts, v2))
+    failed = " ".join(verdict(nifty_facts, v1))
+    assert f"the chosen arm, {v1}, is **not recommended**" in failed
+    assert "verification XIRR/DD below D13's at the ₹1 cr/day floor" in failed
+    assert f"did **not** choose that meet all three conditions in the table: {v2}" in failed

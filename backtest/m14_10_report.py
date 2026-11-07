@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ from backtest.sweep import D13_PAPER_BASELINE, HIGH_FLOOR, LOW_FLOOR
 __all__ = ["main", "render"]
 
 REPORT = Path("ops/gates/M14.10-nifty500-walk-forward-report.md")
+_DD_TOLERANCE = Decimal("0.02")
 _UNIVERSE = "nifty500"
 
 
@@ -124,8 +126,63 @@ def render(
         title="Decision rule (pre-registered M14.10 §4, evaluated in code)",
         universe=_UNIVERSE,
     )
+    out += verdict(facts, selected)
     out += [MARKER, hand_written.strip("\n"), ""]
     return "\n".join(out)
+
+
+def _failures(facts: Sequence[EntryFacts], label: str) -> list[str]:
+    """The §4 conditions ``label`` fails on the NIFTY 500 cells (empty: it meets all three)."""
+    cells = [f.base for f in facts if f.base.universe == _UNIVERSE]
+    d13 = {(f.window, f.floor): f for f in cells if f.label == D13_PAPER_BASELINE.label}
+    rows = {(f.window, f.floor): f for f in cells if f.label == label}
+    pairs = [(rows[k], d13[k]) for k in rows if k in d13]
+    failed = [
+        f"verification XIRR/DD below D13's at the {_floor_label(floor)}"
+        for floor in (LOW_FLOOR, HIGH_FLOOR)
+        if ("wf-verification", floor) not in rows
+        or ("wf-verification", floor) not in d13
+        or rows[("wf-verification", floor)].ratio < d13[("wf-verification", floor)].ratio
+    ]
+    if sum(1 for f, b in pairs if f.ratio >= b.ratio) < 6:
+        failed.append("fewer than 6 of 8 cells at or above D13")
+    if any(f.max_drawdown - b.max_drawdown > _DD_TOLERANCE for f, b in pairs):
+        failed.append("a drawdown more than 2 pp deeper than D13's")
+    return failed
+
+
+def verdict(facts: Sequence[EntryFacts], selected: str) -> list[str]:
+    """The rule's outcome in words: only the walk-forward's own choice can be recommended (§4).
+
+    The decision table lists every arm's conditions for the record. An arm the walk-forward did
+    not choose that meets all three is named as such, never left to read as a recommendation.
+    """
+    if not selected or selected == D13_PAPER_BASELINE.label:
+        return ["3. **Verdict (code):** the walk-forward chose D13; no arm is recommended.", ""]
+    failed = _failures(facts, selected)
+    if not failed:
+        return [
+            f"3. **Verdict (code):** {selected} meets all three conditions: recommended as a "
+            "candidate for a separate paper book; adoption is the owner's decision.",
+            "",
+        ]
+    lines = [
+        f"3. **Verdict (code):** the chosen arm, {selected}, is **not recommended** "
+        f"({'; '.join(failed)}). D13 stays as ratified."
+    ]
+    others = [
+        arm.label
+        for arm in NIFTY500_WF_SET[1:]
+        if arm.label != selected and not _failures(facts, arm.label)
+    ]
+    if others:
+        lines.append(
+            "4. Arms the walk-forward did **not** choose that meet all three conditions in the "
+            f"table: {', '.join(others)}. The rule never recommends an unchosen arm; choosing one "
+            "after reading the verification rows is the selection the walk-forward exists to "
+            "prevent."
+        )
+    return [*lines, ""]
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
