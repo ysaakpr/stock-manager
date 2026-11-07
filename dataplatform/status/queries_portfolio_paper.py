@@ -1,9 +1,9 @@
 """D5: the strategy paper books on the console's Portfolio page (M18.7: every book a portfolio).
 
-A strategy paper book — today the D13 momentum v2 book the ``paper_session`` job runs — is shown
-exactly like an M17 book: its holdings with CMP, average price and the day's change, the orders
-staged for the next session, and its fund totals. It is read from what the paper session persists
-and nothing it does not:
+A strategy paper book — the D13 momentum v2 book, and the D40 candidate beside it, that the
+``paper_session`` job runs — is shown exactly like an M17 book: its holdings with CMP, average
+price and the day's change, the orders staged for the next session, and its fund totals. It is
+read from what the paper session persists and nothing it does not:
 
 * **which books** — every distinct ``paper_session.book_id`` that is not an M17 desk record
   (``m17_fund_managers``, ``m17_dry*_fund_managers``), so a future strategy book appears by itself;
@@ -69,7 +69,10 @@ __all__ = [
 PAPER_KIND: Final = "PAPER"
 #: A paper book's policy, from its id's prefix (the paper session names its book for its policy
 #: and its ratification). A prefix not listed here is shown as the id's words before ``_paper``.
-_POLICIES: Final = (("momentum_v2_paper_", "momentum v2 (D13)"),)
+_POLICIES: Final = (
+    ("momentum_v2_paper_", "momentum v2 (D13)"),
+    ("momentum_v2_turn_srefill_paper_", "momentum v2 + V2 turn + S+refill (D40 candidate)"),
+)
 _COMPLETED: Final = "COMPLETED"
 
 # The M17 desk records are the desk's state, not strategy books (`queries_portfolio`).
