@@ -70,6 +70,7 @@ from backtest.sweep import (
     EARLY_ENTRY_ARMS,
     HIGH_FLOOR,
     LOW_FLOOR,
+    NIFTY500_WF_ARMS,
     PER_STOCK_ARMS,
     REGIME_DAILY_ARMS,
     REGIME_LENGTH_ARMS,
@@ -86,6 +87,7 @@ __all__ = [
     "ARM_SETS",
     "EARLY_ENTRY_SET",
     "LONG",
+    "NIFTY500_WF_SET",
     "PER_STOCK_SET",
     "REGIME_DAILY_SET",
     "REGIME_LENGTH_SET",
@@ -157,6 +159,9 @@ EARLY_ENTRY_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *EARLY_ENTRY_ARMS)
 #: M14.9 arm S: D13 beside its rank-ordered-buys and sector-refill variants.
 SECTOR_ORDER_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *SECTOR_ORDER_ARMS)
 
+#: M14.10's arm set: D13, V1, V2, S+refill and V2+S+refill, for the NIFTY 500 walk-forward.
+NIFTY500_WF_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *NIFTY500_WF_ARMS)
+
 #: M14.6's arm set: D13 beside its per-stock entry variants (``backtest.sweep.PER_STOCK_ARMS``).
 PER_STOCK_SET: tuple[Arm, ...] = (D13_PAPER_BASELINE, *PER_STOCK_ARMS)
 
@@ -198,6 +203,7 @@ ARM_SETS: Mapping[str, tuple[Arm, ...]] = _ArmSets(
         "per-stock": PER_STOCK_SET,
         "early-entry": EARLY_ENTRY_SET,
         "sector-order": SECTOR_ORDER_SET,
+        "nifty500-wf": NIFTY500_WF_SET,
     },
     {"m16": m16_arms, "m16-fundamentals": m16_fundamentals_arms},
 )
@@ -479,6 +485,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         "per-stock: D13 and its M14.6 per-stock entry variants; "
         "early-entry: D13 and its M14.9 early re-entry variants; "
         "sector-order: D13 and its M14.9 rank-ordered-buys / sector-refill arms; "
+        "nifty500-wf: M14.10's D13, V1, V2, S+refill, V2+S+refill; "
         "m16: baselines, A1, A2, A3, A7; m16-fundamentals: D13, M10.7, A4, A5 "
         "(six-year and wf-verification only)",
     )

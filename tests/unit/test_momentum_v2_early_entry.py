@@ -39,6 +39,7 @@ from backtest.policies.momentum_v2 import (
     PAPER_RATIFIED_2026_09_06,
     MomentumV2Parameters,
     MomentumV2Policy,
+    MomentumV2Record,
 )
 from backtest.rails import BacktestRailPolicy, RailGate, SectorMap
 from backtest.replay import ReplayEngine, ReplayResult, SessionDecision
@@ -538,3 +539,64 @@ def test_the_scale_in_completes_the_basket_at_the_next_risk_on_rebalance() -> No
         )
 
     assert february_buys(result) > february_buys(full)
+
+
+# ── M14.10: the one pre-specified combination, V2 + S+refill ─────────────────────────────────────
+
+
+def test_the_momentum_turn_combines_with_the_sector_refill_and_nothing_else_does() -> None:
+    from backtest.policies.momentum_v2 import D13_SECTOR_REFILL, D13_V2_SECTOR_REFILL
+
+    assert replace(D13_SECTOR_REFILL, early_entry=EarlyEntry.MOMENTUM_TURN) == D13_V2_SECTOR_REFILL
+    singles = {repr(D13_EARLY_MOMENTUM_TURN), repr(D13_SECTOR_REFILL)}
+    assert repr(D13_V2_SECTOR_REFILL) not in singles
+    replace(D13_SECTOR_REFILL, early_entry=EarlyEntry.CONFIRMED_CROSS)  # allowed
+    for refused in (EarlyEntry.SCALE_IN, EarlyEntry.BREADTH_TURN):
+        with pytest.raises(ValueError, match="early_entry"):
+            replace(D13_SECTOR_REFILL, early_entry=refused)
+
+
+class _SixNames(_EarlyData):
+    """Six candidates ranked NAMES[0] best; the trend and breadth seams of :class:`_EarlyData`."""
+
+    def signal(self, as_of: date) -> Dataset[MomentumV2Record]:
+        self.signal_reads.append(as_of)
+        records = tuple(
+            MomentumV2Record(
+                isin=isin,
+                momentum_0_12=Decimal(6 - i) / 10,
+                momentum_12_1=Decimal(6 - i) / 10,
+                price=PRICE,
+                volatility=Decimal("0.2"),
+                knowable_date=as_of,
+            )
+            for i, isin in enumerate(NAMES[:6])
+        )
+        return Dataset.declaring(f"m@{as_of}", records, knowable_date=lambda r: r.knowable_date)
+
+
+def test_a_momentum_turn_reentry_goes_through_the_sector_refill() -> None:
+    # Ranks 1 and 2 share sector X. Three slots at 1/3 each: A8's 35% cap takes the first X name
+    # (33%) and refuses the second (67%), so the re-entry the momentum turn triggers (below the
+    # MA) buys rank 1 and the next two ranks outside X. Inversion: without the refill rank 2 is
+    # proposed and the gate is left to refuse it.
+    from backtest.policies.momentum_v2 import D13_EARLY_MOMENTUM_TURN, D13_V2_SECTOR_REFILL
+
+    sectors = {NAMES[0]: "X", NAMES[1]: "X"}
+
+    def buys(base: MomentumV2Parameters) -> set[str]:
+        data = _SixNames("99")
+        data.trend = _trend(level="99")
+        params = replace(base, top_n=3, sell_band=3)
+        policy = MomentumV2Policy(
+            data, params, order_caps=RAILS, sector_of=lambda isin: sectors.get(isin, isin)
+        )
+        data.level = Decimal("90")
+        policy.decide(_ctx(REBALANCE, _Broker(holdings=_held(*NAMES[:3]))))
+        data.level = Decimal("99")
+        decision = policy.decide(_ctx(MID, _Broker(cash="1000000")))
+        assert not policy.parked
+        return {o.isin for o in decision.orders if o.side is Side.BUY}
+
+    assert buys(D13_V2_SECTOR_REFILL) == {NAMES[0], NAMES[2], NAMES[3]}
+    assert buys(D13_EARLY_MOMENTUM_TURN) == {NAMES[0], NAMES[1], NAMES[2]}

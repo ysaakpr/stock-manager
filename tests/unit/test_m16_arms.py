@@ -40,6 +40,7 @@ def test_default_sets_are_unchanged() -> None:
         "per-stock",
         "early-entry",
         "sector-order",
+        "nifty500-wf",
         "m16",
         "m16-fundamentals",
     }
