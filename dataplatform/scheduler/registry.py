@@ -1041,9 +1041,13 @@ FAILURE_ALERTS = Job(
 
 
 def paper_session(context: JobContext) -> None:
-    """The daily paper-trading session (M13.1): one session of the D13-ratified momentum v2 book.
+    """The daily paper-trading session (M13.1): one session of each paper book, D13 first.
 
-    What it does: decides today's session of the paper book through the same replay-engine →
+    The books are the D13-ratified momentum v2 book and, since D40 (owner, 2026-11-07), the
+    V2 + S+refill candidate beside it (M14.11). Each is decided in its own transaction, D13 first
+    and committed before the candidate starts, so a candidate failure never touches D13's session.
+
+    What it does: decides today's session of each paper book through the same replay-engine →
     rails → `SimBroker` path its backtests ran on — its orders staged, filled and reconciled
     through the live path's `execution` staging coordinator, reconciler and kill switch (M15.3) —
     journals every decision including the no-ops, and records the session in `paper_session` — or,
@@ -1075,8 +1079,8 @@ PAPER_SESSION = Job(
     fn=paper_session,
     timeout=timedelta(minutes=30),
     description=(
-        "Daily paper-trading session of the D13-ratified momentum v2 book (M13.1); "
-        "a no-op until PAPER_SESSION_ENABLED=true"
+        "Daily paper-trading session of the D13-ratified momentum v2 book (M13.1) and the "
+        "D40 V2 + S+refill candidate beside it (M14.11); a no-op until PAPER_SESSION_ENABLED=true"
     ),
 )
 

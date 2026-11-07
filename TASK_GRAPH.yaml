@@ -2630,6 +2630,33 @@ tasks:
     - "make check is green"
   verify: "uv run pytest tests/unit/test_momentum_v2_daily_regime.py tests/unit/test_m12_rerun.py tests/unit/test_m14_5_report.py -q"
 
+- id: M14.11
+  title: Forward paper book for V2 + S+refill beside D13 (D40)
+  milestone: M14
+  module: X2
+  autonomy: AUTO
+  deps: [M13.1, M15.3]
+  spec: |
+    Owner decision D40 (2026-11-07): run M14.10's V2 + S+refill arm forward as a second, separate
+    paper book beside D13, pre-registered in
+    `ops/studies/preregistration-paper-v2-srefill-2026-11-07.md` before any code. Book
+    `momentum_v2_turn_srefill_paper_2026_11_09`, parameters `PAPER_CANDIDATE_V2_SREFILL_2026_11_07`
+    (D13 plus exactly the arm's three switches), ₹10 L, D13's universe, cost model and A8 rails.
+    First session 2026-11-09, opening parked (the opening month counts as rebalanced). The
+    `paper_session` job decides D13 first in its own transaction, then the candidate in its own;
+    a candidate failure is raised only after D13 has committed. The forward runner carries the
+    policy state the candidate needs across sessions (the regime-parked flag and the rank map the
+    rank-ordered redeploy reads) in `book_state.policy`, written only for a book that needs it, so
+    D13's rows are unchanged. No migration.
+  deliverables: [ops/studies/preregistration-paper-v2-srefill-2026-11-07.md, HUMAN_DECISIONS.md, backtest/policies/momentum_v2.py, backtest/paper_session.py, dataplatform/status/queries_portfolio_paper.py, ops/runbooks/daily-eod.md, tests/paper_session_support.py, tests/unit/test_paper_candidate_book.py]
+  acceptance:
+    - "the pre-registration is committed before any code; the parameters constant equals the M14.10 arm's and D13 plus exactly three switches"
+    - "D13's decisions, journal bytes and book bytes are identical with and without the candidate in the job"
+    - "a candidate failure leaves D13's session committed and unchanged, and the job run fails loud"
+    - "the candidate decided a day at a time equals one replay of the same days from the parked state, including the carried rank order"
+    - "the candidate journals its opening and every session including no-ops; make check is green"
+  verify: "uv run pytest tests/unit/test_paper_candidate_book.py tests/unit/test_paper_session_job.py -q"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # M15 — real-money readiness prerequisites (run of 2026-10-08)
 # Built and merged (PRs #90 + #93, #87, #89, #88, #86, #91) without graph entries; recorded here after

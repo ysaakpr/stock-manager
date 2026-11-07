@@ -1031,6 +1031,35 @@ rulings:
 
 ---
 
+### D40 — Run V2 + S+refill forward as a second paper book beside D13 → **ANSWERED (owner, 2026-11-07): "go with your recommendations… merge the PR and deploy the (a) and then do the (b)".**
+
+M14.10 (`ops/gates/M14.10-nifty500-walk-forward-report.md`, PR #173) left **D13 as ratified**. Its
+walk-forward chose S+refill, which failed the ₹1 cr verification condition. The arm it did not
+choose, **V2 + S+refill** (momentum-turn early re-entry with rank-ordered, sector-refilled buys), met
+all three conditions after the fact. The report called that post-hoc and recommended a forward paper
+book beside D13 under its own pre-registration as the only honest test. On Sat 7 Nov 2026 the owner
+chose that path. Item (a) of the recommendations is this book; (b) is a later, separate task.
+
+Taken:
+* **A second, separate paper book**, `momentum_v2_turn_srefill_paper_2026_11_09`, with parameters
+  `PAPER_CANDIDATE_V2_SREFILL_2026_11_07`. Those are D13's plus exactly the M14.10 arm's three
+  switches.
+* Run by the same `paper_session` job, after D13 and independently of it.
+* First session Mon 9 Nov 2026. It **opens parked**, mirroring D13 after its 2 Nov risk-off
+  rebalance, so V2 can fire on its first qualifying session. Exits stay monthly.
+* Compared with D13 on XIRR ÷ max drawdown over the same sessions.
+* No pass/fail claim before 9 May 2027.
+
+What is unchanged:
+* D13 and its paper book.
+* Paper only. A real-money version is a separate ratification (AGENTIC_CONTEXT §3.2).
+* **Adopting the candidate in place of D13 stays the owner's decision.**
+
+Pre-registration, including the opening-state rule and the trial-count caveat:
+`ops/studies/preregistration-paper-v2-srefill-2026-11-07.md`. Task M14.11.
+
+---
+
 ## Coming up
 
 Not yet open — each becomes an entry below the moment its dependencies complete and it becomes

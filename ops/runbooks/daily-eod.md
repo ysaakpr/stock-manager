@@ -449,3 +449,39 @@ fails if this one could reach `KiteBroker`. What it does share with a real-money
 above the broker — staging, the kill switch and reconciliation are the same `execution` code
 (invariant #5; `tests/unit/test_paper_session_shared_path.py` pins that the trades are unchanged by
 it).
+
+### The second book: the D40 candidate (M14.11)
+
+Since D40 (owner, 2026-11-07) the same job decides a **second paper book**, after D13:
+`momentum_v2_turn_srefill_paper_2026_11_09`, parameters `PAPER_CANDIDATE_V2_SREFILL_2026_11_07`
+(D13 plus M14.10's V2 momentum-turn re-entry, rank-ordered buys and the sector refill). Everything
+else is D13's: ₹10 lakh, the NIFTY 500 ₹1 cr screen, the cost model, the A8 rails. Pre-registration:
+`ops/studies/preregistration-paper-v2-srefill-2026-11-07.md`. It is a candidate, not a replacement:
+adopting it in D13's place is an owner decision.
+
+- **Isolation.** D13 is decided and committed first, in its own transaction; the candidate then runs
+  in its own. A candidate failure is raised only after D13 has committed: the run is `FAILED` in
+  `job_run` (log `paper_session.book_failed`, `book=<id>`), D13's session stands, and a
+  `run-once paper_session` retry is a no-op for D13 (`ALREADY_DECIDED`).
+- **First session Mon 9 Nov 2026.** Before it the candidate returns `NOT_OPEN` and writes nothing,
+  so it is absent from `/status/paper` and the Portfolio page until its first row. It **opens
+  parked**: its first decided session journals a `HEARTBEAT` with `payload.event = OPENED_PARKED`,
+  November counts as rebalanced, and the next monthly rebalance is the first December session.
+- **While parked**, every session reads the session's NIFTY 50 TRI trend (V2: TRI ≥ 0.98 × MA200,
+  MA50 above its value 10 sessions back, 20-session return > 0). A fire is a full rebalance at that
+  close, recorded `reason = early_reentry` (not `rebalanced`), filling the next session. A missing
+  TRI level on a parked session is red **for the candidate only** (`missing_input =
+  nifty_tri_history/nifty50`); D13 does not read the TRI off a rebalance.
+- **Its state** is `paper_session.book_state.policy` (`parked`, and the rank map the next
+  session's redeploy orders its buys by). A candidate row without it fails the next run loud;
+  never hand-edit it. D13's rows carry no such key.
+- **Its own kill switch:** `<DATA_ROOT>/kill_switch/momentum_v2_turn_srefill_paper_2026_11_09.json`.
+  Halting, resetting and resolving work exactly as above with this book id; a tripped candidate
+  never halts D13, and the other way round.
+
+```sql
+SELECT book_id, trading_date, outcome, reason, rebalanced, book_state->'policy'->>'parked' AS parked
+FROM paper_session WHERE book_id IN ('momentum_v2_paper_2026_09_06',
+                                     'momentum_v2_turn_srefill_paper_2026_11_09')
+ORDER BY trading_date DESC, book_id LIMIT 20;
+```

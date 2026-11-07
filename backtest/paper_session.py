@@ -74,7 +74,19 @@ function of the session and replays byte-for-byte. When the row actually landed 
 **Rebalance timing.** The ratified backtest rebalances on the first session of each month. A paper
 book cannot rebalance on a day it was not allowed to decide, so here a rebalance is due on the
 first session of the month *this book decides*: a red first session moves the rebalance to the next
-green one instead of skipping the month. The first session the book ever decides rebalances too.
+green one instead of skipping the month. The first session the book ever decides rebalances too
+— unless the book opens parked (below).
+
+**A second book (D40, M14.11).** The job decides every book of :func:`paper_books`: D13, then the
+V2 + S+refill candidate (:func:`candidate_paper_book`), each in its own transaction, D13's committed
+before the candidate starts. The candidate's spec declares a first session and a parked opening: on
+its first decided session the policy resumes regime-parked, its opening month counts as
+rebalanced, and an ``OPENED_PARKED`` HEARTBEAT journals the declared basis. Its policy keeps state
+beyond ``pending`` — the parked flag its early re-entry trigger reads, and the rank map its
+rank-ordered redeploy reads — so the session persists it as ``book_state.policy`` and resumes from
+it. Only a book that carries that state writes the key, so D13's rows are byte-for-byte what they
+were. While parked, the candidate reads the session's TRI trend on every session; a missing level
+is red for that book alone.
 
 **Paper only, structurally.** Nothing here takes a broker. The one broker this module can build is
 a ``SimBroker``, constructed or restored inside :func:`_restore_book` and checked by
@@ -127,7 +139,15 @@ from backtest.book_actions import (
     ShareRescale,
     ShareSwap,
 )
+from backtest.policies.early_entry import (
+    EarlyEntry,
+    RegimeTrendData,
+    RegimeTrendReading,
+    confirmed_cross,
+    momentum_turn,
+)
 from backtest.policies.momentum_v2 import (
+    PAPER_CANDIDATE_V2_SREFILL_2026_11_07,
     PAPER_RATIFIED_2026_09_06,
     MomentumV2Data,
     MomentumV2Parameters,
@@ -185,10 +205,14 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AMBIGUOUS_ACTION_EVENT",
+    "CANDIDATE_BOOK_ID",
+    "CANDIDATE_FIRST_SESSION",
+    "CANDIDATE_PREREGISTRATION",
     "CHANGED_ACTION_EVENT",
     "EOD_DUE_AT",
     "KILL_SWITCH_EVENT",
     "LATE_ACTION_EVENT",
+    "OPENED_PARKED_EVENT",
     "PAPER_BOOK_ID",
     "PAPER_DATASETS",
     "PAPER_MODE",
@@ -218,7 +242,9 @@ __all__ = [
     "SessionOutcome",
     "action_identity",
     "action_terms",
+    "candidate_paper_book",
     "owed_session",
+    "paper_books",
     "paper_kill_switch",
     "ratified_paper_book",
     "require_paper_broker",
@@ -231,6 +257,17 @@ _LOG = get_logger(__name__)
 #: The book D13/D15 put into paper trading. One id per ratified configuration: a different
 #: configuration is a different book with its own ledger, never a mutation of this one.
 PAPER_BOOK_ID: Final = "momentum_v2_paper_2026_09_06"
+
+#: The second paper book (D40, owner 2026-11-07): M14.10's V2 + S+refill arm run forward beside
+#: D13, under its own pre-registration. A candidate, never a replacement: adopting it in D13's place
+#: is a separate owner decision.
+CANDIDATE_BOOK_ID: Final = "momentum_v2_turn_srefill_paper_2026_11_09"
+#: The candidate's first session (pre-registration §1). No earlier session is ever decided for it.
+CANDIDATE_FIRST_SESSION: Final = date(2026, 11, 9)
+#: Where the candidate's parameters, opening state and comparison rule are pinned.
+CANDIDATE_PREREGISTRATION: Final = "ops/studies/preregistration-paper-v2-srefill-2026-11-07.md"
+#: The payload ``event`` on the HEARTBEAT that journals a book's declared parked opening.
+OPENED_PARKED_EVENT: Final = "OPENED_PARKED"
 
 #: The capital every M9 momentum v2 report was struck on (₹10 lakh nominal) — the paper book opens
 #: with the capital its evidence assumed, so its results are comparable to that evidence.
@@ -258,6 +295,13 @@ PAPER_MODE: Final = "PAPER"
 EOD_DUE_AT: Final = time(18, 30)
 
 _BOOK_ID = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
+#: The M14.9 early re-entry triggers a paper book may run: the two that read the regime index's
+#: trend, which the paper world serves. The session reads the trigger ahead of the policy with the
+#: policy's own predicate (:func:`_input_gap`), so a fire that needs the signal is never red-blind.
+_EARLY_TRIGGERS: Final[Mapping[EarlyEntry, Callable[[RegimeTrendReading], bool]]] = {
+    EarlyEntry.CONFIRMED_CROSS: confirmed_cross,
+    EarlyEntry.MOMENTUM_TURN: momentum_turn,
+}
 #: How far past the session the fill calendar is extended: an order staged on the session needs the
 #: next session to target, and the longest Indian market closure runs to a few days.
 _CALENDAR_HEADROOM = timedelta(days=45)
@@ -337,6 +381,8 @@ class RunVerdict(StrEnum):
     """The date was already recorded red and is still red: the skip is not journaled twice."""
     NOT_A_SESSION = "NOT_A_SESSION"
     """A holiday or a weekend: no decision is owed."""
+    NOT_OPEN = "NOT_OPEN"
+    """Before the book's first session (``PaperBookSpec.first_session``): nothing is written."""
     HALTED = "HALTED"
     """The kill switch was tripped: one no-op journaled, nothing staged (recorded red)."""
     RECON_BREAK = "RECON_BREAK"
@@ -432,9 +478,16 @@ def _break_document(item: ReconBreak) -> dict[str, str]:
 class PaperBookSpec:
     """The book being paper-traded: its id, the ratified parameters, capital, and rails.
 
-    Fixed by construction — the job builds the one ratified spec (:func:`ratified_paper_book`) and a
+    Fixed by construction — the job builds its pre-registered specs (:func:`paper_books`) and a
     test builds its own. The rail policy is required: an unrailed paper book would report results
     for a portfolio this system would never be allowed to hold (invariant #6).
+
+    ``first_session`` is the first session the book may decide (``None``: any). ``opens_parked``
+    declares the book's opening state as regime-parked (D40): on its first decided session the
+    policy resumes with its parked flag set, the month of ``first_session`` counts as already
+    rebalanced, and ``opening_basis`` — why it opens parked, citing its pre-registration — is
+    journaled as that session's ``OPENED_PARKED`` entry. Without it a book opens the D24 #1 way,
+    rebalancing on its first session.
     """
 
     book_id: str
@@ -442,6 +495,9 @@ class PaperBookSpec:
     opening_cash: Decimal
     rail_policy: BacktestRailPolicy
     datasets: tuple[str, ...] = PAPER_DATASETS
+    first_session: date | None = None
+    opens_parked: bool = False
+    opening_basis: str = ""
 
     def __post_init__(self) -> None:
         if not _BOOK_ID.match(self.book_id):
@@ -452,6 +508,28 @@ class PaperBookSpec:
             raise ValueError(f"opening_cash must be positive, got {self.opening_cash}")
         if not self.datasets:
             raise ValueError("a paper book must name the datasets its interlock checks")
+        params = self.parameters
+        if params.early_entry is not None and params.early_entry not in _EARLY_TRIGGERS:
+            # The scale-in caps exposure across sessions and the breadth turn reads a universe
+            # series the paper world does not serve; neither has a forward runner.
+            raise ValueError(f"early_entry={params.early_entry} has no forward paper runner")
+        if params.regime_daily:
+            raise ValueError("the M14.5 daily regime checks have no forward paper runner")
+        if self.opens_parked:
+            if self.first_session is None or not self.opening_basis.strip():
+                raise ValueError("a book that opens parked names its first session and its basis")
+            if not params.regime_filter:
+                raise ValueError("only a regime-filtered book can open parked")
+
+    @property
+    def carries_policy_state(self) -> bool:
+        """Whether the policy keeps state beyond ``pending`` that the book must carry (D40).
+
+        The regime-parked flag an early re-entry trigger reads, and the rank map a rank-ordered
+        redeploy reads. Persisted as ``book_state.policy`` only for such a book, so every other
+        book's rows (D13's) are exactly what they were.
+        """
+        return self.parameters.early_entry is not None or self.parameters.rank_ordered_buys
 
 
 def ratified_paper_book() -> PaperBookSpec:
@@ -462,6 +540,39 @@ def ratified_paper_book() -> PaperBookSpec:
         opening_cash=PAPER_OPENING_CASH,
         rail_policy=ratified_backtest_rail_policy(),
     )
+
+
+def candidate_paper_book() -> PaperBookSpec:
+    """The D40 candidate: V2 + S+refill under D13's capital and rails, opening parked on 9 Nov 2026.
+
+    Everything but the parameters and the opening is D13's (pre-registration §1.2). It opens parked
+    because D13 parked on its 2 Nov rebalance and the owner asked for the candidate to start there
+    (pre-registration §2); nothing is written to D13's journal to say so.
+    """
+    return PaperBookSpec(
+        book_id=CANDIDATE_BOOK_ID,
+        parameters=PAPER_CANDIDATE_V2_SREFILL_2026_11_07,
+        opening_cash=PAPER_OPENING_CASH,
+        rail_policy=ratified_backtest_rail_policy(),
+        first_session=CANDIDATE_FIRST_SESSION,
+        opens_parked=True,
+        opening_basis=(
+            "book opens regime-parked in cash, as pre-registered (D40, "
+            f"{CANDIDATE_PREREGISTRATION} §2): D13's 2026-11-02 rebalance read the NIFTY 50 TRI "
+            "below its 200-session mean and parked, and this book's monthly regime rule is D13's, "
+            "so November counts as rebalanced; the V2 momentum-turn trigger is read every "
+            "session while parked"
+        ),
+    )
+
+
+def paper_books() -> tuple[PaperBookSpec, ...]:
+    """Every book the ``paper_session`` job decides, in order: D13 first, then the D40 candidate.
+
+    The order is the isolation (pre-registration §3): D13's session is committed before the
+    candidate starts, so nothing the candidate does can change it.
+    """
+    return (ratified_paper_book(), candidate_paper_book())
 
 
 class ActionStatus(StrEnum):
@@ -1720,6 +1831,74 @@ class _PaperMomentumData:
         return self._data.regime(as_of)
 
 
+class _PaperTrendData(_PaperMomentumData):
+    """:class:`_PaperMomentumData` that also serves the regime index's trend (M14.9 V1/V2).
+
+    Used only for a book whose trigger reads the trend, so every other book's policy sees exactly
+    the data seam it always did.
+    """
+
+    __slots__ = ()
+
+    def regime_trend(self, as_of: date) -> Dataset[RegimeTrendReading]:
+        if not isinstance(self._data, RegimeTrendData):
+            raise PaperSessionError("the paper world serves no regime trend for an early trigger")
+        return self._data.regime_trend(as_of)
+
+
+def _paper_data(
+    data: MomentumV2Data, parameters: MomentumV2Parameters, *, rebalance_on: date | None
+) -> _PaperMomentumData:
+    """The policy's data for one paper session: the trend seam only when a trigger reads it."""
+    if parameters.early_entry in _EARLY_TRIGGERS:
+        return _PaperTrendData(data, rebalance_on=rebalance_on)
+    return _PaperMomentumData(data, rebalance_on=rebalance_on)
+
+
+@dataclass(frozen=True, slots=True)
+class _PolicyState:
+    """The policy state a D40-style book carries across sessions beside ``pending``.
+
+    ``parked`` is the regime-parked flag an early trigger reads; ``rank_of`` the momentum ranks of
+    the last rebalance, which a rank-ordered redeploy submits its buys by. Persisted as
+    ``book_state.policy`` (strings only), and only for a book that carries it.
+    """
+
+    parked: bool
+    rank_of: Mapping[str, int]
+
+    def to_document(self) -> dict[str, Any]:
+        return {
+            "parked": "true" if self.parked else "false",
+            "rank_of": {isin: str(rank) for isin, rank in sorted(self.rank_of.items())},
+        }
+
+    @classmethod
+    def from_document(cls, document: Mapping[str, Any]) -> _PolicyState:
+        return cls(
+            parked=document["parked"] == "true",
+            rank_of={isin: int(rank) for isin, rank in document["rank_of"].items()},
+        )
+
+
+def _carried_policy(spec: PaperBookSpec, last: PaperSessionRecord | None) -> _PolicyState:
+    """The policy state the last session that moved the book left, or the book's opening one.
+
+    A book that carries policy state must find it on its last row: a row without it cannot be
+    resumed into the decision an uninterrupted replay would make, so that is an error, never a
+    silent default.
+    """
+    if last is None:
+        return _PolicyState(parked=spec.opens_parked, rank_of={})
+    document = None if last.book_state is None else last.book_state.get("policy")
+    if document is None:
+        raise PaperSessionError(
+            f"{spec.book_id} {last.trading_date.isoformat()} recorded no policy state; the book "
+            "carries its parked flag and rank map across sessions and cannot resume without them"
+        )
+    return _PolicyState.from_document(document)
+
+
 class _Capturing:
     """Delegates to the policy and keeps the evidence it decided on, for the journal snapshot."""
 
@@ -1765,8 +1944,26 @@ def _input_gap(
     checked only on a rebalance, the one day the regime is read, so a TRI that is late on an
     ordinary day never turns that day red — and a rebalance or a redeploy needs a non-empty
     candidate set. An empty set on a rebalance would sell the whole book on missing data, so it is
-    red rather than a decision.
+    red rather than a decision. A parked book with an early re-entry trigger (D40) reads the
+    regime index's trend off a rebalance too: its session's TRI level is required, and a trigger
+    that fires — read with the policy's own predicate — needs the candidate set like a rebalance.
     """
+    early_fires = False
+    trigger = _EARLY_TRIGGERS.get(parameters.early_entry) if parameters.early_entry else None
+    if trigger is not None and not rebalance and policy.parked:
+        if not isinstance(data, RegimeTrendData):
+            raise PaperSessionError("the paper world serves no regime trend for an early trigger")
+        try:
+            (trend,) = data.regime_trend(trading_date).records
+        except RegimeSourceError as error:
+            return _InputGap(
+                f"early re-entry input unavailable ({REGIME_TRI_INPUT}, the session's published "
+                f"NIFTY 50 TRI, landed same-evening by tri_evening, M13.7) for "
+                f"{trading_date.isoformat()}: {error}; a parked book reads the "
+                f"{parameters.early_entry} trigger every session",
+                REGIME_TRI_INPUT,
+            )
+        early_fires = trigger(trend)
     if rebalance and parameters.regime_filter:
         try:
             data.regime(trading_date)
@@ -1782,7 +1979,7 @@ def _input_gap(
                 REGIME_TRI_INPUT,
             )
     try:
-        needs_signal = rebalance or policy.pending is not None
+        needs_signal = rebalance or policy.pending is not None or early_fires
         if needs_signal and not data.signal(trading_date).records:
             return _InputGap(f"no momentum candidates for {trading_date.isoformat()}")
     except _MISSING_INPUT as error:
@@ -1848,6 +2045,13 @@ def run_paper_session(
     if not world.is_session(trading_date):
         log.info("paper_session.not_a_session")
         return PaperSessionResult(trading_date, RunVerdict.NOT_A_SESSION, "not a trading session")
+    if spec.first_session is not None and trading_date < spec.first_session:
+        log.info("paper_session.not_open", first_session=spec.first_session.isoformat())
+        return PaperSessionResult(
+            trading_date,
+            RunVerdict.NOT_OPEN,
+            f"before the book's first session {spec.first_session.isoformat()}",
+        )
 
     existing = store.get(spec.book_id, trading_date)
     if existing is not None and existing.outcome.moved_book:
@@ -1929,14 +2133,27 @@ def run_paper_session(
         == (trading_date.year, trading_date.month)
         for summary in decided
     )
+    if spec.opens_parked and spec.first_session is not None:
+        # A book that opens parked counts its opening month as rebalanced (D40): the park it
+        # mirrors was that month's rebalance, so the next one is the next month's.
+        opening_month = (spec.first_session.year, spec.first_session.month)
+        rebalance = rebalance and (trading_date.year, trading_date.month) != opening_month
+    opening = spec.opens_parked and last is None
     data = world.momentum_data(trading_date, spec.parameters)
     policy = MomentumV2Policy(
-        _PaperMomentumData(data, rebalance_on=trading_date if rebalance else None),
+        _paper_data(data, spec.parameters, rebalance_on=trading_date if rebalance else None),
         spec.parameters,
         order_caps=spec.rail_policy.rails,
+        sector_of=spec.rail_policy.sectors.sector_of,
     )
     carried = last.pending if last is not None else None
-    policy.resume(carried)
+    carried_policy: _PolicyState | None = None
+    if spec.carries_policy_state:
+        carried_policy = _carried_policy(spec, last)
+        policy.resume(carried, parked=carried_policy.parked, rank_of=carried_policy.rank_of)
+    else:
+        policy.resume(carried)
+    was_parked = policy.parked
     gap = _input_gap(data, policy, spec.parameters, trading_date, rebalance=rebalance)
     if gap is not None:
         return _skip(
@@ -2028,12 +2245,23 @@ def run_paper_session(
         pending = carried
         rebalanced = False
         risk_off = False
+        early = False
+        policy_state = carried_policy
     else:
         engine_entries = tuple(_tagged(entry, spec) for entry in result.journal)
         pending = policy.pending
         rebalanced = rebalance
         risk_off = (
             rebalance and capturing.evidence is not None and regime_parked(capturing.evidence)
+        )
+        # Off a rebalance only an early trigger unparks a parked book (D40).
+        early = not rebalance and was_parked and not policy.parked
+        policy_state = (
+            None
+            if carried_policy is None
+            else _PolicyState(
+                parked=policy.parked, rank_of=policy.rank_of if pending is not None else {}
+            )
         )
     if not recon.ok:
         # A break day never counts as the month's rebalance and never advances the redeploy state,
@@ -2042,11 +2270,19 @@ def run_paper_session(
         pending = carried
         rebalanced = False
         risk_off = False
-    entries = (*changed_entries, *late_entries, *engine_entries, recon_entry)
+        early = False
+        policy_state = carried_policy
+    evidence_of: dict[int, EvidenceBundle] = {id(recon_entry): recon_evidence}
+    opened: tuple[JournalEntry, ...] = ()
+    if opening:
+        opening_entry, opening_evidence = _opening_entry(spec, trading_date, session_clock)
+        opened = (opening_entry,)
+        evidence_of[id(opening_entry)] = opening_evidence
+    entries = (*opened, *changed_entries, *late_entries, *engine_entries, recon_entry)
     if result is not None and capturing.evidence is not None:
         journal.snapshot(capturing.evidence)
     for entry in entries:
-        journal.append(entry, evidence=recon_evidence if entry is recon_entry else None)
+        journal.append(entry, evidence=evidence_of.get(id(entry)))
     state = sim.export_state()
     outcome = SessionOutcome.COMPLETED if recon.ok else SessionOutcome.RECON_BREAK
     record = PaperSessionRecord(
@@ -2054,7 +2290,7 @@ def run_paper_session(
         trading_date=trading_date,
         outcome=outcome,
         reason=(
-            _decided_reason(rebalance=rebalance, risk_off=risk_off)
+            _decided_reason(rebalance=rebalance, risk_off=risk_off, early=early)
             if recon.ok
             else f"reconciliation break: {'; '.join(reconciled.breaks)}"
         ),
@@ -2076,6 +2312,8 @@ def run_paper_session(
                 }
                 for line in sim.ledger()
             ],
+            # Only a book that carries policy state writes the key (D40): D13's rows are unchanged.
+            **({} if policy_state is None else {"policy": policy_state.to_document()}),
         },
         book_digest=_state_digest(state),
         actions=(*changed_seen, *late_seen, *on_time_seen),
@@ -2088,6 +2326,8 @@ def run_paper_session(
         "paper_session.decided" if recon.ok else "paper_session.recon_break",
         rebalance=rebalance,
         risk_off=risk_off,
+        **({"early_reentry": early, "parked": policy_state.parked} if policy_state else {}),
+        **({"opened_parked": True} if opening else {}),
         entries=len(entries),
         decisions=sorted({entry.decision.value for entry in entries}),
         orders=len(record.orders),
@@ -2242,13 +2482,17 @@ def _halted_reason(kill_switch: KillSwitch) -> str:
     )
 
 
-def _decided_reason(*, rebalance: bool, risk_off: bool) -> str:
-    """A ``COMPLETED`` row's reason: ``decided``, ``rebalance``, or ``rebalance_risk_off``.
+def _decided_reason(*, rebalance: bool, risk_off: bool, early: bool = False) -> str:
+    """A ``COMPLETED`` row's reason: ``decided``, ``rebalance``, ``rebalance_risk_off`` or
+    ``early_reentry``.
 
     ``risk_off`` is a rebalance the regime filter parked in cash, named on the row so the book's
-    being in cash is legible without following the evidence link (M14.4). The reason is prose for a
-    reader; nothing keys on it — the rebalance rule reads ``rebalanced``.
+    being in cash is legible without following the evidence link (M14.4); ``early`` an early
+    re-entry trigger's rebalance off the monthly one (D40). The reason is prose for a reader;
+    nothing keys on it — the rebalance rule reads ``rebalanced``.
     """
+    if early:
+        return "early_reentry"
     if not rebalance:
         return "decided"
     return "rebalance_risk_off" if risk_off else "rebalance"
@@ -2320,6 +2564,54 @@ def _skip(
     store.record(record, recorded_at=clock.now())
     log.warning("paper_session.data_red", reason=reason, refusal=event or "data_red")
     return PaperSessionResult(trading_date, verdict, reason, entries=(entry,), record=record)
+
+
+def _opening_entry(
+    spec: PaperBookSpec, trading_date: date, clock: Clock
+) -> tuple[JournalEntry, EvidenceBundle]:
+    """The HEARTBEAT that journals a book's declared parked opening on its first decided session.
+
+    The opening is a pre-registered state, not a decision this book made, so it is journaled as
+    what it is — the basis the spec states, with the opening cash and the parked flag as its
+    evidence — and never as a backdated park (D40).
+    """
+    first = spec.first_session.isoformat() if spec.first_session is not None else ""
+    evidence = EvidenceBundle(
+        trading_date=trading_date,
+        actor=Actor.SYSTEM,
+        items=(
+            EvidenceItem(
+                kind=EvidenceKind.POLICY,
+                source="paper_book_spec",
+                label="opening_state",
+                as_of=trading_date,
+                text=spec.opening_basis,
+                detail={"parked": "true", "first_session": first},
+            ),
+            EvidenceItem(
+                kind=EvidenceKind.POSITION,
+                source="paper_book",
+                label="cash",
+                as_of=trading_date,
+                value=spec.opening_cash,
+            ),
+        ),
+    )
+    entry = JournalEntry(
+        ts=clock.now(),
+        trading_date=trading_date,
+        actor=Actor.SYSTEM,
+        decision=Decision.HEARTBEAT,
+        evidence_snapshot_ref=evidence.ref().ref,
+        rationale=spec.opening_basis,
+        payload={
+            "event": OPENED_PARKED_EVENT,
+            "first_session": first,
+            "opening_cash": str(spec.opening_cash),
+            **_tag(spec),
+        },
+    )
+    return entry, evidence
 
 
 def _tag(spec: PaperBookSpec) -> dict[str, str]:
@@ -2426,12 +2718,16 @@ class L1PaperWorld:
         return _L1MomentumV2Data(
             reader,
             [day],
-            _RegimeSource.published(
-                through=day, ma_days=parameters.regime_ma_days, data_root=self.data_root
-            ),
+            self._regime_source(day, parameters),
             signal_closes=signal_closes,
             universe_filter=_InvestableUniverse(reader, self.universe, data_root=self.data_root),
             lookback_sessions=reader.all_sessions(),
+        )
+
+    def _regime_source(self, day: date, parameters: MomentumV2Parameters) -> _RegimeSource:
+        """The published NIFTY 50 TRI regime source through ``day`` — the backtests' own series."""
+        return _RegimeSource.published(
+            through=day, ma_days=parameters.regime_ma_days, data_root=self.data_root
         )
 
 
@@ -2444,13 +2740,14 @@ class _LazyL1MomentumData:
     into a red day.
     """
 
-    __slots__ = ("_built", "_day", "_parameters", "_world")
+    __slots__ = ("_built", "_day", "_parameters", "_regime", "_world")
 
     def __init__(self, world: L1PaperWorld, day: date, parameters: MomentumV2Parameters) -> None:
         self._world = world
         self._day = day
         self._parameters = parameters
         self._built: _L1MomentumV2Data | None = None
+        self._regime: _RegimeSource | None = None
 
     def _data(self) -> _L1MomentumV2Data:
         if self._built is None:
@@ -2466,6 +2763,24 @@ class _LazyL1MomentumData:
     def regime(self, as_of: date) -> Dataset[RegimeReading]:
         return self._data().regime(as_of)
 
+    def regime_trend(self, as_of: date) -> Dataset[RegimeTrendReading]:
+        """The regime index's trend (M14.9 V1/V2) — read only by a book with an early trigger.
+
+        A parked book reads it every session, so it comes from the regime source alone — the same
+        published series and moving average the full build reads — and a session whose trigger
+        does not fire never pays for the ranked candidate set.
+        """
+        if self._built is not None:
+            return self._built.regime_trend(as_of)
+        if self._regime is None:
+            self._regime = self._world._regime_source(self._day, self._parameters)
+        reading = self._regime.trend(as_of)
+        return Dataset.declaring(
+            f"regime_trend@{as_of.isoformat()}",
+            (reading,),
+            knowable_date=lambda r: r.knowable_date,
+        )
+
 
 # ── the scheduler entry point ────────────────────────────────────────────────────────────────────
 
@@ -2476,21 +2791,25 @@ def run_paper_session_job(
     world: PaperWorld | None = None,
     trading_date: date | None = None,
 ) -> PaperSessionResult | None:
-    """The ``paper_session`` scheduler job: the owed session of the ratified paper book.
+    """The ``paper_session`` scheduler job: the owed session of every paper book, D13 first.
 
     What it does: unless ``Settings.paper_session_enabled`` is off (the default — module
-    docstring), opens one Postgres transaction, runs :func:`run_paper_session` for
-    ``trading_date`` — by default :func:`owed_session` at the context's clock, an explicit date,
-    never the calendar day; an explicit one may be neither after the owed session nor before the
-    book's latest decided session — with the ratified spec, the status interlock over the job's own
-    database, the L1 world, the real append-only journal and ``paper_session``, the book's kill
-    switch under ``Settings.data_root`` (:func:`paper_kill_switch`) and a logging recon alerter,
-    and commits.
+    docstring), decides ``trading_date`` — by default :func:`owed_session` at the context's clock,
+    an explicit date, never the calendar day; an explicit one may be neither after the owed session
+    nor before a book's latest decided session — for each book of :func:`paper_books` in turn: D13
+    (D13/D15), then the D40 candidate. Each book runs :func:`run_paper_session` in **its own**
+    Postgres transaction, committed before the next book starts, with the status interlock over
+    the job's own database, the shared L1 world, the real append-only journal and
+    ``paper_session``, the book's own kill switch under ``Settings.data_root``
+    (:func:`paper_kill_switch`) and a logging recon alerter. Returns D13's result.
     What it assumes: the database is migrated through 0015 and the EOD pipeline has run for the
     owed session. ``world`` is injectable for a test; production passes nothing.
     What it never does: route to a real broker — there is no broker parameter anywhere on this
-    path and ``Settings.broker_provider`` is never read — or commit a half-written session: an
-    exception rolls the whole session back and the runner records the run FAILED.
+    path and ``Settings.broker_provider`` is never read — commit a half-written session (an
+    exception rolls that book's session back), or let one book's failure stop, change or block
+    another's: D13 is decided and committed before the candidate starts, and a book that failed is
+    raised only after every book has run, so the runner records the run FAILED (fail loud) with
+    every other book's session intact. A retry is then a no-op for the books already decided.
     """
     settings = context.settings
     if not settings.paper_session_enabled:
@@ -2503,7 +2822,9 @@ def run_paper_session_job(
             ),
         )
         return None
-    spec = ratified_paper_book()
+    books = paper_books()
+    results: dict[str, PaperSessionResult] = {}
+    failures: list[tuple[str, Exception]] = []
     with ExitStack() as stack:
         if world is None:
             l1 = L1PaperWorld(data_root=settings.data_root, settings=settings)
@@ -2520,9 +2841,39 @@ def run_paper_session_job(
                 f"{trading_date.isoformat()} is after the owed session {due.isoformat()}: its EOD "
                 "is not due yet, so deciding it would trade on data that does not exist"
             )
-        # A date before the book's latest decided session is refused by run_paper_session itself.
+        # A date before a book's latest decided session is refused by run_paper_session itself.
         owed = trading_date if trading_date is not None else due
-        conn = stack.enter_context(connection(settings))
+        for spec in books:
+            try:
+                results[spec.book_id] = _run_book_session(context, spec, world, owed)
+            except Exception as error:  # isolated per book; raised below once every book has run
+                failures.append((spec.book_id, error))
+                # The type only: a driver's message can quote the connection string (#13).
+                _LOG.error(
+                    "paper_session.book_failed",
+                    book=spec.book_id,
+                    trading_date=owed.isoformat(),
+                    error=type(error).__name__,
+                    run_id=str(context.run_id),
+                )
+    failed = dict(failures)
+    if books[0].book_id in failed:
+        raise failed[books[0].book_id]  # D13's own failure, exactly as before the second book
+    if failures:
+        failed_id, cause = failures[0]
+        raise PaperSessionError(
+            f"paper book {failed_id} failed on {owed.isoformat()} ({type(cause).__name__}); "
+            f"{', '.join(sorted(results))} decided and committed independently"
+        ) from cause
+    return results[books[0].book_id]
+
+
+def _run_book_session(
+    context: JobContext, spec: PaperBookSpec, world: PaperWorld, owed: date
+) -> PaperSessionResult:
+    """One book's session in its own transaction, committed before the job moves on."""
+    settings = context.settings
+    with connection(settings) as conn:
         result = run_paper_session(
             trading_date=owed,
             spec=spec,

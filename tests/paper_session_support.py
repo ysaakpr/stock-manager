@@ -9,7 +9,9 @@ so two worlds built the same way are indistinguishable and a session over one is
 Knobs a test turns: ``actions`` (the corporate actions the store knows at the time of a run),
 ``unpriced`` (sessions whose bars are missing — prices not in L1),
 ``no_regime`` (sessions the published index has no level for), ``risk_off`` (sessions the regime
-filter reads as below its moving average). ``reads`` records every signal/regime read.
+filter reads as below its moving average), ``trend_fires`` (sessions whose regime-index trend
+fires the M14.9 V2 momentum turn — and V1 never) and ``no_trend`` (sessions with no trend
+reading). ``reads`` records every signal/regime/trend read.
 
 ``fixture_spec`` is the book under test: the D13-ratified parameters (or ones a test passes) under
 the ratified rail *numbers* (15 % position, 35 % sector, 8 names, ₹1.2 L per order) with a sector
@@ -29,6 +31,7 @@ from pathlib import Path
 from analyst.cases import RiskRails
 from backtest.book_actions import BookAction, BookActionCalendar, BookActionSource
 from backtest.paper_session import PaperBookSpec
+from backtest.policies.early_entry import RegimeTrendReading
 from backtest.policies.momentum_v2 import (
     PAPER_RATIFIED_2026_09_06,
     MomentumV2Parameters,
@@ -101,6 +104,8 @@ class FixtureWorld:
     unpriced: set[date] = field(default_factory=set)
     no_regime: set[date] = field(default_factory=set)
     risk_off: set[date] = field(default_factory=set)
+    trend_fires: set[date] = field(default_factory=set)
+    no_trend: set[date] = field(default_factory=set)
     rebalance_on: set[date] | None = None
     #: The corporate actions the store knows *now* — a test appends one to model it arriving late.
     actions: list[BookAction] = field(default_factory=list)
@@ -213,6 +218,32 @@ class _FixtureMomentum:
             knowable_date=lambda r: r.knowable_date,
         )
 
+    def regime_trend(self, as_of: date) -> Dataset[RegimeTrendReading]:
+        """The index's trend: 1 % under its MA, 20-session return positive, MA50 rising on a fire.
+
+        A session in ``trend_fires`` has its 50-session mean above its value 10 sessions back, so
+        the V2 momentum turn fires; any other session's is below, so it does not. The close is
+        always below the MA200, so V1's confirmed cross never fires.
+        """
+        self._world.reads.append(("regime_trend", as_of))
+        if as_of in self._world.no_trend:
+            raise RegimeSourceError(f"the published 'nifty50' series has no level for {as_of}")
+        rising = as_of in self._world.trend_fires
+        reading = RegimeTrendReading(
+            index_level=Decimal("99"),
+            moving_average=Decimal("100"),
+            sessions_at_or_above=0,
+            short_average=Decimal("101") if rising else Decimal("99"),
+            short_average_lagged=Decimal("100"),
+            level_lagged=Decimal("95"),
+            knowable_date=as_of,
+        )
+        return Dataset.declaring(
+            f"fixture_regime_trend@{as_of.isoformat()}",
+            (reading,),
+            knowable_date=lambda r: r.knowable_date,
+        )
+
 
 def fixture_rail_policy() -> BacktestRailPolicy:
     """The ratified rail numbers over the fixture's sector map."""
@@ -246,6 +277,21 @@ def fixture_spec(parameters: MomentumV2Parameters = PAPER_RATIFIED_2026_09_06) -
         parameters=parameters,
         opening_cash=FIXTURE_CASH,
         rail_policy=fixture_rail_policy(),
+    )
+
+
+def candidate_fixture_spec(
+    parameters: MomentumV2Parameters, *, first_session: date = OCT_FIRST
+) -> PaperBookSpec:
+    """A D40-style book over the fixture: its own id, a first session, and a parked opening."""
+    return PaperBookSpec(
+        book_id="paper_fixture_candidate",
+        parameters=parameters,
+        opening_cash=FIXTURE_CASH,
+        rail_policy=fixture_rail_policy(),
+        first_session=first_session,
+        opens_parked=True,
+        opening_basis="fixture: opens regime-parked, as a pre-registered candidate does",
     )
 
 

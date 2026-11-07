@@ -160,6 +160,7 @@ __all__ = [
     "D13_RESID_MOM",
     "D13_SECTOR_REFILL",
     "D13_V2_SECTOR_REFILL",
+    "PAPER_CANDIDATE_V2_SREFILL_2026_11_07",
     "PAPER_RATIFIED_2026_09_06",
     "PER_STOCK_REVIEW_SESSIONS",
     "MomentumV2Data",
@@ -566,6 +567,24 @@ D13_SECTOR_REFILL: Final = replace(D13_RANK_ORDERED_BUYS, sector_refill=True)
 #: M14.10's one pre-specified combination: the V2 momentum-turn trigger with S+refill.
 D13_V2_SECTOR_REFILL: Final = replace(D13_SECTOR_REFILL, early_entry=EarlyEntry.MOMENTUM_TURN)
 
+#: The D40 candidate paper book (owner, 2026-11-07): M14.10's V2 + S+refill arm, run forward as a
+#: second, separate paper book beside D13
+#: (`ops/studies/preregistration-paper-v2-srefill-2026-11-07.md`).
+#: Written out field by field, not derived, so a later edit of the research constants above cannot
+#: move it; a unit test pins it to the M14.10 arm and to D13 plus exactly these three switches.
+#: Paper only, and a candidate: adopting it in D13's place is a separate owner decision.
+PAPER_CANDIDATE_V2_SREFILL_2026_11_07: Final = MomentumV2Parameters(
+    top_n=20,
+    use_12_1=True,
+    sell_band=30,
+    regime_filter=True,
+    vol_scaled=True,
+    redeploy_next_session=True,
+    early_entry=EarlyEntry.MOMENTUM_TURN,
+    rank_ordered_buys=True,
+    sector_refill=True,
+)
+
 
 @runtime_checkable
 class MomentumV2Data(Protocol):
@@ -712,19 +731,38 @@ class MomentumV2Policy:
     def parked(self) -> bool:
         """Whether the basket is parked by the regime filter — the daily re-entry's trigger state.
 
-        Only the daily regime checks (M14.5) read it. A forward runner that adopts one must carry
-        it across sessions with :meth:`resume`, as it carries :attr:`pending`.
+        Only the daily regime checks (M14.5) and the early re-entry triggers (M14.9) read it. A
+        forward runner that adopts one must carry it across sessions with :meth:`resume`, as it
+        carries :attr:`pending`.
         """
         return self._parked
 
-    def resume(self, pending: Mapping[str, Decimal] | None, *, parked: bool = False) -> None:
+    @property
+    def rank_of(self) -> Mapping[str, int]:
+        """The momentum rank of every candidate at the last rebalance (``rank_ordered_buys`` only).
+
+        Read by the next session's redeploy to submit its buys best-ranked first, so a forward
+        runner with ``rank_ordered_buys`` carries it across sessions with :meth:`resume`, as it
+        carries :attr:`pending`. Empty for every other configuration.
+        """
+        return dict(self._rank_of)
+
+    def resume(
+        self,
+        pending: Mapping[str, Decimal] | None,
+        *,
+        parked: bool = False,
+        rank_of: Mapping[str, int] | None = None,
+    ) -> None:
         """Restore the state :attr:`pending` reported at the end of the previous decided session.
 
         What it assumes: ``pending`` is exactly what this policy reported after the last session it
         decided for this book, so resuming and then deciding is the same decision an uninterrupted
-        replay would make; likewise ``parked`` (read only under a daily regime check). What it
-        never does: invent a target — ``None`` clears it, or resume a per-stock (M14.6) book,
-        whose clocks are research state no forward runner carries — that raises.
+        replay would make; likewise ``parked`` (read only under a daily regime check or an early
+        re-entry trigger) and ``rank_of`` (read only by a rank-ordered redeploy; ``None`` leaves
+        the rank map as it is). What it never does: invent a target — ``None`` clears it, or
+        resume a per-stock (M14.6) book, whose clocks are research state no forward runner
+        carries — that raises.
         """
         if self._params.daily_slot_fill:
             raise NotImplementedError(
@@ -732,6 +770,8 @@ class MomentumV2Policy:
             )
         self._pending = None if pending is None else dict(pending)
         self._parked = parked
+        if rank_of is not None:
+            self._rank_of = dict(rank_of)
 
     def decide(self, ctx: SessionContext) -> SessionDecision:
         """Decide this session: a heartbeat off a rebalance, a full rebalance on one.
