@@ -12,6 +12,7 @@ before something structural; its drills from 2026-08-08 are further down.
 |---|---|---|---|
 | `postgres_backup` | 05:30 daily | `pg_dump -Fc --no-owner --no-privileges` → `~/backups/postgres/trading-<stamp>.dump` + `.json` sidecar, then retention | 30 min |
 | `l0_backup` | 05:45 daily | extend `~/backups/l0/MANIFEST.sha256` with every new L0 file; rsync L0 to `BACKUP_L0_MIRROR` if set | 1 h |
+| `l0_s3_sync` | 10:00 Sunday | `ops/l0-s3-sync.sh sync` then `verify 300` to the SSE-C S3 mirror; unhealthy if the last success is > 8 days old ([l0-s3-mirror.md](l0-s3-mirror.md)) | 6 h |
 
 Why 05:30: every writer of the day has finished — the paper session (21:45), `nse_daily_capture`
 (23:00), `announcements_capture` (00:30) and `fundamentals_forward` (02:00, own deadline 04:45) —
@@ -110,12 +111,12 @@ A local `BACKUP_L0_MIRROR` must exist and be on a **different filesystem** from 
 unmounted mount point is a plain directory on the root disk, and copying the lake there is no copy.
 The job refuses that (`… is on the lake's own filesystem`). A remote `host:path` is not checked.
 
-**The second copy of L0 is the S3 mirror, run by hand.** This host has one disk (`/dev/root`,
+**The second copy of L0 is the S3 mirror, synced weekly by `l0_s3_sync`.** This host has one disk (`/dev/root`,
 193 GB, the lake ~10 GB). L0 is copied to S3 under an SSE-C key by `ops/l0-s3-sync.sh`
 ([l0-s3-mirror.md](l0-s3-mirror.md)): `sync` uploads only keys S3 lacks and never overwrites,
-`verify` checks names, sizes and a sha256 sample against both the lake and this manifest. It is not
-a scheduler job — run `sync` then `verify` after a fetch campaign and at least monthly, and note it
-in the table at the end of this file. The nightly job's own mirror is separate and still unset
+`verify` checks names, sizes and a sha256 sample against both the lake and this manifest. The
+`l0_s3_sync` job runs both every Sunday at 10:00 IST and goes unhealthy on `/status/jobs` when its
+last success is more than 8 days old; run them by hand too after a large fetch campaign. The nightly job's own mirror is separate and still unset
 (`BACKUP_L0_MIRROR`), so it logs `backup.l0_mirror_unconfigured` every night; that is expected.
 Pointing it at a second EBS volume or another host reachable by rsync is an owner decision (a
 spending decision, AGENTIC_CONTEXT §3.9); once set, the nightly job copies with
